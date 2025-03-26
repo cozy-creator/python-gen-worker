@@ -1,2 +1,1 @@
-def hello() -> str:
-    return "Hello from image-gen!"
+from .image_gen import register_functions

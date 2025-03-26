@@ -4,6 +4,9 @@ import logging
 import subprocess
 import importlib
 from gen_orchestrator import Worker, ActionContext
+import dotenv
+
+dotenv.load_dotenv()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("pytorch-worker")
@@ -21,24 +24,24 @@ logger = logging.getLogger("pytorch-worker")
 #         logger.error(f"Failed to install package '{package_name}': {e}")
 #         raise
 
-def install_package(package_name: str) -> None:
+def install_package(package_spec: str) -> None:
     """
-    Install a package based on the specification.
+    Install a package based on the specification using the uv CLI.
     If the package spec contains a colon and the second part starts with http,
     use that as the index URL; otherwise, install normally.
     """
-    parts = package_name.split(":", 1)
-    cmd = [sys.executable, "-m", "pip", "install"]
+    parts = package_spec.split(":", 1)
+    cmd = ["uv", "pip", "install"]
     
     if len(parts) == 2 and parts[1].strip().lower().startswith("http"):
         package_name = parts[0].strip()
         index_url = parts[1].strip()
         cmd.extend(["--index-url", index_url])
-        print(f"Installing {package_name} from {index_url}")
+        logger.info(f"Installing {package_name} from {index_url} using uv")
         cmd.append(package_name)
     else:
-        package_name = package_name.strip()
-        print(f"Installing {package_name} from default index")
+        package_name = package_spec.strip()
+        logger.info(f"Installing {package_name} from default index using uv")
         cmd.append(package_name)
     
     subprocess.check_call(cmd)
@@ -57,15 +60,35 @@ def import_and_register(worker: Worker, package_name: str) -> None:
         logger.warning(f"Package '{package_name}' does not expose a 'register_functions(worker)' function.")
 
 
+def parse_function_packages(packages_str: str) -> list[str]:
+    """
+    Parse a comma-separated list of function package specifications.
+    If a spec contains a colon (indicating a private index URL), return only the package name.
+    """
+    packages = []
+    for pkg_spec in packages_str.split(","):
+        pkg_spec = pkg_spec.strip()
+        if not pkg_spec:
+            continue
+
+        if ":" in pkg_spec:
+            pkg_name = pkg_spec.split(":", 1)[0].strip()
+            packages.append(pkg_name)
+        else:
+            packages.append(pkg_spec)
+    return packages
+
+
 def main():
     logger.info("Starting pytorch-worker...")
 
     # Read environment variables for configuration
     scheduler_addr = os.environ.get("SCHEDULER_ADDR", "localhost:8080")
     worker_id = os.environ.get("WORKER_ID", f"pytorch-worker-{os.getpid()}")
-    function_packages = os.environ.get("FUNCTION_PACKAGES", "")
+    function_packages = os.environ.get("FUNCTION_PACKAGES", "") # TODO:consider passing function packages through cli too on startup
+    
 
-    package_list = [pkg.strip() for pkg in function_packages.split(",") if pkg.strip()]
+    package_list = parse_function_packages(function_packages)
 
     # Create a Worker instance from the gen-orchestrator library
     worker = Worker(

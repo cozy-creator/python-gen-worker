@@ -37,12 +37,14 @@ def get_pipeline() -> StableDiffusionXLPipeline:
     if _global_pipeline is None:
         logger.info("Loading StableDiffusionXLPipeline onto GPU...")
         _global_pipeline = StableDiffusionXLPipeline.from_pretrained(
-            "stabilityai/stable-diffusion-xl-base-1.0",
-            torch_dtype=torch.float16
+            "John6666/fucktastic-anime-checkpoint-15-sdxl",
+            torch_dtype=torch.float16,
+            # variant="fp16"
         )
         _global_pipeline.to("cuda")
         logger.info("Pipeline loaded successfully.")
     return _global_pipeline
+
 
 def image_gen_action(ctx, data: dict) -> dict:
     """
@@ -72,7 +74,7 @@ def image_gen_action(ctx, data: dict) -> dict:
                 num_images_per_prompt=input_data.num_images,
                 guidance_scale=input_data.guidance_scale
             )
-            images = output.images  # List of PIL.Image objects
+            images = output.images
 
         # Save images locally and construct file URLs
         output_dir = "./generated_images"
@@ -92,7 +94,7 @@ def image_gen_action(ctx, data: dict) -> dict:
         logger.exception("Error during image generation:")
         return {"error": str(e)}
     
-    
+
 def register_functions(worker):
     """
     Register the image generation function with the provided worker.
