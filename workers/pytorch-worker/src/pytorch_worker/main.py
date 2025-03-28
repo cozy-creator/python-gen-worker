@@ -3,7 +3,10 @@ import sys
 import logging
 import subprocess
 import importlib
-from gen_orchestrator import Worker, ActionContext
+from gen_orchestrator import Worker
+from gen_orchestrator.model_memory_manager import ModelMemoryManager
+from gen_orchestrator.utils.config import set_config, load_config
+from gen_orchestrator.utils.parse_cli import parse_arguments
 import dotenv
 
 dotenv.load_dotenv()
@@ -11,18 +14,6 @@ dotenv.load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("pytorch-worker")
 
-# def install_package(package_name: str) -> None:
-#     """
-#     Install a Python package using pip.
-#     This is (or will be) useful when the worker needs to install packages dynamically.
-#     """
-#     logger.info(f"Installing package '{package_name}'...")
-#     try:
-#         subprocess.check_call([sys.executable, "-m", "pip", "install", package_name])
-#         logger.info(f"Package '{package_name}' installed successfully.")
-#     except subprocess.CalledProcessError as e:
-#         logger.error(f"Failed to install package '{package_name}': {e}")
-#         raise
 
 def install_package(package_spec: str) -> None:
     """
@@ -46,18 +37,18 @@ def install_package(package_spec: str) -> None:
     
     subprocess.check_call(cmd)
     
-def import_and_register(worker: Worker, package_name: str) -> None:
+def import_and_register(worker: Worker, package_name: str, model_memory_manager: ModelMemoryManager) -> None:
     """
-    Import the given package and call its register_functions(worker) function if it exists.
-    This allows the package to register one or more functions with the worker.
+    Import the given package and call its register_functions(worker, model_memory_manager) function if it exists.
+    This allows the package to register one or more functions with the worker and the model memory manager.
     """
     logger.info(f"Importing package '{package_name}' for function registration...")
     module = importlib.import_module(package_name)
     if hasattr(module, "register_functions"):
         logger.info(f"Registering functions from package '{package_name}'...")
-        module.register_functions(worker)
+        module.register_functions(worker, model_memory_manager)
     else:
-        logger.warning(f"Package '{package_name}' does not expose a 'register_functions(worker)' function.")
+        logger.warning(f"Package '{package_name}' does not expose a 'register_functions(worker, model_memory_manager)' function.")
 
 
 def parse_function_packages(packages_str: str) -> list[str]:
@@ -98,6 +89,14 @@ def main():
 
     logger.info(f"Created Worker with ID '{worker_id}' connecting to '{scheduler_addr}'")
 
+    config = load_config()
+    print(f"config: {config}")
+
+    set_config(config)
+
+    # Instantiate the ModelMemoryManager (to handle dynamic model loading/unloading)
+    model_manager = ModelMemoryManager()
+
     # Install and register packages if specified
     for pkg in package_list:
         try:
@@ -107,7 +106,7 @@ def main():
             continue
 
         try:
-            import_and_register(worker, pkg)
+            import_and_register(worker, pkg, model_manager)
         except Exception as e:
             logger.error(f"Failed to import and register package '{pkg}': {e}")
 
@@ -124,3 +123,7 @@ def main():
         
 if __name__ == "__main__":
     main()
+
+
+# TODO:
+# - Upload to s3
