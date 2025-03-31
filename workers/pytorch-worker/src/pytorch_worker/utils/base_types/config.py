@@ -30,6 +30,7 @@ def default_models_path() -> str:
     return os.path.join(DEFAULT_HOME_DIR, "models")
 
 
+
 def default_host() -> str:
     return "0.0.0.0" if os.path.exists("/.dockerenv") else "localhost"
 
