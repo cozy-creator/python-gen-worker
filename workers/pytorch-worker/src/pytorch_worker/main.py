@@ -4,9 +4,9 @@ import logging
 import subprocess
 import importlib
 from gen_orchestrator import Worker
-from gen_orchestrator.model_memory_manager import ModelMemoryManager
-from gen_orchestrator.utils.config import set_config, load_config
-from gen_orchestrator.utils.parse_cli import parse_arguments
+from .model_memory_manager import ModelMemoryManager
+from .utils.config import set_config, load_config
+from .utils.parse_cli import parse_arguments
 import dotenv
 
 dotenv.load_dotenv()
