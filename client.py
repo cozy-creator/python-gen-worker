@@ -20,7 +20,7 @@ def main():
         "positive_prompt": "A serene landscape with mountains at sunset",
         "negative_prompt": "low resolution, blurry",
         "aspect_ratio": "1/1",
-        "num_images": 1,
+        "num_images": 2,
         "enhance_prompt": False,
         "style": "cinematic",
         "random_seed": 42,
@@ -31,7 +31,7 @@ def main():
     input_payload = msgpack.packb(input_data, use_bin_type=True)
     
     action_options = frontend_pb2.ActionOptions(
-        id="test-run-016", 
+        id="test-run-029", 
         timeout_ms=60000
     )
     

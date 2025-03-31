@@ -4,9 +4,9 @@ import logging
 import subprocess
 import importlib
 from gen_orchestrator import Worker
-from .model_memory_manager import ModelMemoryManager
-from .utils.config import set_config, load_config
-from .utils.parse_cli import parse_arguments
+from pytorch_worker.model_memory_manager import ModelMemoryManager
+from pytorch_worker.utils.config import set_config, load_config
+from pytorch_worker.utils.parse_cli import parse_arguments
 import dotenv
 
 dotenv.load_dotenv()

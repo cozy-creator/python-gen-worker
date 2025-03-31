@@ -197,7 +197,7 @@ class ModelMemoryManager:
         # State flags
         self.is_in_device: bool = False
         self.is_startup_load: bool = False
-        self.environment: str = get_environment()
+        # self.environment: str = get_environment()
 
         # Managers and caches
         self.model_downloader = get_model_downloader()

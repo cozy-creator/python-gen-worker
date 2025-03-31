@@ -22,6 +22,12 @@ from diffusers import (
     FluxControlNetPipeline,
 )
 from compel import Compel, ReturnedEmbeddingsType
+import boto3
+import tempfile
+import blake3
+from io import BytesIO
+from botocore.client import Config
+
 
 # Dummy aspect ratio conversion
 def aspect_ratio_to_dimensions(aspect_ratio: str, class_name: str):
@@ -100,9 +106,8 @@ async def image_gen_action(ctx, data: dict, model_manager) -> dict:
         class_name = pipeline.__class__.__name__
         logger.info(f"Using pipeline class: {class_name}")
         
-        # Optional prompt enhancement.
+        # Optional prompt enhancement. TODO: Implement prompt enhancement from previous code.
         if enhance_prompt:
-            # Here, you could integrate a real prompt enhancer.
             positive_prompt = positive_prompt + " in " + style + " style"
         
         # Initialize Compel for embedding generation if applicable.
@@ -173,22 +178,81 @@ async def image_gen_action(ctx, data: dict, model_manager) -> dict:
                 torch.cuda.empty_cache()
         
         progress_callback.close()
+
+
+        # Upload images to S3
+        upload_to_s3 = os.environ.get("UPLOAD_TO_S3", "false").lower() == "true"
+        if upload_to_s3:
+            file_urls = upload_images_to_s3(generated_images)
+        else:
+            output_dir = "./generated_images"
+            os.makedirs(output_dir, exist_ok=True)
+            file_urls = []
+            for img in generated_images:
+                hashed_name = get_hashed_filename(img)
+                file_path = os.path.join(output_dir, hashed_name)
+                img.save(file_path, format="PNG")
+                abs_path = os.path.abspath(file_path)
+                file_urls.append(f"file://{abs_path}")
         
-        # Save images locally.
-        output_dir = "./generated_images"
-        os.makedirs(output_dir, exist_ok=True)
-        file_urls = []
-        for idx, img in enumerate(generated_images):
-            file_name = f"generated_{int(time.time())}_{idx}.png"
-            file_path = os.path.join(output_dir, file_name)
-            img.save(file_path, format="PNG")
-            abs_path = os.path.abspath(file_path)
-            file_urls.append(f"file://{abs_path}")
         
         return {"urls": file_urls}
     except Exception as e:
         traceback.print_exc()
         raise ValueError(f"Error generating images: {e}")
+    
+
+def get_hashed_filename(img, extension=".png"):
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    data = buf.getvalue()
+    hash_hex = blake3.blake3(data).hexdigest()
+    return f"{hash_hex}{extension}"
+    
+
+def upload_images_to_s3(generated_images):
+    bucket_name = os.environ.get("S3_BUCKET_NAME")
+    if not bucket_name:
+        raise ValueError("S3_BUCKET_NAME environment variable is not set.")
+    
+    region = os.environ.get("S3_REGION")
+    
+    s3_client = boto3.client("s3",
+        region_name=region,
+        endpoint_url=os.environ.get("S3_ENDPOINT_URL"),
+        aws_access_key_id=os.environ.get("S3_ACCESS_KEY_ID"),
+        aws_secret_access_key=os.environ.get("S3_SECRET_ACCESS_KEY"),
+        config=Config(signature_version='s3v4')
+    )
+    
+    file_urls = []
+    for idx, img in enumerate(generated_images):
+        # get the hash of the file using blake3 so as to avoid duplicates
+        file_hash = get_hashed_filename(img)
+
+        s3_key = f"orchestrator_images_test/{file_hash}"
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as temp_file:
+            img.save(temp_file.name, format="PNG")
+            tmp_file = temp_file.name
+
+        s3_client.upload_file(
+            tmp_file,
+            bucket_name,
+            s3_key,
+            ExtraArgs={"ACL": "public-read", "ContentType": "image/png"}
+        )
+
+        file_url = f"https://{bucket_name}.{region}.digitaloceanspaces.com/{s3_key}"
+        file_urls.append(file_url)
+        os.remove(tmp_file)
+
+    return file_urls
+        
+        
+
+    
+    
 
 def register_functions(worker, model_manager) -> None:
     """
