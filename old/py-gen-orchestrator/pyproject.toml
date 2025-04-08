@@ -1,0 +1,47 @@
+[project]
+name = "gen-orchestrator"
+version = "0.1.12"
+description = "Contains python interfaces for both client and worker, used to communicate with the scheduler"
+readme = "README.md"
+authors = [{ name = "Paul Fidika", email = "paul@fidika.com" }]
+requires-python = ">=3.12"
+dependencies = [
+    "grpcio>=1.71.0",
+    "msgpack>=1.1.0",
+    "protobuf>=5.26.1",
+    "pydantic>=2.5.0",
+    "grpcio-tools>=1.71.0",
+    "devpi-client>=7.2.0",
+    "psutil>=7.0.0",
+    "torch>=2.6.0",
+    "torchaudio>=2.6.0",
+    "torchvision>=0.21.0",
+    "transformers>=4.50.3",
+    "diffusers>=0.32.2",
+    "accelerate>=1.5.2",
+    "aiohttp>=3.11.14",
+    "backoff>=2.2.1",
+    "spandrel>=0.4.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build]
+ignore-vcs = true
+only-include = [] 
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/gen_orchestrator" = "gen_orchestrator"
+"src/gen_orchestrator/pb" = "gen_orchestrator/pb"
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cu126", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
