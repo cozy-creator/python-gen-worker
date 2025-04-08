@@ -5,3 +5,6 @@ __pycache__
 
 .env
 generated_images/
+
+src/gen_worker/pb/**
+!src/gen_worker/pb/__init__.py

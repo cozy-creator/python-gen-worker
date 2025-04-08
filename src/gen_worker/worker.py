@@ -1,0 +1,604 @@
+import grpc
+import logging
+import time
+import threading
+import os
+import signal
+import queue
+import psutil
+import importlib
+import inspect
+import functools
+from typing import Any, Callable, Dict, Optional, TypeVar, Iterator, List
+import msgpack
+
+# Use relative imports within the package
+from .pb import worker_scheduler_pb2 as pb # type: ignore
+from .pb import worker_scheduler_pb2_grpc as pb_grpc # type: ignore
+from .decorators import ResourceRequirements # Import ResourceRequirements for type hints if needed
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__) # Use __name__ for logger
+
+# Type variables for generic function signatures
+I = TypeVar('I')  # Input type
+O = TypeVar('O')  # Output type
+
+# Generic type for action functions
+ActionFunc = Callable[[Any, I], O]
+
+HEARTBEAT_INTERVAL = 10  # seconds
+
+class ActionContext:
+    """Context object passed to action functions, allowing cancellation."""
+    def __init__(self, run_id: str):
+        self._run_id = run_id
+        self._canceled = False
+        self._cancel_event = threading.Event()
+
+    @property
+    def run_id(self) -> str:
+        return self._run_id
+
+    def is_canceled(self) -> bool:
+        """Check if the action was canceled."""
+        return self._canceled
+
+    def cancel(self):
+        """Mark the action as canceled."""
+        if not self._canceled:
+            self._canceled = True
+            self._cancel_event.set()
+            logger.info(f"Action {self.run_id} marked for cancellation.")
+
+    def done(self) -> threading.Event:
+        """Returns an event that is set when the action is cancelled."""
+        return self._cancel_event
+
+# Define the interceptor class correctly
+class _AuthInterceptor(grpc.StreamStreamClientInterceptor):
+    def __init__(self, token: str):
+        self._token = token
+
+    def intercept_stream_stream(self, continuation, client_call_details, request_iterator):
+        metadata = list(client_call_details.metadata or [])
+        metadata.append(('authorization', f'Bearer {self._token}'))
+        new_details = client_call_details._replace(metadata=metadata)
+        return continuation(new_details, request_iterator)
+
+class Worker:
+    """Worker implementation that connects to the scheduler via gRPC."""
+
+    def __init__(
+        self,
+        scheduler_addr: str = "localhost:8080",
+        user_module_names: List[str] = ["functions"], # Add new parameter for user modules
+        worker_id: Optional[str] = None,
+        auth_token: Optional[str] = None,
+        use_tls: bool = False,
+        reconnect_delay: int = 5,
+        max_reconnect_attempts: int = 0,  # 0 means infinite retries
+    ):
+        """Initialize a new worker.
+
+        Args:
+            scheduler_addr: Address of the scheduler service.
+            user_module_names: List of Python module names containing user-defined @worker_function functions.
+            worker_id: Unique ID for this worker (generated if not provided).
+            auth_token: Optional authentication token.
+            use_tls: Whether to use TLS for the connection.
+            reconnect_delay: Seconds to wait between reconnection attempts.
+            max_reconnect_attempts: Max reconnect attempts (0 = infinite).
+        """
+        self.scheduler_addr = scheduler_addr
+        self.user_module_names = user_module_names # Store module names
+        self.worker_id = worker_id or f"py-worker-{os.getpid()}"
+        self.auth_token = auth_token
+        self.use_tls = use_tls
+        self.reconnect_delay = reconnect_delay
+        self.max_reconnect_attempts = max_reconnect_attempts
+
+        self._actions: Dict[str, Callable[[ActionContext, bytes], bytes]] = {}
+        self._active_tasks: Dict[str, ActionContext] = {}
+        self._active_tasks_lock = threading.Lock()
+        self._discovered_resources: Dict[str, ResourceRequirements] = {} # Store resources per function
+
+        self._channel = None
+        self._stub = None
+        self._stream = None
+        self._running = False
+        self._stop_event = threading.Event()
+        self._reconnect_count = 0
+        self._outgoing_queue = queue.Queue()
+
+        self._receive_thread = None
+        self._heartbeat_thread = None
+
+        logger.info(f"Created worker with ID={self.worker_id}, scheduler={scheduler_addr}")
+
+        # Discover functions before setting signals? Maybe after. Let's do it here.
+        self._discover_and_register_functions()
+
+        signal.signal(signal.SIGINT, self._handle_interrupt)
+        signal.signal(signal.SIGTERM, self._handle_interrupt)
+
+    def _discover_and_register_functions(self):
+        """Discover and register functions marked with @worker_function."""
+        logger.info(f"Discovering worker functions in modules: {self.user_module_names}...")
+        discovered_count = 0
+        for module_name in self.user_module_names:
+            try:
+                module = importlib.import_module(module_name)
+                logger.debug(f"Inspecting module: {module_name}")
+                for name, obj in inspect.getmembers(module):
+                    if inspect.isfunction(obj) and hasattr(obj, '_is_worker_function'):
+                        if getattr(obj, '_is_worker_function') is True:
+                            # Found a decorated function
+                            original_func = obj # Keep reference to the actual decorated function
+                            func_name = original_func.__name__ # Use the real function name
+
+                            if func_name in self._actions:
+                                logger.warning(f"Function '{func_name}' from module '{module_name}' conflicts with an already registered function. Skipping.")
+                                continue
+
+                            resources: ResourceRequirements = getattr(original_func, '_worker_resources', ResourceRequirements())
+                            self._discovered_resources[func_name] = resources
+
+                            # Create the wrapper for gRPC/msgpack interaction
+                            def create_wrapper(captured_func: Callable, captured_name: str) -> Callable[[ActionContext, bytes], bytes]:
+                                @functools.wraps(captured_func) # Preserve metadata of original user func
+                                def wrapper(ctx: ActionContext, input_bytes: bytes) -> bytes:
+                                    try:
+                                        input_obj = msgpack.unpackb(input_bytes, raw=False)
+                                        # Pass the context and deserialized input to the *original* user function
+                                        result = captured_func(ctx, input_obj)
+                                        if ctx.is_canceled():
+                                             raise InterruptedError("Task was canceled during execution")
+                                        # Ensure result is bytes after msgpack serialization
+                                        packed_result = msgpack.packb(result, use_bin_type=True)
+                                        # Check type explicitly after packing
+                                        if not isinstance(packed_result, bytes):
+                                            raise TypeError(f"Function {captured_name} did not return msgpack-serializable data resulting in bytes")
+                                        return packed_result
+                                    except InterruptedError as ie: # Catch cancellation specifically
+                                        logger.warning(f"Function {captured_name} run {ctx.run_id} was interrupted.")
+                                        raise # Re-raise to be handled in _execute_function
+                                    except Exception as e:
+                                        logger.exception(f"Error during execution of function {captured_name} (run_id: {ctx.run_id})")
+                                        raise # Re-raise to be caught by _execute_function
+                                return wrapper
+
+                            self._actions[func_name] = create_wrapper(original_func, func_name)
+                            logger.info(f"Registered function: '{func_name}' from module '{module_name}' with resources: {resources}")
+                            discovered_count += 1
+
+            except ImportError:
+                logger.error(f"Could not import user module: {module_name}")
+            except Exception as e:
+                logger.exception(f"Error during discovery in module {module_name}: {e}")
+
+        if discovered_count == 0:
+             logger.warning(f"No functions decorated with @worker_function found in specified modules: {self.user_module_names}")
+        else:
+             logger.info(f"Discovery complete. Found {discovered_count} worker functions.")
+
+    def _send_message(self, message: pb.WorkerSchedulerMessage):
+        """Add a message to the outgoing queue."""
+        if self._running and not self._stop_event.is_set():
+            try:
+                self._outgoing_queue.put_nowait(message)
+            except queue.Full:
+                 logger.error("Outgoing message queue is full. Message dropped!")
+        else:
+            logger.warning("Attempted to send message while worker is stopping or stopped.")
+
+    def connect(self) -> bool:
+        """Connect to the scheduler.
+
+        Returns:
+            bool: True if connection was successful, False otherwise.
+        """
+        try:
+            if self.use_tls:
+                # TODO: Add proper credential loading if needed
+                creds = grpc.ssl_channel_credentials()
+                self._channel = grpc.secure_channel(self.scheduler_addr, creds)
+            else:
+                self._channel = grpc.insecure_channel(self.scheduler_addr)
+
+            interceptors = []
+            if self.auth_token:
+                interceptors.append(_AuthInterceptor(self.auth_token))
+
+            if interceptors:
+                self._channel = grpc.intercept_channel(self._channel, *interceptors)
+
+            self._stub = pb_grpc.SchedulerWorkerServiceStub(self._channel)
+
+            # Start the bidirectional stream
+            request_iterator = self._outgoing_message_iterator()
+            self._stream = self._stub.ConnectWorker(request_iterator)
+
+            logger.info(f"Attempting to connect to scheduler at {self.scheduler_addr}...")
+
+            # Send initial registration immediately
+            self._register_worker(is_heartbeat=False)
+
+            # Start the receive loop in a separate thread *after* stream is initiated
+            self._receive_thread = threading.Thread(target=self._receive_loop, daemon=True)
+            self._receive_thread.start()
+
+            # Start heartbeat thread
+            self._heartbeat_thread = threading.Thread(target=self._heartbeat_loop, daemon=True)
+            self._heartbeat_thread.start()
+
+            logger.info(f"Successfully connected to scheduler at {self.scheduler_addr}")
+            self._reconnect_count = 0
+            return True
+
+        except grpc.RpcError as e:
+            # Access code() and details() methods for RpcError
+            code = e.code() if hasattr(e, 'code') and callable(e.code) else grpc.StatusCode.UNKNOWN # type: ignore
+            details = e.details() if hasattr(e, 'details') and callable(e.details) else str(e) # type: ignore
+            logger.error(f"Failed to connect to scheduler: {code} - {details}")
+            self._close_connection()
+            return False
+        except Exception as e:
+            logger.exception(f"Unexpected error connecting to scheduler: {e}")
+            self._close_connection()
+            return False
+
+    def _outgoing_message_iterator(self) -> Iterator[pb.WorkerSchedulerMessage]:
+        """Yields messages from the outgoing queue to send to the scheduler."""
+        while not self._stop_event.is_set():
+            try:
+                # Block for a short time to allow stopping gracefully
+                message = self._outgoing_queue.get(timeout=0.1)
+                yield message
+                # self._outgoing_queue.task_done() # Not needed if not joining queue
+            except queue.Empty:
+                continue
+            except Exception as e:
+                 if not self._stop_event.is_set():
+                     logger.exception(f"Error in outgoing message iterator: {e}")
+                     self._handle_connection_error()
+                     break # Exit iterator on error
+
+    def _heartbeat_loop(self):
+        """Periodically sends heartbeat messages."""
+        while not self._stop_event.wait(HEARTBEAT_INTERVAL):
+            try:
+                self._register_worker(is_heartbeat=True)
+                logger.debug("Sent heartbeat to scheduler")
+            except Exception as e:
+                if not self._stop_event.is_set():
+                    logger.error(f"Error sending heartbeat: {e}")
+                    self._handle_connection_error()
+                    break # Stop heartbeating on error
+
+    def _register_worker(self, is_heartbeat: bool = False):
+        """Create and send a registration/heartbeat message."""
+        try:
+            mem = psutil.virtual_memory()
+            resources = pb.WorkerResources(
+                worker_id=self.worker_id,
+                cpu_cores=os.cpu_count() or 0,
+                memory_bytes=mem.total,
+                # TODO: Add GPU detection if needed (e.g., using torch.cuda)
+                gpu_count=0,
+                gpu_memory_bytes=0,
+                available_functions=list(self._actions.keys()),
+                available_models=[],
+                supports_model_loading=False # TODO: Set based on capability
+            )
+            registration = pb.WorkerRegistration(
+                resources=resources,
+                is_heartbeat=is_heartbeat
+            )
+            message = pb.WorkerSchedulerMessage(worker_registration=registration)
+            self._send_message(message)
+        except Exception as e:
+            logger.error(f"Failed to create or send registration/heartbeat: {e}")
+
+    def run(self) -> None:
+        """Run the worker, connecting to the scheduler and processing tasks."""
+        if self._running:
+            logger.warning("Worker is already running")
+            return
+
+        self._running = True
+        self._stop_event.clear()
+        self._reconnect_count = 0 # Reset reconnect count on new run
+
+        while self._running and not self._stop_event.is_set():
+            self._reconnect_count += 1
+            logger.info(f"Connection attempt {self._reconnect_count}...")
+            if self.connect():
+                # Successfully connected, wait for stop signal or disconnection
+                logger.info("Connection successful. Worker running.")
+                self._stop_event.wait() # Wait here until stopped or disconnected
+                logger.info("Worker run loop received stop/disconnect signal.")
+                # If stopped normally (self.stop() called), _running will be False
+                # If disconnected, connect() failed, threads stopped, _handle_connection_error called _stop_event.set()
+            else:
+                # Connection failed
+                if self.max_reconnect_attempts > 0 and self._reconnect_count >= self.max_reconnect_attempts:
+                    logger.error("Failed to connect after maximum attempts. Stopping worker.")
+                    self._running = False # Ensure loop terminates
+                    break
+
+                if self._running and not self._stop_event.is_set():
+                    logger.info(f"Connection attempt {self._reconnect_count} failed. Retrying in {self.reconnect_delay} seconds...")
+                    # Wait for delay, but break if stop event is set during wait
+                    if self._stop_event.wait(self.reconnect_delay):
+                        logger.info("Stop requested during reconnect delay.")
+                        break # Exit if stopped while waiting
+            # After a failed attempt or disconnect, clear stop event for next retry
+            if self._running:
+                 self._stop_event.clear()
+
+        # Cleanup after loop exits (either max attempts reached or manual stop)
+        self.stop()
+
+    def _handle_interrupt(self, sig, frame):
+        """Handle interrupt signal (Ctrl+C)."""
+        logger.info(f"Received signal {sig}, shutting down gracefully.")
+        self.stop()
+
+    def stop(self) -> None:
+        """Stop the worker and clean up resources."""
+        if not self._running and not self._stop_event.is_set(): # Check if already stopped or stopping
+            # Avoid multiple stop calls piling up
+            # logger.debug("Stop called but worker already stopped or stopping.")
+            return
+
+        logger.info("Stopping worker...")
+        self._running = False # Signal loops to stop
+        self._stop_event.set() # Wake up any waiting threads
+
+        # Cancel any active tasks
+        active_task_ids = []
+        with self._active_tasks_lock:
+            active_task_ids = list(self._active_tasks.keys())
+            for run_id in active_task_ids:
+                 ctx = self._active_tasks.get(run_id)
+                 if ctx:
+                     logger.debug(f"Cancelling active task {run_id} during stop.")
+                     ctx.cancel()
+            # Don't clear here, allow _execute_function to finish and remove
+
+        # Wait for threads (give them a chance to finish)
+        # Stop heartbeat first
+        if self._heartbeat_thread and self._heartbeat_thread.is_alive():
+             logger.debug("Joining heartbeat thread...")
+             self._heartbeat_thread.join(timeout=1.0)
+
+        # The outgoing iterator might be blocked on queue.get, stop_event wakes it
+
+        # Close the gRPC connection (this might interrupt the receive loop)
+        self._close_connection()
+
+        # Wait for receive thread
+        if self._receive_thread and self._receive_thread.is_alive():
+            logger.debug("Joining receive thread...")
+            self._receive_thread.join(timeout=2.0)
+
+        # Clear outgoing queue after threads are stopped
+        logger.debug("Clearing outgoing message queue...")
+        while not self._outgoing_queue.empty():
+            try:
+                self._outgoing_queue.get_nowait()
+            except queue.Empty:
+                break
+
+        logger.info("Worker stopped.")
+        # Reset stop event in case run() is called again
+        self._stop_event.clear()
+
+    def _close_connection(self):
+        """Close the gRPC channel and reset state."""
+        if self._stream:
+             try:
+                  # Attempt to cancel the stream from the client side
+                  # This might help the server side release resources quicker
+                  # Note: Behavior might vary depending on server implementation
+                  if hasattr(self._stream, 'cancel') and callable(self._stream.cancel):
+                     self._stream.cancel() # type: ignore
+                     logger.debug("gRPC stream cancelled.")
+             except Exception as e:
+                  logger.warning(f"Error cancelling gRPC stream: {e}")
+        self._stream = None
+
+        if self._channel:
+            try:
+                self._channel.close()
+                logger.debug("gRPC channel closed.")
+            except Exception as e:
+                 logger.error(f"Error closing gRPC channel: {e}")
+        self._channel = None
+        self._stub = None
+
+
+    def _receive_loop(self) -> None:
+        """Loop to receive messages from the scheduler via the stream."""
+        logger.info("Receive loop started.")
+        try:
+            if not self._stream:
+                 logger.error("Receive loop started without a valid stream.")
+                 # Don't call _handle_connection_error here, connect should have failed
+                 return
+
+            for message in self._stream:
+                # Check stop event *before* processing
+                if self._stop_event.is_set():
+                    logger.debug("Stop event set during iteration, exiting receive loop.")
+                    break
+                try:
+                    self._process_message(message)
+                except Exception as e:
+                    # Log errors processing individual messages but continue loop
+                    logger.exception(f"Error processing message: {e}")
+
+        except grpc.RpcError as e:
+            # RpcError indicates a problem with the gRPC connection itself
+            code = e.code() if hasattr(e, 'code') and callable(e.code) else grpc.StatusCode.UNKNOWN # type: ignore
+            details = e.details() if hasattr(e, 'details') and callable(e.details) else str(e) # type: ignore
+
+            if self._stop_event.is_set():
+                 # If stopping, cancellation is expected
+                 if code == grpc.StatusCode.CANCELLED:
+                     logger.info("gRPC stream cancelled gracefully during shutdown.")
+                 else:
+                     logger.warning(f"gRPC error during shutdown: {code} - {details}")
+            elif code == grpc.StatusCode.CANCELLED:
+                logger.warning("gRPC stream unexpectedly cancelled by server or network.")
+                self._handle_connection_error()
+            elif code in (grpc.StatusCode.UNAVAILABLE, grpc.StatusCode.DEADLINE_EXCEEDED, grpc.StatusCode.INTERNAL):
+                 logger.warning(f"gRPC connection lost ({code}). Attempting reconnect.")
+                 self._handle_connection_error()
+            else:
+                 logger.error(f"Unhandled gRPC error in receive loop: {code} - {details}")
+                 self._handle_connection_error() # Attempt reconnect on unknown errors too
+        except Exception as e:
+            # Catch-all for non-gRPC errors in the loop
+            if not self._stop_event.is_set():
+                logger.exception(f"Unexpected error in receive loop: {e}")
+                self._handle_connection_error() # Attempt reconnect
+        finally:
+             logger.info("Receive loop finished.")
+
+    def _handle_connection_error(self):
+         """Handles actions needed when a connection error occurs during run."""
+         if self._running and not self._stop_event.is_set():
+             logger.warning("Connection error detected. Signaling main loop to reconnect...")
+             self._close_connection() # Ensure resources are closed before reconnect attempt
+             self._stop_event.set() # Signal run loop to attempt reconnection
+         # else: # Already stopping or stopped
+             # logger.debug("Connection error detected but worker is already stopping.")
+
+
+    def _process_message(self, message: pb.WorkerSchedulerMessage):
+        """Process a single message received from the scheduler."""
+        msg_type = message.WhichOneof('msg')
+        # logger.debug(f"Received message of type: {msg_type}")
+
+        if msg_type == 'run_request':
+            self._handle_run_request(message.run_request)
+        elif msg_type == 'load_model_cmd':
+            # TODO: Implement model loading logic
+            model_id = message.load_model_cmd.model_id
+            logger.warning(f"Received load_model_cmd for {model_id}, but not yet implemented.")
+            # Send result back (failure for now)
+            result = pb.LoadModelResult(model_id=model_id, success=False, error_message="Model loading not implemented")
+            self._send_message(pb.WorkerSchedulerMessage(load_model_result=result))
+        elif msg_type == 'unload_model_cmd':
+            # TODO: Implement model unloading logic
+            model_id = message.unload_model_cmd.model_id
+            logger.warning(f"Received unload_model_cmd for {model_id}, but not yet implemented.")
+            result = pb.UnloadModelResult(model_id=model_id, success=False, error_message="Model unloading not implemented")
+            self._send_message(pb.WorkerSchedulerMessage(unload_model_result=result))
+        elif msg_type == 'interrupt_run_cmd':
+            run_id = message.interrupt_run_cmd.run_id
+            self._handle_interrupt_request(run_id)
+        # Add handling for other message types if needed (e.g., config updates)
+        elif msg_type is None:
+             logger.warning("Received empty message from scheduler.")
+        else:
+            logger.warning(f"Received unhandled message type: {msg_type}")
+
+
+    def _handle_run_request(self, request: pb.TaskExecutionRequest):
+        """Handle a task execution request from the scheduler."""
+        run_id = request.run_id
+        function_name = request.function_name
+        input_payload = request.input_payload
+
+        logger.info(f"Received task request: run_id={run_id}, function={function_name}")
+
+        func = self._actions.get(function_name)
+        if not func:
+            error_msg = f"Unknown function requested: {function_name}"
+            logger.error(error_msg)
+            self._send_task_result(run_id, False, None, error_msg)
+            return
+
+        ctx = ActionContext(run_id)
+        # Add to active tasks *before* starting thread
+        with self._active_tasks_lock:
+             # Double-check if task is already active (race condition mitigation)
+             if run_id in self._active_tasks:
+                  error_msg = f"Task with run_id {run_id} is already active (race condition?)."
+                  logger.error(error_msg)
+                  return # Avoid starting duplicate thread
+             self._active_tasks[run_id] = ctx
+
+        # Execute function in a separate thread to avoid blocking the receive loop
+        thread = threading.Thread(target=self._execute_function, args=(ctx, func, input_payload), daemon=True)
+        thread.start()
+
+    def _handle_interrupt_request(self, run_id: str):
+        """Handle a request to interrupt/cancel a running task."""
+        logger.info(f"Received interrupt request for run_id={run_id}")
+        with self._active_tasks_lock:
+            ctx = self._active_tasks.get(run_id)
+            if ctx:
+                ctx.cancel() # Set internal flag and event
+            else:
+                logger.warning(f"Could not interrupt task {run_id}: Not found in active tasks.")
+
+    def _execute_function(self, ctx: ActionContext, func: Callable[[ActionContext, bytes], bytes], input_payload: bytes):
+        """Execute the registered function and send the result/error back."""
+        run_id = ctx.run_id
+        output_payload: Optional[bytes] = None
+        error_message: str = ""
+        success = False
+        try:
+            # Check for cancellation before starting
+            if ctx.is_canceled():
+                 raise InterruptedError("Task was cancelled before execution started")
+
+            # Execute the function wrapper (which handles deserialization/serialization)
+            output_payload = func(ctx, input_payload)
+            # Check for cancellation *during* execution (func should check ctx.is_canceled)
+            if ctx.is_canceled():
+                raise InterruptedError("Task was cancelled during execution")
+
+            success = True
+            logger.info(f"Task {run_id} completed successfully.")
+
+        except InterruptedError as e:
+             error_message = str(e) or "Task was canceled"
+             logger.warning(f"Task {run_id} was canceled: {error_message}")
+             success = False # Explicitly set success to False on cancellation
+        except Exception as e:
+            error_message = f"{type(e).__name__}: {str(e)}"
+            logger.exception(f"Error executing function for run_id={run_id}: {error_message}")
+            success = False
+        finally:
+            # Always send a result back, regardless of success, failure, or cancellation
+            self._send_task_result(run_id, success, output_payload, error_message)
+            # Remove from active tasks *after* sending result
+            with self._active_tasks_lock:
+                if run_id in self._active_tasks:
+                    del self._active_tasks[run_id]
+                # else: # Might have been removed by stop() already
+                     # logger.warning(f"Task {run_id} not found in active tasks during cleanup.")
+
+
+    def _send_task_result(self, run_id: str, success: bool, output_payload: Optional[bytes], error_message: str):
+        """Send a task execution result back to the scheduler via the queue."""
+        try:
+            result = pb.TaskExecutionResult(
+                run_id=run_id,
+                success=success,
+                output_payload=(output_payload or b'') if success else b'', # Default to b'' if None
+                error_message=error_message if not success else ""
+            )
+            msg = pb.WorkerSchedulerMessage(run_result=result)
+            self._send_message(msg)
+            logger.debug(f"Queued task result for run_id={run_id}, success={success}")
+        except Exception as e:
+             # This shouldn't generally fail unless message creation has issues
+             logger.error(f"Failed to create or queue task result for run_id={run_id}: {e}")
+

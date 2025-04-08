@@ -1,0 +1,24 @@
+[project]
+name = "gen-worker"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Paul Fidika", email = "paul@fidika.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "grpcio>=1.71.0",
+    "grpcio-tools>=1.71.0",
+    "msgpack>=1.1.0",
+    "protobuf>=5.29.4",
+    "psutil>=7.0.0",
+    "pydantic>=2.11.2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv.workspace]
+members = ["example-functions"]

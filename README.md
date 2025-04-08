@@ -1,5 +1,9 @@
-These are worker-runtimes and worker functions.
+This is a python package, called gen_worker, which is used to decorate worker functions. It implements a grpc-client which communicates witht he gen-orchestrator, receives jobs, executes them using a running (entrypoint.py) and then returns the results.
 
-The runtimes provide a set of dependencies and an environment for execution inside of a Docker container. They then install a set of functions (which are separate packages) to execute, and register them with the orchestrator. When the worker receives an Action (function call + input), it executes the function and returns the result to the orchestrator.
+The worker can also load models into and out of CUDA memory using PyTorch. It's designed to manage models in memory with a LRU cache.
 
-Worker functions are not isolated from each other: they all run in the same environment, and share the same installed dependencies and filesystem. It's up to the worker to share usage of the GPU amongst functions. This is necessary because Kubernetes can only assign GPUs to pods, and doesn't have any notion of pods sharing a GPU.
+---
+
+Files in src/gen_worker/pb must be auto-generated in the gen-orchestrator repo, using the proto files. Go in there and run `task proto`
+
+---
