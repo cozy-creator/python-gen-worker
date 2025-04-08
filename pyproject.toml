@@ -1,6 +1,6 @@
 [project]
 name = "gen-worker"
-version = "0.1.0"
+version = "0.1.1"
 description = "Add your description here"
 readme = "README.md"
 authors = [
@@ -9,16 +9,44 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "grpcio>=1.71.0",
-    "grpcio-tools>=1.71.0",
     "msgpack>=1.1.0",
-    "protobuf>=5.29.4",
+    "protobuf>=5.26.1",
+    "pydantic>=2.5.0",
+    "grpcio-tools>=1.71.0",
+    "devpi-client>=7.2.0",
     "psutil>=7.0.0",
-    "pydantic>=2.11.2",
+    "torch>=2.6.0",
+    "torchaudio>=2.6.0",
+    "torchvision>=0.21.0",
+    "transformers>=4.50.3",
+    "diffusers>=0.32.2",
+    "accelerate>=1.5.2",
+    "aiohttp>=3.11.14",
+    "backoff>=2.2.1",
+    "spandrel>=0.4.1",
 ]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
-[tool.uv.workspace]
-members = ["example-functions"]
+[tool.hatch.build]
+ignore-vcs = true
+only-include = []
+
+# [tool.uv.workspace]
+# members = ["example-functions"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/gen_worker" = "gen_worker"
+"src/gen_worker/pb" = "gen_worker/pb"
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cu126", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
