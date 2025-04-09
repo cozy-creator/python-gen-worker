@@ -8,13 +8,18 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
-    "gen_worker @ file://../../src/gen_worker",
+    "gen-worker",
     "Pillow>=10.0",
 ]
 
 [[tool.uv.index]]
 name = "pytorch-cu126"
 url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[[tool.uv.index]]
+name = "mydev"
+url = "http://137.184.153.104:3141/root/mydev/+simple"
 explicit = true
 
 [project.scripts]

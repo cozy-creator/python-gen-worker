@@ -9,7 +9,7 @@ import sys
 # sys.path.insert(0, os.path.dirname(script_dir))
 
 try:
-    from .worker import Worker # Use relative import
+    from worker import Worker
 except ImportError as e:
     print(f"Error importing Worker: {e}", file=sys.stderr)
     print("Please ensure the gen_worker package is installed or accessible in PYTHONPATH.", file=sys.stderr)
@@ -27,7 +27,7 @@ default_user_modules = 'functions' # A sensible default
 user_modules_str = os.getenv('USER_MODULES', default_user_modules)
 USER_MODULES = [mod.strip() for mod in user_modules_str.split(',') if mod.strip()]
 
-WORKER_ID = os.getenv('WORKER_ID') # Optional, will be generated if None
+WORKER_ID = os.getenv('WORKER_ID', "worker-1") # Optional, will be generated if None
 AUTH_TOKEN = os.getenv('AUTH_TOKEN') # Optional
 USE_TLS = os.getenv('USE_TLS', 'false').lower() in ('true', '1', 't')
 RECONNECT_DELAY = int(os.getenv('RECONNECT_DELAY', '5'))

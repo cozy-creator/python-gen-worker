@@ -35,7 +35,7 @@ sdxl_resources = ResourceRequirements(
 )
 
 @worker_function(resources=sdxl_resources)
-def generate_image(ctx: ActionContext, prompt_details: dict) -> bytes:
+def generate_image_demo(ctx: ActionContext, prompt_details: dict) -> bytes:
     """
     Generates an image based on a prompt.
     (Actual model loading/inference would happen here or be managed by the worker)
@@ -128,7 +128,7 @@ if __name__ == "__main__":
     # Example 1 call
     try:
         print("\nTesting generate_image...")
-        png_bytes = generate_image(dummy_ctx, {"prompt": "a cat", "seed": 123})
+        png_bytes = generate_image_demo(dummy_ctx, {"prompt": "a cat", "seed": 123})
         print(f"generate_image returned {len(png_bytes)} bytes")
     except Exception as e:
         print(f"generate_image failed: {e}")

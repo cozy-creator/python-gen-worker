@@ -13,9 +13,9 @@ from typing import Any, Callable, Dict, Optional, TypeVar, Iterator, List
 import msgpack
 
 # Use relative imports within the package
-from .pb import worker_scheduler_pb2 as pb # type: ignore
-from .pb import worker_scheduler_pb2_grpc as pb_grpc # type: ignore
-from .decorators import ResourceRequirements # Import ResourceRequirements for type hints if needed
+from pb import worker_scheduler_pb2 as pb # type: ignore
+from pb import worker_scheduler_pb2_grpc as pb_grpc # type: ignore
+from decorators import ResourceRequirements # Import ResourceRequirements for type hints if needed
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')

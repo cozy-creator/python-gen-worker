@@ -50,3 +50,6 @@ explicit = true
 torch = [
   { index = "pytorch-cu126", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
+
+[tool.uv.workspace]
+members = ["image_gen_example/src/image_gen"]
