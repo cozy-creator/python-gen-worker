@@ -1,0 +1,46 @@
+# 1. Choose a Base Image (Same as before)
+ARG CUDA_VERSION=12.6.0
+ARG PYTHON_VERSION=3.12
+ARG UBUNTU_VERSION=22.04
+FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION}
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python${PYTHON_VERSION} \
+    python${PYTHON_VERSION}-pip \
+    python${PYTHON_VERSION}-venv \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 && \
+    update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION}
+
+# 2. Set up Working Directory and Install uv
+WORKDIR /app
+
+RUN python3 -m ensurepip --upgrade
+RUN pip3 install uv
+
+# 3. Copy and Install Dependencies (Same as before)
+RUN uv pip install \
+    --system \
+    --index-url http://137.184.153.104:3141/root/mydev/+simple \
+    gen-worker \
+    grpcio \
+    msgpack-python \
+    psutil
+
+RUN uv pip install \
+    --system \
+    --extra-index-url https://download.pytorch.org/whl/cu126 \
+    torch==2.6.0 \
+    torchvision==0.21.0 \
+    torchaudio==2.6.0
+
+# 5. Define Entrypoint/Command (Simplified)
+#    Set environment variables needed by gen_worker.entrypoint
+
+ENV PYTHONUNBUFFERED=1
+ENV SCHEDULER_ADDR="scheduler.service:8080"
+
+
+# Run the built-in entrypoint module from the installed gen_worker package
+ENTRYPOINT ["python", "-m", "gen_worker.entrypoint"]

@@ -14,10 +14,15 @@ except ImportError:
     print("You might need to adjust the import path or ensure the 'pb' directory is in your PYTHONPATH.", file=sys.stderr)
     sys.exit(1)
 
-def run_generate_image(scheduler_addr: str, prompt: str, seed: int, output_file: str):
+def run_generate_image(scheduler_addr: str, deployment_id: str, prompt: str, seed: int, output_file: str):
     """Connects to the scheduler, requests image generation, and saves the result."""
 
+    if not deployment_id:
+        print("Error: Deployment ID is required.", file=sys.stderr)
+        return
+
     print(f"Connecting to scheduler at: {scheduler_addr}")
+    print(f"Target Deployment ID: {deployment_id}")
     try:
         with grpc.insecure_channel(scheduler_addr) as channel:
             stub = frontend_pb2_grpc.FrontendServiceStub(channel)
@@ -38,6 +43,7 @@ def run_generate_image(scheduler_addr: str, prompt: str, seed: int, output_file:
             execute_request = frontend_pb2.ExecuteActionRequest(
                 function_name="generate_image",
                 input_payload=input_payload_bytes,
+                deployment_id=deployment_id,
             )
 
             # Call ExecuteAction on the scheduler
@@ -112,9 +118,11 @@ if __name__ == "__main__":
     test_prompt = "a futuristic cityscape at sunset, cyberpunk style"
     test_seed = 12345
     test_output_filename = "generated_test_image.png"
+    test_deployment_id = os.getenv("DEPLOYMENT_ID", "tenant-a-image-gen-app-v1")
 
     print("--- Running Test Client ---")
     print(f"Scheduler Address: {scheduler_target_addr}")
+    print(f"Deployment ID: {test_deployment_id}")
     print(f"Prompt: {test_prompt}")
     print(f"Seed: {test_seed}")
     print(f"Output File: {test_output_filename}")
@@ -122,6 +130,7 @@ if __name__ == "__main__":
 
     run_generate_image(
         scheduler_addr=scheduler_target_addr,
+        deployment_id=test_deployment_id,
         prompt=test_prompt,
         seed=test_seed,
         output_file=test_output_filename
