@@ -1,12 +1,12 @@
 [project]
 name = "gen-worker"
-version = "0.1.1"
+version = "0.1.2"
 description = "Add your description here"
 readme = "README.md"
 authors = [
     { name = "Paul Fidika", email = "paul@fidika.com" }
 ]
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 dependencies = [
     "grpcio>=1.71.0",
     "msgpack>=1.1.0",
@@ -51,5 +51,5 @@ torch = [
   { index = "pytorch-cu126", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 
-[tool.uv.workspace]
-members = ["image_gen_example/src/image_gen"]
+# [tool.uv.workspace]
+# members = ["image_gen_example/src/image_gen"]

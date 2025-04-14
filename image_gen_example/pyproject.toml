@@ -6,7 +6,7 @@ readme = "README.md"
 authors = [
     { name = "Oghenetega Biokoro", email = "teggyg123@gmail.com" }
 ]
-requires-python = ">=3.12"
+requires-python = ">=3.10"
 dependencies = [
     "diffusers",
     "torch",
