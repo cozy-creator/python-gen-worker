@@ -18,6 +18,9 @@ RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1
     update-alternatives --set python3 /usr/bin/python3.10 && \
     ln -s /usr/bin/python3 /usr/bin/python
 
+RUN which python && python --version
+RUN which python3 && python3 --version
+
 # 2. Set up Working Directory and Install uv
 WORKDIR /app
 
