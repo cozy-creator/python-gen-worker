@@ -4,12 +4,13 @@ import os
 import sys
 import time
 
-
 try:
     from gen_worker.pb import frontend_pb2
     from gen_worker.pb import frontend_pb2_grpc
-except ImportError:
-    print("Error: Could not import protobuf definitions.", file=sys.stderr)
+except ImportError as e:
+    print(f"Error: Could not import protobuf definitions. {e}", file=sys.stderr)
+    print("Ensure the generated 'frontend_pb2.py' and 'frontend_pb2_grpc.py' are accessible.", file=sys.stderr)
+    sys.exit(1)
     print("Ensure the generated 'frontend_pb2.py' and 'frontend_pb2_grpc.py' are accessible.", file=sys.stderr)
     print("You might need to adjust the import path or ensure the 'pb' directory is in your PYTHONPATH.", file=sys.stderr)
     sys.exit(1)

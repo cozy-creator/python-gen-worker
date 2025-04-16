@@ -46,4 +46,4 @@ ENV SCHEDULER_ADDR="scheduler.service:8080"
 
 
 # Run the built-in entrypoint module from the installed gen_worker package
-ENTRYPOINT ["python", "-m", "gen_worker.entrypoint"]
+ENTRYPOINT ["/usr/bin/python3", "-m", "gen_worker.entrypoint"]

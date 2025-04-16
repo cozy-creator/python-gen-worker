@@ -9,7 +9,7 @@ import sys
 # sys.path.insert(0, os.path.dirname(script_dir))
 
 try:
-    from worker import Worker
+    from .worker import Worker
 except ImportError as e:
     print(f"Error importing Worker: {e}", file=sys.stderr)
     print("Please ensure the gen_worker package is installed or accessible in PYTHONPATH.", file=sys.stderr)

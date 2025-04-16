@@ -11,11 +11,12 @@ import inspect
 import functools
 from typing import Any, Callable, Dict, Optional, TypeVar, Iterator, List
 import msgpack
+import torch
 
 # Use relative imports within the package
-from pb import worker_scheduler_pb2 as pb # type: ignore
-from pb import worker_scheduler_pb2_grpc as pb_grpc # type: ignore
-from decorators import ResourceRequirements # Import ResourceRequirements for type hints if needed
+from .pb import worker_scheduler_pb2 as pb
+from .pb import worker_scheduler_pb2_grpc as pb_grpc 
+from .decorators import ResourceRequirements # Import ResourceRequirements for type hints if needed
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -99,6 +100,12 @@ class Worker:
         self.reconnect_delay = reconnect_delay
         self.max_reconnect_attempts = max_reconnect_attempts
 
+        self.deployment_id = os.getenv("DEPLOYMENT_ID", "") # Read DEPLOYMENT_ID env var
+        if not self.deployment_id:
+            logger.warning("DEPLOYMENT_ID environment variable not set for this worker!")
+
+        self.tenant_id = os.getenv("TENANT_ID", "")
+
         self._actions: Dict[str, Callable[[ActionContext, bytes], bytes]] = {}
         self._active_tasks: Dict[str, ActionContext] = {}
         self._active_tasks_lock = threading.Lock()
@@ -115,7 +122,7 @@ class Worker:
         self._receive_thread = None
         self._heartbeat_thread = None
 
-        logger.info(f"Created worker with ID={self.worker_id}, scheduler={scheduler_addr}")
+        logger.info(f"Created worker: ID={self.worker_id}, DeploymentID={self.deployment_id or 'N/A'}, Scheduler={scheduler_addr}")
 
         # Discover functions before setting signals? Maybe after. Let's do it here.
         self._discover_and_register_functions()
@@ -281,16 +288,34 @@ class Worker:
         """Create and send a registration/heartbeat message."""
         try:
             mem = psutil.virtual_memory()
+            cpu_cores = os.cpu_count() or 0
+
+            gpu_count = 0
+            gpu_memory = 0
+
+            if torch.cuda.is_available():
+                gpu_count = torch.cuda.device_count()
+                if gpu_count > 0:
+                    try:
+                        props = torch.cuda.get_device_properties(0)
+                        gpu_memory = props.total_memory
+                    except Exception as gpu_err:
+                         logger.warning(f"Could not get GPU properties: {gpu_err}")
+
+            supports_loading = False
+            current_models = []
+
             resources = pb.WorkerResources(
                 worker_id=self.worker_id,
-                cpu_cores=os.cpu_count() or 0,
+                deployment_id=self.deployment_id,
+                tenant_id=self.tenant_id,
+                cpu_cores=cpu_cores,
                 memory_bytes=mem.total,
-                # TODO: Add GPU detection if needed (e.g., using torch.cuda)
-                gpu_count=0,
-                gpu_memory_bytes=0,
+                gpu_count=gpu_count,
+                gpu_memory_bytes=gpu_memory,
                 available_functions=list(self._actions.keys()),
-                available_models=[],
-                supports_model_loading=False # TODO: Set based on capability
+                available_models=current_models,
+                supports_model_loading=supports_loading,
             )
             registration = pb.WorkerRegistration(
                 resources=resources,
