@@ -24,13 +24,15 @@ def _initialize_pipeline():
     try:
         # Determine device and dtype
         if torch.cuda.is_available():
-            device = torch.device("cuda")
+            device = "cuda"
             torch_dtype = torch.float16
             logger.info("CUDA available, setting device to GPU and dtype to float16.")
         else:
-            device = torch.device("cpu")
+            device = "cpu"
             torch_dtype = torch.float32
             logger.warning("CUDA not available, setting device to CPU and dtype to float32. Inference will be slow.")
+
+        print(f"Device: {device}")
 
         pipe = StableDiffusionXLPipeline.from_pretrained(
             "John6666/holy-mix-illustriousxl-vibrant-anime-checkpoint-v1-sdxl",
