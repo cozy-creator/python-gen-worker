@@ -22,24 +22,27 @@ def _initialize_pipeline():
 
     logger.info("Initializing Stable Diffusion XL Pipeline (stabilityai/stable-diffusion-xl-base-1.0)...")
     try:
-        # Determine device and dtype
-        if torch.cuda.is_available():
-            device = "cuda"
-            torch_dtype = torch.float16
-            logger.info("CUDA available, setting device to GPU and dtype to float16.")
-        else:
-            device = "cpu"
-            torch_dtype = torch.float32
-            logger.warning("CUDA not available, setting device to CPU and dtype to float32. Inference will be slow.")
-
-        print(f"Device: {device}")
 
         pipe = StableDiffusionXLPipeline.from_pretrained(
             "John6666/holy-mix-illustriousxl-vibrant-anime-checkpoint-v1-sdxl",
-            torch_dtype=torch_dtype,
+            torch_dtype=torch.float16,
             use_safetensors=True,
             # variant="fp16" if torch_dtype == torch.float16 else None
-        ).to(device)
+        )
+
+        # Determine device and dtype
+        if torch.cuda.is_available():
+            device = "cuda"
+            # torch_dtype = torch.float16
+            logger.info("CUDA available, setting device to GPU and dtype to float16.")
+        else:
+            device = "cpu"
+            # torch_dtype = torch.float32
+            logger.warning("CUDA not available, setting device to CPU and dtype to float32. Inference will be slow.")
+
+        print(f"Device: {device}")
+        
+        pipe.to(device)
         
         logger.info(f"Pipeline loaded successfully and moved to device '{device}'.")
 
