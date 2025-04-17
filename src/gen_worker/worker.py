@@ -308,7 +308,7 @@ class Worker:
             resources = pb.WorkerResources(
                 worker_id=self.worker_id,
                 deployment_id=self.deployment_id,
-                tenant_id=self.tenant_id,
+                # tenant_id=self.tenant_id,
                 cpu_cores=cpu_cores,
                 memory_bytes=mem.total,
                 gpu_count=gpu_count,

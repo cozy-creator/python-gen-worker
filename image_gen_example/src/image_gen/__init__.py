@@ -37,8 +37,8 @@ def _initialize_pipeline():
             torch_dtype=torch_dtype,
             use_safetensors=True,
             # variant="fp16" if torch_dtype == torch.float16 else None
-        )
-        pipe.to(device)
+        ).to(device)
+        
         logger.info(f"Pipeline loaded successfully and moved to device '{device}'.")
 
     except ImportError as ie:

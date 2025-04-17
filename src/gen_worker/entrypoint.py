@@ -37,7 +37,7 @@ if __name__ == '__main__':
     logger.info(f'Starting worker...')
     logger.info(f'  Scheduler Address: {SCHEDULER_ADDR}')
     logger.info(f'  User Function Modules: {USER_MODULES}')
-    logger.info(f'  Worker ID: {WORKER_ID or '(generated)'}')
+    logger.info(f'  Worker ID: {WORKER_ID or "(generated)"}')
     logger.info(f'  Use TLS: {USE_TLS}')
     logger.info(f'  Reconnect Delay: {RECONNECT_DELAY}s')
     logger.info(f'  Max Reconnect Attempts: {MAX_RECONNECT_ATTEMPTS or "Infinite"}')
