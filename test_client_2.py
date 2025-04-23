@@ -61,10 +61,6 @@ def execute_and_await(stub: frontend_pb2_grpc.FrontendServiceStub,
             output_payload_bytes = get_run_response.output_payload
             if not output_payload_bytes:
                  print("  Warning: Task succeeded but returned empty payload.")
-                 # Decide if empty payload is valid for this function
-                 # For generate_image it's an error, for upload maybe ok?
-                 # Let's assume upload should return URL, so empty is errorish
-                 # Returning an empty dict might be better signal than None
                  return {} # Return empty dict for success but no payload
 
             try:
