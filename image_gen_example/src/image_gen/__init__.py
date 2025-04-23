@@ -126,105 +126,105 @@ def generate_image(ctx: ActionContext, prompt_details: dict) -> bytes:
     return img_bytes
 
 
-def _get_s3_client() -> Optional[boto3.client]:
-    """Initializes and returns an S3 client using environment variables."""
+# def _get_s3_client() -> Optional[boto3.client]:
+#     """Initializes and returns an S3 client using environment variables."""
 
-    access_key = os.environ.get("S3_ACCESS_KEY_ID")
-    secret_key = os.environ.get("S3_SECRET_ACCESS_KEY")
-    bucket_name = os.environ.get("S3_BUCKET_NAME")
-    region = os.environ.get("S3_REGION")
-    endpoint_url = os.environ.get("S3_ENDPOINT_URL")
+#     access_key = os.environ.get("S3_ACCESS_KEY_ID")
+#     secret_key = os.environ.get("S3_SECRET_ACCESS_KEY")
+#     bucket_name = os.environ.get("S3_BUCKET_NAME")
+#     region = os.environ.get("S3_REGION")
+#     endpoint_url = os.environ.get("S3_ENDPOINT_URL")
 
-    if not all([access_key, secret_key, bucket_name, region]):
-        logger.error("Missing one or more S3 environment variables (S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY, S3_BUCKET_NAME)")
-        return None
+#     if not all([access_key, secret_key, bucket_name, region]):
+#         logger.error("Missing one or more S3 environment variables (S3_ACCESS_KEY_ID, S3_SECRET_ACCESS_KEY, S3_BUCKET_NAME)")
+#         return None
     
-    try:
-        s3_client = boto3.client(
-            "s3",
-            region_name=region,
-            endpoint_url=endpoint_url,
-            aws_access_key_id=access_key,
-            aws_secret_access_key=secret_key,
-            config=Config(signature_version="s3v4")
-        )
-        return s3_client
-    except Exception as e:
-        logger.exception("Failed to initialize S3 client")
-        return None
-    
-
-def _generate_s3_key(image_bytes: bytes, filename: Optional[str] = None) -> str:
-    """Generates a unique S3 key for the image."""
-    if filename:
-        safe_filename = "".join(c if c.isalnum() or c in ['.', '-', '_'] else '_' for c in filename)
-        hash_prefix = blake3.blake3(image_bytes).hexdigest()[:16]
-        return f"uploads/{hash_prefix}-{safe_filename}"
-    else:
-        hash_hex = blake3.blake3(image_bytes).hexdigest()
-        return f"uploads/{hash_hex}"
+#     try:
+#         s3_client = boto3.client(
+#             "s3",
+#             region_name=region,
+#             endpoint_url=endpoint_url,
+#             aws_access_key_id=access_key,
+#             aws_secret_access_key=secret_key,
+#             config=Config(signature_version="s3v4")
+#         )
+#         return s3_client
+#     except Exception as e:
+#         logger.exception("Failed to initialize S3 client")
+#         return None
     
 
-s3_upload_resources = ResourceRequirements()
-
-@worker_function(resources=s3_upload_resources)
-def upload_image_to_s3(ctx: ActionContext, upload_details: dict) -> str:
-    """
-    Uploads provided image bytes to an S3 bucket configured via environment variables.
-
-    Args:
-        ctx: The ActionContext.
-        upload_details: A dictionary containing:
-            - 'image_bytes': The raw image data (bytes).
-            - 'filename': (Optional) Desired filename base for the S3 object.
-
-    Returns:
-        A dictionary containing 's3_url' on success.
-    """
-    logger.info(f"[run_id={ctx.run_id}] Received S3 upload request.")
-
-    image_bytes = upload_details.get("image_bytes")
-    filename = upload_details.get("filename")
-
-    if not image_bytes or not isinstance(image_bytes, bytes):
-        raise ValueError("Missing or invalid 'image_bytes' in upload_details")
+# def _generate_s3_key(image_bytes: bytes, filename: Optional[str] = None) -> str:
+#     """Generates a unique S3 key for the image."""
+#     if filename:
+#         safe_filename = "".join(c if c.isalnum() or c in ['.', '-', '_'] else '_' for c in filename)
+#         hash_prefix = blake3.blake3(image_bytes).hexdigest()[:16]
+#         return f"uploads/{hash_prefix}-{safe_filename}"
+#     else:
+#         hash_hex = blake3.blake3(image_bytes).hexdigest()
+#         return f"uploads/{hash_hex}"
     
-    if ctx.is_canceled():
-        raise InterruptedError("Upload cancelled before starting")
+
+# s3_upload_resources = ResourceRequirements()
+
+# @worker_function(resources=s3_upload_resources)
+# def upload_image_to_s3(ctx: ActionContext, upload_details: dict) -> str:
+#     """
+#     Uploads provided image bytes to an S3 bucket configured via environment variables.
+
+#     Args:
+#         ctx: The ActionContext.
+#         upload_details: A dictionary containing:
+#             - 'image_bytes': The raw image data (bytes).
+#             - 'filename': (Optional) Desired filename base for the S3 object.
+
+#     Returns:
+#         A dictionary containing 's3_url' on success.
+#     """
+#     logger.info(f"[run_id={ctx.run_id}] Received S3 upload request.")
+
+#     image_bytes = upload_details.get("image_bytes")
+#     filename = upload_details.get("filename")
+
+#     if not image_bytes or not isinstance(image_bytes, bytes):
+#         raise ValueError("Missing or invalid 'image_bytes' in upload_details")
     
-    bucket_name = os.environ.get("S3_BUCKET_NAME")
-    region = os.environ.get("S3_REGION")
-    endpoint_url = os.environ.get("S3_ENDPOINT_URL")
-
-    if not bucket_name:
-        raise ValueError("S3_BUCKET_NAME environment variable is not set for this worker.")
+#     if ctx.is_canceled():
+#         raise InterruptedError("Upload cancelled before starting")
     
-    s3_client = _get_s3_client()
-    if not s3_client:
-        raise RuntimeError("Failed to initialize S3 client. Check worker logs and environment variables.")
+#     bucket_name = os.environ.get("S3_BUCKET_NAME")
+#     region = os.environ.get("S3_REGION")
+#     endpoint_url = os.environ.get("S3_ENDPOINT_URL")
+
+#     if not bucket_name:
+#         raise ValueError("S3_BUCKET_NAME environment variable is not set for this worker.")
     
-    s3_key = _generate_s3_key(image_bytes, filename)
-    content_type = "image/png"
-
-    logger.info(f"[run_id={ctx.run_id}] Uploading {len(image_bytes)} bytes to s3://{bucket_name}/{s3_key}")
-
-    try:
-        s3_client.upload_file(
-            Bucket=bucket_name,
-            Key=s3_key,
-            Body=image_bytes,
-            ContentType=content_type,
-            ACL='public-read'
-        )
-
-        file_url = f"https://{bucket_name}.{region}.digitaloceanspaces.com/{s3_key}"
-
-        logger.info(f"[run_id={ctx.run_id}] Upload successful. URL: {file_url}")
-        return {"s3_url": file_url}
+#     s3_client = _get_s3_client()
+#     if not s3_client:
+#         raise RuntimeError("Failed to initialize S3 client. Check worker logs and environment variables.")
     
-    except Exception as e:
-        logger.exception(f"[run_id={ctx.run_id}] Error during S3 upload.")
-        raise
+#     s3_key = _generate_s3_key(image_bytes, filename)
+#     content_type = "image/png"
+
+#     logger.info(f"[run_id={ctx.run_id}] Uploading {len(image_bytes)} bytes to s3://{bucket_name}/{s3_key}")
+
+#     try:
+#         s3_client.upload_file(
+#             Bucket=bucket_name,
+#             Key=s3_key,
+#             Body=image_bytes,
+#             ContentType=content_type,
+#             ACL='public-read'
+#         )
+
+#         file_url = f"https://{bucket_name}.{region}.digitaloceanspaces.com/{s3_key}"
+
+#         logger.info(f"[run_id={ctx.run_id}] Upload successful. URL: {file_url}")
+#         return {"s3_url": file_url}
+    
+#     except Exception as e:
+#         logger.exception(f"[run_id={ctx.run_id}] Error during S3 upload.")
+#         raise
 
 
         
