@@ -139,6 +139,8 @@ class Worker:
                 module = importlib.import_module(module_name)
                 logger.debug(f"Inspecting module: {module_name}")
                 for name, obj in inspect.getmembers(module):
+                    print(f"Inspecting member: {name}")
+                    print(f"Object: {obj}")
                     if inspect.isfunction(obj) and hasattr(obj, '_is_worker_function'):
                         if getattr(obj, '_is_worker_function') is True:
                             # Found a decorated function
