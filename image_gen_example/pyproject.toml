@@ -13,7 +13,11 @@ dependencies = [
     "pillow",
     "msgpack",
     "protobuf",
-    "gen-worker"
+    "gen-worker",
+    "boto3",
+    "blake3",
+    "accelerate",
+    "transformers",
 ]
 
 
