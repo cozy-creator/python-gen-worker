@@ -209,7 +209,7 @@ def upload_image_to_s3(ctx: ActionContext, upload_details: dict) -> str:
     logger.info(f"[run_id={ctx.run_id}] Uploading {len(image_bytes)} bytes to s3://{bucket_name}/{s3_key}")
 
     try:
-        s3_client.upload_file(
+        s3_client.put_object(
             Bucket=bucket_name,
             Key=s3_key,
             Body=image_bytes,
