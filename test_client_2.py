@@ -93,7 +93,7 @@ if __name__ == "__main__":
     # Use the Deployment ID registered for the image containing both functions
     test_deployment_id = os.getenv("DEPLOYMENT_ID", "tenant-a-image-gen-app-v1")
 
-    test_prompt = "detailed portrait of a tabby cat wearing sunglasses, cinematic lighting"
+    test_prompt = "cowgirl riding a horse, cinematic lighting"
     test_seed = 9876
     output_image_filename = "workflow_output_local.png" # Save locally for verification
     # --- End Configuration ---
