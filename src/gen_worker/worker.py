@@ -105,6 +105,9 @@ class Worker:
             logger.warning("DEPLOYMENT_ID environment variable not set for this worker!")
 
         self.tenant_id = os.getenv("TENANT_ID", "")
+        self.runpod_pod_id = os.getenv("RUNPOD_POD_ID", "") # Read injected pod ID
+        if not self.runpod_pod_id:
+            logger.warning("RUNPOD_POD_ID environment variable not set for this worker!")
 
         self._actions: Dict[str, Callable[[ActionContext, bytes], bytes]] = {}
         self._active_tasks: Dict[str, ActionContext] = {}
@@ -311,6 +314,7 @@ class Worker:
                 worker_id=self.worker_id,
                 deployment_id=self.deployment_id,
                 # tenant_id=self.tenant_id,
+                runpod_pod_id=self.runpod_pod_id,
                 cpu_cores=cpu_cores,
                 memory_bytes=mem.total,
                 gpu_count=gpu_count,
