@@ -109,6 +109,8 @@ class Worker:
         if not self.runpod_pod_id:
             logger.warning("RUNPOD_POD_ID environment variable not set for this worker!")
 
+        print(f"RUNPOD_POD_ID: {self.runpod_pod_id}")
+
         self._actions: Dict[str, Callable[[ActionContext, bytes], bytes]] = {}
         self._active_tasks: Dict[str, ActionContext] = {}
         self._active_tasks_lock = threading.Lock()
@@ -142,8 +144,8 @@ class Worker:
                 module = importlib.import_module(module_name)
                 logger.debug(f"Inspecting module: {module_name}")
                 for name, obj in inspect.getmembers(module):
-                    print(f"Inspecting member: {name}")
-                    print(f"Object: {obj}")
+                    # print(f"Inspecting member: {name}")
+                    # print(f"Object: {obj}")
                     if inspect.isfunction(obj) and hasattr(obj, '_is_worker_function'):
                         if getattr(obj, '_is_worker_function') is True:
                             # Found a decorated function
@@ -328,6 +330,8 @@ class Worker:
                 is_heartbeat=is_heartbeat
             )
             message = pb.WorkerSchedulerMessage(worker_registration=registration)
+            logger.info(f"DEBUG: Preparing to send registration. Resource object: {resources}")
+            logger.info(f"DEBUG: Value being sent for runpod_pod_id: '{resources.runpod_pod_id}'")
             self._send_message(message)
         except Exception as e:
             logger.error(f"Failed to create or send registration/heartbeat: {e}")
