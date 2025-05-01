@@ -109,7 +109,7 @@ class Worker:
         if not self.runpod_pod_id:
             logger.warning("RUNPOD_POD_ID environment variable not set for this worker!")
 
-        print(f"RUNPOD_POD_ID: {self.runpod_pod_id}")
+        logger.info(f"RUNPOD_POD_ID: {self.runpod_pod_id}")
 
         self._actions: Dict[str, Callable[[ActionContext, bytes], bytes]] = {}
         self._active_tasks: Dict[str, ActionContext] = {}
