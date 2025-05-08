@@ -4,12 +4,13 @@ from io import BytesIO
 import logging
 import torch
 from diffusers import StableDiffusionXLPipeline
-from typing import Optional
+from typing import Optional, Dict
 from gen_worker import worker_function, ResourceRequirements, ActionContext
 import os
 import boto3
 import blake3
 from botocore.client import Config
+import threading
 
 
 logger = logging.getLogger(__name__)
@@ -17,6 +18,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 
 pipe = None
 device = None
+pipeline_lock = threading.Lock()
 
 def _initialize_pipeline():
     """Loads the SDXL pipeline onto the appropriate device."""
@@ -79,7 +81,7 @@ def generate_image(ctx: ActionContext, prompt_details: dict) -> bytes:
 
     _initialize_pipeline()
 
-    global pipe, device
+    global pipe, device, pipeline_lock
 
     if pipe is None or device is None:
         logger.error("SDXL Pipeline is not initialized. Cannot generate image.")
@@ -88,33 +90,34 @@ def generate_image(ctx: ActionContext, prompt_details: dict) -> bytes:
     prompt = prompt_details.get("prompt", "a default prompt")
     seed = prompt_details.get("seed", 42)
 
-    logger.info(f"[run_id={ctx.run_id}] Generating image for prompt: '{prompt}', seed: {seed} on device {device}")
-
-    # Check for cancellation before starting inference
-    if ctx.is_canceled():
-        logger.warning(f"[run_id={ctx.run_id}] Cancellation detected before starting generation.")
-        raise InterruptedError("Image generation cancelled before start")
-
-    generator = torch.Generator(device=device).manual_seed(seed)
-
     img_bytes: Optional[bytes] = None
     try:
-        with torch.inference_mode():
-            image_result = pipe(
-                prompt=prompt,
-                generator=generator,
-                num_inference_steps=28
-            ).images[0]
+        with pipeline_lock:
+            logger.info(f"[run_id={ctx.run_id}] Generating image for prompt: '{prompt}', seed: {seed} on device {device}")
 
-        if ctx.is_canceled():
-            logger.warning(f"[run_id={ctx.run_id}] Cancellation detected after generation finished.")
-            raise InterruptedError("Image generation cancelled after processing")
+            # Check for cancellation before starting inference
+            if ctx.is_canceled():
+                logger.warning(f"[run_id={ctx.run_id}] Cancellation detected before starting generation.")
+                raise InterruptedError("Image generation cancelled before start")
 
-        # Convert PIL Image to PNG bytes
-        buffer = BytesIO()
-        image_result.save(buffer, format="PNG")
-        img_bytes = buffer.getvalue()
-        logger.info(f"[run_id={ctx.run_id}] Image generation complete ({len(img_bytes)} bytes).")
+            generator = torch.Generator(device=device).manual_seed(seed)
+
+            with torch.inference_mode():
+                image_result = pipe(
+                    prompt=prompt,
+                    generator=generator,
+                    num_inference_steps=28
+                ).images[0]
+
+            if ctx.is_canceled():
+                logger.warning(f"[run_id={ctx.run_id}] Cancellation detected after generation finished.")
+                raise InterruptedError("Image generation cancelled after processing")
+
+            # Convert PIL Image to PNG bytes
+            buffer = BytesIO()
+            image_result.save(buffer, format="PNG")
+            img_bytes = buffer.getvalue()
+            logger.info(f"[run_id={ctx.run_id}] Image generation complete ({len(img_bytes)} bytes).")
 
     except Exception as e:
         logger.exception(f"[run_id={ctx.run_id}] Error during SDXL inference or image saving.")
@@ -168,7 +171,7 @@ def _generate_s3_key(image_bytes: bytes, filename: Optional[str] = None) -> str:
 s3_upload_resources = ResourceRequirements()
 
 @worker_function(resources=s3_upload_resources)
-def upload_image_to_s3(ctx: ActionContext, upload_details: dict) -> str:
+def upload_image_to_s3(ctx: ActionContext, upload_details: dict) -> Dict[str, str]:
     """
     Uploads provided image bytes to an S3 bucket configured via environment variables.
 

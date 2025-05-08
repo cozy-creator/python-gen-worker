@@ -116,6 +116,9 @@ class Worker:
         self._active_tasks_lock = threading.Lock()
         self._discovered_resources: Dict[str, ResourceRequirements] = {} # Store resources per function
 
+        self._gpu_busy_lock = threading.Lock()
+        self._is_gpu_busy = False
+
         self._channel = None
         self._stub = None
         self._stream = None
@@ -134,6 +137,23 @@ class Worker:
 
         signal.signal(signal.SIGINT, self._handle_interrupt)
         signal.signal(signal.SIGTERM, self._handle_interrupt)
+
+
+    def _set_gpu_busy_status(self, busy: bool, func_name_for_log: str = ""):
+        with self._gpu_busy_lock:
+            if self._is_gpu_busy == busy: # No change
+                return
+            self._is_gpu_busy = busy
+        if func_name_for_log:
+            logger.info(f"GPU status changed to {busy} due to function '{func_name_for_log}'.")
+        else:
+            logger.info(f"GPU status changed to {busy}.")
+
+
+    def _get_gpu_busy_status(self) -> bool:
+        with self._gpu_busy_lock:
+            return self._is_gpu_busy
+
 
     def _discover_and_register_functions(self):
         """Discover and register functions marked with @worker_function."""
@@ -317,6 +337,7 @@ class Worker:
                 deployment_id=self.deployment_id,
                 # tenant_id=self.tenant_id,
                 runpod_pod_id=self.runpod_pod_id,
+                gpu_busy=self._get_gpu_busy_status(),
                 cpu_cores=cpu_cores,
                 memory_bytes=mem.total,
                 gpu_count=gpu_count,
@@ -551,8 +572,8 @@ class Worker:
 
         logger.info(f"Received task request: run_id={run_id}, function={function_name}")
 
-        func = self._actions.get(function_name)
-        if not func:
+        func_wrapper = self._actions.get(function_name)
+        if not func_wrapper:
             error_msg = f"Unknown function requested: {function_name}"
             logger.error(error_msg)
             self._send_task_result(run_id, False, None, error_msg)
@@ -569,7 +590,7 @@ class Worker:
              self._active_tasks[run_id] = ctx
 
         # Execute function in a separate thread to avoid blocking the receive loop
-        thread = threading.Thread(target=self._execute_function, args=(ctx, func, input_payload), daemon=True)
+        thread = threading.Thread(target=self._execute_function, args=(ctx, function_name, func_wrapper, input_payload), daemon=True)
         thread.start()
 
     def _handle_interrupt_request(self, run_id: str):
@@ -582,19 +603,37 @@ class Worker:
             else:
                 logger.warning(f"Could not interrupt task {run_id}: Not found in active tasks.")
 
-    def _execute_function(self, ctx: ActionContext, func: Callable[[ActionContext, bytes], bytes], input_payload: bytes):
+    def _execute_function(self, ctx: ActionContext, function_name: str, func_to_execute: Callable[[ActionContext, bytes], bytes], input_payload: bytes):
         """Execute the registered function and send the result/error back."""
         run_id = ctx.run_id
         output_payload: Optional[bytes] = None
         error_message: str = ""
         success = False
+
+        # Determine if this function requires GPU and manage worker's GPU state
+        func_requires_gpu = False
+        resource_req = self._discovered_resources.get(function_name)
+        if resource_req:
+            func_requires_gpu = resource_req.requires_gpu
+
+        # Variable to track if this specific thread execution set the GPU busy
+        this_thread_set_gpu_busy = False
+        if func_requires_gpu:
+            with self._gpu_busy_lock: # Lock to check and set self._is_gpu_busy atomically
+                if not self._is_gpu_busy:
+                    self._is_gpu_busy = True
+                    this_thread_set_gpu_busy = True
+                    logger.info(f"Worker GPU marked as BUSY by task {run_id} ({function_name}).")
+                else:
+                    logger.warning(f"Task {run_id} ({function_name}) requires GPU, but worker GPU was already marked busy. Proceeding...")
+
         try:
             # Check for cancellation before starting
             if ctx.is_canceled():
                  raise InterruptedError("Task was cancelled before execution started")
 
             # Execute the function wrapper (which handles deserialization/serialization)
-            output_payload = func(ctx, input_payload)
+            output_payload = func_to_execute(ctx, input_payload)
             # Check for cancellation *during* execution (func should check ctx.is_canceled)
             if ctx.is_canceled():
                 raise InterruptedError("Task was cancelled during execution")
@@ -611,6 +650,12 @@ class Worker:
             logger.exception(f"Error executing function for run_id={run_id}: {error_message}")
             success = False
         finally:
+            # Release the GPU if this thread set it busy
+            if this_thread_set_gpu_busy:
+                with self._gpu_busy_lock: # Lock to set self._is_gpu_busy
+                    self._is_gpu_busy = False
+                logger.info(f"Worker GPU marked as NOT BUSY by task {run_id} ({function_name}).")
+
             # Always send a result back, regardless of success, failure, or cancellation
             self._send_task_result(run_id, success, output_payload, error_message)
             # Remove from active tasks *after* sending result
