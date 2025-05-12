@@ -337,7 +337,7 @@ class Worker:
                 deployment_id=self.deployment_id,
                 # tenant_id=self.tenant_id,
                 runpod_pod_id=self.runpod_pod_id,
-                gpu_busy=self._get_gpu_busy_status(),
+                gpu_is_busy=self._get_gpu_busy_status(),
                 cpu_cores=cpu_cores,
                 memory_bytes=mem.total,
                 gpu_count=gpu_count,
