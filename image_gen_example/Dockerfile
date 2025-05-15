@@ -21,3 +21,4 @@ COPY src/image_gen ./image_gen
 # Set the environment variable telling the worker which Python module
 # contains the decorated functions.
 ENV USER_MODULES=image_gen
+ENV ENABLE_DEFAULT_MODEL_MANAGER=true

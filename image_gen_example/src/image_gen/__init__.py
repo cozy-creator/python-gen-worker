@@ -11,7 +11,7 @@ import boto3
 import blake3
 from botocore.client import Config
 import threading
-
+from diffusers import DiffusionPipeline
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -67,7 +67,7 @@ sdxl_resources = ResourceRequirements(
 )
 
 @worker_function(resources=sdxl_resources)
-def generate_image(ctx: ActionContext, prompt_details: dict) -> bytes:
+def generate_image(ctx: ActionContext, pipeline: DiffusionPipeline, prompt_details: dict) -> bytes:
     """
     Generates an image based on a prompt using the pre-loaded SDXL pipeline.
 
@@ -79,45 +79,51 @@ def generate_image(ctx: ActionContext, prompt_details: dict) -> bytes:
         PNG image data as bytes.
     """
 
-    _initialize_pipeline()
+    # _initialize_pipeline()
 
-    global pipe, device, pipeline_lock
+    # global pipe, device, pipeline_lock
 
-    if pipe is None or device is None:
-        logger.error("SDXL Pipeline is not initialized. Cannot generate image.")
-        raise RuntimeError("SDXL Pipeline failed to initialize during worker startup.")
+    if pipeline is None:
+        # This check is a safeguard; Worker core should ensure a valid pipeline is passed
+        # if the function is designated as needing one and a required_model_id was processed.
+        logger.error(f"Run {ctx.run_id} for generate_image received a None pipeline object.")
+        raise ValueError("Pipeline object cannot be None for image generation.")
 
-    prompt = prompt_details.get("prompt", "a default prompt")
-    seed = prompt_details.get("seed", 42)
+    prompt = prompt_details.get("prompt", "a beautiful landscape")
+    negative_prompt = prompt_details.get("negative_prompt", "")
+    seed = int(prompt_details.get("seed", 42))
+    num_inference_steps = int(prompt_details.get("num_inference_steps", 28))
+    guidance_scale = float(prompt_details.get("guidance_scale", 7.5))
+    width = int(prompt_details.get("width", 1024))
+    height = int(prompt_details.get("height", 1024))
 
     img_bytes: Optional[bytes] = None
     try:
-        with pipeline_lock:
-            logger.info(f"[run_id={ctx.run_id}] Generating image for prompt: '{prompt}', seed: {seed} on device {device}")
+        logger.info(f"[run_id={ctx.run_id}] Generating image for prompt: '{prompt}', seed: {seed} on device {device}")
 
-            # Check for cancellation before starting inference
-            if ctx.is_canceled():
-                logger.warning(f"[run_id={ctx.run_id}] Cancellation detected before starting generation.")
-                raise InterruptedError("Image generation cancelled before start")
+        # Check for cancellation before starting inference
+        if ctx.is_canceled():
+            logger.warning(f"[run_id={ctx.run_id}] Cancellation detected before starting generation.")
+            raise InterruptedError("Image generation cancelled before start")
 
-            generator = torch.Generator(device=device).manual_seed(seed)
+        generator = torch.Generator(device=device).manual_seed(seed)
 
-            with torch.inference_mode():
-                image_result = pipe(
-                    prompt=prompt,
-                    generator=generator,
-                    num_inference_steps=28
-                ).images[0]
+        with torch.inference_mode():
+            image_result = pipe(
+                prompt=prompt,
+                generator=generator,
+                num_inference_steps=28
+            ).images[0]
 
-            if ctx.is_canceled():
-                logger.warning(f"[run_id={ctx.run_id}] Cancellation detected after generation finished.")
-                raise InterruptedError("Image generation cancelled after processing")
+        if ctx.is_canceled():
+            logger.warning(f"[run_id={ctx.run_id}] Cancellation detected after generation finished.")
+            raise InterruptedError("Image generation cancelled after processing")
 
-            # Convert PIL Image to PNG bytes
-            buffer = BytesIO()
-            image_result.save(buffer, format="PNG")
-            img_bytes = buffer.getvalue()
-            logger.info(f"[run_id={ctx.run_id}] Image generation complete ({len(img_bytes)} bytes).")
+        # Convert PIL Image to PNG bytes
+        buffer = BytesIO()
+        image_result.save(buffer, format="PNG")
+        img_bytes = buffer.getvalue()
+        logger.info(f"[run_id={ctx.run_id}] Image generation complete ({len(img_bytes)} bytes).")
 
     except Exception as e:
         logger.exception(f"[run_id={ctx.run_id}] Error during SDXL inference or image saving.")

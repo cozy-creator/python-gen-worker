@@ -12,11 +12,14 @@ import functools
 from typing import Any, Callable, Dict, Optional, TypeVar, Iterator, List
 import msgpack
 import torch
+import asyncio
 
 # Use relative imports within the package
 from .pb import worker_scheduler_pb2 as pb
 from .pb import worker_scheduler_pb2_grpc as pb_grpc 
 from .decorators import ResourceRequirements # Import ResourceRequirements for type hints if needed
+
+from .model_interface import ModelManagementInterface
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -80,6 +83,7 @@ class Worker:
         use_tls: bool = False,
         reconnect_delay: int = 5,
         max_reconnect_attempts: int = 0,  # 0 means infinite retries
+        model_manager: Optional[ModelManagementInterface] = None, # Optional model manager
     ):
         """Initialize a new worker.
 
@@ -91,6 +95,7 @@ class Worker:
             use_tls: Whether to use TLS for the connection.
             reconnect_delay: Seconds to wait between reconnection attempts.
             max_reconnect_attempts: Max reconnect attempts (0 = infinite).
+            model_manager: Optional model manager.
         """
         self.scheduler_addr = scheduler_addr
         self.user_module_names = user_module_names # Store module names
@@ -129,6 +134,16 @@ class Worker:
 
         self._receive_thread = None
         self._heartbeat_thread = None
+
+        self._model_manager = model_manager
+        self._supported_model_ids_from_scheduler: Optional[List[str]] = None # To store IDs from scheduler
+        self._model_init_done_event = threading.Event() # To signal model init is complete
+
+        if self._model_manager:
+            logger.info(f"ModelManager of type '{type(self._model_manager).__name__}' provided.")
+        else:
+            logger.info("No ModelManager provided. Worker operating in simple mode regarding models.")
+            self._model_init_done_event.set() # No model init to wait for if no manager
 
         logger.info(f"Created worker: ID={self.worker_id}, DeploymentID={self.deployment_id or 'N/A'}, Scheduler={scheduler_addr}")
 
@@ -180,13 +195,16 @@ class Worker:
                             self._discovered_resources[func_name] = resources
 
                             # Create the wrapper for gRPC/msgpack interaction
-                            def create_wrapper(captured_func: Callable, captured_name: str) -> Callable[[ActionContext, bytes], bytes]:
+                            def create_wrapper(captured_func: Callable, captured_name: str, func_needs_model: bool = False) -> Callable[[ActionContext, bytes], bytes]:
                                 @functools.wraps(captured_func) # Preserve metadata of original user func
-                                def wrapper(ctx: ActionContext, input_bytes: bytes) -> bytes:
+                                def wrapper(ctx: ActionContext, pipeline_instance_or_none: Optional[Any], input_bytes: bytes) -> bytes:
                                     try:
                                         input_obj = msgpack.unpackb(input_bytes, raw=False)
                                         # Pass the context and deserialized input to the *original* user function
-                                        result = captured_func(ctx, input_obj)
+                                        if func_needs_model: # Only pass pipeline if function expects it
+                                            result = captured_func(ctx, pipeline_instance_or_none, input_obj)
+                                        else:
+                                            result = captured_func(ctx, input_obj) # For functions not needing a model
                                         if ctx.is_canceled():
                                              raise InterruptedError("Task was canceled during execution")
                                         # Ensure result is bytes after msgpack serialization
@@ -318,19 +336,25 @@ class Worker:
             cpu_cores = os.cpu_count() or 0
 
             gpu_count = 0
-            gpu_memory = 0
+            gpu_total_mem = 0
+            vram_models = []
+            gpu_used_mem = 0
 
             if torch.cuda.is_available():
                 gpu_count = torch.cuda.device_count()
                 if gpu_count > 0:
                     try:
                         props = torch.cuda.get_device_properties(0)
-                        gpu_memory = props.total_memory
+                        gpu_total_mem = props.total_memory
+                        gpu_used_mem = torch.cuda.memory_allocated(0)
                     except Exception as gpu_err:
                          logger.warning(f"Could not get GPU properties: {gpu_err}")
 
-            supports_loading = False
-            current_models = []
+            supports_model_loading_flag = False
+            # current_models = []
+            if self._model_manager:
+                vram_models = self._model_manager.get_vram_loaded_models()
+                supports_model_loading_flag = True 
 
             resources = pb.WorkerResources(
                 worker_id=self.worker_id,
@@ -341,10 +365,11 @@ class Worker:
                 cpu_cores=cpu_cores,
                 memory_bytes=mem.total,
                 gpu_count=gpu_count,
-                gpu_memory_bytes=gpu_memory,
+                gpu_memory_bytes=gpu_total_mem,
+                gpu_used_memory_bytes=gpu_used_mem,
                 available_functions=list(self._actions.keys()),
-                available_models=current_models,
-                supports_model_loading=supports_loading,
+                available_models=vram_models,
+                supports_model_loading=supports_model_loading_flag,
             )
             registration = pb.WorkerRegistration(
                 resources=resources,
@@ -558,10 +583,74 @@ class Worker:
             run_id = message.interrupt_run_cmd.run_id
             self._handle_interrupt_request(run_id)
         # Add handling for other message types if needed (e.g., config updates)
+        elif msg_type == 'deployment_model_config':
+            if self._model_manager:
+                logger.info(f"Received DeploymentModelConfig: {message.deployment_model_config.supported_model_ids}")
+                self._supported_model_ids_from_scheduler = list(message.deployment_model_config.supported_model_ids)
+                self._model_init_done_event.clear() # Clear before starting new init
+                model_init_thread = threading.Thread(target=self._process_deployment_config_async_wrapper, daemon=True)
+                model_init_thread.start()
+            else:
+                logger.info("Received DeploymentModelConfig, but no model manager configured. Ignoring.")
+                self._model_init_done_event.set() # Signal completion as there's nothing to do
         elif msg_type is None:
              logger.warning("Received empty message from scheduler.")
         else:
             logger.warning(f"Received unhandled message type: {msg_type}")
+
+    def _process_deployment_config_async_wrapper(self):
+        if not self._model_manager or self._supported_model_ids_from_scheduler is None:
+            self._model_init_done_event.set()
+            return
+        
+        loop = None
+        try:
+            # Get or create an event loop for this thread
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+
+            loop.run_until_complete(
+                self._model_manager.process_supported_models_config(
+                    self._supported_model_ids_from_scheduler,
+                    None # Pass downloader instance here if Worker creates/manages it
+                )
+            )
+            logger.info("Model configuration and downloads (if any) processed.")
+        except Exception as e:
+            logger.exception(f"Error during model_manager.process_supported_models_config: {e}")
+        finally:
+            if loop and not loop.is_running() and not loop.is_closed(): # Clean up loop if we created it
+                loop.close()
+            self._model_init_done_event.set() # Signal completion or failure
+
+    def _handle_load_model_cmd(self, cmd: pb.LoadModelCommand):
+        model_id = cmd.model_id
+        logger.info(f"Received LoadModelCommand for: {model_id}")
+        success = False; error_msg = ""
+        if not self._model_manager:
+            error_msg = "LoadModelCommand: No model manager configured on worker."
+            logger.error(error_msg)
+        else:
+            try:
+                # Wait for initial model downloads if they haven't finished
+                if not self._model_init_done_event.is_set():
+                    logger.info(f"LoadModelCmd ({model_id}): Waiting for initial model setup...")
+                    # Timeout for this wait, can be adjusted
+                    if not self._model_init_done_event.wait(timeout=300.0): # 5 minutes
+                         raise TimeoutError("Timeout waiting for model initialization before VRAM load.")
+                
+                logger.info(f"Model Memory Manager attempting to load '{model_id}' into VRAM...")
+                # load_model_into_vram is async
+                success = asyncio.run(self._model_manager.load_model_into_vram(model_id))
+                if success: logger.info(f"Model '{model_id}' loaded to VRAM by Model Memory Manager.")
+                else: error_msg = f"MMM.load_model_into_vram failed for '{model_id}'."; logger.error(error_msg)
+            except Exception as e: error_msg = f"Exception in mmm.load_model_into_vram for '{model_id}': {e}"; logger.exception(error_msg)
+        
+        result = pb.LoadModelResult(model_id=model_id, success=success, error_message=error_msg)
+        self._send_message(pb.WorkerSchedulerMessage(load_model_result=result))
 
 
     def _handle_run_request(self, request: pb.TaskExecutionRequest):
@@ -569,8 +658,12 @@ class Worker:
         run_id = request.run_id
         function_name = request.function_name
         input_payload = request.input_payload
+        required_model_id_for_exec = ""
 
-        logger.info(f"Received task request: run_id={run_id}, function={function_name}")
+        if request.required_models and len(request.required_models) > 0:
+            required_model_id_for_exec = request.required_models[0]
+
+        logger.info(f"Received Task request: run_id={run_id}, function={function_name}, model='{required_model_id_for_exec or 'None'}'")
 
         func_wrapper = self._actions.get(function_name)
         if not func_wrapper:
@@ -590,7 +683,7 @@ class Worker:
              self._active_tasks[run_id] = ctx
 
         # Execute function in a separate thread to avoid blocking the receive loop
-        thread = threading.Thread(target=self._execute_function, args=(ctx, function_name, func_wrapper, input_payload), daemon=True)
+        thread = threading.Thread(target=self._execute_function, args=(ctx, function_name, func_wrapper, input_payload, required_model_id_for_exec), daemon=True)
         thread.start()
 
     def _handle_interrupt_request(self, run_id: str):
@@ -603,7 +696,7 @@ class Worker:
             else:
                 logger.warning(f"Could not interrupt task {run_id}: Not found in active tasks.")
 
-    def _execute_function(self, ctx: ActionContext, function_name: str, func_to_execute: Callable[[ActionContext, bytes], bytes], input_payload: bytes):
+    def _execute_function(self, ctx: ActionContext, function_name: str, func_to_execute: Callable[[ActionContext, bytes], bytes], input_payload: bytes, required_model_id: str):
         """Execute the registered function and send the result/error back."""
         run_id = ctx.run_id
         output_payload: Optional[bytes] = None
@@ -627,10 +720,22 @@ class Worker:
                 else:
                     logger.warning(f"Task {run_id} ({function_name}) requires GPU, but worker GPU was already marked busy. Proceeding...")
 
+        active_pipeline_instance = None # To hold the pipeline for the user function
         try:
-            # Check for cancellation before starting
-            if ctx.is_canceled():
-                 raise InterruptedError("Task was cancelled before execution started")
+            if ctx.is_canceled(): 
+                raise InterruptedError("Task cancelled before execution")
+
+            if required_model_id and self._model_manager:
+                if not self._model_init_done_event.is_set():
+                    logger.info(f"Task {run_id} ({function_name}) waiting for initial model setup...")
+                    if not self._model_init_done_event.wait(timeout=300.0): # 5 min timeout
+                        raise TimeoutError(f"Timeout waiting for model initialization for task {run_id}")
+                
+                logger.info(f"Task {run_id} ({function_name}) getting active pipeline for model '{required_model_id}'...")
+                # get_active_pipeline is async
+                active_pipeline_instance = asyncio.run(self._model_manager.get_active_pipeline(required_model_id))
+                if not active_pipeline_instance:
+                    raise RuntimeError(f"ModelManager failed to provide active pipeline for '{required_model_id}' for task {run_id}.")
 
             # Execute the function wrapper (which handles deserialization/serialization)
             output_payload = func_to_execute(ctx, input_payload)

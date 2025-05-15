@@ -21,7 +21,7 @@ DEPLOYMENT_ID    = os.getenv("DEPLOYMENT_ID", "tenant-a-image-gen-app-v1")
 # === Everything else is hard-coded here ===
 TEST_PROMPT      = "cowgirl riding a horse, cinematic lighting"
 TEST_SEED        = 9876
-CONCURRENCY      = 3
+CONCURRENCY      = 1
 # =====================================================
 
 def execute_and_await(stub: frontend_pb2_grpc.FrontendServiceStub,
