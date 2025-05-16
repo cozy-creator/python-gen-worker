@@ -114,7 +114,7 @@ if __name__ == '__main__':
             use_tls=USE_TLS,
             reconnect_delay=RECONNECT_DELAY,
             max_reconnect_attempts=MAX_RECONNECT_ATTEMPTS,
-            model_manager_instance=model_manager_instance_to_pass
+            model_manager=model_manager_instance_to_pass
         )
         # This blocks until the worker stops
         worker.run()
