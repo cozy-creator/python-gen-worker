@@ -366,7 +366,7 @@ class Worker:
                 memory_bytes=mem.total,
                 gpu_count=gpu_count,
                 gpu_memory_bytes=gpu_total_mem,
-                gpu_used_memory_bytes=gpu_used_mem,
+                gpu_memory_used_bytes=gpu_used_mem,
                 available_functions=list(self._actions.keys()),
                 available_models=vram_models,
                 supports_model_loading=supports_model_loading_flag,

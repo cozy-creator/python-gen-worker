@@ -1,6 +1,7 @@
 import json
 import logging
 from typing import List, Dict, Any, Optional
+from decimal import Decimal
 
 logger = logging.getLogger(__name__)
 
@@ -11,7 +12,7 @@ class PipelineDef:
     def __init__(self, name: str, source: str = "", class_name: str = "", 
                  custom_pipeline: str = "", default_args: Dict = None, 
                  metadata: Dict = None, components: Dict = None,
-                 prompt_def: Optional['PromptDef'] = None):
+                 prompt_def: Optional['PromptDef'] = None, estimated_size_gb: Optional[float] = None):
         self.name = name
         self.source = source
         self.class_name = class_name
@@ -20,6 +21,7 @@ class PipelineDef:
         self.metadata = metadata or {}
         self.components = components or {}
         self.prompt_def = prompt_def
+        self.estimated_size_gb = estimated_size_gb
 
 class PromptDef:
     """
@@ -59,6 +61,7 @@ def get_pipeline_defs(db_conn, pipeline_names: List[str]) -> List[PipelineDef]:
                     p.default_args,
                     p.metadata,
                     p.components,
+                    p.estimated_size_bytes,
                     pr.positive_prompt,
                     pr.negative_prompt
                 FROM 
@@ -103,6 +106,16 @@ def get_pipeline_defs(db_conn, pipeline_names: List[str]) -> List[PipelineDef]:
                         components = json.loads(row['components']) if isinstance(row['components'], str) else row['components']
                     except json.JSONDecodeError:
                         logger.warning(f"Failed to parse components for pipeline {row['name']}")
+
+                estimated_size_val_gb = None # Changed name
+                if row['estimated_size_bytes'] is not None: # DB column name is still estimated_size_bytes
+                    try:
+                        if isinstance(row['estimated_size_bytes'], Decimal):
+                            estimated_size_val_gb = float(row['estimated_size_bytes'])
+                        else:
+                            estimated_size_val_gb = float(str(row['estimated_size_bytes']))
+                    except (ValueError, TypeError) as e:
+                        logger.warning(f"Could not convert estimated_size_bytes ('{row['estimated_size_bytes']}') to float for {row['name']}: {e}")
                 
                 # Create PipelineDef
                 pipeline_def = PipelineDef(
@@ -113,7 +126,8 @@ def get_pipeline_defs(db_conn, pipeline_names: List[str]) -> List[PipelineDef]:
                     default_args=default_args,
                     metadata=metadata,
                     components=components,
-                    prompt_def=prompt_def
+                    prompt_def=prompt_def,
+                    estimated_size_gb=estimated_size_val_gb
                 )
                 
                 pipeline_defs.append(pipeline_def)

@@ -22,7 +22,7 @@ DEPLOYMENT_ID    = os.getenv("DEPLOYMENT_ID", "tenant-a-image-gen-app-v1")
 TEST_PROMPT      = "cowgirl riding a horse, cinematic lighting"
 TEST_SEED        = 9876
 CONCURRENCY      = 1
-REQUIRED_MODEL   = "auraflow"
+REQUIRED_MODEL   = "ebara-pony-xl"
 # =====================================================
 
 def execute_and_await(stub: frontend_pb2_grpc.FrontendServiceStub,
@@ -51,10 +51,10 @@ def execute_and_await(stub: frontend_pb2_grpc.FrontendServiceStub,
             deployment_id   = deployment_id,
             function_name   = function_name,
             input_payload   = payload,
-            required_model_id = required_model_id
+            # required_model_id = required_model_id
         )
-        # if required_model_id: # This is the critical part
-        #     request.required_model_id = required_model_id
+        if required_model_id: # This is the critical part
+            request.required_model_id = required_model_id
 
         print(f"  [execute_and_await] request={request}")
 

@@ -36,34 +36,46 @@ def load_pipeline_defs_from_db(enabled_models: List[str]) -> Dict[str, Any]:
         from .db.database import get_db_connection
         from .repository import get_pipeline_defs
         
-        if not enabled_models:
-            return {}
+        # if not enabled_models:
+        #     return {}
             
-        db = get_db_connection()
+        db_conn = get_db_connection()
 
-        names_to_query = enabled_models
-        if not names_to_query:
+        if not db_conn:
+            logger.error("load_pipeline_defs_from_db: Could not get database connection.")
+            return {} # Cannot proceed without DB connection
+
+        names_to_query: List[str]
+        if enabled_models is None or not enabled_models: # Check if None or empty list
             logger.info("load_pipeline_defs_from_db: No specific model names provided, fetching all model names from DB.")
             all_db_model_names = []
-            with db.cursor() as cursor:
-                cursor.execute("SELECT name FROM pipeline_defs")
+            with db_conn.cursor() as cursor: # Use a different variable name for cursor
+                cursor.execute("SELECT name FROM pipeline_defs WHERE source IS NOT NULL AND source != ''") # Fetch only usable models
                 rows = cursor.fetchall()
                 for row in rows:
                     all_db_model_names.append(row['name'])
-                names_to_query = all_db_model_names
-                if not names_to_query:
-                    logger.warning("load_pipeline_defs_from_db: No model names found in DB.")
-                    return {}
+            
+            if not all_db_model_names:
+                logger.warning("load_pipeline_defs_from_db: No model names found in DB to load definitions for.")
+                return {}
+            names_to_query = all_db_model_names
+        else:
+            names_to_query = enabled_models
         
         logger.debug(f"load_pipeline_defs_from_db: Fetching definitions for models: {names_to_query}")
         
-        db_models = get_pipeline_defs(db, names_to_query)
+        # get_pipeline_defs returns List[PipelineDef objects]
+        pipeline_def_objects = get_pipeline_defs(db_conn, names_to_query) 
         
-        logger.debug(f"Loaded {len(db_models)} pipeline definitions from database")
+        if not pipeline_def_objects:
+            logger.warning(f"load_pipeline_defs_from_db: get_pipeline_defs returned no objects for names: {names_to_query}")
+            return {}
+
+        logger.info(f"load_pipeline_defs_from_db: Loaded {len(pipeline_def_objects)} PipelineDef objects from repository.")
         
         # Convert DB models to dictionary format
         db_pipeline_defs = {}
-        for model in db_models:
+        for model in pipeline_def_objects:
             pipeline_def = {
                 "source": model.source,
                 "class_name": model.class_name,
@@ -182,6 +194,8 @@ def load_config() -> RuntimeConfig:
         # "enabled_models": [],
         "models_path": default_models_path,
     }
+
+    print(f"default_config: {default_config}")
     
     # Use COZY_HOME if set, else default.
     home_dir = os.environ.get("COZY_HOME", default_home)
@@ -222,9 +236,11 @@ def load_config() -> RuntimeConfig:
     # The modified load_pipeline_defs_from_db with no args should fetch all.
     logger.info("Loading all pipeline definitions from database...")
     db_pipeline_defs = load_pipeline_defs_from_db(enabled_models=None)
+    print(f"db_pipeline_defs: {db_pipeline_defs}")
     
     # Merge pipeline definitions from config and database
     merged["pipeline_defs"] = merge_pipeline_defs(config_pipeline_defs, db_pipeline_defs)
+    print(f"merged: {merged}")
     
     return RuntimeConfig(**merged)
 

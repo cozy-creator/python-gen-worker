@@ -33,7 +33,9 @@ RUN uv pip install \
     gen-worker \
     grpcio \
     msgpack-python \
-    psutil
+    psutil \
+    psycopg2-binary \
+    python-dotenv
 
 RUN uv pip install \
     --system \
