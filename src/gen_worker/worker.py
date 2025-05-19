@@ -156,7 +156,7 @@ class Worker:
 
     def _set_gpu_busy_status(self, busy: bool, func_name_for_log: str = ""):
         with self._gpu_busy_lock:
-            if self._is_gpu_busy == busy: # No change
+            if self._is_gpu_busy == busy:
                 return
             self._is_gpu_busy = busy
         if func_name_for_log:
@@ -568,11 +568,12 @@ class Worker:
             self._handle_run_request(message.run_request)
         elif msg_type == 'load_model_cmd':
             # TODO: Implement model loading logic
-            model_id = message.load_model_cmd.model_id
-            logger.warning(f"Received load_model_cmd for {model_id}, but not yet implemented.")
-            # Send result back (failure for now)
-            result = pb.LoadModelResult(model_id=model_id, success=False, error_message="Model loading not implemented")
-            self._send_message(pb.WorkerSchedulerMessage(load_model_result=result))
+            # model_id = message.load_model_cmd.model_id
+            # logger.warning(f"Received load_model_cmd for {model_id}, but not yet implemented.")
+            # # Send result back (failure for now)
+            # result = pb.LoadModelResult(model_id=model_id, success=False, error_message="Model loading not implemented")
+            # self._send_message(pb.WorkerSchedulerMessage(load_model_result=result))
+            self._handle_load_model_cmd(message.load_model_cmd)
         elif msg_type == 'unload_model_cmd':
             # TODO: Implement model unloading logic
             model_id = message.unload_model_cmd.model_id
