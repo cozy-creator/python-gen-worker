@@ -184,7 +184,13 @@ def load_config() -> RuntimeConfig:
     Merges it with default values and database pipeline definitions.
     """
     default_home = os.path.expanduser("~/.cozy-creator")
+
+    cozy_mount_path = os.getenv("COZY_MOUNT_PATH")
+    if cozy_mount_path:
+        default_home = cozy_mount_path
+
     default_models_path = os.path.join(default_home, "models")
+    
     default_config = {
         "home_dir": default_home,
         "environment": "dev",

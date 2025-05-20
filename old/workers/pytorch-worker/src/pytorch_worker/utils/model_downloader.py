@@ -160,15 +160,13 @@ class ModelManager:
 
             source = ModelSource(model_info["source"])
 
+            component_names = None
             # Get components from model_config
-            if model_config:
-                components = model_config.get("components", [])
-                # add the component names to an array
-                if isinstance(components, list):
-                    component_names = [component for component in components]
-                    print(f"Component names: {component_names}")
-                else:
-                    component_names = None
+            if model_config and model_config.get("components"):
+                if isinstance(model_config["components"], list): # If it's just a list of names
+                    component_names = model_config["components"]
+                elif isinstance(model_config["components"], dict): # If it's a dict of name:details
+                    component_names = list(model_config["components"].keys())
 
             # Handle local files - just check if they exist
             if source.type == "file":

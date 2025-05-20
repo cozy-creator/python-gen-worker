@@ -739,7 +739,7 @@ class Worker:
                     raise RuntimeError(f"ModelManager failed to provide active pipeline for '{required_model_id}' for task {run_id}.")
 
             # Execute the function wrapper (which handles deserialization/serialization)
-            output_payload = func_to_execute(ctx, input_payload)
+            output_payload = func_to_execute(ctx, active_pipeline_instance, input_payload)
             # Check for cancellation *during* execution (func should check ctx.is_canceled)
             if ctx.is_canceled():
                 raise InterruptedError("Task was cancelled during execution")
