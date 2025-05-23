@@ -17,48 +17,48 @@ logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
 pipe = None
-device = None
-pipeline_lock = threading.Lock()
+device = "cuda" if torch.cuda.is_available() else "cpu"
+# pipeline_lock = threading.Lock()
 
-def _initialize_pipeline():
-    """Loads the SDXL pipeline onto the appropriate device."""
-    global pipe, device
-    if pipe is not None:
-        return
+# def _initialize_pipeline():
+#     """Loads the SDXL pipeline onto the appropriate device."""
+#     global pipe, device
+#     if pipe is not None:
+#         return
 
-    logger.info("Initializing Stable Diffusion XL Pipeline (stabilityai/stable-diffusion-xl-base-1.0)...")
-    try:
-        # Determine device and dtype
-        if torch.cuda.is_available():
-            device = "cuda"
-            torch_dtype = torch.float16
-            logger.info("CUDA available, setting device to GPU and dtype to float16.")
-        else:
-            device = "cpu"
-            torch_dtype = torch.float32
-            logger.warning("CUDA not available, setting device to CPU and dtype to float32. Inference will be slow.")
+#     logger.info("Initializing Stable Diffusion XL Pipeline (stabilityai/stable-diffusion-xl-base-1.0)...")
+#     try:
+#         # Determine device and dtype
+#         if torch.cuda.is_available():
+#             device = "cuda"
+#             torch_dtype = torch.float16
+#             logger.info("CUDA available, setting device to GPU and dtype to float16.")
+#         else:
+#             device = "cpu"
+#             torch_dtype = torch.float32
+#             logger.warning("CUDA not available, setting device to CPU and dtype to float32. Inference will be slow.")
 
-        print(f"Device: {device}")
+#         print(f"Device: {device}")
 
-        pipe = StableDiffusionXLPipeline.from_pretrained(
-            "John6666/holy-mix-illustriousxl-vibrant-anime-checkpoint-v1-sdxl",
-            torch_dtype=torch_dtype,
-            use_safetensors=True,
-            # variant="fp16" if torch_dtype == torch.float16 else None
-        ).to(device)
+#         pipe = StableDiffusionXLPipeline.from_pretrained(
+#             "John6666/holy-mix-illustriousxl-vibrant-anime-checkpoint-v1-sdxl",
+#             torch_dtype=torch_dtype,
+#             use_safetensors=True,
+#             # variant="fp16" if torch_dtype == torch.float16 else None
+#         ).to(device)
         
-        logger.info(f"Pipeline loaded successfully and moved to device '{device}'.")
+#         logger.info(f"Pipeline loaded successfully and moved to device '{device}'.")
 
-    except ImportError as ie:
-         logger.exception("ImportError during pipeline initialization. Are diffusers/transformers/accelerate installed?")
-         pipe = None
-         device = None
-         raise ie
-    except Exception as e:
-        logger.exception("Failed to initialize Stable Diffusion XL Pipeline.")
-        pipe = None
-        device = None
-        raise e
+#     except ImportError as ie:
+#          logger.exception("ImportError during pipeline initialization. Are diffusers/transformers/accelerate installed?")
+#          pipe = None
+#          device = None
+#          raise ie
+#     except Exception as e:
+#         logger.exception("Failed to initialize Stable Diffusion XL Pipeline.")
+#         pipe = None
+#         device = None
+#         raise e
 
 sdxl_resources = ResourceRequirements(
     model_name="John6666/holy-mix-illustriousxl-vibrant-anime-checkpoint-v1-sdxl",
@@ -68,7 +68,7 @@ sdxl_resources = ResourceRequirements(
 )
 
 @worker_function(resources=sdxl_resources)
-def generate_image(ctx: ActionContext, pipeline: DiffusionPipeline, prompt_details: dict) -> bytes:
+def generate_image(ctx: ActionContext, pipeline: DiffusionPipeline = None, prompt_details: dict = None) -> bytes:
     """
     Generates an image based on a prompt using the pre-loaded SDXL pipeline.
 
@@ -110,7 +110,7 @@ def generate_image(ctx: ActionContext, pipeline: DiffusionPipeline, prompt_detai
         generator = torch.Generator(device=device).manual_seed(seed)
 
         with torch.inference_mode():
-            image_result = pipe(
+            image_result = pipeline(
                 prompt=prompt,
                 generator=generator,
                 num_inference_steps=28
