@@ -179,8 +179,6 @@ class Worker:
                 module = importlib.import_module(module_name)
                 logger.debug(f"Inspecting module: {module_name}")
                 for name, obj in inspect.getmembers(module):
-                    # print(f"Inspecting member: {name}")
-                    # print(f"Object: {obj}")
                     if inspect.isfunction(obj) and hasattr(obj, '_is_worker_function'):
                         if getattr(obj, '_is_worker_function') is True:
                             # Found a decorated function
@@ -194,17 +192,24 @@ class Worker:
                             resources: ResourceRequirements = getattr(original_func, '_worker_resources', ResourceRequirements())
                             self._discovered_resources[func_name] = resources
 
+                            expects_pipeline_flag = resources.expects_pipeline_arg
+
                             # Create the wrapper for gRPC/msgpack interaction
-                            def create_wrapper(captured_func: Callable, captured_name: str, func_needs_model: bool = False) -> Callable[[ActionContext, bytes], bytes]:
+                            def create_wrapper(captured_func: Callable, captured_name: str, func_expects_pipeline: bool = False) -> Callable[[ActionContext, bytes], bytes]:
                                 @functools.wraps(captured_func) # Preserve metadata of original user func
-                                def wrapper(ctx: ActionContext, pipeline_instance_or_none: Optional[Any], input_bytes: bytes) -> bytes:
+                                def wrapper(ctx: ActionContext, pipeline_instance: Optional[Any], input_bytes: bytes) -> bytes:
                                     try:
                                         input_obj = msgpack.unpackb(input_bytes, raw=False)
                                         # Pass the context and deserialized input to the *original* user function
-                                        if func_needs_model: # Only pass pipeline if function expects it
-                                            result = captured_func(ctx, pipeline_instance_or_none, input_obj)
+                                        if func_expects_pipeline: # Only pass pipeline if function expects it
+                                            if pipeline_instance is None:
+                                                err_msg = f"Function '{captured_name}' expected a pipeline argument, but None was provided by the Worker core."
+                                                logger.error(err_msg)
+                                                raise ValueError(err_msg)
+                                            result = captured_func(ctx, pipeline_instance, input_obj)
                                         else:
                                             result = captured_func(ctx, input_obj) # For functions not needing a model
+
                                         if ctx.is_canceled():
                                              raise InterruptedError("Task was canceled during execution")
                                         # Ensure result is bytes after msgpack serialization
@@ -221,7 +226,7 @@ class Worker:
                                         raise # Re-raise to be caught by _execute_function
                                 return wrapper
 
-                            self._actions[func_name] = create_wrapper(original_func, func_name)
+                            self._actions[func_name] = create_wrapper(original_func, func_name, func_expects_pipeline=expects_pipeline_flag)
                             logger.info(f"Registered function: '{func_name}' from module '{module_name}' with resources: {resources}")
                             discovered_count += 1
 
@@ -709,6 +714,7 @@ class Worker:
         resource_req = self._discovered_resources.get(function_name)
         if resource_req:
             func_requires_gpu = resource_req.requires_gpu
+            func_expects_pipeline = resource_req.expects_pipeline_arg
 
         # Variable to track if this specific thread execution set the GPU busy
         this_thread_set_gpu_busy = False
@@ -725,18 +731,27 @@ class Worker:
         try:
             if ctx.is_canceled(): 
                 raise InterruptedError("Task cancelled before execution")
-
-            if required_model_id and self._model_manager:
+            
+            if func_expects_pipeline:
+                if not required_model_id:
+                    raise ValueError(f"Function '{function_name}' expects a pipeline argument, but no model ID was provided.")
+                
+                if not self._model_manager:
+                    raise RuntimeError(f"Function '{function_name}' expects a pipeline argument, but no model manager configured on worker.")
+                
                 if not self._model_init_done_event.is_set():
                     logger.info(f"Task {run_id} ({function_name}) waiting for initial model setup...")
                     if not self._model_init_done_event.wait(timeout=300.0): # 5 min timeout
                         raise TimeoutError(f"Timeout waiting for model initialization for task {run_id}")
+                    logger.info(f"Initial model setup complete. Proceeding for task {run_id}.")
                 
                 logger.info(f"Task {run_id} ({function_name}) getting active pipeline for model '{required_model_id}'...")
                 # get_active_pipeline is async
                 active_pipeline_instance = asyncio.run(self._model_manager.get_active_pipeline(required_model_id))
                 if not active_pipeline_instance:
                     raise RuntimeError(f"ModelManager failed to provide active pipeline for '{required_model_id}' for task {run_id}.")
+                
+                logger.info(f"Task {run_id} ({function_name}) obtained pipeline for model '{required_model_id}'.")
 
             # Execute the function wrapper (which handles deserialization/serialization)
             output_payload = func_to_execute(ctx, active_pipeline_instance, input_payload)
@@ -751,6 +766,10 @@ class Worker:
              error_message = str(e) or "Task was canceled"
              logger.warning(f"Task {run_id} was canceled: {error_message}")
              success = False # Explicitly set success to False on cancellation
+        except (ValueError, RuntimeError, TimeoutError) as ve_rte_to: # Catch specific errors we raise
+            error_message = f"{type(ve_rte_to).__name__}: {str(ve_rte_to)}"
+            logger.error(f"Task {run_id} ({function_name}) failed pre-execution or during model acquisition: {error_message}")
+            success = False
         except Exception as e:
             error_message = f"{type(e).__name__}: {str(e)}"
             logger.exception(f"Error executing function for run_id={run_id}: {error_message}")

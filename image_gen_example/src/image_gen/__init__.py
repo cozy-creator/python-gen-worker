@@ -63,7 +63,8 @@ def _initialize_pipeline():
 sdxl_resources = ResourceRequirements(
     model_name="John6666/holy-mix-illustriousxl-vibrant-anime-checkpoint-v1-sdxl",
     min_vram_gb=8.0,
-    recommended_vram_gb=12.0
+    recommended_vram_gb=12.0,
+    expects_pipeline_arg=True
 )
 
 @worker_function(resources=sdxl_resources)

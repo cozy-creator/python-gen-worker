@@ -10,7 +10,8 @@ class ResourceRequirements:
         model_name: Optional[str] = None,
         min_vram_gb: Optional[float] = None,
         recommended_vram_gb: Optional[float] = None,
-        requires_gpu: bool = False
+        requires_gpu: bool = False,
+        expects_pipeline_arg: bool = False
         # Add other potential requirements here:
         # e.g., cpu_cores: Optional[int] = None,
         # specific_accelerators: Optional[list[str]] = None,
@@ -20,6 +21,7 @@ class ResourceRequirements:
         self.min_vram_gb = min_vram_gb
         self.recommended_vram_gb = recommended_vram_gb
         self.requires_gpu = requires_gpu
+        self.expects_pipeline_arg = expects_pipeline_arg
         # Store all defined attributes for easy access
         self._requirements = {k: v for k, v in locals().items() if k != 'self' and v is not None}
 
