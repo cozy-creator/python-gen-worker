@@ -8,3 +8,5 @@ blake3
 accelerate
 transformers
 botocore
+bitsandbytes
+sentencepiece

@@ -22,7 +22,7 @@ DEPLOYMENT_ID    = os.getenv("DEPLOYMENT_ID", "tenant-a-image-gen-app-v1")
 TEST_PROMPT      = "cowgirl riding a horse, cinematic lighting"
 TEST_SEED        = 9876
 CONCURRENCY      = 1
-REQUIRED_MODEL   = "playground2.5"
+REQUIRED_MODEL   = "flux.1-dev-fp8"
 
 # =====================================================
 def execute_and_await(stub: frontend_pb2_grpc.FrontendServiceStub,
@@ -39,7 +39,7 @@ def execute_and_await(stub: frontend_pb2_grpc.FrontendServiceStub,
         print(f"  [execute_and_await] no required_model")
     try:
         payload = msgpack.packb(input_data, use_bin_type=True)
-        print(f"  [execute_and_await] payload={payload}")
+        # print(f"  [execute_and_await] payload={payload}")
     except Exception as e:
         print(f"  [Error] serializing input: {e}", file=sys.stderr)
         return None
@@ -56,7 +56,7 @@ def execute_and_await(stub: frontend_pb2_grpc.FrontendServiceStub,
         if required_model_id: # This is the critical part
             request.required_model_id = required_model_id
 
-        print(f"  [execute_and_await] request={request}")
+        # print(f"  [execute_and_await] request={request}")
 
         resp = stub.ExecuteAction(request, timeout=30)
         print(f"    → Submitted. Run ID: {resp.run_id}")
@@ -121,7 +121,7 @@ def run_workflow(task_id: int,
         return
 
     local_file = f"output_task_{task_id}.png"
-    print(f"[Task {task_id}] Saving image to {local_file}")
+    # print(f"[Task {task_id}] Saving image to {local_file}")
     try:
         with open(local_file, "wb") as f:
             f.write(img_bytes)

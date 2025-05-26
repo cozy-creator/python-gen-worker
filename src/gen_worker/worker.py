@@ -381,8 +381,8 @@ class Worker:
                 is_heartbeat=is_heartbeat
             )
             message = pb.WorkerSchedulerMessage(worker_registration=registration)
-            logger.info(f"DEBUG: Preparing to send registration. Resource object: {resources}")
-            logger.info(f"DEBUG: Value being sent for runpod_pod_id: '{resources.runpod_pod_id}'")
+            # logger.info(f"DEBUG: Preparing to send registration. Resource object: {resources}")
+            # logger.info(f"DEBUG: Value being sent for runpod_pod_id: '{resources.runpod_pod_id}'")
             self._send_message(message)
         except Exception as e:
             logger.error(f"Failed to create or send registration/heartbeat: {e}")
