@@ -235,7 +235,8 @@ class ModelManager:
             raise RuntimeError("Session not initialized. Use async with context.")
 
         if source.type == "huggingface":
-            return await self.download(source.location)
+            repo_id, subfolder, filename = self.parse_hf_string(source.location)
+            return await self.download(repo_id, subfolder, filename)
         elif source.type == "civitai":
             return await self._download_civitai(model_id, source.location)
         else:
