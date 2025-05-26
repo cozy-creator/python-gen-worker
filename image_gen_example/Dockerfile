@@ -2,7 +2,7 @@
 FROM cozycreator/base-worker:cuda126-py312-base-v1
 
 # Set the working directory
-WORKDIR /app
+WORKDIR /workspace
 
 # Copy the specific requirements file for this function set
 COPY requirements.txt .

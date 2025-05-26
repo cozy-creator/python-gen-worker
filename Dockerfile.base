@@ -6,6 +6,7 @@ FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION}
 
 # Install system deps + Python 3.10 (available by default in Ubuntu 22.04)
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    clang build-essential \
     python3.10 \
     python3.10-venv \
     python3.10-distutils \
@@ -13,6 +14,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
     && rm -rf /var/lib/apt/lists/*
+
+ENV CC=/usr/bin/clang \
+    CXX=/usr/bin/clang++
 
 RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1 && \
     update-alternatives --set python3 /usr/bin/python3.10 && \
@@ -22,7 +26,7 @@ RUN which python && python --version
 RUN which python3 && python3 --version
 
 # 2. Set up Working Directory and Install uv
-WORKDIR /app
+WORKDIR /workspace
 
 RUN pip3 install uv
 
