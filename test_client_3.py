@@ -22,7 +22,7 @@ DEPLOYMENT_ID    = os.getenv("DEPLOYMENT_ID", "tenant-a-image-gen-app-v1")
 TEST_PROMPT      = "cowgirl riding a horse, cinematic lighting"
 TEST_SEED        = 9876
 CONCURRENCY      = 1
-REQUIRED_MODEL   = "flux.1-dev-fp8"
+REQUIRED_MODEL   = "playground2.5"
 
 # =====================================================
 def execute_and_await(stub: frontend_pb2_grpc.FrontendServiceStub,

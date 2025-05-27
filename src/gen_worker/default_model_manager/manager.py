@@ -4,7 +4,7 @@ import logging
 import importlib
 from enum import Enum
 import traceback
-from typing import Optional, Any, Dict, List, Tuple, Union, Type
+from typing import Optional, Any, Dict, List, Tuple, Union, Type, Set
 import psutil
 from collections import OrderedDict
 import time
@@ -13,6 +13,7 @@ import sys
 import torch
 import diffusers
 import numpy as np
+import asyncio
 
 from diffusers import (
     DiffusionPipeline,
@@ -31,6 +32,7 @@ from .utils.globals import (
     # get_hf_model_manager,
     get_architectures,
     get_available_torch_device,
+    set_available_torch_device,
     get_model_downloader,
 )
 from .utils.model_downloader import ModelSource
@@ -206,53 +208,30 @@ class DefaultModelManager:
         self.cache_dir = HF_HUB_CACHE
         self.lru_cache = LRUCache()
 
+        self.allowed_model_ids: Optional[Set[str]] = None
+        self.supports_all_known_models: bool = False # Default to explicit list
+        self._download_lock = asyncio.Lock() # Lock for ensuring only one prioritized download happens at a time
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        set_available_torch_device(device)
+
 
     async def process_supported_models_config(
-        self, 
-        supported_model_ids: List[str], 
-        downloader_instance: Optional[DownloaderType] # Can ignore if using self.model_downloader
-    ) -> None:
-        logger.info(f"DefaultModelManager processing supported_model_ids for download: {supported_model_ids}")
-        
-        # Use self.model_downloader instantiated in __init__
-        active_downloader = self.model_downloader
-
-        cfg = get_config() # This should be set by the entrypoint before MMM is instantiated
-        if not cfg or not cfg.pipeline_defs:
-            logger.error("DefaultModelManager: Global config or pipeline_defs not loaded. Cannot download models.")
-            return
-
-        async with active_downloader: # Manages aiohttp session for all downloads
-            for model_id in supported_model_ids:
-                p_def_dict = cfg.pipeline_defs.get(model_id)
-                if not p_def_dict:
-                    logger.warning(f"DefaultModelManager: No pipeline_def found for supported model_id: {model_id}")
-                    continue
-                
-                # Main model source
-                main_source_str = p_def_dict.get("source")
-                if main_source_str:
-                    logger.info(f"Ensuring main model source for '{model_id}' ({main_source_str}) is handled...")
-                    is_main_downloaded, _ = await active_downloader.is_downloaded(model_id, model_config=p_def_dict)
-                    if not is_main_downloaded:
-                        logger.info(f"DefaultModelManager: Downloading main source for {model_id}...")
-                        await active_downloader.download_model(model_id, ModelSource(main_source_str))
-                    else:
-                        logger.info(f"DefaultModelManager: Main source for {model_id} already present.")
-                
-                # Components
-                components = p_def_dict.get("components", {})
-                if isinstance(components, dict):
-                    for comp_name, comp_details in components.items():
-                        comp_source_str = None
-                        if isinstance(comp_details, dict): comp_source_str = comp_details.get("source")
-                        elif isinstance(comp_details, str): comp_source_str = comp_details
-                        
-                        if comp_source_str:
-                            comp_dl_id = f"{model_id}::{comp_name}" # Contextual ID for downloader
-                            logger.info(f"Ensuring component '{comp_name}' for '{model_id}' ({comp_source_str}) is handled...")
-                            await active_downloader.download_model(comp_dl_id, ModelSource(comp_source_str))
-        logger.info("DefaultModelManager: Finished processing supported models config (download checks/attempts).")
+        self, supported_model_ids: List[str], downloader_instance: Optional[DownloaderType] = None # Can ignore if using self.model_downloader
+        ) -> None:
+        logger.info(f"DMM: Processing scheduler-provided supported_model_ids: {supported_model_ids}")
+        if len(supported_model_ids) == 1 and supported_model_ids[0] == "*": # "*" means all
+            self.supports_all_known_models = True
+            self.allowed_model_ids = None 
+            logger.info("DMM: Configured to support ALL known models (on-demand) due to '*' from scheduler.")
+        elif not supported_model_ids: # Empty list means no specific dynamic models for this worker config
+            self.supports_all_known_models = False
+            self.allowed_model_ids = set() 
+            logger.info("DMM: Configured with an empty supported model list from scheduler (supports no dynamic models).")
+        else: # Specific list
+            self.supports_all_known_models = False
+            self.allowed_model_ids = set(supported_model_ids)
+            logger.info(f"DMM: Configured to support specific models: {self.allowed_model_ids}")
 
     async def load_model_into_vram(self, model_id: str) -> bool:
         logger.info(f"DefaultModelManager: Request to load '{model_id}' into VRAM.")
@@ -385,6 +364,61 @@ class DefaultModelManager:
         return (model_size <= (self._get_available_vram() - VRAM_SAFETY_MARGIN_GB))
     
 
+    async def _ensure_model_files_on_disk(self, model_id: str, model_config_dict: Dict[str, Any]) -> bool:
+        """
+        Internal helper: Ensures a specific model and its components are downloaded.
+        This is called by self.load() before attempting to load from disk.
+        This method is now the primary point for on-demand downloads.
+        Returns True if all necessary files are confirmed/downloaded, False otherwise.
+        """
+        logger.info(f"DMM._ensure_model_files_on_disk: Checking/downloading '{model_id}'...")
+        all_parts_ok = True
+        async with self.model_downloader as downloader: # Use context manager for session
+            # 1. Main model source
+            main_source_str = model_config_dict.get("source")
+            if main_source_str:
+                is_main_downloaded, _ = await downloader.is_downloaded(model_id, model_config=model_config_dict)
+                if not is_main_downloaded:
+                    logger.info(f"DMM: Main files for '{model_id}' (source: {main_source_str}) not on disk. Downloading...")
+                    try:
+                        await downloader.download_model(model_id, ModelSource(main_source_str))
+                        is_main_downloaded, _ = await downloader.is_downloaded(model_id, model_config=model_config_dict) # Verify
+                        if not is_main_downloaded:
+                            logger.error(f"DMM: Download verification FAILED for main files of '{model_id}'.")
+                            all_parts_ok = False
+                        else:
+                            logger.info(f"DMM: Main files for '{model_id}' downloaded and verified.")
+                    except Exception as e:
+                        logger.exception(f"DMM: Exception during download of main files for '{model_id}': {e}")
+                        all_parts_ok = False
+                else:
+                    logger.info(f"DMM: Main files for '{model_id}' already on disk.")
+            else:
+                logger.error(f"DMM: No source found for model '{model_id}' in its config. Cannot download.")
+                return False # Cannot proceed without a source
+
+            # 2. Components (if main download was okay or not needed, and components exist)
+            if all_parts_ok and model_config_dict.get("components") and isinstance(model_config_dict["components"], dict):
+                for comp_name, comp_details in model_config_dict["components"].items():
+                    comp_source_str = None
+                    if isinstance(comp_details, dict): comp_source_str = comp_details.get("source")
+                    elif isinstance(comp_details, str): comp_source_str = comp_details
+                    
+                    if comp_source_str:
+                        comp_dl_id = f"{model_id}::{comp_name}"
+                        # TODO: Need a robust way to check if component is downloaded via downloader.is_downloaded
+                        # For now, we rely on downloader.download_model being idempotent.
+                        logger.info(f"DMM: Ensuring component '{comp_name}' for '{model_id}' (source: {comp_source_str}) is downloaded...")
+                        try:
+                            await downloader.download_model(comp_dl_id, ModelSource(comp_source_str))
+                            # Add verification for component if possible
+                            logger.info(f"DMM: Component '{comp_name}' for '{model_id}' download attempt finished.")
+                        except Exception as e:
+                            logger.exception(f"DMM: Exception downloading component '{comp_name}' for '{model_id}': {e}")
+                            all_parts_ok = False; break # Stop if a component fails
+        return all_parts_ok
+    
+
     async def load(
         self, model_id: str, gpu: Optional[int] = None, pipe_type: Optional[str] = None
     ) -> Optional[DiffusionPipeline]:
@@ -405,7 +439,19 @@ class DefaultModelManager:
         Returns:
             Loaded pipeline or None if loading failed
         """
-        logger.info(f"Loading model {model_id}")
+        logger.info(f"Processing model {model_id}")
+
+        if not self.supports_all_known_models:
+            if self.allowed_model_ids is None: # Should have been set if not supports_all
+                 logger.error(f"DMM.load: Inconsistent state - worker not configured for all models, but allowed_model_ids is None. Denying load for '{model_id}'.")
+                 return None
+            if model_id not in self.allowed_model_ids:
+                logger.error(f"DMM.load: Model '{model_id}' is NOT in the allowed list for this worker instance. Allowed: {self.allowed_model_ids}. Denying load.")
+                return None
+            
+        # If self.supports_all_known_models is True, any model_id is principally allowed, contingent on it being defined in the global pipeline_defs.
+
+        logger.debug(f"DMM.load: Model '{model_id}' is permitted for this worker instance.")
 
         # Check existing loaded models
         if model_id in self.loaded_models:
@@ -418,6 +464,23 @@ class DefaultModelManager:
             logger.info(f"Model {model_id} is CPU-offloaded and ready")
             self.lru_cache.access(model_id, "cpu")
             return self.cpu_models[model_id]
+        
+        
+        # On-Demand model download
+        cfg = get_config()
+        if not cfg or not cfg.pipeline_defs:
+            logger.error("DefaultModelManager: Global config or pipeline_defs not loaded. Cannot download models.")
+            return None
+        
+        model_config_dict = cfg.pipeline_defs.get(model_id)
+        if not model_config_dict:
+            logger.error(f"Model {model_id} not found in configuration")
+            return None
+        
+        async with self._download_lock: # Ensure only one download process at a time for this MMM instance
+            if not await self._ensure_model_files_on_disk(model_id, model_config_dict):
+                logger.error(f"Failed to ensure model files for {model_id} are on disk")
+                return None
 
         # Load new model
         return await self._load_new_model(model_id, gpu, pipe_type)
@@ -722,6 +785,7 @@ class DefaultModelManager:
 
         try:
             device = get_available_torch_device()
+            print("Moving to device", device)
 
             # check if pippeline supports vae tiling and slicing
             if hasattr(pipeline, "enable_vae_tiling"):
@@ -789,7 +853,7 @@ class DefaultModelManager:
                 f"repo_id={repo_id},torch_dtype={torch_dtype},local_files_only=True,variant={variant},pipeline_kwargs={pipeline_kwargs},"
             )
             try:
-                pipeline = pipeline_class.from_pretrained(
+                pipeline = await asyncio.to_thread(pipeline_class.from_pretrained,
                     repo_id,
                     torch_dtype=torch_dtype,
                     local_files_only=True,
@@ -800,7 +864,7 @@ class DefaultModelManager:
                 print(f"Custom pipeline '{custom_pipeline}' not found: {e}")
                 print("Falling back to the default pipeline...")
                 del pipeline_kwargs["custom_pipeline"]
-                pipeline = pipeline_class.from_pretrained(
+                pipeline = await asyncio.to_thread(pipeline_class.from_pretrained,
                     repo_id,
                     variant=variant,
                     torch_dtype=torch_dtype,
@@ -1718,7 +1782,7 @@ class DefaultModelManager:
 
             if component_name:
                 if variant:
-                    component = model_class.from_pretrained(
+                    component = await asyncio.to_thread(model_class.from_pretrained,
                         component_repo,
                         subfolder=component_name,
                         variant=variant,
@@ -1727,7 +1791,7 @@ class DefaultModelManager:
                         else torch.float16,
                     )
                 else:
-                    component = model_class.from_pretrained(
+                    component = await asyncio.to_thread(model_class.from_pretrained,
                         component_repo,
                         subfolder=component_name,
                         torch_dtype=torch.bfloat16
@@ -1736,7 +1800,7 @@ class DefaultModelManager:
                     )
             else:
                 if variant:
-                    component = model_class.from_pretrained(
+                    component = await asyncio.to_thread(model_class.from_pretrained,
                         component_repo,
                         variant=variant,
                         torch_dtype=torch.bfloat16
@@ -1744,7 +1808,7 @@ class DefaultModelManager:
                         else torch.float16,
                     )
                 else:
-                    component = model_class.from_pretrained(
+                    component = await asyncio.to_thread(model_class.from_pretrained,
                         component_repo,
                         torch_dtype=torch.bfloat16
                         if "flux" in component_repo.lower()
