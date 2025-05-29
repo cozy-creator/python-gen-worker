@@ -9,6 +9,7 @@ import psutil
 from collections import OrderedDict
 import time
 import sys
+import threading
 
 import torch
 import diffusers
@@ -186,11 +187,14 @@ class DefaultModelManager:
         """Initialize the model memory manager with empty states and default configurations."""
         # Model tracking
         self.current_model: Optional[str] = None
+        self.base_pipelines: Dict[str, DiffusionPipeline] = {}
         self.loaded_models: Dict[str, DiffusionPipeline] = {}
         self.cpu_models: Dict[str, DiffusionPipeline] = {}
         self.model_sizes: Dict[str, float] = {}
         self.model_types: Dict[str, torch.dtype] = {}
         self.loaded_model: Optional[DiffusionPipeline] = None
+
+        self.pipeline_locks: Dict[str, threading.Lock] = {}
 
         # Memory tracking
         self.vram_usage: float = 0
@@ -237,25 +241,82 @@ class DefaultModelManager:
         logger.info(f"DefaultModelManager: Request to load '{model_id}' into VRAM.")
         pipeline = await self.load(model_id) 
         if pipeline:
+            self.base_pipelines[model_id] = pipeline
             self.loaded_model = pipeline
             self.current_model = model_id
+            self.loaded_models[model_id] = pipeline # this is for backward compatibility (will be removed in the future)
             return True
         return False
 
     async def get_active_pipeline(self, model_id: str) -> Optional[Any]:
         logger.info(f"DefaultModelManager: Request to get active pipeline for '{model_id}'.")
-        pipeline = await self.load(model_id)
-        if pipeline:
-            if self.current_model == model_id and self.loaded_model is not None:
-                return self.loaded_model
-            else: # Should not happen if load() is correct
-                logger.error(f"Mismatch after load: current_model is {self.current_model}, requested {model_id}")
-                return None 
-        return None
+        base_pipeline = await self.load(model_id)
+        if not base_pipeline:
+            logger.error(f"Failed to load base pipeline for {model_id}")
+            return None
+        
+        # Create a task-specific pipeline instance with fresh scheduler state
+        task_pipeline = self.get_pipeline_for_task(model_id, "worker_task")
+        if not task_pipeline:
+            logger.error(f"Failed to create thread-safe pipeline for {model_id}")
+            return None
+        
+        return task_pipeline
 
     def get_vram_loaded_models(self) -> List[str]:
         # This should return a list of model_ids that are currently in VRAM
         return list(self.loaded_models.keys())
+    
+    def get_pipeline_for_task(self, model_id: str, run_id: str = None) -> Optional[DiffusionPipeline]:
+        """
+        Create a task-specific pipeline instance with fresh scheduler state.
+        This prevents thread safety issues in concurrent executions.
+        
+        This is the KEY FIX for the IndexError: index 29 is out of bounds issue.
+        """
+        try:
+            # Get the base pipeline (shared components)
+            base_pipeline = self.get_base_pipeline(model_id)
+            if not base_pipeline:
+                logger.error(f"No base pipeline found for model {model_id}")
+                return None
+
+            # Create a fresh scheduler for this task to prevent state corruption
+            fresh_scheduler = base_pipeline.scheduler.from_config(
+                base_pipeline.scheduler.config
+            )
+            
+            # Create task-specific pipeline with shared components but fresh scheduler
+            task_pipeline = base_pipeline.__class__.from_pipe(
+                base_pipeline,
+                scheduler=fresh_scheduler
+            )
+            
+            logger.info(f"[ModelManager] Created thread-safe pipeline for task {run_id} model {model_id}")
+            return task_pipeline
+            
+        except Exception as e:
+            logger.error(f"Error creating task-specific pipeline for {model_id}: {e}")
+            return None
+        
+    def get_base_pipeline(self, model_id: str) -> Optional[DiffusionPipeline]:
+        """
+        Get the base pipeline for component sharing.
+        This contains the loaded model components but should NOT be used directly for inference.
+        """
+        # Check base pipelines first
+        if model_id in self.base_pipelines:
+            return self.base_pipelines[model_id]
+        
+        # Check loaded models (for backward compatibility)
+        if model_id in self.loaded_models:
+            return self.loaded_models[model_id]
+            
+        # Check CPU models
+        if model_id in self.cpu_models:
+            return self.cpu_models[model_id]
+            
+        return None
 
 
     # If the scheduler is not set in `pipeline_defs`, then we'll rely on diffusers to pick a default

@@ -21,7 +21,7 @@ DEPLOYMENT_ID    = os.getenv("DEPLOYMENT_ID", "tenant-a-image-gen-app-v1")
 # === Everything else is hard-coded here ===
 TEST_PROMPT      = "cowgirl riding a horse, cinematic lighting"
 TEST_SEED        = 9876
-CONCURRENCY      = 1
+CONCURRENCY      = 10
 REQUIRED_MODEL   = "playground2.5"
 
 # =====================================================
