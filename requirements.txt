@@ -1,0 +1,18 @@
+# --extra-index-url http://137.184.153.104:3141/root/mydev/+simple
+# gen-worker
+grpcio
+msgpack-python
+psutil
+psycopg2-binary
+python-dotenv
+diffusers
+pillow
+msgpack
+protobuf
+boto3
+blake3
+accelerate
+transformers
+botocore
+bitsandbytes
+sentencepiece

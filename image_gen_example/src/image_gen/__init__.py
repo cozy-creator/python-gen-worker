@@ -16,50 +16,9 @@ from diffusers import DiffusionPipeline
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
-pipe = None
 device = "cuda" if torch.cuda.is_available() else "cpu"
-# pipeline_lock = threading.Lock()
 
-# def _initialize_pipeline():
-#     """Loads the SDXL pipeline onto the appropriate device."""
-#     global pipe, device
-#     if pipe is not None:
-#         return
-
-#     logger.info("Initializing Stable Diffusion XL Pipeline (stabilityai/stable-diffusion-xl-base-1.0)...")
-#     try:
-#         # Determine device and dtype
-#         if torch.cuda.is_available():
-#             device = "cuda"
-#             torch_dtype = torch.float16
-#             logger.info("CUDA available, setting device to GPU and dtype to float16.")
-#         else:
-#             device = "cpu"
-#             torch_dtype = torch.float32
-#             logger.warning("CUDA not available, setting device to CPU and dtype to float32. Inference will be slow.")
-
-#         print(f"Device: {device}")
-
-#         pipe = StableDiffusionXLPipeline.from_pretrained(
-#             "John6666/holy-mix-illustriousxl-vibrant-anime-checkpoint-v1-sdxl",
-#             torch_dtype=torch_dtype,
-#             use_safetensors=True,
-#             # variant="fp16" if torch_dtype == torch.float16 else None
-#         ).to(device)
-        
-#         logger.info(f"Pipeline loaded successfully and moved to device '{device}'.")
-
-#     except ImportError as ie:
-#          logger.exception("ImportError during pipeline initialization. Are diffusers/transformers/accelerate installed?")
-#          pipe = None
-#          device = None
-#          raise ie
-#     except Exception as e:
-#         logger.exception("Failed to initialize Stable Diffusion XL Pipeline.")
-#         pipe = None
-#         device = None
-#         raise e
-
+# Combined resources for both image generation and S3 upload
 sdxl_resources = ResourceRequirements(
     model_name="John6666/holy-mix-illustriousxl-vibrant-anime-checkpoint-v1-sdxl",
     min_vram_gb=8.0,
@@ -68,40 +27,42 @@ sdxl_resources = ResourceRequirements(
 )
 
 @worker_function(resources=sdxl_resources)
-def generate_image(ctx: ActionContext, pipeline: DiffusionPipeline = None, prompt_details: dict = None) -> bytes:
+def generate_and_upload_image(ctx: ActionContext, pipeline: DiffusionPipeline = None, request_details: dict = None) -> Dict[str, str]:
     """
-    Generates an image based on a prompt using the pre-loaded SDXL pipeline.
+    Generates an image based on a prompt and uploads it directly to S3.
 
     Args:
         ctx: The ActionContext provided by the worker.
-        prompt_details: A dictionary containing 'prompt' (str) and 'seed' (int).
+        request_details: A dictionary containing:
+            - 'prompt' (str): Text prompt for image generation
+            - 'seed' (int, optional): Random seed for generation
+            - 'filename' (str, optional): Desired filename for S3 upload
+            - Other SDXL parameters (negative_prompt, num_inference_steps, etc.)
 
     Returns:
-        PNG image data as bytes.
+        A dictionary containing 's3_url' and generation metadata.
     """
-
-    # _initialize_pipeline()
-
-    # global pipe, device, pipeline_lock
-
+    
     if pipeline is None:
-        # This check is a safeguard; Worker core should ensure a valid pipeline is passed
-        # if the function is designated as needing one and a required_model_id was processed.
-        logger.error(f"Run {ctx.run_id} for generate_image received a None pipeline object.")
+        logger.error(f"Run {ctx.run_id} for generate_and_upload_image received a None pipeline object.")
         raise ValueError("Pipeline object cannot be None for image generation.")
 
-    prompt = prompt_details.get("prompt", "a beautiful landscape")
-    negative_prompt = prompt_details.get("negative_prompt", "")
-    seed = int(prompt_details.get("seed", 42))
-    num_inference_steps = int(prompt_details.get("num_inference_steps", 28))
-    guidance_scale = float(prompt_details.get("guidance_scale", 7.5))
-    width = int(prompt_details.get("width", 1024))
-    height = int(prompt_details.get("height", 1024))
+    # Extract generation parameters
+    prompt = request_details.get("prompt", "a beautiful landscape")
+    negative_prompt = request_details.get("negative_prompt", "")
+    seed = int(request_details.get("seed", 42))
+    num_inference_steps = int(request_details.get("num_inference_steps", 28))
+    guidance_scale = float(request_details.get("guidance_scale", 7.5))
+    width = int(request_details.get("width", 1024))
+    height = int(request_details.get("height", 1024))
+    filename = request_details.get("filename")
 
-    img_bytes: Optional[bytes] = None
+    logger.info(f"[run_id={ctx.run_id}] Starting combined generate+upload for prompt: '{prompt}', seed: {seed}")
+
     try:
-        logger.info(f"[run_id={ctx.run_id}] Generating image for prompt: '{prompt}', seed: {seed} on device {device}")
-
+        # Step 1: Generate Image
+        logger.info(f"[run_id={ctx.run_id}] Generating image on device {device}")
+        
         # Check for cancellation before starting inference
         if ctx.is_canceled():
             logger.warning(f"[run_id={ctx.run_id}] Cancellation detected before starting generation.")
@@ -112,8 +73,12 @@ def generate_image(ctx: ActionContext, pipeline: DiffusionPipeline = None, promp
         with torch.inference_mode():
             image_result = pipeline(
                 prompt=prompt,
+                negative_prompt=negative_prompt,
                 generator=generator,
-                num_inference_steps=28
+                num_inference_steps=num_inference_steps,
+                guidance_scale=guidance_scale,
+                width=width,
+                height=height
             ).images[0]
 
         if ctx.is_canceled():
@@ -126,19 +91,86 @@ def generate_image(ctx: ActionContext, pipeline: DiffusionPipeline = None, promp
         img_bytes = buffer.getvalue()
         logger.info(f"[run_id={ctx.run_id}] Image generation complete ({len(img_bytes)} bytes).")
 
+        if ctx.is_canceled():
+            logger.warning(f"[run_id={ctx.run_id}] Cancellation detected before upload.")
+            raise InterruptedError("Upload cancelled before starting")
+
+        # Step 2: Upload to S3
+        logger.info(f"[run_id={ctx.run_id}] Uploading generated image to S3")
+        
+        s3_url = _upload_image_to_s3(ctx, img_bytes, filename)
+        
+        logger.info(f"[run_id={ctx.run_id}] Complete workflow finished successfully")
+        
+        return {
+            "s3_url": s3_url,
+            "prompt": prompt,
+            "seed": seed,
+            "width": width,
+            "height": height,
+            "image_size_bytes": len(img_bytes)
+        }
+
+    except InterruptedError:
+        logger.warning(f"[run_id={ctx.run_id}] Workflow was cancelled")
+        raise
     except Exception as e:
-        logger.exception(f"[run_id={ctx.run_id}] Error during SDXL inference or image saving.")
+        logger.exception(f"[run_id={ctx.run_id}] Error during generate+upload workflow")
         raise
 
-    if img_bytes is None:
-         raise RuntimeError("Image generation failed, resulting bytes are None.")
 
-    return img_bytes
+def _upload_image_to_s3(ctx: ActionContext, image_bytes: bytes, filename: Optional[str] = None) -> str:
+    """
+    Internal helper function to upload image bytes to S3.
+    
+    Args:
+        ctx: The ActionContext
+        image_bytes: The raw image data
+        filename: Optional filename for the S3 object
+        
+    Returns:
+        The S3 URL of the uploaded image
+    """
+    if not image_bytes or not isinstance(image_bytes, bytes):
+        raise ValueError("Missing or invalid image_bytes for S3 upload")
+    
+    # Get S3 configuration from environment
+    bucket_name = os.environ.get("S3_BUCKET_NAME")
+    region = os.environ.get("S3_REGION")
+    endpoint_url = os.environ.get("S3_ENDPOINT_URL")
+
+    if not bucket_name:
+        raise ValueError("S3_BUCKET_NAME environment variable is not set for this worker.")
+    
+    s3_client = _get_s3_client()
+    if not s3_client:
+        raise RuntimeError("Failed to initialize S3 client. Check worker logs and environment variables.")
+    
+    s3_key = _generate_s3_key(image_bytes, filename)
+    content_type = "image/png"
+
+    logger.info(f"[run_id={ctx.run_id}] Uploading {len(image_bytes)} bytes to s3://{bucket_name}/{s3_key}")
+
+    try:
+        s3_client.put_object(
+            Bucket=bucket_name,
+            Key=s3_key,
+            Body=image_bytes,
+            ContentType=content_type,
+            ACL='public-read'
+        )
+
+        file_url = f"https://{bucket_name}.{region}.digitaloceanspaces.com/{s3_key}"
+        logger.info(f"[run_id={ctx.run_id}] Upload successful. URL: {file_url}")
+        return file_url
+    
+    except Exception as e:
+        logger.exception(f"[run_id={ctx.run_id}] Error during S3 upload")
+        raise
 
 
 def _get_s3_client() -> Optional[boto3.client]:
     """Initializes and returns an S3 client using environment variables."""
-
     access_key = os.environ.get("S3_ACCESS_KEY_ID")
     secret_key = os.environ.get("S3_SECRET_ACCESS_KEY")
     bucket_name = os.environ.get("S3_BUCKET_NAME")
@@ -173,70 +205,61 @@ def _generate_s3_key(image_bytes: bytes, filename: Optional[str] = None) -> str:
     else:
         hash_hex = blake3.blake3(image_bytes).hexdigest()
         return f"uploads/{hash_hex}"
+
+
+# @worker_function(resources=sdxl_resources)
+# def generate_image(ctx: ActionContext, pipeline: DiffusionPipeline = None, prompt_details: dict = None) -> bytes:
+#     """
+#     Legacy function: Generates an image and returns raw bytes.
+#     Consider using generate_and_upload_image for complete workflows.
+#     """
+#     if pipeline is None:
+#         logger.error(f"Run {ctx.run_id} for generate_image received a None pipeline object.")
+#         raise ValueError("Pipeline object cannot be None for image generation.")
+
+#     prompt = prompt_details.get("prompt", "a beautiful landscape")
+#     seed = int(prompt_details.get("seed", 42))
+
+#     logger.info(f"[run_id={ctx.run_id}] Generating image for prompt: '{prompt}', seed: {seed}")
+
+#     if ctx.is_canceled():
+#         raise InterruptedError("Image generation cancelled")
+
+#     generator = torch.Generator(device=device).manual_seed(seed)
+
+#     with torch.inference_mode():
+#         image_result = pipeline(
+#             prompt=prompt,
+#             generator=generator,
+#             num_inference_steps=28
+#         ).images[0]
+
+#     buffer = BytesIO()
+#     image_result.save(buffer, format="PNG")
+#     img_bytes = buffer.getvalue()
     
+#     logger.info(f"[run_id={ctx.run_id}] Image generation complete ({len(img_bytes)} bytes).")
+#     return img_bytes
 
-s3_upload_resources = ResourceRequirements()
 
-@worker_function(resources=s3_upload_resources)
-def upload_image_to_s3(ctx: ActionContext, upload_details: dict) -> Dict[str, str]:
-    """
-    Uploads provided image bytes to an S3 bucket configured via environment variables.
+# s3_upload_resources = ResourceRequirements()
 
-    Args:
-        ctx: The ActionContext.
-        upload_details: A dictionary containing:
-            - 'image_bytes': The raw image data (bytes).
-            - 'filename': (Optional) Desired filename base for the S3 object.
+# @worker_function(resources=s3_upload_resources)
+# def upload_image_to_s3(ctx: ActionContext, upload_details: dict) -> Dict[str, str]:
+#     """
+#     Legacy function: Uploads image bytes to S3.
+#     Consider using generate_and_upload_image for complete workflows.
+#     """
+#     logger.info(f"[run_id={ctx.run_id}] Received S3 upload request.")
 
-    Returns:
-        A dictionary containing 's3_url' on success.
-    """
-    logger.info(f"[run_id={ctx.run_id}] Received S3 upload request.")
+#     image_bytes = upload_details.get("image_bytes")
+#     filename = upload_details.get("filename")
 
-    image_bytes = upload_details.get("image_bytes")
-    filename = upload_details.get("filename")
-
-    if not image_bytes or not isinstance(image_bytes, bytes):
-        raise ValueError("Missing or invalid 'image_bytes' in upload_details")
+#     if not image_bytes or not isinstance(image_bytes, bytes):
+#         raise ValueError("Missing or invalid 'image_bytes' in upload_details")
     
-    if ctx.is_canceled():
-        raise InterruptedError("Upload cancelled before starting")
+#     if ctx.is_canceled():
+#         raise InterruptedError("Upload cancelled")
     
-    bucket_name = os.environ.get("S3_BUCKET_NAME")
-    region = os.environ.get("S3_REGION")
-    endpoint_url = os.environ.get("S3_ENDPOINT_URL")
-
-    if not bucket_name:
-        raise ValueError("S3_BUCKET_NAME environment variable is not set for this worker.")
-    
-    s3_client = _get_s3_client()
-    if not s3_client:
-        raise RuntimeError("Failed to initialize S3 client. Check worker logs and environment variables.")
-    
-    s3_key = _generate_s3_key(image_bytes, filename)
-    content_type = "image/png"
-
-    logger.info(f"[run_id={ctx.run_id}] Uploading {len(image_bytes)} bytes to s3://{bucket_name}/{s3_key}")
-
-    try:
-        s3_client.put_object(
-            Bucket=bucket_name,
-            Key=s3_key,
-            Body=image_bytes,
-            ContentType=content_type,
-            ACL='public-read'
-        )
-
-        file_url = f"https://{bucket_name}.{region}.digitaloceanspaces.com/{s3_key}"
-
-        logger.info(f"[run_id={ctx.run_id}] Upload successful. URL: {file_url}")
-        return {"s3_url": file_url}
-    
-    except Exception as e:
-        logger.exception(f"[run_id={ctx.run_id}] Error during S3 upload.")
-        raise
-
-
-        
-    
-
+#     s3_url = _upload_image_to_s3(ctx, image_bytes, filename)
+#     return {"s3_url": s3_url}

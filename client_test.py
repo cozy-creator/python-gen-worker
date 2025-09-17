@@ -1,5 +1,3 @@
-# client_test.py (Concurrent Workflow Example)
-
 import os
 import sys
 import time
@@ -101,55 +99,62 @@ def run_workflow(task_id: int,
                  base_prompt: str,
                  base_seed: int,
                  model_id_for_generation: Optional[str] = None):
-    """One end-to-end workflow: generate then upload."""
+    """One end-to-end workflow: generate and upload in single function call."""
     print(f"\n--- Task {task_id} started ---")
     prompt = f"{base_prompt} [task {task_id}]"
     seed = base_seed + task_id
+    filename = f"task_{task_id}_{seed}.png"
 
-    # Step 1: generate image
-    print(f"[Task {task_id}] Generating image with seed={seed}")
-    img_bytes = execute_and_await(
+    # Single combined call: generate + upload
+    print(f"[Task {task_id}] Generating and uploading image with seed={seed}")
+    result = execute_and_await(
         stub, 
         deployment_id, 
-        "generate_image",
-        {"prompt": prompt, "seed": seed},
+        "generate_and_upload_image",  # New combined function
+        {
+            "prompt": prompt, 
+            "seed": seed,
+            "filename": filename,
+            # Optional: Add other generation parameters
+            "num_inference_steps": 28,
+            "guidance_scale": 7.5,
+            "width": 1024,
+            "height": 1024
+        },
         required_model_id=model_id_for_generation,
-        wait_timeout=600
+        wait_timeout=600  # Allow more time for both generation + upload
     )
-    if not isinstance(img_bytes, (bytes, bytearray)):
-        print(f"[Task {task_id}] generate_image failed.", file=sys.stderr)
+    
+    if not isinstance(result, dict):
+        print(f"[Task {task_id}] generate_and_upload_image failed.", file=sys.stderr)
         return
 
-    local_file = f"output_task_{task_id}.png"
-    # print(f"[Task {task_id}] Saving image to {local_file}")
-    try:
-        with open(local_file, "wb") as f:
-            f.write(img_bytes)
-    except IOError as e:
-        print(f"[Task {task_id}] Error saving image: {e}", file=sys.stderr)
+    # Extract results from combined response
+    s3_url = result.get("s3_url")
+    if not s3_url:
+        print(f"[Task {task_id}] No S3 URL in response.", file=sys.stderr)
+        return
 
-    # Step 2: upload to S3
-    print(f"[Task {task_id}] Uploading to S3")
-    upload_resp = execute_and_await(
-        stub, deployment_id, "upload_image_to_s3",
-        {"image_bytes": img_bytes, "filename": f"task_{task_id}_{seed}.png"},
-        required_model_id=None,
-        wait_timeout=60
-    )
-    if isinstance(upload_resp, dict) and upload_resp.get("s3_url"):
-        print(f"[Task {task_id}] Uploaded: {upload_resp['s3_url']}")
-    else:
-        print(f"[Task {task_id}] upload_image_to_s3 failed.", file=sys.stderr)
+    print(f"[Task {task_id}] ✅ Complete! S3 URL: {s3_url}")
+    
+    # Print additional metadata if available
+    if "image_size_bytes" in result:
+        size_kb = result["image_size_bytes"] / 1024
+        print(f"[Task {task_id}] Generated image: {size_kb:.1f} KB")
+    
+    if "width" in result and "height" in result:
+        print(f"[Task {task_id}] Dimensions: {result['width']}x{result['height']}")
 
 if __name__ == "__main__":
     # Print startup info
-    print("--- Running Client Workflow Test ---")
+    print("--- Running Client Workflow Test (Combined Function) ---")
     print(f"Scheduler Address: {SCHEDULER_ADDR}")
     print(f"Deployment ID:     {DEPLOYMENT_ID}")
     print(f"Test Prompt:       {TEST_PROMPT!r}")
     print(f"Test Seed:         {TEST_SEED}")
     print(f"Required Model:    {REQUIRED_MODEL}")
     print(f"Concurrency:       {CONCURRENCY}")
+    print("Using combined generate_and_upload_image function")
     print("------------------------------------")
 
     # Connect and fire off concurrent tasks
