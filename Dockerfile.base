@@ -35,6 +35,7 @@ RUN pip3 install uv
 RUN uv pip install \
     --system \
     --index-url http://137.184.153.104:3141/root/mydev/+simple \
+    --extra-index-url https://download.pytorch.org/whl/cu128 \
     gen-worker \
     grpcio \
     msgpack-python \
