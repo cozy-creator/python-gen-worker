@@ -1,5 +1,5 @@
 # Start from the specific pre-built base worker image
-FROM cozycreator/base-worker:cuda126-py312-base-v1
+FROM cozycreator/base-worker:cuda128-py312-base-v1
 
 # Set the working directory
 WORKDIR /app
