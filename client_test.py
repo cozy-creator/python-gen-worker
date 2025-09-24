@@ -110,7 +110,7 @@ def run_workflow(task_id: int,
     result = execute_and_await(
         stub, 
         deployment_id, 
-        "generate_and_upload_image",  # New combined function
+        "generate_and_upload_image",
         {
             "prompt": prompt, 
             "seed": seed,

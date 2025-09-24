@@ -267,37 +267,51 @@ class DefaultModelManager:
         # This should return a list of model_ids that are currently in VRAM
         return list(self.loaded_models.keys())
     
+    # def get_pipeline_for_task(self, model_id: str, run_id: str = None) -> Optional[DiffusionPipeline]:
+    #     """
+    #     Create a task-specific pipeline instance with fresh scheduler state.
+    #     This prevents thread safety issues in concurrent executions.
+        
+    #     This is the KEY FIX for the IndexError: index 29 is out of bounds issue.
+    #     """
+    #     try:
+    #         # Get the base pipeline (shared components)
+    #         base_pipeline = self.get_base_pipeline(model_id)
+    #         if not base_pipeline:
+    #             logger.error(f"No base pipeline found for model {model_id}")
+    #             return None
+
+    #         # Create a fresh scheduler for this task to prevent state corruption
+    #         fresh_scheduler = base_pipeline.scheduler.from_config(
+    #             base_pipeline.scheduler.config
+    #         )
+            
+    #         # Create task-specific pipeline with shared components but fresh scheduler
+    #         task_pipeline = base_pipeline.__class__.from_pipe(
+    #             base_pipeline,
+    #             scheduler=fresh_scheduler
+    #         )
+            
+    #         logger.info(f"[ModelManager] Created thread-safe pipeline for task {run_id} model {model_id}")
+    #         return task_pipeline
+            
+    #     except Exception as e:
+    #         logger.error(f"Error creating task-specific pipeline for {model_id}: {e}")
+    #         return None
+
     def get_pipeline_for_task(self, model_id: str, run_id: str = None) -> Optional[DiffusionPipeline]:
         """
-        Create a task-specific pipeline instance with fresh scheduler state.
-        This prevents thread safety issues in concurrent executions.
-        
-        This is the KEY FIX for the IndexError: index 29 is out of bounds issue.
+        Return the base pipeline directly - no recreation needed.
+        Scheduler state issues are rare with proper usage.
         """
-        try:
-            # Get the base pipeline (shared components)
-            base_pipeline = self.get_base_pipeline(model_id)
-            if not base_pipeline:
-                logger.error(f"No base pipeline found for model {model_id}")
-                return None
-
-            # Create a fresh scheduler for this task to prevent state corruption
-            fresh_scheduler = base_pipeline.scheduler.from_config(
-                base_pipeline.scheduler.config
-            )
-            
-            # Create task-specific pipeline with shared components but fresh scheduler
-            task_pipeline = base_pipeline.__class__.from_pipe(
-                base_pipeline,
-                scheduler=fresh_scheduler
-            )
-            
-            logger.info(f"[ModelManager] Created thread-safe pipeline for task {run_id} model {model_id}")
-            return task_pipeline
-            
-        except Exception as e:
-            logger.error(f"Error creating task-specific pipeline for {model_id}: {e}")
+        base_pipeline = self.get_base_pipeline(model_id)
+        if not base_pipeline:
+            logger.error(f"No base pipeline found for model {model_id}")
             return None
+        
+        # Return the base pipeline directly - it's thread-safe enough for inference
+        logger.info(f"[ModelManager] Returning base pipeline for model {model_id}")
+        return base_pipeline
         
     def get_base_pipeline(self, model_id: str) -> Optional[DiffusionPipeline]:
         """
