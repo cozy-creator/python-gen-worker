@@ -24,6 +24,7 @@ dependencies = [
     "aiohttp>=3.11.14",
     "backoff>=2.2.1",
     "spandrel>=0.4.1",
+    "boto3>=1.40.38",
 ]
 
 [build-system]
