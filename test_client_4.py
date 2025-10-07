@@ -1,57 +1,49 @@
-# minimal_client.py
 import grpc
+import msgpack
+import time
+from gen_worker.pb import frontend_pb2_grpc, frontend_pb2
+
 import os
-import sys
-try:
-    from gen_worker.pb import frontend_pb2
-    from gen_worker.pb import frontend_pb2_grpc
-except ImportError:
-    print("Import Error. Ensure PYTHONPATH is correct and protos are compiled.", file=sys.stderr)
-    sys.exit(1)
+from dotenv import load_dotenv
 
-SCHEDULER_ADDR = os.getenv("SCHEDULER_ADDR", "localhost:8080")
-DEPLOYMENT_ID = "tenant-a-image-gen-app-v1"
-FUNCTION_NAME = "generate_image"
-# REQUIRED_MODEL = "ebara-pony-xl" # Test with this set
-REQUIRED_MODEL = "auraflow" # Test with this None/empty to compare
+load_dotenv()
 
-print(f"--- Minimal Client Test ---")
-print(f"Targeting: {SCHEDULER_ADDR}")
-print(f"Model ID to send: {REQUIRED_MODEL}")
+addr = os.getenv("SCHEDULER_ADDR", "localhost:8080")
+# Connect to the orchestrator
+channel = grpc.insecure_channel(addr)
+stub = frontend_pb2_grpc.FrontendServiceStub(channel)
 
-try:
-    with grpc.insecure_channel(SCHEDULER_ADDR) as channel:
-        print("Attempting channel ready check...")
-        grpc.channel_ready_future(channel).result(timeout=5)
-        print("Channel is ready.")
-        stub = frontend_pb2_grpc.FrontendServiceStub(channel)
+# Prepare your request
+request_params = {
+    "prompt": "a majestic dragon flying over mountains at sunset",
+    "seed": 12345,
+    "num_inference_steps": 30,
+    "guidance_scale": 8.0,
+    "width": 1024,
+    "height": 1024,
+    "filename": "dragon_sunset.png"
+}
 
-        # Dummy payload, msgpack not important for this connectivity test
-        dummy_payload = b'\x81\xa3str\xa5hello' # msgpack for {"str": "hello"}
+# Submit the job
+request = frontend_pb2.ExecuteActionRequest(
+    function_name="generate_and_upload_image",
+    deployment_id="tenant-a-image-gen-app-v1",
+    required_model_id="ebara-pony-xl",
+    input_payload=msgpack.packb(request_params)
+)
 
-        request = frontend_pb2.ExecuteActionRequest(
-            deployment_id=DEPLOYMENT_ID,
-            function_name=FUNCTION_NAME,
-            input_payload=dummy_payload
-        )
+response = stub.ExecuteAction(request)
+run_id = response.run_id
+print(f"Job submitted with ID: {run_id}")
 
-        if REQUIRED_MODEL: # Only set it if it's not None/empty
-            print(f"Setting request.required_model_id to: '{REQUIRED_MODEL}'")
-            request.required_model_id = REQUIRED_MODEL
-        else:
-            print("Not setting request.required_model_id (it's None/empty).")
-         
-        print(f"Sending request: {request}")
+# Wait for completion
+get_request = frontend_pb2.GetRunRequest(run_id=run_id)
+result = stub.GetRun(get_request, timeout=300)  # 5 minute timeout
 
-        try:
-            response = stub.ExecuteAction(request, timeout=10) # 10 sec timeout for the RPC
-            print(f"SUCCESS: ExecuteAction response: {response.run_id}")
-        except grpc.RpcError as e:
-            print(f"GRPC ERROR during ExecuteAction: {e.code()} - {e.details()}", file=sys.stderr)
-        except Exception as e_exec:
-            print(f"GENERAL ERROR during ExecuteAction: {e_exec}", file=sys.stderr)
-
-except grpc.FutureTimeoutError:
-    print(f"TIMEOUT: Channel to {SCHEDULER_ADDR} not ready.", file=sys.stderr)
-except Exception as e:
-    print(f"Overall script error: {e}", file=sys.stderr)
+if result.success:
+    output = msgpack.unpackb(result.output_payload)
+    print(f"Image generated successfully!")
+    print(f"URL: {output['s3_url']}")
+    print(f"Size: {output['image_size_bytes']} bytes")
+else:
+    print(f"Generation failed: {result.error_message}")

@@ -5,6 +5,7 @@ import grpc
 import msgpack
 import concurrent.futures
 from typing import Optional
+from dotenv import load_dotenv
 
 try:
     from gen_worker.pb import frontend_pb2
@@ -13,13 +14,15 @@ except ImportError:
     print("Error: Could not import protobuf definitions.", file=sys.stderr)
     sys.exit(1)
 
+load_dotenv()
+
 # === Configuration (only these two come from ENV) ===
 SCHEDULER_ADDR   = os.getenv("SCHEDULER_ADDR", "localhost:8080")
 DEPLOYMENT_ID    = os.getenv("DEPLOYMENT_ID", "tenant-a-image-gen-app-v1")
 # === Everything else is hard-coded here ===
 TEST_PROMPT      = "cowgirl riding a horse, cinematic lighting"
 TEST_SEED        = 9876
-CONCURRENCY      = 1
+CONCURRENCY      = 11
 REQUIRED_MODEL   = "ebara-pony-xl"
 
 # =====================================================
