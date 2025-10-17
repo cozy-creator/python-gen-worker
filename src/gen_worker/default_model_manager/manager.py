@@ -351,9 +351,25 @@ class DefaultModelManager:
         scheduler_kwargs = scheduler_config.get("kwargs", {})
 
         try:
+            INVALID_SCHEDULER_CONFIG_KEYS = {
+            'do_classifier_free_guidance',
+            'guidance_scale',
+            }
+
+            # Only pass kwargs that are valid for scheduler initialization
+            filtered_kwargs = {
+                k: v for k, v in scheduler_kwargs.items() 
+                if k.lower() not in {key.lower() for key in INVALID_SCHEDULER_CONFIG_KEYS}
+            }
+            
+            if len(scheduler_kwargs) != len(filtered_kwargs):
+                removed = set(scheduler_kwargs.keys()) - set(filtered_kwargs.keys())
+                logger.warning(f"Removed invalid scheduler config keys for {model_id}: {removed}")  
+
             new_scheduler = getattr(diffusers, scheduler_class).from_config(
-                pipeline.scheduler.config, **scheduler_kwargs
-            )
+                pipeline.scheduler.config, **filtered_kwargs
+                )
+                
             pipeline.scheduler = new_scheduler
 
             print(f"Successfully set scheduler to {scheduler_class}")

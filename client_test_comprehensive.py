@@ -21,12 +21,12 @@ load_dotenv()
 SCHEDULER_ADDR = os.getenv("SCHEDULER_ADDR", "localhost:8080")
 DEPLOYMENT_ID = os.getenv("DEPLOYMENT_ID", "tenant-a-image-gen-app-v1")
 
-# Your actual model list
+
 AVAILABLE_MODELS = [
-    "ebara-pony-xl",
-    "real.dream.pony",
+    # "ebara-pony-xl",
+    # "wai-ani-nsfw-ponyxl",
     "playground2.5",
-    "pony.realism",
+    # "pony.realism",
     "illustrious.xl",
 ]
 
@@ -306,11 +306,11 @@ def test_mixed_models_burst(stub, deployment_id):
     print("TEST 6: MIXED MODEL BURST (12 jobs, 3 different models)")
     print("="*60)
     
-    # Use 3 specific models, 4 jobs each
+    # Use 2 specific models, 4 jobs each
     model_distribution = [
         ("ebara-pony-xl", 4),
-        ("flux.1-dev", 4),
-        ("sdxl.base", 4),
+        # ("flux.1-dev", 4),
+        ("wai-ani-nsfw-ponyxl", 4),
     ]
     
     all_futures = []
