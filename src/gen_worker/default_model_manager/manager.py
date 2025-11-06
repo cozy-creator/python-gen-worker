@@ -39,6 +39,7 @@ from .utils.globals import (
 from .utils.model_downloader import ModelSource
 from .utils.load_models import load_state_dict_from_file
 from .utils.base_types.config import PipelineConfig
+from .utils import diffusers_fix
 
 from ..model_interface import ModelManagementInterface, DownloaderType
 
@@ -265,7 +266,7 @@ class DefaultModelManager:
 
     def get_vram_loaded_models(self) -> List[str]:
         # This should return a list of model_ids that are currently in VRAM
-        return list(self.loaded_models.keys())
+        return list[str](self.loaded_models.keys())
     
     # def get_pipeline_for_task(self, model_id: str, run_id: str = None) -> Optional[DiffusionPipeline]:
     #     """
