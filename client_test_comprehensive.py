@@ -26,7 +26,7 @@ AVAILABLE_MODELS = [
     # "ebara-pony-xl",
     # "wai-ani-nsfw-ponyxl",
     "playground2.5",
-    # "pony.realism",
+    "pony.realism",
     "illustrious.xl",
 ]
 
