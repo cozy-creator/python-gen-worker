@@ -706,7 +706,8 @@ class DefaultModelManager:
         prefix, path = source.split(":", 1)
 
         try:
-            # === FLASHPACK: Try loading from FlashPack first ===
+            # === LOCAL CACHE + FLASHPACK ===
+            # Try FlashPack first
             flashpack_path = self.flashpack_loader.get_flashpack_path(model_id, source)
             if flashpack_path:
                 (pipeline_class, _) = get_pipeline_class(class_name)
@@ -715,7 +716,22 @@ class DefaultModelManager:
                 )
                 if pipeline:
                     return pipeline
-                logger.warning(f"FlashPack loading failed for {model_id}, falling back to standard loading")
+                logger.warning(f"FlashPack loading failed for {model_id}, falling back")
+            
+            # No FlashPack - copy safetensors to local cache anyway
+            if self.flashpack_loader.local_cache:
+                local_path = await self.flashpack_loader.local_cache.ensure_local(
+                    model_id, source, priority=True
+                )
+                if local_path:
+                    logger.info(f"📂 Loading from local cache: {local_path}")
+                    if local_path.suffix == ".safetensors" or local_path.is_file():
+                        path = str(local_path)
+                        prefix = "file"
+                    else:
+                        # It's a directory (HF model)
+                        path = str(local_path)
+                        prefix = "hf"
             
             # === STANDARD LOADING: Fallback to standard loading if FlashPack fails ===
             if prefix == "hf":
