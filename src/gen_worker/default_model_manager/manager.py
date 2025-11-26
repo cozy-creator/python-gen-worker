@@ -43,6 +43,8 @@ from .utils import diffusers_fix
 
 from ..model_interface import ModelManagementInterface, DownloaderType
 
+from .utils.flashpack_loader import FlashPackLoader
+
 # Configure logging
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -212,6 +214,7 @@ class DefaultModelManager:
         self.model_downloader = get_model_downloader()
         self.cache_dir = HF_HUB_CACHE
         self.lru_cache = LRUCache()
+        self.flashpack_loader = FlashPackLoader()
 
         self.allowed_model_ids: Optional[Set[str]] = None
         self.supports_all_known_models: bool = False # Default to explicit list
@@ -703,6 +706,18 @@ class DefaultModelManager:
         prefix, path = source.split(":", 1)
 
         try:
+            # === FLASHPACK: Try loading from FlashPack first ===
+            flashpack_path = self.flashpack_loader.get_flashpack_path(model_id, source)
+            if flashpack_path:
+                (pipeline_class, _) = get_pipeline_class(class_name)
+                pipeline = await self.flashpack_loader.load_from_flashpack(
+                    model_id, flashpack_path, pipeline_class
+                )
+                if pipeline:
+                    return pipeline
+                logger.warning(f"FlashPack loading failed for {model_id}, falling back to standard loading")
+            
+            # === STANDARD LOADING: Fallback to standard loading if FlashPack fails ===
             if prefix == "hf":
                 is_downloaded, variant = await self.model_downloader.is_downloaded(
                     model_id,
