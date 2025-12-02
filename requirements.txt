@@ -16,3 +16,4 @@ transformers
 botocore
 bitsandbytes
 sentencepiece
+flashpack
