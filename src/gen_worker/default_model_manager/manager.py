@@ -626,6 +626,22 @@ class DefaultModelManager:
                     self.model_sizes[model_id] = estimated_size
                     self.vram_usage += estimated_size
                     self.lru_cache.access(model_id, "gpu")
+                    # Background prefetch other deployment models
+                    if hasattr(self, 'flashpack_loader') and self.flashpack_loader.local_cache:
+                        if self.allowed_model_ids and len(self.allowed_model_ids) > 1:
+                            sources = {}
+                            for mid in self.allowed_model_ids:
+                                if mid != model_id:
+                                    model_cfg = config.pipeline_defs.get(mid)
+                                    if model_cfg:
+                                        sources[mid] = model_cfg.get("source") if isinstance(model_cfg, dict) else model_cfg.source
+                            if sources:
+                                logger.info(f"🔄 Starting background prefetch for {len(sources)} other models")
+                                asyncio.create_task(
+                                    self.flashpack_loader.prefetch_deployment_models(
+                                        list(self.allowed_model_ids), sources, exclude_model_id=model_id
+                                    )
+                                )
                     return pipeline
                 else:
                     logger.error(f"Failed to move {model_id} to GPU")
@@ -646,6 +662,22 @@ class DefaultModelManager:
                         self.model_sizes[model_id] = estimated_size
                         self.vram_usage += estimated_size
                         self.lru_cache.access(model_id, "gpu")
+                        # Background prefetch other deployment models
+                        if hasattr(self, 'flashpack_loader') and self.flashpack_loader.local_cache:
+                            if self.allowed_model_ids and len(self.allowed_model_ids) > 1:
+                                sources = {}
+                                for mid in self.allowed_model_ids:
+                                    if mid != model_id:
+                                        model_cfg = config.pipeline_defs.get(mid)
+                                        if model_cfg:
+                                            sources[mid] = model_cfg.get("source") if isinstance(model_cfg, dict) else model_cfg.source
+                                if sources:
+                                    logger.info(f"🔄 Starting background prefetch for {len(sources)} other models")
+                                    asyncio.create_task(
+                                        self.flashpack_loader.prefetch_deployment_models(
+                                            list(self.allowed_model_ids), sources, exclude_model_id=model_id
+                                        )
+                                    )
                         return pipeline
                     else:
                         logger.error(f"Failed to move {model_id} to GPU")
@@ -672,6 +704,22 @@ class DefaultModelManager:
                     self.cpu_models[model_id] = pipeline
                     self.model_sizes[model_id] = estimated_size
                     self.lru_cache.access(model_id, "cpu")
+                    # Background prefetch other deployment models
+                    if hasattr(self, 'flashpack_loader') and self.flashpack_loader.local_cache:
+                        if self.allowed_model_ids and len(self.allowed_model_ids) > 1:
+                            sources = {}
+                            for mid in self.allowed_model_ids:
+                                if mid != model_id:
+                                    model_cfg = config.pipeline_defs.get(mid)
+                                    if model_cfg:
+                                        sources[mid] = model_cfg.get("source") if isinstance(model_cfg, dict) else model_cfg.source
+                            if sources:
+                                logger.info(f"🔄 Starting background prefetch for {len(sources)} other models")
+                                asyncio.create_task(
+                                    self.flashpack_loader.prefetch_deployment_models(
+                                        list(self.allowed_model_ids), sources, exclude_model_id=model_id
+                                    )
+                                )
                     return pipeline
             
             logger.error(f"Insufficient memory to load model {model_id}")

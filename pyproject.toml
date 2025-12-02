@@ -25,7 +25,7 @@ dependencies = [
     "backoff>=2.2.1",
     "spandrel>=0.4.1",
     "boto3>=1.40.38",
-    "flashpack"
+    "flashpack>=0.1.2"
 ]
 
 [build-system]
