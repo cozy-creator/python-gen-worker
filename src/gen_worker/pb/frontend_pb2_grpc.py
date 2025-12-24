@@ -3,9 +3,9 @@
 import grpc
 import warnings
 
-from . import frontend_pb2 as frontend__pb2
+import frontend_pb2 as frontend__pb2
 
-GRPC_GENERATED_VERSION = '1.73.0'
+GRPC_GENERATED_VERSION = '1.71.0'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -45,6 +45,11 @@ class FrontendServiceStub(object):
                 request_serializer=frontend__pb2.GetRunRequest.SerializeToString,
                 response_deserializer=frontend__pb2.GetRunResponse.FromString,
                 _registered_method=True)
+        self.CancelRun = channel.unary_unary(
+                '/frontend.FrontendService/CancelRun',
+                request_serializer=frontend__pb2.CancelRunRequest.SerializeToString,
+                response_deserializer=frontend__pb2.CancelRunResponse.FromString,
+                _registered_method=True)
 
 
 class FrontendServiceServicer(object):
@@ -65,6 +70,13 @@ class FrontendServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def CancelRun(self, request, context):
+        """3) Cancel an in-flight action/job.
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_FrontendServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -77,6 +89,11 @@ def add_FrontendServiceServicer_to_server(servicer, server):
                     servicer.GetRun,
                     request_deserializer=frontend__pb2.GetRunRequest.FromString,
                     response_serializer=frontend__pb2.GetRunResponse.SerializeToString,
+            ),
+            'CancelRun': grpc.unary_unary_rpc_method_handler(
+                    servicer.CancelRun,
+                    request_deserializer=frontend__pb2.CancelRunRequest.FromString,
+                    response_serializer=frontend__pb2.CancelRunResponse.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -134,6 +151,33 @@ class FrontendService(object):
             '/frontend.FrontendService/GetRun',
             frontend__pb2.GetRunRequest.SerializeToString,
             frontend__pb2.GetRunResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def CancelRun(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/frontend.FrontendService/CancelRun',
+            frontend__pb2.CancelRunRequest.SerializeToString,
+            frontend__pb2.CancelRunResponse.FromString,
             options,
             channel_credentials,
             insecure,

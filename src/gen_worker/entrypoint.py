@@ -2,6 +2,7 @@ import logging
 import os
 import sys
 import  asyncio
+from typing import cast
 
 # Ensure the package source is potentially discoverable if running locally
 # In a proper install, this might not be strictly necessary
@@ -11,6 +12,7 @@ import  asyncio
 
 try:
     from .worker import Worker
+    from .model_interface import ModelManagementInterface
 except ImportError as e:
     print(f"Error importing Worker: {e}", file=sys.stderr)
     print("Please ensure the gen_worker package is installed or accessible in PYTHONPATH.", file=sys.stderr)
@@ -23,7 +25,7 @@ dmm_load_config_func = None
 dmm_set_config_func = None
 
 try:
-    from .default_model_manager import (
+    from .torch_manager import (
         DefaultModelManager, # The class itself
         load_config,         # The config loading utility
         set_config           # The config setting utility
@@ -50,6 +52,8 @@ else:
 # --- Configuration ---
 # Read from environment variables or set defaults
 SCHEDULER_ADDR = os.getenv('SCHEDULER_ADDR', 'localhost:8080')
+SCHEDULER_ADDRS = os.getenv('SCHEDULER_ADDRS', '')
+SEED_ADDRS = [addr.strip() for addr in SCHEDULER_ADDRS.split(',') if addr.strip()]
 
 # Default user module name, can be overridden by environment variable
 default_user_modules = 'functions' # A sensible default
@@ -57,7 +61,7 @@ user_modules_str = os.getenv('USER_MODULES', default_user_modules)
 USER_MODULES = [mod.strip() for mod in user_modules_str.split(',') if mod.strip()]
 
 WORKER_ID = os.getenv('WORKER_ID', "worker-1") # Optional, will be generated if None
-AUTH_TOKEN = os.getenv('AUTH_TOKEN') # Optional
+AUTH_TOKEN = os.getenv('AUTH_TOKEN') or os.getenv('WORKER_JWT') # Optional
 USE_TLS = os.getenv('USE_TLS', 'false').lower() in ('true', '1', 't')
 RECONNECT_DELAY = int(os.getenv('RECONNECT_DELAY', '5'))
 MAX_RECONNECT_ATTEMPTS = int(os.getenv('MAX_RECONNECT_ATTEMPTS', '0'))
@@ -71,6 +75,8 @@ if __name__ == '__main__':
 
     logger.info(f'Starting worker...')
     logger.info(f'  Scheduler Address: {SCHEDULER_ADDR}')
+    if SEED_ADDRS:
+        logger.info(f'  Scheduler Seeds: {SEED_ADDRS}')
     logger.info(f'  User Function Modules: {USER_MODULES}')
     logger.info(f'  Worker ID: {WORKER_ID or "(generated)"}')
     logger.info(f'  Use TLS: {USE_TLS}')
@@ -93,7 +99,7 @@ if __name__ == '__main__':
                 dmm_set_config_func(app_cfg) # Set it globally for utils used by DMM
                 logger.info("Application configuration loaded for DefaultModelManager.")
                 
-                model_manager_instance_to_pass = DefaultModelManager_cls()
+                model_manager_instance_to_pass = cast(ModelManagementInterface, DefaultModelManager_cls())
                 logger.info("DefaultModelManager instance created.")
             except Exception as e_dmm_init:
                 logger.exception(f"Failed to initialize DefaultModelManager: {e_dmm_init}. "
@@ -108,6 +114,7 @@ if __name__ == '__main__':
     try:
         worker = Worker(
             scheduler_addr=SCHEDULER_ADDR,
+            scheduler_addrs=SEED_ADDRS,
             user_module_names=USER_MODULES,
             worker_id=WORKER_ID,
             auth_token=AUTH_TOKEN,
@@ -126,4 +133,3 @@ if __name__ == '__main__':
     except Exception as e:
         logger.exception(f"Worker failed unexpectedly: {e}")
         sys.exit(1) 
-

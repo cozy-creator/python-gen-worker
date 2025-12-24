@@ -1,4 +1,5 @@
-from .manager import DefaultModelManager
-from .utils.config import load_config, set_config
+"""Compatibility shim for legacy imports.
 
-__all__ = ["DefaultModelManager", "load_config", "set_config"]
+Use gen_worker.torch_manager instead.
+"""
+from ..torch_manager import DefaultModelManager, load_config, set_config  # noqa: F401

@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import List, Any, Optional
+from typing import List, Any, Optional, Dict
 
 DownloaderType = Any 
 
@@ -21,5 +21,32 @@ class ModelManagementInterface(ABC):
         pass
 
     @abstractmethod
+    async def get_active_model_bundle(self, model_id: str) -> Optional[Any]:
+        pass
+
+    @abstractmethod
     def get_vram_loaded_models(self) -> List[str]:
+        pass
+
+
+class ModelManager(ABC):
+    """
+    Core model manager interface (no torch imports).
+    Implementations are responsible for loading/unloading models into memory.
+    """
+
+    @abstractmethod
+    def load(self, model_ref: str, local_path: Optional[str] = None, **opts: Any) -> Any:
+        pass
+
+    @abstractmethod
+    def get(self, model_ref: str) -> Optional[Any]:
+        pass
+
+    @abstractmethod
+    def unload(self, model_ref: str) -> None:
+        pass
+
+    @abstractmethod
+    def stats(self) -> Dict[str, Any]:
         pass

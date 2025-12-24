@@ -1,8 +1,13 @@
 # 1. Choose a Base Image
 ARG CUDA_VERSION=12.8.0
-# ARG PYTHON_VERSION=3.11
 ARG UBUNTU_VERSION=22.04
+ARG TORCH_VERSION=2.7.0
+ARG TORCH_CUDA_VARIANT=cu128
 FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION}
+
+# Re-declare build args for use after FROM
+ARG TORCH_VERSION
+ARG TORCH_CUDA_VARIANT
 
 # Install system deps + Python 3.10 (available by default in Ubuntu 22.04)
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -35,7 +40,7 @@ RUN pip3 install uv
 RUN uv pip install \
     --system \
     --index-url http://137.184.153.104:3141/root/mydev/+simple \
-    --extra-index-url https://download.pytorch.org/whl/cu128 \
+    --extra-index-url https://download.pytorch.org/whl/${TORCH_CUDA_VARIANT} \
     gen-worker \
     grpcio \
     msgpack-python \
@@ -45,8 +50,8 @@ RUN uv pip install \
 
 RUN uv pip install \
     --system \
-    --extra-index-url https://download.pytorch.org/whl/cu128 \
-    torch==2.8.0 \
+    --extra-index-url https://download.pytorch.org/whl/${TORCH_CUDA_VARIANT} \
+    torch==${TORCH_VERSION} \
     torchvision \
     torchaudio
 

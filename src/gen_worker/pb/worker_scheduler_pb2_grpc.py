@@ -3,9 +3,9 @@
 import grpc
 import warnings
 
-from . import worker_scheduler_pb2 as worker__scheduler__pb2
+import worker_scheduler_pb2 as worker__scheduler__pb2
 
-GRPC_GENERATED_VERSION = '1.73.0'
+GRPC_GENERATED_VERSION = '1.71.0'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
