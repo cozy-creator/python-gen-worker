@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional
 from unittest.mock import patch
 
 from gen_worker.types import Asset
-from gen_worker.worker import Worker
+from gen_worker.worker import ActionContext, Worker
 
 
 class _FakeHeaders(dict):
@@ -59,7 +59,7 @@ class TestAssetMaterialization(unittest.TestCase):
                     return _FakeHTTPResponse(data)
 
             with patch("urllib.request.build_opener", return_value=_Opener()) as _mock:
-                w._materialize_asset("run-1", a)
+                w._materialize_asset(ActionContext("run-1", tenant_id=w.tenant_id), a)
                 self.assertGreaterEqual(_mock.call_count, 1)
 
             self.assertIsNotNone(a.local_path)
@@ -88,7 +88,7 @@ class TestAssetMaterialization(unittest.TestCase):
 
             with patch("urllib.request.build_opener", return_value=_Opener()):
                 with self.assertRaises(Exception):
-                    w._materialize_asset("run-1", a)
+                    w._materialize_asset(ActionContext("run-1", tenant_id=w.tenant_id), a)
 
     def test_materialize_cozy_hub_ref(self) -> None:
         w = self._worker(tenant_id="tenant-1")
@@ -124,13 +124,16 @@ class TestAssetMaterialization(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             os.environ["WORKER_RUN_DIR"] = td
             os.environ["WORKER_CACHE_DIR"] = os.path.join(td, "cache")
-            os.environ["FILE_API_BASE_URL"] = "https://cozy-hub.example"
-            os.environ["FILE_API_TOKEN"] = "tok"
-            os.environ["TENANT_ID"] = "tenant-1"
             os.environ["WORKER_MAX_INPUT_FILE_BYTES"] = "9999999"
 
             with patch("urllib.request.urlopen", side_effect=fake_urlopen):
-                w._materialize_asset("run-1", a)
+                ctx = ActionContext(
+                    "run-1",
+                    tenant_id="tenant-1",
+                    file_api_base_url="https://cozy-hub.example",
+                    file_api_token="tok",
+                )
+                w._materialize_asset(ctx, a)
 
             self.assertIsNotNone(a.local_path)
             assert a.local_path is not None

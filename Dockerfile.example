@@ -1,4 +1,4 @@
-# worker-example-functions/demo/Dockerfile (Revised)
+# python-worker/examples/demo/Dockerfile (Revised)
 
 # 1. Choose a Base Image (Same as before)
 ARG CUDA_VERSION=12.6.0
@@ -26,15 +26,15 @@ RUN pip install uv
 COPY python-worker/src/gen_worker /app/gen_worker_src/src/gen_worker
 COPY python-worker/pyproject.toml /app/gen_worker_src/pyproject.toml
 COPY python-worker/README.md /app/gen_worker_src/README.md
-COPY worker-example-functions/demo/pyproject.toml /app/user_project/pyproject.toml
-COPY worker-example-functions/demo/README.md /app/user_project/README.md
+COPY python-worker/examples/demo/pyproject.toml /app/user_project/pyproject.toml
+COPY python-worker/examples/demo/README.md /app/user_project/README.md
 
 WORKDIR /app/user_project
 RUN uv pip install --system /app/gen_worker_src && \
     uv pip install --system .
 
 # 4. Copy User's Application Code (Same as before)
-COPY worker-example-functions/demo/src /app/user_project/src
+COPY python-worker/examples/demo/src /app/user_project/src
 
 # 5. Define Entrypoint/Command (Simplified)
 #    Set environment variables needed by gen_worker.entrypoint

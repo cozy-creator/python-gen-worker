@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x16worker_scheduler.proto\x12\tscheduler\"\x82\x05\n\x0fWorkerResources\x12\x11\n\tworker_id\x18\x01 \x01(\t\x12\x11\n\tcpu_cores\x18\x02 \x01(\x05\x12\x14\n\x0cmemory_bytes\x18\x03 \x01(\x03\x12\x11\n\tgpu_count\x18\x04 \x01(\x05\x12\x18\n\x10gpu_memory_bytes\x18\x05 \x01(\x03\x12\x1b\n\x13\x61vailable_functions\x18\x06 \x03(\t\x12\x18\n\x10\x61vailable_models\x18\x07 \x03(\t\x12\x1e\n\x16supports_model_loading\x18\x08 \x01(\x08\x12\x15\n\rdeployment_id\x18\t \x01(\t\x12\x15\n\rrunpod_pod_id\x18\n \x01(\t\x12\x13\n\x0bgpu_is_busy\x18\x0b \x01(\x08\x12\x1d\n\x15gpu_memory_used_bytes\x18\x0c \x01(\x03\x12\x10\n\x08gpu_name\x18\r \x01(\t\x12\x12\n\ngpu_driver\x18\x0e \x01(\t\x12\x1d\n\x15gpu_memory_free_bytes\x18\x0f \x01(\x03\x12\x17\n\x0fmax_concurrency\x18\x10 \x01(\x05\x12Q\n\x14\x66unction_concurrency\x18\x11 \x03(\x0b\x32\x33.scheduler.WorkerResources.FunctionConcurrencyEntry\x12\x14\n\x0c\x63uda_version\x18\x12 \x01(\t\x12\x15\n\rtorch_version\x18\x13 \x01(\t\x12\x33\n\x10\x66unction_schemas\x18\x14 \x03(\x0b\x32\x19.scheduler.FunctionSchema\x1a:\n\x18\x46unctionConcurrencyEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\x05:\x02\x38\x01\"U\n\x0e\x46unctionSchema\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x19\n\x11input_schema_json\x18\x02 \x01(\x0c\x12\x1a\n\x12output_schema_json\x18\x03 \x01(\x0c\"Y\n\x12WorkerRegistration\x12-\n\tresources\x18\x01 \x01(\x0b\x32\x1a.scheduler.WorkerResources\x12\x14\n\x0cis_heartbeat\x18\x02 \x01(\x08\"$\n\x10LoadModelCommand\x12\x10\n\x08model_id\x18\x01 \x01(\t\"&\n\x12UnloadModelCommand\x12\x10\n\x08model_id\x18\x01 \x01(\t\"&\n\x14InterruptTaskCommand\x12\x0e\n\x06run_id\x18\x01 \x01(\t\"\xa5\x01\n\x14TaskExecutionRequest\x12\x0e\n\x06run_id\x18\x01 \x01(\t\x12\x15\n\rfunction_name\x18\x02 \x01(\t\x12\x15\n\rinput_payload\x18\x03 \x01(\x0c\x12\x17\n\x0frequired_models\x18\x04 \x03(\t\x12\x12\n\ntimeout_ms\x18\x05 \x01(\x03\x12\x11\n\ttenant_id\x18\x06 \x01(\t\x12\x0f\n\x07user_id\x18\x07 \x01(\t\"\xa2\x01\n\x13TaskExecutionResult\x12\x0e\n\x06run_id\x18\x01 \x01(\t\x12\x0f\n\x07success\x18\x02 \x01(\x08\x12\x16\n\x0eoutput_payload\x18\x03 \x01(\x0c\x12\x15\n\rerror_message\x18\x04 \x01(\t\x12\x12\n\nerror_type\x18\x05 \x01(\t\x12\x11\n\tretryable\x18\x06 \x01(\x08\x12\x14\n\x0csafe_message\x18\x07 \x01(\t\"`\n\x11SpawnTasksRequest\x12\x15\n\rparent_run_id\x18\x01 \x01(\t\x12\x34\n\x0b\x63hild_tasks\x18\x02 \x03(\x0b\x32\x1f.scheduler.TaskExecutionRequest\"G\n\x0bWorkerEvent\x12\x0e\n\x06run_id\x18\x01 \x01(\t\x12\x12\n\nevent_type\x18\x02 \x01(\t\x12\x14\n\x0cpayload_json\x18\x03 \x01(\x0c\"K\n\x0fLoadModelResult\x12\x10\n\x08model_id\x18\x01 \x01(\t\x12\x0f\n\x07success\x18\x02 \x01(\x08\x12\x15\n\rerror_message\x18\x03 \x01(\t\"M\n\x11UnloadModelResult\x12\x10\n\x08model_id\x18\x01 \x01(\t\x12\x0f\n\x07success\x18\x02 \x01(\x08\x12\x15\n\rerror_message\x18\x03 \x01(\t\"4\n\x15\x44\x65ploymentModelConfig\x12\x1b\n\x13supported_model_ids\x18\x01 \x03(\t\"\x9b\x05\n\x16WorkerSchedulerMessage\x12<\n\x13worker_registration\x18\x01 \x01(\x0b\x32\x1d.scheduler.WorkerRegistrationH\x00\x12\x34\n\nrun_result\x18\x02 \x01(\x0b\x32\x1e.scheduler.TaskExecutionResultH\x00\x12\x33\n\x0bspawn_tasks\x18\x03 \x01(\x0b\x32\x1c.scheduler.SpawnTasksRequestH\x00\x12\x37\n\x11load_model_result\x18\x04 \x01(\x0b\x32\x1a.scheduler.LoadModelResultH\x00\x12;\n\x13unload_model_result\x18\x05 \x01(\x0b\x32\x1c.scheduler.UnloadModelResultH\x00\x12.\n\x0cworker_event\x18\x06 \x01(\x0b\x32\x16.scheduler.WorkerEventH\x00\x12\x36\n\x0brun_request\x18\n \x01(\x0b\x32\x1f.scheduler.TaskExecutionRequestH\x00\x12\x35\n\x0eload_model_cmd\x18\x0b \x01(\x0b\x32\x1b.scheduler.LoadModelCommandH\x00\x12\x39\n\x10unload_model_cmd\x18\x0c \x01(\x0b\x32\x1d.scheduler.UnloadModelCommandH\x00\x12<\n\x11interrupt_run_cmd\x18\r \x01(\x0b\x32\x1f.scheduler.InterruptTaskCommandH\x00\x12\x43\n\x17\x64\x65ployment_model_config\x18\x0e \x01(\x0b\x32 .scheduler.DeploymentModelConfigH\x00\x42\x05\n\x03msg2s\n\x16SchedulerWorkerService\x12Y\n\rConnectWorker\x12!.scheduler.WorkerSchedulerMessage\x1a!.scheduler.WorkerSchedulerMessage(\x01\x30\x01\x42\x41Z?github.com/cozy-creator/gen-orchestrator/pkg/pb/workerSchedulerb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x16worker_scheduler.proto\x12\tscheduler\"\xc9\x05\n\x0fWorkerResources\x12\x11\n\tworker_id\x18\x01 \x01(\t\x12\x11\n\tcpu_cores\x18\x02 \x01(\x05\x12\x14\n\x0cmemory_bytes\x18\x03 \x01(\x03\x12\x11\n\tgpu_count\x18\x04 \x01(\x05\x12\x18\n\x10gpu_memory_bytes\x18\x05 \x01(\x03\x12\x1b\n\x13\x61vailable_functions\x18\x06 \x03(\t\x12\x18\n\x10\x61vailable_models\x18\x07 \x03(\t\x12\x1e\n\x16supports_model_loading\x18\x08 \x01(\x08\x12\x15\n\rdeployment_id\x18\t \x01(\t\x12\x15\n\rrunpod_pod_id\x18\n \x01(\t\x12\x13\n\x0bgpu_is_busy\x18\x0b \x01(\x08\x12\x1d\n\x15gpu_memory_used_bytes\x18\x0c \x01(\x03\x12\x10\n\x08gpu_name\x18\r \x01(\t\x12\x12\n\ngpu_driver\x18\x0e \x01(\t\x12\x1d\n\x15gpu_memory_free_bytes\x18\x0f \x01(\x03\x12\x17\n\x0fmax_concurrency\x18\x10 \x01(\x05\x12Q\n\x14\x66unction_concurrency\x18\x11 \x03(\x0b\x32\x33.scheduler.WorkerResources.FunctionConcurrencyEntry\x12\x14\n\x0c\x63uda_version\x18\x12 \x01(\t\x12\x15\n\rtorch_version\x18\x13 \x01(\t\x12\x33\n\x10\x66unction_schemas\x18\x14 \x03(\x0b\x32\x19.scheduler.FunctionSchema\x12\x0e\n\x06gpu_sm\x18\x15 \x01(\t\x12\x18\n\x10tensorrt_version\x18\x16 \x01(\t\x12\x1b\n\x13onnxruntime_version\x18\x17 \x01(\t\x1a:\n\x18\x46unctionConcurrencyEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\x05:\x02\x38\x01\"\xa4\x01\n\x0e\x46unctionSchema\x12\x0c\n\x04name\x18\x01 \x01(\t\x12\x19\n\x11input_schema_json\x18\x02 \x01(\x0c\x12\x1a\n\x12output_schema_json\x18\x03 \x01(\x0c\x12\x16\n\x0einjection_json\x18\x04 \x01(\x0c\x12\x1a\n\x12incremental_output\x18\x05 \x01(\x08\x12\x19\n\x11\x64\x65lta_schema_json\x18\x06 \x01(\x0c\"Y\n\x12WorkerRegistration\x12-\n\tresources\x18\x01 \x01(\x0b\x32\x1a.scheduler.WorkerResources\x12\x14\n\x0cis_heartbeat\x18\x02 \x01(\x08\"$\n\x10LoadModelCommand\x12\x10\n\x08model_id\x18\x01 \x01(\t\"&\n\x12UnloadModelCommand\x12\x10\n\x08model_id\x18\x01 \x01(\t\"&\n\x14InterruptTaskCommand\x12\x0e\n\x06run_id\x18\x01 \x01(\t\"\xd0\x01\n\x14TaskExecutionRequest\x12\x0e\n\x06run_id\x18\x01 \x01(\t\x12\x15\n\rfunction_name\x18\x02 \x01(\t\x12\x15\n\rinput_payload\x18\x03 \x01(\x0c\x12\x17\n\x0frequired_models\x18\x04 \x03(\t\x12\x12\n\ntimeout_ms\x18\x05 \x01(\x03\x12\x11\n\ttenant_id\x18\x06 \x01(\t\x12\x0f\n\x07user_id\x18\x07 \x01(\t\x12\x15\n\rfile_base_url\x18\x08 \x01(\t\x12\x12\n\nfile_token\x18\t \x01(\t\"\xa2\x01\n\x13TaskExecutionResult\x12\x0e\n\x06run_id\x18\x01 \x01(\t\x12\x0f\n\x07success\x18\x02 \x01(\x08\x12\x16\n\x0eoutput_payload\x18\x03 \x01(\x0c\x12\x15\n\rerror_message\x18\x04 \x01(\t\x12\x12\n\nerror_type\x18\x05 \x01(\t\x12\x11\n\tretryable\x18\x06 \x01(\x08\x12\x14\n\x0csafe_message\x18\x07 \x01(\t\"`\n\x11SpawnTasksRequest\x12\x15\n\rparent_run_id\x18\x01 \x01(\t\x12\x34\n\x0b\x63hild_tasks\x18\x02 \x03(\x0b\x32\x1f.scheduler.TaskExecutionRequest\"G\n\x0bWorkerEvent\x12\x0e\n\x06run_id\x18\x01 \x01(\t\x12\x12\n\nevent_type\x18\x02 \x01(\t\x12\x14\n\x0cpayload_json\x18\x03 \x01(\x0c\"\x91\x01\n\x13RealtimeOpenCommand\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x15\n\rfunction_name\x18\x02 \x01(\t\x12\x17\n\x0frequired_models\x18\x03 \x03(\t\x12\x11\n\ttenant_id\x18\x04 \x01(\t\x12\x0f\n\x07user_id\x18\x05 \x01(\t\x12\x12\n\ntimeout_ms\x18\x06 \x01(\x03\"B\n\rRealtimeFrame\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x0c\n\x04\x64\x61ta\x18\x02 \x01(\x0c\x12\x0f\n\x07is_text\x18\x03 \x01(\x08\":\n\x14RealtimeCloseCommand\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x0e\n\x06reason\x18\x02 \x01(\t\"K\n\x0fLoadModelResult\x12\x10\n\x08model_id\x18\x01 \x01(\t\x12\x0f\n\x07success\x18\x02 \x01(\x08\x12\x15\n\rerror_message\x18\x03 \x01(\t\"M\n\x11UnloadModelResult\x12\x10\n\x08model_id\x18\x01 \x01(\t\x12\x0f\n\x07success\x18\x02 \x01(\x08\x12\x15\n\rerror_message\x18\x03 \x01(\t\"\xb6\x01\n\x15\x44\x65ploymentModelConfig\x12\x1b\n\x13supported_model_ids\x18\x01 \x03(\t\x12K\n\x0fmodel_id_by_key\x18\x02 \x03(\x0b\x32\x32.scheduler.DeploymentModelConfig.ModelIdByKeyEntry\x1a\x33\n\x11ModelIdByKeyEntry\x12\x0b\n\x03key\x18\x01 \x01(\t\x12\r\n\x05value\x18\x02 \x01(\t:\x02\x38\x01\"\xcb\x06\n\x16WorkerSchedulerMessage\x12<\n\x13worker_registration\x18\x01 \x01(\x0b\x32\x1d.scheduler.WorkerRegistrationH\x00\x12\x34\n\nrun_result\x18\x02 \x01(\x0b\x32\x1e.scheduler.TaskExecutionResultH\x00\x12\x33\n\x0bspawn_tasks\x18\x03 \x01(\x0b\x32\x1c.scheduler.SpawnTasksRequestH\x00\x12\x37\n\x11load_model_result\x18\x04 \x01(\x0b\x32\x1a.scheduler.LoadModelResultH\x00\x12;\n\x13unload_model_result\x18\x05 \x01(\x0b\x32\x1c.scheduler.UnloadModelResultH\x00\x12.\n\x0cworker_event\x18\x06 \x01(\x0b\x32\x16.scheduler.WorkerEventH\x00\x12\x36\n\x0brun_request\x18\n \x01(\x0b\x32\x1f.scheduler.TaskExecutionRequestH\x00\x12\x35\n\x0eload_model_cmd\x18\x0b \x01(\x0b\x32\x1b.scheduler.LoadModelCommandH\x00\x12\x39\n\x10unload_model_cmd\x18\x0c \x01(\x0b\x32\x1d.scheduler.UnloadModelCommandH\x00\x12<\n\x11interrupt_run_cmd\x18\r \x01(\x0b\x32\x1f.scheduler.InterruptTaskCommandH\x00\x12\x43\n\x17\x64\x65ployment_model_config\x18\x0e \x01(\x0b\x32 .scheduler.DeploymentModelConfigH\x00\x12;\n\x11realtime_open_cmd\x18\x0f \x01(\x0b\x32\x1e.scheduler.RealtimeOpenCommandH\x00\x12\x32\n\x0erealtime_frame\x18\x10 \x01(\x0b\x32\x18.scheduler.RealtimeFrameH\x00\x12=\n\x12realtime_close_cmd\x18\x11 \x01(\x0b\x32\x1f.scheduler.RealtimeCloseCommandH\x00\x42\x05\n\x03msg2s\n\x16SchedulerWorkerService\x12Y\n\rConnectWorker\x12!.scheduler.WorkerSchedulerMessage\x1a!.scheduler.WorkerSchedulerMessage(\x01\x30\x01\x42\x41Z?github.com/cozy-creator/gen-orchestrator/pkg/pb/workerSchedulerb\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -34,36 +34,46 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._serialized_options = b'Z?github.com/cozy-creator/gen-orchestrator/pkg/pb/workerScheduler'
   _globals['_WORKERRESOURCES_FUNCTIONCONCURRENCYENTRY']._loaded_options = None
   _globals['_WORKERRESOURCES_FUNCTIONCONCURRENCYENTRY']._serialized_options = b'8\001'
+  _globals['_DEPLOYMENTMODELCONFIG_MODELIDBYKEYENTRY']._loaded_options = None
+  _globals['_DEPLOYMENTMODELCONFIG_MODELIDBYKEYENTRY']._serialized_options = b'8\001'
   _globals['_WORKERRESOURCES']._serialized_start=38
-  _globals['_WORKERRESOURCES']._serialized_end=680
-  _globals['_WORKERRESOURCES_FUNCTIONCONCURRENCYENTRY']._serialized_start=622
-  _globals['_WORKERRESOURCES_FUNCTIONCONCURRENCYENTRY']._serialized_end=680
-  _globals['_FUNCTIONSCHEMA']._serialized_start=682
-  _globals['_FUNCTIONSCHEMA']._serialized_end=767
-  _globals['_WORKERREGISTRATION']._serialized_start=769
-  _globals['_WORKERREGISTRATION']._serialized_end=858
-  _globals['_LOADMODELCOMMAND']._serialized_start=860
-  _globals['_LOADMODELCOMMAND']._serialized_end=896
-  _globals['_UNLOADMODELCOMMAND']._serialized_start=898
-  _globals['_UNLOADMODELCOMMAND']._serialized_end=936
-  _globals['_INTERRUPTTASKCOMMAND']._serialized_start=938
-  _globals['_INTERRUPTTASKCOMMAND']._serialized_end=976
-  _globals['_TASKEXECUTIONREQUEST']._serialized_start=979
-  _globals['_TASKEXECUTIONREQUEST']._serialized_end=1144
-  _globals['_TASKEXECUTIONRESULT']._serialized_start=1147
-  _globals['_TASKEXECUTIONRESULT']._serialized_end=1309
-  _globals['_SPAWNTASKSREQUEST']._serialized_start=1311
-  _globals['_SPAWNTASKSREQUEST']._serialized_end=1407
-  _globals['_WORKEREVENT']._serialized_start=1409
-  _globals['_WORKEREVENT']._serialized_end=1480
-  _globals['_LOADMODELRESULT']._serialized_start=1482
-  _globals['_LOADMODELRESULT']._serialized_end=1557
-  _globals['_UNLOADMODELRESULT']._serialized_start=1559
-  _globals['_UNLOADMODELRESULT']._serialized_end=1636
-  _globals['_DEPLOYMENTMODELCONFIG']._serialized_start=1638
-  _globals['_DEPLOYMENTMODELCONFIG']._serialized_end=1690
-  _globals['_WORKERSCHEDULERMESSAGE']._serialized_start=1693
-  _globals['_WORKERSCHEDULERMESSAGE']._serialized_end=2360
-  _globals['_SCHEDULERWORKERSERVICE']._serialized_start=2362
-  _globals['_SCHEDULERWORKERSERVICE']._serialized_end=2477
+  _globals['_WORKERRESOURCES']._serialized_end=751
+  _globals['_WORKERRESOURCES_FUNCTIONCONCURRENCYENTRY']._serialized_start=693
+  _globals['_WORKERRESOURCES_FUNCTIONCONCURRENCYENTRY']._serialized_end=751
+  _globals['_FUNCTIONSCHEMA']._serialized_start=754
+  _globals['_FUNCTIONSCHEMA']._serialized_end=918
+  _globals['_WORKERREGISTRATION']._serialized_start=920
+  _globals['_WORKERREGISTRATION']._serialized_end=1009
+  _globals['_LOADMODELCOMMAND']._serialized_start=1011
+  _globals['_LOADMODELCOMMAND']._serialized_end=1047
+  _globals['_UNLOADMODELCOMMAND']._serialized_start=1049
+  _globals['_UNLOADMODELCOMMAND']._serialized_end=1087
+  _globals['_INTERRUPTTASKCOMMAND']._serialized_start=1089
+  _globals['_INTERRUPTTASKCOMMAND']._serialized_end=1127
+  _globals['_TASKEXECUTIONREQUEST']._serialized_start=1130
+  _globals['_TASKEXECUTIONREQUEST']._serialized_end=1338
+  _globals['_TASKEXECUTIONRESULT']._serialized_start=1341
+  _globals['_TASKEXECUTIONRESULT']._serialized_end=1503
+  _globals['_SPAWNTASKSREQUEST']._serialized_start=1505
+  _globals['_SPAWNTASKSREQUEST']._serialized_end=1601
+  _globals['_WORKEREVENT']._serialized_start=1603
+  _globals['_WORKEREVENT']._serialized_end=1674
+  _globals['_REALTIMEOPENCOMMAND']._serialized_start=1677
+  _globals['_REALTIMEOPENCOMMAND']._serialized_end=1822
+  _globals['_REALTIMEFRAME']._serialized_start=1824
+  _globals['_REALTIMEFRAME']._serialized_end=1890
+  _globals['_REALTIMECLOSECOMMAND']._serialized_start=1892
+  _globals['_REALTIMECLOSECOMMAND']._serialized_end=1950
+  _globals['_LOADMODELRESULT']._serialized_start=1952
+  _globals['_LOADMODELRESULT']._serialized_end=2027
+  _globals['_UNLOADMODELRESULT']._serialized_start=2029
+  _globals['_UNLOADMODELRESULT']._serialized_end=2106
+  _globals['_DEPLOYMENTMODELCONFIG']._serialized_start=2109
+  _globals['_DEPLOYMENTMODELCONFIG']._serialized_end=2291
+  _globals['_DEPLOYMENTMODELCONFIG_MODELIDBYKEYENTRY']._serialized_start=2240
+  _globals['_DEPLOYMENTMODELCONFIG_MODELIDBYKEYENTRY']._serialized_end=2291
+  _globals['_WORKERSCHEDULERMESSAGE']._serialized_start=2294
+  _globals['_WORKERSCHEDULERMESSAGE']._serialized_end=3137
+  _globals['_SCHEDULERWORKERSERVICE']._serialized_start=3139
+  _globals['_SCHEDULERWORKERSERVICE']._serialized_end=3254
 # @@protoc_insertion_point(module_scope)

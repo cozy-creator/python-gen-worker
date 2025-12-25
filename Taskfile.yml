@@ -1,0 +1,32 @@
+version: '3'
+
+vars:
+  # Assumes a sibling checkout:
+  #   ../gen-orchestrator/proto/{frontend.proto,worker_scheduler.proto}
+  PROTO_SRC: ../gen-orchestrator/proto
+  PY_OUT: src/gen_worker/pb
+
+tasks:
+  proto:
+    desc: Generate Python protobuf + gRPC stubs from sibling gen-orchestrator protos
+    cmds:
+      - test -d {{.PROTO_SRC}}
+      - mkdir -p {{.PY_OUT}}
+      - uv sync --extra dev
+      - |
+        uv run python -m grpc_tools.protoc \
+          -I {{.PROTO_SRC}} \
+          --python_out={{.PY_OUT}} \
+          --grpc_python_out={{.PY_OUT}} \
+          {{.PROTO_SRC}}/frontend.proto \
+          {{.PROTO_SRC}}/worker_scheduler.proto
+    sources:
+      - "{{.PROTO_SRC}}/*.proto"
+    generates:
+      - "{{.PY_OUT}}/*_pb2.py"
+      - "{{.PY_OUT}}/*_pb2_grpc.py"
+
+  proto-clean:
+    desc: Remove generated protobuf stubs (keeps pb/__init__.py)
+    cmds:
+      - rm -f {{.PY_OUT}}/*_pb2.py {{.PY_OUT}}/*_pb2_grpc.py

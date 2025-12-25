@@ -4,75 +4,73 @@
       "name": "Signature-based dependency injection (typing.Annotated + ModelRef)",
       "description": "Adopt the new tenant function contract where models/processors/pipelines are injected via `typing.Annotated[..., ModelRef(...)]` instead of decorator flags like expects_pipeline_arg. The worker owns downloads + VRAM lifecycle; tenant code receives ready-to-use objects. Keep `@worker_function` minimal (marker + requires_gpu) and rely on signature inspection for injection and validation.",
       "tasks": [
-        "[ ] Add `gen_worker.injection` module defining:\n    - `ModelRefSource` enum (at least: DEPLOYMENT, PAYLOAD_LABEL)\n    - `ModelRef` annotation helper carrying (source, default_model_id, label_key?)\n    - Strong typing via `typing.Annotated` metadata and `typing.get_type_hints(..., include_extras=True)`.",
-        "[ ] Add `ModelArtifacts` injection type for non-standard runtimes:\n    - Injects local artifact paths (a directory + named files map) for a resolved model ref\n    - Used when tenant code imports a custom runtime (e.g. krea-ai/realtime-video) and loads weights itself\n    - Source of truth for artifact keys is deployment config (not inferred from repo contents).",
-        "[ ] Define injection resolution rules (document + implement):\n    - DEPLOYMENT: inject the deployment-configured model_id\n    - PAYLOAD_LABEL: payload chooses a model_id from a deployment allowlist via a reserved label\n    - Reject any model_id not allowlisted for the deployment.",
-        "[ ] Implement injection in the worker call wrapper:\n    - Inspect function signature including Annotated metadata\n    - Build injected args before invoking tenant code\n    - Keep payload decoding (msgspec) + Asset materialization as today.",
-        "[ ] Implement a minimal injection catalog (torch backend first):\n    - Inject `AutoModelForCausalLM`-style models and `AutoProcessor`/tokenizers\n    - Inject diffusers pipelines when the annotation requests a pipeline type\n    - Inject `ModelArtifacts` when the annotation requests artifact paths instead of a ready runtime object\n    - Ensure injection is cheap at invocation time (reuse cached objects; no from_pretrained in tenant code).",
-        "[ ] Support tenant-provided loader hooks for custom runtime handles:\n    - Allow tenant projects to register a loader callable that builds a custom runtime handle (e.g. `KreaRuntime`) from `ModelArtifacts`\n    - The worker/model-manager should run the loader once per resolved model ref (load into VRAM), cache the returned object, and inject it into functions/websocket handlers\n    - Define lifecycle: cache keys, refcounts/leases for websocket sessions, and eviction on memory pressure or idle timeout.",
-        "[ ] Tighten `@worker_function` usage:\n    - Keep decorator only as a marker + `requires_gpu` (and maybe max_concurrency)\n    - Ignore/remove expects_pipeline_arg / expects_model_bundle_arg in the new contract.",
-        "[ ] Schema reporting: include injection metadata per function (requires orchestrator proto/schema changes) so deployments can be registered without out-of-band docs.",
-        "[ ] Reserved payload fields for model selection:\n    - Decide a single reserved field name (e.g. `model_id`)\n    - Ensure it is not part of the msgspec payload struct and is only used for PAYLOAD_LABEL resolution.",
-        "[ ] Tests:\n    - Annotated model + processor injection works\n    - ModelArtifacts injection returns stable local paths and named keys\n    - Loader hook is used for custom runtime types and returns cached VRAM-resident handles\n    - PAYLOAD_LABEL rejects non-allowlisted ids\n    - No legacy decorator flags are required for injection."
+        "[x] Add `gen_worker.injection` module defining:\n    - `ModelRefSource` enum (at least: DEPLOYMENT, PAYLOAD)\n    - `ModelRef` annotation helper carrying (source, key)\n    - Strong typing via `typing.Annotated` metadata and `typing.get_type_hints(..., include_extras=True)`.",
+        "[x] Add `ModelArtifacts` injection type for non-standard runtimes:\n    - Injects local artifact paths (a directory + named files map) for a resolved model ref\n    - Used when tenant code imports a custom runtime (e.g. krea-ai/realtime-video) and loads weights itself\n    - Source of truth for artifact keys is deployment config (not inferred from repo contents).",
+        "[x] Define injection resolution rules (document + implement):\n    - DEPLOYMENT: inject the deployment-configured model_id (or a literal id)\n    - PAYLOAD: payload chooses a model key/label from a deployment allowlist mapping\n    - Reject any resolved model_id not allowlisted for the deployment.",
+        "[x] Implement injection in the worker call wrapper:\n    - Inspect function signature including Annotated metadata\n    - Build injected args before invoking tenant code\n    - Keep payload decoding (msgspec) + Asset materialization as today.",
+        "[x] Implement a minimal injection catalog (torch backend first):\n    - Inject `AutoModelForCausalLM`-style models and `AutoProcessor`/tokenizers (via cached from_pretrained)\n    - Inject diffusers pipelines via the configured ModelManager (when available)\n    - Inject `ModelArtifacts` when the annotation requests artifact paths instead of a ready runtime object\n    - Ensure injection is cheap at invocation time (reuse cached objects; no per-invocation downloads).",
+        "[x] Support tenant-provided loader hooks for custom runtime handles:\n    - Allow tenant projects to register a loader callable that builds a custom runtime handle from `ModelArtifacts`\n    - The worker caches the returned object per (model_id, injected type) and injects it into functions/websocket handlers.",
+        "[x] Tighten `@worker_function` usage:\n    - Keep decorator only as a marker + `requires_gpu` (and max_concurrency)\n    - Remove expects_pipeline_arg / expects_model_bundle_arg in the new contract.",
+        "[x] Schema reporting: include injection metadata per function (requires orchestrator proto/schema changes) so deployments can be registered without out-of-band docs.",
+        "[x] Tests:\n    - Annotated injection works (DEPLOYMENT + PAYLOAD)\n    - ModelArtifacts injection returns stable local paths and named keys\n    - Loader hook is used for custom runtime types and returns cached handles\n    - Non-allowlisted selections are rejected"
       ],
-      "completed": false
+      "completed": true
     },
     {
       "name": "Strict typed tenant contract (msgspec input/output inferred from signature)",
       "description": "Enforce that tenant functions use strongly-typed `msgspec.Struct` for inputs and outputs, inferred from the function signature (no dict payloads, no explicit input_model/output_model args). This makes function invocation safer and enables orchestrator-side JSON validation against the exact schema the function expects.",
       "tasks": [
-        "[ ] Define the canonical function signature rules (and enforce at discovery time):\n    - Must accept `ctx: ActionContext` as the first arg\n    - Must accept exactly one payload arg, and its type must be a `msgspec.Struct` subclass\n    - May accept additional injected args via `typing.Annotated[..., ModelRef(...)]`\n    - Reject untyped parameters and reject `dict`/`Any` payloads.",
-        "[ ] Implement signature inspection utilities using `typing.get_type_hints(..., include_extras=True)` and `inspect.signature`:\n    - Identify payload parameter and payload struct type\n    - Identify injected parameters (Annotated + ModelRef metadata)\n    - Identify output mode from return annotation: `msgspec.Struct` or `Iterator[msgspec.Struct]` (incremental output).",
-        "[ ] Update function discovery to fail fast with clear errors when a function violates the contract (include function name/module and rule violated).",
-        "[ ] Update invocation wrapper to decode payload strictly as the inferred `msgspec.Struct` type (unknown fields rejected; defaults applied by msgspec).",
-        "[ ] Update output handling:\n    - Non-incremental: require returned value is instance of the annotated output `msgspec.Struct`\n    - Incremental: require iterator yields instances of the annotated delta `msgspec.Struct`.\n    - Convert outputs to builtins (`msgspec.to_builtins`) before msgpack encoding for Go compatibility (keep this behavior).",
-        "[ ] Enforce that dict-based payload handlers are not supported (fail discovery with a clear error).",
-        "[ ] Tests:\n    - Reject dict payloads\n    - Reject missing ctx\n    - Reject missing return annotations\n    - Accept typed functions with injected params + msgspec payload\n    - Ensure schema hashes/identifiers are stable (if used downstream)."
+        "[x] Define the canonical function signature rules (and enforce at discovery time):\n    - Must accept `ctx: ActionContext` as the first arg\n    - Must accept exactly one payload arg, and its type must be a `msgspec.Struct` subclass\n    - May accept additional injected args via `typing.Annotated[..., ModelRef(...)]`\n    - Reject untyped parameters and reject `dict`/`Any` payloads.",
+        "[x] Implement signature inspection utilities using `typing.get_type_hints(..., include_extras=True)` and `inspect.signature`:\n    - Identify payload parameter and payload struct type\n    - Identify injected parameters (Annotated + ModelRef metadata)\n    - Identify output mode from return annotation: `msgspec.Struct` or `Iterator[msgspec.Struct]` (incremental output).",
+        "[x] Update function discovery to fail fast with clear errors when a function violates the contract (include function name/module and rule violated).",
+        "[x] Update invocation wrapper to decode payload strictly as the inferred `msgspec.Struct` type (unknown fields rejected; defaults applied by msgspec).",
+        "[x] Update output handling:\n    - Non-incremental: require returned value is instance of the annotated output `msgspec.Struct`\n    - Incremental: require iterator yields instances of the annotated delta `msgspec.Struct`.\n    - Convert outputs to builtins (`msgspec.to_builtins`) before msgpack encoding for Go compatibility (keep this behavior).",
+        "[x] Enforce that dict-based payload handlers are not supported (fail discovery with a clear error).",
+        "[x] Tests:\n    - Reject dict payloads\n    - Reject missing ctx\n    - Reject missing return annotations\n    - Accept typed functions with injected params + msgspec payload\n    - Ensure schema hashes/identifiers are stable (if used downstream)."
       ],
-      "completed": false
+      "completed": true
     },
     {
       "name": "Incremental output: generator functions + typed output events",
       "description": "Add first-class support for incremental output from tenant functions (e.g. token-by-token output). The worker should support functions that yield typed deltas and/or explicitly emit typed output events, and forward those incrementals to the scheduler as ordered job events without requiring tenants to manage storage/VRAM. (\"Streaming\" over WebSockets is a separate feature.)",
       "tasks": [
-        "[ ] Infer incremental output from the function return annotation (`Iterator[DeltaStruct]` / `Iterable[DeltaStruct]`) rather than adding decorator flags.",
-        "[ ] Extend function discovery to support two output modes:\n    - non-incremental: return type is `msgspec.Struct`\n    - incremental: return type is `Iterator[msgspec.Struct]` / `Iterable[msgspec.Struct]` (delta type) and/or `Generator[msgspec.Struct, None, FinalStruct?]` (future: separate final type).",
-        "[ ] Define a minimal, stable event taxonomy for incremental output emitted by the worker:\n    - `output.delta` (payload is a JSON object derived from the yielded msgspec struct)\n    - `output.completed` (optional; emitted when the iterator finishes)\n    - `output.error` (emitted on exception before the final RunResult)\n    Keep existing `job.progress` / `job.log` events unchanged.",
-        "[ ] Implement iterator execution path in the worker wrapper:\n    - If function returns an iterator, iterate and emit `output.delta` for each item\n    - Apply basic rate limiting/coalescing knobs (env-configurable): max events/sec, max payload bytes per event\n    - Respect cancellation: stop iterating promptly when InterruptTaskCommand is received or ctx.is_canceled() becomes true.",
-        "[ ] Ensure emitted deltas are strictly JSON-serializable (use `msgspec.to_builtins` then JSON dump) and enforce a small per-delta size limit to prevent DB bloat.",
-        "[ ] Preserve existing RunResult semantics:\n    - For incremental-output functions, RunResult `output_payload` should contain a small final summary object (or be empty) while incremental output is delivered via events.\n    - For non-incremental functions, keep current behavior.",
-        "[ ] Extend schema reporting to include incremental-output metadata (requires proto changes in scheduler message types) so orchestrator can advertise/validate whether a function has incremental output and what its delta schema is.",
-        "[ ] Add unit tests:\n    - iterator yields N deltas -> emits N ordered `WorkerEvent` messages\n    - iterator cancellation -> stops early and emits canceled result\n    - oversize delta -> fail with validation error / drop with structured `output.error` (decide behavior and test it).",
-        "[ ] Add an example incremental-output function in /worker-example-functions (LLM token delta stub) that yields deltas and can be observed via `/v1/jobs/<id>/events`."
+        "[x] Infer incremental output from the function return annotation (`Iterator[DeltaStruct]` / `Iterable[DeltaStruct]`) rather than adding decorator flags.",
+        "[x] Extend function discovery to support two output modes:\n    - non-incremental: return type is `msgspec.Struct`\n    - incremental: return type is `Iterator[msgspec.Struct]` / `Iterable[msgspec.Struct]` (delta type) and/or `Generator[msgspec.Struct, None, FinalStruct?]` (future: separate final type).",
+        "[x] Define a minimal, stable event taxonomy for incremental output emitted by the worker:\n    - `output.delta` (payload is a JSON object derived from the yielded msgspec struct)\n    - `output.completed` (optional; emitted when the iterator finishes)\n    - `output.error` (emitted on exception before the final RunResult)\n    Keep existing `job.progress` / `job.log` events unchanged.",
+        "[x] Implement iterator execution path in the worker wrapper:\n    - If function returns an iterator, iterate and emit `output.delta` for each item\n    - Apply basic rate limiting/coalescing knobs (env-configurable): max events/sec, max payload bytes per event\n    - Respect cancellation: stop iterating promptly when InterruptTaskCommand is received or ctx.is_canceled() becomes true.",
+        "[x] Ensure emitted deltas are strictly JSON-serializable (use `msgspec.to_builtins` then JSON dump) and enforce a small per-delta size limit to prevent DB bloat.",
+        "[x] Preserve existing RunResult semantics:\n    - For incremental-output functions, RunResult `output_payload` should contain a small final summary object (or be empty) while incremental output is delivered via events.\n    - For non-incremental functions, keep current behavior.",
+        "[x] Extend schema reporting to include incremental-output metadata (requires proto changes in scheduler message types) so orchestrator can advertise/validate whether a function has incremental output and what its delta schema is.",
+        "[x] Add unit tests:\n    - iterator yields N deltas -> emits N ordered `WorkerEvent` messages\n    - iterator cancellation -> stops early and emits canceled result\n    - oversize delta -> capped/truncated per event size limits.",
+        "[x] Add an example incremental-output function in python-worker/examples (LLM token delta stub) that yields deltas and can be observed via `/v1/jobs/<id>/events`."
       ],
-      "completed": false
+      "completed": true
     },
     {
       "name": "WebSocket realtime functions (worker-side runtime)",
       "description": "Support true WebSocket realtime endpoints (bidirectional) without exposing workers publicly. Tenant code registers an async handler (e.g. `@worker_websocket`) and uses a gen-worker-owned socket interface. The worker talks to gen-orchestrator over a bidirectional internal transport stream; gen-orchestrator http-api proxies to/from the browser WebSocket and handles auth + rate limiting.",
       "tasks": [
-        "[ ] Define a worker-owned `RealtimeSocket` interface (no FastAPI dependency):\n    - `accept()` / `close(code?, reason?)`\n    - `receive_bytes()` / `send_bytes()`\n    - `send_json()` convenience (optional)\n    - Backpressure semantics: `send_*` is awaitable; buffers are bounded.",
-        "[ ] Add `@worker_websocket` decorator (marker only) and discovery:\n    - Identify websocket handlers separately from job functions\n    - Enforce signature: `(ctx: ActionContext, ws: RealtimeSocket, ...injected...) -> Awaitable[None]`.",
-        "[ ] Add internal realtime session loop over worker transport:\n    - Extend/define a worker RPC for realtime: `OpenRealtimeSession(init) <-> stream Frame`\n    - Map inbound frames to `RealtimeSocket.receive_*` and outbound frames from `RealtimeSocket.send_*`.\n    - Support binary frames as the primary payload; allow tiny JSON control messages (ready/status).",
-        "[ ] Injection support for realtime handlers:\n    - Allow websocket handlers to receive injected deps via `typing.Annotated[..., ModelRef(...)]`\n    - Resolve injection once per session (not per frame) and cache for session lifetime.",
-        "[ ] Cancellation + cleanup:\n    - If the orchestrator closes/cancels the session, propagate cancellation to tenant handler and close socket\n    - Ensure model manager releases/evicts resources according to policy after session end.",
-        "[ ] Safety limits (defense-in-depth):\n    - Enforce `WORKER_MAX_WS_FRAME_BYTES` and drop/close on oversize frames\n    - Enforce optional idle timeout from orchestrator (no frames for N seconds).",
-        "[ ] Tests:\n    - Unit test socket adapter mapping (transport frames <-> handler calls)\n    - Integration smoke: echo handler that sends a ready JSON message then echoes binary frames."
+        "[x] Define a worker-owned `RealtimeSocket` interface (no FastAPI dependency):\n    - `accept()` / `close(code?, reason?)`\n    - `receive_bytes()` / `send_bytes()`\n    - `send_json()` convenience (optional)\n    - Backpressure semantics: `send_*` is awaitable; buffers are bounded.",
+        "[x] Add `@worker_websocket` decorator (marker only) and discovery:\n    - Identify websocket handlers separately from job functions\n    - Enforce signature: `(ctx: ActionContext, ws: RealtimeSocket, ...injected...) -> Awaitable[None]`.",
+        "[x] Add internal realtime session loop over worker transport:\n    - Extend/define a worker RPC for realtime: Open/Frame/Close messages over the scheduler stream\n    - Map inbound frames to `RealtimeSocket.receive_*` and outbound frames from `RealtimeSocket.send_*`.\n    - Support binary frames as the primary payload; allow tiny JSON control messages (ready/status).",
+        "[x] Injection support for realtime handlers:\n    - Allow websocket handlers to receive injected deps via `typing.Annotated[..., ModelRef(...)]`\n    - Resolve injection once per session (not per frame) and cache for session lifetime.",
+        "[x] Cancellation + cleanup:\n    - If the orchestrator closes/cancels the session, propagate cancellation to tenant handler and close socket\n    - Ensure resources are released after session end.",
+        "[x] Safety limits (defense-in-depth):\n    - Enforce `WORKER_MAX_WS_FRAME_BYTES` and drop/close on oversize frames",
+        "[x] Tests:\n    - Integration smoke: echo handler that sends a ready JSON message then echoes binary frames."
       ],
-      "completed": false
+      "completed": true
     },
     {
       "name": "Alternative backends: ONNX Runtime + TensorRT runtime handles",
       "description": "Add first-class support for non-torch execution backends by injecting backend-specific runtime handles into tenant functions via `typing.Annotated[..., ModelRef(...)]`. Strict artifact boundaries: ONNX uses `.onnx`(+external data) artifacts, TensorRT uses prebuilt `.engine` artifacts with explicit compatibility metadata. No exporting/building on worker boot.",
       "tasks": [
-        "[ ] Packaging extras:\n    - Add `gen-worker[onnxruntime]` (onnxruntime-gpu + minimum helpers)\n    - Add `gen-worker[tensorrt]` (tensorrt python bindings + minimum helpers)\n    - Ensure core package stays lightweight; backend deps are optional extras.",
-        "[ ] Backend runtime handle interfaces (worker-owned):\n    - Define minimal protocols/types for injected handles (e.g. `OrtPipelineLike` / `OrtRuntime`, `TrtRuntime`)\n    - Keep tenant-visible types stable; internal implementation can vary per image/version.",
-        "[ ] Model manager implementations:\n    - ONNX: download/caches ONNX graphs, instantiate and cache `onnxruntime.InferenceSession` (GPU provider), optional warmup\n    - TensorRT: download/caches engine blobs, deserialize engines, allocate buffers, expose a small runner object\n    - Enforce: no export to ONNX and no engine builds at worker startup/invocation.",
-        "[ ] Compatibility gating (TensorRT):\n    - Require artifact metadata (at least cuda_version, tensorrt_version, sm) in the invocation envelope\n    - Fail fast with a safe error if the runtime/host is incompatible with the selected engine artifact.",
-        "[ ] Injection catalog extension:\n    - Allow injection of ONNX runtime handles when parameter type matches (e.g. `ORTStableDiffusionPipeline` or Cozy wrapper)\n    - Allow injection of TensorRT runtime handles (Cozy wrapper types)\n    - Ensure injection is one-time per process/session and reused across invocations where safe.",
-        "[ ] Tests:\n    - Unit test injection selection for a fake ONNX handle and fake TensorRT handle\n    - Unit test compatibility mismatch produces a structured safe error\n    - (Optional) e2e smoke in CPU-only mode with onnxruntime CPU provider stub."
+        "[x] Packaging extras:\n    - Add `gen-worker[onnxruntime]` and `gen-worker[tensorrt]` optional extras (core stays lightweight).",
+        "[x] Backend runtime handle interfaces (worker-owned):\n    - Define minimal stable protocols/types for injected handles (e.g. OrtRuntime/TrtRuntime).",
+        "[x] Injection support:\n    - Use signature-driven injection + loader hooks to build backend-specific runtime handles from `ModelArtifacts`.\n    - Cache injected runtime handles per (model_id, injected type) so creation is one-time per worker process.",
+        "[x] Compatibility gating (TensorRT):\n    - When selecting a `@tensorrt` artifact, enforce basic metadata compatibility (cuda/tensorrt/sm) using `ModelArtifacts.metadata`.\n    - Fail fast with a structured resource error on mismatch.",
+        "[x] Tests:\n    - Unit test loader-hook injection caching\n    - Unit test TensorRT metadata mismatch produces a structured resource error"
       ],
-      "completed": false
+      "completed": true
     },
     {
       "name": "Support orchestrator queue/long-poll API (bytes + multipart inputs)",
@@ -134,14 +132,14 @@
       "completed": true
     },
     {
-      "name": "Example worker functions repo",
-      "description": "Co-evolve /worker-example-functions with python-worker so gen-builder can deploy consistent tenant examples.",
+      "name": "Example worker functions (python-worker/examples)",
+      "description": "Maintain example tenant projects inside the python-worker repo under `python-worker/examples/` so they evolve with the SDK and stay runnable by gen-builder.",
       "tasks": [
-        "[x] Decide on the example project layout (functions module/package, deps via pyproject.toml and/or uv.lock, TOML manifest via cozy.toml)",
-        "[x] Create multiple example subfolders (minimal, image-gen, s3-upload, etc.) under /worker-example-functions",
+        "[x] Decide on the example project layout (functions module/package, deps via pyproject.toml and/or uv.lock, config via [tool.cozy])",
+        "[x] Create multiple example subfolders (minimal, image-gen, etc.) under python-worker/examples",
         "[x] Ensure each example imports gen_worker and uses @worker_function metadata",
         "[x] Enforce dependency policy: no requirements.txt; require pyproject.toml and/or uv.lock (uv-first)",
-        "[x] Add cozy.toml entries to examples (functions.modules, runtime.base_image, optional limits)",
+        "[x] Add [tool.cozy] entries to examples (functions.modules, runtime.base_image, optional limits)",
         "[x] Align dependencies to python-worker SDK version and document how to deploy with gen-builder",
         "[x] Add README per example with inputs/outputs and required env vars"
       ],
@@ -149,10 +147,10 @@
     },
     {
       "name": "Python worker SDK cleanup",
-      "description": "Position python-worker as a pure pip package and move example projects into /worker-example-functions.",
+      "description": "Position python-worker as a pure pip package and keep example projects in python-worker/examples.",
       "tasks": [
         "[x] Remove or relocate python-worker/example-functions and image_gen_example",
-        "[x] Update python-worker README to describe SDK usage and point to /worker-example-functions",
+        "[x] Update python-worker README to describe SDK usage and point to python-worker/examples",
         "[x] Ensure packaging stays intact (pyproject.toml + src/gen_worker)",
         "[x] Add or update minimal docs for decorators, function signature, and dependency policy (pyproject.toml + uv.lock only, cozy.toml manifest)",
         "[x] Document the recommended contract for dynamic checkpoint selection (model family in metadata, model_ref provided at runtime)",
@@ -190,13 +188,24 @@
     },
     {
       "name": "Standardize deployment config in pyproject.toml ([tool.cozy])",
-      "description": "Remove the separate cozy.toml manifest and standardize all tenant deployment configuration under `pyproject.toml` in `[tool.cozy]` (uv-first). Keep docs and examples consistent across python-worker and worker-example-functions.",
+      "description": "Remove the separate cozy.toml manifest and standardize all tenant deployment configuration under `pyproject.toml` in `[tool.cozy]` (uv-first). Keep docs and examples consistent across python-worker and python-worker/examples.",
       "tasks": [
-        "[ ] Update docs:\n    - Update python-worker README and the e2e spec to use `[tool.cozy]` only\n    - Remove any mention of cozy.toml as a supported config path.",
-        "[ ] Update worker-example-functions:\n    - Move any `cozy.toml` settings into `pyproject.toml` under `[tool.cozy]` for each example\n    - Delete `cozy.toml` files from examples (or fail CI if present).",
-        "[ ] Update worker-side config parsing (if any exists):\n    - Ensure no code path attempts to load a separate cozy.toml file\n    - Treat missing `[tool.cozy]` as a hard error when running discovery/build tooling.",
-        "[ ] Add a small validation helper (optional):\n    - A `gen_worker.validate_project()` utility that checks for `[tool.cozy]`, `uv.lock` presence (if required), and rejects requirements.txt/cozy.toml.",
-        "[ ] Tests:\n    - Example projects still import and pass mypy\n    - Any lingering cozy.toml usage is rejected by the validation helper (if added)."
+        "[x] Update docs:\n    - Update python-worker README and the e2e spec to use `[tool.cozy]` only\n    - Remove any mention of cozy.toml as a supported config path.",
+        "[x] Update python-worker/examples:\n    - Ensure all examples use `[tool.cozy]` in `pyproject.toml`\n    - Ensure no cozy.toml files exist in examples.",
+        "[x] Update worker-side config parsing (if any exists):\n    - Ensure no code path attempts to load a separate cozy.toml file\n    - Treat missing `[tool.cozy]` as a hard error when running discovery/build tooling (via validation helper).",
+        "[x] Add a small validation helper (optional):\n    - A `gen_worker.validate_project()` utility that checks for `[tool.cozy]`, `uv.lock` presence (if required), and rejects requirements.txt/cozy.toml.",
+        "[x] Tests:\n    - Any lingering cozy.toml usage is rejected by the validation helper"
+      ],
+      "completed": true
+    },
+    {
+      "name": "Untrusted tenant code: per-run file capability tokens (no static FILE_SERVICE_TOKEN in pods)",
+      "description": "Assume tenant functions can read any env var/file in the container. Remove reliance on long-lived file service tokens inside worker pods. Instead, accept a short-lived, run-scoped file capability JWT from gen-orchestrator for each task/session and use it for all cozy-hub file store reads/writes (inputs/outputs).",
+      "tasks": [
+        "[ ] Extend worker task envelope to include `file_token` (JWT) + `file_base_url` (cozy-hub file API base) and thread it into ActionContext / CozyHubFileClient.",
+        "[ ] Update CozyHubDownloader/ctx.save_* helpers to use the per-run `file_token` (Authorization: Bearer ...) and avoid using env FILE_API_TOKEN for production flows.",
+        "[ ] Ensure the token is tenant-scoped and prefix-scoped (runs/<run_id>/...) and expires quickly; treat auth failures as non-retriable unless token is refreshable.",
+        "[ ] Add tests: task-scoped file token is required when running in \"untrusted\" mode; uploads/downloads succeed for allowed prefixes and fail for disallowed paths."
       ],
       "completed": false
     }

@@ -114,3 +114,22 @@ def type_qualname(t: Any) -> str:
 def is_async_callable(fn: Callable[..., Any]) -> bool:
     return inspect.iscoroutinefunction(fn) or inspect.isasyncgenfunction(fn)
 
+
+_RUNTIME_LOADERS: dict[str, Callable[..., Any]] = {}
+
+
+def register_runtime_loader(runtime_type: Any, loader: Callable[..., Any]) -> None:
+    """
+    Register a tenant-provided loader hook for a custom injected runtime type.
+
+    The worker/model-manager can call these loaders to build a VRAM-resident
+    runtime handle from ModelArtifacts and then cache/inject that handle.
+    """
+    qn = type_qualname(runtime_type)
+    if not callable(loader):
+        raise TypeError("loader must be callable")
+    _RUNTIME_LOADERS[qn] = loader
+
+
+def get_registered_runtime_loader(runtime_type: Any) -> Optional[Callable[..., Any]]:
+    return _RUNTIME_LOADERS.get(type_qualname(runtime_type))

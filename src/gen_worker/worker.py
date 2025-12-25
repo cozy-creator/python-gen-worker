@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import grpc
 import logging
 import time
@@ -18,7 +20,10 @@ import functools
 import typing
 import socket
 import ipaddress
-from typing import Any, Callable, Dict, Optional, TypeVar, Iterator, List, Tuple
+from pathlib import Path
+from dataclasses import dataclass
+import collections.abc as cabc
+from typing import Any, Callable, Dict, Optional, TypeVar, Iterator, List, Tuple, Iterable, get_args, get_origin
 from types import ModuleType
 import hashlib
 import msgspec
@@ -58,6 +63,16 @@ from .errors import CanceledError, FatalError, ResourceError, RetryableError, Va
 from .model_interface import ModelManagementInterface
 from .downloader import CozyHubDownloader, ModelDownloader
 from .types import Asset
+from .injection import (
+    InjectionSpec,
+    ModelArtifacts,
+    ModelRef,
+    ModelRefSource,
+    get_registered_runtime_loader,
+    parse_injection,
+    resolve_loader,
+    type_qualname,
+)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -73,6 +88,108 @@ ActionFunc = Callable[[Any, I], O]
 HEARTBEAT_INTERVAL = 10  # seconds
 
 
+@dataclass(frozen=True)
+class _TaskSpec:
+    name: str
+    func: Callable[..., Any]
+    resources: ResourceRequirements
+    ctx_param: str
+    payload_param: str
+    payload_type: type[msgspec.Struct]
+    output_mode: str  # "single" | "incremental"
+    output_type: Optional[type[msgspec.Struct]] = None
+    delta_type: Optional[type[msgspec.Struct]] = None
+    injections: Tuple[InjectionSpec, ...] = ()
+    input_schema_json: bytes = b""
+    output_schema_json: bytes = b""
+    delta_schema_json: Optional[bytes] = None
+    injection_json: bytes = b""
+
+
+@dataclass(frozen=True)
+class _WebsocketSpec:
+    name: str
+    func: Callable[..., Any]
+    resources: ResourceRequirements
+    ctx_param: str
+    socket_param: str
+    injections: Tuple[InjectionSpec, ...] = ()
+
+
+class RealtimeSocket:
+    """
+    Worker-owned socket interface for realtime handlers (no FastAPI dependency).
+    """
+
+    async def send_bytes(self, data: bytes) -> None:  # pragma: no cover - interface
+        raise NotImplementedError
+
+    async def send_json(self, obj: Any) -> None:  # pragma: no cover - interface
+        raise NotImplementedError
+
+    async def iter_bytes(self) -> Any:  # pragma: no cover - interface
+        raise NotImplementedError
+
+    async def close(self) -> None:  # pragma: no cover - interface
+        raise NotImplementedError
+
+
+@dataclass
+class _RealtimeSessionState:
+    session_id: str
+    spec: _WebsocketSpec
+    ctx: ActionContext
+    loop: asyncio.AbstractEventLoop
+    in_q: "asyncio.Queue[Optional[bytes]]"
+    closed: threading.Event
+
+
+class _RealtimeSocketAdapter(RealtimeSocket):
+    def __init__(self, worker: "Worker", session_id: str, loop: asyncio.AbstractEventLoop, in_q: "asyncio.Queue[Optional[bytes]]") -> None:
+        self._worker = worker
+        self._session_id = session_id
+        self._loop = loop
+        self._in_q = in_q
+        self._closed = False
+
+    async def send_bytes(self, data: bytes) -> None:
+        if self._closed:
+            return
+        self._worker._send_message(
+            pb.WorkerSchedulerMessage(
+                realtime_frame=pb.RealtimeFrame(session_id=self._session_id, data=data, is_text=False)
+            )
+        )
+
+    async def send_json(self, obj: Any) -> None:
+        if self._closed:
+            return
+        data = json.dumps(obj, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        self._worker._send_message(
+            pb.WorkerSchedulerMessage(
+                realtime_frame=pb.RealtimeFrame(session_id=self._session_id, data=data, is_text=True)
+            )
+        )
+
+    async def iter_bytes(self):
+        while True:
+            item = await self._in_q.get()
+            if item is None:
+                break
+            yield item
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            self._worker._send_message(
+                pb.WorkerSchedulerMessage(
+                    realtime_close_cmd=pb.RealtimeCloseCommand(session_id=self._session_id, reason="closed")
+                )
+            )
+        except Exception:
+            pass
 def _encode_ref_for_url(ref: str) -> str:
     ref = ref.strip().lstrip("/")
     parts = [urllib.parse.quote(p, safe="") for p in ref.split("/") if p]
@@ -125,12 +242,13 @@ def _http_request(
     method: str,
     url: str,
     token: str,
+    tenant_id: Optional[str] = None,
     body: Optional[bytes] = None,
     content_type: Optional[str] = None,
 ) -> urllib.request.Request:
     req = urllib.request.Request(url, data=body, method=method)
     req.add_header("Authorization", f"Bearer {token}")
-    tenant_id = os.getenv("TENANT_ID", "").strip()
+    tenant_id = (tenant_id or "").strip() or os.getenv("TENANT_ID", "").strip()
     if tenant_id:
         req.add_header("X-Cozy-Tenant-Id", tenant_id)
     if content_type:
@@ -233,11 +351,15 @@ class ActionContext:
         tenant_id: Optional[str] = None,
         user_id: Optional[str] = None,
         timeout_ms: Optional[int] = None,
+        file_api_base_url: Optional[str] = None,
+        file_api_token: Optional[str] = None,
     ) -> None:
         self._run_id = run_id
         self._tenant_id = tenant_id
         self._user_id = user_id
         self._timeout_ms = timeout_ms
+        self._file_api_base_url = (file_api_base_url or "").strip() or None
+        self._file_api_token = (file_api_token or "").strip() or None
         self._started_at = time.time()
         self._deadline: Optional[float] = None
         if timeout_ms is not None and timeout_ms > 0:
@@ -284,6 +406,16 @@ class ActionContext:
             return torch.device(f"cuda:{torch.cuda.current_device()}")
 
         return torch.device("cpu")
+
+    def _get_file_api_base_url(self) -> str:
+        if self._file_api_base_url:
+            return self._file_api_base_url.rstrip("/")
+        return _require_file_api_base_url()
+
+    def _get_file_api_token(self) -> str:
+        if self._file_api_token:
+            return self._file_api_token
+        return _require_file_api_token()
 
     def time_remaining_s(self) -> Optional[float]:
         if self._deadline is None:
@@ -338,11 +470,18 @@ class ActionContext:
         if not ref.startswith(_default_output_prefix(self.run_id)):
             raise ValueError(f"ref must start with '{_default_output_prefix(self.run_id)}'")
 
-        base = _require_file_api_base_url()
-        token = _require_file_api_token()
+        base = self._get_file_api_base_url()
+        token = self._get_file_api_token()
         url = f"{base}/api/v1/file/{_encode_ref_for_url(ref)}"
         # Default behavior is upsert: PUT to the tenant file store.
-        req = _http_request("PUT", url, token, body=data, content_type="application/octet-stream")
+        req = _http_request(
+            "PUT",
+            url,
+            token,
+            tenant_id=self.tenant_id,
+            body=data,
+            content_type="application/octet-stream",
+        )
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 body = resp.read()
@@ -380,10 +519,17 @@ class ActionContext:
         if not ref.startswith(_default_output_prefix(self.run_id)):
             raise ValueError(f"ref must start with '{_default_output_prefix(self.run_id)}'")
 
-        base = _require_file_api_base_url()
-        token = _require_file_api_token()
+        base = self._get_file_api_base_url()
+        token = self._get_file_api_token()
         url = f"{base}/api/v1/file/{_encode_ref_for_url(ref)}"
-        req = _http_request("POST", url, token, body=data, content_type="application/octet-stream")
+        req = _http_request(
+            "POST",
+            url,
+            token,
+            tenant_id=self.tenant_id,
+            body=data,
+            content_type="application/octet-stream",
+        )
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 body = resp.read()
@@ -488,7 +634,8 @@ class Worker:
 
         logger.info(f"RUNPOD_POD_ID: {self.runpod_pod_id}")
 
-        self._actions: Dict[str, Callable[[ActionContext, Optional[Any], bytes], bytes]] = {}
+        self._task_specs: Dict[str, _TaskSpec] = {}
+        self._ws_specs: Dict[str, _WebsocketSpec] = {}
         self._active_tasks: Dict[str, ActionContext] = {}
         self._active_tasks_lock = threading.Lock()
         self._active_function_counts: Dict[str, int] = {}
@@ -496,7 +643,19 @@ class Worker:
         self._drain_timeout_seconds = int(os.getenv("WORKER_DRAIN_TIMEOUT_SECONDS", "0"))
         self._draining = False
         self._discovered_resources: Dict[str, ResourceRequirements] = {} # Store resources per function
-        self._function_schemas: Dict[str, Tuple[bytes, bytes]] = {}  # func_name -> (input_schema_json, output_schema_json)
+        self._function_schemas: Dict[str, Tuple[bytes, bytes, Optional[bytes], bytes]] = {}  # func_name -> (input_schema_json, output_schema_json, delta_schema_json, injection_json)
+
+        # Custom runtime loader hooks (type qualname -> import path)
+        self._runtime_loaders: Dict[str, str] = {}
+        try:
+            raw = os.getenv("WORKER_RUNTIME_LOADERS_JSON", "").strip()
+            if raw:
+                self._runtime_loaders = json.loads(raw)
+        except Exception as exc:
+            logger.warning("invalid WORKER_RUNTIME_LOADERS_JSON: %s", exc)
+
+        self._custom_runtime_cache: Dict[Tuple[str, str], Any] = {}  # (model_id, injected_type_qualname) -> runtime handle
+        self._custom_runtime_locks: Dict[Tuple[str, str], threading.Lock] = {}
 
         self._gpu_busy_lock = threading.Lock()
         self._is_gpu_busy = False
@@ -512,6 +671,9 @@ class Worker:
 
         self._receive_thread: Optional[threading.Thread] = None
         self._heartbeat_thread: Optional[threading.Thread] = None
+
+        self._realtime_sessions: Dict[str, _RealtimeSessionState] = {}
+        self._realtime_lock = threading.Lock()
 
         self._reconnect_delay_base = max(0, reconnect_delay)
         self._reconnect_delay_max = int(os.getenv("RECONNECT_MAX_DELAY", "60"))
@@ -539,6 +701,9 @@ class Worker:
             if base_url:
                 self._downloader = CozyHubDownloader(base_url, token=token)
         self._supported_model_ids_from_scheduler: Optional[List[str]] = None # To store IDs from scheduler
+        # Signature-driven model selection mapping and allowlist (provided by orchestrator).
+        self._deployment_model_id_by_key: Dict[str, str] = {}
+        self._deployment_allowed_model_ids: Optional[set[str]] = None
         self._model_init_done_event = threading.Event() # To signal model init is complete
 
         if self._model_manager:
@@ -683,115 +848,209 @@ class Worker:
 
 
     def _discover_and_register_functions(self) -> None:
-        """Discover and register functions marked with @worker_function."""
-        logger.info(f"Discovering worker functions in modules: {self.user_module_names}...")
-        discovered_count = 0
+        """Discover and register functions marked with @worker_function / @worker_websocket."""
+        logger.info("Discovering worker handlers in modules: %s...", self.user_module_names)
+        discovered = 0
+
         for module_name in self.user_module_names:
             try:
                 module = importlib.import_module(module_name)
-                logger.debug(f"Inspecting module: {module_name}")
-                for name, obj in inspect.getmembers(module):
-                    if inspect.isfunction(obj) and hasattr(obj, '_is_worker_function'):
-                        if getattr(obj, '_is_worker_function') is True:
-                            # Found a decorated function
-                            original_func = obj # Keep reference to the actual decorated function
-                            func_name = original_func.__name__ # Use the real function name
-
-                            if func_name in self._actions:
-                                logger.warning(f"Function '{func_name}' from module '{module_name}' conflicts with an already registered function. Skipping.")
-                                continue
-
-                            resources: ResourceRequirements = getattr(original_func, '_worker_resources', ResourceRequirements())
-                            self._discovered_resources[func_name] = resources
-
-                            expects_pipeline_flag = resources.expects_pipeline_arg
-                            payload_type = self._infer_payload_type(original_func, expects_pipeline_flag)
-                            return_type = self._infer_return_type(original_func)
-                            if payload_type is None or return_type is None:
-                                logger.error(
-                                    "Skipping function '%s' due to invalid or missing payload type annotation.",
-                                    func_name,
-                                )
-                                continue
-
-                            try:
-                                input_schema = msgspec.json.schema(payload_type)
-                                output_schema = msgspec.json.schema(return_type)
-                                self._function_schemas[func_name] = (
-                                    json.dumps(input_schema, separators=(",", ":"), sort_keys=True).encode("utf-8"),
-                                    json.dumps(output_schema, separators=(",", ":"), sort_keys=True).encode("utf-8"),
-                                )
-                            except Exception as exc:
-                                logger.error("Failed to generate msgspec JSON schema for '%s': %s", func_name, exc)
-                                continue
-
-                            # Create the wrapper for gRPC/msgpack interaction
-                            def create_wrapper(
-                                captured_func: Callable[..., Any],
-                                captured_name: str,
-                                captured_payload_type: type[msgspec.Struct],
-                                captured_return_type: type[msgspec.Struct],
-                                func_expects_pipeline: bool = False,
-                            ) -> Callable[[ActionContext, Optional[Any], bytes], bytes]:
-                                @functools.wraps(captured_func) # Preserve metadata of original user func
-                                def wrapper(ctx: ActionContext, pipeline_instance: Optional[Any], input_bytes: bytes) -> bytes:
-                                    try:
-                                        input_obj = msgspec.msgpack.decode(input_bytes, type=captured_payload_type)
-                                        self._materialize_assets(ctx.run_id, input_obj)
-                                        # Pass the context and deserialized input to the *original* user function
-                                        if func_expects_pipeline: # Only pass pipeline if function expects it
-                                            if pipeline_instance is None:
-                                                err_msg = f"Function '{captured_name}' expected a pipeline argument, but None was provided by the Worker core."
-                                                logger.error(err_msg)
-                                                raise ValueError(err_msg)
-                                            result = captured_func(ctx, pipeline_instance, input_obj)
-                                        else:
-                                            result = captured_func(ctx, input_obj) # For functions not needing a model
-
-                                        if ctx.is_canceled():
-                                             raise InterruptedError("Task was canceled during execution")
-                                        if not isinstance(result, captured_return_type):
-                                            raise TypeError(
-                                                f"Function {captured_name} returned {type(result)!r}, "
-                                                f"expected {captured_return_type!r}"
-                                            )
-                                        # Ensure result is bytes after msgspec msgpack serialization
-                                        # Encode as msgpack *maps* (field names preserved) so
-                                        # downstream services (scheduler/orchestrator) can
-                                        # reliably discover nested Asset objects by key.
-                                        packed_result = msgspec.msgpack.encode(msgspec.to_builtins(result))
-                                        if not isinstance(packed_result, bytes):
-                                            raise TypeError(
-                                                f"Function {captured_name} did not return msgspec-serializable data resulting in bytes"
-                                            )
-                                        return packed_result
-                                    except InterruptedError as ie: # Catch cancellation specifically
-                                        logger.warning(f"Function {captured_name} run {ctx.run_id} was interrupted.")
-                                        raise # Re-raise to be handled in _execute_function
-                                    except Exception as e:
-                                        logger.exception(f"Error during execution of function {captured_name} (run_id: {ctx.run_id})")
-                                        raise # Re-raise to be caught by _execute_function
-                                return wrapper
-
-                            self._actions[func_name] = create_wrapper(
-                                original_func,
-                                func_name,
-                                payload_type,
-                                return_type,
-                                func_expects_pipeline=expects_pipeline_flag,
-                            )
-                            logger.info(f"Registered function: '{func_name}' from module '{module_name}' with resources: {resources}")
-                            discovered_count += 1
-
             except ImportError:
-                logger.error(f"Could not import user module: {module_name}")
-            except Exception as e:
-                logger.exception(f"Error during discovery in module {module_name}: {e}")
+                logger.error("Could not import user module: %s", module_name)
+                continue
 
-        if discovered_count == 0:
-             logger.warning(f"No functions decorated with @worker_function found in specified modules: {self.user_module_names}")
+            for _, obj in inspect.getmembers(module):
+                if not inspect.isfunction(obj):
+                    continue
+
+                if getattr(obj, "_is_worker_function", False) is True:
+                    try:
+                        spec = self._inspect_task_spec(obj)
+                    except Exception as exc:
+                        logger.error("Skipping function '%s': %s", getattr(obj, "__name__", "<unknown>"), exc)
+                        continue
+                    if spec.name in self._task_specs or spec.name in self._ws_specs:
+                        logger.warning("Handler name conflict for '%s'; skipping", spec.name)
+                        continue
+                    self._task_specs[spec.name] = spec
+                    self._discovered_resources[spec.name] = spec.resources
+                    self._function_schemas[spec.name] = (
+                        spec.input_schema_json,
+                        spec.output_schema_json,
+                        spec.delta_schema_json,
+                        spec.injection_json,
+                    )
+                    discovered += 1
+                    logger.info("Registered function: '%s' (%s)", spec.name, spec.output_mode)
+                    continue
+
+                if getattr(obj, "_is_worker_websocket", False) is True:
+                    try:
+                        ws_spec = self._inspect_websocket_spec(obj)
+                    except Exception as exc:
+                        logger.error("Skipping websocket '%s': %s", getattr(obj, "__name__", "<unknown>"), exc)
+                        continue
+                    if ws_spec.name in self._task_specs or ws_spec.name in self._ws_specs:
+                        logger.warning("Handler name conflict for '%s'; skipping", ws_spec.name)
+                        continue
+                    self._ws_specs[ws_spec.name] = ws_spec
+                    self._discovered_resources[ws_spec.name] = ws_spec.resources
+                    discovered += 1
+                    logger.info("Registered websocket: '%s'", ws_spec.name)
+
+        if discovered == 0:
+            logger.warning("No worker handlers found in modules: %s", self.user_module_names)
         else:
-             logger.info(f"Discovery complete. Found {discovered_count} worker functions.")
+            logger.info("Discovery complete. Found %d handlers.", discovered)
+
+    def _inspect_task_spec(self, func: Callable[..., Any]) -> _TaskSpec:
+        func_name = func.__name__
+        resources: ResourceRequirements = getattr(func, "_worker_resources", ResourceRequirements())
+
+        try:
+            hints = typing.get_type_hints(func, globalns=func.__globals__, include_extras=True)
+        except Exception as exc:
+            raise ValueError(f"failed to resolve type hints: {exc}")
+
+        sig = inspect.signature(func)
+        params = list(sig.parameters.values())
+        if not params:
+            raise ValueError("must accept ctx: ActionContext as first arg")
+
+        ctx_name = params[0].name
+        ctx_type = hints.get(ctx_name)
+        if ctx_type is not ActionContext:
+            raise ValueError("first argument must be ctx: ActionContext")
+
+        injections: list[InjectionSpec] = []
+        payload_type: Optional[type[msgspec.Struct]] = None
+        payload_param: Optional[str] = None
+        for p in params[1:]:
+            ann = hints.get(p.name)
+            if ann is None:
+                raise ValueError(f"missing type annotation for param: {p.name}")
+            inj = parse_injection(ann)
+            if inj is not None:
+                base_t, model_ref = inj
+                injections.append(InjectionSpec(param_name=p.name, param_type=base_t, model_ref=model_ref))
+                continue
+            if isinstance(ann, type) and issubclass(ann, msgspec.Struct):
+                if payload_type is not None:
+                    raise ValueError("must accept exactly one msgspec.Struct payload arg")
+                payload_type = ann
+                payload_param = p.name
+                continue
+            raise ValueError(f"unsupported param type (must be payload msgspec.Struct or Annotated injection): {p.name}={ann!r}")
+
+        if payload_type is None or payload_param is None:
+            raise ValueError("must accept exactly one msgspec.Struct payload arg")
+
+        ret = hints.get("return")
+        if ret is None:
+            raise ValueError("missing return type annotation")
+
+        output_mode = "single"
+        output_type: Optional[type[msgspec.Struct]] = None
+        delta_type: Optional[type[msgspec.Struct]] = None
+
+        if isinstance(ret, type) and issubclass(ret, msgspec.Struct):
+            output_type = ret
+        else:
+            origin = get_origin(ret)
+            if origin in (Iterator, Iterable, cabc.Iterator, cabc.Iterable):
+                args = get_args(ret)
+                if len(args) != 1:
+                    raise ValueError("incremental output return type must be Iterator[DeltaStruct]")
+                dt = args[0]
+                if not isinstance(dt, type) or not issubclass(dt, msgspec.Struct):
+                    raise ValueError("delta type must be msgspec.Struct")
+                output_mode = "incremental"
+                delta_type = dt
+                output_type = dt  # best-effort schema until proto adds delta schema field
+            else:
+                raise ValueError("return type must be msgspec.Struct or Iterator[msgspec.Struct]")
+
+        input_schema = msgspec.json.schema(payload_type)
+        output_schema = msgspec.json.schema(output_type)
+        input_schema_json = json.dumps(input_schema, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        output_schema_json = json.dumps(output_schema, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        delta_schema_json = None
+        if delta_type is not None:
+            delta_schema_json = json.dumps(msgspec.json.schema(delta_type), separators=(",", ":"), sort_keys=True).encode(
+                "utf-8"
+            )
+
+        injection_payload = [
+            {
+                "param": inj.param_name,
+                "type": type_qualname(inj.param_type),
+                "model_ref": {"source": inj.model_ref.source.value, "key": inj.model_ref.key},
+            }
+            for inj in injections
+        ]
+        injection_json = json.dumps(injection_payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+
+        return _TaskSpec(
+            name=func_name,
+            func=func,
+            resources=resources,
+            ctx_param=ctx_name,
+            payload_param=payload_param,
+            payload_type=payload_type,
+            output_mode=output_mode,
+            output_type=output_type,
+            delta_type=delta_type,
+            injections=tuple(injections),
+            input_schema_json=input_schema_json,
+            output_schema_json=output_schema_json,
+            delta_schema_json=delta_schema_json,
+            injection_json=injection_json,
+        )
+
+    def _inspect_websocket_spec(self, func: Callable[..., Any]) -> _WebsocketSpec:
+        func_name = func.__name__
+        resources: ResourceRequirements = getattr(func, "_worker_resources", ResourceRequirements())
+        if not inspect.iscoroutinefunction(func):
+            raise ValueError("websocket handler must be async def")
+
+        try:
+            hints = typing.get_type_hints(func, globalns=func.__globals__, include_extras=True)
+        except Exception as exc:
+            raise ValueError(f"failed to resolve type hints: {exc}")
+
+        sig = inspect.signature(func)
+        params = list(sig.parameters.values())
+        if len(params) < 2:
+            raise ValueError("websocket handler must accept (ctx: ActionContext, sock: RealtimeSocket, ...)")
+
+        ctx_name = params[0].name
+        if hints.get(ctx_name) is not ActionContext:
+            raise ValueError("first argument must be ctx: ActionContext")
+
+        # We do not enforce a concrete socket type here; it is worker-owned and may
+        # be provided by the runtime. We only validate that the param exists.
+        socket_name = params[1].name
+        injections: list[InjectionSpec] = []
+        for p in params[2:]:
+            ann = hints.get(p.name)
+            if ann is None:
+                raise ValueError(f"missing type annotation for param: {p.name}")
+            inj = parse_injection(ann)
+            if inj is None:
+                raise ValueError("websocket extra params must be Annotated injections")
+            base_t, model_ref = inj
+            if model_ref.source == ModelRefSource.PAYLOAD:
+                raise ValueError("websocket handlers cannot use ModelRef(PAYLOAD, ...) (no payload for selection)")
+            injections.append(InjectionSpec(param_name=p.name, param_type=base_t, model_ref=model_ref))
+
+        return _WebsocketSpec(
+            name=func_name,
+            func=func,
+            resources=resources,
+            ctx_param=ctx_name,
+            socket_param=socket_name,
+            injections=tuple(injections),
+        )
 
     def _infer_payload_type(
         self,
@@ -864,32 +1123,33 @@ class Worker:
         else:
             logger.warning("Attempted to send message while worker is stopping or stopped.")
 
-    def _materialize_assets(self, run_id: str, obj: Any) -> None:
+    def _materialize_assets(self, ctx: ActionContext, obj: Any) -> None:
         if isinstance(obj, Asset):
-            self._materialize_asset(run_id, obj)
+            self._materialize_asset(ctx, obj)
             return
         if isinstance(obj, list):
             for it in obj:
-                self._materialize_assets(run_id, it)
+                self._materialize_assets(ctx, it)
             return
         if isinstance(obj, dict):
             for it in obj.values():
-                self._materialize_assets(run_id, it)
+                self._materialize_assets(ctx, it)
             return
         fields = getattr(obj, "__struct_fields__", None)
         if fields and isinstance(fields, (tuple, list)):
             for name in fields:
                 try:
-                    self._materialize_assets(run_id, getattr(obj, name))
+                    self._materialize_assets(ctx, getattr(obj, name))
                 except Exception:
                     continue
 
-    def _materialize_asset(self, run_id: str, asset: Asset) -> None:
+    def _materialize_asset(self, ctx: ActionContext, asset: Asset) -> None:
         if asset.local_path:
             return
         ref = (asset.ref or "").strip()
         if not ref:
             return
+        run_id = ctx.run_id
 
         base_dir = os.getenv("WORKER_RUN_DIR", "/tmp/cozy").rstrip("/")
         local_inputs_dir = os.path.join(base_dir, run_id, "inputs")
@@ -916,11 +1176,11 @@ class Worker:
             return
 
         # Cozy Hub file ref (tenant scoped) - use orchestrator file API with HEAD+cache.
-        base = _require_file_api_base_url()
-        token = _require_file_api_token()
+        base = ctx._get_file_api_base_url()
+        token = ctx._get_file_api_token()
         url = f"{base}/api/v1/file/{_encode_ref_for_url(ref)}"
 
-        head_req = _http_request("HEAD", url, token)
+        head_req = _http_request("HEAD", url, token, tenant_id=ctx.tenant_id)
         with urllib.request.urlopen(head_req, timeout=10) as resp:
             if resp.status < 200 or resp.status >= 300:
                 raise RuntimeError(f"failed to stat asset ({resp.status})")
@@ -947,7 +1207,7 @@ class Worker:
         cache_path = os.path.join(cache_dir, cache_name)
 
         if not os.path.exists(cache_path):
-            get_req = _http_request("GET", url, token)
+            get_req = _http_request("GET", url, token, tenant_id=ctx.tenant_id)
             with urllib.request.urlopen(get_req, timeout=30) as resp:
                 if resp.status < 200 or resp.status >= 300:
                     raise RuntimeError(f"failed to download asset ({resp.status})")
@@ -976,7 +1236,7 @@ class Worker:
 
         asset.local_path = local_path
         if not asset.tenant_id:
-            asset.tenant_id = self.tenant_id
+            asset.tenant_id = ctx.tenant_id or self.tenant_id
         asset.mime_type = mime or None
         asset.size_bytes = size or None
         asset.sha256 = sha256_hex or None
@@ -1208,13 +1468,17 @@ class Worker:
                 cuda_version = os.getenv("CUDA_VERSION", "").strip() or os.getenv("NVIDIA_CUDA_VERSION", "").strip()
 
             function_schemas = []
-            for fname, (in_schema, out_schema) in self._function_schemas.items():
+            for fname, (in_schema, out_schema, _delta_schema, inj_json) in self._function_schemas.items():
                 try:
+                    spec = self._task_specs.get(fname)
+                    incremental = bool(spec and spec.output_mode == "incremental")
                     function_schemas.append(
                         pb.FunctionSchema(
                             name=fname,
                             input_schema_json=in_schema,
                             output_schema_json=out_schema,
+                            injection_json=inj_json,
+                            incremental_output=incremental,
                         )
                     )
                 except Exception:
@@ -1238,7 +1502,7 @@ class Worker:
                 function_concurrency=function_concurrency,
                 cuda_version=cuda_version,
                 torch_version=torch_version,
-                available_functions=list(self._actions.keys()),
+                available_functions=list(dict.fromkeys(list(self._task_specs.keys()) + list(self._ws_specs.keys()))),
                 available_models=vram_models,
                 supports_model_loading=supports_model_loading_flag,
                 function_schemas=function_schemas,
@@ -1478,11 +1742,23 @@ class Worker:
         elif msg_type == 'interrupt_run_cmd':
             run_id = message.interrupt_run_cmd.run_id
             self._handle_interrupt_request(run_id)
+        elif msg_type == "realtime_open_cmd":
+            self._handle_realtime_open_cmd(message.realtime_open_cmd)
+        elif msg_type == "realtime_frame":
+            self._handle_realtime_frame(message.realtime_frame)
+        elif msg_type == "realtime_close_cmd":
+            self._handle_realtime_close_cmd(message.realtime_close_cmd)
         # Add handling for other message types if needed (e.g., config updates)
         elif msg_type == 'deployment_model_config':
             if self._model_manager:
                 logger.info(f"Received DeploymentModelConfig: {message.deployment_model_config.supported_model_ids}")
                 self._supported_model_ids_from_scheduler = list(message.deployment_model_config.supported_model_ids)
+                try:
+                    # Optional label->id mapping for signature-driven model selection.
+                    self._deployment_model_id_by_key = dict(message.deployment_model_config.model_id_by_key)  # type: ignore[attr-defined]
+                except Exception:
+                    self._deployment_model_id_by_key = {}
+                self._deployment_allowed_model_ids = set(self._supported_model_ids_from_scheduler)
                 self._model_init_done_event.clear() # Clear before starting new init
                 model_init_thread = threading.Thread(target=self._process_deployment_config_async_wrapper, daemon=True)
                 model_init_thread.start()
@@ -1558,14 +1834,16 @@ class Worker:
         timeout_ms = int(getattr(request, "timeout_ms", 0) or 0)
         tenant_id = str(getattr(request, "tenant_id", "") or "") or (self.tenant_id or "")
         user_id = str(getattr(request, "user_id", "") or "")
+        file_base_url = str(getattr(request, "file_base_url", "") or "")
+        file_token = str(getattr(request, "file_token", "") or "")
 
         if request.required_models and len(request.required_models) > 0:
             required_model_id_for_exec = request.required_models[0]
 
         logger.info(f"Received Task request: run_id={run_id}, function={function_name}, model='{required_model_id_for_exec or 'None'}'")
 
-        func_wrapper = self._actions.get(function_name)
-        if not func_wrapper:
+        spec = self._task_specs.get(function_name)
+        if not spec:
             error_msg = f"Unknown function requested: {function_name}"
             logger.error(error_msg)
             self._send_task_result(run_id, False, None, "internal", False, "internal error", error_msg)
@@ -1587,6 +1865,8 @@ class Worker:
             tenant_id=tenant_id or None,
             user_id=user_id or None,
             timeout_ms=timeout_ms if timeout_ms > 0 else None,
+            file_api_base_url=file_base_url or None,
+            file_api_token=file_token or None,
         )
         # Add to active tasks *before* starting thread
         with self._active_tasks_lock:
@@ -1613,8 +1893,8 @@ class Worker:
 
         # Execute function in a separate thread to avoid blocking the receive loop
         thread = threading.Thread(
-            target=self._execute_function,
-            args=(ctx, function_name, func_wrapper, input_payload, required_model_id_for_exec),
+            target=self._execute_task,
+            args=(ctx, spec, input_payload),
             daemon=True,
         )
         thread.start()
@@ -1629,113 +1909,426 @@ class Worker:
             else:
                 logger.warning(f"Could not interrupt task {run_id}: Not found in active tasks.")
 
-    def _execute_function(
+    def _handle_realtime_open_cmd(self, cmd: Any) -> None:
+        session_id = str(getattr(cmd, "session_id", "") or "")
+        function_name = str(getattr(cmd, "function_name", "") or "")
+        if not session_id or not function_name:
+            return
+        spec = self._ws_specs.get(function_name)
+        if spec is None:
+            self._send_message(
+                pb.WorkerSchedulerMessage(
+                    realtime_close_cmd=pb.RealtimeCloseCommand(session_id=session_id, reason="unknown_function")
+                )
+            )
+            return
+
+        tenant_id = str(getattr(cmd, "tenant_id", "") or "") or (self.tenant_id or "")
+        user_id = str(getattr(cmd, "user_id", "") or "")
+        timeout_ms = int(getattr(cmd, "timeout_ms", 0) or 0) or None
+        ctx = ActionContext(
+            session_id,
+            emitter=self._emit_progress_event,
+            tenant_id=tenant_id or None,
+            user_id=user_id or None,
+            timeout_ms=timeout_ms,
+        )
+
+        max_frame = int(os.getenv("WORKER_MAX_WS_FRAME_BYTES", "0") or 0)
+
+        def runner() -> None:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            in_q: asyncio.Queue[Optional[bytes]] = asyncio.Queue(maxsize=16)
+            sock = _RealtimeSocketAdapter(self, session_id, loop, in_q)
+            closed = threading.Event()
+            st = _RealtimeSessionState(session_id=session_id, spec=spec, ctx=ctx, loop=loop, in_q=in_q, closed=closed)
+            with self._realtime_lock:
+                self._realtime_sessions[session_id] = st
+
+            async def run_handler() -> None:
+                # Build kwargs for handler.
+                kwargs: Dict[str, Any] = {spec.ctx_param: ctx, spec.socket_param: sock}
+                required_models = list(getattr(cmd, "required_models", []) or [])
+                for idx, inj in enumerate(spec.injections):
+                    model_id = ""
+                    if idx < len(required_models) and str(required_models[idx]).strip():
+                        raw = str(required_models[idx]).strip()
+                        model_id = self._deployment_model_id_by_key.get(raw, raw)
+                    elif inj.model_ref.source == ModelRefSource.DEPLOYMENT and inj.model_ref.key.strip():
+                        raw = inj.model_ref.key.strip()
+                        model_id = self._deployment_model_id_by_key.get(raw, raw)
+                    if not model_id:
+                        raise ValueError(f"missing resolved model id for injection param: {inj.param_name}")
+                    self._enforce_model_allowlist(model_id, inj)
+                    kwargs[inj.param_name] = self._resolve_injected_value(ctx, inj.param_type, model_id, inj)
+                await spec.func(**kwargs)
+
+            try:
+                loop.run_until_complete(run_handler())
+                self._send_message(
+                    pb.WorkerSchedulerMessage(
+                        realtime_close_cmd=pb.RealtimeCloseCommand(session_id=session_id, reason="completed")
+                    )
+                )
+            except Exception as exc:
+                self._send_message(
+                    pb.WorkerSchedulerMessage(
+                        realtime_close_cmd=pb.RealtimeCloseCommand(session_id=session_id, reason=f"error:{type(exc).__name__}")
+                    )
+                )
+            finally:
+                closed.set()
+                try:
+                    loop.call_soon_threadsafe(in_q.put_nowait, None)
+                except Exception:
+                    pass
+                with self._realtime_lock:
+                    self._realtime_sessions.pop(session_id, None)
+                try:
+                    loop.stop()
+                except Exception:
+                    pass
+                try:
+                    loop.close()
+                except Exception:
+                    pass
+
+        t = threading.Thread(target=runner, daemon=True)
+        t.start()
+
+    def _handle_realtime_frame(self, frame: Any) -> None:
+        session_id = str(getattr(frame, "session_id", "") or "")
+        data = bytes(getattr(frame, "data", b"") or b"")
+        if not session_id:
+            return
+
+        max_frame = int(os.getenv("WORKER_MAX_WS_FRAME_BYTES", "0") or 0)
+        if max_frame > 0 and len(data) > max_frame:
+            self._send_message(
+                pb.WorkerSchedulerMessage(
+                    realtime_close_cmd=pb.RealtimeCloseCommand(session_id=session_id, reason="frame_too_large")
+                )
+            )
+            return
+
+        with self._realtime_lock:
+            st = self._realtime_sessions.get(session_id)
+        if st is None:
+            return
+        try:
+            st.loop.call_soon_threadsafe(st.in_q.put_nowait, data)
+        except Exception:
+            pass
+
+    def _handle_realtime_close_cmd(self, cmd: Any) -> None:
+        session_id = str(getattr(cmd, "session_id", "") or "")
+        if not session_id:
+            return
+        with self._realtime_lock:
+            st = self._realtime_sessions.get(session_id)
+        if st is None:
+            return
+        st.ctx.cancel()
+        try:
+            st.loop.call_soon_threadsafe(st.in_q.put_nowait, None)
+        except Exception:
+            pass
+
+    def _execute_task(
         self,
         ctx: ActionContext,
-        function_name: str,
-        func_to_execute: Callable[[ActionContext, Optional[Any], bytes], bytes],
+        spec: _TaskSpec,
         input_payload: bytes,
-        required_model_id: str,
     ) -> None:
-        """Execute the registered function and send the result/error back."""
+        """Execute a discovered task handler and send result/events back."""
         run_id = ctx.run_id
         output_payload: Optional[bytes] = None
         error_type: str = ""
         safe_message: str = ""
         error_message: str = ""  # internal/legacy
+        retryable = False
         success = False
 
-        # Determine if this function requires GPU and manage worker's GPU state
-        func_requires_gpu = False
-        resource_req = self._discovered_resources.get(function_name)
-        if resource_req:
-            func_requires_gpu = resource_req.requires_gpu
-            func_expects_pipeline = resource_req.expects_pipeline_arg
-
-        # Variable to track if this specific thread execution set the GPU busy
         this_thread_set_gpu_busy = False
-        if func_requires_gpu:
-            with self._gpu_busy_lock: # Lock to check and set self._is_gpu_busy atomically
+        if spec.resources.requires_gpu:
+            with self._gpu_busy_lock:
                 if not self._is_gpu_busy:
                     self._is_gpu_busy = True
                     this_thread_set_gpu_busy = True
-                    logger.info(f"Worker GPU marked as BUSY by task {run_id} ({function_name}).")
-                else:
-                    logger.warning(f"Task {run_id} ({function_name}) requires GPU, but worker GPU was already marked busy. Proceeding...")
+                    logger.info("Worker GPU marked BUSY by %s (%s).", run_id, spec.name)
 
-        active_pipeline_instance = None # To hold the pipeline for the user function
         try:
             if ctx.is_canceled():
                 raise CanceledError("canceled")
-            
-            if func_expects_pipeline:
-                if not required_model_id and resource_req and resource_req.model_name:
-                    required_model_id = str(resource_req.model_name)
-                if not required_model_id:
-                    raise ValueError(f"Function '{function_name}' expects a pipeline argument, but no model ID was provided.")
-                
-                if not self._model_manager:
-                    raise RuntimeError(f"Function '{function_name}' expects a pipeline argument, but no model manager configured on worker.")
-                
-                if not self._model_init_done_event.is_set():
-                    logger.info(f"Task {run_id} ({function_name}) waiting for initial model setup...")
-                    if not self._model_init_done_event.wait(timeout=300.0): # 5 min timeout
-                        raise TimeoutError(f"Timeout waiting for model initialization for task {run_id}")
-                    logger.info(f"Initial model setup complete. Proceeding for task {run_id}.")
-                
-                logger.info(f"Task {run_id} ({function_name}) getting active pipeline for model '{required_model_id}'...")
-                # get_active_pipeline is async
-                active_pipeline_instance = asyncio.run(self._model_manager.get_active_pipeline(required_model_id))
-                if not active_pipeline_instance:
-                    raise RuntimeError(f"ModelManager failed to provide active pipeline for '{required_model_id}' for task {run_id}.")
-                
-                logger.info(f"Task {run_id} ({function_name}) obtained pipeline for model '{required_model_id}'.")
 
-            # Execute the function wrapper (which handles deserialization/serialization)
-            output_payload = func_to_execute(ctx, active_pipeline_instance, input_payload)
-            # Check for cancellation *during* execution (func should check ctx.is_canceled)
+            # Decode payload strictly.
+            input_obj = msgspec.msgpack.decode(input_payload, type=spec.payload_type)
+            self._materialize_assets(ctx, input_obj)
+
+            # Resolve injected args.
+            call_kwargs: Dict[str, Any] = {}
+            call_kwargs[spec.ctx_param] = ctx
+            call_kwargs[spec.payload_param] = input_obj
+
+            for inj in spec.injections:
+                model_id = self._resolve_model_id_for_injection(inj, payload=input_obj)
+                call_kwargs[inj.param_name] = self._resolve_injected_value(ctx, inj.param_type, model_id, inj)
+
+            # Invoke.
+            if inspect.iscoroutinefunction(spec.func):
+                result = asyncio.run(spec.func(**call_kwargs))
+            elif inspect.isasyncgenfunction(spec.func):
+                result = spec.func(**call_kwargs)
+            else:
+                result = spec.func(**call_kwargs)
+
             if ctx.is_canceled():
                 raise CanceledError("canceled")
 
-            if output_payload is not None and self.max_output_bytes > 0:
-                if len(output_payload) > self.max_output_bytes:
+            if spec.output_mode == "single":
+                if not isinstance(result, spec.output_type):
+                    raise TypeError(f"Function {spec.name} returned {type(result)!r}, expected {spec.output_type!r}")
+                output_payload = msgspec.msgpack.encode(msgspec.to_builtins(result))
+                if self.max_output_bytes > 0 and len(output_payload) > self.max_output_bytes:
                     raise ValueError(f"Output payload too large: {len(output_payload)} bytes (max {self.max_output_bytes})")
+                success = True
+            else:
+                # Incremental output: the function returns an iterator of delta structs.
+                max_delta_bytes = int(os.getenv("WORKER_MAX_OUTPUT_DELTA_BYTES", "65536"))
+                max_events = int(os.getenv("WORKER_MAX_OUTPUT_DELTA_EVENTS", "0"))
+                count = 0
 
-            success = True
-            logger.info(f"Task {run_id} completed successfully.")
+                def emit_delta(delta_obj: msgspec.Struct) -> None:
+                    nonlocal count
+                    payload = msgspec.to_builtins(delta_obj)
+                    raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+                    if max_delta_bytes > 0 and len(raw) > max_delta_bytes:
+                        raw = json.dumps({"truncated": True}, separators=(",", ":"), sort_keys=True).encode("utf-8")
+                    self._send_message(
+                        pb.WorkerSchedulerMessage(
+                            worker_event=pb.WorkerEvent(run_id=run_id, event_type="output.delta", payload_json=raw)
+                        )
+                    )
+                    count += 1
+
+                iterator_obj = result
+
+                async def consume_async() -> None:
+                    nonlocal count
+                    async for item in iterator_obj:
+                        if ctx.is_canceled():
+                            raise CanceledError("canceled")
+                        if not isinstance(item, spec.delta_type):
+                            raise TypeError(f"delta item type {type(item)!r} != {spec.delta_type!r}")
+                        emit_delta(item)
+                        if max_events > 0 and count >= max_events:
+                            break
+
+                if hasattr(iterator_obj, "__aiter__"):
+                    asyncio.run(consume_async())
+                else:
+                    if not isinstance(iterator_obj, cabc.Iterator) and not isinstance(iterator_obj, cabc.Iterable):
+                        raise TypeError("incremental output functions must return an iterator/iterable")
+
+                    for item in iterator_obj:
+                        if ctx.is_canceled():
+                            raise CanceledError("canceled")
+                        if not isinstance(item, spec.delta_type):
+                            raise TypeError(f"delta item type {type(item)!r} != {spec.delta_type!r}")
+                        emit_delta(item)
+                        if max_events > 0 and count >= max_events:
+                            break
+
+                # Optionally emit completion marker.
+                self._send_message(
+                    pb.WorkerSchedulerMessage(
+                        worker_event=pb.WorkerEvent(run_id=run_id, event_type="output.completed", payload_json=b"{}")
+                    )
+                )
+                output_payload = b""
+                success = True
+
+            logger.info("Task %s completed successfully.", run_id)
 
         except Exception as e:
             error_type, retryable, safe_message, error_message = self._map_exception(e)
-            if error_type == "canceled":
-                logger.warning(f"Task {run_id} was canceled: {safe_message}")
-            elif retryable:
-                logger.error(f"Task {run_id} ({function_name}) retryable failure: {safe_message}")
-            else:
-                logger.exception(f"Error executing function for run_id={run_id}: {safe_message}")
+            if spec.output_mode == "incremental":
+                try:
+                    payload = json.dumps({"error_type": error_type, "message": safe_message}, separators=(",", ":")).encode("utf-8")
+                    self._send_message(
+                        pb.WorkerSchedulerMessage(
+                            worker_event=pb.WorkerEvent(run_id=run_id, event_type="output.error", payload_json=payload)
+                        )
+                    )
+                except Exception:
+                    pass
             success = False
         finally:
-            # Release the GPU if this thread set it busy
             if this_thread_set_gpu_busy:
-                with self._gpu_busy_lock: # Lock to set self._is_gpu_busy
+                with self._gpu_busy_lock:
                     self._is_gpu_busy = False
-                logger.info(f"Worker GPU marked as NOT BUSY by task {run_id} ({function_name}).")
+                logger.info("Worker GPU marked NOT BUSY by %s (%s).", run_id, spec.name)
 
-            # Always send a result back, regardless of success, failure, or cancellation
-            self._send_task_result(run_id, success, output_payload, error_type, retryable if not success else False, safe_message, error_message)
-            # Remove from active tasks *after* sending result
+            self._send_task_result(run_id, success, output_payload, error_type, bool(retryable), safe_message, error_message)
+
             with self._active_tasks_lock:
-                if run_id in self._active_tasks:
-                    del self._active_tasks[run_id]
-                resource_req = self._discovered_resources.get(function_name)
-                func_limit = resource_req.max_concurrency if resource_req and resource_req.max_concurrency else 0
+                self._active_tasks.pop(run_id, None)
+                func_limit = spec.resources.max_concurrency or 0
                 if func_limit > 0:
-                    current = self._active_function_counts.get(function_name, 0) - 1
+                    current = self._active_function_counts.get(spec.name, 0) - 1
                     if current <= 0:
-                        self._active_function_counts.pop(function_name, None)
+                        self._active_function_counts.pop(spec.name, None)
                     else:
-                        self._active_function_counts[function_name] = current
-                # else: # Might have been removed by stop() already
-                     # logger.warning(f"Task {run_id} not found in active tasks during cleanup.")
+                        self._active_function_counts[spec.name] = current
+
+    def _resolve_injected_value(self, ctx: ActionContext, requested_type: Any, model_id: str, inj: InjectionSpec) -> Any:
+        # Artifacts injection (paths only).
+        if requested_type is ModelArtifacts:
+            return self._resolve_model_artifacts(model_id)
+
+        # Custom runtime handle via loader hooks (type name -> loader callable).
+        qn = type_qualname(requested_type)
+        loader_path = self._runtime_loaders.get(qn)
+        if loader_path:
+            key = (model_id, qn)
+            lock = self._custom_runtime_locks.setdefault(key, threading.Lock())
+            with lock:
+                cached = self._custom_runtime_cache.get(key)
+                if cached is not None:
+                    return cached
+                artifacts = self._resolve_model_artifacts(model_id)
+                self._enforce_backend_compatibility(model_id, artifacts)
+                loader = resolve_loader(loader_path)
+                runtime = loader(ctx, artifacts)
+                self._custom_runtime_cache[key] = runtime
+                return runtime
+
+        reg = get_registered_runtime_loader(requested_type)
+        if reg is not None:
+            key = (model_id, qn)
+            lock = self._custom_runtime_locks.setdefault(key, threading.Lock())
+            with lock:
+                cached = self._custom_runtime_cache.get(key)
+                if cached is not None:
+                    return cached
+                artifacts = self._resolve_model_artifacts(model_id)
+                self._enforce_backend_compatibility(model_id, artifacts)
+                runtime = reg(ctx, artifacts)
+                self._custom_runtime_cache[key] = runtime
+                return runtime
+
+        # diffusers pipeline injection via existing model manager (torch-only).
+        if self._model_manager is not None:
+            try:
+                pipe = asyncio.run(self._model_manager.get_active_pipeline(model_id))
+                if pipe is not None:
+                    return pipe
+            except Exception:
+                pass
+
+        # Transformers-style injection (AutoModel/AutoProcessor/etc) and any other
+        # libraries with a `from_pretrained` factory.
+        # We treat these as worker-owned cached handles: load once, reuse across invocations.
+        if hasattr(requested_type, "from_pretrained") and callable(getattr(requested_type, "from_pretrained", None)):
+            qn = type_qualname(requested_type)
+            key = (model_id, qn)
+            lock = self._custom_runtime_locks.setdefault(key, threading.Lock())
+            with lock:
+                cached = self._custom_runtime_cache.get(key)
+                if cached is not None:
+                    return cached
+                obj = requested_type.from_pretrained(model_id)  # type: ignore[attr-defined]
+                # Best-effort move to worker device if supported.
+                try:
+                    if torch is not None and hasattr(obj, "to") and callable(getattr(obj, "to", None)):
+                        obj = obj.to(str(ctx.device))
+                except Exception:
+                    pass
+                self._custom_runtime_cache[key] = obj
+                return obj
+
+        raise ValueError(f"no injection provider for type {qn} (model_id={model_id})")
+
+    def _resolve_model_id_for_injection(self, inj: InjectionSpec, payload: msgspec.Struct) -> str:
+        if inj.model_ref.source == ModelRefSource.DEPLOYMENT:
+            raw = inj.model_ref.key.strip()
+            if not raw:
+                raise ValueError(f"empty deployment ModelRef for injection param: {inj.param_name}")
+            model_id = self._deployment_model_id_by_key.get(raw, raw)
+            self._enforce_model_allowlist(model_id, inj)
+            return model_id
+
+        if inj.model_ref.source == ModelRefSource.PAYLOAD:
+            field = inj.model_ref.key.strip()
+            if not field:
+                raise ValueError(f"empty payload ModelRef for injection param: {inj.param_name}")
+            try:
+                chosen = getattr(payload, field)
+            except Exception:
+                raise ValueError(f"missing payload field for model selection: {field!r}") from None
+            if chosen is None:
+                raise ValueError(f"payload field {field!r} is null; expected a model key")
+            if not isinstance(chosen, str):
+                raise ValueError(f"payload field {field!r} must be a string (model key), got {type(chosen)!r}")
+            key = chosen.strip()
+            if not key:
+                raise ValueError(f"payload field {field!r} is empty; expected a model key")
+            model_id = self._deployment_model_id_by_key.get(key, key)
+            self._enforce_model_allowlist(model_id, inj)
+            return model_id
+
+        raise ValueError(f"unknown ModelRef source: {inj.model_ref.source!r}")
+
+    def _enforce_model_allowlist(self, model_id: str, inj: InjectionSpec) -> None:
+        allowed = self._deployment_allowed_model_ids
+        if allowed is None:
+            return
+        if model_id not in allowed:
+            raise ValueError(f"model_id not allowed for deployment: {model_id!r} (injection param {inj.param_name})")
+
+    def _enforce_backend_compatibility(self, model_id: str, artifacts: ModelArtifacts) -> None:
+        # Minimal TensorRT compatibility gating based on artifact metadata.
+        # We key off a conventional "@tensorrt" suffix in the model id.
+        if "@tensorrt" not in model_id:
+            return
+
+        meta = dict(artifacts.metadata or {})
+        cuda = str(meta.get("cuda_version") or "").strip()
+        trt = str(meta.get("tensorrt_version") or "").strip()
+        sm = str(meta.get("sm") or "").strip()
+        if not cuda or not trt or not sm:
+            raise ResourceError("incompatible tensorrt engine (missing metadata)")
+
+        host_cuda = (os.getenv("WORKER_CUDA_VERSION") or os.getenv("CUDA_VERSION") or os.getenv("NVIDIA_CUDA_VERSION") or "").strip()
+        host_trt = (os.getenv("WORKER_TENSORRT_VERSION") or "").strip()
+        host_sm = (os.getenv("WORKER_SM") or "").strip()
+
+        if host_cuda and host_cuda != cuda:
+            raise ResourceError("incompatible tensorrt engine (cuda mismatch)")
+        if host_trt and host_trt != trt:
+            raise ResourceError("incompatible tensorrt engine (tensorrt mismatch)")
+        if host_sm and host_sm != sm:
+            raise ResourceError("incompatible tensorrt engine (sm mismatch)")
+
+    def _resolve_model_artifacts(self, model_id: str) -> ModelArtifacts:
+        # Allow deployments to define artifact paths via env for now.
+        # This will be replaced by orchestrator-provided artifact refs/mappings.
+        raw = os.getenv("WORKER_MODEL_ARTIFACTS_JSON", "").strip()
+        if raw:
+            try:
+                data = json.loads(raw)
+                ent = data.get(model_id) or {}
+                root = Path(str(ent.get("root_dir") or ent.get("root") or "/tmp/cozy/models")).expanduser()
+                files = {k: Path(v).expanduser() for k, v in dict(ent.get("files") or {}).items()}
+                return ModelArtifacts(model_id=model_id, root_dir=root, files=files, metadata=ent.get("metadata"))
+            except Exception:
+                pass
+
+        base = Path(os.getenv("WORKER_MODEL_CACHE_DIR", "/tmp/cozy/models")).expanduser()
+        safe = re.sub(r"[^a-zA-Z0-9_.-]+", "_", model_id)[:200]
+        root_dir = base / safe
+        return ModelArtifacts(model_id=model_id, root_dir=root_dir, files={})
 
     def _send_task_result(
         self,

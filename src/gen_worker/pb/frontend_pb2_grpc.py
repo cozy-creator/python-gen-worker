@@ -50,6 +50,11 @@ class FrontendServiceStub(object):
                 request_serializer=frontend__pb2.CancelRunRequest.SerializeToString,
                 response_deserializer=frontend__pb2.CancelRunResponse.FromString,
                 _registered_method=True)
+        self.RealtimeSession = channel.stream_stream(
+                '/frontend.FrontendService/RealtimeSession',
+                request_serializer=frontend__pb2.RealtimeProxyMessage.SerializeToString,
+                response_deserializer=frontend__pb2.RealtimeProxyMessage.FromString,
+                _registered_method=True)
 
 
 class FrontendServiceServicer(object):
@@ -77,6 +82,13 @@ class FrontendServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def RealtimeSession(self, request_iterator, context):
+        """Realtime sessions (WebSocket proxy).
+        """
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
 
 def add_FrontendServiceServicer_to_server(servicer, server):
     rpc_method_handlers = {
@@ -94,6 +106,11 @@ def add_FrontendServiceServicer_to_server(servicer, server):
                     servicer.CancelRun,
                     request_deserializer=frontend__pb2.CancelRunRequest.FromString,
                     response_serializer=frontend__pb2.CancelRunResponse.SerializeToString,
+            ),
+            'RealtimeSession': grpc.stream_stream_rpc_method_handler(
+                    servicer.RealtimeSession,
+                    request_deserializer=frontend__pb2.RealtimeProxyMessage.FromString,
+                    response_serializer=frontend__pb2.RealtimeProxyMessage.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
@@ -178,6 +195,33 @@ class FrontendService(object):
             '/frontend.FrontendService/CancelRun',
             frontend__pb2.CancelRunRequest.SerializeToString,
             frontend__pb2.CancelRunResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def RealtimeSession(request_iterator,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.stream_stream(
+            request_iterator,
+            target,
+            '/frontend.FrontendService/RealtimeSession',
+            frontend__pb2.RealtimeProxyMessage.SerializeToString,
+            frontend__pb2.RealtimeProxyMessage.FromString,
             options,
             channel_credentials,
             insecure,

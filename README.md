@@ -10,14 +10,20 @@ Torch-based model memory management is optional and installed via extras.
 
 ---
 
-Files in src/gen_worker/pb must be auto-generated in the gen-orchestrator repo, using the proto files. Go in there and run `task proto`
+Files in `python-worker/src/gen_worker/pb` are generated from the `.proto` definitions in `gen-orchestrator/proto`.
+
+Assuming `gen-orchestrator` is checked out as a sibling repo, regenerate stubs with:
+
+`task -d python-worker proto`
+
+This runs `uv sync --extra dev` and then `grpc_tools.protoc` against `../gen-orchestrator/proto`.
 
 Install modes:
 
 - Core only: `gen-worker`
 - Torch runtime add-on: `gen-worker[torch]` (torch + torchvision + torchaudio + safetensors + flashpack + numpy)
 
-Example tenant projects live in `../worker-example-functions`. They use:
+Example tenant projects live in `./examples`. They use:
 
 - `pyproject.toml` + `uv.lock` for dependencies (no requirements.txt)
 - `[tool.cozy]` in `pyproject.toml` for deployment config (functions.modules, runtime.base_image, etc.)
@@ -41,17 +47,46 @@ base_image = "ghcr.io/cozy/python-worker:cuda12.1-torch2.6"
 Function signature:
 
 ```python
-from gen_worker import worker_function, ResourceRequirements, ActionContext
+from typing import Annotated, Iterator
 
-@worker_function(ResourceRequirements(model_family="sdxl", requires_gpu=True))
-def generate(ctx: ActionContext, payload: dict) -> dict:
-    return {"ok": True}
+import msgspec
+
+from gen_worker import ActionContext, ResourceRequirements, worker_function
+from gen_worker.injection import ModelArtifacts, ModelRef, ModelRefSource as Src
+
+class Input(msgspec.Struct):
+    prompt: str
+    model_key: str = "default"
+
+class Output(msgspec.Struct):
+    text: str
+
+@worker_function(ResourceRequirements(requires_gpu=True))
+def run(
+    ctx: ActionContext,
+    # The worker injects cached handles based on the ModelRef.
+    # ModelRef(Src.DEPLOYMENT, ...) is fixed by deployment configuration (or a literal model id).
+    artifacts: Annotated[ModelArtifacts, ModelRef(Src.DEPLOYMENT, "google/functiongemma-270m-it")],
+    payload: Input,
+) -> Output:
+    return Output(text=f"prompt={payload.prompt} model_root={artifacts.root_dir}")
+
+class Delta(msgspec.Struct):
+    delta: str
+
+@worker_function(ResourceRequirements())
+def run_incremental(ctx: ActionContext, payload: Input) -> Iterator[Delta]:
+    for ch in payload.prompt:
+        if ctx.is_canceled():
+            raise InterruptedError("canceled")
+        yield Delta(delta=ch)
 ```
 
 Dynamic checkpoints:
 
-- Use `ResourceRequirements(model_family=...)` to declare a family (e.g., "sdxl")
-- Pass the exact checkpoint at runtime via request payload (e.g., `model_ref`)
+- Prefer deployment-defined allowlists. Requests pick a **key/label** from the payload
+  (e.g. `payload.model_key`), and the worker resolves it via a deployment-provided mapping.
+- Use `ModelRef(Src.PAYLOAD, "model_key")` for this pattern (the payload value is a key, not a raw HF id).
 
 Build contract (gen-builder):
 

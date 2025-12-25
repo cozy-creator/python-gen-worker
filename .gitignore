@@ -1,7 +1,9 @@
 # Python
 **/.venv
+*.pyc
 __pycache__
 **/dist
+.mypy_cache
 
 .env
 generated_images/
@@ -9,5 +11,12 @@ generated_images/
 !src/gen_worker/pb/**
 !src/gen_worker/pb/__init__.py
 
+# Keep generated protobuf stubs, but never commit bytecode caches.
+src/gen_worker/pb/__pycache__/
+src/gen_worker/pb/**/*.pyc
+src/gen_worker/pb/**/*.pyo
+
 **/*.png
 **/*.jpg
+
+.task/
