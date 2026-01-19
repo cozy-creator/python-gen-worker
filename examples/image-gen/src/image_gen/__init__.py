@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import logging
 from io import BytesIO
-from typing import Annotated, Any, cast
+from typing import Annotated
 
 import msgspec
-from diffusers import DiffusionPipeline
+from diffusers import StableDiffusionXLPipeline
 from PIL import Image
 
 from gen_worker import ActionContext, ResourceRequirements, worker_function
@@ -33,7 +33,9 @@ class GenerateOutput(msgspec.Struct):
 @worker_function(sdxl_resources)
 def generate_image(
     ctx: ActionContext,
-    pipeline: Annotated[DiffusionPipeline, ModelRef(Src.DEPLOYMENT, "stabilityai/stable-diffusion-xl-base-1.0")],
+    pipeline: Annotated[
+        StableDiffusionXLPipeline, ModelRef(Src.DEPLOYMENT, "stabilityai/stable-diffusion-xl-base-1.0")
+    ],
     payload: GenerateInput,
 ) -> GenerateOutput:
     if ctx.is_canceled():
@@ -41,20 +43,20 @@ def generate_image(
 
     logger.info("[run_id=%s] image-gen prompt=%r", ctx.run_id, payload.prompt)
 
-    # diffusers pipelines are callable at runtime (typing doesn't model __call__ well).
-    pipe = cast(Any, pipeline)
-    image: Image.Image = pipe(
+    result = pipeline(
         prompt=payload.prompt,
         negative_prompt=payload.negative_prompt,
         num_inference_steps=payload.num_inference_steps,
         guidance_scale=payload.guidance_scale,
         width=payload.width,
         height=payload.height,
-    ).images[0]
+    )
+    image: Image.Image = result.images[0]
 
     buf = BytesIO()
     image.save(buf, format="PNG")
     out = ctx.save_bytes(f"runs/{ctx.run_id}/outputs/image.png", buf.getvalue())
+    
     return GenerateOutput(image=out)
 
 

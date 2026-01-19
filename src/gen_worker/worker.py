@@ -2220,12 +2220,19 @@ class Worker:
 
         # diffusers pipeline injection via existing model manager (torch-only).
         if self._model_manager is not None:
+            pipe = None
             try:
                 pipe = asyncio.run(self._model_manager.get_active_pipeline(model_id))
-                if pipe is not None:
-                    return pipe
             except Exception:
-                pass
+                pipe = None
+            if pipe is not None:
+                if isinstance(requested_type, type) and not isinstance(pipe, requested_type):
+                    expected_qn = type_qualname(requested_type)
+                    got_qn = type_qualname(type(pipe))
+                    raise ValueError(
+                        f"model injection type mismatch for {inj.param_name}: expected {expected_qn}, got {got_qn} (model_id={model_id})"
+                    )
+                return pipe
 
         # Transformers-style injection (AutoModel/AutoProcessor/etc) and any other
         # libraries with a `from_pretrained` factory.
@@ -2239,6 +2246,12 @@ class Worker:
                 if cached is not None:
                     return cached
                 obj = requested_type.from_pretrained(model_id)  # type: ignore[attr-defined]
+                if isinstance(requested_type, type) and not isinstance(obj, requested_type):
+                    expected_qn = type_qualname(requested_type)
+                    got_qn = type_qualname(type(obj))
+                    raise ValueError(
+                        f"model injection type mismatch for {inj.param_name}: expected {expected_qn}, got {got_qn} (model_id={model_id})"
+                    )
                 # Best-effort move to worker device if supported.
                 try:
                     if torch is not None and hasattr(obj, "to") and callable(getattr(obj, "to", None)):
