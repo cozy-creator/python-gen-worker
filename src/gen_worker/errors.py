@@ -20,3 +20,7 @@ class CanceledError(WorkerError):
 
 class FatalError(WorkerError):
     """Indicates the job should not be retried."""
+
+
+class AuthError(WorkerError):
+    """Authentication/authorization failure; do not retry (token expired or invalid)."""

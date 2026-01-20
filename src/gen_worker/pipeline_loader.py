@@ -12,6 +12,26 @@ Loads diffusers pipelines with support for:
 - Warm-up inference to pre-compile kernels
 - Model downloading from Cozy Hub
 - Local NVMe cache for NFS models
+- Thread-safe concurrent inference via get_for_inference()
+
+Thread Safety
+-------------
+Diffusers schedulers maintain internal state (timesteps, sigmas, step_index)
+that gets corrupted when multiple threads use the same scheduler simultaneously,
+causing 'IndexError: index N is out of bounds for dimension 0 with size N'.
+
+The solution is to create a fresh scheduler instance for each concurrent request
+while sharing the heavy pipeline components (UNet ~10GB, VAE ~300MB, encoders ~1GB).
+Only the scheduler (~few KB) is recreated per-request.
+
+Use get_for_inference() instead of get() for concurrent workloads:
+
+    pipeline = loader.get_for_inference(model_id)  # Thread-safe
+    result = pipeline(prompt=..., ...)
+
+References:
+- https://huggingface.co/docs/diffusers/using-diffusers/create_a_server
+- https://github.com/huggingface/diffusers/issues/3672
 """
 
 import asyncio
@@ -287,7 +307,7 @@ class LocalModelCache:
     ) -> None:
         """Copy model files with FlashPack files first."""
 
-        def do_copy():
+        def do_copy() -> None:
             dest.mkdir(parents=True, exist_ok=True)
 
             # Collect all files and sort by priority
@@ -332,7 +352,7 @@ class LocalModelCache:
         if self.is_cached(model_id):
             return
 
-        async def prefetch():
+        async def prefetch() -> None:
             try:
                 await self.cache_model(model_id, source_path)
             except Exception as e:
@@ -848,7 +868,7 @@ class PipelineLoader:
                         (aiohttp.ClientError, asyncio.TimeoutError),
                         max_tries=3,
                     )
-                    async def download_file():
+                    async def download_file() -> None:
                         download_timeout = aiohttp.ClientTimeout(total=600)
                         async with aiohttp.ClientSession(
                             timeout=download_timeout, headers=headers
@@ -907,7 +927,7 @@ class PipelineLoader:
         results = {}
         for model_id in ids:
 
-            def make_callback(mid: str):
+            def make_callback(mid: str) -> Optional[Callable[[str, float], None]]:
                 if progress_callback:
                     return lambda stage, pct: progress_callback(mid, stage, pct)
                 return None
@@ -1424,6 +1444,70 @@ class PipelineLoader:
         """Get a loaded pipeline by model ID."""
         loaded = self._loaded_pipelines.get(model_id)
         return loaded.pipeline if loaded else None
+
+    def get_for_inference(self, model_id: str) -> Optional[Any]:
+        """
+        Get a thread-safe pipeline copy for concurrent inference.
+
+        The diffusers scheduler maintains internal state (timesteps, sigmas) that
+        gets corrupted when multiple threads use it simultaneously, causing:
+        'IndexError: index N is out of bounds for dimension 0 with size N'
+
+        This method creates a fresh scheduler instance while sharing the heavy
+        pipeline components (UNet, VAE, text encoders). Only the scheduler (~few KB)
+        is recreated; the model weights (~10+ GB) remain shared.
+
+        References:
+        - https://huggingface.co/docs/diffusers/using-diffusers/create_a_server
+        - https://github.com/huggingface/diffusers/issues/3672
+
+        Args:
+            model_id: The model ID to get a pipeline for
+
+        Returns:
+            A thread-safe pipeline copy, or None if model not loaded
+        """
+        loaded = self._loaded_pipelines.get(model_id)
+        if not loaded:
+            return None
+
+        base_pipeline = loaded.pipeline
+
+        # Check if pipeline has a scheduler (some pipelines might not)
+        if not hasattr(base_pipeline, 'scheduler') or base_pipeline.scheduler is None:
+            # No scheduler to worry about - return base pipeline
+            return base_pipeline
+
+        try:
+            # Create fresh scheduler from config
+            fresh_scheduler = base_pipeline.scheduler.from_config(
+                base_pipeline.scheduler.config
+            )
+
+            # Create new pipeline instance with shared components but fresh scheduler
+            # from_pipe() shares all components except those explicitly overridden
+            pipeline_class = type(base_pipeline)
+            if hasattr(pipeline_class, 'from_pipe'):
+                task_pipeline = pipeline_class.from_pipe(
+                    base_pipeline,
+                    scheduler=fresh_scheduler
+                )
+                logger.debug(f"Created thread-safe pipeline for {model_id}")
+                return task_pipeline
+            else:
+                # Fallback for older diffusers without from_pipe
+                # Just set the scheduler directly (less safe but better than nothing)
+                logger.warning(
+                    f"Pipeline {pipeline_class.__name__} lacks from_pipe(); "
+                    "falling back to direct scheduler assignment"
+                )
+                base_pipeline.scheduler = fresh_scheduler
+                return base_pipeline
+
+        except Exception as e:
+            logger.error(f"Failed to create thread-safe pipeline for {model_id}: {e}")
+            # Fall back to base pipeline - concurrent access may cause issues
+            return base_pipeline
 
     def get_loaded_models(self) -> List[str]:
         """Get list of loaded model IDs."""

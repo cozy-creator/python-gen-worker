@@ -58,7 +58,7 @@ UnloadModelResult = Any
 TaskExecutionRequest = Any
 TaskExecutionResult = Any
 from .decorators import ResourceRequirements # Import ResourceRequirements for type hints if needed
-from .errors import CanceledError, FatalError, ResourceError, RetryableError, ValidationError
+from .errors import AuthError, CanceledError, FatalError, ResourceError, RetryableError, ValidationError
 
 from .model_interface import ModelManagementInterface
 from .downloader import CozyHubDownloader, ModelDownloader
@@ -128,7 +128,7 @@ class RealtimeSocket:
     async def send_json(self, obj: Any) -> None:  # pragma: no cover - interface
         raise NotImplementedError
 
-    async def iter_bytes(self) -> Any:  # pragma: no cover - interface
+    def iter_bytes(self) -> typing.AsyncIterator[bytes]:  # pragma: no cover - interface
         raise NotImplementedError
 
     async def close(self) -> None:  # pragma: no cover - interface
@@ -172,7 +172,7 @@ class _RealtimeSocketAdapter(RealtimeSocket):
             )
         )
 
-    async def iter_bytes(self):
+    async def iter_bytes(self) -> typing.AsyncIterator[bytes]:
         while True:
             item = await self._in_q.get()
             if item is None:
@@ -493,7 +493,10 @@ class ActionContext:
                 except Exception:
                     meta = {}
         except urllib.error.HTTPError as e:
-            raise RuntimeError(f"file save failed ({getattr(e, 'code', 'unknown')})") from e
+            code = getattr(e, 'code', 0)
+            if code in (401, 403):
+                raise AuthError(f"file save unauthorized ({code}): check file_token validity") from e
+            raise RuntimeError(f"file save failed ({code or 'unknown'})") from e
 
         return Asset(
             ref=ref,
@@ -541,9 +544,12 @@ class ActionContext:
                 except Exception:
                     meta = {}
         except urllib.error.HTTPError as e:
-            if getattr(e, "code", None) == 409:
+            code = getattr(e, "code", 0)
+            if code in (401, 403):
+                raise AuthError(f"file save unauthorized ({code}): check file_token validity") from e
+            if code == 409:
                 raise RuntimeError("output path already exists") from e
-            raise RuntimeError(f"file save failed ({getattr(e, 'code', 'unknown')})") from e
+            raise RuntimeError(f"file save failed ({code or 'unknown'})") from e
 
         return Asset(
             ref=ref,
@@ -842,6 +848,8 @@ class Worker:
             return "resource", False, self._sanitize_safe_message(str(exc) or "resource exhausted"), internal
         if isinstance(exc, FatalError):
             return "fatal", False, self._sanitize_safe_message(str(exc) or "fatal error"), internal
+        if isinstance(exc, AuthError):
+            return "auth", False, self._sanitize_safe_message(str(exc) or "authentication failed"), internal
         # Torch OOM detection without importing torch at import time.
         if type(exc).__name__ in {"OutOfMemoryError", "CUDAOutOfMemoryError"}:
             return "resource", False, "out of memory", internal
@@ -1218,12 +1226,18 @@ class Worker:
         url = f"{base}/api/v1/file/{_encode_ref_for_url(ref)}"
 
         head_req = _http_request("HEAD", url, token, tenant_id=ctx.tenant_id)
-        with urllib.request.urlopen(head_req, timeout=10) as resp:
-            if resp.status < 200 or resp.status >= 300:
-                raise RuntimeError(f"failed to stat asset ({resp.status})")
-            sha256_hex = (resp.headers.get("X-Cozy-SHA256") or "").strip()
-            size_hdr = (resp.headers.get("X-Cozy-Size-Bytes") or "").strip()
-            mime = (resp.headers.get("X-Cozy-Mime-Type") or "").strip()
+        try:
+            with urllib.request.urlopen(head_req, timeout=10) as resp:
+                if resp.status < 200 or resp.status >= 300:
+                    raise RuntimeError(f"failed to stat asset ({resp.status})")
+                sha256_hex = (resp.headers.get("X-Cozy-SHA256") or "").strip()
+                size_hdr = (resp.headers.get("X-Cozy-Size-Bytes") or "").strip()
+                mime = (resp.headers.get("X-Cozy-Mime-Type") or "").strip()
+        except urllib.error.HTTPError as e:
+            code = getattr(e, "code", 0)
+            if code in (401, 403):
+                raise AuthError(f"file read unauthorized ({code}): check file_token validity") from e
+            raise RuntimeError(f"failed to stat asset ({code or 'unknown'})") from e
         size = int(size_hdr) if size_hdr.isdigit() else 0
         if max_bytes > 0 and size > max_bytes:
             raise RuntimeError("input file too large")
@@ -1245,14 +1259,20 @@ class Worker:
 
         if not os.path.exists(cache_path):
             get_req = _http_request("GET", url, token, tenant_id=ctx.tenant_id)
-            with urllib.request.urlopen(get_req, timeout=30) as resp:
-                if resp.status < 200 or resp.status >= 300:
-                    raise RuntimeError(f"failed to download asset ({resp.status})")
-                _size, _sha = self._stream_to_file(resp, cache_path, max_bytes)
-                if not size:
-                    size = _size
-                if not sha256_hex:
-                    sha256_hex = _sha
+            try:
+                with urllib.request.urlopen(get_req, timeout=30) as resp:
+                    if resp.status < 200 or resp.status >= 300:
+                        raise RuntimeError(f"failed to download asset ({resp.status})")
+                    _size, _sha = self._stream_to_file(resp, cache_path, max_bytes)
+                    if not size:
+                        size = _size
+                    if not sha256_hex:
+                        sha256_hex = _sha
+            except urllib.error.HTTPError as e:
+                code = getattr(e, "code", 0)
+                if code in (401, 403):
+                    raise AuthError(f"file read unauthorized ({code}): check file_token validity") from e
+                raise RuntimeError(f"failed to download asset ({code or 'unknown'})") from e
 
         local_path = os.path.join(local_inputs_dir, cache_name)
         if not os.path.exists(local_path):
@@ -1484,7 +1504,7 @@ class Worker:
                     logger.warning("Invalid WORKER_FAKE_GPU_COUNT; ignoring fake GPU override.")
 
             supports_model_loading_flag = False
-            cached_models: List[str] = []  # Models on disk, ready to load
+            disk_models: List[str] = []  # Models on disk, ready to load
             downloading_models: List[str] = []  # Models being downloaded
 
             if self._model_manager:
@@ -1497,12 +1517,12 @@ class Worker:
 
             # Get disk-cached and downloading models from model cache
             if self._model_cache:
-                cached_models = self._model_cache.get_disk_models()
+                disk_models = self._model_cache.get_disk_models()
                 stats = self._model_cache.get_stats()
                 downloading_models = stats.downloading_models
                 # Log model cache stats for debugging
                 logger.debug(
-                    f"Model cache: vram={len(vram_models)}, disk={len(cached_models)}, "
+                    f"Model cache: vram={len(vram_models)}, disk={len(disk_models)}, "
                     f"downloading={len(downloading_models)}"
                 ) 
 
@@ -1557,8 +1577,8 @@ class Worker:
                 cuda_version=cuda_version,
                 torch_version=torch_version,
                 available_functions=list(dict.fromkeys(list(self._task_specs.keys()) + list(self._ws_specs.keys()))),
-                available_models=vram_models,  # Models in VRAM (hot)
-                cached_models=cached_models,   # Models on disk (warm)
+                vram_models=vram_models,   # Models in VRAM (hot)
+                disk_models=disk_models,   # Models on disk (warm)
                 supports_model_loading=supports_model_loading_flag,
                 function_schemas=function_schemas,
             )
@@ -1806,7 +1826,7 @@ class Worker:
                 self._supported_model_ids_from_scheduler = list(message.deployment_model_config.supported_model_ids)
                 try:
                     # Optional label->id mapping for signature-driven model selection.
-                    self._deployment_model_id_by_key = dict(message.deployment_model_config.model_id_by_key)  # type: ignore[attr-defined]
+                    self._deployment_model_id_by_key = dict(message.deployment_model_config.model_id_by_key)
                 except Exception:
                     self._deployment_model_id_by_key = {}
                 self._deployment_allowed_model_ids = set(self._supported_model_ids_from_scheduler)
@@ -2016,12 +2036,16 @@ class Worker:
         tenant_id = str(getattr(cmd, "tenant_id", "") or "") or (self.tenant_id or "")
         user_id = str(getattr(cmd, "user_id", "") or "")
         timeout_ms = int(getattr(cmd, "timeout_ms", 0) or 0) or None
+        file_base_url = str(getattr(cmd, "file_base_url", "") or "")
+        file_token = str(getattr(cmd, "file_token", "") or "")
         ctx = ActionContext(
             session_id,
             emitter=self._emit_progress_event,
             tenant_id=tenant_id or None,
             user_id=user_id or None,
             timeout_ms=timeout_ms,
+            file_api_base_url=file_base_url or None,
+            file_api_token=file_token or None,
         )
 
         max_frame = int(os.getenv("WORKER_MAX_WS_FRAME_BYTES", "0") or 0)
@@ -2177,7 +2201,7 @@ class Worker:
                 raise CanceledError("canceled")
 
             if spec.output_mode == "single":
-                if not isinstance(result, spec.output_type):
+                if spec.output_type is not None and not isinstance(result, spec.output_type):
                     raise TypeError(f"Function {spec.name} returned {type(result)!r}, expected {spec.output_type!r}")
                 output_payload = msgspec.msgpack.encode(msgspec.to_builtins(result))
                 if self.max_output_bytes > 0 and len(output_payload) > self.max_output_bytes:
@@ -2209,7 +2233,7 @@ class Worker:
                     async for item in iterator_obj:
                         if ctx.is_canceled():
                             raise CanceledError("canceled")
-                        if not isinstance(item, spec.delta_type):
+                        if spec.delta_type is not None and not isinstance(item, spec.delta_type):
                             raise TypeError(f"delta item type {type(item)!r} != {spec.delta_type!r}")
                         emit_delta(item)
                         if max_events > 0 and count >= max_events:
@@ -2224,7 +2248,7 @@ class Worker:
                     for item in iterator_obj:
                         if ctx.is_canceled():
                             raise CanceledError("canceled")
-                        if not isinstance(item, spec.delta_type):
+                        if spec.delta_type is not None and not isinstance(item, spec.delta_type):
                             raise TypeError(f"delta item type {type(item)!r} != {spec.delta_type!r}")
                         emit_delta(item)
                         if max_events > 0 and count >= max_events:
@@ -2312,7 +2336,12 @@ class Worker:
         if self._model_manager is not None:
             pipe = None
             try:
-                pipe = asyncio.run(self._model_manager.get_active_pipeline(model_id))
+                # Prefer get_for_inference() for thread-safe pipeline access
+                # (creates fresh scheduler to avoid concurrent access issues)
+                if hasattr(self._model_manager, 'get_for_inference'):
+                    pipe = self._model_manager.get_for_inference(model_id)
+                elif hasattr(self._model_manager, 'get_active_pipeline'):
+                    pipe = asyncio.run(self._model_manager.get_active_pipeline(model_id))
             except Exception:
                 pipe = None
             if pipe is not None:
@@ -2335,7 +2364,7 @@ class Worker:
                 cached = self._custom_runtime_cache.get(key)
                 if cached is not None:
                     return cached
-                obj = requested_type.from_pretrained(model_id)  # type: ignore[attr-defined]
+                obj = requested_type.from_pretrained(model_id)
                 if isinstance(requested_type, type) and not isinstance(obj, requested_type):
                     expected_qn = type_qualname(requested_type)
                     got_qn = type_qualname(type(obj))

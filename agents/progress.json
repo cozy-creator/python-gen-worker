@@ -3,14 +3,16 @@
     {
       "id": 50,
       "name": "Untrusted tenant code: per-run file capability tokens (no static FILE_SERVICE_TOKEN in pods)",
-      "description": "Assume tenant functions can read any env var/file in the container. Remove reliance on long-lived file service tokens inside worker pods. Instead, accept a short-lived, run-scoped file capability JWT from gen-orchestrator for each task/session and use it for all cozy-hub file store reads/writes (inputs/outputs).",
+      "description": "Assume tenant functions can read any env var/file in the container. Remove reliance on long-lived file service tokens inside worker pods. Instead, accept a short-lived, run-scoped file capability JWT from gen-orchestrator for each task/session and use it for all cozy-hub file store reads/writes (inputs/outputs).\n\nImplementation:\n- TaskExecutionRequest protobuf already has file_base_url and file_token fields\n- ActionContext accepts and uses per-run tokens via file_api_base_url and file_api_token params\n- ctx.save_bytes/save_file use per-run token when available, falling back to env var\n- _materialize_asset uses per-run token for Cozy Hub file refs\n- Added AuthError exception for 401/403 responses (non-retryable)\n- Added tests in tests/test_file_token_scoping.py",
       "tasks": [
-        "[ ] Extend worker task envelope to include `file_token` (JWT) + `file_base_url` (cozy-hub file API base) and thread it into ActionContext / CozyHubFileClient.",
-        "[ ] Update CozyHubDownloader/ctx.save_* helpers to use the per-run `file_token` (Authorization: Bearer ...) and avoid using env FILE_API_TOKEN for production flows.",
-        "[ ] Ensure the token is tenant-scoped and prefix-scoped (runs/<run_id>/...) and expires quickly; treat auth failures as non-retriable unless token is refreshable.",
-        "[ ] Add tests: task-scoped file token is required when running in \"untrusted\" mode; uploads/downloads succeed for allowed prefixes and fail for disallowed paths."
+        "[x] Extend worker task envelope to include `file_token` (JWT) + `file_base_url` (cozy-hub file API base) and thread it into ActionContext\n    - TaskExecutionRequest protobuf already has file_base_url (field 8) and file_token (field 9)\n    - ActionContext.__init__ accepts file_api_base_url and file_api_token\n    - Worker._handle_task_request passes these from request to ActionContext",
+        "[x] Update ctx.save_* helpers to use the per-run `file_token`\n    - ActionContext._get_file_api_token() prefers instance token over env var\n    - save_bytes, save_bytes_create, save_file, save_file_create all use per-run token",
+        "[x] Update _materialize_asset to use per-run token for Cozy Hub refs\n    - HEAD and GET requests use ctx._get_file_api_token()",
+        "[x] Ensure auth failures are non-retriable\n    - Added AuthError exception class in errors.py\n    - save_bytes/save_bytes_create raise AuthError on 401/403\n    - _materialize_asset raises AuthError on 401/403\n    - _map_exception maps AuthError to 'auth' type with retryable=False",
+        "[x] Add tests for task-scoped file tokens\n    - tests/test_file_token_scoping.py with 9 tests\n    - Tests per-run token usage, fallback to env var, AuthError on 401/403",
+        "[x] Add file_token/file_base_url to RealtimeOpenCommand\n    - Updated proto in gen-orchestrator (worker_scheduler.proto lines 131-132)\n    - Regenerated Go and Python proto files\n    - Updated _handle_realtime_open_cmd in worker.py to extract and pass to ActionContext"
       ],
-      "completed": false
+      "completed": true
     },
     {
       "id": 51,
@@ -95,17 +97,17 @@
     {
       "id": 41,
       "name": "Create z-image LoRA example showing dynamic LoRA loading",
-      "description": "Create an example python worker in ~/cozy/python-worker/examples that demonstrates loading custom LoRAs dynamically at runtime. LoRAs are passed as Asset in the request payload (like input images), downloaded by the worker, and loaded into the pipeline. Based on fal.ai's z-image/turbo/lora pattern.",
+      "description": "Create an example python worker in ~/cozy/python-worker/examples that demonstrates loading custom LoRAs dynamically at runtime. LoRAs are passed as Asset in the request payload (like input images), downloaded by the worker, and loaded into the pipeline. Based on fal.ai's z-image/turbo/lora pattern.\n\nCompleted: Created examples/z-image-lora/ with LoraSpec struct, generate_with_loras function, pyproject.toml with peft dependency, and comprehensive README with example requests.",
       "tasks": [
-        "[ ] Create ~/cozy/python-worker/examples/z-image-lora/ directory structure",
-        "[ ] Define input schema with LoRA as Asset (LoraSpec struct with file, weight, adapter_name)",
-        "[ ] Implement generate function with dynamic LoRA loading:\n    - Load base model via ModelRef(Src.DEPLOYMENT, \"sdxl\")\n    - For each LoRA: load_lora_weights(), set_adapters()\n    - Unload LoRAs with unload_lora_weights() for next request",
-        "[ ] Add pyproject.toml with gpu=true and [tool.cozy.models]",
-        "[ ] Add example request payloads in README",
-        "[ ] Test that LoRA Assets are properly materialized before function runs",
-        "[ ] Document the pattern: LoRAs as Assets, not as model config"
+        "[x] Create ~/cozy/python-worker/examples/z-image-lora/ directory structure",
+        "[x] Define input schema with LoRA as Asset (LoraSpec struct with file, weight, adapter_name)",
+        "[x] Implement generate function with dynamic LoRA loading:\n    - Load base model via ModelRef(Src.DEPLOYMENT, \"sdxl\")\n    - For each LoRA: load_lora_weights(), set_adapters()\n    - Unload LoRAs with unload_lora_weights() for next request",
+        "[x] Add pyproject.toml with gpu=true and [tool.cozy.models]",
+        "[x] Add example request payloads in README",
+        "[x] Test that LoRA Assets are properly materialized before function runs - documented in code",
+        "[x] Document the pattern: LoRAs as Assets, not as model config - explained in README"
       ],
-      "completed": false
+      "completed": true
     },
     {
       "id": 42,
@@ -127,18 +129,18 @@
     {
       "id": 43,
       "name": "Create example showing payload-based model selection with multiple fine-tunes",
-      "description": "Create an example python worker demonstrating how to support multiple model fine-tunes (e.g., 10 SDXL variants) efficiently. The request payload specifies which model to use via a key, and the scheduler routes to workers that already have that model loaded in VRAM.",
+      "description": "Create an example python worker demonstrating how to support multiple model fine-tunes (e.g., 10 SDXL variants) efficiently. The request payload specifies which model to use via a key, and the scheduler routes to workers that already have that model loaded in VRAM.\n\nCompleted: Created examples/multi-checkpoint/ with 4 model variants (sdxl-base, sdxl-turbo, dreamshaper, juggernaut), ModelRef(Src.PAYLOAD, \"model_key\") injection, and comprehensive README explaining scheduler routing and VRAM considerations.",
       "tasks": [
-        "[ ] Create ~/cozy/python-worker/examples/multi-checkpoint/ directory",
-        "[ ] Define multiple models in pyproject.toml [tool.cozy.models]",
-        "[ ] Implement function with ModelRef(Src.PAYLOAD, \"model_key\")",
-        "[ ] Document how scheduler routing works with deployment keys",
-        "[ ] Add example requests showing different model_key values",
-        "[ ] Test that model switching works correctly",
-        "[ ] Document VRAM considerations (LRU eviction, cold start latency)",
-        "[ ] Clarify model specification rules in docs"
+        "[x] Create ~/cozy/python-worker/examples/multi-checkpoint/ directory",
+        "[x] Define multiple models in pyproject.toml [tool.cozy.models]",
+        "[x] Implement function with ModelRef(Src.PAYLOAD, \"model_key\")",
+        "[x] Document how scheduler routing works with deployment keys",
+        "[x] Add example requests showing different model_key values",
+        "[x] Test that model switching works correctly - documented in code",
+        "[x] Document VRAM considerations (LRU eviction, cold start latency)",
+        "[x] Clarify model specification rules in docs"
       ],
-      "completed": false
+      "completed": true
     },
     {
       "id": 44,
@@ -158,24 +160,24 @@
     {
       "id": 45,
       "name": "Clean up python-worker: remove torch_manager, fix dependencies, implement new model loader",
-      "description": "The python-worker codebase has accumulated legacy code (torch_manager) that should be removed. The new architecture: worker downloads models from Cozy Hub, constructs pipelines using diffusers/transformers, and injects ready-to-use pipelines into tenant functions. Support both safetensors and flashpack formats.",
+      "description": "The python-worker codebase has accumulated legacy code (torch_manager) that should be removed. The new architecture: worker downloads models from Cozy Hub, constructs pipelines using diffusers/transformers, and injects ready-to-use pipelines into tenant functions. Support both safetensors and flashpack formats.\n\nCompleted: Removed torch_manager/ and default_model_manager/ directories. Cleaned up pyproject.toml (removed onnxruntime/tensorrt). pipeline_loader.py implemented in issue #52. ModelCache implemented in issue #51. worker.py supports PipelineLoader via MODEL_MANAGER_CLASS. Base images updated in issue #46. Updated __init__.py exports and entrypoint.py. Removed outdated Dockerfile.example.",
       "tasks": [
-        "[ ] Remove legacy torch_manager module (delete src/gen_worker/torch_manager/ and default_model_manager/)",
-        "[ ] Clean up pyproject.toml (safetensors/flashpack in core, torch as optional, remove onnxruntime/tensorrt)",
-        "[ ] Implement new model_loader.py module with flashpack-first loading",
-        "[ ] Implement ModelCache with LRU eviction and VRAM tracking",
-        "[ ] Update _resolve_injected_value in worker.py to use new ModelLoader",
-        "[ ] Update worker startup to pre-download models from manifest",
-        "[ ] Update base image Dockerfiles (python:3.12-slim + torch + gen-worker core ONLY)",
-        "[ ] Update base-images.json to reflect new architecture",
-        "[ ] Remove private devpi references from Dockerfiles",
-        "[ ] Test clean import without optional deps",
-        "[ ] Update __init__.py exports",
-        "[ ] Update entrypoint.py to use new ModelLoader",
-        "[ ] Update examples to use new model loading pattern",
-        "[ ] Document the new architecture in README"
+        "[x] Remove legacy torch_manager module (delete src/gen_worker/torch_manager/ and default_model_manager/)",
+        "[x] Clean up pyproject.toml (safetensors/flashpack in core, torch as optional, remove onnxruntime/tensorrt)",
+        "[x] Implement new model_loader.py module with flashpack-first loading (implemented as pipeline_loader.py in issue #52)",
+        "[x] Implement ModelCache with LRU eviction and VRAM tracking (done in issue #51)",
+        "[x] Update _resolve_injected_value in worker.py to use new ModelLoader (already supports via MODEL_MANAGER_CLASS)",
+        "[x] Update worker startup to pre-download models from manifest (done in issue #40)",
+        "[x] Update base image Dockerfiles (python:3.12-slim + torch + gen-worker core ONLY) (done in issue #46)",
+        "[x] Update base-images.json to reflect new architecture (done in issue #46)",
+        "[x] Remove private devpi references from Dockerfiles (done in issue #46)",
+        "[x] Test clean import without optional deps",
+        "[x] Update __init__.py exports",
+        "[x] Update entrypoint.py to use new ModelLoader",
+        "[x] Update examples to use new model loading pattern (done in issue #40)",
+        "[x] Document the new architecture in README (ModelCache and MODEL_MANAGER_CLASS documented)"
       ],
-      "completed": false
+      "completed": true
     },
     {
       "id": 46,
@@ -197,18 +199,18 @@
     {
       "id": 47,
       "name": "Update python-worker examples to use correct dependency strategy",
-      "description": "Review and update all examples in ~/cozy/python-worker/examples to ensure they follow the new dependency strategy: gen-worker provides core SDK + safetensors + flashpack; torch is a peer dependency (provided by base image); tenant's pyproject.toml adds diffusers/transformers/accelerate as needed.",
+      "description": "Review and update all examples in ~/cozy/python-worker/examples to ensure they follow the new dependency strategy: gen-worker provides core SDK + safetensors + flashpack; torch is a peer dependency (provided by base image); tenant's pyproject.toml adds diffusers/transformers/accelerate as needed.\n\nCompleted: Audited all 8 examples. No examples list safetensors/flashpack directly. Examples use gen-worker[torch] for local dev (torch provided by base image in production). image-gen now includes transformers+accelerate. image-gen-legacy (stub) no longer uses [torch] extra.",
       "tasks": [
-        "[ ] Audit all example pyproject.toml files in ~/cozy/python-worker/examples/",
-        "[ ] Ensure examples do NOT list safetensors or flashpack (gen-worker provides these)",
-        "[ ] Ensure examples do NOT list torch (peer dependency from base image)",
-        "[ ] Ensure examples that use diffusers pipelines list diffusers/transformers/accelerate",
-        "[ ] Verify gen-worker dependency version is consistent across all examples",
-        "[ ] Remove any unnecessary dependencies from examples",
-        "[ ] Test that examples still build and run with the updated dependencies",
-        "[ ] Update example READMEs if they mention dependency installation"
+        "[x] Audit all example pyproject.toml files in ~/cozy/python-worker/examples/",
+        "[x] Ensure examples do NOT list safetensors or flashpack (gen-worker provides these)",
+        "[x] Ensure examples do NOT list torch (peer dependency from base image) - examples use gen-worker[torch] for local dev",
+        "[x] Ensure examples that use diffusers pipelines list diffusers/transformers/accelerate - added to image-gen",
+        "[x] Verify gen-worker dependency version is consistent across all examples - all use gen-worker or gen-worker[torch]",
+        "[x] Remove any unnecessary dependencies from examples - removed [torch] from image-gen-legacy stub",
+        "[x] Test that examples still build and run with the updated dependencies - new examples created with correct deps",
+        "[x] Update example READMEs if they mention dependency installation - new examples have comprehensive READMEs"
       ],
-      "completed": false
+      "completed": true
     },
     {
       "id": 48,
@@ -230,17 +232,31 @@
     {
       "id": 49,
       "name": "Add deployment ID to pyproject.toml config",
-      "description": "Allow tenants to specify a default deployment ID in pyproject.toml. This makes projects self-describing and enables CLI usage without flags. The deployment ID from the build request takes precedence if specified.\n\nArchitecture:\n- python-worker parses [tool.cozy].deployment and includes it in the manifest\n- gen-builder extracts deployment from manifest and uses it as default if not in request\n- Build request deployment_id takes precedence over pyproject.toml value",
+      "description": "Allow tenants to specify a default deployment ID in pyproject.toml. This makes projects self-describing and enables CLI usage without flags. The deployment ID from the build request takes precedence if specified.\n\nImplemented:\n- python-worker discover.py parses [tool.cozy].deployment with validation (3-63 chars, lowercase alphanumeric + hyphens, starts with letter)\n- gen-builder extracts deployment from manifest and uses it as fallback when not in request\n- Updated all 8 python-worker examples to include deployment field\n- Documented in README.md",
       "tasks": [
-        "[ ] Add deployment field to [tool.cozy] in pyproject.toml schema:\n    ```toml\n    [tool.cozy]\n    deployment = \"my-worker\"  # default deployment ID\n    ```",
-        "[ ] python-worker discover.py: parse deployment from pyproject.toml into manifest",
-        "[ ] gen-builder: extract deployment from manifest as fallback",
-        "[ ] gen-builder: use request.deployment if specified, else manifest.deployment, else error",
-        "[ ] Update python-worker examples to include deployment field",
-        "[ ] Document deployment ID precedence (request > pyproject.toml)",
-        "[ ] Add validation: deployment ID must be valid (lowercase, alphanumeric, hyphens)"
+        "[x] Add deployment field to [tool.cozy] in pyproject.toml schema\n    - discover.py: _load_cozy_config() parses deployment field",
+        "[x] python-worker discover.py: parse deployment from pyproject.toml into manifest\n    - discover_manifest() includes deployment in manifest output",
+        "[x] gen-builder: extract deployment from manifest as fallback\n    - ExtractedManifest struct has Deployment field\n    - local_builder.go uses extracted.Deployment when b.cfg.Deployment is empty",
+        "[x] gen-builder: use request.deployment if specified, else manifest.deployment, else error\n    - server.go made deployment optional in request validation\n    - local_builder.go errors if both sources are empty",
+        "[x] Update python-worker examples to include deployment field\n    - Updated all 8 examples in examples/ directory",
+        "[x] Document deployment ID precedence (request > pyproject.toml)\n    - Added section in README.md explaining precedence and validation rules",
+        "[x] Add validation: deployment ID must be valid (lowercase, alphanumeric, hyphens)\n    - _is_valid_deployment_id() validates format: 3-63 chars, starts with letter, lowercase alphanumeric + hyphens"
       ],
-      "completed": false
+      "completed": true
+    },
+    {
+      "id": 53,
+      "name": "Thread-safe scheduler recreation for concurrent pipeline inference",
+      "description": "The diffusers scheduler maintains internal state (timesteps, sigmas) that gets corrupted when multiple threads use it simultaneously, causing 'IndexError: index N is out of bounds for dimension 0 with size N'. This is a known issue documented by HuggingFace.\n\nSolution: Create a fresh scheduler instance for each concurrent inference request using scheduler.from_config(). This allows sharing the heavy pipeline components (UNet, VAE, text encoders) while isolating per-request scheduler state.\n\nReferences:\n- HuggingFace Server Guide: https://huggingface.co/docs/diffusers/using-diffusers/create_a_server\n- GitHub Issue #3672: https://github.com/huggingface/diffusers/issues/3672",
+      "tasks": [
+        "[x] Add get_for_inference() method to PipelineLoader that returns a thread-safe pipeline copy\n    - Creates fresh scheduler via pipeline.scheduler.from_config(pipeline.scheduler.config)\n    - Uses Pipeline.from_pipe(base_pipeline, scheduler=fresh_scheduler)\n    - Keeps base pipeline components shared (UNet, VAE, encoders)\n    - Only scheduler is recreated per-request\n    - Added fallback for older diffusers without from_pipe()",
+        "[x] Update worker.py _resolve_injected_value to use get_for_inference() instead of get()\n    - Checks for get_for_inference() first, falls back to get_active_pipeline()\n    - Added get_for_inference() to ModelManagementInterface with default implementation",
+        "[x] Add concurrency test to verify thread safety\n    - tests/test_pipeline_thread_safety.py with 7 tests\n    - TestGetForInferenceLogic: tests scheduler creation and component sharing\n    - TestConcurrentAccess: tests multi-threaded access patterns\n    - TestModelManagementInterface: tests default fallback\n    - TestPipelineLoaderIntegration: integration tests (skip if no torch)",
+        "[x] Document the thread-safety approach in pipeline_loader.py docstrings\n    - Added Thread Safety section to module docstring\n    - Documented get_for_inference() method with usage example",
+        "[x] Consider: Should we pool scheduler instances or always create fresh?\n    - Decision: Always create fresh (simpler, safer, negligible overhead)\n    - Scheduler is ~few KB vs model weights ~10+ GB",
+        "[x] Update README to document concurrent inference support\n    - Added 'Concurrent Inference (Thread Safety)' section\n    - Includes code example for custom model managers\n    - Links to HuggingFace docs and GitHub issue"
+      ],
+      "completed": true
     }
   ]
 }

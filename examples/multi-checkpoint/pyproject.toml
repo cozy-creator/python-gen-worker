@@ -1,7 +1,7 @@
 [project]
-name = "image-gen"
+name = "multi-checkpoint"
 version = "0.1.0"
-description = "Image generation function"
+description = "Multi-checkpoint example with payload-based model selection"
 requires-python = ">=3.12"
 dependencies = [
     "gen-worker[torch]",
@@ -19,7 +19,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/image_gen"]
+packages = ["src/multi_checkpoint"]
 
 [tool.uv.sources]
 gen-worker = { path = "../.." }
@@ -30,14 +30,19 @@ ignore_missing_imports = true
 disallow_untyped_defs = true
 
 [tool.cozy]
-deployment = "image-gen"
+deployment = "multi-checkpoint"
 
 [tool.cozy.build]
 gpu = true
 torch = ">=2.9"
 
 [tool.cozy.resources]
-vram_gb = 12         # SDXL needs ~8-10GB VRAM, 12GB provides headroom
+vram_gb = 12  # Each SDXL variant needs ~8-10GB
 
+# Define multiple model variants
+# The scheduler will route requests to workers that have the required model in VRAM
 [tool.cozy.models]
-sdxl = "stabilityai/stable-diffusion-xl-base-1.0"
+sdxl-base = "stabilityai/stable-diffusion-xl-base-1.0"
+sdxl-turbo = "stabilityai/sdxl-turbo"
+dreamshaper = "Lykon/dreamshaper-xl-v2-turbo"
+juggernaut = "RunDiffusion/Juggernaut-XL-v9"

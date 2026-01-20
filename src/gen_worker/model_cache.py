@@ -119,9 +119,8 @@ class ModelCache:
         self._vram_safety_margin = vram_safety_margin_gb or float(
             os.getenv("WORKER_VRAM_SAFETY_MARGIN_GB", str(DEFAULT_VRAM_SAFETY_MARGIN_GB))
         )
-        self._model_cache_dir = Path(
-            model_cache_dir or os.getenv("WORKER_MODEL_CACHE_DIR", "/tmp/cozy/models")
-        )
+        cache_dir = model_cache_dir or os.getenv("WORKER_MODEL_CACHE_DIR") or "/tmp/cozy/models"
+        self._model_cache_dir = Path(cache_dir)
         self._model_cache_dir.mkdir(parents=True, exist_ok=True)
 
         # Detect or configure VRAM

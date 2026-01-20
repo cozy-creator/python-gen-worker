@@ -25,6 +25,9 @@ python_version = "3.12"
 ignore_missing_imports = true
 disallow_untyped_defs = true
 
+[tool.cozy]
+deployment = "hello-world"  # Default deployment ID
+
 [tool.cozy.build]
 # Option 1: Simple GPU selection (recommended)
 gpu = true           # Build GPU variant

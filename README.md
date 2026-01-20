@@ -38,11 +38,27 @@ Example:
 
 ```toml
 [tool.cozy]
-functions.modules = ["functions"]
+deployment = "my-worker"  # Default deployment ID
 
-[tool.cozy.runtime]
-base_image = "ghcr.io/cozy/python-worker:cuda12.1-torch2.6"
+[tool.cozy.build]
+gpu = true
+torch = ">=2.9"
 ```
+
+### Deployment ID
+
+The deployment ID identifies your worker in the orchestrator. It can be specified in two ways:
+
+1. **In pyproject.toml** (recommended): Set `[tool.cozy].deployment` for a self-describing project
+2. **In build request**: Pass `deployment` field when calling the gen-builder API
+
+**Precedence**: Build request > pyproject.toml
+
+**Validation rules**:
+- 3-63 characters
+- Lowercase alphanumeric and hyphens only
+- Must start with a letter
+- No consecutive hyphens or trailing hyphen
 
 Function signature:
 
@@ -214,8 +230,8 @@ Workers report model availability to the orchestrator for intelligent job routin
 ### Heartbeat Reporting
 
 Workers report two model lists in each heartbeat:
-- `available_models` - Models currently loaded in VRAM (hot)
-- `cached_models` - Models cached on disk but not in VRAM (warm)
+- `vram_models` - Models currently loaded in VRAM (hot)
+- `disk_models` - Models cached on disk but not in VRAM (warm)
 
 The orchestrator uses this to route jobs:
 1. First preference: Workers with model in VRAM (instant)
@@ -259,6 +275,33 @@ cache.get_disk_models()   # ["model-b"]
 Workers can accept jobs as soon as required models are ready. If a function needs model A and model B:
 - Jobs requiring only model A can run while model B is still downloading
 - The `are_models_available(model_ids)` method checks if all required models are ready
+
+### Concurrent Inference (Thread Safety)
+
+Diffusers schedulers maintain internal state that gets corrupted with concurrent access, causing `IndexError: index N is out of bounds`. The worker handles this automatically by creating a fresh scheduler for each request.
+
+**How it works:**
+- Heavy components (UNet, VAE, text encoders) are shared in VRAM (~10+ GB)
+- Only the scheduler (~few KB) is recreated per-request
+- Uses `Pipeline.from_pipe()` with a fresh scheduler from `scheduler.from_config()`
+
+**For custom model managers:**
+```python
+from gen_worker.model_interface import ModelManagementInterface
+
+class MyModelManager(ModelManagementInterface):
+    def get_for_inference(self, model_id: str) -> Optional[Any]:
+        """Return thread-safe pipeline with fresh scheduler."""
+        base = self._pipelines.get(model_id)
+        if not base or not hasattr(base, 'scheduler'):
+            return base
+        fresh_scheduler = base.scheduler.from_config(base.scheduler.config)
+        return type(base).from_pipe(base, scheduler=fresh_scheduler)
+```
+
+References:
+- [HuggingFace Server Guide](https://huggingface.co/docs/diffusers/using-diffusers/create_a_server)
+- [GitHub Issue #3672](https://github.com/huggingface/diffusers/issues/3672)
 
 ---
 
