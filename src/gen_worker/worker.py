@@ -63,6 +63,7 @@ from .errors import CanceledError, FatalError, ResourceError, RetryableError, Va
 from .model_interface import ModelManagementInterface
 from .downloader import CozyHubDownloader, ModelDownloader
 from .types import Asset
+from .model_cache import ModelCache, ModelCacheStats, ModelLocation
 from .injection import (
     InjectionSpec,
     ModelArtifacts,
@@ -591,6 +592,7 @@ class Worker:
         max_reconnect_attempts: int = 0,  # 0 means infinite retries
         model_manager: Optional[ModelManagementInterface] = None, # Optional model manager
         downloader: Optional[ModelDownloader] = None,  # Optional model downloader
+        manifest: Optional[Dict[str, Any]] = None,  # Optional manifest from build
     ) -> None:
         """Initialize a new worker.
 
@@ -605,6 +607,7 @@ class Worker:
             max_reconnect_attempts: Max reconnect attempts (0 = infinite).
             model_manager: Optional model manager.
             downloader: Optional model downloader.
+            manifest: Optional manifest dict (baked in at build time) containing models, resources, etc.
         """
         self.scheduler_addr = scheduler_addr
         self.scheduler_addrs = self._normalize_scheduler_addrs(scheduler_addr, scheduler_addrs)
@@ -713,8 +716,35 @@ class Worker:
         self._deployment_allowed_model_ids: Optional[set[str]] = None
         self._model_init_done_event = threading.Event() # To signal model init is complete
 
+        # LRU model cache for tracking VRAM and disk-cached models
+        self._model_cache = ModelCache()
+
+        # Store manifest and initialize model config from it
+        self._manifest = manifest
+        if manifest and "models" in manifest:
+            # Initialize model key->id mapping from manifest (baked in at build time)
+            # This allows ModelRef(Src.DEPLOYMENT, "key") to resolve without scheduler config
+            manifest_models = manifest["models"]
+            if isinstance(manifest_models, dict):
+                self._deployment_model_id_by_key = {str(k): str(v) for k, v in manifest_models.items()}
+                self._deployment_allowed_model_ids = set(self._deployment_model_id_by_key.values())
+                logger.info(f"Loaded {len(self._deployment_model_id_by_key)} models from manifest: {list(self._deployment_model_id_by_key.keys())}")
+
         if self._model_manager:
             logger.info(f"ModelManager of type '{type(self._model_manager).__name__}' provided.")
+            # If we have models from manifest, start pre-download in background
+            if self._deployment_allowed_model_ids:
+                self._supported_model_ids_from_scheduler = list(self._deployment_allowed_model_ids)
+                logger.info(f"Starting pre-download of {len(self._supported_model_ids_from_scheduler)} models from manifest")
+                model_init_thread = threading.Thread(
+                    target=self._process_deployment_config_async_wrapper,
+                    daemon=True,
+                    name="ManifestModelInit"
+                )
+                model_init_thread.start()
+            else:
+                # No models to pre-download, mark init as done
+                self._model_init_done_event.set()
         else:
             logger.info("No ModelManager provided. Worker operating in simple mode regarding models.")
             self._model_init_done_event.set() # No model init to wait for if no manager
@@ -1454,10 +1484,27 @@ class Worker:
                     logger.warning("Invalid WORKER_FAKE_GPU_COUNT; ignoring fake GPU override.")
 
             supports_model_loading_flag = False
-            # current_models = []
+            cached_models: List[str] = []  # Models on disk, ready to load
+            downloading_models: List[str] = []  # Models being downloaded
+
             if self._model_manager:
                 vram_models = self._model_manager.get_vram_loaded_models()
-                supports_model_loading_flag = True 
+                supports_model_loading_flag = True
+            elif self._model_cache:
+                # Use model cache for VRAM-loaded models if no legacy model_manager
+                vram_models = self._model_cache.get_vram_models()
+                supports_model_loading_flag = True
+
+            # Get disk-cached and downloading models from model cache
+            if self._model_cache:
+                cached_models = self._model_cache.get_disk_models()
+                stats = self._model_cache.get_stats()
+                downloading_models = stats.downloading_models
+                # Log model cache stats for debugging
+                logger.debug(
+                    f"Model cache: vram={len(vram_models)}, disk={len(cached_models)}, "
+                    f"downloading={len(downloading_models)}"
+                ) 
 
             function_concurrency = {}
             for func_name, req in self._discovered_resources.items():
@@ -1510,7 +1557,8 @@ class Worker:
                 cuda_version=cuda_version,
                 torch_version=torch_version,
                 available_functions=list(dict.fromkeys(list(self._task_specs.keys()) + list(self._ws_specs.keys()))),
-                available_models=vram_models,
+                available_models=vram_models,  # Models in VRAM (hot)
+                cached_models=cached_models,   # Models on disk (warm)
                 supports_model_loading=supports_model_loading_flag,
                 function_schemas=function_schemas,
             )
@@ -1741,11 +1789,7 @@ class Worker:
             # self._send_message(pb.WorkerSchedulerMessage(load_model_result=result))
             self._handle_load_model_cmd(message.load_model_cmd)
         elif msg_type == 'unload_model_cmd':
-            # TODO: Implement model unloading logic
-            model_id = message.unload_model_cmd.model_id
-            logger.warning(f"Received unload_model_cmd for {model_id}, but not yet implemented.")
-            result = pb.UnloadModelResult(model_id=model_id, success=False, error_message="Model unloading not implemented")
-            self._send_message(pb.WorkerSchedulerMessage(unload_model_result=result))
+            self._handle_unload_model_cmd(message.unload_model_cmd)
         elif msg_type == 'interrupt_run_cmd':
             run_id = message.interrupt_run_cmd.run_id
             self._handle_interrupt_request(run_id)
@@ -1831,6 +1875,45 @@ class Worker:
         result = pb.LoadModelResult(model_id=model_id, success=success, error_message=error_msg)
         self._send_message(pb.WorkerSchedulerMessage(load_model_result=result))
 
+        # Update model cache tracking if successful
+        if success and self._model_cache:
+            # Estimate size (could be improved with actual model size tracking)
+            estimated_size_gb = 0.0
+            if self._model_manager and hasattr(self._model_manager, 'model_sizes'):
+                estimated_size_gb = self._model_manager.model_sizes.get(model_id, 0.0)
+            self._model_cache.mark_loaded_to_vram(model_id, None, estimated_size_gb)
+
+    def _handle_unload_model_cmd(self, cmd: Any) -> None:
+        """Handle orchestrator command to unload a model from VRAM."""
+        model_id = cmd.model_id
+        logger.info(f"Received UnloadModelCommand for: {model_id}")
+        success = False
+        error_msg = ""
+
+        try:
+            # Try legacy model_manager first
+            if self._model_manager and hasattr(self._model_manager, 'unload'):
+                self._model_manager.unload(model_id)
+                success = True
+                logger.info(f"Model '{model_id}' unloaded via Model Manager.")
+
+            # Also update model cache
+            if self._model_cache:
+                self._model_cache.unload_model(model_id)
+                success = True
+                logger.info(f"Model '{model_id}' removed from model cache.")
+
+            if not self._model_manager and not self._model_cache:
+                error_msg = "No model manager or cache configured on worker."
+                logger.error(error_msg)
+
+        except Exception as e:
+            error_msg = f"Exception unloading model '{model_id}': {e}"
+            logger.exception(error_msg)
+            success = False
+
+        result = pb.UnloadModelResult(model_id=model_id, success=success, error_message=error_msg)
+        self._send_message(pb.WorkerSchedulerMessage(unload_model_result=result))
 
     def _handle_run_request(self, request: TaskExecutionRequest) -> None:
         """Handle a task execution request from the scheduler."""

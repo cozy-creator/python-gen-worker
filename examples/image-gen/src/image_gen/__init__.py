@@ -34,7 +34,7 @@ class GenerateOutput(msgspec.Struct):
 def generate_image(
     ctx: ActionContext,
     pipeline: Annotated[
-        StableDiffusionXLPipeline, ModelRef(Src.DEPLOYMENT, "stabilityai/stable-diffusion-xl-base-1.0")
+        StableDiffusionXLPipeline, ModelRef(Src.DEPLOYMENT, "sdxl")  # Key from [tool.cozy.models]
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:

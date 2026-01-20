@@ -149,7 +149,8 @@ if __name__ == '__main__':
             use_tls=USE_TLS,
             reconnect_delay=RECONNECT_DELAY,
             max_reconnect_attempts=MAX_RECONNECT_ATTEMPTS,
-            model_manager=model_manager_instance_to_pass
+            model_manager=model_manager_instance_to_pass,
+            manifest=MANIFEST,  # Pass manifest for model config from [tool.cozy.models]
         )
         # This blocks until the worker stops
         worker.run()

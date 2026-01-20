@@ -10,7 +10,7 @@ requires-python = ">=3.12"
 dependencies = [
     "grpcio>=1.71.0",
     "msgspec>=0.18.6",
-    "protobuf>=5.26.1",
+    "protobuf>=6.30.0",
     "PyJWT[crypto]>=2.8.0",
     "psutil>=7.0.0",
     "aiohttp>=3.11.14",
@@ -35,7 +35,8 @@ tensorrt = [
 ]
 dev = [
     "grpcio-tools>=1.71.0",
-    "devpi-client>=7.2.0"
+    "devpi-client>=7.2.0",
+    "mypy>=1.10.0",
 ]
 
 [build-system]
@@ -74,6 +75,3 @@ explicit = true
 torch = [
   { index = "pytorch-cu126", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
-
-# [tool.uv.workspace]
-# members = ["image_gen_example/src/image_gen"]

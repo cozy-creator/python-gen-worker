@@ -27,6 +27,8 @@ import msgspec
 from gen_worker import ActionContext
 from gen_worker.injection import ModelRef
 
+import tomllib  # Python 3.11+ built-in
+
 
 def _type_id(t: type) -> Dict[str, str]:
     """Get module and qualname for a type."""
@@ -260,6 +262,14 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
     if delta_type is not None:
         delta_schema, delta_sha = _schema_and_hash(delta_type)
 
+    # Extract required_models: deployment-source model keys that must be available
+    # These are models declared in [tool.cozy.models] that the function needs
+    required_models = [
+        inj["model_ref"]["key"]
+        for inj in injections
+        if inj.get("model_ref", {}).get("source") == "deployment"
+    ]
+
     fn: Dict[str, Any] = {
         "name": func.__name__,
         "module": module_name,
@@ -273,6 +283,7 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
         "output_schema": output_schema,
         "incremental_output": incremental,
         "injection_json": injections,
+        "required_models": required_models,  # deployment model keys needed by this function
     }
 
     if delta_type is not None:
@@ -281,6 +292,75 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
         fn["delta_output_schema"] = delta_schema
 
     return fn
+
+
+def _load_cozy_config(root: Path) -> Dict[str, Any]:
+    """
+    Load [tool.cozy] config from pyproject.toml.
+
+    Returns dict with:
+        - build: dict with gpu, cuda, torch, backend, base_image settings
+        - models: dict mapping deployment keys to Cozy Hub model IDs
+        - resources: dict with vram_gb, gpu_type, memory_gb, cpu_cores
+
+    python-worker is the source of truth for all [tool.cozy.*] config parsing.
+    gen-builder extracts this manifest and forwards it to the orchestrator.
+    """
+    config: Dict[str, Any] = {}
+    pyproject_path = root / "pyproject.toml"
+
+    if not pyproject_path.exists():
+        return config
+
+    try:
+        with open(pyproject_path, "rb") as f:
+            data = tomllib.load(f)
+    except Exception as e:
+        print(f"warning: failed to parse pyproject.toml: {e}", file=sys.stderr)
+        return config
+
+    tool_cozy = data.get("tool", {}).get("cozy", {})
+    if not tool_cozy:
+        return config
+
+    # Parse [tool.cozy.build] - build settings (gpu, cuda, torch, backend, base_image)
+    build = tool_cozy.get("build", {})
+    if build and isinstance(build, dict):
+        bld: Dict[str, Any] = {}
+        if "gpu" in build and isinstance(build["gpu"], bool):
+            bld["gpu"] = build["gpu"]
+        if "cuda" in build and isinstance(build["cuda"], str):
+            bld["cuda"] = build["cuda"]
+        if "torch" in build and isinstance(build["torch"], str):
+            bld["torch"] = build["torch"]
+        if "backend" in build and isinstance(build["backend"], str):
+            bld["backend"] = build["backend"]
+        if "base_image" in build and isinstance(build["base_image"], str):
+            bld["base_image"] = build["base_image"]
+        if bld:
+            config["build"] = bld
+
+    # Parse [tool.cozy.models] - deployment key -> Cozy Hub model ID
+    models = tool_cozy.get("models", {})
+    if models and isinstance(models, dict):
+        config["models"] = {str(k): str(v) for k, v in models.items() if k and v}
+
+    # Parse [tool.cozy.resources] - hardware requirements
+    resources = tool_cozy.get("resources", {})
+    if resources and isinstance(resources, dict):
+        res: Dict[str, Any] = {}
+        if "vram_gb" in resources and isinstance(resources["vram_gb"], int):
+            res["vram_gb"] = resources["vram_gb"]
+        if "gpu_type" in resources and isinstance(resources["gpu_type"], str):
+            res["gpu_type"] = resources["gpu_type"]
+        if "memory_gb" in resources and isinstance(resources["memory_gb"], int):
+            res["memory_gb"] = resources["memory_gb"]
+        if "cpu_cores" in resources and isinstance(resources["cpu_cores"], int):
+            res["cpu_cores"] = resources["cpu_cores"]
+        if res:
+            config["resources"] = res
+
+    return config
 
 
 def discover_functions(root: Optional[Path] = None) -> List[Dict[str, Any]]:
@@ -341,6 +421,61 @@ def discover_functions(root: Optional[Path] = None) -> List[Dict[str, Any]]:
     return functions
 
 
+def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
+    """
+    Discover functions and load config to build complete manifest.
+
+    Args:
+        root: Project root directory. Defaults to current working directory.
+
+    Returns:
+        Complete manifest dict with functions, build, models, and resources.
+
+    The manifest includes:
+        - functions: list of discovered worker functions with required_models
+        - models: dict mapping deployment keys to Cozy Hub model IDs
+        - build: build settings from [tool.cozy.build]
+        - resources: hardware requirements from [tool.cozy.resources]
+    """
+    if root is None:
+        root = Path.cwd()
+    root = root.resolve()
+
+    functions = discover_functions(root)
+    config = _load_cozy_config(root)
+
+    manifest: Dict[str, Any] = {"functions": functions}
+
+    # Include config sections if present
+    if "build" in config:
+        manifest["build"] = config["build"]
+    if "resources" in config:
+        manifest["resources"] = config["resources"]
+
+    # Extract all required model keys from functions (deployment source only)
+    all_required_keys: Set[str] = set()
+    for fn in functions:
+        required = fn.get("required_models", [])
+        all_required_keys.update(required)
+
+    # Get models from [tool.cozy.models] config
+    config_models: Dict[str, str] = config.get("models", {})
+
+    # Validate: all required model keys must be defined in config
+    missing_keys = all_required_keys - set(config_models.keys())
+    if missing_keys:
+        print(
+            f"warning: functions require model keys not defined in [tool.cozy.models]: {sorted(missing_keys)}",
+            file=sys.stderr,
+        )
+
+    # Include models in manifest if we have any
+    if config_models:
+        manifest["models"] = config_models
+
+    return manifest
+
+
 def main() -> None:
     """Main entry point for CLI usage."""
     # Check for legacy COZY_FUNCTION_MODULES env var
@@ -352,15 +487,14 @@ def main() -> None:
         )
 
     try:
-        functions = discover_functions()
+        manifest = discover_manifest()
     except Exception as e:
         print(f"error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    if not functions:
+    if not manifest.get("functions"):
         print("warning: no @worker_function decorated functions found", file=sys.stderr)
 
-    manifest = {"functions": functions}
     print(json.dumps(manifest, indent=2))
 
 

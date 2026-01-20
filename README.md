@@ -197,6 +197,71 @@ Error hints:
 
 - Use `gen_worker.errors.RetryableError` in worker functions to flag retryable failures.
 
+---
+
+## Model Availability and Cache-Aware Routing
+
+Workers report model availability to the orchestrator for intelligent job routing. The orchestrator prefers workers that already have the required model ready.
+
+### Model States
+
+| State | Location | Description |
+|-------|----------|-------------|
+| **Hot** | VRAM | Model loaded in GPU memory - instant inference |
+| **Warm** | Disk | Model cached on local disk - fast load (seconds), no download |
+| **Cold** | None | Model not present - requires download + load (minutes) |
+
+### Heartbeat Reporting
+
+Workers report two model lists in each heartbeat:
+- `available_models` - Models currently loaded in VRAM (hot)
+- `cached_models` - Models cached on disk but not in VRAM (warm)
+
+The orchestrator uses this to route jobs:
+1. First preference: Workers with model in VRAM (instant)
+2. Second preference: Workers with model on disk (fast load)
+3. Last resort: Any capable worker (will need download)
+
+### ModelCache
+
+The `ModelCache` class tracks model states and provides availability checks:
+
+```python
+from gen_worker.model_cache import ModelCache, ModelLocation
+
+cache = ModelCache(max_vram_gb=20.0)
+
+# Register models
+cache.mark_loaded_to_vram("model-a", pipeline, size_gb=8.0)
+cache.mark_cached_to_disk("model-b", Path("/cache/model-b"), size_gb=10.0)
+
+# Check availability
+cache.is_in_vram("model-a")      # True
+cache.is_on_disk("model-b")      # True
+cache.are_models_available(["model-a", "model-b"])  # True (both ready)
+
+# Get model lists for heartbeat
+cache.get_vram_models()   # ["model-a"]
+cache.get_disk_models()   # ["model-b"]
+```
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `WORKER_MAX_VRAM_GB` | Auto-detect | Maximum VRAM to use for models |
+| `WORKER_VRAM_SAFETY_MARGIN_GB` | 3.5 | Reserved VRAM for working memory |
+| `WORKER_MODEL_CACHE_DIR` | `/tmp/model_cache` | Directory for disk-cached models |
+| `WORKER_MAX_CONCURRENT_DOWNLOADS` | 2 | Max parallel model downloads |
+
+### Progressive Availability
+
+Workers can accept jobs as soon as required models are ready. If a function needs model A and model B:
+- Jobs requiring only model A can run while model B is still downloading
+- The `are_models_available(model_ids)` method checks if all required models are ready
+
+---
+
 API note:
 
 - `output_format` is an orchestrator HTTP response preference (queue vs long-poll bytes/url) and does not change worker behavior; workers persist outputs as `Asset` refs via the Cozy hub file API.

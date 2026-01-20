@@ -32,6 +32,7 @@ class TestLoaderHooksAndArtifacts(unittest.TestCase):
 
         w._gpu_busy_lock = threading.Lock()
         w._is_gpu_busy = False
+        w._has_gpu = False
         w.max_output_bytes = 0
         w._model_manager = None
         w._runtime_loaders = {}

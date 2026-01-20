@@ -2,20 +2,13 @@
 name = "smoke-test"
 version = "0.1.0"
 description = "Simple worker functions for smoke testing"
-readme = "README.md"
-authors = [
-    { name = "Paul Fidika", email = "paul@fidika.com" }
-]
 requires-python = ">=3.12"
 dependencies = [
-    "gen-worker>=0.1.4",
-    "pydantic>=2.5.0"
+    "gen-worker",
 ]
 
 [dependency-groups]
-dev = [
-    "mypy>=1.10.0",
-]
+dev = ["mypy>=1.10.0"]
 
 [build-system]
 requires = ["hatchling"]
@@ -31,8 +24,7 @@ gen-worker = { path = "../.." }
 python_version = "3.12"
 ignore_missing_imports = true
 disallow_untyped_defs = true
-python_executable = ".venv/bin/python3"
 
-[tool.cozy.runtime]
-cuda = ">=12.6"
+[tool.cozy.build]
+gpu = true
 torch = ">=2.9"

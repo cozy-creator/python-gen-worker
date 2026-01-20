@@ -6,8 +6,8 @@ class ResourceRequirements:
     """
     Specifies the resource requirements for a worker function.
 
-    Note: GPU/CPU is a deployment-level decision configured via the cuda
-    constraint in [tool.cozy.runtime], not a per-function setting.
+    Note: GPU/CPU is a deployment-level decision configured via gpu/cuda
+    in [tool.cozy.build], not a per-function setting.
     """
     def __init__(
         self,
