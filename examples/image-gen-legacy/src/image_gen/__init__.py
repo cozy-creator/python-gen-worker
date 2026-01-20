@@ -30,7 +30,7 @@ def aspect_ratio_to_dimensions(aspect_ratio: str) -> Tuple[int, int]:
     return 1024, 1024
 
 
-@worker_function(ResourceRequirements(requires_gpu=True))
+@worker_function()
 def generate_image(ctx: ActionContext, payload: ImageGenInput) -> ImageGenOutput:
     if ctx.is_canceled():
         raise InterruptedError("canceled")

@@ -659,6 +659,13 @@ class Worker:
 
         self._gpu_busy_lock = threading.Lock()
         self._is_gpu_busy = False
+        # Detect GPU availability once at startup
+        self._has_gpu = False
+        try:
+            import torch
+            self._has_gpu = torch.cuda.is_available() and torch.cuda.device_count() > 0
+        except ImportError:
+            pass
 
         self._channel: Optional[Any] = None
         self._stub: Optional[Any] = None
@@ -2051,12 +2058,12 @@ class Worker:
         success = False
 
         this_thread_set_gpu_busy = False
-        if spec.resources.requires_gpu:
+        if self._has_gpu:
             with self._gpu_busy_lock:
                 if not self._is_gpu_busy:
                     self._is_gpu_busy = True
                     this_thread_set_gpu_busy = True
-                    logger.info("Worker GPU marked BUSY by %s (%s).", run_id, spec.name)
+                    logger.debug("Worker GPU marked BUSY by %s (%s).", run_id, spec.name)
 
         try:
             if ctx.is_canceled():
@@ -2168,7 +2175,7 @@ class Worker:
             if this_thread_set_gpu_busy:
                 with self._gpu_busy_lock:
                     self._is_gpu_busy = False
-                logger.info("Worker GPU marked NOT BUSY by %s (%s).", run_id, spec.name)
+                logger.debug("Worker GPU marked NOT BUSY by %s (%s).", run_id, spec.name)
 
             self._send_task_result(run_id, success, output_payload, error_type, bool(retryable), safe_message, error_message)
 

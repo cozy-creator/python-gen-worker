@@ -32,7 +32,7 @@ class FailOutput(msgspec.Struct):
     message: str
 
 
-@worker_function(ResourceRequirements(requires_gpu=False))
+@worker_function(ResourceRequirements())
 def generate_image_demo(ctx: ActionContext, payload: GenerateImageInput) -> GenerateImageOutput:
     """Dummy image generator that returns a saved Asset (no model inference)."""
     if ctx.is_canceled():

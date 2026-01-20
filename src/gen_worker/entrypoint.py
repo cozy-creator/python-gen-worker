@@ -1,14 +1,9 @@
+import json
 import logging
 import os
 import sys
-import  asyncio
-from typing import cast
-
-# Ensure the package source is potentially discoverable if running locally
-# In a proper install, this might not be strictly necessary
-# but helps during development if the current dir is the repo root.
-# script_dir = os.path.dirname(os.path.abspath(__file__))
-# sys.path.insert(0, os.path.dirname(script_dir))
+from pathlib import Path
+from typing import cast, List, Optional
 
 try:
     from .worker import Worker
@@ -17,6 +12,32 @@ except ImportError as e:
     print(f"Error importing Worker: {e}", file=sys.stderr)
     print("Please ensure the gen_worker package is installed or accessible in PYTHONPATH.", file=sys.stderr)
     sys.exit(1)
+
+MANIFEST_PATH = Path("/app/.cozy/manifest.json")
+
+
+def load_manifest() -> Optional[dict]:
+    """Load the function manifest if it exists (baked in at build time)."""
+    if not MANIFEST_PATH.exists():
+        return None
+    try:
+        with open(MANIFEST_PATH, "r") as f:
+            return json.load(f)
+    except Exception as e:
+        logging.getLogger("WorkerEntrypoint").warning(
+            "Failed to load manifest from %s: %s", MANIFEST_PATH, e
+        )
+        return None
+
+
+def get_modules_from_manifest(manifest: dict) -> List[str]:
+    """Extract unique module names from the manifest."""
+    modules = set()
+    for func in manifest.get("functions", []):
+        module = func.get("module")
+        if module:
+            modules.add(module)
+    return sorted(modules)
 
 # Optional Default Model Management Components
 DMM_AVAILABLE = False
@@ -55,10 +76,17 @@ SCHEDULER_ADDR = os.getenv('SCHEDULER_ADDR', 'localhost:8080')
 SCHEDULER_ADDRS = os.getenv('SCHEDULER_ADDRS', '')
 SEED_ADDRS = [addr.strip() for addr in SCHEDULER_ADDRS.split(',') if addr.strip()]
 
-# Default user module name, can be overridden by environment variable
-default_user_modules = 'functions' # A sensible default
-user_modules_str = os.getenv('USER_MODULES', default_user_modules)
-USER_MODULES = [mod.strip() for mod in user_modules_str.split(',') if mod.strip()]
+# Load manifest if available (baked in at build time)
+MANIFEST = load_manifest()
+
+# Determine user modules: from manifest (preferred) or USER_MODULES env var (fallback)
+if MANIFEST:
+    USER_MODULES = get_modules_from_manifest(MANIFEST)
+    logger.info("Loaded manifest from %s with %d functions", MANIFEST_PATH, len(MANIFEST.get("functions", [])))
+else:
+    default_user_modules = 'functions'
+    user_modules_str = os.getenv('USER_MODULES', default_user_modules)
+    USER_MODULES = [mod.strip() for mod in user_modules_str.split(',') if mod.strip()]
 
 WORKER_ID = os.getenv('WORKER_ID', "worker-1") # Optional, will be generated if None
 AUTH_TOKEN = os.getenv('AUTH_TOKEN') or os.getenv('WORKER_JWT') # Optional
@@ -85,7 +113,7 @@ if __name__ == '__main__':
     logger.info(f'  Enable Default Model Manager: {ENABLE_DEFAULT_MODEL_MANAGER}')
 
     if not USER_MODULES:
-        logger.error("No user function modules specified. Set the USER_MODULES environment variable.")
+        logger.error("No user function modules found. Either provide a manifest at /app/.cozy/manifest.json or set the USER_MODULES environment variable.")
         sys.exit(1)
 
     model_manager_instance_to_pass = None

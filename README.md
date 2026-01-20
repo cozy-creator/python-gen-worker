@@ -61,7 +61,7 @@ class Input(msgspec.Struct):
 class Output(msgspec.Struct):
     text: str
 
-@worker_function(ResourceRequirements(requires_gpu=True))
+@worker_function(ResourceRequirements())
 def run(
     ctx: ActionContext,
     # The worker injects cached handles based on the ModelRef.
@@ -93,6 +93,90 @@ Build contract (gen-builder):
 - Tenant code + `pyproject.toml`/`uv.lock` are packaged together
 - gen-builder layers tenant code + deps on top of a python-worker base image
 - gen-orchestrator deploys the resulting worker image
+
+---
+
+## Manual builds (without gen-builder)
+
+You can build worker images directly using Docker, without gen-builder.
+
+### 1. Project structure
+
+```
+my-worker/
+├── pyproject.toml      # dependencies + [tool.cozy] config
+├── uv.lock             # lockfile (recommended)
+└── src/
+    └── my_module/
+        └── __init__.py # contains @worker_function decorated functions
+```
+
+### 2. Copy the Dockerfile template
+
+Copy `Dockerfile.template` from this repo to your project as `Dockerfile`:
+
+```bash
+cp /path/to/python-worker/Dockerfile.template ./Dockerfile
+```
+
+Or write your own:
+
+```dockerfile
+ARG BASE_IMAGE=cozycreator/python-worker:cuda12.8-torch2.9
+FROM ${BASE_IMAGE}
+
+WORKDIR /app
+COPY . /app
+
+RUN pip install --no-cache-dir uv
+RUN if [ -f /app/uv.lock ]; then uv sync --frozen --no-dev; else uv sync --no-dev; fi
+
+# Generate function manifest at build time
+RUN mkdir -p /app/.cozy && python -m gen_worker.discover > /app/.cozy/manifest.json
+
+ENTRYPOINT ["python", "-m", "gen_worker.entrypoint"]
+```
+
+### 3. Build
+
+```bash
+# CPU only
+docker build -t my-worker --build-arg BASE_IMAGE=cozycreator/python-worker:cpu-torch2.9 .
+
+# CUDA 12.8 (default)
+docker build -t my-worker .
+
+# CUDA 13.0
+docker build -t my-worker --build-arg BASE_IMAGE=cozycreator/python-worker:cuda13-torch2.9 .
+```
+
+### 4. Run
+
+```bash
+docker run -e ORCHESTRATOR_URL=http://orchestrator:8080 my-worker
+```
+
+The worker will:
+1. Read the manifest from `/app/.cozy/manifest.json`
+2. Self-register with the orchestrator
+3. Start listening for tasks
+
+### Available base images
+
+| Image | GPU | CUDA | PyTorch |
+|-------|-----|------|---------|
+| `cozycreator/python-worker:cpu-torch2.9` | No | - | 2.9.1 |
+| `cozycreator/python-worker:cuda12.6-torch2.9` | Yes | 12.6 | 2.9.1 |
+| `cozycreator/python-worker:cuda12.8-torch2.9` | Yes | 12.8 | 2.9.1 |
+| `cozycreator/python-worker:cuda13-torch2.9` | Yes | 13.0 | 2.9.1 |
+
+### What happens automatically
+
+- **Function discovery**: `gen_worker.discover` scans for `@worker_function` decorators
+- **Manifest generation**: Input/output schemas extracted from msgspec types
+- **Self-registration**: Worker registers its functions with orchestrator on startup
+
+No gen-builder required for local development or custom CI pipelines.
 
 ---
 

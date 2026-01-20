@@ -25,7 +25,7 @@ class ImageGenOutput(msgspec.Struct):
     urls: List[str]
 
 
-@worker_function(ResourceRequirements(requires_gpu=True))
+@worker_function(ResourceRequirements())
 def image_gen_action(ctx: ActionContext, data: ImageGenInput) -> ImageGenOutput:
     """Example image generation function (dummy output)."""
     if ctx.is_canceled():

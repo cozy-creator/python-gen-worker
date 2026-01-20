@@ -15,7 +15,7 @@ from gen_worker.types import Asset
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
-sdxl_resources = ResourceRequirements(requires_gpu=True)
+sdxl_resources = ResourceRequirements()
 
 class GenerateInput(msgspec.Struct):
     prompt: str

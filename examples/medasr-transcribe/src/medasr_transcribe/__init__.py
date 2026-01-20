@@ -21,7 +21,7 @@ class MedASROutput(msgspec.Struct):
     text: str
 
 
-@worker_function(ResourceRequirements(requires_gpu=True))
+@worker_function(ResourceRequirements())
 def medasr_transcribe(
     ctx: ActionContext,
     model: Annotated[AutoModelForCTC, ModelRef(Src.DEPLOYMENT, _MODEL_ID)],

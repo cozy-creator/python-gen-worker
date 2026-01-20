@@ -1,12 +1,12 @@
 [project]
 name = "gen-worker"
-version = "0.1.4"
-description = "Add your description here"
+version = "0.1.0"
+description = "A library used to build custom endpoints in Cozy Creator's serverless function platform."
 readme = "README.md"
 authors = [
     { name = "Paul Fidika", email = "paul@fidika.com" }
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
     "grpcio>=1.71.0",
     "msgspec>=0.18.6",
@@ -49,7 +49,7 @@ packages = ["src/gen_worker"]
 include = ["src/gen_worker", "README.md", "pyproject.toml", "uv.lock"]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.12"
 ignore_missing_imports = true
 warn_unused_ignores = true
 warn_redundant_casts = true

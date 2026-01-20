@@ -27,7 +27,7 @@ def _sha256_file(asset: Asset, max_bytes: int = 5 * 1024 * 1024) -> str:
     data = asset.read_bytes(max_bytes=max_bytes)
     return hashlib.sha256(data).hexdigest()
 
-@worker_function(ResourceRequirements(requires_gpu=False))
+@worker_function(ResourceRequirements())
 def generate(
     ctx: ActionContext,
     artifacts: Annotated[ModelArtifacts, ModelRef(Src.DEPLOYMENT, "stub-model")],

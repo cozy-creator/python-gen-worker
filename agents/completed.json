@@ -1,0 +1,202 @@
+{
+  "issues": [
+    {
+      "name": "Signature-based dependency injection (typing.Annotated + ModelRef)",
+      "description": "Adopt the new tenant function contract where models/processors/pipelines are injected via `typing.Annotated[..., ModelRef(...)]` instead of decorator flags like expects_pipeline_arg. The worker owns downloads + VRAM lifecycle; tenant code receives ready-to-use objects. Keep `@worker_function` minimal (marker + requires_gpu) and rely on signature inspection for injection and validation.",
+      "tasks": [
+        "[x] Add `gen_worker.injection` module defining ModelRefSource enum, ModelRef annotation helper",
+        "[x] Add `ModelArtifacts` injection type for non-standard runtimes",
+        "[x] Define injection resolution rules (DEPLOYMENT, PAYLOAD sources)",
+        "[x] Implement injection in the worker call wrapper",
+        "[x] Implement a minimal injection catalog (torch backend first)",
+        "[x] Support tenant-provided loader hooks for custom runtime handles",
+        "[x] Tighten `@worker_function` usage (marker + requires_gpu only)",
+        "[x] Schema reporting: include injection metadata per function",
+        "[x] Tests for Annotated injection, ModelArtifacts, loader hooks, allowlist rejection"
+      ],
+      "completed": true
+    },
+    {
+      "name": "Strict typed tenant contract (msgspec input/output inferred from signature)",
+      "description": "Enforce that tenant functions use strongly-typed `msgspec.Struct` for inputs and outputs, inferred from the function signature. This makes function invocation safer and enables orchestrator-side JSON validation against the exact schema the function expects.",
+      "tasks": [
+        "[x] Define canonical function signature rules and enforce at discovery time",
+        "[x] Implement signature inspection utilities",
+        "[x] Update function discovery to fail fast with clear errors",
+        "[x] Update invocation wrapper to decode payload strictly as inferred msgspec.Struct",
+        "[x] Update output handling for non-incremental and incremental functions",
+        "[x] Enforce that dict-based payload handlers are not supported",
+        "[x] Tests for contract enforcement"
+      ],
+      "completed": true
+    },
+    {
+      "name": "Incremental output: generator functions + typed output events",
+      "description": "Add first-class support for incremental output from tenant functions. The worker supports functions that yield typed deltas and forwards those incrementals to the scheduler as ordered job events.",
+      "tasks": [
+        "[x] Infer incremental output from return annotation (Iterator/Iterable)",
+        "[x] Extend function discovery to support incremental output mode",
+        "[x] Define minimal stable event taxonomy (output.delta, output.completed, output.error)",
+        "[x] Implement iterator execution path with rate limiting and cancellation",
+        "[x] Ensure emitted deltas are JSON-serializable with size limits",
+        "[x] Preserve existing RunResult semantics",
+        "[x] Extend schema reporting for incremental output metadata",
+        "[x] Unit tests for iterator yields, cancellation, oversize handling",
+        "[x] Add example incremental-output function"
+      ],
+      "completed": true
+    },
+    {
+      "name": "WebSocket realtime functions (worker-side runtime)",
+      "description": "Support true WebSocket realtime endpoints (bidirectional) without exposing workers publicly. Tenant code registers an async handler and uses a gen-worker-owned socket interface.",
+      "tasks": [
+        "[x] Define worker-owned RealtimeSocket interface",
+        "[x] Add @worker_websocket decorator and discovery",
+        "[x] Add internal realtime session loop over worker transport",
+        "[x] Injection support for realtime handlers",
+        "[x] Cancellation + cleanup handling",
+        "[x] Safety limits (max frame bytes)",
+        "[x] Integration tests for echo handler"
+      ],
+      "completed": true
+    },
+    {
+      "name": "Alternative backends: ONNX Runtime + TensorRT runtime handles",
+      "description": "Add first-class support for non-torch execution backends by injecting backend-specific runtime handles into tenant functions.",
+      "tasks": [
+        "[x] Packaging extras for onnxruntime and tensorrt",
+        "[x] Backend runtime handle interfaces",
+        "[x] Injection support with loader hooks",
+        "[x] Compatibility gating for TensorRT",
+        "[x] Tests for loader-hook caching and metadata mismatch"
+      ],
+      "completed": true
+    },
+    {
+      "name": "Support orchestrator queue/long-poll API (bytes + multipart inputs)",
+      "description": "Ensure python-worker cleanly supports the orchestrator's simplified API surface: queue + long-poll, raw-bytes output, and multipart-uploaded inputs proxied through cozy-hub.",
+      "tasks": [
+        "[x] Confirm function discovery reports Asset-based file inputs",
+        "[x] Ensure input materialization supports cozy-hub refs and URLs with size caps and SSRF protections",
+        "[x] Ensure output contract for file outputs is Asset",
+        "[x] Ensure ctx.save_bytes/ctx.save_file persist to cozy-hub and return Asset metadata",
+        "[x] Unit tests for asset materialization with size caps",
+        "[x] Document output_format only affects orchestrator HTTP responses"
+      ],
+      "completed": true
+    },
+    {
+      "name": "Expanded structured error taxonomy + sanitization",
+      "description": "Expand beyond retryable/fatal into a richer, typed error taxonomy for tenant functions with strict sanitization for client-facing messages.",
+      "tasks": [
+        "[x] Add tenant-facing error classes (ValidationError, ResourceError, CanceledError)",
+        "[x] Define canonical error payload shape",
+        "[x] Implement exception->error mapping layer",
+        "[x] Implement sanitization policy for safe_message",
+        "[x] Tests for error mapping and sanitization"
+      ],
+      "completed": true
+    },
+    {
+      "name": "Worker leader discovery + failover",
+      "description": "Add multi-seed scheduler discovery and automatic leader redirect handling for Raft deployments.",
+      "tasks": [
+        "[x] Add SCHEDULER_ADDRS env (comma-separated)",
+        "[x] Try seed addresses on startup until connection succeeds",
+        "[x] On stream failure, retry across seed list with backoff",
+        "[x] Parse FailedPrecondition not_leader:<addr> and reconnect",
+        "[x] Add test coverage for redirect handling"
+      ],
+      "completed": true
+    },
+    {
+      "name": "Worker runtime enhancements (outputs, progress, limits)",
+      "description": "Improve worker ergonomics for serverless inference: direct output uploads, progress events, and concurrency caps.",
+      "tasks": [
+        "[x] Add direct output upload support",
+        "[x] Return output metadata instead of raw bytes",
+        "[x] Deprecate raw output byte streaming for large outputs",
+        "[x] Add ctx.emit() for progress/events",
+        "[x] Add per-worker/per-function concurrency limits",
+        "[x] Add basic validation for input/output payloads",
+        "[x] Add structured error taxonomy",
+        "[x] Report richer resource info (GPU, VRAM, driver version)",
+        "[x] Add heartbeat backoff + jitter",
+        "[x] Add graceful shutdown to drain in-flight jobs",
+        "[x] Enforce configurable max payload sizes",
+        "[x] Verify scheduler JWT on connect",
+        "[x] Fetch and cache scheduler JWKS",
+        "[x] Handle JWKS rotation",
+        "[x] Fail closed when JWT verification fails"
+      ],
+      "completed": true
+    },
+    {
+      "name": "Example worker functions (python-worker/examples)",
+      "description": "Maintain example tenant projects inside the python-worker repo under `python-worker/examples/` so they evolve with the SDK and stay runnable by gen-builder.",
+      "tasks": [
+        "[x] Decide on example project layout",
+        "[x] Create multiple example subfolders",
+        "[x] Ensure each example imports gen_worker and uses @worker_function",
+        "[x] Enforce dependency policy (no requirements.txt)",
+        "[x] Add [tool.cozy] entries to examples",
+        "[x] Align dependencies to python-worker SDK version",
+        "[x] Add README per example"
+      ],
+      "completed": true
+    },
+    {
+      "name": "Python worker SDK cleanup",
+      "description": "Position python-worker as a pure pip package and keep example projects in python-worker/examples.",
+      "tasks": [
+        "[x] Remove or relocate python-worker/example-functions and image_gen_example",
+        "[x] Update python-worker README",
+        "[x] Ensure packaging stays intact",
+        "[x] Add or update minimal docs",
+        "[x] Document recommended contract for dynamic checkpoint selection",
+        "[x] Document the build contract",
+        "[x] Verify examples install gen-worker as dependency"
+      ],
+      "completed": true
+    },
+    {
+      "name": "JWT RSA import safety",
+      "description": "Avoid import-time failures when PyJWT lacks RSA support; ensure JWKS verification is available when configured.",
+      "tasks": [
+        "[x] Guard RSAAlgorithm import",
+        "[x] Require PyJWT crypto extra",
+        "[x] Reinstall and smoke test example imports"
+      ],
+      "completed": true
+    },
+    {
+      "name": "gen-worker core + torch add-on split",
+      "description": "Separate lightweight orchestration SDK from torch-specific model memory management, with a clean interface between them.",
+      "tasks": [
+        "[x] Define core responsibilities",
+        "[x] Keep model downloading from Cozy hub in core",
+        "[x] Core must integrate downloader -> local model path -> ModelManager calls",
+        "[x] Define ModelManager interface in core with no torch imports",
+        "[x] Move default_model_manager behind optional add-on",
+        "[x] Remove torch/diffusers/transformers from core dependencies",
+        "[x] Add optional dependency group for torch runtime",
+        "[x] Update worker to accept ModelManager instance or plugin path",
+        "[x] Document the split and install modes",
+        "[x] Audit imports to ensure torch-only code is isolated"
+      ],
+      "completed": true
+    },
+    {
+      "name": "Standardize deployment config in pyproject.toml ([tool.cozy])",
+      "description": "Remove the separate cozy.toml manifest and standardize all tenant deployment configuration under `pyproject.toml` in `[tool.cozy]`.",
+      "tasks": [
+        "[x] Update docs to use [tool.cozy] only",
+        "[x] Update python-worker/examples to use [tool.cozy]",
+        "[x] Update worker-side config parsing",
+        "[x] Add validation helper for [tool.cozy], uv.lock presence",
+        "[x] Tests for cozy.toml rejection"
+      ],
+      "completed": true
+    }
+  ]
+}

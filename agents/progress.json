@@ -1,204 +1,6 @@
 {
   "issues": [
     {
-      "name": "Signature-based dependency injection (typing.Annotated + ModelRef)",
-      "description": "Adopt the new tenant function contract where models/processors/pipelines are injected via `typing.Annotated[..., ModelRef(...)]` instead of decorator flags like expects_pipeline_arg. The worker owns downloads + VRAM lifecycle; tenant code receives ready-to-use objects. Keep `@worker_function` minimal (marker + requires_gpu) and rely on signature inspection for injection and validation.",
-      "tasks": [
-        "[x] Add `gen_worker.injection` module defining:\n    - `ModelRefSource` enum (at least: DEPLOYMENT, PAYLOAD)\n    - `ModelRef` annotation helper carrying (source, key)\n    - Strong typing via `typing.Annotated` metadata and `typing.get_type_hints(..., include_extras=True)`.",
-        "[x] Add `ModelArtifacts` injection type for non-standard runtimes:\n    - Injects local artifact paths (a directory + named files map) for a resolved model ref\n    - Used when tenant code imports a custom runtime (e.g. krea-ai/realtime-video) and loads weights itself\n    - Source of truth for artifact keys is deployment config (not inferred from repo contents).",
-        "[x] Define injection resolution rules (document + implement):\n    - DEPLOYMENT: inject the deployment-configured model_id (or a literal id)\n    - PAYLOAD: payload chooses a model key/label from a deployment allowlist mapping\n    - Reject any resolved model_id not allowlisted for the deployment.",
-        "[x] Implement injection in the worker call wrapper:\n    - Inspect function signature including Annotated metadata\n    - Build injected args before invoking tenant code\n    - Keep payload decoding (msgspec) + Asset materialization as today.",
-        "[x] Implement a minimal injection catalog (torch backend first):\n    - Inject `AutoModelForCausalLM`-style models and `AutoProcessor`/tokenizers (via cached from_pretrained)\n    - Inject diffusers pipelines via the configured ModelManager (when available)\n    - Inject `ModelArtifacts` when the annotation requests artifact paths instead of a ready runtime object\n    - Ensure injection is cheap at invocation time (reuse cached objects; no per-invocation downloads).",
-        "[x] Support tenant-provided loader hooks for custom runtime handles:\n    - Allow tenant projects to register a loader callable that builds a custom runtime handle from `ModelArtifacts`\n    - The worker caches the returned object per (model_id, injected type) and injects it into functions/websocket handlers.",
-        "[x] Tighten `@worker_function` usage:\n    - Keep decorator only as a marker + `requires_gpu` (and max_concurrency)\n    - Remove expects_pipeline_arg / expects_model_bundle_arg in the new contract.",
-        "[x] Schema reporting: include injection metadata per function (requires orchestrator proto/schema changes) so deployments can be registered without out-of-band docs.",
-        "[x] Tests:\n    - Annotated injection works (DEPLOYMENT + PAYLOAD)\n    - ModelArtifacts injection returns stable local paths and named keys\n    - Loader hook is used for custom runtime types and returns cached handles\n    - Non-allowlisted selections are rejected"
-      ],
-      "completed": true
-    },
-    {
-      "name": "Strict typed tenant contract (msgspec input/output inferred from signature)",
-      "description": "Enforce that tenant functions use strongly-typed `msgspec.Struct` for inputs and outputs, inferred from the function signature (no dict payloads, no explicit input_model/output_model args). This makes function invocation safer and enables orchestrator-side JSON validation against the exact schema the function expects.",
-      "tasks": [
-        "[x] Define the canonical function signature rules (and enforce at discovery time):\n    - Must accept `ctx: ActionContext` as the first arg\n    - Must accept exactly one payload arg, and its type must be a `msgspec.Struct` subclass\n    - May accept additional injected args via `typing.Annotated[..., ModelRef(...)]`\n    - Reject untyped parameters and reject `dict`/`Any` payloads.",
-        "[x] Implement signature inspection utilities using `typing.get_type_hints(..., include_extras=True)` and `inspect.signature`:\n    - Identify payload parameter and payload struct type\n    - Identify injected parameters (Annotated + ModelRef metadata)\n    - Identify output mode from return annotation: `msgspec.Struct` or `Iterator[msgspec.Struct]` (incremental output).",
-        "[x] Update function discovery to fail fast with clear errors when a function violates the contract (include function name/module and rule violated).",
-        "[x] Update invocation wrapper to decode payload strictly as the inferred `msgspec.Struct` type (unknown fields rejected; defaults applied by msgspec).",
-        "[x] Update output handling:\n    - Non-incremental: require returned value is instance of the annotated output `msgspec.Struct`\n    - Incremental: require iterator yields instances of the annotated delta `msgspec.Struct`.\n    - Convert outputs to builtins (`msgspec.to_builtins`) before msgpack encoding for Go compatibility (keep this behavior).",
-        "[x] Enforce that dict-based payload handlers are not supported (fail discovery with a clear error).",
-        "[x] Tests:\n    - Reject dict payloads\n    - Reject missing ctx\n    - Reject missing return annotations\n    - Accept typed functions with injected params + msgspec payload\n    - Ensure schema hashes/identifiers are stable (if used downstream)."
-      ],
-      "completed": true
-    },
-    {
-      "name": "Incremental output: generator functions + typed output events",
-      "description": "Add first-class support for incremental output from tenant functions (e.g. token-by-token output). The worker should support functions that yield typed deltas and/or explicitly emit typed output events, and forward those incrementals to the scheduler as ordered job events without requiring tenants to manage storage/VRAM. (\"Streaming\" over WebSockets is a separate feature.)",
-      "tasks": [
-        "[x] Infer incremental output from the function return annotation (`Iterator[DeltaStruct]` / `Iterable[DeltaStruct]`) rather than adding decorator flags.",
-        "[x] Extend function discovery to support two output modes:\n    - non-incremental: return type is `msgspec.Struct`\n    - incremental: return type is `Iterator[msgspec.Struct]` / `Iterable[msgspec.Struct]` (delta type) and/or `Generator[msgspec.Struct, None, FinalStruct?]` (future: separate final type).",
-        "[x] Define a minimal, stable event taxonomy for incremental output emitted by the worker:\n    - `output.delta` (payload is a JSON object derived from the yielded msgspec struct)\n    - `output.completed` (optional; emitted when the iterator finishes)\n    - `output.error` (emitted on exception before the final RunResult)\n    Keep existing `job.progress` / `job.log` events unchanged.",
-        "[x] Implement iterator execution path in the worker wrapper:\n    - If function returns an iterator, iterate and emit `output.delta` for each item\n    - Apply basic rate limiting/coalescing knobs (env-configurable): max events/sec, max payload bytes per event\n    - Respect cancellation: stop iterating promptly when InterruptTaskCommand is received or ctx.is_canceled() becomes true.",
-        "[x] Ensure emitted deltas are strictly JSON-serializable (use `msgspec.to_builtins` then JSON dump) and enforce a small per-delta size limit to prevent DB bloat.",
-        "[x] Preserve existing RunResult semantics:\n    - For incremental-output functions, RunResult `output_payload` should contain a small final summary object (or be empty) while incremental output is delivered via events.\n    - For non-incremental functions, keep current behavior.",
-        "[x] Extend schema reporting to include incremental-output metadata (requires proto changes in scheduler message types) so orchestrator can advertise/validate whether a function has incremental output and what its delta schema is.",
-        "[x] Add unit tests:\n    - iterator yields N deltas -> emits N ordered `WorkerEvent` messages\n    - iterator cancellation -> stops early and emits canceled result\n    - oversize delta -> capped/truncated per event size limits.",
-        "[x] Add an example incremental-output function in python-worker/examples (LLM token delta stub) that yields deltas and can be observed via `/v1/jobs/<id>/events`."
-      ],
-      "completed": true
-    },
-    {
-      "name": "WebSocket realtime functions (worker-side runtime)",
-      "description": "Support true WebSocket realtime endpoints (bidirectional) without exposing workers publicly. Tenant code registers an async handler (e.g. `@worker_websocket`) and uses a gen-worker-owned socket interface. The worker talks to gen-orchestrator over a bidirectional internal transport stream; gen-orchestrator http-api proxies to/from the browser WebSocket and handles auth + rate limiting.",
-      "tasks": [
-        "[x] Define a worker-owned `RealtimeSocket` interface (no FastAPI dependency):\n    - `accept()` / `close(code?, reason?)`\n    - `receive_bytes()` / `send_bytes()`\n    - `send_json()` convenience (optional)\n    - Backpressure semantics: `send_*` is awaitable; buffers are bounded.",
-        "[x] Add `@worker_websocket` decorator (marker only) and discovery:\n    - Identify websocket handlers separately from job functions\n    - Enforce signature: `(ctx: ActionContext, ws: RealtimeSocket, ...injected...) -> Awaitable[None]`.",
-        "[x] Add internal realtime session loop over worker transport:\n    - Extend/define a worker RPC for realtime: Open/Frame/Close messages over the scheduler stream\n    - Map inbound frames to `RealtimeSocket.receive_*` and outbound frames from `RealtimeSocket.send_*`.\n    - Support binary frames as the primary payload; allow tiny JSON control messages (ready/status).",
-        "[x] Injection support for realtime handlers:\n    - Allow websocket handlers to receive injected deps via `typing.Annotated[..., ModelRef(...)]`\n    - Resolve injection once per session (not per frame) and cache for session lifetime.",
-        "[x] Cancellation + cleanup:\n    - If the orchestrator closes/cancels the session, propagate cancellation to tenant handler and close socket\n    - Ensure resources are released after session end.",
-        "[x] Safety limits (defense-in-depth):\n    - Enforce `WORKER_MAX_WS_FRAME_BYTES` and drop/close on oversize frames",
-        "[x] Tests:\n    - Integration smoke: echo handler that sends a ready JSON message then echoes binary frames."
-      ],
-      "completed": true
-    },
-    {
-      "name": "Alternative backends: ONNX Runtime + TensorRT runtime handles",
-      "description": "Add first-class support for non-torch execution backends by injecting backend-specific runtime handles into tenant functions via `typing.Annotated[..., ModelRef(...)]`. Strict artifact boundaries: ONNX uses `.onnx`(+external data) artifacts, TensorRT uses prebuilt `.engine` artifacts with explicit compatibility metadata. No exporting/building on worker boot.",
-      "tasks": [
-        "[x] Packaging extras:\n    - Add `gen-worker[onnxruntime]` and `gen-worker[tensorrt]` optional extras (core stays lightweight).",
-        "[x] Backend runtime handle interfaces (worker-owned):\n    - Define minimal stable protocols/types for injected handles (e.g. OrtRuntime/TrtRuntime).",
-        "[x] Injection support:\n    - Use signature-driven injection + loader hooks to build backend-specific runtime handles from `ModelArtifacts`.\n    - Cache injected runtime handles per (model_id, injected type) so creation is one-time per worker process.",
-        "[x] Compatibility gating (TensorRT):\n    - When selecting a `@tensorrt` artifact, enforce basic metadata compatibility (cuda/tensorrt/sm) using `ModelArtifacts.metadata`.\n    - Fail fast with a structured resource error on mismatch.",
-        "[x] Tests:\n    - Unit test loader-hook injection caching\n    - Unit test TensorRT metadata mismatch produces a structured resource error"
-      ],
-      "completed": true
-    },
-    {
-      "name": "Support orchestrator queue/long-poll API (bytes + multipart inputs)",
-      "description": "Ensure python-worker cleanly supports the orchestrator’s simplified API surface: queue (job id) + long-poll (Prefer: wait), raw-bytes primary output for long-poll, and multipart-uploaded inputs proxied through cozy-hub. Worker should never see base64/data-URIs or multipart form parts; it should only see msgpack inputs with resolved Asset refs/URLs.",
-      "tasks": [
-        "[x] Confirm function discovery reports msgspec JSON schemas that accept file inputs as `Asset` (never `data:` URIs, never `form_file`).",
-        "[x] Ensure input materialization supports both cozy-hub refs and external URLs with strict size caps (`WORKER_MAX_INPUT_FILE_BYTES`) and SSRF protections for URL downloads.",
-        "[x] Ensure output contract for file outputs is `Asset` (or list of `Asset`), stored under reserved prefixes (e.g. `runs/<run_id>/outputs/...`), so orchestrator can reliably pick a primary output.",
-        "[x] Ensure `ctx.save_bytes/ctx.save_file` always persist to cozy-hub file API and return populated `Asset` metadata (ref/sha/size/mime) for downstream URL/bytes fetching by the orchestrator.",
-        "[x] Add unit tests for asset materialization (external URL + cozy-hub ref) with size caps enforced (mock urllib).",
-        "[x] Document that `output_format` only affects orchestrator HTTP responses; worker behavior is storage-first."
-      ],
-      "completed": true
-    },
-    {
-      "name": "Expanded structured error taxonomy + sanitization",
-      "description": "Expand beyond retryable/fatal into a richer, typed error taxonomy for tenant functions and ensure python-worker always returns a single structured error payload to the scheduler (with strict sanitization for client-facing messages).",
-      "tasks": [
-        "[x] Add tenant-facing error classes to gen_worker.errors: ValidationError, ResourceError, CanceledError (keep RetryableError/FatalError).",
-        "[x] Define canonical error payload shape emitted by python-worker for all failures: {error_type, retryable, safe_message} (internal error string kept for logs/back-compat).",
-        "[x] Implement exception->error mapping layer in python-worker runtime:\n    - ValidationError/ValueError -> error_type=validation, retryable=false\n    - RetryableError -> error_type=retryable, retryable=true\n    - FatalError -> error_type=fatal, retryable=false\n    - ResourceError (incl. torch OOM by name) -> error_type=resource, retryable=false\n    - CanceledError/interrupt -> error_type=canceled, retryable=false\n    - unknown exception -> error_type=internal, retryable=false",
-        "[x] Implement sanitization policy for safe_message: strip obvious tokens (Bearer ...), URLs, and local filesystem paths; log detailed errors server-side with correlation to run_id.",
-        "[x] Add tests coverage: mapping produces expected {error_type,retryable}; safe_message redacts tokens/urls/paths."
-      ],
-      "completed": true
-    },
-    {
-      "name": "Worker leader discovery + failover",
-      "description": "Add multi-seed scheduler discovery and automatic leader redirect handling for Raft deployments.",
-      "tasks": [
-        "[x] Add SCHEDULER_ADDRS env (comma-separated) alongside SCHEDULER_ADDR",
-        "[x] Try seed addresses on startup until a connection succeeds",
-        "[x] On stream failure, retry across the seed list with backoff",
-        "[x] Parse FailedPrecondition not_leader:<addr> and reconnect immediately",
-        "[x] Add minimal test or smoke coverage for redirect handling"
-      ],
-      "completed": true
-    },
-    {
-      "name": "Worker runtime enhancements (outputs, progress, limits)",
-      "description": "Improve worker ergonomics for serverless inference: direct output uploads, progress events, and concurrency caps.",
-      "tasks": [
-        "[x] Add direct output upload support to platform-managed file storage",
-        "[x] Return output metadata (url/key/size/sha256) instead of raw bytes when uploaded",
-        "[x] Deprecate/remove raw output byte streaming for large outputs (keep only small payloads)",
-        "[x] Add ctx.emit() (progress/events) and forward to scheduler",
-        "[x] Add per-worker/per-function concurrency limits and advertise to scheduler",
-        "[x] Add basic validation for input/output payloads (msgpack + optional schema)",
-        "[x] Add structured error taxonomy (retryable vs fatal)",
-        "[x] Report richer resource info (GPU name, VRAM total/free, driver version)",
-        "[x] Add heartbeat backoff + jitter on disconnect/reconnect",
-        "[x] Add graceful shutdown to drain in-flight jobs",
-        "[x] Enforce configurable max payload sizes (input/output)",
-        "[x] Verify scheduler JWT on connect (asymmetric signature)",
-        "[x] Fetch scheduler JWKS from configured URL and cache with TTL",
-        "[x] Handle JWKS rotation (refresh on key ID miss)",
-        "[x] Fail closed when JWT verification fails"
-      ],
-      "completed": true
-    },
-    {
-      "name": "Example worker functions (python-worker/examples)",
-      "description": "Maintain example tenant projects inside the python-worker repo under `python-worker/examples/` so they evolve with the SDK and stay runnable by gen-builder.",
-      "tasks": [
-        "[x] Decide on the example project layout (functions module/package, deps via pyproject.toml and/or uv.lock, config via [tool.cozy])",
-        "[x] Create multiple example subfolders (minimal, image-gen, etc.) under python-worker/examples",
-        "[x] Ensure each example imports gen_worker and uses @worker_function metadata",
-        "[x] Enforce dependency policy: no requirements.txt; require pyproject.toml and/or uv.lock (uv-first)",
-        "[x] Add [tool.cozy] entries to examples (functions.modules, runtime.base_image, optional limits)",
-        "[x] Align dependencies to python-worker SDK version and document how to deploy with gen-builder",
-        "[x] Add README per example with inputs/outputs and required env vars"
-      ],
-      "completed": true
-    },
-    {
-      "name": "Python worker SDK cleanup",
-      "description": "Position python-worker as a pure pip package and keep example projects in python-worker/examples.",
-      "tasks": [
-        "[x] Remove or relocate python-worker/example-functions and image_gen_example",
-        "[x] Update python-worker README to describe SDK usage and point to python-worker/examples",
-        "[x] Ensure packaging stays intact (pyproject.toml + src/gen_worker)",
-        "[x] Add or update minimal docs for decorators, function signature, and dependency policy (pyproject.toml + uv.lock only, cozy.toml manifest)",
-        "[x] Document the recommended contract for dynamic checkpoint selection (model family in metadata, model_ref provided at runtime)",
-        "[x] Document the build contract: tenant deps in pyproject.toml/uv.lock, Cozy config in cozy.toml, gen-builder bakes into a worker image for gen-orchestrator",
-        "[x] Verify the examples install gen-worker as a dependency and import cleanly"
-      ],
-      "completed": true
-    },
-    {
-      "name": "JWT RSA import safety",
-      "description": "Avoid import-time failures when PyJWT lacks RSA support; ensure JWKS verification is available when configured.",
-      "tasks": [
-        "[x] Guard RSAAlgorithm import and raise only when JWKS is actually used",
-        "[x] Require PyJWT crypto extra to ensure RSAAlgorithm is available in standard installs",
-        "[x] Reinstall and smoke test example imports to confirm no crash"
-      ],
-      "completed": true
-    },
-    {
-      "name": "gen-worker core + torch add-on split",
-      "description": "Separate lightweight orchestration SDK from torch-specific model memory management, with a clean interface between them.",
-      "tasks": [
-        "[x] Define core responsibilities: orchestrator comms/job loop, request/response handling, function discovery, decorators/metadata, ActionContext, errors, progress events, S3 uploads",
-        "[x] Keep model downloading from Cozy hub in core (async downloader + retries + progress; no huggingface_hub dependency)",
-        "[x] Core must integrate downloader -> local model path -> ModelManager.load/unload/get calls (abstract interface; no torch imports)",
-        "[x] Define a ModelManager interface in core (load/get/unload/stats) with no torch imports",
-        "[x] Move default_model_manager and torch-specific utilities behind an optional add-on (torch extra or separate module)",
-        "[x] Remove torch/diffusers/transformers/accelerate/etc. from core dependencies; keep only grpc/protobuf/msgpack/jwt/psutil/boto3 plus aiohttp/backoff/tqdm for downloader/retry/progress",
-        "[x] Add optional dependency group for torch runtime (torch, torchvision, torchaudio, safetensors, flashpack, numpy; keep xformers tenant-only)",
-        "[x] Update worker to accept a ModelManager instance or plugin path (env) and run without torch when none provided",
-        "[x] Document the split and install modes: gen-worker (core) vs gen-worker[torch] (runtime)",
-        "[x] Audit imports to ensure torch-only code is isolated and not required for basic worker startup"
-      ],
-      "completed": true
-    },
-    {
-      "name": "Standardize deployment config in pyproject.toml ([tool.cozy])",
-      "description": "Remove the separate cozy.toml manifest and standardize all tenant deployment configuration under `pyproject.toml` in `[tool.cozy]` (uv-first). Keep docs and examples consistent across python-worker and python-worker/examples.",
-      "tasks": [
-        "[x] Update docs:\n    - Update python-worker README and the e2e spec to use `[tool.cozy]` only\n    - Remove any mention of cozy.toml as a supported config path.",
-        "[x] Update python-worker/examples:\n    - Ensure all examples use `[tool.cozy]` in `pyproject.toml`\n    - Ensure no cozy.toml files exist in examples.",
-        "[x] Update worker-side config parsing (if any exists):\n    - Ensure no code path attempts to load a separate cozy.toml file\n    - Treat missing `[tool.cozy]` as a hard error when running discovery/build tooling (via validation helper).",
-        "[x] Add a small validation helper (optional):\n    - A `gen_worker.validate_project()` utility that checks for `[tool.cozy]`, `uv.lock` presence (if required), and rejects requirements.txt/cozy.toml.",
-        "[x] Tests:\n    - Any lingering cozy.toml usage is rejected by the validation helper"
-      ],
-      "completed": true
-    },
-    {
       "name": "Untrusted tenant code: per-run file capability tokens (no static FILE_SERVICE_TOKEN in pods)",
       "description": "Assume tenant functions can read any env var/file in the container. Remove reliance on long-lived file service tokens inside worker pods. Instead, accept a short-lived, run-scoped file capability JWT from gen-orchestrator for each task/session and use it for all cozy-hub file store reads/writes (inputs/outputs).",
       "tasks": [
@@ -206,6 +8,207 @@
         "[ ] Update CozyHubDownloader/ctx.save_* helpers to use the per-run `file_token` (Authorization: Bearer ...) and avoid using env FILE_API_TOKEN for production flows.",
         "[ ] Ensure the token is tenant-scoped and prefix-scoped (runs/<run_id>/...) and expires quickly; treat auth failures as non-retriable unless token is refreshable.",
         "[ ] Add tests: task-scoped file token is required when running in \"untrusted\" mode; uploads/downloads succeed for allowed prefixes and fail for disallowed paths."
+      ],
+      "completed": false
+    },
+    {
+      "name": "LRU model cache with live VRAM reporting to gen-orchestrator",
+      "description": "Implement an LRU model cache in python-worker that tracks loaded models in VRAM and reports availability to gen-orchestrator in real-time via heartbeats. This enables model-aware routing where the orchestrator can route requests to workers that already have the required model loaded.\n\nStudied torch_manager LRUCache (manager.py:126-177). Key patterns:\n- Uses OrderedDict with timestamps for efficient LRU tracking\n- Separate gpu_cache and cpu_cache for different memory locations\n- access() moves item to end (most recently used)\n- get_lru_models() returns list ordered by least recently used first\n- Constants: VRAM_SAFETY_MARGIN_GB = 3.5, DEFAULT_MAX_VRAM_BUFFER_GB = 2.0, RAM_SAFETY_MARGIN_GB = 10.0",
+      "tasks": [
+        "[ ] Implement ModelCache class with LRU eviction (from torch_manager LRUCache pattern)",
+        "[ ] Implement VRAM tracking with weights vs working memory",
+        "[ ] Implement get_stats() for heartbeat reporting",
+        "[ ] Update worker heartbeat to include model cache stats",
+        "[ ] Integrate ModelCache with model injection",
+        "[ ] Support orchestrator-commanded model operations (LoadModelCommand, UnloadModelCommand)",
+        "[ ] Add configurable settings via environment variables",
+        "[ ] Add tests for LRU eviction, safety margins, heartbeat stats"
+      ],
+      "completed": false
+    },
+    {
+      "name": "Diffusers pipeline construction parity with torch_manager",
+      "description": "Implement proper diffusers pipeline construction in the new python-worker to achieve feature parity with the legacy torch_manager. The worker must be able to load models from Cozy Hub manifests, construct pipelines with component sharing, apply optimizations, and handle various model formats.\n\nStudied torch_manager implementation (manager.py, flashpack_loader.py). Key patterns to carry forward:\n- MODEL_COMPONENTS dict defines components per pipeline type (vae, unet/transformer, text_encoder, scheduler, tokenizer)\n- VRAM_SAFETY_MARGIN_GB = 3.5, DEFAULT_MAX_VRAM_BUFFER_GB = 2.0\n- FlashPackLoader loads from pipeline/ subdirectory with config files\n- Optimizations are CONDITIONAL: only applied when model_size > max_vram\n- LocalModelCache copies from NFS to local NVMe for faster loading (prioritizes flashpack)",
+      "tasks": [
+        "[ ] Pipeline loading with format priority (flashpack first, then safetensors, then single file)",
+        "[ ] Component reference resolution (_cozy_ref in model_index.json)",
+        "[ ] dtype selection (bfloat16 for Flux, float16 for others)",
+        "[ ] Device placement with VAE tiling/slicing ALWAYS enabled during _move_to_gpu",
+        "[ ] Scheduler configuration (dynamic import from diffusers)",
+        "[ ] Pipeline optimizations (CONDITIONAL - only when model_size > max_vram)",
+        "[ ] Warm-up inference (4 steps, output_type='pil', flushes memory after)",
+        "[ ] Custom pipeline classes support",
+        "[ ] Memory management (flush_memory, unload with remove_all_hooks and explicit component deletion, _free_space_for_model LRU eviction)",
+        "[ ] Model download from Cozy Hub",
+        "[ ] Startup model initialization with randomization",
+        "[ ] Error handling (missing files, incompatible formats, CUDA OOM)",
+        "[ ] LocalModelCache for NFS->NVMe optimization with background prefetch"
+      ],
+      "completed": false
+    },
+    {
+      "id": 38,
+      "name": "Simplify GPU selection with gpu=true flag",
+      "description": "Replace the cuda constraint as the primary GPU selection mechanism with a simpler gpu=true/false flag. The cuda constraint becomes an optional advanced override. This aligns with how other platforms (Modal, Replicate, Fal) handle GPU selection.",
+      "tasks": [
+        "[ ] Update gen-builder config.go to parse new gpu field:\n    - gpu = true -> build GPU variant (pick latest stable CUDA)\n    - gpu = false or omitted -> build CPU variant\n    - cuda = \">=12.6\" -> optional override for specific CUDA version",
+        "[ ] Update FilterVariants in runtime_catalog.go:\n    - Check gpu flag first\n    - If gpu=true and no cuda constraint, use default CUDA version\n    - If gpu=false, return CPU variants only",
+        "[ ] Update gen-builder README with new gpu flag documentation",
+        "[ ] Update python-worker examples to use gpu=true instead of cuda constraint",
+        "[ ] Add validation: warn if cuda is set but gpu is false (conflicting config)"
+      ],
+      "completed": false
+    },
+    {
+      "id": 39,
+      "name": "Add resource requirements to deployment config",
+      "description": "Allow tenants to specify hardware requirements (VRAM, GPU type, memory, CPU) in pyproject.toml. These are used by the orchestrator/scheduler to match deployments to appropriate workers.",
+      "tasks": [
+        "[ ] Define [tool.cozy.resources] schema:\n    - vram_gb: int (minimum GPU VRAM required)\n    - gpu_type: string (\"any\", \"A100\", \"H100\", \"A10G\", \"T4\", etc.)\n    - memory_gb: int (system RAM)\n    - cpu_cores: int",
+        "[ ] Update gen-builder config.go to parse resources section",
+        "[ ] Include resources in build manifest output",
+        "[ ] Update gen-orchestrator to read resources from deployment registration",
+        "[ ] Update scheduler to filter workers by resource requirements",
+        "[ ] Document resource requirements in gen-builder README",
+        "[ ] Add examples showing resource configuration"
+      ],
+      "completed": false
+    },
+    {
+      "id": 40,
+      "name": "Simplify model specification in deployment config",
+      "description": "Models that a worker needs should be declared in [tool.cozy.models] in pyproject.toml. Model IDs are Cozy Hub identifiers (not raw HuggingFace/Civitai URLs). Workers download models via Cozy Hub API, which handles the actual source (HuggingFace, S3, CDN, etc.). Orchestrator routes using deployment-local keys only. Dynamic/small files like LoRAs come as Asset in request payloads.",
+      "tasks": [
+        "[ ] Define [tool.cozy.models] schema in pyproject.toml:\n    ```toml\n    [tool.cozy.models]\n    sd-xl = \"stabilityai/stable-diffusion-xl-base-1.0\"  # Cozy Hub model ID\n    controlnet = \"lllyasviel/control_v11p_sd15_canny\"   # Cozy Hub model ID\n    ```\n    - Keys (sd-xl, controlnet) are deployment-local, used for routing\n    - Values are Cozy Hub model IDs (unique identifiers in Cozy's model registry)\n    - Cozy Hub resolves IDs to actual storage location (HuggingFace, S3, CDN, etc.)",
+        "[ ] Update gen-builder config.go to parse [tool.cozy.models] section",
+        "[ ] Include models in build manifest (list of model IDs to pre-download)",
+        "[ ] Update worker startup to pre-download all models via Cozy Hub API",
+        "[ ] Update ModelRef to resolve keys from [tool.cozy.models]",
+        "[ ] Deprecate/remove runtime.model_allowlist (replaced by [tool.cozy.models])",
+        "[ ] Document that LoRAs and other dynamic files should use Asset type in payload",
+        "[ ] Update python-worker examples to use new [tool.cozy.models] config",
+        "[ ] Add size limits for Asset downloads (prevent abuse with huge LoRA files)"
+      ],
+      "completed": false
+    },
+    {
+      "id": 41,
+      "name": "Create z-image LoRA example showing dynamic LoRA loading",
+      "description": "Create an example python worker in ~/cozy/python-worker/examples that demonstrates loading custom LoRAs dynamically at runtime. LoRAs are passed as Asset in the request payload (like input images), downloaded by the worker, and loaded into the pipeline. Based on fal.ai's z-image/turbo/lora pattern.",
+      "tasks": [
+        "[ ] Create ~/cozy/python-worker/examples/z-image-lora/ directory structure",
+        "[ ] Define input schema with LoRA as Asset (LoraSpec struct with file, weight, adapter_name)",
+        "[ ] Implement generate function with dynamic LoRA loading:\n    - Load base model via ModelRef(Src.DEPLOYMENT, \"sdxl\")\n    - For each LoRA: load_lora_weights(), set_adapters()\n    - Unload LoRAs with unload_lora_weights() for next request",
+        "[ ] Add pyproject.toml with gpu=true and [tool.cozy.models]",
+        "[ ] Add example request payloads in README",
+        "[ ] Test that LoRA Assets are properly materialized before function runs",
+        "[ ] Document the pattern: LoRAs as Assets, not as model config"
+      ],
+      "completed": false
+    },
+    {
+      "id": 42,
+      "name": "Improve manifest to include top-level models list and per-function model requirements",
+      "description": "The manifest generated by gen_worker.discover should have a clear top-level list of all required models, plus per-function model requirements. This makes it easy for workers to know what to pre-download, and for schedulers to understand deployment requirements.",
+      "tasks": [
+        "[ ] Add top-level 'models' field to manifest output (keys are deployment-local, values are Cozy Hub IDs)",
+        "[ ] Extract models from all function injection_json and deduplicate",
+        "[ ] Add 'required_models' field to each function in manifest",
+        "[ ] Only include models with source='deployment' (not 'payload' which are dynamic)",
+        "[ ] Update gen-builder to read top-level models list from manifest",
+        "[ ] Update worker startup to use manifest models list for pre-download",
+        "[ ] Validate manifest models against [tool.cozy.models] config if present",
+        "[ ] Update manifest JSON schema documentation",
+        "[ ] Add tests for models extraction in discover.py"
+      ],
+      "completed": false
+    },
+    {
+      "id": 43,
+      "name": "Create example showing payload-based model selection with multiple fine-tunes",
+      "description": "Create an example python worker demonstrating how to support multiple model fine-tunes (e.g., 10 SDXL variants) efficiently. The request payload specifies which model to use via a key, and the scheduler routes to workers that already have that model loaded in VRAM.",
+      "tasks": [
+        "[ ] Create ~/cozy/python-worker/examples/multi-checkpoint/ directory",
+        "[ ] Define multiple models in pyproject.toml [tool.cozy.models]",
+        "[ ] Implement function with ModelRef(Src.PAYLOAD, \"model_key\")",
+        "[ ] Document how scheduler routing works with deployment keys",
+        "[ ] Add example requests showing different model_key values",
+        "[ ] Test that model switching works correctly",
+        "[ ] Document VRAM considerations (LRU eviction, cold start latency)",
+        "[ ] Clarify model specification rules in docs"
+      ],
+      "completed": false
+    },
+    {
+      "id": 44,
+      "name": "Progressive model availability and disk vs VRAM tracking",
+      "description": "Refine model-aware routing to support progressive model availability (worker can start serving inference as soon as first model downloads, while continuing to download others) and distinguish between disk-cached vs VRAM-loaded models.",
+      "tasks": [
+        "[ ] Add cached_models and downloading_models fields to WorkerResources proto",
+        "[ ] Update python-worker heartbeat to report all three model states (available, cached, downloading)",
+        "[ ] Update gen-orchestrator scheduler routing logic for three-tier preference",
+        "[ ] Implement progressive startup in python-worker (accept jobs as models become available)",
+        "[ ] Add model download progress tracking in heartbeat metadata",
+        "[ ] Update scheduler to avoid sending job for model still downloading",
+        "[ ] Handle multi-model functions correctly (check all required_models)",
+        "[ ] Add config for download concurrency limit (WORKER_MAX_CONCURRENT_DOWNLOADS)",
+        "[ ] Document progressive availability behavior in python-worker README",
+        "[ ] Add tests for progressive model availability"
+      ],
+      "completed": false
+    },
+    {
+      "id": 45,
+      "name": "Clean up python-worker: remove torch_manager, fix dependencies, implement new model loader",
+      "description": "The python-worker codebase has accumulated legacy code (torch_manager) that should be removed. The new architecture: worker downloads models from Cozy Hub, constructs pipelines using diffusers/transformers, and injects ready-to-use pipelines into tenant functions. Support both safetensors and flashpack formats.",
+      "tasks": [
+        "[ ] Remove legacy torch_manager module (delete src/gen_worker/torch_manager/ and default_model_manager/)",
+        "[ ] Clean up pyproject.toml (safetensors/flashpack in core, torch as optional, remove onnxruntime/tensorrt)",
+        "[ ] Implement new model_loader.py module with flashpack-first loading",
+        "[ ] Implement ModelCache with LRU eviction and VRAM tracking",
+        "[ ] Update _resolve_injected_value in worker.py to use new ModelLoader",
+        "[ ] Update worker startup to pre-download models from manifest",
+        "[ ] Update base image Dockerfiles (python:3.12-slim + torch + gen-worker core ONLY)",
+        "[ ] Update base-images.json to reflect new architecture",
+        "[ ] Remove private devpi references from Dockerfiles",
+        "[ ] Test clean import without optional deps",
+        "[ ] Update __init__.py exports",
+        "[ ] Update entrypoint.py to use new ModelLoader",
+        "[ ] Update examples to use new model loading pattern",
+        "[ ] Document the new architecture in README"
+      ],
+      "completed": false
+    },
+    {
+      "id": 46,
+      "name": "Switch base images from nvidia/cuda to python:3.12-slim",
+      "description": "Replace the large nvidia/cuda base images with minimal python:3.12-slim. PyTorch CUDA wheels bundle their own CUDA runtime, so the nvidia base is unnecessary. This reduces image size by ~1-2GB and simplifies the build.",
+      "tasks": [
+        "[x] Update runtime/Dockerfile.base (GPU) to use python:3.12-slim + PyTorch wheels",
+        "[x] Update runtime/Dockerfile.base.cpu",
+        "[x] Update runtime/base-images.json",
+        "[x] Remove deadsnakes PPA setup",
+        "[x] Remove clang (gcc from build-essential is sufficient)",
+        "[x] Test image builds and verify smaller sizes",
+        "[x] Test PyTorch CUDA functionality (torch.cuda.is_available())",
+        "[x] Update build-local-base-images.sh script",
+        "[x] Document the change in README"
+      ],
+      "completed": true
+    },
+    {
+      "id": 47,
+      "name": "Update python-worker examples to use correct dependency strategy",
+      "description": "Review and update all examples in ~/cozy/python-worker/examples to ensure they follow the new dependency strategy: gen-worker provides core SDK + safetensors + flashpack; torch is a peer dependency (provided by base image); tenant's pyproject.toml adds diffusers/transformers/accelerate as needed.",
+      "tasks": [
+        "[ ] Audit all example pyproject.toml files in ~/cozy/python-worker/examples/",
+        "[ ] Ensure examples do NOT list safetensors or flashpack (gen-worker provides these)",
+        "[ ] Ensure examples do NOT list torch (peer dependency from base image)",
+        "[ ] Ensure examples that use diffusers pipelines list diffusers/transformers/accelerate",
+        "[ ] Verify gen-worker dependency version is consistent across all examples",
+        "[ ] Remove any unnecessary dependencies from examples",
+        "[ ] Test that examples still build and run with the updated dependencies",
+        "[ ] Update example READMEs if they mention dependency installation"
       ],
       "completed": false
     }

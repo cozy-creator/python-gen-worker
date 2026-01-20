@@ -6,7 +6,7 @@ readme = "README.md"
 authors = [
     { name = "Paul Fidika", email = "paul@fidika.com" }
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
     "gen-worker[torch]>=0.1.4",
     "librosa>=0.10.0",
@@ -29,13 +29,10 @@ packages = ["src/medasr_transcribe"]
 gen-worker = { path = "../.." }
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.12"
 ignore_missing_imports = true
 disallow_untyped_defs = true
 python_executable = ".venv/bin/python3"
-
-[tool.cozy]
-functions.modules = ["medasr_transcribe"]
 
 [tool.cozy.runtime]
 base_image = "ghcr.io/cozy/python-worker:cuda12.1-torch2.6"

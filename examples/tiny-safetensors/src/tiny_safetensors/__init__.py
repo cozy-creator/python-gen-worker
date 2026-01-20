@@ -46,7 +46,7 @@ def _download_model(model_ref: str) -> str:
     return asyncio.run(downloader.download(model_ref, MODEL_CACHE_DIR, filename=safe_name))
 
 
-@worker_function(resources=ResourceRequirements(requires_gpu=False))
+@worker_function(resources=ResourceRequirements())
 def tiny_linear(ctx: ActionContext, payload: TinyLinearInput) -> TinyLinearOutput:
     if ctx.is_canceled():
         raise InterruptedError("request canceled")

@@ -5,15 +5,18 @@ F = TypeVar("F", bound=Callable[..., Any])
 class ResourceRequirements:
     """
     Specifies the resource requirements for a worker function.
+
+    Note: GPU/CPU is a deployment-level decision configured via the cuda
+    constraint in [tool.cozy.runtime], not a per-function setting.
     """
     def __init__(
         self,
-        requires_gpu: bool = False,
         max_concurrency: Optional[int] = None,
     ) -> None:
-        self.requires_gpu = requires_gpu
         self.max_concurrency = max_concurrency
-        self._requirements = {k: v for k, v in locals().items() if k != "self" and v is not None}
+        self._requirements = {}
+        if max_concurrency is not None:
+            self._requirements["max_concurrency"] = max_concurrency
 
     def to_dict(self) -> Dict[str, Any]:
         """Returns a dictionary representation of the defined requirements."""

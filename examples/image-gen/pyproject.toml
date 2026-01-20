@@ -6,7 +6,7 @@ readme = "README.md"
 authors = [
     { name = "Oghenetega Biokoro", email = "teggyg123@gmail.com" }
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
     "diffusers",
     "pillow",
@@ -38,13 +38,11 @@ gen-worker = { path = "../.." }
 
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.12"
 ignore_missing_imports = true
 disallow_untyped_defs = true
 python_executable = ".venv/bin/python3"
 
-[tool.cozy]
-functions.modules = ["image_gen"]
-
 [tool.cozy.runtime]
-base_image = "ghcr.io/cozy/python-worker:cuda12.1-torch2.6"
+cuda = ">=12.6"
+torch = ">=2.9"
