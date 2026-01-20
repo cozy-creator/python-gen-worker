@@ -1,0 +1,48 @@
+[project]
+name = "multi-checkpoint"
+version = "0.1.0"
+description = "Multi-checkpoint example with payload-based model selection"
+requires-python = ">=3.12"
+dependencies = [
+    "gen-worker[torch]",
+    "diffusers",
+    "transformers",
+    "accelerate",
+    "pillow",
+]
+
+[dependency-groups]
+dev = ["mypy>=1.10.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/multi_checkpoint"]
+
+[tool.uv.sources]
+gen-worker = { path = "../.." }
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+disallow_untyped_defs = true
+
+[tool.cozy]
+deployment = "multi-checkpoint"
+
+[tool.cozy.build]
+gpu = true
+torch = ">=2.9"
+
+[tool.cozy.resources]
+vram_gb = 12  # Each SDXL variant needs ~8-10GB
+
+# Define multiple model variants
+# The scheduler will route requests to workers that have the required model in VRAM
+[tool.cozy.models]
+sdxl-base = "stabilityai/stable-diffusion-xl-base-1.0"
+sdxl-turbo = "stabilityai/sdxl-turbo"
+dreamshaper = "Lykon/dreamshaper-xl-v2-turbo"
+juggernaut = "RunDiffusion/Juggernaut-XL-v9"

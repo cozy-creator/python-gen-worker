@@ -1,0 +1,41 @@
+[project]
+name = "hello-world"
+version = "0.1.0"
+description = "Minimal hello-world worker function example"
+requires-python = ">=3.12"
+dependencies = [
+    "gen-worker",
+]
+
+[dependency-groups]
+dev = ["mypy>=1.10.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/hello_world"]
+
+[tool.uv.sources]
+gen-worker = { path = "../.." }
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+disallow_untyped_defs = true
+
+[tool.cozy]
+deployment = "hello-world"  # Default deployment ID
+
+[tool.cozy.build]
+# Option 1: Simple GPU selection (recommended)
+gpu = true           # Build GPU variant
+torch = ">=2.9"      # Optional torch version constraint
+
+# Option 2: GPU with specific CUDA version
+# gpu = true
+# cuda = ">=12.6"    # Optional: filter CUDA versions
+
+# Option 3: Specify exact base image (overrides all constraints)
+# base_image = "cozycreator/python-worker:cuda12.8-torch2.9"

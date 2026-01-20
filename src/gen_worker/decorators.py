@@ -1,29 +1,22 @@
-import functools
-from typing import Callable, Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional, TypeVar
+
+F = TypeVar("F", bound=Callable[..., Any])
 
 class ResourceRequirements:
     """
     Specifies the resource requirements for a worker function.
+
+    Note: GPU/CPU is a deployment-level decision configured via gpu/cuda
+    in [tool.cozy.build], not a per-function setting.
     """
     def __init__(
         self,
-        model_name: Optional[str] = None,
-        min_vram_gb: Optional[float] = None,
-        recommended_vram_gb: Optional[float] = None,
-        requires_gpu: bool = False,
-        expects_pipeline_arg: bool = False
-        # Add other potential requirements here:
-        # e.g., cpu_cores: Optional[int] = None,
-        # specific_accelerators: Optional[list[str]] = None,
-        # etc.
-    ):
-        self.model_name = model_name
-        self.min_vram_gb = min_vram_gb
-        self.recommended_vram_gb = recommended_vram_gb
-        self.requires_gpu = requires_gpu
-        self.expects_pipeline_arg = expects_pipeline_arg
-        # Store all defined attributes for easy access
-        self._requirements = {k: v for k, v in locals().items() if k != 'self' and v is not None}
+        max_concurrency: Optional[int] = None,
+    ) -> None:
+        self.max_concurrency = max_concurrency
+        self._requirements = {}
+        if max_concurrency is not None:
+            self._requirements["max_concurrency"] = max_concurrency
 
     def to_dict(self) -> Dict[str, Any]:
         """Returns a dictionary representation of the defined requirements."""
@@ -33,7 +26,9 @@ class ResourceRequirements:
         return f"ResourceRequirements({self._requirements})"
 
 
-def worker_function(resources: Optional[ResourceRequirements] = None):
+def worker_function(
+    resources: Optional[ResourceRequirements] = None,
+) -> Callable[[F], F]:
     """
     Decorator to mark a function as a worker task and associate resource requirements.
 
@@ -43,15 +38,37 @@ def worker_function(resources: Optional[ResourceRequirements] = None):
     if resources is None:
         resources = ResourceRequirements() # Default empty requirements
 
-    def decorator(func: Callable) -> Callable:
+    def decorator(func: F) -> F:
         # Attach metadata directly to the function object.
         # The SDK's runner component will look for these attributes.
         setattr(func, '_is_worker_function', True)
         setattr(func, '_worker_resources', resources)
 
         # Return the original function, now marked with attributes.
-        # Use functools.wraps to preserve original function metadata (like __name__, __doc__)
-        # even though we are returning the function itself.
-        return functools.wraps(func)(func)
+        #
+        # Important: do not wrap the function; we want `inspect.signature()`
+        # to reflect the tenant-authored callable, and self-wrapping can create
+        # `inspect.unwrap()` loops.
+        return func
+
+    return decorator
+
+
+def worker_websocket(
+    resources: Optional[ResourceRequirements] = None,
+) -> Callable[[F], F]:
+    """
+    Decorator to mark an async function as a WebSocket realtime handler.
+
+    WebSocket handlers are invoked via a worker-owned socket interface (no FastAPI
+    dependency) when the scheduler/orchestrator starts a realtime session.
+    """
+    if resources is None:
+        resources = ResourceRequirements()
+
+    def decorator(func: F) -> F:
+        setattr(func, "_is_worker_websocket", True)
+        setattr(func, "_worker_resources", resources)
+        return func
 
     return decorator
