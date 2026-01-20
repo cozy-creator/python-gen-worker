@@ -45,6 +45,15 @@ gpu = true
 torch = ">=2.9"
 ```
 
+### Development
+
+| Command | Purpose |
+|---------|---------|
+| `uv build` | Verify package builds correctly |
+| `uv run mypy src/gen_worker` | Type checking |
+| `uv run pytest` | Run tests |
+| `rm -rf dist/ && uv build && uv publish` | Publish to PyPI |
+
 ### Deployment ID
 
 The deployment ID identifies your worker in the orchestrator. It can be specified in two ways:
