@@ -1,0 +1,48 @@
+{
+  "description": "Future work items for python-worker (not planned for immediate implementation)",
+  "issues": [
+    {
+      "id": 200,
+      "name": "Multi-backend support (PyTorch, TensorRT, ONNX Runtime)",
+      "description": "Allow tenants to specify which ML backend(s) they need in [tool.cozy.build]. Currently PyTorch is assumed. Support TensorRT and ONNX Runtime as alternatives or additions. This affects base image selection and what gets installed.",
+      "config_schema": {
+        "example": "[tool.cozy.build]\ngpu = true\ncuda = \">=12.6\"\nbackends = [\"pytorch\", \"tensorrt\"]  # or just \"onnxruntime\"\n\n# Optional version constraints per backend\ntorch = \">=2.9\"\ntensorrt = \">=10.0\"\nonnxruntime = \">=1.17\"",
+        "fields": {
+          "backends": "List of backends to install. Options: 'pytorch', 'tensorrt', 'onnxruntime'. Default: ['pytorch']. Can be a single string or list.",
+          "torch": "PyTorch version constraint (semver). Only used if 'pytorch' in backends.",
+          "tensorrt": "TensorRT version constraint. Only used if 'tensorrt' in backends.",
+          "onnxruntime": "ONNX Runtime version constraint. Only used if 'onnxruntime' in backends."
+        },
+        "notes": "If backends is omitted, defaults to ['pytorch'] for backward compatibility. Tenants who don't want PyTorch at all can specify backends = ['onnxruntime'] or backends = ['tensorrt']."
+      },
+      "backend_details": {
+        "pytorch": {
+          "packages": ["torch", "torchvision", "torchaudio"],
+          "size": "~2.2 GB download, ~5-6 GB installed",
+          "use_cases": "Training, general inference, diffusers pipelines, most ML workloads"
+        },
+        "tensorrt": {
+          "packages": ["tensorrt-cu12"],
+          "size": "~1.1 GB download, ~1.5 GB installed",
+          "use_cases": "Optimized NVIDIA inference, 2-10x faster than PyTorch for supported models"
+        },
+        "onnxruntime": {
+          "packages": ["onnxruntime-gpu"],
+          "size": "~900 MB download, ~1.2 GB installed",
+          "use_cases": "Cross-platform inference, universal model format, good for exported models"
+        }
+      },
+      "tasks": [
+        "[ ] Update discover.py to parse 'backends' field from [tool.cozy.build]",
+        "[ ] Update discover.py to parse backend-specific version constraints (torch, tensorrt, onnxruntime)",
+        "[ ] Include backends in manifest output for gen-builder consumption",
+        "[ ] Update backends.py Protocol definitions if needed for runtime injection",
+        "[ ] Add validation: warn if backend version constraint specified but backend not in list",
+        "[ ] Update examples to show non-PyTorch configurations",
+        "[ ] Document backend selection in README"
+      ],
+      "notes": "This pairs with gen-builder issue #101 (on-demand base image builds). python-worker parses the config and includes it in the manifest; gen-builder uses it to select or build the appropriate base image.",
+      "priority": "medium"
+    }
+  ]
+}
