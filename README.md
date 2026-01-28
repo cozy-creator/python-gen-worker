@@ -111,11 +111,12 @@ def process(ctx: ActionContext, payload: Input) -> Output:
 [tool.cozy]
 deployment = "my-worker"
 
-[tool.cozy.functions]
-modules = ["my_module"]
-
 [tool.cozy.models]
-sdxl = "stabilityai/stable-diffusion-xl-base-1.0"
+# Model refs (phase 1):
+# - Cozy Hub snapshot (default): org/repo[:tag] or org/repo@sha256:<digest>
+# - Hugging Face repo: hf:org/repo[@revision] (requires gen-worker)
+sdxl = "cozy:stabilityai/sdxl:latest"
+qwen_image = "hf:Qwen/Qwen2.5-VL-7B-Instruct@main"
 
 [tool.cozy.build]
 gpu = true
@@ -139,6 +140,23 @@ gpu = true
 | `WORKER_MAX_CONCURRENT_DOWNLOADS` | 2 | Max parallel model downloads |
 | `COZY_HUB_URL` | - | Cozy hub base URL |
 | `COZY_HUB_TOKEN` | - | Cozy hub bearer token |
+| `HF_TOKEN` | - | Hugging Face token (for private `hf:` refs) |
+
+### Hugging Face (`hf:`) download behavior
+
+By default, `hf:` model refs **do not download the full repo**. The worker uses `huggingface_hub.snapshot_download(allow_patterns=...)` to avoid pulling huge legacy weights.
+
+Defaults:
+- Download only what a diffusers pipeline needs (derived from `model_index.json`).
+- Skip `safety_checker` and `feature_extractor` by default.
+- Download only reduced-precision **safetensors** weights (`fp16`/`bf16`); never download `.ckpt` or `.bin` by default.
+
+Overrides:
+- `COZY_HF_COMPONENTS="unet,vae,text_encoder,tokenizer,scheduler"`: hard override component list.
+- `COZY_HF_INCLUDE_OPTIONAL_COMPONENTS=1`: include components like `safety_checker` / `feature_extractor` if present.
+- `COZY_HF_WEIGHT_PRECISIONS="fp16,bf16"`: change which weight suffixes are accepted (add `fp32` only if you really need it).
+- `COZY_HF_ALLOW_ROOT_JSON=1`: allow additional small root `*.json` files (some repos need extra root config).
+- `COZY_HF_FULL_REPO_DOWNLOAD=1`: disable filtering and download the entire repo (not recommended; can be 10s of GB).
 
 ## Docker Deployment
 

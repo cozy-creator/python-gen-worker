@@ -62,6 +62,8 @@ from .errors import AuthError, CanceledError, FatalError, ResourceError, Retryab
 
 from .model_interface import ModelManagementInterface
 from .downloader import CozyHubDownloader, ModelDownloader
+from .model_ref_downloader import ModelRefDownloader
+from .model_refs import parse_model_ref
 from .types import Asset
 from .model_cache import ModelCache, ModelCacheStats, ModelLocation
 from .injection import (
@@ -294,6 +296,26 @@ def _url_is_blocked(url_str: str) -> bool:
         if _is_private_ip_str(ip_str):
             return True
     return False
+
+
+def _canonicalize_model_ref_string(raw: str) -> str:
+    """
+    Best-effort normalization of Cozy/HF model ref strings for allowlisting and caching identity.
+
+    If the string doesn't parse as a phase-1 model ref, return it unchanged.
+    """
+    s = (raw or "").strip()
+    if not s:
+        return s
+    try:
+        parsed = parse_model_ref(s)
+        if parsed.scheme == "cozy" and parsed.cozy is not None:
+            return parsed.cozy.canonical()
+        if parsed.scheme == "hf" and parsed.hf is not None:
+            return parsed.hf.canonical()
+        return s
+    except Exception:
+        return s
 
 class _JWKSCache:
     def __init__(self, url: str, ttl_seconds: int = 300) -> None:
@@ -714,8 +736,10 @@ class Worker:
         if self._downloader is None:
             base_url = os.getenv("COZY_HUB_URL", "").strip()
             token = os.getenv("COZY_HUB_TOKEN", "").strip() or None
-            if base_url:
-                self._downloader = CozyHubDownloader(base_url, token=token)
+            # Default to the composite model-ref downloader:
+            # - Cozy snapshots when COZY_HUB_URL is set
+            # - Hugging Face refs via huggingface_hub when installed
+            self._downloader = ModelRefDownloader(cozy_base_url=base_url, cozy_token=token)
         self._supported_model_ids_from_scheduler: Optional[List[str]] = None # To store IDs from scheduler
         # Signature-driven model selection mapping and allowlist (provided by orchestrator).
         self._deployment_model_id_by_key: Dict[str, str] = {}
@@ -732,7 +756,9 @@ class Worker:
             # This allows ModelRef(Src.DEPLOYMENT, "key") to resolve without scheduler config
             manifest_models = manifest["models"]
             if isinstance(manifest_models, dict):
-                self._deployment_model_id_by_key = {str(k): str(v) for k, v in manifest_models.items()}
+                self._deployment_model_id_by_key = {
+                    str(k): _canonicalize_model_ref_string(str(v)) for k, v in manifest_models.items()
+                }
                 self._deployment_allowed_model_ids = set(self._deployment_model_id_by_key.values())
                 logger.info(f"Loaded {len(self._deployment_model_id_by_key)} models from manifest: {list(self._deployment_model_id_by_key.keys())}")
 
@@ -1823,10 +1849,15 @@ class Worker:
         elif msg_type == 'deployment_model_config':
             if self._model_manager:
                 logger.info(f"Received DeploymentModelConfig: {message.deployment_model_config.supported_model_ids}")
-                self._supported_model_ids_from_scheduler = list(message.deployment_model_config.supported_model_ids)
+                self._supported_model_ids_from_scheduler = [
+                    _canonicalize_model_ref_string(str(v)) for v in list(message.deployment_model_config.supported_model_ids)
+                ]
                 try:
                     # Optional label->id mapping for signature-driven model selection.
-                    self._deployment_model_id_by_key = dict(message.deployment_model_config.model_id_by_key)
+                    self._deployment_model_id_by_key = {
+                        str(k): _canonicalize_model_ref_string(str(v))
+                        for k, v in dict(message.deployment_model_config.model_id_by_key).items()
+                    }
                 except Exception:
                     self._deployment_model_id_by_key = {}
                 self._deployment_allowed_model_ids = set(self._supported_model_ids_from_scheduler)

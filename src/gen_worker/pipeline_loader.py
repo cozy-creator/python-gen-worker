@@ -38,6 +38,7 @@ import asyncio
 import gc
 import hashlib
 import importlib
+import inspect
 import json
 import logging
 import os
@@ -583,6 +584,34 @@ def resolve_cozy_refs(model_path: Path, base_models_dir: Optional[Path] = None) 
     return resolved
 
 
+def missing_component_overrides_for_from_pretrained(pipeline_class: Type, model_path: Path) -> Dict[str, Any]:
+    """
+    If a pipeline's `model_index.json` references optional components that are not
+    present on disk (common when we intentionally skip safety_checker /
+    feature_extractor), diffusers will fail unless we pass explicit overrides.
+
+    We only pass overrides for parameters that exist on the pipeline __init__.
+    """
+    kwargs: Dict[str, Any] = {}
+    try:
+        sig = inspect.signature(pipeline_class.__init__)
+        params = set(sig.parameters.keys())
+    except Exception:
+        return kwargs
+
+    if "safety_checker" in params and not (model_path / "safety_checker").exists():
+        kwargs["safety_checker"] = None
+
+    if "feature_extractor" in params and not (model_path / "feature_extractor").exists():
+        kwargs["feature_extractor"] = None
+
+    # Some pipelines expose a boolean flag.
+    if "requires_safety_checker" in params and "safety_checker" in kwargs:
+        kwargs["requires_safety_checker"] = False
+
+    return kwargs
+
+
 def estimate_model_size_gb(model_path: Path) -> float:
     """
     Estimate model size in GB based on file sizes.
@@ -657,6 +686,7 @@ class PipelineLoader:
         vram_safety_margin_gb: float = VRAM_SAFETY_MARGIN_GB,
         cozy_hub_url: Optional[str] = None,
         cozy_hub_token: Optional[str] = None,
+        downloader: Optional[Any] = None,
     ):
         """
         Initialize the pipeline loader.
@@ -676,6 +706,7 @@ class PipelineLoader:
         # Cozy Hub configuration
         self._cozy_hub_url = cozy_hub_url or os.environ.get("COZY_HUB_URL", "")
         self._cozy_hub_token = cozy_hub_token or os.environ.get("COZY_HUB_TOKEN", "")
+        self._downloader = downloader
 
         # Auto-detect VRAM
         if max_vram_gb is not None:
@@ -789,14 +820,31 @@ class PipelineLoader:
                 return local_path
 
         # Try to download from Cozy Hub
+        if self._downloader is not None:
+            # Prefer the unified model-ref downloader (cozy snapshots, hf repos, etc.)
+            try:
+                local = self._downloader.download(model_id, str(self.models_dir))
+                return Path(local)
+            except Exception as e:
+                raise ModelDownloadError(model_id, str(e), retryable=False)
+
+        # Legacy Cozy Hub "model manifest" API is no longer supported. Use the
+        # unified downloader instead (ModelRefDownloader / Cozy snapshot APIs).
+        if self._cozy_hub_url:
+            raise ModelDownloadError(
+                model_id,
+                "legacy cozy hub manifest downloads are not supported; configure a model ref downloader",
+                retryable=False,
+            )
+
         if not self._cozy_hub_url:
             raise ModelNotFoundError(
                 model_id,
                 self.models_dir / model_id if self.models_dir else None,
             )
 
-        async with self._download_semaphore:
-            return await self._download_from_cozy_hub(model_id, progress_callback)
+        # Unreachable: we always either have a downloader or fail above.
+        raise ModelNotFoundError(model_id, self.models_dir / model_id if self.models_dir else None)
 
     async def _download_from_cozy_hub(
         self,
@@ -1051,6 +1099,8 @@ class PipelineLoader:
         kwargs: Dict[str, Any] = {
             "torch_dtype": torch_dtype,
         }
+
+        kwargs.update(missing_component_overrides_for_from_pretrained(pipeline_class, model_path))
 
         if custom_pipeline:
             kwargs["custom_pipeline"] = custom_pipeline

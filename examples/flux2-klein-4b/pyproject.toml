@@ -1,0 +1,43 @@
+[project]
+name = "flux2-klein-4b"
+version = "0.1.0"
+description = "Flux2-klein-4B example (inference-only; models via [tool.cozy.models])"
+requires-python = ">=3.12"
+dependencies = [
+    "gen-worker[torch]",
+    "diffusers",
+    "transformers",
+    "accelerate",
+    "pillow",
+]
+
+[dependency-groups]
+dev = ["mypy>=1.10.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/flux2_klein_4b"]
+
+[tool.cozy]
+deployment = "flux2-klein-4b"
+
+[tool.uv.sources]
+gen-worker = { path = "../.." }
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+disallow_untyped_defs = true
+
+[tool.cozy.build]
+gpu = true
+torch = ">=2.9"
+
+[tool.cozy.resources]
+vram_gb = 12
+
+[tool.cozy.models]
+flux2-klein-4b = "black-forest-labs/flux2-klein-4b"

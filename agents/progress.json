@@ -257,6 +257,83 @@
         "[x] Update README to document concurrent inference support\n    - Added 'Concurrent Inference (Thread Safety)' section\n    - Includes code example for custom model managers\n    - Links to HuggingFace docs and GitHub issue"
       ],
       "completed": true
+    },
+    {
+      "id": 54,
+      "name": "Unified model refs in [tool.cozy.models] (cozy/hf)",
+      "description": "Standardize how tenant projects declare models in `pyproject.toml` so the worker can reliably download/cache weights from Cozy Hub and Hugging Face.\n\nGoal (phase 1): allow a single string value in `[tool.cozy.models]` to represent one of:\n- Cozy Hub snapshot (default): `org/repo:tag` or `org/repo@sha256:<digest>` (or explicitly `cozy:org/repo:tag`)\n- Hugging Face repo: `hf:org/repo` (downloaded via `huggingface_hub`)\n\nPhase 2 (deferred): civitai + arbitrary URL model refs.\n\nNotes:\n- This issue is about the tenant-facing ref contract + resolver plumbing.\n- Cozy Hub snapshot/object downloading details are tracked separately (see worker issue id=55).\n\nDeferred schemes (issue id=56) must enforce strict size caps and SSRF protections for direct URL fetches.",
+      "tasks": [
+        "[x] Define the model ref grammar and validation rules (phase 1)\n    - Supported schemes: cozy (default), hf\n    - Cozy refs support `org/repo:tag` and `org/repo@sha256:<digest>` (optionally prefixed with `cozy:`)\n    - Add clear error messages for unknown schemes (civitai/url deferred)",
+        "[x] Update manifest contract and docs for `[tool.cozy.models]`\n    - Document cozy + hf examples\n    - Clarify that manifest stores model refs (not necessarily Cozy Hub numeric IDs)\n    - Define precedence/compatibility for older manifests",
+        "[x] Implement the resolver plumbing (cozy + hf)\n    - Route `cozy:` refs to the Cozy Hub snapshot downloader (see id=55)\n    - Route `hf:` refs to Hugging Face Hub via `huggingface_hub` (no custom downloader)\n    - Ensure concurrency limits and atomic writes where applicable",
+        "[x] Implement Hugging Face downloads via `huggingface_hub`\n    - Add optional dependency group for `huggingface_hub`\n    - Use `snapshot_download` (or equivalent) so HF’s cache/resume logic is reused\n    - Respect `HF_HOME` / `TRANSFORMERS_CACHE` / `DIFFUSERS_CACHE` and prefer shared volume paths",
+        "[x] Wire the resolver into model managers / injection flow\n    - Ensure `process_supported_models_config(..., downloader)` uses the resolver\n    - Ensure model allowlist enforcement happens after ref resolution to a canonical model identity",
+        "[x] Add tests\n    - Parsing + validation (cozy/hf)\n    - Routing logic (scheme → handler)\n    - HF download integration can be mocked (do not require network)",
+        "[ ] Coordinate changes with cozy-hub and gen-orchestrator\n    - Ensure workers get the right base URL/token/env for Cozy Hub access\n    - Keep the `HF_HOME` + shared volume strategy for HF-backed models"
+      ],
+      "completed": false
+    },
+    {
+      "id": 55,
+      "name": "Worker: download Cozy Hub snapshots by ref (org/repo:tag and @sha256)",
+      "description": "Implement the worker-side half of Cozy Hub snapshot downloads so `[tool.cozy.models]` can declare Cozy models like Docker images (e.g. `cozy:org/repo:latest` or `cozy:org/repo@sha256:...`).\n\nHigh-level flow:\n1) Parse Cozy model ref string.\n2) Resolve `:tag` to an immutable snapshot digest via cozy-hub (or accept `@sha256:` directly).\n3) Fetch the snapshot manifest, which references content-addressed object digests (UNet/VAE/encoders/etc for diffusers pipelines).\n4) Download needed objects (once per object digest) into `WORKER_MODEL_CACHE_DIR`, verifying hashes.\n5) Materialize a diffusers-compatible directory for `from_pretrained()` by linking to cached object directories, then atomically activate the snapshot.\n\nGoal: if 10 SDXL fine-tunes share the same text encoders + VAE, the worker downloads those shared objects once and only downloads the 10 UNets.",
+      "tasks": [
+        "[x] Define the canonical Cozy model ref format and canonicalization\n    - Accept: `cozy:<org>/<repo>` (defaults to `:latest`), `cozy:<org>/<repo>:<tag>`, `cozy:<org>/<repo>@sha256:<digest>`\n    - Normalize whitespace and error messages\n    - Decide what the worker uses as the cache key (prefer snapshot digest, not mutable tag)",
+        "[x] Add a Cozy Hub client in gen-worker (internal HTTP)\n    - Base URL + auth from env (likely `COZY_HUB_URL` + token/JWT)\n    - Resolve tag -> snapshot digest endpoint\n    - Fetch snapshot manifest (includes object digests)\n    - Fetch object manifests (files with {path,size,blake3,url})",
+        "[x] Implement object cache layout + singleflight downloads\n    - Per-file hash: compute BLAKE3 while streaming bytes (store hex digest alongside size)\n    - Object digest: BLAKE3 tree-hash over file metadata, no re-reading GBs\n      - Canonical entries: for every file in the object subtree, compute tuple `(rel_path, size_bytes, blake3_hex)`\n      - Normalize paths: UTF-8, `/` separators, no leading `/`, reject `..`\n      - Sort by `rel_path` (bytewise)\n      - Encode each entry as: `<rel_path>\\t<size_bytes>\\t<blake3_hex>\\n` (UTF-8)\n      - `object_digest = blake3(concat(all_entries))`\n    - Object cache dir: `${WORKER_MODEL_CACHE_DIR}/cozy/objects/<object_digest>/...`\n    - Ensure concurrent requests for the same object digest share one in-flight download\n    - Verify per-file BLAKE3 + size; keep a small local index file on success (e.g. `cozy.download.json`)",
+        "[x] Implement snapshot materialization (no duplicate weights)\n    - Snapshot materialization dir: `${WORKER_MODEL_CACHE_DIR}/cozy/snapshots/<snapshot_digest>/...`\n    - Create a diffusers-compatible directory tree by hardlinking/symlinking object subdirs (unet/, vae/, text_encoder/, ...)\n    - Atomic activation: build in `.../.building/` then rename\n    - Optional convenience aliases (do not rely on them for caching): `${WORKER_MODEL_CACHE_DIR}/cozy/repos/<org>/<repo>/tags/<tag>` -> symlink to `<snapshot_digest>`",
+        "[x] Implement resumable/idempotent behavior\n    - If an object dir exists and all files are verified, skip download\n    - If a partial download dir exists (`.downloading`), resume or clean up safely\n    - Concurrency knobs: per-object file downloads and per-snapshot downloads",
+        "[x] Integrate with ModelManager + injection\n    - Ensure `process_supported_models_config(..., downloader)` can resolve Cozy refs\n    - Ensure injected `ModelArtifacts.root_dir` points at the materialized snapshot dir\n    - Ensure allowlist enforcement uses canonical model identity (resolved snapshot digest)",
+        "[x] Add tests\n    - Parse/normalize Cozy refs\n    - Tag resolution + manifest fetch (mock HTTP)\n    - Object singleflight + cache reuse across multiple snapshots\n    - Atomic activation, resume behavior, hash verification failures\n    - Large file streaming behavior (no full-file buffering in memory)",
+        "[x] Remove/replace legacy Cozy Hub manifest assumptions in PipelineLoader\n    - Stop calling legacy endpoints like `/models/{model_id}/manifest` unless they are reintroduced\n    - Route Cozy downloads through the same resolver used by ModelManager"
+      ],
+      "completed": true
+    },
+    {
+      "id": 56,
+      "name": "Model refs phase 2: civitai + arbitrary URL support",
+      "description": "Add additional model ref schemes for `[tool.cozy.models]` beyond Cozy Hub and Hugging Face.\n\nScope:\n- `civitai:` refs for downloading safetensors/other allowed artifacts from Civitai\n- `url:` refs for direct downloads (strict safety + size caps)\n\nCivitai notes (per Civitai REST API reference, updated Dec 23 2025):\n- Auth: API key via `Authorization: Bearer <api_key>` header OR `?token=<api_key>` query string; creators can require login to download.\n- Metadata: `GET https://civitai.com/api/v1/model-versions/<modelVersionId>` returns `files[]` with `name`, `sizeKB`, `metadata.format` (e.g. `SafeTensor`/`PickleTensor`), `hashes` including `BLAKE3`, and `downloadUrl`.\n- Download: `downloadUrl` is typically `https://civitai.com/api/download/models/<modelVersionId>` (may include query params like `type=`/`format=`); filename is provided via `Content-Disposition`.",
+      "tasks": [
+        "[ ] Define ref formats and validation rules\n    - `civitai:` and `url:` schemes only (no implicit parsing)\n    - Prefer `civitai:<modelVersionId>` as the canonical ref (modelVersionId appears in download URLs and API)\n    - Accept `civitai:<url>` only if it can be parsed to a modelVersionId\n    - Allowlist extensions/content-types (safetensors, flashpack, onnx, etc.)",
+        "[ ] Civitai: implement metadata resolution\n    - Call `GET /api/v1/model-versions/<modelVersionId>` to obtain files list, sizes, hashes (including BLAKE3), and downloadUrl\n    - If given a model page URL, parse `modelVersionId` from query string\n    - Select a safe file to download (prefer `metadata.format == SafeTensor`; disallow PickleTensor entirely)",
+        "[ ] Civitai: implement downloads\n    - Download via the returned `downloadUrl` (usually `/api/download/models/<modelVersionId>`)\n    - Support API key auth via header or token query string\n    - Respect `Content-Disposition` for filename\n    - Stream to disk with verification (BLAKE3) and size caps",
+        "[ ] Implement strict size caps for direct URL downloads\n    - Configurable max bytes (hard fail when exceeded)\n    - Prefer HEAD/Content-Length when available but enforce during streaming",
+        "[ ] Implement SSRF protections for URL fetches\n    - Block private IP ranges and localhost\n    - Block non-http(s) schemes\n    - Consider DNS rebinding protections",
+        "[ ] Add optional checksum pinning\n    - Support `url:...#blake3=<hex>` (or similar) to pin expected content",
+        "[ ] Add tests\n    - Civitai URL parsing -> modelVersionId\n    - Metadata selection (SafeTensor preference)\n    - Size-cap enforcement\n    - SSRF blocking"
+      ],
+      "completed": false
+    },
+    {
+      "id": 57,
+      "name": "Smarter Hugging Face downloads: minimal fp16/bf16 safetensors + component allowlisting",
+      "description": "Today, naive `huggingface_hub.snapshot_download()` pulls the entire repo, which is often 10s of GB because repos include legacy `.ckpt`, full fp32, `.bin`, safety-checker, feature extractor, training configs, etc.\n\nGoal: by default, download ONLY what is needed to run inference for diffusers pipelines, and prefer reduced-precision safetensors.\n\nDefaults:\n- Only fp16/bf16 weights (prefer fp16 unless pipeline requires bf16).\n- Only safetensors weights (never `.ckpt`; never `.bin` unless explicitly requested).\n- Only required pipeline components (e.g. `unet/`, `vae/`, `text_encoder/`, `tokenizer/`, `scheduler/`) derived from `model_index.json` (or a Cozy Hub manifest equivalent).\n\nThis should be used both by:\n- `hf:` model refs in the worker (tenant-side downloads)\n- the Cozy Hub seeding/mirroring tooling that clones HF repos into Cozy snapshots/objects.\n\nNon-goals (for now): civitai/url downloads (tracked in issue id=56).",
+      "tasks": [
+        "[x] Define HF download policy + override knobs\n    - Env/config: allowed components (default from model_index.json), allowed precisions (`fp16,bf16`), and strict safetensors-only behavior\n    - Escape hatches: `COZY_HF_FULL_REPO_DOWNLOAD=1`, optional root json, optional component inclusion",
+        "[x] Derive required components from `model_index.json`\n    - Skip `safety_checker` and `feature_extractor` by default\n    - Allow override to include them (`COZY_HF_INCLUDE_OPTIONAL_COMPONENTS=1`) or hard override component list (`COZY_HF_COMPONENTS=...`)",
+        "[x] Implement selective HF downloads with `snapshot_download(allow_patterns=...)`\n    - Download `model_index.json` via `hf_hub_download` first\n    - Validate available files via `HfApi.list_repo_files()` before downloading\n    - Allowlist component configs + reduced-precision safetensors weights; allow full small trees for tokenizer/scheduler\n    - Avoid repo-root `.ckpt` / `.bin` because they aren’t in the allowlist",
+        "[x] Add a failure strategy when fp16/bf16 safetensors are missing\n    - Hard fail early with a clear error\n    - Suggest override `COZY_HF_WEIGHT_PRECISIONS=fp16,bf16,fp32` or `COZY_HF_FULL_REPO_DOWNLOAD=1`",
+        "[x] Add tests\n    - Mock `huggingface_hub` (no network)\n    - Assert optional components are excluded by default\n    - Assert error when only fp32 safetensors exist",
+        "[x] Document the behavior\n    - Added README docs for `hf:` refs: defaults + override env vars"
+      ],
+      "completed": true
+    },
+    {
+      "id": 58,
+      "name": "HF downloader v2: diffusers-aware minimal fetch + variants + mirror parity",
+      "description": "Issue #57 adds a safe default allowlist (fp16/bf16 safetensors + required components) for `hf:` refs. This follow-up keeps parity between:\n- the worker's direct `hf:` downloads (Python)\n- the HF→CozyHub mirroring tool (Go)\n\nCozy-hub stays pure Go and does not call any Python. That means we will implement the same selection behavior twice (Python in python-gen-worker; Go in the mirror tool) and keep them aligned with shared golden fixtures.\n\nGoals:\n- Avoid downloading unnecessary repo-root weights (`*.ckpt`, `*.bin`) and fp32 weights by default.\n- Correctly handle diffusers variant conventions (`variant=\"fp16\"`) and repos that use sharded weights (`*.index.json` + shards).\n- Keep behavior deterministic and explicit (no silent fallback to ckpt/bin).\n- Ensure worker and mirror select the same files for the same repo/policy.\n\nNon-goals:\n- Civitai/url support (tracked separately).\n- Training-time assets (optimizer states, training configs, etc.).",
+      "tasks": [
+        "[ ] Define a shared selection spec (golden fixtures)\n    - Fixture inputs: `model_index.json` + `repo_files[]` + policy knobs\n    - Fixture outputs: exact selected file set (and allow_patterns for Python)\n    - Used to keep Python (worker) and Go (mirror tool) in sync",
+        "[ ] Diffusers-aware selection from `model_index.json`\n    - Prefer reading `model_index.json` first via `hf_hub_download`\n    - Derive component names (ignore `_` keys)\n    - Maintain default skip list: `safety_checker`, `feature_extractor`\n    - Provide overrides:\n      - `COZY_HF_COMPONENTS=...` (hard override)\n      - `COZY_HF_INCLUDE_OPTIONAL_COMPONENTS=1`",
+        "[ ] Variant + weight format policy\n    - Support explicit `COZY_HF_VARIANT=fp16|bf16` (maps to diffusers `variant=`)\n    - Prefer reduced precision weights by default:\n      - accept `*fp16*.safetensors` / `*bf16*.safetensors`\n      - allow `fp32` only when explicitly configured\n    - Never download `.ckpt` or `.bin` unless explicitly configured",
+        "[ ] Sharded safetensors handling\n    - If a component has `*.safetensors.index.json`, ensure the index + all referenced shards are included in allow_patterns\n    - Validate expected files using `HfApi.list_repo_files()` before downloading",
+        "[ ] Worker implementation (Python)\n    - Expand `gen_worker.hf_downloader` selection to cover variants + sharded weights\n    - Keep using `snapshot_download(allow_patterns=...)`\n    - Add unit tests (no network)",
+        "[ ] Mirror implementation (Go tool)\n    - Implement the same selection logic in the HF→CozyHub mirroring tool (Go)\n    - Use Hugging Face Hub HTTP APIs to list files + fetch only required ones\n    - Add tests that verify behavior against the golden fixtures",
+        "[ ] Repo-size / safety checks\n    - Add optional \"max total bytes\" check driven by HF metadata (fail fast before download)\n    - Require explicit opt-in for large downloads beyond a threshold",
+        "[ ] End-to-end validation\n    - E2E should cover both:\n      - worker HF-direct (`hf:...`)\n      - mirror HF→CozyHub then worker CozyHub download\n    - Verify both paths downloaded only the minimal file set",
+        "[ ] Docs\n    - Document defaults and overrides (env vars) clearly\n    - Provide an SD1.5 example showing that only `unet/vae/text_encoder/tokenizer/scheduler` fp16 safetensors are fetched"
+      ],
+      "completed": false
     }
   ]
 }
