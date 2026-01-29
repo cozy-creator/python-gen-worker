@@ -323,17 +323,46 @@
       "name": "HF downloader v2: diffusers-aware minimal fetch + variants + mirror parity",
       "description": "Issue #57 adds a safe default allowlist (fp16/bf16 safetensors + required components) for `hf:` refs. This follow-up keeps parity between:\n- the worker's direct `hf:` downloads (Python)\n- the HF→CozyHub mirroring tool (Go)\n\nCozy-hub stays pure Go and does not call any Python. That means we will implement the same selection behavior twice (Python in python-gen-worker; Go in the mirror tool) and keep them aligned with shared golden fixtures.\n\nGoals:\n- Avoid downloading unnecessary repo-root weights (`*.ckpt`, `*.bin`) and fp32 weights by default.\n- Correctly handle diffusers variant conventions (`variant=\"fp16\"`) and repos that use sharded weights (`*.index.json` + shards).\n- Keep behavior deterministic and explicit (no silent fallback to ckpt/bin).\n- Ensure worker and mirror select the same files for the same repo/policy.\n\nNon-goals:\n- Civitai/url support (tracked separately).\n- Training-time assets (optimizer states, training configs, etc.).",
       "tasks": [
-        "[ ] Define a shared selection spec (golden fixtures)\n    - Fixture inputs: `model_index.json` + `repo_files[]` + policy knobs\n    - Fixture outputs: exact selected file set (and allow_patterns for Python)\n    - Used to keep Python (worker) and Go (mirror tool) in sync",
-        "[ ] Diffusers-aware selection from `model_index.json`\n    - Prefer reading `model_index.json` first via `hf_hub_download`\n    - Derive component names (ignore `_` keys)\n    - Maintain default skip list: `safety_checker`, `feature_extractor`\n    - Provide overrides:\n      - `COZY_HF_COMPONENTS=...` (hard override)\n      - `COZY_HF_INCLUDE_OPTIONAL_COMPONENTS=1`",
-        "[ ] Variant + weight format policy\n    - Support explicit `COZY_HF_VARIANT=fp16|bf16` (maps to diffusers `variant=`)\n    - Prefer reduced precision weights by default:\n      - accept `*fp16*.safetensors` / `*bf16*.safetensors`\n      - allow `fp32` only when explicitly configured\n    - Never download `.ckpt` or `.bin` unless explicitly configured",
-        "[ ] Sharded safetensors handling\n    - If a component has `*.safetensors.index.json`, ensure the index + all referenced shards are included in allow_patterns\n    - Validate expected files using `HfApi.list_repo_files()` before downloading",
-        "[ ] Worker implementation (Python)\n    - Expand `gen_worker.hf_downloader` selection to cover variants + sharded weights\n    - Keep using `snapshot_download(allow_patterns=...)`\n    - Add unit tests (no network)",
+        "[x] Define a shared selection spec (golden fixtures)\n    - Fixture inputs: `model_index.json` + `repo_files[]` + policy knobs\n    - Fixture outputs: exact selected file set (and allow_patterns for Python)\n    - Used to keep Python (worker) and Go (mirror tool) in sync",
+        "[x] Diffusers-aware selection from `model_index.json`\n    - Prefer reading `model_index.json` first via `hf_hub_download`\n    - Derive component names (ignore `_` keys)\n    - Maintain default skip list: `safety_checker`, `feature_extractor`\n    - Provide overrides:\n      - `COZY_HF_COMPONENTS=...` (hard override)\n      - `COZY_HF_INCLUDE_OPTIONAL_COMPONENTS=1`",
+        "[x] Variant + weight format policy (hardcoded preference order)\n    - Prefer safetensors by default (never silent fallback to ckpt/bin)\n    - Hardcode preferred variant order: `bf16` → `fp8` → `fp16` → default\n    - Keep existing escape hatches, but do not add new env/config knobs",
+        "[x] Sharded safetensors handling\n    - If a component has `*.safetensors.index.json`, ensure the index + all referenced shards are included in allow_patterns\n    - Validate expected files using `HfApi.list_repo_files()` before downloading",
+        "[x] Worker implementation (Python)\n    - Expand `gen_worker.hf_downloader` selection to cover variants + sharded weights\n    - Keep using `snapshot_download(allow_patterns=...)`\n    - Add unit tests (no network)",
+        "[x] Local completeness check (no network)\n    - If the repo snapshot is already present in the HF cache, validate required files locally\n    - If complete, skip HF API calls + skip snapshot_download\n    - If partial, fall back to normal download path\n    - Treat `*.incomplete` (HF cache) as incomplete",
+        "[x] Fallback for repos without `model_index.json`\n    - If `model_index.json` is missing, infer a diffusers-like component set from repo structure (known component dirs)\n    - Prefer sharded safetensors when available (index + shards)\n    - Stay strict on weight formats (no silent `.bin`/`.ckpt` fallback)",
         "[ ] Mirror implementation (Go tool)\n    - Implement the same selection logic in the HF→CozyHub mirroring tool (Go)\n    - Use Hugging Face Hub HTTP APIs to list files + fetch only required ones\n    - Add tests that verify behavior against the golden fixtures",
-        "[ ] Repo-size / safety checks\n    - Add optional \"max total bytes\" check driven by HF metadata (fail fast before download)\n    - Require explicit opt-in for large downloads beyond a threshold",
+        "[ ] Repo-size / safety checks\n    - Add a conservative, non-configurable safety limit (or remove this task if not desired)\n    - Avoid adding new env/config knobs",
         "[ ] End-to-end validation\n    - E2E should cover both:\n      - worker HF-direct (`hf:...`)\n      - mirror HF→CozyHub then worker CozyHub download\n    - Verify both paths downloaded only the minimal file set",
-        "[ ] Docs\n    - Document defaults and overrides (env vars) clearly\n    - Provide an SD1.5 example showing that only `unet/vae/text_encoder/tokenizer/scheduler` fp16 safetensors are fetched"
+        "[x] Docs\n    - Document defaults and overrides (env vars) clearly\n    - Provide an SD1.5 example showing that only `unet/vae/text_encoder/tokenizer/scheduler` fp16 safetensors are fetched"
       ],
       "completed": false
+    },
+    {
+      "id": 59,
+      "name": "Resumable Cozy snapshot/object downloads (Range + .part)",
+      "description": "Improve reliability and performance of Cozy snapshot/object downloads by supporting resume for interrupted downloads.\n\nHugging Face (`hf:`) downloads already rely on `huggingface_hub` caching/locking/resume; we should not invent our own `.incomplete` scheme there.\n\nFor Cozy snapshot/object files, python-gen-worker currently downloads each file into `<dst>.part` and renames atomically on success, but it deletes any existing `.part` and restarts from 0. We want to resume from partial `.part` downloads using HTTP Range requests when the file URL supports it (typically presigned object-store URLs).\n\nApproach:\n- Keep atomic finalization: write to `.part`, verify size + blake3, then rename.\n- If `.part` exists, resume:\n  - read current size\n  - issue GET with `Range: bytes=<offset>-`\n  - append to `.part`\n  - verify expected size + blake3\n\nNote: Cozy Hub snapshot/object manifests return presigned GET URLs to the object store. Range support depends on the underlying object store (S3/MinIO typically support Range).",
+      "tasks": [
+        "[x] Confirm Range support for file URLs returned by Cozy Hub manifests\n    - Snapshot/object manifest URLs are presigned object-store GET URLs\n    - Range support depends on the object store (S3/MinIO typically support Range)",
+        "[x] Implement resumable file download in `src/gen_worker/cozy_cas.py`\n    - Preserve existing `.part` files\n    - Resume with Range + append when possible\n    - Fall back to full re-download if server does not support Range",
+        "[x] Add tests for resume behavior\n    - Simulate an interrupted download via a local aiohttp server with Range support\n    - Verify `.part` resume and final hash/size validation",
+        "[x] Document behavior\n    - Clarify HF resumes via huggingface_hub\n    - Clarify Cozy snapshot downloads use `.part` + Range resume when supported"
+      ],
+      "completed": true
+    },
+    {
+      "id": 60,
+      "name": "Dev tool: mock orchestrator gRPC client for local worker testing",
+      "description": "Add a local-only dev tool that can submit tasks to a running python-gen-worker over the same gRPC interface used by gen-orchestrator. This enables end-to-end testing of: gRPC envelope + auth headers + function discovery + schema + model injection + asset materialization + outputs, without standing up the full gen-orchestrator.\n\nDesign goals:\n- Use the existing generated protobuf stubs in `src/gen_worker/pb/` (no new proto definitions).\n- Be easy to run against a locally started worker container.\n- Support a minimal \"run one function\" mode and a more realistic streaming mode.\n- Keep it dev-only (lives under `scripts/` and/or `gen_worker/testing/`).",
+      "tasks": [
+        "[x] Decide packaging/entrypoint\n    - Implemented as a Python CLI module: `python -m gen_worker.testing.mock_orchestrator ...`\n    - Avoids adding an HTTP surface to the worker",
+        "[x] Implement connection + auth\n    - Runs a gRPC server that the worker connects to (bidirectional stream)\n    - Captures and prints gRPC metadata (including auth header if present)",
+        "[x] Implement the minimal gRPC protocol flow\n    - Accepts the worker ConnectWorker stream\n    - Sends `TaskExecutionRequest` and receives `TaskExecutionResult` and `WorkerEvent` messages",
+        "[x] Function selection + payload encoding\n    - Reads function name + JSON payload from CLI args\n    - Encodes payload as msgpack (worker expects msgspec msgpack payloads)",
+        "[x] Output handling\n    - Decodes msgpack output payload to JSON and prints it\n    - Prints streamed worker events when enabled",
+        "[x] Provide runnable examples\n    - Added README section with commands for running against a worker container",
+        "[x] Add a basic integration test\n    - Added a dev-only pytest that spawns a worker process and submits one task (skipped by default)"
+      ],
+      "completed": true
     }
   ]
 }

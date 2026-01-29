@@ -299,7 +299,7 @@ def _safe_symlink_dir(target: Path, link: Path) -> None:
         shutil.copytree(target, link, dirs_exist_ok=True)
 
 
-@backoff.on_exception(backoff.expo, (aiohttp.ClientError, asyncio.TimeoutError), max_tries=4)
+@backoff.on_exception(backoff.expo, (aiohttp.ClientError, asyncio.TimeoutError, ValueError), max_tries=4)
 async def _download_one_file(url: str, dst: Path, expected_size: int, expected_blake3: str) -> None:
     if dst.exists():
         try:
@@ -315,29 +315,65 @@ async def _download_one_file(url: str, dst: Path, expected_size: int, expected_b
             pass
 
     timeout = aiohttp.ClientTimeout(total=600)
-    h = blake3()
-    size = 0
     tmp = dst.with_suffix(dst.suffix + ".part")
+    # If we have a partial file, try to resume via HTTP Range.
+    offset = 0
     if tmp.exists():
-        tmp.unlink(missing_ok=True)  # type: ignore[arg-type]
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(url) as resp:
-            resp.raise_for_status()
-            with open(tmp, "wb") as f:
-                async for chunk in resp.content.iter_chunked(1 << 20):
-                    if not chunk:
-                        continue
-                    f.write(chunk)
-                    h.update(chunk)
-                    size += len(chunk)
-                    if expected_size and size > expected_size:
-                        raise ValueError("download exceeded expected size")
+        try:
+            offset = tmp.stat().st_size
+        except Exception:
+            offset = 0
+        if expected_size and offset > expected_size:
+            tmp.unlink(missing_ok=True)  # type: ignore[arg-type]
+            offset = 0
 
-    if expected_size and size != expected_size:
-        raise ValueError(f"size mismatch (expected {expected_size}, got {size})")
-    got = h.hexdigest()
-    if expected_blake3 and got.lower() != expected_blake3.lower():
-        raise ValueError("blake3 mismatch")
+    # If the partial file is already complete, validate + finalize.
+    if offset and expected_size and offset == expected_size:
+        got = _blake3_file(tmp)
+        if expected_blake3 and got.lower() != expected_blake3.lower():
+            tmp.unlink(missing_ok=True)  # type: ignore[arg-type]
+        else:
+            tmp.rename(dst)
+            return
+
+    headers: Dict[str, str] = {}
+    mode = "wb"
+    if offset and expected_size:
+        headers["Range"] = f"bytes={offset}-"
+        mode = "ab"
+
+    async def _stream_to_file(resp: aiohttp.ClientResponse, *, mode: str, start: int) -> None:
+        nonlocal expected_size
+        size = start
+        with open(tmp, mode) as f:
+            async for chunk in resp.content.iter_chunked(1 << 20):
+                if not chunk:
+                    continue
+                f.write(chunk)
+                size += len(chunk)
+                if expected_size and size > expected_size:
+                    raise ValueError("download exceeded expected size")
+
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(url, headers=headers) as resp:
+            # If the server ignored our Range request, restart from scratch to avoid
+            # duplicating bytes by appending a full response.
+            if offset and resp.status == 200:
+                resp.release()
+                async with session.get(url) as resp2:
+                    resp2.raise_for_status()
+                    await _stream_to_file(resp2, mode="wb", start=0)
+            else:
+                resp.raise_for_status()
+                await _stream_to_file(resp, mode=mode, start=offset)
+
+    # Validate final file.
+    if expected_size and tmp.stat().st_size != expected_size:
+        raise ValueError(f"size mismatch (expected {expected_size}, got {tmp.stat().st_size})")
+    if expected_blake3:
+        got = _blake3_file(tmp)
+        if got.lower() != expected_blake3.lower():
+            raise ValueError("blake3 mismatch")
     tmp.rename(dst)
 
 

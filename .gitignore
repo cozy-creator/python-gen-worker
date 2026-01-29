@@ -5,6 +5,8 @@ __pycache__
 **/dist
 .mypy_cache
 
+.hf-cache/
+
 .env
 generated_images/
 

@@ -150,6 +150,7 @@ Defaults:
 - Download only what a diffusers pipeline needs (derived from `model_index.json`).
 - Skip `safety_checker` and `feature_extractor` by default.
 - Download only reduced-precision **safetensors** weights (`fp16`/`bf16`); never download `.ckpt` or `.bin` by default.
+- For sharded safetensors, also download the `*.safetensors.index.json` and the referenced shard files.
 
 Overrides:
 - `COZY_HF_COMPONENTS="unet,vae,text_encoder,tokenizer,scheduler"`: hard override component list.
@@ -157,6 +158,10 @@ Overrides:
 - `COZY_HF_WEIGHT_PRECISIONS="fp16,bf16"`: change which weight suffixes are accepted (add `fp32` only if you really need it).
 - `COZY_HF_ALLOW_ROOT_JSON=1`: allow additional small root `*.json` files (some repos need extra root config).
 - `COZY_HF_FULL_REPO_DOWNLOAD=1`: disable filtering and download the entire repo (not recommended; can be 10s of GB).
+
+### Cozy Hub (`cozy:`) download behavior
+
+Cozy snapshot/object file downloads are written to `*.part` and then atomically renamed on success. If a `*.part` file exists from a previous interrupted download, the worker attempts to resume it using HTTP `Range` requests (if supported by the presigned object-store URL), and falls back to a full re-download if Range is not supported.
 
 ## Docker Deployment
 
@@ -218,6 +223,22 @@ Workers report model availability for intelligent job routing:
 | Cold | None | Minutes (download required) |
 
 ```python
+
+## Dev Testing (Mock Orchestrator)
+
+For local end-to-end tests without standing up `gen-orchestrator`, you can run a mock orchestrator gRPC server and point a worker at it. This exercises the real worker gRPC protocol (ConnectWorker stream + TaskExecutionRequest/Result).
+
+Start mock orchestrator (listens on port 8080 and runs a single function call):
+
+```bash
+python -m gen_worker.testing.mock_orchestrator --listen 0.0.0.0:8080 --run hello --payload-json '{"name":"world"}'
+```
+
+Then start your worker container pointing `SCHEDULER_ADDR` to the host:
+
+```bash
+docker run --rm -e SCHEDULER_ADDR=host.docker.internal:8080 <your-worker-image>
+```
 from gen_worker.model_cache import ModelCache
 
 cache = ModelCache(max_vram_gb=20.0)

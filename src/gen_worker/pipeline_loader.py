@@ -485,6 +485,26 @@ def get_torch_dtype(dtype_str: Optional[str], model_id: str) -> Any:
         return torch.float16
 
 
+def detect_diffusers_variant(model_path: Path) -> Optional[str]:
+    """
+    Detect a diffusers `variant=` value ("bf16", "fp8", "fp16") from files on disk.
+
+    Many diffusers repos store weights as:
+      - `unet/diffusion_pytorch_model.fp16.safetensors`
+      - `text_encoder/model.fp16.safetensors`
+      - sharded: `*.fp16.safetensors.index.json` + `*.fp16-00001-of-0000N.safetensors`
+    """
+    candidates = ["bf16", "fp8", "fp16"]
+    for p in model_path.rglob("*"):
+        if not p.is_file():
+            continue
+        name = p.name.lower()
+        for v in candidates:
+            if f".{v}." in name and name.endswith((".safetensors", ".json")):
+                return v
+    return None
+
+
 def get_pipeline_class(
     class_name: Union[str, Tuple[str, str], None],
     model_path: str,
@@ -1183,6 +1203,16 @@ class PipelineLoader:
 
         Optimizations are CONDITIONAL - only applied when needed.
         """
+        try:
+            import torch
+
+            if not torch.cuda.is_available():
+                logger.info("  CPU mode: skipping VRAM/offload optimizations")
+                return
+        except Exception:
+            logger.info("  CPU mode: skipping VRAM/offload optimizations")
+            return
+
         available_vram = get_available_vram_gb()
         needs_optimization = model_size_gb > (available_vram - self.vram_safety_margin_gb)
 
@@ -1310,6 +1340,8 @@ class PipelineLoader:
             raise ModelNotFoundError(model_id, path)
 
         config = config or PipelineConfig(model_path=str(path))
+        if config.variant is None:
+            config.variant = detect_diffusers_variant(path)
 
         # Determine dtype
         torch_dtype = get_torch_dtype(config.dtype, model_id)

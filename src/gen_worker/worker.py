@@ -2395,7 +2395,97 @@ class Worker:
                 cached = self._custom_runtime_cache.get(key)
                 if cached is not None:
                     return cached
-                obj = requested_type.from_pretrained(model_id)
+
+                # Diffusers pipelines: prefer downloading via the worker's model downloader and
+                # loading from a local directory, instead of letting diffusers/huggingface_hub
+                # interpret model refs like "hf:org/repo".
+                #
+                # This keeps tenant code inference-only while still supporting the platform's
+                # model-ref schemes and caching behavior.
+                obj = None
+                try:
+                    from diffusers import DiffusionPipeline  # type: ignore
+                except Exception:
+                    DiffusionPipeline = None  # type: ignore
+
+                if (
+                    obj is None
+                    and DiffusionPipeline is not None
+                    and isinstance(requested_type, type)
+                    and issubclass(requested_type, DiffusionPipeline)
+                ):
+                    local = None
+                    try:
+                        p = Path(model_id)
+                        if p.exists():
+                            local = p.as_posix()
+                    except Exception:
+                        local = None
+
+                    if local is None:
+                        if self._downloader is None:
+                            raise ValueError("diffusers pipeline injection requires a model downloader")
+                        cache_dir = os.getenv("WORKER_MODEL_CACHE_DIR", "/tmp/cozy/models")
+                        local = self._downloader.download(model_id, cache_dir)
+
+                    kwargs: dict[str, Any] = {}
+
+                    try:
+                        from gen_worker.pipeline_loader import detect_diffusers_variant  # type: ignore
+
+                        variant = detect_diffusers_variant(Path(local))
+                        if variant is not None:
+                            kwargs["variant"] = variant
+                    except Exception:
+                        pass
+
+                    # Choose a dtype that won't explode RAM on CPU. Prefer matching the variant.
+                    try:
+                        if torch is not None:
+                            device_is_cuda = str(ctx.device).startswith("cuda") and torch.cuda.is_available()
+                            variant = str(kwargs.get("variant") or "").strip().lower()
+                            if device_is_cuda:
+                                kwargs["torch_dtype"] = torch.float16
+                            elif variant == "fp16":
+                                kwargs["torch_dtype"] = torch.float16
+                            elif variant == "bf16":
+                                kwargs["torch_dtype"] = torch.bfloat16
+                            else:
+                                kwargs["torch_dtype"] = torch.float32
+                    except Exception:
+                        pass
+
+                    try:
+                        obj = requested_type.from_pretrained(local, **kwargs)
+                    except OSError as e:
+                        # Many Stable Diffusion repos include safety_checker/feature_extractor
+                        # components that are often omitted from "minimal" downloads. Retry with
+                        # those components disabled so the pipeline can still load.
+                        msg = str(e).lower()
+                        disable_optional_components = any(
+                            s in msg
+                            for s in (
+                                "model.safetensors",
+                                "pytorch_model.bin",
+                                "preprocessor_config.json",
+                                "feature_extractor",
+                                "image processor",
+                                "image_processor",
+                                "safety_checker",
+                            )
+                        )
+                        if disable_optional_components:
+                            kwargs2 = dict(kwargs)
+                            kwargs2.setdefault("safety_checker", None)
+                            kwargs2.setdefault("feature_extractor", None)
+                            kwargs2.setdefault("image_processor", None)
+                            kwargs2.setdefault("requires_safety_checker", False)
+                            obj = requested_type.from_pretrained(local, **kwargs2)
+                        else:
+                            raise
+
+                if obj is None:
+                    obj = requested_type.from_pretrained(model_id)
                 if isinstance(requested_type, type) and not isinstance(obj, requested_type):
                     expected_qn = type_qualname(requested_type)
                     got_qn = type_qualname(type(obj))

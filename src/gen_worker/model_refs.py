@@ -67,6 +67,11 @@ def parse_model_ref(raw: str) -> ParsedModelRef:
 
     if scheme == "hf":
         repo = rest.strip()
+        # Be tolerant of accidentally double-prefixed refs like:
+        #   hf:hf:org/repo[@rev]
+        # This can happen when a canonical "hf:..." string is wrapped again by a caller.
+        if repo.lower().startswith("hf:"):
+            repo = repo.split(":", 1)[1].strip()
         if not repo:
             raise ValueError("empty hf model ref")
         revision = None
@@ -111,4 +116,3 @@ def parse_model_ref(raw: str) -> ParsedModelRef:
         return ParsedModelRef(scheme="cozy", cozy=CozyRef(org=org, repo=repo, tag=tag, digest=digest))
 
     raise ValueError(f"unsupported model ref scheme: {scheme!r}")
-

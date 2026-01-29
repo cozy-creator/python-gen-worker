@@ -6,9 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Set
 
-from huggingface_hub import HfApi, hf_hub_download, snapshot_download
-
 from .model_refs import HuggingFaceRef
+from .hf_selection import HFSelectionPolicy, finalize_diffusers_download, plan_diffusers_download
 
 
 @dataclass(frozen=True)
@@ -63,6 +62,10 @@ def _token_from_env() -> Optional[str]:
     return None
 
 
+def _truthy_env(name: str) -> bool:
+    return (os.getenv(name) or "").strip().lower() in ("1", "true", "yes", "y", "t")
+
+
 class HuggingFaceHubDownloader:
     """
     Download Hugging Face repos using the official huggingface_hub cache/layout.
@@ -75,6 +78,21 @@ class HuggingFaceHubDownloader:
         self.hf_token = (hf_token or _token_from_env() or "").strip() or None
 
     def download(self, ref: HuggingFaceRef) -> HuggingFaceDownloadResult:
+        try:
+            from huggingface_hub import HfApi, hf_hub_download, snapshot_download  # type: ignore
+        except Exception as e:
+            raise RuntimeError(
+                "huggingface_hub is required for hf: model refs. Install gen-worker with the Hugging Face extra."
+            ) from e
+
+        # Be defensive: the HF APIs want a bare "org/repo" repo_id. If a caller accidentally
+        # passes "hf:org/repo" through as the repo_id, strip the scheme.
+        repo_id = (ref.repo_id or "").strip()
+        if repo_id.lower().startswith("hf:"):
+            repo_id = repo_id.split(":", 1)[1].strip()
+        if not repo_id:
+            raise ValueError("empty hf repo_id")
+
         kwargs = {"resume_download": True}
         if self.hf_home:
             kwargs["cache_dir"] = self.hf_home
@@ -83,104 +101,177 @@ class HuggingFaceHubDownloader:
 
         # Prefer minimal downloads for diffusers-style repos by default.
         # This can be overridden by setting COZY_HF_FULL_REPO_DOWNLOAD=1.
-        full_repo = (os.getenv("COZY_HF_FULL_REPO_DOWNLOAD") or "").strip() in ("1", "true", "yes")
+        full_repo = _truthy_env("COZY_HF_FULL_REPO_DOWNLOAD")
         if not full_repo:
-            allow = self._build_allow_patterns(ref, HfApi(token=self.hf_token))
-            kwargs["allow_patterns"] = allow
-
-        local = snapshot_download(repo_id=ref.repo_id, revision=ref.revision, **kwargs)
-        return HuggingFaceDownloadResult(local_dir=Path(local))
-
-    def _build_allow_patterns(self, ref: HuggingFaceRef, api) -> List[str]:
-        """
-        Build allow_patterns for snapshot_download so we avoid pulling huge legacy files.
-
-        Defaults (can be overridden via env vars):
-        - Only reduced-precision safetensors weights (fp16/bf16).
-        - Only the components needed for inference.
-        - Never download repo-root .ckpt/.bin weights unless full repo download is enabled.
-        """
-        from huggingface_hub import hf_hub_download  # type: ignore
-
-        # Download only model_index.json first (small), then derive components.
-        index_path = hf_hub_download(
-            repo_id=ref.repo_id,
-            revision=ref.revision,
-            filename="model_index.json",
-            cache_dir=self.hf_home,
-            token=self.hf_token,
-        )
-        model_index = json.loads(Path(index_path).read_text("utf-8"))
-
-        env_components = _csv_env("COZY_HF_COMPONENTS")
-        include_optional = (os.getenv("COZY_HF_INCLUDE_OPTIONAL_COMPONENTS") or "").strip() in (
-            "1",
-            "true",
-            "yes",
-        )
-        deny_by_default = {"safety_checker", "feature_extractor"}
-        precisions = _precisions_from_env()
-
-        if env_components is not None:
-            components = _normalize_components(env_components)
-        else:
-            keys = [k for k in model_index.keys() if isinstance(k, str) and not k.startswith("_")]
-            if not include_optional:
-                keys = [k for k in keys if k not in deny_by_default]
-            components = _normalize_components(keys)
-
-        # Validate component folders exist (without downloading) and that required weights exist.
-        repo_files: Sequence[str] = api.list_repo_files(repo_id=ref.repo_id, repo_type="model", revision=ref.revision)
-        file_set = set(repo_files)
-
-        present_components: List[str] = []
-        for c in components:
-            if any(p.startswith(f"{c}/") for p in repo_files):
-                present_components.append(c)
-
-        if not present_components:
-            raise RuntimeError(
-                f"hf:{ref.repo_id} does not look like a diffusers pipeline repo (no component folders found). "
-                "Set COZY_HF_FULL_REPO_DOWNLOAD=1 to force a full snapshot_download."
+            env_components = _csv_env("COZY_HF_COMPONENTS")
+            policy = HFSelectionPolicy(
+                components_override=_normalize_components(env_components) if env_components else None,
+                include_optional_components=_truthy_env("COZY_HF_INCLUDE_OPTIONAL_COMPONENTS"),
+                weight_precisions=_precisions_from_env(),
+                allow_root_json=_truthy_env("COZY_HF_ALLOW_ROOT_JSON"),
             )
 
-        allow: List[str] = ["model_index.json"]
+            # Best-effort local completeness check: if we already have a local snapshot folder that
+            # contains all required files, skip network calls and downloads.
+            local_snapshot = _try_get_local_snapshot_dir(
+                snapshot_download=snapshot_download,
+                repo_id=repo_id,
+                revision=ref.revision,
+                cache_dir=self.hf_home,
+                token=self.hf_token,
+            )
+            if local_snapshot is not None:
+                local_files = _walk_relative_files(local_snapshot)
+                model_index = _try_load_local_model_index(local_snapshot)
+                if model_index is not None:
+                    plan = plan_diffusers_download(model_index=model_index, repo_files=sorted(local_files), policy=policy)
+                    needed = finalize_diffusers_download(
+                        plan=plan,
+                        repo_files=sorted(local_files),
+                        weight_index_json_by_file=_load_local_weight_indexes(local_snapshot, plan.required_weight_index_files),
+                    )
+                    if needed.issubset(local_files) and not _has_incomplete_markers(local_snapshot):
+                        return HuggingFaceDownloadResult(local_dir=local_snapshot)
 
-        # Some repos have additional small root json needed for loading.
-        if (os.getenv("COZY_HF_ALLOW_ROOT_JSON") or "").strip() in ("1", "true", "yes"):
-            allow.append("*.json")
+            api = HfApi(token=self.hf_token)
+            repo_files: Sequence[str] = api.list_repo_files(
+                repo_id=repo_id, repo_type="model", revision=ref.revision
+            )
 
-        small_tree_components = {"tokenizer", "tokenizer_2", "scheduler"}
+            # Fetch model_index.json if present; otherwise infer components from repo structure.
+            model_index = _try_fetch_model_index_json(
+                hf_hub_download=hf_hub_download,
+                repo_id=repo_id,
+                revision=ref.revision,
+                cache_dir=self.hf_home,
+                token=self.hf_token,
+            )
+            if model_index is None and policy.components_override is None:
+                inferred = _infer_diffusers_components_from_repo_files(repo_files)
+                policy = HFSelectionPolicy(
+                    components_override=inferred,
+                    include_optional_components=policy.include_optional_components,
+                    weight_precisions=policy.weight_precisions,
+                    allow_root_json=policy.allow_root_json,
+                )
+                model_index = {"_class_name": "Unknown"}
 
-        def _has_precision_safetensors(c: str) -> bool:
-            for p in repo_files:
-                if not p.startswith(f"{c}/"):
-                    continue
-                if not p.endswith(".safetensors"):
-                    continue
-                if any(prec in p.lower() for prec in precisions):
-                    return True
-            return False
-
-        for c in present_components:
-            # Always include config if present.
-            if f"{c}/config.json" in file_set:
-                allow.append(f"{c}/config.json")
-
-            if c in small_tree_components:
-                allow.append(f"{c}/*")
-                continue
-
-            # Reduced precision safetensors only by default.
-            for prec in precisions:
-                allow.append(f"{c}/*{prec}*.safetensors")
-
-            # Hard fail early if we would end up with no weights for a required component.
-            if not _has_precision_safetensors(c):
+            if model_index is None:
                 raise RuntimeError(
-                    f"hf:{ref.repo_id} missing required reduced-precision safetensors for component '{c}'. "
-                    f"Available files include: {[p for p in repo_files if p.startswith(c + '/') and p.endswith('.safetensors')][:10]} "
-                    "You can override with COZY_HF_WEIGHT_PRECISIONS=fp16,bf16,fp32 or set COZY_HF_FULL_REPO_DOWNLOAD=1."
+                    f"hf:{ref.repo_id} is missing model_index.json and no diffusers-like components could be inferred."
                 )
 
-        return allow
+            plan = plan_diffusers_download(model_index=model_index, repo_files=repo_files, policy=policy)
+
+            # If any components use sharded weights, download the index JSON(s) (small) to identify shards.
+            idx_json_by_file: dict[str, dict] = {}
+            for idx_path in sorted(plan.required_weight_index_files):
+                p = hf_hub_download(
+                    repo_id=repo_id,
+                    revision=ref.revision,
+                    filename=idx_path,
+                    cache_dir=self.hf_home,
+                    token=self.hf_token,
+                )
+                idx_json_by_file[idx_path] = json.loads(Path(p).read_text("utf-8"))
+
+            selected_files = finalize_diffusers_download(
+                plan=plan, repo_files=repo_files, weight_index_json_by_file=idx_json_by_file
+            )
+
+            # Deterministic order helps debugging and keeps behavior stable.
+            kwargs["allow_patterns"] = sorted(selected_files)
+
+        local = snapshot_download(repo_id=repo_id, revision=ref.revision, **kwargs)
+        return HuggingFaceDownloadResult(local_dir=Path(local))
+
+
+def _try_fetch_model_index_json(*, hf_hub_download, repo_id: str, revision: str | None, cache_dir: str | None, token: str | None) -> Optional[dict]:
+    try:
+        index_path = hf_hub_download(
+            repo_id=repo_id,
+            revision=revision,
+            filename="model_index.json",
+            cache_dir=cache_dir,
+            token=token,
+        )
+    except Exception:
+        return None
+    try:
+        return json.loads(Path(index_path).read_text("utf-8"))
+    except Exception:
+        return None
+
+
+def _infer_diffusers_components_from_repo_files(repo_files: Sequence[str]) -> list[str]:
+    known = [
+        "transformer",
+        "unet",
+        "vae",
+        "text_encoder",
+        "text_encoder_2",
+        "tokenizer",
+        "tokenizer_2",
+        "scheduler",
+    ]
+    present: list[str] = []
+    for c in known:
+        if any(p.startswith(f"{c}/") for p in repo_files):
+            present.append(c)
+    # Require at least one heavyweight component to avoid selecting random repos.
+    if not any(c in present for c in ("transformer", "unet")):
+        return []
+    return present
+
+
+def _try_get_local_snapshot_dir(*, snapshot_download, repo_id: str, revision: str | None, cache_dir: str | None, token: str | None) -> Optional[Path]:
+    try:
+        p = snapshot_download(
+            repo_id=repo_id,
+            revision=revision,
+            local_files_only=True,
+            resume_download=True,
+            cache_dir=cache_dir,
+            token=token,
+        )
+        return Path(p)
+    except Exception:
+        return None
+
+
+def _walk_relative_files(root: Path) -> set[str]:
+    out: set[str] = set()
+    for p in root.rglob("*"):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(root).as_posix()
+        out.add(rel)
+    return out
+
+
+def _try_load_local_model_index(root: Path) -> Optional[dict]:
+    p = root / "model_index.json"
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text("utf-8"))
+    except Exception:
+        return None
+
+
+def _load_local_weight_indexes(root: Path, idx_paths: set[str]) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    for rel in idx_paths:
+        p = root / rel
+        if not p.exists():
+            continue
+        try:
+            out[rel] = json.loads(p.read_text("utf-8"))
+        except Exception:
+            continue
+    return out
+
+
+def _has_incomplete_markers(root: Path) -> bool:
+    # huggingface_hub uses *.incomplete markers for partial files.
+    return any(p.is_file() and p.name.endswith(".incomplete") for p in root.rglob("*.incomplete"))
