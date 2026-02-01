@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 import os
+import struct
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, List, Optional, Sequence, Set
+
+import requests
 
 from .model_refs import HuggingFaceRef
 from .hf_selection import HFSelectionPolicy, finalize_diffusers_download, plan_diffusers_download
@@ -84,6 +87,10 @@ class HuggingFaceHubDownloader:
             raise RuntimeError(
                 "huggingface_hub is required for hf: model refs. Install gen-worker with the Hugging Face extra."
             ) from e
+        try:
+            from huggingface_hub import hf_hub_url  # type: ignore
+        except Exception:
+            hf_hub_url = None
 
         # Be defensive: the HF APIs want a bare "org/repo" repo_id. If a caller accidentally
         # passes "hf:org/repo" through as the repo_id, strip the scheme.
@@ -103,6 +110,12 @@ class HuggingFaceHubDownloader:
         # This can be overridden by setting COZY_HF_FULL_REPO_DOWNLOAD=1.
         full_repo = _truthy_env("COZY_HF_FULL_REPO_DOWNLOAD")
         if not full_repo:
+            # Non-configurable safety guard: refuse to download extremely large file sets by default.
+            #
+            # This is intentionally hardcoded. Callers can bypass it by explicitly opting into a full
+            # repo download (COZY_HF_FULL_REPO_DOWNLOAD=1), which is already an escape hatch.
+            max_total_bytes = 30_000_000_000  # 30GB
+
             env_components = _csv_env("COZY_HF_COMPONENTS")
             policy = HFSelectionPolicy(
                 components_override=_normalize_components(env_components) if env_components else None,
@@ -134,9 +147,21 @@ class HuggingFaceHubDownloader:
                         return HuggingFaceDownloadResult(local_dir=local_snapshot)
 
             api = HfApi(token=self.hf_token)
-            repo_files: Sequence[str] = api.list_repo_files(
-                repo_id=repo_id, repo_type="model", revision=ref.revision
-            )
+            repo_files: Sequence[str] = api.list_repo_files(repo_id=repo_id, repo_type="model", revision=ref.revision)
+
+            # Best-effort: get file sizes from list_repo_tree when available.
+            repo_file_sizes: dict[str, int] = {}
+            if hasattr(api, "list_repo_tree"):
+                try:
+                    tree = api.list_repo_tree(repo_id=repo_id, repo_type="model", revision=ref.revision, recursive=True)  # type: ignore[misc]
+                    for ent in tree:
+                        # huggingface_hub RepoFile has .path and .size
+                        p = getattr(ent, "path", None)
+                        sz = getattr(ent, "size", None)
+                        if isinstance(p, str) and isinstance(sz, int):
+                            repo_file_sizes[p] = sz
+                except Exception:
+                    repo_file_sizes = {}
 
             # Fetch model_index.json if present; otherwise infer components from repo structure.
             model_index = _try_fetch_model_index_json(
@@ -161,23 +186,91 @@ class HuggingFaceHubDownloader:
                     f"hf:{ref.repo_id} is missing model_index.json and no diffusers-like components could be inferred."
                 )
 
-            plan = plan_diffusers_download(model_index=model_index, repo_files=repo_files, policy=policy)
-
-            # If any components use sharded weights, download the index JSON(s) (small) to identify shards.
+            # Prefetch all sharded-weight index JSONs (small) so we can choose the best weight set per component.
             idx_json_by_file: dict[str, dict] = {}
-            for idx_path in sorted(plan.required_weight_index_files):
-                p = hf_hub_download(
-                    repo_id=repo_id,
-                    revision=ref.revision,
-                    filename=idx_path,
-                    cache_dir=self.hf_home,
-                    token=self.hf_token,
-                )
-                idx_json_by_file[idx_path] = json.loads(Path(p).read_text("utf-8"))
+            for pth in repo_files:
+                if not pth.lower().endswith(".safetensors.index.json"):
+                    continue
+                try:
+                    p = hf_hub_download(
+                        repo_id=repo_id,
+                        revision=ref.revision,
+                        filename=pth,
+                        cache_dir=self.hf_home,
+                        token=self.hf_token,
+                    )
+                    idx_json_by_file[pth] = json.loads(Path(p).read_text("utf-8"))
+                except Exception:
+                    continue
 
-            selected_files = finalize_diffusers_download(
-                plan=plan, repo_files=repo_files, weight_index_json_by_file=idx_json_by_file
+            session = requests.Session()
+            dtype_cache: dict[str, Optional[set[str]]] = {}
+
+            def probe_safetensors_dtypes(rel_path: str) -> Optional[set[str]]:
+                if rel_path in dtype_cache:
+                    return dtype_cache[rel_path]
+                if hf_hub_url is None:
+                    dtype_cache[rel_path] = None
+                    return None
+                if not rel_path.lower().endswith(".safetensors"):
+                    dtype_cache[rel_path] = None
+                    return None
+
+                url = hf_hub_url(repo_id=repo_id, filename=rel_path, repo_type="model", revision=ref.revision)
+                headers = {"Range": "bytes=0-7"}
+                if self.hf_token:
+                    headers["Authorization"] = f"Bearer {self.hf_token}"
+
+                try:
+                    r = session.get(url, headers=headers, allow_redirects=True, timeout=60)
+                    r.raise_for_status()
+                    if len(r.content) != 8:
+                        dtype_cache[rel_path] = None
+                        return None
+                    (header_len,) = struct.unpack("<Q", r.content)
+                    if header_len <= 0 or header_len > (32 << 20):
+                        dtype_cache[rel_path] = None
+                        return None
+
+                    headers2 = {"Range": f"bytes=8-{8 + header_len - 1}"}
+                    if self.hf_token:
+                        headers2["Authorization"] = f"Bearer {self.hf_token}"
+                    r2 = session.get(url, headers=headers2, allow_redirects=True, timeout=60)
+                    r2.raise_for_status()
+                    raw = json.loads(r2.content.decode("utf-8"))
+                    dtypes: set[str] = set()
+                    for name, meta in raw.items():
+                        if name == "__metadata__":
+                            continue
+                        if not isinstance(meta, dict):
+                            continue
+                        dt = meta.get("dtype")
+                        if isinstance(dt, str) and dt.strip():
+                            dtypes.add(dt.strip())
+                    dtype_cache[rel_path] = dtypes or None
+                    return dtype_cache[rel_path]
+                except Exception:
+                    dtype_cache[rel_path] = None
+                    return None
+
+            plan = plan_diffusers_download(
+                model_index=model_index,
+                repo_files=repo_files,
+                policy=policy,
+                weight_index_json_by_file=idx_json_by_file,
+                repo_file_sizes=repo_file_sizes,
+                probe_safetensors_dtypes=probe_safetensors_dtypes,
             )
+
+            selected_files = finalize_diffusers_download(plan=plan, repo_files=repo_files, weight_index_json_by_file=idx_json_by_file)
+
+            if repo_file_sizes:
+                total = sum(int(repo_file_sizes.get(p, 0) or 0) for p in selected_files)
+                if total > max_total_bytes:
+                    raise RuntimeError(
+                        f"refusing to download an excessively large Hugging Face repo selection: {total} bytes "
+                        f"(limit {max_total_bytes} bytes). Use COZY_HF_FULL_REPO_DOWNLOAD=1 to override."
+                    )
 
             # Deterministic order helps debugging and keeps behavior stable.
             kwargs["allow_patterns"] = sorted(selected_files)

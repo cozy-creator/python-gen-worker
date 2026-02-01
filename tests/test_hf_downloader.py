@@ -246,3 +246,58 @@ def test_hf_downloader_includes_sharded_weights_from_index(tmp_path: Path, monke
     assert "unet/diffusion_pytorch_model.fp16.safetensors.index.json" in allow
     assert "unet/diffusion_pytorch_model.fp16-00001-of-00002.safetensors" in allow
     assert "unet/diffusion_pytorch_model.fp16-00002-of-00002.safetensors" in allow
+
+
+def test_hf_downloader_errors_if_selection_too_large(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    hub = types.ModuleType("huggingface_hub")
+
+    class FakeRepoFile:
+        def __init__(self, path: str, size: int):
+            self.path = path
+            self.size = size
+
+    class FakeApi:
+        def __init__(self, token=None):
+            self.token = token
+
+        def list_repo_files(self, repo_id: str, repo_type: str, revision: str | None):
+            assert repo_type == "model"
+            return [
+                "model_index.json",
+                "unet/config.json",
+                "unet/diffusion_pytorch_model.fp16.safetensors",
+            ]
+
+        def list_repo_tree(self, repo_id: str, repo_type: str, revision: str | None, recursive: bool):
+            assert recursive is True
+            return [
+                FakeRepoFile("model_index.json", 100),
+                FakeRepoFile("unet/config.json", 100),
+                # Make the selection exceed the 30GB hard limit.
+                FakeRepoFile("unet/diffusion_pytorch_model.fp16.safetensors", 31_000_000_000),
+            ]
+
+    def fake_hf_hub_download(*, repo_id: str, revision: str | None, filename: str, cache_dir=None, token=None):
+        p = tmp_path / "model_index.json"
+        p.write_text(json.dumps({"_class_name": "X", "unet": ["diffusers", "UNet2DConditionModel"]}), "utf-8")
+        return str(p)
+
+    def fake_snapshot_download(*, repo_id: str, revision: str | None, **kwargs):
+        raise AssertionError("snapshot_download should not be called when safety limit triggers")
+
+    hub.HfApi = FakeApi
+    hub.hf_hub_download = fake_hf_hub_download
+    hub.snapshot_download = fake_snapshot_download
+    hub.hf_hub_url = lambda **kwargs: "https://example.invalid/file"
+    monkeypatch.setitem(sys.modules, "huggingface_hub", hub)
+
+    monkeypatch.delenv("COZY_HF_FULL_REPO_DOWNLOAD", raising=False)
+    monkeypatch.delenv("COZY_HF_COMPONENTS", raising=False)
+    monkeypatch.delenv("COZY_HF_INCLUDE_OPTIONAL_COMPONENTS", raising=False)
+    monkeypatch.delenv("COZY_HF_WEIGHT_PRECISIONS", raising=False)
+    monkeypatch.delenv("COZY_HF_ALLOW_ROOT_JSON", raising=False)
+
+    d = HuggingFaceHubDownloader(hf_home=str(tmp_path))
+    with pytest.raises(RuntimeError) as e:
+        d.download(HuggingFaceRef(repo_id="org/repo"))
+    assert "excessively large" in str(e.value)

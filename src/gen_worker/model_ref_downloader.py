@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Optional
 
 from .cozy_cas import CozyHubClient, CozySnapshotDownloader
+from .cozy_snapshot_v2_downloader import ensure_snapshot_sync
 from .downloader import ModelDownloader
 from .hf_downloader import HuggingFaceHubDownloader
 from .model_refs import ParsedModelRef, parse_model_ref
@@ -31,6 +32,8 @@ class ModelRefDownloader(ModelDownloader):
         self._hf = HuggingFaceHubDownloader(hf_home=hf_home, hf_token=hf_token)
         self._cozy: Optional[CozySnapshotDownloader] = None
         if self._cozy_base_url:
+            # Legacy snapshot/object downloader kept for backward compatibility with
+            # older Cozy Hub endpoints; current Cozy Hub should use resolve_artifact.
             client = CozyHubClient(self._cozy_base_url, token=self._cozy_token)
             self._cozy = CozySnapshotDownloader(client)
 
@@ -41,7 +44,17 @@ class ModelRefDownloader(ModelDownloader):
         if parsed.scheme == "cozy" and parsed.cozy is not None:
             if self._cozy is None:
                 raise RuntimeError("cozy downloads require COZY_HUB_URL")
-            return await self._cozy.ensure_snapshot(dest_dir, parsed.cozy)
+            # Prefer Cozy Hub v2 resolve_artifact flow (snapshots+blobs).
+            try:
+                return ensure_snapshot_sync(
+                    base_dir=dest_dir,
+                    ref=parsed.cozy,
+                    base_url=self._cozy_base_url or "",
+                    token=self._cozy_token,
+                )
+            except Exception:
+                # Fall back to legacy object-based downloader if the hub is old.
+                return await self._cozy.ensure_snapshot(dest_dir, parsed.cozy)
 
         raise ValueError("invalid parsed model ref")
 
