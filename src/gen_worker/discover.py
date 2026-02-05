@@ -320,7 +320,7 @@ def _load_cozy_config(root: Path) -> Dict[str, Any]:
 
     Returns dict with:
         - deployment: default deployment ID
-        - build: dict with gpu, cuda, torch, backend, base_image settings
+        - build: dict with gpu, cuda, torch, backend settings
         - models: dict mapping deployment keys to Cozy Hub model IDs
         - resources: dict with vram_gb, gpu_type, memory_gb, cpu_cores
 
@@ -357,7 +357,7 @@ def _load_cozy_config(root: Path) -> Dict[str, Any]:
     if not tool_cozy:
         return config
 
-    # Parse [tool.cozy.build] - build settings (gpu, cuda, torch, backend, base_image)
+    # Parse [tool.cozy.build] - build settings (gpu, cuda, torch, backend)
     build = tool_cozy.get("build", {})
     if build and isinstance(build, dict):
         bld: Dict[str, Any] = {}
@@ -369,8 +369,6 @@ def _load_cozy_config(root: Path) -> Dict[str, Any]:
             bld["torch"] = build["torch"]
         if "backend" in build and isinstance(build["backend"], str):
             bld["backend"] = build["backend"]
-        if "base_image" in build and isinstance(build["base_image"], str):
-            bld["base_image"] = build["base_image"]
         if bld:
             config["build"] = bld
 

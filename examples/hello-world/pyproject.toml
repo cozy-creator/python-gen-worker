@@ -28,6 +28,10 @@ disallow_untyped_defs = true
 [tool.cozy]
 deployment = "hello-world"  # Default deployment ID
 
+[tool.cozy.environment]
+LOG_LEVEL = "info"
+WORKER_PROFILE = "hello-world"
+
 [tool.cozy.build]
 # Option 1: Simple GPU selection (recommended)
 gpu = true           # Build GPU variant
@@ -36,6 +40,3 @@ torch = ">=2.9"      # Optional torch version constraint
 # Option 2: GPU with specific CUDA version
 # gpu = true
 # cuda = ">=12.6"    # Optional: filter CUDA versions
-
-# Option 3: Specify exact base image (overrides all constraints)
-# base_image = "cozycreator/python-worker:cuda12.8-torch2.9"

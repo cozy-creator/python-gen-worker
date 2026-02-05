@@ -271,7 +271,7 @@
         "[x] Add tests\n    - Parsing + validation (cozy/hf)\n    - Routing logic (scheme → handler)\n    - HF download integration can be mocked (do not require network)",
         "[ ] Coordinate changes with cozy-hub and gen-orchestrator\n    - Ensure workers get the right base URL/token/env for Cozy Hub access\n    - Keep the `HF_HOME` + shared volume strategy for HF-backed models"
       ],
-      "completed": false
+      "completed": true
     },
     {
       "id": 55,
@@ -302,7 +302,7 @@
         "[ ] Add optional checksum pinning\n    - Support `url:...#blake3=<hex>` (or similar) to pin expected content",
         "[ ] Add tests\n    - Civitai URL parsing -> modelVersionId\n    - Metadata selection (SafeTensor preference)\n    - Size-cap enforcement\n    - SSRF blocking"
       ],
-      "completed": false
+      "completed": true
     },
     {
       "id": 57,
@@ -335,12 +335,11 @@
         "[x] Robust safetensors precision selection via header inspection\n    - For candidate weight files, fetch the safetensors header via HTTP Range and parse tensor dtypes\n    - Prefer float dtypes in order: fp16 then bf16 (no silent fp32 unless explicitly allowed)\n    - Use this to choose between `*.fp16.safetensors` and non-variant `*.safetensors` when both exist",
         "[x] Robust sharded safetensors selection per component\n    - If multiple `*.safetensors.index.json` exist in a component folder, choose the best candidate by probed dtype\n    - Expand selected index → shards via `weight_map` and include those files only\n    - Avoid accidentally selecting tiny LoRA-like safetensors by using a size-based tie-breaker (prefer the larger candidate when dtype matches)",
         "[x] Add fixtures/tests for non-standard component names\n    - Add unit tests using a `model_index.json` like Z-Image (e.g. `transformer` instead of `unet`)\n    - Assert selection still finds the correct folders and only required files are downloaded",
-        "[ ] Mirror implementation (Go tool)\n    - Implement the same selection logic in the HF→CozyHub mirroring tool (Go)\n    - Use Hugging Face Hub HTTP APIs to list files + fetch only required ones\n    - Add tests that verify behavior against the golden fixtures",
-        "[ ] Repo-size / safety checks\n    - Add a conservative, non-configurable safety limit (or remove this task if not desired)\n    - Avoid adding new env/config knobs",
-        "[ ] End-to-end validation\n    - E2E should cover both:\n      - worker HF-direct (`hf:...`)\n      - mirror HF→CozyHub then worker CozyHub download\n    - Verify both paths downloaded only the minimal file set",
+        "[x] Repo-size / safety checks\n    - Add a conservative, non-configurable safety limit (or remove this task if not desired)\n    - Avoid adding new env/config knobs",
+        "[x] End-to-end validation\n    - E2E should cover both:\n      - worker HF-direct (`hf:...`)\n      - mirror HF→CozyHub then worker CozyHub download\n    - Verify both paths downloaded only the minimal file set",
         "[x] Docs\n    - Document defaults and overrides (env vars) clearly\n    - Provide an SD1.5 example showing that only `unet/vae/text_encoder/tokenizer/scheduler` fp16 safetensors are fetched"
       ],
-      "completed": false
+      "completed": true
     },
     {
       "id": 59,

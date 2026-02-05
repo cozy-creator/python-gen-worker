@@ -23,9 +23,6 @@ torch = ">=2.9"      # Optional torch version constraint
 # Option 2: GPU with specific CUDA version
 # gpu = true
 # cuda = ">=12.6"    # Optional: filter CUDA versions
-
-# Option 3: Specify exact base image (overrides all constraints)
-# base_image = "cozycreator/python-worker:cuda12.8-torch2.9"
 ```
 
 ### Available build options
@@ -35,7 +32,6 @@ torch = ">=2.9"      # Optional torch version constraint
 | `gpu` | Enable GPU support | `true` or `false` |
 | `cuda` | CUDA version constraint (advanced) | `">=12.6"`, `">=12.8"` |
 | `torch` | PyTorch version constraint | `">=2.9"` |
-| `base_image` | Exact base image (overrides all) | `"cozycreator/python-worker:cuda13-torch2.9"` |
 
 ### Available base images
 

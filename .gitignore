@@ -22,3 +22,7 @@ src/gen_worker/pb/**/*.pyo
 **/*.jpg
 
 .task/
+
+.hf-cache-*
+.pytest_cache
+.mock-files*

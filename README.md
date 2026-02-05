@@ -1,8 +1,10 @@
 # gen-worker
 
-A Python SDK for building serverless AI inference workers on the Cozy Creator platform.
+A Python SDK for building serverless api-endpoints for AI inference. Just write your custom function, create a manifest specifying what model-weights you need from Cozy-Hub, and then deploy it! We take care of the rest!
 
 ## Installation
+
+Start a python project, and then run:
 
 ```bash
 uv add gen-worker
@@ -111,6 +113,11 @@ def process(ctx: ActionContext, payload: Input) -> Output:
 [tool.cozy]
 deployment = "my-worker"
 
+[tool.cozy.environment]
+# Baked into image as Docker ENV defaults (non-secret values only).
+HF_HOME = "/app/.cache/huggingface"
+LOG_LEVEL = "info"
+
 [tool.cozy.models]
 # Model refs (phase 1):
 # - Cozy Hub snapshot (default): org/repo[:tag] or org/repo@sha256:<digest>
@@ -173,44 +180,29 @@ my-worker/
 ├── uv.lock
 └── src/
     └── my_module/
-        └── __init__.py
+        └── main.py
 ```
 
-### Dockerfile
+### Local Dev Build (Using Root `Dockerfile`)
 
-```dockerfile
-ARG BASE_IMAGE=cozycreator/gen-runtime:cuda12.8-torch2.9
-FROM ${BASE_IMAGE}
-
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
-
-WORKDIR /app
-COPY . /app
-RUN if [ -f uv.lock ]; then uv sync --frozen --no-dev; else uv sync --no-dev; fi
-
-RUN mkdir -p .cozy && python -m gen_worker.discover > .cozy/manifest.json
-
-ENTRYPOINT ["python", "-m", "gen_worker.entrypoint"]
-```
-
-### Build & Run
+For production, use the `cozyctl` CLI to build and deploy worker-images to our network. But for local testing, you can build images using our provided `Dockerfile`:
 
 ```bash
-# Build
-docker build -t my-worker .
+# Build an example using the same root Dockerfile
+docker build -t sd15-worker -f Dockerfile examples/sd15
 
 # Run
-docker run -e SCHEDULER_ADDR=orchestrator:8080 my-worker
+docker run -e SCHEDULER_ADDR=orchestrator:8080 sd15-worker
 ```
 
 ### Base Images
 
 | Image | GPU | CUDA | PyTorch |
 |-------|-----|------|---------|
-| `cozycreator/gen-runtime:cpu-torch2.9` | No | - | 2.9 |
-| `cozycreator/gen-runtime:cuda12.6-torch2.9` | Yes | 12.6 | 2.9 |
-| `cozycreator/gen-runtime:cuda12.8-torch2.9` | Yes | 12.8 | 2.9 |
-| `cozycreator/gen-runtime:cuda13-torch2.9` | Yes | 13.0 | 2.9 |
+| `cozycreator/gen-worker:cpu-torch2.9` | No | - | 2.9 |
+| `cozycreator/gen-worker:cuda12.6-torch2.9` | Yes | 12.6 | 2.9 |
+| `cozycreator/gen-worker:cuda12.8-torch2.9` | Yes | 12.8 | 2.9 |
+| `cozycreator/gen-worker:cuda13-torch2.9` | Yes | 13.0 | 2.9 |
 
 ## Model Cache
 
@@ -222,23 +214,31 @@ Workers report model availability for intelligent job routing:
 | Warm | Disk | Seconds |
 | Cold | None | Minutes (download required) |
 
-```python
-
 ## Dev Testing (Mock Orchestrator)
 
-For local end-to-end tests without standing up `gen-orchestrator`, you can run a mock orchestrator gRPC server and point a worker at it. This exercises the real worker gRPC protocol (ConnectWorker stream + TaskExecutionRequest/Result).
+For local end-to-end tests without standing up `gen-orchestrator`, use the one-off mock orchestrator invoke command (curl-like workflow). It starts a temporary scheduler, waits for a worker to connect, sends one `TaskExecutionRequest`, prints the result, and exits.
 
-Start mock orchestrator (listens on port 8080 and runs a single function call):
-
-```bash
-python -m gen_worker.testing.mock_orchestrator --listen 0.0.0.0:8080 --run hello --payload-json '{"name":"world"}'
-```
-
-Then start your worker container pointing `SCHEDULER_ADDR` to the host:
+Start your worker container first:
 
 ```bash
-docker run --rm -e SCHEDULER_ADDR=host.docker.internal:8080 <your-worker-image>
+docker run --rm \
+  --add-host=host.docker.internal:host-gateway \
+  -e SCHEDULER_ADDR=host.docker.internal:8080 \
+  <your-worker-image>
 ```
+
+In another terminal, send one request:
+
+```bash
+python -m gen_worker.testing.mock_orchestrator \
+  --listen 0.0.0.0:8080 \
+  --run hello \
+  --payload-json '{"name":"world"}'
+```
+
+Run the command again with a different payload whenever you want to send another request.
+
+```python
 from gen_worker.model_cache import ModelCache
 
 cache = ModelCache(max_vram_gb=20.0)

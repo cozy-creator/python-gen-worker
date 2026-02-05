@@ -334,11 +334,23 @@ def _format_msg(msg: pb.WorkerSchedulerMessage) -> str:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    ap = argparse.ArgumentParser(prog="mock-orchestrator", description="Local mock gen-orchestrator for python-gen-worker")
+    ap = argparse.ArgumentParser(
+        prog="mock-orchestrator",
+        description=(
+            "One-off local invoke helper for python-gen-worker. "
+            "Starts a temporary mock scheduler, waits for a worker to connect, "
+            "sends one task, prints the result, and exits."
+        ),
+    )
     ap.add_argument("--listen", default="0.0.0.0:8080", help="address to listen on (host:port)")
     ap.add_argument("--wait-s", type=float, default=30.0, help="seconds to wait for a worker to connect")
 
-    ap.add_argument("--run", dest="function_name", default="", help="function name to run once a worker connects")
+    ap.add_argument(
+        "--run",
+        dest="function_name",
+        required=True,
+        help="function name to run once a worker connects",
+    )
     ap.add_argument("--payload-json", default="{}", help="JSON payload to encode and send")
     ap.add_argument("--timeout-ms", type=int, default=0)
     ap.add_argument("--tenant-id", default="")
@@ -350,8 +362,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--serve-files-dir", default="", help="if set, start a tiny dev file API server writing into this directory")
     ap.add_argument("--serve-files-listen", default="0.0.0.0:8081", help="listen address for --serve-files-dir server (host:port)")
 
-    ap.add_argument("--print-events", action="store_true", help="print worker_event messages")
-    ap.add_argument("--print-registrations", action="store_true", help="print worker_registration heartbeats")
+    ap.add_argument("--print-events", action="store_true", help="print worker_event messages during run")
+    ap.add_argument(
+        "--print-registrations",
+        action="store_true",
+        help="print worker_registration heartbeats during run",
+    )
 
     args = ap.parse_args(argv)
 
@@ -375,18 +391,6 @@ def main(argv: Optional[list[str]] = None) -> int:
             print(f"[connected] functions={list(sess.available_functions)}")
         if sess.metadata:
             print(f"[connected] metadata={list(sess.metadata)}")
-
-        if not args.function_name:
-            # Just keep printing messages until Ctrl-C.
-            while True:
-                msg = sess.recv(timeout_s=0.5)
-                if msg is None:
-                    continue
-                if msg.HasField("worker_event") and not args.print_events:
-                    continue
-                if msg.HasField("worker_registration") and not args.print_registrations:
-                    continue
-                print(_format_msg(msg))
 
         payload_obj = _parse_payload_json(args.payload_json)
         run_id = sess.run_task(

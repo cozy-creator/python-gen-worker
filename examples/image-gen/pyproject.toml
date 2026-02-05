@@ -32,6 +32,10 @@ disallow_untyped_defs = true
 [tool.cozy]
 deployment = "image-gen"
 
+[tool.cozy.environment]
+HF_HOME = "/app/.cache/huggingface"
+LOG_LEVEL = "info"
+
 [tool.cozy.build]
 gpu = true
 torch = ">=2.9"
