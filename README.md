@@ -195,14 +195,23 @@ docker build -t sd15-worker -f Dockerfile examples/sd15
 docker run -e SCHEDULER_ADDR=orchestrator:8080 sd15-worker
 ```
 
-### Base Images
+Optional build args:
 
-| Image | GPU | CUDA | PyTorch |
-|-------|-----|------|---------|
-| `cozycreator/gen-worker:cpu-torch2.9` | No | - | 2.9 |
-| `cozycreator/gen-worker:cuda12.6-torch2.9` | Yes | 12.6 | 2.9 |
-| `cozycreator/gen-worker:cuda12.8-torch2.9` | Yes | 12.8 | 2.9 |
-| `cozycreator/gen-worker:cuda13-torch2.9` | Yes | 13.0 | 2.9 |
+```bash
+docker build \
+  --build-arg PYTHON_VERSION=3.12 \
+  --build-arg UV_TORCH_BACKEND=cu128 \
+  --build-arg TORCH_SPEC=">=2.9,<3" \
+  -t my-worker -f Dockerfile examples/sd15
+```
+
+### Build Base
+
+Worker images build directly from a Python+uv base image:
+
+- `ghcr.io/astral-sh/uv:python3.12-bookworm-slim`
+
+PyTorch/CUDA dependencies are installed as part of your worker's dependency set during image build.
 
 ## Model Cache
 

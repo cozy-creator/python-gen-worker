@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import logging
+import os
 from io import BytesIO
 from typing import Annotated, Optional
 
 import msgspec
+import torch
 from diffusers import Flux2KleinPipeline
 from PIL import Image
 
@@ -29,6 +31,11 @@ class GenerateOutput(msgspec.Struct):
     image: Asset
 
 
+def _should_enable_seq_offload() -> bool:
+    raw = (os.getenv("COZY_DISABLE_SEQUENTIAL_CPU_OFFLOAD") or "").strip().lower()
+    return raw not in {"1", "true", "yes", "y", "t"}
+
+
 @worker_function(ResourceRequirements())
 def generate(
     ctx: ActionContext,
@@ -42,10 +49,14 @@ def generate(
 
     logger.info("[run_id=%s] flux2-klein-4b prompt=%r", ctx.run_id, payload.prompt)
 
+    # FLUX.2-klein-4B can exceed 8GB VRAM; use sequential CPU offload by default.
+    if torch.cuda.is_available() and _should_enable_seq_offload():
+        if not getattr(pipeline, "_cozy_seq_offload_enabled", False):
+            pipeline.enable_sequential_cpu_offload(gpu_id=0)
+            setattr(pipeline, "_cozy_seq_offload_enabled", True)
+
     generator = None
     if payload.seed is not None:
-        import torch
-
         device = "cuda" if torch.cuda.is_available() else "cpu"
         generator = torch.Generator(device=device).manual_seed(payload.seed)
 

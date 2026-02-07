@@ -5,8 +5,8 @@ description = "Flux2-klein-4B example (inference-only; models via [tool.cozy.mod
 requires-python = ">=3.12"
 dependencies = [
     "gen-worker[torch]",
-    "diffusers",
-    "transformers",
+    "diffusers @ git+https://github.com/huggingface/diffusers.git@99e2cfff27dec514a43e260e885c5e6eca038b36",
+    "transformers>=4.56,<5",
     "accelerate",
     "pillow",
 ]
@@ -20,6 +20,9 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/flux2_klein_4b"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.cozy]
 deployment = "flux2-klein-4b"
@@ -40,4 +43,4 @@ torch = ">=2.9"
 vram_gb = 12
 
 [tool.cozy.models]
-flux2-klein-4b = "black-forest-labs/flux2-klein-4b"
+flux2-klein-4b = "hf:black-forest-labs/FLUX.2-klein-4B"

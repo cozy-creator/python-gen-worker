@@ -9,7 +9,7 @@ Config:
 
 ```toml
 [tool.cozy.models]
-flux2-klein-4b = "black-forest-labs/flux2-klein-4b"
+flux2-klein-4b = "hf:black-forest-labs/FLUX.2-klein-4B"
 ```
 
 Code uses:
