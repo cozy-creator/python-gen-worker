@@ -28,7 +28,6 @@ ignore_missing_imports = true
 disallow_untyped_defs = true
 
 [tool.cozy]
-deployment = "medasr-transcribe"
 
 [tool.cozy.build]
 gpu = true

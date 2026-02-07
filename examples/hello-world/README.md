@@ -5,7 +5,7 @@ Minimal example of a Cozy worker function.
 ## Contents
 
 - `src/hello_world` - module with a single `@worker_function`
-- `pyproject.toml` - dependencies and `[tool.cozy]` deployment config
+- `pyproject.toml` - dependencies and `[tool.cozy]` configuration
 
 ## Configuration
 

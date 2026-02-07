@@ -7,7 +7,7 @@ orchestrator's scheduler routes requests to workers that already have that model
 loaded in VRAM.
 
 Key concepts:
-- Models are declared in [tool.cozy.models] with deployment-local keys
+- Models are declared in [tool.cozy.models] with endpoint-local keys
 - ModelRef(Src.PAYLOAD, "model_key") resolves the model from the request
 - Scheduler uses vram_models/disk_models heartbeat data for smart routing
 - LRU eviction manages VRAM when switching between models

@@ -654,9 +654,10 @@ class Worker:
         self._jwt_audience = os.getenv("SCHEDULER_JWT_AUDIENCE", "").strip()
         self._jwks_cache: Optional[_JWKSCache] = _JWKSCache(self._jwks_url, self._jwks_ttl_seconds) if self._jwks_url else None
 
-        self.deployment_id = os.getenv("DEPLOYMENT_ID", "") # Read DEPLOYMENT_ID env var
-        if not self.deployment_id:
-            logger.warning("DEPLOYMENT_ID environment variable not set for this worker!")
+        # Internal runtime identity for the currently running release.
+        self.release_id = os.getenv("RELEASE_ID", "").strip()
+        if not self.release_id:
+            logger.warning("RELEASE_ID environment variable not set for this worker!")
 
         self.tenant_id = os.getenv("TENANT_ID", "")
         self.runpod_pod_id = os.getenv("RUNPOD_POD_ID", "") # Read injected pod ID
@@ -783,7 +784,7 @@ class Worker:
         if self._downloader:
             logger.info(f"ModelDownloader of type '{type(self._downloader).__name__}' configured.")
 
-        logger.info(f"Created worker: ID={self.worker_id}, DeploymentID={self.deployment_id or 'N/A'}, Scheduler={scheduler_addr}")
+        logger.info(f"Created worker: ID={self.worker_id}, ReleaseID={self.release_id or 'N/A'}, Scheduler={scheduler_addr}")
 
         # Discover functions before setting signals? Maybe after. Let's do it here.
         self._discover_and_register_functions()
@@ -1586,7 +1587,8 @@ class Worker:
 
             resources = pb.WorkerResources(
                 worker_id=self.worker_id,
-                deployment_id=self.deployment_id,
+                # Runtime identity is release_id.
+                deployment_id=self.release_id,
                 # tenant_id=self.tenant_id,
                 runpod_pod_id=self.runpod_pod_id,
                 gpu_is_busy=self._get_gpu_busy_status(),

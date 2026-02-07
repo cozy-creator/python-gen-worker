@@ -4,7 +4,7 @@ Contents:
 
 - `src/medasr_transcribe` with a single `@worker_function` (`medasr_transcribe`).
 - `pyproject.toml` with deps.
-- `[tool.cozy]` deployment config in `pyproject.toml`.
+- `[tool.cozy]` configuration in `pyproject.toml`.
 
 Notes:
 

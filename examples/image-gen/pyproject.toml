@@ -30,7 +30,6 @@ ignore_missing_imports = true
 disallow_untyped_defs = true
 
 [tool.cozy]
-deployment = "image-gen"
 
 [tool.cozy.environment]
 HF_HOME = "/app/.cache/huggingface"

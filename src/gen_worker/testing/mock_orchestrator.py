@@ -160,7 +160,7 @@ def _start_file_api_server(listen: str, files_dir: str, token: str) -> Threading
 @dataclass
 class WorkerSession:
     worker_id: str
-    deployment_id: str
+    release_id: str
     available_functions: Tuple[str, ...]
     function_schemas: Dict[str, pb.FunctionSchema]
     metadata: Tuple[Tuple[str, str], ...]
@@ -245,7 +245,7 @@ class _MockOrchestrator(pb_grpc.SchedulerWorkerServiceServicer):
 
         # Wait for initial registration to populate the session.
         worker_id = ""
-        deployment_id = ""
+        release_id = ""
         available_functions: Tuple[str, ...] = ()
         function_schemas: Dict[str, pb.FunctionSchema] = {}
 
@@ -264,13 +264,13 @@ class _MockOrchestrator(pb_grpc.SchedulerWorkerServiceServicer):
                 reg = msg.worker_registration
                 res = reg.resources
                 worker_id = res.worker_id
-                deployment_id = res.deployment_id
+                release_id = res.deployment_id
                 available_functions = tuple(res.available_functions)
                 for fs in res.function_schemas:
                     function_schemas[fs.name] = fs
                 session = WorkerSession(
                     worker_id=worker_id,
-                    deployment_id=deployment_id,
+                    release_id=release_id,
                     available_functions=available_functions,
                     function_schemas=function_schemas,
                     metadata=md,
@@ -386,7 +386,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             print(f"timed out waiting for worker to connect to {args.listen}", file=sys.stderr)
             return 2
 
-        print(f"[connected] worker_id={sess.worker_id!r} deployment_id={sess.deployment_id!r}")
+        print(f"[connected] worker_id={sess.worker_id!r} release_id={sess.release_id!r}")
         if sess.available_functions:
             print(f"[connected] functions={list(sess.available_functions)}")
         if sess.metadata:

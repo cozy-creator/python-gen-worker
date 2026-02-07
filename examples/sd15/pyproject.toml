@@ -30,7 +30,6 @@ ignore_missing_imports = true
 disallow_untyped_defs = true
 
 [tool.cozy]
-deployment = "sd15"
 
 [tool.cozy.build]
 gpu = true

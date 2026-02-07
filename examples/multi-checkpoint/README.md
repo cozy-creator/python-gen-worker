@@ -4,7 +4,7 @@ Example showing payload-based model selection with multiple SDXL variants.
 
 ## Overview
 
-This example demonstrates how to efficiently support multiple model fine-tunes (checkpoints) in a single deployment. The request payload specifies which model to use, and the orchestrator routes requests to workers that have the requested model available.
+This example demonstrates how to efficiently support multiple model fine-tunes (checkpoints) in a single endpoint package. The request payload specifies which model to use, and the orchestrator routes requests to workers that have the requested model available.
 
 ## How It Works
 
@@ -18,7 +18,7 @@ dreamshaper = "Lykon/dreamshaper-xl-v2-turbo"
 juggernaut = "RunDiffusion/Juggernaut-XL-v9"
 ```
 
-Keys (left side) are deployment-local identifiers used in requests.
+Keys (left side) are endpoint-local identifiers used in requests.
 Values (right side) are Cozy Hub model IDs.
 
 ### 2. Use Payload-Based Model Selection
@@ -122,12 +122,12 @@ Cold starts are slower but only happen once per model per worker.
 
 ## Model Specification Rules
 
-1. **Keys are deployment-local**: `"sdxl-base"` only has meaning within this deployment
+1. **Keys are endpoint-local**: `"sdxl-base"` only has meaning within this endpoint package
 2. **Values are Cozy Hub IDs**: Globally unique model identifiers
 3. **Payload uses keys**: Requests specify `model_key: "sdxl-base"`, not the full ID
-4. **Scheduler uses keys**: Routing decisions use the deployment-local keys
+4. **Scheduler uses keys**: Routing decisions use the endpoint-local keys
 
 This separation allows:
 - Changing the underlying model without changing client code
-- Different deployments to use different versions of the "same" key
+- Different endpoint packages to use different versions of the "same" key
 - Clear ownership of model configuration in pyproject.toml

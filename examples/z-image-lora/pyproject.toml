@@ -31,7 +31,6 @@ ignore_missing_imports = true
 disallow_untyped_defs = true
 
 [tool.cozy]
-deployment = "z-image-lora"
 
 [tool.cozy.build]
 gpu = true

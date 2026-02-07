@@ -98,7 +98,7 @@ class TestContractAndIncremental(unittest.TestCase):
         self.assertEqual(json.loads(events[1][1].decode("utf-8"))["delta"], "!")
         self.assertEqual(events[2][0], "output.completed")
 
-    def test_payload_model_key_resolves_via_deployment_map(self) -> None:
+    def test_payload_model_key_resolves_via_endpoint_map(self) -> None:
         def fn(
             ctx: ActionContext,
             model: Annotated[FakeModel, ModelRef(Src.PAYLOAD, "model_key")],

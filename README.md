@@ -111,7 +111,6 @@ def process(ctx: ActionContext, payload: Input) -> Output:
 
 ```toml
 [tool.cozy]
-deployment = "my-worker"
 
 [tool.cozy.environment]
 # Baked into image as Docker ENV defaults (non-secret values only).
@@ -212,6 +211,16 @@ Worker images build directly from a Python+uv base image:
 - `ghcr.io/astral-sh/uv:python3.12-bookworm-slim`
 
 PyTorch/CUDA dependencies are installed as part of your worker's dependency set during image build.
+
+## Publish/Promote Lifecycle
+
+Control-plane behavior (cozy-hub + orchestrator):
+
+- Every publish creates a new immutable internal `release_id`.
+- End users invoke endpoints by `tenant/endpoint` (default `prod`) or `tenant/endpoint@tag`.
+- Publishing does not move traffic by default.
+- Promoting an endpoint/tag moves traffic to that release.
+- Rollback is just retargeting the tag to an older release.
 
 ## Model Cache
 

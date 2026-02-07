@@ -3,7 +3,7 @@ Image generation worker example (diffusers + torch).
 What this contains:
 
 - Python module `image_gen` with @worker_function for SDXL-style inference.
-- `pyproject.toml` with tenant deps and `[tool.cozy]` deployment config.
+- `pyproject.toml` with tenant deps and `[tool.cozy]` configuration.
 
 Notes:
 

@@ -294,34 +294,13 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
     return fn
 
 
-def _is_valid_deployment_id(deployment_id: str) -> bool:
-    """
-    Validate deployment ID format.
-
-    Valid format: lowercase alphanumeric with hyphens, must start with letter,
-    3-63 characters (DNS-like subdomain rules).
-    """
-    import re
-    if not deployment_id:
-        return False
-    # Must be 3-63 chars, start with letter, only lowercase alphanumeric and hyphens
-    # Cannot end with hyphen or have consecutive hyphens
-    pattern = r'^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$'
-    if not re.match(pattern, deployment_id):
-        return False
-    if len(deployment_id) < 3 or len(deployment_id) > 63:
-        return False
-    return True
-
-
 def _load_cozy_config(root: Path) -> Dict[str, Any]:
     """
     Load [tool.cozy] config from pyproject.toml.
 
     Returns dict with:
-        - deployment: default deployment ID
         - build: dict with gpu, cuda, torch, backend settings
-        - models: dict mapping deployment keys to Cozy Hub model IDs
+        - models: dict mapping endpoint-local keys to Cozy Hub model IDs
         - resources: dict with vram_gb, gpu_type, memory_gb, cpu_cores
 
     python-worker is the source of truth for all [tool.cozy.*] config parsing.
@@ -342,18 +321,6 @@ def _load_cozy_config(root: Path) -> Dict[str, Any]:
 
     tool_cozy = data.get("tool", {}).get("cozy", {})
 
-    # Parse [tool.cozy].deployment - default deployment ID
-    deployment = tool_cozy.get("deployment")
-    if deployment and isinstance(deployment, str):
-        deployment = deployment.strip()
-        if _is_valid_deployment_id(deployment):
-            config["deployment"] = deployment
-        else:
-            print(
-                f"warning: invalid deployment ID '{deployment}' - must be 3-63 chars, "
-                "lowercase alphanumeric with hyphens, start with letter",
-                file=sys.stderr,
-            )
     if not tool_cozy:
         return config
 
@@ -372,7 +339,7 @@ def _load_cozy_config(root: Path) -> Dict[str, Any]:
         if bld:
             config["build"] = bld
 
-    # Parse [tool.cozy.models] - deployment key -> Cozy Hub model ID
+    # Parse [tool.cozy.models] - endpoint-local key -> Cozy Hub model ID
     models = tool_cozy.get("models", {})
     if models and isinstance(models, dict):
         config["models"] = {str(k): str(v) for k, v in models.items() if k and v}
@@ -461,12 +428,11 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
         root: Project root directory. Defaults to current working directory.
 
     Returns:
-        Complete manifest dict with functions, deployment, build, models, and resources.
+        Complete manifest dict with functions, build, models, and resources.
 
     The manifest includes:
         - functions: list of discovered worker functions with required_models
-        - deployment: default deployment ID from [tool.cozy].deployment
-        - models: dict mapping deployment keys to Cozy Hub model IDs
+        - models: dict mapping endpoint-local keys to Cozy Hub model IDs
         - build: build settings from [tool.cozy.build]
         - resources: hardware requirements from [tool.cozy.resources]
     """
@@ -480,14 +446,12 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
     manifest: Dict[str, Any] = {"functions": functions}
 
     # Include config sections if present
-    if "deployment" in config:
-        manifest["deployment"] = config["deployment"]
     if "build" in config:
         manifest["build"] = config["build"]
     if "resources" in config:
         manifest["resources"] = config["resources"]
 
-    # Extract all required model keys from functions (deployment source only)
+    # Extract all required model keys from functions (static model source only)
     all_required_keys: Set[str] = set()
     for fn in functions:
         required = fn.get("required_models", [])

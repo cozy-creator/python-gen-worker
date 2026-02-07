@@ -25,7 +25,6 @@ packages = ["src/flux2_klein_4b"]
 allow-direct-references = true
 
 [tool.cozy]
-deployment = "flux2-klein-4b"
 
 [tool.uv.sources]
 gen-worker = { path = "../.." }
