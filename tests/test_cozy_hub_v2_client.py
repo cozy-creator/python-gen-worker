@@ -97,7 +97,7 @@ def test_resolve_artifact_success() -> None:
         client = CozyHubV2Client(srv.base_url)
         res = asyncio.run(
             client.resolve_artifact(
-                org="o",
+                owner="o",
                 repo="r",
                 tag="latest",
                 include_urls=True,
@@ -123,7 +123,7 @@ def test_resolve_artifact_no_compatible() -> None:
         with pytest.raises(CozyHubNoCompatibleArtifactError) as e:
             asyncio.run(
                 client.resolve_artifact(
-                    org="o",
+                    owner="o",
                     repo="r",
                     tag="latest",
                     include_urls=False,
@@ -135,4 +135,3 @@ def test_resolve_artifact_no_compatible() -> None:
         assert isinstance(e.value.debug, dict)
     finally:
         _stop_server(srv)
-

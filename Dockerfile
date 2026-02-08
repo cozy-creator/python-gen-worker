@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # Cozy Worker Dockerfile
 #
 # Build your own worker image without gen-builder.
@@ -8,37 +9,69 @@
 # Build args:
 #   --build-arg PYTHON_VERSION=3.12
 #   --build-arg UV_TORCH_BACKEND=cu126   (cpu, cu126, cu128, cu130, ...)
-#   --build-arg TORCH_SPEC=">=2.9,<3"
+#   --build-arg TORCH_SPEC="~=2.10.0"
 #
 # This Dockerfile matches cozy-hub's direct build path (no prebuilt cozycreator/gen-worker base).
 ARG PYTHON_VERSION=3.12
-FROM ghcr.io/astral-sh/uv:python${PYTHON_VERSION}-bookworm-slim
+FROM ghcr.io/astral-sh/uv:python${PYTHON_VERSION}-bookworm-slim AS cozy_base
 
 ARG UV_TORCH_BACKEND=cu126
-ARG TORCH_SPEC=">=2.9,<3"
+# Pin torch to 2.10.x by default. We rely on stable torch layers for caching and
+# do not want automatic upgrades beyond 2.10.x without an explicit spec.
+ARG TORCH_SPEC="~=2.10.0"
+# Set to 0 to skip installing torch entirely (for non-torch workers).
+ARG USE_TORCH=1
 
 WORKDIR /app
 
+ENV UV_CACHE_DIR=/var/cache/uv
+ENV UV_LINK_MODE=copy
+
 # Install system dependencies for GPU worker parity with cozy-hub templates.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=cache,id=cozy-apt-cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,id=cozy-apt-lists,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    && apt-get clean
 
 # Install shared runtime layers first for cache reuse.
-RUN uv pip install --system --break-system-packages --no-cache --torch-backend ${UV_TORCH_BACKEND} \
-    "torch${TORCH_SPEC}" \
-    "torchvision${TORCH_SPEC}" \
-    "torchaudio${TORCH_SPEC}"
-RUN uv pip install --system --break-system-packages --no-cache gen-worker
+RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
+    if [ "${USE_TORCH}" = "1" ]; then \
+      uv pip install --system --break-system-packages --torch-backend ${UV_TORCH_BACKEND} \
+        "torch${TORCH_SPEC}"; \
+    fi
+RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
+    uv pip install --system --break-system-packages gen-worker
 
-# Copy app code late so app edits only invalidate lower layers.
-COPY . /app
+# Final stage: app-specific deps + code.
+FROM cozy_base
+
+# Copy lock metadata first so dependency layers are cacheable across releases.
+COPY pyproject.toml uv.lock /app/
 
 # Install dependencies into the global Python environment (no project venv).
-RUN uv pip install --system --break-system-packages --no-sources /app
+# Important:
+# - --no-sources ignores tool.uv.sources so build contexts don’t need local path deps.
+# - We exclude torch + gen-worker because those are installed above and must never be replaced.
+RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
+    uv export --locked --no-dev --no-hashes --no-sources --no-emit-project \
+      --no-emit-package torch --no-emit-package gen-worker \
+      -o /tmp/requirements.all.txt \
+    # If the project lock includes torch CUDA deps (often via accelerate), never install them here.
+    # Torch (and its CUDA runtime deps) are installed in a stable layer above via --torch-backend.
+    && grep -Ev '^(torch|triton|nvidia-|cuda-)' /tmp/requirements.all.txt > /tmp/requirements.txt \
+    && uv pip install --system --break-system-packages --no-deps -r /tmp/requirements.txt
 
-# Generate function manifest at build time
-RUN mkdir -p /app/.cozy && python -m gen_worker.discover > /app/.cozy/manifest.json
+# Copy app code late so app edits only invalidate the final layers.
+COPY . /app
+
+# Install the project itself without altering dependency layers.
+RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
+    uv pip install --system --break-system-packages --no-deps --no-sources /app
+
+# Generate function manifest at build time.
+# Backward-compat: published gen-worker currently exposes ModelRefSource.DEPLOYMENT.
+RUN mkdir -p /app/.cozy && python -c 'from gen_worker.injection import ModelRefSource as M; import runpy; hasattr(M, "RELEASE") or setattr(M, "RELEASE", M.DEPLOYMENT); runpy.run_module("gen_worker.discover", run_name="__main__")' > /app/.cozy/manifest.json
 
 # Run as non-root at runtime.
 RUN groupadd --system --gid 10001 cozy \

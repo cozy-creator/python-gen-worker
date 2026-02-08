@@ -92,8 +92,8 @@ class HuggingFaceHubDownloader:
         except Exception:
             hf_hub_url = None
 
-        # Be defensive: the HF APIs want a bare "org/repo" repo_id. If a caller accidentally
-        # passes "hf:org/repo" through as the repo_id, strip the scheme.
+        # Be defensive: the HF APIs want a bare "owner/repo" repo_id. If a caller accidentally
+        # passes "hf:owner/repo" through as the repo_id, strip the scheme.
         repo_id = (ref.repo_id or "").strip()
         if repo_id.lower().startswith("hf:"):
             repo_id = repo_id.split(":", 1)[1].strip()

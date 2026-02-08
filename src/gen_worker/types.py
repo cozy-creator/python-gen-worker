@@ -7,14 +7,14 @@ import msgspec
 
 
 class Asset(msgspec.Struct):
-    """Reference to a file in the invoking tenant's file store.
+    """Reference to a file in the invoking owner's file store.
 
     The worker runtime should populate `local_path` before invoking tenant code
     so the function can open/read the file efficiently.
     """
 
     ref: str
-    tenant_id: Optional[str] = None
+    owner: Optional[str] = None
     local_path: Optional[str] = None
     mime_type: Optional[str] = None
     size_bytes: Optional[int] = None

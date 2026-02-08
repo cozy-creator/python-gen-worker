@@ -1,4 +1,4 @@
-# multi-checkpoint
+# multi-sdxl-checkpoints
 
 Example showing payload-based model selection with multiple SDXL variants.
 
@@ -12,14 +12,20 @@ This example demonstrates how to efficiently support multiple model fine-tunes (
 
 ```toml
 [tool.cozy.models]
-sdxl-base = "stabilityai/stable-diffusion-xl-base-1.0"
-sdxl-turbo = "stabilityai/sdxl-turbo"
-dreamshaper = "Lykon/dreamshaper-xl-v2-turbo"
-juggernaut = "RunDiffusion/Juggernaut-XL-v9"
+sdxl-base = "hf:stabilityai/stable-diffusion-xl-base-1.0"
+sdxl-turbo = "hf:stabilityai/sdxl-turbo"
+dreamshaper = "hf:Lykon/dreamshaper-xl-v2-turbo"
+juggernaut = "hf:RunDiffusion/Juggernaut-XL-v9"
+realvisxl = "hf:SG161222/RealVisXL_V5.0"
+animagine = "hf:cagliostrolab/animagine-xl-3.1"
+playground-v25 = "hf:playgroundai/playground-v2.5-1024px-aesthetic"
+ssd-1b = "hf:segmind/SSD-1B"
+pony-v6 = "hf:Runware/pony-xl-v6-diffusers"
+illustrious-xl = "hf:drawhisper/illustrious-xl"
 ```
 
 Keys (left side) are endpoint-local identifiers used in requests.
-Values (right side) are Cozy Hub model IDs.
+Values (right side) are model refs. `hf:` loads from Hugging Face; `cozy:` loads from Cozy Hub.
 
 ### 2. Use Payload-Based Model Selection
 
@@ -62,19 +68,6 @@ The scheduler prioritizes:
 }
 ```
 
-### Using SDXL Turbo (fast inference)
-
-```json
-{
-    "prompt": "a futuristic city with flying cars",
-    "model_key": "sdxl-turbo",
-    "num_inference_steps": 4,
-    "guidance_scale": 0.0
-}
-```
-
-Note: Turbo models use distillation and work best with 1-4 steps and guidance_scale=0.
-
 ### Using DreamShaper
 
 ```json
@@ -113,7 +106,7 @@ With multiple workers, the scheduler distributes requests to maximize cache hits
 
 If no worker has the requested model:
 1. Request goes to any capable worker
-2. Worker downloads model from Cozy Hub (cached to disk)
+2. Worker downloads model from Hugging Face or Cozy Hub (cached to disk)
 3. Worker loads model into VRAM
 4. Inference runs
 5. Model stays in VRAM for future requests
@@ -123,8 +116,8 @@ Cold starts are slower but only happen once per model per worker.
 ## Model Specification Rules
 
 1. **Keys are endpoint-local**: `"sdxl-base"` only has meaning within this endpoint package
-2. **Values are Cozy Hub IDs**: Globally unique model identifiers
-3. **Payload uses keys**: Requests specify `model_key: "sdxl-base"`, not the full ID
+2. **Values are model refs**: `hf:` refs load from Hugging Face; `cozy:` refs load from Cozy Hub
+3. **Payload uses keys**: Requests specify `model_key: "sdxl-base"`, not the full model ref
 4. **Scheduler uses keys**: Routing decisions use the endpoint-local keys
 
 This separation allows:

@@ -72,7 +72,7 @@ class TestFileTokenScoping(unittest.TestCase):
 
         ctx = ActionContext(
             "run-123",
-            tenant_id="tenant-1",
+            owner="tenant-1",
             file_api_base_url="https://cozy-hub.example",
             file_api_token="per-run-token",
         )
@@ -101,7 +101,7 @@ class TestFileTokenScoping(unittest.TestCase):
 
         ctx = ActionContext(
             "run-456",
-            tenant_id="tenant-1",
+            owner="tenant-1",
             # No file_api_token provided
         )
 
@@ -123,7 +123,7 @@ class TestAuthErrorHandling(unittest.TestCase):
 
         ctx = ActionContext(
             "run-789",
-            tenant_id="tenant-1",
+            owner="tenant-1",
             file_api_base_url="https://cozy-hub.example",
             file_api_token="expired-token",
         )
@@ -142,7 +142,7 @@ class TestAuthErrorHandling(unittest.TestCase):
 
         ctx = ActionContext(
             "run-abc",
-            tenant_id="tenant-1",
+            owner="tenant-1",
             file_api_base_url="https://cozy-hub.example",
             file_api_token="wrong-scope-token",
         )
@@ -160,7 +160,7 @@ class TestAuthErrorHandling(unittest.TestCase):
 
         ctx = ActionContext(
             "run-def",
-            tenant_id="tenant-1",
+            owner="tenant-1",
             file_api_base_url="https://cozy-hub.example",
             file_api_token="bad-token",
         )
@@ -172,7 +172,7 @@ class TestAuthErrorHandling(unittest.TestCase):
     def test_materialize_asset_raises_auth_error_on_401(self) -> None:
         """_materialize_asset should raise AuthError on 401 for HEAD request."""
         w = Worker.__new__(Worker)
-        w.tenant_id = "tenant-1"
+        w.owner = "tenant-1"
 
         def fake_urlopen(req: Any, timeout: int = 0) -> _FakeHTTPResponse:
             raise _make_http_error(401, "Unauthorized")
@@ -185,7 +185,7 @@ class TestAuthErrorHandling(unittest.TestCase):
 
             ctx = ActionContext(
                 "run-ghi",
-                tenant_id="tenant-1",
+                owner="tenant-1",
                 file_api_base_url="https://cozy-hub.example",
                 file_api_token="expired-token",
             )
@@ -199,7 +199,7 @@ class TestAuthErrorHandling(unittest.TestCase):
     def test_materialize_asset_raises_auth_error_on_403(self) -> None:
         """_materialize_asset should raise AuthError on 403 for HEAD request."""
         w = Worker.__new__(Worker)
-        w.tenant_id = "tenant-1"
+        w.owner = "tenant-1"
 
         def fake_urlopen(req: Any, timeout: int = 0) -> _FakeHTTPResponse:
             raise _make_http_error(403, "Forbidden - path not in allowed prefixes")
@@ -212,7 +212,7 @@ class TestAuthErrorHandling(unittest.TestCase):
 
             ctx = ActionContext(
                 "run-jkl",
-                tenant_id="tenant-1",
+                owner="tenant-1",
                 file_api_base_url="https://cozy-hub.example",
                 file_api_token="scoped-token",
             )
@@ -230,7 +230,7 @@ class TestAuthErrorMapping(unittest.TestCase):
     def test_auth_error_is_non_retryable(self) -> None:
         """AuthError should map to 'auth' error type with retryable=False."""
         w = Worker.__new__(Worker)
-        w.tenant_id = "tenant-1"
+        w.owner = "tenant-1"
 
         exc = AuthError("token expired")
         error_type, retryable, safe_msg, internal_msg = w._map_exception(exc)
@@ -243,7 +243,7 @@ class TestAuthErrorMapping(unittest.TestCase):
     def test_auth_error_default_message(self) -> None:
         """AuthError with empty message should use 'authentication failed'."""
         w = Worker.__new__(Worker)
-        w.tenant_id = "tenant-1"
+        w.owner = "tenant-1"
 
         exc = AuthError("")
         error_type, retryable, safe_msg, internal_msg = w._map_exception(exc)

@@ -1,5 +1,5 @@
 """
-multi-checkpoint: Payload-based model selection example
+multi-sdxl-checkpoints: Payload-based model selection example
 
 This example demonstrates how to support multiple model fine-tunes (checkpoints)
 efficiently. The request payload specifies which model to use via a key, and the
@@ -60,11 +60,7 @@ def generate(
     """
     Generate an image using the model specified in the payload.
 
-    The model_key in the payload maps to a key in [tool.cozy.models]:
-    - "sdxl-base" -> stabilityai/stable-diffusion-xl-base-1.0
-    - "sdxl-turbo" -> stabilityai/sdxl-turbo
-    - "dreamshaper" -> Lykon/dreamshaper-xl-v2-turbo
-    - "juggernaut" -> RunDiffusion/Juggernaut-XL-v9
+    The model_key in the payload must be a key in `[tool.cozy.models]` in pyproject.toml.
 
     The scheduler routes this request to a worker that has the requested
     model already loaded in VRAM (hot) or on disk (warm). If no worker has

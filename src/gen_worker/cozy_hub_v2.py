@@ -45,7 +45,7 @@ class CozyHubV2Client:
     Cozy Hub v2 model APIs (resolve_artifact).
 
     Endpoint:
-      - POST /api/v1/repos/<org>/<repo>/resolve_artifact
+      - POST /api/v1/repos/<owner>/<repo>/resolve_artifact
 
     Response (v1):
       - repo_revision_seq: number
@@ -68,18 +68,18 @@ class CozyHubV2Client:
     async def resolve_artifact(
         self,
         *,
-        org: str,
+        owner: str,
         repo: str,
         tag: str,
         include_urls: bool,
         preferences: Mapping[str, Any],
         capabilities: Mapping[str, Any],
     ) -> CozyHubResolveArtifactResult:
-        if not org or not repo:
-            raise ValueError("org/repo required")
+        if not owner or not repo:
+            raise ValueError("owner/repo required")
         tag = (tag or "").strip() or "latest"
 
-        url = f"{self.base_url}/api/v1/repos/{org}/{repo}/resolve_artifact"
+        url = f"{self.base_url}/api/v1/repos/{owner}/{repo}/resolve_artifact"
         payload = {
             "tag": tag,
             "include_urls": bool(include_urls),
@@ -106,16 +106,16 @@ class CozyHubV2Client:
 
         return _parse_resolve_artifact_response(data, include_urls=include_urls)
 
-    async def get_snapshot_manifest(self, *, org: str, repo: str, digest: str) -> List[CozyHubSnapshotFile]:
+    async def get_snapshot_manifest(self, *, owner: str, repo: str, digest: str) -> List[CozyHubSnapshotFile]:
         """
         Fetch a snapshot manifest by digest (already pinned).
 
         Endpoint:
-          - GET /api/v1/repos/<org>/<repo>/snapshots/<digest>/manifest
+          - GET /api/v1/repos/<owner>/<repo>/snapshots/<digest>/manifest
         """
-        if not org or not repo or not digest:
-            raise ValueError("org/repo/digest required")
-        url = f"{self.base_url}/api/v1/repos/{org}/{repo}/snapshots/{digest}/manifest"
+        if not owner or not repo or not digest:
+            raise ValueError("owner/repo/digest required")
+        url = f"{self.base_url}/api/v1/repos/{owner}/{repo}/snapshots/{digest}/manifest"
 
         timeout = aiohttp.ClientTimeout(total=self.timeout_s)
         async with aiohttp.ClientSession(timeout=timeout, headers=self._headers()) as session:

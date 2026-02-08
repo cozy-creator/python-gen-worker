@@ -29,7 +29,7 @@ def test_detect_worker_capabilities_with_fake_torch(monkeypatch) -> None:
             return (8, 9)
 
     fake_torch = SimpleNamespace(
-        __version__="2.9.0",
+        __version__="2.10.0",
         version=SimpleNamespace(cuda="12.8"),
         cuda=_FakeCuda(),
     )
@@ -37,5 +37,4 @@ def test_detect_worker_capabilities_with_fake_torch(monkeypatch) -> None:
     caps = detect_worker_capabilities()
     assert caps.cuda_version == "12.8"
     assert caps.gpu_sm == 89
-    assert caps.torch_version == "2.9.0"
-
+    assert caps.torch_version == "2.10.0"

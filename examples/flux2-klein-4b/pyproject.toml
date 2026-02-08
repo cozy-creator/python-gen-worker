@@ -4,7 +4,6 @@ version = "0.1.0"
 description = "Flux2-klein-4B example (inference-only; models via [tool.cozy.models])"
 requires-python = ">=3.12"
 dependencies = [
-    "gen-worker[torch]",
     "diffusers @ git+https://github.com/huggingface/diffusers.git@99e2cfff27dec514a43e260e885c5e6eca038b36",
     "transformers>=4.56,<5",
     "accelerate",
@@ -26,9 +25,6 @@ allow-direct-references = true
 
 [tool.cozy]
 
-[tool.uv.sources]
-gen-worker = { path = "../.." }
-
 [tool.mypy]
 python_version = "3.12"
 ignore_missing_imports = true
@@ -36,7 +32,7 @@ disallow_untyped_defs = true
 
 [tool.cozy.build]
 gpu = true
-torch = ">=2.9"
+torch = "2.10.0"
 
 [tool.cozy.resources]
 vram_gb = 12

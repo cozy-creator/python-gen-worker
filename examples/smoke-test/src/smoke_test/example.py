@@ -1,41 +1,51 @@
 import time
+import base64
 from typing import Iterator, List
 
 import msgspec
 
 from gen_worker import ActionContext, ResourceRequirements, worker_function
+from gen_worker.types import Asset
 
 
 class ImageGenInput(msgspec.Struct):
     """Input parameters for image generation."""
 
-    positive_prompt: str
-    model_ref: str
-    num_images: int
-    aspect_ratio: str
-    steps: int
-    cfg: float
-    negative_prompt: str | None = None
-    seed: int = 0
+    prompt: str = "a tiny test image"
+    width: int = 1
+    height: int = 1
+    num_images: int = 1
 
 
 class ImageGenOutput(msgspec.Struct):
-    """Output from image generation."""
+    """Output from image generation (real file output)."""
 
-    urls: List[str]
+    images: List[Asset]
+
+
+# 1x1 PNG (valid image bytes). This is deterministic and avoids pulling in Pillow.
+_PNG_1X1 = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMBAAEnnX8AAAAASUVORK5CYII="
+)
 
 
 @worker_function(ResourceRequirements())
 def image_gen_action(ctx: ActionContext, data: ImageGenInput) -> ImageGenOutput:
-    """Example image generation function (dummy output)."""
+    """Example image generation function that returns real output Assets.
+
+    This is a smoke test: it does not run ML inference. It validates:
+    - request/response msgspec serialization
+    - output file creation + upload path wiring (ctx.save_bytes)
+    """
     if ctx.is_canceled():
         raise InterruptedError("Task cancelled")
 
-    urls = [
-        f"https://example.com/generated-image-{i+1}.png"
-        for i in range(data.num_images)
-    ]
-    return ImageGenOutput(urls=urls)
+    out: List[Asset] = []
+    n = max(1, int(data.num_images))
+    for i in range(n):
+        ref = f"runs/{ctx.run_id}/outputs/image-{i+1}.png"
+        out.append(ctx.save_bytes(ref, _PNG_1X1))
+    return ImageGenOutput(images=out)
 
 
 class AddInput(msgspec.Struct):

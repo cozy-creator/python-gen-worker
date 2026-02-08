@@ -125,7 +125,7 @@ def test_snapshot_v2_downloader_materializes(tmp_path: Path) -> None:
         base = srv.base_url
         client = CozyHubV2Client(base_url=base)
         dl = CozySnapshotV2Downloader(client)
-        ref = CozyRef(org="o", repo="r", tag="latest")
+        ref = CozyRef(owner="o", repo="r", tag="latest")
         local = asyncio.run(dl.ensure_snapshot(tmp_path, ref))
         assert (local / "cozy.pipeline.yaml").read_bytes() == b1
         assert (local / "unet" / "config.json").read_bytes() == b2
@@ -133,4 +133,3 @@ def test_snapshot_v2_downloader_materializes(tmp_path: Path) -> None:
         assert blob1.exists()
     finally:
         _stop_server(srv)
-

@@ -70,7 +70,7 @@ class MockPipeline:
 @worker_function()
 def generate(
     ctx: ActionContext,
-    pipeline: Annotated[MockPipeline, ModelRef(Src.DEPLOYMENT, "sdxl")],
+    pipeline: Annotated[MockPipeline, ModelRef(Src.RELEASE, "sdxl")],
     payload: Input,
 ) -> Output:
     return Output(result="ok")
@@ -78,8 +78,8 @@ def generate(
 @worker_function()
 def generate_with_cn(
     ctx: ActionContext,
-    pipeline: Annotated[MockPipeline, ModelRef(Src.DEPLOYMENT, "sdxl")],
-    cn: Annotated[MockPipeline, ModelRef(Src.DEPLOYMENT, "controlnet")],
+    pipeline: Annotated[MockPipeline, ModelRef(Src.RELEASE, "sdxl")],
+    cn: Annotated[MockPipeline, ModelRef(Src.RELEASE, "controlnet")],
     payload: Input,
 ) -> Output:
     return Output(result="ok")
@@ -169,7 +169,7 @@ class MockPipeline:
 @worker_function()
 def generate(
     ctx: ActionContext,
-    pipeline: Annotated[MockPipeline, ModelRef(Src.DEPLOYMENT, "sdxl")],
+    pipeline: Annotated[MockPipeline, ModelRef(Src.RELEASE, "sdxl")],
     payload: Input,
 ) -> Output:
     return Output(result="ok")

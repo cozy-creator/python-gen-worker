@@ -30,3 +30,20 @@ class TestProjectValidation(unittest.TestCase):
             self.assertTrue(any("requirements.txt" in e for e in res.errors))
             self.assertTrue(any("cozy.toml" in e for e in res.errors))
 
+    def test_requires_project_name(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "pyproject.toml").write_text("[tool.cozy]\nfunctions.modules=['x']\n", encoding="utf-8")
+            res = validate_project(root)
+            self.assertFalse(res.ok)
+            self.assertTrue(any("missing [project].name" in e for e in res.errors))
+
+    def test_accepts_non_slug_project_name(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            (root / "pyproject.toml").write_text(
+                "[project]\nname='My Cool Project'\n[tool.cozy]\nfunctions.modules=['x']\n",
+                encoding="utf-8",
+            )
+            res = validate_project(root)
+            self.assertTrue(res.ok)

@@ -4,7 +4,6 @@ version = "0.1.0"
 description = "Stable Diffusion 1.5 example (inference-only; models via [tool.cozy.models])"
 requires-python = ">=3.12"
 dependencies = [
-    "gen-worker[torch]",
     "diffusers",
     "transformers",
     "accelerate",
@@ -21,9 +20,6 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/sd15"]
 
-[tool.uv.sources]
-gen-worker = { path = "../.." }
-
 [tool.mypy]
 python_version = "3.12"
 ignore_missing_imports = true
@@ -33,7 +29,7 @@ disallow_untyped_defs = true
 
 [tool.cozy.build]
 gpu = true
-torch = ">=2.9"
+torch = "2.10.0"
 
 [tool.cozy.resources]
 vram_gb = 8

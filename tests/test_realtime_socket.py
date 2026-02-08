@@ -17,13 +17,13 @@ class TestRealtimeSocket(unittest.TestCase):
         w = Worker.__new__(Worker)
         import threading
 
-        w.tenant_id = "tenant-1"
+        w.owner = "tenant-1"
         w._emit_progress_event = lambda e: None  # type: ignore[method-assign]
         w._runtime_loaders = {}
         w._custom_runtime_cache = {}
         w._custom_runtime_locks = {}
-        w._deployment_model_id_by_key = {}
-        w._deployment_allowed_model_ids = None
+        w._release_model_id_by_key = {}
+        w._release_allowed_model_ids = None
         w._model_manager = None
         w._realtime_sessions = {}
         w._realtime_lock = threading.Lock()
@@ -44,7 +44,7 @@ class TestRealtimeSocket(unittest.TestCase):
         w._ws_specs[spec.name] = spec
 
         w._handle_realtime_open_cmd(
-            pb.RealtimeOpenCommand(session_id="s1", function_name=spec.name, tenant_id="tenant-1")
+            pb.RealtimeOpenCommand(session_id="s1", function_name=spec.name, owner="tenant-1")
         )
 
         # Wait for ready JSON frame.

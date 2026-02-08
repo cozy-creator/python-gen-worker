@@ -80,8 +80,8 @@ class CozyHubClient:
     Minimal Cozy Hub client for snapshot/object resolution.
 
     Expected endpoints (see cozy-hub issue id=40):
-      - GET /api/v1/repos/<org>/<repo>/resolve?tag=<tag> -> {"digest": "..."}
-      - GET /api/v1/repos/<org>/<repo>/snapshots/<digest>/manifest
+      - GET /api/v1/repos/<owner>/<repo>/resolve?tag=<tag> -> {"digest": "..."}
+      - GET /api/v1/repos/<owner>/<repo>/snapshots/<digest>/manifest
       - GET /api/v1/objects/<object_digest>/manifest
     """
 
@@ -107,15 +107,15 @@ class CozyHubClient:
                     raise ValueError("unexpected response shape")
                 return data
 
-    async def resolve_tag(self, org: str, repo: str, tag: str) -> str:
-        data = await self._get_json(f"/api/v1/repos/{org}/{repo}/resolve?tag={aiohttp.helpers.quote(tag)}")
+    async def resolve_tag(self, owner: str, repo: str, tag: str) -> str:
+        data = await self._get_json(f"/api/v1/repos/{owner}/{repo}/resolve?tag={aiohttp.helpers.quote(tag)}")
         digest = str(data.get("digest") or data.get("snapshot_digest") or "").strip()
         if not digest:
             raise ValueError("resolve response missing digest")
         return digest
 
-    async def get_snapshot_manifest(self, org: str, repo: str, digest: str) -> CozySnapshotManifest:
-        data = await self._get_json(f"/api/v1/repos/{org}/{repo}/snapshots/{digest}/manifest")
+    async def get_snapshot_manifest(self, owner: str, repo: str, digest: str) -> CozySnapshotManifest:
+        data = await self._get_json(f"/api/v1/repos/{owner}/{repo}/snapshots/{digest}/manifest")
         snap = str(data.get("snapshot_digest") or data.get("digest") or digest).strip()
         objects_raw = data.get("objects") or {}
         if not isinstance(objects_raw, dict):
@@ -170,8 +170,8 @@ class CozySnapshotDownloader:
     async def canonicalize(self, ref: CozyRef) -> CozyRef:
         if ref.digest:
             return ref
-        digest = await self._client.resolve_tag(ref.org, ref.repo, ref.tag)
-        return CozyRef(org=ref.org, repo=ref.repo, tag=ref.tag, digest=digest)
+        digest = await self._client.resolve_tag(ref.owner, ref.repo, ref.tag)
+        return CozyRef(owner=ref.owner, repo=ref.repo, tag=ref.tag, digest=digest)
 
     async def ensure_snapshot(self, base_dir: Path, ref: CozyRef) -> Path:
         canon = await self.canonicalize(ref)
@@ -193,7 +193,7 @@ class CozySnapshotDownloader:
         with lock:
             if snap_dir.exists():
                 return snap_dir
-            manifest = await self._client.get_snapshot_manifest(canon.org, canon.repo, snapshot_digest)
+            manifest = await self._client.get_snapshot_manifest(canon.owner, canon.repo, snapshot_digest)
 
             # Ensure all referenced objects exist locally.
             resolved: Dict[str, str] = {}

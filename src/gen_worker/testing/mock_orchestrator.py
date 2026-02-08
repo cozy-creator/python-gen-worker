@@ -186,7 +186,7 @@ class WorkerSession:
         function_name: str,
         payload_obj: Any,
         run_id: Optional[str] = None,
-        tenant_id: str = "",
+        owner: str = "",
         user_id: str = "",
         timeout_ms: int = 0,
         required_models: Tuple[str, ...] = (),
@@ -201,7 +201,7 @@ class WorkerSession:
             input_payload=raw,
             required_models=list(required_models),
             timeout_ms=timeout_ms,
-            tenant_id=tenant_id,
+            owner=owner,
             user_id=user_id,
             file_base_url=file_base_url,
             file_token=file_token,
@@ -264,7 +264,7 @@ class _MockOrchestrator(pb_grpc.SchedulerWorkerServiceServicer):
                 reg = msg.worker_registration
                 res = reg.resources
                 worker_id = res.worker_id
-                release_id = res.deployment_id
+                release_id = res.release_id
                 available_functions = tuple(res.available_functions)
                 for fs in res.function_schemas:
                     function_schemas[fs.name] = fs
@@ -316,8 +316,8 @@ def _format_msg(msg: pb.WorkerSchedulerMessage) -> str:
         return "unload_model_result"
     if msg.HasField("interrupt_run_cmd"):
         return "interrupt_run_cmd"
-    if msg.HasField("deployment_model_config"):
-        return "deployment_model_config"
+    if msg.HasField("release_model_config"):
+        return "release_model_config"
     if msg.HasField("realtime_open_cmd"):
         return "realtime_open_cmd"
     if msg.HasField("realtime_frame"):
@@ -353,7 +353,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     ap.add_argument("--payload-json", default="{}", help="JSON payload to encode and send")
     ap.add_argument("--timeout-ms", type=int, default=0)
-    ap.add_argument("--tenant-id", default="")
+    ap.add_argument("--owner", default="")
     ap.add_argument("--user-id", default="")
     ap.add_argument("--required-model", action="append", default=[], help="repeatable model id/key list for injections")
 
@@ -397,7 +397,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             function_name=args.function_name,
             payload_obj=payload_obj,
             timeout_ms=int(args.timeout_ms),
-            tenant_id=args.tenant_id,
+            owner=args.owner,
             user_id=args.user_id,
             required_models=tuple(args.required_model),
             file_base_url=str(args.file_base_url or ""),

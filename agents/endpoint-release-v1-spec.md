@@ -137,8 +137,8 @@ Note:
 
 ## Orchestrator Invoke Contract
 
-- Default invoke: `POST /{tenant}/{endpoint}` -> resolve `tag=prod`.
-- Tagged invoke: `POST /{tenant}/{endpoint}@{tag}`.
+- Default invoke: `POST /{tenant}/{project}/{endpoint}` -> resolve `tag=prod`.
+- Tagged invoke: `POST /{tenant}/{project}/{endpoint}@{tag}`.
 - Resolution chain:
   1. `(tenant, endpoint, tag)` -> `release_id`
   2. `release_id` + host capabilities -> compatible `release_images` row
@@ -156,7 +156,7 @@ Realtime path should use the same pointer resolution rules.
 
 ## Non-goals for V1
 
-- No deployment-id public model.
+- No legacy deploy-id public model.
 - No compatibility routes.
 - No migration/backfill complexity.
 - No explicit version-id layer beyond `release_id`.

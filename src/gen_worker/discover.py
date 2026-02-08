@@ -17,6 +17,7 @@ import importlib.util
 import inspect
 import json
 import os
+import re
 import sys
 import typing
 from pathlib import Path
@@ -75,6 +76,30 @@ def _schema_and_hash(t: type) -> Tuple[Dict[str, Any], str]:
     schema = msgspec.json.schema(t)
     raw = json.dumps(schema, separators=(",", ":"), sort_keys=True).encode("utf-8")
     return schema, hashlib.sha256(raw).hexdigest()
+
+
+_NON_SLUG_CHARS = re.compile(r"[^a-z0-9.]+")
+_DUP_SLUG_SEPARATORS = re.compile(r"-{2,}")
+
+
+def _slugify_name(raw: str) -> str:
+    raw = raw.strip().lower().replace("_", "-")
+    if not raw:
+        return ""
+    raw = _NON_SLUG_CHARS.sub("-", raw)
+    raw = _DUP_SLUG_SEPARATORS.sub("-", raw)
+    raw = raw.strip("-.")
+    if len(raw) > 128:
+        raw = raw[:128].strip("-.")
+    return raw
+
+
+def _slugify_endpoint_name(raw: str) -> str:
+    return _slugify_name(raw)
+
+
+def _slugify_project_name(raw: str) -> str:
+    return _slugify_name(raw)
 
 
 def _should_skip_path(path: Path, skip_patterns: Set[str]) -> bool:
@@ -262,16 +287,21 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
     if delta_type is not None:
         delta_schema, delta_sha = _schema_and_hash(delta_type)
 
-    # Extract required_models: deployment-source model keys that must be available
+    # Extract required_models: release-source model keys that must be available
     # These are models declared in [tool.cozy.models] that the function needs
     required_models = [
         inj["model_ref"]["key"]
         for inj in injections
-        if inj.get("model_ref", {}).get("source") == "deployment"
+        if inj.get("model_ref", {}).get("source") == "release"
     ]
+
+    endpoint_name = _slugify_endpoint_name(func.__name__)
+    if not endpoint_name:
+        raise ValueError(f"{func.__name__}: function name cannot be normalized to endpoint_name")
 
     fn: Dict[str, Any] = {
         "name": func.__name__,
+        "endpoint_name": endpoint_name,
         "module": module_name,
         "resources": res_dict,
         "payload_type": _type_id(payload_type),
@@ -283,7 +313,7 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
         "output_schema": output_schema,
         "incremental_output": incremental,
         "injection_json": injections,
-        "required_models": required_models,  # deployment model keys needed by this function
+        "required_models": required_models,  # release model keys needed by this function
     }
 
     if delta_type is not None:
@@ -299,6 +329,7 @@ def _load_cozy_config(root: Path) -> Dict[str, Any]:
     Load [tool.cozy] config from pyproject.toml.
 
     Returns dict with:
+        - project_name: normalized slug from [project].name
         - build: dict with gpu, cuda, torch, backend settings
         - models: dict mapping endpoint-local keys to Cozy Hub model IDs
         - resources: dict with vram_gb, gpu_type, memory_gb, cpu_cores
@@ -318,6 +349,14 @@ def _load_cozy_config(root: Path) -> Dict[str, Any]:
     except Exception as e:
         print(f"warning: failed to parse pyproject.toml: {e}", file=sys.stderr)
         return config
+
+    project = data.get("project", {})
+    if isinstance(project, dict):
+        raw_project_name = project.get("name")
+        if isinstance(raw_project_name, str):
+            project_name = _slugify_project_name(raw_project_name)
+            if project_name:
+                config["project_name"] = project_name
 
     tool_cozy = data.get("tool", {}).get("cozy", {})
 
@@ -431,6 +470,7 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
         Complete manifest dict with functions, build, models, and resources.
 
     The manifest includes:
+        - project_name: project slug from [project].name
         - functions: list of discovered worker functions with required_models
         - models: dict mapping endpoint-local keys to Cozy Hub model IDs
         - build: build settings from [tool.cozy.build]
@@ -441,9 +481,28 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
     root = root.resolve()
 
     functions = discover_functions(root)
+    endpoint_to_function: Dict[str, str] = {}
+    for fn in functions:
+        endpoint_name = str(fn.get("endpoint_name", "")).strip()
+        function_name = str(fn.get("name", "")).strip()
+        if not endpoint_name:
+            raise ValueError(f"{function_name or '<unknown>'}: missing endpoint_name in discovered metadata")
+        prior = endpoint_to_function.get(endpoint_name)
+        if prior and prior != function_name:
+            raise ValueError(
+                f"multiple functions normalize to the same endpoint '{endpoint_name}': {prior}, {function_name}"
+            )
+        endpoint_to_function[endpoint_name] = function_name
     config = _load_cozy_config(root)
 
-    manifest: Dict[str, Any] = {"functions": functions}
+    project_name = str(config.get("project_name", "")).strip()
+    if not project_name:
+        raise ValueError("missing [project].name in pyproject.toml")
+
+    manifest: Dict[str, Any] = {
+        "project_name": project_name,
+        "functions": functions,
+    }
 
     # Include config sections if present
     if "build" in config:

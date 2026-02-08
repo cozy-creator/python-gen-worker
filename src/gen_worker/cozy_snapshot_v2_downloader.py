@@ -40,7 +40,7 @@ def _try_hardlink_or_copy(src: Path, dst: Path) -> None:
 class CozySnapshotV2Downloader:
     """
     Cozy Hub v2 downloader:
-      - resolve org/repo:tag via resolve_artifact
+      - resolve owner/repo:tag via resolve_artifact
       - download all referenced blobs to a local blob store
       - materialize a snapshot checkout by hardlinking blobs into the snapshot tree
 
@@ -90,7 +90,7 @@ class CozySnapshotV2Downloader:
     async def _resolve(self, ref: CozyRef) -> CozyHubResolveArtifactResult:
         if ref.digest:
             # If the caller already pinned a snapshot digest, just fetch the snapshot manifest.
-            files = await self._client.get_snapshot_manifest(org=ref.org, repo=ref.repo, digest=ref.digest)
+            files = await self._client.get_snapshot_manifest(owner=ref.owner, repo=ref.repo, digest=ref.digest)
             return CozyHubResolveArtifactResult(
                 repo_revision_seq=0,
                 snapshot_digest=ref.digest,
@@ -101,7 +101,7 @@ class CozySnapshotV2Downloader:
         prefs = default_resolve_preferences()
         caps = detect_worker_capabilities()
         return await self._client.resolve_artifact(
-            org=ref.org,
+            owner=ref.owner,
             repo=ref.repo,
             tag=ref.tag,
             include_urls=True,

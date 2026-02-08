@@ -148,9 +148,9 @@ def test_cozy_snapshot_downloader_materializes(tmp_path: Path, use_tag: bool) ->
         dl = CozySnapshotDownloader(client)
 
         if use_tag:
-            ref = CozyRef(org="o", repo="r", tag="latest", digest=None)
+            ref = CozyRef(owner="o", repo="r", tag="latest", digest=None)
         else:
-            ref = CozyRef(org="o", repo="r", tag="latest", digest=snap_digest)
+            ref = CozyRef(owner="o", repo="r", tag="latest", digest=snap_digest)
 
         local = asyncio.run(dl.ensure_snapshot(tmp_path, ref))
         assert (local / "transformer" / "config.json").read_bytes() == config_bytes
@@ -158,4 +158,3 @@ def test_cozy_snapshot_downloader_materializes(tmp_path: Path, use_tag: bool) ->
         assert (tmp_path / "cozy" / "objects" / obj_digest / ".cozy-object.json").exists()
     finally:
         _stop_server(srv)
-

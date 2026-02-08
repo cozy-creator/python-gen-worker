@@ -87,7 +87,7 @@ from gen_worker.injection import ModelArtifacts, ModelRef, ModelRefSource as Src
 @worker_function()
 def generate(
     ctx: ActionContext,
-    artifacts: Annotated[ModelArtifacts, ModelRef(Src.DEPLOYMENT, "my-model")],
+    artifacts: Annotated[ModelArtifacts, ModelRef(Src.RELEASE, "my-model")],
     payload: Input,
 ) -> Output:
     model_path = artifacts.root_dir
@@ -119,8 +119,8 @@ LOG_LEVEL = "info"
 
 [tool.cozy.models]
 # Model refs (phase 1):
-# - Cozy Hub snapshot (default): org/repo[:tag] or org/repo@sha256:<digest>
-# - Hugging Face repo: hf:org/repo[@revision] (requires gen-worker)
+# - Cozy Hub snapshot (default): owner/repo[:tag] or owner/repo@sha256:<digest>
+# - Hugging Face repo: hf:owner/repo[@revision] (requires gen-worker)
 sdxl = "cozy:stabilityai/sdxl:latest"
 qwen_image = "hf:Qwen/Qwen2.5-VL-7B-Instruct@main"
 
@@ -194,6 +194,20 @@ docker build -t sd15-worker -f Dockerfile examples/sd15
 docker run -e SCHEDULER_ADDR=orchestrator:8080 sd15-worker
 ```
 
+Canonical local dev build args (GPU, CUDA 12.6, torch 2.10.x, Python 3.12):
+
+```bash
+cd ~/cozy/python-gen-worker
+
+docker build \
+  --build-arg PYTHON_VERSION=3.12 \
+  --build-arg UV_TORCH_BACKEND=cu126 \
+  --build-arg TORCH_SPEC='~=2.10.0' \
+  -f Dockerfile \
+  -t my-worker:dev \
+  examples/sd15
+```
+
 Optional build args:
 
 ```bash
@@ -217,7 +231,9 @@ PyTorch/CUDA dependencies are installed as part of your worker's dependency set 
 Control-plane behavior (cozy-hub + orchestrator):
 
 - Every publish creates a new immutable internal `release_id`.
-- End users invoke endpoints by `tenant/endpoint` (default `prod`) or `tenant/endpoint@tag`.
+- End users invoke endpoints by `tenant/project/endpoint` (default `prod`) or `tenant/project/endpoint@tag`.
+- `project` is derived from `pyproject.toml` `[project].name` and normalized to a URL-safe slug.
+- Endpoint names are derived from worker function names and slugified to URL-safe form (for example, `medasr_transcribe` -> `medasr-transcribe`).
 - Publishing does not move traffic by default.
 - Promoting an endpoint/tag moves traffic to that release.
 - Rollback is just retargeting the tag to an older release.

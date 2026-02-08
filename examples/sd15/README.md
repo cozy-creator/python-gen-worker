@@ -15,5 +15,5 @@ sd15 = "stable-diffusion-v1-5/stable-diffusion-v1-5"
 Code uses:
 
 ```py
-pipeline: Annotated[StableDiffusionPipeline, ModelRef(Src.DEPLOYMENT, "sd15")]
+pipeline: Annotated[StableDiffusionPipeline, ModelRef(Src.RELEASE, "sd15")]
 ```

@@ -6,13 +6,13 @@ from typing import Optional
 
 @dataclass(frozen=True)
 class CozyRef:
-    org: str
+    owner: str
     repo: str
     tag: str = "latest"
     digest: Optional[str] = None  # hex digest (no sha256:/blake3: prefix)
 
     def repo_id(self) -> str:
-        return f"{self.org}/{self.repo}"
+        return f"{self.owner}/{self.repo}"
 
     def canonical(self) -> str:
         if self.digest:
@@ -54,9 +54,9 @@ def parse_model_ref(raw: str) -> ParsedModelRef:
     Parse a model ref string.
 
     Phase 1 supported schemes:
-      - Cozy Hub (default): "org/repo", "org/repo:tag", "org/repo@sha256:<hex>",
+      - Cozy Hub (default): "owner/repo", "owner/repo:tag", "owner/repo@sha256:<hex>",
         optionally prefixed with "cozy:".
-      - Hugging Face: "hf:org/repo" or "hf:org/repo@revision".
+      - Hugging Face: "hf:owner/repo" or "hf:owner/repo@revision".
 
     Returns:
         ParsedModelRef with scheme + typed payload.
@@ -80,7 +80,7 @@ def parse_model_ref(raw: str) -> ParsedModelRef:
             repo = repo.strip()
             revision = revision.strip() or None
         if "/" not in repo:
-            raise ValueError("hf ref must be 'org/repo'")
+            raise ValueError("hf ref must be 'owner/repo'")
         return ParsedModelRef(scheme="hf", hf=HuggingFaceRef(repo_id=repo, revision=revision))
 
     if scheme == "cozy":
@@ -107,12 +107,12 @@ def parse_model_ref(raw: str) -> ParsedModelRef:
         else:
             repo_id = s
         if "/" not in repo_id:
-            raise ValueError("cozy ref must be 'org/repo' (optionally with :tag or @sha256:<hex>)")
-        org, repo = repo_id.split("/", 1)
-        org = org.strip()
+            raise ValueError("cozy ref must be 'owner/repo' (optionally with :tag or @sha256:<hex>)")
+        owner, repo = repo_id.split("/", 1)
+        owner = owner.strip()
         repo = repo.strip()
-        if not org or not repo:
-            raise ValueError("cozy ref must be 'org/repo'")
-        return ParsedModelRef(scheme="cozy", cozy=CozyRef(org=org, repo=repo, tag=tag, digest=digest))
+        if not owner or not repo:
+            raise ValueError("cozy ref must be 'owner/repo'")
+        return ParsedModelRef(scheme="cozy", cozy=CozyRef(owner=owner, repo=repo, tag=tag, digest=digest))
 
     raise ValueError(f"unsupported model ref scheme: {scheme!r}")

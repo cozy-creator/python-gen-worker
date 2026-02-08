@@ -28,5 +28,4 @@ disallow_untyped_defs = true
 [tool.cozy]
 
 [tool.cozy.build]
-gpu = true
-torch = ">=2.9"
+gpu = false

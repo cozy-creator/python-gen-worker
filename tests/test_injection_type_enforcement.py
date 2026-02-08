@@ -24,7 +24,7 @@ class TestInjectionTypeEnforcement(unittest.TestCase):
         inj = InjectionSpec(
             param_name="pipeline",
             param_type=_ExpectedPipeline,
-            model_ref=ModelRef(ModelRefSource.DEPLOYMENT, "foo"),
+            model_ref=ModelRef(ModelRefSource.RELEASE, "foo"),
         )
 
         with self.assertRaises(ValueError):

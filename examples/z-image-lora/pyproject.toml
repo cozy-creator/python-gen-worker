@@ -5,7 +5,7 @@ description = "Image generation with dynamic LoRA loading (z-image pattern)"
 requires-python = ">=3.12"
 dependencies = [
     "gen-worker[torch]",
-    "diffusers",
+    "diffusers>=0.36.0",
     "transformers",
     "accelerate",
     "pillow",
@@ -34,10 +34,10 @@ disallow_untyped_defs = true
 
 [tool.cozy.build]
 gpu = true
-torch = ">=2.9"
+torch = "2.10.0"
 
 [tool.cozy.resources]
-vram_gb = 16  # SDXL + LoRAs need extra headroom
+vram_gb = 16  # z-image turbo + LoRAs need extra headroom
 
 [tool.cozy.models]
-sdxl = "stabilityai/stable-diffusion-xl-base-1.0"
+z-image-turbo = "hf:Tongyi-MAI/Z-Image-Turbo"

@@ -9,7 +9,7 @@ from typing import Any, Callable, Mapping, Optional, get_args, get_origin, Annot
 
 
 class ModelRefSource(str, Enum):
-    DEPLOYMENT = "deployment"
+    RELEASE = "release"
     PAYLOAD = "payload"
 
 
@@ -33,7 +33,7 @@ class ModelArtifacts:
     This is for "non-standard" runtimes where the worker cannot (or should not)
     construct an in-memory pipeline/model object itself.
 
-    `files` keys are deployment-defined (source of truth is deployment config),
+    `files` keys are release-defined (source of truth is release config),
     e.g. {"checkpoint_path": Path(...), "config_path": Path(...)}.
     """
 

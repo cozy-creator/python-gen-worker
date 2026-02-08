@@ -38,9 +38,9 @@ class _FakeHTTPResponse:
 
 
 class TestAssetMaterialization(unittest.TestCase):
-    def _worker(self, tenant_id: str = "tenant-1") -> Worker:
+    def _worker(self, owner: str = "tenant-1") -> Worker:
         w = Worker.__new__(Worker)
-        w.tenant_id = tenant_id
+        w.owner = owner
         return w
 
     def test_materialize_external_url(self) -> None:
@@ -59,7 +59,7 @@ class TestAssetMaterialization(unittest.TestCase):
                     return _FakeHTTPResponse(data)
 
             with patch("urllib.request.build_opener", return_value=_Opener()) as _mock:
-                w._materialize_asset(ActionContext("run-1", tenant_id=w.tenant_id), a)
+                w._materialize_asset(ActionContext("run-1", owner=w.owner), a)
                 self.assertGreaterEqual(_mock.call_count, 1)
 
             self.assertIsNotNone(a.local_path)
@@ -88,10 +88,10 @@ class TestAssetMaterialization(unittest.TestCase):
 
             with patch("urllib.request.build_opener", return_value=_Opener()):
                 with self.assertRaises(Exception):
-                    w._materialize_asset(ActionContext("run-1", tenant_id=w.tenant_id), a)
+                    w._materialize_asset(ActionContext("run-1", owner=w.owner), a)
 
     def test_materialize_cozy_hub_ref(self) -> None:
-        w = self._worker(tenant_id="tenant-1")
+        w = self._worker(owner="tenant-1")
         a = Asset(ref="my-uploads/cat.png")
         body = b"\x89PNG\r\n\x1a\ncat"
         sha = hashlib.sha256(body).hexdigest()
@@ -106,7 +106,7 @@ class TestAssetMaterialization(unittest.TestCase):
                     hdrs[str(k).lower()] = str(v)
             if method == "HEAD":
                 self.assertEqual(hdrs.get("authorization"), "Bearer tok")
-                self.assertEqual(hdrs.get("x-cozy-tenant-id"), "tenant-1")
+                self.assertEqual(hdrs.get("x-cozy-owner"), "tenant-1")
                 return _FakeHTTPResponse(
                     b"",
                     status=200,
@@ -118,7 +118,7 @@ class TestAssetMaterialization(unittest.TestCase):
                 )
             # GET request
             self.assertEqual(hdrs.get("authorization"), "Bearer tok")
-            self.assertEqual(hdrs.get("x-cozy-tenant-id"), "tenant-1")
+            self.assertEqual(hdrs.get("x-cozy-owner"), "tenant-1")
             return _FakeHTTPResponse(body, status=200, headers={"Content-Type": "image/png"})
 
         with tempfile.TemporaryDirectory() as td:
@@ -129,7 +129,7 @@ class TestAssetMaterialization(unittest.TestCase):
             with patch("urllib.request.urlopen", side_effect=fake_urlopen):
                 ctx = ActionContext(
                     "run-1",
-                    tenant_id="tenant-1",
+                    owner="tenant-1",
                     file_api_base_url="https://cozy-hub.example",
                     file_api_token="tok",
                 )

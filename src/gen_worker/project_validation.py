@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+import re
 
 try:
     import tomllib  # py3.11+
@@ -17,12 +18,29 @@ class ProjectValidationResult:
     warnings: tuple[str, ...] = ()
 
 
+_NON_SLUG_CHARS = re.compile(r"[^a-z0-9.]+")
+_DUP_SLUG_SEPARATORS = re.compile(r"-{2,}")
+
+
+def _normalize_project_name(raw: str) -> str:
+    name = raw.strip().lower().replace("_", "-")
+    if not name:
+        return ""
+    name = _NON_SLUG_CHARS.sub("-", name)
+    name = _DUP_SLUG_SEPARATORS.sub("-", name)
+    name = name.strip("-.")
+    if len(name) > 128:
+        name = name[:128].strip("-.")
+    return name
+
+
 def validate_project(root: str | Path, *, require_uv_lock: bool = False) -> ProjectValidationResult:
     """
     Validate a tenant project directory.
 
     Requirements:
     - `pyproject.toml` must exist
+    - `[project].name` must exist (normalized for URL-safe project paths)
     - `[tool.cozy]` must exist in `pyproject.toml`
     - `requirements.txt` must not exist
     - `cozy.toml` must not exist (config is standardized in `[tool.cozy]`)
@@ -61,10 +79,16 @@ def validate_project(root: str | Path, *, require_uv_lock: bool = False) -> Proj
         errors.append(f"failed to parse pyproject.toml: {exc}")
         return ProjectValidationResult(ok=False, errors=tuple(errors), warnings=tuple(warnings))
 
+    project = data.get("project")
+    project_name = project.get("name") if isinstance(project, dict) else None
+    if not isinstance(project_name, str) or project_name.strip() == "":
+        errors.append("missing [project].name in pyproject.toml")
+    elif _normalize_project_name(project_name) == "":
+        errors.append("invalid [project].name in pyproject.toml")
+
     tool = data.get("tool")
     cozy = tool.get("cozy") if isinstance(tool, dict) else None
     if not isinstance(cozy, dict):
         errors.append("missing [tool.cozy] in pyproject.toml")
 
     return ProjectValidationResult(ok=not errors, errors=tuple(errors), warnings=tuple(warnings))
-

@@ -14,8 +14,8 @@ from .model_refs import ParsedModelRef, parse_model_ref
 class ModelRefDownloader(ModelDownloader):
     """
     Composite downloader for phase-1 model refs:
-      - Cozy Hub snapshots (default): org/repo[:tag] or org/repo@sha256:<digest>
-      - Hugging Face repos: hf:org/repo[@revision]
+      - Cozy Hub snapshots (default): owner/repo[:tag] or owner/repo@sha256:<digest>
+      - Hugging Face repos: hf:owner/repo[@revision]
 
     Returns a local directory path for both schemes.
     """

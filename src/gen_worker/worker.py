@@ -245,15 +245,15 @@ def _http_request(
     method: str,
     url: str,
     token: str,
-    tenant_id: Optional[str] = None,
+    owner: Optional[str] = None,
     body: Optional[bytes] = None,
     content_type: Optional[str] = None,
 ) -> urllib.request.Request:
     req = urllib.request.Request(url, data=body, method=method)
     req.add_header("Authorization", f"Bearer {token}")
-    tenant_id = (tenant_id or "").strip() or os.getenv("TENANT_ID", "").strip()
-    if tenant_id:
-        req.add_header("X-Cozy-Tenant-Id", tenant_id)
+    owner = (owner or "").strip() or os.getenv("OWNER", "").strip()
+    if owner:
+        req.add_header("X-Cozy-Owner", owner)
     if content_type:
         req.add_header("Content-Type", content_type)
     return req
@@ -371,14 +371,14 @@ class ActionContext:
         self,
         run_id: str,
         emitter: Optional[Callable[[Dict[str, Any]], None]] = None,
-        tenant_id: Optional[str] = None,
+        owner: Optional[str] = None,
         user_id: Optional[str] = None,
         timeout_ms: Optional[int] = None,
         file_api_base_url: Optional[str] = None,
         file_api_token: Optional[str] = None,
     ) -> None:
         self._run_id = run_id
-        self._tenant_id = tenant_id
+        self._owner = owner
         self._user_id = user_id
         self._timeout_ms = timeout_ms
         self._file_api_base_url = (file_api_base_url or "").strip() or None
@@ -396,8 +396,8 @@ class ActionContext:
         return self._run_id
 
     @property
-    def tenant_id(self) -> Optional[str]:
-        return self._tenant_id
+    def owner(self) -> Optional[str]:
+        return self._owner
 
     @property
     def user_id(self) -> Optional[str]:
@@ -501,7 +501,7 @@ class ActionContext:
             "PUT",
             url,
             token,
-            tenant_id=self.tenant_id,
+            owner=self.owner,
             body=data,
             content_type="application/octet-stream",
         )
@@ -522,7 +522,7 @@ class ActionContext:
 
         return Asset(
             ref=ref,
-            tenant_id=self.tenant_id,
+            owner=self.owner,
             local_path=None,
             mime_type=str(meta.get("mime_type") or "") or None,
             size_bytes=int(meta.get("size_bytes") or 0) or len(data),
@@ -552,7 +552,7 @@ class ActionContext:
             "POST",
             url,
             token,
-            tenant_id=self.tenant_id,
+            owner=self.owner,
             body=data,
             content_type="application/octet-stream",
         )
@@ -575,7 +575,7 @@ class ActionContext:
 
         return Asset(
             ref=ref,
-            tenant_id=self.tenant_id,
+            owner=self.owner,
             local_path=None,
             mime_type=str(meta.get("mime_type") or "") or None,
             size_bytes=int(meta.get("size_bytes") or 0) or len(data),
@@ -659,7 +659,7 @@ class Worker:
         if not self.release_id:
             logger.warning("RELEASE_ID environment variable not set for this worker!")
 
-        self.tenant_id = os.getenv("TENANT_ID", "")
+        self.owner = os.getenv("OWNER", "")
         self.runpod_pod_id = os.getenv("RUNPOD_POD_ID", "") # Read injected pod ID
         if not self.runpod_pod_id:
             logger.warning("RUNPOD_POD_ID environment variable not set for this worker!")
@@ -743,8 +743,8 @@ class Worker:
             self._downloader = ModelRefDownloader(cozy_base_url=base_url, cozy_token=token)
         self._supported_model_ids_from_scheduler: Optional[List[str]] = None # To store IDs from scheduler
         # Signature-driven model selection mapping and allowlist (provided by orchestrator).
-        self._deployment_model_id_by_key: Dict[str, str] = {}
-        self._deployment_allowed_model_ids: Optional[set[str]] = None
+        self._release_model_id_by_key: Dict[str, str] = {}
+        self._release_allowed_model_ids: Optional[set[str]] = None
         self._model_init_done_event = threading.Event() # To signal model init is complete
 
         # LRU model cache for tracking VRAM and disk-cached models
@@ -754,23 +754,23 @@ class Worker:
         self._manifest = manifest
         if manifest and "models" in manifest:
             # Initialize model key->id mapping from manifest (baked in at build time)
-            # This allows ModelRef(Src.DEPLOYMENT, "key") to resolve without scheduler config
+            # This allows ModelRef(Src.RELEASE, "key") to resolve without scheduler config
             manifest_models = manifest["models"]
             if isinstance(manifest_models, dict):
-                self._deployment_model_id_by_key = {
+                self._release_model_id_by_key = {
                     str(k): _canonicalize_model_ref_string(str(v)) for k, v in manifest_models.items()
                 }
-                self._deployment_allowed_model_ids = set(self._deployment_model_id_by_key.values())
-                logger.info(f"Loaded {len(self._deployment_model_id_by_key)} models from manifest: {list(self._deployment_model_id_by_key.keys())}")
+                self._release_allowed_model_ids = set(self._release_model_id_by_key.values())
+                logger.info(f"Loaded {len(self._release_model_id_by_key)} models from manifest: {list(self._release_model_id_by_key.keys())}")
 
         if self._model_manager:
             logger.info(f"ModelManager of type '{type(self._model_manager).__name__}' provided.")
             # If we have models from manifest, start pre-download in background
-            if self._deployment_allowed_model_ids:
-                self._supported_model_ids_from_scheduler = list(self._deployment_allowed_model_ids)
+            if self._release_allowed_model_ids:
+                self._supported_model_ids_from_scheduler = list(self._release_allowed_model_ids)
                 logger.info(f"Starting pre-download of {len(self._supported_model_ids_from_scheduler)} models from manifest")
                 model_init_thread = threading.Thread(
-                    target=self._process_deployment_config_async_wrapper,
+                    target=self._process_release_config_async_wrapper,
                     daemon=True,
                     name="ManifestModelInit"
                 )
@@ -1240,19 +1240,19 @@ class Worker:
             local_path = os.path.join(local_inputs_dir, f"{name_hash}{ext}")
             size, sha256_hex, mime = self._download_url_to_file(ref, local_path, max_bytes)
             asset.local_path = local_path
-            if not asset.tenant_id:
-                asset.tenant_id = self.tenant_id
+            if not asset.owner:
+                asset.owner = self.owner
             asset.mime_type = mime
             asset.size_bytes = size
             asset.sha256 = sha256_hex
             return
 
-        # Cozy Hub file ref (tenant scoped) - use orchestrator file API with HEAD+cache.
+        # Cozy Hub file ref (owner scoped) - use orchestrator file API with HEAD+cache.
         base = ctx._get_file_api_base_url()
         token = ctx._get_file_api_token()
         url = f"{base}/api/v1/file/{_encode_ref_for_url(ref)}"
 
-        head_req = _http_request("HEAD", url, token, tenant_id=ctx.tenant_id)
+        head_req = _http_request("HEAD", url, token, owner=ctx.owner)
         try:
             with urllib.request.urlopen(head_req, timeout=10) as resp:
                 if resp.status < 200 or resp.status >= 300:
@@ -1285,7 +1285,7 @@ class Worker:
         cache_path = os.path.join(cache_dir, cache_name)
 
         if not os.path.exists(cache_path):
-            get_req = _http_request("GET", url, token, tenant_id=ctx.tenant_id)
+            get_req = _http_request("GET", url, token, owner=ctx.owner)
             try:
                 with urllib.request.urlopen(get_req, timeout=30) as resp:
                     if resp.status < 200 or resp.status >= 300:
@@ -1319,8 +1319,8 @@ class Worker:
             mime = _infer_mime_type(ref, head)
 
         asset.local_path = local_path
-        if not asset.tenant_id:
-            asset.tenant_id = ctx.tenant_id or self.tenant_id
+        if not asset.owner:
+            asset.owner = (ctx.owner or self.owner)
         asset.mime_type = mime or None
         asset.size_bytes = size or None
         asset.sha256 = sha256_hex or None
@@ -1588,8 +1588,8 @@ class Worker:
             resources = pb.WorkerResources(
                 worker_id=self.worker_id,
                 # Runtime identity is release_id.
-                deployment_id=self.release_id,
-                # tenant_id=self.tenant_id,
+                release_id=self.release_id,
+                # owner is provided per-request via TaskExecutionRequest/RealtimeOpenCommand.
                 runpod_pod_id=self.runpod_pod_id,
                 gpu_is_busy=self._get_gpu_busy_status(),
                 cpu_cores=cpu_cores,
@@ -1848,33 +1848,33 @@ class Worker:
         elif msg_type == "realtime_close_cmd":
             self._handle_realtime_close_cmd(message.realtime_close_cmd)
         # Add handling for other message types if needed (e.g., config updates)
-        elif msg_type == 'deployment_model_config':
+        elif msg_type == 'release_model_config':
             if self._model_manager:
-                logger.info(f"Received DeploymentModelConfig: {message.deployment_model_config.supported_model_ids}")
+                logger.info(f"Received ReleaseModelConfig: {message.release_model_config.supported_model_ids}")
                 self._supported_model_ids_from_scheduler = [
-                    _canonicalize_model_ref_string(str(v)) for v in list(message.deployment_model_config.supported_model_ids)
+                    _canonicalize_model_ref_string(str(v)) for v in list(message.release_model_config.supported_model_ids)
                 ]
                 try:
                     # Optional label->id mapping for signature-driven model selection.
-                    self._deployment_model_id_by_key = {
+                    self._release_model_id_by_key = {
                         str(k): _canonicalize_model_ref_string(str(v))
-                        for k, v in dict(message.deployment_model_config.model_id_by_key).items()
+                        for k, v in dict(message.release_model_config.model_id_by_key).items()
                     }
                 except Exception:
-                    self._deployment_model_id_by_key = {}
-                self._deployment_allowed_model_ids = set(self._supported_model_ids_from_scheduler)
+                    self._release_model_id_by_key = {}
+                self._release_allowed_model_ids = set(self._supported_model_ids_from_scheduler)
                 self._model_init_done_event.clear() # Clear before starting new init
-                model_init_thread = threading.Thread(target=self._process_deployment_config_async_wrapper, daemon=True)
+                model_init_thread = threading.Thread(target=self._process_release_config_async_wrapper, daemon=True)
                 model_init_thread.start()
             else:
-                logger.info("Received DeploymentModelConfig, but no model manager configured. Ignoring.")
+                logger.info("Received ReleaseModelConfig, but no model manager configured. Ignoring.")
                 self._model_init_done_event.set() # Signal completion as there's nothing to do
         elif msg_type is None:
              logger.warning("Received empty message from scheduler.")
         else:
             logger.warning(f"Received unhandled message type: {msg_type}")
 
-    def _process_deployment_config_async_wrapper(self) -> None:
+    def _process_release_config_async_wrapper(self) -> None:
         if not self._model_manager or self._supported_model_ids_from_scheduler is None:
             self._model_init_done_event.set()
             return
@@ -1975,7 +1975,7 @@ class Worker:
         input_payload = request.input_payload
         required_model_id_for_exec = ""
         timeout_ms = int(getattr(request, "timeout_ms", 0) or 0)
-        tenant_id = str(getattr(request, "tenant_id", "") or "") or (self.tenant_id or "")
+        owner = str(getattr(request, "owner", "") or "") or (self.owner or "")
         user_id = str(getattr(request, "user_id", "") or "")
         file_base_url = str(getattr(request, "file_base_url", "") or "")
         file_token = str(getattr(request, "file_token", "") or "")
@@ -2005,7 +2005,7 @@ class Worker:
         ctx = ActionContext(
             run_id,
             emitter=self._emit_progress_event,
-            tenant_id=tenant_id or None,
+            owner=owner or None,
             user_id=user_id or None,
             timeout_ms=timeout_ms if timeout_ms > 0 else None,
             file_api_base_url=file_base_url or None,
@@ -2066,7 +2066,7 @@ class Worker:
             )
             return
 
-        tenant_id = str(getattr(cmd, "tenant_id", "") or "") or (self.tenant_id or "")
+        owner = str(getattr(cmd, "owner", "") or "") or (self.owner or "")
         user_id = str(getattr(cmd, "user_id", "") or "")
         timeout_ms = int(getattr(cmd, "timeout_ms", 0) or 0) or None
         file_base_url = str(getattr(cmd, "file_base_url", "") or "")
@@ -2074,7 +2074,7 @@ class Worker:
         ctx = ActionContext(
             session_id,
             emitter=self._emit_progress_event,
-            tenant_id=tenant_id or None,
+            owner=owner or None,
             user_id=user_id or None,
             timeout_ms=timeout_ms,
             file_api_base_url=file_base_url or None,
@@ -2101,10 +2101,10 @@ class Worker:
                     model_id = ""
                     if idx < len(required_models) and str(required_models[idx]).strip():
                         raw = str(required_models[idx]).strip()
-                        model_id = self._deployment_model_id_by_key.get(raw, raw)
-                    elif inj.model_ref.source == ModelRefSource.DEPLOYMENT and inj.model_ref.key.strip():
+                        model_id = self._release_model_id_by_key.get(raw, raw)
+                    elif inj.model_ref.source == ModelRefSource.RELEASE and inj.model_ref.key.strip():
                         raw = inj.model_ref.key.strip()
-                        model_id = self._deployment_model_id_by_key.get(raw, raw)
+                        model_id = self._release_model_id_by_key.get(raw, raw)
                     if not model_id:
                         raise ValueError(f"missing resolved model id for injection param: {inj.param_name}")
                     self._enforce_model_allowlist(model_id, inj)
@@ -2400,7 +2400,7 @@ class Worker:
 
                 # Diffusers pipelines: prefer downloading via the worker's model downloader and
                 # loading from a local directory, instead of letting diffusers/huggingface_hub
-                # interpret model refs like "hf:org/repo".
+                # interpret model refs like "hf:owner/repo".
                 #
                 # This keeps tenant code inference-only while still supporting the platform's
                 # model-ref schemes and caching behavior.
@@ -2506,11 +2506,11 @@ class Worker:
         raise ValueError(f"no injection provider for type {qn} (model_id={model_id})")
 
     def _resolve_model_id_for_injection(self, inj: InjectionSpec, payload: msgspec.Struct) -> str:
-        if inj.model_ref.source == ModelRefSource.DEPLOYMENT:
+        if inj.model_ref.source == ModelRefSource.RELEASE:
             raw = inj.model_ref.key.strip()
             if not raw:
-                raise ValueError(f"empty deployment ModelRef for injection param: {inj.param_name}")
-            model_id = self._deployment_model_id_by_key.get(raw, raw)
+                raise ValueError(f"empty release ModelRef for injection param: {inj.param_name}")
+            model_id = self._release_model_id_by_key.get(raw, raw)
             self._enforce_model_allowlist(model_id, inj)
             return model_id
 
@@ -2529,18 +2529,18 @@ class Worker:
             key = chosen.strip()
             if not key:
                 raise ValueError(f"payload field {field!r} is empty; expected a model key")
-            model_id = self._deployment_model_id_by_key.get(key, key)
+            model_id = self._release_model_id_by_key.get(key, key)
             self._enforce_model_allowlist(model_id, inj)
             return model_id
 
         raise ValueError(f"unknown ModelRef source: {inj.model_ref.source!r}")
 
     def _enforce_model_allowlist(self, model_id: str, inj: InjectionSpec) -> None:
-        allowed = self._deployment_allowed_model_ids
+        allowed = self._release_allowed_model_ids
         if allowed is None:
             return
         if model_id not in allowed:
-            raise ValueError(f"model_id not allowed for deployment: {model_id!r} (injection param {inj.param_name})")
+            raise ValueError(f"model_id not allowed for release: {model_id!r} (injection param {inj.param_name})")
 
     def _enforce_backend_compatibility(self, model_id: str, artifacts: ModelArtifacts) -> None:
         # Minimal TensorRT compatibility gating based on artifact metadata.
@@ -2567,7 +2567,7 @@ class Worker:
             raise ResourceError("incompatible tensorrt engine (sm mismatch)")
 
     def _resolve_model_artifacts(self, model_id: str) -> ModelArtifacts:
-        # Allow deployments to define artifact paths via env for now.
+        # Allow release config to define artifact paths via env for now.
         # This will be replaced by orchestrator-provided artifact refs/mappings.
         raw = os.getenv("WORKER_MODEL_ARTIFACTS_JSON", "").strip()
         if raw:

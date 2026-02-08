@@ -34,7 +34,7 @@ class GenerateOutput(msgspec.Struct):
 def generate(
     ctx: ActionContext,
     pipeline: Annotated[
-        StableDiffusionPipeline, ModelRef(Src.DEPLOYMENT, "sd15")  # Key from [tool.cozy.models]
+        StableDiffusionPipeline, ModelRef(Src.RELEASE, "sd15")  # Key from [tool.cozy.models]
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:

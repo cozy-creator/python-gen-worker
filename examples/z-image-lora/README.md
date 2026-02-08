@@ -4,11 +4,11 @@ Dynamic LoRA loading example demonstrating the z-image pattern.
 
 ## Overview
 
-This example shows how to load custom LoRAs at runtime, similar to fal.ai's z-image/turbo/lora endpoint. LoRAs are passed as `Asset` references in the request payload, downloaded and cached by the worker, then applied to the base SDXL pipeline.
+This example shows how to load custom LoRAs at runtime, similar to fal.ai's z-image/turbo/lora endpoint. LoRAs are passed as `Asset` references in the request payload, downloaded and cached by the worker, then applied to the base Z-Image Turbo pipeline.
 
 **Key features:**
-- Base model (SDXL) is loaded once and kept in VRAM via `ModelRef(Src.DEPLOYMENT, "sdxl")`
-- LoRAs are passed as `Asset` in the request (URLs or Cozy Hub refs)
+- Base model (Z-Image Turbo) is loaded once and kept in VRAM via `ModelRef(Src.RELEASE, "z-image-turbo")`
+- LoRAs are passed as `Asset` in the request (external URLs or Cozy Hub file refs)
 - LoRAs are loaded dynamically per-request
 - LoRAs are unloaded after each request to avoid VRAM accumulation
 - Multiple LoRAs can be combined with individual weights
@@ -33,8 +33,8 @@ The worker materializes `Asset` references before calling your function, so `lor
 ```json
 {
     "prompt": "a beautiful landscape at sunset",
-    "num_inference_steps": 28,
-    "guidance_scale": 7.5
+    "num_inference_steps": 9,
+    "guidance_scale": 0.0
 }
 ```
 
@@ -45,11 +45,12 @@ The worker materializes `Asset` references before calling your function, so `lor
     "prompt": "a portrait in anime style",
     "loras": [
         {
-            "file": {"url": "https://example.com/anime-style.safetensors"},
+            "file": {"ref": "https://example.com/anime-style.safetensors"},
             "weight": 0.8
         }
     ],
-    "num_inference_steps": 28
+    "num_inference_steps": 9,
+    "guidance_scale": 0.0
 }
 ```
 
@@ -60,30 +61,30 @@ The worker materializes `Asset` references before calling your function, so `lor
     "prompt": "a cyberpunk city with neon lights",
     "loras": [
         {
-            "file": {"url": "https://example.com/cyberpunk-style.safetensors"},
+            "file": {"ref": "https://example.com/cyberpunk-style.safetensors"},
             "weight": 0.7,
             "adapter_name": "cyberpunk"
         },
         {
-            "file": {"url": "https://example.com/neon-lights.safetensors"},
+            "file": {"ref": "https://example.com/neon-lights.safetensors"},
             "weight": 0.5,
             "adapter_name": "neon"
         }
     ],
     "negative_prompt": "blurry, low quality",
-    "num_inference_steps": 30,
-    "guidance_scale": 8.0
+    "num_inference_steps": 9,
+    "guidance_scale": 0.0
 }
 ```
 
-### Using Cozy Hub refs
+### Using Cozy Hub file refs
 
 ```json
 {
     "prompt": "product photography, white background",
     "loras": [
         {
-            "file": {"cozy_ref": "loras/product-photography-v1"},
+            "file": {"ref": "loras/product-photography-v1"},
             "weight": 1.0
         }
     ]
@@ -92,7 +93,7 @@ The worker materializes `Asset` references before calling your function, so `lor
 
 ## VRAM Considerations
 
-- **Base model**: ~10GB VRAM for SDXL
+- **Base model**: depends on the base model; Turbo-class image models still typically require >10GB for 1024x1024 at reasonable speed
 - **LoRAs**: ~10-100MB each when loaded
 - **Working memory**: ~3-4GB during inference
 

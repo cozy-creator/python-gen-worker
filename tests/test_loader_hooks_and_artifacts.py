@@ -38,8 +38,8 @@ class TestLoaderHooksAndArtifacts(unittest.TestCase):
         w._runtime_loaders = {}
         w._custom_runtime_cache = {}
         w._custom_runtime_locks = {}
-        w._deployment_model_id_by_key = {}
-        w._deployment_allowed_model_ids = None
+        w._release_model_id_by_key = {}
+        w._release_allowed_model_ids = None
         w._active_tasks_lock = threading.Lock()
         w._active_tasks = {}
         w._active_function_counts = {}
@@ -63,7 +63,7 @@ class TestLoaderHooksAndArtifacts(unittest.TestCase):
 
         def fn(
             ctx: ActionContext,
-            rt: Annotated[RuntimeHandle, ModelRef(Src.DEPLOYMENT, "model-a")],
+            rt: Annotated[RuntimeHandle, ModelRef(Src.RELEASE, "model-a")],
             payload: Payload,
         ) -> Output:
             _ = payload
@@ -106,7 +106,7 @@ class TestLoaderHooksAndArtifacts(unittest.TestCase):
 
         def fn(
             ctx: ActionContext,
-            rt: Annotated[RuntimeHandle, ModelRef(Src.DEPLOYMENT, "engine-a@tensorrt")],
+            rt: Annotated[RuntimeHandle, ModelRef(Src.RELEASE, "engine-a@tensorrt")],
             payload: Payload,
         ) -> Output:
             _ = (ctx, payload)

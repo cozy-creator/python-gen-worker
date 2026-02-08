@@ -15,5 +15,5 @@ flux2-klein-4b = "hf:black-forest-labs/FLUX.2-klein-4B"
 Code uses:
 
 ```py
-pipeline: Annotated[Flux2KleinPipeline, ModelRef(Src.DEPLOYMENT, "flux2-klein-4b")]
+pipeline: Annotated[Flux2KleinPipeline, ModelRef(Src.RELEASE, "flux2-klein-4b")]
 ```

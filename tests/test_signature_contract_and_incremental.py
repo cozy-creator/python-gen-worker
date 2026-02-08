@@ -46,8 +46,8 @@ def _make_worker() -> Worker:
     w._runtime_loaders = {}
     w._custom_runtime_cache = {}
     w._custom_runtime_locks = {}
-    w._deployment_model_id_by_key = {}
-    w._deployment_allowed_model_ids = None
+    w._release_model_id_by_key = {}
+    w._release_allowed_model_ids = None
     w._active_tasks_lock = threading.Lock()
     w._active_tasks = {}
     w._active_function_counts = {}
@@ -107,8 +107,8 @@ class TestContractAndIncremental(unittest.TestCase):
             return Output(model_id=model.model_id)
 
         w = _make_worker()
-        w._deployment_model_id_by_key = {"a": "google/foo"}
-        w._deployment_allowed_model_ids = {"google/foo"}
+        w._release_model_id_by_key = {"a": "google/foo"}
+        w._release_allowed_model_ids = {"google/foo"}
         spec = w._inspect_task_spec(fn)  # type: ignore[arg-type]
         ctx = ActionContext("run-2", emitter=lambda _e: None)
         payload = InputWithModel(text="x", model_key="a")
@@ -131,8 +131,8 @@ class TestContractAndIncremental(unittest.TestCase):
             return Output(model_id=model.model_id)
 
         w = _make_worker()
-        w._deployment_model_id_by_key = {"a": "google/foo", "b": "google/bar"}
-        w._deployment_allowed_model_ids = {"google/foo"}
+        w._release_model_id_by_key = {"a": "google/foo", "b": "google/bar"}
+        w._release_allowed_model_ids = {"google/foo"}
         spec = w._inspect_task_spec(fn)  # type: ignore[arg-type]
         ctx = ActionContext("run-3", emitter=lambda _e: None)
         payload = InputWithModel(text="x", model_key="b")
