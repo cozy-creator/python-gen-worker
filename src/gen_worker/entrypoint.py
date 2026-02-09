@@ -60,9 +60,46 @@ SEED_ADDRS = [addr.strip() for addr in SCHEDULER_ADDRS.split(",") if addr.strip(
 
 WORKER_ID = os.getenv("WORKER_ID", "").strip()
 WORKER_JWT = os.getenv("WORKER_JWT", "").strip()
-USE_TLS = os.getenv("USE_TLS", "false").lower() in ("true", "1", "t")
+USE_TLS_ENV = os.getenv("USE_TLS")
 RECONNECT_DELAY = int(os.getenv("RECONNECT_DELAY", "5"))
 MAX_RECONNECT_ATTEMPTS = int(os.getenv("MAX_RECONNECT_ATTEMPTS", "0"))
+
+def _normalize_grpc_addr(addr: str) -> tuple[str, bool]:
+    """Normalize scheduler address strings for grpc.{insecure,secure}_channel.
+
+    Accepts:
+      - host:port
+      - grpc://host:port
+      - grpcs://host:port
+      - http(s)://host:port
+    Returns:
+      - normalized host:port
+      - inferred tls bool (based on scheme or :443)
+    """
+    a = (addr or "").strip()
+    if not a:
+        return "", False
+    lower = a.lower()
+    if lower.startswith("grpcs://"):
+        return a[len("grpcs://"):].strip(), True
+    if lower.startswith("grpc://"):
+        return a[len("grpc://"):].strip(), False
+    if lower.startswith("https://"):
+        return a[len("https://"):].strip(), True
+    if lower.startswith("http://"):
+        return a[len("http://"):].strip(), False
+    # No scheme: infer from port 443.
+    tls = a.endswith(":443")
+    return a, tls
+
+SCHEDULER_ADDR, _ADDR_TLS = _normalize_grpc_addr(SCHEDULER_ADDR)
+SEED_ADDRS = [(_normalize_grpc_addr(a)[0]) for a in SEED_ADDRS]
+
+if USE_TLS_ENV is None:
+    # Auto mode: use TLS when the primary scheduler address looks like a public TLS endpoint (:443 or grpcs://).
+    USE_TLS = _ADDR_TLS
+else:
+    USE_TLS = USE_TLS_ENV.lower() in ("true", "1", "t")
 
 
 if __name__ == "__main__":

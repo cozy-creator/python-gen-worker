@@ -36,7 +36,7 @@ class SchedulerWorkerServiceStub(object):
             channel: A grpc.Channel.
         """
         self.ConnectWorker = channel.stream_stream(
-                '/scheduler.SchedulerWorkerService/ConnectWorker',
+                '/scheduler.v1.SchedulerWorkerService/ConnectWorker',
                 request_serializer=worker__scheduler__pb2.WorkerSchedulerMessage.SerializeToString,
                 response_deserializer=worker__scheduler__pb2.WorkerSchedulerMessage.FromString,
                 _registered_method=True)
@@ -62,9 +62,9 @@ def add_SchedulerWorkerServiceServicer_to_server(servicer, server):
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
-            'scheduler.SchedulerWorkerService', rpc_method_handlers)
+            'scheduler.v1.SchedulerWorkerService', rpc_method_handlers)
     server.add_generic_rpc_handlers((generic_handler,))
-    server.add_registered_method_handlers('scheduler.SchedulerWorkerService', rpc_method_handlers)
+    server.add_registered_method_handlers('scheduler.v1.SchedulerWorkerService', rpc_method_handlers)
 
 
  # This class is part of an EXPERIMENTAL API.
@@ -86,7 +86,7 @@ class SchedulerWorkerService(object):
         return grpc.experimental.stream_stream(
             request_iterator,
             target,
-            '/scheduler.SchedulerWorkerService/ConnectWorker',
+            '/scheduler.v1.SchedulerWorkerService/ConnectWorker',
             worker__scheduler__pb2.WorkerSchedulerMessage.SerializeToString,
             worker__scheduler__pb2.WorkerSchedulerMessage.FromString,
             options,

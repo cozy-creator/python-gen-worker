@@ -4,6 +4,7 @@ Stable Diffusion 1.5 example using Cozy’s injection pattern.
 
 - The worker function only defines input/output + runs inference.
 - Model selection + downloading is handled by the worker runtime via `[tool.cozy.models]`.
+- The worker clamps `num_inference_steps` to a minimum of 25 for quality.
 
 Config:
 

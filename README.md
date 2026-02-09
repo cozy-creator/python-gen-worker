@@ -40,6 +40,7 @@ def generate(ctx: ActionContext, payload: Input) -> Output:
 - **Model injection** - Dependency injection for ML models with caching
 - **Streaming output** - Support for incremental/streaming responses
 - **Progress reporting** - Built-in progress events via `ActionContext`
+- **Perf metrics** - Best-effort per-run metrics emitted to gen-orchestrator (`metrics.*` worker events)
 - **File handling** - Upload/download assets via Cozy hub file API
 - **Model caching** - LRU cache with VRAM/disk management and cache-aware routing
 
@@ -158,6 +159,12 @@ Local dev / advanced (not injected by orchestrator):
 | `WORKER_ALLOW_COZY_HUB_API_RESOLVE` | `false` | Local dev only: allow the worker to call Cozy Hub resolve APIs |
 | `COZY_HUB_TOKEN` | - | Local dev only: Cozy Hub bearer token (only used when `WORKER_ALLOW_COZY_HUB_API_RESOLVE=1`) |
 | `HF_TOKEN` | - | Hugging Face token (for private `hf:` refs) |
+
+## Metrics
+
+The worker can emit best-effort performance/debug metrics to gen-orchestrator via `WorkerEvent` messages.
+
+See `docs/metrics.md`.
 
 ### Hugging Face (`hf:`) download behavior
 

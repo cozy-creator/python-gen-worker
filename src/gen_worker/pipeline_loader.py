@@ -521,6 +521,31 @@ def get_pipeline_class(
     """
     from diffusers import DiffusionPipeline
 
+    custom_pipeline: Optional[str] = None
+
+    # Cozy pipeline YAML is the authoritative equivalent of model_index.json.
+    # Prefer cozy.pipeline.lock.yaml when present; fall back to cozy.pipeline.yaml.
+    if class_name is None:
+        try:
+            from .cozy_pipeline_spec import (
+                cozy_custom_pipeline_arg,
+                ensure_diffusers_model_index_json,
+                load_cozy_pipeline_spec,
+            )
+
+            root = Path(model_path)
+            spec = load_cozy_pipeline_spec(root)
+            if spec is not None:
+                _ = ensure_diffusers_model_index_json(root)
+                if spec.pipe_class:
+                    class_name = spec.pipe_class
+                try:
+                    custom_pipeline = cozy_custom_pipeline_arg(root, spec)
+                except Exception:
+                    custom_pipeline = None
+        except Exception:
+            pass
+
     # Auto-detect from model_index.json if not specified
     if class_name is None:
         model_index_path = Path(model_path) / "model_index.json"
@@ -530,23 +555,23 @@ def get_pipeline_class(
                 class_name = model_index.get("_class_name")
 
     if class_name is None:
-        return (DiffusionPipeline, None)
+        return (DiffusionPipeline, custom_pipeline)
 
     # Handle tuple format (package, class)
     if isinstance(class_name, (list, tuple)):
         package, cls = class_name
         module = importlib.import_module(package)
-        return (getattr(module, cls), None)
+        return (getattr(module, cls), custom_pipeline)
 
     # Try loading as a diffusers class
     try:
         pipeline_class = getattr(importlib.import_module("diffusers"), class_name)
         if not issubclass(pipeline_class, DiffusionPipeline):
             raise TypeError(f"{class_name} does not inherit from DiffusionPipeline")
-        return (pipeline_class, None)
+        return (pipeline_class, custom_pipeline)
     except (ImportError, AttributeError):
         # Assume it's a custom pipeline name
-        return (DiffusionPipeline, class_name)
+        return (DiffusionPipeline, custom_pipeline or class_name)
 
 
 def get_scheduler_class(scheduler_name: str) -> Type:

@@ -23,7 +23,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 class GenerateInput(msgspec.Struct):
     prompt: str
     negative_prompt: str = ""
-    num_inference_steps: int = 20
+    num_inference_steps: int = 25
     guidance_scale: float = 7.5
     width: int = 512
     height: int = 512
@@ -45,7 +45,18 @@ def generate(
     if ctx.is_canceled():
         raise InterruptedError("canceled")
 
-    logger.info("[run_id=%s] sd15 prompt=%r", ctx.run_id, payload.prompt)
+    requested_steps = payload.num_inference_steps
+    steps = requested_steps
+    if steps < 25:
+        steps = 25
+
+    logger.info(
+        "[run_id=%s] sd15 prompt=%r steps=%s (requested=%s)",
+        ctx.run_id,
+        payload.prompt,
+        steps,
+        requested_steps,
+    )
 
     generator = None
     if payload.seed is not None:
@@ -57,7 +68,7 @@ def generate(
     result = pipeline(
         prompt=payload.prompt,
         negative_prompt=payload.negative_prompt,
-        num_inference_steps=payload.num_inference_steps,
+        num_inference_steps=steps,
         guidance_scale=payload.guidance_scale,
         width=payload.width,
         height=payload.height,

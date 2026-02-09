@@ -66,6 +66,7 @@ from .model_ref_downloader import ModelRefDownloader
 from .model_refs import parse_model_ref
 from .types import Asset
 from .model_cache import ModelCache, ModelCacheStats, ModelLocation
+from .run_metrics_v1 import RunMetricsV1, best_effort_bytes_downloaded, best_effort_init_model_metrics, safe_json_bytes
 from .injection import (
     InjectionSpec,
     ModelRef,
@@ -374,6 +375,7 @@ class ActionContext:
         file_api_base_url: Optional[str] = None,
         file_api_token: Optional[str] = None,
         resolved_cozy_models_by_id: Optional[Dict[str, Any]] = None,
+        required_models: Optional[List[str]] = None,
     ) -> None:
         self._run_id = run_id
         self._owner = owner
@@ -382,6 +384,7 @@ class ActionContext:
         self._file_api_base_url = (file_api_base_url or "").strip() or None
         self._file_api_token = (file_api_token or "").strip() or None
         self._resolved_cozy_models_by_id = resolved_cozy_models_by_id
+        self._required_models = list(required_models or [])
         self._started_at = time.time()
         self._deadline: Optional[float] = None
         if timeout_ms is not None and timeout_ms > 0:
@@ -439,9 +442,14 @@ class ActionContext:
             return self._file_api_token
         return _require_file_api_token()
 
-    
+
+    @property
     def resolved_cozy_models_by_id(self) -> Optional[Dict[str, Any]]:
         return self._resolved_cozy_models_by_id
+
+    @property
+    def required_models(self) -> List[str]:
+        return list(self._required_models)
 
 
     def time_remaining_s(self) -> Optional[float]:
@@ -509,6 +517,7 @@ class ActionContext:
             body=data,
             content_type="application/octet-stream",
         )
+        t0 = time.monotonic()
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 body = resp.read()
@@ -523,6 +532,13 @@ class ActionContext:
             if code in (401, 403):
                 raise AuthError(f"file save unauthorized ({code}): check file_token validity") from e
             raise RuntimeError(f"file save failed ({code or 'unknown'})") from e
+        finally:
+            rm = getattr(self, "_run_metrics", None)
+            if rm is not None:
+                try:
+                    rm.add_upload_time(int((time.monotonic() - t0) * 1000))
+                except Exception:
+                    pass
 
         return Asset(
             ref=ref,
@@ -560,6 +576,7 @@ class ActionContext:
             body=data,
             content_type="application/octet-stream",
         )
+        t0 = time.monotonic()
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 body = resp.read()
@@ -576,6 +593,13 @@ class ActionContext:
             if code == 409:
                 raise RuntimeError("output path already exists") from e
             raise RuntimeError(f"file save failed ({code or 'unknown'})") from e
+        finally:
+            rm = getattr(self, "_run_metrics", None)
+            if rm is not None:
+                try:
+                    rm.add_upload_time(int((time.monotonic() - t0) * 1000))
+                except Exception:
+                    pass
 
         return Asset(
             ref=ref,
@@ -917,6 +941,20 @@ class Worker:
             self._send_message(msg)
         except Exception:
             logger.exception("Failed to emit progress event")
+
+    def _emit_worker_event_bytes(self, run_id: str, event_type: str, payload_json: bytes) -> None:
+        """Best-effort worker->scheduler WorkerEvent emitter (must never fail a run)."""
+        try:
+            msg = pb.WorkerSchedulerMessage(
+                worker_event=pb.WorkerEvent(
+                    run_id=str(run_id or ""),
+                    event_type=str(event_type or ""),
+                    payload_json=bytes(payload_json or b"{}"),
+                )
+            )
+            self._send_message(msg)
+        except Exception:
+            return
 
 
     def _set_gpu_busy_status(self, busy: bool, func_name_for_log: str = "") -> None:
@@ -2063,6 +2101,20 @@ class Worker:
                             )
                         except Exception:
                             pass
+                        # Volume inventory signal (gen-orchestrator issue #236).
+                        try:
+                            payload = json.dumps(
+                                {"model_variant_id": canon},
+                                separators=(",", ":"),
+                                sort_keys=True,
+                            ).encode("utf-8")
+                            self._send_message(
+                                pb.WorkerSchedulerMessage(
+                                    worker_event=pb.WorkerEvent(run_id="", event_type="model.cached", payload_json=payload)
+                                )
+                            )
+                        except Exception:
+                            pass
                         # Push a registration update promptly (do not wait for the 10s heartbeat tick).
                         self._register_worker(is_heartbeat=True)
                         continue
@@ -2095,6 +2147,21 @@ class Worker:
                         self._send_message(
                             pb.WorkerSchedulerMessage(
                                 worker_event=pb.WorkerEvent(run_id="", event_type="model.ready", payload_json=payload)
+                            )
+                        )
+                    except Exception:
+                        pass
+                    # Volume inventory signal (gen-orchestrator issue #236).
+                    # model_variant_id should match what the scheduler uses in required_model_ids.
+                    try:
+                        payload = json.dumps(
+                            {"model_variant_id": canon},
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        ).encode("utf-8")
+                        self._send_message(
+                            pb.WorkerSchedulerMessage(
+                                worker_event=pb.WorkerEvent(run_id="", event_type="model.cached", payload_json=payload)
                             )
                         )
                     except Exception:
@@ -2404,8 +2471,9 @@ class Worker:
         file_token = str(getattr(request, "file_token", "") or "")
         resolved_cozy_models_by_id = dict(getattr(request, "resolved_cozy_models_by_id", {}) or {})
 
-        if request.required_models and len(request.required_models) > 0:
-            required_model_id_for_exec = request.required_models[0]
+        required_models_raw = list(getattr(request, "required_models", []) or [])
+        if required_models_raw:
+            required_model_id_for_exec = str(required_models_raw[0] or "").strip()
 
         logger.info(f"Received Task request: run_id={run_id}, function={function_name}, model='{required_model_id_for_exec or 'None'}'")
 
@@ -2426,6 +2494,15 @@ class Worker:
             self._send_task_result(run_id, False, None, "retryable", True, "worker busy", error_msg)
             return
 
+        # Prefer the scheduler-provided required_models list, but map through any
+        # release-local key->id mapping if the scheduler used deployment-local keys.
+        required_models: List[str] = []
+        for raw in required_models_raw:
+            s = str(raw or "").strip()
+            if not s:
+                continue
+            required_models.append(self._release_model_id_by_key.get(s, s))
+
         ctx = ActionContext(
             run_id,
             emitter=self._emit_progress_event,
@@ -2435,6 +2512,7 @@ class Worker:
             file_api_base_url=file_base_url or None,
             file_api_token=file_token or None,
             resolved_cozy_models_by_id=resolved_cozy_models_by_id or None,
+            required_models=required_models or None,
         )
         # Add to active tasks *before* starting thread
         with self._active_tasks_lock:
@@ -2629,6 +2707,39 @@ class Worker:
         retryable = False
         success = False
 
+        # Metrics (best-effort): never fail a run.
+        resolved_map = getattr(ctx, "resolved_cozy_models_by_id", None) or None
+        rm = RunMetricsV1(
+            run_id=str(run_id or ""),
+            function_name=str(spec.name or ""),
+            required_models=list(getattr(ctx, "required_models", []) or []),
+            resolved_cozy_models_by_id=resolved_map,
+        )
+        # Attach to ctx so ActionContext.save_* and injection paths can accumulate.
+        try:
+            setattr(ctx, "_run_metrics", rm)
+        except Exception:
+            pass
+        rm.mark_compute_started()
+        if rm.compute_started_at:
+            self._emit_worker_event_bytes(run_id, "metrics.compute.started", safe_json_bytes({"at": rm.compute_started_at}))
+
+        # Initialize model cache_state for required models using worker's cache hints.
+        try:
+            vram = self._model_cache.get_vram_models() if self._model_cache else []
+            disk = self._model_cache.get_disk_models() if self._model_cache else []
+            best_effort_init_model_metrics(rm, rm.required_models, vram_models=vram, disk_models=disk, cache_dir=Path(os.getenv("WORKER_MODEL_CACHE_DIR", "/tmp/cozy/models")))
+        except Exception:
+            pass
+
+        # Best-effort peak tracking
+        if torch is not None:
+            try:
+                if torch.cuda.is_available():
+                    torch.cuda.reset_peak_memory_stats()
+            except Exception:
+                pass
+
         # Refcounted BUSY so overlapping runs/model ops can't flip BUSY -> NOT BUSY early.
         self._gpu_busy_enter()
 
@@ -2646,6 +2757,33 @@ class Worker:
             # Decode payload strictly.
             input_obj = msgspec.msgpack.decode(input_payload, type=spec.payload_type)
             self._materialize_assets(ctx, input_obj)
+            # Best-effort extract diffusion-ish numeric fields for metrics.run.
+            try:
+                def _get_num(name: str) -> Optional[float]:
+                    try:
+                        v = getattr(input_obj, name)
+                    except Exception:
+                        return None
+                    if isinstance(v, bool):
+                        return None
+                    if isinstance(v, (int, float)):
+                        return float(v)
+                    return None
+
+                steps = _get_num("num_inference_steps") or _get_num("steps")
+                if steps is not None:
+                    rm.steps = int(steps)
+                guidance = _get_num("guidance_scale") or _get_num("guidance")
+                if guidance is not None:
+                    rm.guidance = float(guidance)
+                w = _get_num("width")
+                h = _get_num("height")
+                if w is not None:
+                    rm.width = int(w)
+                if h is not None:
+                    rm.height = int(h)
+            except Exception:
+                pass
 
             # Resolve injected args.
             call_kwargs: Dict[str, Any] = {}
@@ -2661,6 +2799,7 @@ class Worker:
                 call_kwargs[inj.param_name] = self._resolve_injected_value(ctx, inj.param_type, model_id, inj)
 
             # Invoke.
+            t_infer0 = time.monotonic()
             if inspect.iscoroutinefunction(spec.func):
                 result = asyncio.run(spec.func(**call_kwargs))
             elif inspect.isasyncgenfunction(spec.func):
@@ -2734,6 +2873,13 @@ class Worker:
                 output_payload = b""
                 success = True
 
+            # inference_ms is best-effort and currently reflects the time spent in the user function
+            # (including incremental consumption for streaming outputs).
+            try:
+                rm.inference_ms = int((time.monotonic() - t_infer0) * 1000)
+            except Exception:
+                pass
+
             logger.info("Task %s completed successfully.", run_id)
 
         except Exception as e:
@@ -2759,6 +2905,44 @@ class Worker:
                     pass
             self._gpu_busy_exit()
 
+            # Best-effort resource peaks.
+            try:
+                import resource as _resource  # linux/mac
+                r = _resource.getrusage(_resource.RUSAGE_SELF)
+                # Linux: ru_maxrss is KB. macOS: bytes. We only run linux in prod, but keep best-effort.
+                rss = int(getattr(r, "ru_maxrss", 0) or 0)
+                if rss > 0:
+                    # Heuristic: treat small values as KB.
+                    rm.peak_ram_bytes = rss * 1024 if rss < (1 << 40) else rss
+            except Exception:
+                pass
+            if torch is not None:
+                try:
+                    if torch.cuda.is_available():
+                        rm.peak_vram_bytes = int(torch.cuda.max_memory_allocated())
+                except Exception:
+                    pass
+
+            rm.mark_compute_completed()
+            if rm.compute_completed_at:
+                self._emit_worker_event_bytes(run_id, "metrics.compute.completed", safe_json_bytes({"at": rm.compute_completed_at}))
+
+            # Emit canonical metric events if values exist.
+            try:
+                rm.finalize()
+                for ev_type, payload in rm.canonical_events():
+                    # compute.* already emitted in real time above
+                    if ev_type in ("metrics.compute.started", "metrics.compute.completed"):
+                        continue
+                    self._emit_worker_event_bytes(run_id, ev_type, safe_json_bytes(payload))
+            except Exception:
+                pass
+            # Emit extended debug payload at end (best-effort).
+            try:
+                self._emit_worker_event_bytes(run_id, "metrics.run", safe_json_bytes(rm.to_metrics_run_payload()))
+            except Exception:
+                pass
+
             self._send_task_result(run_id, success, output_payload, error_type, bool(retryable), safe_message, error_message)
 
             with self._active_tasks_lock:
@@ -2773,6 +2957,7 @@ class Worker:
 
     def _resolve_injected_value(self, ctx: ActionContext, requested_type: Any, model_id: str, inj: InjectionSpec) -> Any:
         qn = type_qualname(requested_type)
+        rm: Optional[RunMetricsV1] = getattr(ctx, "_run_metrics", None)
 
         # diffusers pipeline injection via existing model manager (torch-only).
         if self._model_manager is not None:
@@ -2787,6 +2972,13 @@ class Worker:
             except Exception:
                 pipe = None
             if pipe is not None:
+                if rm is not None and model_id:
+                    try:
+                        parsed = parse_model_ref(str(model_id))
+                        canon = parsed.cozy.canonical() if parsed.scheme == "cozy" and parsed.cozy is not None else str(model_id)
+                        rm.set_initial_model_state(canon, "hot_vram", rm.models.get(canon, None).snapshot_digest if canon in rm.models else None)
+                    except Exception:
+                        pass
                 if isinstance(requested_type, type) and not isinstance(pipe, requested_type):
                     expected_qn = type_qualname(requested_type)
                     got_qn = type_qualname(type(pipe))
@@ -2837,9 +3029,55 @@ class Worker:
                         if self._downloader is None:
                             raise ValueError("diffusers pipeline injection requires a model downloader")
                         cache_dir = os.getenv("WORKER_MODEL_CACHE_DIR", "/tmp/cozy/models")
+                        # Best-effort download timing.
+                        t_dl0 = time.monotonic()
                         local = self._downloader.download(model_id, cache_dir)
+                        t_dl_ms = int((time.monotonic() - t_dl0) * 1000)
+                        if rm is not None:
+                            try:
+                                parsed = parse_model_ref(str(model_id))
+                                canon = parsed.cozy.canonical() if parsed.scheme == "cozy" and parsed.cozy is not None else str(model_id)
+                                warm = False
+                                try:
+                                    warm = canon in set(self._model_cache.get_disk_models())
+                                except Exception:
+                                    warm = False
+                                # If we have an orchestrator-resolved manifest, estimate missing bytes.
+                                resolved_entry = None
+                                try:
+                                    resolved_entry = (getattr(ctx, "resolved_cozy_models_by_id", None) or {}).get(canon)
+                                except Exception:
+                                    resolved_entry = None
+                                bytes_dl = None
+                                if resolved_entry is not None:
+                                    bytes_dl = best_effort_bytes_downloaded(Path(cache_dir), resolved_entry)
+                                rm.add_fetch_time(canon, 0 if warm else t_dl_ms, 0 if warm else bytes_dl)
+                            except Exception:
+                                pass
 
                     kwargs: dict[str, Any] = {}
+
+                    # Cozy pipeline YAML is authoritative; ensure diffusers can load even
+                    # if the artifact only shipped cozy.pipeline.lock.yaml/yaml (no model_index.json).
+                    try:
+                        from gen_worker.cozy_pipeline_spec import (
+                            cozy_custom_pipeline_arg,
+                            ensure_diffusers_model_index_json,
+                            load_cozy_pipeline_spec,
+                        )
+
+                        root = Path(local)
+                        spec = load_cozy_pipeline_spec(root)
+                        if spec is not None:
+                            _ = ensure_diffusers_model_index_json(root)
+                            try:
+                                custom_pipeline = cozy_custom_pipeline_arg(root, spec)
+                                if custom_pipeline:
+                                    kwargs["custom_pipeline"] = custom_pipeline
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
 
                     try:
                         from gen_worker.pipeline_loader import detect_diffusers_variant  # type: ignore
@@ -2867,7 +3105,10 @@ class Worker:
                         pass
 
                     try:
+                        t_pi0 = time.monotonic()
                         obj = requested_type.from_pretrained(local, **kwargs)
+                        if rm is not None:
+                            rm.add_pipeline_init_time(int((time.monotonic() - t_pi0) * 1000))
                     except OSError as e:
                         # Many Stable Diffusion repos include safety_checker/feature_extractor
                         # components that are often omitted from "minimal" downloads. Retry with
@@ -2891,12 +3132,18 @@ class Worker:
                             kwargs2.setdefault("feature_extractor", None)
                             kwargs2.setdefault("image_processor", None)
                             kwargs2.setdefault("requires_safety_checker", False)
+                            t_pi0 = time.monotonic()
                             obj = requested_type.from_pretrained(local, **kwargs2)
+                            if rm is not None:
+                                rm.add_pipeline_init_time(int((time.monotonic() - t_pi0) * 1000))
                         else:
                             raise
 
                 if obj is None:
+                    t_pi0 = time.monotonic()
                     obj = requested_type.from_pretrained(model_id)
+                    if rm is not None:
+                        rm.add_pipeline_init_time(int((time.monotonic() - t_pi0) * 1000))
                 if isinstance(requested_type, type) and not isinstance(obj, requested_type):
                     expected_qn = type_qualname(requested_type)
                     got_qn = type_qualname(type(obj))
@@ -2906,7 +3153,10 @@ class Worker:
                 # Best-effort move to worker device if supported.
                 try:
                     if torch is not None and hasattr(obj, "to") and callable(getattr(obj, "to", None)):
+                        t_to0 = time.monotonic()
                         obj = obj.to(str(ctx.device))
+                        if rm is not None:
+                            rm.add_gpu_load_time(int((time.monotonic() - t_to0) * 1000))
                 except Exception:
                     pass
                 self._custom_runtime_cache[key] = obj

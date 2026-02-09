@@ -36,22 +36,17 @@ class FrontendServiceStub(object):
             channel: A grpc.Channel.
         """
         self.ExecuteAction = channel.unary_unary(
-                '/frontend.FrontendService/ExecuteAction',
+                '/frontend.v1.FrontendService/ExecuteAction',
                 request_serializer=frontend__pb2.ExecuteActionRequest.SerializeToString,
                 response_deserializer=frontend__pb2.ExecuteActionResponse.FromString,
                 _registered_method=True)
-        self.GetRun = channel.unary_unary(
-                '/frontend.FrontendService/GetRun',
-                request_serializer=frontend__pb2.GetRunRequest.SerializeToString,
-                response_deserializer=frontend__pb2.GetRunResponse.FromString,
-                _registered_method=True)
         self.CancelRun = channel.unary_unary(
-                '/frontend.FrontendService/CancelRun',
+                '/frontend.v1.FrontendService/CancelRun',
                 request_serializer=frontend__pb2.CancelRunRequest.SerializeToString,
                 response_deserializer=frontend__pb2.CancelRunResponse.FromString,
                 _registered_method=True)
         self.RealtimeSession = channel.stream_stream(
-                '/frontend.FrontendService/RealtimeSession',
+                '/frontend.v1.FrontendService/RealtimeSession',
                 request_serializer=frontend__pb2.RealtimeProxyMessage.SerializeToString,
                 response_deserializer=frontend__pb2.RealtimeProxyMessage.FromString,
                 _registered_method=True)
@@ -68,15 +63,8 @@ class FrontendServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def GetRun(self, request, context):
-        """2) Wait/await the final result of an existing action. Blocks until completed or error.
-        """
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
     def CancelRun(self, request, context):
-        """3) Cancel an in-flight action/job.
+        """2) Cancel an in-flight action/job.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -97,11 +85,6 @@ def add_FrontendServiceServicer_to_server(servicer, server):
                     request_deserializer=frontend__pb2.ExecuteActionRequest.FromString,
                     response_serializer=frontend__pb2.ExecuteActionResponse.SerializeToString,
             ),
-            'GetRun': grpc.unary_unary_rpc_method_handler(
-                    servicer.GetRun,
-                    request_deserializer=frontend__pb2.GetRunRequest.FromString,
-                    response_serializer=frontend__pb2.GetRunResponse.SerializeToString,
-            ),
             'CancelRun': grpc.unary_unary_rpc_method_handler(
                     servicer.CancelRun,
                     request_deserializer=frontend__pb2.CancelRunRequest.FromString,
@@ -114,9 +97,9 @@ def add_FrontendServiceServicer_to_server(servicer, server):
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
-            'frontend.FrontendService', rpc_method_handlers)
+            'frontend.v1.FrontendService', rpc_method_handlers)
     server.add_generic_rpc_handlers((generic_handler,))
-    server.add_registered_method_handlers('frontend.FrontendService', rpc_method_handlers)
+    server.add_registered_method_handlers('frontend.v1.FrontendService', rpc_method_handlers)
 
 
  # This class is part of an EXPERIMENTAL API.
@@ -138,36 +121,9 @@ class FrontendService(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/frontend.FrontendService/ExecuteAction',
+            '/frontend.v1.FrontendService/ExecuteAction',
             frontend__pb2.ExecuteActionRequest.SerializeToString,
             frontend__pb2.ExecuteActionResponse.FromString,
-            options,
-            channel_credentials,
-            insecure,
-            call_credentials,
-            compression,
-            wait_for_ready,
-            timeout,
-            metadata,
-            _registered_method=True)
-
-    @staticmethod
-    def GetRun(request,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
-        return grpc.experimental.unary_unary(
-            request,
-            target,
-            '/frontend.FrontendService/GetRun',
-            frontend__pb2.GetRunRequest.SerializeToString,
-            frontend__pb2.GetRunResponse.FromString,
             options,
             channel_credentials,
             insecure,
@@ -192,7 +148,7 @@ class FrontendService(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/frontend.FrontendService/CancelRun',
+            '/frontend.v1.FrontendService/CancelRun',
             frontend__pb2.CancelRunRequest.SerializeToString,
             frontend__pb2.CancelRunResponse.FromString,
             options,
@@ -219,7 +175,7 @@ class FrontendService(object):
         return grpc.experimental.stream_stream(
             request_iterator,
             target,
-            '/frontend.FrontendService/RealtimeSession',
+            '/frontend.v1.FrontendService/RealtimeSession',
             frontend__pb2.RealtimeProxyMessage.SerializeToString,
             frontend__pb2.RealtimeProxyMessage.FromString,
             options,

@@ -38,4 +38,5 @@ torch = "2.10.0"
 vram_gb = 12
 
 [tool.cozy.models]
-flux2-klein-4b = "hf:black-forest-labs/FLUX.2-klein-4B"
+# Use Cozy Hub snapshot (backed by R2) instead of pulling from Hugging Face at runtime.
+flux2-klein-4b = "black-forest-labs/flux-2-klein-4b"

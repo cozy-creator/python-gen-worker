@@ -4,6 +4,7 @@ FLUX.2-klein-4B example using Cozy’s injection pattern.
 
 - The worker function only defines input/output + runs inference.
 - Model selection + downloading is handled by the worker runtime via `[tool.cozy.models]`.
+- This model is treated as a turbo model: the worker forces `num_inference_steps=8`.
 
 Config:
 

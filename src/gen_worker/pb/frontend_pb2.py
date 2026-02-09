@@ -24,38 +24,32 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0e\x66rontend.proto\x12\x08\x66rontend\"\\\n\rActionOptions\x12\n\n\x02id\x18\x01 \x01(\t\x12\x12\n\ntimeout_ms\x18\x02 \x01(\x03\x12+\n\x0cretry_policy\x18\x03 \x01(\x0b\x32\x15.frontend.RetryPolicy\"\xa1\x01\n\x0bRetryPolicy\x12\x1b\n\x13initial_interval_ms\x18\x01 \x01(\x03\x12\x1b\n\x13\x62\x61\x63koff_coefficient\x18\x02 \x01(\x02\x12\x1b\n\x13maximum_interval_ms\x18\x03 \x01(\x03\x12\x18\n\x10maximum_attempts\x18\x04 \x01(\x05\x12!\n\x19non_retryable_error_types\x18\x05 \x03(\t\"\xca\x01\n\x14\x45xecuteActionRequest\x12\x15\n\rfunction_name\x18\x01 \x01(\t\x12\x15\n\rinput_payload\x18\x02 \x01(\x0c\x12(\n\x07options\x18\x03 \x01(\x0b\x32\x17.frontend.ActionOptions\x12\x12\n\nrelease_id\x18\x04 \x01(\t\x12\x19\n\x11required_model_id\x18\x05 \x01(\t\x12\x0f\n\x07user_id\x18\x06 \x01(\t\x12\x1a\n\x12required_model_ids\x18\x07 \x03(\t\"\'\n\x15\x45xecuteActionResponse\x12\x0e\n\x06run_id\x18\x01 \x01(\t\"\x1f\n\rGetRunRequest\x12\x0e\n\x06run_id\x18\x01 \x01(\t\"P\n\x0eGetRunResponse\x12\x0f\n\x07success\x18\x01 \x01(\x08\x12\x16\n\x0eoutput_payload\x18\x02 \x01(\x0c\x12\x15\n\rerror_message\x18\x03 \x01(\t\"\"\n\x10\x43\x61ncelRunRequest\x12\x0e\n\x06run_id\x18\x01 \x01(\t\"\x1f\n\x11\x43\x61ncelRunResponse\x12\n\n\x02ok\x18\x01 \x01(\x08\"\x81\x01\n\x0cRealtimeOpen\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x12\n\nrelease_id\x18\x02 \x01(\t\x12\x15\n\rfunction_name\x18\x03 \x01(\t\x12\r\n\x05owner\x18\x04 \x01(\t\x12\x0f\n\x07user_id\x18\x05 \x01(\t\x12\x12\n\ntimeout_ms\x18\x06 \x01(\x03\"B\n\rRealtimeFrame\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x0c\n\x04\x64\x61ta\x18\x02 \x01(\x0c\x12\x0f\n\x07is_text\x18\x03 \x01(\x08\"3\n\rRealtimeClose\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x0e\n\x06reason\x18\x02 \x01(\t\"\x99\x01\n\x14RealtimeProxyMessage\x12&\n\x04open\x18\x01 \x01(\x0b\x32\x16.frontend.RealtimeOpenH\x00\x12(\n\x05\x66rame\x18\x02 \x01(\x0b\x32\x17.frontend.RealtimeFrameH\x00\x12(\n\x05\x63lose\x18\x03 \x01(\x0b\x32\x17.frontend.RealtimeCloseH\x00\x42\x05\n\x03msg2\xbd\x02\n\x0f\x46rontendService\x12P\n\rExecuteAction\x12\x1e.frontend.ExecuteActionRequest\x1a\x1f.frontend.ExecuteActionResponse\x12;\n\x06GetRun\x12\x17.frontend.GetRunRequest\x1a\x18.frontend.GetRunResponse\x12\x44\n\tCancelRun\x12\x1a.frontend.CancelRunRequest\x1a\x1b.frontend.CancelRunResponse\x12U\n\x0fRealtimeSession\x12\x1e.frontend.RealtimeProxyMessage\x1a\x1e.frontend.RealtimeProxyMessage(\x01\x30\x01\x42:Z8github.com/cozy-creator/gen-orchestrator/pkg/pb/frontendb\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0e\x66rontend.proto\x12\x0b\x66rontend.v1\"C\n\rActionOptions\x12\n\n\x02id\x18\x01 \x01(\t\x12\x12\n\ntimeout_ms\x18\x02 \x01(\x03J\x04\x08\x03\x10\x04R\x0cretry_policy\"\xda\x01\n\x14\x45xecuteActionRequest\x12\x15\n\rfunction_name\x18\x01 \x01(\t\x12\x15\n\rinput_payload\x18\x02 \x01(\x0c\x12+\n\x07options\x18\x03 \x01(\x0b\x32\x1a.frontend.v1.ActionOptions\x12\x12\n\nrelease_id\x18\x04 \x01(\t\x12\x0f\n\x07user_id\x18\x06 \x01(\t\x12\x1a\n\x12required_model_ids\x18\x07 \x03(\t\x12\r\n\x05owner\x18\x08 \x01(\tJ\x04\x08\x05\x10\x06R\x11required_model_id\"\'\n\x15\x45xecuteActionResponse\x12\x0e\n\x06run_id\x18\x01 \x01(\t\"\"\n\x10\x43\x61ncelRunRequest\x12\x0e\n\x06run_id\x18\x01 \x01(\t\"\x1f\n\x11\x43\x61ncelRunResponse\x12\n\n\x02ok\x18\x01 \x01(\x08\"\x81\x01\n\x0cRealtimeOpen\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x12\n\nrelease_id\x18\x02 \x01(\t\x12\x15\n\rfunction_name\x18\x03 \x01(\t\x12\r\n\x05owner\x18\x04 \x01(\t\x12\x0f\n\x07user_id\x18\x05 \x01(\t\x12\x12\n\ntimeout_ms\x18\x06 \x01(\x03\"B\n\rRealtimeFrame\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x0c\n\x04\x64\x61ta\x18\x02 \x01(\x0c\x12\x0f\n\x07is_text\x18\x03 \x01(\x08\"3\n\rRealtimeClose\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x0e\n\x06reason\x18\x02 \x01(\t\"\xa2\x01\n\x14RealtimeProxyMessage\x12)\n\x04open\x18\x01 \x01(\x0b\x32\x19.frontend.v1.RealtimeOpenH\x00\x12+\n\x05\x66rame\x18\x02 \x01(\x0b\x32\x1a.frontend.v1.RealtimeFrameH\x00\x12+\n\x05\x63lose\x18\x03 \x01(\x0b\x32\x1a.frontend.v1.RealtimeCloseH\x00\x42\x05\n\x03msg2\x92\x02\n\x0f\x46rontendService\x12V\n\rExecuteAction\x12!.frontend.v1.ExecuteActionRequest\x1a\".frontend.v1.ExecuteActionResponse\x12J\n\tCancelRun\x12\x1d.frontend.v1.CancelRunRequest\x1a\x1e.frontend.v1.CancelRunResponse\x12[\n\x0fRealtimeSession\x12!.frontend.v1.RealtimeProxyMessage\x1a!.frontend.v1.RealtimeProxyMessage(\x01\x30\x01\x42GZEgithub.com/cozy-creator/gen-orchestrator/pkg/pb/frontendv1;frontendv1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
 _builder.BuildTopDescriptorsAndMessages(DESCRIPTOR, 'frontend_pb2', _globals)
 if not _descriptor._USE_C_DESCRIPTORS:
   _globals['DESCRIPTOR']._loaded_options = None
-  _globals['DESCRIPTOR']._serialized_options = b'Z8github.com/cozy-creator/gen-orchestrator/pkg/pb/frontend'
-  _globals['_ACTIONOPTIONS']._serialized_start=28
-  _globals['_ACTIONOPTIONS']._serialized_end=120
-  _globals['_RETRYPOLICY']._serialized_start=123
-  _globals['_RETRYPOLICY']._serialized_end=284
-  _globals['_EXECUTEACTIONREQUEST']._serialized_start=287
-  _globals['_EXECUTEACTIONREQUEST']._serialized_end=489
-  _globals['_EXECUTEACTIONRESPONSE']._serialized_start=491
-  _globals['_EXECUTEACTIONRESPONSE']._serialized_end=530
-  _globals['_GETRUNREQUEST']._serialized_start=532
-  _globals['_GETRUNREQUEST']._serialized_end=563
-  _globals['_GETRUNRESPONSE']._serialized_start=565
-  _globals['_GETRUNRESPONSE']._serialized_end=645
-  _globals['_CANCELRUNREQUEST']._serialized_start=647
-  _globals['_CANCELRUNREQUEST']._serialized_end=681
-  _globals['_CANCELRUNRESPONSE']._serialized_start=683
-  _globals['_CANCELRUNRESPONSE']._serialized_end=714
-  _globals['_REALTIMEOPEN']._serialized_start=717
-  _globals['_REALTIMEOPEN']._serialized_end=846
-  _globals['_REALTIMEFRAME']._serialized_start=848
-  _globals['_REALTIMEFRAME']._serialized_end=914
-  _globals['_REALTIMECLOSE']._serialized_start=916
-  _globals['_REALTIMECLOSE']._serialized_end=967
-  _globals['_REALTIMEPROXYMESSAGE']._serialized_start=970
-  _globals['_REALTIMEPROXYMESSAGE']._serialized_end=1123
-  _globals['_FRONTENDSERVICE']._serialized_start=1126
-  _globals['_FRONTENDSERVICE']._serialized_end=1443
+  _globals['DESCRIPTOR']._serialized_options = b'ZEgithub.com/cozy-creator/gen-orchestrator/pkg/pb/frontendv1;frontendv1'
+  _globals['_ACTIONOPTIONS']._serialized_start=31
+  _globals['_ACTIONOPTIONS']._serialized_end=98
+  _globals['_EXECUTEACTIONREQUEST']._serialized_start=101
+  _globals['_EXECUTEACTIONREQUEST']._serialized_end=319
+  _globals['_EXECUTEACTIONRESPONSE']._serialized_start=321
+  _globals['_EXECUTEACTIONRESPONSE']._serialized_end=360
+  _globals['_CANCELRUNREQUEST']._serialized_start=362
+  _globals['_CANCELRUNREQUEST']._serialized_end=396
+  _globals['_CANCELRUNRESPONSE']._serialized_start=398
+  _globals['_CANCELRUNRESPONSE']._serialized_end=429
+  _globals['_REALTIMEOPEN']._serialized_start=432
+  _globals['_REALTIMEOPEN']._serialized_end=561
+  _globals['_REALTIMEFRAME']._serialized_start=563
+  _globals['_REALTIMEFRAME']._serialized_end=629
+  _globals['_REALTIMECLOSE']._serialized_start=631
+  _globals['_REALTIMECLOSE']._serialized_end=682
+  _globals['_REALTIMEPROXYMESSAGE']._serialized_start=685
+  _globals['_REALTIMEPROXYMESSAGE']._serialized_end=847
+  _globals['_FRONTENDSERVICE']._serialized_start=850
+  _globals['_FRONTENDSERVICE']._serialized_end=1124
 # @@protoc_insertion_point(module_scope)

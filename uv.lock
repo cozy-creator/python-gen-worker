@@ -610,6 +610,7 @@ dependencies = [
     { name = "protobuf" },
     { name = "psutil" },
     { name = "pyjwt", extra = ["crypto"] },
+    { name = "pyyaml" },
     { name = "tqdm" },
 ]
 
@@ -645,6 +646,7 @@ requires-dist = [
     { name = "psutil", specifier = ">=7.0.0" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.8.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.0" },
+    { name = "pyyaml", specifier = ">=6.0.0" },
     { name = "safetensors", marker = "extra == 'torch'", specifier = ">=0.7.0" },
     { name = "torch", marker = "(sys_platform == 'linux' and extra == 'torch') or (sys_platform == 'win32' and extra == 'torch')", specifier = ">=2.10.0", index = "https://download.pytorch.org/whl/cu126" },
     { name = "torch", marker = "sys_platform != 'linux' and sys_platform != 'win32' and extra == 'torch'", specifier = ">=2.10.0" },

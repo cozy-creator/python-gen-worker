@@ -86,9 +86,12 @@ class TestContractAndIncremental(unittest.TestCase):
         # Capture worker_event messages.
         events = []
         for m in w._sent:
-            if getattr(m, "worker_event", None) is None:
+            if not hasattr(m, "WhichOneof") or m.WhichOneof("msg") != "worker_event":
                 continue
             evt = m.worker_event
+            # Ignore non-output events (e.g. metrics.*).
+            if not str(evt.event_type or "").startswith("output."):
+                continue
             events.append((evt.event_type, evt.payload_json))
 
         self.assertGreaterEqual(len(events), 3)
@@ -115,7 +118,7 @@ class TestContractAndIncremental(unittest.TestCase):
         b = msgspec.msgpack.encode(msgspec.to_builtins(payload))
         w._execute_task(ctx, spec, b)
 
-        run_results = [m.run_result for m in w._sent if getattr(m, "run_result", None) is not None]
+        run_results = [m.run_result for m in w._sent if hasattr(m, "WhichOneof") and m.WhichOneof("msg") == "run_result"]
         self.assertEqual(len(run_results), 1)
         rr = run_results[0]
         self.assertTrue(rr.success)
@@ -139,7 +142,7 @@ class TestContractAndIncremental(unittest.TestCase):
         b = msgspec.msgpack.encode(msgspec.to_builtins(payload))
         w._execute_task(ctx, spec, b)
 
-        run_results = [m.run_result for m in w._sent if getattr(m, "run_result", None) is not None]
+        run_results = [m.run_result for m in w._sent if hasattr(m, "WhichOneof") and m.WhichOneof("msg") == "run_result"]
         self.assertEqual(len(run_results), 1)
         rr = run_results[0]
         self.assertFalse(rr.success)

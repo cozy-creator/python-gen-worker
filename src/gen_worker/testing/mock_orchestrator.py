@@ -308,8 +308,6 @@ def _format_msg(msg: pb.WorkerSchedulerMessage) -> str:
     if msg.HasField("worker_event"):
         ev = msg.worker_event
         return f"worker_event run_id={ev.run_id} type={ev.event_type}"
-    if msg.HasField("spawn_tasks"):
-        return "spawn_tasks"
     if msg.HasField("load_model_result"):
         return "load_model_result"
     if msg.HasField("unload_model_result"):

@@ -1,6 +1,6 @@
 [project]
 name = "sd15"
-version = "0.1.0"
+version = "0.1.1"
 description = "Stable Diffusion 1.5 example (inference-only; models via [tool.cozy.models])"
 requires-python = ">=3.12"
 dependencies = [

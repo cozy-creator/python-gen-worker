@@ -24,7 +24,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 
 class GenerateInput(msgspec.Struct):
     prompt: str
-    num_inference_steps: int = 4
+    # FLUX.2-klein-4B is a turbo model: we always run at 8 steps.
+    # Keep the field for API compatibility, but ignore it in `generate()`.
+    num_inference_steps: int = 8
     guidance_scale: float = 1.0
     width: int = 1024
     height: int = 1024
@@ -51,7 +53,14 @@ def generate(
     if ctx.is_canceled():
         raise InterruptedError("canceled")
 
-    logger.info("[run_id=%s] flux2-klein-4b prompt=%r", ctx.run_id, payload.prompt)
+    steps = 8  # forced turbo steps
+    logger.info(
+        "[run_id=%s] flux2-klein-4b prompt=%r steps=%s (forced, requested=%s)",
+        ctx.run_id,
+        payload.prompt,
+        steps,
+        payload.num_inference_steps,
+    )
 
     # FLUX.2-klein-4B can exceed 8GB VRAM; use sequential CPU offload by default.
     if torch.cuda.is_available() and _should_enable_seq_offload():
@@ -66,7 +75,7 @@ def generate(
 
     result = pipeline(
         prompt=payload.prompt,
-        num_inference_steps=payload.num_inference_steps,
+        num_inference_steps=steps,
         guidance_scale=payload.guidance_scale,
         width=payload.width,
         height=payload.height,
