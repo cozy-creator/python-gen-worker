@@ -68,12 +68,9 @@ from .types import Asset
 from .model_cache import ModelCache, ModelCacheStats, ModelLocation
 from .injection import (
     InjectionSpec,
-    ModelArtifacts,
     ModelRef,
     ModelRefSource,
-    get_registered_runtime_loader,
     parse_injection,
-    resolve_loader,
     type_qualname,
 )
 
@@ -251,7 +248,7 @@ def _http_request(
 ) -> urllib.request.Request:
     req = urllib.request.Request(url, data=body, method=method)
     req.add_header("Authorization", f"Bearer {token}")
-    owner = (owner or "").strip() or os.getenv("OWNER", "").strip()
+    owner = (owner or "").strip()
     if owner:
         req.add_header("X-Cozy-Owner", owner)
     if content_type:
@@ -376,6 +373,7 @@ class ActionContext:
         timeout_ms: Optional[int] = None,
         file_api_base_url: Optional[str] = None,
         file_api_token: Optional[str] = None,
+        resolved_cozy_models_by_id: Optional[Dict[str, Any]] = None,
     ) -> None:
         self._run_id = run_id
         self._owner = owner
@@ -383,6 +381,7 @@ class ActionContext:
         self._timeout_ms = timeout_ms
         self._file_api_base_url = (file_api_base_url or "").strip() or None
         self._file_api_token = (file_api_token or "").strip() or None
+        self._resolved_cozy_models_by_id = resolved_cozy_models_by_id
         self._started_at = time.time()
         self._deadline: Optional[float] = None
         if timeout_ms is not None and timeout_ms > 0:
@@ -439,6 +438,11 @@ class ActionContext:
         if self._file_api_token:
             return self._file_api_token
         return _require_file_api_token()
+
+    
+    def resolved_cozy_models_by_id(self) -> Optional[Dict[str, Any]]:
+        return self._resolved_cozy_models_by_id
+
 
     def time_remaining_s(self) -> Optional[float]:
         if self._deadline is None:
@@ -608,13 +612,15 @@ class _AuthInterceptor(grpc.StreamStreamClientInterceptor):
 class Worker:
     """Worker implementation that connects to the scheduler via gRPC."""
 
+    _JWT_ROTATE_EVENT_TYPES = ("worker.jwt.rotate", "worker_jwt.rotate")
+
     def __init__(
         self,
         scheduler_addr: str = "localhost:8080",
         scheduler_addrs: Optional[List[str]] = None,
         user_module_names: List[str] = ["functions"], # Add new parameter for user modules
         worker_id: Optional[str] = None,
-        auth_token: Optional[str] = None,
+        worker_jwt: str = "",
         use_tls: bool = False,
         reconnect_delay: int = 5,
         max_reconnect_attempts: int = 0,  # 0 means infinite retries
@@ -629,7 +635,7 @@ class Worker:
             scheduler_addrs: Optional list of seed scheduler addresses.
             user_module_names: List of Python module names containing user-defined @worker_function functions.
             worker_id: Unique ID for this worker (generated if not provided).
-            auth_token: Optional authentication token.
+            worker_jwt: Worker-connect JWT (required).
             use_tls: Whether to use TLS for the connection.
             reconnect_delay: Seconds to wait between reconnection attempts.
             max_reconnect_attempts: Max reconnect attempts (0 = infinite).
@@ -641,7 +647,9 @@ class Worker:
         self.scheduler_addrs = self._normalize_scheduler_addrs(scheduler_addr, scheduler_addrs)
         self.user_module_names = user_module_names # Store module names
         self.worker_id = worker_id or f"py-worker-{os.getpid()}"
-        self.auth_token = auth_token
+        self.worker_jwt = (worker_jwt or "").strip()
+        if not self.worker_jwt:
+            raise ValueError("WORKER_JWT is required (worker-connect JWT); refusing to run unauthenticated worker")
         self.use_tls = use_tls
         self.reconnect_delay = reconnect_delay
         self.max_reconnect_attempts = max_reconnect_attempts
@@ -654,12 +662,10 @@ class Worker:
         self._jwt_audience = os.getenv("SCHEDULER_JWT_AUDIENCE", "").strip()
         self._jwks_cache: Optional[_JWKSCache] = _JWKSCache(self._jwks_url, self._jwks_ttl_seconds) if self._jwks_url else None
 
-        # Internal runtime identity for the currently running release.
-        self.release_id = os.getenv("RELEASE_ID", "").strip()
-        if not self.release_id:
-            logger.warning("RELEASE_ID environment variable not set for this worker!")
-
-        self.owner = os.getenv("OWNER", "")
+        # Worker containers are treated as untrusted. Do not depend on RELEASE_ID/OWNER env vars.
+        # Release + owner identity come from the scheduler-issued JWT and per-run gRPC envelopes.
+        self.release_id = ""
+        self.owner = ""
         self.runpod_pod_id = os.getenv("RUNPOD_POD_ID", "") # Read injected pod ID
         if not self.runpod_pod_id:
             logger.warning("RUNPOD_POD_ID environment variable not set for this worker!")
@@ -677,20 +683,15 @@ class Worker:
         self._discovered_resources: Dict[str, ResourceRequirements] = {} # Store resources per function
         self._function_schemas: Dict[str, Tuple[bytes, bytes, Optional[bytes], bytes]] = {}  # func_name -> (input_schema_json, output_schema_json, delta_schema_json, injection_json)
 
-        # Custom runtime loader hooks (type qualname -> import path)
-        self._runtime_loaders: Dict[str, str] = {}
-        try:
-            raw = os.getenv("WORKER_RUNTIME_LOADERS_JSON", "").strip()
-            if raw:
-                self._runtime_loaders = json.loads(raw)
-        except Exception as exc:
-            logger.warning("invalid WORKER_RUNTIME_LOADERS_JSON: %s", exc)
-
         self._custom_runtime_cache: Dict[Tuple[str, str], Any] = {}  # (model_id, injected_type_qualname) -> runtime handle
         self._custom_runtime_locks: Dict[Tuple[str, str], threading.Lock] = {}
 
         self._gpu_busy_lock = threading.Lock()
-        self._is_gpu_busy = False
+        # Busy is used by the scheduler as a cheap routing hint.
+        # Use a refcount (not a boolean) so overlapping inference + model ops
+        # cannot flip BUSY -> NOT BUSY prematurely.
+        self._gpu_busy_refcount = 0
+        self._is_gpu_busy = False  # legacy; derived from refcount in _get_gpu_busy_status()
         # Detect GPU availability once at startup
         self._has_gpu = False
         try:
@@ -698,6 +699,11 @@ class Worker:
             self._has_gpu = torch.cuda.is_available() and torch.cuda.device_count() > 0
         except ImportError:
             pass
+
+        # Track models currently in use by in-flight runs, so we can refuse
+        # UnloadModelCommand that would thrash/kill active inference.
+        self._active_model_use_lock = threading.Lock()
+        self._active_model_use_counts: Dict[str, int] = {}
 
         self._channel: Optional[Any] = None
         self._stub: Optional[Any] = None
@@ -736,15 +742,25 @@ class Worker:
         self._downloader = downloader
         if self._downloader is None:
             base_url = os.getenv("COZY_HUB_URL", "").strip()
-            token = os.getenv("COZY_HUB_TOKEN", "").strip() or None
+            allow_api = str(os.getenv("WORKER_ALLOW_COZY_HUB_API_RESOLVE", "") or "").strip().lower() in ("1", "true", "t", "yes", "y")
+            token = (os.getenv("COZY_HUB_TOKEN", "").strip() or None) if allow_api else None
             # Default to the composite model-ref downloader:
-            # - Cozy snapshots when COZY_HUB_URL is set
+            # - Cozy snapshots using orchestrator-resolved URLs (no Cozy Hub API calls)
             # - Hugging Face refs via huggingface_hub when installed
-            self._downloader = ModelRefDownloader(cozy_base_url=base_url, cozy_token=token)
+            self._downloader = ModelRefDownloader(
+                cozy_base_url=base_url,
+                cozy_token=token,
+                allow_cozy_hub_api_resolve=allow_api,
+            )
         self._supported_model_ids_from_scheduler: Optional[List[str]] = None # To store IDs from scheduler
         # Signature-driven model selection mapping and allowlist (provided by orchestrator).
         self._release_model_id_by_key: Dict[str, str] = {}
         self._release_allowed_model_ids: Optional[set[str]] = None
+        # Orchestrator-resolved manifests received in ReleaseModelConfig (startup prefetch baseline).
+        # Keys should be canonical model ref strings (e.g. "cozy:owner/repo@sha256:<digest>").
+        self._resolved_cozy_models_by_id_baseline: Dict[str, Any] = {}
+        self._prefetch_lock = threading.Lock()
+        self._prefetch_thread: Optional[threading.Thread] = None
         self._model_init_done_event = threading.Event() # To signal model init is complete
 
         # LRU model cache for tracking VRAM and disk-cached models
@@ -784,12 +800,12 @@ class Worker:
         if self._downloader:
             logger.info(f"ModelDownloader of type '{type(self._downloader).__name__}' configured.")
 
-        logger.info(f"Created worker: ID={self.worker_id}, ReleaseID={self.release_id or 'N/A'}, Scheduler={scheduler_addr}")
+        logger.info(f"Created worker: ID={self.worker_id}, Scheduler={scheduler_addr}")
 
         # Discover functions before setting signals? Maybe after. Let's do it here.
         self._discover_and_register_functions()
 
-        self._verify_auth_token()
+        self._verify_worker_jwt()
 
         signal.signal(signal.SIGINT, self._handle_interrupt)
         signal.signal(signal.SIGTERM, self._handle_interrupt)
@@ -829,27 +845,27 @@ class Worker:
             seen.add(addr)
             yield addr
 
-    def _verify_auth_token(self) -> None:
-        if not self.auth_token or not self._jwks_cache:
+    def _verify_worker_jwt(self) -> None:
+        if not self.worker_jwt or not self._jwks_cache:
             return
         try:
-            header = jwt.get_unverified_header(self.auth_token)
+            header = jwt.get_unverified_header(self.worker_jwt)
             kid = header.get("kid")
             key = self._jwks_cache.get_key(kid)
             if not key:
                 raise ValueError("JWKS key not found for token")
             options = {"verify_aud": bool(self._jwt_audience)}
             jwt.decode(
-                self.auth_token,
+                self.worker_jwt,
                 key=key,
                 algorithms=["RS256"],
                 audience=self._jwt_audience or None,
                 issuer=self._jwt_issuer or None,
                 options=options,
             )
-            logger.info("Worker auth token verified against scheduler JWKS.")
+            logger.info("Worker-connect JWT verified against scheduler JWKS.")
         except Exception as e:
-            logger.error(f"Worker auth token verification failed: {e}")
+            logger.error(f"Worker-connect JWT verification failed: {e}")
             raise
 
     def _sanitize_safe_message(self, message: str) -> str:
@@ -904,19 +920,95 @@ class Worker:
 
 
     def _set_gpu_busy_status(self, busy: bool, func_name_for_log: str = "") -> None:
-        with self._gpu_busy_lock:
-            if self._is_gpu_busy == busy:
-                return
-            self._is_gpu_busy = busy
-        if func_name_for_log:
-            logger.info(f"GPU status changed to {busy} due to function '{func_name_for_log}'.")
+        # Legacy setter kept for older call sites (none in-tree). Translate to refcount.
+        if busy:
+            self._gpu_busy_enter()
         else:
-            logger.info(f"GPU status changed to {busy}.")
+            self._gpu_busy_exit()
 
 
     def _get_gpu_busy_status(self) -> bool:
-        with self._gpu_busy_lock:
-            return self._is_gpu_busy
+        lock = getattr(self, "_gpu_busy_lock", None)
+        if lock is None:
+            return bool(getattr(self, "_is_gpu_busy", False))
+        with lock:
+            ref = int(getattr(self, "_gpu_busy_refcount", 0) or 0)
+            busy = ref > 0
+            # Keep legacy boolean in sync for any external introspection.
+            try:
+                self._is_gpu_busy = busy
+            except Exception:
+                pass
+            return busy
+
+    def _gpu_busy_enter(self) -> None:
+        if not bool(getattr(self, "_has_gpu", False)):
+            return
+        lock = getattr(self, "_gpu_busy_lock", None)
+        if lock is None:
+            return
+        with lock:
+            cur = int(getattr(self, "_gpu_busy_refcount", 0) or 0)
+            self._gpu_busy_refcount = cur + 1
+            self._is_gpu_busy = self._gpu_busy_refcount > 0
+
+    def _gpu_busy_exit(self) -> None:
+        if not bool(getattr(self, "_has_gpu", False)):
+            return
+        lock = getattr(self, "_gpu_busy_lock", None)
+        if lock is None:
+            return
+        with lock:
+            cur = int(getattr(self, "_gpu_busy_refcount", 0) or 0)
+            if cur <= 1:
+                self._gpu_busy_refcount = 0
+            else:
+                self._gpu_busy_refcount = cur - 1
+            self._is_gpu_busy = self._gpu_busy_refcount > 0
+
+    def _model_use_enter(self, canonical_model_id: str) -> None:
+        mid = str(canonical_model_id or "").strip()
+        if not mid:
+            return
+        lock = getattr(self, "_active_model_use_lock", None)
+        if lock is None:
+            return
+        with lock:
+            mp = getattr(self, "_active_model_use_counts", None)
+            if mp is None:
+                self._active_model_use_counts = {}
+                mp = self._active_model_use_counts
+            mp[mid] = int(mp.get(mid, 0) or 0) + 1
+
+    def _model_use_exit(self, canonical_model_id: str) -> None:
+        mid = str(canonical_model_id or "").strip()
+        if not mid:
+            return
+        lock = getattr(self, "_active_model_use_lock", None)
+        if lock is None:
+            return
+        with lock:
+            mp = getattr(self, "_active_model_use_counts", None) or {}
+            cur = int(mp.get(mid, 0) or 0) - 1
+            if cur <= 0:
+                mp.pop(mid, None)
+            else:
+                mp[mid] = cur
+            try:
+                self._active_model_use_counts = mp
+            except Exception:
+                pass
+
+    def _is_model_in_use(self, canonical_model_id: str) -> bool:
+        mid = str(canonical_model_id or "").strip()
+        if not mid:
+            return False
+        lock = getattr(self, "_active_model_use_lock", None)
+        if lock is None:
+            return False
+        with lock:
+            mp = getattr(self, "_active_model_use_counts", None) or {}
+            return int(mp.get(mid, 0) or 0) > 0
 
 
     def _discover_and_register_functions(self) -> None:
@@ -1407,8 +1499,8 @@ class Worker:
                 self._channel = grpc.insecure_channel(self.scheduler_addr)
 
             interceptors = []
-            if self.auth_token:
-                interceptors.append(_AuthInterceptor(self.auth_token))
+            if self.worker_jwt:
+                interceptors.append(_AuthInterceptor(self.worker_jwt))
 
             if interceptors:
                 self._channel = grpc.intercept_channel(self._channel, *interceptors)
@@ -1586,9 +1678,9 @@ class Worker:
                     continue
 
             resources = pb.WorkerResources(
-                worker_id=self.worker_id,
-                # Runtime identity is release_id.
-                release_id=self.release_id,
+                # Worker identity is carried in the worker-connect JWT claims. These fields are ignored.
+                worker_id="",
+                release_id="",
                 # owner is provided per-request via TaskExecutionRequest/RealtimeOpenCommand.
                 runpod_pod_id=self.runpod_pod_id,
                 gpu_is_busy=self._get_gpu_busy_status(),
@@ -1847,32 +1939,268 @@ class Worker:
             self._handle_realtime_frame(message.realtime_frame)
         elif msg_type == "realtime_close_cmd":
             self._handle_realtime_close_cmd(message.realtime_close_cmd)
+        elif msg_type == "worker_event":
+            self._handle_worker_event_from_scheduler(message.worker_event)
         # Add handling for other message types if needed (e.g., config updates)
         elif msg_type == 'release_model_config':
+            logger.info("Received ReleaseModelConfig (%d models)", len(message.release_model_config.supported_model_ids))
+            self._supported_model_ids_from_scheduler = [
+                _canonicalize_model_ref_string(str(v)) for v in list(message.release_model_config.supported_model_ids)
+            ]
+            try:
+                # Optional label->id mapping for signature-driven model selection.
+                self._release_model_id_by_key = {
+                    str(k): _canonicalize_model_ref_string(str(v))
+                    for k, v in dict(message.release_model_config.model_id_by_key).items()
+                }
+            except Exception:
+                self._release_model_id_by_key = {}
+
+            # Baseline resolved manifests for Cozy model downloads (issue #66/#238).
+            self._resolved_cozy_models_by_id_baseline = self._canonicalize_resolved_models_map(
+                dict(getattr(message.release_model_config, "resolved_cozy_models_by_id", {}) or {})
+            )
+
+            self._release_allowed_model_ids = set(self._supported_model_ids_from_scheduler)
+
+            # Start background prefetch regardless of model manager; disk readiness is useful even
+            # for lightweight workers and enables cache-aware routing.
+            self._start_startup_prefetch(self._supported_model_ids_from_scheduler)
+
             if self._model_manager:
-                logger.info(f"Received ReleaseModelConfig: {message.release_model_config.supported_model_ids}")
-                self._supported_model_ids_from_scheduler = [
-                    _canonicalize_model_ref_string(str(v)) for v in list(message.release_model_config.supported_model_ids)
-                ]
-                try:
-                    # Optional label->id mapping for signature-driven model selection.
-                    self._release_model_id_by_key = {
-                        str(k): _canonicalize_model_ref_string(str(v))
-                        for k, v in dict(message.release_model_config.model_id_by_key).items()
-                    }
-                except Exception:
-                    self._release_model_id_by_key = {}
-                self._release_allowed_model_ids = set(self._supported_model_ids_from_scheduler)
+                # Legacy/model-manager-specific config hook (may load/prep models).
                 self._model_init_done_event.clear() # Clear before starting new init
                 model_init_thread = threading.Thread(target=self._process_release_config_async_wrapper, daemon=True)
                 model_init_thread.start()
             else:
-                logger.info("Received ReleaseModelConfig, but no model manager configured. Ignoring.")
-                self._model_init_done_event.set() # Signal completion as there's nothing to do
+                self._model_init_done_event.set()
         elif msg_type is None:
              logger.warning("Received empty message from scheduler.")
         else:
             logger.warning(f"Received unhandled message type: {msg_type}")
+
+    @staticmethod
+    def _canonicalize_resolved_models_map(mp: Dict[str, Any]) -> Dict[str, Any]:
+        out: Dict[str, Any] = {}
+        for k, v in (mp or {}).items():
+            raw = str(k or "").strip()
+            if not raw:
+                continue
+            canon = _canonicalize_model_ref_string(raw)
+            out[canon] = v
+            # Also keep the raw key if different, to be tolerant of non-canonical senders.
+            if raw != canon:
+                out[raw] = v
+        return out
+
+    def _start_startup_prefetch(self, model_ids: List[str]) -> None:
+        model_ids = [str(m or "").strip() for m in (model_ids or []) if str(m or "").strip()]
+        if not model_ids:
+            return
+        with self._prefetch_lock:
+            if self._prefetch_thread and self._prefetch_thread.is_alive():
+                return
+            self._prefetch_thread = threading.Thread(
+                target=self._startup_prefetch_loop,
+                args=(model_ids,),
+                daemon=True,
+                name="StartupModelPrefetch",
+            )
+            self._prefetch_thread.start()
+
+    def _startup_prefetch_loop(self, model_ids: List[str]) -> None:
+        """
+        Download required models on startup without waiting for a run.
+
+        This warms the disk cache and increments readiness via disk_models in the next heartbeat.
+        """
+        cache_dir = Path(os.getenv("WORKER_MODEL_CACHE_DIR") or "/tmp/cozy/models")
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        # Concurrency cap (best-effort). download() itself is blocking, so we use worker threads.
+        max_conc = 2
+        try:
+            max_conc = max(1, int(self._model_cache.get_max_concurrent_downloads()))
+        except Exception:
+            max_conc = 2
+
+        q: "queue.Queue[str]" = queue.Queue()
+        for mid in model_ids:
+            q.put_nowait(mid)
+
+        def worker() -> None:
+            from .model_ref_downloader import reset_resolved_cozy_models_by_id, set_resolved_cozy_models_by_id
+
+            while not self._stop_event.is_set():
+                try:
+                    model_id = q.get_nowait()
+                except queue.Empty:
+                    return
+
+                canon = _canonicalize_model_ref_string(model_id)
+                try:
+                    started_at = time.monotonic()
+                    # If Cozy snapshot already exists on disk, mark it ready without downloading.
+                    existing = self._try_find_existing_cozy_snapshot_dir(canon, cache_dir)
+                    if existing is not None:
+                        self._model_cache.mark_cached_to_disk(canon, existing)
+                        # Best-effort telemetry + convergence signals.
+                        try:
+                            payload = json.dumps(
+                                {"model_id": canon, "cached": True, "duration_ms": 0},
+                                separators=(",", ":"),
+                                sort_keys=True,
+                            ).encode("utf-8")
+                            self._send_message(
+                                pb.WorkerSchedulerMessage(
+                                    worker_event=pb.WorkerEvent(run_id="", event_type="model.download.completed", payload_json=payload)
+                                )
+                            )
+                            self._send_message(
+                                pb.WorkerSchedulerMessage(
+                                    worker_event=pb.WorkerEvent(run_id="", event_type="model.ready", payload_json=json.dumps({"model_id": canon}, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+                                )
+                            )
+                        except Exception:
+                            pass
+                        # Push a registration update promptly (do not wait for the 10s heartbeat tick).
+                        self._register_worker(is_heartbeat=True)
+                        continue
+
+                    self._model_cache.mark_downloading(canon, progress=0.0)
+                    try:
+                        payload = json.dumps({"model_id": canon}, separators=(",", ":"), sort_keys=True).encode("utf-8")
+                        self._send_message(
+                            pb.WorkerSchedulerMessage(
+                                worker_event=pb.WorkerEvent(run_id="", event_type="model.download.started", payload_json=payload)
+                            )
+                        )
+                    except Exception:
+                        pass
+
+                    tok = set_resolved_cozy_models_by_id(self._resolved_cozy_models_by_id_baseline or None)
+                    try:
+                        local_path = self._downloader.download(canon, str(cache_dir)) if self._downloader else ""
+                    finally:
+                        reset_resolved_cozy_models_by_id(tok)
+
+                    lp = Path(local_path) if local_path else None
+                    if lp is None or not lp.exists():
+                        raise RuntimeError(f"model download returned missing path: {local_path!r}")
+
+                    self._model_cache.mark_cached_to_disk(canon, lp)
+                    # Optional fast convergence signal.
+                    try:
+                        payload = json.dumps({"model_id": canon}, separators=(",", ":"), sort_keys=True).encode("utf-8")
+                        self._send_message(
+                            pb.WorkerSchedulerMessage(
+                                worker_event=pb.WorkerEvent(run_id="", event_type="model.ready", payload_json=payload)
+                            )
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        dur_ms = int((time.monotonic() - started_at) * 1000)
+                        payload = json.dumps(
+                            {"model_id": canon, "cached": False, "duration_ms": dur_ms},
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        ).encode("utf-8")
+                        self._send_message(
+                            pb.WorkerSchedulerMessage(
+                                worker_event=pb.WorkerEvent(run_id="", event_type="model.download.completed", payload_json=payload)
+                            )
+                        )
+                    except Exception:
+                        pass
+                    # Push a registration update promptly (do not wait for the 10s heartbeat tick).
+                    self._register_worker(is_heartbeat=True)
+                except Exception as e:
+                    try:
+                        # Clear "downloading" state on failure so we don't report a stuck download forever.
+                        if self._model_cache:
+                            self._model_cache.unload_model(canon)
+                    except Exception:
+                        pass
+                    # Best-effort: if resolved URLs expired, request refresh from scheduler.
+                    msg = str(e)
+                    if "403" in msg or "401" in msg:
+                        try:
+                            payload = json.dumps({"model_id": canon}, separators=(",", ":"), sort_keys=True).encode("utf-8")
+                            self._send_message(
+                                pb.WorkerSchedulerMessage(
+                                    worker_event=pb.WorkerEvent(run_id="", event_type="model.url_refresh", payload_json=payload)
+                                )
+                            )
+                        except Exception:
+                            pass
+                    try:
+                        dur_ms = int((time.monotonic() - started_at) * 1000)
+                        payload = json.dumps(
+                            {"model_id": canon, "duration_ms": dur_ms, "error_type": type(e).__name__},
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        ).encode("utf-8")
+                        self._send_message(
+                            pb.WorkerSchedulerMessage(
+                                worker_event=pb.WorkerEvent(run_id="", event_type="model.download.failed", payload_json=payload)
+                            )
+                        )
+                    except Exception:
+                        pass
+                    logger.warning("Startup prefetch failed for %s: %s", canon, e)
+
+        threads = [threading.Thread(target=worker, daemon=True, name=f"PrefetchWorker-{i}") for i in range(max_conc)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+    def _try_find_existing_cozy_snapshot_dir(self, canonical_model_id: str, cache_dir: Path) -> Optional[Path]:
+        # Only applies to cozy:@sha256 refs where the snapshot digest is known.
+        try:
+            parsed = parse_model_ref(canonical_model_id)
+        except Exception:
+            return None
+        if parsed.scheme != "cozy" or parsed.cozy is None:
+            return None
+        digest = (parsed.cozy.digest or "").strip()
+        if not digest:
+            # Tag refs are mutable; rely on downloads.
+            return None
+        snap_dir = cache_dir / "cozy" / "snapshots" / digest
+        if snap_dir.exists():
+            return snap_dir
+        return None
+
+    def _handle_worker_event_from_scheduler(self, ev: WorkerEvent) -> None:
+        # Direction is not enforced by the proto; we reserve WorkerEvent for low-frequency
+        # scheduler->worker control signals too (e.g. WORKER_JWT rotation).
+        try:
+            event_type = str(getattr(ev, "event_type", "") or "").strip()
+            if not event_type:
+                return
+            if event_type not in self._JWT_ROTATE_EVENT_TYPES:
+                logger.info("Ignoring scheduler worker_event type=%r", event_type)
+                return
+
+            payload_raw = getattr(ev, "payload_json", b"") or b""
+            payload: Dict[str, Any] = {}
+            try:
+                payload = json.loads(payload_raw.decode("utf-8")) if payload_raw else {}
+            except Exception:
+                payload = {}
+
+            new_token = str(payload.get("worker_jwt") or payload.get("token") or "").strip()
+            if not new_token:
+                logger.warning("Received worker JWT rotation event without a token; ignoring")
+                return
+
+            # Only affects future reconnects. The current stream uses the interceptor created at connect time.
+            self.worker_jwt = new_token
+            logger.info("Stored rotated WORKER_JWT for next reconnect (len=%d).", len(new_token))
+        except Exception as e:
+            logger.warning("Failed to handle scheduler worker_event: %s", e)
 
     def _process_release_config_async_wrapper(self) -> None:
         if not self._model_manager or self._supported_model_ids_from_scheduler is None:
@@ -1888,12 +2216,17 @@ class Worker:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
 
-            loop.run_until_complete(
-                self._model_manager.process_supported_models_config(
-                    self._supported_model_ids_from_scheduler,
-                    self._downloader
+            from .model_ref_downloader import reset_resolved_cozy_models_by_id, set_resolved_cozy_models_by_id
+            tok = set_resolved_cozy_models_by_id(self._resolved_cozy_models_by_id_baseline or None)
+            try:
+                loop.run_until_complete(
+                    self._model_manager.process_supported_models_config(
+                        self._supported_model_ids_from_scheduler,
+                        self._downloader
+                    )
                 )
-            )
+            finally:
+                reset_resolved_cozy_models_by_id(tok)
             logger.info("Model configuration and downloads (if any) processed.")
         except Exception as e:
             logger.exception(f"Error during model_manager.process_supported_models_config: {e}")
@@ -1903,9 +2236,23 @@ class Worker:
             self._model_init_done_event.set() # Signal completion or failure
 
     def _handle_load_model_cmd(self, cmd: LoadModelCommand) -> None:
-        model_id = cmd.model_id
-        logger.info(f"Received LoadModelCommand for: {model_id}")
-        success = False; error_msg = ""
+        model_id = _canonicalize_model_ref_string(str(getattr(cmd, "model_id", "") or "").strip())
+        logger.info("Received LoadModelCommand for: %s", model_id)
+        success = False
+        error_msg = ""
+        started_at = time.monotonic()
+
+        try:
+            payload = json.dumps({"model_id": model_id}, separators=(",", ":"), sort_keys=True).encode("utf-8")
+            self._send_message(
+                pb.WorkerSchedulerMessage(
+                    worker_event=pb.WorkerEvent(run_id="", event_type="model.load.started", payload_json=payload)
+                )
+            )
+        except Exception:
+            pass
+
+        self._gpu_busy_enter()
         if not self._model_manager:
             error_msg = "LoadModelCommand: No model manager configured on worker."
             logger.error(error_msg)
@@ -1923,7 +2270,14 @@ class Worker:
                 success = asyncio.run(self._model_manager.load_model_into_vram(model_id))
                 if success: logger.info(f"Model '{model_id}' loaded to VRAM by Model Memory Manager.")
                 else: error_msg = f"MMM.load_model_into_vram failed for '{model_id}'."; logger.error(error_msg)
-            except Exception as e: error_msg = f"Exception in mmm.load_model_into_vram for '{model_id}': {e}"; logger.exception(error_msg)
+            except Exception as e:
+                msg = str(e)
+                if "out of memory" in msg.lower():
+                    error_msg = f"insufficient_vram: {msg}"
+                else:
+                    error_msg = f"Exception in mmm.load_model_into_vram for '{model_id}': {e}"
+                logger.exception(error_msg)
+        self._gpu_busy_exit()
         
         result = pb.LoadModelResult(model_id=model_id, success=success, error_message=error_msg)
         self._send_message(pb.WorkerSchedulerMessage(load_model_result=result))
@@ -1935,14 +2289,62 @@ class Worker:
             if self._model_manager and hasattr(self._model_manager, 'model_sizes'):
                 estimated_size_gb = self._model_manager.model_sizes.get(model_id, 0.0)
             self._model_cache.mark_loaded_to_vram(model_id, None, estimated_size_gb)
+            # Push an immediate heartbeat/registration update for faster scheduler convergence.
+            self._register_worker(is_heartbeat=True)
+
+        try:
+            dur_ms = int((time.monotonic() - started_at) * 1000)
+            ev_type = "model.load.completed" if success else "model.load.failed"
+            payload = json.dumps(
+                {"model_id": model_id, "duration_ms": dur_ms, "error_type": "" if success else "load_failed"},
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            self._send_message(
+                pb.WorkerSchedulerMessage(
+                    worker_event=pb.WorkerEvent(run_id="", event_type=ev_type, payload_json=payload)
+                )
+            )
+        except Exception:
+            pass
 
     def _handle_unload_model_cmd(self, cmd: Any) -> None:
         """Handle orchestrator command to unload a model from VRAM."""
-        model_id = cmd.model_id
-        logger.info(f"Received UnloadModelCommand for: {model_id}")
+        model_id = _canonicalize_model_ref_string(str(getattr(cmd, "model_id", "") or "").strip())
+        logger.info("Received UnloadModelCommand for: %s", model_id)
         success = False
         error_msg = ""
+        started_at = time.monotonic()
 
+        if self._is_model_in_use(model_id):
+            error_msg = "model_in_use"
+            logger.warning("Refusing UnloadModelCommand for in-use model_id=%s", model_id)
+            result = pb.UnloadModelResult(model_id=model_id, success=False, error_message=error_msg)
+            self._send_message(pb.WorkerSchedulerMessage(unload_model_result=result))
+            try:
+                payload = json.dumps({"model_id": model_id, "reason": "in_use"}, separators=(",", ":"), sort_keys=True).encode(
+                    "utf-8"
+                )
+                self._send_message(
+                    pb.WorkerSchedulerMessage(
+                        worker_event=pb.WorkerEvent(run_id="", event_type="model.unload.failed", payload_json=payload)
+                    )
+                )
+            except Exception:
+                pass
+            return
+
+        try:
+            payload = json.dumps({"model_id": model_id}, separators=(",", ":"), sort_keys=True).encode("utf-8")
+            self._send_message(
+                pb.WorkerSchedulerMessage(
+                    worker_event=pb.WorkerEvent(run_id="", event_type="model.unload.started", payload_json=payload)
+                )
+            )
+        except Exception:
+            pass
+
+        self._gpu_busy_enter()
         try:
             # Try legacy model_manager first
             if self._model_manager and hasattr(self._model_manager, 'unload'):
@@ -1964,9 +2366,30 @@ class Worker:
             error_msg = f"Exception unloading model '{model_id}': {e}"
             logger.exception(error_msg)
             success = False
+        finally:
+            self._gpu_busy_exit()
 
         result = pb.UnloadModelResult(model_id=model_id, success=success, error_message=error_msg)
         self._send_message(pb.WorkerSchedulerMessage(unload_model_result=result))
+        if success:
+            # Push an immediate heartbeat/registration update for faster scheduler convergence.
+            self._register_worker(is_heartbeat=True)
+
+        try:
+            dur_ms = int((time.monotonic() - started_at) * 1000)
+            ev_type = "model.unload.completed" if success else "model.unload.failed"
+            payload = json.dumps(
+                {"model_id": model_id, "duration_ms": dur_ms, "error_type": "" if success else "unload_failed"},
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            self._send_message(
+                pb.WorkerSchedulerMessage(
+                    worker_event=pb.WorkerEvent(run_id="", event_type=ev_type, payload_json=payload)
+                )
+            )
+        except Exception:
+            pass
 
     def _handle_run_request(self, request: TaskExecutionRequest) -> None:
         """Handle a task execution request from the scheduler."""
@@ -1979,6 +2402,7 @@ class Worker:
         user_id = str(getattr(request, "user_id", "") or "")
         file_base_url = str(getattr(request, "file_base_url", "") or "")
         file_token = str(getattr(request, "file_token", "") or "")
+        resolved_cozy_models_by_id = dict(getattr(request, "resolved_cozy_models_by_id", {}) or {})
 
         if request.required_models and len(request.required_models) > 0:
             required_model_id_for_exec = request.required_models[0]
@@ -2010,6 +2434,7 @@ class Worker:
             timeout_ms=timeout_ms if timeout_ms > 0 else None,
             file_api_base_url=file_base_url or None,
             file_api_token=file_token or None,
+            resolved_cozy_models_by_id=resolved_cozy_models_by_id or None,
         )
         # Add to active tasks *before* starting thread
         with self._active_tasks_lock:
@@ -2079,6 +2504,7 @@ class Worker:
             timeout_ms=timeout_ms,
             file_api_base_url=file_base_url or None,
             file_api_token=file_token or None,
+            resolved_cozy_models_by_id=getattr(self, "_resolved_cozy_models_by_id_baseline", None) or None,
         )
 
         max_frame = int(os.getenv("WORKER_MAX_WS_FRAME_BYTES", "0") or 0)
@@ -2096,20 +2522,26 @@ class Worker:
             async def run_handler() -> None:
                 # Build kwargs for handler.
                 kwargs: Dict[str, Any] = {spec.ctx_param: ctx, spec.socket_param: sock}
-                required_models = list(getattr(cmd, "required_models", []) or [])
-                for idx, inj in enumerate(spec.injections):
-                    model_id = ""
-                    if idx < len(required_models) and str(required_models[idx]).strip():
-                        raw = str(required_models[idx]).strip()
-                        model_id = self._release_model_id_by_key.get(raw, raw)
-                    elif inj.model_ref.source == ModelRefSource.RELEASE and inj.model_ref.key.strip():
-                        raw = inj.model_ref.key.strip()
-                        model_id = self._release_model_id_by_key.get(raw, raw)
-                    if not model_id:
-                        raise ValueError(f"missing resolved model id for injection param: {inj.param_name}")
-                    self._enforce_model_allowlist(model_id, inj)
-                    kwargs[inj.param_name] = self._resolve_injected_value(ctx, inj.param_type, model_id, inj)
-                await spec.func(**kwargs)
+                from .model_ref_downloader import reset_resolved_cozy_models_by_id, set_resolved_cozy_models_by_id
+                baseline = getattr(self, "_resolved_cozy_models_by_id_baseline", None) or None
+                resolved_tok = set_resolved_cozy_models_by_id(getattr(ctx, "resolved_cozy_models_by_id", None) or baseline)
+                try:
+                    required_models = list(getattr(cmd, "required_models", []) or [])
+                    for idx, inj in enumerate(spec.injections):
+                        model_id = ""
+                        if idx < len(required_models) and str(required_models[idx]).strip():
+                            raw = str(required_models[idx]).strip()
+                            model_id = self._release_model_id_by_key.get(raw, raw)
+                        elif inj.model_ref.source == ModelRefSource.RELEASE and inj.model_ref.key.strip():
+                            raw = inj.model_ref.key.strip()
+                            model_id = self._release_model_id_by_key.get(raw, raw)
+                        if not model_id:
+                            raise ValueError(f"missing resolved model id for injection param: {inj.param_name}")
+                        self._enforce_model_allowlist(model_id, inj)
+                        kwargs[inj.param_name] = self._resolve_injected_value(ctx, inj.param_type, model_id, inj)
+                    await spec.func(**kwargs)
+                finally:
+                    reset_resolved_cozy_models_by_id(resolved_tok)
 
             try:
                 loop.run_until_complete(run_handler())
@@ -2197,14 +2629,16 @@ class Worker:
         retryable = False
         success = False
 
-        this_thread_set_gpu_busy = False
-        if self._has_gpu:
-            with self._gpu_busy_lock:
-                if not self._is_gpu_busy:
-                    self._is_gpu_busy = True
-                    this_thread_set_gpu_busy = True
-                    logger.debug("Worker GPU marked BUSY by %s (%s).", run_id, spec.name)
+        # Refcounted BUSY so overlapping runs/model ops can't flip BUSY -> NOT BUSY early.
+        self._gpu_busy_enter()
 
+        from .model_ref_downloader import reset_resolved_cozy_models_by_id, set_resolved_cozy_models_by_id
+
+        baseline = getattr(self, "_resolved_cozy_models_by_id_baseline", None) or None
+        resolved_map = getattr(ctx, "resolved_cozy_models_by_id", None) or baseline
+        resolved_tok = set_resolved_cozy_models_by_id(resolved_map)
+
+        models_in_use: set[str] = set()
         try:
             if ctx.is_canceled():
                 raise CanceledError("canceled")
@@ -2220,6 +2654,10 @@ class Worker:
 
             for inj in spec.injections:
                 model_id = self._resolve_model_id_for_injection(inj, payload=input_obj)
+                canon_model_id = _canonicalize_model_ref_string(str(model_id or "").strip()) if model_id else ""
+                if canon_model_id and canon_model_id not in models_in_use:
+                    self._model_use_enter(canon_model_id)
+                    models_in_use.add(canon_model_id)
                 call_kwargs[inj.param_name] = self._resolve_injected_value(ctx, inj.param_type, model_id, inj)
 
             # Invoke.
@@ -2312,10 +2750,14 @@ class Worker:
                     pass
             success = False
         finally:
-            if this_thread_set_gpu_busy:
-                with self._gpu_busy_lock:
-                    self._is_gpu_busy = False
-                logger.debug("Worker GPU marked NOT BUSY by %s (%s).", run_id, spec.name)
+            reset_resolved_cozy_models_by_id(resolved_tok)
+
+            for mid in models_in_use:
+                try:
+                    self._model_use_exit(mid)
+                except Exception:
+                    pass
+            self._gpu_busy_exit()
 
             self._send_task_result(run_id, success, output_payload, error_type, bool(retryable), safe_message, error_message)
 
@@ -2330,40 +2772,7 @@ class Worker:
                         self._active_function_counts[spec.name] = current
 
     def _resolve_injected_value(self, ctx: ActionContext, requested_type: Any, model_id: str, inj: InjectionSpec) -> Any:
-        # Artifacts injection (paths only).
-        if requested_type is ModelArtifacts:
-            return self._resolve_model_artifacts(model_id)
-
-        # Custom runtime handle via loader hooks (type name -> loader callable).
         qn = type_qualname(requested_type)
-        loader_path = self._runtime_loaders.get(qn)
-        if loader_path:
-            key = (model_id, qn)
-            lock = self._custom_runtime_locks.setdefault(key, threading.Lock())
-            with lock:
-                cached = self._custom_runtime_cache.get(key)
-                if cached is not None:
-                    return cached
-                artifacts = self._resolve_model_artifacts(model_id)
-                self._enforce_backend_compatibility(model_id, artifacts)
-                loader = resolve_loader(loader_path)
-                runtime = loader(ctx, artifacts)
-                self._custom_runtime_cache[key] = runtime
-                return runtime
-
-        reg = get_registered_runtime_loader(requested_type)
-        if reg is not None:
-            key = (model_id, qn)
-            lock = self._custom_runtime_locks.setdefault(key, threading.Lock())
-            with lock:
-                cached = self._custom_runtime_cache.get(key)
-                if cached is not None:
-                    return cached
-                artifacts = self._resolve_model_artifacts(model_id)
-                self._enforce_backend_compatibility(model_id, artifacts)
-                runtime = reg(ctx, artifacts)
-                self._custom_runtime_cache[key] = runtime
-                return runtime
 
         # diffusers pipeline injection via existing model manager (torch-only).
         if self._model_manager is not None:
@@ -2541,49 +2950,6 @@ class Worker:
             return
         if model_id not in allowed:
             raise ValueError(f"model_id not allowed for release: {model_id!r} (injection param {inj.param_name})")
-
-    def _enforce_backend_compatibility(self, model_id: str, artifacts: ModelArtifacts) -> None:
-        # Minimal TensorRT compatibility gating based on artifact metadata.
-        # We key off a conventional "@tensorrt" suffix in the model id.
-        if "@tensorrt" not in model_id:
-            return
-
-        meta = dict(artifacts.metadata or {})
-        cuda = str(meta.get("cuda_version") or "").strip()
-        trt = str(meta.get("tensorrt_version") or "").strip()
-        sm = str(meta.get("sm") or "").strip()
-        if not cuda or not trt or not sm:
-            raise ResourceError("incompatible tensorrt engine (missing metadata)")
-
-        host_cuda = (os.getenv("WORKER_CUDA_VERSION") or os.getenv("CUDA_VERSION") or os.getenv("NVIDIA_CUDA_VERSION") or "").strip()
-        host_trt = (os.getenv("WORKER_TENSORRT_VERSION") or "").strip()
-        host_sm = (os.getenv("WORKER_SM") or "").strip()
-
-        if host_cuda and host_cuda != cuda:
-            raise ResourceError("incompatible tensorrt engine (cuda mismatch)")
-        if host_trt and host_trt != trt:
-            raise ResourceError("incompatible tensorrt engine (tensorrt mismatch)")
-        if host_sm and host_sm != sm:
-            raise ResourceError("incompatible tensorrt engine (sm mismatch)")
-
-    def _resolve_model_artifacts(self, model_id: str) -> ModelArtifacts:
-        # Allow release config to define artifact paths via env for now.
-        # This will be replaced by orchestrator-provided artifact refs/mappings.
-        raw = os.getenv("WORKER_MODEL_ARTIFACTS_JSON", "").strip()
-        if raw:
-            try:
-                data = json.loads(raw)
-                ent = data.get(model_id) or {}
-                root = Path(str(ent.get("root_dir") or ent.get("root") or "/tmp/cozy/models")).expanduser()
-                files = {k: Path(v).expanduser() for k, v in dict(ent.get("files") or {}).items()}
-                return ModelArtifacts(model_id=model_id, root_dir=root, files=files, metadata=ent.get("metadata"))
-            except Exception:
-                pass
-
-        base = Path(os.getenv("WORKER_MODEL_CACHE_DIR", "/tmp/cozy/models")).expanduser()
-        safe = re.sub(r"[^a-zA-Z0-9_.-]+", "_", model_id)[:200]
-        root_dir = base / safe
-        return ModelArtifacts(model_id=model_id, root_dir=root_dir, files={})
 
     def _send_task_result(
         self,

@@ -5,14 +5,12 @@
       "description": "Adopt the new tenant function contract where models/processors/pipelines are injected via `typing.Annotated[..., ModelRef(...)]` instead of decorator flags like expects_pipeline_arg. The worker owns downloads + VRAM lifecycle; tenant code receives ready-to-use objects. Keep `@worker_function` minimal (marker + requires_gpu) and rely on signature inspection for injection and validation.",
       "tasks": [
         "[x] Add `gen_worker.injection` module defining ModelRefSource enum, ModelRef annotation helper",
-        "[x] Add `ModelArtifacts` injection type for non-standard runtimes",
         "[x] Define injection resolution rules (DEPLOYMENT, PAYLOAD sources)",
         "[x] Implement injection in the worker call wrapper",
         "[x] Implement a minimal injection catalog (torch backend first)",
-        "[x] Support tenant-provided loader hooks for custom runtime handles",
         "[x] Tighten `@worker_function` usage (marker + requires_gpu only)",
         "[x] Schema reporting: include injection metadata per function",
-        "[x] Tests for Annotated injection, ModelArtifacts, loader hooks, allowlist rejection"
+        "[x] Tests for Annotated injection and allowlist rejection"
       ],
       "completed": true
     },

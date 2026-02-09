@@ -59,10 +59,8 @@ def _start_server(routes: Dict[str, web.StreamResponse]) -> _Server:
 
 
 def _stop_server(srv: _Server) -> None:
-    async def _stop() -> None:
-        await srv.runner.cleanup()
-
-    srv.loop.call_soon_threadsafe(lambda: asyncio.create_task(_stop()))
+    fut = asyncio.run_coroutine_threadsafe(srv.runner.cleanup(), srv.loop)
+    fut.result(timeout=5)
     srv.loop.call_soon_threadsafe(srv.loop.stop)
 
 
@@ -131,5 +129,106 @@ def test_snapshot_v2_downloader_materializes(tmp_path: Path) -> None:
         assert (local / "unet" / "config.json").read_bytes() == b2
         blob1 = tmp_path / "cozy" / "blobs" / "blake3" / b1_digest[:2] / b1_digest[2:4] / b1_digest
         assert blob1.exists()
+    finally:
+        _stop_server(srv)
+
+
+@dataclass
+class _ResolvedFile:
+    path: str
+    size_bytes: int
+    blake3: str
+    url: str
+
+
+@dataclass
+class _ResolvedModel:
+    snapshot_digest: str
+    files: list[_ResolvedFile]
+
+
+def test_snapshot_v2_downloader_uses_orchestrator_resolved_urls(tmp_path: Path) -> None:
+    snap = "b" * 64
+
+    b1 = b"hello"
+    b1_digest = blake3(b1).hexdigest()
+
+    base = ""  # populated after server starts
+    routes: Dict[str, web.StreamResponse] = {}
+
+    async def get_pipeline(_req: web.Request) -> web.Response:
+        return web.Response(body=b1, headers={"Content-Type": "application/octet-stream"})
+
+    routes["/files/pipeline"] = get_pipeline  # type: ignore[assignment]
+
+    srv = _start_server(routes)
+    try:
+        base = srv.base_url
+
+        resolved = _ResolvedModel(
+            snapshot_digest=snap,
+            files=[
+                _ResolvedFile(
+                    path="cozy.pipeline.yaml",
+                    size_bytes=len(b1),
+                    blake3=b1_digest,
+                    url=f"{base}/files/pipeline",
+                )
+            ],
+        )
+
+        # client=None: no Cozy Hub API calls are allowed/possible here.
+        dl = CozySnapshotV2Downloader(client=None)
+        ref = CozyRef(owner="o", repo="r", tag="latest")
+        local = asyncio.run(dl.ensure_snapshot(tmp_path, ref, resolved=resolved))
+        assert (local / "cozy.pipeline.yaml").read_bytes() == b1
+
+        blob1 = tmp_path / "cozy" / "blobs" / "blake3" / b1_digest[:2] / b1_digest[2:4] / b1_digest
+        assert blob1.exists()
+    finally:
+        _stop_server(srv)
+
+
+def test_model_ref_downloader_uses_resolved_urls_without_cozy_hub_token(tmp_path: Path) -> None:
+    from gen_worker.model_ref_downloader import ModelRefDownloader, reset_resolved_cozy_models_by_id, set_resolved_cozy_models_by_id
+
+    snap = "c" * 64
+
+    b1 = b"hello"
+    b1_digest = blake3(b1).hexdigest()
+
+    base = ""  # populated after server starts
+    routes: Dict[str, web.StreamResponse] = {}
+
+    async def get_pipeline(_req: web.Request) -> web.Response:
+        return web.Response(body=b1, headers={"Content-Type": "application/octet-stream"})
+
+    routes["/files/pipeline"] = get_pipeline  # type: ignore[assignment]
+
+    srv = _start_server(routes)
+    try:
+        base = srv.base_url
+
+        resolved = _ResolvedModel(
+            snapshot_digest=snap,
+            files=[
+                _ResolvedFile(
+                    path="cozy.pipeline.yaml",
+                    size_bytes=len(b1),
+                    blake3=b1_digest,
+                    url=f"{base}/files/pipeline",
+                )
+            ],
+        )
+
+        # NOTE: canonical() lowercases and adds cozy: prefix.
+        resolved_by_id = {"cozy:o/r:latest": resolved}
+        tok = set_resolved_cozy_models_by_id(resolved_by_id)
+        try:
+            dl = ModelRefDownloader(cozy_base_url=None, cozy_token=None, allow_cozy_hub_api_resolve=False)
+            local = dl.download("cozy:o/r:latest", tmp_path.as_posix())
+            assert (Path(local) / "cozy.pipeline.yaml").read_bytes() == b1
+        finally:
+            reset_resolved_cozy_models_by_id(tok)
     finally:
         _stop_server(srv)

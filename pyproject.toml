@@ -39,12 +39,12 @@ Issues = "https://github.com/cozy-creator/python-gen-worker/issues"
 
 [project.optional-dependencies]
 torch = [
-    "torch>=2.6.0",
-    "torchvision>=0.21.0",
-    "torchaudio>=2.6.0",
-    "safetensors>=0.4.3",
-    "flashpack>=0.1.2",
-    "numpy>=1.26.0"
+    "torch>=2.10.0",
+    "torchvision>=0.25.0",
+    "torchaudio>=2.10.0",
+    "safetensors>=0.7.0",
+    "flashpack>=0.2.1",
+    "numpy>=2.4.2"
 ]
 dev = [
     "grpcio-tools>=1.71.0",

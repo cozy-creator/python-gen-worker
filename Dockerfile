@@ -19,6 +19,9 @@ ARG UV_TORCH_BACKEND=cu126
 # Pin torch to 2.10.x by default. We rely on stable torch layers for caching and
 # do not want automatic upgrades beyond 2.10.x without an explicit spec.
 ARG TORCH_SPEC="~=2.10.0"
+# Pin gen-worker to a known version for reproducible builds and stable caching.
+# Override explicitly to test unreleased versions.
+ARG GEN_WORKER_SPEC="==0.2.1"
 # Set to 0 to skip installing torch entirely (for non-torch workers).
 ARG USE_TORCH=1
 
@@ -41,7 +44,17 @@ RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
         "torch${TORCH_SPEC}"; \
     fi
 RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
-    uv pip install --system --break-system-packages gen-worker
+    uv pip install --system --break-system-packages "gen-worker${GEN_WORKER_SPEC}"
+RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
+    if [ "${USE_TORCH}" = "1" ]; then \
+      # Keep these as explicit shared-layer deps. They are excluded from project installs
+      # when the tenant depends on gen-worker[torch], because we install gen-worker
+      # separately to prevent torch replacement.
+      uv pip install --system --break-system-packages \
+        "safetensors>=0.7.0" \
+        "flashpack>=0.2.1" \
+        "numpy>=2.4.2"; \
+    fi
 
 # Final stage: app-specific deps + code.
 FROM cozy_base

@@ -1,6 +1,6 @@
 # Make src/gen_worker a Python package
 from .decorators import ResourceRequirements, worker_function, worker_websocket
-from .injection import ModelArtifacts, ModelRef, ModelRefSource
+from .injection import ModelRef, ModelRefSource
 from .worker import ActionContext, RealtimeSocket
 from .errors import AuthError, RetryableError, FatalError
 from .types import Asset
@@ -28,7 +28,6 @@ __all__ = [
     "worker_function",
     "worker_websocket",
     "ResourceRequirements",
-    "ModelArtifacts",
     "ModelRef",
     "ModelRefSource",
     "ActionContext",

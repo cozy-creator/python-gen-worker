@@ -82,16 +82,16 @@ def stream(ctx: ActionContext, payload: Input) -> Iterator[Delta]:
 
 ```python
 from typing import Annotated
-from gen_worker.injection import ModelArtifacts, ModelRef, ModelRefSource as Src
+from diffusers import DiffusionPipeline
+from gen_worker.injection import ModelRef, ModelRefSource as Src
 
 @worker_function()
 def generate(
     ctx: ActionContext,
-    artifacts: Annotated[ModelArtifacts, ModelRef(Src.RELEASE, "my-model")],
+    pipe: Annotated[DiffusionPipeline, ModelRef(Src.RELEASE, "my-model")],
     payload: Input,
 ) -> Output:
-    model_path = artifacts.root_dir
-    # Load and use model...
+    # Use the injected pipeline (loaded/cached by the worker's model manager).
     return Output(result="done")
 ```
 
@@ -130,12 +130,22 @@ gpu = true
 
 ### Environment Variables
 
+Orchestrator-injected (production contract):
+
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SCHEDULER_ADDR` | - | Primary scheduler address |
-| `SCHEDULER_ADDRS` | - | Comma-separated seed addresses for leader discovery |
-| `WORKER_JWT` | - | Auth token (fallback if `AUTH_TOKEN` not set) |
-| `SCHEDULER_JWKS_URL` | - | JWKS URL for JWT verification |
+| `SCHEDULER_ADDR` | - | Scheduler address workers should dial |
+| `SCHEDULER_ADDRS` | - | Optional comma-separated seed addresses for leader discovery |
+| `WORKER_JWT` | - | Worker-connect JWT (required; claims are authoritative) |
+
+Local dev / advanced (not injected by orchestrator):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SCHEDULER_JWKS_URL` | - | Optional: verify WORKER_JWT locally against scheduler JWKS |
+| `SCHEDULER_JWT_ISSUER` | - | Optional: expected `iss` when verifying WORKER_JWT locally |
+| `SCHEDULER_JWT_AUDIENCE` | - | Optional: expected `aud` when verifying WORKER_JWT locally |
+| `USE_TLS` | `false` | Local-dev knob for plaintext vs TLS gRPC; production typically terminates TLS upstream |
 | `WORKER_MAX_CONCURRENCY` | - | Max concurrent task executions |
 | `WORKER_MAX_INPUT_BYTES` | - | Max input payload size |
 | `WORKER_MAX_OUTPUT_BYTES` | - | Max output payload size |
@@ -144,8 +154,9 @@ gpu = true
 | `WORKER_VRAM_SAFETY_MARGIN_GB` | 3.5 | Reserved VRAM for working memory |
 | `WORKER_MODEL_CACHE_DIR` | `/tmp/model_cache` | Disk cache directory |
 | `WORKER_MAX_CONCURRENT_DOWNLOADS` | 2 | Max parallel model downloads |
-| `COZY_HUB_URL` | - | Cozy hub base URL |
-| `COZY_HUB_TOKEN` | - | Cozy hub bearer token |
+| `COZY_HUB_URL` | - | Local dev only: Cozy Hub base URL (used only if you enable Cozy Hub API resolve) |
+| `WORKER_ALLOW_COZY_HUB_API_RESOLVE` | `false` | Local dev only: allow the worker to call Cozy Hub resolve APIs |
+| `COZY_HUB_TOKEN` | - | Local dev only: Cozy Hub bearer token (only used when `WORKER_ALLOW_COZY_HUB_API_RESOLVE=1`) |
 | `HF_TOKEN` | - | Hugging Face token (for private `hf:` refs) |
 
 ### Hugging Face (`hf:`) download behavior
@@ -191,7 +202,10 @@ For production, use the `cozyctl` CLI to build and deploy worker-images to our n
 docker build -t sd15-worker -f Dockerfile examples/sd15
 
 # Run
-docker run -e SCHEDULER_ADDR=orchestrator:8080 sd15-worker
+docker run \
+  -e SCHEDULER_ADDR=orchestrator:8080 \
+  -e WORKER_JWT='<worker-connect-jwt>' \
+  sd15-worker
 ```
 
 Canonical local dev build args (GPU, CUDA 12.6, torch 2.10.x, Python 3.12):
@@ -258,6 +272,7 @@ Start your worker container first:
 docker run --rm \
   --add-host=host.docker.internal:host-gateway \
   -e SCHEDULER_ADDR=host.docker.internal:8080 \
+  -e WORKER_JWT='dev-worker-jwt' \
   <your-worker-image>
 ```
 

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-import librosa
 import msgspec
+import numpy as np
+import soundfile as sf
+import soxr
 import torch
 from transformers import AutoModelForCTC, AutoProcessor
 
@@ -35,7 +37,13 @@ def medasr_transcribe(
         raise InterruptedError("canceled")
 
     device = next(model.parameters()).device
-    speech, sample_rate = librosa.load(payload.audio.local_path, sr=16000)
+    speech, sample_rate = sf.read(payload.audio.local_path, always_2d=False, dtype="float32")
+    if speech.ndim > 1:
+        # Mix down multi-channel audio to mono.
+        speech = np.mean(speech, axis=1)
+    if sample_rate != 16000:
+        speech = soxr.resample(speech, sample_rate, 16000)
+        sample_rate = 16000
     inputs = processor(speech, sampling_rate=sample_rate, return_tensors="pt", padding=True)
     inputs = inputs.to(device)
 

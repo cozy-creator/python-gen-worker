@@ -19,7 +19,7 @@ class _ActualPipeline:
 
 class TestInjectionTypeEnforcement(unittest.TestCase):
     def test_rejects_model_manager_type_mismatch(self) -> None:
-        w = Worker(user_module_names=[], model_manager=_StubModelManager())
+        w = Worker(user_module_names=[], model_manager=_StubModelManager(), worker_jwt="dummy-worker-jwt")
         ctx = ActionContext("run-1")
         inj = InjectionSpec(
             param_name="pipeline",
@@ -29,4 +29,3 @@ class TestInjectionTypeEnforcement(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             w._resolve_injected_value(ctx, _ExpectedPipeline, "model-id", inj)
-

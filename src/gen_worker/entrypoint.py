@@ -58,8 +58,8 @@ SCHEDULER_ADDR = os.getenv("SCHEDULER_ADDR", "localhost:8080")
 SCHEDULER_ADDRS = os.getenv("SCHEDULER_ADDRS", "")
 SEED_ADDRS = [addr.strip() for addr in SCHEDULER_ADDRS.split(",") if addr.strip()]
 
-WORKER_ID = os.getenv("WORKER_ID", "worker-1")
-AUTH_TOKEN = os.getenv("AUTH_TOKEN") or os.getenv("WORKER_JWT")
+WORKER_ID = os.getenv("WORKER_ID", "").strip()
+WORKER_JWT = os.getenv("WORKER_JWT", "").strip()
 USE_TLS = os.getenv("USE_TLS", "false").lower() in ("true", "1", "t")
 RECONNECT_DELAY = int(os.getenv("RECONNECT_DELAY", "5"))
 MAX_RECONNECT_ATTEMPTS = int(os.getenv("MAX_RECONNECT_ATTEMPTS", "0"))
@@ -87,7 +87,7 @@ if __name__ == "__main__":
     if SEED_ADDRS:
         logger.info("  Scheduler Seeds: %s", SEED_ADDRS)
     logger.info("  User Function Modules: %s", user_modules)
-    logger.info("  Worker ID: %s", WORKER_ID or "(generated)")
+    logger.info("  Worker ID: %s", WORKER_ID or "(from JWT)")
     logger.info("  Use TLS: %s", USE_TLS)
     logger.info("  Reconnect Delay: %ss", RECONNECT_DELAY)
     logger.info("  Max Reconnect Attempts: %s", MAX_RECONNECT_ATTEMPTS or "Infinite")
@@ -99,13 +99,17 @@ if __name__ == "__main__":
         )
         sys.exit(1)
 
+    if not WORKER_JWT:
+        logger.error("WORKER_JWT is required (worker-connect JWT). Refusing to start unauthenticated worker.")
+        sys.exit(1)
+
     try:
         worker = Worker(
             scheduler_addr=SCHEDULER_ADDR,
             scheduler_addrs=SEED_ADDRS,
             user_module_names=user_modules,
-            worker_id=WORKER_ID,
-            auth_token=AUTH_TOKEN,
+            worker_id=WORKER_ID or None,
+            worker_jwt=WORKER_JWT,
             use_tls=USE_TLS,
             reconnect_delay=RECONNECT_DELAY,
             max_reconnect_attempts=MAX_RECONNECT_ATTEMPTS,

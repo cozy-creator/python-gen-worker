@@ -57,6 +57,7 @@ def hello(ctx: ActionContext, payload: Input) -> Output:
     env["USER_MODULES"] = "hello_mod"
     env["PYTHONPATH"] = f"{mod_dir}:{env.get('PYTHONPATH','')}"
     env["WORKER_ID"] = "dev-test"
+    env["WORKER_JWT"] = "dev-test-jwt"
 
     proc = subprocess.Popen(
         [sys.executable, "-m", "gen_worker.entrypoint"],
@@ -98,4 +99,3 @@ def hello(ctx: ActionContext, payload: Input) -> Output:
         except Exception:
             proc.kill()
         server.stop(grace=None)
-

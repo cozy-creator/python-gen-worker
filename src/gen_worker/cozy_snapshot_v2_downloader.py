@@ -5,7 +5,7 @@ import os
 import shutil
 import threading
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from .cozy_cas import _download_one_file as _download_one_file  # reuse verified Range-resume downloader
 from .cozy_cas import _norm_rel_path
@@ -37,32 +37,80 @@ def _try_hardlink_or_copy(src: Path, dst: Path) -> None:
     shutil.copy2(src, dst)
 
 
+def _coerce_resolved_model(ref: CozyRef, resolved: Any) -> CozyHubResolveArtifactResult:
+    """Coerce an orchestrator-provided resolved model object into CozyHubResolveArtifactResult."""
+    snapshot_digest = str(getattr(resolved, "snapshot_digest", "") or "").strip()
+    if not snapshot_digest:
+        snapshot_digest = str(getattr(resolved, "snapshotDigest", "") or "").strip()
+    if not snapshot_digest:
+        raise ValueError("resolved model missing snapshot_digest")
+
+    files_raw = list(getattr(resolved, "files", []) or [])
+    files: List[CozyHubSnapshotFile] = []
+    for ent in files_raw:
+        path = str(getattr(ent, "path", "") or "").strip()
+        if not path:
+            continue
+        blake3_hex = str(getattr(ent, "blake3", "") or "").strip().lower()
+        if not blake3_hex:
+            blake3_hex = str(getattr(ent, "BLAKE3", "") or "").strip().lower()
+        url = str(getattr(ent, "url", "") or "").strip() or None
+        size_bytes = int(getattr(ent, "size_bytes", 0) or 0)
+        if not blake3_hex or not url:
+            raise ValueError(f"resolved model file missing blake3/url: {path}")
+        files.append(CozyHubSnapshotFile(path=path, size_bytes=size_bytes, blake3=blake3_hex, url=url))
+    if not files:
+        raise ValueError("resolved model has empty files list")
+
+    return CozyHubResolveArtifactResult(
+        repo_revision_seq=0,
+        snapshot_digest=snapshot_digest,
+        artifact=None,  # type: ignore[arg-type]
+        files=files,
+    )
+
+
 class CozySnapshotV2Downloader:
-    """
-    Cozy Hub v2 downloader:
+    """Cozy Hub v2 downloader.
+
+    Normal mode:
       - resolve owner/repo:tag via resolve_artifact
       - download all referenced blobs to a local blob store
       - materialize a snapshot checkout by hardlinking blobs into the snapshot tree
+
+    Issue #92 mode:
+      - if `resolved` is provided, skip Cozy Hub API calls and use the provided
+        presigned URLs directly.
 
     On-disk layout under <base_dir>/cozy:
       - blobs/blake3/<aa>/<bb>/<digest>
       - snapshots/<snapshot_digest>/...
     """
 
-    def __init__(self, client: CozyHubV2Client) -> None:
+    def __init__(self, client: Optional[CozyHubV2Client]) -> None:
         self._client = client
         self._locks_lock = threading.Lock()
         self._blob_locks: Dict[str, asyncio.Lock] = {}
         self._snapshot_locks: Dict[str, asyncio.Lock] = {}
 
-    async def ensure_snapshot(self, base_dir: Path, ref: CozyRef) -> Path:
+    async def ensure_snapshot(
+        self,
+        base_dir: Path,
+        ref: CozyRef,
+        *,
+        resolved: Optional[Any] = None,
+    ) -> Path:
         cozy_root = base_dir / "cozy"
         blobs_root = cozy_root / "blobs"
         snaps_root = cozy_root / "snapshots"
         blobs_root.mkdir(parents=True, exist_ok=True)
         snaps_root.mkdir(parents=True, exist_ok=True)
 
-        res = await self._resolve(ref)
+        if resolved is not None:
+            res = _coerce_resolved_model(ref, resolved)
+        else:
+            res = await self._resolve(ref)
+
         snap_dir = snaps_root / res.snapshot_digest
         if snap_dir.exists():
             return snap_dir
@@ -72,7 +120,6 @@ class CozySnapshotV2Downloader:
             if snap_dir.exists():
                 return snap_dir
 
-            # Download blobs (singleflight per digest).
             await self._ensure_blobs(blobs_root, res.files)
 
             tmp = snaps_root / f"{res.snapshot_digest}.building"
@@ -88,8 +135,10 @@ class CozySnapshotV2Downloader:
             return snap_dir
 
     async def _resolve(self, ref: CozyRef) -> CozyHubResolveArtifactResult:
+        if self._client is None:
+            raise RuntimeError("cozy hub api resolve is disabled")
+
         if ref.digest:
-            # If the caller already pinned a snapshot digest, just fetch the snapshot manifest.
             files = await self._client.get_snapshot_manifest(owner=ref.owner, repo=ref.repo, digest=ref.digest)
             return CozyHubResolveArtifactResult(
                 repo_revision_seq=0,
@@ -147,12 +196,18 @@ def ensure_snapshot_sync(
     ref: CozyRef,
     base_url: str,
     token: Optional[str],
+    resolved: Optional[Any] = None,
 ) -> Path:
-    client = CozyHubV2Client(base_url=base_url, token=token)
+    client: Optional[CozyHubV2Client] = None
+    if resolved is None:
+        if not (base_url or "").strip():
+            raise RuntimeError("cozy downloads require COZY_HUB_URL")
+        client = CozyHubV2Client(base_url=base_url, token=token)
+
     dl = CozySnapshotV2Downloader(client)
 
     async def _run() -> Path:
-        return await dl.ensure_snapshot(base_dir, ref)
+        return await dl.ensure_snapshot(base_dir, ref, resolved=resolved)
 
     try:
         loop = asyncio.get_running_loop()
