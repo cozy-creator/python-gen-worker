@@ -40,14 +40,20 @@ name = "test-project"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = ["gen-worker"]
+""")
+                (root / "cozy.toml").write_text(
+                    """
+schema_version = 1
+name = "test-project"
+main = "funcs_a"
+gen_worker = ">=0"
 
-[tool.cozy.functions]
-modules = ["funcs_a"]
-
-[tool.cozy.models]
+[models]
 sdxl = "stabilityai/stable-diffusion-xl-base-1.0"
 controlnet = "lllyasviel/control_v11p_sd15_canny"
-""")
+""".lstrip(),
+                    encoding="utf-8",
+                )
 
                 # Create test module
                 src_dir = root / "src" / "funcs_a"
@@ -70,7 +76,7 @@ class MockPipeline:
 @worker_function()
 def generate(
     ctx: ActionContext,
-    pipeline: Annotated[MockPipeline, ModelRef(Src.RELEASE, "sdxl")],
+    pipeline: Annotated[MockPipeline, ModelRef(Src.FIXED, "sdxl")],
     payload: Input,
 ) -> Output:
     return Output(result="ok")
@@ -78,8 +84,8 @@ def generate(
 @worker_function()
 def generate_with_cn(
     ctx: ActionContext,
-    pipeline: Annotated[MockPipeline, ModelRef(Src.RELEASE, "sdxl")],
-    cn: Annotated[MockPipeline, ModelRef(Src.RELEASE, "controlnet")],
+    pipeline: Annotated[MockPipeline, ModelRef(Src.FIXED, "sdxl")],
+    cn: Annotated[MockPipeline, ModelRef(Src.FIXED, "controlnet")],
     payload: Input,
 ) -> Output:
     return Output(result="ok")
@@ -110,6 +116,10 @@ def generate_dynamic(
                 # generate_dynamic: PAYLOAD source, so no required_models
                 self.assertIn("generate_dynamic", funcs)
                 self.assertEqual(funcs["generate_dynamic"]["required_models"], [])
+                self.assertEqual(
+                    funcs["generate_dynamic"]["payload_repo_selectors"],
+                    [{"field": "model_key", "kind": "short_key"}],
+                )
 
                 # Top-level models should be present
                 self.assertIn("models", manifest)
@@ -140,13 +150,19 @@ name = "test-project"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = ["gen-worker"]
-
-[tool.cozy.functions]
-modules = ["funcs_b"]
-
-[tool.cozy.models]
-other = "some/other-model"
 """)
+                (root / "cozy.toml").write_text(
+                    """
+schema_version = 1
+name = "test-project"
+main = "funcs_b"
+gen_worker = ">=0"
+
+[models]
+other = "some/other-model"
+""".lstrip(),
+                    encoding="utf-8",
+                )
 
                 # Create test module that requires sdxl
                 src_dir = root / "src" / "funcs_b"
@@ -169,7 +185,7 @@ class MockPipeline:
 @worker_function()
 def generate(
     ctx: ActionContext,
-    pipeline: Annotated[MockPipeline, ModelRef(Src.RELEASE, "sdxl")],
+    pipeline: Annotated[MockPipeline, ModelRef(Src.FIXED, "sdxl")],
     payload: Input,
 ) -> Output:
     return Output(result="ok")
@@ -197,7 +213,7 @@ class TestManifestModelsField(unittest.TestCase):
     """Tests for top-level models field in manifest."""
 
     def test_models_from_config(self) -> None:
-        """Test that models from [tool.cozy.models] are included."""
+        """Test that models from [models] (cozy.toml) are included."""
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             original_cwd = os.getcwd()
@@ -214,14 +230,20 @@ name = "test-project"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = ["gen-worker"]
+""")
+                (root / "cozy.toml").write_text(
+                    """
+schema_version = 1
+name = "test-project"
+main = "funcs_c"
+gen_worker = ">=0"
 
-[tool.cozy.functions]
-modules = ["funcs_c"]
-
-[tool.cozy.models]
+[models]
 model-a = "org/model-a"
 model-b = "org/model-b"
-""")
+""".lstrip(),
+                    encoding="utf-8",
+                )
 
                 src_dir = root / "src" / "funcs_c"
                 src_dir.mkdir(parents=True)
@@ -252,7 +274,7 @@ def simple(ctx: ActionContext, payload: Input) -> Output:
                 _cleanup_modules("funcs_c")
 
     def test_no_models_section(self) -> None:
-        """Test manifest when no [tool.cozy.models] is defined."""
+        """Test manifest when no [models] is defined."""
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             original_cwd = os.getcwd()
@@ -269,10 +291,16 @@ name = "test-project"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = ["gen-worker"]
-
-[tool.cozy.functions]
-modules = ["funcs_d"]
 """)
+                (root / "cozy.toml").write_text(
+                    """
+schema_version = 1
+name = "test-project"
+main = "funcs_d"
+gen_worker = ">=0"
+""".lstrip(),
+                    encoding="utf-8",
+                )
 
                 src_dir = root / "src" / "funcs_d"
                 src_dir.mkdir(parents=True)

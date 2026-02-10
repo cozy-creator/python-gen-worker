@@ -24,6 +24,7 @@ dependencies = [
     "msgspec>=0.18.6",
     "protobuf>=6.30.0",
     "PyJWT[crypto]>=2.8.0",
+    "requests>=2.32.0",
     "psutil>=7.0.0",
     "pyyaml>=6.0.0",
     "aiohttp>=3.11.14",

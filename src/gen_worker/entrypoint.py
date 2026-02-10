@@ -52,7 +52,6 @@ def get_modules_from_manifest(manifest: dict) -> List[str]:
             modules.add(module)
     return sorted(modules)
 
-
 # Configuration from environment
 SCHEDULER_ADDR = os.getenv("SCHEDULER_ADDR", "localhost:8080")
 SCHEDULER_ADDRS = os.getenv("SCHEDULER_ADDRS", "")
@@ -106,18 +105,11 @@ if __name__ == "__main__":
     # Load manifest if available (baked in at build time)
     manifest = load_manifest()
 
-    # Determine user modules: from manifest (preferred) or USER_MODULES env var (fallback)
+    # Determine user modules: baked discovery manifest is required in the Dockerfile-first contract.
+    user_modules: list[str] = []
     if manifest:
         user_modules = get_modules_from_manifest(manifest)
-        logger.info(
-            "Loaded manifest from %s with %d functions",
-            MANIFEST_PATH,
-            len(manifest.get("functions", [])),
-        )
-    else:
-        default_user_modules = "functions"
-        user_modules_str = os.getenv("USER_MODULES", default_user_modules)
-        user_modules = [mod.strip() for mod in user_modules_str.split(",") if mod.strip()]
+        logger.info("Loaded manifest from %s with %d functions", MANIFEST_PATH, len(manifest.get("functions", [])))
 
     logger.info("Starting worker...")
     logger.info("  Scheduler Address: %s", SCHEDULER_ADDR)
@@ -131,8 +123,9 @@ if __name__ == "__main__":
 
     if not user_modules:
         logger.error(
-            "No user function modules found. Either provide a manifest at "
-            "/app/.cozy/manifest.json or set the USER_MODULES environment variable."
+            "No user function modules found. A baked manifest at /app/.cozy/manifest.json is required.\n"
+            "Your Dockerfile should run discovery at build time:\n"
+            "  RUN mkdir -p /app/.cozy && python -m gen_worker.discover > /app/.cozy/manifest.json"
         )
         sys.exit(1)
 

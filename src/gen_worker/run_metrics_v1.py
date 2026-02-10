@@ -99,6 +99,11 @@ class ModelMetricsV1:
     bytes_downloaded: Optional[int] = None
     download_ms: Optional[int] = None
     bytes_read_disk: Optional[int] = None
+    disk_fstype: Optional[str] = None
+    disk_backend: Optional[str] = None  # local|nfs
+    localized: Optional[bool] = None
+    nfs_to_local_copy_ms: Optional[int] = None
+    bytes_copied: Optional[int] = None
 
     def to_json(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {"model_id": self.model_id}
@@ -114,6 +119,16 @@ class ModelMetricsV1:
             out["download_ms"] = int(self.download_ms)
         if self.bytes_read_disk is not None:
             out["bytes_read_disk"] = int(self.bytes_read_disk)
+        if self.disk_fstype is not None:
+            out["disk_fstype"] = str(self.disk_fstype)
+        if self.disk_backend is not None:
+            out["disk_backend"] = str(self.disk_backend)
+        if self.localized is not None:
+            out["localized"] = bool(self.localized)
+        if self.nfs_to_local_copy_ms is not None:
+            out["nfs_to_local_copy_ms"] = int(self.nfs_to_local_copy_ms)
+        if self.bytes_copied is not None:
+            out["bytes_copied"] = int(self.bytes_copied)
         return out
 
 
@@ -190,6 +205,34 @@ class RunMetricsV1:
         ent.download_ms = ms_i
         if bytes_downloaded is not None:
             ent.bytes_downloaded = int(bytes_downloaded)
+
+    def set_model_disk_backend(
+        self,
+        model_id: str,
+        *,
+        disk_fstype: Optional[str] = None,
+        disk_backend: Optional[str] = None,
+        localized: Optional[bool] = None,
+        nfs_to_local_copy_ms: Optional[int] = None,
+        bytes_copied: Optional[int] = None,
+    ) -> None:
+        ent = self._get_model_entry(model_id)
+        if disk_fstype is not None:
+            ent.disk_fstype = str(disk_fstype)
+        if disk_backend is not None:
+            ent.disk_backend = str(disk_backend)
+        if localized is not None:
+            ent.localized = bool(localized)
+        if nfs_to_local_copy_ms is not None:
+            try:
+                ent.nfs_to_local_copy_ms = int(nfs_to_local_copy_ms)
+            except Exception:
+                pass
+        if bytes_copied is not None:
+            try:
+                ent.bytes_copied = int(bytes_copied)
+            except Exception:
+                pass
 
     def add_pipeline_init_time(self, ms: int) -> None:
         try:

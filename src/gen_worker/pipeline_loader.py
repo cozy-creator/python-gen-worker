@@ -44,6 +44,7 @@ import logging
 import os
 import random
 import shutil
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -182,7 +183,9 @@ class LocalModelCache:
         self.cache_dir = Path(local_cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.max_cache_size_gb = max_cache_size_gb
-        self._cache_lock = asyncio.Lock()
+        # Multi-GB directory copies are blocking; guard to prevent duplicate work.
+        # Async callers will run copy operations via asyncio.to_thread.
+        self._cache_lock = threading.Lock()
         self._prefetch_tasks: Dict[str, asyncio.Task] = {}
 
     def _get_cache_path(self, model_id: str) -> Path:
@@ -241,110 +244,155 @@ class LocalModelCache:
             return cache_path
         return None
 
-    async def cache_model(
+    def cache_model_blocking(
         self,
         model_id: str,
         source_path: Path,
         progress_callback: Optional[Callable[[str, float], None]] = None,
     ) -> Path:
         """
-        Copy model from source (NFS) to local cache (NVMe).
+        Blocking copy model from source to local cache.
 
-        Prioritizes FlashPack files for copying.
-
-        Args:
-            model_id: Model identifier
-            source_path: Source path (e.g., NFS mount)
-            progress_callback: Optional callback(stage, progress_pct)
-
-        Returns:
-            Path to cached model
+        - This is safe for sync callers (e.g. worker injection paths).
+        - Async callers should use cache_model(), which delegates to a thread.
         """
         cache_path = self._get_cache_path(model_id)
-
         if cache_path.exists():
-            logger.debug(f"Model {model_id} already in local cache")
+            try:
+                cache_path.touch()
+            except Exception:
+                pass
             return cache_path
 
-        async with self._cache_lock:
-            # Double-check after acquiring lock
+        with self._cache_lock:
             if cache_path.exists():
+                try:
+                    cache_path.touch()
+                except Exception:
+                    pass
                 return cache_path
 
-            # Estimate size
+            # Estimate size.
             source_size_gb = sum(
                 f.stat().st_size for f in source_path.rglob("*") if f.is_file()
             ) / (1024**3)
 
-            # Evict if needed
+            # Evict if needed.
             current_size = self._get_cache_size_gb()
             if current_size + source_size_gb > self.max_cache_size_gb:
                 needed = current_size + source_size_gb - self.max_cache_size_gb + 1.0
                 self._evict_lru(needed)
 
-            logger.info(f"Caching {model_id} ({source_size_gb:.1f}GB) to local NVMe")
+            logger.info(f"Caching {model_id} ({source_size_gb:.1f}GB) to local cache")
 
-            # Create temp directory for atomic copy
+            # Create temp directory for atomic copy.
             temp_path = cache_path.with_suffix(".tmp")
             if temp_path.exists():
-                shutil.rmtree(temp_path)
+                shutil.rmtree(temp_path, ignore_errors=True)
 
-            # Copy with FlashPack priority
-            await self._copy_model_prioritized(
-                source_path, temp_path, progress_callback
-            )
+            _ = self._copy_model_prioritized_blocking(source_path, temp_path, progress_callback)
 
-            # Atomic rename
+            # Atomic rename.
             temp_path.rename(cache_path)
             logger.info(f"Cached {model_id} to {cache_path}")
-
             return cache_path
 
-    async def _copy_model_prioritized(
+    def cache_model_blocking_with_stats(
+        self,
+        model_id: str,
+        source_path: Path,
+        progress_callback: Optional[Callable[[str, float], None]] = None,
+    ) -> tuple[Path, Optional[int]]:
+        """
+        Like cache_model_blocking(), but also returns best-effort bytes_copied.
+
+        If the model was already cached, bytes_copied is None.
+        """
+        cache_path = self._get_cache_path(model_id)
+        if cache_path.exists():
+            try:
+                cache_path.touch()
+            except Exception:
+                pass
+            return cache_path, None
+
+        with self._cache_lock:
+            if cache_path.exists():
+                try:
+                    cache_path.touch()
+                except Exception:
+                    pass
+                return cache_path, None
+
+            source_size_gb = sum(
+                f.stat().st_size for f in source_path.rglob("*") if f.is_file()
+            ) / (1024**3)
+            current_size = self._get_cache_size_gb()
+            if current_size + source_size_gb > self.max_cache_size_gb:
+                needed = current_size + source_size_gb - self.max_cache_size_gb + 1.0
+                self._evict_lru(needed)
+
+            logger.info(f"Caching {model_id} ({source_size_gb:.1f}GB) to local cache")
+
+            temp_path = cache_path.with_suffix(".tmp")
+            if temp_path.exists():
+                shutil.rmtree(temp_path, ignore_errors=True)
+
+            bytes_copied = self._copy_model_prioritized_blocking(source_path, temp_path, progress_callback)
+            temp_path.rename(cache_path)
+            logger.info(f"Cached {model_id} to {cache_path}")
+            return cache_path, bytes_copied
+
+    async def cache_model(
+        self,
+        model_id: str,
+        source_path: Path,
+        progress_callback: Optional[Callable[[str, float], None]] = None,
+    ) -> Path:
+        return await asyncio.to_thread(self.cache_model_blocking, model_id, source_path, progress_callback)
+
+    def _copy_model_prioritized_blocking(
         self,
         source: Path,
         dest: Path,
         progress_callback: Optional[Callable[[str, float], None]] = None,
-    ) -> None:
-        """Copy model files with FlashPack files first."""
+    ) -> int:
+        """Copy model files with FlashPack files first (blocking). Returns bytes copied."""
+        dest.mkdir(parents=True, exist_ok=True)
 
-        def do_copy() -> None:
-            dest.mkdir(parents=True, exist_ok=True)
+        # Collect all files and sort by priority.
+        all_files = list(source.rglob("*"))
+        files_to_copy = [f for f in all_files if f.is_file()]
 
-            # Collect all files and sort by priority
-            all_files = list(source.rglob("*"))
-            files_to_copy = [f for f in all_files if f.is_file()]
+        # Sort: .flashpack files first, then safetensors, then rest.
+        def priority(f: Path) -> int:
+            if f.suffix == ".flashpack":
+                return 0
+            if f.suffix == ".safetensors":
+                return 1
+            return 2
 
-            # Sort: .flashpack files first, then safetensors, then rest
-            def priority(f: Path) -> int:
-                if f.suffix == ".flashpack":
-                    return 0
-                if f.suffix == ".safetensors":
-                    return 1
-                return 2
+        files_to_copy.sort(key=priority)
 
-            files_to_copy.sort(key=priority)
+        total_size = sum(f.stat().st_size for f in files_to_copy)
+        copied = 0
 
-            total_size = sum(f.stat().st_size for f in files_to_copy)
-            copied = 0
+        for file in files_to_copy:
+            rel = file.relative_to(source)
+            dst = dest / rel
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(file, dst)
+            copied += file.stat().st_size
 
-            for file in files_to_copy:
-                rel = file.relative_to(source)
-                dst = dest / rel
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(file, dst)
-                copied += file.stat().st_size
+            if progress_callback and total_size > 0:
+                progress_callback("caching", copied / total_size * 100)
 
-                if progress_callback and total_size > 0:
-                    progress_callback("caching", copied / total_size * 100)
-
-            # Copy empty directories
-            for d in all_files:
-                if d.is_dir():
-                    rel = d.relative_to(source)
-                    (dest / rel).mkdir(parents=True, exist_ok=True)
-
-        await asyncio.to_thread(do_copy)
+        # Copy empty directories.
+        for d in all_files:
+            if d.is_dir():
+                rel = d.relative_to(source)
+                (dest / rel).mkdir(parents=True, exist_ok=True)
+        return int(total_size)
 
     def start_prefetch(self, model_id: str, source_path: Path) -> None:
         """Start background prefetch of a model."""
@@ -679,7 +727,10 @@ def estimate_model_size_gb(model_path: Path) -> float:
 
 def get_available_vram_gb() -> float:
     """Get available VRAM in GB."""
-    import torch
+    try:
+        import torch
+    except Exception:
+        return 0.0
     if not torch.cuda.is_available():
         return 0.0
 
@@ -692,7 +743,10 @@ def get_available_vram_gb() -> float:
 
 def get_total_vram_gb() -> float:
     """Get total VRAM in GB."""
-    import torch
+    try:
+        import torch
+    except Exception:
+        return 0.0
     if not torch.cuda.is_available():
         return 0.0
 
@@ -744,8 +798,11 @@ class PipelineLoader:
             cozy_hub_url: Base URL for Cozy Hub API
             cozy_hub_token: Authentication token for Cozy Hub
         """
+        if models_dir is None:
+            # Standard shared disk cache root (Runpod: /workspace/..., local dev: /tmp/...).
+            models_dir = os.environ.get("WORKER_MODEL_CACHE_DIR", "/tmp/cozy/models")
         self.models_dir = Path(models_dir) if models_dir else None
-        self.local_cache_dir = Path(local_cache_dir) if local_cache_dir else None
+        self.local_cache_dir: Optional[Path] = None
         self.vram_safety_margin_gb = vram_safety_margin_gb
 
         # Cozy Hub configuration
@@ -768,9 +825,29 @@ class PipelineLoader:
 
         # Local NVMe cache for NFS optimization
         self._local_cache: Optional[LocalModelCache] = None
+        if local_cache_dir is None:
+            # Standard env for local (non-NFS) cache. Empty disables.
+            local_cache_dir = os.environ.get("WORKER_LOCAL_MODEL_CACHE_DIR", "/tmp/cozy/local-model-cache").strip() or None
+        if local_cache_dir:
+            # Validate local cache isn't itself on NFS; otherwise localization is pointless.
+            try:
+                from .mount_backend import mount_backend_for_path
+
+                mb = mount_backend_for_path(local_cache_dir)
+                if mb is not None and mb.is_nfs:
+                    logger.warning(
+                        "WORKER_LOCAL_MODEL_CACHE_DIR appears to be on NFS (%s, %s); disabling localization cache",
+                        mb.fstype,
+                        mb.mountpoint,
+                    )
+                    local_cache_dir = None
+            except Exception:
+                # best-effort; if mount detection fails, still allow cache usage
+                pass
         if local_cache_dir:
             max_cache_gb = float(os.environ.get("WORKER_LOCAL_CACHE_GB", "100"))
             self._local_cache = LocalModelCache(local_cache_dir, max_cache_gb)
+            self.local_cache_dir = Path(local_cache_dir)
             logger.info(f"Local cache enabled: {local_cache_dir} ({max_cache_gb}GB max)")
 
         # Download semaphore for concurrent downloads
@@ -854,13 +931,21 @@ class PipelineLoader:
             if local_path.exists():
                 logger.debug(f"Model {model_id} found locally: {local_path}")
 
-                # Optionally copy to local NVMe cache
+                # If the snapshot is on NFS/shared storage, prefer on-demand localization
+                # to local disk for faster model load.
                 if self._local_cache:
-                    cached = self._local_cache.get_cached_path(model_id)
-                    if cached:
-                        return cached
-                    # Cache in background for next time
-                    self._local_cache.start_prefetch(model_id, local_path)
+                    try:
+                        from .mount_backend import mount_backend_for_path
+
+                        mb = mount_backend_for_path(local_path)
+                        if mb is not None and mb.is_nfs:
+                            cached = self._local_cache.get_cached_path(model_id)
+                            if cached:
+                                return cached
+                            return await self._local_cache.cache_model(model_id, local_path)
+                    except Exception:
+                        # best-effort; fall back to original path
+                        pass
 
                 return local_path
 

@@ -710,6 +710,13 @@ class Worker:
         self._custom_runtime_cache: Dict[Tuple[str, str], Any] = {}  # (model_id, injected_type_qualname) -> runtime handle
         self._custom_runtime_locks: Dict[Tuple[str, str], threading.Lock] = {}
 
+        # Local (non-NFS) cache for NFS->local snapshot localization.
+        # Empty WORKER_LOCAL_MODEL_CACHE_DIR disables localization entirely.
+        self._local_model_cache_dir = os.getenv("WORKER_LOCAL_MODEL_CACHE_DIR", "/tmp/cozy/local-model-cache").strip()
+        self._local_model_cache: Optional[Any] = None
+        self._local_model_cache_lock = threading.Lock()
+        self._last_disk_inventory_hash: str = ""
+
         self._gpu_busy_lock = threading.Lock()
         # Busy is used by the scheduler as a cheap routing hint.
         # Use a refcount (not a boolean) so overlapping inference + model ops
@@ -776,11 +783,12 @@ class Worker:
                 cozy_token=token,
                 allow_cozy_hub_api_resolve=allow_api,
             )
-        self._supported_model_ids_from_scheduler: Optional[List[str]] = None # To store IDs from scheduler
+        self._supported_model_ids_from_scheduler: Optional[List[str]] = None  # allowlist from scheduler (repo refs)
+        self._required_variant_refs_from_scheduler: Optional[List[str]] = None  # warm-start pinned variants
         # Signature-driven model selection mapping and allowlist (provided by orchestrator).
         self._release_model_id_by_key: Dict[str, str] = {}
         self._release_allowed_model_ids: Optional[set[str]] = None
-        # Orchestrator-resolved manifests received in ReleaseModelConfig (startup prefetch baseline).
+        # Orchestrator-resolved manifests received in DeploymentArtifactConfig (startup prefetch baseline).
         # Keys should be canonical model ref strings (e.g. "cozy:owner/repo@sha256:<digest>").
         self._resolved_cozy_models_by_id_baseline: Dict[str, Any] = {}
         self._prefetch_lock = threading.Lock()
@@ -794,7 +802,7 @@ class Worker:
         self._manifest = manifest
         if manifest and "models" in manifest:
             # Initialize model key->id mapping from manifest (baked in at build time)
-            # This allows ModelRef(Src.RELEASE, "key") to resolve without scheduler config
+            # This allows ModelRef(Src.FIXED, "key") to resolve without scheduler config
             manifest_models = manifest["models"]
             if isinstance(manifest_models, dict):
                 self._release_model_id_by_key = {
@@ -1698,6 +1706,22 @@ class Worker:
             if not cuda_version:
                 cuda_version = os.getenv("CUDA_VERSION", "").strip() or os.getenv("NVIDIA_CUDA_VERSION", "").strip()
 
+            gpu_sm = ""
+            installed_libs: List[str] = []
+            try:
+                from .cozy_hub_policy import detect_worker_capabilities
+
+                caps = detect_worker_capabilities()
+                installed_libs = list(caps.installed_libs or [])
+                if caps.gpu_sm:
+                    gpu_sm = str(int(caps.gpu_sm))
+                if not cuda_version:
+                    cuda_version = str(caps.cuda_version or "")
+                if not torch_version:
+                    torch_version = str(caps.torch_version or "")
+            except Exception:
+                pass
+
             function_schemas = []
             for fname, (in_schema, out_schema, _delta_schema, inj_json) in self._function_schemas.items():
                 try:
@@ -1734,6 +1758,8 @@ class Worker:
                 function_concurrency=function_concurrency,
                 cuda_version=cuda_version,
                 torch_version=torch_version,
+                gpu_sm=gpu_sm,
+                installed_libs=installed_libs,
                 available_functions=list(dict.fromkeys(list(self._task_specs.keys()) + list(self._ws_specs.keys()))),
                 vram_models=vram_models,   # Models in VRAM (hot)
                 disk_models=disk_models,   # Models on disk (warm)
@@ -1748,6 +1774,37 @@ class Worker:
             # logger.info(f"DEBUG: Preparing to send registration. Resource object: {resources}")
             # logger.info(f"DEBUG: Value being sent for runpod_pod_id: '{resources.runpod_pod_id}'")
             self._send_message(message)
+
+            # Best-effort: report disk inventory + volume identity for NFS-aware scheduling/debug.
+            # This is intentionally redundant with WorkerResources.disk_models but adds the missing
+            # "which shared volume is this?" dimension.
+            try:
+                vol = self._shared_disk_volume_info()
+                if vol and disk_models:
+                    import hashlib as _hashlib
+
+                    # Only emit when inventory changes to avoid spamming.
+                    h = _hashlib.sha256()
+                    h.update((vol.get("disk_volume_key") or "").encode("utf-8"))
+                    for mid in sorted(set(str(x) for x in disk_models)):
+                        h.update(b"\0")
+                        h.update(mid.encode("utf-8", errors="ignore"))
+                    inv_hash = h.hexdigest()
+                    if inv_hash != self._last_disk_inventory_hash:
+                        self._last_disk_inventory_hash = inv_hash
+                        payload = dict(vol)
+                        payload["disk_models"] = sorted(set(str(x) for x in disk_models))
+                        self._send_message(
+                            pb.WorkerSchedulerMessage(
+                                worker_event=pb.WorkerEvent(
+                                    run_id="",
+                                    event_type="models.disk_inventory",
+                                    payload_json=json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8"),
+                                )
+                            )
+                        )
+            except Exception:
+                pass
         except Exception as e:
             logger.error(f"Failed to create or send registration/heartbeat: {e}")
 
@@ -1980,30 +2037,40 @@ class Worker:
         elif msg_type == "worker_event":
             self._handle_worker_event_from_scheduler(message.worker_event)
         # Add handling for other message types if needed (e.g., config updates)
-        elif msg_type == 'release_model_config':
-            logger.info("Received ReleaseModelConfig (%d models)", len(message.release_model_config.supported_model_ids))
+        elif msg_type == 'deployment_artifact_config':
+            cfg = message.deployment_artifact_config
+            resolved_by_variant = dict(getattr(cfg, "resolved_cozy_models_by_variant_ref", {}) or {})
+            logger.info(
+                "Received DeploymentArtifactConfig (supported=%d required=%d resolved=%d)",
+                len(cfg.supported_repo_refs),
+                len(cfg.required_variant_refs),
+                len(resolved_by_variant),
+            )
             self._supported_model_ids_from_scheduler = [
-                _canonicalize_model_ref_string(str(v)) for v in list(message.release_model_config.supported_model_ids)
+                _canonicalize_model_ref_string(str(v)) for v in list(cfg.supported_repo_refs)
             ]
             try:
                 # Optional label->id mapping for signature-driven model selection.
                 self._release_model_id_by_key = {
                     str(k): _canonicalize_model_ref_string(str(v))
-                    for k, v in dict(message.release_model_config.model_id_by_key).items()
+                    for k, v in dict(cfg.repo_ref_by_key).items()
                 }
             except Exception:
                 self._release_model_id_by_key = {}
 
             # Baseline resolved manifests for Cozy model downloads (issue #66/#238).
             self._resolved_cozy_models_by_id_baseline = self._canonicalize_resolved_models_map(
-                dict(getattr(message.release_model_config, "resolved_cozy_models_by_id", {}) or {})
+                resolved_by_variant
             )
 
             self._release_allowed_model_ids = set(self._supported_model_ids_from_scheduler)
+            self._required_variant_refs_from_scheduler = [
+                _canonicalize_model_ref_string(str(v)) for v in list(cfg.required_variant_refs)
+            ]
 
             # Start background prefetch regardless of model manager; disk readiness is useful even
             # for lightweight workers and enables cache-aware routing.
-            self._start_startup_prefetch(self._supported_model_ids_from_scheduler)
+            self._start_startup_prefetch(self._required_variant_refs_from_scheduler or [])
 
             if self._model_manager:
                 # Legacy/model-manager-specific config hook (may load/prep models).
@@ -2104,7 +2171,7 @@ class Worker:
                         # Volume inventory signal (gen-orchestrator issue #236).
                         try:
                             payload = json.dumps(
-                                {"model_variant_id": canon},
+                                {"model_variant_id": canon, **self._shared_disk_volume_info(existing)},
                                 separators=(",", ":"),
                                 sort_keys=True,
                             ).encode("utf-8")
@@ -2152,10 +2219,10 @@ class Worker:
                     except Exception:
                         pass
                     # Volume inventory signal (gen-orchestrator issue #236).
-                    # model_variant_id should match what the scheduler uses in required_model_ids.
+                    # model_variant_id should match what the scheduler uses in required_variant_refs.
                     try:
                         payload = json.dumps(
-                            {"model_variant_id": canon},
+                            {"model_variant_id": canon, **self._shared_disk_volume_info(lp)},
                             separators=(",", ":"),
                             sort_keys=True,
                         ).encode("utf-8")
@@ -2471,7 +2538,7 @@ class Worker:
         file_token = str(getattr(request, "file_token", "") or "")
         resolved_cozy_models_by_id = dict(getattr(request, "resolved_cozy_models_by_id", {}) or {})
 
-        required_models_raw = list(getattr(request, "required_models", []) or [])
+        required_models_raw = list(getattr(request, "required_variant_refs", []) or [])
         if required_models_raw:
             required_model_id_for_exec = str(required_models_raw[0] or "").strip()
 
@@ -2494,14 +2561,13 @@ class Worker:
             self._send_task_result(run_id, False, None, "retryable", True, "worker busy", error_msg)
             return
 
-        # Prefer the scheduler-provided required_models list, but map through any
-        # release-local key->id mapping if the scheduler used deployment-local keys.
+        # required_variant_refs are pinned variant refs chosen by the scheduler; the worker must not guess.
         required_models: List[str] = []
         for raw in required_models_raw:
             s = str(raw or "").strip()
             if not s:
                 continue
-            required_models.append(self._release_model_id_by_key.get(s, s))
+            required_models.append(_canonicalize_model_ref_string(s))
 
         ctx = ActionContext(
             run_id,
@@ -2604,17 +2670,11 @@ class Worker:
                 baseline = getattr(self, "_resolved_cozy_models_by_id_baseline", None) or None
                 resolved_tok = set_resolved_cozy_models_by_id(getattr(ctx, "resolved_cozy_models_by_id", None) or baseline)
                 try:
-                    required_models = list(getattr(cmd, "required_models", []) or [])
+                    required_variant_refs = list(getattr(cmd, "required_variant_refs", []) or [])
                     for idx, inj in enumerate(spec.injections):
-                        model_id = ""
-                        if idx < len(required_models) and str(required_models[idx]).strip():
-                            raw = str(required_models[idx]).strip()
-                            model_id = self._release_model_id_by_key.get(raw, raw)
-                        elif inj.model_ref.source == ModelRefSource.RELEASE and inj.model_ref.key.strip():
-                            raw = inj.model_ref.key.strip()
-                            model_id = self._release_model_id_by_key.get(raw, raw)
-                        if not model_id:
-                            raise ValueError(f"missing resolved model id for injection param: {inj.param_name}")
+                        if idx >= len(required_variant_refs) or not str(required_variant_refs[idx]).strip():
+                            raise ValueError(f"missing required_variant_refs for injection param: {inj.param_name}")
+                        model_id = _canonicalize_model_ref_string(str(required_variant_refs[idx]).strip())
                         self._enforce_model_allowlist(model_id, inj)
                         kwargs[inj.param_name] = self._resolve_injected_value(ctx, inj.param_type, model_id, inj)
                     await spec.func(**kwargs)
@@ -2955,6 +3015,68 @@ class Worker:
                     else:
                         self._active_function_counts[spec.name] = current
 
+    def _get_local_model_cache(self) -> Optional[Any]:
+        """
+        Best-effort initialize a local (non-NFS) model cache for NFS->local localization.
+
+        Returns None when disabled or misconfigured (e.g. local cache dir is itself on NFS).
+        """
+        d = (self._local_model_cache_dir or "").strip()
+        if not d:
+            return None
+        with self._local_model_cache_lock:
+            if self._local_model_cache is not None:
+                return self._local_model_cache
+            try:
+                from .mount_backend import mount_backend_for_path
+                mb = mount_backend_for_path(d)
+                if mb is not None and mb.is_nfs:
+                    logger.warning(
+                        "WORKER_LOCAL_MODEL_CACHE_DIR appears to be on NFS (%s, %s); disabling localization cache",
+                        mb.fstype,
+                        mb.mountpoint,
+                    )
+                    # Disable for the rest of the process lifetime.
+                    self._local_model_cache_dir = ""
+                    return None
+            except Exception:
+                pass
+
+            try:
+                from .pipeline_loader import LocalModelCache  # local import to avoid heavy import at worker init
+
+                max_cache_gb = float(os.environ.get("WORKER_LOCAL_CACHE_GB", "100"))
+                self._local_model_cache = LocalModelCache(d, max_cache_gb)
+                logger.info("Local model cache enabled: %s (%.1fGB max)", d, max_cache_gb)
+                return self._local_model_cache
+            except Exception as e:
+                logger.warning("Failed to init local model cache: %s", e)
+                self._local_model_cache_dir = ""
+                return None
+
+    def _shared_disk_volume_info(self, path: Optional[Path] = None) -> Dict[str, Any]:
+        """
+        Best-effort identify the disk backend and volume identity for the shared model cache.
+
+        - Does not include file paths or raw mount sources (those may leak internal details).
+        - Provides a stable `disk_volume_key` that gen-orchestrator can use to group workers
+          that share the same NFS volume.
+        """
+        try:
+            from .mount_backend import mount_backend_for_path, volume_key_for_path
+
+            p = path or Path(os.getenv("WORKER_MODEL_CACHE_DIR", "/tmp/cozy/models"))
+            mb = mount_backend_for_path(p)
+            if mb is None:
+                return {}
+            return {
+                "disk_backend": "nfs" if mb.is_nfs else "local",
+                "disk_fstype": mb.fstype,
+                "disk_volume_key": volume_key_for_path(p),
+            }
+        except Exception:
+            return {}
+
     def _resolve_injected_value(self, ctx: ActionContext, requested_type: Any, model_id: str, inj: InjectionSpec) -> Any:
         qn = type_qualname(requested_type)
         rm: Optional[RunMetricsV1] = getattr(ctx, "_run_metrics", None)
@@ -3018,6 +3140,12 @@ class Worker:
                     and issubclass(requested_type, DiffusionPipeline)
                 ):
                     local = None
+                    canon = str(model_id)
+                    try:
+                        parsed = parse_model_ref(str(model_id))
+                        canon = parsed.cozy.canonical() if parsed.scheme == "cozy" and parsed.cozy is not None else str(model_id)
+                    except Exception:
+                        canon = str(model_id)
                     try:
                         p = Path(model_id)
                         if p.exists():
@@ -3033,27 +3161,95 @@ class Worker:
                         t_dl0 = time.monotonic()
                         local = self._downloader.download(model_id, cache_dir)
                         t_dl_ms = int((time.monotonic() - t_dl0) * 1000)
+
+                        warm = False
+                        try:
+                            warm = canon in set(self._model_cache.get_disk_models())
+                        except Exception:
+                            warm = False
+
+                        # If we have an orchestrator-resolved manifest, estimate missing bytes.
+                        resolved_entry = None
+                        try:
+                            resolved_entry = (getattr(ctx, "resolved_cozy_models_by_id", None) or {}).get(canon)
+                        except Exception:
+                            resolved_entry = None
+                        bytes_dl = None
+                        if resolved_entry is not None:
+                            bytes_dl = best_effort_bytes_downloaded(Path(cache_dir), resolved_entry)
                         if rm is not None:
                             try:
-                                parsed = parse_model_ref(str(model_id))
-                                canon = parsed.cozy.canonical() if parsed.scheme == "cozy" and parsed.cozy is not None else str(model_id)
-                                warm = False
-                                try:
-                                    warm = canon in set(self._model_cache.get_disk_models())
-                                except Exception:
-                                    warm = False
-                                # If we have an orchestrator-resolved manifest, estimate missing bytes.
-                                resolved_entry = None
-                                try:
-                                    resolved_entry = (getattr(ctx, "resolved_cozy_models_by_id", None) or {}).get(canon)
-                                except Exception:
-                                    resolved_entry = None
-                                bytes_dl = None
-                                if resolved_entry is not None:
-                                    bytes_dl = best_effort_bytes_downloaded(Path(cache_dir), resolved_entry)
                                 rm.add_fetch_time(canon, 0 if warm else t_dl_ms, 0 if warm else bytes_dl)
                             except Exception:
                                 pass
+
+                        # Ensure the shared cache has a durable snapshot under WORKER_MODEL_CACHE_DIR
+                        # before any NFS->local localization happens, so future pods can warm-start.
+                        try:
+                            lp = Path(local or "")
+                            if lp.exists():
+                                try:
+                                    self._model_cache.mark_cached_to_disk(canon, lp)
+                                except Exception:
+                                    pass
+                                if not warm:
+                                    # Volume inventory signal (gen-orchestrator issue #236).
+                                    try:
+                                        payload = json.dumps(
+                                            {"model_variant_id": canon, **self._shared_disk_volume_info(lp)},
+                                            separators=(",", ":"),
+                                            sort_keys=True,
+                                        ).encode("utf-8")
+                                        self._send_message(
+                                            pb.WorkerSchedulerMessage(
+                                                worker_event=pb.WorkerEvent(run_id="", event_type="model.cached", payload_json=payload)
+                                            )
+                                        )
+                                    except Exception:
+                                        pass
+                        except Exception:
+                            pass
+
+                    # Detect mount backend (NFS vs local) and localize snapshot to local disk if needed.
+                    try:
+                        from .mount_backend import mount_backend_for_path
+
+                        src_path = Path(local or "")
+                        mb_src = mount_backend_for_path(src_path)
+                        if mb_src is not None and rm is not None:
+                            rm.set_model_disk_backend(
+                                canon,
+                                disk_fstype=mb_src.fstype,
+                                disk_backend="nfs" if mb_src.is_nfs else "local",
+                                localized=False,
+                            )
+
+                        if mb_src is not None and mb_src.is_nfs and src_path.exists() and src_path.is_dir():
+                            lcache = self._get_local_model_cache()
+                            if lcache is not None:
+                                t_cp0 = time.monotonic()
+                                cached_path, bytes_copied = lcache.cache_model_blocking_with_stats(canon, src_path)
+                                cp_ms = int((time.monotonic() - t_cp0) * 1000)
+
+                                # Update metrics with effective backend used for loading.
+                                if rm is not None:
+                                    try:
+                                        mb_eff = mount_backend_for_path(cached_path)
+                                        kw: Dict[str, Any] = {
+                                            "disk_fstype": mb_eff.fstype if mb_eff is not None else None,
+                                            "disk_backend": "local",
+                                            "localized": True,
+                                        }
+                                        if bytes_copied is not None:
+                                            kw["nfs_to_local_copy_ms"] = cp_ms
+                                            kw["bytes_copied"] = bytes_copied
+                                        rm.set_model_disk_backend(canon, **kw)
+                                    except Exception:
+                                        pass
+
+                                local = str(cached_path)
+                    except Exception:
+                        pass
 
                     kwargs: dict[str, Any] = {}
 
@@ -3165,10 +3361,10 @@ class Worker:
         raise ValueError(f"no injection provider for type {qn} (model_id={model_id})")
 
     def _resolve_model_id_for_injection(self, inj: InjectionSpec, payload: msgspec.Struct) -> str:
-        if inj.model_ref.source == ModelRefSource.RELEASE:
+        if inj.model_ref.source == ModelRefSource.FIXED:
             raw = inj.model_ref.key.strip()
             if not raw:
-                raise ValueError(f"empty release ModelRef for injection param: {inj.param_name}")
+                raise ValueError(f"empty fixed ModelRef for injection param: {inj.param_name}")
             model_id = self._release_model_id_by_key.get(raw, raw)
             self._enforce_model_allowlist(model_id, inj)
             return model_id
@@ -3188,7 +3384,25 @@ class Worker:
             key = chosen.strip()
             if not key:
                 raise ValueError(f"payload field {field!r} is empty; expected a model key")
-            model_id = self._release_model_id_by_key.get(key, key)
+            # Payload-based selection must use a short-key from `[models]` (cozy.toml).
+            # Do not allow arbitrary refs in the payload by default, otherwise the
+            # orchestrator cannot route cache-aware and the allowlist becomes harder
+            # to reason about.
+            if not self._release_model_id_by_key:
+                raise ValueError(
+                    "payload model selection is not configured: no short-key mapping is available "
+                    "(expected `[models]` (cozy.toml) to populate model_id_by_key)"
+                )
+            if key not in self._release_model_id_by_key:
+                allowed = sorted(self._release_model_id_by_key.keys())
+                head = allowed[:20]
+                suffix = ""
+                if len(allowed) > len(head):
+                    suffix = f" (+{len(allowed) - len(head)} more)"
+                raise ValueError(
+                    f"unknown model key {key!r} for payload field {field!r}; allowed keys: {head}{suffix}"
+                )
+            model_id = self._release_model_id_by_key[key]
             self._enforce_model_allowlist(model_id, inj)
             return model_id
 

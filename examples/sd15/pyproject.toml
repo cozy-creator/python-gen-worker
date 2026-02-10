@@ -1,7 +1,7 @@
 [project]
 name = "sd15"
 version = "0.1.1"
-description = "Stable Diffusion 1.5 example (inference-only; models via [tool.cozy.models])"
+description = "Stable Diffusion 1.5 example (inference-only; Cozy manifest via cozy.toml)"
 requires-python = ">=3.12"
 dependencies = [
     "diffusers",
@@ -24,15 +24,3 @@ packages = ["src/sd15"]
 python_version = "3.12"
 ignore_missing_imports = true
 disallow_untyped_defs = true
-
-[tool.cozy]
-
-[tool.cozy.build]
-gpu = true
-torch = "2.10.0"
-
-[tool.cozy.resources]
-vram_gb = 8
-
-[tool.cozy.models]
-sd15 = "stable-diffusion-v1-5/stable-diffusion-v1-5"

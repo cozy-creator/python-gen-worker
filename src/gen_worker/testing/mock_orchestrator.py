@@ -189,7 +189,7 @@ class WorkerSession:
         owner: str = "",
         user_id: str = "",
         timeout_ms: int = 0,
-        required_models: Tuple[str, ...] = (),
+        required_variant_refs: Tuple[str, ...] = (),
         file_base_url: str = "",
         file_token: str = "",
     ) -> str:
@@ -199,7 +199,7 @@ class WorkerSession:
             run_id=rid,
             function_name=function_name,
             input_payload=raw,
-            required_models=list(required_models),
+            required_variant_refs=list(required_variant_refs),
             timeout_ms=timeout_ms,
             owner=owner,
             user_id=user_id,
@@ -314,8 +314,8 @@ def _format_msg(msg: pb.WorkerSchedulerMessage) -> str:
         return "unload_model_result"
     if msg.HasField("interrupt_run_cmd"):
         return "interrupt_run_cmd"
-    if msg.HasField("release_model_config"):
-        return "release_model_config"
+    if msg.HasField("deployment_artifact_config"):
+        return "deployment_artifact_config"
     if msg.HasField("realtime_open_cmd"):
         return "realtime_open_cmd"
     if msg.HasField("realtime_frame"):
@@ -397,7 +397,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             timeout_ms=int(args.timeout_ms),
             owner=args.owner,
             user_id=args.user_id,
-            required_models=tuple(args.required_model),
+            required_variant_refs=tuple(args.required_model),
             file_base_url=str(args.file_base_url or ""),
             file_token=str(args.file_token or ""),
         )

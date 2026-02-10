@@ -24,7 +24,14 @@ def test_parse_cozy_digest() -> None:
     p = parse_model_ref("owner/repo@sha256:abcd")
     assert p.scheme == "cozy"
     assert p.cozy is not None
-    assert p.cozy.digest == "abcd"
+    assert p.cozy.digest == "sha256:abcd"
+
+
+def test_parse_cozy_digest_blake3() -> None:
+    p = parse_model_ref("owner/repo@blake3:abcd")
+    assert p.scheme == "cozy"
+    assert p.cozy is not None
+    assert p.cozy.digest == "blake3:abcd"
 
 
 def test_parse_hf_basic() -> None:

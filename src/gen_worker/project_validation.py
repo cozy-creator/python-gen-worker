@@ -39,11 +39,15 @@ def validate_project(root: str | Path, *, require_uv_lock: bool = False) -> Proj
     Validate a tenant project directory.
 
     Requirements:
-    - `pyproject.toml` must exist
-    - `[project].name` must exist (normalized for URL-safe project paths)
-    - `[tool.cozy]` must exist in `pyproject.toml`
+    - `Dockerfile` must exist
+    - `cozy.toml` must exist (flat schema)
+      - schema_version = 1
+      - name = "..."
+      - main = "pkg.module"
+      - gen_worker = ">=x,<y"
+    - `pyproject.toml` must exist (Python packaging metadata)
+    - `[project].name` must exist in `pyproject.toml` (normalized for URL-safe project paths)
     - `requirements.txt` must not exist
-    - `cozy.toml` must not exist (config is standardized in `[tool.cozy]`)
 
     Optionally:
     - require `uv.lock` if `require_uv_lock=True`
@@ -53,16 +57,19 @@ def validate_project(root: str | Path, *, require_uv_lock: bool = False) -> Proj
     errors: list[str] = []
     warnings: list[str] = []
 
+    if not (root_path / "Dockerfile").exists():
+        errors.append("missing Dockerfile")
+
+    cozy_toml = root_path / "cozy.toml"
+    if not cozy_toml.exists():
+        errors.append("missing cozy.toml")
+
     pyproject = root_path / "pyproject.toml"
     if not pyproject.exists():
         errors.append("missing pyproject.toml")
-        return ProjectValidationResult(ok=False, errors=tuple(errors), warnings=tuple(warnings))
 
     if (root_path / "requirements.txt").exists():
         errors.append("requirements.txt is not supported; use pyproject.toml/uv.lock")
-
-    if (root_path / "cozy.toml").exists():
-        errors.append("cozy.toml is not supported; use [tool.cozy] in pyproject.toml")
 
     if require_uv_lock and not (root_path / "uv.lock").exists():
         errors.append("missing uv.lock (required)")
@@ -70,7 +77,36 @@ def validate_project(root: str | Path, *, require_uv_lock: bool = False) -> Proj
         warnings.append("uv.lock not found (recommended for reproducible builds)")
 
     if tomllib is None:
-        warnings.append("tomllib is unavailable; cannot validate [tool.cozy] presence")
+        warnings.append("tomllib is unavailable; cannot validate cozy.toml/pyproject.toml")
+        return ProjectValidationResult(ok=not errors, errors=tuple(errors), warnings=tuple(warnings))
+
+    # Validate cozy.toml (flat schema).
+    if cozy_toml.exists():
+        try:
+            cozy: dict[str, Any] = tomllib.loads(cozy_toml.read_text(encoding="utf-8"))
+        except Exception as exc:
+            errors.append(f"failed to parse cozy.toml: {exc}")
+            cozy = {}
+
+        if cozy.get("schema_version") != 1:
+            errors.append("cozy.toml missing or invalid schema_version (expected schema_version = 1)")
+
+        cozy_name = cozy.get("name")
+        if not isinstance(cozy_name, str) or cozy_name.strip() == "":
+            errors.append("cozy.toml missing name")
+        elif _normalize_project_name(cozy_name) == "":
+            errors.append("cozy.toml invalid name")
+
+        main = cozy.get("main")
+        if not isinstance(main, str) or main.strip() == "":
+            errors.append("cozy.toml missing main")
+
+        gen_worker = cozy.get("gen_worker")
+        if not isinstance(gen_worker, str) or gen_worker.strip() == "":
+            errors.append("cozy.toml missing gen_worker constraint")
+
+    # Validate pyproject.toml.
+    if not pyproject.exists():
         return ProjectValidationResult(ok=not errors, errors=tuple(errors), warnings=tuple(warnings))
 
     try:
@@ -85,10 +121,5 @@ def validate_project(root: str | Path, *, require_uv_lock: bool = False) -> Proj
         errors.append("missing [project].name in pyproject.toml")
     elif _normalize_project_name(project_name) == "":
         errors.append("invalid [project].name in pyproject.toml")
-
-    tool = data.get("tool")
-    cozy = tool.get("cozy") if isinstance(tool, dict) else None
-    if not isinstance(cozy, dict):
-        errors.append("missing [tool.cozy] in pyproject.toml")
 
     return ProjectValidationResult(ok=not errors, errors=tuple(errors), warnings=tuple(warnings))

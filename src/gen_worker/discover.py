@@ -226,10 +226,14 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
         inj = _parse_annotated_model_ref(ann)
         if inj is not None:
             base_t, mr = inj
+            src = mr.source.value
+            # Canonicalize older "release" terminology into "fixed" for manifests.
+            if src == "release":
+                src = "fixed"
             injections.append({
                 "param": p.name,
                 "type": _type_qualname(base_t),
-                "model_ref": {"source": mr.source.value, "key": mr.key},
+                "model_ref": {"source": src, "key": mr.key},
             })
             continue
 
@@ -287,13 +291,27 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
     if delta_type is not None:
         delta_schema, delta_sha = _schema_and_hash(delta_type)
 
-    # Extract required_models: release-source model keys that must be available
-    # These are models declared in [tool.cozy.models] that the function needs
+    # Extract required_models: fixed-source model keys that must be available.
+    # These are short-keys declared in [models] (cozy.toml) that the function needs.
     required_models = [
         inj["model_ref"]["key"]
         for inj in injections
-        if inj.get("model_ref", {}).get("source") == "release"
+        if inj.get("model_ref", {}).get("source") == "fixed"
     ]
+
+    # Extract payload-based repo selectors so schedulers can compute required repos
+    # at submit-time for cache-aware routing.
+    payload_repo_selectors = []
+    seen_fields = set()
+    for inj in injections:
+        mr = inj.get("model_ref", {}) or {}
+        if mr.get("source") != "payload":
+            continue
+        field = str(mr.get("key") or "").strip()
+        if not field or field in seen_fields:
+            continue
+        seen_fields.add(field)
+        payload_repo_selectors.append({"field": field, "kind": "short_key"})
 
     endpoint_name = _slugify_endpoint_name(func.__name__)
     if not endpoint_name:
@@ -314,6 +332,7 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
         "incremental_output": incremental,
         "injection_json": injections,
         "required_models": required_models,  # release model keys needed by this function
+        "payload_repo_selectors": payload_repo_selectors,
     }
 
     if delta_type is not None:
@@ -324,79 +343,75 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
     return fn
 
 
-def _load_cozy_config(root: Path) -> Dict[str, Any]:
-    """
-    Load [tool.cozy] config from pyproject.toml.
+COZY_TOML_IMAGE_PATH = Path("/cozy/cozy.toml")
+COZY_TOML_IMAGE_PATH_ALIAS = Path("/cozy/manifest.toml")
 
-    Returns dict with:
-        - project_name: normalized slug from [project].name
-        - build: dict with gpu, cuda, torch, backend settings
-        - models: dict mapping endpoint-local keys to Cozy Hub model IDs
-        - resources: dict with vram_gb, gpu_type, memory_gb, cpu_cores
 
-    python-worker is the source of truth for all [tool.cozy.*] config parsing.
-    gen-builder extracts this manifest and forwards it to the orchestrator.
-    """
+def _load_cozy_manifest_toml(root: Path) -> Dict[str, Any]:
+    """Load Cozy manifest config from cozy.toml (flat schema)."""
     config: Dict[str, Any] = {}
-    pyproject_path = root / "pyproject.toml"
 
-    if not pyproject_path.exists():
+    env_path = os.getenv("COZY_MANIFEST_PATH", "").strip()
+    candidates: list[Path] = []
+    if env_path:
+        candidates.append(Path(env_path))
+    candidates.append(COZY_TOML_IMAGE_PATH)
+    candidates.append(COZY_TOML_IMAGE_PATH_ALIAS)
+    candidates.append(root / "cozy.toml")
+
+    data: Dict[str, Any] | None = None
+    for p in candidates:
+        try:
+            if not p.exists():
+                continue
+            data = tomllib.loads(p.read_text(encoding="utf-8"))
+            break
+        except Exception as e:
+            print(f"warning: failed to parse cozy.toml at {p}: {e}", file=sys.stderr)
+            return config
+
+    if not isinstance(data, dict):
         return config
 
-    try:
-        with open(pyproject_path, "rb") as f:
-            data = tomllib.load(f)
-    except Exception as e:
-        print(f"warning: failed to parse pyproject.toml: {e}", file=sys.stderr)
+    schema_version = data.get("schema_version")
+    if schema_version != 1:
         return config
 
-    project = data.get("project", {})
-    if isinstance(project, dict):
-        raw_project_name = project.get("name")
-        if isinstance(raw_project_name, str):
-            project_name = _slugify_project_name(raw_project_name)
-            if project_name:
-                config["project_name"] = project_name
+    raw_name = data.get("name")
+    if isinstance(raw_name, str):
+        project_name = _slugify_project_name(raw_name)
+        if project_name:
+            config["project_name"] = project_name
 
-    tool_cozy = data.get("tool", {}).get("cozy", {})
+    main = data.get("main")
+    if isinstance(main, str) and main.strip():
+        config["main"] = main.strip()
 
-    if not tool_cozy:
-        return config
+    gen_worker = data.get("gen_worker")
+    if isinstance(gen_worker, str) and gen_worker.strip():
+        config["gen_worker"] = gen_worker.strip()
 
-    # Parse [tool.cozy.build] - build settings (gpu, cuda, torch, backend)
-    build = tool_cozy.get("build", {})
-    if build and isinstance(build, dict):
-        bld: Dict[str, Any] = {}
-        if "gpu" in build and isinstance(build["gpu"], bool):
-            bld["gpu"] = build["gpu"]
-        if "cuda" in build and isinstance(build["cuda"], str):
-            bld["cuda"] = build["cuda"]
-        if "torch" in build and isinstance(build["torch"], str):
-            bld["torch"] = build["torch"]
-        if "backend" in build and isinstance(build["backend"], str):
-            bld["backend"] = build["backend"]
-        if bld:
-            config["build"] = bld
+    host = data.get("host")
+    if isinstance(host, dict):
+        req = host.get("requirements")
+        if isinstance(req, dict):
+            cuda = req.get("cuda")
+            if isinstance(cuda, str) and cuda.strip():
+                config["host_requirements"] = {"cuda": cuda.strip()}
 
-    # Parse [tool.cozy.models] - endpoint-local key -> Cozy Hub model ID
-    models = tool_cozy.get("models", {})
-    if models and isinstance(models, dict):
-        config["models"] = {str(k): str(v) for k, v in models.items() if k and v}
+    models = data.get("models")
+    if isinstance(models, dict):
+        config["models"] = {str(k): str(v) for k, v in models.items() if str(k).strip() and str(v).strip()}
 
-    # Parse [tool.cozy.resources] - hardware requirements
-    resources = tool_cozy.get("resources", {})
-    if resources and isinstance(resources, dict):
-        res: Dict[str, Any] = {}
-        if "vram_gb" in resources and isinstance(resources["vram_gb"], int):
-            res["vram_gb"] = resources["vram_gb"]
-        if "gpu_type" in resources and isinstance(resources["gpu_type"], str):
-            res["gpu_type"] = resources["gpu_type"]
-        if "memory_gb" in resources and isinstance(resources["memory_gb"], int):
-            res["memory_gb"] = resources["memory_gb"]
-        if "cpu_cores" in resources and isinstance(resources["cpu_cores"], int):
-            res["cpu_cores"] = resources["cpu_cores"]
-        if res:
-            config["resources"] = res
+    resources = data.get("resources")
+    if isinstance(resources, dict):
+        # Keep as-is but only allow the known keys.
+        out: Dict[str, Any] = {}
+        for k in ("vram_gb", "ram_gb", "cpu_cores", "disk_gb"):
+            if k in resources:
+                out[k] = resources[k]
+        if out:
+            config["resources"] = out
 
     return config
 
@@ -461,20 +476,12 @@ def discover_functions(root: Optional[Path] = None) -> List[Dict[str, Any]]:
 
 def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
     """
-    Discover functions and load config to build complete manifest.
+    Discover functions and load Cozy manifest config to build complete manifest.
 
     Args:
         root: Project root directory. Defaults to current working directory.
 
-    Returns:
-        Complete manifest dict with functions, build, models, and resources.
-
-    The manifest includes:
-        - project_name: project slug from [project].name
-        - functions: list of discovered worker functions with required_models
-        - models: dict mapping endpoint-local keys to Cozy Hub model IDs
-        - build: build settings from [tool.cozy.build]
-        - resources: hardware requirements from [tool.cozy.resources]
+    Returns: Complete manifest dict with functions + models/resources metadata.
     """
     if root is None:
         root = Path.cwd()
@@ -493,20 +500,17 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
                 f"multiple functions normalize to the same endpoint '{endpoint_name}': {prior}, {function_name}"
             )
         endpoint_to_function[endpoint_name] = function_name
-    config = _load_cozy_config(root)
+    config = _load_cozy_manifest_toml(root)
 
     project_name = str(config.get("project_name", "")).strip()
     if not project_name:
-        raise ValueError("missing [project].name in pyproject.toml")
+        raise ValueError("missing cozy.toml name (flat schema: name=...)")
 
     manifest: Dict[str, Any] = {
         "project_name": project_name,
         "functions": functions,
     }
 
-    # Include config sections if present
-    if "build" in config:
-        manifest["build"] = config["build"]
     if "resources" in config:
         manifest["resources"] = config["resources"]
 
@@ -516,14 +520,14 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
         required = fn.get("required_models", [])
         all_required_keys.update(required)
 
-    # Get models from [tool.cozy.models] config
+    # Get models from [models] in cozy.toml
     config_models: Dict[str, str] = config.get("models", {})
 
     # Validate: all required model keys must be defined in config
     missing_keys = all_required_keys - set(config_models.keys())
     if missing_keys:
         print(
-            f"warning: functions require model keys not defined in [tool.cozy.models]: {sorted(missing_keys)}",
+            f"warning: functions require model keys not defined in [models] (cozy.toml): {sorted(missing_keys)}",
             file=sys.stderr,
         )
 

@@ -42,7 +42,7 @@ def test_startup_prefetch_warms_disk_and_reports_disk_models(tmp_path: Path, mon
     grpc_port = server.add_insecure_port("127.0.0.1:0")
     server.start()
 
-    model_id = "cozy:demo/repo@sha256:snap-1"
+    variant_ref = "cozy:demo/repo@blake3:snap-1"
 
     w = Worker(
         scheduler_addr=f"127.0.0.1:{grpc_port}",
@@ -56,10 +56,11 @@ def test_startup_prefetch_warms_disk_and_reports_disk_models(tmp_path: Path, mon
         sess = orch.get_session(timeout_s=30.0)
         assert sess is not None
 
-        cfg = pb.ReleaseModelConfig(
-            supported_model_ids=[model_id],
-            resolved_cozy_models_by_id={
-                model_id: pb.ResolvedCozyModel(
+        cfg = pb.DeploymentArtifactConfig(
+            supported_repo_refs=[variant_ref],
+            required_variant_refs=[variant_ref],
+            resolved_cozy_models_by_variant_ref={
+                variant_ref: pb.ResolvedCozyModel(
                     snapshot_digest="snap-1",
                     files=[
                         pb.ResolvedCozyModelFile(
@@ -72,7 +73,7 @@ def test_startup_prefetch_warms_disk_and_reports_disk_models(tmp_path: Path, mon
                 )
             },
         )
-        sess.send(pb.WorkerSchedulerMessage(release_model_config=cfg))
+        sess.send(pb.WorkerSchedulerMessage(deployment_artifact_config=cfg))
 
         # The worker prefetch thread triggers an immediate registration update after caching.
         start = time.monotonic()
@@ -94,7 +95,7 @@ def test_startup_prefetch_warms_disk_and_reports_disk_models(tmp_path: Path, mon
                     return
                 continue
             disk_models = list(msg.worker_registration.resources.disk_models)
-            if model_id in disk_models:
+            if variant_ref in disk_models:
                 disk_ready = True
             if disk_ready and saw_started and saw_completed:
                 return

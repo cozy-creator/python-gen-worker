@@ -12,10 +12,6 @@ from gen_worker import ActionContext, ResourceRequirements, worker_function
 from gen_worker.injection import ModelRef, ModelRefSource as Src
 from gen_worker.types import Asset
 
-# Back-compat: older gen-worker releases used ModelRefSource.DEPLOYMENT.
-if not hasattr(Src, "RELEASE") and hasattr(Src, "DEPLOYMENT"):
-    Src.RELEASE = Src.DEPLOYMENT  # type: ignore[attr-defined]
-
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
@@ -38,7 +34,7 @@ class GenerateOutput(msgspec.Struct):
 def generate(
     ctx: ActionContext,
     pipeline: Annotated[
-        StableDiffusionPipeline, ModelRef(Src.RELEASE, "sd15")  # Key from [tool.cozy.models]
+        StableDiffusionPipeline, ModelRef(Src.FIXED, "sd15")  # Key from cozy.toml [models]
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:

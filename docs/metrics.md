@@ -52,6 +52,11 @@ Per-model object keys (all optional unless noted):
 - `bytes_downloaded`: int (0 if none)
 - `download_ms`: int (0 if warm disk hit)
 - `bytes_read_disk`: int
+- `disk_fstype`: string (e.g. `nfs4`, `ext4`, `overlay`) (best-effort)
+- `disk_backend`: `local | nfs` (best-effort)
+- `localized`: bool (true when an NFS snapshot was copied into the local cache dir before load)
+- `nfs_to_local_copy_ms`: int (only when a copy occurred)
+- `bytes_copied`: int (only when a copy occurred)
 
 ## Notes
 
@@ -59,3 +64,18 @@ Per-model object keys (all optional unless noted):
 - `metrics.gpu_load` is best-effort and currently reflects time spent moving injected model objects to the worker device when supported.
 - `metrics.inference` is best-effort and currently reflects time spent executing the user function body (not including scheduler queueing).
 
+## Model Cache Inventory (NFS-Aware)
+
+Separately from `metrics.*`, the worker emits best-effort events that help `gen-orchestrator` understand which shared volumes (e.g. NFS) have which models.
+
+- `model.cached` (run_id="") payload:
+  - `model_variant_id`: string (canonical model id)
+  - `disk_backend`: `local | nfs` (best-effort)
+  - `disk_fstype`: string (best-effort)
+  - `disk_volume_key`: string (sha256 hash of mount identity; does not expose raw mount source)
+
+- `models.disk_inventory` (run_id="") payload:
+  - `disk_backend`, `disk_fstype`, `disk_volume_key`
+  - `disk_models`: string[] (canonical model ids present on disk)
+
+These are emitted best-effort and must never fail a run.

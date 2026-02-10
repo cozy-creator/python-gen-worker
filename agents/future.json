@@ -43,6 +43,37 @@
       ],
       "notes": "This pairs with gen-builder issue #101 (on-demand base image builds). python-worker parses the config and includes it in the manifest; gen-builder uses it to select or build the appropriate base image.",
       "priority": "medium"
+    },
+    {
+      "id": 201,
+      "name": "Backend Optimizations (torch.compile, TensorRT Engines, ONNX, Candle)",
+      "description": "Define a forward-compatible way for tenants to request performance optimizations and/or alternative execution backends.\n\nScope (future):\n- PyTorch optimization toggles (torch.compile, SDPA/FlashAttention, xformers, CUDA graphs where applicable)\n- Export/compile flows (PyTorch -> ONNX, PyTorch -> TensorRT engine)\n- Non-PyTorch runtime option: HuggingFace Candle (when/if a usable Python runtime story exists)\n\nConstraints:\n- Optimizations must be optional and safe-by-default. If an optimization fails, fall back to the baseline backend.\n- Compilation artifacts should be cacheable and shareable (per release + variant), ideally persisted under the shared model cache root (e.g. Runpod `/workspace`).\n- No secrets/paths in telemetry; only timing + small identifiers.",
+      "config_schema": {
+        "example": "[tool.cozy.build]\n# One of: pytorch, onnxruntime, tensorrt, candle\nbackend = \"pytorch\"\n\n[tool.cozy.build.optimize]\n# PyTorch-only\ntorch_compile = true\ntorch_compile_mode = \"max-autotune\"   # or \"default\", \"reduce-overhead\"\ntorch_compile_dynamic = false\n\n# Attention/memory kernels (backend-dependent)\nflash_attn = true\nxformers = false\n\n# Export/compile (future)\nexport_onnx = false\nbuild_tensorrt_engine = false\n\n# Cache compiled artifacts (per release+variant)\nartifact_cache = \"shared\"   # shared|local|off",
+        "fields": {
+          "backend": "Execution backend. Default: 'pytorch'. Future: 'onnxruntime', 'tensorrt', 'candle'.",
+          "optimize": "Optimization options. Backend-specific; ignored when not applicable.",
+          "optimize.torch_compile": "Enable torch.compile (PyTorch only). Must gracefully fall back if compile fails.",
+          "optimize.torch_compile_mode": "torch.compile mode hint (e.g. default/max-autotune/reduce-overhead).",
+          "optimize.torch_compile_dynamic": "Whether to allow dynamic shapes (may reduce compilation cache hit rate).",
+          "optimize.flash_attn": "Prefer FlashAttention / SDPA fastpath when available (backend-dependent).",
+          "optimize.xformers": "Prefer xformers attention kernels when available (backend-dependent).",
+          "optimize.export_onnx": "Request ONNX export as part of build/warmup (future).",
+          "optimize.build_tensorrt_engine": "Request building a TensorRT engine as part of build/warmup (future).",
+          "optimize.artifact_cache": "Where compiled artifacts should be stored: shared (NFS), local (NVMe), or off."
+        },
+        "notes": "This is a request/intent API. The platform may ignore options it cannot satisfy for the chosen accelerator, architecture, or model type."
+      },
+      "tasks": [
+        "[ ] Extend cozy build config parsing to capture optimization intents (manifest-only, no behavior change yet)",
+        "[ ] Define canonical artifact cache keys (release_id + variant + model_id + backend + optimize flags)",
+        "[ ] Decide compilation lifecycle: build-time vs warmup-time vs first-request",
+        "[ ] Decide artifact storage location(s): shared cache root vs local cache root vs object storage",
+        "[ ] Add best-effort telemetry fields to metrics.run for compile/export timings (no secrets/paths)",
+        "[ ] Add docs + examples showing how to request torch.compile and alternative backends"
+      ],
+      "notes": "This is intentionally separated from basic 'install these backends' (issue #200). This issue is about the execution/compilation/optimization story and artifact caching.",
+      "priority": "medium"
     }
   ]
 }

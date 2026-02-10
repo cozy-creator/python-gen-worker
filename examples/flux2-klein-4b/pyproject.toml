@@ -1,7 +1,7 @@
 [project]
 name = "flux2-klein-4b"
 version = "0.1.0"
-description = "Flux2-klein-4B example (inference-only; models via [tool.cozy.models])"
+description = "Flux2-klein-4B example (inference-only; Cozy manifest via cozy.toml)"
 requires-python = ">=3.12"
 dependencies = [
     "diffusers @ git+https://github.com/huggingface/diffusers.git@99e2cfff27dec514a43e260e885c5e6eca038b36",
@@ -23,20 +23,7 @@ packages = ["src/flux2_klein_4b"]
 [tool.hatch.metadata]
 allow-direct-references = true
 
-[tool.cozy]
-
 [tool.mypy]
 python_version = "3.12"
 ignore_missing_imports = true
 disallow_untyped_defs = true
-
-[tool.cozy.build]
-gpu = true
-torch = "2.10.0"
-
-[tool.cozy.resources]
-vram_gb = 12
-
-[tool.cozy.models]
-# Use Cozy Hub snapshot (backed by R2) instead of pulling from Hugging Face at runtime.
-flux2-klein-4b = "black-forest-labs/flux-2-klein-4b"

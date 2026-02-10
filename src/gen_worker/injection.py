@@ -7,7 +7,9 @@ from typing import Any, Callable, Optional, get_args, get_origin, Annotated
 
 
 class ModelRefSource(str, Enum):
-    RELEASE = "release"
+    # FIXED means the model key is fixed by the function signature and does not
+    # depend on the request payload.
+    FIXED = "fixed"
     PAYLOAD = "payload"
 
 

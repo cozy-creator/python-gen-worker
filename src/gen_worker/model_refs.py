@@ -9,14 +9,14 @@ class CozyRef:
     owner: str
     repo: str
     tag: str = "latest"
-    digest: Optional[str] = None  # hex digest (no sha256:/blake3: prefix)
+    digest: Optional[str] = None  # snapshot digest, including algorithm prefix (e.g. "blake3:<hex>")
 
     def repo_id(self) -> str:
         return f"{self.owner}/{self.repo}"
 
     def canonical(self) -> str:
         if self.digest:
-            return f"cozy:{self.repo_id()}@sha256:{self.digest}"
+            return f"cozy:{self.repo_id()}@{self.digest}"
         return f"cozy:{self.repo_id()}:{self.tag}"
 
 
@@ -89,17 +89,28 @@ def parse_model_ref(raw: str) -> ParsedModelRef:
             raise ValueError("empty cozy model ref")
         digest = None
         tag = "latest"
-        if "@sha256:" in s:
-            repo_id, dig = s.split("@sha256:", 1)
-            repo_id = repo_id.strip()
-            dig = dig.strip()
+        low = s.lower()
+        if "@sha256:" in low:
+            idx = low.index("@sha256:")
+            repo_id = s[:idx].strip()
+            dig = s[idx + len("@sha256:"):].strip()
             if not dig:
                 raise ValueError("cozy ref sha256 digest is empty")
-            digest = dig
+            digest = f"sha256:{dig}"
             s = repo_id
+            low = s.lower()
+        elif "@blake3:" in low:
+            idx = low.index("@blake3:")
+            repo_id = s[:idx].strip()
+            dig = s[idx + len("@blake3:"):].strip()
+            if not dig:
+                raise ValueError("cozy ref blake3 digest is empty")
+            digest = f"blake3:{dig}"
+            s = repo_id
+            low = s.lower()
         elif "@" in s:
-            # Reserve @ for future. Force explicit @sha256: for now.
-            raise ValueError("cozy ref digest must use @sha256:<hex>")
+            # Reserve @ for future; require explicit algorithm prefix.
+            raise ValueError("cozy ref digest must use @sha256:<hex> or @blake3:<hex>")
         if ":" in s:
             repo_id, tag_part = s.rsplit(":", 1)
             repo_id = repo_id.strip()
@@ -107,7 +118,7 @@ def parse_model_ref(raw: str) -> ParsedModelRef:
         else:
             repo_id = s
         if "/" not in repo_id:
-            raise ValueError("cozy ref must be 'owner/repo' (optionally with :tag or @sha256:<hex>)")
+            raise ValueError("cozy ref must be 'owner/repo' (optionally with :tag or @sha256:<hex> or @blake3:<hex>)")
         owner, repo = repo_id.split("/", 1)
         owner = owner.strip()
         repo = repo.strip()

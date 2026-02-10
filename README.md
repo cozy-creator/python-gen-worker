@@ -2,6 +2,36 @@
 
 A Python SDK for building serverless api-endpoints for AI inference. Just write your custom function, create a manifest specifying what model-weights you need from Cozy-Hub, and then deploy it! We take care of the rest!
 
+## Tenant Worker Build Contract (Dockerfile-First)
+
+When publishing a tenant worker, Cozy expects a **Dockerfile-first** project layout.
+
+Build inputs MUST include:
+
+- `cozy.toml` (Cozy manifest; used at build/publish time)
+- `Dockerfile` (builds the worker image)
+- tenant code (`pyproject.toml`, `uv.lock`, `src/`, etc.)
+
+The built image MUST:
+
+1. Install `gen-worker` (so discovery + runtime can run).
+2. Bake endpoint discovery output at build time:
+
+```dockerfile
+RUN mkdir -p /app/.cozy && python -m gen_worker.discover > /app/.cozy/manifest.json
+```
+
+3. Use the Cozy worker runtime as the ENTRYPOINT:
+
+```dockerfile
+ENTRYPOINT ["python", "-m", "gen_worker.entrypoint"]
+```
+
+Notes:
+
+- `cozy.toml` is **not required** to be present in the final image; it is a build-time input.
+- The platform reads `/app/.cozy/manifest.json` from the built image and stores it in Cozy Hub DB for routing/invocation.
+
 ## Installation
 
 Start a python project, and then run:
@@ -89,12 +119,47 @@ from gen_worker.injection import ModelRef, ModelRefSource as Src
 @worker_function()
 def generate(
     ctx: ActionContext,
-    pipe: Annotated[DiffusionPipeline, ModelRef(Src.RELEASE, "my-model")],
+    pipe: Annotated[DiffusionPipeline, ModelRef(Src.FIXED, "my-model")],
     payload: Input,
 ) -> Output:
     # Use the injected pipeline (loaded/cached by the worker's model manager).
     return Output(result="done")
 ```
+
+### Payload-Selected Model (Short Key)
+
+If you want the client payload to choose which repo to run, declare a short-key
+mapping in `cozy.toml` and use `ModelRef(PAYLOAD, ...)`:
+
+```toml
+[models]
+sd15 = "hf:stable-diffusion-v1-5/stable-diffusion-v1-5"
+flux = "hf:black-forest-labs/FLUX.2-klein-4B"
+```
+
+```python
+from typing import Annotated
+import msgspec
+from diffusers import DiffusionPipeline
+from gen_worker import ActionContext, worker_function
+from gen_worker.injection import ModelRef, ModelRefSource as Src
+
+class Input(msgspec.Struct):
+    prompt: str
+    model: str  # must be one of: "sd15" | "flux"
+
+@worker_function()
+def generate(
+    ctx: ActionContext,
+    pipe: Annotated[DiffusionPipeline, ModelRef(Src.PAYLOAD, "model")],
+    payload: Input,
+):
+    ...
+```
+
+Note: by default the worker requires payload model selection to use a known
+short-key from `[models]` (cozy.toml) (it will not accept arbitrary repo refs in
+the payload).
 
 ### Saving Files
 
@@ -108,25 +173,16 @@ def process(ctx: ActionContext, payload: Input) -> Output:
 
 ## Configuration
 
-### pyproject.toml
+### cozy.toml
 
 ```toml
-[tool.cozy]
+schema_version = 1
+name = "my-worker"
+main = "my_pkg.main"
+gen_worker = ">=0.2.0,<0.3.0"
 
-[tool.cozy.environment]
-# Baked into image as Docker ENV defaults (non-secret values only).
-HF_HOME = "/app/.cache/huggingface"
-LOG_LEVEL = "info"
-
-[tool.cozy.models]
-# Model refs (phase 1):
-# - Cozy Hub snapshot (default): owner/repo[:tag] or owner/repo@sha256:<digest>
-# - Hugging Face repo: hf:owner/repo[@revision] (requires gen-worker)
-sdxl = "cozy:stabilityai/sdxl:latest"
-qwen_image = "hf:Qwen/Qwen2.5-VL-7B-Instruct@main"
-
-[tool.cozy.build]
-gpu = true
+[models]
+sdxl = "hf:stabilityai/stable-diffusion-xl-base-1.0"
 ```
 
 ### Environment Variables
