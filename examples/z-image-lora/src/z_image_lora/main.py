@@ -55,7 +55,7 @@ class GenerateOutput(msgspec.Struct):
 def generate_with_loras(
     ctx: ActionContext,
     pipeline: Annotated[
-        DiffusionPipeline, ModelRef(Src.FIXED, "z-image-turbo")
+        DiffusionPipeline, ModelRef(Src.DEPLOYMENT, "z-image-turbo")
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:

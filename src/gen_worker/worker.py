@@ -374,6 +374,7 @@ class ActionContext:
         timeout_ms: Optional[int] = None,
         file_api_base_url: Optional[str] = None,
         file_api_token: Optional[str] = None,
+        local_output_dir: Optional[str] = None,
         resolved_cozy_models_by_id: Optional[Dict[str, Any]] = None,
         required_models: Optional[List[str]] = None,
     ) -> None:
@@ -383,6 +384,7 @@ class ActionContext:
         self._timeout_ms = timeout_ms
         self._file_api_base_url = (file_api_base_url or "").strip() or None
         self._file_api_token = (file_api_token or "").strip() or None
+        self._local_output_dir = (local_output_dir or "").strip() or None
         self._resolved_cozy_models_by_id = resolved_cozy_models_by_id
         self._required_models = list(required_models or [])
         self._started_at = time.time()
@@ -441,6 +443,27 @@ class ActionContext:
         if self._file_api_token:
             return self._file_api_token
         return _require_file_api_token()
+
+    def _resolve_local_output_path(self, ref: str) -> Optional[str]:
+        """
+        Dev-only local output backend.
+
+        When local_output_dir is set, ActionContext.save_* will write outputs to disk
+        instead of using Cozy Hub's file API.
+        """
+        base = (self._local_output_dir or "").strip()
+        if not base:
+            return None
+
+        # Normalize and prevent path traversal.
+        ref = (ref or "").strip().replace("\\", "/").lstrip("/")
+        if not ref:
+            raise ValueError("invalid ref")
+        out = (Path(base).expanduser() / ref).resolve()
+        root = Path(base).expanduser().resolve()
+        if root not in out.parents and out != root:
+            raise ValueError("path traversal")
+        return str(out)
 
 
     @property
@@ -505,6 +528,21 @@ class ActionContext:
         if not ref.startswith(_default_output_prefix(self.run_id)):
             raise ValueError(f"ref must start with '{_default_output_prefix(self.run_id)}'")
 
+        local_path = self._resolve_local_output_path(ref)
+        if local_path:
+            p = Path(local_path)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(data)
+            sha = hashlib.sha256(data).hexdigest()
+            return Asset(
+                ref=ref,
+                owner=self.owner,
+                local_path=str(p),
+                mime_type=None,
+                size_bytes=len(data),
+                sha256=sha,
+            )
+
         base = self._get_file_api_base_url()
         token = self._get_file_api_token()
         url = f"{base}/api/v1/file/{_encode_ref_for_url(ref)}"
@@ -564,6 +602,24 @@ class ActionContext:
         ref = ref.strip().lstrip("/")
         if not ref.startswith(_default_output_prefix(self.run_id)):
             raise ValueError(f"ref must start with '{_default_output_prefix(self.run_id)}'")
+
+        local_path = self._resolve_local_output_path(ref)
+        if local_path:
+            p = Path(local_path)
+            # Create semantics: fail if already exists.
+            if p.exists():
+                raise RuntimeError("output path already exists")
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(data)
+            sha = hashlib.sha256(data).hexdigest()
+            return Asset(
+                ref=ref,
+                owner=self.owner,
+                local_path=str(p),
+                mime_type=None,
+                size_bytes=len(data),
+                sha256=sha,
+            )
 
         base = self._get_file_api_base_url()
         token = self._get_file_api_token()
@@ -788,6 +844,8 @@ class Worker:
         # Signature-driven model selection mapping and allowlist (provided by orchestrator).
         self._release_model_id_by_key: Dict[str, str] = {}
         self._release_allowed_model_ids: Optional[set[str]] = None
+        # Per-function model keyspace from baked discovery manifest (short_key -> model_ref).
+        self._model_id_by_key_by_function: Dict[str, Dict[str, str]] = {}
         # Orchestrator-resolved manifests received in DeploymentArtifactConfig (startup prefetch baseline).
         # Keys should be canonical model ref strings (e.g. "cozy:owner/repo@sha256:<digest>").
         self._resolved_cozy_models_by_id_baseline: Dict[str, Any] = {}
@@ -800,16 +858,53 @@ class Worker:
 
         # Store manifest and initialize model config from it
         self._manifest = manifest
-        if manifest and "models" in manifest:
-            # Initialize model key->id mapping from manifest (baked in at build time)
-            # This allows ModelRef(Src.FIXED, "key") to resolve without scheduler config
-            manifest_models = manifest["models"]
-            if isinstance(manifest_models, dict):
+        if manifest and isinstance(manifest, dict):
+            # New contract: per-function mapping (allows endpoint-specific model sets and dtype constraints).
+            mbf = manifest.get("models_by_function")
+            if isinstance(mbf, dict):
+                for fn_name, mapping in mbf.items():
+                    if not isinstance(mapping, dict):
+                        continue
+                    out: Dict[str, str] = {}
+                    for k, v in mapping.items():
+                        key = str(k).strip()
+                        if not key:
+                            continue
+                        if isinstance(v, dict):
+                            ref = str(v.get("ref") or "").strip()
+                        else:
+                            ref = str(v or "").strip()
+                        if not ref:
+                            continue
+                        out[key] = _canonicalize_model_ref_string(ref)
+                    if out:
+                        self._model_id_by_key_by_function[str(fn_name)] = out
+
+            # Legacy contract: flat mapping at manifest["models"] (string refs).
+            legacy_models = manifest.get("models")
+            if isinstance(legacy_models, dict):
                 self._release_model_id_by_key = {
-                    str(k): _canonicalize_model_ref_string(str(v)) for k, v in manifest_models.items()
+                    str(k): _canonicalize_model_ref_string(str(v)) for k, v in legacy_models.items()
                 }
-                self._release_allowed_model_ids = set(self._release_model_id_by_key.values())
-                logger.info(f"Loaded {len(self._release_model_id_by_key)} models from manifest: {list(self._release_model_id_by_key.keys())}")
+
+            # Compute union allowlist for prefetch/guardrails.
+            allowed: set[str] = set()
+            for m in self._model_id_by_key_by_function.values():
+                allowed.update(m.values())
+            if self._release_model_id_by_key:
+                allowed.update(self._release_model_id_by_key.values())
+            self._release_allowed_model_ids = allowed or None
+
+            if self._model_id_by_key_by_function:
+                logger.info(
+                    "Loaded model mappings from manifest for %d functions",
+                    len(self._model_id_by_key_by_function),
+                )
+            elif self._release_model_id_by_key:
+                logger.info(
+                    "Loaded %d models from legacy manifest mapping",
+                    len(self._release_model_id_by_key),
+                )
 
         if self._model_manager:
             logger.info(f"ModelManager of type '{type(self._model_manager).__name__}' provided.")
@@ -839,8 +934,15 @@ class Worker:
 
         self._verify_worker_jwt()
 
-        signal.signal(signal.SIGINT, self._handle_interrupt)
-        signal.signal(signal.SIGTERM, self._handle_interrupt)
+        # The worker is usually a top-level process. When embedded in tests/dev
+        # helpers, it might be constructed in a non-main thread (signal handlers
+        # are only allowed in the main thread).
+        try:
+            if threading.current_thread() is threading.main_thread():
+                signal.signal(signal.SIGINT, self._handle_interrupt)
+                signal.signal(signal.SIGTERM, self._handle_interrupt)
+        except Exception:
+            pass
 
     @staticmethod
     def _normalize_scheduler_addrs(primary: str, addrs: Optional[List[str]]) -> List[str]:
@@ -2577,6 +2679,7 @@ class Worker:
             timeout_ms=timeout_ms if timeout_ms > 0 else None,
             file_api_base_url=file_base_url or None,
             file_api_token=file_token or None,
+            local_output_dir=None,
             resolved_cozy_models_by_id=resolved_cozy_models_by_id or None,
             required_models=required_models or None,
         )
@@ -2851,7 +2954,7 @@ class Worker:
             call_kwargs[spec.payload_param] = input_obj
 
             for inj in spec.injections:
-                model_id = self._resolve_model_id_for_injection(inj, payload=input_obj)
+                model_id = self._resolve_model_id_for_injection(spec.name, inj, payload=input_obj)
                 canon_model_id = _canonicalize_model_ref_string(str(model_id or "").strip()) if model_id else ""
                 if canon_model_id and canon_model_id not in models_in_use:
                     self._model_use_enter(canon_model_id)
@@ -3360,14 +3463,24 @@ class Worker:
 
         raise ValueError(f"no injection provider for type {qn} (model_id={model_id})")
 
-    def _resolve_model_id_for_injection(self, inj: InjectionSpec, payload: msgspec.Struct) -> str:
-        if inj.model_ref.source == ModelRefSource.FIXED:
+    def _resolve_model_id_for_injection(self, fn_name: str, inj: InjectionSpec, payload: msgspec.Struct) -> str:
+        # Prefer per-function model keyspace from baked discovery manifest.
+        model_id_by_key = self._model_id_by_key_by_function.get(fn_name) or self._release_model_id_by_key
+        allowed_ids: Optional[set[str]] = None
+        if model_id_by_key:
+            allowed_ids = set(model_id_by_key.values())
+
+        if inj.model_ref.source in (ModelRefSource.FIXED, ModelRefSource.RELEASE):
             raw = inj.model_ref.key.strip()
             if not raw:
                 raise ValueError(f"empty fixed ModelRef for injection param: {inj.param_name}")
-            model_id = self._release_model_id_by_key.get(raw, raw)
-            self._enforce_model_allowlist(model_id, inj)
-            return model_id
+            if raw in model_id_by_key:
+                model_id = model_id_by_key[raw]
+                self._enforce_model_allowlist(model_id, inj, allowed_ids=allowed_ids)
+                return model_id
+            # Allow direct model refs for FIXED injections (advanced usage).
+            # Do not apply per-function allowlists when no short-key mapping was used.
+            return raw
 
         if inj.model_ref.source == ModelRefSource.PAYLOAD:
             field = inj.model_ref.key.strip()
@@ -3384,17 +3497,17 @@ class Worker:
             key = chosen.strip()
             if not key:
                 raise ValueError(f"payload field {field!r} is empty; expected a model key")
-            # Payload-based selection must use a short-key from `[models]` (cozy.toml).
+            # Payload-based selection must use a short-key from the baked discovery manifest.
             # Do not allow arbitrary refs in the payload by default, otherwise the
             # orchestrator cannot route cache-aware and the allowlist becomes harder
             # to reason about.
-            if not self._release_model_id_by_key:
+            if not model_id_by_key:
                 raise ValueError(
                     "payload model selection is not configured: no short-key mapping is available "
-                    "(expected `[models]` (cozy.toml) to populate model_id_by_key)"
+                    "(expected /app/.cozy/manifest.json to provide models_by_function)"
                 )
-            if key not in self._release_model_id_by_key:
-                allowed = sorted(self._release_model_id_by_key.keys())
+            if key not in model_id_by_key:
+                allowed = sorted(model_id_by_key.keys())
                 head = allowed[:20]
                 suffix = ""
                 if len(allowed) > len(head):
@@ -3402,17 +3515,19 @@ class Worker:
                 raise ValueError(
                     f"unknown model key {key!r} for payload field {field!r}; allowed keys: {head}{suffix}"
                 )
-            model_id = self._release_model_id_by_key[key]
-            self._enforce_model_allowlist(model_id, inj)
+            model_id = model_id_by_key[key]
+            self._enforce_model_allowlist(model_id, inj, allowed_ids=allowed_ids)
             return model_id
 
         raise ValueError(f"unknown ModelRef source: {inj.model_ref.source!r}")
 
-    def _enforce_model_allowlist(self, model_id: str, inj: InjectionSpec) -> None:
-        allowed = self._release_allowed_model_ids
-        if allowed is None:
-            return
-        if model_id not in allowed:
+    def _enforce_model_allowlist(self, model_id: str, inj: InjectionSpec, *, allowed_ids: Optional[set[str]] = None) -> None:
+        # Enforce BOTH:
+        # - any per-function mapping restriction (allowed_ids), AND
+        # - the release-level allowlist from the scheduler (defense-in-depth).
+        if allowed_ids is not None and model_id not in allowed_ids:
+            raise ValueError(f"model_id not allowed for endpoint: {model_id!r} (injection param {inj.param_name})")
+        if self._release_allowed_model_ids is not None and model_id not in self._release_allowed_model_ids:
             raise ValueError(f"model_id not allowed for release: {model_id!r} (injection param {inj.param_name})")
 
     def _send_task_result(

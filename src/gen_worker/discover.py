@@ -28,7 +28,7 @@ import msgspec
 from gen_worker import ActionContext
 from gen_worker.injection import ModelRef
 
-import tomllib  # Python 3.11+ built-in
+from gen_worker.cozy_toml import CozyModelSpec, CozyToml, load_cozy_toml
 
 
 def _type_id(t: type) -> Dict[str, str]:
@@ -343,80 +343,34 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
     return fn
 
 
-COZY_TOML_IMAGE_PATH = Path("/cozy/cozy.toml")
-COZY_TOML_IMAGE_PATH_ALIAS = Path("/cozy/manifest.toml")
-
-
-def _load_cozy_manifest_toml(root: Path) -> Dict[str, Any]:
-    """Load Cozy manifest config from cozy.toml (flat schema)."""
-    config: Dict[str, Any] = {}
-
+def _find_cozy_toml_path(root: Path) -> Path | None:
     env_path = os.getenv("COZY_MANIFEST_PATH", "").strip()
-    candidates: list[Path] = []
     if env_path:
-        candidates.append(Path(env_path))
-    candidates.append(COZY_TOML_IMAGE_PATH)
-    candidates.append(COZY_TOML_IMAGE_PATH_ALIAS)
-    candidates.append(root / "cozy.toml")
-
-    data: Dict[str, Any] | None = None
-    for p in candidates:
-        try:
-            if not p.exists():
-                continue
-            data = tomllib.loads(p.read_text(encoding="utf-8"))
-            break
-        except Exception as e:
-            print(f"warning: failed to parse cozy.toml at {p}: {e}", file=sys.stderr)
-            return config
-
-    if not isinstance(data, dict):
-        return config
-
-    schema_version = data.get("schema_version")
-    if schema_version != 1:
-        return config
-
-    raw_name = data.get("name")
-    if isinstance(raw_name, str):
-        project_name = _slugify_project_name(raw_name)
-        if project_name:
-            config["project_name"] = project_name
-
-    main = data.get("main")
-    if isinstance(main, str) and main.strip():
-        config["main"] = main.strip()
-
-    gen_worker = data.get("gen_worker")
-    if isinstance(gen_worker, str) and gen_worker.strip():
-        config["gen_worker"] = gen_worker.strip()
-
-    host = data.get("host")
-    if isinstance(host, dict):
-        req = host.get("requirements")
-        if isinstance(req, dict):
-            cuda = req.get("cuda")
-            if isinstance(cuda, str) and cuda.strip():
-                config["host_requirements"] = {"cuda": cuda.strip()}
-
-    models = data.get("models")
-    if isinstance(models, dict):
-        config["models"] = {str(k): str(v) for k, v in models.items() if str(k).strip() and str(v).strip()}
-
-    resources = data.get("resources")
-    if isinstance(resources, dict):
-        # Keep as-is but only allow the known keys.
-        out: Dict[str, Any] = {}
-        for k in ("vram_gb", "ram_gb", "cpu_cores", "disk_gb"):
-            if k in resources:
-                out[k] = resources[k]
-        if out:
-            config["resources"] = out
-
-    return config
+        p = Path(env_path)
+        return p if p.exists() else None
+    p = root / "cozy.toml"
+    return p if p.exists() else None
 
 
-def discover_functions(root: Optional[Path] = None) -> List[Dict[str, Any]]:
+def _load_cozy_manifest_toml(root: Path) -> CozyToml:
+    p = _find_cozy_toml_path(root)
+    if p is None:
+        raise ValueError("missing cozy.toml (required for discovery)")
+    return load_cozy_toml(p)
+
+
+def _model_spec_to_json(spec: CozyModelSpec) -> Dict[str, Any]:
+    return {"ref": spec.ref, "dtypes": list(spec.dtypes)}
+
+
+def _models_by_key_to_json(models: Dict[str, CozyModelSpec]) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    for k, spec in models.items():
+        out[str(k)] = _model_spec_to_json(spec)
+    return out
+
+
+def discover_functions(root: Optional[Path] = None, *, main_module: str | None = None) -> List[Dict[str, Any]]:
     """
     Discover all @worker_function decorated functions in the project.
 
@@ -438,23 +392,42 @@ def discover_functions(root: Optional[Path] = None) -> List[Dict[str, Any]]:
     if (root / "src").exists() and src_str not in sys.path:
         sys.path.insert(0, src_str)
 
-    # Find Python files that might have worker functions
-    py_files = _find_python_files(root)
-
-    # Filter to files that use @worker_function (quick AST check)
-    candidate_files = [f for f in py_files if _file_uses_worker_decorator(f)]
-
-    # Compute module names and import
     functions: List[Dict[str, Any]] = []
     imported_modules: Set[str] = set()
 
+    if main_module:
+        before = set(sys.modules.keys())
+        try:
+            importlib.import_module(main_module)
+        except Exception as e:
+            raise ValueError(f"failed to import cozy.toml main module {main_module!r}: {e}") from e
+
+        after = set(sys.modules.keys())
+        newly_loaded = sorted(after - before)
+        # Also include the main module itself (it was present in before in some cases).
+        candidates = set(newly_loaded)
+        candidates.add(main_module)
+        for module_name in sorted(candidates):
+            if module_name in imported_modules:
+                continue
+            imported_modules.add(module_name)
+            mod = sys.modules.get(module_name)
+            if mod is None:
+                continue
+            for name, obj in inspect.getmembers(mod):
+                if inspect.isfunction(obj) and getattr(obj, "_is_worker_function", False):
+                    fn_meta = _extract_function_metadata(obj, module_name)
+                    functions.append(fn_meta)
+        return functions
+
+    # Fallback: scan the filesystem for decorated functions.
+    py_files = _find_python_files(root)
+    candidate_files = [f for f in py_files if _file_uses_worker_decorator(f)]
     for filepath in candidate_files:
         module_name = _compute_module_name(filepath, root)
         if module_name is None or module_name in imported_modules:
             continue
-
         imported_modules.add(module_name)
-
         try:
             mod = importlib.import_module(module_name)
         except Exception as e:
@@ -487,7 +460,9 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
         root = Path.cwd()
     root = root.resolve()
 
-    functions = discover_functions(root)
+    cozy = _load_cozy_manifest_toml(root)
+
+    functions = discover_functions(root, main_module=cozy.main)
     endpoint_to_function: Dict[str, str] = {}
     for fn in functions:
         endpoint_name = str(fn.get("endpoint_name", "")).strip()
@@ -500,40 +475,41 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
                 f"multiple functions normalize to the same endpoint '{endpoint_name}': {prior}, {function_name}"
             )
         endpoint_to_function[endpoint_name] = function_name
-    config = _load_cozy_manifest_toml(root)
-
-    project_name = str(config.get("project_name", "")).strip()
+    project_name = _slugify_project_name(cozy.name)
     if not project_name:
-        raise ValueError("missing cozy.toml name (flat schema: name=...)")
+        raise ValueError("invalid cozy.toml name")
 
     manifest: Dict[str, Any] = {
         "project_name": project_name,
         "functions": functions,
     }
 
-    if "resources" in config:
-        manifest["resources"] = config["resources"]
+    if cozy.resources:
+        manifest["resources"] = dict(cozy.resources)
 
-    # Extract all required model keys from functions (static model source only)
-    all_required_keys: Set[str] = set()
+    # Build per-function model keyspace.
+    models_by_function: Dict[str, Any] = {}
     for fn in functions:
-        required = fn.get("required_models", [])
-        all_required_keys.update(required)
+        fn_name = str(fn.get("name") or "").strip()
+        endpoint_name = str(fn.get("endpoint_name") or "").strip()
+        if not fn_name or not endpoint_name:
+            continue
 
-    # Get models from [models] in cozy.toml
-    config_models: Dict[str, str] = config.get("models", {})
+        # Endpoint-specific mapping wins; otherwise fall back to global [models].
+        eff = cozy.endpoint_models.get(endpoint_name) or cozy.models
 
-    # Validate: all required model keys must be defined in config
-    missing_keys = all_required_keys - set(config_models.keys())
-    if missing_keys:
-        print(
-            f"warning: functions require model keys not defined in [models] (cozy.toml): {sorted(missing_keys)}",
-            file=sys.stderr,
-        )
+        # Validate required fixed keys for this function against the effective mapping.
+        required_keys = set(fn.get("required_models", []) or [])
+        missing = sorted(k for k in required_keys if k not in eff)
+        if missing:
+            raise ValueError(
+                f"endpoint '{endpoint_name}' requires model keys not defined in cozy.toml [models]: {missing}"
+            )
+        if eff:
+            models_by_function[fn_name] = _models_by_key_to_json(eff)
 
-    # Include models in manifest if we have any
-    if config_models:
-        manifest["models"] = config_models
+    if models_by_function:
+        manifest["models_by_function"] = models_by_function
 
     return manifest
 

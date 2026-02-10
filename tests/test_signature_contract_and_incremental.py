@@ -47,6 +47,7 @@ def _make_worker() -> Worker:
     w._custom_runtime_cache = {}
     w._custom_runtime_locks = {}
     w._release_model_id_by_key = {}
+    w._model_id_by_key_by_function = {}
     w._release_allowed_model_ids = None
     w._active_tasks_lock = threading.Lock()
     w._active_tasks = {}
@@ -55,8 +56,9 @@ def _make_worker() -> Worker:
     w._sent = []
     w._stop_event = threading.Event()
     w._running = True
-    w._materialize_assets = lambda run_id, obj: None  # type: ignore[method-assign]
+    w._materialize_assets = lambda ctx, obj: None  # type: ignore[method-assign]
     w._discovered_resources = {}
+    w._model_cache = None
     return w
 
 

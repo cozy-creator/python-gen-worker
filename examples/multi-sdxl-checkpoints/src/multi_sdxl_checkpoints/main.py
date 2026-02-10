@@ -7,7 +7,7 @@ orchestrator's scheduler routes requests to workers that already have that model
 loaded in VRAM.
 
 Key concepts:
-- Models are declared in [tool.cozy.models] with endpoint-local keys
+- Models are declared in cozy.toml [models] with endpoint-local keys
 - ModelRef(Src.PAYLOAD, "model_key") resolves the model from the request
 - Scheduler uses vram_models/disk_models heartbeat data for smart routing
 - LRU eviction manages VRAM when switching between models
@@ -33,7 +33,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 class GenerateInput(msgspec.Struct):
     """Input for image generation with model selection."""
     prompt: str
-    model_key: str = "sdxl-base"  # Key from [tool.cozy.models]
+    model_key: str = "sdxl-base"  # Key from cozy.toml [models]
     negative_prompt: str = ""
     num_inference_steps: int = 28
     guidance_scale: float = 7.5
@@ -60,7 +60,7 @@ def generate(
     """
     Generate an image using the model specified in the payload.
 
-    The model_key in the payload must be a key in `[tool.cozy.models]` in pyproject.toml.
+    The model_key in the payload must be a key in `cozy.toml [models]`.
 
     The scheduler routes this request to a worker that has the requested
     model already loaded in VRAM (hot) or on disk (warm). If no worker has

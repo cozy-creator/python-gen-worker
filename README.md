@@ -167,9 +167,33 @@ the payload).
 @worker_function()
 def process(ctx: ActionContext, payload: Input) -> Output:
     # Save bytes and get asset reference
-    asset = ctx.save_bytes("output.png", image_bytes)
+    asset = ctx.save_bytes(f"runs/{ctx.run_id}/outputs/output.png", image_bytes)
     return Output(result=asset.ref)
 ```
+
+## Dev HTTP Runner (Local Inference Without gen-orchestrator)
+
+For local testing of a built worker image (without standing up gen-orchestrator),
+run the dev HTTP runner and write outputs to a mounted local directory.
+
+Container example:
+
+```bash
+docker run --rm --gpus all -p 8081:8081 \
+  -v "$(pwd)/out:/outputs" \
+  <your-worker-image> \
+  python -m gen_worker.testing.http_runner --listen 0.0.0.0:8081 --outputs /outputs
+```
+
+Invoke an endpoint:
+
+```bash
+curl -sS -X POST 'http://localhost:8081/v1/run/generate' \
+  -H 'content-type: application/json' \
+  -d '{"payload": {"prompt": "a tiny robot watering a bonsai, macro photo"}}'
+```
+
+Outputs are written under `/outputs/runs/<run_id>/outputs/...` (matching Cozy ref semantics).
 
 ## Configuration
 
@@ -182,8 +206,15 @@ main = "my_pkg.main"
 gen_worker = ">=0.2.0,<0.3.0"
 
 [models]
-sdxl = "hf:stabilityai/stable-diffusion-xl-base-1.0"
+sdxl = { ref = "hf:stabilityai/stable-diffusion-xl-base-1.0", dtypes = ["fp16","bf16"] }
 ```
+
+`[models]` entries support two forms:
+
+- String form (defaults to `dtypes=["fp16","bf16"]`):
+  - `sd15 = "hf:stable-diffusion-v1-5/stable-diffusion-v1-5"`
+- Table form:
+  - `flux_fp8 = { ref = "hf:black-forest-labs/FLUX.2-klein-4B", dtypes = ["fp8"] }`
 
 ### Environment Variables
 

@@ -38,7 +38,7 @@ COPY pyproject.toml uv.lock /app/
 
 # Install tenant dependencies into the global environment without replacing torch/gen-worker.
 RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
-    uv export --locked --no-dev --no-hashes --no-emit-project \
+    uv export --no-dev --no-hashes --no-sources --no-emit-project --no-emit-local \
       --no-emit-package torch --no-emit-package gen-worker \
       -o /tmp/requirements.all.txt \
     && grep -Ev '^(torch|triton|nvidia-|cuda-)' /tmp/requirements.all.txt > /tmp/requirements.txt \

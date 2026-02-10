@@ -1,0 +1,17 @@
+schema_version = 1
+
+name = "medasr-transcribe"
+main = "medasr_transcribe.main"
+gen_worker = ">=0.2.0,<0.3.0"
+
+[host.requirements]
+cuda = "12.6"
+
+[models]
+medasr = "hf:google/medasr"
+
+[resources]
+vram_gb = 8
+ram_gb = 16
+cpu_cores = 4
+disk_gb = 30

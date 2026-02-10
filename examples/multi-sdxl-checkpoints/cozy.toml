@@ -1,0 +1,26 @@
+schema_version = 1
+
+name = "multi-sdxl-checkpoints"
+main = "multi_sdxl_checkpoints.main"
+gen_worker = ">=0.2.0,<0.3.0"
+
+[host.requirements]
+cuda = "12.6"
+
+[models]
+sdxl-base = "hf:stabilityai/stable-diffusion-xl-base-1.0"
+sdxl-turbo = "hf:stabilityai/sdxl-turbo"
+dreamshaper = "hf:Lykon/dreamshaper-xl-v2-turbo"
+juggernaut = "hf:RunDiffusion/Juggernaut-XL-v9"
+realvisxl = "hf:SG161222/RealVisXL_V5.0"
+animagine = "hf:cagliostrolab/animagine-xl-3.1"
+playground-v25 = "hf:playgroundai/playground-v2.5-1024px-aesthetic"
+ssd-1b = "hf:segmind/SSD-1B"
+pony-v6 = "hf:Runware/pony-xl-v6-diffusers"
+illustrious-xl = "hf:drawhisper/illustrious-xl"
+
+[resources]
+vram_gb = 12
+ram_gb = 32
+cpu_cores = 8
+disk_gb = 80

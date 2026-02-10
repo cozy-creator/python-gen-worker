@@ -11,7 +11,7 @@ This example demonstrates how to efficiently support multiple model fine-tunes (
 ### 1. Declare Models in Config
 
 ```toml
-[tool.cozy.models]
+[models]
 sdxl-base = "hf:stabilityai/stable-diffusion-xl-base-1.0"
 sdxl-turbo = "hf:stabilityai/sdxl-turbo"
 dreamshaper = "hf:Lykon/dreamshaper-xl-v2-turbo"
@@ -123,4 +123,4 @@ Cold starts are slower but only happen once per model per worker.
 This separation allows:
 - Changing the underlying model without changing client code
 - Different endpoint packages to use different versions of the "same" key
-- Clear ownership of model configuration in pyproject.toml
+- Clear ownership of model configuration in `cozy.toml`

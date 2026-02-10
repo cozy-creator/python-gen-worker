@@ -29,7 +29,7 @@ class TestPayloadModelSelection(unittest.TestCase):
         )
         payload = _Payload(model="does-not-exist")
         with self.assertRaises(ValueError) as ctx:
-            w._resolve_model_id_for_injection(inj, payload)
+            w._resolve_model_id_for_injection("generate", inj, payload)
         self.assertIn("unknown model key", str(ctx.exception).lower())
         self.assertIn("sd15", str(ctx.exception))
 
@@ -45,6 +45,5 @@ class TestPayloadModelSelection(unittest.TestCase):
             model_ref=ModelRef(ModelRefSource.PAYLOAD, "model"),
         )
         payload = _Payload(model="sd15")
-        out = w._resolve_model_id_for_injection(inj, payload)
+        out = w._resolve_model_id_for_injection("generate", inj, payload)
         self.assertEqual(out, "cozy:demo/sd15:latest")
-

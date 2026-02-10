@@ -42,7 +42,7 @@ def _should_enable_seq_offload() -> bool:
 def generate(
     ctx: ActionContext,
     pipeline: Annotated[
-        Flux2KleinPipeline, ModelRef(Src.FIXED, "flux2-klein-4b")  # Key from cozy.toml [models]
+        Flux2KleinPipeline, ModelRef(Src.DEPLOYMENT, "flux2-klein-4b")  # Key from cozy.toml [models]
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:

@@ -15,7 +15,7 @@ This example shows how to load custom LoRAs at runtime, similar to fal.ai's z-im
 
 ## Pattern: LoRAs as Assets, Not Model Config
 
-LoRAs are **not** declared in `[tool.cozy.models]` because they're dynamic per-request. Instead, they're passed as `Asset` in the payload:
+LoRAs are **not** declared in `cozy.toml [models]` because they're dynamic per-request. Instead, they're passed as `Asset` in the payload:
 
 ```python
 class LoraSpec(msgspec.Struct):

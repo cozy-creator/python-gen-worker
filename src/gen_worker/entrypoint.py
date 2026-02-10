@@ -12,8 +12,11 @@ import json
 import logging
 import os
 import sys
+import importlib.metadata as md
 from pathlib import Path
 from typing import List, Optional
+
+from .cozy_toml import constraint_satisfied, load_cozy_toml
 
 try:
     from .worker import Worker
@@ -51,6 +54,43 @@ def get_modules_from_manifest(manifest: dict) -> List[str]:
         if module:
             modules.add(module)
     return sorted(modules)
+
+
+def _dev_validate_gen_worker_version() -> None:
+    """
+    Dev-only guardrail.
+
+    If COZY_MANIFEST_PATH points at a cozy.toml, verify the locally installed
+    gen-worker version satisfies cozy.toml's gen_worker constraint.
+    """
+    manifest_path_str = os.getenv("COZY_MANIFEST_PATH", "").strip()
+    if not manifest_path_str:
+        return
+    p = Path(manifest_path_str)
+    if not p.exists():
+        return
+    try:
+        cozy = load_cozy_toml(p)
+        constraint = cozy.gen_worker
+    except Exception as e:
+        logger.warning("Failed to parse cozy.toml for dev runtime validation (%s): %s", p, e)
+        return
+    try:
+        installed = md.version("gen-worker")
+    except Exception:
+        installed = ""
+    if not installed:
+        logger.warning("Dev validation skipped: could not determine installed gen-worker version")
+        return
+    if not constraint_satisfied(constraint, installed):
+        logger.error(
+            "Installed gen-worker version %s does not satisfy cozy.toml gen_worker constraint %r (%s).",
+            installed,
+            constraint,
+            p,
+        )
+        sys.exit(2)
+
 
 # Configuration from environment
 SCHEDULER_ADDR = os.getenv("SCHEDULER_ADDR", "localhost:8080")
@@ -102,6 +142,8 @@ else:
 
 
 if __name__ == "__main__":
+    _dev_validate_gen_worker_version()
+
     # Load manifest if available (baked in at build time)
     manifest = load_manifest()
 

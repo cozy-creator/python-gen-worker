@@ -49,7 +49,7 @@ main = "funcs_a"
 gen_worker = ">=0"
 
 [models]
-sdxl = "stabilityai/stable-diffusion-xl-base-1.0"
+sdxl = { ref = "stabilityai/stable-diffusion-xl-base-1.0", dtypes = ["fp16","bf16"] }
 controlnet = "lllyasviel/control_v11p_sd15_canny"
 """.lstrip(),
                     encoding="utf-8",
@@ -121,18 +121,20 @@ def generate_dynamic(
                     [{"field": "model_key", "kind": "short_key"}],
                 )
 
-                # Top-level models should be present
-                self.assertIn("models", manifest)
-                self.assertEqual(manifest["models"]["sdxl"], "stabilityai/stable-diffusion-xl-base-1.0")
-                self.assertEqual(manifest["models"]["controlnet"], "lllyasviel/control_v11p_sd15_canny")
+                # Per-function models_by_function should be present (includes dtype constraints).
+                self.assertIn("models_by_function", manifest)
+                mbf = manifest["models_by_function"]
+                self.assertIn("generate", mbf)
+                self.assertEqual(mbf["generate"]["sdxl"]["ref"], "stabilityai/stable-diffusion-xl-base-1.0")
+                self.assertEqual(mbf["generate"]["sdxl"]["dtypes"], ["fp16", "bf16"])
 
             finally:
                 os.chdir(original_cwd)
                 sys.path[:] = original_path
                 _cleanup_modules("funcs_a")
 
-    def test_missing_model_key_warning(self) -> None:
-        """Test that warning is issued for model keys not in config."""
+    def test_missing_model_key_fails(self) -> None:
+        """Test that missing fixed model keys fail discovery (build-time validation)."""
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             original_cwd = os.getcwd()
@@ -191,17 +193,9 @@ def generate(
     return Output(result="ok")
 """)
 
-                # Run discovery - should print warning but not fail
-                stderr = io.StringIO()
-                with patch('sys.stderr', stderr):
-                    manifest = discover_manifest(root)
-
-                warning = stderr.getvalue()
-                self.assertIn("sdxl", warning)
-                self.assertIn("not defined", warning.lower())
-
-                # Function should still have required_models
-                self.assertEqual(manifest["functions"][0]["required_models"], ["sdxl"])
+                with self.assertRaises(ValueError) as ctx:
+                    discover_manifest(root)
+                self.assertIn("sdxl", str(ctx.exception))
 
             finally:
                 os.chdir(original_cwd)
@@ -240,7 +234,7 @@ gen_worker = ">=0"
 
 [models]
 model-a = "org/model-a"
-model-b = "org/model-b"
+model-b = { ref = "org/model-b", dtypes = ["fp8"] }
 """.lstrip(),
                     encoding="utf-8",
                 )
@@ -264,9 +258,13 @@ def simple(ctx: ActionContext, payload: Input) -> Output:
 
                 manifest = discover_manifest(root)
 
-                self.assertIn("models", manifest)
-                self.assertEqual(manifest["models"]["model-a"], "org/model-a")
-                self.assertEqual(manifest["models"]["model-b"], "org/model-b")
+                self.assertIn("models_by_function", manifest)
+                mbf = manifest["models_by_function"]
+                self.assertIn("simple", mbf)
+                self.assertEqual(mbf["simple"]["model-a"]["ref"], "org/model-a")
+                self.assertEqual(mbf["simple"]["model-a"]["dtypes"], ["fp16", "bf16"])
+                self.assertEqual(mbf["simple"]["model-b"]["ref"], "org/model-b")
+                self.assertEqual(mbf["simple"]["model-b"]["dtypes"], ["fp8"])
 
             finally:
                 os.chdir(original_cwd)
@@ -322,7 +320,7 @@ def simple(ctx: ActionContext, payload: Input) -> Output:
                 manifest = discover_manifest(root)
 
                 # No models in config means no models field
-                self.assertNotIn("models", manifest)
+                self.assertNotIn("models_by_function", manifest)
                 # Function should have empty required_models
                 self.assertEqual(manifest["functions"][0]["required_models"], [])
 
