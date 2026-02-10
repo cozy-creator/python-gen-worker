@@ -16,6 +16,13 @@ class CozyHubNoCompatibleArtifactError(CozyHubError):
         self.debug = debug
 
 
+class CozyHubPublicModelPendingError(CozyHubError):
+    def __init__(self, ingest_job_id: str) -> None:
+        ingest_job_id = (ingest_job_id or "").strip() or "unknown"
+        super().__init__(f"public model ingest pending (ingest_job_id={ingest_job_id})")
+        self.ingest_job_id = ingest_job_id
+
+
 @dataclass(frozen=True)
 class CozyHubArtifact:
     label: str
@@ -149,6 +156,77 @@ class CozyHubV2Client:
             raise ValueError("empty files list")
         return out
 
+    async def request_public_model(
+        self,
+        *,
+        model_ref: str,
+        dtypes: Optional[List[str]] = None,
+        file_types: Optional[List[str]] = None,
+        file_layouts: Optional[List[str]] = None,
+        include_urls: bool = True,
+    ) -> CozyHubResolveArtifactResult:
+        """
+        Request a (public) model via Cozy Hub.
+
+        Endpoint:
+          - POST /api/v1/public/models/request
+
+        Responses:
+          - 200: {owner,repo,tag,variant_label,snapshot_digest,snapshot_manifest:{files:[...]}}
+          - 202: {ingest_job_id,...} (pending)
+          - 403: forbidden (model not mirrored and caller not authenticated)
+          - 409: no compatible variant
+        """
+        model_ref = (model_ref or "").strip()
+        if not model_ref:
+            raise ValueError("model_ref required")
+
+        url = f"{self.base_url}/api/v1/public/models/request"
+        payload = {
+            "model_ref": model_ref,
+            "constraints": {
+                "dtypes": [str(x) for x in (dtypes or []) if str(x).strip()],
+                "file_types": [str(x) for x in (file_types or []) if str(x).strip()],
+                "file_layouts": [str(x) for x in (file_layouts or []) if str(x).strip()],
+            },
+            "include_urls": bool(include_urls),
+        }
+
+        timeout = aiohttp.ClientTimeout(total=self.timeout_s)
+        async with aiohttp.ClientSession(timeout=timeout, headers=self._headers()) as session:
+            async with session.post(url, json=payload) as resp:
+                if resp.status == 202:
+                    try:
+                        data = await resp.json()
+                    except Exception:
+                        data = {}
+                    ingest_job_id = str(data.get("ingest_job_id") or "").strip() if isinstance(data, dict) else ""
+                    raise CozyHubPublicModelPendingError(ingest_job_id or "")
+                if resp.status == 409:
+                    try:
+                        data = await resp.json()
+                    except Exception:
+                        data = {}
+                    raise CozyHubNoCompatibleArtifactError(
+                        "no compatible artifact for worker",
+                        debug=data if isinstance(data, dict) else None,
+                    )
+                if resp.status == 403:
+                    try:
+                        data = await resp.json()
+                    except Exception:
+                        data = {}
+                    msg = "forbidden"
+                    if isinstance(data, dict):
+                        msg = str(data.get("message") or data.get("error") or msg)
+                    raise CozyHubError(msg)
+                resp.raise_for_status()
+                data = await resp.json()
+                if not isinstance(data, dict):
+                    raise ValueError("unexpected response shape")
+
+        return _parse_request_public_model_response(data, include_urls=include_urls)
+
 
 def _parse_resolve_artifact_response(data: Mapping[str, Any], *, include_urls: bool) -> CozyHubResolveArtifactResult:
     repo_revision_seq = int(data.get("repo_revision_seq") or 0)
@@ -183,6 +261,57 @@ def _parse_resolve_artifact_response(data: Mapping[str, Any], *, include_urls: b
             continue
         size_bytes = int(ent.get("size_bytes") or 0)
         blake3_hex = str(ent.get("blake3") or "").strip().lower()
+        url = str(ent.get("url") or "").strip() if include_urls else ""
+        files.append(
+            CozyHubSnapshotFile(
+                path=path,
+                size_bytes=size_bytes,
+                blake3=blake3_hex,
+                url=url or None,
+            )
+        )
+    if not files:
+        raise ValueError("empty snapshot file list")
+
+    return CozyHubResolveArtifactResult(
+        repo_revision_seq=repo_revision_seq,
+        snapshot_digest=snapshot_digest,
+        artifact=artifact,
+        files=files,
+    )
+
+
+def _parse_request_public_model_response(data: Mapping[str, Any], *, include_urls: bool) -> CozyHubResolveArtifactResult:
+    repo_revision_seq = int(data.get("repo_revision_seq") or 0)
+    snapshot_digest = str(data.get("snapshot_digest") or "").strip()
+    if repo_revision_seq <= 0 or not snapshot_digest:
+        raise ValueError("missing snapshot_digest/repo_revision_seq")
+
+    variant_label = str(data.get("variant_label") or "").strip()
+    artifact = None
+    if variant_label:
+        artifact = CozyHubArtifact(label=variant_label, file_layout="", file_type="", quantization="")
+
+    manifest = data.get("snapshot_manifest")
+    if not isinstance(manifest, dict):
+        raise ValueError("missing snapshot_manifest")
+    files_raw = manifest.get("files")
+    if not isinstance(files_raw, list):
+        raise ValueError("missing snapshot_manifest.files")
+
+    files: List[CozyHubSnapshotFile] = []
+    for ent in files_raw:
+        if not isinstance(ent, dict):
+            continue
+        path = str(ent.get("path") or "").strip()
+        if not path:
+            continue
+        size_bytes = int(ent.get("size_bytes") or 0)
+        blake3_hex = str(ent.get("blake3") or "").strip().lower()
+        if not blake3_hex:
+            dig = str(ent.get("digest") or "").strip().lower()
+            if dig.startswith("blake3:"):
+                blake3_hex = dig.split(":", 1)[1].strip().lower()
         url = str(ent.get("url") or "").strip() if include_urls else ""
         files.append(
             CozyHubSnapshotFile(

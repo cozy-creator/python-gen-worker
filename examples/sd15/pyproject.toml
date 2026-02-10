@@ -5,9 +5,14 @@ description = "Stable Diffusion 1.5 example (inference-only; Cozy manifest via c
 requires-python = ">=3.12"
 dependencies = [
     "diffusers",
-    "transformers",
+    "transformers<5",
     "accelerate",
+    # diffusers imports some optional pipelines during module import; include
+    # ftfy to avoid import-time failures in our build-time manifest discovery.
+    "ftfy",
     "pillow",
+    # Needed for fp8 weight-only quantization variants (diffusers TorchAoConfig).
+    "torchao",
 ]
 
 [dependency-groups]

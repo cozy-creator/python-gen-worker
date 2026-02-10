@@ -11,11 +11,13 @@ gen_worker = ">=0.2.0,<0.3.0"
 cuda = "12.6"
 
 [models]
-sd15 = "hf:stable-diffusion-v1-5/stable-diffusion-v1-5"
+sd15 = "cozy:stable-diffusion-v1-5/stable-diffusion-v1-5:latest"
+sd15_fp8 = { ref = "cozy:stable-diffusion-v1-5/stable-diffusion-v1-5:latest", dtypes = ["fp8"] }
+sd15_int8 = { ref = "cozy:stable-diffusion-v1-5/stable-diffusion-v1-5:latest", dtypes = ["int8"] }
+sd15_int4 = { ref = "cozy:stable-diffusion-v1-5/stable-diffusion-v1-5:latest", dtypes = ["int4"] }
 
 [resources]
 vram_gb = 8
 ram_gb = 16
 cpu_cores = 4
 disk_gb = 30
-

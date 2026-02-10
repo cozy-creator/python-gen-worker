@@ -8,6 +8,8 @@ dependencies = [
     "transformers>=4.56,<5",
     "accelerate",
     "pillow",
+    # Needed for fp8 weight-only quantization variants (diffusers TorchAoConfig).
+    "torchao",
 ]
 
 [dependency-groups]

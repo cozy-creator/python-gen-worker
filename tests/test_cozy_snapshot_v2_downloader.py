@@ -232,3 +232,128 @@ def test_model_ref_downloader_uses_resolved_urls_without_cozy_hub_token(tmp_path
             reset_resolved_cozy_models_by_id(tok)
     finally:
         _stop_server(srv)
+
+
+def test_model_ref_downloader_hf_prefers_cozy_hub_public_request(tmp_path: Path) -> None:
+    from gen_worker.model_ref_downloader import ModelRefDownloader
+
+    snap = "blake3:" + ("d" * 64)
+
+    b1 = b"hello"
+    b1_digest = blake3(b1).hexdigest()
+
+    base = ""  # populated after server starts
+    routes: Dict[str, web.StreamResponse] = {}
+    call_count = {"n": 0}
+
+    async def request_public_model(req: web.Request) -> web.Response:
+        nonlocal base
+        call_count["n"] += 1
+        body = await req.json()
+        assert body["model_ref"] == "hf:o/r@main"
+        return web.json_response(
+            {
+                "cozy_repo_ref": "cozy:hf/o--r:latest",
+                "owner": "hf",
+                "repo": "o--r",
+                "tag": "latest",
+                "repo_revision_seq": 1,
+                "variant_label": "safetensors-bf16",
+                "snapshot_digest": snap,
+                "snapshot_manifest": {
+                    "version": 1,
+                    "files": [
+                        {
+                            "path": "cozy.pipeline.yaml",
+                            "size_bytes": len(b1),
+                            "blake3": b1_digest,
+                            "url": f"{base}/files/pipeline",
+                        }
+                    ],
+                },
+            }
+        )
+
+    async def get_pipeline(_req: web.Request) -> web.Response:
+        return web.Response(body=b1, headers={"Content-Type": "application/octet-stream"})
+
+    routes["/api/v1/public/models/request"] = request_public_model  # type: ignore[assignment]
+    routes["/files/pipeline"] = get_pipeline  # type: ignore[assignment]
+
+    srv = _start_server(routes)
+    try:
+        base = srv.base_url
+        dl = ModelRefDownloader(
+            cozy_base_url=base,
+            cozy_token=None,
+            allow_cozy_hub_api_resolve=False,
+        )
+        local = Path(dl.download("hf:o/r@main", tmp_path.as_posix()))
+        assert (local / "cozy.pipeline.yaml").read_bytes() == b1
+        assert call_count["n"] == 1
+    finally:
+        _stop_server(srv)
+
+
+def test_model_ref_downloader_public_request_polls_202_then_200(tmp_path: Path) -> None:
+    from gen_worker.model_ref_downloader import ModelRefDownloader
+
+    snap = "blake3:" + ("e" * 64)
+
+    b1 = b"hello"
+    b1_digest = blake3(b1).hexdigest()
+
+    base = ""  # populated after server starts
+    routes: Dict[str, web.StreamResponse] = {}
+    call_count = {"n": 0}
+
+    # Speed up the test: don't wait 15m on pending responses.
+    ModelRefDownloader.DEFAULT_PUBLIC_MODEL_REQUEST_WAIT_TIMEOUT_S = 5
+
+    async def request_public_model(_req: web.Request) -> web.Response:
+        nonlocal base
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return web.json_response({"ingest_job_id": "sess1"}, status=202)
+        return web.json_response(
+            {
+                "cozy_repo_ref": "cozy:hf/o--r:latest",
+                "owner": "hf",
+                "repo": "o--r",
+                "tag": "latest",
+                "repo_revision_seq": 1,
+                "variant_label": "safetensors-bf16",
+                "snapshot_digest": snap,
+                "snapshot_manifest": {
+                    "version": 1,
+                    "files": [
+                        {
+                            "path": "cozy.pipeline.yaml",
+                            "size_bytes": len(b1),
+                            "blake3": b1_digest,
+                            "url": f"{base}/files/pipeline",
+                        }
+                    ],
+                },
+            }
+        )
+
+    async def get_pipeline(_req: web.Request) -> web.Response:
+        return web.Response(body=b1, headers={"Content-Type": "application/octet-stream"})
+
+    routes["/api/v1/public/models/request"] = request_public_model  # type: ignore[assignment]
+    routes["/files/pipeline"] = get_pipeline  # type: ignore[assignment]
+
+    srv = _start_server(routes)
+    try:
+        base = srv.base_url
+        dl = ModelRefDownloader(
+            cozy_base_url=base,
+            cozy_token=None,
+            allow_cozy_hub_api_resolve=False,
+        )
+        local = Path(dl.download("hf:o/r@main", tmp_path.as_posix()))
+        assert (local / "cozy.pipeline.yaml").read_bytes() == b1
+        assert call_count["n"] >= 2
+    finally:
+        _stop_server(srv)

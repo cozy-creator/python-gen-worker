@@ -80,6 +80,29 @@ components:
     assert out["scheduler"] == ["diffusers", "PNDMScheduler"]
 
 
+def test_lockfile_allows_ref_fields_for_attribution(tmp_path: Path) -> None:
+    _write(
+        tmp_path / COZY_PIPELINE_LOCK_FILENAME,
+        """
+apiVersion: v1
+kind: DiffusersPipeline
+pipe:
+  library: diffusers
+  class: StableDiffusionPipeline
+components:
+  text_encoder:
+    path: text_encoder
+    ref: cozy:alice/model@blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa#text_encoder?dtype=bf16&rev=123
+    library: transformers
+    class: CLIPTextModel
+""".lstrip(),
+    )
+    spec = load_cozy_pipeline_spec(tmp_path)
+    assert spec is not None
+    out = generate_diffusers_model_index_from_cozy(spec)
+    assert out["text_encoder"] == ["transformers", "CLIPTextModel"]
+
+
 def test_ensure_model_index_json_from_cozy_pipeline(tmp_path: Path) -> None:
     _write(
         tmp_path / COZY_PIPELINE_LOCK_FILENAME,
@@ -146,4 +169,3 @@ components: {}
     assert spec is not None
     with pytest.raises(ValueError):
         _ = cozy_custom_pipeline_arg(tmp_path, spec)
-

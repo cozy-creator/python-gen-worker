@@ -535,14 +535,14 @@ def get_torch_dtype(dtype_str: Optional[str], model_id: str) -> Any:
 
 def detect_diffusers_variant(model_path: Path) -> Optional[str]:
     """
-    Detect a diffusers `variant=` value ("bf16", "fp8", "fp16") from files on disk.
+    Detect a diffusers `variant=` value ("bf16", "fp8", "fp16", "int8", "int4") from files on disk.
 
     Many diffusers repos store weights as:
       - `unet/diffusion_pytorch_model.fp16.safetensors`
       - `text_encoder/model.fp16.safetensors`
       - sharded: `*.fp16.safetensors.index.json` + `*.fp16-00001-of-0000N.safetensors`
     """
-    candidates = ["bf16", "fp8", "fp16"]
+    candidates = ["bf16", "fp8", "fp16", "int8", "int4"]
     for p in model_path.rglob("*"):
         if not p.is_file():
             continue

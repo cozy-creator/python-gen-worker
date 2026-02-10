@@ -24,8 +24,9 @@ class TestWorkerModelKeyspace(unittest.TestCase):
         )
         payload = _Payload(model_key="sdxl")
 
-        got = Worker._resolve_model_id_for_injection(w, "generate", inj, payload)  # type: ignore[arg-type]
+        got, key = Worker._resolve_model_id_for_injection(w, "generate", inj, payload)  # type: ignore[arg-type]
         self.assertEqual(got, "hf:stabilityai/stable-diffusion-xl-base-1.0")
+        self.assertEqual(key, "sdxl")
 
     def test_payload_model_selection_rejects_unknown_key(self) -> None:
         w = Worker.__new__(Worker)
@@ -46,4 +47,3 @@ class TestWorkerModelKeyspace(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-

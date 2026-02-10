@@ -11,8 +11,11 @@ gen_worker = ">=0.2.0,<0.3.0"
 cuda = "12.6"
 
 [models]
-# Model key -> model ref mapping used by ModelRef(Src.FIXED, "<key>") injections.
+# Model key -> model ref mapping used by ModelRef(Src.DEPLOYMENT, "<key>") injections.
 flux2-klein-4b = "hf:black-forest-labs/FLUX.2-klein-4B"
+flux2-klein-4b_fp8 = { ref = "hf:black-forest-labs/FLUX.2-klein-4B", dtypes = ["fp8"] }
+flux2-klein-4b_int8 = { ref = "hf:black-forest-labs/FLUX.2-klein-4B", dtypes = ["int8"] }
+flux2-klein-4b_int4 = { ref = "hf:black-forest-labs/FLUX.2-klein-4B", dtypes = ["int4"] }
 
 [resources]
 vram_gb = 12

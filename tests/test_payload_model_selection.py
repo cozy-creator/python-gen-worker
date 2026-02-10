@@ -45,5 +45,6 @@ class TestPayloadModelSelection(unittest.TestCase):
             model_ref=ModelRef(ModelRefSource.PAYLOAD, "model"),
         )
         payload = _Payload(model="sd15")
-        out = w._resolve_model_id_for_injection("generate", inj, payload)
+        out, key = w._resolve_model_id_for_injection("generate", inj, payload)
         self.assertEqual(out, "cozy:demo/sd15:latest")
+        self.assertEqual(key, "sd15")

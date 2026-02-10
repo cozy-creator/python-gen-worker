@@ -394,6 +394,27 @@ def discover_functions(root: Optional[Path] = None, *, main_module: str | None =
 
     functions: List[Dict[str, Any]] = []
     imported_modules: Set[str] = set()
+    seen_functions: Set[Tuple[str, str]] = set()  # (module, name)
+
+    def _module_is_in_project(mod: Any) -> bool:
+        """
+        Limit discovery to modules that live under the project root.
+
+        This avoids inspecting third-party modules (e.g. transformers LazyModule),
+        which can trigger expensive/optional imports and break discovery.
+        """
+        mod_file = getattr(mod, "__file__", None)
+        if not mod_file:
+            return False
+        try:
+            p = Path(mod_file).resolve()
+        except Exception:
+            return False
+        try:
+            p.relative_to(root)
+            return True
+        except Exception:
+            return False
 
     if main_module:
         before = set(sys.modules.keys())
@@ -414,10 +435,18 @@ def discover_functions(root: Optional[Path] = None, *, main_module: str | None =
             mod = sys.modules.get(module_name)
             if mod is None:
                 continue
-            for name, obj in inspect.getmembers(mod):
-                if inspect.isfunction(obj) and getattr(obj, "_is_worker_function", False):
-                    fn_meta = _extract_function_metadata(obj, module_name)
-                    functions.append(fn_meta)
+            if not _module_is_in_project(mod):
+                continue
+            # Iterate module dict to avoid triggering module-level __getattr__.
+            for obj in mod.__dict__.values():
+                if not inspect.isfunction(obj) or not getattr(obj, "_is_worker_function", False):
+                    continue
+                key = (getattr(obj, "__module__", ""), getattr(obj, "__name__", ""))
+                if key in seen_functions:
+                    continue
+                seen_functions.add(key)
+                fn_meta = _extract_function_metadata(obj, module_name)
+                functions.append(fn_meta)
         return functions
 
     # Fallback: scan the filesystem for decorated functions.
@@ -435,14 +464,20 @@ def discover_functions(root: Optional[Path] = None, *, main_module: str | None =
             continue
 
         # Find decorated functions
-        for name, obj in inspect.getmembers(mod):
-            if inspect.isfunction(obj) and getattr(obj, "_is_worker_function", False):
-                try:
-                    fn_meta = _extract_function_metadata(obj, module_name)
-                    functions.append(fn_meta)
-                except Exception as e:
-                    print(f"warning: failed to extract metadata from {name}: {e}", file=sys.stderr)
-                    raise
+        # Iterate module dict to avoid triggering module-level __getattr__.
+        for name, obj in mod.__dict__.items():
+            if not inspect.isfunction(obj) or not getattr(obj, "_is_worker_function", False):
+                continue
+            key = (getattr(obj, "__module__", ""), getattr(obj, "__name__", ""))
+            if key in seen_functions:
+                continue
+            seen_functions.add(key)
+            try:
+                fn_meta = _extract_function_metadata(obj, module_name)
+                functions.append(fn_meta)
+            except Exception as e:
+                print(f"warning: failed to extract metadata from {name}: {e}", file=sys.stderr)
+                raise
 
     return functions
 

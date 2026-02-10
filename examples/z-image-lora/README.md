@@ -7,7 +7,7 @@ Dynamic LoRA loading example demonstrating the z-image pattern.
 This example shows how to load custom LoRAs at runtime, similar to fal.ai's z-image/turbo/lora endpoint. LoRAs are passed as `Asset` references in the request payload, downloaded and cached by the worker, then applied to the base Z-Image Turbo pipeline.
 
 **Key features:**
-- Base model (Z-Image Turbo) is loaded once and kept in VRAM via `ModelRef(Src.FIXED, "z-image-turbo")`
+- Base model (Z-Image Turbo) is loaded once and kept in VRAM via `ModelRef(Src.DEPLOYMENT, "z-image-turbo")`
 - LoRAs are passed as `Asset` in the request (external URLs or Cozy Hub file refs)
 - LoRAs are loaded dynamically per-request
 - LoRAs are unloaded after each request to avoid VRAM accumulation

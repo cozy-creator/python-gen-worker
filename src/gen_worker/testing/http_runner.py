@@ -306,13 +306,41 @@ async def serve_http(argv: Optional[list[str]] = None) -> None:
 
         out: list[dict[str, Any]] = []
         for raw in models:
-            mid = str(raw or "").strip()
+            prefs: dict[str, Any] = {}
+            if isinstance(raw, dict):
+                mid = str(raw.get("ref") or raw.get("model_ref") or raw.get("model_id") or "").strip()
+                dtypes = raw.get("dtypes")
+                if isinstance(dtypes, list):
+                    prefs["dtypes"] = [str(x) for x in dtypes if str(x).strip()]
+                ft = str(raw.get("file_type") or "").strip()
+                if ft:
+                    prefs["file_type"] = ft
+            else:
+                mid = str(raw or "").strip()
             if not mid:
                 continue
             t0 = time.monotonic()
             try:
                 # Best-effort download into the shared cache dir.
-                local_path = w._downloader.download(mid, str(cache_dir)) if getattr(w, "_downloader", None) else ""
+                local_path = ""
+                if getattr(w, "_downloader", None) is not None:
+                    from gen_worker.model_ref_downloader import (
+                        reset_cozy_model_download_prefs_by_ref,
+                        set_cozy_model_download_prefs_by_ref,
+                    )
+                    from gen_worker.model_refs import parse_model_ref
+
+                    canon = mid
+                    try:
+                        canon = parse_model_ref(mid).canonical()
+                    except Exception:
+                        canon = mid
+
+                    tok = set_cozy_model_download_prefs_by_ref({canon: prefs} if prefs else None)
+                    try:
+                        local_path = w._downloader.download(mid, str(cache_dir))
+                    finally:
+                        reset_cozy_model_download_prefs_by_ref(tok)
                 lp = Path(str(local_path))
                 if not local_path or not lp.exists():
                     raise RuntimeError(f"download returned missing path: {local_path!r}")

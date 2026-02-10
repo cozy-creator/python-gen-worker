@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import math
 from io import BytesIO
 from typing import Annotated, Optional
 
@@ -20,9 +21,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 
 class GenerateInput(msgspec.Struct):
     prompt: str
-    # FLUX.2-klein-4B is a turbo model: we always run at 8 steps.
-    # Keep the field for API compatibility, but ignore it in `generate()`.
-    num_inference_steps: int = 8
+    # Turbo model: keep the range tight for latency/cost predictability.
+    # Accept int/float and clamp to [4, 8] (rounded to nearest int).
+    num_inference_steps: int | float = 8
     guidance_scale: float = 1.0
     width: int = 1024
     height: int = 1024
@@ -37,6 +38,21 @@ def _should_enable_seq_offload() -> bool:
     raw = (os.getenv("COZY_DISABLE_SEQUENTIAL_CPU_OFFLOAD") or "").strip().lower()
     return raw not in {"1", "true", "yes", "y", "t"}
 
+def _clamp_steps(raw: int | float) -> int:
+    try:
+        x = float(raw)
+    except Exception:
+        x = 8.0
+    if not math.isfinite(x):
+        x = 8.0
+    # Round half-up (avoid Python's banker's rounding surprises).
+    steps = int(math.floor(x + 0.5))
+    if steps < 4:
+        return 4
+    if steps > 8:
+        return 8
+    return steps
+
 
 @worker_function(ResourceRequirements())
 def generate(
@@ -49,9 +65,9 @@ def generate(
     if ctx.is_canceled():
         raise InterruptedError("canceled")
 
-    steps = 8  # forced turbo steps
+    steps = _clamp_steps(payload.num_inference_steps)
     logger.info(
-        "[run_id=%s] flux2-klein-4b prompt=%r steps=%s (forced, requested=%s)",
+        "[run_id=%s] flux2-klein-4b prompt=%r steps=%s (requested=%s)",
         ctx.run_id,
         payload.prompt,
         steps,
@@ -83,3 +99,53 @@ def generate(
     image.save(buf, format="PNG")
     out = ctx.save_bytes(f"runs/{ctx.run_id}/outputs/image.png", buf.getvalue())
     return GenerateOutput(image=out)
+
+
+@worker_function(ResourceRequirements())
+def generate_fp8(
+    ctx: ActionContext,
+    pipeline: Annotated[
+        Flux2KleinPipeline, ModelRef(Src.DEPLOYMENT, "flux2-klein-4b_fp8")  # Key from cozy.toml [models]
+    ],
+    payload: GenerateInput,
+) -> GenerateOutput:
+    """
+    FP8 endpoint.
+
+    This endpoint is intended to run against an fp8-weight-only artifact (or an artifact
+    that the worker can load with torchao-backed fp8 quantization enabled).
+    """
+    return generate(ctx, pipeline, payload)
+
+
+@worker_function(ResourceRequirements())
+def generate_int8(
+    ctx: ActionContext,
+    pipeline: Annotated[
+        Flux2KleinPipeline, ModelRef(Src.DEPLOYMENT, "flux2-klein-4b_int8")  # Key from cozy.toml [models]
+    ],
+    payload: GenerateInput,
+) -> GenerateOutput:
+    """
+    INT8 endpoint (weight-only).
+
+    This endpoint is intended to run against an int8-weight-only artifact (or an artifact
+    that the worker can load with torchao-backed int8 quantization enabled).
+    """
+    return generate(ctx, pipeline, payload)
+
+
+@worker_function(ResourceRequirements())
+def generate_int4(
+    ctx: ActionContext,
+    pipeline: Annotated[
+        Flux2KleinPipeline, ModelRef(Src.DEPLOYMENT, "flux2-klein-4b_int4")  # Key from cozy.toml [models]
+    ],
+    payload: GenerateInput,
+) -> GenerateOutput:
+    """
+    INT4 endpoint (weight-only).
+
+    This endpoint is experimental; expect quality regressions or incompatibilities.
+    """
+    return generate(ctx, pipeline, payload)

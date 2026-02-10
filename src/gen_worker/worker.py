@@ -830,7 +830,7 @@ class Worker:
         if self._downloader is None:
             base_url = os.getenv("COZY_HUB_URL", "").strip()
             allow_api = str(os.getenv("WORKER_ALLOW_COZY_HUB_API_RESOLVE", "") or "").strip().lower() in ("1", "true", "t", "yes", "y")
-            token = (os.getenv("COZY_HUB_TOKEN", "").strip() or None) if allow_api else None
+            token = os.getenv("COZY_HUB_TOKEN", "").strip() or None
             # Default to the composite model-ref downloader:
             # - Cozy snapshots using orchestrator-resolved URLs (no Cozy Hub API calls)
             # - Hugging Face refs via huggingface_hub when installed
@@ -846,6 +846,8 @@ class Worker:
         self._release_allowed_model_ids: Optional[set[str]] = None
         # Per-function model keyspace from baked discovery manifest (short_key -> model_ref).
         self._model_id_by_key_by_function: Dict[str, Dict[str, str]] = {}
+        # Per-function model specs (short_key -> {ref,dtypes}) from baked discovery manifest.
+        self._model_spec_by_key_by_function: Dict[str, Dict[str, Dict[str, Any]]] = {}
         # Orchestrator-resolved manifests received in DeploymentArtifactConfig (startup prefetch baseline).
         # Keys should be canonical model ref strings (e.g. "cozy:owner/repo@sha256:<digest>").
         self._resolved_cozy_models_by_id_baseline: Dict[str, Any] = {}
@@ -866,19 +868,29 @@ class Worker:
                     if not isinstance(mapping, dict):
                         continue
                     out: Dict[str, str] = {}
+                    out_spec: Dict[str, Dict[str, Any]] = {}
                     for k, v in mapping.items():
                         key = str(k).strip()
                         if not key:
                             continue
                         if isinstance(v, dict):
                             ref = str(v.get("ref") or "").strip()
+                            dtypes = v.get("dtypes")
                         else:
                             ref = str(v or "").strip()
+                            dtypes = None
                         if not ref:
                             continue
-                        out[key] = _canonicalize_model_ref_string(ref)
+                        canon_ref = _canonicalize_model_ref_string(ref)
+                        out[key] = canon_ref
+                        if isinstance(dtypes, list):
+                            out_spec[key] = {"ref": canon_ref, "dtypes": [str(x) for x in dtypes if str(x).strip()]}
+                        else:
+                            out_spec[key] = {"ref": canon_ref, "dtypes": []}
                     if out:
                         self._model_id_by_key_by_function[str(fn_name)] = out
+                    if out_spec:
+                        self._model_spec_by_key_by_function[str(fn_name)] = out_spec
 
             # Legacy contract: flat mapping at manifest["models"] (string refs).
             legacy_models = manifest.get("models")
@@ -2769,9 +2781,15 @@ class Worker:
             async def run_handler() -> None:
                 # Build kwargs for handler.
                 kwargs: Dict[str, Any] = {spec.ctx_param: ctx, spec.socket_param: sock}
-                from .model_ref_downloader import reset_resolved_cozy_models_by_id, set_resolved_cozy_models_by_id
+                from .model_ref_downloader import (
+                    reset_cozy_model_download_prefs_by_ref,
+                    reset_resolved_cozy_models_by_id,
+                    set_cozy_model_download_prefs_by_ref,
+                    set_resolved_cozy_models_by_id,
+                )
                 baseline = getattr(self, "_resolved_cozy_models_by_id_baseline", None) or None
                 resolved_tok = set_resolved_cozy_models_by_id(getattr(ctx, "resolved_cozy_models_by_id", None) or baseline)
+                prefs_tok = set_cozy_model_download_prefs_by_ref({})
                 try:
                     required_variant_refs = list(getattr(cmd, "required_variant_refs", []) or [])
                     for idx, inj in enumerate(spec.injections):
@@ -2783,6 +2801,7 @@ class Worker:
                     await spec.func(**kwargs)
                 finally:
                     reset_resolved_cozy_models_by_id(resolved_tok)
+                    reset_cozy_model_download_prefs_by_ref(prefs_tok)
 
             try:
                 loop.run_until_complete(run_handler())
@@ -2906,11 +2925,18 @@ class Worker:
         # Refcounted BUSY so overlapping runs/model ops can't flip BUSY -> NOT BUSY early.
         self._gpu_busy_enter()
 
-        from .model_ref_downloader import reset_resolved_cozy_models_by_id, set_resolved_cozy_models_by_id
+        from .model_ref_downloader import (
+            reset_cozy_model_download_prefs_by_ref,
+            reset_resolved_cozy_models_by_id,
+            set_cozy_model_download_prefs_by_ref,
+            set_resolved_cozy_models_by_id,
+        )
 
         baseline = getattr(self, "_resolved_cozy_models_by_id_baseline", None) or None
         resolved_map = getattr(ctx, "resolved_cozy_models_by_id", None) or baseline
         resolved_tok = set_resolved_cozy_models_by_id(resolved_map)
+        prefs_map: Dict[str, Any] = {}
+        prefs_tok = set_cozy_model_download_prefs_by_ref(prefs_map)
 
         models_in_use: set[str] = set()
         try:
@@ -2954,8 +2980,19 @@ class Worker:
             call_kwargs[spec.payload_param] = input_obj
 
             for inj in spec.injections:
-                model_id = self._resolve_model_id_for_injection(spec.name, inj, payload=input_obj)
+                model_id, model_key = self._resolve_model_id_for_injection(spec.name, inj, payload=input_obj)
                 canon_model_id = _canonicalize_model_ref_string(str(model_id or "").strip()) if model_id else ""
+                # Best-effort: attach dtype preferences from cozy.toml-derived manifest mapping.
+                if model_key:
+                    try:
+                        fn_specs = self._model_spec_by_key_by_function.get(spec.name) or {}
+                        s = fn_specs.get(model_key) if isinstance(fn_specs, dict) else None
+                        if isinstance(s, dict):
+                            dts = s.get("dtypes")
+                            if isinstance(dts, list) and canon_model_id:
+                                prefs_map[canon_model_id] = {"dtypes": [str(x) for x in dts if str(x).strip()]}
+                    except Exception:
+                        pass
                 if canon_model_id and canon_model_id not in models_in_use:
                     self._model_use_enter(canon_model_id)
                     models_in_use.add(canon_model_id)
@@ -3060,6 +3097,7 @@ class Worker:
             success = False
         finally:
             reset_resolved_cozy_models_by_id(resolved_tok)
+            reset_cozy_model_download_prefs_by_ref(prefs_tok)
 
             for mid in models_in_use:
                 try:
@@ -3387,13 +3425,57 @@ class Worker:
                     except Exception:
                         pass
 
+                    # Quantized weight-only inference requires explicit loader hints.
+                    #
+                    # Cozy Hub/orchestrator controls whether an endpoint may select fp8 variants, but
+                    # the worker must still pass an explicit quantization_config so diffusers loads
+                    # quantized modules correctly (torchao-backed).
+                    variant = str(kwargs.get("variant") or "").strip().lower()
+                    if variant in ("fp8", "int8", "int4"):
+                        # Ensure torchao is present (actual quantization implementation).
+                        import importlib.util as _ilu
+
+                        if _ilu.find_spec("torchao") is None:
+                            raise ValueError(
+                                f"{variant} diffusers variant selected, but torchao is not installed in this worker image"
+                            )
+
+                        try:
+                            from diffusers.quantizers import PipelineQuantizationConfig  # type: ignore
+                            from diffusers import TorchAoConfig as DiffusersTorchAoConfig  # type: ignore
+                        except Exception as e:
+                            raise ValueError(
+                                f"{variant} diffusers variant selected, but diffusers torchao quantization hooks are unavailable"
+                            ) from e
+
+                        quant_kind = {
+                            "fp8": "float8_weight_only",
+                            "int8": "int8_weight_only",
+                            "int4": "int4_weight_only",
+                        }[variant]
+
+                        root = Path(local)
+                        quant_mapping: dict[str, Any] = {}
+                        if (root / "transformer").exists():
+                            quant_mapping["transformer"] = DiffusersTorchAoConfig(quant_kind)
+                        if (root / "unet").exists():
+                            quant_mapping["unet"] = DiffusersTorchAoConfig(quant_kind)
+                        if not quant_mapping:
+                            raise ValueError(
+                                f"{variant} diffusers variant selected, but no quantizable component directories were found under {root}"
+                            )
+                        kwargs["quantization_config"] = PipelineQuantizationConfig(quant_mapping=quant_mapping)
+
                     # Choose a dtype that won't explode RAM on CPU. Prefer matching the variant.
                     try:
                         if torch is not None:
                             device_is_cuda = str(ctx.device).startswith("cuda") and torch.cuda.is_available()
                             variant = str(kwargs.get("variant") or "").strip().lower()
                             if device_is_cuda:
-                                kwargs["torch_dtype"] = torch.float16
+                                if variant in ("fp8", "int8", "int4") and hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported():
+                                    kwargs["torch_dtype"] = torch.bfloat16
+                                else:
+                                    kwargs["torch_dtype"] = torch.float16
                             elif variant == "fp16":
                                 kwargs["torch_dtype"] = torch.float16
                             elif variant == "bf16":
@@ -3463,24 +3545,24 @@ class Worker:
 
         raise ValueError(f"no injection provider for type {qn} (model_id={model_id})")
 
-    def _resolve_model_id_for_injection(self, fn_name: str, inj: InjectionSpec, payload: msgspec.Struct) -> str:
+    def _resolve_model_id_for_injection(self, fn_name: str, inj: InjectionSpec, payload: msgspec.Struct) -> tuple[str, Optional[str]]:
         # Prefer per-function model keyspace from baked discovery manifest.
         model_id_by_key = self._model_id_by_key_by_function.get(fn_name) or self._release_model_id_by_key
         allowed_ids: Optional[set[str]] = None
         if model_id_by_key:
             allowed_ids = set(model_id_by_key.values())
 
-        if inj.model_ref.source in (ModelRefSource.FIXED, ModelRefSource.RELEASE):
+        if inj.model_ref.source == ModelRefSource.FIXED:
             raw = inj.model_ref.key.strip()
             if not raw:
                 raise ValueError(f"empty fixed ModelRef for injection param: {inj.param_name}")
             if raw in model_id_by_key:
                 model_id = model_id_by_key[raw]
                 self._enforce_model_allowlist(model_id, inj, allowed_ids=allowed_ids)
-                return model_id
+                return model_id, raw
             # Allow direct model refs for FIXED injections (advanced usage).
             # Do not apply per-function allowlists when no short-key mapping was used.
-            return raw
+            return raw, None
 
         if inj.model_ref.source == ModelRefSource.PAYLOAD:
             field = inj.model_ref.key.strip()
@@ -3517,7 +3599,7 @@ class Worker:
                 )
             model_id = model_id_by_key[key]
             self._enforce_model_allowlist(model_id, inj, allowed_ids=allowed_ids)
-            return model_id
+            return model_id, key
 
         raise ValueError(f"unknown ModelRef source: {inj.model_ref.source!r}")
 

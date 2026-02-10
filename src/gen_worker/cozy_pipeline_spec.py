@@ -123,8 +123,12 @@ def generate_diffusers_model_index_from_cozy(spec: CozyPipelineSpec) -> Dict[str
             raise ValueError(f"component {name!r} must be a mapping")
 
         if "ref" in comp and comp.get("ref") not in (None, ""):
-            # In published artifacts, lockfiles should not contain refs.
-            raise ValueError(f"component {name!r} uses ref; expected lockfile-expanded path")
+            # In cozy.pipeline.yaml (intent), refs are not expected to be present at runtime
+            # because the worker cannot resolve them. In cozy.pipeline.lock.yaml, refs may be
+            # present as pinned attribution (repo+digest+dtype), but are not used for loading
+            # because the artifact is already flattened.
+            if spec.source_path.name != COZY_PIPELINE_LOCK_FILENAME:
+                raise ValueError(f"component {name!r} uses ref; expected lockfile-expanded path")
 
         path = str(comp.get("path") or name).strip()
         lib = str(comp.get("library") or "").strip()
@@ -166,4 +170,3 @@ def ensure_diffusers_model_index_json(model_root: Path) -> Optional[Path]:
         except Exception:
             pass
     return mi
-

@@ -181,8 +181,17 @@ Container example:
 ```bash
 docker run --rm --gpus all -p 8081:8081 \
   -v "$(pwd)/out:/outputs" \
+  -e COZY_HUB_URL='http://host.docker.internal:7777' \
   <your-worker-image> \
   python -m gen_worker.testing.http_runner --listen 0.0.0.0:8081 --outputs /outputs
+```
+
+Prefetch a public model (example: SD1.5 on Hugging Face, via Cozy Hub mirror):
+
+```bash
+curl -sS -X POST 'http://localhost:8081/v1/models/prefetch' \
+  -H 'content-type: application/json' \
+  -d '{"models":[{"ref":"hf:runwayml/stable-diffusion-v1-5@main","dtypes":["bf16","fp16"]}]}'
 ```
 
 Invoke an endpoint:
@@ -242,9 +251,9 @@ Local dev / advanced (not injected by orchestrator):
 | `WORKER_VRAM_SAFETY_MARGIN_GB` | 3.5 | Reserved VRAM for working memory |
 | `WORKER_MODEL_CACHE_DIR` | `/tmp/model_cache` | Disk cache directory |
 | `WORKER_MAX_CONCURRENT_DOWNLOADS` | 2 | Max parallel model downloads |
-| `COZY_HUB_URL` | - | Local dev only: Cozy Hub base URL (used only if you enable Cozy Hub API resolve) |
+| `COZY_HUB_URL` | - | Cozy Hub base URL (used for public model requests and, if enabled, Cozy Hub API resolve) |
 | `WORKER_ALLOW_COZY_HUB_API_RESOLVE` | `false` | Local dev only: allow the worker to call Cozy Hub resolve APIs |
-| `COZY_HUB_TOKEN` | - | Local dev only: Cozy Hub bearer token (only used when `WORKER_ALLOW_COZY_HUB_API_RESOLVE=1`) |
+| `COZY_HUB_TOKEN` | - | Cozy Hub bearer token (optional; enables ingest-if-missing for public HF models, if Cozy Hub requires auth) |
 | `HF_TOKEN` | - | Hugging Face token (for private `hf:` refs) |
 
 ## Metrics

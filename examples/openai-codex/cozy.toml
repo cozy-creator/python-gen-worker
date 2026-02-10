@@ -1,0 +1,15 @@
+schema_version = 1
+
+name = "openai-codex"
+main = "openai_codex_worker.main"
+
+# Gen-worker version constraint for discovery-time validation.
+gen_worker = ">=0.2.1"
+
+[host.requirements]
+# No GPU requirement for this example.
+
+[resources]
+ram_gb = 4
+cpu_cores = 2
+

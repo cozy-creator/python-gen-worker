@@ -76,3 +76,53 @@ def generate(
     image.save(buf, format="PNG")
     out = ctx.save_bytes(f"runs/{ctx.run_id}/outputs/image.png", buf.getvalue())
     return GenerateOutput(image=out)
+
+
+@worker_function(ResourceRequirements())
+def generate_fp8(
+    ctx: ActionContext,
+    pipeline: Annotated[
+        StableDiffusionPipeline, ModelRef(Src.DEPLOYMENT, "sd15_fp8")  # Key from cozy.toml [models]
+    ],
+    payload: GenerateInput,
+) -> GenerateOutput:
+    """
+    FP8 endpoint.
+
+    This endpoint is intended to run against an fp8-weight-only artifact (or an artifact
+    that the worker can load with torchao-backed fp8 quantization enabled).
+    """
+    return generate(ctx, pipeline, payload)
+
+
+@worker_function(ResourceRequirements())
+def generate_int8(
+    ctx: ActionContext,
+    pipeline: Annotated[
+        StableDiffusionPipeline, ModelRef(Src.DEPLOYMENT, "sd15_int8")  # Key from cozy.toml [models]
+    ],
+    payload: GenerateInput,
+) -> GenerateOutput:
+    """
+    INT8 endpoint (weight-only).
+
+    This endpoint is intended to run against an int8-weight-only artifact (or an artifact
+    that the worker can load with torchao-backed int8 quantization enabled).
+    """
+    return generate(ctx, pipeline, payload)
+
+
+@worker_function(ResourceRequirements())
+def generate_int4(
+    ctx: ActionContext,
+    pipeline: Annotated[
+        StableDiffusionPipeline, ModelRef(Src.DEPLOYMENT, "sd15_int4")  # Key from cozy.toml [models]
+    ],
+    payload: GenerateInput,
+) -> GenerateOutput:
+    """
+    INT4 endpoint (weight-only).
+
+    This endpoint is experimental; many diffusion pipelines are not validated at int4.
+    """
+    return generate(ctx, pipeline, payload)

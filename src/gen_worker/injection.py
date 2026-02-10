@@ -10,8 +10,8 @@ class ModelRefSource(str, Enum):
     # FIXED means the model key is fixed by the function signature and does not
     # depend on the request payload.
     FIXED = "fixed"
-    # Deprecated alias for FIXED (kept for compatibility with older workers/examples).
-    RELEASE = "release"
+    # Back-compat alias used by older examples/docs.
+    DEPLOYMENT = "fixed"
     PAYLOAD = "payload"
 
 
