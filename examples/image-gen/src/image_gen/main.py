@@ -10,6 +10,7 @@ from PIL import Image
 
 from gen_worker import ActionContext, ResourceRequirements, worker_function
 from gen_worker.injection import ModelRef, ModelRefSource as Src
+from gen_worker.payload_constraints import Clamp
 from gen_worker.types import Asset
 
 logger = logging.getLogger(__name__)
@@ -17,11 +18,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 
 sdxl_resources = ResourceRequirements()
 
+
 class GenerateInput(msgspec.Struct):
     prompt: str
     negative_prompt: str = ""
-    num_inference_steps: int = 28
-    guidance_scale: float = 7.5
+    num_inference_steps: Annotated[int | float, Clamp(20, 50, cast="int")] = 25
+    guidance_scale: float = 7.0
     width: int = 1024
     height: int = 1024
 
@@ -43,10 +45,11 @@ def generate_image(
 
     logger.info("[run_id=%s] image-gen prompt=%r", ctx.run_id, payload.prompt)
 
+    steps = int(payload.num_inference_steps)
     result = pipeline(
         prompt=payload.prompt,
         negative_prompt=payload.negative_prompt,
-        num_inference_steps=payload.num_inference_steps,
+        num_inference_steps=steps,
         guidance_scale=payload.guidance_scale,
         width=payload.width,
         height=payload.height,

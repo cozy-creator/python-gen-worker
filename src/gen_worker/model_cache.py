@@ -485,6 +485,45 @@ class ModelCache:
             logger.info(f"Completely unloaded model {model_id}")
             return True
 
+    def unload_from_vram(self, model_id: str, keep_on_disk: bool = True) -> float:
+        """
+        Unload a model from VRAM while optionally keeping its disk cache entry.
+
+        This is a public wrapper around the internal VRAM unload logic so the
+        worker runtime can enforce simple count-based eviction policies without
+        reaching into private methods.
+        """
+        return self._unload_from_vram(model_id, keep_on_disk=keep_on_disk)
+
+    def evict_lru_vram_until_count(self, max_vram_models: int) -> int:
+        """
+        Evict least-recently-used VRAM models until we have <= max_vram_models.
+
+        Returns the number of models evicted.
+        """
+        try:
+            max_vram_models = int(max_vram_models)
+        except Exception:
+            max_vram_models = 0
+        if max_vram_models < 0:
+            max_vram_models = 0
+
+        evicted = 0
+        # Evict outside the lock (flush can be slow).
+        while True:
+            with self._lock:
+                vram = [m.model_id for m in self._models.values() if m.location == ModelLocation.VRAM]
+                if len(vram) <= max_vram_models:
+                    break
+                victim = vram[0]
+            freed = self._unload_from_vram(victim, keep_on_disk=True)
+            if freed <= 0:
+                # Avoid infinite loops if unload fails for some reason.
+                break
+            evicted += 1
+
+        return evicted
+
     def can_fit_in_vram(self, size_gb: float) -> bool:
         """Check if a model of given size can fit in VRAM (with potential eviction)."""
         with self._lock:

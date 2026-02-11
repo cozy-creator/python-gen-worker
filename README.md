@@ -111,6 +111,13 @@ def stream(ctx: ActionContext, payload: Input) -> Iterator[Delta]:
 
 ### Model Injection
 
+Declare your model keyspace in `cozy.toml`:
+
+```toml
+[models]
+sd15 = "hf:stable-diffusion-v1-5/stable-diffusion-v1-5"
+```
+
 ```python
 from typing import Annotated
 from diffusers import DiffusionPipeline
@@ -119,7 +126,7 @@ from gen_worker.injection import ModelRef, ModelRefSource as Src
 @worker_function()
 def generate(
     ctx: ActionContext,
-    pipe: Annotated[DiffusionPipeline, ModelRef(Src.FIXED, "my-model")],
+    pipe: Annotated[DiffusionPipeline, ModelRef(Src.FIXED, "sd15")],  # key from cozy.toml [models]
     payload: Input,
 ) -> Output:
     # Use the injected pipeline (loaded/cached by the worker's model manager).
@@ -158,8 +165,9 @@ def generate(
 ```
 
 Note: by default the worker requires payload model selection to use a known
-short-key from `[models]` (cozy.toml) (it will not accept arbitrary repo refs in
-the payload).
+short-key from `[models]` (cozy.toml). It will not accept arbitrary repo refs in
+the payload. `ModelRef(FIXED, ...)` is also restricted to keys declared in the
+manifest mapping (no inline `hf:`/`cozy:` refs).
 
 ### Saving Files
 

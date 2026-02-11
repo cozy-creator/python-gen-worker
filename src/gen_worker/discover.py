@@ -74,6 +74,12 @@ def _parse_annotated_model_ref(ann: Any) -> Optional[Tuple[type, ModelRef]]:
 def _schema_and_hash(t: type) -> Tuple[Dict[str, Any], str]:
     """Generate JSON schema and SHA256 hash for a msgspec type."""
     schema = msgspec.json.schema(t)
+    try:
+        from .payload_constraints import apply_schema_constraints
+
+        schema = apply_schema_constraints(schema, t)
+    except Exception:
+        pass
     raw = json.dumps(schema, separators=(",", ":"), sort_keys=True).encode("utf-8")
     return schema, hashlib.sha256(raw).hexdigest()
 

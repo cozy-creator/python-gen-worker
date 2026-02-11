@@ -42,7 +42,7 @@ def test_hf_selection_fixtures(fixture_name: str) -> None:
     assert selected == set(fx["expected_files"])
 
 
-def test_hf_selection_prefers_larger_candidate_when_dtype_equal() -> None:
+def test_hf_selection_prefers_smaller_candidate_when_dtype_equal() -> None:
     model_index = {
         "_class_name": "XPipeline",
         "transformer": ["diffusers", "XTransformer2DModel"],
@@ -68,11 +68,11 @@ def test_hf_selection_prefers_larger_candidate_when_dtype_equal() -> None:
         repo_file_sizes=sizes,
         probe_safetensors_dtypes=lambda p: dtypes.get(p),
     )
-    assert "transformer/large.safetensors" in plan.selected_files
-    assert "transformer/small.safetensors" not in plan.selected_files
+    assert "transformer/small.safetensors" in plan.selected_files
+    assert "transformer/large.safetensors" not in plan.selected_files
 
 
-def test_hf_selection_prefers_larger_sharded_candidate_when_dtype_equal() -> None:
+def test_hf_selection_prefers_smaller_sharded_candidate_when_dtype_equal() -> None:
     model_index = {
         "_class_name": "XPipeline",
         "transformer": ["diffusers", "XTransformer2DModel"],
@@ -117,7 +117,40 @@ def test_hf_selection_prefers_larger_sharded_candidate_when_dtype_equal() -> Non
         repo_file_sizes=sizes,
         probe_safetensors_dtypes=lambda p: dtypes.get(p),
     )
-    assert "transformer/b.safetensors.index.json" in plan.selected_files
-    assert "transformer/b-00001-of-00002.safetensors" in plan.selected_files
-    assert "transformer/b-00002-of-00002.safetensors" in plan.selected_files
-    assert "transformer/a.safetensors.index.json" not in plan.selected_files
+    assert "transformer/a.safetensors.index.json" in plan.selected_files
+    assert "transformer/a-00001-of-00002.safetensors" in plan.selected_files
+    assert "transformer/a-00002-of-00002.safetensors" in plan.selected_files
+    assert "transformer/b.safetensors.index.json" not in plan.selected_files
+
+
+def test_hf_selection_ignores_large_export_formats_by_default() -> None:
+    model_index = {
+        "_class_name": "XPipeline",
+        "unet": ["diffusers", "UNet2DConditionModel"],
+    }
+    repo_files = [
+        "model_index.json",
+        "unet/config.json",
+        "unet/diffusion_pytorch_model.fp16.safetensors",
+        "unet/model.onnx_data",
+        "unet/diffusion_flax_model.msgpack",
+        "unet/openvino_model.xml",
+    ]
+    policy = HFSelectionPolicy(weight_precisions=("fp16", "bf16"))
+
+    plan = plan_diffusers_download(
+        model_index=model_index,
+        repo_files=repo_files,
+        policy=policy,
+        repo_file_sizes={
+            "unet/diffusion_pytorch_model.fp16.safetensors": 123,
+            "unet/model.onnx_data": 999999999,
+            "unet/diffusion_flax_model.msgpack": 999999999,
+        },
+        probe_safetensors_dtypes=lambda p: {"F16"} if p.endswith(".safetensors") else None,
+    )
+    assert "unet/diffusion_pytorch_model.fp16.safetensors" in plan.selected_files
+    assert "unet/config.json" in plan.selected_files
+    assert "unet/model.onnx_data" not in plan.selected_files
+    assert "unet/diffusion_flax_model.msgpack" not in plan.selected_files
+    assert "unet/openvino_model.xml" not in plan.selected_files

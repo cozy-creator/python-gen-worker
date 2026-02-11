@@ -11,6 +11,23 @@ class _Payload(msgspec.Struct):
 
 
 class TestPayloadModelSelection(unittest.TestCase):
+    def test_fixed_key_must_exist_in_mapping(self) -> None:
+        w = Worker(
+            user_module_names=[],
+            worker_jwt="dummy-worker-jwt",
+            manifest={"models": {"sd15": "cozy:demo/sd15:latest"}},
+        )
+        inj = InjectionSpec(
+            param_name="pipeline",
+            param_type=object,
+            model_ref=ModelRef(ModelRefSource.FIXED, "cozy:demo/sd15:latest"),
+        )
+        payload = _Payload(model="sd15")
+        with self.assertRaises(ValueError) as ctx:
+            w._resolve_model_id_for_injection("generate", inj, payload)
+        self.assertIn("unknown fixed model key", str(ctx.exception).lower())
+        self.assertIn("sd15", str(ctx.exception))
+
     def test_payload_key_must_exist_in_mapping(self) -> None:
         w = Worker(
             user_module_names=[],

@@ -8,16 +8,18 @@ gen_worker = ">=0.2.0,<0.3.0"
 cuda = "12.6"
 
 [models]
-sdxl-base = "hf:stabilityai/stable-diffusion-xl-base-1.0"
-sdxl-turbo = "hf:stabilityai/sdxl-turbo"
-dreamshaper = "hf:Lykon/dreamshaper-xl-v2-turbo"
-juggernaut = "hf:RunDiffusion/Juggernaut-XL-v9"
-realvisxl = "hf:SG161222/RealVisXL_V5.0"
-animagine = "hf:cagliostrolab/animagine-xl-3.1"
-playground-v25 = "hf:playgroundai/playground-v2.5-1024px-aesthetic"
-ssd-1b = "hf:segmind/SSD-1B"
-pony-v6 = "hf:Runware/pony-xl-v6-diffusers"
-illustrious-xl = "hf:drawhisper/illustrious-xl"
+# Cozy Hub mirrored public repos live under the reserved "hf" owner namespace:
+#   cozy:hf/<org--repo>:latest
+# We omit the "cozy:" prefix because "owner/repo" defaults to Cozy refs in the worker.
+sdxl-base = "cozy:hf/stabilityai--stable-diffusion-xl-base-1.0:latest"
+dreamshaper = "cozy:hf/lykon--dreamshaper-xl-v2-turbo:latest"
+juggernaut = "cozy:hf/rundiffusion--juggernaut-xl-v9:latest"
+realvisxl = "cozy:hf/sg161222--realvisxl-v5.0:latest"
+animagine = "cozy:hf/cagliostrolab--animagine-xl-3.1:latest"
+playground-v25 = "cozy:hf/playgroundai--playground-v2.5-1024px-aesthetic:latest"
+ssd-1b = "cozy:hf/segmind--ssd-1b:latest"
+pony-v6 = "cozy:hf/runware--pony-xl-v6-diffusers:latest"
+illustrious-xl = "cozy:hf/drawhisper--illustrious-xl:latest"
 
 [resources]
 vram_gb = 12

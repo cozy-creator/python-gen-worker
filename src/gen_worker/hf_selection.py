@@ -158,6 +158,12 @@ def _support_files_for_component(repo_files: Sequence[str], component: str) -> s
         low = p.lower()
         if low.endswith(".bin") or low.endswith(".ckpt"):
             continue
+        # Skip alternate export formats that are often very large and not needed for
+        # our PyTorch diffusers runtime (onnx/flax/openvino/etc).
+        if low.endswith(".onnx") or low.endswith(".onnx_data") or low.endswith(".msgpack"):
+            continue
+        if "openvino" in low:
+            continue
         if low.endswith(".safetensors") or low.endswith(".safetensors.index.json"):
             continue
         out.add(p)
@@ -275,7 +281,8 @@ def _select_component_weights(
 
         score = _dtype_score(dtypes, policy)
         total = sum(int(repo_file_sizes.get(p, 0) or 0) for p in selected)
-        if score > best_score or (score == best_score and total > best_total):
+        # For equal dtype score, prefer the *smallest* total download size.
+        if score > best_score or (score == best_score and (best_total < 0 or total < best_total)):
             best_score = score
             best_total = total
             best_files = selected

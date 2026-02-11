@@ -314,8 +314,8 @@ def _format_msg(msg: pb.WorkerSchedulerMessage) -> str:
         return "unload_model_result"
     if msg.HasField("interrupt_run_cmd"):
         return "interrupt_run_cmd"
-    if msg.HasField("deployment_artifact_config"):
-        return "deployment_artifact_config"
+    if msg.HasField("release_artifact_config"):
+        return "release_artifact_config"
     if msg.HasField("realtime_open_cmd"):
         return "realtime_open_cmd"
     if msg.HasField("realtime_frame"):

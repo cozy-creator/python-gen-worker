@@ -844,11 +844,14 @@ class Worker:
         # Signature-driven model selection mapping and allowlist (provided by orchestrator).
         self._release_model_id_by_key: Dict[str, str] = {}
         self._release_allowed_model_ids: Optional[set[str]] = None
+        # Immutable allowlist derived from the baked discovery manifest (tenant-declared scope).
+        # Scheduler config may narrow this set but must never widen it.
+        self._manifest_allowed_model_ids: Optional[set[str]] = None
         # Per-function model keyspace from baked discovery manifest (short_key -> model_ref).
         self._model_id_by_key_by_function: Dict[str, Dict[str, str]] = {}
         # Per-function model specs (short_key -> {ref,dtypes}) from baked discovery manifest.
         self._model_spec_by_key_by_function: Dict[str, Dict[str, Dict[str, Any]]] = {}
-        # Orchestrator-resolved manifests received in DeploymentArtifactConfig (startup prefetch baseline).
+        # Orchestrator-resolved manifests received in ReleaseArtifactConfig (startup prefetch baseline).
         # Keys should be canonical model ref strings (e.g. "cozy:owner/repo@sha256:<digest>").
         self._resolved_cozy_models_by_id_baseline: Dict[str, Any] = {}
         self._prefetch_lock = threading.Lock()
@@ -905,7 +908,10 @@ class Worker:
                 allowed.update(m.values())
             if self._release_model_id_by_key:
                 allowed.update(self._release_model_id_by_key.values())
-            self._release_allowed_model_ids = allowed or None
+            self._manifest_allowed_model_ids = allowed or None
+            # Default enforcement scope to what the tenant declared (baked manifest),
+            # until the scheduler narrows it further.
+            self._release_allowed_model_ids = self._manifest_allowed_model_ids
 
             if self._model_id_by_key_by_function:
                 logger.info(
@@ -1296,13 +1302,25 @@ class Worker:
 
         input_schema = msgspec.json.schema(payload_type)
         output_schema = msgspec.json.schema(output_type)
+        try:
+            from .payload_constraints import apply_schema_constraints
+
+            input_schema = apply_schema_constraints(input_schema, payload_type)
+            output_schema = apply_schema_constraints(output_schema, output_type)
+        except Exception:
+            pass
         input_schema_json = json.dumps(input_schema, separators=(",", ":"), sort_keys=True).encode("utf-8")
         output_schema_json = json.dumps(output_schema, separators=(",", ":"), sort_keys=True).encode("utf-8")
         delta_schema_json = None
         if delta_type is not None:
-            delta_schema_json = json.dumps(msgspec.json.schema(delta_type), separators=(",", ":"), sort_keys=True).encode(
-                "utf-8"
-            )
+            delta_schema = msgspec.json.schema(delta_type)
+            try:
+                from .payload_constraints import apply_schema_constraints
+
+                delta_schema = apply_schema_constraints(delta_schema, delta_type)
+            except Exception:
+                pass
+            delta_schema_json = json.dumps(delta_schema, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
         injection_payload = [
             {
@@ -2151,24 +2169,82 @@ class Worker:
         elif msg_type == "worker_event":
             self._handle_worker_event_from_scheduler(message.worker_event)
         # Add handling for other message types if needed (e.g., config updates)
-        elif msg_type == 'deployment_artifact_config':
-            cfg = message.deployment_artifact_config
+        elif msg_type == 'release_artifact_config':
+            cfg = message.release_artifact_config
             resolved_by_variant = dict(getattr(cfg, "resolved_cozy_models_by_variant_ref", {}) or {})
             logger.info(
-                "Received DeploymentArtifactConfig (supported=%d required=%d resolved=%d)",
+                "Received ReleaseArtifactConfig (supported=%d required=%d resolved=%d)",
                 len(cfg.supported_repo_refs),
                 len(cfg.required_variant_refs),
                 len(resolved_by_variant),
             )
-            self._supported_model_ids_from_scheduler = [
+
+            # Optional: authoritative per-function model keyspace updates (runtime-editable).
+            # When present, this replaces any baked manifest mapping for payload-driven selection.
+            has_keyspace_update = False
+            try:
+                mbf = dict(getattr(cfg, "models_by_function", {}) or {})
+                if mbf:
+                    has_keyspace_update = True
+                    new_by_fn: Dict[str, Dict[str, str]] = {}
+                    new_spec_by_fn: Dict[str, Dict[str, Dict[str, Any]]] = {}
+                    for fn_name, mbk in mbf.items():
+                        if not fn_name or mbk is None:
+                            continue
+                        models = dict(getattr(mbk, "models", {}) or {})
+                        if not models:
+                            continue
+                        out: Dict[str, str] = {}
+                        out_spec: Dict[str, Dict[str, Any]] = {}
+                        for k, spec in models.items():
+                            key = str(k).strip()
+                            if not key or spec is None:
+                                continue
+                            ref = _canonicalize_model_ref_string(str(getattr(spec, "ref", "") or ""))
+                            if not ref:
+                                continue
+                            dtypes = []
+                            try:
+                                dtypes = [str(x).strip() for x in list(getattr(spec, "dtypes", []) or []) if str(x).strip()]
+                            except Exception:
+                                dtypes = []
+                            out[key] = ref
+                            out_spec[key] = {"ref": ref, "dtypes": dtypes}
+                        if out:
+                            new_by_fn[str(fn_name)] = out
+                        if out_spec:
+                            new_spec_by_fn[str(fn_name)] = out_spec
+                    if new_by_fn:
+                        self._model_id_by_key_by_function = new_by_fn
+                    if new_spec_by_fn:
+                        self._model_spec_by_key_by_function = new_spec_by_fn
+            except Exception:
+                has_keyspace_update = False
+
+            supported_from_sched = [
                 _canonicalize_model_ref_string(str(v)) for v in list(cfg.supported_repo_refs)
             ]
+            # Scheduler may narrow the set of models this worker should advertise/prefetch, but must
+            # never widen beyond tenant-declared scope (baked manifest), unless it supplies an
+            # explicit runtime model keyspace update.
+            if self._manifest_allowed_model_ids is not None and not has_keyspace_update:
+                supported_set = {s for s in supported_from_sched if s and s != "*"}
+                if supported_set:
+                    supported_set &= self._manifest_allowed_model_ids
+                    self._supported_model_ids_from_scheduler = sorted(supported_set)
+                else:
+                    # Empty/"*" means "no extra restriction"; keep manifest scope.
+                    self._supported_model_ids_from_scheduler = sorted(self._manifest_allowed_model_ids)
+            else:
+                self._supported_model_ids_from_scheduler = supported_from_sched
             try:
                 # Optional label->id mapping for signature-driven model selection.
-                self._release_model_id_by_key = {
-                    str(k): _canonicalize_model_ref_string(str(v))
-                    for k, v in dict(cfg.repo_ref_by_key).items()
-                }
+                if not self._model_id_by_key_by_function and not self._release_model_id_by_key:
+                    # Legacy fallback only: allow scheduler-provided mapping when no baked mapping exists.
+                    self._release_model_id_by_key = {
+                        str(k): _canonicalize_model_ref_string(str(v))
+                        for k, v in dict(cfg.repo_ref_by_key).items()
+                    }
             except Exception:
                 self._release_model_id_by_key = {}
 
@@ -2177,7 +2253,25 @@ class Worker:
                 resolved_by_variant
             )
 
-            self._release_allowed_model_ids = set(self._supported_model_ids_from_scheduler)
+            # Allowlist semantics:
+            # - empty list means "no allowlist enforced" (allow all), for dev/seeded deployments
+            # - "*" means wildcard allow-all (used in some seed manifests)
+            allow = set(self._supported_model_ids_from_scheduler or [])
+            if not allow or "*" in allow:
+                if has_keyspace_update:
+                    # When scheduler supplies an explicit keyspace update, prefer that as the
+                    # runtime enforcement scope.
+                    scope: set[str] = set()
+                    for m in (self._model_id_by_key_by_function or {}).values():
+                        scope.update(m.values())
+                    self._release_allowed_model_ids = scope or None
+                else:
+                    # If we have a baked manifest scope, never allow widening beyond it.
+                    self._release_allowed_model_ids = self._manifest_allowed_model_ids
+            else:
+                if self._manifest_allowed_model_ids is not None and not has_keyspace_update:
+                    allow &= self._manifest_allowed_model_ids
+                self._release_allowed_model_ids = allow or self._manifest_allowed_model_ids
             self._required_variant_refs_from_scheduler = [
                 _canonicalize_model_ref_string(str(v)) for v in list(cfg.required_variant_refs)
             ]
@@ -2945,6 +3039,13 @@ class Worker:
 
             # Decode payload strictly.
             input_obj = msgspec.msgpack.decode(input_payload, type=spec.payload_type)
+            # Optional post-decode constraints (e.g. clamping) declared on the payload type.
+            try:
+                from .payload_constraints import apply_payload_constraints
+
+                _ = apply_payload_constraints(input_obj)
+            except Exception:
+                pass
             self._materialize_assets(ctx, input_obj)
             # Best-effort extract diffusion-ish numeric fields for metrics.run.
             try:
@@ -3269,6 +3370,8 @@ class Worker:
                 # This keeps tenant code inference-only while still supporting the platform's
                 # model-ref schemes and caching behavior.
                 obj = None
+                is_diffusers_pipeline_type = False
+                canon = ""
                 try:
                     from diffusers import DiffusionPipeline  # type: ignore
                 except Exception:
@@ -3280,6 +3383,7 @@ class Worker:
                     and isinstance(requested_type, type)
                     and issubclass(requested_type, DiffusionPipeline)
                 ):
+                    is_diffusers_pipeline_type = True
                     local = None
                     canon = str(model_id)
                     try:
@@ -3287,6 +3391,33 @@ class Worker:
                         canon = parsed.cozy.canonical() if parsed.scheme == "cozy" and parsed.cozy is not None else str(model_id)
                     except Exception:
                         canon = str(model_id)
+
+                    # If this pipeline is already hot in VRAM, reuse it directly.
+                    # This is crucial for multi-model endpoints (e.g. SDXL checkpoint router),
+                    # otherwise the worker will steadily accumulate VRAM allocations and OOM.
+                    try:
+                        if self._model_cache is not None:
+                            cached = self._model_cache.get_pipeline(canon)
+                            if cached is not None:
+                                if rm is not None and canon:
+                                    try:
+                                        rm.set_initial_model_state(
+                                            canon,
+                                            "hot_vram",
+                                            rm.models.get(canon, None).snapshot_digest if canon in rm.models else None,
+                                        )
+                                    except Exception:
+                                        pass
+                                if isinstance(requested_type, type) and not isinstance(cached, requested_type):
+                                    expected_qn = type_qualname(requested_type)
+                                    got_qn = type_qualname(type(cached))
+                                    raise ValueError(
+                                        f"model injection type mismatch for {inj.param_name}: expected {expected_qn}, got {got_qn} (model_id={model_id})"
+                                    )
+                                return cached
+                    except Exception:
+                        pass
+
                     try:
                         p = Path(model_id)
                         if p.exists():
@@ -3348,6 +3479,15 @@ class Worker:
                                         )
                                     except Exception:
                                         pass
+                        except Exception:
+                            pass
+                    else:
+                        # Model was provided as a local path; best-effort register it as disk-cached
+                        # so VRAM eviction can keep a disk pointer for warm reloads.
+                        try:
+                            lp = Path(local or "")
+                            if lp.exists() and self._model_cache is not None:
+                                self._model_cache.mark_cached_to_disk(canon, lp)
                         except Exception:
                             pass
 
@@ -3534,10 +3674,64 @@ class Worker:
                 # Best-effort move to worker device if supported.
                 try:
                     if torch is not None and hasattr(obj, "to") and callable(getattr(obj, "to", None)):
+                        # For diffusers pipelines, evict older VRAM pipelines before moving a new one
+                        # to GPU to avoid transient OOMs during `.to("cuda")`.
+                        try:
+                            device_is_cuda = str(ctx.device).startswith("cuda") and torch.cuda.is_available()
+                            if device_is_cuda and is_diffusers_pipeline_type and self._model_cache is not None and canon:
+                                max_keep = int(os.getenv("WORKER_MAX_DIFFUSERS_VRAM_MODELS", "2") or "2")
+                                if max_keep > 0 and not self._model_cache.is_in_vram(canon):
+                                    self._model_cache.evict_lru_vram_until_count(max_keep - 1)
+                        except Exception:
+                            pass
+
                         t_to0 = time.monotonic()
-                        obj = obj.to(str(ctx.device))
+                        mem_before = 0
+                        try:
+                            if torch.cuda.is_available():
+                                mem_before = int(torch.cuda.memory_allocated())
+                        except Exception:
+                            mem_before = 0
+
+                        # Prefer moving with an explicit dtype to avoid mixed fp16/fp32 modules
+                        # (can cause runtime errors like: input half + bias float).
+                        torch_dtype = None
+                        try:
+                            torch_dtype = kwargs.get("torch_dtype") if isinstance(kwargs, dict) else None
+                        except Exception:
+                            torch_dtype = None
+                        try:
+                            if torch_dtype is not None:
+                                obj = obj.to(str(ctx.device), dtype=torch_dtype)
+                            else:
+                                obj = obj.to(str(ctx.device))
+                        except TypeError:
+                            # Some objects implement .to(device) but not dtype kwarg.
+                            obj = obj.to(str(ctx.device))
                         if rm is not None:
                             rm.add_gpu_load_time(int((time.monotonic() - t_to0) * 1000))
+
+                        # Cache diffusers pipelines in the worker's ModelCache (LRU + heartbeats)
+                        # instead of the generic from_pretrained object cache, otherwise VRAM
+                        # grows unbounded across many model_key requests.
+                        try:
+                            device_is_cuda = str(ctx.device).startswith("cuda") and torch.cuda.is_available()
+                            if is_diffusers_pipeline_type and self._model_cache is not None and canon:
+                                size_gb = 0.0
+                                if device_is_cuda:
+                                    try:
+                                        mem_after = int(torch.cuda.memory_allocated())
+                                        delta = max(0, mem_after - mem_before)
+                                        size_gb = float(delta) / float(1024 ** 3)
+                                    except Exception:
+                                        size_gb = 0.0
+                                    if size_gb <= 0.1:
+                                        # Fallback heuristic when deltas are noisy.
+                                        size_gb = float(os.getenv("WORKER_DIFFUSERS_VRAM_GB_FALLBACK", "10") or "10")
+                                self._model_cache.mark_loaded_to_vram(canon, obj, size_gb)
+                                return obj
+                        except Exception:
+                            pass
                 except Exception:
                     pass
                 self._custom_runtime_cache[key] = obj
@@ -3556,13 +3750,26 @@ class Worker:
             raw = inj.model_ref.key.strip()
             if not raw:
                 raise ValueError(f"empty fixed ModelRef for injection param: {inj.param_name}")
-            if raw in model_id_by_key:
-                model_id = model_id_by_key[raw]
-                self._enforce_model_allowlist(model_id, inj, allowed_ids=allowed_ids)
-                return model_id, raw
-            # Allow direct model refs for FIXED injections (advanced usage).
-            # Do not apply per-function allowlists when no short-key mapping was used.
-            return raw, None
+            # FIXED selection must use a tenant-declared short-key from the baked discovery manifest.
+            # This keeps the model keyspace auditable and prevents endpoints from silently using
+            # models outside their declared scope.
+            if not model_id_by_key:
+                raise ValueError(
+                    "fixed model selection is not configured: no short-key mapping is available "
+                    "(expected /app/.cozy/manifest.json to provide models_by_function)"
+                )
+            if raw not in model_id_by_key:
+                allowed = sorted(model_id_by_key.keys())
+                head = allowed[:20]
+                suffix = ""
+                if len(allowed) > len(head):
+                    suffix = f" (+{len(allowed) - len(head)} more)"
+                raise ValueError(
+                    f"unknown fixed model key {raw!r}; allowed keys: {head}{suffix}"
+                )
+            model_id = model_id_by_key[raw]
+            self._enforce_model_allowlist(model_id, inj, allowed_ids=allowed_ids)
+            return model_id, raw
 
         if inj.model_ref.source == ModelRefSource.PAYLOAD:
             field = inj.model_ref.key.strip()

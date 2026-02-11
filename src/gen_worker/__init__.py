@@ -8,6 +8,7 @@ from .model_interface import ModelManager
 from .downloader import ModelDownloader, CozyHubDownloader
 from .project_validation import ProjectValidationResult, validate_project
 from .model_cache import ModelCache, ModelCacheStats, ModelLocation
+from .payload_constraints import Clamp
 
 # Optional torch-dependent exports
 try:
@@ -45,6 +46,7 @@ __all__ = [
     "ModelCache",
     "ModelCacheStats",
     "ModelLocation",
+    "Clamp",
     # Pipeline loader (torch-dependent, may not be available)
     "PipelineLoader",
     "PipelineConfig",

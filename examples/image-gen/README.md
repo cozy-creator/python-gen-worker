@@ -12,3 +12,8 @@ Notes:
 - Install deps with `uv sync` and generate `uv.lock` for reproducible builds.
 - Model choice can be dynamic at runtime via request payload (model_ref).
 - Deploy by publishing this folder to Cozy Hub (Dockerfile-first build inputs).
+
+Defaults:
+
+- `num_inference_steps` defaults to `25` and is clamped to `[20, 50]` (rounded).
+- `guidance_scale` (CFG) defaults to `7.0` and is configurable via the payload.

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import os
-import math
 from io import BytesIO
 from typing import Annotated, Optional
 
@@ -13,6 +12,7 @@ from PIL import Image
 
 from gen_worker import ActionContext, ResourceRequirements, worker_function
 from gen_worker.injection import ModelRef, ModelRefSource as Src
+from gen_worker.payload_constraints import Clamp
 from gen_worker.types import Asset
 
 logger = logging.getLogger(__name__)
@@ -23,7 +23,7 @@ class GenerateInput(msgspec.Struct):
     prompt: str
     # Turbo model: keep the range tight for latency/cost predictability.
     # Accept int/float and clamp to [4, 8] (rounded to nearest int).
-    num_inference_steps: int | float = 8
+    num_inference_steps: Annotated[int | float, Clamp(4, 8, cast="int")] = 8
     guidance_scale: float = 1.0
     width: int = 1024
     height: int = 1024
@@ -38,21 +38,6 @@ def _should_enable_seq_offload() -> bool:
     raw = (os.getenv("COZY_DISABLE_SEQUENTIAL_CPU_OFFLOAD") or "").strip().lower()
     return raw not in {"1", "true", "yes", "y", "t"}
 
-def _clamp_steps(raw: int | float) -> int:
-    try:
-        x = float(raw)
-    except Exception:
-        x = 8.0
-    if not math.isfinite(x):
-        x = 8.0
-    # Round half-up (avoid Python's banker's rounding surprises).
-    steps = int(math.floor(x + 0.5))
-    if steps < 4:
-        return 4
-    if steps > 8:
-        return 8
-    return steps
-
 
 @worker_function(ResourceRequirements())
 def generate(
@@ -65,7 +50,7 @@ def generate(
     if ctx.is_canceled():
         raise InterruptedError("canceled")
 
-    steps = _clamp_steps(payload.num_inference_steps)
+    steps = int(payload.num_inference_steps)
     logger.info(
         "[run_id=%s] flux2-klein-4b prompt=%r steps=%s (requested=%s)",
         ctx.run_id,

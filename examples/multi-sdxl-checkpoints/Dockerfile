@@ -25,6 +25,7 @@ RUN --mount=type=cache,id=cozy-apt-cache,target=/var/cache/apt,sharing=locked \
 RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
     uv pip install --system --break-system-packages --torch-backend ${UV_TORCH_BACKEND} \
       "torch${TORCH_SPEC}"
+
 RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
     uv pip install --system --break-system-packages gen-worker
 
