@@ -8,13 +8,14 @@ Usage:
     python -m gen_worker.entrypoint
 """
 
+import importlib.metadata as md
 import json
 import logging
 import os
 import sys
-import importlib.metadata as md
+import traceback
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from .cozy_toml import constraint_satisfied, load_cozy_toml
 
@@ -34,12 +35,71 @@ logging.basicConfig(
 logger = logging.getLogger("WorkerEntrypoint")
 
 
+def _normalize_grpc_addr(addr: str) -> tuple[str, bool]:
+    """Normalize scheduler address strings for grpc.{insecure,secure}_channel."""
+    a = (addr or "").strip()
+    if not a:
+        return "", False
+    lower = a.lower()
+    if lower.startswith("grpcs://"):
+        return a[len("grpcs://"):].strip(), True
+    if lower.startswith("grpc://"):
+        return a[len("grpc://"):].strip(), False
+    if lower.startswith("https://"):
+        return a[len("https://"):].strip(), True
+    if lower.startswith("http://"):
+        return a[len("http://"):].strip(), False
+    tls = a.endswith(":443")
+    return a, tls
+
+
+def _startup_payload(phase: str, status: str = "ok", **extra: Any) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "phase": str(phase or "").strip(),
+        "status": str(status or "ok"),
+        "pid": int(os.getpid()),
+        "uid": int(os.getuid()) if hasattr(os, "getuid") else None,
+        "gid": int(os.getgid()) if hasattr(os, "getgid") else None,
+        "cwd": str(os.getcwd()),
+    }
+    payload.update({k: v for k, v in extra.items() if v is not None})
+    return payload
+
+
+def _log_startup_phase(phase: str, *, status: str = "ok", level: int = logging.INFO, **extra: Any) -> None:
+    payload = _startup_payload(phase, status=status, **extra)
+    try:
+        logger.log(level, "worker.startup.phase %s", json.dumps(payload, separators=(",", ":"), sort_keys=True))
+    except Exception:
+        logger.log(level, "worker.startup.phase phase=%s status=%s", phase, status)
+
+
+def _log_worker_fatal(phase: str, exc: BaseException, *, exit_code: int) -> None:
+    try:
+        tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    except Exception:
+        tb = traceback.format_exc()
+    payload = _startup_payload(
+        "worker_fatal",
+        status="error",
+        phase_context=str(phase or ""),
+        exception_class=type(exc).__name__,
+        exception_message=str(exc),
+        traceback=tb,
+        exit_code=int(exit_code),
+    )
+    try:
+        logger.error("worker.fatal %s", json.dumps(payload, separators=(",", ":"), sort_keys=True))
+    except Exception:
+        logger.exception("worker.fatal: %s", exc)
+
+
 def load_manifest() -> Optional[dict]:
     """Load the function manifest if it exists (baked in at build time)."""
     if not MANIFEST_PATH.exists():
         return None
     try:
-        with open(MANIFEST_PATH, "r") as f:
+        with open(MANIFEST_PATH, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception as e:
         logger.warning("Failed to load manifest from %s: %s", MANIFEST_PATH, e)
@@ -92,76 +152,168 @@ def _dev_validate_gen_worker_version() -> None:
         sys.exit(2)
 
 
-# Configuration from environment
-SCHEDULER_ADDR = os.getenv("SCHEDULER_ADDR", "localhost:8080")
-SCHEDULER_ADDRS = os.getenv("SCHEDULER_ADDRS", "")
-SEED_ADDRS = [addr.strip() for addr in SCHEDULER_ADDRS.split(",") if addr.strip()]
+def _probe_cache_path_writable(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    probe = path / f".cozy-write-probe-{os.getpid()}"
+    with open(probe, "wb") as f:
+        f.write(b"ok")
+        f.flush()
+        os.fsync(f.fileno())
+    probe.unlink(missing_ok=True)
 
-WORKER_ID = os.getenv("WORKER_ID", "").strip()
-WORKER_JWT = os.getenv("WORKER_JWT", "").strip()
-USE_TLS_ENV = os.getenv("USE_TLS")
-RECONNECT_DELAY = int(os.getenv("RECONNECT_DELAY", "5"))
-MAX_RECONNECT_ATTEMPTS = int(os.getenv("MAX_RECONNECT_ATTEMPTS", "0"))
 
-def _normalize_grpc_addr(addr: str) -> tuple[str, bool]:
-    """Normalize scheduler address strings for grpc.{insecure,secure}_channel.
+def _check_cache_path(label: str, path_str: str) -> tuple[bool, Dict[str, Any]]:
+    p = Path(path_str)
+    details: Dict[str, Any] = {"label": label, "path": str(p)}
+    try:
+        _probe_cache_path_writable(p)
+        _log_startup_phase("cache_preflight_ok", status="ok", path=str(p), label=label)
+        return True, details
+    except Exception as e:
+        details["exception_class"] = type(e).__name__
+        details["exception_message"] = str(e)
+        _log_startup_phase(
+            "cache_preflight_failed",
+            status="error",
+            level=logging.ERROR,
+            path=str(p),
+            label=label,
+            exception_class=type(e).__name__,
+            exception_message=str(e),
+        )
+        return False, details
 
-    Accepts:
-      - host:port
-      - grpc://host:port
-      - grpcs://host:port
-      - http(s)://host:port
-    Returns:
-      - normalized host:port
-      - inferred tls bool (based on scheme or :443)
+
+def _preflight_cache_dirs() -> Dict[str, str]:
     """
-    a = (addr or "").strip()
-    if not a:
-        return "", False
-    lower = a.lower()
-    if lower.startswith("grpcs://"):
-        return a[len("grpcs://"):].strip(), True
-    if lower.startswith("grpc://"):
-        return a[len("grpc://"):].strip(), False
-    if lower.startswith("https://"):
-        return a[len("https://"):].strip(), True
-    if lower.startswith("http://"):
-        return a[len("http://"):].strip(), False
-    # No scheme: infer from port 443.
-    tls = a.endswith(":443")
-    return a, tls
+    Validate model cache directory writeability before worker startup.
 
-SCHEDULER_ADDR, _ADDR_TLS = _normalize_grpc_addr(SCHEDULER_ADDR)
-SEED_ADDRS = [(_normalize_grpc_addr(a)[0]) for a in SEED_ADDRS]
+    - Primary: WORKER_MODEL_CACHE_DIR (default: /tmp/cozy/models)
+    - Optional local cache: WORKER_LOCAL_MODEL_CACHE_DIR (if set)
+    - Optional fallback: WORKER_CACHE_DIR_FALLBACK
+    """
+    primary = (os.getenv("WORKER_MODEL_CACHE_DIR", "/tmp/cozy/models") or "").strip() or "/tmp/cozy/models"
+    fallback = (os.getenv("WORKER_CACHE_DIR_FALLBACK", "") or "").strip()
+    local_cache = (os.getenv("WORKER_LOCAL_MODEL_CACHE_DIR", "") or "").strip()
 
-if USE_TLS_ENV is None:
-    # Auto mode: use TLS when the primary scheduler address looks like a public TLS endpoint (:443 or grpcs://).
-    USE_TLS = _ADDR_TLS
-else:
-    USE_TLS = USE_TLS_ENV.lower() in ("true", "1", "t")
+    _log_startup_phase(
+        "cache_preflight_started",
+        status="starting",
+        primary_cache_dir=primary,
+        local_cache_dir=local_cache or None,
+        fallback_cache_dir=fallback or None,
+    )
+
+    ok, details = _check_cache_path("WORKER_MODEL_CACHE_DIR", primary)
+    effective_primary = primary
+    if not ok:
+        if fallback:
+            _log_startup_phase(
+                "cache_preflight_fallback_attempt",
+                status="starting",
+                failed_path=primary,
+                fallback_path=fallback,
+            )
+            ok_fb, fb_details = _check_cache_path("WORKER_CACHE_DIR_FALLBACK", fallback)
+            if ok_fb:
+                os.environ["WORKER_MODEL_CACHE_DIR"] = fallback
+                effective_primary = fallback
+                _log_startup_phase(
+                    "cache_preflight_fallback_enabled",
+                    status="ok",
+                    original_path=primary,
+                    fallback_path=fallback,
+                )
+            else:
+                raise RuntimeError(
+                    "worker cache preflight failed for primary and fallback paths. "
+                    f"primary={primary} ({details.get('exception_class')}: {details.get('exception_message')}), "
+                    f"fallback={fallback} ({fb_details.get('exception_class')}: {fb_details.get('exception_message')}). "
+                    "Fix volume permissions/ownership or choose a writable cache path."
+                )
+        else:
+            raise RuntimeError(
+                "worker cache preflight failed for WORKER_MODEL_CACHE_DIR="
+                f"{primary} ({details.get('exception_class')}: {details.get('exception_message')}). "
+                "Fix volume permissions/ownership, run container as a user with write access, "
+                "or set WORKER_CACHE_DIR_FALLBACK to a writable directory such as /tmp/cozy/models."
+            )
+
+    effective_local = local_cache
+    if local_cache:
+        ok_local, local_details = _check_cache_path("WORKER_LOCAL_MODEL_CACHE_DIR", local_cache)
+        if not ok_local:
+            raise RuntimeError(
+                "worker cache preflight failed for WORKER_LOCAL_MODEL_CACHE_DIR="
+                f"{local_cache} ({local_details.get('exception_class')}: {local_details.get('exception_message')}). "
+                "Fix path permissions or unset WORKER_LOCAL_MODEL_CACHE_DIR."
+            )
+
+    return {
+        "model_cache_dir": effective_primary,
+        "local_model_cache_dir": effective_local,
+    }
 
 
-if __name__ == "__main__":
+def _run_main() -> int:
     _dev_validate_gen_worker_version()
+    _log_startup_phase("boot", status="starting")
 
-    # Load manifest if available (baked in at build time)
     manifest = load_manifest()
-
-    # Determine user modules: baked discovery manifest is required in the Dockerfile-first contract.
-    user_modules: list[str] = []
+    user_modules: List[str] = []
     if manifest:
         user_modules = get_modules_from_manifest(manifest)
-        logger.info("Loaded manifest from %s with %d functions", MANIFEST_PATH, len(manifest.get("functions", [])))
+        _log_startup_phase(
+            "manifest_loaded",
+            status="ok",
+            manifest_path=str(MANIFEST_PATH),
+            function_count=len(manifest.get("functions", [])),
+            module_count=len(user_modules),
+        )
+    else:
+        _log_startup_phase(
+            "manifest_loaded",
+            status="error",
+            level=logging.ERROR,
+            manifest_path=str(MANIFEST_PATH),
+            reason="missing_or_invalid_manifest",
+        )
+
+    try:
+        cache_cfg = _preflight_cache_dirs()
+    except Exception as e:
+        _log_worker_fatal("cache_preflight", e, exit_code=1)
+        logger.error(str(e))
+        return 1
+
+    scheduler_addr_raw = os.getenv("SCHEDULER_ADDR", "localhost:8080")
+    scheduler_addrs_raw = os.getenv("SCHEDULER_ADDRS", "")
+    worker_id = os.getenv("WORKER_ID", "").strip()
+    worker_jwt = os.getenv("WORKER_JWT", "").strip()
+    use_tls_env = os.getenv("USE_TLS")
+    reconnect_delay = int(os.getenv("RECONNECT_DELAY", "5") or "5")
+    max_reconnect_attempts = int(os.getenv("MAX_RECONNECT_ATTEMPTS", "0") or "0")
+
+    seed_addrs = [addr.strip() for addr in scheduler_addrs_raw.split(",") if addr.strip()]
+    scheduler_addr, inferred_tls = _normalize_grpc_addr(scheduler_addr_raw)
+    seed_addrs = [_normalize_grpc_addr(a)[0] for a in seed_addrs]
+    if use_tls_env is None:
+        use_tls = inferred_tls
+    else:
+        use_tls = use_tls_env.lower() in ("true", "1", "t")
 
     logger.info("Starting worker...")
-    logger.info("  Scheduler Address: %s", SCHEDULER_ADDR)
-    if SEED_ADDRS:
-        logger.info("  Scheduler Seeds: %s", SEED_ADDRS)
+    logger.info("  Scheduler Address: %s", scheduler_addr)
+    if seed_addrs:
+        logger.info("  Scheduler Seeds: %s", seed_addrs)
     logger.info("  User Function Modules: %s", user_modules)
-    logger.info("  Worker ID: %s", WORKER_ID or "(from JWT)")
-    logger.info("  Use TLS: %s", USE_TLS)
-    logger.info("  Reconnect Delay: %ss", RECONNECT_DELAY)
-    logger.info("  Max Reconnect Attempts: %s", MAX_RECONNECT_ATTEMPTS or "Infinite")
+    logger.info("  Worker ID: %s", worker_id or "(from JWT)")
+    logger.info("  Use TLS: %s", use_tls)
+    logger.info("  Reconnect Delay: %ss", reconnect_delay)
+    logger.info("  Max Reconnect Attempts: %s", max_reconnect_attempts or "Infinite")
+    logger.info("  Model Cache Dir: %s", cache_cfg["model_cache_dir"])
+    if cache_cfg["local_model_cache_dir"]:
+        logger.info("  Local Model Cache Dir: %s", cache_cfg["local_model_cache_dir"])
 
     if not user_modules:
         logger.error(
@@ -169,27 +321,27 @@ if __name__ == "__main__":
             "Your Dockerfile should run discovery at build time:\n"
             "  RUN mkdir -p /app/.cozy && python -m gen_worker.discover > /app/.cozy/manifest.json"
         )
-        sys.exit(1)
+        return 1
 
-    if not WORKER_JWT:
+    if not worker_jwt:
         logger.error("WORKER_JWT is required (worker-connect JWT). Refusing to start unauthenticated worker.")
-        sys.exit(1)
+        return 1
 
     try:
         worker = Worker(
-            scheduler_addr=SCHEDULER_ADDR,
-            scheduler_addrs=SEED_ADDRS,
+            scheduler_addr=scheduler_addr,
+            scheduler_addrs=seed_addrs,
             user_module_names=user_modules,
-            worker_id=WORKER_ID or None,
-            worker_jwt=WORKER_JWT,
-            use_tls=USE_TLS,
-            reconnect_delay=RECONNECT_DELAY,
-            max_reconnect_attempts=MAX_RECONNECT_ATTEMPTS,
+            worker_id=worker_id or None,
+            worker_jwt=worker_jwt,
+            use_tls=use_tls,
+            reconnect_delay=reconnect_delay,
+            max_reconnect_attempts=max_reconnect_attempts,
             manifest=manifest,
         )
         worker.run()
         logger.info("Worker process finished gracefully.")
-        sys.exit(0)
+        return 0
     except ImportError as e:
         logger.exception(
             "Failed to import user module(s) or dependencies: %s. "
@@ -197,7 +349,13 @@ if __name__ == "__main__":
             e,
             user_modules,
         )
-        sys.exit(1)
+        _log_worker_fatal("import", e, exit_code=1)
+        return 1
     except Exception as e:
         logger.exception("Worker failed unexpectedly: %s", e)
-        sys.exit(1)
+        _log_worker_fatal("runtime", e, exit_code=1)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(_run_main())

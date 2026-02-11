@@ -1,0 +1,17 @@
+schema_version = 1
+
+name = "qwen-image-2512"
+main = "qwen_image_2512.main"
+gen_worker = ">=0.2.0,<0.3.0"
+
+[host.requirements]
+cuda = "12.6"
+
+[models]
+qwen_image = "cozy:hf/qwen--qwen-image-2512:latest"
+
+[resources]
+vram_gb = 24
+ram_gb = 64
+cpu_cores = 8
+disk_gb = 120

@@ -45,13 +45,9 @@ RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
 RUN mkdir -p /app/.cozy \
     && python -m gen_worker.discover > /app/.cozy/manifest.json
 
-RUN groupadd --system --gid 10001 cozy \
-    && useradd --system --uid 10001 --gid cozy --create-home --home-dir /home/cozy --shell /usr/sbin/nologin cozy \
-    && chown -R cozy:cozy /app /home/cozy
 
-ENV HOME=/home/cozy
-ENV XDG_CACHE_HOME=/home/cozy/.cache
+ENV HOME=/root
+ENV XDG_CACHE_HOME=/root/.cache
 
-USER cozy:cozy
 
 ENTRYPOINT ["python", "-m", "gen_worker.entrypoint"]

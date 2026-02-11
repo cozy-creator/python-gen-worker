@@ -257,7 +257,13 @@ Local dev / advanced (not injected by orchestrator):
 | `WORKER_MAX_UPLOAD_BYTES` | - | Max file upload size |
 | `WORKER_MAX_VRAM_GB` | Auto | Maximum VRAM for models |
 | `WORKER_VRAM_SAFETY_MARGIN_GB` | 3.5 | Reserved VRAM for working memory |
-| `WORKER_MODEL_CACHE_DIR` | `/tmp/model_cache` | Disk cache directory |
+| `WORKER_MODEL_CACHE_DIR` | `/tmp/cozy/models` | Disk cache directory |
+| `WORKER_CACHE_DIR_FALLBACK` | - | Optional fallback cache path if primary cache preflight is not writable |
+| `WORKER_LOCAL_MODEL_CACHE_DIR` | `/tmp/cozy/local-model-cache` | Optional local (non-NFS) cache for snapshot localization |
+| `WORKER_REGISTER_TIMEOUT_S` | `90` | Startup watchdog: fail fast if worker never registers with scheduler |
+| `WORKER_WARN_MODEL_RESOLVE_S` | `30` | Emit `task.model_resolve.stuck` warning after this duration |
+| `WORKER_WARN_MODEL_LOAD_S` | `60` | Emit `task.model_load.stuck` warning after this duration |
+| `WORKER_WARN_INFERENCE_S` | `60` | Emit `task.inference.stuck` warning after this duration |
 | `WORKER_MAX_CONCURRENT_DOWNLOADS` | 2 | Max parallel model downloads |
 | `COZY_HUB_URL` | - | Cozy Hub base URL (used for public model requests and, if enabled, Cozy Hub API resolve) |
 | `WORKER_ALLOW_COZY_HUB_API_RESOLVE` | `false` | Local dev only: allow the worker to call Cozy Hub resolve APIs |
@@ -269,6 +275,7 @@ Local dev / advanced (not injected by orchestrator):
 The worker can emit best-effort performance/debug metrics to gen-orchestrator via `WorkerEvent` messages.
 
 See `docs/metrics.md`.
+See `docs/worker-stuck-visibility.md` for startup/task watchdog events used to diagnose stuck workers.
 
 ### Hugging Face (`hf:`) download behavior
 

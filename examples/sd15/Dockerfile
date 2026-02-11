@@ -56,15 +56,11 @@ RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
 RUN mkdir -p /app/.cozy \
     && python -m gen_worker.discover > /app/.cozy/manifest.json
 
-# Run as non-root at runtime.
-RUN groupadd --system --gid 10001 cozy \
-    && useradd --system --uid 10001 --gid cozy --create-home --home-dir /home/cozy --shell /usr/sbin/nologin cozy \
-    && chown -R cozy:cozy /app /home/cozy
+# Run as root at runtime (needed for writable mounted cache dirs like /workspace).
 
-ENV HOME=/home/cozy
-ENV XDG_CACHE_HOME=/home/cozy/.cache
-ENV HF_HOME=/home/cozy/.cache/huggingface
+ENV HOME=/root
+ENV XDG_CACHE_HOME=/root/.cache
+ENV HF_HOME=/root/.cache/huggingface
 
-USER cozy:cozy
 
 ENTRYPOINT ["python", "-m", "gen_worker.entrypoint"]

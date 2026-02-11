@@ -12,6 +12,7 @@ import random
 import threading
 import os
 import signal
+import traceback
 import queue
 import psutil
 import importlib
@@ -725,6 +726,14 @@ class Worker:
         """
         self.scheduler_addr = scheduler_addr
         self.scheduler_addrs = self._normalize_scheduler_addrs(scheduler_addr, scheduler_addrs)
+        self._process_started_monotonic = time.monotonic()
+        self._registered_event = threading.Event()
+        self._registration_watchdog_thread: Optional[threading.Thread] = None
+        self._startup_timeout_triggered = False
+        self._register_timeout_s = int(os.getenv("WORKER_REGISTER_TIMEOUT_S", "90") or "90")
+        self._warn_model_resolve_s = float(os.getenv("WORKER_WARN_MODEL_RESOLVE_S", "30") or "30")
+        self._warn_model_load_s = float(os.getenv("WORKER_WARN_MODEL_LOAD_S", "60") or "60")
+        self._warn_inference_s = float(os.getenv("WORKER_WARN_INFERENCE_S", "60") or "60")
         self.user_module_names = user_module_names # Store module names
         self.worker_id = worker_id or f"py-worker-{os.getpid()}"
         self.worker_jwt = (worker_jwt or "").strip()
@@ -946,6 +955,12 @@ class Worker:
             logger.info(f"ModelDownloader of type '{type(self._downloader).__name__}' configured.")
 
         logger.info(f"Created worker: ID={self.worker_id}, Scheduler={scheduler_addr}")
+        self._emit_startup_phase(
+            "boot",
+            status="ok",
+            emit_worker_event=False,
+            scheduler_seed_count=len(self.scheduler_addrs),
+        )
 
         # Discover functions before setting signals? Maybe after. Let's do it here.
         self._discover_and_register_functions()
@@ -1083,6 +1098,116 @@ class Worker:
             self._send_message(msg)
         except Exception:
             return
+
+    def _emit_startup_phase(
+        self,
+        phase: str,
+        *,
+        status: str = "ok",
+        level: int = logging.INFO,
+        emit_worker_event: bool = True,
+        **extra: Any,
+    ) -> None:
+        """
+        Emit a structured startup phase marker to logs and (best-effort) scheduler WorkerEvent.
+        """
+        payload: Dict[str, Any] = {
+            "phase": str(phase or "").strip(),
+            "status": str(status or "ok"),
+            "worker_id": str(getattr(self, "worker_id", "") or ""),
+            "scheduler_addr": str(getattr(self, "scheduler_addr", "") or ""),
+            "pid": int(os.getpid()),
+            "uid": int(os.getuid()) if hasattr(os, "getuid") else None,
+            "gid": int(os.getgid()) if hasattr(os, "getgid") else None,
+            "cwd": str(os.getcwd()),
+            "elapsed_ms": int(max(0.0, (time.monotonic() - float(getattr(self, "_process_started_monotonic", time.monotonic()))) * 1000.0)),
+        }
+        payload.update({k: v for k, v in extra.items() if v is not None})
+        try:
+            logger.log(level, "worker.startup.phase %s", json.dumps(payload, separators=(",", ":"), sort_keys=True))
+        except Exception:
+            logger.log(level, "worker.startup.phase phase=%s status=%s", payload.get("phase"), payload.get("status"))
+        if emit_worker_event:
+            try:
+                self._emit_worker_event_bytes("", "worker.startup.phase", safe_json_bytes(payload))
+            except Exception:
+                pass
+
+    def _emit_worker_fatal(self, phase: str, exc: BaseException, *, exit_code: int = 1) -> None:
+        """
+        Emit a structured fatal event that includes traceback metadata.
+        """
+        try:
+            tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        except Exception:
+            tb = traceback.format_exc()
+        payload: Dict[str, Any] = {
+            "phase": str(phase or "").strip() or "unknown",
+            "exception_class": type(exc).__name__,
+            "exception_message": str(exc),
+            "traceback": tb,
+            "exit_code": int(exit_code),
+            "worker_id": str(getattr(self, "worker_id", "") or ""),
+            "scheduler_addr": str(getattr(self, "scheduler_addr", "") or ""),
+            "elapsed_ms": int(max(0.0, (time.monotonic() - float(getattr(self, "_process_started_monotonic", time.monotonic()))) * 1000.0)),
+        }
+        try:
+            logger.error("worker.fatal %s", json.dumps(payload, separators=(",", ":"), sort_keys=True))
+        except Exception:
+            logger.exception("worker.fatal: %s", exc)
+        try:
+            self._emit_worker_event_bytes("", "worker.fatal", safe_json_bytes(payload))
+        except Exception:
+            pass
+
+    def _emit_task_event(self, run_id: str, event_type: str, payload: Optional[Dict[str, Any]] = None) -> None:
+        try:
+            self._emit_worker_event_bytes(run_id, event_type, safe_json_bytes(payload or {}))
+        except Exception:
+            pass
+
+    def _start_task_phase_watchdog(
+        self,
+        *,
+        run_id: str,
+        phase: str,
+        warn_after_s: float,
+        payload: Optional[Dict[str, Any]] = None,
+    ) -> Optional[threading.Timer]:
+        """
+        Start a soft watchdog for long-running task phases.
+
+        Emits `task.<phase>.stuck` if the timer fires.
+        """
+        try:
+            timeout_s = float(warn_after_s or 0.0)
+        except Exception:
+            timeout_s = 0.0
+        if timeout_s <= 0:
+            return None
+        started_at = time.monotonic()
+        base_payload = dict(payload or {})
+
+        def _fire() -> None:
+            elapsed_ms = int((time.monotonic() - started_at) * 1000)
+            ev_payload = dict(base_payload)
+            ev_payload["phase"] = str(phase or "")
+            ev_payload["warn_after_s"] = timeout_s
+            ev_payload["elapsed_ms"] = elapsed_ms
+            self._emit_task_event(run_id, f"task.{phase}.stuck", ev_payload)
+            logger.warning(
+                "task phase stuck run_id=%s phase=%s elapsed_ms=%d warn_after_s=%.1f payload=%s",
+                run_id,
+                phase,
+                elapsed_ms,
+                timeout_s,
+                ev_payload,
+            )
+
+        timer = threading.Timer(timeout_s, _fire)
+        timer.daemon = True
+        timer.start()
+        return timer
 
 
     def _set_gpu_busy_status(self, busy: bool, func_name_for_log: str = "") -> None:
@@ -1642,12 +1767,72 @@ class Worker:
                 pass
         return total, h.hexdigest()
 
+    def _start_registration_watchdog(self) -> None:
+        timeout_s = int(getattr(self, "_register_timeout_s", 0) or 0)
+        if timeout_s <= 0:
+            return
+        if self._registration_watchdog_thread and self._registration_watchdog_thread.is_alive():
+            return
+        self._registration_watchdog_thread = threading.Thread(
+            target=self._registration_watchdog_loop,
+            daemon=True,
+            name="WorkerRegistrationWatchdog",
+        )
+        self._registration_watchdog_thread.start()
+
+    def _registration_watchdog_loop(self, timeout_s: Optional[float] = None) -> None:
+        try:
+            t = float(timeout_s if timeout_s is not None else (getattr(self, "_register_timeout_s", 0) or 0))
+        except Exception:
+            t = 0.0
+        if t <= 0:
+            return
+        if self._registered_event.wait(timeout=t):
+            return
+        if not getattr(self, "_running", False) or getattr(self, "_stop_event", threading.Event()).is_set():
+            return
+
+        self._startup_timeout_triggered = True
+        payload = {
+            "phase": "startup_timeout_unregistered",
+            "timeout_s": t,
+            "worker_id": str(getattr(self, "worker_id", "") or ""),
+            "scheduler_addr": str(getattr(self, "scheduler_addr", "") or ""),
+            "elapsed_ms": int(max(0.0, (time.monotonic() - float(getattr(self, "_process_started_monotonic", time.monotonic()))) * 1000.0)),
+        }
+        self._emit_startup_phase(
+            "startup_timeout_unregistered",
+            status="error",
+            level=logging.ERROR,
+            timeout_s=t,
+            emit_worker_event=False,
+        )
+        self._emit_worker_event_bytes("", "worker.startup_timeout_unregistered", safe_json_bytes(payload))
+        logger.error(
+            "Worker did not register with scheduler before timeout (timeout_s=%.1f addr=%s); stopping worker.",
+            t,
+            self.scheduler_addr,
+        )
+        try:
+            self._close_connection()
+        except Exception:
+            pass
+        try:
+            self._running = False
+        except Exception:
+            pass
+        try:
+            self._stop_event.set()
+        except Exception:
+            pass
+
     def connect(self) -> bool:
         """Connect to the scheduler.
 
         Returns:
             bool: True if connection was successful, False otherwise.
         """
+        self._emit_startup_phase("scheduler_connecting", status="starting", emit_worker_event=False)
         attempted: set[str] = set()
         while True:
             addr = None
@@ -1693,6 +1878,8 @@ class Worker:
 
             # Send initial registration immediately
             self._register_worker(is_heartbeat=False)
+            self._registered_event.set()
+            self._emit_startup_phase("registered", status="ok", scheduler_addr=self.scheduler_addr)
 
             # Start the receive loop in a separate thread *after* stream is initiated
             self._receive_thread = threading.Thread(target=self._receive_loop, daemon=True)
@@ -1703,6 +1890,7 @@ class Worker:
             self._heartbeat_thread.start()
 
             logger.info(f"Successfully connected to scheduler at {self.scheduler_addr}")
+            self._emit_startup_phase("ready", status="ok", scheduler_addr=self.scheduler_addr)
             self._reconnect_count = 0
             return True
 
@@ -1717,10 +1905,26 @@ class Worker:
                 self._set_scheduler_addr(leader)
             else:
                 logger.error(f"Failed to connect to scheduler: {code} - {details}")
+            self._emit_startup_phase(
+                "scheduler_connect_failed",
+                status="error",
+                level=logging.WARNING,
+                emit_worker_event=False,
+                grpc_code=str(code),
+                grpc_details=str(details),
+            )
             self._close_connection()
             return False
         except Exception as e:
             logger.exception(f"Unexpected error connecting to scheduler: {e}")
+            self._emit_startup_phase(
+                "scheduler_connect_failed",
+                status="error",
+                level=logging.ERROR,
+                emit_worker_event=False,
+                error_type=type(e).__name__,
+                error=str(e),
+            )
             self._close_connection()
             return False
 
@@ -1947,44 +2151,56 @@ class Worker:
             return
 
         self._running = True
+        self._startup_timeout_triggered = False
+        self._registered_event.clear()
         self._stop_event.clear()
         self._reconnect_count = 0 # Reset reconnect count on new run
         self._draining = False
+        self._start_registration_watchdog()
 
-        while self._running and not self._stop_event.is_set():
-            self._reconnect_count += 1
-            logger.info(f"Connection attempt {self._reconnect_count}...")
-            if self.connect():
-                # Successfully connected, wait for stop signal or disconnection
-                logger.info("Connection successful. Worker running.")
-                self._stop_event.wait() # Wait here until stopped or disconnected
-                logger.info("Worker run loop received stop/disconnect signal.")
-                # If stopped normally (self.stop() called), _running will be False
-                # If disconnected, connect() failed, threads stopped, _handle_connection_error called _stop_event.set()
-            else:
-                # Connection failed
-                if self.max_reconnect_attempts > 0 and self._reconnect_count >= self.max_reconnect_attempts:
-                    logger.error("Failed to connect after maximum attempts. Stopping worker.")
-                    self._running = False # Ensure loop terminates
-                    break
+        try:
+            while self._running and not self._stop_event.is_set():
+                self._reconnect_count += 1
+                logger.info(f"Connection attempt {self._reconnect_count}...")
+                if self.connect():
+                    # Successfully connected, wait for stop signal or disconnection
+                    logger.info("Connection successful. Worker running.")
+                    self._stop_event.wait() # Wait here until stopped or disconnected
+                    logger.info("Worker run loop received stop/disconnect signal.")
+                    # If stopped normally (self.stop() called), _running will be False
+                    # If disconnected, connect() failed, threads stopped, _handle_connection_error called _stop_event.set()
+                else:
+                    # Connection failed
+                    if self.max_reconnect_attempts > 0 and self._reconnect_count >= self.max_reconnect_attempts:
+                        logger.error("Failed to connect after maximum attempts. Stopping worker.")
+                        self._running = False # Ensure loop terminates
+                        break
 
-                if self._running and not self._stop_event.is_set():
-                    backoff = self._reconnect_delay_base * (2 ** max(self._reconnect_count - 1, 0))
-                    if self._reconnect_delay_max > 0:
-                        backoff = min(backoff, self._reconnect_delay_max)
-                    jitter = random.uniform(0, self._reconnect_jitter) if self._reconnect_jitter > 0 else 0
-                    delay = backoff + jitter
-                    logger.info(f"Connection attempt {self._reconnect_count} failed. Retrying in {delay:.2f} seconds...")
-                    # Wait for delay, but break if stop event is set during wait
-                    if self._stop_event.wait(delay):
-                        logger.info("Stop requested during reconnect delay.")
-                        break # Exit if stopped while waiting
-            # After a failed attempt or disconnect, clear stop event for next retry
-            if self._running:
-                 self._stop_event.clear()
+                    if self._running and not self._stop_event.is_set():
+                        backoff = self._reconnect_delay_base * (2 ** max(self._reconnect_count - 1, 0))
+                        if self._reconnect_delay_max > 0:
+                            backoff = min(backoff, self._reconnect_delay_max)
+                        jitter = random.uniform(0, self._reconnect_jitter) if self._reconnect_jitter > 0 else 0
+                        delay = backoff + jitter
+                        logger.info(f"Connection attempt {self._reconnect_count} failed. Retrying in {delay:.2f} seconds...")
+                        # Wait for delay, but break if stop event is set during wait
+                        if self._stop_event.wait(delay):
+                            logger.info("Stop requested during reconnect delay.")
+                            break # Exit if stopped while waiting
+                # After a failed attempt or disconnect, clear stop event for next retry
+                if self._running:
+                    self._stop_event.clear()
+        except Exception as e:
+            self._emit_worker_fatal("run_loop", e, exit_code=1)
+            raise
+        finally:
+            # Cleanup after loop exits (either max attempts reached or manual stop)
+            self.stop()
+            if self._registration_watchdog_thread and self._registration_watchdog_thread.is_alive():
+                self._registration_watchdog_thread.join(timeout=1.0)
 
-        # Cleanup after loop exits (either max attempts reached or manual stop)
-        self.stop()
+        if self._startup_timeout_triggered:
+            raise RuntimeError("startup_timeout_unregistered")
 
     def _handle_interrupt(self, sig: int, frame: Optional[Any]) -> None:
         """Handle interrupt signal (Ctrl+C)."""
@@ -2038,6 +2254,10 @@ class Worker:
         if self._receive_thread and self._receive_thread.is_alive():
             logger.debug("Joining receive thread...")
             self._receive_thread.join(timeout=2.0)
+
+        if self._registration_watchdog_thread and self._registration_watchdog_thread.is_alive():
+            logger.debug("Joining registration watchdog thread...")
+            self._registration_watchdog_thread.join(timeout=1.0)
 
         # Clear outgoing queue after threads are stopped
         logger.debug("Clearing outgoing message queue...")
@@ -2751,21 +2971,41 @@ class Worker:
             required_model_id_for_exec = str(required_models_raw[0] or "").strip()
 
         logger.info(f"Received Task request: run_id={run_id}, function={function_name}, model='{required_model_id_for_exec or 'None'}'")
+        self._emit_task_event(
+            run_id,
+            "task.received",
+            {
+                "function_name": function_name,
+                "required_variant_refs_count": len(required_models_raw),
+                "input_bytes": len(input_payload or b""),
+            },
+        )
 
         spec = self._task_specs.get(function_name)
         if not spec:
             error_msg = f"Unknown function requested: {function_name}"
             logger.error(error_msg)
+            self._emit_task_event(
+                run_id,
+                "task.rejected",
+                {"reason": "unknown_function", "function_name": function_name},
+            )
             self._send_task_result(run_id, False, None, "internal", False, "internal error", error_msg)
             return
         if self.max_input_bytes > 0 and len(input_payload) > self.max_input_bytes:
             error_msg = f"Input payload too large: {len(input_payload)} bytes (max {self.max_input_bytes})"
             logger.error(error_msg)
+            self._emit_task_event(
+                run_id,
+                "task.rejected",
+                {"reason": "input_too_large", "input_bytes": len(input_payload)},
+            )
             self._send_task_result(run_id, False, None, "validation", False, "invalid input", error_msg)
             return
         if self._draining:
             error_msg = "Worker is draining; refusing new tasks"
             logger.warning(error_msg)
+            self._emit_task_event(run_id, "task.rejected", {"reason": "worker_draining"})
             self._send_task_result(run_id, False, None, "retryable", True, "worker busy", error_msg)
             return
 
@@ -2795,10 +3035,12 @@ class Worker:
              if run_id in self._active_tasks:
                   error_msg = f"Task with run_id {run_id} is already active (race condition?)."
                   logger.error(error_msg)
+                  self._emit_task_event(run_id, "task.rejected", {"reason": "duplicate_run_id"})
                   return # Avoid starting duplicate thread
              if self.max_concurrency > 0 and len(self._active_tasks) >= self.max_concurrency:
                   error_msg = f"Worker concurrency limit reached ({self.max_concurrency})."
                   logger.error(error_msg)
+                  self._emit_task_event(run_id, "task.rejected", {"reason": "max_concurrency_reached"})
                   self._send_task_result(run_id, False, None, "retryable", True, "worker busy", error_msg)
                   return
              resource_req = self._discovered_resources.get(function_name)
@@ -2806,6 +3048,11 @@ class Worker:
              if func_limit > 0 and self._active_function_counts.get(function_name, 0) >= func_limit:
                   error_msg = f"Function concurrency limit reached for {function_name} ({func_limit})."
                   logger.error(error_msg)
+                  self._emit_task_event(
+                      run_id,
+                      "task.rejected",
+                      {"reason": "function_concurrency_reached", "function_name": function_name},
+                  )
                   self._send_task_result(run_id, False, None, "retryable", True, "worker busy", error_msg)
                   return
              self._active_tasks[run_id] = ctx
@@ -2999,6 +3246,14 @@ class Worker:
         rm.mark_compute_started()
         if rm.compute_started_at:
             self._emit_worker_event_bytes(run_id, "metrics.compute.started", safe_json_bytes({"at": rm.compute_started_at}))
+        self._emit_task_event(
+            run_id,
+            "task.started",
+            {
+                "function_name": str(spec.name or ""),
+                "required_variant_refs": list(getattr(ctx, "required_models", []) or []),
+            },
+        )
 
         # Initialize model cache_state for required models using worker's cache hints.
         try:
@@ -3033,6 +3288,7 @@ class Worker:
         prefs_tok = set_cozy_model_download_prefs_by_ref(prefs_map)
 
         models_in_use: set[str] = set()
+        inference_watchdog: Optional[threading.Timer] = None
         try:
             if ctx.is_canceled():
                 raise CanceledError("canceled")
@@ -3081,8 +3337,50 @@ class Worker:
             call_kwargs[spec.payload_param] = input_obj
 
             for inj in spec.injections:
-                model_id, model_key = self._resolve_model_id_for_injection(spec.name, inj, payload=input_obj)
-                canon_model_id = _canonicalize_model_ref_string(str(model_id or "").strip()) if model_id else ""
+                resolve_t0 = time.monotonic()
+                resolve_watchdog = self._start_task_phase_watchdog(
+                    run_id=run_id,
+                    phase="model_resolve",
+                    warn_after_s=float(getattr(self, "_warn_model_resolve_s", 30.0)),
+                    payload={"function_name": spec.name, "param_name": inj.param_name},
+                )
+                self._emit_task_event(
+                    run_id,
+                    "task.model_resolve.started",
+                    {"function_name": spec.name, "param_name": inj.param_name},
+                )
+                model_id = ""
+                model_key: Optional[str] = None
+                canon_model_id = ""
+                try:
+                    model_id, model_key = self._resolve_model_id_for_injection(spec.name, inj, payload=input_obj)
+                    canon_model_id = _canonicalize_model_ref_string(str(model_id or "").strip()) if model_id else ""
+                    self._emit_task_event(
+                        run_id,
+                        "task.model_resolve.completed",
+                        {
+                            "function_name": spec.name,
+                            "param_name": inj.param_name,
+                            "model_id": canon_model_id,
+                            "model_key": model_key or "",
+                            "duration_ms": int((time.monotonic() - resolve_t0) * 1000),
+                        },
+                    )
+                except Exception as resolve_exc:
+                    self._emit_task_event(
+                        run_id,
+                        "task.model_resolve.failed",
+                        {
+                            "function_name": spec.name,
+                            "param_name": inj.param_name,
+                            "error_type": type(resolve_exc).__name__,
+                            "duration_ms": int((time.monotonic() - resolve_t0) * 1000),
+                        },
+                    )
+                    raise
+                finally:
+                    if resolve_watchdog is not None:
+                        resolve_watchdog.cancel()
                 # Best-effort: attach dtype preferences from cozy.toml-derived manifest mapping.
                 if model_key:
                     try:
@@ -3097,10 +3395,68 @@ class Worker:
                 if canon_model_id and canon_model_id not in models_in_use:
                     self._model_use_enter(canon_model_id)
                     models_in_use.add(canon_model_id)
-                call_kwargs[inj.param_name] = self._resolve_injected_value(ctx, inj.param_type, model_id, inj)
+                load_t0 = time.monotonic()
+                load_watchdog = self._start_task_phase_watchdog(
+                    run_id=run_id,
+                    phase="model_load",
+                    warn_after_s=float(getattr(self, "_warn_model_load_s", 60.0)),
+                    payload={
+                        "function_name": spec.name,
+                        "param_name": inj.param_name,
+                        "model_id": canon_model_id,
+                    },
+                )
+                self._emit_task_event(
+                    run_id,
+                    "task.model_load.started",
+                    {
+                        "function_name": spec.name,
+                        "param_name": inj.param_name,
+                        "model_id": canon_model_id,
+                    },
+                )
+                try:
+                    call_kwargs[inj.param_name] = self._resolve_injected_value(ctx, inj.param_type, model_id, inj)
+                    self._emit_task_event(
+                        run_id,
+                        "task.model_load.completed",
+                        {
+                            "function_name": spec.name,
+                            "param_name": inj.param_name,
+                            "model_id": canon_model_id,
+                            "duration_ms": int((time.monotonic() - load_t0) * 1000),
+                        },
+                    )
+                except Exception as load_exc:
+                    self._emit_task_event(
+                        run_id,
+                        "task.model_load.failed",
+                        {
+                            "function_name": spec.name,
+                            "param_name": inj.param_name,
+                            "model_id": canon_model_id,
+                            "error_type": type(load_exc).__name__,
+                            "duration_ms": int((time.monotonic() - load_t0) * 1000),
+                        },
+                    )
+                    raise
+                finally:
+                    if load_watchdog is not None:
+                        load_watchdog.cancel()
 
             # Invoke.
             t_infer0 = time.monotonic()
+            inference_watchdog = self._start_task_phase_watchdog(
+                run_id=run_id,
+                phase="inference",
+                warn_after_s=float(getattr(self, "_warn_inference_s", 60.0)),
+                payload={"function_name": spec.name, "output_mode": spec.output_mode},
+            )
+            self._emit_task_event(
+                run_id,
+                "task.inference.started",
+                {"function_name": spec.name, "output_mode": spec.output_mode},
+            )
             if inspect.iscoroutinefunction(spec.func):
                 result = asyncio.run(spec.func(**call_kwargs))
             elif inspect.isasyncgenfunction(spec.func):
@@ -3180,11 +3536,44 @@ class Worker:
                 rm.inference_ms = int((time.monotonic() - t_infer0) * 1000)
             except Exception:
                 pass
+            if inference_watchdog is not None:
+                inference_watchdog.cancel()
+            self._emit_task_event(
+                run_id,
+                "task.inference.completed",
+                {
+                    "function_name": spec.name,
+                    "output_mode": spec.output_mode,
+                    "duration_ms": int((time.monotonic() - t_infer0) * 1000),
+                },
+            )
 
             logger.info("Task %s completed successfully.", run_id)
 
         except Exception as e:
             error_type, retryable, safe_message, error_message = self._map_exception(e)
+            if inference_watchdog is not None:
+                inference_watchdog.cancel()
+            self._emit_task_event(
+                run_id,
+                "task.failed",
+                {
+                    "function_name": spec.name,
+                    "error_type": error_type,
+                    "retryable": bool(retryable),
+                    "safe_message": safe_message,
+                },
+            )
+            if "t_infer0" in locals():
+                self._emit_task_event(
+                    run_id,
+                    "task.inference.failed",
+                    {
+                        "function_name": spec.name,
+                        "error_type": error_type,
+                        "duration_ms": int((time.monotonic() - float(locals().get("t_infer0", time.monotonic()))) * 1000),
+                    },
+                )
             if spec.output_mode == "incremental":
                 try:
                     payload = json.dumps({"error_type": error_type, "message": safe_message}, separators=(",", ":")).encode("utf-8")
@@ -3197,6 +3586,8 @@ class Worker:
                     pass
             success = False
         finally:
+            if inference_watchdog is not None:
+                inference_watchdog.cancel()
             reset_resolved_cozy_models_by_id(resolved_tok)
             reset_cozy_model_download_prefs_by_ref(prefs_tok)
 
@@ -3244,6 +3635,15 @@ class Worker:
                 self._emit_worker_event_bytes(run_id, "metrics.run", safe_json_bytes(rm.to_metrics_run_payload()))
             except Exception:
                 pass
+            if success:
+                self._emit_task_event(
+                    run_id,
+                    "task.completed",
+                    {
+                        "function_name": spec.name,
+                        "duration_ms": int((time.monotonic() - float(getattr(rm, "_t0_monotonic", time.monotonic()))) * 1000),
+                    },
+                )
 
             self._send_task_result(run_id, success, output_payload, error_type, bool(retryable), safe_message, error_message)
 

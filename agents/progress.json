@@ -70,6 +70,22 @@
         "[x] Tests\n    - Unit tests for the new Cozy Hub client method using the existing test HTTP server harness:\n      - 200-ready response returns expected files + digest\n      - 202 pending is raised as `CozyHubPublicModelPendingError`\n    - ModelRefDownloader tests:\n      - hf refs prefer Cozy Hub public request when the flag is enabled\n      - 202 pending then 200 ready works via bounded polling"
       ],
       "completed": true
+    },
+    {
+      "id": 76,
+      "name": "Worker Stuck/Error Visibility: Startup, Runtime, and Scheduler Surfacing",
+      "description": "Problem: workers can appear \"running\" at the pod level but never become usable (never register, block during startup/model load, or crash before signaling readiness). This currently looks like \"waiting for worker connection\" and can be hard to diagnose quickly.\n\nGoal: make stuck/error states explicit and actionable instead of silent. Operators should always be able to answer:\n- Did the worker start?\n- Which startup phase is it in?\n- Did it crash, and why?\n- Is it blocked on model download/load/inference?\n- Did scheduler/orchestrator detect and surface that state?\n\nThis issue includes python-gen-worker reporting plus orchestrator-facing signals/contract updates where needed.\n",
+      "tasks": [
+        "[x] Startup phase markers (structured logs/events)\n    - Emit structured phase transitions at boot: `boot`, `manifest_loaded`, `cache_preflight_ok|failed`, `scheduler_connecting`, `registered`, `ready`\n    - Include key debug fields: worker_id (if known), pod_id (if known), uid/gid, cache dirs, elapsed_ms since process start",
+        "[x] Cache path preflight + actionable failure details\n    - Validate writeability of `WORKER_MODEL_CACHE_DIR` and `WORKER_LOCAL_MODEL_CACHE_DIR` before registration\n    - On failure, emit explicit remediation text (writable path, mount perms, fallback path) and exit non-zero unless fallback is enabled",
+        "[x] Top-level fatal crash reporting (no silent death)\n    - Wrap startup/main loop with fatal exception handler that emits one structured `worker_fatal` event with phase, exception class, message, traceback, exit_code\n    - Ensure fatal paths always flush logs before process exit",
+        "[x] Startup registration watchdog\n    - Add `WORKER_REGISTER_TIMEOUT_S` (default reasonable, e.g. 90s)\n    - If worker does not register with scheduler before timeout, emit `startup_timeout_unregistered` event and exit non-zero",
+        "[x] Runtime blocked/stuck telemetry\n    - Emit per-task lifecycle events: `task_received`, `model_resolve_start/end`, `model_load_start/end`, `inference_start/end`, `task_completed|task_failed`\n    - Add long-running warnings (soft watchdog) for model load/inference phases with elapsed time and identifiers (run_id, function, model ref)",
+        "[x] Orchestrator surfacing contract (coordination task)\n    - Document/implement worker event fields so gen-orchestrator can mark states like `launch_failed`, `startup_timeout`, `worker_fatal`, `task_stuck`\n    - Ensure \"waiting for worker connection\" paths include concrete reason + last known worker phase in logs/API where available",
+        "[x] Tests\n    - Startup permission failure test: verifies explicit structured failure + non-zero exit\n    - Registration-timeout test: verifies watchdog event + exit\n    - Runtime stuck warning test: verifies long-running phase warning emission\n    - Fatal exception test: verifies `worker_fatal` event includes traceback metadata",
+        "[x] Operator docs\n    - Add runbook section for diagnosing stuck workers (startup vs model download vs inference)\n    - Include expected event/log sequence and recommended actions for each failure mode"
+      ],
+      "completed": true
     }
   ]
 }

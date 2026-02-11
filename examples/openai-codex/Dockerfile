@@ -38,6 +38,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-venv \
     tar \
+  && ln -sf /usr/bin/python3 /usr/local/bin/python \
   && rm -rf /var/lib/apt/lists/*
 
 # Install Codex CLI binary.
@@ -77,15 +78,10 @@ RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
 RUN mkdir -p /app/.cozy \
   && python3 -m gen_worker.discover > /app/.cozy/manifest.json
 
-# Non-root runtime user.
-RUN groupadd --system --gid 10001 cozy \
-  && useradd --system --uid 10001 --gid cozy --create-home --home-dir /home/cozy --shell /usr/sbin/nologin cozy \
-  && chown -R cozy:cozy /app /home/cozy
+# Run as root at runtime (needed for writable mounted cache dirs like /workspace).
 
-ENV HOME=/home/cozy
-ENV XDG_CACHE_HOME=/home/cozy/.cache
+ENV HOME=/root
+ENV XDG_CACHE_HOME=/root/.cache
 
-USER cozy:cozy
 
 ENTRYPOINT ["python3", "-m", "gen_worker.entrypoint"]
-
