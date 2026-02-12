@@ -50,6 +50,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 
+from .cache_paths import worker_local_model_cache_dir_default, worker_model_cache_dir
+
 logger = logging.getLogger(__name__)
 
 
@@ -799,8 +801,8 @@ class PipelineLoader:
             cozy_hub_token: Authentication token for Cozy Hub
         """
         if models_dir is None:
-            # Standard shared disk cache root (Runpod: /workspace/..., local dev: /tmp/...).
-            models_dir = os.environ.get("WORKER_MODEL_CACHE_DIR", "/tmp/cozy/models")
+            # Standard shared disk cache root.
+            models_dir = str(worker_model_cache_dir())
         self.models_dir = Path(models_dir) if models_dir else None
         self.local_cache_dir: Optional[Path] = None
         self.vram_safety_margin_gb = vram_safety_margin_gb
@@ -827,7 +829,10 @@ class PipelineLoader:
         self._local_cache: Optional[LocalModelCache] = None
         if local_cache_dir is None:
             # Standard env for local (non-NFS) cache. Empty disables.
-            local_cache_dir = os.environ.get("WORKER_LOCAL_MODEL_CACHE_DIR", "/tmp/cozy/local-model-cache").strip() or None
+            local_cache_dir = os.environ.get(
+                "WORKER_LOCAL_MODEL_CACHE_DIR",
+                str(worker_local_model_cache_dir_default()),
+            ).strip() or None
         if local_cache_dir:
             # Validate local cache isn't itself on NFS; otherwise localization is pointless.
             try:

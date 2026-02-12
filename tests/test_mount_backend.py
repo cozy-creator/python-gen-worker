@@ -18,7 +18,7 @@ def test_mount_backend_for_path_parses_mountinfo_and_classifies_nfs() -> None:
     assert mb.fstype == "nfs4"
     assert mb.is_nfs is True
 
-    mb2 = mount_backend_for_path("/tmp/cozy/local-model-cache", mountinfo_text=mountinfo)
+    mb2 = mount_backend_for_path("/tmp/tensorhub/local-model-cache", mountinfo_text=mountinfo)
     assert mb2 is not None
     assert mb2.fstype == "ext4"
     assert mb2.is_nfs is False

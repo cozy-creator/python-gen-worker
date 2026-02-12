@@ -11,7 +11,7 @@ This module provides a model cache that:
 Configuration via environment variables:
 - WORKER_MAX_VRAM_GB: Maximum VRAM to use (default: auto-detect - safety margin)
 - WORKER_VRAM_SAFETY_MARGIN_GB: Reserved VRAM for working memory (default: 3.5)
-- WORKER_MODEL_CACHE_DIR: Directory for disk-cached models (default: /tmp/cozy/models)
+- TENSORHUB_CACHE_DIR: TensorHub cache root (default: ~/.cache/tensorhub)
 - WORKER_MAX_CONCURRENT_DOWNLOADS: Maximum concurrent model downloads (default: 2)
 """
 
@@ -27,6 +27,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
+
+from .cache_paths import worker_model_cache_dir
 
 logger = logging.getLogger(__name__)
 
@@ -119,8 +121,8 @@ class ModelCache:
         self._vram_safety_margin = vram_safety_margin_gb or float(
             os.getenv("WORKER_VRAM_SAFETY_MARGIN_GB", str(DEFAULT_VRAM_SAFETY_MARGIN_GB))
         )
-        cache_dir = model_cache_dir or os.getenv("WORKER_MODEL_CACHE_DIR") or "/tmp/cozy/models"
-        self._model_cache_dir = Path(cache_dir)
+        cache_dir = model_cache_dir or str(worker_model_cache_dir())
+        self._model_cache_dir = Path(os.path.expanduser(cache_dir))
         self._model_cache_dir.mkdir(parents=True, exist_ok=True)
 
         # Detect or configure VRAM

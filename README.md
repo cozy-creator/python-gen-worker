@@ -257,9 +257,8 @@ Local dev / advanced (not injected by orchestrator):
 | `WORKER_MAX_UPLOAD_BYTES` | - | Max file upload size |
 | `WORKER_MAX_VRAM_GB` | Auto | Maximum VRAM for models |
 | `WORKER_VRAM_SAFETY_MARGIN_GB` | 3.5 | Reserved VRAM for working memory |
-| `WORKER_MODEL_CACHE_DIR` | `/tmp/cozy/models` | Disk cache directory |
-| `WORKER_CACHE_DIR_FALLBACK` | - | Optional fallback cache path if primary cache preflight is not writable |
-| `WORKER_LOCAL_MODEL_CACHE_DIR` | `/tmp/cozy/local-model-cache` | Optional local (non-NFS) cache for snapshot localization |
+| `TENSORHUB_CACHE_DIR` | `~/.cache/tensorhub` | TensorHub cache root; worker CAS defaults derive from this (`${TENSORHUB_CACHE_DIR}/cas/...`) |
+| `WORKER_LOCAL_MODEL_CACHE_DIR` | `/tmp/tensorhub/local-model-cache` | Optional local (non-NFS) cache for snapshot localization |
 | `WORKER_REGISTER_TIMEOUT_S` | `90` | Startup watchdog: fail fast if worker never registers with scheduler |
 | `WORKER_WARN_MODEL_RESOLVE_S` | `30` | Emit `task.model_resolve.stuck` warning after this duration |
 | `WORKER_WARN_MODEL_LOAD_S` | `60` | Emit `task.model_load.stuck` warning after this duration |
@@ -456,6 +455,13 @@ Requires `gen-orchestrator` as a sibling repo:
 uv sync --extra dev
 python -m grpc_tools.protoc -I../gen-orchestrator/proto --python_out=src/gen_worker/pb --grpc_python_out=src/gen_worker/pb ../gen-orchestrator/proto/*.proto
 ```
+
+### Worker Wire Protocol
+
+The worker advertises a protocol `MAJOR.MINOR` in `WorkerRegistration` (`protocol_major`, `protocol_minor`).
+
+- Current runtime constants live in `src/gen_worker/wire_protocol.py`.
+- Orchestrator compatibility policy/ranges are documented in `../gen-orchestrator/docs/worker_wire_protocol.md`.
 
 ## License
 

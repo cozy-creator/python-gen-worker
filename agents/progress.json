@@ -86,6 +86,36 @@
         "[x] Operator docs\n    - Add runbook section for diagnosing stuck workers (startup vs model download vs inference)\n    - Include expected event/log sequence and recommended actions for each failure mode"
       ],
       "completed": true
+    },
+    {
+      "id": 77,
+      "name": "Canonical Startup Phases Over gRPC (No /healthz Dependency)",
+      "description": "Align worker startup/runtime observability with orchestrator policy:\n- After connect, worker->orchestrator gRPC telemetry is source-of-truth.\n- Worker startup should report canonical phases: `booting`, `models_downloading`, `pipeline_loading`, `ready`.\n- Provider diagnostics are for pre-connect/post-disconnect only.\n\nImportant non-goal:\n- Do not add a `/healthz` endpoint in worker images for orchestration health decisions. Health for scheduling should come from gRPC connectivity + phase/events.",
+      "tasks": [
+        "[ ] Emit canonical startup phases over existing worker event channel\n    - Map current detailed internal phases/events to canonical external states:\n      - process start/import/bootstrap -> `booting`\n      - model snapshot/materialization/download steps -> `models_downloading`\n      - pipeline construction + GPU load/warmup -> `pipeline_loading`\n      - post-registration and first-run capable -> `ready`\n    - Include phase timestamps and elapsed_ms",
+        "[ ] Preserve detailed sub-phase diagnostics while publishing canonical state\n    - Keep current granular events (`manifest_loaded`, cache preflight, scheduler_connecting, etc.) for debugging\n    - Add canonical `startup_phase` field alongside detailed event_type",
+        "[ ] Document and enforce contract with orchestrator\n    - Update worker docs/event schema so orchestrator can rely on canonical phases\n    - Ensure phase transitions are monotonic per process lifecycle (no regressions without restart)",
+        "[ ] Explicitly document no `/healthz` orchestration dependency\n    - README/OPERATIONS note: scheduler health decisions must not depend on worker HTTP health checks"
+      ],
+      "completed": false
+    },
+    {
+      "id": 78,
+      "name": "Worker Protocol Stability: MAJOR.MINOR Versioning + Configurable Support Ranges (Cross-Repo)",
+      "description": "Goal: keep the gen-worker <-> gen-orchestrator wire protocol stable so tenant images do not require rebuilds for normal platform iteration, while allowing orchestrator to support multiple older protocol versions for a period of time.\n\nPolicy:\n- Version only the worker wire protocol (not auth/JWT).\n- Auth remains separately enforced and is not part of wire version negotiation.\n- Additive changes only by default.\n- Breaking wire changes require MAJOR bump and explicit migration window.\n- Version model is protocol MAJOR.MINOR:\n  - MAJOR = breaking wire compatibility\n  - MINOR = backward-compatible additive change\n- Proto source layout rule:\n  - Same MAJOR: keep one proto package/schema and evolve additively.\n  - Breaking MAJOR (e.g. v1 -> v2): introduce separate versioned proto package/files and generated bindings for each supported MAJOR.\n\nRuntime model:\n- Handshake validation occurs after successful auth on worker registration.\n- Worker advertises `protocol_major` + `protocol_minor` in handshake.\n- Orchestrator accepts a configurable set of supported ranges (multiple majors, each with minor floor/ceiling), so old tenant images keep working until dropped.\n\nScope:\n- `~/cozy/gen-orchestrator` (proto source + server validation)\n- `~/cozy/python-gen-worker` (client/runtime handshake + compatibility checks)\n- Shared protobuf governance/docs/CI\n",
+      "tasks": [
+        "[x] Wire protocol policy doc (authoritative)\n    - Added in `gen-orchestrator/docs/worker_wire_protocol.md` with compatibility invariants and governance rules",
+        "[x] Proto layout by MAJOR\n    - Documented: additive changes stay in `scheduler.v1`; breaking changes require separate versioned package/files",
+        "[x] Add protocol version fields to handshake (wire)\n    - Added `protocol_major` + `protocol_minor` to `WorkerRegistration` in `proto/worker_scheduler.proto`\n    - Regenerated Go + Python stubs via `task proto`\n    - Validation remains post-auth in `ConnectWorker`",
+        "[x] gen-orchestrator: configurable compatibility ranges\n    - Added `WORKER_SUPPORTED_PROTOCOL_RANGES` (default `1:0-9999`) with parser + matcher\n    - Worker connect now rejects unsupported versions with clear `unsupported_worker_protocol` failure details\n    - Added appconfig mapping: `workers.supported_protocol_ranges` -> env",
+        "[x] gen-orchestrator: minor-version feature gating + fallback paths\n    - Added per-feature minor matrix in `pkg/scheduler/worker_protocol.go`\n    - Baseline feature support now starts at v1.0 for `release.models_by_function`\n    - Downgrade/fallback hooks remain in place for future minor-gated fields",
+        "[x] python-gen-worker: advertise and enforce compatibility\n    - Added central runtime constants in `src/gen_worker/wire_protocol.py`\n    - Worker advertises protocol on every registration/heartbeat\n    - Worker detects protocol incompatibility errors and fails clearly instead of retrying blindly",
+        "[ ] CI breaking-change guard on proto\n    - Pending: add automated proto breaking check + cross-repo generated-stub sync gate in CI",
+        "[x] Cross-repo sync workflow\n    - Added canonical flow in `gen-orchestrator/docs/worker_wire_protocol.md`",
+        "[x] Compatibility tests\n    - Added orchestrator protocol compatibility tests in `pkg/scheduler/worker_protocol_test.go`\n    - Added worker registration/version tests in `tests/test_worker_wire_protocol.py`",
+        "[x] Rollout/migration playbook\n    - Added MAJOR/MINOR rollout guidance in `gen-orchestrator/docs/worker_wire_protocol.md`"
+      ],
+      "completed": false
     }
   ]
 }

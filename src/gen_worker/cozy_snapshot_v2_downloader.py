@@ -82,7 +82,7 @@ class CozySnapshotV2Downloader:
       - if `resolved` is provided, skip Cozy Hub API calls and use the provided
         presigned URLs directly.
 
-    On-disk layout under <base_dir>/cozy:
+    On-disk layout under <base_dir>:
       - blobs/blake3/<aa>/<bb>/<digest>
       - snapshots/<snapshot_digest>/...
     """
@@ -100,9 +100,8 @@ class CozySnapshotV2Downloader:
         *,
         resolved: Optional[Any] = None,
     ) -> Path:
-        cozy_root = base_dir / "cozy"
-        blobs_root = cozy_root / "blobs"
-        snaps_root = cozy_root / "snapshots"
+        blobs_root = base_dir / "blobs"
+        snaps_root = base_dir / "snapshots"
         blobs_root.mkdir(parents=True, exist_ok=True)
         snaps_root.mkdir(parents=True, exist_ok=True)
 

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import json
-import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 
+from .cache_paths import worker_model_cache_dir
 from .model_refs import parse_model_ref
 
 
@@ -24,11 +24,11 @@ def _blob_path(blobs_root: Path, digest: str) -> Path:
 
 
 def _cozy_snapshot_dir(base_dir: Path, snapshot_digest: str) -> Path:
-    return base_dir / "cozy" / "snapshots" / snapshot_digest
+    return base_dir / "snapshots" / snapshot_digest
 
 
 def _cozy_blobs_root(base_dir: Path) -> Path:
-    return base_dir / "cozy" / "blobs"
+    return base_dir / "blobs"
 
 
 def _extract_snapshot_digest(resolved_entry: Any) -> Optional[str]:
@@ -87,7 +87,7 @@ def _missing_bytes_for_resolved_model(base_dir: Path, resolved_entry: Any) -> Op
 
 
 def _cache_dir() -> Path:
-    return Path(os.getenv("WORKER_MODEL_CACHE_DIR", "/tmp/cozy/models"))
+    return worker_model_cache_dir()
 
 
 @dataclass

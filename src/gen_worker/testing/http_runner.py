@@ -15,6 +15,7 @@ import aiohttp
 from aiohttp import web
 import msgspec
 
+from gen_worker.cache_paths import worker_model_cache_dir
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.worker import ActionContext, Worker
 
@@ -301,7 +302,7 @@ async def serve_http(argv: Optional[list[str]] = None) -> None:
         models = (body or {}).get("models") or []
         if not isinstance(models, list) or not models:
             return _json_response({"error": "missing_models"}, status=400)
-        cache_dir = Path(os.getenv("WORKER_MODEL_CACHE_DIR") or "/tmp/cozy/models")
+        cache_dir = worker_model_cache_dir()
         cache_dir.mkdir(parents=True, exist_ok=True)
 
         out: list[dict[str, Any]] = []

@@ -17,7 +17,7 @@ from gen_worker.worker import Worker
 
 def test_startup_prefetch_warms_disk_and_reports_disk_models(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RUNPOD_POD_ID", "pod-test")
-    monkeypatch.setenv("WORKER_MODEL_CACHE_DIR", str(tmp_path / "cache"))
+    monkeypatch.setenv("TENSORHUB_CACHE_DIR", str(tmp_path))
     monkeypatch.setenv("WORKER_MAX_CONCURRENT_DOWNLOADS", "1")
 
     # Start a tiny HTTP file server to act as the "presigned URL" origin.

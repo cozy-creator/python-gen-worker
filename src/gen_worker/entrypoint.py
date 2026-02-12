@@ -17,6 +17,7 @@ import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .cache_paths import worker_model_cache_dir
 from .cozy_toml import constraint_satisfied, load_cozy_toml
 
 try:
@@ -188,12 +189,11 @@ def _preflight_cache_dirs() -> Dict[str, str]:
     """
     Validate model cache directory writeability before worker startup.
 
-    - Primary: WORKER_MODEL_CACHE_DIR (default: /tmp/cozy/models)
+    - Primary: ${TENSORHUB_CACHE_DIR}/cas (default TENSORHUB_CACHE_DIR=~/.cache/tensorhub)
     - Optional local cache: WORKER_LOCAL_MODEL_CACHE_DIR (if set)
-    - Optional fallback: WORKER_CACHE_DIR_FALLBACK
     """
-    primary = (os.getenv("WORKER_MODEL_CACHE_DIR", "/tmp/cozy/models") or "").strip() or "/tmp/cozy/models"
-    fallback = (os.getenv("WORKER_CACHE_DIR_FALLBACK", "") or "").strip()
+    default_primary = str(worker_model_cache_dir())
+    primary = default_primary
     local_cache = (os.getenv("WORKER_LOCAL_MODEL_CACHE_DIR", "") or "").strip()
 
     _log_startup_phase(
@@ -201,43 +201,17 @@ def _preflight_cache_dirs() -> Dict[str, str]:
         status="starting",
         primary_cache_dir=primary,
         local_cache_dir=local_cache or None,
-        fallback_cache_dir=fallback or None,
+        tensorhub_cache_dir=os.getenv("TENSORHUB_CACHE_DIR", "~/.cache/tensorhub"),
     )
 
-    ok, details = _check_cache_path("WORKER_MODEL_CACHE_DIR", primary)
+    ok, details = _check_cache_path("TENSORHUB_CAS_DIR", primary)
     effective_primary = primary
     if not ok:
-        if fallback:
-            _log_startup_phase(
-                "cache_preflight_fallback_attempt",
-                status="starting",
-                failed_path=primary,
-                fallback_path=fallback,
-            )
-            ok_fb, fb_details = _check_cache_path("WORKER_CACHE_DIR_FALLBACK", fallback)
-            if ok_fb:
-                os.environ["WORKER_MODEL_CACHE_DIR"] = fallback
-                effective_primary = fallback
-                _log_startup_phase(
-                    "cache_preflight_fallback_enabled",
-                    status="ok",
-                    original_path=primary,
-                    fallback_path=fallback,
-                )
-            else:
-                raise RuntimeError(
-                    "worker cache preflight failed for primary and fallback paths. "
-                    f"primary={primary} ({details.get('exception_class')}: {details.get('exception_message')}), "
-                    f"fallback={fallback} ({fb_details.get('exception_class')}: {fb_details.get('exception_message')}). "
-                    "Fix volume permissions/ownership or choose a writable cache path."
-                )
-        else:
-            raise RuntimeError(
-                "worker cache preflight failed for WORKER_MODEL_CACHE_DIR="
-                f"{primary} ({details.get('exception_class')}: {details.get('exception_message')}). "
-                "Fix volume permissions/ownership, run container as a user with write access, "
-                "or set WORKER_CACHE_DIR_FALLBACK to a writable directory such as /tmp/cozy/models."
-            )
+        raise RuntimeError(
+            "worker cache preflight failed for tensorhub CAS path "
+            f"{primary} ({details.get('exception_class')}: {details.get('exception_message')}). "
+            "Fix volume permissions/ownership or set TENSORHUB_CACHE_DIR to a writable tensorhub cache root."
+        )
 
     effective_local = local_cache
     if local_cache:

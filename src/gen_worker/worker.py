@@ -68,6 +68,8 @@ from .model_refs import parse_model_ref
 from .types import Asset
 from .model_cache import ModelCache, ModelCacheStats, ModelLocation
 from .run_metrics_v1 import RunMetricsV1, best_effort_bytes_downloaded, best_effort_init_model_metrics, safe_json_bytes
+from .cache_paths import worker_local_model_cache_dir_default, worker_model_cache_dir
+from .wire_protocol import WIRE_PROTOCOL_MAJOR, WIRE_PROTOCOL_MINOR, wire_protocol_version_string
 from .injection import (
     InjectionSpec,
     ModelRef,
@@ -777,7 +779,10 @@ class Worker:
 
         # Local (non-NFS) cache for NFS->local snapshot localization.
         # Empty WORKER_LOCAL_MODEL_CACHE_DIR disables localization entirely.
-        self._local_model_cache_dir = os.getenv("WORKER_LOCAL_MODEL_CACHE_DIR", "/tmp/cozy/local-model-cache").strip()
+        self._local_model_cache_dir = os.getenv(
+            "WORKER_LOCAL_MODEL_CACHE_DIR",
+            str(worker_local_model_cache_dir_default()),
+        ).strip()
         self._local_model_cache: Optional[Any] = None
         self._local_model_cache_lock = threading.Lock()
         self._last_disk_inventory_hash: str = ""
@@ -954,7 +959,9 @@ class Worker:
         if self._downloader:
             logger.info(f"ModelDownloader of type '{type(self._downloader).__name__}' configured.")
 
-        logger.info(f"Created worker: ID={self.worker_id}, Scheduler={scheduler_addr}")
+        logger.info(
+            f"Created worker: ID={self.worker_id}, Scheduler={scheduler_addr}, WireProtocol={wire_protocol_version_string()}"
+        )
         self._emit_startup_phase(
             "boot",
             status="ok",
@@ -994,6 +1001,29 @@ class Worker:
             leader = details.split("not_leader:", 1)[1].strip()
             return leader or None
         return None
+
+    @staticmethod
+    def _is_protocol_incompatibility(details: Optional[str]) -> bool:
+        return bool(details and details.startswith("unsupported_worker_protocol:"))
+
+    def _handle_protocol_incompatibility(self, details: str) -> None:
+        logger.error(
+            "Scheduler rejected worker wire protocol %s (%s). "
+            "This worker cannot connect to the current orchestrator policy.",
+            wire_protocol_version_string(),
+            details,
+        )
+        self._emit_startup_phase(
+            "scheduler_protocol_incompatible",
+            status="error",
+            level=logging.ERROR,
+            emit_worker_event=False,
+            wire_protocol=wire_protocol_version_string(),
+            grpc_details=details,
+        )
+        self._running = False
+        self._close_connection()
+        self._stop_event.set()
 
     def _set_scheduler_addr(self, addr: str) -> None:
         addr = addr.strip()
@@ -1618,7 +1648,7 @@ class Worker:
             return
         run_id = ctx.run_id
 
-        base_dir = os.getenv("WORKER_RUN_DIR", "/tmp/cozy").rstrip("/")
+        base_dir = os.getenv("WORKER_RUN_DIR", "/tmp/tensorhub/run").rstrip("/")
         local_inputs_dir = os.path.join(base_dir, run_id, "inputs")
         os.makedirs(local_inputs_dir, exist_ok=True)
         cache_dir = os.getenv("WORKER_CACHE_DIR", os.path.join(base_dir, "cache")).rstrip("/")
@@ -1899,7 +1929,9 @@ class Worker:
             code = e.code() if hasattr(e, 'code') and callable(e.code) else grpc.StatusCode.UNKNOWN
             details = e.details() if hasattr(e, 'details') and callable(e.details) else str(e)
             leader = self._extract_leader_addr(details)
-            if code == grpc.StatusCode.FAILED_PRECONDITION and leader:
+            if code == grpc.StatusCode.FAILED_PRECONDITION and self._is_protocol_incompatibility(details):
+                self._handle_protocol_incompatibility(str(details))
+            elif code == grpc.StatusCode.FAILED_PRECONDITION and leader:
                 logger.warning(f"Scheduler returned not_leader for {self.scheduler_addr}; redirecting to {leader}")
                 self._leader_hint = leader
                 self._set_scheduler_addr(leader)
@@ -2104,7 +2136,9 @@ class Worker:
             )
             registration = pb.WorkerRegistration(
                 resources=resources,
-                is_heartbeat=is_heartbeat
+                is_heartbeat=is_heartbeat,
+                protocol_major=WIRE_PROTOCOL_MAJOR,
+                protocol_minor=WIRE_PROTOCOL_MINOR,
             )
             message = pb.WorkerSchedulerMessage(worker_registration=registration)
             # logger.info(f"DEBUG: Preparing to send registration. Resource object: {resources}")
@@ -2328,7 +2362,9 @@ class Worker:
                      logger.warning(f"gRPC error during shutdown: {code} - {details}")
             elif code == grpc.StatusCode.FAILED_PRECONDITION:
                 leader = self._extract_leader_addr(details)
-                if leader:
+                if self._is_protocol_incompatibility(details):
+                    self._handle_protocol_incompatibility(str(details))
+                elif leader:
                     logger.warning(f"Scheduler redirect received; reconnecting to leader at {leader}")
                     self._leader_hint = leader
                     self._set_scheduler_addr(leader)
@@ -2547,7 +2583,7 @@ class Worker:
 
         This warms the disk cache and increments readiness via disk_models in the next heartbeat.
         """
-        cache_dir = Path(os.getenv("WORKER_MODEL_CACHE_DIR") or "/tmp/cozy/models")
+        cache_dir = worker_model_cache_dir()
         cache_dir.mkdir(parents=True, exist_ok=True)
 
         # Concurrency cap (best-effort). download() itself is blocking, so we use worker threads.
@@ -2730,7 +2766,7 @@ class Worker:
         if not digest:
             # Tag refs are mutable; rely on downloads.
             return None
-        snap_dir = cache_dir / "cozy" / "snapshots" / digest
+        snap_dir = cache_dir / "snapshots" / digest
         if snap_dir.exists():
             return snap_dir
         return None
@@ -3259,7 +3295,13 @@ class Worker:
         try:
             vram = self._model_cache.get_vram_models() if self._model_cache else []
             disk = self._model_cache.get_disk_models() if self._model_cache else []
-            best_effort_init_model_metrics(rm, rm.required_models, vram_models=vram, disk_models=disk, cache_dir=Path(os.getenv("WORKER_MODEL_CACHE_DIR", "/tmp/cozy/models")))
+            best_effort_init_model_metrics(
+                rm,
+                rm.required_models,
+                vram_models=vram,
+                disk_models=disk,
+                cache_dir=worker_model_cache_dir(),
+            )
         except Exception:
             pass
 
@@ -3707,7 +3749,7 @@ class Worker:
         try:
             from .mount_backend import mount_backend_for_path, volume_key_for_path
 
-            p = path or Path(os.getenv("WORKER_MODEL_CACHE_DIR", "/tmp/cozy/models"))
+            p = path or worker_model_cache_dir()
             mb = mount_backend_for_path(p)
             if mb is None:
                 return {}
@@ -3828,7 +3870,7 @@ class Worker:
                     if local is None:
                         if self._downloader is None:
                             raise ValueError("diffusers pipeline injection requires a model downloader")
-                        cache_dir = os.getenv("WORKER_MODEL_CACHE_DIR", "/tmp/cozy/models")
+                        cache_dir = str(worker_model_cache_dir())
                         # Best-effort download timing.
                         t_dl0 = time.monotonic()
                         local = self._downloader.download(model_id, cache_dir)
@@ -3855,8 +3897,9 @@ class Worker:
                             except Exception:
                                 pass
 
-                        # Ensure the shared cache has a durable snapshot under WORKER_MODEL_CACHE_DIR
-                        # before any NFS->local localization happens, so future pods can warm-start.
+                        # Ensure the shared cache has a durable snapshot under
+                        # ${TENSORHUB_CACHE_DIR}/cas before any NFS->local
+                        # localization happens, so future pods can warm-start.
                         try:
                             lp = Path(local or "")
                             if lp.exists():

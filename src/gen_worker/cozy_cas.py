@@ -157,8 +157,8 @@ class CozySnapshotDownloader:
     """
     Downloads Cozy snapshots using Cozy Hub manifest APIs into a local CAS layout:
 
-      <base>/cozy/objects/<object_digest>/...
-      <base>/cozy/snapshots/<snapshot_digest>/...
+      <base>/objects/<object_digest>/...
+      <base>/snapshots/<snapshot_digest>/...
     """
 
     def __init__(self, client: CozyHubClient) -> None:
@@ -179,9 +179,8 @@ class CozySnapshotDownloader:
         if not snapshot_digest:
             raise ValueError("snapshot digest missing after canonicalization")
 
-        cozy_root = base_dir / "cozy"
-        objects_root = cozy_root / "objects"
-        snaps_root = cozy_root / "snapshots"
+        objects_root = base_dir / "objects"
+        snaps_root = base_dir / "snapshots"
         objects_root.mkdir(parents=True, exist_ok=True)
         snaps_root.mkdir(parents=True, exist_ok=True)
 

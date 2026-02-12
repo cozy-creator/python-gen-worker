@@ -155,6 +155,6 @@ def test_cozy_snapshot_downloader_materializes(tmp_path: Path, use_tag: bool) ->
         local = asyncio.run(dl.ensure_snapshot(tmp_path, ref))
         assert (local / "transformer" / "config.json").read_bytes() == config_bytes
         assert (local / "model_index.json").read_bytes() == model_index_bytes
-        assert (tmp_path / "cozy" / "objects" / obj_digest / ".cozy-object.json").exists()
+        assert (tmp_path / "objects" / obj_digest / ".cozy-object.json").exists()
     finally:
         _stop_server(srv)

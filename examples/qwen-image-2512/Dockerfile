@@ -1,7 +1,8 @@
 # Tenant-supplied Dockerfile example.
 #
-# - Installs torch + gen-worker in stable cacheable layers.
+# - Installs torch in a stable cacheable layer.
 # - Installs tenant deps from uv.lock without replacing torch/gen-worker.
+# - Installs exactly one gen-worker source from Cozy Hub vendored build context.
 # - Bakes discovered endpoints into /app/.cozy/manifest.json at build time.
 #
 ARG PYTHON_VERSION=3.12
@@ -26,9 +27,6 @@ RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
     uv pip install --system --break-system-packages --torch-backend ${UV_TORCH_BACKEND} \
       "torch${TORCH_SPEC}"
 
-RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
-    uv pip install --system --break-system-packages gen-worker
-
 FROM cozy_base AS cozy_final
 
 COPY pyproject.toml uv.lock /app/
@@ -45,8 +43,15 @@ COPY . /app
 RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
     uv pip install --system --break-system-packages --no-deps --no-sources /app
 
+RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
+    test -f /app/.cozy/vendor/gen-worker/pyproject.toml \
+    && uv pip install --system --break-system-packages /app/.cozy/vendor/gen-worker
+
 RUN mkdir -p /app/.cozy \
-    && python -m gen_worker.discover > /app/.cozy/manifest.json
+    && python - <<'PY' > /app/.cozy/manifest.json
+import runpy
+runpy.run_module("gen_worker.discover", run_name="__main__")
+PY
 
 
 ENV HOME=/root

@@ -127,7 +127,7 @@ def test_snapshot_v2_downloader_materializes(tmp_path: Path) -> None:
         local = asyncio.run(dl.ensure_snapshot(tmp_path, ref))
         assert (local / "cozy.pipeline.yaml").read_bytes() == b1
         assert (local / "unet" / "config.json").read_bytes() == b2
-        blob1 = tmp_path / "cozy" / "blobs" / "blake3" / b1_digest[:2] / b1_digest[2:4] / b1_digest
+        blob1 = tmp_path / "blobs" / "blake3" / b1_digest[:2] / b1_digest[2:4] / b1_digest
         assert blob1.exists()
     finally:
         _stop_server(srv)
@@ -183,7 +183,7 @@ def test_snapshot_v2_downloader_uses_orchestrator_resolved_urls(tmp_path: Path) 
         local = asyncio.run(dl.ensure_snapshot(tmp_path, ref, resolved=resolved))
         assert (local / "cozy.pipeline.yaml").read_bytes() == b1
 
-        blob1 = tmp_path / "cozy" / "blobs" / "blake3" / b1_digest[:2] / b1_digest[2:4] / b1_digest
+        blob1 = tmp_path / "blobs" / "blake3" / b1_digest[:2] / b1_digest[2:4] / b1_digest
         assert blob1.exists()
     finally:
         _stop_server(srv)
