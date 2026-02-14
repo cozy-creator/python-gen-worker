@@ -260,13 +260,17 @@ def _run_main() -> int:
         logger.error(str(e))
         return 1
 
-    scheduler_addr_raw = os.getenv("SCHEDULER_ADDR", "localhost:8080")
+    scheduler_addr_raw = (os.getenv("SCHEDULER_PUBLIC_ADDR") or "").strip()
     scheduler_addrs_raw = os.getenv("SCHEDULER_ADDRS", "")
     worker_id = os.getenv("WORKER_ID", "").strip()
     worker_jwt = os.getenv("WORKER_JWT", "").strip()
     use_tls_env = os.getenv("USE_TLS")
     reconnect_delay = int(os.getenv("RECONNECT_DELAY", "5") or "5")
     max_reconnect_attempts = int(os.getenv("MAX_RECONNECT_ATTEMPTS", "0") or "0")
+
+    if not scheduler_addr_raw:
+        logger.error("SCHEDULER_PUBLIC_ADDR is required (scheduler dial address). Refusing to start worker.")
+        return 1
 
     seed_addrs = [addr.strip() for addr in scheduler_addrs_raw.split(",") if addr.strip()]
     scheduler_addr, inferred_tls = _normalize_grpc_addr(scheduler_addr_raw)

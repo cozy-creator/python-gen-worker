@@ -53,7 +53,7 @@ def hello(ctx: ActionContext, payload: Input) -> Output:
 
     # Start a worker process that connects to our mock orchestrator.
     env = dict(os.environ)
-    env["SCHEDULER_ADDR"] = f"127.0.0.1:{port}"
+    env["SCHEDULER_PUBLIC_ADDR"] = f"127.0.0.1:{port}"
     (tmp_path / "cozy.toml").write_text(
         """
 schema_version = 1
