@@ -2,7 +2,7 @@ schema_version = 1
 
 name = "image-gen"
 main = "image_gen.main"
-gen_worker = ">=0.2.0,<0.3.0"
+gen_worker = ">=0.2.0"
 
 [host.requirements]
 cuda = "12.6"

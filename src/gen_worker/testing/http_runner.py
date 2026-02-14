@@ -120,8 +120,6 @@ class DevWorker(Worker):
             timeout_ms=int(timeout_ms or 0),
             owner=str(owner or ""),
             user_id=str(user_id or ""),
-            file_base_url="",  # local-only
-            file_token="",  # local-only
         )
 
         # Mirror _handle_run_request's ctx construction, but use local output backend.

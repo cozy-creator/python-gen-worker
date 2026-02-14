@@ -4,21 +4,14 @@ name = "flux2-klein-4b"
 # Python import path used for endpoint discovery (not a Docker ENTRYPOINT).
 main = "flux2_klein_4b.main"
 # gen-worker runtime compatibility constraint (validated by Cozy Hub at publish time).
-gen_worker = ">=0.2.0,<0.3.0"
+gen_worker = ">=0.2.0"
 
 [host.requirements]
 # If cuda is set, the platform treats this worker as requiring an NVIDIA GPU.
 cuda = "12.6"
 
-[models]
-# Model key -> model ref mapping used by ModelRef(Src.DEPLOYMENT, "<key>") injections.
-flux2-klein-4b = "hf:black-forest-labs/FLUX.2-klein-4B"
-flux2-klein-4b_fp8 = { ref = "hf:black-forest-labs/FLUX.2-klein-4B", dtypes = ["fp8"] }
-flux2-klein-4b_int8 = { ref = "hf:black-forest-labs/FLUX.2-klein-4B", dtypes = ["int8"] }
-flux2-klein-4b_int4 = { ref = "hf:black-forest-labs/FLUX.2-klein-4B", dtypes = ["int4"] }
-
 [resources]
-vram_gb = 12
+vram_gb = 24
 ram_gb = 32
 cpu_cores = 8
 disk_gb = 50

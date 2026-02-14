@@ -30,6 +30,8 @@ from gen_worker.injection import ModelRef
 
 from gen_worker.cozy_toml import CozyModelSpec, CozyToml, load_cozy_toml
 
+_ALLOWED_MODEL_DTYPES: frozenset[str] = frozenset({"fp16", "bf16", "fp8", "fp32", "int8", "int4"})
+
 
 def _type_id(t: type) -> Dict[str, str]:
     """Get module and qualname for a type."""
@@ -236,10 +238,20 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
             # Canonicalize older "release" terminology into "fixed" for manifests.
             if src == "release":
                 src = "fixed"
+            dtypes = []
+            try:
+                dtypes = [str(x).strip() for x in list(getattr(mr, "dtypes", ()) or ()) if str(x).strip()]
+            except Exception:
+                dtypes = []
+            ref = ""
+            try:
+                ref = str(getattr(mr, "ref", "") or "").strip()
+            except Exception:
+                ref = ""
             injections.append({
                 "param": p.name,
                 "type": _type_qualname(base_t),
-                "model_ref": {"source": src, "key": mr.key},
+                "model_ref": {"source": src, "key": mr.key, "ref": ref, "dtypes": dtypes},
             })
             continue
 
@@ -298,7 +310,7 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
         delta_schema, delta_sha = _schema_and_hash(delta_type)
 
     # Extract required_models: fixed-source model keys that must be available.
-    # These are short-keys declared in [models] (cozy.toml) that the function needs.
+    # These are keys used by ModelRef(FIXED, "<key>", ...) injections.
     required_models = [
         inj["model_ref"]["key"]
         for inj in injections
@@ -538,16 +550,57 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
 
         # Endpoint-specific mapping wins; otherwise fall back to global [models].
         eff = cozy.endpoint_models.get(endpoint_name) or cozy.models
+        eff2: Dict[str, CozyModelSpec] = dict(eff or {})
 
-        # Validate required fixed keys for this function against the effective mapping.
+        # If a fixed ModelRef has an explicit ref (and optional dtypes) in the signature,
+        # auto-add it to the effective mapping so cozy.toml [models] isn't required for
+        # fixed endpoints.
         required_keys = set(fn.get("required_models", []) or [])
-        missing = sorted(k for k in required_keys if k not in eff)
+        inj_list = list(fn.get("injection_json", []) or [])
+        sig_specs: Dict[str, CozyModelSpec] = {}
+        for inj in inj_list:
+            mr = dict(inj.get("model_ref", {}) or {})
+            if mr.get("source") != "fixed":
+                continue
+            key = str(mr.get("key") or "").strip()
+            if not key:
+                continue
+            ref = str(mr.get("ref") or "").strip()
+            if not ref:
+                # Fallback: allow using a full repo ref directly as the key.
+                # (Still treated as a FIXED keyspace entry; useful for quick examples.)
+                if "/" in key:
+                    ref = key
+                else:
+                    continue
+            dtypes_raw = mr.get("dtypes")
+            dtypes: tuple[str, ...] = ()
+            if isinstance(dtypes_raw, list):
+                cleaned = tuple(str(x).strip() for x in dtypes_raw if str(x).strip())
+                bad = sorted({x for x in cleaned if x not in _ALLOWED_MODEL_DTYPES})
+                if bad:
+                    raise ValueError(f"endpoint '{endpoint_name}' has invalid model dtypes for {key!r}: {bad}")
+                dtypes = cleaned
+            if dtypes:
+                sig_specs[key] = CozyModelSpec(ref=ref, dtypes=dtypes)
+            else:
+                sig_specs[key] = CozyModelSpec(ref=ref)
+
+        missing = []
+        for k in sorted(required_keys):
+            if k in eff2:
+                continue
+            if k in sig_specs:
+                eff2[k] = sig_specs[k]
+                continue
+            missing.append(k)
         if missing:
             raise ValueError(
-                f"endpoint '{endpoint_name}' requires model keys not defined in cozy.toml [models]: {missing}"
+                f"endpoint '{endpoint_name}' requires model keys not defined in cozy.toml [models] "
+                f"and not provided via signature ModelRef(ref=...): {missing}"
             )
-        if eff:
-            models_by_function[fn_name] = _models_by_key_to_json(eff)
+        if eff2:
+            models_by_function[fn_name] = _models_by_key_to_json(eff2)
 
     if models_by_function:
         manifest["models_by_function"] = models_by_function

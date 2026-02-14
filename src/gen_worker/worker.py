@@ -222,6 +222,16 @@ def _default_output_prefix(run_id: str) -> str:
     return f"runs/{run_id}/outputs/"
 
 
+def _normalize_output_ref(ref: str) -> str:
+    out = str(ref or "").strip()
+    if not out:
+        raise ValueError("invalid ref")
+    lower = out.lower()
+    if lower.startswith("http://") or lower.startswith("https://"):
+        raise ValueError("output ref must be a logical file ref, not a URL")
+    return out.lstrip("/")
+
+
 def _require_file_api_base_url() -> str:
     base = os.getenv("FILE_API_BASE_URL", "").strip()
     if not base:
@@ -377,6 +387,7 @@ class ActionContext:
         timeout_ms: Optional[int] = None,
         file_api_base_url: Optional[str] = None,
         file_api_token: Optional[str] = None,
+        materialized_input_urls: Optional[Dict[str, str]] = None,
         local_output_dir: Optional[str] = None,
         resolved_cozy_models_by_id: Optional[Dict[str, Any]] = None,
         required_models: Optional[List[str]] = None,
@@ -387,6 +398,7 @@ class ActionContext:
         self._timeout_ms = timeout_ms
         self._file_api_base_url = (file_api_base_url or "").strip() or None
         self._file_api_token = (file_api_token or "").strip() or None
+        self._materialized_input_urls = dict(materialized_input_urls or {})
         self._local_output_dir = (local_output_dir or "").strip() or None
         self._resolved_cozy_models_by_id = resolved_cozy_models_by_id
         self._required_models = list(required_models or [])
@@ -468,6 +480,15 @@ class ActionContext:
             raise ValueError("path traversal")
         return str(out)
 
+    def _materialized_input_url_for_ref(self, ref: str) -> Optional[str]:
+        raw = (ref or "").strip().lstrip("/")
+        if not raw:
+            return None
+        out = str(self._materialized_input_urls.get(raw) or "").strip()
+        if out:
+            return out
+        return None
+
 
     @property
     def resolved_cozy_models_by_id(self) -> Optional[Dict[str, Any]]:
@@ -527,9 +548,7 @@ class ActionContext:
         max_bytes = int(os.getenv("WORKER_MAX_OUTPUT_FILE_BYTES", str(200 * 1024 * 1024)))
         if max_bytes > 0 and len(data) > max_bytes:
             raise ValueError("output file too large")
-        ref = ref.strip().lstrip("/")
-        if not ref.startswith(_default_output_prefix(self.run_id)):
-            raise ValueError(f"ref must start with '{_default_output_prefix(self.run_id)}'")
+        ref = _normalize_output_ref(ref)
 
         local_path = self._resolve_local_output_path(ref)
         if local_path:
@@ -602,9 +621,7 @@ class ActionContext:
         max_bytes = int(os.getenv("WORKER_MAX_OUTPUT_FILE_BYTES", str(200 * 1024 * 1024)))
         if max_bytes > 0 and len(data) > max_bytes:
             raise ValueError("output file too large")
-        ref = ref.strip().lstrip("/")
-        if not ref.startswith(_default_output_prefix(self.run_id)):
-            raise ValueError(f"ref must start with '{_default_output_prefix(self.run_id)}'")
+        ref = _normalize_output_ref(ref)
 
         local_path = self._resolve_local_output_path(ref)
         if local_path:
@@ -1646,6 +1663,9 @@ class Worker:
         ref = (asset.ref or "").strip()
         if not ref:
             return
+        if not (ref.startswith("http://") or ref.startswith("https://")):
+            if mapped := ctx._materialized_input_url_for_ref(ref):
+                ref = mapped
         run_id = ctx.run_id
 
         base_dir = os.getenv("WORKER_RUN_DIR", "/tmp/tensorhub/run").rstrip("/")
@@ -1672,9 +1692,13 @@ class Worker:
             asset.sha256 = sha256_hex
             return
 
-        # Cozy Hub file ref (owner scoped) - use orchestrator file API with HEAD+cache.
-        base = ctx._get_file_api_base_url()
-        token = ctx._get_file_api_token()
+        # Non-URL refs require explicit file API credentials. Standard execution should
+        # receive presigned input URLs from orchestrator and avoid this path.
+        base = (getattr(ctx, "_file_api_base_url", None) or "").strip()
+        token = (getattr(ctx, "_file_api_token", None) or "").strip()
+        if not base or not token:
+            raise RuntimeError("input ref was not materialized to URL and no file API credentials were provided")
+        base = base.rstrip("/")
         url = f"{base}/api/v1/file/{_encode_ref_for_url(ref)}"
 
         head_req = _http_request("HEAD", url, token, owner=ctx.owner)
@@ -3001,6 +3025,26 @@ class Worker:
         file_base_url = str(getattr(request, "file_base_url", "") or "")
         file_token = str(getattr(request, "file_token", "") or "")
         resolved_cozy_models_by_id = dict(getattr(request, "resolved_cozy_models_by_id", {}) or {})
+        materialized_input_urls: Dict[str, str] = {}
+        raw_urls_map = getattr(request, "input_ref_urls", None)
+        if isinstance(raw_urls_map, cabc.Mapping):
+            for k, v in raw_urls_map.items():
+                ks = str(k or "").strip().lstrip("/")
+                vs = str(v or "").strip()
+                if ks and vs:
+                    materialized_input_urls[ks] = vs
+        raw_urls = getattr(request, "input_ref_urls_json", None)
+        if isinstance(raw_urls, str) and raw_urls.strip():
+            try:
+                parsed = json.loads(raw_urls)
+                if isinstance(parsed, dict):
+                    for k, v in parsed.items():
+                        ks = str(k or "").strip().lstrip("/")
+                        vs = str(v or "").strip()
+                        if ks and vs:
+                            materialized_input_urls[ks] = vs
+            except Exception:
+                pass
 
         required_models_raw = list(getattr(request, "required_variant_refs", []) or [])
         if required_models_raw:
@@ -3061,6 +3105,7 @@ class Worker:
             timeout_ms=timeout_ms if timeout_ms > 0 else None,
             file_api_base_url=file_base_url or None,
             file_api_token=file_token or None,
+            materialized_input_urls=materialized_input_urls or None,
             local_output_dir=None,
             resolved_cozy_models_by_id=resolved_cozy_models_by_id or None,
             required_models=required_models or None,
@@ -3132,6 +3177,26 @@ class Worker:
         timeout_ms = int(getattr(cmd, "timeout_ms", 0) or 0) or None
         file_base_url = str(getattr(cmd, "file_base_url", "") or "")
         file_token = str(getattr(cmd, "file_token", "") or "")
+        materialized_input_urls: Dict[str, str] = {}
+        raw_urls_map = getattr(cmd, "input_ref_urls", None)
+        if isinstance(raw_urls_map, cabc.Mapping):
+            for k, v in raw_urls_map.items():
+                ks = str(k or "").strip().lstrip("/")
+                vs = str(v or "").strip()
+                if ks and vs:
+                    materialized_input_urls[ks] = vs
+        raw_urls = getattr(cmd, "input_ref_urls_json", None)
+        if isinstance(raw_urls, str) and raw_urls.strip():
+            try:
+                parsed = json.loads(raw_urls)
+                if isinstance(parsed, dict):
+                    for k, v in parsed.items():
+                        ks = str(k or "").strip().lstrip("/")
+                        vs = str(v or "").strip()
+                        if ks and vs:
+                            materialized_input_urls[ks] = vs
+            except Exception:
+                pass
         ctx = ActionContext(
             session_id,
             emitter=self._emit_progress_event,
@@ -3140,6 +3205,7 @@ class Worker:
             timeout_ms=timeout_ms,
             file_api_base_url=file_base_url or None,
             file_api_token=file_token or None,
+            materialized_input_urls=materialized_input_urls or None,
             resolved_cozy_models_by_id=getattr(self, "_resolved_cozy_models_by_id_baseline", None) or None,
         )
 

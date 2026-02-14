@@ -190,11 +190,13 @@ class WorkerSession:
         user_id: str = "",
         timeout_ms: int = 0,
         required_variant_refs: Tuple[str, ...] = (),
-        file_base_url: str = "",
-        file_token: str = "",
+        input_ref_urls: Optional[Dict[str, str]] = None,
     ) -> str:
         rid = run_id or str(uuid.uuid4())
-        raw = msgspec.msgpack.encode(payload_obj)
+        payload = payload_obj
+        if input_ref_urls:
+            payload = _rewrite_refs_to_urls(payload_obj, input_ref_urls)
+        raw = msgspec.msgpack.encode(payload)
         req = pb.TaskExecutionRequest(
             run_id=rid,
             function_name=function_name,
@@ -203,8 +205,6 @@ class WorkerSession:
             timeout_ms=timeout_ms,
             owner=owner,
             user_id=user_id,
-            file_base_url=file_base_url,
-            file_token=file_token,
         )
         self.send(pb.WorkerSchedulerMessage(run_request=req))
         return rid
@@ -299,6 +299,38 @@ def _parse_payload_json(payload_json: str) -> Any:
         raise SystemExit(f"invalid --payload-json: {e}")
 
 
+def _parse_input_ref_urls(raw_items: list[str]) -> Dict[str, str]:
+    out: Dict[str, str] = {}
+    for raw in raw_items:
+        item = str(raw or "").strip()
+        if not item:
+            continue
+        if "=" not in item:
+            raise SystemExit(f"invalid --input-ref-url {item!r}; expected ref=url")
+        ref, url = item.split("=", 1)
+        ref = ref.strip().lstrip("/")
+        url = url.strip()
+        if not ref or not url:
+            raise SystemExit(f"invalid --input-ref-url {item!r}; expected ref=url")
+        out[ref] = url
+    return out
+
+
+def _rewrite_refs_to_urls(obj: Any, input_ref_urls: Dict[str, str]) -> Any:
+    if isinstance(obj, dict):
+        out: Dict[Any, Any] = {}
+        for k, v in obj.items():
+            if k == "ref" and isinstance(v, str):
+                key = v.strip().lstrip("/")
+                out[k] = input_ref_urls.get(key, v)
+            else:
+                out[k] = _rewrite_refs_to_urls(v, input_ref_urls)
+        return out
+    if isinstance(obj, list):
+        return [_rewrite_refs_to_urls(v, input_ref_urls) for v in obj]
+    return obj
+
+
 def _format_msg(msg: pb.WorkerSchedulerMessage) -> str:
     if msg.HasField("worker_registration"):
         return "worker_registration"
@@ -355,8 +387,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--user-id", default="")
     ap.add_argument("--required-model", action="append", default=[], help="repeatable model id/key list for injections")
 
-    ap.add_argument("--file-base-url", default="", help="file API base URL to pass to the worker (TaskExecutionRequest.file_base_url)")
-    ap.add_argument("--file-token", default="", help="file token to pass to the worker (TaskExecutionRequest.file_token)")
+    ap.add_argument(
+        "--input-ref-url",
+        action="append",
+        default=[],
+        help="repeatable mapping ref=url used to rewrite payload refs before sending run_request",
+    )
     ap.add_argument("--serve-files-dir", default="", help="if set, start a tiny dev file API server writing into this directory")
     ap.add_argument("--serve-files-listen", default="0.0.0.0:8081", help="listen address for --serve-files-dir server (host:port)")
 
@@ -376,7 +412,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     server.start()
     file_server: Optional[ThreadingHTTPServer] = None
     if args.serve_files_dir:
-        file_server = _start_file_api_server(args.serve_files_listen, args.serve_files_dir, args.file_token)
+        file_server = _start_file_api_server(args.serve_files_listen, args.serve_files_dir, "")
         print(f"[file-api] listening={args.serve_files_listen} dir={args.serve_files_dir!r}")
     try:
         sess = orch.get_session(timeout_s=float(args.wait_s))
@@ -391,6 +427,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             print(f"[connected] metadata={list(sess.metadata)}")
 
         payload_obj = _parse_payload_json(args.payload_json)
+        input_ref_urls = _parse_input_ref_urls(list(args.input_ref_url or []))
         run_id = sess.run_task(
             function_name=args.function_name,
             payload_obj=payload_obj,
@@ -398,8 +435,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             owner=args.owner,
             user_id=args.user_id,
             required_variant_refs=tuple(args.required_model),
-            file_base_url=str(args.file_base_url or ""),
-            file_token=str(args.file_token or ""),
+            input_ref_urls=input_ref_urls or None,
         )
         print(f"[sent] run_id={run_id} function={args.function_name!r}")
 

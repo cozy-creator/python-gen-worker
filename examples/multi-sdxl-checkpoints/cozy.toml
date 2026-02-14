@@ -2,7 +2,7 @@ schema_version = 1
 
 name = "multi-sdxl-checkpoints"
 main = "multi_sdxl_checkpoints.main"
-gen_worker = ">=0.2.0,<0.3.0"
+gen_worker = ">=0.2.0"
 
 [host.requirements]
 cuda = "12.6"

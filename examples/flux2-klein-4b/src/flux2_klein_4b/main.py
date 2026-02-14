@@ -12,7 +12,6 @@ from PIL import Image
 
 from gen_worker import ActionContext, ResourceRequirements, worker_function
 from gen_worker.injection import ModelRef, ModelRefSource as Src
-from gen_worker.payload_constraints import Clamp
 from gen_worker.types import Asset
 
 logger = logging.getLogger(__name__)
@@ -21,9 +20,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 
 class GenerateInput(msgspec.Struct):
     prompt: str
-    # Turbo model: keep the range tight for latency/cost predictability.
-    # Accept int/float and clamp to [4, 8] (rounded to nearest int).
-    num_inference_steps: Annotated[int | float, Clamp(4, 8, cast="int")] = 8
+    # Keep the range tight for latency/cost predictability; clamped in code.
+    num_inference_steps: int | float = 8
     guidance_scale: float = 1.0
     width: int = 1024
     height: int = 1024
@@ -39,27 +37,26 @@ def _should_enable_seq_offload() -> bool:
     return raw not in {"1", "true", "yes", "y", "t"}
 
 
-@worker_function(ResourceRequirements())
-def generate(
+def _generate(
     ctx: ActionContext,
-    pipeline: Annotated[
-        Flux2KleinPipeline, ModelRef(Src.DEPLOYMENT, "flux2-klein-4b")  # Key from cozy.toml [models]
-    ],
+    pipeline,
     payload: GenerateInput,
+    model_key: str,
 ) -> GenerateOutput:
     if ctx.is_canceled():
         raise InterruptedError("canceled")
 
-    steps = int(payload.num_inference_steps)
+    steps = max(4, min(8, int(payload.num_inference_steps)))
     logger.info(
-        "[run_id=%s] flux2-klein-4b prompt=%r steps=%s (requested=%s)",
+        "[run_id=%s] %s prompt=%r steps=%s (requested=%s)",
         ctx.run_id,
+        model_key,
         payload.prompt,
         steps,
         payload.num_inference_steps,
     )
 
-    # FLUX.2-klein-4B can exceed 8GB VRAM; use sequential CPU offload by default.
+    # FLUX.2-klein variants can exceed 8GB VRAM; use sequential CPU offload by default.
     if torch.cuda.is_available() and _should_enable_seq_offload():
         if not getattr(pipeline, "_cozy_seq_offload_enabled", False):
             pipeline.enable_sequential_cpu_offload(gpu_id=0)
@@ -87,10 +84,33 @@ def generate(
 
 
 @worker_function(ResourceRequirements())
+def generate(
+    ctx: ActionContext,
+    pipeline: Annotated[
+        Flux2KleinPipeline,
+        ModelRef(
+            Src.FIXED,
+            "flux2-klein-4b",
+            ref="black-forest-labs/FLUX.2-klein-4B",
+            dtypes=("bf16",),
+        ),
+    ],
+    payload: GenerateInput,
+) -> GenerateOutput:
+    return _generate(ctx, pipeline, payload, "flux2-klein-4b")
+
+
+@worker_function(ResourceRequirements())
 def generate_fp8(
     ctx: ActionContext,
     pipeline: Annotated[
-        Flux2KleinPipeline, ModelRef(Src.DEPLOYMENT, "flux2-klein-4b_fp8")  # Key from cozy.toml [models]
+        Flux2KleinPipeline,
+        ModelRef(
+            Src.FIXED,
+            "flux2-klein-4b_fp8",
+            ref="black-forest-labs/FLUX.2-klein-4B",
+            dtypes=("fp8",),
+        ),
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:
@@ -100,14 +120,54 @@ def generate_fp8(
     This endpoint is intended to run against an fp8-weight-only artifact (or an artifact
     that the worker can load with torchao-backed fp8 quantization enabled).
     """
-    return generate(ctx, pipeline, payload)
+    return _generate(ctx, pipeline, payload, "flux2-klein-4b_fp8")
+
+
+@worker_function(ResourceRequirements())
+def generate_9b(
+    ctx: ActionContext,
+    pipeline: Annotated[
+        Flux2KleinPipeline,
+        ModelRef(
+            Src.FIXED,
+            "flux2-klein-9b",
+            ref="black-forest-labs/FLUX.2-klein-9B",
+            dtypes=("bf16",),
+        ),
+    ],
+    payload: GenerateInput,
+) -> GenerateOutput:
+    return _generate(ctx, pipeline, payload, "flux2-klein-9b")
+
+
+@worker_function(ResourceRequirements())
+def generate_9b_fp8(
+    ctx: ActionContext,
+    pipeline: Annotated[
+        Flux2KleinPipeline,
+        ModelRef(
+            Src.FIXED,
+            "flux2-klein-9b_fp8",
+            ref="black-forest-labs/FLUX.2-klein-9B",
+            dtypes=("fp8",),
+        ),
+    ],
+    payload: GenerateInput,
+) -> GenerateOutput:
+    return _generate(ctx, pipeline, payload, "flux2-klein-9b_fp8")
 
 
 @worker_function(ResourceRequirements())
 def generate_int8(
     ctx: ActionContext,
     pipeline: Annotated[
-        Flux2KleinPipeline, ModelRef(Src.DEPLOYMENT, "flux2-klein-4b_int8")  # Key from cozy.toml [models]
+        Flux2KleinPipeline,
+        ModelRef(
+            Src.FIXED,
+            "flux2-klein-4b_int8",
+            ref="black-forest-labs/FLUX.2-klein-4B",
+            dtypes=("int8",),
+        ),
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:
@@ -117,14 +177,20 @@ def generate_int8(
     This endpoint is intended to run against an int8-weight-only artifact (or an artifact
     that the worker can load with torchao-backed int8 quantization enabled).
     """
-    return generate(ctx, pipeline, payload)
+    return _generate(ctx, pipeline, payload, "flux2-klein-4b_int8")
 
 
 @worker_function(ResourceRequirements())
 def generate_int4(
     ctx: ActionContext,
     pipeline: Annotated[
-        Flux2KleinPipeline, ModelRef(Src.DEPLOYMENT, "flux2-klein-4b_int4")  # Key from cozy.toml [models]
+        Flux2KleinPipeline,
+        ModelRef(
+            Src.FIXED,
+            "flux2-klein-4b_int4",
+            ref="black-forest-labs/FLUX.2-klein-4B",
+            dtypes=("int4",),
+        ),
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:
@@ -133,4 +199,4 @@ def generate_int4(
 
     This endpoint is experimental; expect quality regressions or incompatibilities.
     """
-    return generate(ctx, pipeline, payload)
+    return _generate(ctx, pipeline, payload, "flux2-klein-4b_int4")
