@@ -97,7 +97,7 @@ class DevWorker(Worker):
         payload_obj: Any,
         run_id: Optional[str] = None,
         owner: str = "",
-        user_id: str = "",
+        invoker_id: str = "",
         timeout_ms: int = 0,
         required_variant_refs: Optional[list[str]] = None,
         resolved_cozy_models_by_id: Optional[dict[str, Any]] = None,
@@ -119,7 +119,7 @@ class DevWorker(Worker):
             required_variant_refs=[str(v).strip() for v in (required_variant_refs or []) if str(v).strip()],
             timeout_ms=int(timeout_ms or 0),
             owner=str(owner or ""),
-            user_id=str(user_id or ""),
+            invoker_id=str(invoker_id or ""),
         )
 
         # Mirror _handle_run_request's ctx construction, but use local output backend.
@@ -127,7 +127,7 @@ class DevWorker(Worker):
             rid,
             emitter=self._emit_progress_event,
             owner=str(owner or "") or None,
-            user_id=str(user_id or "") or None,
+            invoker_id=str(invoker_id or "") or None,
             timeout_ms=int(timeout_ms or 0) or None,
             file_api_base_url=None,
             file_api_token=None,
@@ -203,7 +203,7 @@ async def serve_http(argv: Optional[list[str]] = None) -> None:
     ap = argparse.ArgumentParser(prog="gen-worker dev serve-http")
     ap.add_argument("--listen", default=os.getenv("GEN_WORKER_HTTP_LISTEN", "127.0.0.1:8081"))
     ap.add_argument("--manifest", default=os.getenv("GEN_WORKER_MANIFEST_PATH", "/app/.cozy/manifest.json"))
-    ap.add_argument("--project-root", default=os.getenv("GEN_WORKER_PROJECT_ROOT", "/app"))
+    ap.add_argument("--endpoint-root", default=os.getenv("GEN_WORKER_ENDPOINT_ROOT", "/app"))
     ap.add_argument("--outputs", default=os.getenv("GEN_WORKER_OUTPUT_DIR", "/outputs"))
     args = ap.parse_args(list(argv) if argv is not None else None)
 
@@ -218,7 +218,7 @@ async def serve_http(argv: Optional[list[str]] = None) -> None:
         raise SystemExit(f"manifest not found: {manifest_path}")
     manifest = _load_manifest(manifest_path)
 
-    _maybe_add_pythonpath(str(args.project_root))
+    _maybe_add_pythonpath(str(args.endpoint_root))
     user_modules = _get_modules_from_manifest(manifest)
     if not user_modules:
         raise SystemExit("manifest contains no function modules")
@@ -363,7 +363,7 @@ async def serve_http(argv: Optional[list[str]] = None) -> None:
         rid = str(env.get("run_id") or "").strip() or str(uuid.uuid4())
         timeout_ms = int(env.get("timeout_ms") or 0)
         owner = str(env.get("owner") or "").strip()
-        user_id = str(env.get("user_id") or "").strip()
+        invoker_id = str(env.get("invoker_id") or "").strip()
         required_variant_refs = env.get("required_variant_refs")
         if required_variant_refs is None:
             required_variant_refs = env.get("required_models")  # alias
@@ -382,7 +382,7 @@ async def serve_http(argv: Optional[list[str]] = None) -> None:
                 payload_obj=payload,
                 run_id=rid,
                 owner=owner,
-                user_id=user_id,
+                invoker_id=invoker_id,
                 timeout_ms=timeout_ms,
                 required_variant_refs=rvr,
                 resolved_cozy_models_by_id=resolved if isinstance(resolved, dict) else None,

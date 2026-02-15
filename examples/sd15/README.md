@@ -19,10 +19,10 @@ sd15_int4 = { ref = "cozy:stable-diffusion-v1-5/stable-diffusion-v1-5:latest", d
 Code uses:
 
 ```py
-pipeline: Annotated[StableDiffusionPipeline, ModelRef(Src.DEPLOYMENT, "sd15")]
+pipeline: Annotated[StableDiffusionPipeline, ModelRef(Src.FIXED, "sd15")]
 ```
 
-There are two endpoints:
+There are two functions:
 
 - `generate`: fp16/bf16 (default)
 - `generate_fp8`: fp8-only

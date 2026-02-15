@@ -6,7 +6,7 @@ from .errors import AuthError, RetryableError, FatalError
 from .types import Asset
 from .model_interface import ModelManager
 from .downloader import ModelDownloader, CozyHubDownloader
-from .project_validation import ProjectValidationResult, validate_project
+from .endpoint_validation import EndpointValidationResult, validate_endpoint
 from .model_cache import ModelCache, ModelCacheStats, ModelLocation
 from .payload_constraints import Clamp
 
@@ -40,8 +40,8 @@ __all__ = [
     "ModelManager",
     "ModelDownloader",
     "CozyHubDownloader",
-    "ProjectValidationResult",
-    "validate_project",
+    "EndpointValidationResult",
+    "validate_endpoint",
     # Model cache (always available)
     "ModelCache",
     "ModelCacheStats",

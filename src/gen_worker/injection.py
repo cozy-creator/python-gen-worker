@@ -10,8 +10,6 @@ class ModelRefSource(str, Enum):
     # FIXED means the model key is fixed by the function signature and does not
     # depend on the request payload.
     FIXED = "fixed"
-    # Back-compat alias used by older examples/docs.
-    DEPLOYMENT = "fixed"
     PAYLOAD = "payload"
 
 
@@ -28,7 +26,7 @@ class ModelRef:
     # Optional explicit model ref string for FIXED source.
     #
     # If set, discovery will include this (ref+dtypes) in the baked manifest model keyspace,
-    # so you don't need a separate cozy.toml [models] mapping for fixed endpoints.
+    # so you don't need a separate cozy.toml [models] mapping for fixed functions.
     ref: Optional[str] = None
     dtypes: tuple[str, ...] = ()
 

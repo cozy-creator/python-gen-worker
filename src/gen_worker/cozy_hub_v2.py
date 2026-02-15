@@ -174,7 +174,7 @@ class CozyHubV2Client:
         Responses:
           - 200: {owner,repo,tag,variant_label,snapshot_digest,snapshot_manifest:{files:[...]}}
           - 202: {ingest_job_id,...} (pending)
-          - 403: forbidden (model not mirrored and caller not authenticated)
+          - 403: forbidden (model not mirrored and invoker not authenticated)
           - 409: no compatible variant
         """
         model_ref = (model_ref or "").strip()

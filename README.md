@@ -1,6 +1,6 @@
 # gen-worker
 
-A Python SDK for building serverless api-endpoints for AI inference. Just write your custom function, create a manifest specifying what model-weights you need from Cozy-Hub, and then deploy it! We take care of the rest!
+A Python SDK for building serverless functions for AI inference. Write your function, declare required model refs, publish an endpoint release, and invoke it via Cozy's control plane.
 
 ## Tenant Worker Build Contract (Dockerfile-First)
 
@@ -15,7 +15,7 @@ Build inputs MUST include:
 The built image MUST:
 
 1. Install `gen-worker` (so discovery + runtime can run).
-2. Bake endpoint discovery output at build time:
+2. Bake function discovery output (manifest) at build time:
 
 ```dockerfile
 RUN mkdir -p /app/.cozy && python -m gen_worker.discover > /app/.cozy/manifest.json
@@ -202,7 +202,7 @@ curl -sS -X POST 'http://localhost:8081/v1/models/prefetch' \
   -d '{"models":[{"ref":"hf:runwayml/stable-diffusion-v1-5@main","dtypes":["bf16","fp16"]}]}'
 ```
 
-Invoke an endpoint:
+Invoke a function:
 
 ```bash
 curl -sS -X POST 'http://localhost:8081/v1/run/generate' \
@@ -362,11 +362,11 @@ PyTorch/CUDA dependencies are installed as part of your worker's dependency set 
 Control-plane behavior (cozy-hub + orchestrator):
 
 - Every publish creates a new immutable internal `release_id`.
-- End users invoke endpoints by `tenant/project/endpoint` (default `prod`) or `tenant/project/endpoint@tag`.
-- `project` is derived from `pyproject.toml` `[project].name` and normalized to a URL-safe slug.
-- Endpoint names are derived from worker function names and slugified to URL-safe form (for example, `medasr_transcribe` -> `medasr-transcribe`).
+- End users invoke functions by `owner/endpoint/function` (default `prod`) or `owner/endpoint/function:tag`.
+- `endpoint` is derived from `cozy.toml` `name` and normalized to a URL-safe slug.
+- `function` names are derived from Python `@worker_function` names and normalized to URL-safe slugs (for example, `medasr_transcribe` -> `medasr-transcribe`).
 - Publishing does not move traffic by default.
-- Promoting an endpoint/tag moves traffic to that release.
+- Promoting a function tag moves traffic to that release.
 - Rollback is just retargeting the tag to an older release.
 
 ## Model Cache

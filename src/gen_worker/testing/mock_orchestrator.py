@@ -187,7 +187,7 @@ class WorkerSession:
         payload_obj: Any,
         run_id: Optional[str] = None,
         owner: str = "",
-        user_id: str = "",
+        invoker_id: str = "",
         timeout_ms: int = 0,
         required_variant_refs: Tuple[str, ...] = (),
         input_ref_urls: Optional[Dict[str, str]] = None,
@@ -204,7 +204,7 @@ class WorkerSession:
             required_variant_refs=list(required_variant_refs),
             timeout_ms=timeout_ms,
             owner=owner,
-            user_id=user_id,
+            invoker_id=invoker_id,
         )
         self.send(pb.WorkerSchedulerMessage(run_request=req))
         return rid
@@ -384,7 +384,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     ap.add_argument("--payload-json", default="{}", help="JSON payload to encode and send")
     ap.add_argument("--timeout-ms", type=int, default=0)
     ap.add_argument("--owner", default="")
-    ap.add_argument("--user-id", default="")
+    ap.add_argument("--invoker-id", default="")
     ap.add_argument("--required-model", action="append", default=[], help="repeatable model id/key list for injections")
 
     ap.add_argument(
@@ -433,7 +433,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             payload_obj=payload_obj,
             timeout_ms=int(args.timeout_ms),
             owner=args.owner,
-            user_id=args.user_id,
+            invoker_id=args.invoker_id,
             required_variant_refs=tuple(args.required_model),
             input_ref_urls=input_ref_urls or None,
         )

@@ -45,11 +45,11 @@ def generate(ctx: ActionContext, payload: In) -> Out:
 
     # Fake baked manifest pointing at that module.
     man = {
-        "project_name": "t",
+        "endpoint_name": "t",
         "functions": [
             {
                 "name": "generate",
-                "endpoint_name": "generate",
+                "python_name": "generate",
                 "module": "tenant_mod",
                 "required_models": [],
                 "payload_repo_selectors": [],
@@ -66,7 +66,7 @@ def generate(ctx: ActionContext, payload: In) -> Out:
     port = _free_port()
     monkeypatch.setenv("GEN_WORKER_HTTP_LISTEN", f"127.0.0.1:{port}")
     monkeypatch.setenv("GEN_WORKER_MANIFEST_PATH", str(manifest_path))
-    monkeypatch.setenv("GEN_WORKER_PROJECT_ROOT", str(pkg_dir))
+    monkeypatch.setenv("GEN_WORKER_ENDPOINT_ROOT", str(pkg_dir))
     monkeypatch.setenv("GEN_WORKER_OUTPUT_DIR", str(outputs))
 
     # Start server in background thread.

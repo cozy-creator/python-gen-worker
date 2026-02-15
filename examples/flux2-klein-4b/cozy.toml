@@ -1,7 +1,7 @@
 schema_version = 1
 
 name = "flux2-klein-4b"
-# Python import path used for endpoint discovery (not a Docker ENTRYPOINT).
+# Python import path used for function discovery (not a Docker ENTRYPOINT).
 main = "flux2_klein_4b.main"
 # gen-worker runtime compatibility constraint (validated by Cozy Hub at publish time).
 gen_worker = ">=0.2.0"

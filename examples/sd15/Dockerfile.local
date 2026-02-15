@@ -54,7 +54,7 @@ COPY examples/sd15/ /app/
 RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
     uv pip install --system --break-system-packages --no-deps --no-sources /app
 
-# Bake discovered endpoints into the image so Cozy Hub can read them without executing tenant code.
+# Bake discovered functions into the image so Cozy Hub can read them without executing tenant code.
 RUN mkdir -p /app/.cozy \
     && python -m gen_worker.discover > /app/.cozy/manifest.json
 

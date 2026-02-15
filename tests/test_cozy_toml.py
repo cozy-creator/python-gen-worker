@@ -76,7 +76,7 @@ m = { ref = "hf:o/r", dtypes = ["fp16","wat"] }
             with self.assertRaises(ValueError):
                 load_cozy_toml(p)
 
-    def test_endpoint_models_override(self) -> None:
+    def test_function_models_override(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "cozy.toml"
             p.write_text(
@@ -89,14 +89,14 @@ gen_worker = ">=0"
 [models]
 sdxl = "hf:stabilityai/stable-diffusion-xl-base-1.0"
 
-[endpoints.generate.models]
+[functions.generate.models]
 sdxl = { ref = "hf:stabilityai/stable-diffusion-xl-base-1.0", dtypes = ["fp16"] }
 """.lstrip(),
                 encoding="utf-8",
             )
             cfg = load_cozy_toml(p)
-            self.assertIn("generate", cfg.endpoint_models)
-            self.assertEqual(cfg.endpoint_models["generate"]["sdxl"].dtypes, ("fp16",))
+            self.assertIn("generate", cfg.function_models)
+            self.assertEqual(cfg.function_models["generate"]["sdxl"].dtypes, ("fp16",))
 
     def test_invalid_cuda_constraint_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as td:

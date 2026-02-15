@@ -7,6 +7,7 @@ from typing import Any, Mapping
 import tomllib
 import re
 
+from .names import slugify_function_name
 
 _DEFAULT_DTYPES: tuple[str, ...] = ("fp16", "bf16")
 _ALLOWED_DTYPES: frozenset[str] = frozenset({"fp16", "bf16", "fp8", "fp32", "int8", "int4"})
@@ -29,7 +30,7 @@ class CozyToml:
     gen_worker: str
     cuda: str | None
     models: dict[str, CozyModelSpec]
-    endpoint_models: dict[str, dict[str, CozyModelSpec]]  # endpoint_name -> model_key -> spec
+    function_models: dict[str, dict[str, CozyModelSpec]]  # function_name -> model_key -> spec
     resources: dict[str, Any]
 
 
@@ -192,24 +193,24 @@ def load_cozy_toml(path: Path) -> CozyToml:
                 continue
             models[key] = _parse_model_spec(v)
 
-    endpoint_models: dict[str, dict[str, CozyModelSpec]] = {}
-    raw_endpoints = data.get("endpoints")
-    if isinstance(raw_endpoints, dict):
-        for ep_name, ep_cfg in raw_endpoints.items():
-            ep = str(ep_name).strip()
-            if not ep or not isinstance(ep_cfg, dict):
+    function_models: dict[str, dict[str, CozyModelSpec]] = {}
+    raw_functions = data.get("functions")
+    if isinstance(raw_functions, dict):
+        for fn_name, fn_cfg in raw_functions.items():
+            fn = slugify_function_name(str(fn_name).strip())
+            if not fn or not isinstance(fn_cfg, dict):
                 continue
-            ep_models_raw = ep_cfg.get("models")
-            if not isinstance(ep_models_raw, dict):
+            fn_models_raw = fn_cfg.get("models")
+            if not isinstance(fn_models_raw, dict):
                 continue
             m: dict[str, CozyModelSpec] = {}
-            for k, v in ep_models_raw.items():
+            for k, v in fn_models_raw.items():
                 key = str(k).strip()
                 if not key:
                     continue
                 m[key] = _parse_model_spec(v)
             if m:
-                endpoint_models[ep] = m
+                function_models[fn] = m
 
     resources: dict[str, Any] = {}
     raw_resources = data.get("resources")
@@ -225,6 +226,6 @@ def load_cozy_toml(path: Path) -> CozyToml:
         gen_worker=gen_worker,
         cuda=cuda,
         models=models,
-        endpoint_models=endpoint_models,
+        function_models=function_models,
         resources=resources,
     )

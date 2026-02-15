@@ -1,6 +1,6 @@
 # multi-sdxl-checkpoints
 
-Payload-based model selection for multiple SDXL checkpoints using a single endpoint (`generate`).
+Payload-based model selection for multiple SDXL checkpoints using a single function (`generate`).
 
 ## Overview
 

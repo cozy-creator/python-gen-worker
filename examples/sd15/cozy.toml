@@ -1,7 +1,7 @@
 schema_version = 1
 
 name = "sd15"
-# Python import path used for endpoint discovery (not a Docker ENTRYPOINT).
+# Python import path used for function discovery (not a Docker ENTRYPOINT).
 main = "sd15.main"
 # gen-worker runtime compatibility constraint (validated by Cozy Hub at publish time).
 gen_worker = ">=0.2.0"

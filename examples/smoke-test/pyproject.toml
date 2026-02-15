@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Simple worker functions for smoke testing"
 requires-python = ">=3.12"
 dependencies = [
-    "gen-worker",
+    "gen-worker==0.3.0",
 ]
 
 [dependency-groups]

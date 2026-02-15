@@ -1,6 +1,6 @@
-# Tenant-supplied Dockerfile example.
+# Tenant-supplied Dockerfile example (GPU).
 #
-# - Installs torch in a stable cacheable layer.
+# - Installs torch + gen-worker in stable cacheable layers.
 # - Installs tenant deps from uv.lock without replacing torch/gen-worker.
 # - Bakes discovered functions into /app/.cozy/manifest.json at build time.
 #
@@ -15,7 +15,6 @@ WORKDIR /app
 ENV UV_CACHE_DIR=/var/cache/uv
 ENV UV_LINK_MODE=copy
 
-# Keep base stages identical across GPU examples to maximize local/remote cache hits.
 RUN --mount=type=cache,id=cozy-apt-cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,id=cozy-apt-lists,target=/var/lib/apt/lists,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
@@ -45,15 +44,10 @@ RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
     uv pip install --system --break-system-packages --no-deps --no-sources /app
 
 RUN mkdir -p /app/.cozy \
-    && python - <<'PY' > /app/.cozy/manifest.json
-import runpy
-runpy.run_module("gen_worker.discover", run_name="__main__")
-PY
-
+    && python -m gen_worker.discover > /app/.cozy/manifest.json
 
 ENV HOME=/root
 ENV XDG_CACHE_HOME=/root/.cache
 ENV HF_HOME=/root/.cache/huggingface
-
 
 ENTRYPOINT ["python", "-m", "gen_worker.entrypoint"]

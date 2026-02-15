@@ -26,8 +26,8 @@ class MedASROutput(msgspec.Struct):
 @worker_function(ResourceRequirements())
 def medasr_transcribe(
     ctx: ActionContext,
-    model: Annotated[AutoModelForCTC, ModelRef(Src.DEPLOYMENT, _MODEL_KEY)],
-    processor: Annotated[AutoProcessor, ModelRef(Src.DEPLOYMENT, _MODEL_KEY)],
+    model: Annotated[AutoModelForCTC, ModelRef(Src.FIXED, _MODEL_KEY)],
+    processor: Annotated[AutoProcessor, ModelRef(Src.FIXED, _MODEL_KEY)],
     payload: MedASRInput,
 ) -> MedASROutput:
     if payload.audio.local_path is None:

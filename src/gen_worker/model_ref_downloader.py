@@ -97,8 +97,8 @@ class ModelRefDownloader(ModelDownloader):
             # Token is optional. If set, it enables ingest-if-missing for public HF models.
             self._cozy_v2 = CozyHubV2Client(base_url=self._cozy_base_url, token=self._cozy_token)
 
-        # Legacy snapshot/object downloader kept for backward compatibility with older Cozy Hub
-        # endpoints; only enabled when API resolve is explicitly allowed.
+        # Legacy snapshot/object downloader kept for compatibility with older Cozy Hub
+        # routes; only enabled when API resolve is explicitly allowed.
         self._cozy_legacy: Optional[CozySnapshotDownloader] = None
         if self._allow_cozy_hub_api_resolve and self._cozy_base_url:
             client = CozyHubClient(self._cozy_base_url, token=self._cozy_token)

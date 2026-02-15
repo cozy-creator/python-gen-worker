@@ -79,7 +79,7 @@ class CozyHubClient:
     """
     Minimal Cozy Hub client for snapshot/object resolution.
 
-    Expected endpoints (see cozy-hub issue id=40):
+    Expected routes (see cozy-hub issue id=40):
       - GET /api/v1/repos/<owner>/<repo>/resolve?tag=<tag> -> {"digest": "..."}
       - GET /api/v1/repos/<owner>/<repo>/snapshots/<digest>/manifest
       - GET /api/v1/objects/<object_digest>/manifest

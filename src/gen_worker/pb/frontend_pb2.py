@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0e\x66rontend.proto\x12\x0b\x66rontend.v1\"C\n\rActionOptions\x12\n\n\x02id\x18\x01 \x01(\t\x12\x12\n\ntimeout_ms\x18\x02 \x01(\x03J\x04\x08\x03\x10\x04R\x0cretry_policy\"\x84\x03\n\x12VariantPreferences\x12;\n\x05quant\x18\x01 \x01(\x0e\x32,.frontend.v1.VariantPreferences.Quantization\x12<\n\tpackaging\x18\x02 \x01(\x0e\x32).frontend.v1.VariantPreferences.Packaging\x12\x36\n\x06layout\x18\x03 \x01(\x0e\x32&.frontend.v1.VariantPreferences.Layout\"B\n\x0cQuantization\x12\x15\n\x11QUANT_UNSPECIFIED\x10\x00\x12\x08\n\x04\x46P16\x10\x01\x12\x08\n\x04\x42\x46\x31\x36\x10\x02\x12\x07\n\x03\x46P8\x10\x03\"F\n\tPackaging\x12\x19\n\x15PACKAGING_UNSPECIFIED\x10\x00\x12\x0f\n\x0bSAFETENSORS\x10\x01\x12\r\n\tFLASHPACK\x10\x02\"/\n\x06Layout\x12\x16\n\x12LAYOUT_UNSPECIFIED\x10\x00\x12\r\n\tDIFFUSERS\x10\x01\"\x92\x02\n\x14\x45xecuteActionRequest\x12\x15\n\rfunction_name\x18\x01 \x01(\t\x12\x15\n\rinput_payload\x18\x02 \x01(\x0c\x12+\n\x07options\x18\x03 \x01(\x0b\x32\x1a.frontend.v1.ActionOptions\x12\x12\n\nrelease_id\x18\x04 \x01(\t\x12\x0f\n\x07user_id\x18\x06 \x01(\t\x12\x1a\n\x12required_repo_refs\x18\x07 \x03(\t\x12\r\n\x05owner\x18\x08 \x01(\t\x12\x36\n\rvariant_prefs\x18\t \x01(\x0b\x32\x1f.frontend.v1.VariantPreferencesJ\x04\x08\x05\x10\x06R\x11required_model_id\"\'\n\x15\x45xecuteActionResponse\x12\x0e\n\x06run_id\x18\x01 \x01(\t\"\"\n\x10\x43\x61ncelRunRequest\x12\x0e\n\x06run_id\x18\x01 \x01(\t\"\x1f\n\x11\x43\x61ncelRunResponse\x12\n\n\x02ok\x18\x01 \x01(\x08\"\x81\x01\n\x0cRealtimeOpen\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x12\n\nrelease_id\x18\x02 \x01(\t\x12\x15\n\rfunction_name\x18\x03 \x01(\t\x12\r\n\x05owner\x18\x04 \x01(\t\x12\x0f\n\x07user_id\x18\x05 \x01(\t\x12\x12\n\ntimeout_ms\x18\x06 \x01(\x03\"B\n\rRealtimeFrame\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x0c\n\x04\x64\x61ta\x18\x02 \x01(\x0c\x12\x0f\n\x07is_text\x18\x03 \x01(\x08\"3\n\rRealtimeClose\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x0e\n\x06reason\x18\x02 \x01(\t\"\xa2\x01\n\x14RealtimeProxyMessage\x12)\n\x04open\x18\x01 \x01(\x0b\x32\x19.frontend.v1.RealtimeOpenH\x00\x12+\n\x05\x66rame\x18\x02 \x01(\x0b\x32\x1a.frontend.v1.RealtimeFrameH\x00\x12+\n\x05\x63lose\x18\x03 \x01(\x0b\x32\x1a.frontend.v1.RealtimeCloseH\x00\x42\x05\n\x03msg2\x92\x02\n\x0f\x46rontendService\x12V\n\rExecuteAction\x12!.frontend.v1.ExecuteActionRequest\x1a\".frontend.v1.ExecuteActionResponse\x12J\n\tCancelRun\x12\x1d.frontend.v1.CancelRunRequest\x1a\x1e.frontend.v1.CancelRunResponse\x12[\n\x0fRealtimeSession\x12!.frontend.v1.RealtimeProxyMessage\x1a!.frontend.v1.RealtimeProxyMessage(\x01\x30\x01\x42GZEgithub.com/cozy-creator/gen-orchestrator/pkg/pb/frontendv1;frontendv1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x0e\x66rontend.proto\x12\x0b\x66rontend.v1\"C\n\rActionOptions\x12\n\n\x02id\x18\x01 \x01(\t\x12\x12\n\ntimeout_ms\x18\x02 \x01(\x03J\x04\x08\x03\x10\x04R\x0cretry_policy\"\x84\x03\n\x12VariantPreferences\x12;\n\x05quant\x18\x01 \x01(\x0e\x32,.frontend.v1.VariantPreferences.Quantization\x12<\n\tpackaging\x18\x02 \x01(\x0e\x32).frontend.v1.VariantPreferences.Packaging\x12\x36\n\x06layout\x18\x03 \x01(\x0e\x32&.frontend.v1.VariantPreferences.Layout\"B\n\x0cQuantization\x12\x15\n\x11QUANT_UNSPECIFIED\x10\x00\x12\x08\n\x04\x46P16\x10\x01\x12\x08\n\x04\x42\x46\x31\x36\x10\x02\x12\x07\n\x03\x46P8\x10\x03\"F\n\tPackaging\x12\x19\n\x15PACKAGING_UNSPECIFIED\x10\x00\x12\x0f\n\x0bSAFETENSORS\x10\x01\x12\r\n\tFLASHPACK\x10\x02\"/\n\x06Layout\x12\x16\n\x12LAYOUT_UNSPECIFIED\x10\x00\x12\r\n\tDIFFUSERS\x10\x01\"\x95\x02\n\x14\x45xecuteActionRequest\x12\x15\n\rfunction_name\x18\x01 \x01(\t\x12\x15\n\rinput_payload\x18\x02 \x01(\x0c\x12+\n\x07options\x18\x03 \x01(\x0b\x32\x1a.frontend.v1.ActionOptions\x12\x12\n\nrelease_id\x18\x04 \x01(\t\x12\x12\n\ninvoker_id\x18\x06 \x01(\t\x12\x1a\n\x12required_repo_refs\x18\x07 \x03(\t\x12\r\n\x05owner\x18\x08 \x01(\t\x12\x36\n\rvariant_prefs\x18\t \x01(\x0b\x32\x1f.frontend.v1.VariantPreferencesJ\x04\x08\x05\x10\x06R\x11required_model_id\"\'\n\x15\x45xecuteActionResponse\x12\x0e\n\x06run_id\x18\x01 \x01(\t\"\"\n\x10\x43\x61ncelRunRequest\x12\x0e\n\x06run_id\x18\x01 \x01(\t\"\x1f\n\x11\x43\x61ncelRunResponse\x12\n\n\x02ok\x18\x01 \x01(\x08\"\x84\x01\n\x0cRealtimeOpen\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x12\n\nrelease_id\x18\x02 \x01(\t\x12\x15\n\rfunction_name\x18\x03 \x01(\t\x12\r\n\x05owner\x18\x04 \x01(\t\x12\x12\n\ninvoker_id\x18\x05 \x01(\t\x12\x12\n\ntimeout_ms\x18\x06 \x01(\x03\"B\n\rRealtimeFrame\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x0c\n\x04\x64\x61ta\x18\x02 \x01(\x0c\x12\x0f\n\x07is_text\x18\x03 \x01(\x08\"3\n\rRealtimeClose\x12\x12\n\nsession_id\x18\x01 \x01(\t\x12\x0e\n\x06reason\x18\x02 \x01(\t\"\xa2\x01\n\x14RealtimeProxyMessage\x12)\n\x04open\x18\x01 \x01(\x0b\x32\x19.frontend.v1.RealtimeOpenH\x00\x12+\n\x05\x66rame\x18\x02 \x01(\x0b\x32\x1a.frontend.v1.RealtimeFrameH\x00\x12+\n\x05\x63lose\x18\x03 \x01(\x0b\x32\x1a.frontend.v1.RealtimeCloseH\x00\x42\x05\n\x03msg2\x92\x02\n\x0f\x46rontendService\x12V\n\rExecuteAction\x12!.frontend.v1.ExecuteActionRequest\x1a\".frontend.v1.ExecuteActionResponse\x12J\n\tCancelRun\x12\x1d.frontend.v1.CancelRunRequest\x1a\x1e.frontend.v1.CancelRunResponse\x12[\n\x0fRealtimeSession\x12!.frontend.v1.RealtimeProxyMessage\x1a!.frontend.v1.RealtimeProxyMessage(\x01\x30\x01\x42GZEgithub.com/cozy-creator/gen-orchestrator/pkg/pb/frontendv1;frontendv1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -43,21 +43,21 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_VARIANTPREFERENCES_LAYOUT']._serialized_start=442
   _globals['_VARIANTPREFERENCES_LAYOUT']._serialized_end=489
   _globals['_EXECUTEACTIONREQUEST']._serialized_start=492
-  _globals['_EXECUTEACTIONREQUEST']._serialized_end=766
-  _globals['_EXECUTEACTIONRESPONSE']._serialized_start=768
-  _globals['_EXECUTEACTIONRESPONSE']._serialized_end=807
-  _globals['_CANCELRUNREQUEST']._serialized_start=809
-  _globals['_CANCELRUNREQUEST']._serialized_end=843
-  _globals['_CANCELRUNRESPONSE']._serialized_start=845
-  _globals['_CANCELRUNRESPONSE']._serialized_end=876
-  _globals['_REALTIMEOPEN']._serialized_start=879
-  _globals['_REALTIMEOPEN']._serialized_end=1008
-  _globals['_REALTIMEFRAME']._serialized_start=1010
-  _globals['_REALTIMEFRAME']._serialized_end=1076
-  _globals['_REALTIMECLOSE']._serialized_start=1078
-  _globals['_REALTIMECLOSE']._serialized_end=1129
-  _globals['_REALTIMEPROXYMESSAGE']._serialized_start=1132
-  _globals['_REALTIMEPROXYMESSAGE']._serialized_end=1294
-  _globals['_FRONTENDSERVICE']._serialized_start=1297
-  _globals['_FRONTENDSERVICE']._serialized_end=1571
+  _globals['_EXECUTEACTIONREQUEST']._serialized_end=769
+  _globals['_EXECUTEACTIONRESPONSE']._serialized_start=771
+  _globals['_EXECUTEACTIONRESPONSE']._serialized_end=810
+  _globals['_CANCELRUNREQUEST']._serialized_start=812
+  _globals['_CANCELRUNREQUEST']._serialized_end=846
+  _globals['_CANCELRUNRESPONSE']._serialized_start=848
+  _globals['_CANCELRUNRESPONSE']._serialized_end=879
+  _globals['_REALTIMEOPEN']._serialized_start=882
+  _globals['_REALTIMEOPEN']._serialized_end=1014
+  _globals['_REALTIMEFRAME']._serialized_start=1016
+  _globals['_REALTIMEFRAME']._serialized_end=1082
+  _globals['_REALTIMECLOSE']._serialized_start=1084
+  _globals['_REALTIMECLOSE']._serialized_end=1135
+  _globals['_REALTIMEPROXYMESSAGE']._serialized_start=1138
+  _globals['_REALTIMEPROXYMESSAGE']._serialized_end=1300
+  _globals['_FRONTENDSERVICE']._serialized_start=1303
+  _globals['_FRONTENDSERVICE']._serialized_end=1577
 # @@protoc_insertion_point(module_scope)

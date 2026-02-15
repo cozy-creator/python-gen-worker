@@ -3,7 +3,7 @@
 # - Installs gen-worker in a stable cacheable layer.
 # - Installs torch (CPU) so Cozy Hub can record a stable backend version for tagging.
 # - Installs tenant deps from uv.lock without reinstalling gen-worker.
-# - Bakes discovered endpoints into /app/.cozy/manifest.json at build time.
+# - Bakes discovered functions into /app/.cozy/manifest.json at build time.
 #
 ARG PYTHON_VERSION=3.12
 FROM ghcr.io/astral-sh/uv:python${PYTHON_VERSION}-bookworm-slim
@@ -27,7 +27,7 @@ RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
       "torch${TORCH_SPEC}"
 
 RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
-    uv pip install --system --break-system-packages gen-worker
+    uv pip install --system --break-system-packages gen-worker==0.3.0
 
 COPY pyproject.toml uv.lock /app/
 

@@ -1,4 +1,4 @@
-"""Tests for endpoint name derivation in discover.py."""
+"""Tests for endpoint/function name derivation in discover.py."""
 
 import os
 import sys
@@ -15,8 +15,8 @@ def _cleanup_modules(prefix: str) -> None:
             del sys.modules[mod]
 
 
-class TestDiscoverEndpointNames(unittest.TestCase):
-    def test_endpoint_name_slugified_from_function_name(self) -> None:
+class TestDiscoverNames(unittest.TestCase):
+    def test_function_name_slugified_from_python_name(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             original_cwd = os.getcwd()
@@ -66,8 +66,9 @@ def medasr_transcribe(ctx: ActionContext, payload: Input) -> Output:
 
                 manifest = discover_manifest(root)
                 funcs = {f["name"]: f for f in manifest["functions"]}
-                self.assertEqual(manifest["project_name"], "test-project")
-                self.assertEqual(funcs["medasr_transcribe"]["endpoint_name"], "medasr-transcribe")
+                self.assertEqual(manifest["endpoint_name"], "test-project")
+                self.assertIn("medasr-transcribe", funcs)
+                self.assertEqual(funcs["medasr-transcribe"]["python_name"], "medasr_transcribe")
             finally:
                 os.chdir(original_cwd)
                 sys.path[:] = original_path
@@ -132,7 +133,7 @@ def image__worker(ctx: ActionContext, payload: Input) -> Output:
                 sys.path[:] = original_path
                 _cleanup_modules("endpoint_mod_collision")
 
-    def test_project_name_slugified_from_pyproject(self) -> None:
+    def test_endpoint_name_slugified_from_cozy_toml(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             original_cwd = os.getcwd()
@@ -181,7 +182,7 @@ def generate(ctx: ActionContext, payload: Input) -> Output:
                 )
 
                 manifest = discover_manifest(root)
-                self.assertEqual(manifest["project_name"], "my-cool-project")
+                self.assertEqual(manifest["endpoint_name"], "my-cool-project")
             finally:
                 os.chdir(original_cwd)
                 sys.path[:] = original_path

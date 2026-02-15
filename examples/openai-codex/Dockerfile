@@ -24,11 +24,6 @@ ARG PYTHON_VERSION=3.12
 ARG CODEX_VERSION=0.80.0
 ARG TARGETARCH
 
-# Pin gen-worker by git ref so this example picks up local-contract changes immediately.
-# Override to a tag/sha at build time as needed:
-#   docker build --build-arg GEN_WORKER_GIT_REF=<sha_or_tag> ...
-ARG GEN_WORKER_GIT_REF=ea81f42
-
 WORKDIR /app
 
 ENV UV_CACHE_DIR=/var/cache/uv
@@ -60,8 +55,7 @@ RUN set -eu; \
 
 # Stable runtime layer.
 RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
-  uv pip install --system --break-system-packages \
-    "gen-worker @ git+https://github.com/cozy-creator/python-gen-worker.git@${GEN_WORKER_GIT_REF}"
+  uv pip install --system --break-system-packages gen-worker==0.3.0
 
 # Copy lock metadata first (cache-friendly).
 COPY pyproject.toml uv.lock /app/
@@ -80,7 +74,7 @@ COPY . /app
 RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
   uv pip install --system --break-system-packages --no-deps --no-sources /app
 
-# Bake discovered endpoints into the image.
+# Bake discovered functions into the image.
 RUN mkdir -p /app/.cozy \
   && python3 -m gen_worker.discover > /app/.cozy/manifest.json
 

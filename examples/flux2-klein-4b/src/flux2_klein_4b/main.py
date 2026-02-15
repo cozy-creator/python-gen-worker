@@ -115,7 +115,7 @@ def generate_fp8(
     payload: GenerateInput,
 ) -> GenerateOutput:
     """
-    FP8 endpoint.
+    FP8 function.
 
     This endpoint is intended to run against an fp8-weight-only artifact (or an artifact
     that the worker can load with torchao-backed fp8 quantization enabled).
@@ -172,7 +172,7 @@ def generate_int8(
     payload: GenerateInput,
 ) -> GenerateOutput:
     """
-    INT8 endpoint (weight-only).
+    INT8 function (weight-only).
 
     This endpoint is intended to run against an int8-weight-only artifact (or an artifact
     that the worker can load with torchao-backed int8 quantization enabled).
@@ -195,7 +195,7 @@ def generate_int4(
     payload: GenerateInput,
 ) -> GenerateOutput:
     """
-    INT4 endpoint (weight-only).
+    INT4 function (weight-only).
 
     This endpoint is experimental; expect quality regressions or incompatibilities.
     """

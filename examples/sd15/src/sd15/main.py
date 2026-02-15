@@ -34,7 +34,7 @@ class GenerateOutput(msgspec.Struct):
 def generate(
     ctx: ActionContext,
     pipeline: Annotated[
-        StableDiffusionPipeline, ModelRef(Src.DEPLOYMENT, "sd15")  # Key from cozy.toml [models]
+        StableDiffusionPipeline, ModelRef(Src.FIXED, "sd15")  # Key from cozy.toml [models]
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:
@@ -82,12 +82,12 @@ def generate(
 def generate_fp8(
     ctx: ActionContext,
     pipeline: Annotated[
-        StableDiffusionPipeline, ModelRef(Src.DEPLOYMENT, "sd15_fp8")  # Key from cozy.toml [models]
+        StableDiffusionPipeline, ModelRef(Src.FIXED, "sd15_fp8")  # Key from cozy.toml [models]
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:
     """
-    FP8 endpoint.
+    FP8 function.
 
     This endpoint is intended to run against an fp8-weight-only artifact (or an artifact
     that the worker can load with torchao-backed fp8 quantization enabled).
@@ -99,12 +99,12 @@ def generate_fp8(
 def generate_int8(
     ctx: ActionContext,
     pipeline: Annotated[
-        StableDiffusionPipeline, ModelRef(Src.DEPLOYMENT, "sd15_int8")  # Key from cozy.toml [models]
+        StableDiffusionPipeline, ModelRef(Src.FIXED, "sd15_int8")  # Key from cozy.toml [models]
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:
     """
-    INT8 endpoint (weight-only).
+    INT8 function (weight-only).
 
     This endpoint is intended to run against an int8-weight-only artifact (or an artifact
     that the worker can load with torchao-backed int8 quantization enabled).
@@ -116,12 +116,12 @@ def generate_int8(
 def generate_int4(
     ctx: ActionContext,
     pipeline: Annotated[
-        StableDiffusionPipeline, ModelRef(Src.DEPLOYMENT, "sd15_int4")  # Key from cozy.toml [models]
+        StableDiffusionPipeline, ModelRef(Src.FIXED, "sd15_int4")  # Key from cozy.toml [models]
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:
     """
-    INT4 endpoint (weight-only).
+    INT4 function (weight-only).
 
     This endpoint is experimental; many diffusion pipelines are not validated at int4.
     """

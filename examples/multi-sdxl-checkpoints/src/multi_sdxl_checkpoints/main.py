@@ -2,12 +2,12 @@
 multi-sdxl-checkpoints: Payload-based model selection example
 
 This example demonstrates how to support multiple model fine-tunes (checkpoints)
-efficiently using a single endpoint.
+efficiently using a single function.
 
 Key concepts:
 - Models are declared in cozy.toml:
-  - global [models] applies to all endpoints by default
-  - optional [endpoints.<name>.models] overrides per-endpoint model keyspaces
+  - global [models] applies to all functions by default
+  - optional [functions.<name>.models] overrides per-function model keyspaces
 - ModelRef(Src.PAYLOAD, "model_key") resolves the model from the request payload
 - Scheduler uses vram_models/disk_models heartbeat data for smart routing
 - LRU eviction manages VRAM when switching between models

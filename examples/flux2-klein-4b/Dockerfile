@@ -2,7 +2,7 @@
 #
 # - Installs torch + gen-worker in stable cacheable layers.
 # - Installs tenant deps from uv.lock without replacing torch/gen-worker.
-# - Bakes discovered endpoints into /app/.cozy/manifest.json at build time.
+# - Bakes discovered functions into /app/.cozy/manifest.json at build time.
 #
 # Local build (GPU):
 #   docker build -t flux2-klein-4b-worker -f Dockerfile .
@@ -29,7 +29,7 @@ RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
     uv pip install --system --break-system-packages --torch-backend ${UV_TORCH_BACKEND} \
       "torch${TORCH_SPEC}"
 RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
-    uv pip install --system --break-system-packages gen-worker
+    uv pip install --system --break-system-packages gen-worker==0.3.0
 
 FROM cozy_base AS cozy_final
 
@@ -51,7 +51,7 @@ COPY . /app
 RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
     uv pip install --system --break-system-packages --no-deps --no-sources /app
 
-# Bake discovered endpoints into the image so Cozy Hub can read them without executing tenant code.
+# Bake discovered functions into the image so Cozy Hub can read them without executing tenant code.
 RUN mkdir -p /app/.cozy \
     && python -m gen_worker.discover > /app/.cozy/manifest.json
 

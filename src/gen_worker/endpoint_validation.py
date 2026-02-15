@@ -12,7 +12,7 @@ except Exception:  # pragma: no cover
 
 
 @dataclass(frozen=True)
-class ProjectValidationResult:
+class EndpointValidationResult:
     ok: bool
     errors: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
@@ -22,7 +22,7 @@ _NON_SLUG_CHARS = re.compile(r"[^a-z0-9.]+")
 _DUP_SLUG_SEPARATORS = re.compile(r"-{2,}")
 
 
-def _normalize_project_name(raw: str) -> str:
+def _normalize_endpoint_name(raw: str) -> str:
     name = raw.strip().lower().replace("_", "-")
     if not name:
         return ""
@@ -34,9 +34,9 @@ def _normalize_project_name(raw: str) -> str:
     return name
 
 
-def validate_project(root: str | Path, *, require_uv_lock: bool = False) -> ProjectValidationResult:
+def validate_endpoint(root: str | Path, *, require_uv_lock: bool = False) -> EndpointValidationResult:
     """
-    Validate a tenant project directory.
+    Validate a published endpoint directory.
 
     Requirements:
     - `Dockerfile` must exist
@@ -46,7 +46,7 @@ def validate_project(root: str | Path, *, require_uv_lock: bool = False) -> Proj
       - main = "pkg.module"
       - gen_worker = ">=x,<y"
     - `pyproject.toml` must exist (Python packaging metadata)
-    - `[project].name` must exist in `pyproject.toml` (normalized for URL-safe project paths)
+    - `[project].name` must exist in `pyproject.toml` (normalized for URL-safe endpoint paths)
     - `requirements.txt` must not exist
 
     Optionally:
@@ -78,7 +78,7 @@ def validate_project(root: str | Path, *, require_uv_lock: bool = False) -> Proj
 
     if tomllib is None:
         warnings.append("tomllib is unavailable; cannot validate cozy.toml/pyproject.toml")
-        return ProjectValidationResult(ok=not errors, errors=tuple(errors), warnings=tuple(warnings))
+        return EndpointValidationResult(ok=not errors, errors=tuple(errors), warnings=tuple(warnings))
 
     # Validate cozy.toml (flat schema).
     if cozy_toml.exists():
@@ -94,7 +94,7 @@ def validate_project(root: str | Path, *, require_uv_lock: bool = False) -> Proj
         cozy_name = cozy.get("name")
         if not isinstance(cozy_name, str) or cozy_name.strip() == "":
             errors.append("cozy.toml missing name")
-        elif _normalize_project_name(cozy_name) == "":
+        elif _normalize_endpoint_name(cozy_name) == "":
             errors.append("cozy.toml invalid name")
 
         main = cozy.get("main")
@@ -107,19 +107,19 @@ def validate_project(root: str | Path, *, require_uv_lock: bool = False) -> Proj
 
     # Validate pyproject.toml.
     if not pyproject.exists():
-        return ProjectValidationResult(ok=not errors, errors=tuple(errors), warnings=tuple(warnings))
+        return EndpointValidationResult(ok=not errors, errors=tuple(errors), warnings=tuple(warnings))
 
     try:
         data: dict[str, Any] = tomllib.loads(pyproject.read_text(encoding="utf-8"))
     except Exception as exc:
         errors.append(f"failed to parse pyproject.toml: {exc}")
-        return ProjectValidationResult(ok=False, errors=tuple(errors), warnings=tuple(warnings))
+        return EndpointValidationResult(ok=False, errors=tuple(errors), warnings=tuple(warnings))
 
     project = data.get("project")
-    project_name = project.get("name") if isinstance(project, dict) else None
-    if not isinstance(project_name, str) or project_name.strip() == "":
+    pyproject_name = project.get("name") if isinstance(project, dict) else None
+    if not isinstance(pyproject_name, str) or pyproject_name.strip() == "":
         errors.append("missing [project].name in pyproject.toml")
-    elif _normalize_project_name(project_name) == "":
+    elif _normalize_endpoint_name(pyproject_name) == "":
         errors.append("invalid [project].name in pyproject.toml")
 
-    return ProjectValidationResult(ok=not errors, errors=tuple(errors), warnings=tuple(warnings))
+    return EndpointValidationResult(ok=not errors, errors=tuple(errors), warnings=tuple(warnings))

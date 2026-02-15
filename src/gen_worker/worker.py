@@ -77,6 +77,7 @@ from .injection import (
     parse_injection,
     type_qualname,
 )
+from .names import slugify_function_name
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -383,7 +384,7 @@ class ActionContext:
         run_id: str,
         emitter: Optional[Callable[[Dict[str, Any]], None]] = None,
         owner: Optional[str] = None,
-        user_id: Optional[str] = None,
+        invoker_id: Optional[str] = None,
         timeout_ms: Optional[int] = None,
         file_api_base_url: Optional[str] = None,
         file_api_token: Optional[str] = None,
@@ -394,7 +395,7 @@ class ActionContext:
     ) -> None:
         self._run_id = run_id
         self._owner = owner
-        self._user_id = user_id
+        self._invoker_id = invoker_id
         self._timeout_ms = timeout_ms
         self._file_api_base_url = (file_api_base_url or "").strip() or None
         self._file_api_token = (file_api_token or "").strip() or None
@@ -419,8 +420,8 @@ class ActionContext:
         return self._owner
 
     @property
-    def user_id(self) -> Optional[str]:
-        return self._user_id
+    def invoker_id(self) -> Optional[str]:
+        return self._invoker_id
 
     @property
     def timeout_ms(self) -> Optional[int]:
@@ -895,7 +896,7 @@ class Worker:
         # Store manifest and initialize model config from it
         self._manifest = manifest
         if manifest and isinstance(manifest, dict):
-            # New contract: per-function mapping (allows endpoint-specific model sets and dtype constraints).
+            # New contract: per-function mapping (allows function-specific model sets and dtype constraints).
             mbf = manifest.get("models_by_function")
             if isinstance(mbf, dict):
                 for fn_name, mapping in mbf.items():
@@ -1406,7 +1407,10 @@ class Worker:
             logger.info("Discovery complete. Found %d handlers.", discovered)
 
     def _inspect_task_spec(self, func: Callable[..., Any]) -> _TaskSpec:
-        func_name = func.__name__
+        python_name = func.__name__
+        func_name = slugify_function_name(python_name)
+        if not func_name:
+            raise ValueError(f"{python_name}: function name cannot be normalized")
         resources: ResourceRequirements = getattr(func, "_worker_resources", ResourceRequirements())
 
         try:
@@ -1522,7 +1526,10 @@ class Worker:
         )
 
     def _inspect_websocket_spec(self, func: Callable[..., Any]) -> _WebsocketSpec:
-        func_name = func.__name__
+        python_name = func.__name__
+        func_name = slugify_function_name(python_name)
+        if not func_name:
+            raise ValueError(f"{python_name}: function name cannot be normalized")
         resources: ResourceRequirements = getattr(func, "_worker_resources", ResourceRequirements())
         if not inspect.iscoroutinefunction(func):
             raise ValueError("websocket handler must be async def")
@@ -3021,7 +3028,7 @@ class Worker:
         required_model_id_for_exec = ""
         timeout_ms = int(getattr(request, "timeout_ms", 0) or 0)
         owner = str(getattr(request, "owner", "") or "") or (self.owner or "")
-        user_id = str(getattr(request, "user_id", "") or "")
+        invoker_id = str(getattr(request, "invoker_id", "") or "")
         file_base_url = str(getattr(request, "file_base_url", "") or "")
         file_token = str(getattr(request, "file_token", "") or "")
         resolved_cozy_models_by_id = dict(getattr(request, "resolved_cozy_models_by_id", {}) or {})
@@ -3101,7 +3108,7 @@ class Worker:
             run_id,
             emitter=self._emit_progress_event,
             owner=owner or None,
-            user_id=user_id or None,
+            invoker_id=invoker_id or None,
             timeout_ms=timeout_ms if timeout_ms > 0 else None,
             file_api_base_url=file_base_url or None,
             file_api_token=file_token or None,
@@ -3173,7 +3180,7 @@ class Worker:
             return
 
         owner = str(getattr(cmd, "owner", "") or "") or (self.owner or "")
-        user_id = str(getattr(cmd, "user_id", "") or "")
+        invoker_id = str(getattr(cmd, "invoker_id", "") or "")
         timeout_ms = int(getattr(cmd, "timeout_ms", 0) or 0) or None
         file_base_url = str(getattr(cmd, "file_base_url", "") or "")
         file_token = str(getattr(cmd, "file_token", "") or "")
@@ -3201,7 +3208,7 @@ class Worker:
             session_id,
             emitter=self._emit_progress_event,
             owner=owner or None,
-            user_id=user_id or None,
+            invoker_id=invoker_id or None,
             timeout_ms=timeout_ms,
             file_api_base_url=file_base_url or None,
             file_api_token=file_token or None,
@@ -3901,7 +3908,7 @@ class Worker:
                         canon = str(model_id)
 
                     # If this pipeline is already hot in VRAM, reuse it directly.
-                    # This is crucial for multi-model endpoints (e.g. SDXL checkpoint router),
+                    # This is crucial for multi-model functions (e.g. SDXL checkpoint router),
                     # otherwise the worker will steadily accumulate VRAM allocations and OOM.
                     try:
                         if self._model_cache is not None:
@@ -4076,7 +4083,7 @@ class Worker:
 
                     # Quantized weight-only inference requires explicit loader hints.
                     #
-                    # Cozy Hub/orchestrator controls whether an endpoint may select fp8 variants, but
+                    # Cozy Hub/orchestrator controls whether a function may select fp8 variants, but
                     # the worker must still pass an explicit quantization_config so diffusers loads
                     # quantized modules correctly (torchao-backed).
                     variant = str(kwargs.get("variant") or "").strip().lower()
@@ -4260,7 +4267,7 @@ class Worker:
             if not raw:
                 raise ValueError(f"empty fixed ModelRef for injection param: {inj.param_name}")
             # FIXED selection must use a tenant-declared short-key from the baked discovery manifest.
-            # This keeps the model keyspace auditable and prevents endpoints from silently using
+            # This keeps the model keyspace auditable and prevents functions from silently using
             # models outside their declared scope.
             if not model_id_by_key:
                 raise ValueError(
@@ -4324,7 +4331,7 @@ class Worker:
         # - any per-function mapping restriction (allowed_ids), AND
         # - the release-level allowlist from the scheduler (defense-in-depth).
         if allowed_ids is not None and model_id not in allowed_ids:
-            raise ValueError(f"model_id not allowed for endpoint: {model_id!r} (injection param {inj.param_name})")
+            raise ValueError(f"model_id not allowed for function: {model_id!r} (injection param {inj.param_name})")
         if self._release_allowed_model_ids is not None and model_id not in self._release_allowed_model_ids:
             raise ValueError(f"model_id not allowed for release: {model_id!r} (injection param {inj.param_name})")
 

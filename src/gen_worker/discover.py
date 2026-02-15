@@ -29,6 +29,7 @@ from gen_worker import ActionContext
 from gen_worker.injection import ModelRef
 
 from gen_worker.cozy_toml import CozyModelSpec, CozyToml, load_cozy_toml
+from gen_worker.names import slugify_endpoint_name, slugify_function_name
 
 _ALLOWED_MODEL_DTYPES: frozenset[str] = frozenset({"fp16", "bf16", "fp8", "fp32", "int8", "int4"})
 
@@ -84,30 +85,6 @@ def _schema_and_hash(t: type) -> Tuple[Dict[str, Any], str]:
         pass
     raw = json.dumps(schema, separators=(",", ":"), sort_keys=True).encode("utf-8")
     return schema, hashlib.sha256(raw).hexdigest()
-
-
-_NON_SLUG_CHARS = re.compile(r"[^a-z0-9.]+")
-_DUP_SLUG_SEPARATORS = re.compile(r"-{2,}")
-
-
-def _slugify_name(raw: str) -> str:
-    raw = raw.strip().lower().replace("_", "-")
-    if not raw:
-        return ""
-    raw = _NON_SLUG_CHARS.sub("-", raw)
-    raw = _DUP_SLUG_SEPARATORS.sub("-", raw)
-    raw = raw.strip("-.")
-    if len(raw) > 128:
-        raw = raw[:128].strip("-.")
-    return raw
-
-
-def _slugify_endpoint_name(raw: str) -> str:
-    return _slugify_name(raw)
-
-
-def _slugify_project_name(raw: str) -> str:
-    return _slugify_name(raw)
 
 
 def _should_skip_path(path: Path, skip_patterns: Set[str]) -> bool:
@@ -331,13 +308,13 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
         seen_fields.add(field)
         payload_repo_selectors.append({"field": field, "kind": "short_key"})
 
-    endpoint_name = _slugify_endpoint_name(func.__name__)
-    if not endpoint_name:
-        raise ValueError(f"{func.__name__}: function name cannot be normalized to endpoint_name")
+    function_name = slugify_function_name(func.__name__)
+    if not function_name:
+        raise ValueError(f"{func.__name__}: function name cannot be normalized")
 
     fn: Dict[str, Any] = {
-        "name": func.__name__,
-        "endpoint_name": endpoint_name,
+        "name": function_name,
+        "python_name": func.__name__,
         "module": module_name,
         "resources": res_dict,
         "payload_type": _type_id(payload_type),
@@ -516,24 +493,25 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
     cozy = _load_cozy_manifest_toml(root)
 
     functions = discover_functions(root, main_module=cozy.main)
-    endpoint_to_function: Dict[str, str] = {}
+    seen_fn: Dict[str, str] = {}
     for fn in functions:
-        endpoint_name = str(fn.get("endpoint_name", "")).strip()
-        function_name = str(fn.get("name", "")).strip()
-        if not endpoint_name:
-            raise ValueError(f"{function_name or '<unknown>'}: missing endpoint_name in discovered metadata")
-        prior = endpoint_to_function.get(endpoint_name)
-        if prior and prior != function_name:
+        fn_name = str(fn.get("name") or "").strip()
+        py_name = str(fn.get("python_name") or "").strip()
+        if not fn_name:
+            raise ValueError("discovered function missing name")
+        prior = seen_fn.get(fn_name)
+        if prior and prior != py_name:
             raise ValueError(
-                f"multiple functions normalize to the same endpoint '{endpoint_name}': {prior}, {function_name}"
+                f"multiple functions normalize to the same function name '{fn_name}': {prior}, {py_name or '<unknown>'}"
             )
-        endpoint_to_function[endpoint_name] = function_name
-    project_name = _slugify_project_name(cozy.name)
-    if not project_name:
+        seen_fn[fn_name] = py_name
+
+    endpoint_name = slugify_endpoint_name(cozy.name)
+    if not endpoint_name:
         raise ValueError("invalid cozy.toml name")
 
     manifest: Dict[str, Any] = {
-        "project_name": project_name,
+        "endpoint_name": endpoint_name,
         "functions": functions,
     }
 
@@ -544,17 +522,16 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
     models_by_function: Dict[str, Any] = {}
     for fn in functions:
         fn_name = str(fn.get("name") or "").strip()
-        endpoint_name = str(fn.get("endpoint_name") or "").strip()
-        if not fn_name or not endpoint_name:
+        if not fn_name:
             continue
 
-        # Endpoint-specific mapping wins; otherwise fall back to global [models].
-        eff = cozy.endpoint_models.get(endpoint_name) or cozy.models
+        # Function-specific mapping wins; otherwise fall back to global [models].
+        eff = cozy.function_models.get(fn_name) or cozy.models
         eff2: Dict[str, CozyModelSpec] = dict(eff or {})
 
         # If a fixed ModelRef has an explicit ref (and optional dtypes) in the signature,
         # auto-add it to the effective mapping so cozy.toml [models] isn't required for
-        # fixed endpoints.
+        # fixed functions.
         required_keys = set(fn.get("required_models", []) or [])
         inj_list = list(fn.get("injection_json", []) or [])
         sig_specs: Dict[str, CozyModelSpec] = {}
@@ -579,7 +556,7 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
                 cleaned = tuple(str(x).strip() for x in dtypes_raw if str(x).strip())
                 bad = sorted({x for x in cleaned if x not in _ALLOWED_MODEL_DTYPES})
                 if bad:
-                    raise ValueError(f"endpoint '{endpoint_name}' has invalid model dtypes for {key!r}: {bad}")
+                    raise ValueError(f"function '{fn_name}' has invalid model dtypes for {key!r}: {bad}")
                 dtypes = cleaned
             if dtypes:
                 sig_specs[key] = CozyModelSpec(ref=ref, dtypes=dtypes)
@@ -596,7 +573,7 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
             missing.append(k)
         if missing:
             raise ValueError(
-                f"endpoint '{endpoint_name}' requires model keys not defined in cozy.toml [models] "
+                f"function '{fn_name}' requires model keys not defined in cozy.toml [models] "
                 f"and not provided via signature ModelRef(ref=...): {missing}"
             )
         if eff2:

@@ -19,7 +19,7 @@ pipeline: Annotated[
 ]
 ```
 
-Endpoints:
+Functions:
 
 - `generate`: 4B bf16 (regular turbo baseline)
 - `generate_fp8`: 4B fp8
