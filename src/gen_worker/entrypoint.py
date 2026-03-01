@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .cache_paths import worker_model_cache_dir
-from .cozy_toml import constraint_satisfied, load_cozy_toml
+from .tensorhub_toml import constraint_satisfied, load_tensorhub_toml
 
 try:
     from .worker import Worker
@@ -121,20 +121,20 @@ def _dev_validate_gen_worker_version() -> None:
     """
     Dev-only guardrail.
 
-    If COZY_MANIFEST_PATH points at a cozy.toml, verify the locally installed
-    gen-worker version satisfies cozy.toml's gen_worker constraint.
+    If TENSORHUB_TOML_PATH points at a tensorhub.toml, verify the locally installed
+    gen-worker version satisfies tensorhub.toml's gen_worker constraint.
     """
-    manifest_path_str = os.getenv("COZY_MANIFEST_PATH", "").strip()
+    manifest_path_str = os.getenv("TENSORHUB_TOML_PATH", "").strip()
     if not manifest_path_str:
         return
     p = Path(manifest_path_str)
     if not p.exists():
         return
     try:
-        cozy = load_cozy_toml(p)
-        constraint = cozy.gen_worker
+        tensorhub_manifest = load_tensorhub_toml(p)
+        constraint = tensorhub_manifest.gen_worker
     except Exception as e:
-        logger.warning("Failed to parse cozy.toml for dev runtime validation (%s): %s", p, e)
+        logger.warning("Failed to parse tensorhub.toml for dev runtime validation (%s): %s", p, e)
         return
     try:
         installed = md.version("gen-worker")
@@ -145,7 +145,7 @@ def _dev_validate_gen_worker_version() -> None:
         return
     if not constraint_satisfied(constraint, installed):
         logger.error(
-            "Installed gen-worker version %s does not satisfy cozy.toml gen_worker constraint %r (%s).",
+            "Installed gen-worker version %s does not satisfy tensorhub.toml gen_worker constraint %r (%s).",
             installed,
             constraint,
             p,

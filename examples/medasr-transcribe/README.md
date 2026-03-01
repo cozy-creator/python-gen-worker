@@ -4,7 +4,7 @@ Contents:
 
 - `src/medasr_transcribe` with a single `@worker_function` (`medasr_transcribe`).
 - `pyproject.toml` with deps.
-- `cozy.toml` with Cozy build-time metadata (name/main/gen_worker, optional models/resources).
+- `tensorhub.toml` with Cozy build-time metadata (name/main/gen_worker, optional models/resources).
 - `Dockerfile` that installs deps and bakes `/app/.cozy/manifest.json` via `python -m gen_worker.discover`.
 
 Notes:

@@ -5,7 +5,7 @@ This example demonstrates how to support multiple model fine-tunes (checkpoints)
 efficiently using a single function.
 
 Key concepts:
-- Models are declared in cozy.toml:
+- Models are declared in tensorhub.toml:
   - global [models] applies to all functions by default
   - optional [functions.<name>.models] overrides per-function model keyspaces
 - ModelRef(Src.PAYLOAD, "model_key") resolves the model from the request payload
@@ -33,7 +33,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(level
 class GenerateInput(msgspec.Struct):
     """Input for image generation with model selection."""
     prompt: str
-    model_key: str = "sdxl-base"  # Key from cozy.toml [models]
+    model_key: str = "sdxl-base"  # Key from tensorhub.toml [models]
     # Optional. If empty, we apply a light default negative prompt to reduce
     # watermarks/text artifacts (common in SDXL outputs).
     negative_prompt: str = ""
@@ -79,7 +79,7 @@ def generate(
     """
     Generate an image using the model specified in the payload.
 
-    The model_key in the payload must be a key in `cozy.toml [models]`.
+    The model_key in the payload must be a key in `tensorhub.toml [models]`.
 
     The scheduler routes this request to a worker that has the requested
     model already loaded in VRAM (hot) or on disk (warm). If no worker has

@@ -35,7 +35,7 @@ requires-python = ">=3.12"
 dependencies = ["gen-worker"]
 """
                 )
-                (root / "cozy.toml").write_text(
+                (root / "tensorhub.toml").write_text(
                     """
 schema_version = 1
 name = "test-project"
@@ -93,7 +93,7 @@ requires-python = ">=3.12"
 dependencies = ["gen-worker"]
 """
                 )
-                (root / "cozy.toml").write_text(
+                (root / "tensorhub.toml").write_text(
                     """
 schema_version = 1
 name = "test-project"
@@ -133,7 +133,7 @@ def image__worker(ctx: ActionContext, payload: Input) -> Output:
                 sys.path[:] = original_path
                 _cleanup_modules("endpoint_mod_collision")
 
-    def test_endpoint_name_slugified_from_cozy_toml(self) -> None:
+    def test_endpoint_name_slugified_from_tensorhub_toml(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             original_cwd = os.getcwd()
@@ -152,7 +152,7 @@ requires-python = ">=3.12"
 dependencies = ["gen-worker"]
 """
                 )
-                (root / "cozy.toml").write_text(
+                (root / "tensorhub.toml").write_text(
                     """
 schema_version = 1
 name = "My Cool_Project"

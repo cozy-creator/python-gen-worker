@@ -41,7 +41,7 @@ version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = ["gen-worker"]
 """)
-                (root / "cozy.toml").write_text(
+                (root / "tensorhub.toml").write_text(
                     """
 schema_version = 1
 name = "test-project"
@@ -157,7 +157,7 @@ version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = ["gen-worker"]
 """)
-                (root / "cozy.toml").write_text(
+                (root / "tensorhub.toml").write_text(
                     """
 schema_version = 1
 name = "test-project"
@@ -211,7 +211,7 @@ class TestManifestModelsField(unittest.TestCase):
     """Tests for top-level models field in manifest."""
 
     def test_models_from_config(self) -> None:
-        """Test that models from [models] (cozy.toml) are included."""
+        """Test that models from [models] (tensorhub.toml) are included."""
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             original_cwd = os.getcwd()
@@ -229,7 +229,7 @@ version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = ["gen-worker"]
 """)
-                (root / "cozy.toml").write_text(
+                (root / "tensorhub.toml").write_text(
                     """
 schema_version = 1
 name = "test-project"
@@ -294,7 +294,7 @@ version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = ["gen-worker"]
 """)
-                (root / "cozy.toml").write_text(
+                (root / "tensorhub.toml").write_text(
                     """
 schema_version = 1
 name = "test-project"

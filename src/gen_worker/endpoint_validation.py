@@ -40,7 +40,7 @@ def validate_endpoint(root: str | Path, *, require_uv_lock: bool = False) -> End
 
     Requirements:
     - `Dockerfile` must exist
-    - `cozy.toml` must exist (flat schema)
+    - `tensorhub.toml` must exist (flat schema)
       - schema_version = 1
       - name = "..."
       - main = "pkg.module"
@@ -60,9 +60,9 @@ def validate_endpoint(root: str | Path, *, require_uv_lock: bool = False) -> End
     if not (root_path / "Dockerfile").exists():
         errors.append("missing Dockerfile")
 
-    cozy_toml = root_path / "cozy.toml"
-    if not cozy_toml.exists():
-        errors.append("missing cozy.toml")
+    tensorhub_toml = root_path / "tensorhub.toml"
+    if not tensorhub_toml.exists():
+        errors.append("missing tensorhub.toml")
 
     pyproject = root_path / "pyproject.toml"
     if not pyproject.exists():
@@ -77,33 +77,33 @@ def validate_endpoint(root: str | Path, *, require_uv_lock: bool = False) -> End
         warnings.append("uv.lock not found (recommended for reproducible builds)")
 
     if tomllib is None:
-        warnings.append("tomllib is unavailable; cannot validate cozy.toml/pyproject.toml")
+        warnings.append("tomllib is unavailable; cannot validate tensorhub.toml/pyproject.toml")
         return EndpointValidationResult(ok=not errors, errors=tuple(errors), warnings=tuple(warnings))
 
-    # Validate cozy.toml (flat schema).
-    if cozy_toml.exists():
+    # Validate tensorhub.toml (flat schema).
+    if tensorhub_toml.exists():
         try:
-            cozy: dict[str, Any] = tomllib.loads(cozy_toml.read_text(encoding="utf-8"))
+            tensorhub_cfg: dict[str, Any] = tomllib.loads(tensorhub_toml.read_text(encoding="utf-8"))
         except Exception as exc:
-            errors.append(f"failed to parse cozy.toml: {exc}")
-            cozy = {}
+            errors.append(f"failed to parse tensorhub.toml: {exc}")
+            tensorhub_cfg = {}
 
-        if cozy.get("schema_version") != 1:
-            errors.append("cozy.toml missing or invalid schema_version (expected schema_version = 1)")
+        if tensorhub_cfg.get("schema_version") != 1:
+            errors.append("tensorhub.toml missing or invalid schema_version (expected schema_version = 1)")
 
-        cozy_name = cozy.get("name")
-        if not isinstance(cozy_name, str) or cozy_name.strip() == "":
-            errors.append("cozy.toml missing name")
-        elif _normalize_endpoint_name(cozy_name) == "":
-            errors.append("cozy.toml invalid name")
+        endpoint_name = tensorhub_cfg.get("name")
+        if not isinstance(endpoint_name, str) or endpoint_name.strip() == "":
+            errors.append("tensorhub.toml missing name")
+        elif _normalize_endpoint_name(endpoint_name) == "":
+            errors.append("tensorhub.toml invalid name")
 
-        main = cozy.get("main")
+        main = tensorhub_cfg.get("main")
         if not isinstance(main, str) or main.strip() == "":
-            errors.append("cozy.toml missing main")
+            errors.append("tensorhub.toml missing main")
 
-        gen_worker = cozy.get("gen_worker")
+        gen_worker = tensorhub_cfg.get("gen_worker")
         if not isinstance(gen_worker, str) or gen_worker.strip() == "":
-            errors.append("cozy.toml missing gen_worker constraint")
+            errors.append("tensorhub.toml missing gen_worker constraint")
 
     # Validate pyproject.toml.
     if not pyproject.exists():

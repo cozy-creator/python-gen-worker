@@ -8,17 +8,17 @@ from gen_worker.endpoint_validation import validate_endpoint
 
 
 class TestEndpointValidation(unittest.TestCase):
-    def test_requires_dockerfile_cozy_toml_and_pyproject(self) -> None:
+    def test_requires_dockerfile_tensorhub_toml_and_pyproject(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             res = validate_endpoint(root)
             self.assertFalse(res.ok)
             self.assertIn("missing Dockerfile", res.errors)
-            self.assertIn("missing cozy.toml", res.errors)
+            self.assertIn("missing tensorhub.toml", res.errors)
             self.assertIn("missing pyproject.toml", res.errors)
 
             (root / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
-            (root / "cozy.toml").write_text(
+            (root / "tensorhub.toml").write_text(
                 "schema_version = 1\nname = 'x'\nmain = 'x.main'\ngen_worker = '>=0'\n",
                 encoding="utf-8",
             )
@@ -30,7 +30,7 @@ class TestEndpointValidation(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             (root / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
-            (root / "cozy.toml").write_text(
+            (root / "tensorhub.toml").write_text(
                 "schema_version = 1\nname = 'x'\nmain = 'x.main'\ngen_worker = '>=0'\n",
                 encoding="utf-8",
             )
@@ -45,7 +45,7 @@ class TestEndpointValidation(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             (root / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
-            (root / "cozy.toml").write_text(
+            (root / "tensorhub.toml").write_text(
                 "schema_version = 1\nname = 'x'\nmain = 'x.main'\ngen_worker = '>=0'\n",
                 encoding="utf-8",
             )
@@ -58,7 +58,7 @@ class TestEndpointValidation(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             (root / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
-            (root / "cozy.toml").write_text(
+            (root / "tensorhub.toml").write_text(
                 "schema_version = 1\nname = 'My Cool Project'\nmain = 'x.main'\ngen_worker = '>=0'\n",
                 encoding="utf-8",
             )

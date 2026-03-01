@@ -17,20 +17,20 @@ _RE_VERSION_PREFIX = re.compile(r"^\s*([0-9]+(?:\.[0-9]+)*)")
 
 
 @dataclass(frozen=True)
-class CozyModelSpec:
+class TensorhubModelSpec:
     ref: str
     dtypes: tuple[str, ...] = _DEFAULT_DTYPES
 
 
 @dataclass(frozen=True)
-class CozyToml:
+class TensorhubToml:
     schema_version: int
     name: str
     main: str
     gen_worker: str
     cuda: str | None
-    models: dict[str, CozyModelSpec]
-    function_models: dict[str, dict[str, CozyModelSpec]]  # function_name -> model_key -> spec
+    models: dict[str, TensorhubModelSpec]
+    function_models: dict[str, dict[str, TensorhubModelSpec]]  # function_name -> model_key -> spec
     resources: dict[str, Any]
 
 
@@ -127,12 +127,12 @@ def constraint_satisfied(spec: str, version: str) -> bool:
     return True
 
 
-def _parse_model_spec(v: Any) -> CozyModelSpec:
+def _parse_model_spec(v: Any) -> TensorhubModelSpec:
     if isinstance(v, str):
         ref = v.strip()
         if not ref:
             raise ValueError("model ref cannot be empty")
-        return CozyModelSpec(ref=ref, dtypes=_DEFAULT_DTYPES)
+        return TensorhubModelSpec(ref=ref, dtypes=_DEFAULT_DTYPES)
 
     if isinstance(v, Mapping):
         ref = str(v.get("ref") or "").strip()
@@ -140,7 +140,7 @@ def _parse_model_spec(v: Any) -> CozyModelSpec:
             raise ValueError("model spec missing ref")
         dtypes_raw = v.get("dtypes", None)
         if dtypes_raw is None:
-            return CozyModelSpec(ref=ref, dtypes=_DEFAULT_DTYPES)
+            return TensorhubModelSpec(ref=ref, dtypes=_DEFAULT_DTYPES)
         if not isinstance(dtypes_raw, list) or not all(isinstance(x, str) for x in dtypes_raw):
             raise ValueError("model spec dtypes must be a list of strings")
         dtypes = tuple(x.strip() for x in dtypes_raw if x.strip())
@@ -149,29 +149,29 @@ def _parse_model_spec(v: Any) -> CozyModelSpec:
         bad = sorted({x for x in dtypes if x not in _ALLOWED_DTYPES})
         if bad:
             raise ValueError(f"model spec has invalid dtypes: {bad} (allowed: {sorted(_ALLOWED_DTYPES)})")
-        return CozyModelSpec(ref=ref, dtypes=dtypes)
+        return TensorhubModelSpec(ref=ref, dtypes=dtypes)
 
     raise ValueError("model spec must be a string or a table {ref=..., dtypes=[...]}")
 
 
-def load_cozy_toml(path: Path) -> CozyToml:
+def load_tensorhub_toml(path: Path) -> TensorhubToml:
     data = tomllib.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
-        raise ValueError("cozy.toml must be a TOML table at root")
+        raise ValueError("tensorhub.toml must be a TOML table at root")
 
     schema_version = data.get("schema_version")
     if schema_version != 1:
-        raise ValueError("cozy.toml schema_version must be 1")
+        raise ValueError("tensorhub.toml schema_version must be 1")
 
     name = str(data.get("name") or "").strip()
     main = str(data.get("main") or "").strip()
     gen_worker = str(data.get("gen_worker") or "").strip()
     if not name:
-        raise ValueError("cozy.toml missing name")
+        raise ValueError("tensorhub.toml missing name")
     if not main:
-        raise ValueError("cozy.toml missing main")
+        raise ValueError("tensorhub.toml missing main")
     if not gen_worker:
-        raise ValueError("cozy.toml missing gen_worker")
+        raise ValueError("tensorhub.toml missing gen_worker")
     _validate_constraint(gen_worker, field="gen_worker")
 
     cuda: str | None = None
@@ -184,7 +184,7 @@ def load_cozy_toml(path: Path) -> CozyToml:
                 cuda = raw.strip()
                 _validate_constraint(cuda, field="cuda")
 
-    models: dict[str, CozyModelSpec] = {}
+    models: dict[str, TensorhubModelSpec] = {}
     raw_models = data.get("models")
     if isinstance(raw_models, dict):
         for k, v in raw_models.items():
@@ -193,7 +193,7 @@ def load_cozy_toml(path: Path) -> CozyToml:
                 continue
             models[key] = _parse_model_spec(v)
 
-    function_models: dict[str, dict[str, CozyModelSpec]] = {}
+    function_models: dict[str, dict[str, TensorhubModelSpec]] = {}
     raw_functions = data.get("functions")
     if isinstance(raw_functions, dict):
         for fn_name, fn_cfg in raw_functions.items():
@@ -203,7 +203,7 @@ def load_cozy_toml(path: Path) -> CozyToml:
             fn_models_raw = fn_cfg.get("models")
             if not isinstance(fn_models_raw, dict):
                 continue
-            m: dict[str, CozyModelSpec] = {}
+            m: dict[str, TensorhubModelSpec] = {}
             for k, v in fn_models_raw.items():
                 key = str(k).strip()
                 if not key:
@@ -219,7 +219,7 @@ def load_cozy_toml(path: Path) -> CozyToml:
             if k in raw_resources:
                 resources[k] = raw_resources[k]
 
-    return CozyToml(
+    return TensorhubToml(
         schema_version=1,
         name=name,
         main=main,

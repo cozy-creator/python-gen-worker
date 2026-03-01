@@ -26,7 +26,7 @@ class ModelRef:
     # Optional explicit model ref string for FIXED source.
     #
     # If set, discovery will include this (ref+dtypes) in the baked manifest model keyspace,
-    # so you don't need a separate cozy.toml [models] mapping for fixed functions.
+    # so you don't need a separate tensorhub.toml [models] mapping for fixed functions.
     ref: Optional[str] = None
     dtypes: tuple[str, ...] = ()
 

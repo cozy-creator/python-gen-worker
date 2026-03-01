@@ -186,13 +186,13 @@
     },
     {
       "name": "Standardize release config in pyproject.toml ([tool.cozy])",
-      "description": "Remove the separate cozy.toml manifest and standardize all tenant release configuration under `pyproject.toml` in `[tool.cozy]`.",
+      "description": "Remove the separate tensorhub.toml manifest and standardize all tenant release configuration under `pyproject.toml` in `[tool.cozy]`.",
       "tasks": [
         "[x] Update docs to use [tool.cozy] only",
         "[x] Update python-worker/examples to use [tool.cozy]",
         "[x] Update worker-side config parsing",
         "[x] Add validation helper for [tool.cozy], uv.lock presence",
-        "[x] Tests for cozy.toml rejection"
+        "[x] Tests for tensorhub.toml rejection"
       ],
       "completed": true
     },

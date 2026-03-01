@@ -1,7 +1,7 @@
 [project]
 name = "sd15"
 version = "0.1.1"
-description = "Stable Diffusion 1.5 example (inference-only; Cozy manifest via cozy.toml)"
+description = "Stable Diffusion 1.5 example (inference-only; Cozy manifest via tensorhub.toml)"
 requires-python = ">=3.12"
 dependencies = [
     "gen-worker[torch]==0.3.0",

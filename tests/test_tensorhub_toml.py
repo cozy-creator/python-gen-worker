@@ -2,16 +2,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from gen_worker.cozy_toml import constraint_satisfied, load_cozy_toml
+from gen_worker.tensorhub_toml import constraint_satisfied, load_tensorhub_toml
 
 
-class TestCozyToml(unittest.TestCase):
+class TestTensorhubToml(unittest.TestCase):
     def test_schema_version_required(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            p = Path(td) / "cozy.toml"
+            p = Path(td) / "tensorhub.toml"
             p.write_text("name='x'\nmain='x.main'\ngen_worker='>=0'\n", encoding="utf-8")
             with self.assertRaises(ValueError):
-                load_cozy_toml(p)
+                load_tensorhub_toml(p)
 
     def test_constraint_satisfied(self) -> None:
         self.assertTrue(constraint_satisfied(">=0.2.0,<0.3.0", "0.2.1"))
@@ -23,7 +23,7 @@ class TestCozyToml(unittest.TestCase):
 
     def test_models_string_defaults_dtypes(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            p = Path(td) / "cozy.toml"
+            p = Path(td) / "tensorhub.toml"
             p.write_text(
                 """
 schema_version = 1
@@ -36,13 +36,13 @@ sd15 = "hf:stable-diffusion-v1-5/stable-diffusion-v1-5"
 """.lstrip(),
                 encoding="utf-8",
             )
-            cfg = load_cozy_toml(p)
+            cfg = load_tensorhub_toml(p)
             self.assertEqual(cfg.models["sd15"].ref, "hf:stable-diffusion-v1-5/stable-diffusion-v1-5")
             self.assertEqual(cfg.models["sd15"].dtypes, ("fp16", "bf16"))
 
     def test_models_table_with_fp8(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            p = Path(td) / "cozy.toml"
+            p = Path(td) / "tensorhub.toml"
             p.write_text(
                 """
 schema_version = 1
@@ -55,12 +55,12 @@ flux = { ref = "hf:black-forest-labs/FLUX.2-klein-4B", dtypes = ["fp8"] }
 """.lstrip(),
                 encoding="utf-8",
             )
-            cfg = load_cozy_toml(p)
+            cfg = load_tensorhub_toml(p)
             self.assertEqual(cfg.models["flux"].dtypes, ("fp8",))
 
     def test_invalid_dtype_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            p = Path(td) / "cozy.toml"
+            p = Path(td) / "tensorhub.toml"
             p.write_text(
                 """
 schema_version = 1
@@ -74,11 +74,11 @@ m = { ref = "hf:o/r", dtypes = ["fp16","wat"] }
                 encoding="utf-8",
             )
             with self.assertRaises(ValueError):
-                load_cozy_toml(p)
+                load_tensorhub_toml(p)
 
     def test_function_models_override(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            p = Path(td) / "cozy.toml"
+            p = Path(td) / "tensorhub.toml"
             p.write_text(
                 """
 schema_version = 1
@@ -94,13 +94,13 @@ sdxl = { ref = "hf:stabilityai/stable-diffusion-xl-base-1.0", dtypes = ["fp16"] 
 """.lstrip(),
                 encoding="utf-8",
             )
-            cfg = load_cozy_toml(p)
+            cfg = load_tensorhub_toml(p)
             self.assertIn("generate", cfg.function_models)
             self.assertEqual(cfg.function_models["generate"]["sdxl"].dtypes, ("fp16",))
 
     def test_invalid_cuda_constraint_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            p = Path(td) / "cozy.toml"
+            p = Path(td) / "tensorhub.toml"
             p.write_text(
                 """
 schema_version = 1
@@ -114,7 +114,7 @@ cuda = ">=12.6,<wat"
                 encoding="utf-8",
             )
             with self.assertRaises(ValueError):
-                load_cozy_toml(p)
+                load_tensorhub_toml(p)
 
 
 if __name__ == "__main__":

@@ -34,7 +34,7 @@ class GenerateOutput(msgspec.Struct):
 def generate(
     ctx: ActionContext,
     pipeline: Annotated[
-        StableDiffusionPipeline, ModelRef(Src.FIXED, "sd15")  # Key from cozy.toml [models]
+        StableDiffusionPipeline, ModelRef(Src.FIXED, "sd15")  # Key from tensorhub.toml [models]
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:
@@ -82,7 +82,7 @@ def generate(
 def generate_fp8(
     ctx: ActionContext,
     pipeline: Annotated[
-        StableDiffusionPipeline, ModelRef(Src.FIXED, "sd15_fp8")  # Key from cozy.toml [models]
+        StableDiffusionPipeline, ModelRef(Src.FIXED, "sd15_fp8")  # Key from tensorhub.toml [models]
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:
@@ -99,7 +99,7 @@ def generate_fp8(
 def generate_int8(
     ctx: ActionContext,
     pipeline: Annotated[
-        StableDiffusionPipeline, ModelRef(Src.FIXED, "sd15_int8")  # Key from cozy.toml [models]
+        StableDiffusionPipeline, ModelRef(Src.FIXED, "sd15_int8")  # Key from tensorhub.toml [models]
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:
@@ -116,7 +116,7 @@ def generate_int8(
 def generate_int4(
     ctx: ActionContext,
     pipeline: Annotated[
-        StableDiffusionPipeline, ModelRef(Src.FIXED, "sd15_int4")  # Key from cozy.toml [models]
+        StableDiffusionPipeline, ModelRef(Src.FIXED, "sd15_int4")  # Key from tensorhub.toml [models]
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:

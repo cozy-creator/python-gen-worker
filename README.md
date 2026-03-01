@@ -8,7 +8,7 @@ When publishing a tenant worker, Cozy expects a **Dockerfile-first** project lay
 
 Build inputs MUST include:
 
-- `cozy.toml` (Cozy manifest; used at build/publish time)
+- `tensorhub.toml` (Cozy manifest; used at build/publish time)
 - `Dockerfile` (builds the worker image)
 - tenant code (`pyproject.toml`, `uv.lock`, `src/`, etc.)
 
@@ -29,7 +29,7 @@ ENTRYPOINT ["python", "-m", "gen_worker.entrypoint"]
 
 Notes:
 
-- `cozy.toml` is **not required** to be present in the final image; it is a build-time input.
+- `tensorhub.toml` is **not required** to be present in the final image; it is a build-time input.
 - The platform reads `/app/.cozy/manifest.json` from the built image and stores it in Cozy Hub DB for routing/invocation.
 
 ## Installation
@@ -112,7 +112,7 @@ def stream(ctx: ActionContext, payload: Input) -> Iterator[Delta]:
 
 ### Model Injection
 
-Declare your model keyspace in `cozy.toml`:
+Declare your model keyspace in `tensorhub.toml`:
 
 ```toml
 [models]
@@ -127,7 +127,7 @@ from gen_worker.injection import ModelRef, ModelRefSource as Src
 @worker_function()
 def generate(
     ctx: ActionContext,
-    pipe: Annotated[DiffusionPipeline, ModelRef(Src.FIXED, "sd15")],  # key from cozy.toml [models]
+    pipe: Annotated[DiffusionPipeline, ModelRef(Src.FIXED, "sd15")],  # key from tensorhub.toml [models]
     payload: Input,
 ) -> Output:
     # Use the injected pipeline (loaded/cached by the worker's model manager).
@@ -137,7 +137,7 @@ def generate(
 ### Payload-Selected Model (Short Key)
 
 If you want the client payload to choose which repo to run, declare a short-key
-mapping in `cozy.toml` and use `ModelRef(PAYLOAD, ...)`:
+mapping in `tensorhub.toml` and use `ModelRef(PAYLOAD, ...)`:
 
 ```toml
 [models]
@@ -166,7 +166,7 @@ def generate(
 ```
 
 Note: by default the worker requires payload model selection to use a known
-short-key from `[models]` (cozy.toml). It will not accept arbitrary repo refs in
+short-key from `[models]` (tensorhub.toml). It will not accept arbitrary repo refs in
 the payload. `ModelRef(FIXED, ...)` is also restricted to keys declared in the
 manifest mapping (no inline `hf:`/`cozy:` refs).
 
@@ -251,7 +251,7 @@ Outputs are written under `/outputs/runs/<run_id>/outputs/...` (matching Cozy re
 
 ## Configuration
 
-### cozy.toml
+### tensorhub.toml
 
 ```toml
 schema_version = 1
@@ -412,7 +412,7 @@ Control-plane behavior (tensorhub + orchestrator):
 
 - Every publish creates a new immutable internal `release_id`.
 - End users invoke functions by `owner/endpoint/function` (default `prod`) or `owner/endpoint/function:tag`.
-- `endpoint` is derived from `cozy.toml` `name` and normalized to a URL-safe slug.
+- `endpoint` is derived from `tensorhub.toml` `name` and normalized to a URL-safe slug.
 - `function` names are derived from Python `@worker_function` names and normalized to URL-safe slugs (for example, `medasr_transcribe` -> `medasr-transcribe`).
 - Publishing does not move traffic by default.
 - Promoting a function tag moves traffic to that release.

@@ -3496,7 +3496,7 @@ class Worker:
                 finally:
                     if resolve_watchdog is not None:
                         resolve_watchdog.cancel()
-                # Best-effort: attach dtype preferences from cozy.toml-derived manifest mapping.
+                # Best-effort: attach dtype preferences from tensorhub.toml-derived manifest mapping.
                 if model_key:
                     try:
                         fn_specs = self._model_spec_by_key_by_function.get(spec.name) or {}

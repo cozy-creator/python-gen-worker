@@ -28,7 +28,7 @@ import msgspec
 from gen_worker import ActionContext
 from gen_worker.injection import ModelRef
 
-from gen_worker.cozy_toml import CozyModelSpec, CozyToml, load_cozy_toml
+from gen_worker.tensorhub_toml import TensorhubModelSpec, TensorhubToml, load_tensorhub_toml
 from gen_worker.names import slugify_endpoint_name, slugify_function_name
 
 _ALLOWED_MODEL_DTYPES: frozenset[str] = frozenset({"fp16", "bf16", "fp8", "fp32", "int8", "int4"})
@@ -338,27 +338,27 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
     return fn
 
 
-def _find_cozy_toml_path(root: Path) -> Path | None:
-    env_path = os.getenv("COZY_MANIFEST_PATH", "").strip()
+def _find_tensorhub_toml_path(root: Path) -> Path | None:
+    env_path = os.getenv("TENSORHUB_TOML_PATH", "").strip()
     if env_path:
         p = Path(env_path)
         return p if p.exists() else None
-    p = root / "cozy.toml"
+    p = root / "tensorhub.toml"
     return p if p.exists() else None
 
 
-def _load_cozy_manifest_toml(root: Path) -> CozyToml:
-    p = _find_cozy_toml_path(root)
+def _load_tensorhub_manifest_toml(root: Path) -> TensorhubToml:
+    p = _find_tensorhub_toml_path(root)
     if p is None:
-        raise ValueError("missing cozy.toml (required for discovery)")
-    return load_cozy_toml(p)
+        raise ValueError("missing tensorhub.toml (required for discovery)")
+    return load_tensorhub_toml(p)
 
 
-def _model_spec_to_json(spec: CozyModelSpec) -> Dict[str, Any]:
+def _model_spec_to_json(spec: TensorhubModelSpec) -> Dict[str, Any]:
     return {"ref": spec.ref, "dtypes": list(spec.dtypes)}
 
 
-def _models_by_key_to_json(models: Dict[str, CozyModelSpec]) -> Dict[str, Any]:
+def _models_by_key_to_json(models: Dict[str, TensorhubModelSpec]) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     for k, spec in models.items():
         out[str(k)] = _model_spec_to_json(spec)
@@ -416,7 +416,7 @@ def discover_functions(root: Optional[Path] = None, *, main_module: str | None =
         try:
             importlib.import_module(main_module)
         except Exception as e:
-            raise ValueError(f"failed to import cozy.toml main module {main_module!r}: {e}") from e
+            raise ValueError(f"failed to import tensorhub.toml main module {main_module!r}: {e}") from e
 
         after = set(sys.modules.keys())
         newly_loaded = sorted(after - before)
@@ -479,7 +479,7 @@ def discover_functions(root: Optional[Path] = None, *, main_module: str | None =
 
 def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
     """
-    Discover functions and load Cozy manifest config to build complete manifest.
+    Discover functions and load tensorhub manifest config to build complete manifest.
 
     Args:
         root: Project root directory. Defaults to current working directory.
@@ -490,9 +490,9 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
         root = Path.cwd()
     root = root.resolve()
 
-    cozy = _load_cozy_manifest_toml(root)
+    tensorhub_manifest = _load_tensorhub_manifest_toml(root)
 
-    functions = discover_functions(root, main_module=cozy.main)
+    functions = discover_functions(root, main_module=tensorhub_manifest.main)
     seen_fn: Dict[str, str] = {}
     for fn in functions:
         fn_name = str(fn.get("name") or "").strip()
@@ -506,17 +506,17 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
             )
         seen_fn[fn_name] = py_name
 
-    endpoint_name = slugify_endpoint_name(cozy.name)
+    endpoint_name = slugify_endpoint_name(tensorhub_manifest.name)
     if not endpoint_name:
-        raise ValueError("invalid cozy.toml name")
+        raise ValueError("invalid tensorhub.toml name")
 
     manifest: Dict[str, Any] = {
         "endpoint_name": endpoint_name,
         "functions": functions,
     }
 
-    if cozy.resources:
-        manifest["resources"] = dict(cozy.resources)
+    if tensorhub_manifest.resources:
+        manifest["resources"] = dict(tensorhub_manifest.resources)
 
     # Build per-function model keyspace.
     models_by_function: Dict[str, Any] = {}
@@ -526,15 +526,15 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
             continue
 
         # Function-specific mapping wins; otherwise fall back to global [models].
-        eff = cozy.function_models.get(fn_name) or cozy.models
-        eff2: Dict[str, CozyModelSpec] = dict(eff or {})
+        eff = tensorhub_manifest.function_models.get(fn_name) or tensorhub_manifest.models
+        eff2: Dict[str, TensorhubModelSpec] = dict(eff or {})
 
         # If a fixed ModelRef has an explicit ref (and optional dtypes) in the signature,
-        # auto-add it to the effective mapping so cozy.toml [models] isn't required for
+        # auto-add it to the effective mapping so tensorhub.toml [models] isn't required for
         # fixed functions.
         required_keys = set(fn.get("required_models", []) or [])
         inj_list = list(fn.get("injection_json", []) or [])
-        sig_specs: Dict[str, CozyModelSpec] = {}
+        sig_specs: Dict[str, TensorhubModelSpec] = {}
         for inj in inj_list:
             mr = dict(inj.get("model_ref", {}) or {})
             if mr.get("source") != "fixed":
@@ -559,9 +559,9 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
                     raise ValueError(f"function '{fn_name}' has invalid model dtypes for {key!r}: {bad}")
                 dtypes = cleaned
             if dtypes:
-                sig_specs[key] = CozyModelSpec(ref=ref, dtypes=dtypes)
+                sig_specs[key] = TensorhubModelSpec(ref=ref, dtypes=dtypes)
             else:
-                sig_specs[key] = CozyModelSpec(ref=ref)
+                sig_specs[key] = TensorhubModelSpec(ref=ref)
 
         missing = []
         for k in sorted(required_keys):
@@ -573,7 +573,7 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
             missing.append(k)
         if missing:
             raise ValueError(
-                f"function '{fn_name}' requires model keys not defined in cozy.toml [models] "
+                f"function '{fn_name}' requires model keys not defined in tensorhub.toml [models] "
                 f"and not provided via signature ModelRef(ref=...): {missing}"
             )
         if eff2:

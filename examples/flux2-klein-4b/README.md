@@ -3,7 +3,7 @@
 FLUX.2-klein turbo example using Cozy’s injection pattern (4B + 9B variants).
 
 - The worker function only defines input/output + runs inference.
-- Model selection + downloading is handled by the platform via `cozy.toml [models]`.
+- Model selection + downloading is handled by the platform via `tensorhub.toml [models]`.
 - This model is treated as a turbo model: the worker forces `num_inference_steps=8`.
 
 Steps:

@@ -4,13 +4,13 @@ Payload-based model selection for multiple SDXL checkpoints using a single funct
 
 ## Overview
 
-- Requests select `model_key` from `cozy.toml [models]`
+- Requests select `model_key` from `tensorhub.toml [models]`
 - Worker resolves that key via `ModelRef(Src.PAYLOAD, "model_key")`
 - Scheduler routes by warm/hot model cache when possible
 
 ## Model Map
 
-Defined in `cozy.toml`:
+Defined in `tensorhub.toml`:
 
 - `sdxl-base`
 - `dreamshaper`

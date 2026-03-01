@@ -1,7 +1,7 @@
 [project]
 name = "flux2-klein-4b"
 version = "0.1.0"
-description = "Flux2-klein-4B example (inference-only; Cozy manifest via cozy.toml)"
+description = "Flux2-klein-4B example (inference-only; Cozy manifest via tensorhub.toml)"
 requires-python = ">=3.12"
 dependencies = [
     "gen-worker[torch]==0.3.0",
