@@ -232,6 +232,20 @@ def _preflight_cache_dirs() -> Dict[str, str]:
 def _run_main() -> int:
     _dev_validate_gen_worker_version()
     _log_startup_phase("boot", status="starting")
+    worker_mode = (os.getenv("WORKER_MODE") or "inference").strip().lower()
+    if worker_mode not in {"inference", "trainer"}:
+        logger.error("Invalid WORKER_MODE=%r (expected 'inference' or 'trainer')", worker_mode)
+        return 1
+    if worker_mode == "trainer":
+        _log_startup_phase("trainer_mode_selected", status="ok", worker_mode=worker_mode)
+        try:
+            from .trainer.runtime import run_training_runtime_from_env
+
+            return int(run_training_runtime_from_env())
+        except Exception as e:
+            logger.exception("Trainer runtime failed unexpectedly: %s", e)
+            _log_worker_fatal("trainer_runtime", e, exit_code=1)
+            return 1
 
     manifest = load_manifest()
     user_modules: List[str] = []

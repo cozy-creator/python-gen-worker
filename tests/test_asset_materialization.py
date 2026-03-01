@@ -90,7 +90,7 @@ class TestAssetMaterialization(unittest.TestCase):
                 with self.assertRaises(Exception):
                     w._materialize_asset(ActionContext("run-1", owner=w.owner), a)
 
-    def test_materialize_cozy_hub_ref(self) -> None:
+    def test_materialize_tensorhub_ref(self) -> None:
         w = self._worker(owner="tenant-1")
         a = Asset(ref="my-uploads/cat.png")
         body = b"\x89PNG\r\n\x1a\ncat"
@@ -130,7 +130,7 @@ class TestAssetMaterialization(unittest.TestCase):
                 ctx = ActionContext(
                     "run-1",
                     owner="tenant-1",
-                    file_api_base_url="https://cozy-hub.example",
+                    file_api_base_url="https://tensorhub.example",
                     file_api_token="tok",
                 )
                 w._materialize_asset(ctx, a)

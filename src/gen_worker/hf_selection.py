@@ -174,7 +174,7 @@ def _dtype_score(dtypes: Optional[Set[str]], policy: HFSelectionPolicy) -> int:
     """
     Score a safetensors dtype set.
 
-    Preference is hardcoded (same as cozy-hub): F16 first, then BF16.
+    Preference is hardcoded (same as tensorhub): F16 first, then BF16.
     `fp32` is only considered when explicitly enabled in policy.weight_precisions.
     """
     if not dtypes:

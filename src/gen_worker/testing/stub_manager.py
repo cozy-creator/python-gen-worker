@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 from typing import Any, Dict, List, Optional
 
@@ -69,6 +70,8 @@ class StubModelManager(ModelManagementInterface):
         async with self._lock:
             if model_id in self._models:
                 return self._models[model_id]
-            local_path = await self._downloader.download(model_id, self._cache_dir)
+            local_path = self._downloader.download(model_id, self._cache_dir)
+            if inspect.isawaitable(local_path):
+                local_path = await local_path
             self._models[model_id] = local_path
             return local_path

@@ -79,7 +79,7 @@ class CozyHubClient:
     """
     Minimal Cozy Hub client for snapshot/object resolution.
 
-    Expected routes (see cozy-hub issue id=40):
+    Expected routes (see tensorhub issue id=40):
       - GET /api/v1/repos/<owner>/<repo>/resolve?tag=<tag> -> {"digest": "..."}
       - GET /api/v1/repos/<owner>/<repo>/snapshots/<digest>/manifest
       - GET /api/v1/objects/<object_digest>/manifest
@@ -290,7 +290,7 @@ def _safe_symlink_dir(target: Path, link: Path) -> None:
         if link.is_dir() and not link.is_symlink():
             shutil.rmtree(link, ignore_errors=True)
         else:
-            link.unlink(missing_ok=True)  # type: ignore[arg-type]
+            link.unlink(missing_ok=True)
     try:
         os.symlink(str(target), str(link), target_is_directory=True)
     except Exception:
@@ -323,14 +323,14 @@ async def _download_one_file(url: str, dst: Path, expected_size: int, expected_b
         except Exception:
             offset = 0
         if expected_size and offset > expected_size:
-            tmp.unlink(missing_ok=True)  # type: ignore[arg-type]
+            tmp.unlink(missing_ok=True)
             offset = 0
 
     # If the partial file is already complete, validate + finalize.
     if offset and expected_size and offset == expected_size:
         got = _blake3_file(tmp)
         if expected_blake3 and got.lower() != expected_blake3.lower():
-            tmp.unlink(missing_ok=True)  # type: ignore[arg-type]
+            tmp.unlink(missing_ok=True)
         else:
             tmp.rename(dst)
             return

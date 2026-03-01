@@ -8,7 +8,7 @@ from aiohttp import web
 from blake3 import blake3
 
 from gen_worker.cozy_snapshot_v2_downloader import CozySnapshotV2Downloader
-from gen_worker.cozy_hub_v2 import CozyHubV2Client
+from gen_worker.tensorhub_v2 import CozyHubV2Client
 from gen_worker.model_refs import CozyRef
 
 
@@ -80,9 +80,9 @@ def test_snapshot_v2_downloader_materializes(tmp_path: Path) -> None:
         assert body["tag"] == "latest"
         return web.json_response(
             {
+                "version_id": "blake3:" + snap,
                 "repo_revision_seq": 1,
-                "snapshot_digest": snap,
-                "artifact": {
+                "variant": {
                     "label": "safetensors-fp16",
                     "file_layout": "diffusers",
                     "file_type": "safetensors",
@@ -90,7 +90,7 @@ def test_snapshot_v2_downloader_materializes(tmp_path: Path) -> None:
                 },
                 "snapshot_manifest": {
                     "version": 1,
-                    "files": [
+                    "entries": [
                         {
                             "path": "cozy.pipeline.yaml",
                             "size_bytes": len(b1),
@@ -114,7 +114,7 @@ def test_snapshot_v2_downloader_materializes(tmp_path: Path) -> None:
     async def get_unet_config(_req: web.Request) -> web.Response:
         return web.Response(body=b2, headers={"Content-Type": "application/octet-stream"})
 
-    routes["/api/v1/repos/o/r/resolve_artifact"] = resolve_artifact  # type: ignore[assignment]
+    routes["/api/v1/repos/o/r/resolve"] = resolve_artifact  # type: ignore[assignment]
     routes["/files/pipeline"] = get_pipeline  # type: ignore[assignment]
     routes["/files/unet_config"] = get_unet_config  # type: ignore[assignment]
 
@@ -129,6 +129,53 @@ def test_snapshot_v2_downloader_materializes(tmp_path: Path) -> None:
         assert (local / "unet" / "config.json").read_bytes() == b2
         blob1 = tmp_path / "blobs" / "blake3" / b1_digest[:2] / b1_digest[2:4] / b1_digest
         assert blob1.exists()
+    finally:
+        _stop_server(srv)
+
+
+def test_snapshot_v2_downloader_digest_pin_uses_resolve_endpoint(tmp_path: Path) -> None:
+    snap = "blake3:" + ("c" * 64)
+
+    b1 = b"hello"
+    b1_digest = blake3(b1).hexdigest()
+
+    base = ""
+    routes: Dict[str, web.StreamResponse] = {}
+
+    async def resolve_artifact(req: web.Request) -> web.Response:
+        body = await req.json()
+        assert body.get("digest") == snap
+        return web.json_response(
+            {
+                "version_id": snap,
+                "snapshot_manifest": {
+                    "version": 1,
+                    "entries": [
+                        {
+                            "path": "cozy.pipeline.yaml",
+                            "size_bytes": len(b1),
+                            "blake3": b1_digest,
+                            "url": f"{base}/files/pipeline",
+                        }
+                    ],
+                },
+            }
+        )
+
+    async def get_pipeline(_req: web.Request) -> web.Response:
+        return web.Response(body=b1, headers={"Content-Type": "application/octet-stream"})
+
+    routes["/api/v1/repos/o/r/resolve"] = resolve_artifact  # type: ignore[assignment]
+    routes["/files/pipeline"] = get_pipeline  # type: ignore[assignment]
+
+    srv = _start_server(routes)
+    try:
+        base = srv.base_url
+        client = CozyHubV2Client(base_url=base)
+        dl = CozySnapshotV2Downloader(client)
+        ref = CozyRef(owner="o", repo="r", digest=snap)
+        local = asyncio.run(dl.ensure_snapshot(tmp_path, ref))
+        assert (local / "cozy.pipeline.yaml").read_bytes() == b1
     finally:
         _stop_server(srv)
 
@@ -189,7 +236,7 @@ def test_snapshot_v2_downloader_uses_orchestrator_resolved_urls(tmp_path: Path) 
         _stop_server(srv)
 
 
-def test_model_ref_downloader_uses_resolved_urls_without_cozy_hub_token(tmp_path: Path) -> None:
+def test_model_ref_downloader_uses_resolved_urls_without_tensorhub_token(tmp_path: Path) -> None:
     from gen_worker.model_ref_downloader import ModelRefDownloader, reset_resolved_cozy_models_by_id, set_resolved_cozy_models_by_id
 
     snap = "c" * 64
@@ -225,7 +272,7 @@ def test_model_ref_downloader_uses_resolved_urls_without_cozy_hub_token(tmp_path
         resolved_by_id = {"cozy:o/r:latest": resolved}
         tok = set_resolved_cozy_models_by_id(resolved_by_id)
         try:
-            dl = ModelRefDownloader(cozy_base_url=None, cozy_token=None, allow_cozy_hub_api_resolve=False)
+            dl = ModelRefDownloader(cozy_base_url=None, cozy_token=None, allow_tensorhub_api_resolve=False)
             local = dl.download("cozy:o/r:latest", tmp_path.as_posix())
             assert (Path(local) / "cozy.pipeline.yaml").read_bytes() == b1
         finally:
@@ -234,7 +281,7 @@ def test_model_ref_downloader_uses_resolved_urls_without_cozy_hub_token(tmp_path
         _stop_server(srv)
 
 
-def test_model_ref_downloader_hf_prefers_cozy_hub_public_request(tmp_path: Path) -> None:
+def test_model_ref_downloader_hf_prefers_tensorhub_public_request(tmp_path: Path) -> None:
     from gen_worker.model_ref_downloader import ModelRefDownloader
 
     snap = "blake3:" + ("d" * 64)
@@ -286,7 +333,7 @@ def test_model_ref_downloader_hf_prefers_cozy_hub_public_request(tmp_path: Path)
         dl = ModelRefDownloader(
             cozy_base_url=base,
             cozy_token=None,
-            allow_cozy_hub_api_resolve=False,
+            allow_tensorhub_api_resolve=False,
         )
         local = Path(dl.download("hf:o/r@main", tmp_path.as_posix()))
         assert (local / "cozy.pipeline.yaml").read_bytes() == b1
@@ -350,7 +397,7 @@ def test_model_ref_downloader_public_request_polls_202_then_200(tmp_path: Path) 
         dl = ModelRefDownloader(
             cozy_base_url=base,
             cozy_token=None,
-            allow_cozy_hub_api_resolve=False,
+            allow_tensorhub_api_resolve=False,
         )
         local = Path(dl.download("hf:o/r@main", tmp_path.as_posix()))
         assert (local / "cozy.pipeline.yaml").read_bytes() == b1

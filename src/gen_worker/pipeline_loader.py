@@ -785,8 +785,8 @@ class PipelineLoader:
         local_cache_dir: Optional[str] = None,
         max_vram_gb: Optional[float] = None,
         vram_safety_margin_gb: float = VRAM_SAFETY_MARGIN_GB,
-        cozy_hub_url: Optional[str] = None,
-        cozy_hub_token: Optional[str] = None,
+        tensorhub_url: Optional[str] = None,
+        tensorhub_token: Optional[str] = None,
         downloader: Optional[Any] = None,
     ):
         """
@@ -797,8 +797,8 @@ class PipelineLoader:
             local_cache_dir: Local cache directory for NFS->NVMe optimization
             max_vram_gb: Maximum VRAM to use (auto-detect if None)
             vram_safety_margin_gb: VRAM reserved for working memory
-            cozy_hub_url: Base URL for Cozy Hub API
-            cozy_hub_token: Authentication token for Cozy Hub
+            tensorhub_url: Base URL for Cozy Hub API
+            tensorhub_token: Authentication token for Cozy Hub
         """
         if models_dir is None:
             # Standard shared disk cache root.
@@ -808,8 +808,8 @@ class PipelineLoader:
         self.vram_safety_margin_gb = vram_safety_margin_gb
 
         # Cozy Hub configuration
-        self._cozy_hub_url = cozy_hub_url or os.environ.get("COZY_HUB_URL", "")
-        self._cozy_hub_token = cozy_hub_token or os.environ.get("COZY_HUB_TOKEN", "")
+        self._tensorhub_url = tensorhub_url or os.environ.get("TENSORHUB_URL", "")
+        self._tensorhub_token = tensorhub_token or os.environ.get("TENSORHUB_TOKEN", "")
         self._downloader = downloader
 
         # Auto-detect VRAM
@@ -965,14 +965,14 @@ class PipelineLoader:
 
         # Legacy Cozy Hub "model manifest" API is no longer supported. Use the
         # unified downloader instead (ModelRefDownloader / Cozy snapshot APIs).
-        if self._cozy_hub_url:
+        if self._tensorhub_url:
             raise ModelDownloadError(
                 model_id,
                 "legacy cozy hub manifest downloads are not supported; configure a model ref downloader",
                 retryable=False,
             )
 
-        if not self._cozy_hub_url:
+        if not self._tensorhub_url:
             raise ModelNotFoundError(
                 model_id,
                 self.models_dir / model_id if self.models_dir else None,
@@ -981,7 +981,7 @@ class PipelineLoader:
         # Unreachable: we always either have a downloader or fail above.
         raise ModelNotFoundError(model_id, self.models_dir / model_id if self.models_dir else None)
 
-    async def _download_from_cozy_hub(
+    async def _download_from_tensorhub(
         self,
         model_id: str,
         progress_callback: Optional[Callable[[str, float], None]] = None,
@@ -1007,11 +1007,11 @@ class PipelineLoader:
 
         try:
             headers = {}
-            if self._cozy_hub_token:
-                headers["Authorization"] = f"Bearer {self._cozy_hub_token}"
+            if self._tensorhub_token:
+                headers["Authorization"] = f"Bearer {self._tensorhub_token}"
 
             # Get model manifest from Cozy Hub
-            manifest_url = f"{self._cozy_hub_url}/models/{model_id}/manifest"
+            manifest_url = f"{self._tensorhub_url}/models/{model_id}/manifest"
             timeout = aiohttp.ClientTimeout(total=30)
 
             async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
@@ -1039,7 +1039,7 @@ class PipelineLoader:
                 # Download each file
                 for file_info in files:
                     file_path = file_info["path"]
-                    file_url = file_info.get("url") or f"{self._cozy_hub_url}/models/{model_id}/files/{file_path}"
+                    file_url = file_info.get("url") or f"{self._tensorhub_url}/models/{model_id}/files/{file_path}"
                     file_size = file_info.get("size", 0)
 
                     dest_path = temp_dir / file_path

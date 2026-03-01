@@ -1,0 +1,15 @@
+{
+  "trainer_api_version": "v1",
+  "run_id": "training-smoke-001",
+  "trainer": "main:TrainingSmokeTrainer",
+  "owner": "demo-org",
+  "release_ref": "demo-org/demo-repo:latest",
+  "max_steps": 5,
+  "metric_every": 1,
+  "checkpoint_every": 2,
+  "sample_every": 2,
+  "hyperparams": {
+    "learning_rate": 0.0001
+  },
+  "mock_batches": [1, 2, 3, 4, 5]
+}

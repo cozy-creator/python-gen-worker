@@ -5,12 +5,12 @@ import os
 import shutil
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Coroutine, Dict, List, Optional
 
 from .cozy_cas import _download_one_file as _download_one_file  # reuse verified Range-resume downloader
 from .cozy_cas import _norm_rel_path
-from .cozy_hub_policy import default_resolve_preferences, detect_worker_capabilities
-from .cozy_hub_v2 import CozyHubV2Client, CozyHubResolveArtifactResult, CozyHubSnapshotFile
+from .tensorhub_policy import default_resolve_preferences, detect_worker_capabilities
+from .tensorhub_v2 import CozyHubV2Client, CozyHubResolveArtifactResult, CozyHubSnapshotFile
 from .model_refs import CozyRef
 
 
@@ -65,7 +65,7 @@ def _coerce_resolved_model(ref: CozyRef, resolved: Any) -> CozyHubResolveArtifac
     return CozyHubResolveArtifactResult(
         repo_revision_seq=0,
         snapshot_digest=snapshot_digest,
-        artifact=None,  # type: ignore[arg-type]
+        artifact=None,
         files=files,
     )
 
@@ -74,7 +74,7 @@ class CozySnapshotV2Downloader:
     """Cozy Hub v2 downloader.
 
     Normal mode:
-      - resolve owner/repo:tag via resolve_artifact
+      - resolve owner/repo:tag (or @digest) via resolve API
       - download all referenced blobs to a local blob store
       - materialize a snapshot checkout by hardlinking blobs into the snapshot tree
 
@@ -137,21 +137,13 @@ class CozySnapshotV2Downloader:
         if self._client is None:
             raise RuntimeError("cozy hub api resolve is disabled")
 
-        if ref.digest:
-            files = await self._client.get_snapshot_manifest(owner=ref.owner, repo=ref.repo, digest=ref.digest)
-            return CozyHubResolveArtifactResult(
-                repo_revision_seq=0,
-                snapshot_digest=ref.digest,
-                artifact=None,  # type: ignore[arg-type]
-                files=files,
-            )
-
         prefs = default_resolve_preferences()
         caps = detect_worker_capabilities()
         return await self._client.resolve_artifact(
             owner=ref.owner,
             repo=ref.repo,
             tag=ref.tag,
+            digest=ref.digest,
             include_urls=True,
             preferences=prefs,
             capabilities=caps.to_dict(),
@@ -200,7 +192,7 @@ def ensure_snapshot_sync(
     client: Optional[CozyHubV2Client] = None
     if resolved is None:
         if not (base_url or "").strip():
-            raise RuntimeError("cozy downloads require COZY_HUB_URL")
+            raise RuntimeError("cozy downloads require TENSORHUB_URL")
         client = CozyHubV2Client(base_url=base_url, token=token)
 
     dl = CozySnapshotV2Downloader(client)
@@ -217,7 +209,7 @@ def ensure_snapshot_sync(
     return asyncio.run(_run())
 
 
-def _run_in_thread(coro: "asyncio.Future[Path]") -> str:
+def _run_in_thread(coro: Coroutine[Any, Any, Path]) -> str:
     out: dict[str, str] = {}
     err: dict[str, BaseException] = {}
 

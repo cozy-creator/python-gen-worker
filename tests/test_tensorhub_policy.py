@@ -1,7 +1,7 @@
 import sys
 from types import SimpleNamespace
 
-from gen_worker.cozy_hub_policy import default_resolve_preferences, detect_worker_capabilities
+from gen_worker.tensorhub_policy import default_resolve_preferences, detect_worker_capabilities
 
 
 def test_default_preferences_order() -> None:

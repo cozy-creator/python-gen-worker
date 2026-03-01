@@ -73,7 +73,7 @@ class TestFileTokenScoping(unittest.TestCase):
         ctx = ActionContext(
             "run-123",
             owner="tenant-1",
-            file_api_base_url="https://cozy-hub.example",
+            file_api_base_url="https://tensorhub.example",
             file_api_token="per-run-token",
         )
 
@@ -97,7 +97,7 @@ class TestFileTokenScoping(unittest.TestCase):
             return _FakeHTTPResponse(b'{"size_bytes": 5, "sha256": "abc123"}', status=200)
 
         os.environ["FILE_API_TOKEN"] = "env-fallback-token"
-        os.environ["FILE_API_BASE_URL"] = "https://cozy-hub.example"
+        os.environ["FILE_API_BASE_URL"] = "https://tensorhub.example"
 
         ctx = ActionContext(
             "run-456",
@@ -124,7 +124,7 @@ class TestAuthErrorHandling(unittest.TestCase):
         ctx = ActionContext(
             "run-789",
             owner="tenant-1",
-            file_api_base_url="https://cozy-hub.example",
+            file_api_base_url="https://tensorhub.example",
             file_api_token="expired-token",
         )
 
@@ -143,7 +143,7 @@ class TestAuthErrorHandling(unittest.TestCase):
         ctx = ActionContext(
             "run-abc",
             owner="tenant-1",
-            file_api_base_url="https://cozy-hub.example",
+            file_api_base_url="https://tensorhub.example",
             file_api_token="wrong-scope-token",
         )
 
@@ -161,7 +161,7 @@ class TestAuthErrorHandling(unittest.TestCase):
         ctx = ActionContext(
             "run-def",
             owner="tenant-1",
-            file_api_base_url="https://cozy-hub.example",
+            file_api_base_url="https://tensorhub.example",
             file_api_token="bad-token",
         )
 
@@ -186,7 +186,7 @@ class TestAuthErrorHandling(unittest.TestCase):
             ctx = ActionContext(
                 "run-ghi",
                 owner="tenant-1",
-                file_api_base_url="https://cozy-hub.example",
+                file_api_base_url="https://tensorhub.example",
                 file_api_token="expired-token",
             )
 
@@ -213,7 +213,7 @@ class TestAuthErrorHandling(unittest.TestCase):
             ctx = ActionContext(
                 "run-jkl",
                 owner="tenant-1",
-                file_api_base_url="https://cozy-hub.example",
+                file_api_base_url="https://tensorhub.example",
                 file_api_token="scoped-token",
             )
 

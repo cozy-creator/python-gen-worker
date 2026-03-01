@@ -104,20 +104,24 @@ def generate_dynamic(
 
                 # Check functions have required_models
                 funcs = {f["name"]: f for f in manifest["functions"]}
+                funcs_by_python_name = {f["python_name"]: f for f in manifest["functions"]}
 
                 # generate: needs sdxl
                 self.assertIn("generate", funcs)
                 self.assertEqual(funcs["generate"]["required_models"], ["sdxl"])
 
                 # generate_with_cn: needs sdxl and controlnet
-                self.assertIn("generate_with_cn", funcs)
-                self.assertEqual(sorted(funcs["generate_with_cn"]["required_models"]), ["controlnet", "sdxl"])
+                self.assertIn("generate_with_cn", funcs_by_python_name)
+                self.assertEqual(
+                    sorted(funcs_by_python_name["generate_with_cn"]["required_models"]),
+                    ["controlnet", "sdxl"],
+                )
 
                 # generate_dynamic: PAYLOAD source, so no required_models
-                self.assertIn("generate_dynamic", funcs)
-                self.assertEqual(funcs["generate_dynamic"]["required_models"], [])
+                self.assertIn("generate_dynamic", funcs_by_python_name)
+                self.assertEqual(funcs_by_python_name["generate_dynamic"]["required_models"], [])
                 self.assertEqual(
-                    funcs["generate_dynamic"]["payload_repo_selectors"],
+                    funcs_by_python_name["generate_dynamic"]["payload_repo_selectors"],
                     [{"field": "model_key", "kind": "short_key"}],
                 )
 

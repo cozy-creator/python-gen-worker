@@ -71,6 +71,7 @@ def generate(ctx: ActionContext, payload: Input) -> Output:
 - **Streaming output** - Support for incremental/streaming responses
 - **Progress reporting** - Built-in progress events via `ActionContext`
 - **Perf metrics** - Best-effort per-run metrics emitted to gen-orchestrator (`metrics.*` worker events)
+- **Trainer runtime mode** - SDK-native trainer loop via `WORKER_MODE=trainer`
 - **File handling** - Upload/download assets via Cozy hub file API
 - **Model caching** - LRU cache with VRAM/disk management and cache-aware routing
 
@@ -179,6 +180,42 @@ def process(ctx: ActionContext, payload: Input) -> Output:
     return Output(result=asset.ref)
 ```
 
+### Trainer Mode (Class-Only)
+
+```python
+from gen_worker import StepContext, StepResult
+
+class MyTrainer:
+    def setup(self, ctx: StepContext) -> None:
+        pass
+
+    def configure(self, ctx: StepContext) -> dict[str, object]:
+        return {"step": 0}
+
+    def prepare_batch(self, raw_batch: object, state: dict[str, object], ctx: StepContext) -> object:
+        return raw_batch
+
+    def train_step(self, batch: object, state: dict[str, object], ctx: StepContext) -> StepResult:
+        return StepResult(metrics={"train/loss": 0.123})
+
+    def state_dict(self, state: dict[str, object]) -> dict[str, object]:
+        return dict(state)
+
+    def load_state_dict(self, state: dict[str, object], payload: dict[str, object], ctx: StepContext) -> None:
+        state.update(payload)
+```
+
+Run trainer mode:
+
+```bash
+WORKER_MODE=trainer \
+TRAINER_JOB_SPEC_PATH=/app/.cozy/trainer_job.json \
+python -m gen_worker.entrypoint
+```
+
+Full authoring guide: `docs/custom-trainer-authoring.md`.
+Orchestrated runtime contract: `docs/issue-081-orchestrated-trainer-runtime.md`.
+
 ## Dev HTTP Runner (Local Inference Without gen-orchestrator)
 
 For local testing of a built worker image (without standing up gen-orchestrator),
@@ -189,7 +226,7 @@ Container example:
 ```bash
 docker run --rm --gpus all -p 8081:8081 \
   -v "$(pwd)/out:/outputs" \
-  -e COZY_HUB_URL='http://host.docker.internal:7777' \
+  -e TENSORHUB_URL='http://host.docker.internal:7777' \
   <your-worker-image> \
   python -m gen_worker.testing.http_runner --listen 0.0.0.0:8081 --outputs /outputs
 ```
@@ -239,6 +276,7 @@ Orchestrator-injected (production contract):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `WORKER_MODE` | `inference` | Runtime mode selector (`inference` or `trainer`) |
 | `SCHEDULER_PUBLIC_ADDR` | - | Scheduler address workers should dial |
 | `SCHEDULER_ADDRS` | - | Optional comma-separated seed addresses for leader discovery |
 | `WORKER_JWT` | - | Worker-connect JWT (required; claims are authoritative) |
@@ -264,10 +302,15 @@ Local dev / advanced (not injected by orchestrator):
 | `WORKER_WARN_MODEL_LOAD_S` | `60` | Emit `task.model_load.stuck` warning after this duration |
 | `WORKER_WARN_INFERENCE_S` | `60` | Emit `task.inference.stuck` warning after this duration |
 | `WORKER_MAX_CONCURRENT_DOWNLOADS` | 2 | Max parallel model downloads |
-| `COZY_HUB_URL` | - | Cozy Hub base URL (used for public model requests and, if enabled, Cozy Hub API resolve) |
-| `WORKER_ALLOW_COZY_HUB_API_RESOLVE` | `false` | Local dev only: allow the worker to call Cozy Hub resolve APIs |
-| `COZY_HUB_TOKEN` | - | Cozy Hub bearer token (optional; enables ingest-if-missing for public HF models, if Cozy Hub requires auth) |
+| `TENSORHUB_URL` | - | Cozy Hub base URL (used for public model requests and, if enabled, Cozy Hub API resolve) |
+| `WORKER_ALLOW_TENSORHUB_API_RESOLVE` | `false` | Local dev only: allow the worker to call Cozy Hub resolve APIs |
+| `TENSORHUB_TOKEN` | - | Cozy Hub bearer token (optional; enables ingest-if-missing for public HF models, if Cozy Hub requires auth) |
 | `HF_TOKEN` | - | Hugging Face token (for private `hf:` refs) |
+| `TRAINER_JOB_SPEC_PATH` | `/app/.cozy/trainer_job.json` | Trainer-mode JSON job manifest path |
+| `TRAINER_PLUGIN` | - | Trainer plugin import (`module:symbol`); optional if provided in job JSON |
+| `TRAINER_CHECKPOINTS_DIR` | `/tmp/training/checkpoints` | Local checkpoint output directory in trainer mode |
+| `TRAINER_SAMPLES_DIR` | `/tmp/training/samples` | Local sample output directory in trainer mode |
+| `TRAINER_EVENTS_PATH` | - | Optional line-delimited JSON lifecycle event log for trainer mode |
 
 ## Metrics
 
@@ -294,6 +337,12 @@ Overrides:
 - `COZY_HF_FULL_REPO_DOWNLOAD=1`: disable filtering and download the entire repo (not recommended; can be 10s of GB).
 
 ### Cozy Hub (`cozy:`) download behavior
+
+Cozy refs use release selectors:
+- `cozy:owner/repo:tag` (for example `:latest`, `:prod`, `:5.3`)
+- `cozy:owner/repo@blake3:<digest>` (immutable pin)
+
+Tags are mutable pointers, but they resolve only to published versions.
 
 Cozy snapshot/object file downloads are written to `*.part` and then atomically renamed on success. If a `*.part` file exists from a previous interrupted download, the worker attempts to resume it using HTTP `Range` requests (if supported by the presigned object-store URL), and falls back to a full re-download if Range is not supported.
 
@@ -359,7 +408,7 @@ PyTorch/CUDA dependencies are installed as part of your worker's dependency set 
 
 ## Publish/Promote Lifecycle
 
-Control-plane behavior (cozy-hub + orchestrator):
+Control-plane behavior (tensorhub + orchestrator):
 
 - Every publish creates a new immutable internal `release_id`.
 - End users invoke functions by `owner/endpoint/function` (default `prod`) or `owner/endpoint/function:tag`.

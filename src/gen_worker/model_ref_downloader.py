@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Coroutine, Mapping, Optional
 
 import random
 import time
@@ -11,9 +11,10 @@ import time
 from .cozy_cas import CozyHubClient, CozySnapshotDownloader
 from .cozy_snapshot_v2_downloader import ensure_snapshot_sync
 from .downloader import ModelDownloader
-from .cozy_hub_v2 import (
+from .tensorhub_v2 import (
     CozyHubError,
     CozyHubPublicModelPendingError,
+    CozyHubResolveArtifactResult,
     CozyHubV2Client,
 )
 from .hf_downloader import HuggingFaceHubDownloader
@@ -69,7 +70,7 @@ class ModelRefDownloader(ModelDownloader):
     Security posture (issue #92):
       - By default, cozy: downloads MUST use orchestrator-provided resolved manifests
         (presigned URLs). The worker should not call Cozy Hub APIs.
-      - If WORKER_ALLOW_COZY_HUB_API_RESOLVE=1, the worker may call Cozy Hub APIs as
+      - If WORKER_ALLOW_TENSORHUB_API_RESOLVE=1, the worker may call Cozy Hub APIs as
         a dev-only fallback.
 
     Returns a local directory path for both schemes.
@@ -84,11 +85,11 @@ class ModelRefDownloader(ModelDownloader):
         hf_home: Optional[str] = None,
         hf_token: Optional[str] = None,
         *,
-        allow_cozy_hub_api_resolve: bool = False,
+        allow_tensorhub_api_resolve: bool = False,
     ) -> None:
         self._cozy_base_url = (cozy_base_url or "").strip() or None
         self._cozy_token = (cozy_token or "").strip() or None
-        self._allow_cozy_hub_api_resolve = bool(allow_cozy_hub_api_resolve)
+        self._allow_tensorhub_api_resolve = bool(allow_tensorhub_api_resolve)
 
         self._hf = HuggingFaceHubDownloader(hf_home=hf_home, hf_token=hf_token)
 
@@ -100,7 +101,7 @@ class ModelRefDownloader(ModelDownloader):
         # Legacy snapshot/object downloader kept for compatibility with older Cozy Hub
         # routes; only enabled when API resolve is explicitly allowed.
         self._cozy_legacy: Optional[CozySnapshotDownloader] = None
-        if self._allow_cozy_hub_api_resolve and self._cozy_base_url:
+        if self._allow_tensorhub_api_resolve and self._cozy_base_url:
             client = CozyHubClient(self._cozy_base_url, token=self._cozy_token)
             self._cozy_legacy = CozySnapshotDownloader(client)
 
@@ -112,13 +113,13 @@ class ModelRefDownloader(ModelDownloader):
                 try:
                     canonical = parsed.hf.canonical()
                     prefs = _get_prefs_for_ref(canonical)
-                    resolved = await self._request_public_model_with_wait(canonical, prefs=prefs)
+                    resolved_artifact = await self._request_public_model_with_wait(canonical, prefs=prefs)
                     return ensure_snapshot_sync(
                         base_dir=dest_dir,
                         ref=CozyRef(owner="public", repo="public", tag="latest"),
                         base_url=self._cozy_base_url or "",
                         token=None,
-                        resolved=resolved,
+                        resolved=resolved_artifact,
                     )
                 except CozyHubError:
                     pass
@@ -126,8 +127,8 @@ class ModelRefDownloader(ModelDownloader):
 
         if parsed.scheme == "cozy" and parsed.cozy is not None:
             canonical = parsed.cozy.canonical()
-            resolved = _resolved_cozy_models_by_id.get()
-            resolved_entry = resolved.get(canonical) if resolved is not None else None
+            resolved_mapping = _resolved_cozy_models_by_id.get()
+            resolved_entry = resolved_mapping.get(canonical) if resolved_mapping is not None else None
 
             if resolved_entry is not None:
                 return ensure_snapshot_sync(
@@ -139,7 +140,7 @@ class ModelRefDownloader(ModelDownloader):
                 )
 
             # Public model request path.
-            # This is allowed even when api-resolve is disabled, but requires COZY_HUB_URL.
+            # This is allowed even when api-resolve is disabled, but requires TENSORHUB_URL.
             if self._cozy_v2 is not None and parsed.cozy.digest is None:
                 prefs = _get_prefs_for_ref(canonical)
                 resolved = await self._request_public_model_with_wait(canonical, prefs=prefs)
@@ -151,14 +152,14 @@ class ModelRefDownloader(ModelDownloader):
                     resolved=resolved,
                 )
 
-            if not self._allow_cozy_hub_api_resolve:
+            if not self._allow_tensorhub_api_resolve:
                 raise RuntimeError(
                     "cozy model download requires orchestrator-resolved URLs (missing resolved_cozy_models_by_id entry)"
                 )
             if not self._cozy_base_url:
-                raise RuntimeError("cozy downloads require COZY_HUB_URL")
+                raise RuntimeError("cozy downloads require TENSORHUB_URL")
 
-            # Prefer Cozy Hub v2 resolve_artifact flow.
+            # Prefer Cozy Hub v2 resolve flow.
             try:
                 return ensure_snapshot_sync(
                     base_dir=dest_dir,
@@ -217,9 +218,14 @@ class ModelRefDownloader(ModelDownloader):
             return [lo]
         return ["diffusers"]
 
-    async def _request_public_model_with_wait(self, model_ref: str, *, prefs: Mapping[str, Any]):
+    async def _request_public_model_with_wait(
+        self,
+        model_ref: str,
+        *,
+        prefs: Mapping[str, Any],
+    ) -> CozyHubResolveArtifactResult:
         if self._cozy_v2 is None:
-            raise RuntimeError("cozy downloads require COZY_HUB_URL")
+            raise RuntimeError("cozy downloads require TENSORHUB_URL")
 
         deadline = time.monotonic() + self.DEFAULT_PUBLIC_MODEL_REQUEST_WAIT_TIMEOUT_S
         delay = 0.5
@@ -261,7 +267,7 @@ class ModelRefDownloader(ModelDownloader):
         return asyncio.run(self._download_async(parsed, base)).as_posix()
 
 
-def _run_in_thread(coro) -> str:
+def _run_in_thread(coro: Coroutine[Any, Any, Path]) -> str:
     out: dict[str, str] = {}
     err: dict[str, BaseException] = {}
 

@@ -238,7 +238,7 @@ def _require_file_api_base_url() -> str:
     if not base:
         base = os.getenv("ORCHESTRATOR_HTTP_URL", "").strip()
     if not base:
-        base = os.getenv("COZY_HUB_URL", "").strip()
+        base = os.getenv("TENSORHUB_URL", "").strip()
     if not base:
         raise RuntimeError("FILE_API_BASE_URL is required for file operations")
     return base.rstrip("/")
@@ -247,7 +247,7 @@ def _require_file_api_base_url() -> str:
 def _require_file_api_token() -> str:
     token = os.getenv("FILE_API_TOKEN", "").strip()
     if not token:
-        token = os.getenv("COZY_HUB_TOKEN", "").strip()
+        token = os.getenv("TENSORHUB_TOKEN", "").strip()
     if not token:
         raise RuntimeError("FILE_API_TOKEN is required for file operations")
     return token
@@ -860,16 +860,16 @@ class Worker:
         self._model_manager = resolved_model_manager
         self._downloader = downloader
         if self._downloader is None:
-            base_url = os.getenv("COZY_HUB_URL", "").strip()
-            allow_api = str(os.getenv("WORKER_ALLOW_COZY_HUB_API_RESOLVE", "") or "").strip().lower() in ("1", "true", "t", "yes", "y")
-            token = os.getenv("COZY_HUB_TOKEN", "").strip() or None
+            base_url = os.getenv("TENSORHUB_URL", "").strip()
+            allow_api = str(os.getenv("WORKER_ALLOW_TENSORHUB_API_RESOLVE", "") or "").strip().lower() in ("1", "true", "t", "yes", "y")
+            token = os.getenv("TENSORHUB_TOKEN", "").strip() or None
             # Default to the composite model-ref downloader:
             # - Cozy snapshots using orchestrator-resolved URLs (no Cozy Hub API calls)
             # - Hugging Face refs via huggingface_hub when installed
             self._downloader = ModelRefDownloader(
                 cozy_base_url=base_url,
                 cozy_token=token,
-                allow_cozy_hub_api_resolve=allow_api,
+                allow_tensorhub_api_resolve=allow_api,
             )
         self._supported_model_ids_from_scheduler: Optional[List[str]] = None  # allowlist from scheduler (repo refs)
         self._required_variant_refs_from_scheduler: Optional[List[str]] = None  # warm-start pinned variants
@@ -2108,7 +2108,7 @@ class Worker:
             gpu_sm = ""
             installed_libs: List[str] = []
             try:
-                from .cozy_hub_policy import detect_worker_capabilities
+                from .tensorhub_policy import detect_worker_capabilities
 
                 caps = detect_worker_capabilities()
                 installed_libs = list(caps.installed_libs or [])
@@ -3735,16 +3735,16 @@ class Worker:
             if rm.compute_completed_at:
                 self._emit_worker_event_bytes(run_id, "metrics.compute.completed", safe_json_bytes({"at": rm.compute_completed_at}))
 
-            # Emit canonical metric events if values exist.
-            try:
-                rm.finalize()
-                for ev_type, payload in rm.canonical_events():
-                    # compute.* already emitted in real time above
-                    if ev_type in ("metrics.compute.started", "metrics.compute.completed"):
-                        continue
-                    self._emit_worker_event_bytes(run_id, ev_type, safe_json_bytes(payload))
-            except Exception:
-                pass
+                # Emit canonical metric events if values exist.
+                try:
+                    rm.finalize()
+                    for ev_type, event_payload in rm.canonical_events():
+                        # compute.* already emitted in real time above
+                        if ev_type in ("metrics.compute.started", "metrics.compute.completed"):
+                            continue
+                        self._emit_worker_event_bytes(run_id, ev_type, safe_json_bytes(event_payload))
+                except Exception:
+                    pass
             # Emit extended debug payload at end (best-effort).
             try:
                 self._emit_worker_event_bytes(run_id, "metrics.run", safe_json_bytes(rm.to_metrics_run_payload()))
@@ -3855,7 +3855,12 @@ class Worker:
                     try:
                         parsed = parse_model_ref(str(model_id))
                         canon = parsed.cozy.canonical() if parsed.scheme == "cozy" and parsed.cozy is not None else str(model_id)
-                        rm.set_initial_model_state(canon, "hot_vram", rm.models.get(canon, None).snapshot_digest if canon in rm.models else None)
+                        model_metrics = rm.models.get(canon)
+                        rm.set_initial_model_state(
+                            canon,
+                            "hot_vram",
+                            model_metrics.snapshot_digest if model_metrics is not None else None,
+                        )
                     except Exception:
                         pass
                 if isinstance(requested_type, type) and not isinstance(pipe, requested_type):
@@ -3888,9 +3893,9 @@ class Worker:
                 is_diffusers_pipeline_type = False
                 canon = ""
                 try:
-                    from diffusers import DiffusionPipeline  # type: ignore
+                    from diffusers import DiffusionPipeline
                 except Exception:
-                    DiffusionPipeline = None  # type: ignore
+                    DiffusionPipeline = None
 
                 if (
                     obj is None
@@ -3916,10 +3921,11 @@ class Worker:
                             if cached is not None:
                                 if rm is not None and canon:
                                     try:
+                                        model_metrics = rm.models.get(canon)
                                         rm.set_initial_model_state(
                                             canon,
                                             "hot_vram",
-                                            rm.models.get(canon, None).snapshot_digest if canon in rm.models else None,
+                                            model_metrics.snapshot_digest if model_metrics is not None else None,
                                         )
                                     except Exception:
                                         pass
@@ -4046,7 +4052,11 @@ class Worker:
 
                                 local = str(cached_path)
                     except Exception:
-                        pass
+                                pass
+
+                    if local is None:
+                        raise ValueError(f"diffusers pipeline local path is empty for model {model_id!r}")
+                    local_path = Path(local)
 
                     kwargs: dict[str, Any] = {}
 
@@ -4059,7 +4069,7 @@ class Worker:
                             load_cozy_pipeline_spec,
                         )
 
-                        root = Path(local)
+                        root = local_path
                         spec = load_cozy_pipeline_spec(root)
                         if spec is not None:
                             _ = ensure_diffusers_model_index_json(root)
@@ -4073,9 +4083,9 @@ class Worker:
                         pass
 
                     try:
-                        from gen_worker.pipeline_loader import detect_diffusers_variant  # type: ignore
+                        from gen_worker.pipeline_loader import detect_diffusers_variant
 
-                        variant = detect_diffusers_variant(Path(local))
+                        variant = detect_diffusers_variant(local_path)
                         if variant is not None:
                             kwargs["variant"] = variant
                     except Exception:
@@ -4097,8 +4107,8 @@ class Worker:
                             )
 
                         try:
-                            from diffusers.quantizers import PipelineQuantizationConfig  # type: ignore
-                            from diffusers import TorchAoConfig as DiffusersTorchAoConfig  # type: ignore
+                            from diffusers.quantizers import PipelineQuantizationConfig
+                            from diffusers import TorchAoConfig as DiffusersTorchAoConfig
                         except Exception as e:
                             raise ValueError(
                                 f"{variant} diffusers variant selected, but diffusers torchao quantization hooks are unavailable"
@@ -4110,7 +4120,7 @@ class Worker:
                             "int4": "int4_weight_only",
                         }[variant]
 
-                        root = Path(local)
+                        root = local_path
                         quant_mapping: dict[str, Any] = {}
                         if (root / "transformer").exists():
                             quant_mapping["transformer"] = DiffusersTorchAoConfig(quant_kind)
@@ -4143,7 +4153,8 @@ class Worker:
 
                     try:
                         t_pi0 = time.monotonic()
-                        obj = requested_type.from_pretrained(local, **kwargs)
+                        from_pretrained = getattr(requested_type, "from_pretrained")
+                        obj = from_pretrained(local, **kwargs)
                         if rm is not None:
                             rm.add_pipeline_init_time(int((time.monotonic() - t_pi0) * 1000))
                     except OSError as e:
@@ -4170,7 +4181,8 @@ class Worker:
                             kwargs2.setdefault("image_processor", None)
                             kwargs2.setdefault("requires_safety_checker", False)
                             t_pi0 = time.monotonic()
-                            obj = requested_type.from_pretrained(local, **kwargs2)
+                            from_pretrained = getattr(requested_type, "from_pretrained")
+                            obj = from_pretrained(local, **kwargs2)
                             if rm is not None:
                                 rm.add_pipeline_init_time(int((time.monotonic() - t_pi0) * 1000))
                         else:
@@ -4178,7 +4190,8 @@ class Worker:
 
                 if obj is None:
                     t_pi0 = time.monotonic()
-                    obj = requested_type.from_pretrained(model_id)
+                    from_pretrained = getattr(requested_type, "from_pretrained")
+                    obj = from_pretrained(model_id)
                     if rm is not None:
                         rm.add_pipeline_init_time(int((time.monotonic() - t_pi0) * 1000))
                 if isinstance(requested_type, type) and not isinstance(obj, requested_type):

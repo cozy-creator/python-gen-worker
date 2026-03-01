@@ -54,7 +54,7 @@ def detect_worker_capabilities(*, extra_libs: Optional[List[str]] = None) -> Coz
     gpu_sm = 0
     torch_version = ""
     try:
-        import torch  # type: ignore
+        import torch
 
         torch_version = str(getattr(torch, "__version__", "") or "")
         cuda_version = str(getattr(getattr(torch, "version", None), "cuda", "") or "")
@@ -87,4 +87,3 @@ def default_resolve_preferences() -> Dict[str, List[str]]:
         "quantization_preference": ["fp8", "bf16", "fp16"],
         "file_layout_preference": ["diffusers"],
     }
-

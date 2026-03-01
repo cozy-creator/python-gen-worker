@@ -49,16 +49,14 @@ class CozyHubResolveArtifactResult:
 
 class CozyHubV2Client:
     """
-    Cozy Hub v2 model APIs (resolve_artifact).
+    Cozy Hub v2 model APIs (resolve).
 
     Endpoint:
-      - POST /api/v1/repos/<owner>/<repo>/resolve_artifact
+      - POST /api/v1/repos/<owner>/<repo>/resolve
 
-    Response (v1):
-      - repo_revision_seq: number
-      - snapshot_digest: hex
-      - artifact: {label, file_layout, file_type, quantization}
-      - snapshot_manifest: {version, files:[{path,size_bytes,blake3,url?}]}
+    Response compatibility:
+      - Current shape: {version_id, repo_revision_seq, variant, snapshot_manifest:{entries:[...]}}
+      - Legacy shape:  {snapshot_digest, repo_revision_seq, artifact, snapshot_manifest:{files:[...]}}
     """
 
     def __init__(self, base_url: str, token: Optional[str] = None, timeout_s: int = 30) -> None:
@@ -78,6 +76,7 @@ class CozyHubV2Client:
         owner: str,
         repo: str,
         tag: str,
+        digest: Optional[str] = None,
         include_urls: bool,
         preferences: Mapping[str, Any],
         capabilities: Mapping[str, Any],
@@ -85,14 +84,17 @@ class CozyHubV2Client:
         if not owner or not repo:
             raise ValueError("owner/repo required")
         tag = (tag or "").strip() or "latest"
+        digest = (digest or "").strip() or None
 
-        url = f"{self.base_url}/api/v1/repos/{owner}/{repo}/resolve_artifact"
+        url = f"{self.base_url}/api/v1/repos/{owner}/{repo}/resolve"
         payload = {
             "tag": tag,
             "include_urls": bool(include_urls),
             "preferences": dict(preferences),
             "capabilities": dict(capabilities),
         }
+        if digest:
+            payload["digest"] = digest
 
         timeout = aiohttp.ClientTimeout(total=self.timeout_s)
         async with aiohttp.ClientSession(timeout=timeout, headers=self._headers()) as session:
@@ -115,46 +117,20 @@ class CozyHubV2Client:
 
     async def get_snapshot_manifest(self, *, owner: str, repo: str, digest: str) -> List[CozyHubSnapshotFile]:
         """
-        Fetch a snapshot manifest by digest (already pinned).
-
-        Endpoint:
-          - GET /api/v1/repos/<owner>/<repo>/snapshots/<digest>/manifest
+        Fetch a snapshot manifest by digest (already pinned) via resolve.
         """
         if not owner or not repo or not digest:
             raise ValueError("owner/repo/digest required")
-        url = f"{self.base_url}/api/v1/repos/{owner}/{repo}/snapshots/{digest}/manifest"
-
-        timeout = aiohttp.ClientTimeout(total=self.timeout_s)
-        async with aiohttp.ClientSession(timeout=timeout, headers=self._headers()) as session:
-            async with session.get(url) as resp:
-                resp.raise_for_status()
-                data = await resp.json()
-                if not isinstance(data, dict):
-                    raise ValueError("unexpected response shape")
-
-        manifest = data.get("files")
-        if not isinstance(manifest, list):
-            manifest = data.get("root_files")
-        if not isinstance(manifest, list):
-            raise ValueError("missing files list")
-        out: List[CozyHubSnapshotFile] = []
-        for ent in manifest:
-            if not isinstance(ent, dict):
-                continue
-            path = str(ent.get("path") or "").strip()
-            if not path:
-                continue
-            out.append(
-                CozyHubSnapshotFile(
-                    path=path,
-                    size_bytes=int(ent.get("size_bytes") or 0),
-                    blake3=str(ent.get("blake3") or "").strip().lower(),
-                    url=str(ent.get("url") or "").strip() or None,
-                )
-            )
-        if not out:
-            raise ValueError("empty files list")
-        return out
+        res = await self.resolve_artifact(
+            owner=owner,
+            repo=repo,
+            tag="latest",
+            digest=digest,
+            include_urls=True,
+            preferences={},
+            capabilities={},
+        )
+        return res.files
 
     async def request_public_model(
         self,
@@ -229,75 +205,72 @@ class CozyHubV2Client:
 
 
 def _parse_resolve_artifact_response(data: Mapping[str, Any], *, include_urls: bool) -> CozyHubResolveArtifactResult:
-    repo_revision_seq = int(data.get("repo_revision_seq") or 0)
-    snapshot_digest = str(data.get("snapshot_digest") or "").strip()
-    art = data.get("artifact")
-    if not isinstance(art, dict):
-        raise ValueError("missing artifact")
-    artifact = CozyHubArtifact(
-        label=str(art.get("label") or "").strip(),
-        file_layout=str(art.get("file_layout") or "").strip(),
-        file_type=str(art.get("file_type") or "").strip(),
-        quantization=str(art.get("quantization") or "").strip(),
-    )
-    if repo_revision_seq <= 0 or not snapshot_digest:
-        raise ValueError("missing snapshot_digest/repo_revision_seq")
-    if not artifact.label:
-        raise ValueError("missing artifact.label")
+    repo_revision_seq = _coerce_int(data.get("repo_revision_seq")) or _coerce_int(data.get("revision")) or _coerce_int(data.get("version")) or 0
+    snapshot_digest = str(data.get("snapshot_digest") or data.get("version_id") or "").strip()
+    if not snapshot_digest:
+        raise ValueError("missing snapshot_digest/version_id")
 
-    manifest = data.get("snapshot_manifest")
-    if not isinstance(manifest, dict):
-        raise ValueError("missing snapshot_manifest")
-    files_raw = manifest.get("files")
-    if not isinstance(files_raw, list):
-        raise ValueError("missing snapshot_manifest.files")
-
-    files: List[CozyHubSnapshotFile] = []
-    for ent in files_raw:
-        if not isinstance(ent, dict):
-            continue
-        path = str(ent.get("path") or "").strip()
-        if not path:
-            continue
-        size_bytes = int(ent.get("size_bytes") or 0)
-        blake3_hex = str(ent.get("blake3") or "").strip().lower()
-        url = str(ent.get("url") or "").strip() if include_urls else ""
-        files.append(
-            CozyHubSnapshotFile(
-                path=path,
-                size_bytes=size_bytes,
-                blake3=blake3_hex,
-                url=url or None,
-            )
-        )
+    artifact = _parse_artifact_meta(data)
+    files = _parse_snapshot_files(data, include_urls=include_urls)
     if not files:
         raise ValueError("empty snapshot file list")
 
-    return CozyHubResolveArtifactResult(
-        repo_revision_seq=repo_revision_seq,
-        snapshot_digest=snapshot_digest,
-        artifact=artifact,
-        files=files,
-    )
+    return CozyHubResolveArtifactResult(repo_revision_seq=repo_revision_seq, snapshot_digest=snapshot_digest, artifact=artifact, files=files)
 
 
 def _parse_request_public_model_response(data: Mapping[str, Any], *, include_urls: bool) -> CozyHubResolveArtifactResult:
-    repo_revision_seq = int(data.get("repo_revision_seq") or 0)
-    snapshot_digest = str(data.get("snapshot_digest") or "").strip()
-    if repo_revision_seq <= 0 or not snapshot_digest:
-        raise ValueError("missing snapshot_digest/repo_revision_seq")
+    repo_revision_seq = _coerce_int(data.get("repo_revision_seq")) or _coerce_int(data.get("revision")) or _coerce_int(data.get("version")) or 0
+    snapshot_digest = str(data.get("snapshot_digest") or data.get("version_id") or "").strip()
+    if not snapshot_digest:
+        raise ValueError("missing snapshot_digest/version_id")
 
     variant_label = str(data.get("variant_label") or "").strip()
     artifact = None
     if variant_label:
         artifact = CozyHubArtifact(label=variant_label, file_layout="", file_type="", quantization="")
 
+    files = _parse_snapshot_files(data, include_urls=include_urls)
+    if not files:
+        raise ValueError("empty snapshot file list")
+
+    return CozyHubResolveArtifactResult(repo_revision_seq=repo_revision_seq, snapshot_digest=snapshot_digest, artifact=artifact, files=files)
+
+
+def _coerce_int(v: Any) -> Optional[int]:
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, int):
+        return v
+    s = str(v or "").strip()
+    if s == "":
+        return None
+    try:
+        return int(s)
+    except Exception:
+        return None
+
+
+def _extract_blake3_hex(ent: Mapping[str, Any]) -> str:
+    b3 = str(ent.get("blake3") or "").strip().lower()
+    if b3:
+        return b3
+    dig = str(ent.get("digest") or "").strip().lower()
+    if dig.startswith("blake3:"):
+        return dig.split(":", 1)[1].strip().lower()
+    if len(dig) == 64 and all(ch in "0123456789abcdef" for ch in dig):
+        return dig
+    return ""
+
+
+def _parse_snapshot_files(data: Mapping[str, Any], *, include_urls: bool) -> List[CozyHubSnapshotFile]:
     manifest = data.get("snapshot_manifest")
     if not isinstance(manifest, dict):
         raise ValueError("missing snapshot_manifest")
     files_raw = manifest.get("files")
     if not isinstance(files_raw, list):
-        raise ValueError("missing snapshot_manifest.files")
+        files_raw = manifest.get("entries")
+    if not isinstance(files_raw, list):
+        raise ValueError("missing snapshot_manifest.files|entries")
 
     files: List[CozyHubSnapshotFile] = []
     for ent in files_raw:
@@ -306,27 +279,34 @@ def _parse_request_public_model_response(data: Mapping[str, Any], *, include_url
         path = str(ent.get("path") or "").strip()
         if not path:
             continue
-        size_bytes = int(ent.get("size_bytes") or 0)
-        blake3_hex = str(ent.get("blake3") or "").strip().lower()
-        if not blake3_hex:
-            dig = str(ent.get("digest") or "").strip().lower()
-            if dig.startswith("blake3:"):
-                blake3_hex = dig.split(":", 1)[1].strip().lower()
         url = str(ent.get("url") or "").strip() if include_urls else ""
         files.append(
             CozyHubSnapshotFile(
                 path=path,
-                size_bytes=size_bytes,
-                blake3=blake3_hex,
+                size_bytes=int(ent.get("size_bytes") or 0),
+                blake3=_extract_blake3_hex(ent),
                 url=url or None,
             )
         )
-    if not files:
-        raise ValueError("empty snapshot file list")
+    return files
 
-    return CozyHubResolveArtifactResult(
-        repo_revision_seq=repo_revision_seq,
-        snapshot_digest=snapshot_digest,
-        artifact=artifact,
-        files=files,
-    )
+
+def _parse_artifact_meta(data: Mapping[str, Any]) -> Optional[CozyHubArtifact]:
+    art = data.get("artifact")
+    if isinstance(art, Mapping):
+        label = str(art.get("label") or "").strip()
+        file_layout = str(art.get("file_layout") or "").strip()
+        file_type = str(art.get("file_type") or "").strip()
+        quantization = str(art.get("quantization") or "").strip()
+        if label or file_layout or file_type or quantization:
+            return CozyHubArtifact(label=label, file_layout=file_layout, file_type=file_type, quantization=quantization)
+
+    variant = data.get("variant")
+    if isinstance(variant, Mapping):
+        label = str(variant.get("label") or "").strip()
+        file_layout = str(variant.get("file_layout") or "").strip()
+        file_type = str(variant.get("file_type") or "").strip()
+        quantization = str(variant.get("quantization") or variant.get("dtype") or "").strip()
+        if label or file_layout or file_type or quantization:
+            return CozyHubArtifact(label=label, file_layout=file_layout, file_type=file_type, quantization=quantization)
+    return None

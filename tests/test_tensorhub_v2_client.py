@@ -6,7 +6,7 @@ from typing import Dict, Optional
 import pytest
 from aiohttp import web
 
-from gen_worker.cozy_hub_v2 import CozyHubNoCompatibleArtifactError, CozyHubPublicModelPendingError, CozyHubV2Client
+from gen_worker.tensorhub_v2 import CozyHubNoCompatibleArtifactError, CozyHubPublicModelPendingError, CozyHubV2Client
 
 
 @dataclass
@@ -56,11 +56,9 @@ def _start_server(routes: Dict[str, web.StreamResponse]) -> _Server:
 
 
 def _stop_server(srv: _Server) -> None:
-    async def _stop() -> None:
-        await srv.runner.cleanup()
-
+    fut = asyncio.run_coroutine_threadsafe(srv.runner.cleanup(), srv.loop)
+    fut.result(timeout=5)
     srv.loop.call_soon_threadsafe(srv.loop.stop)
-    srv.loop.call_soon_threadsafe(lambda: asyncio.create_task(_stop()))
 
 
 def test_resolve_artifact_success() -> None:
@@ -70,9 +68,9 @@ def test_resolve_artifact_success() -> None:
         assert body["include_urls"] is True
         return web.json_response(
             {
+                "version_id": "blake3:" + ("a" * 64),
                 "repo_revision_seq": 1,
-                "snapshot_digest": "a" * 64,
-                "artifact": {
+                "variant": {
                     "label": "safetensors-fp16",
                     "file_layout": "diffusers",
                     "file_type": "safetensors",
@@ -80,7 +78,7 @@ def test_resolve_artifact_success() -> None:
                 },
                 "snapshot_manifest": {
                     "version": 1,
-                    "files": [
+                    "entries": [
                         {
                             "path": "cozy.pipeline.yaml",
                             "size_bytes": 123,
@@ -92,7 +90,7 @@ def test_resolve_artifact_success() -> None:
             }
         )
 
-    srv = _start_server({"/api/v1/repos/o/r/resolve_artifact": handler})  # type: ignore[arg-type]
+    srv = _start_server({"/api/v1/repos/o/r/resolve": handler})  # type: ignore[arg-type]
     try:
         client = CozyHubV2Client(srv.base_url)
         res = asyncio.run(
@@ -100,13 +98,14 @@ def test_resolve_artifact_success() -> None:
                 owner="o",
                 repo="r",
                 tag="latest",
+                digest=None,
                 include_urls=True,
                 preferences={"file_type_preference": ["safetensors"]},
                 capabilities={"installed_libs": []},
             )
         )
         assert res.repo_revision_seq == 1
-        assert res.snapshot_digest == "a" * 64
+        assert res.snapshot_digest == ("blake3:" + ("a" * 64))
         assert res.artifact.label == "safetensors-fp16"
         assert res.files[0].url is not None
     finally:
@@ -117,7 +116,7 @@ def test_resolve_artifact_no_compatible() -> None:
     async def handler(_req: web.Request) -> web.Response:
         return web.json_response({"error": "no_compatible_artifact", "debug": {"why": "missing_lib"}}, status=409)
 
-    srv = _start_server({"/api/v1/repos/o/r/resolve_artifact": handler})  # type: ignore[arg-type]
+    srv = _start_server({"/api/v1/repos/o/r/resolve": handler})  # type: ignore[arg-type]
     try:
         client = CozyHubV2Client(srv.base_url)
         with pytest.raises(CozyHubNoCompatibleArtifactError) as e:
@@ -126,6 +125,7 @@ def test_resolve_artifact_no_compatible() -> None:
                     owner="o",
                     repo="r",
                     tag="latest",
+                    digest=None,
                     include_urls=False,
                     preferences={},
                     capabilities={},

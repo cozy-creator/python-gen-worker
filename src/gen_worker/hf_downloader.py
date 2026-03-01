@@ -5,7 +5,7 @@ import os
 import struct
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Set
+from typing import Any, Callable, Iterable, List, Optional, Sequence, Set, cast
 
 import requests
 
@@ -82,15 +82,19 @@ class HuggingFaceHubDownloader:
 
     def download(self, ref: HuggingFaceRef) -> HuggingFaceDownloadResult:
         try:
-            from huggingface_hub import HfApi, hf_hub_download, snapshot_download  # type: ignore
+            from huggingface_hub import HfApi, hf_hub_download, snapshot_download
         except Exception as e:
             raise RuntimeError(
                 "huggingface_hub is required for hf: model refs. Install gen-worker with the Hugging Face extra."
             ) from e
+        hf_hub_download_fn = cast(Callable[..., str], hf_hub_download)
+        snapshot_download_fn = cast(Callable[..., str], snapshot_download)
+        hf_hub_url_fn: Optional[Callable[..., str]] = None
         try:
-            from huggingface_hub import hf_hub_url  # type: ignore
+            from huggingface_hub import hf_hub_url as _hf_hub_url
+            hf_hub_url_fn = cast(Callable[..., str], _hf_hub_url)
         except Exception:
-            hf_hub_url = None
+            pass
 
         # Be defensive: the HF APIs want a bare "owner/repo" repo_id. If a caller accidentally
         # passes "hf:owner/repo" through as the repo_id, strip the scheme.
@@ -100,7 +104,7 @@ class HuggingFaceHubDownloader:
         if not repo_id:
             raise ValueError("empty hf repo_id")
 
-        kwargs = {"resume_download": True}
+        kwargs: dict[str, Any] = {"resume_download": True}
         if self.hf_home:
             kwargs["cache_dir"] = self.hf_home
         if self.hf_token:
@@ -127,7 +131,7 @@ class HuggingFaceHubDownloader:
             # Best-effort local completeness check: if we already have a local snapshot folder that
             # contains all required files, skip network calls and downloads.
             local_snapshot = _try_get_local_snapshot_dir(
-                snapshot_download=snapshot_download,
+                snapshot_download=snapshot_download_fn,
                 repo_id=repo_id,
                 revision=ref.revision,
                 cache_dir=self.hf_home,
@@ -153,7 +157,7 @@ class HuggingFaceHubDownloader:
             repo_file_sizes: dict[str, int] = {}
             if hasattr(api, "list_repo_tree"):
                 try:
-                    tree = api.list_repo_tree(repo_id=repo_id, repo_type="model", revision=ref.revision, recursive=True)  # type: ignore[misc]
+                    tree = api.list_repo_tree(repo_id=repo_id, repo_type="model", revision=ref.revision, recursive=True)
                     for ent in tree:
                         # huggingface_hub RepoFile has .path and .size
                         p = getattr(ent, "path", None)
@@ -165,7 +169,7 @@ class HuggingFaceHubDownloader:
 
             # Fetch model_index.json if present; otherwise infer components from repo structure.
             model_index = _try_fetch_model_index_json(
-                hf_hub_download=hf_hub_download,
+                hf_hub_download=hf_hub_download_fn,
                 repo_id=repo_id,
                 revision=ref.revision,
                 cache_dir=self.hf_home,
@@ -192,7 +196,7 @@ class HuggingFaceHubDownloader:
                 if not pth.lower().endswith(".safetensors.index.json"):
                     continue
                 try:
-                    p = hf_hub_download(
+                    p = hf_hub_download_fn(
                         repo_id=repo_id,
                         revision=ref.revision,
                         filename=pth,
@@ -209,14 +213,14 @@ class HuggingFaceHubDownloader:
             def probe_safetensors_dtypes(rel_path: str) -> Optional[set[str]]:
                 if rel_path in dtype_cache:
                     return dtype_cache[rel_path]
-                if hf_hub_url is None:
+                if hf_hub_url_fn is None:
                     dtype_cache[rel_path] = None
                     return None
                 if not rel_path.lower().endswith(".safetensors"):
                     dtype_cache[rel_path] = None
                     return None
 
-                url = hf_hub_url(repo_id=repo_id, filename=rel_path, repo_type="model", revision=ref.revision)
+                url = hf_hub_url_fn(repo_id=repo_id, filename=rel_path, repo_type="model", revision=ref.revision)
                 headers = {"Range": "bytes=0-7"}
                 if self.hf_token:
                     headers["Authorization"] = f"Bearer {self.hf_token}"
@@ -275,11 +279,18 @@ class HuggingFaceHubDownloader:
             # Deterministic order helps debugging and keeps behavior stable.
             kwargs["allow_patterns"] = sorted(selected_files)
 
-        local = snapshot_download(repo_id=repo_id, revision=ref.revision, **kwargs)
+        local = snapshot_download_fn(repo_id=repo_id, revision=ref.revision, **kwargs)
         return HuggingFaceDownloadResult(local_dir=Path(local))
 
 
-def _try_fetch_model_index_json(*, hf_hub_download, repo_id: str, revision: str | None, cache_dir: str | None, token: str | None) -> Optional[dict]:
+def _try_fetch_model_index_json(
+    *,
+    hf_hub_download: Callable[..., str],
+    repo_id: str,
+    revision: str | None,
+    cache_dir: str | None,
+    token: str | None,
+) -> Optional[dict]:
     try:
         index_path = hf_hub_download(
             repo_id=repo_id,
@@ -317,7 +328,14 @@ def _infer_diffusers_components_from_repo_files(repo_files: Sequence[str]) -> li
     return present
 
 
-def _try_get_local_snapshot_dir(*, snapshot_download, repo_id: str, revision: str | None, cache_dir: str | None, token: str | None) -> Optional[Path]:
+def _try_get_local_snapshot_dir(
+    *,
+    snapshot_download: Callable[..., str],
+    repo_id: str,
+    revision: str | None,
+    cache_dir: str | None,
+    token: str | None,
+) -> Optional[Path]:
     try:
         p = snapshot_download(
             repo_id=repo_id,

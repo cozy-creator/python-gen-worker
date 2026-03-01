@@ -60,7 +60,7 @@ class OutputSaveContractTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 ctx.save_bytes("https://example.test/out.bin", b"x")
 
-    def test_save_bytes_uploads_to_cozy_hub_file_api(self) -> None:
+    def test_save_bytes_uploads_to_tensorhub_file_api(self) -> None:
         srv = ThreadingHTTPServer(("127.0.0.1", 0), _UploadHandler)
         t = threading.Thread(target=srv.serve_forever, daemon=True)
         t.start()

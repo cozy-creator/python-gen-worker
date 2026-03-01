@@ -9,6 +9,12 @@ from .downloader import ModelDownloader, CozyHubDownloader
 from .endpoint_validation import EndpointValidationResult, validate_endpoint
 from .model_cache import ModelCache, ModelCacheStats, ModelLocation
 from .payload_constraints import Clamp
+from .trainer import (
+    StepContext,
+    StepControlHints,
+    StepResult,
+    TrainingJobSpec,
+)
 
 # Optional torch-dependent exports
 try:
@@ -47,6 +53,10 @@ __all__ = [
     "ModelCacheStats",
     "ModelLocation",
     "Clamp",
+    "StepContext",
+    "StepControlHints",
+    "StepResult",
+    "TrainingJobSpec",
     # Pipeline loader (torch-dependent, may not be available)
     "PipelineLoader",
     "PipelineConfig",

@@ -74,6 +74,22 @@
       ],
       "notes": "This is intentionally separated from basic 'install these backends' (issue #200). This issue is about the execution/compilation/optimization story and artifact caching.",
       "priority": "medium"
+    },
+    {
+      "id": 202,
+      "name": "Trainer Endpoint Model Compatibility Declarations (Families/Types/Layouts)",
+      "description": "Define and enforce architecture compatibility between model repos and training endpoints.\n\nPlanned contract:\n1) Repos declare architecture metadata (for example `architecture = flux2_klein_9b`) as part of canonical repo metadata.\n2) Training endpoints declare the list of supported architectures.\n3) Training runtime/control-plane validates compatibility before training starts (repo-A architecture must be accepted by training-endpoint-B).\n\nCurrent status (by design): trainer mode is buyer-beware and does not enforce endpoint/repo compatibility.",
+      "tasks": [
+        "[ ] Define repo architecture metadata schema and source-of-truth location (tensorhub repo metadata)",
+        "[ ] Define training endpoint compatibility schema (supported architecture list in endpoint manifest/config)",
+        "[ ] Define canonical architecture taxonomy and versioning strategy (e.g. `sdxl`, `flux2`, `flux2_klein_9b`, `qwen_image_edit_plus`)",
+        "[ ] Implement control-plane preflight validation when launching a training run:\n  - resolve repo architecture metadata\n  - resolve endpoint supported architectures\n  - reject incompatible pairings with a clear error",
+        "[ ] Implement runtime defense-in-depth validation in python-gen-worker trainer startup before `configure()`",
+        "[ ] Define override policy for experimentation:\n  - optional \"allow_unsupported_model\" style bypass in dev\n  - strict default in production",
+        "[ ] Add docs and examples for compatibility declarations and failure cases"
+      ],
+      "notes": "Track this separately from issue #80 so class-only hard-cut can proceed with temporary buyer-beware compatibility.",
+      "priority": "medium"
     }
   ]
 }

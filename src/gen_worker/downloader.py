@@ -3,7 +3,7 @@ import hashlib
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional
+from typing import Coroutine, Optional
 from urllib.parse import urlparse
 
 import aiohttp
@@ -13,7 +13,7 @@ from tqdm import tqdm
 
 class ModelDownloader(ABC):
     @abstractmethod
-    async def download(self, model_ref: str, dest_dir: str, filename: Optional[str] = None) -> str:
+    def download(self, model_ref: str, dest_dir: str, filename: Optional[str] = None) -> str:
         """Download a model artifact and return the local file path."""
         raise NotImplementedError
 
@@ -43,7 +43,7 @@ class CozyHubDownloader(ModelDownloader):
         if ref.startswith("http://") or ref.startswith("https://"):
             return ref
         if not self.base_url:
-            raise ValueError("COZY_HUB_URL is required for non-URL model_ref")
+            raise ValueError("TENSORHUB_URL is required for non-URL model_ref")
         return f"{self.base_url}/{ref.lstrip('/')}"
 
     def _default_filename(self, url: str) -> str:
@@ -52,7 +52,7 @@ class CozyHubDownloader(ModelDownloader):
         return name or "model.bin"
 
     @backoff.on_exception(backoff.expo, (aiohttp.ClientError, asyncio.TimeoutError), max_tries=5)
-    async def download(self, model_ref: str, dest_dir: str, filename: Optional[str] = None) -> str:
+    async def _download_async(self, model_ref: str, dest_dir: str, filename: Optional[str] = None) -> str:
         url = self._resolve_url(model_ref)
         os.makedirs(dest_dir, exist_ok=True)
         target_name = filename or self._default_filename(url)
@@ -82,3 +82,32 @@ class CozyHubDownloader(ModelDownloader):
                 progress.close()
 
         return target_path
+
+    def download(self, model_ref: str, dest_dir: str, filename: Optional[str] = None) -> str:
+        try:
+            loop = asyncio.get_running_loop()
+            if loop.is_running():
+                return _run_in_thread(self._download_async(model_ref, dest_dir, filename))
+        except RuntimeError:
+            pass
+        return asyncio.run(self._download_async(model_ref, dest_dir, filename))
+
+
+def _run_in_thread(coro: Coroutine[object, object, str]) -> str:
+    out: dict[str, str] = {}
+    err: dict[str, BaseException] = {}
+
+    def runner() -> None:
+        try:
+            out["v"] = asyncio.run(coro)
+        except BaseException as e:
+            err["e"] = e
+
+    import threading
+
+    t = threading.Thread(target=runner, daemon=True)
+    t.start()
+    t.join()
+    if "e" in err:
+        raise err["e"]
+    return out["v"]

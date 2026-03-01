@@ -208,9 +208,9 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
         if ann is None:
             raise ValueError(f"{func.__name__}: missing type annotation for param {p.name}")
 
-        inj = _parse_annotated_model_ref(ann)
-        if inj is not None:
-            base_t, mr = inj
+        parsed_injection = _parse_annotated_model_ref(ann)
+        if parsed_injection is not None:
+            base_t, mr = parsed_injection
             src = mr.source.value
             # Canonicalize older "release" terminology into "fixed" for manifests.
             if src == "release":
@@ -298,11 +298,11 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
     # at submit-time for cache-aware routing.
     payload_repo_selectors = []
     seen_fields = set()
-    for inj in injections:
-        mr = inj.get("model_ref", {}) or {}
-        if mr.get("source") != "payload":
+    for inj_entry in injections:
+        mr_json = inj_entry.get("model_ref", {}) or {}
+        if mr_json.get("source") != "payload":
             continue
-        field = str(mr.get("key") or "").strip()
+        field = str(mr_json.get("key") or "").strip()
         if not field or field in seen_fields:
             continue
         seen_fields.add(field)
@@ -448,14 +448,14 @@ def discover_functions(root: Optional[Path] = None, *, main_module: str | None =
     py_files = _find_python_files(root)
     candidate_files = [f for f in py_files if _file_uses_worker_decorator(f)]
     for filepath in candidate_files:
-        module_name = _compute_module_name(filepath, root)
-        if module_name is None or module_name in imported_modules:
+        computed_module_name = _compute_module_name(filepath, root)
+        if computed_module_name is None or computed_module_name in imported_modules:
             continue
-        imported_modules.add(module_name)
+        imported_modules.add(computed_module_name)
         try:
-            mod = importlib.import_module(module_name)
+            mod = importlib.import_module(computed_module_name)
         except Exception as e:
-            print(f"warning: failed to import {module_name}: {e}", file=sys.stderr)
+            print(f"warning: failed to import {computed_module_name}: {e}", file=sys.stderr)
             continue
 
         # Find decorated functions
@@ -468,7 +468,7 @@ def discover_functions(root: Optional[Path] = None, *, main_module: str | None =
                 continue
             seen_functions.add(key)
             try:
-                fn_meta = _extract_function_metadata(obj, module_name)
+                fn_meta = _extract_function_metadata(obj, computed_module_name)
                 functions.append(fn_meta)
             except Exception as e:
                 print(f"warning: failed to extract metadata from {name}: {e}", file=sys.stderr)

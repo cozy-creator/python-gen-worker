@@ -48,10 +48,15 @@ torch = [
     "flashpack>=0.2.1",
     "numpy>=2.4.2"
 ]
+trainer = [
+    "pyarrow>=17.0.0",
+]
 dev = [
     "grpcio-tools>=1.71.0",
     "mypy>=1.10.0",
     "pytest>=9.0.0",
+    "types-PyYAML>=6.0.12.20250915",
+    "types-requests>=2.32.4.20250913",
 ]
 
 [build-system]
@@ -75,6 +80,10 @@ disallow_untyped_defs = true
 
 [[tool.mypy.overrides]]
 module = ["gen_worker.pb.*"]
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = ["gen_worker.testing.*"]
 ignore_errors = true
 
 [tool.pytest.ini_options]

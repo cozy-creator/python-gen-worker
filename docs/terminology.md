@@ -10,3 +10,9 @@ This repo follows Cozy's canonical naming. There is no backward-compat layer for
 - `invoker` / `invoker_id`: the identity performing an invocation.
 - `artifacts`: uploaded source code and endpoint-owned build inputs/outputs.
   - Cozy Hub stores endpoint source tarballs in the endpoint artifacts bucket (`s3.endpoint_artifacts.*` / `S3_ENDPOINT_ARTIFACTS_*`).
+
+Search checklist (to prevent drift):
+
+- Invoke shapes: `owner/project/endpoint`, `publisher/project/endpoint`, `org/project/endpoint`
+- Fields: `project_name` (use `endpoint_name`), `endpoint_name` (old meaning; use `function_name`), `user_id` (use `invoker_id` for invocation identity)
+- Generic nouns: `tenant_slug` (use `owner`), `publisher` (use `owner`)

@@ -103,7 +103,7 @@ def generate_diffusers_model_index_from_cozy(spec: CozyPipelineSpec) -> Dict[str
     out: Dict[str, Any] = {"_class_name": pipe_class}
     # Diffusers uses this for informational checks; include when available.
     try:
-        import diffusers  # type: ignore
+        import diffusers
 
         v = str(getattr(diffusers, "__version__", "") or "").strip()
         if v:
