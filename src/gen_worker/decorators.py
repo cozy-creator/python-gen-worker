@@ -12,11 +12,43 @@ class ResourceRequirements:
     def __init__(
         self,
         max_concurrency: Optional[int] = None,
+        batch_size_min: Optional[int] = None,
+        batch_size_target: Optional[int] = None,
+        batch_size_max: Optional[int] = None,
+        prefetch_depth: Optional[int] = None,
+        max_wait_ms: Optional[int] = None,
+        memory_hint_mb: Optional[int] = None,
+        stage_profile: Optional[str] = None,
+        stage_traits: Optional[list[str]] = None,
     ) -> None:
         self.max_concurrency = max_concurrency
+        self.batch_size_min = batch_size_min
+        self.batch_size_target = batch_size_target
+        self.batch_size_max = batch_size_max
+        self.prefetch_depth = prefetch_depth
+        self.max_wait_ms = max_wait_ms
+        self.memory_hint_mb = memory_hint_mb
+        self.stage_profile = stage_profile
+        self.stage_traits = list(stage_traits or [])
         self._requirements = {}
         if max_concurrency is not None:
             self._requirements["max_concurrency"] = max_concurrency
+        if batch_size_min is not None:
+            self._requirements["batch_size_min"] = int(batch_size_min)
+        if batch_size_target is not None:
+            self._requirements["batch_size_target"] = int(batch_size_target)
+        if batch_size_max is not None:
+            self._requirements["batch_size_max"] = int(batch_size_max)
+        if prefetch_depth is not None:
+            self._requirements["prefetch_depth"] = int(prefetch_depth)
+        if max_wait_ms is not None:
+            self._requirements["max_wait_ms"] = int(max_wait_ms)
+        if memory_hint_mb is not None:
+            self._requirements["memory_hint_mb"] = int(memory_hint_mb)
+        if stage_profile:
+            self._requirements["stage_profile"] = str(stage_profile).strip()
+        if self.stage_traits:
+            self._requirements["stage_traits"] = [str(x).strip() for x in self.stage_traits if str(x).strip()]
 
     def to_dict(self) -> Dict[str, Any]:
         """Returns a dictionary representation of the defined requirements."""

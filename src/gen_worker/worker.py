@@ -392,6 +392,8 @@ class ActionContext:
         local_output_dir: Optional[str] = None,
         resolved_cozy_models_by_id: Optional[Dict[str, Any]] = None,
         required_models: Optional[List[str]] = None,
+        runtime_batching_config: Optional[Dict[str, Any]] = None,
+        stage_execution_hints: Optional[Dict[str, Any]] = None,
     ) -> None:
         self._run_id = run_id
         self._owner = owner
@@ -403,6 +405,8 @@ class ActionContext:
         self._local_output_dir = (local_output_dir or "").strip() or None
         self._resolved_cozy_models_by_id = resolved_cozy_models_by_id
         self._required_models = list(required_models or [])
+        self._runtime_batching_config = dict(runtime_batching_config or {})
+        self._stage_execution_hints = dict(stage_execution_hints or {})
         self._started_at = time.time()
         self._deadline: Optional[float] = None
         if timeout_ms is not None and timeout_ms > 0:
@@ -498,6 +502,32 @@ class ActionContext:
     @property
     def required_models(self) -> List[str]:
         return list(self._required_models)
+
+    @property
+    def runtime_batching_config(self) -> Dict[str, Any]:
+        return dict(self._runtime_batching_config)
+
+    @property
+    def stage_execution_hints(self) -> Dict[str, Any]:
+        return dict(self._stage_execution_hints)
+
+    def preferred_batch_size(self, default: int = 1) -> int:
+        cfg = self._runtime_batching_config
+        target = int(cfg.get("batch_size_target", default) or default)
+        mn = int(cfg.get("batch_size_min", 1) or 1)
+        mx = int(cfg.get("batch_size_max", max(mn, target)) or max(mn, target))
+        if mx < mn:
+            mx = mn
+        if target < mn:
+            target = mn
+        if target > mx:
+            target = mx
+        return max(1, target)
+
+    def prefetch_depth(self, default: int = 1) -> int:
+        cfg = self._runtime_batching_config
+        v = int(cfg.get("prefetch_depth", default) or default)
+        return max(1, v)
 
 
     def time_remaining_s(self) -> Optional[float]:
@@ -785,12 +815,17 @@ class Worker:
         self._ws_specs: Dict[str, _WebsocketSpec] = {}
         self._active_tasks: Dict[str, ActionContext] = {}
         self._active_tasks_lock = threading.Lock()
+        self._run_batch_context: Dict[str, Tuple[str, str]] = {}  # run_id -> (batch_id, item_id)
+        self._run_batch_context_lock = threading.Lock()
         self._active_function_counts: Dict[str, int] = {}
         self.max_concurrency = int(os.getenv("WORKER_MAX_CONCURRENCY", "0"))
         self._drain_timeout_seconds = int(os.getenv("WORKER_DRAIN_TIMEOUT_SECONDS", "0"))
         self._draining = False
         self._discovered_resources: Dict[str, ResourceRequirements] = {} # Store resources per function
         self._function_schemas: Dict[str, Tuple[bytes, bytes, Optional[bytes], bytes]] = {}  # func_name -> (input_schema_json, output_schema_json, delta_schema_json, injection_json)
+        self._runtime_batching_config_by_function: Dict[str, Dict[str, Any]] = {}
+        self._runtime_batching_config_lock = threading.Lock()
+        self._last_function_capabilities_hash = ""
 
         self._custom_runtime_cache: Dict[Tuple[str, str], Any] = {}  # (model_id, injected_type_qualname) -> runtime handle
         self._custom_runtime_locks: Dict[Tuple[str, str], threading.Lock] = {}
@@ -1146,6 +1181,90 @@ class Worker:
             self._send_message(msg)
         except Exception:
             return
+
+    def _emit_incremental_delta_typed(
+        self,
+        *,
+        run_id: str,
+        function_name: str,
+        item_id: str,
+        sequence: int,
+        timestamp_unix_ms: int,
+        delta_text: str,
+        payload_json: bytes,
+    ) -> bool:
+        if not hasattr(pb, "IncrementalTokenDelta"):
+            return False
+        try:
+            msg = pb.WorkerSchedulerMessage(
+                incremental_token_delta=pb.IncrementalTokenDelta(
+                    run_id=str(run_id or ""),
+                    item_id=str(item_id or ""),
+                    function_name=str(function_name or ""),
+                    sequence=int(sequence),
+                    timestamp_unix_ms=int(timestamp_unix_ms),
+                    delta_text=str(delta_text or ""),
+                    payload_json=bytes(payload_json or b"{}"),
+                )
+            )
+            self._send_message(msg)
+            return True
+        except Exception:
+            return False
+
+    def _emit_incremental_done_typed(
+        self,
+        *,
+        run_id: str,
+        function_name: str,
+        item_id: str,
+        sequence: int,
+        timestamp_unix_ms: int,
+    ) -> bool:
+        if not hasattr(pb, "IncrementalTokenStreamDone"):
+            return False
+        try:
+            msg = pb.WorkerSchedulerMessage(
+                incremental_token_stream_done=pb.IncrementalTokenStreamDone(
+                    run_id=str(run_id or ""),
+                    item_id=str(item_id or ""),
+                    function_name=str(function_name or ""),
+                    sequence=int(sequence),
+                    timestamp_unix_ms=int(timestamp_unix_ms),
+                )
+            )
+            self._send_message(msg)
+            return True
+        except Exception:
+            return False
+
+    def _emit_incremental_error_typed(
+        self,
+        *,
+        run_id: str,
+        function_name: str,
+        item_id: str,
+        sequence: int,
+        timestamp_unix_ms: int,
+        error_message: str,
+    ) -> bool:
+        if not hasattr(pb, "IncrementalTokenStreamError"):
+            return False
+        try:
+            msg = pb.WorkerSchedulerMessage(
+                incremental_token_stream_error=pb.IncrementalTokenStreamError(
+                    run_id=str(run_id or ""),
+                    item_id=str(item_id or ""),
+                    function_name=str(function_name or ""),
+                    sequence=int(sequence),
+                    timestamp_unix_ms=int(timestamp_unix_ms),
+                    error_message=str(error_message or ""),
+                )
+            )
+            self._send_message(msg)
+            return True
+        except Exception:
+            return False
 
     def _emit_startup_phase(
         self,
@@ -2206,8 +2325,127 @@ class Worker:
                         )
             except Exception:
                 pass
+
+            # Best-effort: publish function capability/profile hints so scheduler routing/planner
+            # can consume endpoint-level batching and stage traits.
+            try:
+                self._emit_function_capabilities_event()
+            except Exception:
+                pass
         except Exception as e:
             logger.error(f"Failed to create or send registration/heartbeat: {e}")
+
+    def _runtime_batching_cfg_for_function(self, function_name: str) -> Dict[str, Any]:
+        fn = str(function_name or "").strip()
+        if not fn:
+            return {}
+        with self._runtime_batching_config_lock:
+            cfg = self._runtime_batching_config_by_function.get(fn)
+            if not cfg:
+                return {}
+            return dict(cfg)
+
+    def _handle_runtime_batching_config_cmd(self, cmd: Any) -> None:
+        cfg = getattr(cmd, "config", None)
+        function_name = str(getattr(cfg, "function_name", "") or "").strip()
+        version = int(getattr(cfg, "version", 0) or 0)
+        success = False
+        error_message = ""
+        if not function_name:
+            error_message = "missing_function_name"
+        elif function_name not in self._task_specs:
+            error_message = f"unknown_function:{function_name}"
+        else:
+            normalized: Dict[str, Any] = {
+                "function_name": function_name,
+                "batch_size_target": max(1, int(getattr(cfg, "batch_size_target", 1) or 1)),
+                "batch_size_min": max(1, int(getattr(cfg, "batch_size_min", 1) or 1)),
+                "batch_size_max": max(1, int(getattr(cfg, "batch_size_max", 1) or 1)),
+                "prefetch_depth": max(1, int(getattr(cfg, "prefetch_depth", 1) or 1)),
+                "max_wait_ms": max(1, int(getattr(cfg, "max_wait_ms", 1) or 1)),
+                "version": max(1, version),
+            }
+            if normalized["batch_size_max"] < normalized["batch_size_min"]:
+                normalized["batch_size_max"] = normalized["batch_size_min"]
+            if normalized["batch_size_target"] < normalized["batch_size_min"]:
+                normalized["batch_size_target"] = normalized["batch_size_min"]
+            if normalized["batch_size_target"] > normalized["batch_size_max"]:
+                normalized["batch_size_target"] = normalized["batch_size_max"]
+
+            with self._runtime_batching_config_lock:
+                prev = self._runtime_batching_config_by_function.get(function_name)
+                prev_version = int((prev or {}).get("version", 0) or 0)
+                if version > 0 and version < prev_version:
+                    normalized = dict(prev or {})
+                else:
+                    self._runtime_batching_config_by_function[function_name] = normalized
+            success = True
+
+            try:
+                self._send_message(
+                    pb.WorkerSchedulerMessage(
+                        worker_event=pb.WorkerEvent(
+                            run_id="",
+                            event_type="worker.runtime_batching.updated",
+                            payload_json=json.dumps(
+                                {
+                                    "function_name": function_name,
+                                    "version": int(normalized.get("version", 0) or 0),
+                                    "batch_size_target": int(normalized.get("batch_size_target", 1) or 1),
+                                    "batch_size_min": int(normalized.get("batch_size_min", 1) or 1),
+                                    "batch_size_max": int(normalized.get("batch_size_max", 1) or 1),
+                                    "prefetch_depth": int(normalized.get("prefetch_depth", 1) or 1),
+                                    "max_wait_ms": int(normalized.get("max_wait_ms", 1) or 1),
+                                },
+                                separators=(",", ":"),
+                                sort_keys=True,
+                            ).encode("utf-8"),
+                        )
+                    )
+                )
+            except Exception:
+                pass
+
+        ack_version = max(1, version)
+        self._send_message(
+            pb.WorkerSchedulerMessage(
+                runtime_batching_config_result=pb.RuntimeBatchingConfigResult(
+                    function_name=function_name,
+                    version=ack_version,
+                    success=success,
+                    error_message=error_message,
+                )
+            )
+        )
+
+    def _emit_function_capabilities_event(self) -> None:
+        functions: List[Dict[str, Any]] = []
+        for fn_name, req in self._discovered_resources.items():
+            caps = dict(req.to_dict() if req else {})
+            if not caps:
+                continue
+            spec = self._task_specs.get(fn_name)
+            if spec is not None:
+                caps["output_mode"] = spec.output_mode
+            caps["function_name"] = fn_name
+            functions.append(caps)
+        if not functions:
+            return
+        payload = {"functions": sorted(functions, key=lambda x: str(x.get("function_name") or ""))}
+        raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        sig = hashlib.sha256(raw).hexdigest()
+        if sig == self._last_function_capabilities_hash:
+            return
+        self._last_function_capabilities_hash = sig
+        self._send_message(
+            pb.WorkerSchedulerMessage(
+                worker_event=pb.WorkerEvent(
+                    run_id="",
+                    event_type="worker.function_capabilities",
+                    payload_json=raw,
+                )
+            )
+        )
 
     def run(self) -> None:
         """Run the worker, connecting to the scheduler and processing tasks."""
@@ -2434,6 +2672,8 @@ class Worker:
 
         if msg_type == 'run_request':
             self._handle_run_request(message.run_request)
+        elif msg_type == 'batch_run_request':
+            self._handle_batch_run_request(message.batch_run_request)
         elif msg_type == 'load_model_cmd':
             # TODO: Implement model loading logic
             # model_id = message.load_model_cmd.model_id
@@ -2445,8 +2685,13 @@ class Worker:
         elif msg_type == 'unload_model_cmd':
             self._handle_unload_model_cmd(message.unload_model_cmd)
         elif msg_type == 'interrupt_run_cmd':
-            run_id = message.interrupt_run_cmd.run_id
-            self._handle_interrupt_request(run_id)
+            cmd = message.interrupt_run_cmd
+            run_id = cmd.run_id
+            item_ids = [str(x).strip() for x in list(getattr(cmd, "item_ids", []) or []) if str(x).strip()]
+            cancel_queued_only = bool(getattr(cmd, "cancel_queued_only", False))
+            self._handle_interrupt_request(run_id, item_ids=item_ids, cancel_queued_only=cancel_queued_only)
+        elif msg_type == "runtime_batching_config_cmd":
+            self._handle_runtime_batching_config_cmd(message.runtime_batching_config_cmd)
         elif msg_type == "realtime_open_cmd":
             self._handle_realtime_open_cmd(message.realtime_open_cmd)
         elif msg_type == "realtime_frame":
@@ -3104,6 +3349,22 @@ class Worker:
                 continue
             required_models.append(_canonicalize_model_ref_string(s))
 
+        runtime_cfg = self._runtime_batching_cfg_for_function(function_name)
+        resource_req = self._discovered_resources.get(function_name)
+        req_cfg = dict(resource_req.to_dict() if resource_req else {})
+        stage_hints: Dict[str, Any] = {}
+        stage_profile = str(req_cfg.get("stage_profile", "") or "").strip()
+        if stage_profile:
+            stage_hints["stage_profile"] = stage_profile
+        stage_traits = req_cfg.get("stage_traits")
+        if isinstance(stage_traits, list):
+            stage_hints["stage_traits"] = [str(x).strip() for x in stage_traits if str(x).strip()]
+        if "memory_hint_mb" in req_cfg:
+            try:
+                stage_hints["memory_hint_mb"] = int(req_cfg.get("memory_hint_mb") or 0)
+            except Exception:
+                pass
+
         ctx = ActionContext(
             run_id,
             emitter=self._emit_progress_event,
@@ -3116,6 +3377,8 @@ class Worker:
             local_output_dir=None,
             resolved_cozy_models_by_id=resolved_cozy_models_by_id or None,
             required_models=required_models or None,
+            runtime_batching_config=runtime_cfg or None,
+            stage_execution_hints=stage_hints or None,
         )
         # Add to active tasks *before* starting thread
         with self._active_tasks_lock:
@@ -3155,9 +3418,46 @@ class Worker:
         )
         thread.start()
 
-    def _handle_interrupt_request(self, run_id: str) -> None:
+    def _handle_batch_run_request(self, request: Any) -> None:
+        batch_id = str(getattr(request, "batch_id", "") or "")
+        batch_function_name = str(getattr(request, "function_name", "") or "")
+        items = list(getattr(request, "items", []) or [])
+        logger.info(
+            "Received batch task request: batch_id=%s function=%s items=%d",
+            batch_id or "(none)",
+            batch_function_name or "(per-item)",
+            len(items),
+        )
+        for item in items:
+            if item is None:
+                continue
+            function_name = str(getattr(item, "function_name", "") or "") or batch_function_name
+            run_id = str(getattr(item, "run_id", "") or "")
+            item_id = str(getattr(item, "item_id", "") or "") or "item-000001"
+            if not run_id or not function_name:
+                continue
+            with self._run_batch_context_lock:
+                self._run_batch_context[run_id] = (batch_id, item_id)
+            req = pb.TaskExecutionRequest(
+                run_id=run_id,
+                function_name=function_name,
+                input_payload=bytes(getattr(item, "input_payload", b"") or b""),
+                required_variant_refs=list(getattr(item, "required_variant_refs", []) or []),
+                timeout_ms=int(getattr(item, "timeout_ms", 0) or 0),
+                owner=str(getattr(item, "owner", "") or ""),
+                invoker_id=str(getattr(item, "invoker_id", "") or ""),
+                resolved_cozy_models_by_id=dict(getattr(item, "resolved_cozy_models_by_id", {}) or {}),
+            )
+            self._handle_run_request(req)
+
+    def _handle_interrupt_request(self, run_id: str, *, item_ids: Optional[List[str]] = None, cancel_queued_only: bool = False) -> None:
         """Handle a request to interrupt/cancel a running task."""
-        logger.info(f"Received interrupt request for run_id={run_id}")
+        logger.info(
+            "Received interrupt request for run_id=%s item_ids=%s cancel_queued_only=%s",
+            run_id,
+            item_ids or [],
+            cancel_queued_only,
+        )
         with self._active_tasks_lock:
             ctx = self._active_tasks.get(run_id)
             if ctx:
@@ -3361,6 +3661,8 @@ class Worker:
             {
                 "function_name": str(spec.name or ""),
                 "required_variant_refs": list(getattr(ctx, "required_models", []) or []),
+                "runtime_batching_config": getattr(ctx, "runtime_batching_config", {}),
+                "stage_execution_hints": getattr(ctx, "stage_execution_hints", {}),
             },
         )
 
@@ -3594,18 +3896,42 @@ class Worker:
                 max_delta_bytes = int(os.getenv("WORKER_MAX_OUTPUT_DELTA_BYTES", "65536"))
                 max_events = int(os.getenv("WORKER_MAX_OUTPUT_DELTA_EVENTS", "0"))
                 count = 0
+                last_item_id = "item-0"
 
                 def emit_delta(delta_obj: msgspec.Struct) -> None:
-                    nonlocal count
+                    nonlocal count, last_item_id
                     payload = msgspec.to_builtins(delta_obj)
                     raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
                     if max_delta_bytes > 0 and len(raw) > max_delta_bytes:
                         raw = json.dumps({"truncated": True}, separators=(",", ":"), sort_keys=True).encode("utf-8")
-                    self._send_message(
-                        pb.WorkerSchedulerMessage(
-                            worker_event=pb.WorkerEvent(run_id=run_id, event_type="output.delta", payload_json=raw)
-                        )
+                    item_id = "item-0"
+                    delta_text = ""
+                    if isinstance(payload, dict):
+                        iid = payload.get("item_id")
+                        if isinstance(iid, str) and iid.strip():
+                            item_id = iid.strip()
+                        for key in ("delta_text", "delta", "token", "text", "content", "caption_delta"):
+                            val = payload.get(key)
+                            if isinstance(val, str) and val.strip():
+                                delta_text = val.strip()
+                                break
+                    ts_ms = int(time.time() * 1000)
+                    emitted = self._emit_incremental_delta_typed(
+                        run_id=run_id,
+                        function_name=spec.name,
+                        item_id=item_id,
+                        sequence=count + 1,
+                        timestamp_unix_ms=ts_ms,
+                        delta_text=delta_text,
+                        payload_json=raw,
                     )
+                    if not emitted:
+                        self._send_message(
+                            pb.WorkerSchedulerMessage(
+                                worker_event=pb.WorkerEvent(run_id=run_id, event_type="output.delta", payload_json=raw)
+                            )
+                        )
+                    last_item_id = item_id
                     count += 1
 
                 iterator_obj = result
@@ -3637,11 +3963,20 @@ class Worker:
                             break
 
                 # Optionally emit completion marker.
-                self._send_message(
-                    pb.WorkerSchedulerMessage(
-                        worker_event=pb.WorkerEvent(run_id=run_id, event_type="output.completed", payload_json=b"{}")
-                    )
+                done_ts_ms = int(time.time() * 1000)
+                emitted_done = self._emit_incremental_done_typed(
+                    run_id=run_id,
+                    function_name=spec.name,
+                    item_id=last_item_id,
+                    sequence=count + 1,
+                    timestamp_unix_ms=done_ts_ms,
                 )
+                if not emitted_done:
+                    self._send_message(
+                        pb.WorkerSchedulerMessage(
+                            worker_event=pb.WorkerEvent(run_id=run_id, event_type="output.completed", payload_json=b"{}")
+                        )
+                    )
                 output_payload = b""
                 success = True
 
@@ -3692,11 +4027,20 @@ class Worker:
             if spec.output_mode == "incremental":
                 try:
                     payload = json.dumps({"error_type": error_type, "message": safe_message}, separators=(",", ":")).encode("utf-8")
-                    self._send_message(
-                        pb.WorkerSchedulerMessage(
-                            worker_event=pb.WorkerEvent(run_id=run_id, event_type="output.error", payload_json=payload)
-                        )
+                    emitted_err = self._emit_incremental_error_typed(
+                        run_id=run_id,
+                        function_name=spec.name,
+                        item_id="item-0",
+                        sequence=0,
+                        timestamp_unix_ms=int(time.time() * 1000),
+                        error_message=safe_message,
                     )
+                    if not emitted_err:
+                        self._send_message(
+                            pb.WorkerSchedulerMessage(
+                                worker_event=pb.WorkerEvent(run_id=run_id, event_type="output.error", payload_json=payload)
+                            )
+                        )
                 except Exception:
                     pass
             success = False
@@ -4191,7 +4535,26 @@ class Worker:
                 if obj is None:
                     t_pi0 = time.monotonic()
                     from_pretrained = getattr(requested_type, "from_pretrained")
-                    obj = from_pretrained(model_id)
+                    model_source: str = str(model_id)
+                    preload_kwargs: dict[str, Any] = {}
+                    try:
+                        p = Path(model_source)
+                        if p.exists():
+                            model_source = p.as_posix()
+                        else:
+                            parsed = parse_model_ref(model_source)
+                            if self._downloader is not None and parsed.scheme in ("cozy", "hf"):
+                                model_source = self._downloader.download(model_source, str(worker_model_cache_dir()))
+                            elif parsed.scheme == "hf" and parsed.hf is not None:
+                                # Fallback path when downloader is unavailable.
+                                model_source = parsed.hf.repo_id
+                                if parsed.hf.revision:
+                                    preload_kwargs["revision"] = parsed.hf.revision
+                    except Exception:
+                        model_source = str(model_id)
+                        preload_kwargs = {}
+
+                    obj = from_pretrained(model_source, **preload_kwargs)
                     if rm is not None:
                         rm.add_pipeline_init_time(int((time.monotonic() - t_pi0) * 1000))
                 if isinstance(requested_type, type) and not isinstance(obj, requested_type):
@@ -4360,16 +4723,38 @@ class Worker:
     ) -> None:
         """Send a task execution result back to the scheduler via the queue."""
         try:
-            result = pb.TaskExecutionResult(
-                run_id=run_id,
-                success=success,
-                output_payload=(output_payload or b'') if success else b'', # Default to b'' if None
-                error_message=error_message if not success else "",
-                error_type=error_type if not success else "",
-                retryable=bool(retryable) if not success else False,
-                safe_message=safe_message if not success else "",
-            )
-            msg = pb.WorkerSchedulerMessage(run_result=result)
+            batch_ctx: Optional[Tuple[str, str]] = None
+            with self._run_batch_context_lock:
+                batch_ctx = self._run_batch_context.pop(run_id, None)
+            if batch_ctx is not None:
+                batch_id, item_id = batch_ctx
+                item_result = pb.BatchExecutionItemResult(
+                    run_id=run_id,
+                    item_id=item_id or "item-000001",
+                    success=success,
+                    output_payload=(output_payload or b'') if success else b'',
+                    error_message=error_message if not success else "",
+                    error_type=error_type if not success else "",
+                    retryable=bool(retryable) if not success else False,
+                    safe_message=safe_message if not success else "",
+                )
+                msg = pb.WorkerSchedulerMessage(
+                    batch_run_result=pb.BatchExecutionResult(
+                        batch_id=batch_id or "",
+                        items=[item_result],
+                    )
+                )
+            else:
+                result = pb.TaskExecutionResult(
+                    run_id=run_id,
+                    success=success,
+                    output_payload=(output_payload or b'') if success else b'', # Default to b'' if None
+                    error_message=error_message if not success else "",
+                    error_type=error_type if not success else "",
+                    retryable=bool(retryable) if not success else False,
+                    safe_message=safe_message if not success else "",
+                )
+                msg = pb.WorkerSchedulerMessage(run_result=result)
             self._send_message(msg)
             logger.debug(f"Queued task result for run_id={run_id}, success={success}")
         except Exception as e:

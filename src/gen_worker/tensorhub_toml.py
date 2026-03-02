@@ -31,6 +31,7 @@ class TensorhubToml:
     cuda: str | None
     models: dict[str, TensorhubModelSpec]
     function_models: dict[str, dict[str, TensorhubModelSpec]]  # function_name -> model_key -> spec
+    function_resources: dict[str, dict[str, Any]]  # function_name -> runtime/resource hints
     resources: dict[str, Any]
 
 
@@ -154,6 +155,46 @@ def _parse_model_spec(v: Any) -> TensorhubModelSpec:
     raise ValueError("model spec must be a string or a table {ref=..., dtypes=[...]}")
 
 
+def _parse_function_resource_hints(v: Any) -> dict[str, Any]:
+    if not isinstance(v, Mapping):
+        return {}
+    out: dict[str, Any] = {}
+    for key in (
+        "max_concurrency",
+        "batch_size_min",
+        "batch_size_target",
+        "batch_size_max",
+        "prefetch_depth",
+        "max_wait_ms",
+        "memory_hint_mb",
+    ):
+        if key not in v:
+            continue
+        raw = v.get(key)
+        if raw is None:
+            continue
+        try:
+            iv = int(raw)
+        except Exception:
+            raise ValueError(f"function resource hint {key} must be an integer")
+        if iv <= 0:
+            raise ValueError(f"function resource hint {key} must be > 0")
+        out[key] = iv
+
+    if "stage_profile" in v:
+        prof = str(v.get("stage_profile") or "").strip()
+        if prof:
+            out["stage_profile"] = prof
+    if "stage_traits" in v:
+        raw_traits = v.get("stage_traits")
+        if not isinstance(raw_traits, list) or not all(isinstance(x, str) for x in raw_traits):
+            raise ValueError("function resource hint stage_traits must be a list of strings")
+        traits = [x.strip() for x in raw_traits if x.strip()]
+        if traits:
+            out["stage_traits"] = traits
+    return out
+
+
 def load_tensorhub_toml(path: Path) -> TensorhubToml:
     data = tomllib.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
@@ -194,6 +235,7 @@ def load_tensorhub_toml(path: Path) -> TensorhubToml:
             models[key] = _parse_model_spec(v)
 
     function_models: dict[str, dict[str, TensorhubModelSpec]] = {}
+    function_resources: dict[str, dict[str, Any]] = {}
     raw_functions = data.get("functions")
     if isinstance(raw_functions, dict):
         for fn_name, fn_cfg in raw_functions.items():
@@ -212,6 +254,16 @@ def load_tensorhub_toml(path: Path) -> TensorhubToml:
             if m:
                 function_models[fn] = m
 
+            merged_hints: dict[str, Any] = {}
+            runtime_hints = _parse_function_resource_hints(fn_cfg.get("runtime"))
+            if runtime_hints:
+                merged_hints.update(runtime_hints)
+            resource_hints = _parse_function_resource_hints(fn_cfg.get("resources"))
+            if resource_hints:
+                merged_hints.update(resource_hints)
+            if merged_hints:
+                function_resources[fn] = merged_hints
+
     resources: dict[str, Any] = {}
     raw_resources = data.get("resources")
     if isinstance(raw_resources, dict):
@@ -227,5 +279,6 @@ def load_tensorhub_toml(path: Path) -> TensorhubToml:
         cuda=cuda,
         models=models,
         function_models=function_models,
+        function_resources=function_resources,
         resources=resources,
     )

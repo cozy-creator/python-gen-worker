@@ -52,6 +52,8 @@ def _make_worker() -> Worker:
     w._active_tasks_lock = threading.Lock()
     w._active_tasks = {}
     w._active_function_counts = {}
+    w._run_batch_context_lock = threading.Lock()
+    w._run_batch_context = {}
     w._send_message = lambda msg: w._sent.append(msg)  # type: ignore[method-assign]
     w._sent = []
     w._stop_event = threading.Event()
@@ -85,16 +87,24 @@ class TestContractAndIncremental(unittest.TestCase):
         b = msgspec.msgpack.encode(msgspec.to_builtins(payload))
         w._execute_task(ctx, spec, b)
 
-        # Capture worker_event messages.
+        # Capture incremental output messages (typed token events preferred, legacy worker_event fallback).
         events = []
         for m in w._sent:
-            if not hasattr(m, "WhichOneof") or m.WhichOneof("msg") != "worker_event":
+            if not hasattr(m, "WhichOneof"):
                 continue
-            evt = m.worker_event
-            # Ignore non-output events (e.g. metrics.*).
-            if not str(evt.event_type or "").startswith("output."):
+            msg_type = m.WhichOneof("msg")
+            if msg_type == "incremental_token_delta":
+                events.append(("output.delta", m.incremental_token_delta.payload_json))
                 continue
-            events.append((evt.event_type, evt.payload_json))
+            if msg_type == "incremental_token_stream_done":
+                events.append(("output.completed", b"{}"))
+                continue
+            if msg_type == "worker_event":
+                evt = m.worker_event
+                # Ignore non-output events (e.g. metrics.*).
+                if not str(evt.event_type or "").startswith("output."):
+                    continue
+                events.append((evt.event_type, evt.payload_json))
 
         self.assertGreaterEqual(len(events), 3)
         self.assertEqual(events[0][0], "output.delta")
@@ -102,6 +112,22 @@ class TestContractAndIncremental(unittest.TestCase):
         self.assertEqual(events[1][0], "output.delta")
         self.assertEqual(json.loads(events[1][1].decode("utf-8"))["delta"], "!")
         self.assertEqual(events[2][0], "output.completed")
+
+    def test_incremental_output_emits_typed_token_messages(self) -> None:
+        def stream(ctx: ActionContext, payload: Input) -> Iterator[Delta]:
+            yield Delta(delta=payload.text)
+
+        w = _make_worker()
+        spec = w._inspect_task_spec(stream)  # type: ignore[arg-type]
+
+        ctx = ActionContext("run-typed-1", emitter=lambda _e: None)
+        payload = Input(text="hello")
+        b = msgspec.msgpack.encode(msgspec.to_builtins(payload))
+        w._execute_task(ctx, spec, b)
+
+        msg_types = [m.WhichOneof("msg") for m in w._sent if hasattr(m, "WhichOneof")]
+        self.assertIn("incremental_token_delta", msg_types)
+        self.assertIn("incremental_token_stream_done", msg_types)
 
     def test_payload_model_key_resolves_via_endpoint_map(self) -> None:
         def fn(

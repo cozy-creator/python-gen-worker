@@ -493,6 +493,20 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
     tensorhub_manifest = _load_tensorhub_manifest_toml(root)
 
     functions = discover_functions(root, main_module=tensorhub_manifest.main)
+    for fn in functions:
+        fn_name = str(fn.get("name") or "").strip()
+        if not fn_name:
+            continue
+        hints = tensorhub_manifest.function_resources.get(fn_name) or {}
+        if not hints:
+            continue
+        base = fn.get("resources")
+        merged: Dict[str, Any] = {}
+        if isinstance(base, dict):
+            merged.update(base)
+        merged.update(hints)
+        fn["resources"] = merged
+
     seen_fn: Dict[str, str] = {}
     for fn in functions:
         fn_name = str(fn.get("name") or "").strip()
