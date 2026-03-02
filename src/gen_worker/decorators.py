@@ -30,7 +30,7 @@ class ResourceRequirements:
         self.memory_hint_mb = memory_hint_mb
         self.stage_profile = stage_profile
         self.stage_traits = list(stage_traits or [])
-        self._requirements = {}
+        self._requirements: Dict[str, Any] = {}
         if max_concurrency is not None:
             self._requirements["max_concurrency"] = max_concurrency
         if batch_size_min is not None:

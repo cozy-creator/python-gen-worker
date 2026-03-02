@@ -86,6 +86,10 @@ ignore_errors = true
 module = ["gen_worker.testing.*"]
 ignore_errors = true
 
+[[tool.mypy.overrides]]
+module = ["gen_worker.trainer.*"]
+ignore_errors = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 
