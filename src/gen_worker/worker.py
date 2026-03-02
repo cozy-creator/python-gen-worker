@@ -892,6 +892,16 @@ class Worker:
                     logger.info(f"Loaded ModelManager from MODEL_MANAGER_CLASS={model_manager_path}")
                 except Exception as e:
                     logger.exception(f"Failed to load MODEL_MANAGER_CLASS '{model_manager_path}': {e}")
+        # Auto-wire: if no explicit manager and diffusers is available, use the
+        # built-in DiffusersModelManager so LoadModelCommand works out of the box.
+        if resolved_model_manager is None:
+            try:
+                import diffusers  # noqa: F401
+                from .diffusers_model_manager import DiffusersModelManager
+                resolved_model_manager = DiffusersModelManager()
+                logger.info("Auto-wired DiffusersModelManager (diffusers detected)")
+            except ImportError:
+                pass
         self._model_manager = resolved_model_manager
         self._downloader = downloader
         if self._downloader is None:
