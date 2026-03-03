@@ -602,6 +602,15 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
     return manifest
 
 
+def _strip_none(obj: Any) -> Any:
+    """Recursively remove None values from dicts/lists (TOML has no null type)."""
+    if isinstance(obj, dict):
+        return {k: _strip_none(v) for k, v in obj.items() if v is not None}
+    if isinstance(obj, list):
+        return [_strip_none(v) for v in obj if v is not None]
+    return obj
+
+
 def main() -> None:
     """Main entry point for CLI usage."""
     # Check for legacy COZY_FUNCTION_MODULES env var
@@ -621,7 +630,7 @@ def main() -> None:
     if not manifest.get("functions"):
         print("warning: no @worker_function decorated functions found", file=sys.stderr)
 
-    sys.stdout.write(msgspec.toml.encode(manifest).decode("utf-8"))
+    sys.stdout.write(msgspec.toml.encode(_strip_none(manifest)).decode("utf-8"))
     if not sys.stdout.isatty():
         sys.stdout.write("\n")
 
