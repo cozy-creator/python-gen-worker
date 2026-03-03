@@ -49,13 +49,14 @@ def iter_transformers_text_deltas(
 
     # Best-effort cooperative cancellation for long generations.
     if cancel_checker is not None:
+        _checker = cancel_checker
         try:
             from transformers import StoppingCriteria, StoppingCriteriaList
 
             class _CancelStopCriteria(StoppingCriteria):
                 def __call__(self, input_ids: Any, scores: Any, **kwargs: Any) -> bool:
                     try:
-                        return bool(cancel_checker())
+                        return bool(_checker())
                     except Exception:
                         return False
 
