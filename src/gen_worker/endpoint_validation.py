@@ -44,7 +44,6 @@ def validate_endpoint(root: str | Path, *, require_uv_lock: bool = False) -> End
       - schema_version = 1
       - name = "..."
       - main = "pkg.module"
-      - gen_worker = ">=x,<y"
     - `pyproject.toml` must exist (Python packaging metadata)
     - `[project].name` must exist in `pyproject.toml` (normalized for URL-safe endpoint paths)
     - `requirements.txt` must not exist
@@ -100,10 +99,6 @@ def validate_endpoint(root: str | Path, *, require_uv_lock: bool = False) -> End
         main = tensorhub_cfg.get("main")
         if not isinstance(main, str) or main.strip() == "":
             errors.append("tensorhub.toml missing main")
-
-        gen_worker = tensorhub_cfg.get("gen_worker")
-        if not isinstance(gen_worker, str) or gen_worker.strip() == "":
-            errors.append("tensorhub.toml missing gen_worker constraint")
 
     # Validate pyproject.toml.
     if not pyproject.exists():

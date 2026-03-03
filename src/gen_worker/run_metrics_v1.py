@@ -134,7 +134,7 @@ class ModelMetricsV1:
 
 @dataclass
 class RunMetricsV1:
-    run_id: str
+    request_id: str
     function_name: str
     required_models: List[str] = field(default_factory=list)
     resolved_cozy_models_by_id: Optional[Mapping[str, Any]] = None

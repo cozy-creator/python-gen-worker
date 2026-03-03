@@ -2,13 +2,9 @@ schema_version = 1
 
 name = "z-image-lora"
 main = "z_image_lora.main"
-gen_worker = ">=0.2.0"
 
 [host.requirements]
 cuda = "12.6"
-
-[models]
-z-image-turbo = "hf:Tongyi-MAI/Z-Image-Turbo"
 
 [resources]
 vram_gb = 16

@@ -57,7 +57,7 @@ def _maybe_add_pythonpath(root: Optional[str]) -> None:
 
 @dataclass
 class DevRunResult:
-    run_id: str
+    request_id: str
     success: bool
     output: Any
     error_type: str
@@ -95,7 +95,7 @@ class DevWorker(Worker):
         *,
         function_name: str,
         payload_obj: Any,
-        run_id: Optional[str] = None,
+        request_id: Optional[str] = None,
         owner: str = "",
         invoker_id: str = "",
         timeout_ms: int = 0,
@@ -103,7 +103,7 @@ class DevWorker(Worker):
         resolved_cozy_models_by_id: Optional[dict[str, Any]] = None,
         local_output_dir: Optional[str] = None,
     ) -> DevRunResult:
-        rid = (run_id or "").strip() or str(uuid.uuid4())
+        rid = (request_id or "").strip() or str(uuid.uuid4())
         fn = (function_name or "").strip()
         spec = self._task_specs.get(fn)
         if spec is None:
@@ -113,7 +113,7 @@ class DevWorker(Worker):
 
         raw = msgspec.msgpack.encode(payload_obj)
         req = pb.TaskExecutionRequest(
-            run_id=rid,
+            request_id=rid,
             function_name=fn,
             input_payload=raw,
             required_variant_refs=[str(v).strip() for v in (required_variant_refs or []) if str(v).strip()],
@@ -152,7 +152,7 @@ class DevWorker(Worker):
                     payload = {}
                 events.append(
                     {
-                        "run_id": str(ev.run_id or ""),
+                        "request_id": str(ev.request_id or ""),
                         "event_type": str(ev.event_type or ""),
                         "payload": payload,
                     }
@@ -171,7 +171,7 @@ class DevWorker(Worker):
                 out_obj = None
 
         return DevRunResult(
-            run_id=rid,
+            request_id=rid,
             success=bool(result.success),
             output=out_obj,
             error_type=str(result.error_type or ""),
@@ -350,7 +350,7 @@ async def serve_http(argv: Optional[list[str]] = None) -> None:
                 out.append({"model_id": mid, "ok": False, "error_type": type(e).__name__, "duration_ms": int((time.monotonic() - t0) * 1000)})
         return _json_response({"results": out})
 
-    @routes.post("/v1/run/{function_name}")
+    @routes.post("/v1/request/{function_name}")
     async def run(req: web.Request) -> web.Response:
         fn = str(req.match_info.get("function_name") or "").strip()
         try:
@@ -360,7 +360,7 @@ async def serve_http(argv: Optional[list[str]] = None) -> None:
 
         payload, env = _parse_run_body(body)
 
-        rid = str(env.get("run_id") or "").strip() or str(uuid.uuid4())
+        rid = str(env.get("request_id") or "").strip() or str(uuid.uuid4())
         timeout_ms = int(env.get("timeout_ms") or 0)
         owner = str(env.get("owner") or "").strip()
         invoker_id = str(env.get("invoker_id") or "").strip()
@@ -380,7 +380,7 @@ async def serve_http(argv: Optional[list[str]] = None) -> None:
             res = w.run_task_sync(
                 function_name=fn,
                 payload_obj=payload,
-                run_id=rid,
+                request_id=rid,
                 owner=owner,
                 invoker_id=invoker_id,
                 timeout_ms=timeout_ms,
@@ -391,11 +391,11 @@ async def serve_http(argv: Optional[list[str]] = None) -> None:
         except web.HTTPException:
             raise
         except Exception as e:
-            return _json_response({"run_id": rid, "success": False, "error_type": type(e).__name__, "safe_message": str(e)}, status=500)
+            return _json_response({"request_id": rid, "success": False, "error_type": type(e).__name__, "safe_message": str(e)}, status=500)
 
         return _json_response(
             {
-                "run_id": res.run_id,
+                "request_id": res.request_id,
                 "success": res.success,
                 "output": res.output,
                 "error_type": res.error_type,
@@ -409,23 +409,23 @@ async def serve_http(argv: Optional[list[str]] = None) -> None:
 
     @routes.post("/v1/warmup/{function_name}")
     async def warmup(req: web.Request) -> web.Response:
-        # Alias of /v1/run that discards output but forces init/compiles.
+        # Alias of /v1/request that discards output but forces init/compiles.
         fn = str(req.match_info.get("function_name") or "").strip()
         body = await req.json()
         payload, env = _parse_run_body(body)
-        rid = str(env.get("run_id") or "").strip() or str(uuid.uuid4())
+        rid = str(env.get("request_id") or "").strip() or str(uuid.uuid4())
         t0 = time.monotonic()
         res = w.run_task_sync(
             function_name=fn,
             payload_obj=payload,
-            run_id=rid,
+            request_id=rid,
             timeout_ms=int(env.get("timeout_ms") or 0),
             required_variant_refs=[str(v).strip() for v in (env.get("required_variant_refs") or []) if str(v).strip()]
             if isinstance(env.get("required_variant_refs"), list)
             else [],
             local_output_dir=str(out_dir),
         )
-        return _json_response({"ok": res.success, "run_id": rid, "duration_ms": int((time.monotonic() - t0) * 1000)})
+        return _json_response({"ok": res.success, "request_id": rid, "duration_ms": int((time.monotonic() - t0) * 1000)})
 
     app = web.Application(client_max_size=256 * 1024 * 1024)
     app.add_routes(routes)

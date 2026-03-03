@@ -2,13 +2,9 @@ schema_version = 1
 
 name = "qwen-image-2512"
 main = "qwen_image_2512.main"
-gen_worker = ">=0.3.0"
 
 [host.requirements]
 cuda = "12.6"
-
-[models]
-qwen_image = "cozy:hf/qwen--qwen-image-2512:latest"
 
 [resources]
 vram_gb = 24

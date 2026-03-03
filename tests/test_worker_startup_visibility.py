@@ -27,7 +27,7 @@ def test_registration_watchdog_emits_timeout_and_sets_stop() -> None:
     worker_events: list[tuple[str, dict[str, Any]]] = []
     w._emit_startup_phase = lambda phase, **kw: startup_events.append((phase, kw))  # type: ignore[method-assign]
     w._emit_worker_event_bytes = (  # type: ignore[method-assign]
-        lambda run_id, event_type, payload_json: worker_events.append(
+        lambda request_id, event_type, payload_json: worker_events.append(
             (event_type, json.loads(payload_json.decode("utf-8")))
         )
     )
@@ -45,11 +45,11 @@ def test_task_phase_watchdog_emits_stuck_event() -> None:
     w = Worker.__new__(Worker)
     seen: list[tuple[str, dict[str, Any]]] = []
     w._emit_worker_event_bytes = (  # type: ignore[method-assign]
-        lambda run_id, event_type, payload_json: seen.append((event_type, json.loads(payload_json.decode("utf-8"))))
+        lambda request_id, event_type, payload_json: seen.append((event_type, json.loads(payload_json.decode("utf-8"))))
     )
 
     timer = w._start_task_phase_watchdog(
-        run_id="run-1",
+        request_id="run-1",
         phase="inference",
         warn_after_s=0.02,
         payload={"function_name": "generate"},
@@ -71,7 +71,7 @@ def test_emit_worker_fatal_includes_traceback_metadata() -> None:
     w._process_started_monotonic = time.monotonic() - 1.0
     seen: list[tuple[str, dict[str, Any]]] = []
     w._emit_worker_event_bytes = (  # type: ignore[method-assign]
-        lambda run_id, event_type, payload_json: seen.append((event_type, json.loads(payload_json.decode("utf-8"))))
+        lambda request_id, event_type, payload_json: seen.append((event_type, json.loads(payload_json.decode("utf-8"))))
     )
 
     try:

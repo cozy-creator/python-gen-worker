@@ -11,6 +11,7 @@ Pattern inspired by fal.ai's z-image/turbo/lora endpoint.
 from __future__ import annotations
 
 import logging
+import threading
 from io import BytesIO
 from typing import Any, Annotated, List, Optional
 
@@ -24,6 +25,19 @@ from gen_worker.types import Asset
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+_z_image_resources = ResourceRequirements(max_concurrency=1)
+_pipeline_locks_guard = threading.Lock()
+_pipeline_locks: dict[int, threading.Lock] = {}
+
+
+def _lock_for_pipeline(pipeline: object) -> threading.Lock:
+    key = id(pipeline)
+    with _pipeline_locks_guard:
+        lock = _pipeline_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _pipeline_locks[key] = lock
+    return lock
 
 
 class LoraSpec(msgspec.Struct):
@@ -51,11 +65,17 @@ class GenerateOutput(msgspec.Struct):
     image: Asset
 
 
-@worker_function(ResourceRequirements())
+@worker_function(_z_image_resources)
 def generate_with_loras(
     ctx: ActionContext,
     pipeline: Annotated[
-        DiffusionPipeline, ModelRef(Src.FIXED, "z-image-turbo")
+        DiffusionPipeline,
+        ModelRef(
+            Src.FIXED,
+            "z-image-turbo",
+            ref="tongyi-mai/z-image-turbo",
+            dtypes=("bf16", "fp16"),
+        ),
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:
@@ -74,92 +94,93 @@ def generate_with_loras(
     if ctx.is_canceled():
         raise InterruptedError("canceled")
 
-    logger.info("[run_id=%s] Generating with %d LoRAs", ctx.run_id, len(payload.loras))
+    logger.info("[request_id=%s] Generating with %d LoRAs", ctx.request_id, len(payload.loras))
 
-    # Track loaded adapter names for cleanup
-    loaded_adapters: List[str] = []
-
-    try:
-        # Load each LoRA from the Assets
-        for i, lora_spec in enumerate(payload.loras):
-            adapter_name = lora_spec.adapter_name or f"lora_{i}"
-
-            # The Asset's local_path is populated by the worker after materialization
-            lora_path = lora_spec.file.local_path
-            if not lora_path:
-                raise ValueError(f"LoRA {adapter_name} was not materialized (no local_path)")
-
-            logger.info("[run_id=%s] Loading LoRA %s from %s (weight=%.2f)",
-                       ctx.run_id, adapter_name, lora_path, lora_spec.weight)
-
-            if not hasattr(pipeline, "load_lora_weights"):
-                raise RuntimeError(
-                    "This pipeline does not support LoRA loading (missing load_lora_weights). "
-                    "If you intended to use Z-Image Turbo + LoRA, you likely need a newer diffusers build."
-                )
-
-            # Prefer passing the safetensors file path directly (diffusers supports this for LoRA adapters).
-            # For directory-style adapters, lora_path can also be a directory path.
-            pipeline.load_lora_weights(  # type: ignore[attr-defined]
-                lora_path,
-                adapter_name=adapter_name,
-            )
-            loaded_adapters.append(adapter_name)
-
-        # Set adapter weights if we have LoRAs
-        if loaded_adapters:
-            weights = [
-                lora.weight for lora in payload.loras[:len(loaded_adapters)]
-            ]
-            if not hasattr(pipeline, "set_adapters"):
-                raise RuntimeError("This pipeline does not support multi-adapter LoRA selection (missing set_adapters).")
-            pipeline.set_adapters(loaded_adapters, adapter_weights=weights)  # type: ignore[attr-defined]
-            logger.info("[run_id=%s] Applied adapters: %s with weights: %s",
-                       ctx.run_id, loaded_adapters, weights)
-
-        # Set up generator for reproducibility
-        import torch
-        generator = None
-        if payload.seed is not None:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-            generator = torch.Generator(device=device).manual_seed(payload.seed)
-
-        # Generate the image
-        logger.info("[run_id=%s] Running inference: prompt=%r, steps=%d",
-                   ctx.run_id, payload.prompt[:50], payload.num_inference_steps)
-
-        call_kwargs: dict[str, Any] = {
-            "prompt": payload.prompt,
-            "num_inference_steps": payload.num_inference_steps,
-            "guidance_scale": payload.guidance_scale,
-            "width": payload.width,
-            "height": payload.height,
-            "generator": generator,
-        }
-        if payload.negative_prompt:
-            call_kwargs["negative_prompt"] = payload.negative_prompt
+    with _lock_for_pipeline(pipeline):
+        # Track loaded adapter names for cleanup
+        loaded_adapters: List[str] = []
 
         try:
-            result = pipeline(**call_kwargs)
-        except TypeError:
-            # Some pipelines don't accept negative_prompt (and turbo models typically don't use CFG anyway).
-            call_kwargs.pop("negative_prompt", None)
-            result = pipeline(**call_kwargs)
-        image: Image.Image = result.images[0]
+            # Load each LoRA from the Assets
+            for i, lora_spec in enumerate(payload.loras):
+                adapter_name = lora_spec.adapter_name or f"lora_{i}"
 
-        # Save the output
-        buf = BytesIO()
-        image.save(buf, format="PNG")
-        output_asset = ctx.save_bytes(f"runs/{ctx.run_id}/outputs/image.png", buf.getvalue())
+                # The Asset's local_path is populated by the worker after materialization
+                lora_path = lora_spec.file.local_path
+                if not lora_path:
+                    raise ValueError(f"LoRA {adapter_name} was not materialized (no local_path)")
 
-        return GenerateOutput(image=output_asset)
+                logger.info("[request_id=%s] Loading LoRA %s from %s (weight=%.2f)",
+                           ctx.request_id, adapter_name, lora_path, lora_spec.weight)
 
-    finally:
-        # Always unload LoRAs to free VRAM for next request
-        if loaded_adapters:
-            logger.info("[run_id=%s] Unloading %d LoRAs", ctx.run_id, len(loaded_adapters))
+                if not hasattr(pipeline, "load_lora_weights"):
+                    raise RuntimeError(
+                        "This pipeline does not support LoRA loading (missing load_lora_weights). "
+                        "If you intended to use Z-Image Turbo + LoRA, you likely need a newer diffusers build."
+                    )
+
+                # Prefer passing the safetensors file path directly (diffusers supports this for LoRA adapters).
+                # For directory-style adapters, lora_path can also be a directory path.
+                pipeline.load_lora_weights(  # type: ignore[attr-defined]
+                    lora_path,
+                    adapter_name=adapter_name,
+                )
+                loaded_adapters.append(adapter_name)
+
+            # Set adapter weights if we have LoRAs
+            if loaded_adapters:
+                weights = [
+                    lora.weight for lora in payload.loras[:len(loaded_adapters)]
+                ]
+                if not hasattr(pipeline, "set_adapters"):
+                    raise RuntimeError("This pipeline does not support multi-adapter LoRA selection (missing set_adapters).")
+                pipeline.set_adapters(loaded_adapters, adapter_weights=weights)  # type: ignore[attr-defined]
+                logger.info("[request_id=%s] Applied adapters: %s with weights: %s",
+                           ctx.request_id, loaded_adapters, weights)
+
+            # Set up generator for reproducibility
+            import torch
+            generator = None
+            if payload.seed is not None:
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                generator = torch.Generator(device=device).manual_seed(payload.seed)
+
+            # Generate the image
+            logger.info("[request_id=%s] Running inference: prompt=%r, steps=%d",
+                       ctx.request_id, payload.prompt[:50], payload.num_inference_steps)
+
+            call_kwargs: dict[str, Any] = {
+                "prompt": payload.prompt,
+                "num_inference_steps": payload.num_inference_steps,
+                "guidance_scale": payload.guidance_scale,
+                "width": payload.width,
+                "height": payload.height,
+                "generator": generator,
+            }
+            if payload.negative_prompt:
+                call_kwargs["negative_prompt"] = payload.negative_prompt
+
             try:
-                if hasattr(pipeline, "unload_lora_weights"):
-                    pipeline.unload_lora_weights()  # type: ignore[attr-defined]
-            except Exception as e:
-                logger.warning("[run_id=%s] Error unloading LoRAs: %s", ctx.run_id, e)
+                result = pipeline(**call_kwargs)
+            except TypeError:
+                # Some pipelines don't accept negative_prompt (and turbo models typically don't use CFG anyway).
+                call_kwargs.pop("negative_prompt", None)
+                result = pipeline(**call_kwargs)
+            image: Image.Image = result.images[0]
+
+            # Save the output
+            buf = BytesIO()
+            image.save(buf, format="PNG")
+            output_asset = ctx.save_bytes(f"runs/{ctx.request_id}/outputs/image.png", buf.getvalue())
+
+            return GenerateOutput(image=output_asset)
+
+        finally:
+            # Always unload LoRAs to free VRAM for next request
+            if loaded_adapters:
+                logger.info("[request_id=%s] Unloading %d LoRAs", ctx.request_id, len(loaded_adapters))
+                try:
+                    if hasattr(pipeline, "unload_lora_weights"):
+                        pipeline.unload_lora_weights()  # type: ignore[attr-defined]
+                except Exception as e:
+                    logger.warning("[request_id=%s] Error unloading LoRAs: %s", ctx.request_id, e)

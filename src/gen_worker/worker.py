@@ -219,8 +219,8 @@ def _infer_mime_type(ref: str, head: bytes) -> str:
     return guessed or "application/octet-stream"
 
 
-def _default_output_prefix(run_id: str) -> str:
-    return f"runs/{run_id}/outputs/"
+def _default_output_prefix(request_id: str) -> str:
+    return f"runs/{request_id}/outputs/"
 
 
 def _normalize_output_ref(ref: str) -> str:
@@ -381,7 +381,7 @@ class ActionContext:
     """Context object passed to action functions, allowing cancellation."""
     def __init__(
         self,
-        run_id: str,
+        request_id: str,
         emitter: Optional[Callable[[Dict[str, Any]], None]] = None,
         owner: Optional[str] = None,
         invoker_id: Optional[str] = None,
@@ -394,8 +394,13 @@ class ActionContext:
         required_models: Optional[List[str]] = None,
         runtime_batching_config: Optional[Dict[str, Any]] = None,
         stage_execution_hints: Optional[Dict[str, Any]] = None,
+        parent_request_id: Optional[str] = None,
+        child_request_id: Optional[str] = None,
+        item_id: Optional[str] = None,
+        item_index: Optional[int] = None,
+        item_span: Optional[Dict[str, int]] = None,
     ) -> None:
-        self._run_id = run_id
+        self._request_id = str(request_id or "").strip()
         self._owner = owner
         self._invoker_id = invoker_id
         self._timeout_ms = timeout_ms
@@ -407,6 +412,11 @@ class ActionContext:
         self._required_models = list(required_models or [])
         self._runtime_batching_config = dict(runtime_batching_config or {})
         self._stage_execution_hints = dict(stage_execution_hints or {})
+        self._parent_request_id = str(parent_request_id or "").strip() or None
+        self._child_request_id = str(child_request_id or "").strip() or None
+        self._item_id = str(item_id or "").strip() or None
+        self._item_index = int(item_index) if item_index is not None else None
+        self._item_span = dict(item_span or {})
         self._started_at = time.time()
         self._deadline: Optional[float] = None
         if timeout_ms is not None and timeout_ms > 0:
@@ -416,8 +426,8 @@ class ActionContext:
         self._emitter = emitter
 
     @property
-    def run_id(self) -> str:
-        return self._run_id
+    def request_id(self) -> str:
+        return self._request_id
 
     @property
     def owner(self) -> Optional[str]:
@@ -511,6 +521,50 @@ class ActionContext:
     def stage_execution_hints(self) -> Dict[str, Any]:
         return dict(self._stage_execution_hints)
 
+    @property
+    def parent_request_id(self) -> Optional[str]:
+        return self._parent_request_id
+
+    @property
+    def child_request_id(self) -> Optional[str]:
+        return self._child_request_id
+
+    @property
+    def item_id(self) -> Optional[str]:
+        return self._item_id
+
+    @property
+    def item_index(self) -> Optional[int]:
+        return self._item_index
+
+    @property
+    def item_span(self) -> Dict[str, int]:
+        return dict(self._item_span)
+
+    def partition_context(self) -> Dict[str, Any]:
+        out: Dict[str, Any] = {
+            "request_id": self._request_id,
+            "parent_request_id": self._parent_request_id,
+            "child_request_id": self._child_request_id,
+            "item_id": self._item_id,
+            "item_index": self._item_index,
+        }
+        if self._item_span:
+            out["item_span"] = dict(self._item_span)
+        return out
+
+    def item_output_ref(self, filename: str) -> str:
+        """Build a canonical output ref scoped to this request item."""
+        leaf = str(filename or "").strip().lstrip("/")
+        if not leaf:
+            raise ValueError("filename is required")
+        item_key = self._item_id
+        if not item_key and self._item_index is not None:
+            item_key = f"item-{self._item_index:06d}"
+        if not item_key:
+            item_key = "item-000000"
+        return f"runs/{self._request_id}/outputs/items/{item_key}/{leaf}"
+
     def preferred_batch_size(self, default: int = 1) -> int:
         cfg = self._runtime_batching_config
         target = int(cfg.get("batch_size_target", default) or default)
@@ -544,7 +598,7 @@ class ActionContext:
         if not self._canceled:
             self._canceled = True
             self._cancel_event.set()
-            logger.info(f"Action {self.run_id} marked for cancellation.")
+            logger.info(f"Action {self.request_id} marked for cancellation.")
 
     def done(self) -> threading.Event:
         """Returns an event that is set when the action is cancelled."""
@@ -556,7 +610,7 @@ class ActionContext:
             logger.debug(f"emit({event_type}) dropped: no emitter configured")
             return
         event = {
-            "run_id": self._run_id,
+            "request_id": self._request_id,
             "type": event_type,
             "payload": payload or {},
             "timestamp": time.time(),
@@ -567,10 +621,10 @@ class ActionContext:
         payload: Dict[str, Any] = {"progress": progress}
         if stage is not None:
             payload["stage"] = stage
-        self.emit("job.progress", payload)
+        self.emit("request.progress", payload)
 
     def log(self, message: str, level: str = "info") -> None:
-        self.emit("job.log", {"message": message, "level": level})
+        self.emit("request.log", {"message": message, "level": level})
 
     def save_bytes(self, ref: str, data: bytes) -> Asset:
         if not isinstance(data, (bytes, bytearray)):
@@ -815,8 +869,8 @@ class Worker:
         self._ws_specs: Dict[str, _WebsocketSpec] = {}
         self._active_tasks: Dict[str, ActionContext] = {}
         self._active_tasks_lock = threading.Lock()
-        self._run_batch_context: Dict[str, Tuple[str, str]] = {}  # run_id -> (batch_id, item_id)
-        self._run_batch_context_lock = threading.Lock()
+        self._request_batch_context: Dict[str, Tuple[str, str]] = {}  # request_id -> (batch_id, item_id)
+        self._request_batch_context_lock = threading.Lock()
         self._active_function_counts: Dict[str, int] = {}
         self.max_concurrency = int(os.getenv("WORKER_MAX_CONCURRENCY", "0"))
         self._drain_timeout_seconds = int(os.getenv("WORKER_DRAIN_TIMEOUT_SECONDS", "0"))
@@ -918,17 +972,19 @@ class Worker:
             )
         self._supported_model_ids_from_scheduler: Optional[List[str]] = None  # allowlist from scheduler (repo refs)
         self._required_variant_refs_from_scheduler: Optional[List[str]] = None  # warm-start pinned variants
-        # Signature-driven model selection mapping and allowlist (provided by orchestrator).
-        self._release_model_id_by_key: Dict[str, str] = {}
         self._release_allowed_model_ids: Optional[set[str]] = None
         # Immutable allowlist derived from the baked discovery manifest (tenant-declared scope).
         # Scheduler config may narrow this set but must never widen it.
         self._manifest_allowed_model_ids: Optional[set[str]] = None
-        # Per-function model keyspace from baked discovery manifest (short_key -> model_ref).
-        self._model_id_by_key_by_function: Dict[str, Dict[str, str]] = {}
-        # Per-function model specs (short_key -> {ref,dtypes}) from baked discovery manifest.
-        self._model_spec_by_key_by_function: Dict[str, Dict[str, Dict[str, Any]]] = {}
-        # Orchestrator-resolved manifests received in ReleaseArtifactConfig (startup prefetch baseline).
+        # Per-function FIXED model keyspace from baked discovery manifest (short_key -> model_ref).
+        self._fixed_model_id_by_key_by_function: Dict[str, Dict[str, str]] = {}
+        # Per-function payload selector keyspaces from baked discovery manifest.
+        # function_name -> payload_field -> short_key -> model_ref
+        self._payload_model_id_by_selector_by_function: Dict[str, Dict[str, Dict[str, str]]] = {}
+        # DType specs tracked in the same shape as model id maps.
+        self._fixed_model_spec_by_key_by_function: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        self._payload_model_spec_by_selector_by_function: Dict[str, Dict[str, Dict[str, Dict[str, Any]]]] = {}
+        # Orchestrator-resolved manifests received in EndpointConfig (startup prefetch baseline).
         # Keys should be canonical model ref strings (e.g. "cozy:owner/repo@sha256:<digest>").
         self._resolved_cozy_models_by_id_baseline: Dict[str, Any] = {}
         self._prefetch_lock = threading.Lock()
@@ -941,64 +997,85 @@ class Worker:
         # Store manifest and initialize model config from it
         self._manifest = manifest
         if manifest and isinstance(manifest, dict):
-            # New contract: per-function mapping (allows function-specific model sets and dtype constraints).
             mbf = manifest.get("models_by_function")
             if isinstance(mbf, dict):
                 for fn_name, mapping in mbf.items():
                     if not isinstance(mapping, dict):
                         continue
-                    out: Dict[str, str] = {}
-                    out_spec: Dict[str, Dict[str, Any]] = {}
-                    for k, v in mapping.items():
-                        key = str(k).strip()
-                        if not key:
-                            continue
-                        if isinstance(v, dict):
-                            ref = str(v.get("ref") or "").strip()
-                            dtypes = v.get("dtypes")
-                        else:
-                            ref = str(v or "").strip()
-                            dtypes = None
-                        if not ref:
-                            continue
-                        canon_ref = _canonicalize_model_ref_string(ref)
-                        out[key] = canon_ref
-                        if isinstance(dtypes, list):
-                            out_spec[key] = {"ref": canon_ref, "dtypes": [str(x) for x in dtypes if str(x).strip()]}
-                        else:
-                            out_spec[key] = {"ref": canon_ref, "dtypes": []}
-                    if out:
-                        self._model_id_by_key_by_function[str(fn_name)] = out
-                    if out_spec:
-                        self._model_spec_by_key_by_function[str(fn_name)] = out_spec
+                    fn = str(fn_name).strip()
+                    if not fn:
+                        continue
 
-            # Legacy contract: flat mapping at manifest["models"] (string refs).
-            legacy_models = manifest.get("models")
-            if isinstance(legacy_models, dict):
-                self._release_model_id_by_key = {
-                    str(k): _canonicalize_model_ref_string(str(v)) for k, v in legacy_models.items()
-                }
+                    fixed_raw = mapping.get("fixed")
+                    if isinstance(fixed_raw, dict):
+                        out_fixed: Dict[str, str] = {}
+                        out_fixed_spec: Dict[str, Dict[str, Any]] = {}
+                        for k, v in fixed_raw.items():
+                            key = str(k).strip()
+                            if not key or not isinstance(v, dict):
+                                continue
+                            ref = _canonicalize_model_ref_string(str(v.get("ref") or "").strip())
+                            if not ref:
+                                continue
+                            dtypes = v.get("dtypes")
+                            out_fixed[key] = ref
+                            if isinstance(dtypes, list):
+                                out_fixed_spec[key] = {"ref": ref, "dtypes": [str(x) for x in dtypes if str(x).strip()]}
+                            else:
+                                out_fixed_spec[key] = {"ref": ref, "dtypes": []}
+                        if out_fixed:
+                            self._fixed_model_id_by_key_by_function[fn] = out_fixed
+                        if out_fixed_spec:
+                            self._fixed_model_spec_by_key_by_function[fn] = out_fixed_spec
+
+                    payload_raw = mapping.get("payload_selectors")
+                    if isinstance(payload_raw, dict):
+                        selectors: Dict[str, Dict[str, str]] = {}
+                        selectors_spec: Dict[str, Dict[str, Dict[str, Any]]] = {}
+                        for selector_name, keyspace_raw in payload_raw.items():
+                            selector = str(selector_name).strip()
+                            if not selector or not isinstance(keyspace_raw, dict):
+                                continue
+                            keyspace: Dict[str, str] = {}
+                            keyspace_spec: Dict[str, Dict[str, Any]] = {}
+                            for k, v in keyspace_raw.items():
+                                key = str(k).strip()
+                                if not key or not isinstance(v, dict):
+                                    continue
+                                ref = _canonicalize_model_ref_string(str(v.get("ref") or "").strip())
+                                if not ref:
+                                    continue
+                                dtypes = v.get("dtypes")
+                                keyspace[key] = ref
+                                if isinstance(dtypes, list):
+                                    keyspace_spec[key] = {"ref": ref, "dtypes": [str(x) for x in dtypes if str(x).strip()]}
+                                else:
+                                    keyspace_spec[key] = {"ref": ref, "dtypes": []}
+                            if keyspace:
+                                selectors[selector] = keyspace
+                            if keyspace_spec:
+                                selectors_spec[selector] = keyspace_spec
+                        if selectors:
+                            self._payload_model_id_by_selector_by_function[fn] = selectors
+                        if selectors_spec:
+                            self._payload_model_spec_by_selector_by_function[fn] = selectors_spec
 
             # Compute union allowlist for prefetch/guardrails.
             allowed: set[str] = set()
-            for m in self._model_id_by_key_by_function.values():
+            for m in self._fixed_model_id_by_key_by_function.values():
                 allowed.update(m.values())
-            if self._release_model_id_by_key:
-                allowed.update(self._release_model_id_by_key.values())
+            for by_selector in self._payload_model_id_by_selector_by_function.values():
+                for m in by_selector.values():
+                    allowed.update(m.values())
             self._manifest_allowed_model_ids = allowed or None
             # Default enforcement scope to what the tenant declared (baked manifest),
             # until the scheduler narrows it further.
             self._release_allowed_model_ids = self._manifest_allowed_model_ids
 
-            if self._model_id_by_key_by_function:
+            if self._fixed_model_id_by_key_by_function or self._payload_model_id_by_selector_by_function:
                 logger.info(
                     "Loaded model mappings from manifest for %d functions",
-                    len(self._model_id_by_key_by_function),
-                )
-            elif self._release_model_id_by_key:
-                logger.info(
-                    "Loaded %d models from legacy manifest mapping",
-                    len(self._release_model_id_by_key),
+                    len(set(self._fixed_model_id_by_key_by_function) | set(self._payload_model_id_by_selector_by_function)),
                 )
 
         if self._model_manager:
@@ -1160,7 +1237,7 @@ class Worker:
 
     def _emit_progress_event(self, event: Dict[str, Any]) -> None:
         try:
-            run_id = event.get("run_id") or ""
+            request_id = event.get("request_id") or ""
             event_type = event.get("type") or ""
             payload = event.get("payload") or {}
             if "timestamp" not in payload:
@@ -1169,7 +1246,7 @@ class Worker:
             payload_json = json.dumps(payload).encode("utf-8")
             msg = pb.WorkerSchedulerMessage(
                 worker_event=pb.WorkerEvent(
-                    run_id=run_id,
+                    request_id=request_id,
                     event_type=event_type,
                     payload_json=payload_json,
                 )
@@ -1178,12 +1255,12 @@ class Worker:
         except Exception:
             logger.exception("Failed to emit progress event")
 
-    def _emit_worker_event_bytes(self, run_id: str, event_type: str, payload_json: bytes) -> None:
+    def _emit_worker_event_bytes(self, request_id: str, event_type: str, payload_json: bytes) -> None:
         """Best-effort worker->scheduler WorkerEvent emitter (must never fail a run)."""
         try:
             msg = pb.WorkerSchedulerMessage(
                 worker_event=pb.WorkerEvent(
-                    run_id=str(run_id or ""),
+                    request_id=str(request_id or ""),
                     event_type=str(event_type or ""),
                     payload_json=bytes(payload_json or b"{}"),
                 )
@@ -1195,7 +1272,7 @@ class Worker:
     def _emit_incremental_delta_typed(
         self,
         *,
-        run_id: str,
+        request_id: str,
         function_name: str,
         item_id: str,
         sequence: int,
@@ -1208,7 +1285,7 @@ class Worker:
         try:
             msg = pb.WorkerSchedulerMessage(
                 incremental_token_delta=pb.IncrementalTokenDelta(
-                    run_id=str(run_id or ""),
+                    request_id=str(request_id or ""),
                     item_id=str(item_id or ""),
                     function_name=str(function_name or ""),
                     sequence=int(sequence),
@@ -1225,7 +1302,7 @@ class Worker:
     def _emit_incremental_done_typed(
         self,
         *,
-        run_id: str,
+        request_id: str,
         function_name: str,
         item_id: str,
         sequence: int,
@@ -1236,7 +1313,7 @@ class Worker:
         try:
             msg = pb.WorkerSchedulerMessage(
                 incremental_token_stream_done=pb.IncrementalTokenStreamDone(
-                    run_id=str(run_id or ""),
+                    request_id=str(request_id or ""),
                     item_id=str(item_id or ""),
                     function_name=str(function_name or ""),
                     sequence=int(sequence),
@@ -1251,7 +1328,7 @@ class Worker:
     def _emit_incremental_error_typed(
         self,
         *,
-        run_id: str,
+        request_id: str,
         function_name: str,
         item_id: str,
         sequence: int,
@@ -1263,7 +1340,7 @@ class Worker:
         try:
             msg = pb.WorkerSchedulerMessage(
                 incremental_token_stream_error=pb.IncrementalTokenStreamError(
-                    run_id=str(run_id or ""),
+                    request_id=str(request_id or ""),
                     item_id=str(item_id or ""),
                     function_name=str(function_name or ""),
                     sequence=int(sequence),
@@ -1337,16 +1414,16 @@ class Worker:
         except Exception:
             pass
 
-    def _emit_task_event(self, run_id: str, event_type: str, payload: Optional[Dict[str, Any]] = None) -> None:
+    def _emit_task_event(self, request_id: str, event_type: str, payload: Optional[Dict[str, Any]] = None) -> None:
         try:
-            self._emit_worker_event_bytes(run_id, event_type, safe_json_bytes(payload or {}))
+            self._emit_worker_event_bytes(request_id, event_type, safe_json_bytes(payload or {}))
         except Exception:
             pass
 
     def _start_task_phase_watchdog(
         self,
         *,
-        run_id: str,
+        request_id: str,
         phase: str,
         warn_after_s: float,
         payload: Optional[Dict[str, Any]] = None,
@@ -1371,10 +1448,10 @@ class Worker:
             ev_payload["phase"] = str(phase or "")
             ev_payload["warn_after_s"] = timeout_s
             ev_payload["elapsed_ms"] = elapsed_ms
-            self._emit_task_event(run_id, f"task.{phase}.stuck", ev_payload)
+            self._emit_task_event(request_id, f"task.{phase}.stuck", ev_payload)
             logger.warning(
-                "task phase stuck run_id=%s phase=%s elapsed_ms=%d warn_after_s=%.1f payload=%s",
-                run_id,
+                "task phase stuck request_id=%s phase=%s elapsed_ms=%d warn_after_s=%.1f payload=%s",
+                request_id,
                 phase,
                 elapsed_ms,
                 timeout_s,
@@ -1689,8 +1766,8 @@ class Worker:
             if inj is None:
                 raise ValueError("websocket extra params must be Annotated injections")
             base_t, model_ref = inj
-            if model_ref.source == ModelRefSource.PAYLOAD:
-                raise ValueError("websocket handlers cannot use ModelRef(PAYLOAD, ...) (no payload for selection)")
+            if model_ref.source == ModelRefSource.INPUT_PAYLOAD:
+                raise ValueError("websocket handlers cannot use ModelRef(INPUT_PAYLOAD, ...) (no payload for selection)")
             injections.append(InjectionSpec(param_name=p.name, param_type=base_t, model_ref=model_ref))
 
         return _WebsocketSpec(
@@ -1802,10 +1879,10 @@ class Worker:
         if not (ref.startswith("http://") or ref.startswith("https://")):
             if mapped := ctx._materialized_input_url_for_ref(ref):
                 ref = mapped
-        run_id = ctx.run_id
+        request_id = ctx.request_id
 
         base_dir = os.getenv("WORKER_RUN_DIR", "/tmp/tensorhub/run").rstrip("/")
-        local_inputs_dir = os.path.join(base_dir, run_id, "inputs")
+        local_inputs_dir = os.path.join(base_dir, request_id, "inputs")
         os.makedirs(local_inputs_dir, exist_ok=True)
         cache_dir = os.getenv("WORKER_CACHE_DIR", os.path.join(base_dir, "cache")).rstrip("/")
         os.makedirs(cache_dir, exist_ok=True)
@@ -2327,7 +2404,7 @@ class Worker:
                         self._send_message(
                             pb.WorkerSchedulerMessage(
                                 worker_event=pb.WorkerEvent(
-                                    run_id="",
+                                    request_id="",
                                     event_type="models.disk_inventory",
                                     payload_json=json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8"),
                                 )
@@ -2395,7 +2472,7 @@ class Worker:
                 self._send_message(
                     pb.WorkerSchedulerMessage(
                         worker_event=pb.WorkerEvent(
-                            run_id="",
+                            request_id="",
                             event_type="worker.runtime_batching.updated",
                             payload_json=json.dumps(
                                 {
@@ -2434,6 +2511,11 @@ class Worker:
             caps = dict(req.to_dict() if req else {})
             if not caps:
                 continue
+            if "max_inflight_requests" not in caps and "max_concurrency" in caps:
+                try:
+                    caps["max_inflight_requests"] = int(caps.get("max_concurrency") or 0)
+                except Exception:
+                    pass
             spec = self._task_specs.get(fn_name)
             if spec is not None:
                 caps["output_mode"] = spec.output_mode
@@ -2450,7 +2532,7 @@ class Worker:
         self._send_message(
             pb.WorkerSchedulerMessage(
                 worker_event=pb.WorkerEvent(
-                    run_id="",
+                    request_id="",
                     event_type="worker.function_capabilities",
                     payload_json=raw,
                 )
@@ -2545,10 +2627,10 @@ class Worker:
 
         with self._active_tasks_lock:
             active_task_ids = list(self._active_tasks.keys())
-            for run_id in active_task_ids:
-                ctx = self._active_tasks.get(run_id)
+            for request_id in active_task_ids:
+                ctx = self._active_tasks.get(request_id)
                 if ctx:
-                    logger.debug(f"Cancelling active task {run_id} during stop.")
+                    logger.debug(f"Cancelling active task {request_id} during stop.")
                     ctx.cancel()
             # Don't clear here, allow _execute_function to finish and remove
 
@@ -2696,10 +2778,10 @@ class Worker:
             self._handle_unload_model_cmd(message.unload_model_cmd)
         elif msg_type == 'interrupt_run_cmd':
             cmd = message.interrupt_run_cmd
-            run_id = cmd.run_id
+            request_id = cmd.request_id
             item_ids = [str(x).strip() for x in list(getattr(cmd, "item_ids", []) or []) if str(x).strip()]
             cancel_queued_only = bool(getattr(cmd, "cancel_queued_only", False))
-            self._handle_interrupt_request(run_id, item_ids=item_ids, cancel_queued_only=cancel_queued_only)
+            self._handle_interrupt_request(request_id, item_ids=item_ids, cancel_queued_only=cancel_queued_only)
         elif msg_type == "runtime_batching_config_cmd":
             self._handle_runtime_batching_config_cmd(message.runtime_batching_config_cmd)
         elif msg_type == "realtime_open_cmd":
@@ -2711,11 +2793,11 @@ class Worker:
         elif msg_type == "worker_event":
             self._handle_worker_event_from_scheduler(message.worker_event)
         # Add handling for other message types if needed (e.g., config updates)
-        elif msg_type == 'release_artifact_config':
-            cfg = message.release_artifact_config
+        elif msg_type == 'endpoint_config':
+            cfg = message.endpoint_config
             resolved_by_variant = dict(getattr(cfg, "resolved_cozy_models_by_variant_ref", {}) or {})
             logger.info(
-                "Received ReleaseArtifactConfig (supported=%d required=%d resolved=%d)",
+                "Received EndpointConfig (supported=%d required=%d resolved=%d)",
                 len(cfg.supported_repo_refs),
                 len(cfg.required_variant_refs),
                 len(resolved_by_variant),
@@ -2757,9 +2839,9 @@ class Worker:
                         if out_spec:
                             new_spec_by_fn[str(fn_name)] = out_spec
                     if new_by_fn:
-                        self._model_id_by_key_by_function = new_by_fn
+                        self._fixed_model_id_by_key_by_function = new_by_fn
                     if new_spec_by_fn:
-                        self._model_spec_by_key_by_function = new_spec_by_fn
+                        self._fixed_model_spec_by_key_by_function = new_spec_by_fn
             except Exception:
                 has_keyspace_update = False
 
@@ -2779,16 +2861,6 @@ class Worker:
                     self._supported_model_ids_from_scheduler = sorted(self._manifest_allowed_model_ids)
             else:
                 self._supported_model_ids_from_scheduler = supported_from_sched
-            try:
-                # Optional label->id mapping for signature-driven model selection.
-                if not self._model_id_by_key_by_function and not self._release_model_id_by_key:
-                    # Legacy fallback only: allow scheduler-provided mapping when no baked mapping exists.
-                    self._release_model_id_by_key = {
-                        str(k): _canonicalize_model_ref_string(str(v))
-                        for k, v in dict(cfg.repo_ref_by_key).items()
-                    }
-            except Exception:
-                self._release_model_id_by_key = {}
 
             # Baseline resolved manifests for Cozy model downloads (issue #66/#238).
             self._resolved_cozy_models_by_id_baseline = self._canonicalize_resolved_models_map(
@@ -2804,8 +2876,11 @@ class Worker:
                     # When scheduler supplies an explicit keyspace update, prefer that as the
                     # runtime enforcement scope.
                     scope: set[str] = set()
-                    for m in (self._model_id_by_key_by_function or {}).values():
+                    for m in (self._fixed_model_id_by_key_by_function or {}).values():
                         scope.update(m.values())
+                    for by_selector in (self._payload_model_id_by_selector_by_function or {}).values():
+                        for m in by_selector.values():
+                            scope.update(m.values())
                     self._release_allowed_model_ids = scope or None
                 else:
                     # If we have a baked manifest scope, never allow widening beyond it.
@@ -2908,12 +2983,12 @@ class Worker:
                             ).encode("utf-8")
                             self._send_message(
                                 pb.WorkerSchedulerMessage(
-                                    worker_event=pb.WorkerEvent(run_id="", event_type="model.download.completed", payload_json=payload)
+                                    worker_event=pb.WorkerEvent(request_id="", event_type="model.download.completed", payload_json=payload)
                                 )
                             )
                             self._send_message(
                                 pb.WorkerSchedulerMessage(
-                                    worker_event=pb.WorkerEvent(run_id="", event_type="model.ready", payload_json=json.dumps({"model_id": canon}, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+                                    worker_event=pb.WorkerEvent(request_id="", event_type="model.ready", payload_json=json.dumps({"model_id": canon}, separators=(",", ":"), sort_keys=True).encode("utf-8"))
                                 )
                             )
                         except Exception:
@@ -2927,7 +3002,7 @@ class Worker:
                             ).encode("utf-8")
                             self._send_message(
                                 pb.WorkerSchedulerMessage(
-                                    worker_event=pb.WorkerEvent(run_id="", event_type="model.cached", payload_json=payload)
+                                    worker_event=pb.WorkerEvent(request_id="", event_type="model.cached", payload_json=payload)
                                 )
                             )
                         except Exception:
@@ -2941,7 +3016,7 @@ class Worker:
                         payload = json.dumps({"model_id": canon}, separators=(",", ":"), sort_keys=True).encode("utf-8")
                         self._send_message(
                             pb.WorkerSchedulerMessage(
-                                worker_event=pb.WorkerEvent(run_id="", event_type="model.download.started", payload_json=payload)
+                                worker_event=pb.WorkerEvent(request_id="", event_type="model.download.started", payload_json=payload)
                             )
                         )
                     except Exception:
@@ -2963,7 +3038,7 @@ class Worker:
                         payload = json.dumps({"model_id": canon}, separators=(",", ":"), sort_keys=True).encode("utf-8")
                         self._send_message(
                             pb.WorkerSchedulerMessage(
-                                worker_event=pb.WorkerEvent(run_id="", event_type="model.ready", payload_json=payload)
+                                worker_event=pb.WorkerEvent(request_id="", event_type="model.ready", payload_json=payload)
                             )
                         )
                     except Exception:
@@ -2978,7 +3053,7 @@ class Worker:
                         ).encode("utf-8")
                         self._send_message(
                             pb.WorkerSchedulerMessage(
-                                worker_event=pb.WorkerEvent(run_id="", event_type="model.cached", payload_json=payload)
+                                worker_event=pb.WorkerEvent(request_id="", event_type="model.cached", payload_json=payload)
                             )
                         )
                     except Exception:
@@ -2992,7 +3067,7 @@ class Worker:
                         ).encode("utf-8")
                         self._send_message(
                             pb.WorkerSchedulerMessage(
-                                worker_event=pb.WorkerEvent(run_id="", event_type="model.download.completed", payload_json=payload)
+                                worker_event=pb.WorkerEvent(request_id="", event_type="model.download.completed", payload_json=payload)
                             )
                         )
                     except Exception:
@@ -3013,7 +3088,7 @@ class Worker:
                             payload = json.dumps({"model_id": canon}, separators=(",", ":"), sort_keys=True).encode("utf-8")
                             self._send_message(
                                 pb.WorkerSchedulerMessage(
-                                    worker_event=pb.WorkerEvent(run_id="", event_type="model.url_refresh", payload_json=payload)
+                                    worker_event=pb.WorkerEvent(request_id="", event_type="model.url_refresh", payload_json=payload)
                                 )
                             )
                         except Exception:
@@ -3027,7 +3102,7 @@ class Worker:
                         ).encode("utf-8")
                         self._send_message(
                             pb.WorkerSchedulerMessage(
-                                worker_event=pb.WorkerEvent(run_id="", event_type="model.download.failed", payload_json=payload)
+                                worker_event=pb.WorkerEvent(request_id="", event_type="model.download.failed", payload_json=payload)
                             )
                         )
                     except Exception:
@@ -3130,7 +3205,7 @@ class Worker:
             payload = json.dumps({"model_id": model_id}, separators=(",", ":"), sort_keys=True).encode("utf-8")
             self._send_message(
                 pb.WorkerSchedulerMessage(
-                    worker_event=pb.WorkerEvent(run_id="", event_type="model.load.started", payload_json=payload)
+                    worker_event=pb.WorkerEvent(request_id="", event_type="model.load.started", payload_json=payload)
                 )
             )
         except Exception:
@@ -3186,7 +3261,7 @@ class Worker:
             ).encode("utf-8")
             self._send_message(
                 pb.WorkerSchedulerMessage(
-                    worker_event=pb.WorkerEvent(run_id="", event_type=ev_type, payload_json=payload)
+                    worker_event=pb.WorkerEvent(request_id="", event_type=ev_type, payload_json=payload)
                 )
             )
         except Exception:
@@ -3211,7 +3286,7 @@ class Worker:
                 )
                 self._send_message(
                     pb.WorkerSchedulerMessage(
-                        worker_event=pb.WorkerEvent(run_id="", event_type="model.unload.failed", payload_json=payload)
+                        worker_event=pb.WorkerEvent(request_id="", event_type="model.unload.failed", payload_json=payload)
                     )
                 )
             except Exception:
@@ -3222,7 +3297,7 @@ class Worker:
             payload = json.dumps({"model_id": model_id}, separators=(",", ":"), sort_keys=True).encode("utf-8")
             self._send_message(
                 pb.WorkerSchedulerMessage(
-                    worker_event=pb.WorkerEvent(run_id="", event_type="model.unload.started", payload_json=payload)
+                    worker_event=pb.WorkerEvent(request_id="", event_type="model.unload.started", payload_json=payload)
                 )
             )
         except Exception:
@@ -3269,7 +3344,7 @@ class Worker:
             ).encode("utf-8")
             self._send_message(
                 pb.WorkerSchedulerMessage(
-                    worker_event=pb.WorkerEvent(run_id="", event_type=ev_type, payload_json=payload)
+                    worker_event=pb.WorkerEvent(request_id="", event_type=ev_type, payload_json=payload)
                 )
             )
         except Exception:
@@ -3277,7 +3352,7 @@ class Worker:
 
     def _handle_run_request(self, request: TaskExecutionRequest) -> None:
         """Handle a task execution request from the scheduler."""
-        run_id = request.run_id
+        request_id = request.request_id
         function_name = request.function_name
         input_payload = request.input_payload
         required_model_id_for_exec = ""
@@ -3287,6 +3362,16 @@ class Worker:
         file_base_url = str(getattr(request, "file_base_url", "") or "")
         file_token = str(getattr(request, "file_token", "") or "")
         resolved_cozy_models_by_id = dict(getattr(request, "resolved_cozy_models_by_id", {}) or {})
+        parent_request_id = str(getattr(request, "parent_request_id", "") or "").strip() or None
+        child_request_id = str(getattr(request, "child_request_id", "") or "").strip() or None
+        item_id = str(getattr(request, "item_id", "") or "").strip() or None
+        raw_item_index = getattr(request, "item_index", None)
+        item_index: Optional[int] = None
+        if raw_item_index is not None:
+            try:
+                item_index = int(raw_item_index)
+            except Exception:
+                item_index = None
         materialized_input_urls: Dict[str, str] = {}
         raw_urls_map = getattr(request, "input_ref_urls", None)
         if isinstance(raw_urls_map, cabc.Mapping):
@@ -3312,9 +3397,9 @@ class Worker:
         if required_models_raw:
             required_model_id_for_exec = str(required_models_raw[0] or "").strip()
 
-        logger.info(f"Received Task request: run_id={run_id}, function={function_name}, model='{required_model_id_for_exec or 'None'}'")
+        logger.info(f"Received Task request: request_id={request_id}, function={function_name}, model='{required_model_id_for_exec or 'None'}'")
         self._emit_task_event(
-            run_id,
+            request_id,
             "task.received",
             {
                 "function_name": function_name,
@@ -3328,27 +3413,27 @@ class Worker:
             error_msg = f"Unknown function requested: {function_name}"
             logger.error(error_msg)
             self._emit_task_event(
-                run_id,
+                request_id,
                 "task.rejected",
                 {"reason": "unknown_function", "function_name": function_name},
             )
-            self._send_task_result(run_id, False, None, "internal", False, "internal error", error_msg)
+            self._send_task_result(request_id, False, None, "internal", False, "internal error", error_msg)
             return
         if self.max_input_bytes > 0 and len(input_payload) > self.max_input_bytes:
             error_msg = f"Input payload too large: {len(input_payload)} bytes (max {self.max_input_bytes})"
             logger.error(error_msg)
             self._emit_task_event(
-                run_id,
+                request_id,
                 "task.rejected",
                 {"reason": "input_too_large", "input_bytes": len(input_payload)},
             )
-            self._send_task_result(run_id, False, None, "validation", False, "invalid input", error_msg)
+            self._send_task_result(request_id, False, None, "validation", False, "invalid input", error_msg)
             return
         if self._draining:
             error_msg = "Worker is draining; refusing new tasks"
             logger.warning(error_msg)
-            self._emit_task_event(run_id, "task.rejected", {"reason": "worker_draining"})
-            self._send_task_result(run_id, False, None, "retryable", True, "worker busy", error_msg)
+            self._emit_task_event(request_id, "task.rejected", {"reason": "worker_draining"})
+            self._send_task_result(request_id, False, None, "retryable", True, "worker busy", error_msg)
             return
 
         # required_variant_refs are pinned variant refs chosen by the scheduler; the worker must not guess.
@@ -3376,7 +3461,7 @@ class Worker:
                 pass
 
         ctx = ActionContext(
-            run_id,
+            request_id,
             emitter=self._emit_progress_event,
             owner=owner or None,
             invoker_id=invoker_id or None,
@@ -3389,20 +3474,24 @@ class Worker:
             required_models=required_models or None,
             runtime_batching_config=runtime_cfg or None,
             stage_execution_hints=stage_hints or None,
+            parent_request_id=parent_request_id,
+            child_request_id=child_request_id,
+            item_id=item_id,
+            item_index=item_index,
         )
         # Add to active tasks *before* starting thread
         with self._active_tasks_lock:
              # Double-check if task is already active (race condition mitigation)
-             if run_id in self._active_tasks:
-                  error_msg = f"Task with run_id {run_id} is already active (race condition?)."
+             if request_id in self._active_tasks:
+                  error_msg = f"Task with request_id {request_id} is already active (race condition?)."
                   logger.error(error_msg)
-                  self._emit_task_event(run_id, "task.rejected", {"reason": "duplicate_run_id"})
+                  self._emit_task_event(request_id, "task.rejected", {"reason": "duplicate_request_id"})
                   return # Avoid starting duplicate thread
              if self.max_concurrency > 0 and len(self._active_tasks) >= self.max_concurrency:
                   error_msg = f"Worker concurrency limit reached ({self.max_concurrency})."
                   logger.error(error_msg)
-                  self._emit_task_event(run_id, "task.rejected", {"reason": "max_concurrency_reached"})
-                  self._send_task_result(run_id, False, None, "retryable", True, "worker busy", error_msg)
+                  self._emit_task_event(request_id, "task.rejected", {"reason": "max_concurrency_reached"})
+                  self._send_task_result(request_id, False, None, "retryable", True, "worker busy", error_msg)
                   return
              resource_req = self._discovered_resources.get(function_name)
              func_limit = resource_req.max_concurrency if resource_req and resource_req.max_concurrency else 0
@@ -3410,13 +3499,13 @@ class Worker:
                   error_msg = f"Function concurrency limit reached for {function_name} ({func_limit})."
                   logger.error(error_msg)
                   self._emit_task_event(
-                      run_id,
+                      request_id,
                       "task.rejected",
                       {"reason": "function_concurrency_reached", "function_name": function_name},
                   )
-                  self._send_task_result(run_id, False, None, "retryable", True, "worker busy", error_msg)
+                  self._send_task_result(request_id, False, None, "retryable", True, "worker busy", error_msg)
                   return
-             self._active_tasks[run_id] = ctx
+             self._active_tasks[request_id] = ctx
              if func_limit > 0:
                   self._active_function_counts[function_name] = self._active_function_counts.get(function_name, 0) + 1
 
@@ -3442,14 +3531,14 @@ class Worker:
             if item is None:
                 continue
             function_name = str(getattr(item, "function_name", "") or "") or batch_function_name
-            run_id = str(getattr(item, "run_id", "") or "")
+            request_id = str(getattr(item, "request_id", "") or "")
             item_id = str(getattr(item, "item_id", "") or "") or "item-000001"
-            if not run_id or not function_name:
+            if not request_id or not function_name:
                 continue
-            with self._run_batch_context_lock:
-                self._run_batch_context[run_id] = (batch_id, item_id)
+            with self._request_batch_context_lock:
+                self._request_batch_context[request_id] = (batch_id, item_id)
             req = pb.TaskExecutionRequest(
-                run_id=run_id,
+                request_id=request_id,
                 function_name=function_name,
                 input_payload=bytes(getattr(item, "input_payload", b"") or b""),
                 required_variant_refs=list(getattr(item, "required_variant_refs", []) or []),
@@ -3457,23 +3546,27 @@ class Worker:
                 owner=str(getattr(item, "owner", "") or ""),
                 invoker_id=str(getattr(item, "invoker_id", "") or ""),
                 resolved_cozy_models_by_id=dict(getattr(item, "resolved_cozy_models_by_id", {}) or {}),
+                parent_request_id=str(getattr(item, "parent_request_id", "") or ""),
+                child_request_id=str(getattr(item, "child_request_id", "") or ""),
+                item_id=item_id,
+                item_index=int(getattr(item, "item_index", 0) or 0),
             )
             self._handle_run_request(req)
 
-    def _handle_interrupt_request(self, run_id: str, *, item_ids: Optional[List[str]] = None, cancel_queued_only: bool = False) -> None:
+    def _handle_interrupt_request(self, request_id: str, *, item_ids: Optional[List[str]] = None, cancel_queued_only: bool = False) -> None:
         """Handle a request to interrupt/cancel a running task."""
         logger.info(
-            "Received interrupt request for run_id=%s item_ids=%s cancel_queued_only=%s",
-            run_id,
+            "Received interrupt request for request_id=%s item_ids=%s cancel_queued_only=%s",
+            request_id,
             item_ids or [],
             cancel_queued_only,
         )
         with self._active_tasks_lock:
-            ctx = self._active_tasks.get(run_id)
+            ctx = self._active_tasks.get(request_id)
             if ctx:
                 ctx.cancel() # Set internal flag and event
             else:
-                logger.warning(f"Could not interrupt task {run_id}: Not found in active tasks.")
+                logger.warning(f"Could not interrupt task request_id={request_id}: Not found in active tasks.")
 
     def _handle_realtime_open_cmd(self, cmd: Any) -> None:
         session_id = str(getattr(cmd, "session_id", "") or "")
@@ -3641,7 +3734,7 @@ class Worker:
         input_payload: bytes,
     ) -> None:
         """Execute a discovered task handler and send result/events back."""
-        run_id = ctx.run_id
+        request_id = ctx.request_id
         output_payload: Optional[bytes] = None
         error_type: str = ""
         safe_message: str = ""
@@ -3652,7 +3745,7 @@ class Worker:
         # Metrics (best-effort): never fail a run.
         resolved_map = getattr(ctx, "resolved_cozy_models_by_id", None) or None
         rm = RunMetricsV1(
-            run_id=str(run_id or ""),
+            request_id=str(request_id or ""),
             function_name=str(spec.name or ""),
             required_models=list(getattr(ctx, "required_models", []) or []),
             resolved_cozy_models_by_id=resolved_map,
@@ -3664,9 +3757,9 @@ class Worker:
             pass
         rm.mark_compute_started()
         if rm.compute_started_at:
-            self._emit_worker_event_bytes(run_id, "metrics.compute.started", safe_json_bytes({"at": rm.compute_started_at}))
+            self._emit_worker_event_bytes(request_id, "metrics.compute.started", safe_json_bytes({"at": rm.compute_started_at}))
         self._emit_task_event(
-            run_id,
+            request_id,
             "task.started",
             {
                 "function_name": str(spec.name or ""),
@@ -3766,13 +3859,13 @@ class Worker:
             for inj in spec.injections:
                 resolve_t0 = time.monotonic()
                 resolve_watchdog = self._start_task_phase_watchdog(
-                    run_id=run_id,
+                    request_id=request_id,
                     phase="model_resolve",
                     warn_after_s=float(getattr(self, "_warn_model_resolve_s", 30.0)),
                     payload={"function_name": spec.name, "param_name": inj.param_name},
                 )
                 self._emit_task_event(
-                    run_id,
+                    request_id,
                     "task.model_resolve.started",
                     {"function_name": spec.name, "param_name": inj.param_name},
                 )
@@ -3783,7 +3876,7 @@ class Worker:
                     model_id, model_key = self._resolve_model_id_for_injection(spec.name, inj, payload=input_obj)
                     canon_model_id = _canonicalize_model_ref_string(str(model_id or "").strip()) if model_id else ""
                     self._emit_task_event(
-                        run_id,
+                        request_id,
                         "task.model_resolve.completed",
                         {
                             "function_name": spec.name,
@@ -3795,7 +3888,7 @@ class Worker:
                     )
                 except Exception as resolve_exc:
                     self._emit_task_event(
-                        run_id,
+                        request_id,
                         "task.model_resolve.failed",
                         {
                             "function_name": spec.name,
@@ -3811,8 +3904,14 @@ class Worker:
                 # Best-effort: attach dtype preferences from tensorhub.toml-derived manifest mapping.
                 if model_key:
                     try:
-                        fn_specs = self._model_spec_by_key_by_function.get(spec.name) or {}
-                        s = fn_specs.get(model_key) if isinstance(fn_specs, dict) else None
+                        s = None
+                        if inj.model_ref.source == ModelRefSource.FIXED:
+                            fn_specs = self._fixed_model_spec_by_key_by_function.get(spec.name) or {}
+                            s = fn_specs.get(model_key) if isinstance(fn_specs, dict) else None
+                        elif inj.model_ref.source == ModelRefSource.INPUT_PAYLOAD:
+                            by_selector = self._payload_model_spec_by_selector_by_function.get(spec.name) or {}
+                            selector_specs = by_selector.get(inj.model_ref.key) if isinstance(by_selector, dict) else None
+                            s = selector_specs.get(model_key) if isinstance(selector_specs, dict) else None
                         if isinstance(s, dict):
                             dts = s.get("dtypes")
                             if isinstance(dts, list) and canon_model_id:
@@ -3824,7 +3923,7 @@ class Worker:
                     models_in_use.add(canon_model_id)
                 load_t0 = time.monotonic()
                 load_watchdog = self._start_task_phase_watchdog(
-                    run_id=run_id,
+                    request_id=request_id,
                     phase="model_load",
                     warn_after_s=float(getattr(self, "_warn_model_load_s", 60.0)),
                     payload={
@@ -3834,7 +3933,7 @@ class Worker:
                     },
                 )
                 self._emit_task_event(
-                    run_id,
+                    request_id,
                     "task.model_load.started",
                     {
                         "function_name": spec.name,
@@ -3845,7 +3944,7 @@ class Worker:
                 try:
                     call_kwargs[inj.param_name] = self._resolve_injected_value(ctx, inj.param_type, model_id, inj)
                     self._emit_task_event(
-                        run_id,
+                        request_id,
                         "task.model_load.completed",
                         {
                             "function_name": spec.name,
@@ -3856,7 +3955,7 @@ class Worker:
                     )
                 except Exception as load_exc:
                     self._emit_task_event(
-                        run_id,
+                        request_id,
                         "task.model_load.failed",
                         {
                             "function_name": spec.name,
@@ -3874,13 +3973,13 @@ class Worker:
             # Invoke.
             t_infer0 = time.monotonic()
             inference_watchdog = self._start_task_phase_watchdog(
-                run_id=run_id,
+                request_id=request_id,
                 phase="inference",
                 warn_after_s=float(getattr(self, "_warn_inference_s", 60.0)),
                 payload={"function_name": spec.name, "output_mode": spec.output_mode},
             )
             self._emit_task_event(
-                run_id,
+                request_id,
                 "task.inference.started",
                 {"function_name": spec.name, "output_mode": spec.output_mode},
             )
@@ -3927,7 +4026,7 @@ class Worker:
                                 break
                     ts_ms = int(time.time() * 1000)
                     emitted = self._emit_incremental_delta_typed(
-                        run_id=run_id,
+                        request_id=request_id,
                         function_name=spec.name,
                         item_id=item_id,
                         sequence=count + 1,
@@ -3938,7 +4037,7 @@ class Worker:
                     if not emitted:
                         self._send_message(
                             pb.WorkerSchedulerMessage(
-                                worker_event=pb.WorkerEvent(run_id=run_id, event_type="output.delta", payload_json=raw)
+                                worker_event=pb.WorkerEvent(request_id=request_id, event_type="output.delta", payload_json=raw)
                             )
                         )
                     last_item_id = item_id
@@ -3975,7 +4074,7 @@ class Worker:
                 # Optionally emit completion marker.
                 done_ts_ms = int(time.time() * 1000)
                 emitted_done = self._emit_incremental_done_typed(
-                    run_id=run_id,
+                    request_id=request_id,
                     function_name=spec.name,
                     item_id=last_item_id,
                     sequence=count + 1,
@@ -3984,7 +4083,7 @@ class Worker:
                 if not emitted_done:
                     self._send_message(
                         pb.WorkerSchedulerMessage(
-                            worker_event=pb.WorkerEvent(run_id=run_id, event_type="output.completed", payload_json=b"{}")
+                            worker_event=pb.WorkerEvent(request_id=request_id, event_type="output.completed", payload_json=b"{}")
                         )
                     )
                 output_payload = b""
@@ -3999,7 +4098,7 @@ class Worker:
             if inference_watchdog is not None:
                 inference_watchdog.cancel()
             self._emit_task_event(
-                run_id,
+                request_id,
                 "task.inference.completed",
                 {
                     "function_name": spec.name,
@@ -4008,14 +4107,14 @@ class Worker:
                 },
             )
 
-            logger.info("Task %s completed successfully.", run_id)
+            logger.info("Task %s completed successfully.", request_id)
 
         except Exception as e:
             error_type, retryable, safe_message, error_message = self._map_exception(e)
             if inference_watchdog is not None:
                 inference_watchdog.cancel()
             self._emit_task_event(
-                run_id,
+                request_id,
                 "task.failed",
                 {
                     "function_name": spec.name,
@@ -4026,7 +4125,7 @@ class Worker:
             )
             if "t_infer0" in locals():
                 self._emit_task_event(
-                    run_id,
+                    request_id,
                     "task.inference.failed",
                     {
                         "function_name": spec.name,
@@ -4038,7 +4137,7 @@ class Worker:
                 try:
                     payload = json.dumps({"error_type": error_type, "message": safe_message}, separators=(",", ":")).encode("utf-8")
                     emitted_err = self._emit_incremental_error_typed(
-                        run_id=run_id,
+                        request_id=request_id,
                         function_name=spec.name,
                         item_id="item-0",
                         sequence=0,
@@ -4048,7 +4147,7 @@ class Worker:
                     if not emitted_err:
                         self._send_message(
                             pb.WorkerSchedulerMessage(
-                                worker_event=pb.WorkerEvent(run_id=run_id, event_type="output.error", payload_json=payload)
+                                worker_event=pb.WorkerEvent(request_id=request_id, event_type="output.error", payload_json=payload)
                             )
                         )
                 except Exception:
@@ -4087,7 +4186,7 @@ class Worker:
 
             rm.mark_compute_completed()
             if rm.compute_completed_at:
-                self._emit_worker_event_bytes(run_id, "metrics.compute.completed", safe_json_bytes({"at": rm.compute_completed_at}))
+                self._emit_worker_event_bytes(request_id, "metrics.compute.completed", safe_json_bytes({"at": rm.compute_completed_at}))
 
                 # Emit canonical metric events if values exist.
                 try:
@@ -4096,17 +4195,17 @@ class Worker:
                         # compute.* already emitted in real time above
                         if ev_type in ("metrics.compute.started", "metrics.compute.completed"):
                             continue
-                        self._emit_worker_event_bytes(run_id, ev_type, safe_json_bytes(event_payload))
+                        self._emit_worker_event_bytes(request_id, ev_type, safe_json_bytes(event_payload))
                 except Exception:
                     pass
             # Emit extended debug payload at end (best-effort).
             try:
-                self._emit_worker_event_bytes(run_id, "metrics.run", safe_json_bytes(rm.to_metrics_run_payload()))
+                self._emit_worker_event_bytes(request_id, "metrics.run", safe_json_bytes(rm.to_metrics_run_payload()))
             except Exception:
                 pass
             if success:
                 self._emit_task_event(
-                    run_id,
+                    request_id,
                     "task.completed",
                     {
                         "function_name": spec.name,
@@ -4114,10 +4213,10 @@ class Worker:
                     },
                 )
 
-            self._send_task_result(run_id, success, output_payload, error_type, bool(retryable), safe_message, error_message)
+            self._send_task_result(request_id, success, output_payload, error_type, bool(retryable), safe_message, error_message)
 
             with self._active_tasks_lock:
-                self._active_tasks.pop(run_id, None)
+                self._active_tasks.pop(request_id, None)
                 func_limit = spec.resources.max_concurrency or 0
                 if func_limit > 0:
                     current = self._active_function_counts.get(spec.name, 0) - 1
@@ -4350,7 +4449,7 @@ class Worker:
                                         ).encode("utf-8")
                                         self._send_message(
                                             pb.WorkerSchedulerMessage(
-                                                worker_event=pb.WorkerEvent(run_id="", event_type="model.cached", payload_json=payload)
+                                                worker_event=pb.WorkerEvent(request_id="", event_type="model.cached", payload_json=payload)
                                             )
                                         )
                                     except Exception:
@@ -4642,26 +4741,31 @@ class Worker:
         raise ValueError(f"no injection provider for type {qn} (model_id={model_id})")
 
     def _resolve_model_id_for_injection(self, fn_name: str, inj: InjectionSpec, payload: msgspec.Struct) -> tuple[str, Optional[str]]:
-        # Prefer per-function model keyspace from baked discovery manifest.
-        model_id_by_key = self._model_id_by_key_by_function.get(fn_name) or self._release_model_id_by_key
+        fixed_map = dict((getattr(self, "_fixed_model_id_by_key_by_function", {}) or {}).get(fn_name) or {})
+        payload_maps = dict((getattr(self, "_payload_model_id_by_selector_by_function", {}) or {}).get(fn_name) or {})
         allowed_ids: Optional[set[str]] = None
-        if model_id_by_key:
-            allowed_ids = set(model_id_by_key.values())
+        local_allowed: set[str] = set()
+        local_allowed.update(fixed_map.values())
+        for selector_map in payload_maps.values():
+            local_allowed.update(selector_map.values())
+        if local_allowed:
+            allowed_ids = local_allowed
 
         if inj.model_ref.source == ModelRefSource.FIXED:
             raw = inj.model_ref.key.strip()
             if not raw:
                 raise ValueError(f"empty fixed ModelRef for injection param: {inj.param_name}")
-            # FIXED selection must use a tenant-declared short-key from the baked discovery manifest.
-            # This keeps the model keyspace auditable and prevents functions from silently using
-            # models outside their declared scope.
-            if not model_id_by_key:
+            explicit_ref = _canonicalize_model_ref_string(str(inj.model_ref.ref or "").strip())
+            if explicit_ref:
+                self._enforce_model_allowlist(explicit_ref, inj, allowed_ids=allowed_ids)
+                return explicit_ref, raw
+            if not fixed_map:
                 raise ValueError(
-                    "fixed model selection is not configured: no short-key mapping is available "
-                    "(expected /app/.cozy/manifest.json to provide models_by_function)"
+                    f"fixed model selection is not configured for function {fn_name!r}; "
+                    "expected models_by_function.<fn>.fixed in /app/.cozy/manifest.json"
                 )
-            if raw not in model_id_by_key:
-                allowed = sorted(model_id_by_key.keys())
+            if raw not in fixed_map:
+                allowed = sorted(fixed_map.keys())
                 head = allowed[:20]
                 suffix = ""
                 if len(allowed) > len(head):
@@ -4669,11 +4773,11 @@ class Worker:
                 raise ValueError(
                     f"unknown fixed model key {raw!r}; allowed keys: {head}{suffix}"
                 )
-            model_id = model_id_by_key[raw]
+            model_id = fixed_map[raw]
             self._enforce_model_allowlist(model_id, inj, allowed_ids=allowed_ids)
             return model_id, raw
 
-        if inj.model_ref.source == ModelRefSource.PAYLOAD:
+        if inj.model_ref.source == ModelRefSource.INPUT_PAYLOAD:
             field = inj.model_ref.key.strip()
             if not field:
                 raise ValueError(f"empty payload ModelRef for injection param: {inj.param_name}")
@@ -4688,14 +4792,17 @@ class Worker:
             key = chosen.strip()
             if not key:
                 raise ValueError(f"payload field {field!r} is empty; expected a model key")
-            # Payload-based selection must use a short-key from the baked discovery manifest.
-            # Do not allow arbitrary refs in the payload by default, otherwise the
-            # orchestrator cannot route cache-aware and the allowlist becomes harder
-            # to reason about.
-            if not model_id_by_key:
+            if not payload_maps:
                 raise ValueError(
-                    "payload model selection is not configured: no short-key mapping is available "
-                    "(expected /app/.cozy/manifest.json to provide models_by_function)"
+                    f"payload model selection is not configured for function {fn_name!r}; "
+                    "expected models_by_function.<fn>.payload_selectors in /app/.cozy/manifest.json"
+                )
+            model_id_by_key = payload_maps.get(field)
+            if not model_id_by_key:
+                selectors = sorted(payload_maps.keys())
+                raise ValueError(
+                    f"no payload model keyspace configured for field {field!r} in function {fn_name!r}; "
+                    f"configured selector fields: {selectors}"
                 )
             if key not in model_id_by_key:
                 allowed = sorted(model_id_by_key.keys())
@@ -4723,7 +4830,7 @@ class Worker:
 
     def _send_task_result(
         self,
-        run_id: str,
+        request_id: str,
         success: bool,
         output_payload: Optional[bytes],
         error_type: str,
@@ -4734,12 +4841,12 @@ class Worker:
         """Send a task execution result back to the scheduler via the queue."""
         try:
             batch_ctx: Optional[Tuple[str, str]] = None
-            with self._run_batch_context_lock:
-                batch_ctx = self._run_batch_context.pop(run_id, None)
+            with self._request_batch_context_lock:
+                batch_ctx = self._request_batch_context.pop(request_id, None)
             if batch_ctx is not None:
                 batch_id, item_id = batch_ctx
                 item_result = pb.BatchExecutionItemResult(
-                    run_id=run_id,
+                    request_id=request_id,
                     item_id=item_id or "item-000001",
                     success=success,
                     output_payload=(output_payload or b'') if success else b'',
@@ -4756,7 +4863,7 @@ class Worker:
                 )
             else:
                 result = pb.TaskExecutionResult(
-                    run_id=run_id,
+                    request_id=request_id,
                     success=success,
                     output_payload=(output_payload or b'') if success else b'', # Default to b'' if None
                     error_message=error_message if not success else "",
@@ -4766,7 +4873,7 @@ class Worker:
                 )
                 msg = pb.WorkerSchedulerMessage(run_result=result)
             self._send_message(msg)
-            logger.debug(f"Queued task result for run_id={run_id}, success={success}")
+            logger.debug(f"Queued task result for request_id={request_id}, success={success}")
         except Exception as e:
              # This shouldn't generally fail unless message creation has issues
-             logger.error(f"Failed to create or queue task result for run_id={run_id}: {e}")
+             logger.error(f"Failed to create or queue task result for request_id={request_id}: {e}")

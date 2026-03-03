@@ -54,7 +54,7 @@ Behavior:
 
 - `schema_version`: `trainer_event.v1`
 - `event`: `started|metric|checkpoint|sample|completed|failed`
-- `run_id`
+- `request_id`
 - `seq`
 - `timestamp_ms`
 

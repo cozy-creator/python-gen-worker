@@ -19,7 +19,7 @@ class TestEndpointValidation(unittest.TestCase):
 
             (root / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
             (root / "tensorhub.toml").write_text(
-                "schema_version = 1\nname = 'x'\nmain = 'x.main'\ngen_worker = '>=0'\n",
+                "schema_version = 1\nname = 'x'\nmain = 'x.main'\n",
                 encoding="utf-8",
             )
             (root / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
@@ -31,7 +31,7 @@ class TestEndpointValidation(unittest.TestCase):
             root = Path(td)
             (root / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
             (root / "tensorhub.toml").write_text(
-                "schema_version = 1\nname = 'x'\nmain = 'x.main'\ngen_worker = '>=0'\n",
+                "schema_version = 1\nname = 'x'\nmain = 'x.main'\n",
                 encoding="utf-8",
             )
             (root / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
@@ -46,7 +46,7 @@ class TestEndpointValidation(unittest.TestCase):
             root = Path(td)
             (root / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
             (root / "tensorhub.toml").write_text(
-                "schema_version = 1\nname = 'x'\nmain = 'x.main'\ngen_worker = '>=0'\n",
+                "schema_version = 1\nname = 'x'\nmain = 'x.main'\n",
                 encoding="utf-8",
             )
             (root / "pyproject.toml").write_text("[project]\nversion='0.1.0'\n", encoding="utf-8")
@@ -59,7 +59,7 @@ class TestEndpointValidation(unittest.TestCase):
             root = Path(td)
             (root / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
             (root / "tensorhub.toml").write_text(
-                "schema_version = 1\nname = 'My Cool Project'\nmain = 'x.main'\ngen_worker = '>=0'\n",
+                "schema_version = 1\nname = 'My Cool Project'\nmain = 'x.main'\n",
                 encoding="utf-8",
             )
             (root / "pyproject.toml").write_text(

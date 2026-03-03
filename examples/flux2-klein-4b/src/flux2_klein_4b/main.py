@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from io import BytesIO
 from typing import Annotated, Optional
 
@@ -16,6 +17,19 @@ from gen_worker.types import Asset
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+_flux_resources = ResourceRequirements(max_concurrency=1)
+_pipeline_locks_guard = threading.Lock()
+_pipeline_locks: dict[int, threading.Lock] = {}
+
+
+def _lock_for_pipeline(pipeline: object) -> threading.Lock:
+    key = id(pipeline)
+    with _pipeline_locks_guard:
+        lock = _pipeline_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _pipeline_locks[key] = lock
+    return lock
 
 
 class GenerateInput(msgspec.Struct):
@@ -48,42 +62,43 @@ def _generate(
 
     steps = max(4, min(8, int(payload.num_inference_steps)))
     logger.info(
-        "[run_id=%s] %s prompt=%r steps=%s (requested=%s)",
-        ctx.run_id,
+        "[request_id=%s] %s prompt=%r steps=%s (requested=%s)",
+        ctx.request_id,
         model_key,
         payload.prompt,
         steps,
         payload.num_inference_steps,
     )
 
-    # FLUX.2-klein variants can exceed 8GB VRAM; use sequential CPU offload by default.
-    if torch.cuda.is_available() and _should_enable_seq_offload():
-        if not getattr(pipeline, "_cozy_seq_offload_enabled", False):
-            pipeline.enable_sequential_cpu_offload(gpu_id=0)
-            setattr(pipeline, "_cozy_seq_offload_enabled", True)
+    with _lock_for_pipeline(pipeline):
+        # FLUX.2-klein variants can exceed 8GB VRAM; use sequential CPU offload by default.
+        if torch.cuda.is_available() and _should_enable_seq_offload():
+            if not getattr(pipeline, "_cozy_seq_offload_enabled", False):
+                pipeline.enable_sequential_cpu_offload(gpu_id=0)
+                setattr(pipeline, "_cozy_seq_offload_enabled", True)
 
-    generator = None
-    if payload.seed is not None:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        generator = torch.Generator(device=device).manual_seed(payload.seed)
+        generator = None
+        if payload.seed is not None:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            generator = torch.Generator(device=device).manual_seed(payload.seed)
 
-    result = pipeline(
-        prompt=payload.prompt,
-        num_inference_steps=steps,
-        guidance_scale=payload.guidance_scale,
-        width=payload.width,
-        height=payload.height,
-        generator=generator,
-    )
+        result = pipeline(
+            prompt=payload.prompt,
+            num_inference_steps=steps,
+            guidance_scale=payload.guidance_scale,
+            width=payload.width,
+            height=payload.height,
+            generator=generator,
+        )
     image: Image.Image = result.images[0]
 
     buf = BytesIO()
     image.save(buf, format="PNG")
-    out = ctx.save_bytes(f"runs/{ctx.run_id}/outputs/image.png", buf.getvalue())
+    out = ctx.save_bytes(f"runs/{ctx.request_id}/outputs/image.png", buf.getvalue())
     return GenerateOutput(image=out)
 
 
-@worker_function(ResourceRequirements())
+@worker_function(_flux_resources)
 def generate(
     ctx: ActionContext,
     pipeline: Annotated[
@@ -91,7 +106,7 @@ def generate(
         ModelRef(
             Src.FIXED,
             "flux2-klein-4b",
-            ref="black-forest-labs/FLUX.2-klein-4B",
+            ref="black-forest-labs/flux.2-klein-4b",
             dtypes=("bf16",),
         ),
     ],
@@ -100,7 +115,7 @@ def generate(
     return _generate(ctx, pipeline, payload, "flux2-klein-4b")
 
 
-@worker_function(ResourceRequirements())
+@worker_function(_flux_resources)
 def generate_fp8(
     ctx: ActionContext,
     pipeline: Annotated[
@@ -108,7 +123,7 @@ def generate_fp8(
         ModelRef(
             Src.FIXED,
             "flux2-klein-4b_fp8",
-            ref="black-forest-labs/FLUX.2-klein-4B",
+            ref="black-forest-labs/flux.2-klein-4b",
             dtypes=("fp8",),
         ),
     ],
@@ -123,7 +138,7 @@ def generate_fp8(
     return _generate(ctx, pipeline, payload, "flux2-klein-4b_fp8")
 
 
-@worker_function(ResourceRequirements())
+@worker_function(_flux_resources)
 def generate_9b(
     ctx: ActionContext,
     pipeline: Annotated[
@@ -131,7 +146,7 @@ def generate_9b(
         ModelRef(
             Src.FIXED,
             "flux2-klein-9b",
-            ref="black-forest-labs/FLUX.2-klein-9B",
+            ref="black-forest-labs/flux.2-klein-9b",
             dtypes=("bf16",),
         ),
     ],
@@ -140,7 +155,7 @@ def generate_9b(
     return _generate(ctx, pipeline, payload, "flux2-klein-9b")
 
 
-@worker_function(ResourceRequirements())
+@worker_function(_flux_resources)
 def generate_9b_fp8(
     ctx: ActionContext,
     pipeline: Annotated[
@@ -148,7 +163,7 @@ def generate_9b_fp8(
         ModelRef(
             Src.FIXED,
             "flux2-klein-9b_fp8",
-            ref="black-forest-labs/FLUX.2-klein-9B",
+            ref="black-forest-labs/flux.2-klein-9b",
             dtypes=("fp8",),
         ),
     ],
@@ -157,7 +172,7 @@ def generate_9b_fp8(
     return _generate(ctx, pipeline, payload, "flux2-klein-9b_fp8")
 
 
-@worker_function(ResourceRequirements())
+@worker_function(_flux_resources)
 def generate_int8(
     ctx: ActionContext,
     pipeline: Annotated[
@@ -165,7 +180,7 @@ def generate_int8(
         ModelRef(
             Src.FIXED,
             "flux2-klein-4b_int8",
-            ref="black-forest-labs/FLUX.2-klein-4B",
+            ref="black-forest-labs/flux.2-klein-4b",
             dtypes=("int8",),
         ),
     ],
@@ -180,7 +195,7 @@ def generate_int8(
     return _generate(ctx, pipeline, payload, "flux2-klein-4b_int8")
 
 
-@worker_function(ResourceRequirements())
+@worker_function(_flux_resources)
 def generate_int4(
     ctx: ActionContext,
     pipeline: Annotated[
@@ -188,7 +203,7 @@ def generate_int4(
         ModelRef(
             Src.FIXED,
             "flux2-klein-4b_int4",
-            ref="black-forest-labs/FLUX.2-klein-4B",
+            ref="black-forest-labs/flux.2-klein-4b",
             dtypes=("int4",),
         ),
     ],

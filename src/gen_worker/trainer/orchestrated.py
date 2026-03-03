@@ -80,13 +80,13 @@ class JsonHttpArtifactUploader(ArtifactUploader):
     def __init__(
         self,
         *,
-        run_id: str,
+        request_id: str,
         token: str | None,
         endpoints: UploadEndpoints,
         tensorhub_url: str | None = None,
         owner: str = "",
     ) -> None:
-        self._run_id = run_id
+        self._request_id = request_id
         self._token = (token or "").strip() or None
         self._endpoints = endpoints
         self._tensorhub_url = (tensorhub_url or "").strip().rstrip("/")
@@ -140,7 +140,7 @@ class JsonHttpArtifactUploader(ArtifactUploader):
         return self._post_json(
             self._endpoints.checkpoint_url,
             {
-                "run_id": self._run_id,
+                "request_id": self._request_id,
                 "kind": "checkpoint",
                 "step": int(step),
                 "local_path": str(local_path),
@@ -162,7 +162,7 @@ class JsonHttpArtifactUploader(ArtifactUploader):
         return self._post_json(
             self._endpoints.sample_url,
             {
-                "run_id": self._run_id,
+                "request_id": self._request_id,
                 "kind": "sample",
                 "step": int(step),
                 "local_path": str(local_path),
@@ -177,7 +177,7 @@ class JsonHttpArtifactUploader(ArtifactUploader):
         return self._post_json(
             self._endpoints.metrics_url,
             {
-                "run_id": self._run_id,
+                "request_id": self._request_id,
                 "kind": "metrics",
                 "step": int(step),
                 "metrics": {str(k): float(v) for (k, v) in metrics.items()},
@@ -203,7 +203,7 @@ class JsonHttpArtifactUploader(ArtifactUploader):
         return self._post_json(
             self._endpoints.terminal_url,
             {
-                "run_id": self._run_id,
+                "request_id": self._request_id,
                 "kind": "terminal",
                 "status": str(status),
                 "step": int(step),
@@ -223,7 +223,7 @@ class JsonHttpArtifactUploader(ArtifactUploader):
 
         safe_name = p.name.replace("/", "_")
         slot = "final" if final else f"step-{int(step):08d}"
-        ref = f"v1/{self._owner}/runs/{self._run_id}/{category}/{slot}-{safe_name}"
+        ref = f"v1/{self._owner}/runs/{self._request_id}/{category}/{slot}-{safe_name}"
         url = f"{self._tensorhub_url}/api/v1/file/{quote(ref, safe='/')}"
         mime_type = mimetypes.guess_type(p.name)[0] or "application/octet-stream"
         body = p.read_bytes()

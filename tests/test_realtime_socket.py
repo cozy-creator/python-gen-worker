@@ -22,7 +22,10 @@ class TestRealtimeSocket(unittest.TestCase):
         w._runtime_loaders = {}
         w._custom_runtime_cache = {}
         w._custom_runtime_locks = {}
-        w._release_model_id_by_key = {}
+        w._fixed_model_id_by_key_by_function = {}
+        w._payload_model_id_by_selector_by_function = {}
+        w._fixed_model_spec_by_key_by_function = {}
+        w._payload_model_spec_by_selector_by_function = {}
         w._release_allowed_model_ids = None
         w._model_manager = None
         w._realtime_sessions = {}

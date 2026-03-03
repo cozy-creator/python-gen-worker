@@ -68,13 +68,13 @@ Per-model object keys (all optional unless noted):
 
 Separately from `metrics.*`, the worker emits best-effort events that help `gen-orchestrator` understand which shared volumes (e.g. NFS) have which models.
 
-- `model.cached` (run_id="") payload:
+- `model.cached` (request_id="") payload:
   - `model_variant_id`: string (canonical model id)
   - `disk_backend`: `local | nfs` (best-effort)
   - `disk_fstype`: string (best-effort)
   - `disk_volume_key`: string (sha256 hash of mount identity; does not expose raw mount source)
 
-- `models.disk_inventory` (run_id="") payload:
+- `models.disk_inventory` (request_id="") payload:
   - `disk_backend`, `disk_fstype`, `disk_volume_key`
   - `disk_models`: string[] (canonical model ids present on disk)
 

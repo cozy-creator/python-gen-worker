@@ -13,7 +13,15 @@ def test_scheduler_cannot_widen_manifest_model_scope(monkeypatch) -> None:
     w = Worker(
         user_module_names=[],
         worker_jwt="dummy-worker-jwt",
-        manifest={"models": {"sd15": "cozy:demo/sd15:latest"}},
+        manifest={
+            "models_by_function": {
+                "generate": {
+                    "fixed": {
+                        "sd15": {"ref": "demo/sd15", "dtypes": ["fp16", "bf16"]},
+                    }
+                }
+            }
+        },
     )
 
     # Avoid background download threads in this unit test.
@@ -21,14 +29,12 @@ def test_scheduler_cannot_widen_manifest_model_scope(monkeypatch) -> None:
 
     # Scheduler tries to widen scope (should be ignored / intersected away).
     msg = pb.WorkerSchedulerMessage(
-        release_artifact_config=pb.ReleaseArtifactConfig(
+        endpoint_config=pb.EndpointConfig(
             supported_repo_refs=["cozy:evil/evil:latest"],
-            repo_ref_by_key={"evil": "cozy:evil/evil:latest"},
             required_variant_refs=[],
         )
     )
     w._process_message(msg)
 
-    # Worker must not accept new keys/refs outside the tenant manifest mapping.
-    assert "evil" not in w._release_model_id_by_key
+    # Worker must not widen scope outside the tenant manifest mapping.
     assert w._release_allowed_model_ids == {"cozy:demo/sd15:latest"}

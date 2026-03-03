@@ -44,7 +44,7 @@ python -m gen_worker.entrypoint
 Example lines:
 
 ```json
-{"event":"started","run_id":"training-smoke-001"}
+{"event":"started","request_id":"training-smoke-001"}
 {"event":"metric","name":"train/loss","step":1,"value":1.0}
 {"event":"checkpoint","path":"/tmp/training/checkpoints/step-00000002.json","step":2}
 {"event":"completed","final_checkpoint":"/tmp/training/checkpoints/final.json","step":5}

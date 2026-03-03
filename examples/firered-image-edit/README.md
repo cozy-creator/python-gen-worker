@@ -6,7 +6,7 @@ Upstream reference implementation:
 - `FireRedTeam/FireRed-Image-Edit` `inference.py`
 
 Model:
-- `hf:FireRedTeam/FireRed-Image-Edit-1.0`
+- `fireredteam/firered-image-edit-1.0`
 
 This example uses `diffusers.QwenImageEditPlusPipeline` and exposes a single function:
 - `edit`

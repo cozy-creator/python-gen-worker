@@ -36,7 +36,7 @@ class Out(msgspec.Struct):
 
 @worker_function()
 def generate(ctx: ActionContext, payload: In) -> Out:
-    ref = f"runs/{ctx.run_id}/outputs/out.txt"
+    ref = f"runs/{ctx.request_id}/outputs/out.txt"
     ctx.save_bytes(ref, (payload.prompt + "\\n").encode("utf-8"))
     return Out(ref=ref)
 """.lstrip(),
@@ -89,15 +89,15 @@ def generate(ctx: ActionContext, payload: In) -> Out:
             time.sleep(0.05)
 
     r = requests.post(
-        base + "/v1/run/generate",
+        base + "/v1/request/generate",
         json={"payload": {"prompt": "hello"}},
         timeout=10,
     )
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["success"] is True
-    run_id = body["run_id"]
+    request_id = body["request_id"]
     # The output file should exist on disk.
-    p = outputs / "runs" / run_id / "outputs" / "out.txt"
+    p = outputs / "runs" / request_id / "outputs" / "out.txt"
     assert p.exists()
     assert p.read_text(encoding="utf-8").strip() == "hello"

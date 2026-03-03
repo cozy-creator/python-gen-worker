@@ -185,20 +185,20 @@ class WorkerSession:
         *,
         function_name: str,
         payload_obj: Any,
-        run_id: Optional[str] = None,
+        request_id: Optional[str] = None,
         owner: str = "",
         invoker_id: str = "",
         timeout_ms: int = 0,
         required_variant_refs: Tuple[str, ...] = (),
         input_ref_urls: Optional[Dict[str, str]] = None,
     ) -> str:
-        rid = run_id or str(uuid.uuid4())
+        rid = request_id or str(uuid.uuid4())
         payload = payload_obj
         if input_ref_urls:
             payload = _rewrite_refs_to_urls(payload_obj, input_ref_urls)
         raw = msgspec.msgpack.encode(payload)
         req = pb.TaskExecutionRequest(
-            run_id=rid,
+            request_id=rid,
             function_name=function_name,
             input_payload=raw,
             required_variant_refs=list(required_variant_refs),
@@ -336,18 +336,18 @@ def _format_msg(msg: pb.WorkerSchedulerMessage) -> str:
         return "worker_registration"
     if msg.HasField("run_result"):
         rr = msg.run_result
-        return f"run_result run_id={rr.run_id} success={rr.success} error_type={rr.error_type!r} retryable={rr.retryable}"
+        return f"run_result request_id={rr.request_id} success={rr.success} error_type={rr.error_type!r} retryable={rr.retryable}"
     if msg.HasField("worker_event"):
         ev = msg.worker_event
-        return f"worker_event run_id={ev.run_id} type={ev.event_type}"
+        return f"worker_event request_id={ev.request_id} type={ev.event_type}"
     if msg.HasField("load_model_result"):
         return "load_model_result"
     if msg.HasField("unload_model_result"):
         return "unload_model_result"
     if msg.HasField("interrupt_run_cmd"):
         return "interrupt_run_cmd"
-    if msg.HasField("release_artifact_config"):
-        return "release_artifact_config"
+    if msg.HasField("endpoint_config"):
+        return "endpoint_config"
     if msg.HasField("realtime_open_cmd"):
         return "realtime_open_cmd"
     if msg.HasField("realtime_frame"):
@@ -428,7 +428,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
         payload_obj = _parse_payload_json(args.payload_json)
         input_ref_urls = _parse_input_ref_urls(list(args.input_ref_url or []))
-        run_id = sess.run_task(
+        request_id = sess.run_task(
             function_name=args.function_name,
             payload_obj=payload_obj,
             timeout_ms=int(args.timeout_ms),
@@ -437,7 +437,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             required_variant_refs=tuple(args.required_model),
             input_ref_urls=input_ref_urls or None,
         )
-        print(f"[sent] run_id={run_id} function={args.function_name!r}")
+        print(f"[sent] request_id={request_id} function={args.function_name!r}")
 
         # Wait for result.
         start = time.monotonic()
@@ -455,7 +455,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     payload = "<binary>"
                 print(f"[event] {msg.worker_event.event_type}: {payload}")
                 continue
-            if msg.HasField("run_result") and msg.run_result.run_id == run_id:
+            if msg.HasField("run_result") and msg.run_result.request_id == request_id:
                 rr = msg.run_result
                 if rr.output_payload:
                     out_obj = msgspec.msgpack.decode(rr.output_payload)

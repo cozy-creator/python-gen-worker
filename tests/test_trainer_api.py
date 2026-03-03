@@ -9,7 +9,7 @@ from gen_worker.trainer import StepContext, StepResult, TrainingJobSpec, load_tr
 
 
 def _ctx() -> StepContext:
-    return StepContext(job=TrainingJobSpec(run_id="r", max_steps=1))
+    return StepContext(job=TrainingJobSpec(request_id="r", max_steps=1))
 
 
 def test_load_trainer_plugin_from_class(monkeypatch: pytest.MonkeyPatch) -> None:

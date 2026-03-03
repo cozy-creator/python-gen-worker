@@ -59,7 +59,6 @@ def hello(ctx: ActionContext, payload: Input) -> Output:
 schema_version = 1
 name = "dev-test"
 main = "hello_mod"
-gen_worker = ">=0"
 """.lstrip(),
         encoding="utf-8",
     )
@@ -80,7 +79,7 @@ gen_worker = ">=0"
         assert sess is not None
         assert "hello" in sess.available_functions
 
-        run_id = sess.run_task(function_name="hello", payload_obj={"name": "world"})
+        request_id = sess.run_task(function_name="hello", payload_obj={"name": "world"})
 
         # Wait for a result.
         start = time.monotonic()
@@ -88,7 +87,7 @@ gen_worker = ">=0"
             msg = sess.recv(timeout_s=0.5)
             if msg is None:
                 continue
-            if msg.HasField("run_result") and msg.run_result.run_id == run_id:
+            if msg.HasField("run_result") and msg.run_result.request_id == request_id:
                 assert msg.run_result.success is True
                 assert msg.run_result.output_payload
                 import msgspec

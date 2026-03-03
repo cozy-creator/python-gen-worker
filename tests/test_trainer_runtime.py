@@ -53,7 +53,7 @@ def test_training_runtime_from_env_with_mock_batches(monkeypatch: pytest.MonkeyP
     samples_dir = tmp_path / "samples"
     spec = {
         "trainer_api_version": "v1",
-        "run_id": "run_runtime_1",
+        "request_id": "run_runtime_1",
         "trainer": trainer_import,
         "max_steps": 3,
         "metric_every": 1,
@@ -94,7 +94,7 @@ def test_training_runtime_resume_from_latest_step(monkeypatch: pytest.MonkeyPatc
     samples_dir = tmp_path / "samples"
     spec = {
         "trainer_api_version": "v1",
-        "run_id": "run_runtime_resume",
+        "request_id": "run_runtime_resume",
         "trainer": trainer_import,
         "max_steps": 5,
         "metric_every": 1,
@@ -130,7 +130,7 @@ def test_training_runtime_samples_contract_supports_t2i_and_instruct_edit(
     samples_dir = tmp_path / "samples"
     spec = {
         "trainer_api_version": "v1",
-        "run_id": "run_runtime_samples",
+        "request_id": "run_runtime_samples",
         "trainer": trainer_import,
         "max_steps": 1,
         "metric_every": 1,
@@ -187,7 +187,7 @@ def test_training_runtime_resume_skips_corrupt_higher_checkpoint(
     samples_dir = tmp_path / "samples"
     spec = {
         "trainer_api_version": "v1",
-        "run_id": "run_runtime_resume_corrupt",
+        "request_id": "run_runtime_resume_corrupt",
         "trainer": trainer_import,
         "max_steps": 4,
         "metric_every": 1,

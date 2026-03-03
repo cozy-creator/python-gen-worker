@@ -18,9 +18,21 @@ from gen_worker.types import Asset
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
-qwen_resources = ResourceRequirements()
+qwen_resources = ResourceRequirements(max_concurrency=1)
 _compile_lock = threading.Lock()
 _compiled_transformer = False
+_pipeline_locks_guard = threading.Lock()
+_pipeline_locks: dict[int, threading.Lock] = {}
+
+
+def _lock_for_pipeline(pipeline: object) -> threading.Lock:
+    key = id(pipeline)
+    with _pipeline_locks_guard:
+        lock = _pipeline_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _pipeline_locks[key] = lock
+    return lock
 
 
 class GenerateInput(msgspec.Struct):
@@ -84,7 +96,12 @@ def generate(
     ctx: ActionContext,
     pipeline: Annotated[
         DiffusionPipeline,
-        ModelRef(Src.FIXED, "qwen_image"),
+        ModelRef(
+            Src.FIXED,
+            "qwen_image",
+            ref="qwen/qwen-image-2512",
+            dtypes=("bf16", "fp16"),
+        ),
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:
@@ -100,8 +117,8 @@ def generate(
         neg = " "
 
     logger.info(
-        "[run_id=%s] qwen-image prompt=%r preset=%s steps=%s cfg=%.2f size=%sx%s",
-        ctx.run_id,
+        "[request_id=%s] qwen-image prompt=%r preset=%s steps=%s cfg=%.2f size=%sx%s",
+        ctx.request_id,
         payload.prompt[:80],
         payload.preset,
         steps,
@@ -115,47 +132,48 @@ def generate(
         dev = "cuda" if torch.cuda.is_available() else "cpu"
         generator = torch.Generator(device=dev).manual_seed(int(payload.seed))
 
-    if torch.cuda.is_available():
-        torch.backends.cuda.matmul.allow_tf32 = True
-        torch.backends.cudnn.allow_tf32 = True
+    with _lock_for_pipeline(pipeline):
+        if torch.cuda.is_available():
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            try:
+                vram = int(torch.cuda.get_device_properties(0).total_memory)
+                if vram <= 10 * 1024**3 and hasattr(pipeline, "enable_attention_slicing"):
+                    pipeline.enable_attention_slicing()
+                if vram <= 8 * 1024**3 and hasattr(pipeline, "enable_model_cpu_offload"):
+                    try:
+                        pipeline.enable_model_cpu_offload()
+                    except TypeError:
+                        pipeline.enable_model_cpu_offload(gpu_id=0)
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+
+        _try_compile_transformer(pipeline)
+
+        call_kwargs = dict(
+            prompt=payload.prompt,
+            negative_prompt=neg,
+            num_inference_steps=int(steps),
+            true_cfg_scale=float(cfg),
+            width=int(width),
+            height=int(height),
+            max_sequence_length=int(payload.max_sequence_length),
+        )
+        if generator is not None:
+            call_kwargs["generator"] = generator
+
         try:
-            vram = int(torch.cuda.get_device_properties(0).total_memory)
-            if vram <= 10 * 1024**3 and hasattr(pipeline, "enable_attention_slicing"):
-                pipeline.enable_attention_slicing()
-            if vram <= 8 * 1024**3 and hasattr(pipeline, "enable_model_cpu_offload"):
-                try:
-                    pipeline.enable_model_cpu_offload()
-                except TypeError:
-                    pipeline.enable_model_cpu_offload(gpu_id=0)
-            torch.cuda.empty_cache()
-        except Exception:
-            pass
-
-    _try_compile_transformer(pipeline)
-
-    call_kwargs = dict(
-        prompt=payload.prompt,
-        negative_prompt=neg,
-        num_inference_steps=int(steps),
-        true_cfg_scale=float(cfg),
-        width=int(width),
-        height=int(height),
-        max_sequence_length=int(payload.max_sequence_length),
-    )
-    if generator is not None:
-        call_kwargs["generator"] = generator
-
-    try:
-        with torch.inference_mode():
-            result = pipeline(**call_kwargs)
-    except TypeError:
-        # Older diffusers builds may not expose every kwarg.
-        call_kwargs.pop("max_sequence_length", None)
-        with torch.inference_mode():
-            result = pipeline(**call_kwargs)
+            with torch.inference_mode():
+                result = pipeline(**call_kwargs)
+        except TypeError:
+            # Older diffusers builds may not expose every kwarg.
+            call_kwargs.pop("max_sequence_length", None)
+            with torch.inference_mode():
+                result = pipeline(**call_kwargs)
 
     image: Image.Image = result.images[0]
     buf = BytesIO()
     image.save(buf, format="PNG")
-    out = ctx.save_bytes(f"runs/{ctx.run_id}/outputs/image.png", buf.getvalue())
+    out = ctx.save_bytes(f"runs/{ctx.request_id}/outputs/image.png", buf.getvalue())
     return GenerateOutput(image=out)

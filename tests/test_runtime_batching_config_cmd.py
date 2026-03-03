@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 from gen_worker.decorators import ResourceRequirements
@@ -107,3 +108,7 @@ def test_function_capabilities_event_emits_when_changed(monkeypatch) -> None:
     events = [m.worker_event for m in sent if m.HasField("worker_event")]
     assert len(events) == 1
     assert events[0].event_type == "worker.function_capabilities"
+    payload = json.loads(bytes(events[0].payload_json or b"{}").decode("utf-8"))
+    fns = list(payload.get("functions") or [])
+    assert len(fns) == 1
+    assert int(fns[0].get("max_inflight_requests") or 0) == 1

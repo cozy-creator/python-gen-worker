@@ -15,34 +15,47 @@ class TestPayloadModelSelection(unittest.TestCase):
         w = Worker(
             user_module_names=[],
             worker_jwt="dummy-worker-jwt",
-            manifest={"models": {"sd15": "cozy:demo/sd15:latest"}},
-        )
-        inj = InjectionSpec(
-            param_name="pipeline",
-            param_type=object,
-            model_ref=ModelRef(ModelRefSource.FIXED, "cozy:demo/sd15:latest"),
-        )
-        payload = _Payload(model="sd15")
-        with self.assertRaises(ValueError) as ctx:
-            w._resolve_model_id_for_injection("generate", inj, payload)
-        self.assertIn("unknown fixed model key", str(ctx.exception).lower())
-        self.assertIn("sd15", str(ctx.exception))
-
-    def test_payload_key_must_exist_in_mapping(self) -> None:
-        w = Worker(
-            user_module_names=[],
-            worker_jwt="dummy-worker-jwt",
             manifest={
-                "models": {
-                    "sd15": "cozy:demo/sd15:latest",
-                    "flux": "cozy:demo/flux:latest",
+                "models_by_function": {
+                    "generate": {
+                        "fixed": {
+                            "sd15": {"ref": "demo/sd15", "dtypes": ["fp16", "bf16"]},
+                        }
+                    }
                 }
             },
         )
         inj = InjectionSpec(
             param_name="pipeline",
             param_type=object,
-            model_ref=ModelRef(ModelRefSource.PAYLOAD, "model"),
+            model_ref=ModelRef(ModelRefSource.FIXED, "missing"),
+        )
+        payload = _Payload(model="sd15")
+        with self.assertRaises(ValueError) as ctx:
+            w._resolve_model_id_for_injection("generate", inj, payload)
+        self.assertIn("unknown fixed model key", str(ctx.exception).lower())
+
+    def test_payload_key_must_exist_in_selector_mapping(self) -> None:
+        w = Worker(
+            user_module_names=[],
+            worker_jwt="dummy-worker-jwt",
+            manifest={
+                "models_by_function": {
+                    "generate": {
+                        "payload_selectors": {
+                            "model": {
+                                "sd15": {"ref": "demo/sd15", "dtypes": ["fp16", "bf16"]},
+                                "flux": {"ref": "demo/flux", "dtypes": ["bf16"]},
+                            }
+                        }
+                    }
+                }
+            },
+        )
+        inj = InjectionSpec(
+            param_name="pipeline",
+            param_type=object,
+            model_ref=ModelRef(ModelRefSource.INPUT_PAYLOAD, "model"),
         )
         payload = _Payload(model="does-not-exist")
         with self.assertRaises(ValueError) as ctx:
@@ -54,12 +67,22 @@ class TestPayloadModelSelection(unittest.TestCase):
         w = Worker(
             user_module_names=[],
             worker_jwt="dummy-worker-jwt",
-            manifest={"models": {"sd15": "cozy:demo/sd15:latest"}},
+            manifest={
+                "models_by_function": {
+                    "generate": {
+                        "payload_selectors": {
+                            "model": {
+                                "sd15": {"ref": "demo/sd15", "dtypes": ["fp16", "bf16"]},
+                            }
+                        }
+                    }
+                }
+            },
         )
         inj = InjectionSpec(
             param_name="pipeline",
             param_type=object,
-            model_ref=ModelRef(ModelRefSource.PAYLOAD, "model"),
+            model_ref=ModelRef(ModelRefSource.INPUT_PAYLOAD, "model"),
         )
         payload = _Payload(model="sd15")
         out, key = w._resolve_model_id_for_injection("generate", inj, payload)

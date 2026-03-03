@@ -6,7 +6,7 @@ from typing import Protocol
 
 @dataclass(frozen=True)
 class LifecycleLease:
-    run_id: str
+    request_id: str
     lease_id: str
 
 

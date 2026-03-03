@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from io import BytesIO
 from typing import Annotated, Optional
 
@@ -15,6 +16,19 @@ from gen_worker.types import Asset
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+_firered_resources = ResourceRequirements(max_concurrency=1)
+_pipeline_locks_guard = threading.Lock()
+_pipeline_locks: dict[int, threading.Lock] = {}
+
+
+def _lock_for_pipeline(pipeline: object) -> threading.Lock:
+    key = id(pipeline)
+    with _pipeline_locks_guard:
+        lock = _pipeline_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _pipeline_locks[key] = lock
+    return lock
 
 
 class EditInput(msgspec.Struct):
@@ -31,12 +45,17 @@ class EditOutput(msgspec.Struct):
     image: Asset
 
 
-@worker_function(ResourceRequirements())
+@worker_function(_firered_resources)
 def edit(
     ctx: ActionContext,
     pipeline: Annotated[
         QwenImageEditPlusPipeline,
-        ModelRef(Src.FIXED, "firered_image_edit"),
+        ModelRef(
+            Src.FIXED,
+            "firered_image_edit",
+            ref="fireredteam/firered-image-edit-1.0",
+            dtypes=("bf16",),
+        ),
     ],
     payload: EditInput,
 ) -> EditOutput:
@@ -63,8 +82,8 @@ def edit(
         neg = " "
 
     logger.info(
-        "[run_id=%s] firered-image-edit prompt=%r steps=%s cfg=%.2f n=%d",
-        ctx.run_id,
+        "[request_id=%s] firered-image-edit prompt=%r steps=%s cfg=%.2f n=%d",
+        ctx.request_id,
         payload.prompt[:120],
         steps,
         cfg,
@@ -78,19 +97,20 @@ def edit(
         dev = "cuda" if torch.cuda.is_available() else "cpu"
         generator = torch.Generator(device=dev).manual_seed(int(payload.seed))
 
-    with torch.inference_mode():
-        out = pipeline(
-            image=[image],
-            prompt=payload.prompt,
-            generator=generator,
-            true_cfg_scale=cfg,
-            negative_prompt=neg,
-            num_inference_steps=steps,
-            num_images_per_prompt=n,
-        )
+    with _lock_for_pipeline(pipeline):
+        with torch.inference_mode():
+            out = pipeline(
+                image=[image],
+                prompt=payload.prompt,
+                generator=generator,
+                true_cfg_scale=cfg,
+                negative_prompt=neg,
+                num_inference_steps=steps,
+                num_images_per_prompt=n,
+            )
 
     result: Image.Image = out.images[0]
     buf = BytesIO()
     result.save(buf, format="PNG")
-    asset = ctx.save_bytes(f"runs/{ctx.run_id}/outputs/edited.png", buf.getvalue())
+    asset = ctx.save_bytes(f"runs/{ctx.request_id}/outputs/edited.png", buf.getvalue())
     return EditOutput(image=asset)

@@ -44,7 +44,7 @@ class OutputSaveContractTest(unittest.TestCase):
     def test_save_bytes_local_output_accepts_path_agnostic_refs(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             ctx = ActionContext(
-                run_id="run-1",
+                request_id="run-1",
                 owner="alice",
                 local_output_dir=td,
             )
@@ -56,7 +56,7 @@ class OutputSaveContractTest(unittest.TestCase):
 
     def test_save_bytes_rejects_url_refs(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            ctx = ActionContext(run_id="run-2", local_output_dir=td)
+            ctx = ActionContext(request_id="run-2", local_output_dir=td)
             with self.assertRaises(ValueError):
                 ctx.save_bytes("https://example.test/out.bin", b"x")
 
@@ -67,7 +67,7 @@ class OutputSaveContractTest(unittest.TestCase):
         try:
             base = f"http://127.0.0.1:{srv.server_address[1]}"
             ctx = ActionContext(
-                run_id="run-3",
+                request_id="run-3",
                 owner="alice",
                 file_api_base_url=base,
                 file_api_token="worker-cap-token",

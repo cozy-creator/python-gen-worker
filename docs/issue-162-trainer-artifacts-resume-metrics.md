@@ -25,7 +25,7 @@ Overrides remain supported:
   `step-%08d.json`.
 - Final checkpoint marker is written at completion as `final.json`.
 - Checkpoint payload includes serialized trainer state:
-  `{"step": ..., "run_id": ..., "state": {...}}`.
+  `{"step": ..., "request_id": ..., "state": {...}}`.
 - Checkpoint JSON writes are atomic (`tempfile + fsync + rename`) where possible.
 
 ## Sample Writer Contract

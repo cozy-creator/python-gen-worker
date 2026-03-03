@@ -2,5 +2,9 @@ schema_version = 1
 
 name = "smoke-test"
 main = "smoke_test.main"
-gen_worker = ">=0.2.0"
 
+[functions.caption_prompts]
+batch_dimension = "prompts"
+
+[resources]
+max_inflight_requests = 8

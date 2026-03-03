@@ -40,7 +40,6 @@ dependencies = ["gen-worker"]
 schema_version = 1
 name = "test-project"
 main = "endpoint_mod.main"
-gen_worker = ">=0"
 """.lstrip(),
                     encoding="utf-8",
                 )
@@ -98,7 +97,6 @@ dependencies = ["gen-worker"]
 schema_version = 1
 name = "test-project"
 main = "endpoint_mod_collision.main"
-gen_worker = ">=0"
 """.lstrip(),
                     encoding="utf-8",
                 )
@@ -157,7 +155,6 @@ dependencies = ["gen-worker"]
 schema_version = 1
 name = "My Cool_Project"
 main = "endpoint_mod_project_name.main"
-gen_worker = ">=0"
 """.lstrip(),
                     encoding="utf-8",
                 )

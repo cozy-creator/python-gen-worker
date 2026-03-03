@@ -52,8 +52,8 @@ class _Reporter:
     completed_calls: list[tuple[int, str | None]] = field(default_factory=list)
     failed_calls: list[tuple[int, str]] = field(default_factory=list)
 
-    def started(self, *, run_id: str) -> None:
-        _ = run_id
+    def started(self, *, request_id: str) -> None:
+        _ = request_id
 
     def metric(self, *, name: str, value: float, step: int) -> None:
         self.metrics.append((name, value, step))
@@ -130,7 +130,7 @@ def test_training_endpoints_examples_run_in_gen_worker_loop() -> None:
     sys.path.insert(0, str(edit_src))
     try:
         t2i_trainer = load_trainer_plugin("t2i_three_prompts.main:ThreePromptT2ITrainer")
-        t2i_job = TrainingJobSpec(run_id="t2i-run", max_steps=1, metric_every=1, checkpoint_every=1, sample_every=1)
+        t2i_job = TrainingJobSpec(request_id="t2i-run", max_steps=1, metric_every=1, checkpoint_every=1, sample_every=1)
         t2i_ctx = StepContext(
             job=t2i_job,
             model_handles={"model": _T2IModel()},
@@ -151,7 +151,7 @@ def test_training_endpoints_examples_run_in_gen_worker_loop() -> None:
         assert t2i_reporter.samples
 
         edit_trainer = load_trainer_plugin("img2img_edit_optional_prompt_mask.main:Img2ImgEditTrainer")
-        edit_job = TrainingJobSpec(run_id="edit-run", max_steps=1, metric_every=1, checkpoint_every=1, sample_every=1)
+        edit_job = TrainingJobSpec(request_id="edit-run", max_steps=1, metric_every=1, checkpoint_every=1, sample_every=1)
         edit_ctx = StepContext(
             job=edit_job,
             model_handles={"model": _EditModel()},

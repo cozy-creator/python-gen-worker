@@ -8,7 +8,6 @@ Usage:
     python -m gen_worker.entrypoint
 """
 
-import importlib.metadata as md
 import json
 import logging
 import os
@@ -18,8 +17,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .cache_paths import worker_model_cache_dir
-from .tensorhub_toml import constraint_satisfied, load_tensorhub_toml
-
 try:
     from .worker import Worker
 except ImportError as e:
@@ -117,42 +114,6 @@ def get_modules_from_manifest(manifest: dict) -> List[str]:
     return sorted(modules)
 
 
-def _dev_validate_gen_worker_version() -> None:
-    """
-    Dev-only guardrail.
-
-    If TENSORHUB_TOML_PATH points at a tensorhub.toml, verify the locally installed
-    gen-worker version satisfies tensorhub.toml's gen_worker constraint.
-    """
-    manifest_path_str = os.getenv("TENSORHUB_TOML_PATH", "").strip()
-    if not manifest_path_str:
-        return
-    p = Path(manifest_path_str)
-    if not p.exists():
-        return
-    try:
-        tensorhub_manifest = load_tensorhub_toml(p)
-        constraint = tensorhub_manifest.gen_worker
-    except Exception as e:
-        logger.warning("Failed to parse tensorhub.toml for dev runtime validation (%s): %s", p, e)
-        return
-    try:
-        installed = md.version("gen-worker")
-    except Exception:
-        installed = ""
-    if not installed:
-        logger.warning("Dev validation skipped: could not determine installed gen-worker version")
-        return
-    if not constraint_satisfied(constraint, installed):
-        logger.error(
-            "Installed gen-worker version %s does not satisfy tensorhub.toml gen_worker constraint %r (%s).",
-            installed,
-            constraint,
-            p,
-        )
-        sys.exit(2)
-
-
 def _probe_cache_path_writable(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
     probe = path / f".cozy-write-probe-{os.getpid()}"
@@ -230,7 +191,6 @@ def _preflight_cache_dirs() -> Dict[str, str]:
 
 
 def _run_main() -> int:
-    _dev_validate_gen_worker_version()
     _log_startup_phase("boot", status="starting")
     worker_mode = (os.getenv("WORKER_MODE") or "inference").strip().lower()
     if worker_mode not in {"inference", "trainer"}:

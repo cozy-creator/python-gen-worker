@@ -4,13 +4,13 @@ What this contains:
 
 - Python module `image_gen` with @worker_function for SDXL-style inference.
 - `pyproject.toml` + `uv.lock` with tenant deps.
-- `tensorhub.toml` with Cozy build-time metadata (name/main/gen_worker, optional models/resources).
+- `tensorhub.toml` with Cozy build-time metadata (name/main, optional host/resources/function config).
 - `Dockerfile` that installs deps and bakes `/app/.cozy/manifest.json` via `python -m gen_worker.discover`.
 
 Notes:
 
 - Install deps with `uv sync` and generate `uv.lock` for reproducible builds.
-- Model choice can be dynamic at runtime via request payload (model_ref).
+- Fixed model refs are declared in code via `ModelRef(Src.FIXED, ..., ref=..., dtypes=...)`.
 - Deploy by publishing this folder to Cozy Hub (Dockerfile-first build inputs).
 
 Defaults:

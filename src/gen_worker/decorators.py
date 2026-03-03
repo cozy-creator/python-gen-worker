@@ -12,6 +12,7 @@ class ResourceRequirements:
     def __init__(
         self,
         max_concurrency: Optional[int] = None,
+        max_inflight_requests: Optional[int] = None,
         batch_size_min: Optional[int] = None,
         batch_size_target: Optional[int] = None,
         batch_size_max: Optional[int] = None,
@@ -21,7 +22,17 @@ class ResourceRequirements:
         stage_profile: Optional[str] = None,
         stage_traits: Optional[list[str]] = None,
     ) -> None:
+        # Back-compat: if only max_inflight_requests is provided, use it as the
+        # worker-local function concurrency cap as well.
+        if max_concurrency is None and max_inflight_requests is not None:
+            max_concurrency = int(max_inflight_requests)
+
         self.max_concurrency = max_concurrency
+        self.max_inflight_requests = (
+            int(max_inflight_requests)
+            if max_inflight_requests is not None
+            else (int(max_concurrency) if max_concurrency is not None else None)
+        )
         self.batch_size_min = batch_size_min
         self.batch_size_target = batch_size_target
         self.batch_size_max = batch_size_max
@@ -32,7 +43,9 @@ class ResourceRequirements:
         self.stage_traits = list(stage_traits or [])
         self._requirements: Dict[str, Any] = {}
         if max_concurrency is not None:
-            self._requirements["max_concurrency"] = max_concurrency
+            self._requirements["max_concurrency"] = int(max_concurrency)
+        if self.max_inflight_requests is not None:
+            self._requirements["max_inflight_requests"] = int(self.max_inflight_requests)
         if batch_size_min is not None:
             self._requirements["batch_size_min"] = int(batch_size_min)
         if batch_size_target is not None:

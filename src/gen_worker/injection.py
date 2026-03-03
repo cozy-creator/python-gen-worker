@@ -10,7 +10,8 @@ class ModelRefSource(str, Enum):
     # FIXED means the model key is fixed by the function signature and does not
     # depend on the request payload.
     FIXED = "fixed"
-    PAYLOAD = "payload"
+    # Input payload selects the model via a payload field key.
+    INPUT_PAYLOAD = "input_payload"
 
 
 @dataclass(frozen=True)
@@ -24,9 +25,7 @@ class ModelRef:
     source: ModelRefSource
     key: str
     # Optional explicit model ref string for FIXED source.
-    #
-    # If set, discovery will include this (ref+dtypes) in the baked manifest model keyspace,
-    # so you don't need a separate tensorhub.toml [models] mapping for fixed functions.
+    # If set, discovery includes this in the baked manifest fixed keyspace.
     ref: Optional[str] = None
     dtypes: tuple[str, ...] = ()
 

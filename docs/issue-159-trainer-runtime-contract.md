@@ -31,7 +31,7 @@
 ## Canonical Runtime Loop
 
 1. Call trainer `setup(ctx)` then `configure(ctx) -> state`.
-2. Emit `started(run_id=...)`.
+2. Emit `started(request_id=...)`.
 3. Iterate batches while `completed_steps < max_steps`.
 4. At each step: cancel check -> `prepare_batch(...)` -> `train_step(...)` -> validate `StepResult`.
 5. Runtime cadence:

@@ -28,7 +28,12 @@ import msgspec
 from gen_worker import ActionContext
 from gen_worker.injection import ModelRef
 
-from gen_worker.tensorhub_toml import TensorhubModelSpec, TensorhubToml, load_tensorhub_toml
+from gen_worker.tensorhub_toml import (
+    TensorhubModelSpec,
+    TensorhubToml,
+    _validate_endpoint_model_ref,
+    load_tensorhub_toml,
+)
 from gen_worker.names import slugify_endpoint_name, slugify_function_name
 
 _ALLOWED_MODEL_DTYPES: frozenset[str] = frozenset({"fp16", "bf16", "fp8", "fp32", "int8", "int4"})
@@ -179,12 +184,20 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
     """Extract metadata from a worker function."""
     resources = getattr(func, "_worker_resources", None)
     max_concurrency = None
+    max_inflight_requests = None
     if resources is not None:
         max_concurrency = getattr(resources, "max_concurrency", None)
+        max_inflight_requests = getattr(resources, "max_inflight_requests", None)
 
     res_dict: Dict[str, Any] = {}
     if isinstance(max_concurrency, int):
         res_dict["max_concurrency"] = max_concurrency
+    if isinstance(max_inflight_requests, int):
+        res_dict["max_inflight_requests"] = max_inflight_requests
+    elif isinstance(max_concurrency, int):
+        # Back-compat: older code may only set max_concurrency; emit canonical
+        # max_inflight_requests for orchestrator runtime hints as well.
+        res_dict["max_inflight_requests"] = max_concurrency
 
     hints = typing.get_type_hints(func, globalns=func.__globals__, include_extras=True)
     sig = inspect.signature(func)
@@ -300,7 +313,7 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
     seen_fields = set()
     for inj_entry in injections:
         mr_json = inj_entry.get("model_ref", {}) or {}
-        if mr_json.get("source") != "payload":
+        if mr_json.get("source") != "input_payload":
             continue
         field = str(mr_json.get("key") or "").strip()
         if not field or field in seen_fields:
@@ -498,14 +511,17 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
         if not fn_name:
             continue
         hints = tensorhub_manifest.function_resources.get(fn_name) or {}
-        if not hints:
-            continue
-        base = fn.get("resources")
-        merged: Dict[str, Any] = {}
-        if isinstance(base, dict):
-            merged.update(base)
-        merged.update(hints)
-        fn["resources"] = merged
+        if hints:
+            base = fn.get("resources")
+            merged: Dict[str, Any] = {}
+            if isinstance(base, dict):
+                merged.update(base)
+            merged.update(hints)
+            fn["resources"] = merged
+
+        batch_path = (tensorhub_manifest.function_batch_dimensions.get(fn_name) or "").strip()
+        if batch_path:
+            fn["batch_dimension"] = batch_path
 
     seen_fn: Dict[str, str] = {}
     for fn in functions:
@@ -532,23 +548,31 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
     if tensorhub_manifest.resources:
         manifest["resources"] = dict(tensorhub_manifest.resources)
 
-    # Build per-function model keyspace.
+    # Build per-function model keyspaces.
     models_by_function: Dict[str, Any] = {}
     for fn in functions:
         fn_name = str(fn.get("name") or "").strip()
         if not fn_name:
             continue
 
-        # Function-specific mapping wins; otherwise fall back to global [models].
-        eff = tensorhub_manifest.function_models.get(fn_name) or tensorhub_manifest.models
-        eff2: Dict[str, TensorhubModelSpec] = dict(eff or {})
+        payload_keyspaces = dict(tensorhub_manifest.function_models.get(fn_name) or {})
+        payload_selectors = list(fn.get("payload_repo_selectors") or [])
+        required_payload_fields = [
+            str(sel.get("field") or "").strip()
+            for sel in payload_selectors
+            if isinstance(sel, dict) and str(sel.get("field") or "").strip()
+        ]
+        for field in sorted(set(required_payload_fields)):
+            if field not in payload_keyspaces:
+                raise ValueError(
+                    f"function '{fn_name}' declares ModelRef(INPUT_PAYLOAD, {field!r}) but "
+                    f"tensorhub.toml is missing [functions.{fn_name}.models.{field}] keyspace"
+                )
 
-        # If a fixed ModelRef has an explicit ref (and optional dtypes) in the signature,
-        # auto-add it to the effective mapping so tensorhub.toml [models] isn't required for
-        # fixed functions.
+        # Fixed refs must be declared in code.
         required_keys = set(fn.get("required_models", []) or [])
         inj_list = list(fn.get("injection_json", []) or [])
-        sig_specs: Dict[str, TensorhubModelSpec] = {}
+        fixed_specs: Dict[str, TensorhubModelSpec] = {}
         for inj in inj_list:
             mr = dict(inj.get("model_ref", {}) or {})
             if mr.get("source") != "fixed":
@@ -564,6 +588,10 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
                     ref = key
                 else:
                     continue
+            try:
+                _validate_endpoint_model_ref(ref, field=f"function '{fn_name}' model ref for key {key!r}")
+            except ValueError as e:
+                raise ValueError(str(e)) from e
             dtypes_raw = mr.get("dtypes")
             dtypes: tuple[str, ...] = ()
             if isinstance(dtypes_raw, list):
@@ -573,25 +601,29 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
                     raise ValueError(f"function '{fn_name}' has invalid model dtypes for {key!r}: {bad}")
                 dtypes = cleaned
             if dtypes:
-                sig_specs[key] = TensorhubModelSpec(ref=ref, dtypes=dtypes)
+                fixed_specs[key] = TensorhubModelSpec(ref=ref, dtypes=dtypes)
             else:
-                sig_specs[key] = TensorhubModelSpec(ref=ref)
+                fixed_specs[key] = TensorhubModelSpec(ref=ref)
 
         missing = []
         for k in sorted(required_keys):
-            if k in eff2:
-                continue
-            if k in sig_specs:
-                eff2[k] = sig_specs[k]
-                continue
-            missing.append(k)
+            if k not in fixed_specs:
+                missing.append(k)
         if missing:
             raise ValueError(
-                f"function '{fn_name}' requires model keys not defined in tensorhub.toml [models] "
-                f"and not provided via signature ModelRef(ref=...): {missing}"
+                f"function '{fn_name}' has FIXED model keys without explicit ref in code: {missing}; "
+                "declare fixed refs as ModelRef(Src.FIXED, key, ref=..., dtypes=...)"
             )
-        if eff2:
-            models_by_function[fn_name] = _models_by_key_to_json(eff2)
+        fn_models: Dict[str, Any] = {}
+        if fixed_specs:
+            fn_models["fixed"] = _models_by_key_to_json(fixed_specs)
+        if payload_keyspaces:
+            payload_json: Dict[str, Any] = {}
+            for field, keyspace in payload_keyspaces.items():
+                payload_json[str(field)] = _models_by_key_to_json(keyspace)
+            fn_models["payload_selectors"] = payload_json
+        if fn_models:
+            models_by_function[fn_name] = fn_models
 
     if models_by_function:
         manifest["models_by_function"] = models_by_function

@@ -25,8 +25,8 @@ class FakeReporter:
     completed_calls: list[tuple[int, str | None]] = field(default_factory=list)
     failed_calls: list[tuple[int, str]] = field(default_factory=list)
 
-    def started(self, *, run_id: str) -> None:
-        self.started_runs.append(run_id)
+    def started(self, *, request_id: str) -> None:
+        self.started_runs.append(request_id)
 
     def metric(self, *, name: str, value: float, step: int) -> None:
         self.metrics.append((name, value, step))
@@ -58,7 +58,7 @@ class FakeTrainer:
         _ = ctx
 
     def configure(self, ctx: StepContext) -> dict[str, Any]:
-        return {"configured": True, "job": ctx.job.run_id}
+        return {"configured": True, "job": ctx.job.request_id}
 
     def prepare_batch(self, raw_batch: Any, state: Any, ctx: StepContext) -> Any:
         _ = state
@@ -159,7 +159,7 @@ class FakeUploader:
 
 def _job(**kwargs: Any) -> TrainingJobSpec:
     params = {
-        "run_id": "run_159",
+        "request_id": "run_159",
         "max_steps": 5,
         "metric_every": 2,
         "checkpoint_every": 3,

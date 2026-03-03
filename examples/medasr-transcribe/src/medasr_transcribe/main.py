@@ -13,6 +13,7 @@ from gen_worker import ActionContext, Asset, ResourceRequirements, worker_functi
 from gen_worker.injection import ModelRef, ModelRefSource as Src
 
 _MODEL_KEY = "medasr"
+_MODEL_REF = "google/medasr"
 
 
 class MedASRInput(msgspec.Struct):
@@ -26,8 +27,8 @@ class MedASROutput(msgspec.Struct):
 @worker_function(ResourceRequirements())
 def medasr_transcribe(
     ctx: ActionContext,
-    model: Annotated[AutoModelForCTC, ModelRef(Src.FIXED, _MODEL_KEY)],
-    processor: Annotated[AutoProcessor, ModelRef(Src.FIXED, _MODEL_KEY)],
+    model: Annotated[AutoModelForCTC, ModelRef(Src.FIXED, _MODEL_KEY, ref=_MODEL_REF, dtypes=("fp16", "bf16"))],
+    processor: Annotated[AutoProcessor, ModelRef(Src.FIXED, _MODEL_KEY, ref=_MODEL_REF, dtypes=("fp16", "bf16"))],
     payload: MedASRInput,
 ) -> MedASROutput:
     if payload.audio.local_path is None:

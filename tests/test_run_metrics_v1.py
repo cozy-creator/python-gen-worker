@@ -6,7 +6,7 @@ from gen_worker.run_metrics_v1 import RunMetricsV1, best_effort_init_model_metri
 
 
 def test_metrics_run_payload_omits_unknown_fields() -> None:
-    rm = RunMetricsV1(run_id="r1", function_name="f")
+    rm = RunMetricsV1(request_id="r1", function_name="f")
     payload = rm.to_metrics_run_payload()
     assert payload["schema_version"] == 1
     assert payload["function_name"] == "f"
@@ -15,7 +15,7 @@ def test_metrics_run_payload_omits_unknown_fields() -> None:
 
 
 def test_canonical_events_include_only_known_values() -> None:
-    rm = RunMetricsV1(run_id="r1", function_name="f")
+    rm = RunMetricsV1(request_id="r1", function_name="f")
     rm.mark_compute_started()
     rm.fetch_ms = 0
     rm.inference_ms = 123
@@ -31,7 +31,7 @@ def test_canonical_events_include_only_known_values() -> None:
 
 
 def test_best_effort_init_model_metrics_cache_state() -> None:
-    rm = RunMetricsV1(run_id="r1", function_name="f", resolved_cozy_models_by_id={})
+    rm = RunMetricsV1(request_id="r1", function_name="f", resolved_cozy_models_by_id={})
     best_effort_init_model_metrics(
         rm,
         ["cozy:org/repo:tag"],

@@ -3,18 +3,10 @@ schema_version = 1
 name = "sd15"
 # Python import path used for function discovery (not a Docker ENTRYPOINT).
 main = "sd15.main"
-# gen-worker runtime compatibility constraint (validated by Cozy Hub at publish time).
-gen_worker = ">=0.2.0"
 
 [host.requirements]
 # If cuda is set, the platform treats this worker as requiring an NVIDIA GPU.
 cuda = "12.6"
-
-[models]
-sd15 = "cozy:stable-diffusion-v1-5/stable-diffusion-v1-5:latest"
-sd15_fp8 = { ref = "cozy:stable-diffusion-v1-5/stable-diffusion-v1-5:latest", dtypes = ["fp8"] }
-sd15_int8 = { ref = "cozy:stable-diffusion-v1-5/stable-diffusion-v1-5:latest", dtypes = ["int8"] }
-sd15_int4 = { ref = "cozy:stable-diffusion-v1-5/stable-diffusion-v1-5:latest", dtypes = ["int4"] }
 
 [resources]
 vram_gb = 8

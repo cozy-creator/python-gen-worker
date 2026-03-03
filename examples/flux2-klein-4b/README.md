@@ -3,7 +3,7 @@
 FLUX.2-klein turbo example using Cozy’s injection pattern (4B + 9B variants).
 
 - The worker function only defines input/output + runs inference.
-- Model selection + downloading is handled by the platform via `tensorhub.toml [models]`.
+- Fixed model refs are declared directly in code via `ModelRef(Src.FIXED, ..., ref=..., dtypes=...)`.
 - This model is treated as a turbo model: the worker forces `num_inference_steps=8`.
 
 Steps:
@@ -15,7 +15,7 @@ Code uses:
 ```py
 pipeline: Annotated[
   Flux2KleinPipeline,
-  ModelRef(Src.FIXED, "flux2-klein-4b", ref="black-forest-labs/FLUX.2-klein-4B", dtypes=("bf16",)),
+  ModelRef(Src.FIXED, "flux2-klein-4b", ref="black-forest-labs/flux.2-klein-4b", dtypes=("bf16",)),
 ]
 ```
 

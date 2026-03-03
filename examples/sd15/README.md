@@ -6,21 +6,10 @@ Stable Diffusion 1.5 example using Cozy’s injection pattern.
 - Model selection + downloading is handled by the worker runtime via `tensorhub.toml`.
 - The worker clamps `num_inference_steps` to a minimum of 25 for quality.
 
-Config:
+Fixed refs are declared in code:
 
-```toml
-[models]
-sd15 = "cozy:stable-diffusion-v1-5/stable-diffusion-v1-5:latest"
-sd15_fp8 = { ref = "cozy:stable-diffusion-v1-5/stable-diffusion-v1-5:latest", dtypes = ["fp8"] }
-sd15_int8 = { ref = "cozy:stable-diffusion-v1-5/stable-diffusion-v1-5:latest", dtypes = ["int8"] }
-sd15_int4 = { ref = "cozy:stable-diffusion-v1-5/stable-diffusion-v1-5:latest", dtypes = ["int4"] }
-```
-
-Code uses:
-
-```py
-pipeline: Annotated[StableDiffusionPipeline, ModelRef(Src.FIXED, "sd15")]
-```
+- `stable-diffusion-v1-5/stable-diffusion-v1-5` (fp16/bf16)
+- `stable-diffusion-v1-5/stable-diffusion-v1-5` with fp8/int8/int4 variants in separate functions
 
 There are two functions:
 

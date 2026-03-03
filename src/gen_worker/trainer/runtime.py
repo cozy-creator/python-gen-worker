@@ -64,7 +64,7 @@ class LocalTrainingReporter:
     def __init__(self, events_path: str | None = None, *, cancel_policy: RuntimeCancelPolicy | None = None) -> None:
         self._events_path = events_path
         self._cancel_policy = cancel_policy
-        self._run_id = ""
+        self._request_id = ""
         self._seq = 0
         self._last_completed_step = 0
         self._last_final_checkpoint: str | None = None
@@ -79,7 +79,7 @@ class LocalTrainingReporter:
             "schema_version": "trainer_event.v1",
             "event": event,
             "seq": self._seq,
-            "run_id": self._run_id,
+            "request_id": self._request_id,
             "timestamp_ms": int(time.time() * 1000),
             **payload,
         }
@@ -89,11 +89,11 @@ class LocalTrainingReporter:
                 f.write(json.dumps(body, separators=(",", ":"), sort_keys=True))
                 f.write("\n")
 
-    def started(self, *, run_id: str) -> None:
-        self._run_id = run_id
+    def started(self, *, request_id: str) -> None:
+        self._request_id = request_id
         if self._cancel_policy is not None and self._cancel_policy.started_monotonic_s <= 0:
             self._cancel_policy.start()
-        self._event("started", run_id=run_id)
+        self._event("started", request_id=request_id)
 
     def metric(self, *, name: str, value: float, step: int) -> None:
         self._event("metric", name=name, value=value, step=step)
@@ -187,7 +187,7 @@ class LocalArtifactWriter:
         ctx: StepContext,
     ) -> str:
         out = self._checkpoints_dir / f"step-{step:08d}.json"
-        payload: dict[str, Any] = {"step": step, "run_id": ctx.job.run_id, "state": state_payload}
+        payload: dict[str, Any] = {"step": step, "request_id": ctx.job.request_id, "state": state_payload}
         hook = self._checkpoint_hook(trainer)
         if hook is not None:
             output_dir = self._checkpoints_dir / f"step-{step:08d}"
@@ -208,9 +208,9 @@ class LocalArtifactWriter:
             out = self._samples_dir / f"step-{step:08d}.txt"
             _atomic_write_json(
                 out.with_suffix(".json"),
-                {"step": step, "run_id": ctx.job.run_id, "task": "t2i", "prompt": ""},
+                {"step": step, "request_id": ctx.job.request_id, "task": "t2i", "prompt": ""},
             )
-            out.write_text(f"sample step={step} run_id={ctx.job.run_id}\n", encoding="utf-8")
+            out.write_text(f"sample step={step} request_id={ctx.job.request_id}\n", encoding="utf-8")
             return [str(out)]
 
         requests = self._sample_requests
@@ -220,7 +220,7 @@ class LocalArtifactWriter:
             seed = req.seed if req.seed is not None else self._sample_fixed_seed
             payload = {
                 "step": step,
-                "run_id": ctx.job.run_id,
+                "request_id": ctx.job.request_id,
                 "task": req.task,
                 "prompt": req.prompt,
                 "negative_prompt": req.negative_prompt,
@@ -244,7 +244,7 @@ class LocalArtifactWriter:
         ctx: StepContext,
     ) -> str | None:
         out = self._checkpoints_dir / "final.json"
-        payload: dict[str, Any] = {"final": True, "run_id": ctx.job.run_id, "state": state_payload}
+        payload: dict[str, Any] = {"final": True, "request_id": ctx.job.request_id, "state": state_payload}
         hook = self._checkpoint_hook(trainer)
         primary: str | None = None
         if hook is not None:
@@ -608,7 +608,7 @@ def run_training_runtime_from_env() -> int:
         raise
 
     job = TrainingJobSpec(
-        run_id=str(spec.get("run_id") or ""),
+        request_id=str(spec.get("request_id") or ""),
         trainer_api_version=str(spec.get("trainer_api_version") or "v1"),
         max_steps=int(spec.get("max_steps", 0)),
         metric_every=int(spec.get("metric_every", 10)),
@@ -629,7 +629,7 @@ def run_training_runtime_from_env() -> int:
 
     if _already_completed_from_final(cfg.artifacts.checkpoints_dir, spec):
         final_path = str(Path(cfg.artifacts.checkpoints_dir) / "final.json")
-        reporter.started(run_id=job.run_id)
+        reporter.started(request_id=job.request_id)
         reporter.completed(step=int(job.max_steps), final_checkpoint=final_path)
         return 0
 
@@ -647,7 +647,7 @@ def run_training_runtime_from_env() -> int:
     uploader = None
     if cfg.upload_endpoints.enabled():
         uploader = JsonHttpArtifactUploader(
-            run_id=job.run_id,
+            request_id=job.request_id,
             token=cfg.capability_token,
             endpoints=cfg.upload_endpoints,
             tensorhub_url=os.getenv("TENSORHUB_URL"),

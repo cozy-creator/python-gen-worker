@@ -163,7 +163,7 @@ def run_training_loop(
             payload=resume_state_payload,
             ctx=ctx,
         )
-        reporter.started(run_id=job.run_id)
+        reporter.started(request_id=job.request_id)
 
         for raw_batch in _iter_batches(batches):
             if completed_steps >= job.max_steps:

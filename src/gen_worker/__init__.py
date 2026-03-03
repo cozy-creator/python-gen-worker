@@ -15,6 +15,7 @@ from .trainer import (
     StepResult,
     TrainingJobSpec,
 )
+from .transformers_streaming import iter_transformers_text_deltas
 
 # Optional torch-dependent exports
 try:
@@ -57,6 +58,7 @@ __all__ = [
     "StepControlHints",
     "StepResult",
     "TrainingJobSpec",
+    "iter_transformers_text_deltas",
     # Pipeline loader (torch-dependent, may not be available)
     "PipelineLoader",
     "PipelineConfig",

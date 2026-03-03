@@ -14,6 +14,7 @@ _ALLOWED_DTYPES: frozenset[str] = frozenset({"fp16", "bf16", "fp8", "fp32", "int
 
 _RE_CLAUSE = re.compile(r"^\s*(>=|<=|==|~=|>|<)?\s*([0-9]+(?:\.[0-9]+)*)\s*$")
 _RE_VERSION_PREFIX = re.compile(r"^\s*([0-9]+(?:\.[0-9]+)*)")
+_RE_MODEL_SEGMENT = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 
 
 @dataclass(frozen=True)
@@ -27,11 +28,12 @@ class TensorhubToml:
     schema_version: int
     name: str
     main: str
-    gen_worker: str
     cuda: str | None
-    models: dict[str, TensorhubModelSpec]
-    function_models: dict[str, dict[str, TensorhubModelSpec]]  # function_name -> model_key -> spec
+    compute_capabilities: tuple[str, ...]
+    function_models: dict[str, dict[str, dict[str, TensorhubModelSpec]]]
+    # function_name -> payload_selector_field -> model_key -> spec
     function_resources: dict[str, dict[str, Any]]  # function_name -> runtime/resource hints
+    function_batch_dimensions: dict[str, str]  # function_name -> payload-root batch dimension path
     resources: dict[str, Any]
 
 
@@ -131,14 +133,12 @@ def constraint_satisfied(spec: str, version: str) -> bool:
 def _parse_model_spec(v: Any) -> TensorhubModelSpec:
     if isinstance(v, str):
         ref = v.strip()
-        if not ref:
-            raise ValueError("model ref cannot be empty")
+        _validate_endpoint_model_ref(ref, field="model ref")
         return TensorhubModelSpec(ref=ref, dtypes=_DEFAULT_DTYPES)
 
     if isinstance(v, Mapping):
         ref = str(v.get("ref") or "").strip()
-        if not ref:
-            raise ValueError("model spec missing ref")
+        _validate_endpoint_model_ref(ref, field="model spec ref")
         dtypes_raw = v.get("dtypes", None)
         if dtypes_raw is None:
             return TensorhubModelSpec(ref=ref, dtypes=_DEFAULT_DTYPES)
@@ -155,12 +155,54 @@ def _parse_model_spec(v: Any) -> TensorhubModelSpec:
     raise ValueError("model spec must be a string or a table {ref=..., dtypes=[...]}")
 
 
+def _validate_endpoint_model_ref(ref: str, *, field: str) -> None:
+    raw = (ref or "").strip()
+    if not raw:
+        raise ValueError(f"{field} cannot be empty")
+    if raw.lower() != raw:
+        raise ValueError(f"{field} must be lowercase: {raw!r}")
+    if raw.startswith("cozy:") or raw.startswith("hf:"):
+        raise ValueError(
+            f"{field} must not include a scheme prefix; use plain owner/repo form (got {raw!r})"
+        )
+
+    base = raw
+    if "@" in base:
+        if base.count("@") != 1:
+            raise ValueError(f"{field} has invalid digest selector: {raw!r}")
+        base, digest = base.split("@", 1)
+        if not digest.strip():
+            raise ValueError(f"{field} has empty digest selector: {raw!r}")
+
+    if ":" in base:
+        base, tag = base.rsplit(":", 1)
+        if not tag.strip():
+            raise ValueError(f"{field} has empty tag selector: {raw!r}")
+
+    parts = [p.strip() for p in base.split("/")]
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise ValueError(
+            f"{field} must be 'owner/repo' (optionally with :tag or @digest), got {raw!r}"
+        )
+    owner, repo = parts
+    if not _RE_MODEL_SEGMENT.match(owner):
+        raise ValueError(f"{field} has invalid owner segment: {owner!r}")
+    if not _RE_MODEL_SEGMENT.match(repo):
+        raise ValueError(f"{field} has invalid repo segment: {repo!r}")
+
+
 def _parse_function_resource_hints(v: Any) -> dict[str, Any]:
     if not isinstance(v, Mapping):
         return {}
+    if "max_concurrency" in v:
+        raise ValueError(
+            "function resource hint max_concurrency is not supported in tensorhub.toml; "
+            "use max_inflight_requests for orchestrator hints; "
+            "set local worker concurrency in code with @worker_function(ResourceRequirements(max_concurrency=...))"
+        )
     out: dict[str, Any] = {}
     for key in (
-        "max_concurrency",
+        "max_inflight_requests",
         "batch_size_min",
         "batch_size_target",
         "batch_size_max",
@@ -195,6 +237,73 @@ def _parse_function_resource_hints(v: Any) -> dict[str, Any]:
     return out
 
 
+def _parse_batch_dimension_path(raw: Any, *, field: str) -> str | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise ValueError(f"{field} must be a string")
+    s = raw.strip()
+    if not s:
+        return None
+    if s.startswith("input."):
+        raise ValueError(
+            f"{field} must be payload-root relative (for example, 'items' instead of 'input.items')"
+        )
+    return s
+
+
+def _parse_compute_capabilities(raw: Any, *, field: str) -> tuple[str, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not all(isinstance(x, str) for x in raw):
+        raise ValueError(f"{field} must be a list of strings")
+    out: list[str] = []
+    for item in raw:
+        token = item.strip()
+        if not token:
+            continue
+        # Exact/wildcard major forms: 8.0, 8.x
+        if re.match(r"^[0-9]+\.(?:[0-9]+|x)$", token):
+            out.append(token)
+            continue
+        # Range/comparator forms: >=12.0,<13.0
+        ok = True
+        for clause in token.split(","):
+            clause = clause.strip()
+            if not clause:
+                continue
+            if not _RE_CLAUSE.match(clause):
+                ok = False
+                break
+        if not ok:
+            raise ValueError(
+                f"invalid {field} entry {token!r}; expected forms like '8.0', '8.x', or '>=12.0,<13.0'"
+            )
+        out.append(token)
+    return tuple(out)
+
+
+def _parse_function_batch_dimension(v: Any, *, field_prefix: str) -> str | None:
+    if not isinstance(v, Mapping):
+        return None
+
+    for unsupported in (
+        "request_contract",
+        "batch_dimension_path",
+        "request_mode",
+        "max_items_per_request",
+        "dynamic_batching",
+        "partitioning",
+    ):
+        if unsupported in v:
+            raise ValueError(
+                f"{field_prefix}.{unsupported} is not supported; "
+                "only batch_dimension may be configured by endpoints"
+            )
+
+    return _parse_batch_dimension_path(v.get("batch_dimension"), field=f"{field_prefix}.batch_dimension")
+
+
 def load_tensorhub_toml(path: Path) -> TensorhubToml:
     data = tomllib.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
@@ -206,16 +315,13 @@ def load_tensorhub_toml(path: Path) -> TensorhubToml:
 
     name = str(data.get("name") or "").strip()
     main = str(data.get("main") or "").strip()
-    gen_worker = str(data.get("gen_worker") or "").strip()
     if not name:
         raise ValueError("tensorhub.toml missing name")
     if not main:
         raise ValueError("tensorhub.toml missing main")
-    if not gen_worker:
-        raise ValueError("tensorhub.toml missing gen_worker")
-    _validate_constraint(gen_worker, field="gen_worker")
 
     cuda: str | None = None
+    compute_capabilities: tuple[str, ...] = ()
     host = data.get("host")
     if isinstance(host, dict):
         req = host.get("requirements")
@@ -224,18 +330,27 @@ def load_tensorhub_toml(path: Path) -> TensorhubToml:
             if isinstance(raw, str) and raw.strip():
                 cuda = raw.strip()
                 _validate_constraint(cuda, field="cuda")
+            if "cuda_compute_capabilities" in req:
+                raise ValueError(
+                    "host.requirements.cuda_compute_capabilities is no longer supported; "
+                    "use host.requirements.compute_capabilities"
+                )
+            compute_capabilities = _parse_compute_capabilities(
+                req.get("compute_capabilities"),
+                field="host.requirements.compute_capabilities",
+            )
 
-    models: dict[str, TensorhubModelSpec] = {}
     raw_models = data.get("models")
-    if isinstance(raw_models, dict):
-        for k, v in raw_models.items():
-            key = str(k).strip()
-            if not key:
-                continue
-            models[key] = _parse_model_spec(v)
+    if isinstance(raw_models, dict) and raw_models:
+        raise ValueError(
+            "tensorhub.toml top-level [models] is no longer supported; "
+            "declare fixed models in code with ModelRef(Src.FIXED, ..., ref=..., dtypes=...) and "
+            "payload-selected keyspaces under [functions.<fn>.models.<payload_field>]"
+        )
 
-    function_models: dict[str, dict[str, TensorhubModelSpec]] = {}
+    function_models: dict[str, dict[str, dict[str, TensorhubModelSpec]]] = {}
     function_resources: dict[str, dict[str, Any]] = {}
+    function_batch_dimensions: dict[str, str] = {}
     raw_functions = data.get("functions")
     if isinstance(raw_functions, dict):
         for fn_name, fn_cfg in raw_functions.items():
@@ -243,16 +358,32 @@ def load_tensorhub_toml(path: Path) -> TensorhubToml:
             if not fn or not isinstance(fn_cfg, dict):
                 continue
             fn_models_raw = fn_cfg.get("models")
-            if not isinstance(fn_models_raw, dict):
-                continue
-            m: dict[str, TensorhubModelSpec] = {}
-            for k, v in fn_models_raw.items():
-                key = str(k).strip()
-                if not key:
-                    continue
-                m[key] = _parse_model_spec(v)
-            if m:
-                function_models[fn] = m
+            if isinstance(fn_models_raw, dict):
+                selector_map: dict[str, dict[str, TensorhubModelSpec]] = {}
+                for selector_name, selector_cfg in fn_models_raw.items():
+                    selector = str(selector_name).strip()
+                    if not selector:
+                        continue
+                    if not isinstance(selector_cfg, Mapping):
+                        raise ValueError(
+                            f"functions.{fn}.models.{selector} must be a table of model_key -> model spec "
+                            "(use [functions.<fn>.models.<payload_field>])"
+                        )
+                    if "ref" in selector_cfg:
+                        raise ValueError(
+                            f"functions.{fn}.models is in legacy flat shape; use "
+                            f"[functions.{fn}.models.<payload_field>] tables instead"
+                        )
+                    keyspace: dict[str, TensorhubModelSpec] = {}
+                    for model_key_raw, model_spec_raw in selector_cfg.items():
+                        model_key = str(model_key_raw).strip()
+                        if not model_key:
+                            continue
+                        keyspace[model_key] = _parse_model_spec(model_spec_raw)
+                    if keyspace:
+                        selector_map[selector] = keyspace
+                if selector_map:
+                    function_models[fn] = selector_map
 
             merged_hints: dict[str, Any] = {}
             runtime_hints = _parse_function_resource_hints(fn_cfg.get("runtime"))
@@ -264,21 +395,38 @@ def load_tensorhub_toml(path: Path) -> TensorhubToml:
             if merged_hints:
                 function_resources[fn] = merged_hints
 
+            batch_path = _parse_function_batch_dimension(fn_cfg, field_prefix=f"functions.{fn}")
+            if batch_path:
+                function_batch_dimensions[fn] = batch_path
+
     resources: dict[str, Any] = {}
     raw_resources = data.get("resources")
     if isinstance(raw_resources, dict):
-        for k in ("vram_gb", "ram_gb", "cpu_cores", "disk_gb"):
+        for k in ("vram_gb", "ram_gb", "cpu_cores", "disk_gb", "max_inflight_requests"):
             if k in raw_resources:
-                resources[k] = raw_resources[k]
+                val = raw_resources[k]
+                if k == "max_inflight_requests":
+                    try:
+                        iv = int(val)
+                    except Exception:
+                        raise ValueError("resources.max_inflight_requests must be an integer")
+                    if iv <= 0:
+                        raise ValueError("resources.max_inflight_requests must be > 0")
+                    resources[k] = iv
+                else:
+                    resources[k] = val
+    # Endpoint-level inflight default: sequential by default unless explicitly raised.
+    if "max_inflight_requests" not in resources:
+        resources["max_inflight_requests"] = 1
 
     return TensorhubToml(
         schema_version=1,
         name=name,
         main=main,
-        gen_worker=gen_worker,
         cuda=cuda,
-        models=models,
+        compute_capabilities=compute_capabilities,
         function_models=function_models,
         function_resources=function_resources,
+        function_batch_dimensions=function_batch_dimensions,
         resources=resources,
     )

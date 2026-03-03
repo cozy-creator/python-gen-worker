@@ -112,12 +112,7 @@ def stream(ctx: ActionContext, payload: Input) -> Iterator[Delta]:
 
 ### Model Injection
 
-Declare your model keyspace in `tensorhub.toml`:
-
-```toml
-[models]
-sd15 = "hf:stable-diffusion-v1-5/stable-diffusion-v1-5"
-```
+Declare fixed model refs in code:
 
 ```python
 from typing import Annotated
@@ -127,7 +122,15 @@ from gen_worker.injection import ModelRef, ModelRefSource as Src
 @worker_function()
 def generate(
     ctx: ActionContext,
-    pipe: Annotated[DiffusionPipeline, ModelRef(Src.FIXED, "sd15")],  # key from tensorhub.toml [models]
+    pipe: Annotated[
+        DiffusionPipeline,
+        ModelRef(
+            Src.FIXED,
+            "sd15",
+            ref="stable-diffusion-v1-5/stable-diffusion-v1-5",
+            dtypes=("fp16", "bf16"),
+        ),
+    ],
     payload: Input,
 ) -> Output:
     # Use the injected pipeline (loaded/cached by the worker's model manager).
@@ -136,13 +139,13 @@ def generate(
 
 ### Payload-Selected Model (Short Key)
 
-If you want the client payload to choose which repo to run, declare a short-key
-mapping in `tensorhub.toml` and use `ModelRef(PAYLOAD, ...)`:
+If you want the client payload to choose which repo to run, declare selector
+keyspaces in `tensorhub.toml` and use `ModelRef(INPUT_PAYLOAD, ...)`:
 
 ```toml
-[models]
-sd15 = "hf:stable-diffusion-v1-5/stable-diffusion-v1-5"
-flux = "hf:black-forest-labs/FLUX.2-klein-4B"
+[functions.generate.models.model]
+sd15 = { ref = "stable-diffusion-v1-5/stable-diffusion-v1-5", dtypes = ["fp16", "bf16"] }
+flux = { ref = "black-forest-labs/flux.2-klein-4b", dtypes = ["bf16"] }
 ```
 
 ```python
@@ -159,16 +162,15 @@ class Input(msgspec.Struct):
 @worker_function()
 def generate(
     ctx: ActionContext,
-    pipe: Annotated[DiffusionPipeline, ModelRef(Src.PAYLOAD, "model")],
+    pipe: Annotated[DiffusionPipeline, ModelRef(Src.INPUT_PAYLOAD, "model")],
     payload: Input,
 ):
     ...
 ```
 
 Note: by default the worker requires payload model selection to use a known
-short-key from `[models]` (tensorhub.toml). It will not accept arbitrary repo refs in
-the payload. `ModelRef(FIXED, ...)` is also restricted to keys declared in the
-manifest mapping (no inline `hf:`/`cozy:` refs).
+short-key from the selector keyspace in `tensorhub.toml`. It will not accept
+arbitrary repo refs in the payload.
 
 ### Saving Files
 
@@ -176,7 +178,7 @@ manifest mapping (no inline `hf:`/`cozy:` refs).
 @worker_function()
 def process(ctx: ActionContext, payload: Input) -> Output:
     # Save bytes and get asset reference
-    asset = ctx.save_bytes(f"runs/{ctx.run_id}/outputs/output.png", image_bytes)
+    asset = ctx.save_bytes(f"runs/{ctx.request_id}/outputs/output.png", image_bytes)
     return Output(result=asset.ref)
 ```
 
@@ -231,23 +233,23 @@ docker run --rm --gpus all -p 8081:8081 \
   python -m gen_worker.testing.http_runner --listen 0.0.0.0:8081 --outputs /outputs
 ```
 
-Prefetch a public model (example: SD1.5 on Hugging Face, via Cozy Hub mirror):
+Prefetch a public model (example: SD1.5):
 
 ```bash
 curl -sS -X POST 'http://localhost:8081/v1/models/prefetch' \
   -H 'content-type: application/json' \
-  -d '{"models":[{"ref":"hf:runwayml/stable-diffusion-v1-5@main","dtypes":["bf16","fp16"]}]}'
+  -d '{"models":[{"ref":"runwayml/stable-diffusion-v1-5","dtypes":["bf16","fp16"]}]}'
 ```
 
 Invoke a function:
 
 ```bash
-curl -sS -X POST 'http://localhost:8081/v1/run/generate' \
+curl -sS -X POST 'http://localhost:8081/v1/request/generate' \
   -H 'content-type: application/json' \
   -d '{"payload": {"prompt": "a tiny robot watering a bonsai, macro photo"}}'
 ```
 
-Outputs are written under `/outputs/runs/<run_id>/outputs/...` (matching Cozy ref semantics).
+Outputs are written under `/outputs/runs/<request_id>/outputs/...` (matching Cozy ref semantics).
 
 ## Configuration
 
@@ -257,18 +259,16 @@ Outputs are written under `/outputs/runs/<run_id>/outputs/...` (matching Cozy re
 schema_version = 1
 name = "my-worker"
 main = "my_pkg.main"
-gen_worker = ">=0.2.0,<0.3.0"
 
-[models]
-sdxl = { ref = "hf:stabilityai/stable-diffusion-xl-base-1.0", dtypes = ["fp16","bf16"] }
+[functions.generate]
+batch_dimension = "items"  # optional
+
+[functions.generate.models.model_key]
+sdxl = { ref = "stabilityai/stable-diffusion-xl-base-1.0", dtypes = ["fp16", "bf16"] }
+
+[resources]
+max_inflight_requests = 1
 ```
-
-`[models]` entries support two forms:
-
-- String form (defaults to `dtypes=["fp16","bf16"]`):
-  - `sd15 = "hf:stable-diffusion-v1-5/stable-diffusion-v1-5"`
-- Table form:
-  - `flux_fp8 = { ref = "hf:black-forest-labs/FLUX.2-klein-4B", dtypes = ["fp8"] }`
 
 ### Environment Variables
 
@@ -304,8 +304,7 @@ Local dev / advanced (not injected by orchestrator):
 | `WORKER_MAX_CONCURRENT_DOWNLOADS` | 2 | Max parallel model downloads |
 | `TENSORHUB_URL` | - | Cozy Hub base URL (used for public model requests and, if enabled, Cozy Hub API resolve) |
 | `WORKER_ALLOW_TENSORHUB_API_RESOLVE` | `false` | Local dev only: allow the worker to call Cozy Hub resolve APIs |
-| `TENSORHUB_TOKEN` | - | Cozy Hub bearer token (optional; enables ingest-if-missing for public HF models, if Cozy Hub requires auth) |
-| `HF_TOKEN` | - | Hugging Face token (for private `hf:` refs) |
+| `TENSORHUB_TOKEN` | - | Cozy Hub bearer token (optional; enables ingest-if-missing for public models, if Cozy Hub requires auth) |
 | `TRAINER_JOB_SPEC_PATH` | `/app/.cozy/trainer_job.json` | Trainer-mode JSON job manifest path |
 | `TRAINER_PLUGIN` | - | Trainer plugin import (`module:symbol`); optional if provided in job JSON |
 | `TRAINER_CHECKPOINTS_DIR` | `/tmp/training/checkpoints` | Local checkpoint output directory in trainer mode |
@@ -319,30 +318,14 @@ The worker can emit best-effort performance/debug metrics to gen-orchestrator vi
 See `docs/metrics.md`.
 See `docs/worker-stuck-visibility.md` for startup/task watchdog events used to diagnose stuck workers.
 
-### Hugging Face (`hf:`) download behavior
+### Model Download Behavior
 
-By default, `hf:` model refs **do not download the full repo**. The worker uses `huggingface_hub.snapshot_download(allow_patterns=...)` to avoid pulling huge legacy weights.
+Model refs are plain lower-case strings:
+- `owner/repo`
+- `owner/repo:tag`
+- `owner/repo@blake3:<digest>`
 
-Defaults:
-- Download only what a diffusers pipeline needs (derived from `model_index.json`).
-- Skip `safety_checker` and `feature_extractor` by default.
-- Download only reduced-precision **safetensors** weights (`fp16`/`bf16`); never download `.ckpt` or `.bin` by default.
-- For sharded safetensors, also download the `*.safetensors.index.json` and the referenced shard files.
-
-Overrides:
-- `COZY_HF_COMPONENTS="unet,vae,text_encoder,tokenizer,scheduler"`: hard override component list.
-- `COZY_HF_INCLUDE_OPTIONAL_COMPONENTS=1`: include components like `safety_checker` / `feature_extractor` if present.
-- `COZY_HF_WEIGHT_PRECISIONS="fp16,bf16"`: change which weight suffixes are accepted (add `fp32` only if you really need it).
-- `COZY_HF_ALLOW_ROOT_JSON=1`: allow additional small root `*.json` files (some repos need extra root config).
-- `COZY_HF_FULL_REPO_DOWNLOAD=1`: disable filtering and download the entire repo (not recommended; can be 10s of GB).
-
-### Cozy Hub (`cozy:`) download behavior
-
-Cozy refs use release selectors:
-- `cozy:owner/repo:tag` (for example `:latest`, `:prod`, `:5.3`)
-- `cozy:owner/repo@blake3:<digest>` (immutable pin)
-
-Tags are mutable pointers, but they resolve only to published versions.
+Tags are mutable pointers that resolve to published versions.
 
 Cozy snapshot/object file downloads are written to `*.part` and then atomically renamed on success. If a `*.part` file exists from a previous interrupted download, the worker attempts to resume it using HTTP `Range` requests (if supported by the presigned object-store URL), and falls back to a full re-download if Range is not supported.
 

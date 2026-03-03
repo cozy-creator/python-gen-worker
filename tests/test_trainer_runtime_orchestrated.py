@@ -168,7 +168,7 @@ def _start_test_server(token: str, dataset_bytes: bytes, resume_payload: bytes, 
 
 def test_trainer_runtime_startup_requires_capability_token(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     trainer_import = _register_trainer_module(monkeypatch, "tmp_orch_startup_mod", "StartupTrainer")
-    spec = {"run_id": "run-orch-startup", "trainer": trainer_import, "max_steps": 1, "mock_batches": [1]}
+    spec = {"request_id": "run-orch-startup", "trainer": trainer_import, "max_steps": 1, "mock_batches": [1]}
     spec_path = tmp_path / "trainer_job.json"
     spec_path.write_text(json.dumps(spec), encoding="utf-8")
 
@@ -192,7 +192,7 @@ def test_trainer_runtime_orchestrated_happy_path_with_materialize_resume_and_upl
         ckpt = tmp_path / "ckpt"
         samples = tmp_path / "samples"
         spec = {
-            "run_id": "run-orch-happy",
+            "request_id": "run-orch-happy",
             "trainer": trainer_import,
             "trainer_api_version": "v1",
             "max_steps": 2,
@@ -249,7 +249,7 @@ def test_trainer_runtime_orchestrated_uploads_checkpoint_bytes_to_tensorhub(
         ckpt = tmp_path / "ckpt"
         samples = tmp_path / "samples"
         spec = {
-            "run_id": "run-orch-upload-bytes",
+            "request_id": "run-orch-upload-bytes",
             "owner": "00000000-0000-0000-0000-000000000001",
             "trainer": trainer_import,
             "trainer_api_version": "v1",
@@ -289,7 +289,7 @@ def test_trainer_runtime_orchestrated_uploads_checkpoint_bytes_to_tensorhub(
 
 def test_trainer_runtime_cancel_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     trainer_import = _register_trainer_module(monkeypatch, "tmp_orch_cancel_mod", "CancelTrainer")
-    spec = {"run_id": "run-orch-cancel", "trainer": trainer_import, "max_steps": 3, "metric_every": 1, "mock_batches": [1, 2, 3]}
+    spec = {"request_id": "run-orch-cancel", "trainer": trainer_import, "max_steps": 3, "metric_every": 1, "mock_batches": [1, 2, 3]}
     spec_path = tmp_path / "trainer_job_cancel.json"
     spec_path.write_text(json.dumps(spec), encoding="utf-8")
     events = tmp_path / "events.jsonl"
@@ -320,7 +320,7 @@ def test_trainer_runtime_upload_failure_reports_upload_category(monkeypatch: pyt
     )
     try:
         spec = {
-            "run_id": "run-orch-upload-fail",
+            "request_id": "run-orch-upload-fail",
             "trainer": trainer_import,
             "max_steps": 1,
             "metric_every": 1,
@@ -387,7 +387,7 @@ def test_trainer_runtime_timeout_path(monkeypatch: pytest.MonkeyPatch, tmp_path:
     monkeypatch.setitem(sys.modules, "tmp_orch_timeout_mod", mod)
 
     spec = {
-        "run_id": "run-orch-timeout",
+        "request_id": "run-orch-timeout",
         "trainer": "tmp_orch_timeout_mod:SlowTrainer",
         "max_steps": 2,
         "metric_every": 1,
@@ -423,7 +423,7 @@ def test_trainer_runtime_resume_idempotent_skips_when_final_exists(monkeypatch: 
         (ckpt / "final.json").write_text(json.dumps({"state": {"loaded": True}}), encoding="utf-8")
         events = tmp_path / "events.jsonl"
         spec = {
-            "run_id": "run-orch-resume-skip",
+            "request_id": "run-orch-resume-skip",
             "trainer": trainer_import,
             "max_steps": 5,
             "resume_from_latest": True,

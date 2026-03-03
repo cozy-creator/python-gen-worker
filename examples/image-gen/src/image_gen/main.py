@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from io import BytesIO
 from typing import Annotated
 
@@ -15,7 +16,19 @@ from gen_worker.types import Asset
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
-sdxl_resources = ResourceRequirements()
+sdxl_resources = ResourceRequirements(max_concurrency=1)
+_pipeline_locks_guard = threading.Lock()
+_pipeline_locks: dict[int, threading.Lock] = {}
+
+
+def _lock_for_pipeline(pipeline: object) -> threading.Lock:
+    key = id(pipeline)
+    with _pipeline_locks_guard:
+        lock = _pipeline_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _pipeline_locks[key] = lock
+    return lock
 
 
 class GenerateInput(msgspec.Struct):
@@ -35,29 +48,36 @@ class GenerateOutput(msgspec.Struct):
 def generate_image(
     ctx: ActionContext,
     pipeline: Annotated[
-        StableDiffusionXLPipeline, ModelRef(Src.FIXED, "sdxl")  # Key from tensorhub.toml [models]
+        StableDiffusionXLPipeline,
+        ModelRef(
+            Src.FIXED,
+            "sdxl",
+            ref="stabilityai/stable-diffusion-xl-base-1.0",
+            dtypes=("fp16", "bf16"),
+        ),
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:
     if ctx.is_canceled():
         raise InterruptedError("canceled")
 
-    logger.info("[run_id=%s] image-gen prompt=%r", ctx.run_id, payload.prompt)
+    logger.info("[request_id=%s] image-gen prompt=%r", ctx.request_id, payload.prompt)
 
     steps = max(20, min(50, int(payload.num_inference_steps)))
-    result = pipeline(
-        prompt=payload.prompt,
-        negative_prompt=payload.negative_prompt,
-        num_inference_steps=steps,
-        guidance_scale=payload.guidance_scale,
-        width=payload.width,
-        height=payload.height,
-    )
+    with _lock_for_pipeline(pipeline):
+        result = pipeline(
+            prompt=payload.prompt,
+            negative_prompt=payload.negative_prompt,
+            num_inference_steps=steps,
+            guidance_scale=payload.guidance_scale,
+            width=payload.width,
+            height=payload.height,
+        )
     image: Image.Image = result.images[0]
 
     buf = BytesIO()
     image.save(buf, format="PNG")
-    out = ctx.save_bytes(f"runs/{ctx.run_id}/outputs/image.png", buf.getvalue())
+    out = ctx.save_bytes(f"runs/{ctx.request_id}/outputs/image.png", buf.getvalue())
     
     return GenerateOutput(image=out)
 
@@ -69,13 +89,13 @@ def generate_image(
 #     Consider using generate_and_upload_image for complete workflows.
 #     """
 #     if pipeline is None:
-#         logger.error(f"Run {ctx.run_id} for generate_image received a None pipeline object.")
+#         logger.error(f"Run {ctx.request_id} for generate_image received a None pipeline object.")
 #         raise ValueError("Pipeline object cannot be None for image generation.")
 
 #     prompt = prompt_details.get("prompt", "a beautiful landscape")
 #     seed = int(prompt_details.get("seed", 42))
 
-#     logger.info(f"[run_id={ctx.run_id}] Generating image for prompt: '{prompt}', seed: {seed}")
+#     logger.info(f"[request_id={ctx.request_id}] Generating image for prompt: '{prompt}', seed: {seed}")
 
 #     if ctx.is_canceled():
 #         raise InterruptedError("Image generation cancelled")
@@ -93,7 +113,7 @@ def generate_image(
 #     image_result.save(buffer, format="PNG")
 #     img_bytes = buffer.getvalue()
     
-#     logger.info(f"[run_id={ctx.run_id}] Image generation complete ({len(img_bytes)} bytes).")
+#     logger.info(f"[request_id={ctx.request_id}] Image generation complete ({len(img_bytes)} bytes).")
 #     return img_bytes
 
 
@@ -105,7 +125,7 @@ def generate_image(
 #     Legacy function: Uploads image bytes to S3.
 #     Consider using generate_and_upload_image for complete workflows.
 #     """
-#     logger.info(f"[run_id={ctx.run_id}] Received S3 upload request.")
+#     logger.info(f"[request_id={ctx.request_id}] Received S3 upload request.")
 
 #     image_bytes = upload_details.get("image_bytes")
 #     filename = upload_details.get("filename")

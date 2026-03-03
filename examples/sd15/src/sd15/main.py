@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from io import BytesIO
 from typing import Annotated, Optional
 
@@ -14,6 +15,19 @@ from gen_worker.types import Asset
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+_sd15_resources = ResourceRequirements(max_concurrency=1)
+_pipeline_locks_guard = threading.Lock()
+_pipeline_locks: dict[int, threading.Lock] = {}
+
+
+def _lock_for_pipeline(pipeline: object) -> threading.Lock:
+    key = id(pipeline)
+    with _pipeline_locks_guard:
+        lock = _pipeline_locks.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _pipeline_locks[key] = lock
+    return lock
 
 
 class GenerateInput(msgspec.Struct):
@@ -30,11 +44,17 @@ class GenerateOutput(msgspec.Struct):
     image: Asset
 
 
-@worker_function(ResourceRequirements())
+@worker_function(_sd15_resources)
 def generate(
     ctx: ActionContext,
     pipeline: Annotated[
-        StableDiffusionPipeline, ModelRef(Src.FIXED, "sd15")  # Key from tensorhub.toml [models]
+        StableDiffusionPipeline,
+        ModelRef(
+            Src.FIXED,
+            "sd15",
+            ref="stable-diffusion-v1-5/stable-diffusion-v1-5",
+            dtypes=("fp16", "bf16"),
+        ),
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:
@@ -47,8 +67,8 @@ def generate(
         steps = 25
 
     logger.info(
-        "[run_id=%s] sd15 prompt=%r steps=%s (requested=%s)",
-        ctx.run_id,
+        "[request_id=%s] sd15 prompt=%r steps=%s (requested=%s)",
+        ctx.request_id,
         payload.prompt,
         steps,
         requested_steps,
@@ -61,28 +81,35 @@ def generate(
         device = "cuda" if torch.cuda.is_available() else "cpu"
         generator = torch.Generator(device=device).manual_seed(payload.seed)
 
-    result = pipeline(
-        prompt=payload.prompt,
-        negative_prompt=payload.negative_prompt,
-        num_inference_steps=steps,
-        guidance_scale=payload.guidance_scale,
-        width=payload.width,
-        height=payload.height,
-        generator=generator,
-    )
+    with _lock_for_pipeline(pipeline):
+        result = pipeline(
+            prompt=payload.prompt,
+            negative_prompt=payload.negative_prompt,
+            num_inference_steps=steps,
+            guidance_scale=payload.guidance_scale,
+            width=payload.width,
+            height=payload.height,
+            generator=generator,
+        )
     image: Image.Image = result.images[0]
 
     buf = BytesIO()
     image.save(buf, format="PNG")
-    out = ctx.save_bytes(f"runs/{ctx.run_id}/outputs/image.png", buf.getvalue())
+    out = ctx.save_bytes(f"runs/{ctx.request_id}/outputs/image.png", buf.getvalue())
     return GenerateOutput(image=out)
 
 
-@worker_function(ResourceRequirements())
+@worker_function(_sd15_resources)
 def generate_fp8(
     ctx: ActionContext,
     pipeline: Annotated[
-        StableDiffusionPipeline, ModelRef(Src.FIXED, "sd15_fp8")  # Key from tensorhub.toml [models]
+        StableDiffusionPipeline,
+        ModelRef(
+            Src.FIXED,
+            "sd15_fp8",
+            ref="stable-diffusion-v1-5/stable-diffusion-v1-5",
+            dtypes=("fp8",),
+        ),
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:
@@ -95,11 +122,17 @@ def generate_fp8(
     return generate(ctx, pipeline, payload)
 
 
-@worker_function(ResourceRequirements())
+@worker_function(_sd15_resources)
 def generate_int8(
     ctx: ActionContext,
     pipeline: Annotated[
-        StableDiffusionPipeline, ModelRef(Src.FIXED, "sd15_int8")  # Key from tensorhub.toml [models]
+        StableDiffusionPipeline,
+        ModelRef(
+            Src.FIXED,
+            "sd15_int8",
+            ref="stable-diffusion-v1-5/stable-diffusion-v1-5",
+            dtypes=("int8",),
+        ),
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:
@@ -112,11 +145,17 @@ def generate_int8(
     return generate(ctx, pipeline, payload)
 
 
-@worker_function(ResourceRequirements())
+@worker_function(_sd15_resources)
 def generate_int4(
     ctx: ActionContext,
     pipeline: Annotated[
-        StableDiffusionPipeline, ModelRef(Src.FIXED, "sd15_int4")  # Key from tensorhub.toml [models]
+        StableDiffusionPipeline,
+        ModelRef(
+            Src.FIXED,
+            "sd15_int4",
+            ref="stable-diffusion-v1-5/stable-diffusion-v1-5",
+            dtypes=("int4",),
+        ),
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:

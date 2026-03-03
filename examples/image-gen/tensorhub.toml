@@ -2,13 +2,9 @@ schema_version = 1
 
 name = "image-gen"
 main = "image_gen.main"
-gen_worker = ">=0.2.0"
 
 [host.requirements]
 cuda = "12.6"
-
-[models]
-sdxl = "hf:stabilityai/stable-diffusion-xl-base-1.0"
 
 [resources]
 vram_gb = 12

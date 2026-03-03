@@ -1,64 +1,56 @@
 """Tests for model extraction in discover.py."""
 
-import io
 import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 from gen_worker.discover import discover_manifest
 
 
 def _cleanup_modules(prefix: str) -> None:
-    """Clean up imported test modules to avoid pollution between tests."""
     for mod in list(sys.modules.keys()):
         if mod.startswith(prefix):
             del sys.modules[mod]
 
 
 class TestDiscoverModels(unittest.TestCase):
-    """Tests for model extraction from function signatures."""
-
-    def test_required_models_extraction(self) -> None:
-        """Test that required_models is extracted from injection_json."""
+    def test_discovery_emits_fixed_and_payload_keyspaces(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             original_cwd = os.getcwd()
             original_path = sys.path.copy()
-
             try:
                 os.chdir(root)
                 sys.path.insert(0, str(root / "src"))
 
-                # Create pyproject.toml with models
-                pyproject = root / "pyproject.toml"
-                pyproject.write_text("""
+                (root / "pyproject.toml").write_text(
+                    """
 [project]
 name = "test-project"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = ["gen-worker"]
-""")
+""".lstrip(),
+                    encoding="utf-8",
+                )
                 (root / "tensorhub.toml").write_text(
                     """
 schema_version = 1
 name = "test-project"
 main = "funcs_a"
-gen_worker = ">=0"
 
-[models]
-sdxl = { ref = "stabilityai/stable-diffusion-xl-base-1.0", dtypes = ["fp16","bf16"] }
-controlnet = "lllyasviel/control_v11p_sd15_canny"
+[functions.generate_dynamic.models.model_key]
+base = { ref = "stabilityai/stable-diffusion-xl-base-1.0", dtypes = ["fp16", "bf16"] }
 """.lstrip(),
                     encoding="utf-8",
                 )
 
-                # Create test module
                 src_dir = root / "src" / "funcs_a"
                 src_dir.mkdir(parents=True)
-                (src_dir / "__init__.py").write_text("""
+                (src_dir / "__init__.py").write_text(
+                    """
 from typing import Annotated
 import msgspec
 from gen_worker import ActionContext, worker_function
@@ -66,6 +58,7 @@ from gen_worker.injection import ModelRef, ModelRefSource as Src
 
 class Input(msgspec.Struct):
     prompt: str
+    model_key: str = "base"
 
 class Output(msgspec.Struct):
     result: str
@@ -74,18 +67,17 @@ class MockPipeline:
     pass
 
 @worker_function()
-def generate(
+def generate_fixed(
     ctx: ActionContext,
-    pipeline: Annotated[MockPipeline, ModelRef(Src.FIXED, "sdxl")],
-    payload: Input,
-) -> Output:
-    return Output(result="ok")
-
-@worker_function()
-def generate_with_cn(
-    ctx: ActionContext,
-    pipeline: Annotated[MockPipeline, ModelRef(Src.FIXED, "sdxl")],
-    cn: Annotated[MockPipeline, ModelRef(Src.FIXED, "controlnet")],
+    pipeline: Annotated[
+        MockPipeline,
+        ModelRef(
+            Src.FIXED,
+            "sdxl",
+            ref="stabilityai/stable-diffusion-xl-base-1.0",
+            dtypes=("fp16", "bf16"),
+        ),
+    ],
     payload: Input,
 ) -> Output:
     return Output(result="ok")
@@ -93,87 +85,75 @@ def generate_with_cn(
 @worker_function()
 def generate_dynamic(
     ctx: ActionContext,
-    pipeline: Annotated[MockPipeline, ModelRef(Src.PAYLOAD, "model_key")],
+    pipeline: Annotated[MockPipeline, ModelRef(Src.INPUT_PAYLOAD, "model_key")],
     payload: Input,
 ) -> Output:
     return Output(result="ok")
-""")
-
-                # Run discovery
-                manifest = discover_manifest(root)
-
-                # Check functions have required_models
-                funcs = {f["name"]: f for f in manifest["functions"]}
-                funcs_by_python_name = {f["python_name"]: f for f in manifest["functions"]}
-
-                # generate: needs sdxl
-                self.assertIn("generate", funcs)
-                self.assertEqual(funcs["generate"]["required_models"], ["sdxl"])
-
-                # generate_with_cn: needs sdxl and controlnet
-                self.assertIn("generate_with_cn", funcs_by_python_name)
-                self.assertEqual(
-                    sorted(funcs_by_python_name["generate_with_cn"]["required_models"]),
-                    ["controlnet", "sdxl"],
+""".lstrip(),
+                    encoding="utf-8",
                 )
 
-                # generate_dynamic: PAYLOAD source, so no required_models
-                self.assertIn("generate_dynamic", funcs_by_python_name)
-                self.assertEqual(funcs_by_python_name["generate_dynamic"]["required_models"], [])
+                manifest = discover_manifest(root)
+                funcs_by_python = {f["python_name"]: f for f in manifest["functions"]}
+
+                self.assertEqual(funcs_by_python["generate_fixed"]["required_models"], ["sdxl"])
+                self.assertEqual(funcs_by_python["generate_dynamic"]["required_models"], [])
                 self.assertEqual(
-                    funcs_by_python_name["generate_dynamic"]["payload_repo_selectors"],
+                    funcs_by_python["generate_dynamic"]["payload_repo_selectors"],
                     [{"field": "model_key", "kind": "short_key"}],
                 )
 
-                # Per-function models_by_function should be present (includes dtype constraints).
-                self.assertIn("models_by_function", manifest)
                 mbf = manifest["models_by_function"]
-                self.assertIn("generate", mbf)
-                self.assertEqual(mbf["generate"]["sdxl"]["ref"], "stabilityai/stable-diffusion-xl-base-1.0")
-                self.assertEqual(mbf["generate"]["sdxl"]["dtypes"], ["fp16", "bf16"])
+                self.assertEqual(
+                    mbf["generate-fixed"]["fixed"]["sdxl"]["ref"],
+                    "stabilityai/stable-diffusion-xl-base-1.0",
+                )
+                self.assertEqual(
+                    mbf["generate-fixed"]["fixed"]["sdxl"]["dtypes"],
+                    ["fp16", "bf16"],
+                )
+                self.assertEqual(
+                    mbf["generate-dynamic"]["payload_selectors"]["model_key"]["base"]["ref"],
+                    "stabilityai/stable-diffusion-xl-base-1.0",
+                )
 
             finally:
                 os.chdir(original_cwd)
                 sys.path[:] = original_path
                 _cleanup_modules("funcs_a")
 
-    def test_missing_model_key_fails(self) -> None:
-        """Test that missing fixed model keys fail discovery (build-time validation)."""
+    def test_missing_fixed_ref_fails_discovery(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             original_cwd = os.getcwd()
             original_path = sys.path.copy()
-
             try:
                 os.chdir(root)
                 sys.path.insert(0, str(root / "src"))
 
-                # Create pyproject.toml WITHOUT the required model
-                pyproject = root / "pyproject.toml"
-                pyproject.write_text("""
+                (root / "pyproject.toml").write_text(
+                    """
 [project]
 name = "test-project"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = ["gen-worker"]
-""")
+""".lstrip(),
+                    encoding="utf-8",
+                )
                 (root / "tensorhub.toml").write_text(
                     """
 schema_version = 1
 name = "test-project"
 main = "funcs_b"
-gen_worker = ">=0"
-
-[models]
-other = "some/other-model"
 """.lstrip(),
                     encoding="utf-8",
                 )
 
-                # Create test module that requires sdxl
                 src_dir = root / "src" / "funcs_b"
                 src_dir.mkdir(parents=True)
-                (src_dir / "__init__.py").write_text("""
+                (src_dir / "__init__.py").write_text(
+                    """
 from typing import Annotated
 import msgspec
 from gen_worker import ActionContext, worker_function
@@ -195,143 +175,214 @@ def generate(
     payload: Input,
 ) -> Output:
     return Output(result="ok")
-""")
+""".lstrip(),
+                    encoding="utf-8",
+                )
 
                 with self.assertRaises(ValueError) as ctx:
                     discover_manifest(root)
-                self.assertIn("sdxl", str(ctx.exception))
+                self.assertIn("FIXED model keys", str(ctx.exception))
 
             finally:
                 os.chdir(original_cwd)
                 sys.path[:] = original_path
                 _cleanup_modules("funcs_b")
 
-
-class TestManifestModelsField(unittest.TestCase):
-    """Tests for top-level models field in manifest."""
-
-    def test_models_from_config(self) -> None:
-        """Test that models from [models] (tensorhub.toml) are included."""
+    def test_missing_payload_keyspace_fails_discovery(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             original_cwd = os.getcwd()
             original_path = sys.path.copy()
-
             try:
                 os.chdir(root)
                 sys.path.insert(0, str(root / "src"))
 
-                pyproject = root / "pyproject.toml"
-                pyproject.write_text("""
+                (root / "pyproject.toml").write_text(
+                    """
 [project]
 name = "test-project"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = ["gen-worker"]
-""")
+""".lstrip(),
+                    encoding="utf-8",
+                )
                 (root / "tensorhub.toml").write_text(
                     """
 schema_version = 1
 name = "test-project"
 main = "funcs_c"
-gen_worker = ">=0"
-
-[models]
-model-a = "org/model-a"
-model-b = { ref = "org/model-b", dtypes = ["fp8"] }
 """.lstrip(),
                     encoding="utf-8",
                 )
 
                 src_dir = root / "src" / "funcs_c"
                 src_dir.mkdir(parents=True)
-                (src_dir / "__init__.py").write_text("""
+                (src_dir / "__init__.py").write_text(
+                    """
+from typing import Annotated
 import msgspec
 from gen_worker import ActionContext, worker_function
+from gen_worker.injection import ModelRef, ModelRefSource as Src
 
 class Input(msgspec.Struct):
-    x: int
+    prompt: str
+    model_key: str
 
 class Output(msgspec.Struct):
-    y: int
+    result: str
+
+class MockPipeline:
+    pass
 
 @worker_function()
-def simple(ctx: ActionContext, payload: Input) -> Output:
-    return Output(y=payload.x)
-""")
+def generate(
+    ctx: ActionContext,
+    pipeline: Annotated[MockPipeline, ModelRef(Src.INPUT_PAYLOAD, "model_key")],
+    payload: Input,
+) -> Output:
+    return Output(result="ok")
+""".lstrip(),
+                    encoding="utf-8",
+                )
 
-                manifest = discover_manifest(root)
-
-                self.assertIn("models_by_function", manifest)
-                mbf = manifest["models_by_function"]
-                self.assertIn("simple", mbf)
-                self.assertEqual(mbf["simple"]["model-a"]["ref"], "org/model-a")
-                self.assertEqual(mbf["simple"]["model-a"]["dtypes"], ["fp16", "bf16"])
-                self.assertEqual(mbf["simple"]["model-b"]["ref"], "org/model-b")
-                self.assertEqual(mbf["simple"]["model-b"]["dtypes"], ["fp8"])
+                with self.assertRaises(ValueError) as ctx:
+                    discover_manifest(root)
+                self.assertIn("[functions.generate.models.model_key]", str(ctx.exception))
 
             finally:
                 os.chdir(original_cwd)
                 sys.path[:] = original_path
                 _cleanup_modules("funcs_c")
 
-    def test_no_models_section(self) -> None:
-        """Test manifest when no [models] is defined."""
+    def test_batch_dimension_emitted(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             original_cwd = os.getcwd()
             original_path = sys.path.copy()
-
             try:
                 os.chdir(root)
                 sys.path.insert(0, str(root / "src"))
 
-                pyproject = root / "pyproject.toml"
-                pyproject.write_text("""
+                (root / "pyproject.toml").write_text(
+                    """
 [project]
 name = "test-project"
 version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = ["gen-worker"]
-""")
+""".lstrip(),
+                    encoding="utf-8",
+                )
                 (root / "tensorhub.toml").write_text(
                     """
 schema_version = 1
 name = "test-project"
 main = "funcs_d"
-gen_worker = ">=0"
+
+[functions.caption]
+batch_dimension = "items"
 """.lstrip(),
                     encoding="utf-8",
                 )
 
                 src_dir = root / "src" / "funcs_d"
                 src_dir.mkdir(parents=True)
-                (src_dir / "__init__.py").write_text("""
+                (src_dir / "__init__.py").write_text(
+                    """
 import msgspec
 from gen_worker import ActionContext, worker_function
 
 class Input(msgspec.Struct):
-    x: int
+    items: list[str]
 
 class Output(msgspec.Struct):
-    y: int
+    ok: bool
 
 @worker_function()
-def simple(ctx: ActionContext, payload: Input) -> Output:
-    return Output(y=payload.x)
-""")
+def caption(ctx: ActionContext, payload: Input) -> Output:
+    return Output(ok=True)
+""".lstrip(),
+                    encoding="utf-8",
+                )
 
                 manifest = discover_manifest(root)
-
-                # No models in config means no models field
-                self.assertNotIn("models_by_function", manifest)
-                # Function should have empty required_models
-                self.assertEqual(manifest["functions"][0]["required_models"], [])
+                fn = next(f for f in manifest["functions"] if f["name"] == "caption")
+                self.assertEqual(fn["batch_dimension"], "items")
 
             finally:
                 os.chdir(original_cwd)
                 sys.path[:] = original_path
                 _cleanup_modules("funcs_d")
+
+    def test_fixed_ref_with_scheme_prefix_fails_discovery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            original_cwd = os.getcwd()
+            original_path = sys.path.copy()
+            try:
+                os.chdir(root)
+                sys.path.insert(0, str(root / "src"))
+
+                (root / "pyproject.toml").write_text(
+                    """
+[project]
+name = "test-project"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["gen-worker"]
+""".lstrip(),
+                    encoding="utf-8",
+                )
+                (root / "tensorhub.toml").write_text(
+                    """
+schema_version = 1
+name = "test-project"
+main = "funcs_e"
+""".lstrip(),
+                    encoding="utf-8",
+                )
+
+                src_dir = root / "src" / "funcs_e"
+                src_dir.mkdir(parents=True)
+                (src_dir / "__init__.py").write_text(
+                    """
+from typing import Annotated
+import msgspec
+from gen_worker import ActionContext, worker_function
+from gen_worker.injection import ModelRef, ModelRefSource as Src
+
+class Input(msgspec.Struct):
+    prompt: str
+
+class Output(msgspec.Struct):
+    result: str
+
+class MockPipeline:
+    pass
+
+@worker_function()
+def generate(
+    ctx: ActionContext,
+    pipeline: Annotated[
+        MockPipeline,
+        ModelRef(Src.FIXED, "sdxl", ref="hf:stabilityai/stable-diffusion-xl-base-1.0"),
+    ],
+    payload: Input,
+) -> Output:
+    return Output(result="ok")
+""".lstrip(),
+                    encoding="utf-8",
+                )
+
+                with self.assertRaises(ValueError) as ctx:
+                    discover_manifest(root)
+                self.assertIn("must not include a scheme prefix", str(ctx.exception))
+
+            finally:
+                os.chdir(original_cwd)
+                sys.path[:] = original_path
+                _cleanup_modules("funcs_e")
 
 
 if __name__ == "__main__":

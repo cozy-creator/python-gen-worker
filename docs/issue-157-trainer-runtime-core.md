@@ -52,7 +52,7 @@ Optional:
 ```json
 {
   "trainer_api_version": "v1",
-  "run_id": "run_123",
+  "request_id": "run_123",
   "trainer": "my_pkg.train:MyTrainer",
   "max_steps": 1000,
   "metric_every": 10,

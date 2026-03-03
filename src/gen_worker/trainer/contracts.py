@@ -8,7 +8,7 @@ from typing import Any, Callable, Mapping, Optional, Protocol, TypeVar
 class TrainingJobSpec:
     """Immutable training job inputs owned by the runtime."""
 
-    run_id: str
+    request_id: str
     max_steps: int
     trainer_api_version: str = "v1"
     metric_every: int = 10
@@ -19,8 +19,8 @@ class TrainingJobSpec:
     hyperparams: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if not self.run_id:
-            raise ValueError("run_id is required")
+        if not self.request_id:
+            raise ValueError("request_id is required")
         if self.max_steps < 0:
             raise ValueError("max_steps must be >= 0")
         if self.metric_every < 0:
@@ -122,7 +122,7 @@ class TrainingReporter(Protocol):
     Runtime owns reporter calls. Plugins should not emit lifecycle events directly.
     """
 
-    def started(self, *, run_id: str) -> None:
+    def started(self, *, request_id: str) -> None:
         ...
 
     def metric(self, *, name: str, value: float, step: int) -> None:
