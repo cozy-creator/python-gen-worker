@@ -87,7 +87,6 @@ def test_runtime_batching_config_cmd_stale_version_is_ignored(monkeypatch) -> No
 def test_function_capabilities_event_emits_when_changed(monkeypatch) -> None:
     w = Worker(user_module_names=[], worker_jwt="dummy-worker-jwt")
     w._discovered_resources["caption"] = ResourceRequirements(
-        max_concurrency=1,
         batch_size_min=1,
         batch_size_target=4,
         batch_size_max=8,
@@ -111,4 +110,4 @@ def test_function_capabilities_event_emits_when_changed(monkeypatch) -> None:
     payload = json.loads(bytes(events[0].payload_json or b"{}").decode("utf-8"))
     fns = list(payload.get("functions") or [])
     assert len(fns) == 1
-    assert int(fns[0].get("max_inflight_requests") or 0) == 1
+    assert "max_inflight_requests" not in fns[0]

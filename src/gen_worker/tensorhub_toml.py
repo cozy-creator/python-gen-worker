@@ -30,8 +30,10 @@ class TensorhubToml:
     main: str
     cuda: str | None
     compute_capabilities: tuple[str, ...]
-    function_models: dict[str, dict[str, dict[str, TensorhubModelSpec]]]
-    # function_name -> payload_selector_field -> model_key -> spec
+    models: dict[str, TensorhubModelSpec]
+    # top-level fixed keyspace: model_key -> spec
+    function_models: dict[str, dict[str, TensorhubModelSpec]]
+    # function payload keyspace: function_name -> model_key -> spec
     function_resources: dict[str, dict[str, Any]]  # function_name -> runtime/resource hints
     function_batch_dimensions: dict[str, str]  # function_name -> payload-root batch dimension path
     resources: dict[str, Any]
@@ -194,15 +196,13 @@ def _validate_endpoint_model_ref(ref: str, *, field: str) -> None:
 def _parse_function_resource_hints(v: Any) -> dict[str, Any]:
     if not isinstance(v, Mapping):
         return {}
-    if "max_concurrency" in v:
+    if "max_concurrency" in v or "max_inflight_requests" in v:
         raise ValueError(
-            "function resource hint max_concurrency is not supported in tensorhub.toml; "
-            "use max_inflight_requests for orchestrator hints; "
-            "set local worker concurrency in code with @worker_function(ResourceRequirements(max_concurrency=...))"
+            "function-level concurrency hints are not supported in endpoint.toml; "
+            "set endpoint concurrency only via [resources].max_inflight_requests"
         )
     out: dict[str, Any] = {}
     for key in (
-        "max_inflight_requests",
         "batch_size_min",
         "batch_size_target",
         "batch_size_max",
@@ -288,6 +288,7 @@ def _parse_function_batch_dimension(v: Any, *, field_prefix: str) -> str | None:
         return None
 
     for unsupported in (
+        "models",
         "request_contract",
         "batch_dimension_path",
         "request_mode",
@@ -307,18 +308,18 @@ def _parse_function_batch_dimension(v: Any, *, field_prefix: str) -> str | None:
 def load_tensorhub_toml(path: Path) -> TensorhubToml:
     data = tomllib.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
-        raise ValueError("tensorhub.toml must be a TOML table at root")
+        raise ValueError("endpoint.toml must be a TOML table at root")
 
     schema_version = data.get("schema_version")
     if schema_version != 1:
-        raise ValueError("tensorhub.toml schema_version must be 1")
+        raise ValueError("endpoint.toml schema_version must be 1")
 
     name = str(data.get("name") or "").strip()
     main = str(data.get("main") or "").strip()
     if not name:
-        raise ValueError("tensorhub.toml missing name")
+        raise ValueError("endpoint.toml missing name")
     if not main:
-        raise ValueError("tensorhub.toml missing main")
+        raise ValueError("endpoint.toml missing main")
 
     cuda: str | None = None
     compute_capabilities: tuple[str, ...] = ()
@@ -340,15 +341,33 @@ def load_tensorhub_toml(path: Path) -> TensorhubToml:
                 field="host.requirements.compute_capabilities",
             )
 
+    models: dict[str, TensorhubModelSpec] = {}
+    function_models: dict[str, dict[str, TensorhubModelSpec]] = {}
     raw_models = data.get("models")
-    if isinstance(raw_models, dict) and raw_models:
-        raise ValueError(
-            "tensorhub.toml top-level [models] is no longer supported; "
-            "declare fixed models in code with ModelRef(Src.FIXED, ..., ref=..., dtypes=...) and "
-            "payload-selected keyspaces under [functions.<fn>.models.<payload_field>]"
-        )
+    if raw_models is not None:
+        if not isinstance(raw_models, Mapping):
+            raise ValueError("models must be a table")
+        for key_raw, value_raw in raw_models.items():
+            key = str(key_raw).strip()
+            if not key:
+                continue
+            # [models.<function_name>] subtable support:
+            # entries that are maps without model-spec keys are treated as function keyspaces.
+            if isinstance(value_raw, Mapping) and "ref" not in value_raw and "dtypes" not in value_raw:
+                fn = slugify_function_name(key)
+                if not fn:
+                    raise ValueError(f"invalid function keyspace name under [models]: {key!r}")
+                keyspace: dict[str, TensorhubModelSpec] = {}
+                for model_key_raw, model_spec_raw in value_raw.items():
+                    model_key = str(model_key_raw).strip()
+                    if not model_key:
+                        continue
+                    keyspace[model_key] = _parse_model_spec(model_spec_raw)
+                if keyspace:
+                    function_models[fn] = keyspace
+                continue
+            models[key] = _parse_model_spec(value_raw)
 
-    function_models: dict[str, dict[str, dict[str, TensorhubModelSpec]]] = {}
     function_resources: dict[str, dict[str, Any]] = {}
     function_batch_dimensions: dict[str, str] = {}
     raw_functions = data.get("functions")
@@ -357,33 +376,6 @@ def load_tensorhub_toml(path: Path) -> TensorhubToml:
             fn = slugify_function_name(str(fn_name).strip())
             if not fn or not isinstance(fn_cfg, dict):
                 continue
-            fn_models_raw = fn_cfg.get("models")
-            if isinstance(fn_models_raw, dict):
-                selector_map: dict[str, dict[str, TensorhubModelSpec]] = {}
-                for selector_name, selector_cfg in fn_models_raw.items():
-                    selector = str(selector_name).strip()
-                    if not selector:
-                        continue
-                    if not isinstance(selector_cfg, Mapping):
-                        raise ValueError(
-                            f"functions.{fn}.models.{selector} must be a table of model_key -> model spec "
-                            "(use [functions.<fn>.models.<payload_field>])"
-                        )
-                    if "ref" in selector_cfg:
-                        raise ValueError(
-                            f"functions.{fn}.models is in legacy flat shape; use "
-                            f"[functions.{fn}.models.<payload_field>] tables instead"
-                        )
-                    keyspace: dict[str, TensorhubModelSpec] = {}
-                    for model_key_raw, model_spec_raw in selector_cfg.items():
-                        model_key = str(model_key_raw).strip()
-                        if not model_key:
-                            continue
-                        keyspace[model_key] = _parse_model_spec(model_spec_raw)
-                    if keyspace:
-                        selector_map[selector] = keyspace
-                if selector_map:
-                    function_models[fn] = selector_map
 
             merged_hints: dict[str, Any] = {}
             runtime_hints = _parse_function_resource_hints(fn_cfg.get("runtime"))
@@ -425,6 +417,7 @@ def load_tensorhub_toml(path: Path) -> TensorhubToml:
         main=main,
         cuda=cuda,
         compute_capabilities=compute_capabilities,
+        models=models,
         function_models=function_models,
         function_resources=function_resources,
         function_batch_dimensions=function_batch_dimensions,

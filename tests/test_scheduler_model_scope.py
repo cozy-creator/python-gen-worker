@@ -14,12 +14,8 @@ def test_scheduler_cannot_widen_manifest_model_scope(monkeypatch) -> None:
         user_module_names=[],
         worker_jwt="dummy-worker-jwt",
         manifest={
-            "models_by_function": {
-                "generate": {
-                    "fixed": {
-                        "sd15": {"ref": "demo/sd15", "dtypes": ["fp16", "bf16"]},
-                    }
-                }
+            "models": {
+                "sd15": {"ref": "demo/sd15", "dtypes": ["fp16", "bf16"]},
             }
         },
     )

@@ -46,16 +46,15 @@ def _make_worker() -> Worker:
     w._runtime_loaders = {}
     w._custom_runtime_cache = {}
     w._custom_runtime_locks = {}
-    w._fixed_model_id_by_key_by_function = {}
-    w._payload_model_id_by_selector_by_function = {}
-    w._fixed_model_spec_by_key_by_function = {}
-    w._payload_model_spec_by_selector_by_function = {}
+    w._fixed_model_id_by_key = {}
+    w._payload_model_id_by_key_by_function = {}
+    w._fixed_model_spec_by_key = {}
+    w._payload_model_spec_by_key_by_function = {}
     w._release_allowed_model_ids = None
     w._active_tasks_lock = threading.Lock()
     w._active_tasks = {}
-    w._active_function_counts = {}
-    w._run_batch_context_lock = threading.Lock()
-    w._run_batch_context = {}
+    w._request_batch_context_lock = threading.Lock()
+    w._request_batch_context = {}
     w._send_message = lambda msg: w._sent.append(msg)  # type: ignore[method-assign]
     w._sent = []
     w._stop_event = threading.Event()
@@ -134,13 +133,13 @@ class TestContractAndIncremental(unittest.TestCase):
     def test_payload_model_key_resolves_via_endpoint_map(self) -> None:
         def fn(
             ctx: ActionContext,
-            model: Annotated[FakeModel, ModelRef(Src.INPUT_PAYLOAD, "model_key")],
+            model: Annotated[FakeModel, ModelRef(Src.PAYLOAD, "model_key")],
             payload: InputWithModel,
         ) -> Output:
             return Output(model_id=model.model_id)
 
         w = _make_worker()
-        w._payload_model_id_by_selector_by_function = {"fn": {"model_key": {"a": "google/foo"}}}
+        w._payload_model_id_by_key_by_function = {"fn": {"a": "google/foo"}}
         w._release_allowed_model_ids = {"google/foo"}
         spec = w._inspect_task_spec(fn)  # type: ignore[arg-type]
         ctx = ActionContext("run-2", emitter=lambda _e: None)
@@ -158,15 +157,13 @@ class TestContractAndIncremental(unittest.TestCase):
     def test_payload_model_key_rejects_not_allowlisted(self) -> None:
         def fn(
             ctx: ActionContext,
-            model: Annotated[FakeModel, ModelRef(Src.INPUT_PAYLOAD, "model_key")],
+            model: Annotated[FakeModel, ModelRef(Src.PAYLOAD, "model_key")],
             payload: InputWithModel,
         ) -> Output:
             return Output(model_id=model.model_id)
 
         w = _make_worker()
-        w._payload_model_id_by_selector_by_function = {
-            "fn": {"model_key": {"a": "google/foo", "b": "google/bar"}}
-        }
+        w._payload_model_id_by_key_by_function = {"fn": {"a": "google/foo", "b": "google/bar"}}
         w._release_allowed_model_ids = {"google/foo"}
         spec = w._inspect_task_spec(fn)  # type: ignore[arg-type]
         ctx = ActionContext("run-3", emitter=lambda _e: None)

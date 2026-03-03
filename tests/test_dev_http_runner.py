@@ -6,6 +6,7 @@ import threading
 import time
 from pathlib import Path
 
+import msgspec
 import requests
 
 
@@ -57,8 +58,8 @@ def generate(ctx: ActionContext, payload: In) -> Out:
         ],
         "models_by_function": {"generate": {}},
     }
-    manifest_path = tmp_path / "manifest.json"
-    manifest_path.write_text(json.dumps(man), encoding="utf-8")
+    manifest_path = tmp_path / "endpoint.lock"
+    manifest_path.write_text(msgspec.toml.encode(man).decode("utf-8"), encoding="utf-8")
 
     outputs = tmp_path / "out"
     outputs.mkdir(parents=True, exist_ok=True)

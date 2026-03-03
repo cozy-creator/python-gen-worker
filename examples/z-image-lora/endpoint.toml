@@ -3,6 +3,9 @@ schema_version = 1
 name = "z-image-lora"
 main = "z_image_lora.main"
 
+[models]
+z-image-turbo = { ref = "tongyi-mai/z-image-turbo", dtypes = ["bf16", "fp16"] }
+
 [host.requirements]
 cuda = "12.6"
 
@@ -11,3 +14,4 @@ vram_gb = 16
 ram_gb = 32
 cpu_cores = 8
 disk_gb = 80
+max_inflight_requests = 1

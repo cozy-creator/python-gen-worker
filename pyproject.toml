@@ -1,6 +1,6 @@
 [project]
 name = "gen-worker"
-version = "0.3.6"
+version = "0.3.7"
 description = "A library used to build custom functions in Cozy Creator's serverless function platform."
 readme = "README.md"
 license = "MIT"
@@ -22,6 +22,7 @@ requires-python = ">=3.11"
 dependencies = [
     "grpcio>=1.71.0",
     "msgspec>=0.18.6",
+    "tomli-w>=1.2.0",
     "protobuf>=6.30.0",
     "PyJWT[crypto]>=2.8.0",
     "requests>=2.32.0",

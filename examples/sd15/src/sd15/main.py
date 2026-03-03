@@ -15,7 +15,7 @@ from gen_worker.types import Asset
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-_sd15_resources = ResourceRequirements(max_concurrency=1)
+_sd15_resources = ResourceRequirements()
 _pipeline_locks_guard = threading.Lock()
 _pipeline_locks: dict[int, threading.Lock] = {}
 
@@ -49,12 +49,7 @@ def generate(
     ctx: ActionContext,
     pipeline: Annotated[
         StableDiffusionPipeline,
-        ModelRef(
-            Src.FIXED,
-            "sd15",
-            ref="stable-diffusion-v1-5/stable-diffusion-v1-5",
-            dtypes=("fp16", "bf16"),
-        ),
+        ModelRef(Src.FIXED, "sd15"),
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:
@@ -104,12 +99,7 @@ def generate_fp8(
     ctx: ActionContext,
     pipeline: Annotated[
         StableDiffusionPipeline,
-        ModelRef(
-            Src.FIXED,
-            "sd15_fp8",
-            ref="stable-diffusion-v1-5/stable-diffusion-v1-5",
-            dtypes=("fp8",),
-        ),
+        ModelRef(Src.FIXED, "sd15_fp8"),
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:
@@ -127,12 +117,7 @@ def generate_int8(
     ctx: ActionContext,
     pipeline: Annotated[
         StableDiffusionPipeline,
-        ModelRef(
-            Src.FIXED,
-            "sd15_int8",
-            ref="stable-diffusion-v1-5/stable-diffusion-v1-5",
-            dtypes=("int8",),
-        ),
+        ModelRef(Src.FIXED, "sd15_int8"),
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:
@@ -150,12 +135,7 @@ def generate_int4(
     ctx: ActionContext,
     pipeline: Annotated[
         StableDiffusionPipeline,
-        ModelRef(
-            Src.FIXED,
-            "sd15_int4",
-            ref="stable-diffusion-v1-5/stable-diffusion-v1-5",
-            dtypes=("int4",),
-        ),
+        ModelRef(Src.FIXED, "sd15_int4"),
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:

@@ -3,6 +3,9 @@ schema_version = 1
 name = "firered-image-edit"
 main = "firered_image_edit.main"
 
+[models]
+firered_image_edit = { ref = "fireredteam/firered-image-edit-1.0", dtypes = ["bf16"] }
+
 [host.requirements]
 cuda = "12.6"
 
@@ -11,3 +14,4 @@ vram_gb = 24
 ram_gb = 32
 cpu_cores = 8
 disk_gb = 60
+max_inflight_requests = 1

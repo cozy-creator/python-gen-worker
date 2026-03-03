@@ -40,7 +40,7 @@ def validate_endpoint(root: str | Path, *, require_uv_lock: bool = False) -> End
 
     Requirements:
     - `Dockerfile` must exist
-    - `tensorhub.toml` must exist (flat schema)
+    - `endpoint.toml` must exist (flat schema)
       - schema_version = 1
       - name = "..."
       - main = "pkg.module"
@@ -59,9 +59,9 @@ def validate_endpoint(root: str | Path, *, require_uv_lock: bool = False) -> End
     if not (root_path / "Dockerfile").exists():
         errors.append("missing Dockerfile")
 
-    tensorhub_toml = root_path / "tensorhub.toml"
+    tensorhub_toml = root_path / "endpoint.toml"
     if not tensorhub_toml.exists():
-        errors.append("missing tensorhub.toml")
+        errors.append("missing endpoint.toml")
 
     pyproject = root_path / "pyproject.toml"
     if not pyproject.exists():
@@ -76,29 +76,29 @@ def validate_endpoint(root: str | Path, *, require_uv_lock: bool = False) -> End
         warnings.append("uv.lock not found (recommended for reproducible builds)")
 
     if tomllib is None:
-        warnings.append("tomllib is unavailable; cannot validate tensorhub.toml/pyproject.toml")
+        warnings.append("tomllib is unavailable; cannot validate endpoint.toml/pyproject.toml")
         return EndpointValidationResult(ok=not errors, errors=tuple(errors), warnings=tuple(warnings))
 
-    # Validate tensorhub.toml (flat schema).
+    # Validate endpoint.toml (flat schema).
     if tensorhub_toml.exists():
         try:
             tensorhub_cfg: dict[str, Any] = tomllib.loads(tensorhub_toml.read_text(encoding="utf-8"))
         except Exception as exc:
-            errors.append(f"failed to parse tensorhub.toml: {exc}")
+            errors.append(f"failed to parse endpoint.toml: {exc}")
             tensorhub_cfg = {}
 
         if tensorhub_cfg.get("schema_version") != 1:
-            errors.append("tensorhub.toml missing or invalid schema_version (expected schema_version = 1)")
+            errors.append("endpoint.toml missing or invalid schema_version (expected schema_version = 1)")
 
         endpoint_name = tensorhub_cfg.get("name")
         if not isinstance(endpoint_name, str) or endpoint_name.strip() == "":
-            errors.append("tensorhub.toml missing name")
+            errors.append("endpoint.toml missing name")
         elif _normalize_endpoint_name(endpoint_name) == "":
-            errors.append("tensorhub.toml invalid name")
+            errors.append("endpoint.toml invalid name")
 
         main = tensorhub_cfg.get("main")
         if not isinstance(main, str) or main.strip() == "":
-            errors.append("tensorhub.toml missing main")
+            errors.append("endpoint.toml missing main")
 
     # Validate pyproject.toml.
     if not pyproject.exists():

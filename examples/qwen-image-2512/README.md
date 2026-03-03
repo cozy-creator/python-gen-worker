@@ -4,8 +4,8 @@ What this contains:
 
 - Python module `qwen_image_2512` with `@worker_function` for Qwen Image inference.
 - `pyproject.toml` + `uv.lock` with tenant deps.
-- `tensorhub.toml` with Cozy build-time metadata (name/main, optional host/resources/function config).
-- `Dockerfile` that installs deps and bakes `/app/.cozy/manifest.json` via `python -m gen_worker.discover`.
+- `endpoint.toml` with Cozy build-time metadata (name/main, optional host/resources/function config).
+- `Dockerfile` that installs deps and bakes `/app/.tensorhub/endpoint.lock` via `python -m gen_worker.discover`.
 
 Notes:
 

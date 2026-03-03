@@ -1,7 +1,7 @@
 [project]
 name = "firered-image-edit"
 version = "0.1.0"
-description = "FireRed Image Edit example (inference-only; Cozy manifest via tensorhub.toml)"
+description = "FireRed Image Edit example (inference-only; Cozy manifest via endpoint.toml)"
 requires-python = ">=3.12"
 dependencies = [
     "gen-worker[torch]==0.3.0",

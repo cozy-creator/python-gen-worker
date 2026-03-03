@@ -2,7 +2,7 @@
 #
 # Contract:
 # - Installs gen-worker.
-# - Runs discovery at build time, baking /app/.cozy/manifest.json into the image.
+# - Runs discovery at build time, baking /app/.tensorhub/endpoint.lock into the image.
 # - Uses gen-worker as the image ENTRYPOINT.
 #
 # Local build:
@@ -75,8 +75,8 @@ RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
   uv pip install --system --break-system-packages --no-deps --no-sources /app
 
 # Bake discovered functions into the image.
-RUN mkdir -p /app/.cozy \
-  && python3 -m gen_worker.discover > /app/.cozy/manifest.json
+RUN mkdir -p /app/.tensorhub \
+  && python3 -m gen_worker.discover > /app/.tensorhub/endpoint.lock
 
 # Run as root at runtime (needed for writable mounted cache dirs like /workspace).
 

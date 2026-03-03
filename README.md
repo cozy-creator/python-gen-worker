@@ -8,7 +8,7 @@ When publishing a tenant worker, Cozy expects a **Dockerfile-first** project lay
 
 Build inputs MUST include:
 
-- `tensorhub.toml` (Cozy manifest; used at build/publish time)
+- `endpoint.toml` (Cozy manifest; used at build/publish time)
 - `Dockerfile` (builds the worker image)
 - tenant code (`pyproject.toml`, `uv.lock`, `src/`, etc.)
 
@@ -18,7 +18,7 @@ The built image MUST:
 2. Bake function discovery output (manifest) at build time:
 
 ```dockerfile
-RUN mkdir -p /app/.cozy && python -m gen_worker.discover > /app/.cozy/manifest.json
+RUN mkdir -p /app/.cozy && python -m gen_worker.discover > /app/.tensorhub/endpoint.lock
 ```
 
 3. Use the Cozy worker runtime as the ENTRYPOINT:
@@ -29,8 +29,8 @@ ENTRYPOINT ["python", "-m", "gen_worker.entrypoint"]
 
 Notes:
 
-- `tensorhub.toml` is **not required** to be present in the final image; it is a build-time input.
-- The platform reads `/app/.cozy/manifest.json` from the built image and stores it in Cozy Hub DB for routing/invocation.
+- `endpoint.toml` is **not required** to be present in the final image; it is a build-time input.
+- The platform reads `/app/.tensorhub/endpoint.lock` from the built image and stores it in Cozy Hub DB for routing/invocation.
 
 ## Installation
 
@@ -112,7 +112,12 @@ def stream(ctx: ActionContext, payload: Input) -> Iterator[Delta]:
 
 ### Model Injection
 
-Declare fixed model refs in code:
+Declare fixed model keys in code, with refs/dtypes in `endpoint.toml [models]`:
+
+```toml
+[models]
+sd15 = { ref = "stable-diffusion-v1-5/stable-diffusion-v1-5", dtypes = ["fp16", "bf16"] }
+```
 
 ```python
 from typing import Annotated
@@ -122,15 +127,7 @@ from gen_worker.injection import ModelRef, ModelRefSource as Src
 @worker_function()
 def generate(
     ctx: ActionContext,
-    pipe: Annotated[
-        DiffusionPipeline,
-        ModelRef(
-            Src.FIXED,
-            "sd15",
-            ref="stable-diffusion-v1-5/stable-diffusion-v1-5",
-            dtypes=("fp16", "bf16"),
-        ),
-    ],
+    pipe: Annotated[DiffusionPipeline, ModelRef(Src.FIXED, "sd15")],
     payload: Input,
 ) -> Output:
     # Use the injected pipeline (loaded/cached by the worker's model manager).
@@ -140,10 +137,10 @@ def generate(
 ### Payload-Selected Model (Short Key)
 
 If you want the client payload to choose which repo to run, declare selector
-keyspaces in `tensorhub.toml` and use `ModelRef(INPUT_PAYLOAD, ...)`:
+keyspaces in `endpoint.toml` and use `ModelRef(PAYLOAD, ...)`:
 
 ```toml
-[functions.generate.models.model]
+[models.generate]
 sd15 = { ref = "stable-diffusion-v1-5/stable-diffusion-v1-5", dtypes = ["fp16", "bf16"] }
 flux = { ref = "black-forest-labs/flux.2-klein-4b", dtypes = ["bf16"] }
 ```
@@ -162,14 +159,14 @@ class Input(msgspec.Struct):
 @worker_function()
 def generate(
     ctx: ActionContext,
-    pipe: Annotated[DiffusionPipeline, ModelRef(Src.INPUT_PAYLOAD, "model")],
+    pipe: Annotated[DiffusionPipeline, ModelRef(Src.PAYLOAD, "model")],
     payload: Input,
 ):
     ...
 ```
 
 Note: by default the worker requires payload model selection to use a known
-short-key from the selector keyspace in `tensorhub.toml`. It will not accept
+short-key from the function keyspace in `endpoint.toml`. It will not accept
 arbitrary repo refs in the payload.
 
 ### Saving Files
@@ -253,7 +250,7 @@ Outputs are written under `/outputs/runs/<request_id>/outputs/...` (matching Coz
 
 ## Configuration
 
-### tensorhub.toml
+### endpoint.toml
 
 ```toml
 schema_version = 1
@@ -263,8 +260,11 @@ main = "my_pkg.main"
 [functions.generate]
 batch_dimension = "items"  # optional
 
-[functions.generate.models.model_key]
+[models]
 sdxl = { ref = "stabilityai/stable-diffusion-xl-base-1.0", dtypes = ["fp16", "bf16"] }
+
+[models.generate]
+dreamshaper = { ref = "lykon/dreamshaper-xl-v2-turbo", dtypes = ["fp16", "bf16"] }
 
 [resources]
 max_inflight_requests = 1
@@ -395,7 +395,7 @@ Control-plane behavior (tensorhub + orchestrator):
 
 - Every publish creates a new immutable internal `release_id`.
 - End users invoke functions by `owner/endpoint/function` (default `prod`) or `owner/endpoint/function:tag`.
-- `endpoint` is derived from `tensorhub.toml` `name` and normalized to a URL-safe slug.
+- `endpoint` is derived from `endpoint.toml` `name` and normalized to a URL-safe slug.
 - `function` names are derived from Python `@worker_function` names and normalized to URL-safe slugs (for example, `medasr_transcribe` -> `medasr-transcribe`).
 - Publishing does not move traffic by default.
 - Promoting a function tag moves traffic to that release.

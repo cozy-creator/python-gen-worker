@@ -16,6 +16,8 @@ import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import msgspec
+
 from .cache_paths import worker_model_cache_dir
 try:
     from .worker import Worker
@@ -24,7 +26,7 @@ except ImportError as e:
     print("Please ensure the gen_worker package is installed.", file=sys.stderr)
     sys.exit(1)
 
-MANIFEST_PATH = Path("/app/.cozy/manifest.json")
+MANIFEST_PATH = Path("/app/.tensorhub/endpoint.lock")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -97,8 +99,11 @@ def load_manifest() -> Optional[dict]:
     if not MANIFEST_PATH.exists():
         return None
     try:
-        with open(MANIFEST_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
+        raw = MANIFEST_PATH.read_text(encoding="utf-8")
+        manifest = msgspec.toml.decode(raw)
+        if not isinstance(manifest, dict):
+            raise ValueError("endpoint.lock must decode to a TOML table")
+        return manifest
     except Exception as e:
         logger.warning("Failed to load manifest from %s: %s", MANIFEST_PATH, e)
         return None
@@ -269,9 +274,9 @@ def _run_main() -> int:
 
     if not user_modules:
         logger.error(
-            "No user function modules found. A baked manifest at /app/.cozy/manifest.json is required.\n"
+            "No user function modules found. A baked manifest at /app/.tensorhub/endpoint.lock is required.\n"
             "Your Dockerfile should run discovery at build time:\n"
-            "  RUN mkdir -p /app/.cozy && python -m gen_worker.discover > /app/.cozy/manifest.json"
+            "  RUN mkdir -p /app/.cozy && python -m gen_worker.discover > /app/.tensorhub/endpoint.lock"
         )
         return 1
 

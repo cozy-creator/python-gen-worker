@@ -17,7 +17,7 @@ from gen_worker.types import Asset
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-_flux_resources = ResourceRequirements(max_concurrency=1)
+_flux_resources = ResourceRequirements()
 _pipeline_locks_guard = threading.Lock()
 _pipeline_locks: dict[int, threading.Lock] = {}
 
@@ -103,12 +103,7 @@ def generate(
     ctx: ActionContext,
     pipeline: Annotated[
         Flux2KleinPipeline,
-        ModelRef(
-            Src.FIXED,
-            "flux2-klein-4b",
-            ref="black-forest-labs/flux.2-klein-4b",
-            dtypes=("bf16",),
-        ),
+        ModelRef(Src.FIXED, "flux2-klein-4b"),
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:
@@ -120,12 +115,7 @@ def generate_fp8(
     ctx: ActionContext,
     pipeline: Annotated[
         Flux2KleinPipeline,
-        ModelRef(
-            Src.FIXED,
-            "flux2-klein-4b_fp8",
-            ref="black-forest-labs/flux.2-klein-4b",
-            dtypes=("fp8",),
-        ),
+        ModelRef(Src.FIXED, "flux2-klein-4b_fp8"),
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:
@@ -143,12 +133,7 @@ def generate_9b(
     ctx: ActionContext,
     pipeline: Annotated[
         Flux2KleinPipeline,
-        ModelRef(
-            Src.FIXED,
-            "flux2-klein-9b",
-            ref="black-forest-labs/flux.2-klein-9b",
-            dtypes=("bf16",),
-        ),
+        ModelRef(Src.FIXED, "flux2-klein-9b"),
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:
@@ -160,12 +145,7 @@ def generate_9b_fp8(
     ctx: ActionContext,
     pipeline: Annotated[
         Flux2KleinPipeline,
-        ModelRef(
-            Src.FIXED,
-            "flux2-klein-9b_fp8",
-            ref="black-forest-labs/flux.2-klein-9b",
-            dtypes=("fp8",),
-        ),
+        ModelRef(Src.FIXED, "flux2-klein-9b_fp8"),
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:
@@ -177,12 +157,7 @@ def generate_int8(
     ctx: ActionContext,
     pipeline: Annotated[
         Flux2KleinPipeline,
-        ModelRef(
-            Src.FIXED,
-            "flux2-klein-4b_int8",
-            ref="black-forest-labs/flux.2-klein-4b",
-            dtypes=("int8",),
-        ),
+        ModelRef(Src.FIXED, "flux2-klein-4b_int8"),
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:
@@ -200,12 +175,7 @@ def generate_int4(
     ctx: ActionContext,
     pipeline: Annotated[
         Flux2KleinPipeline,
-        ModelRef(
-            Src.FIXED,
-            "flux2-klein-4b_int4",
-            ref="black-forest-labs/flux.2-klein-4b",
-            dtypes=("int4",),
-        ),
+        ModelRef(Src.FIXED, "flux2-klein-4b_int4"),
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:

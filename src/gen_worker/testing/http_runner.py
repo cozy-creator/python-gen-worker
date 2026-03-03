@@ -22,9 +22,9 @@ from gen_worker.worker import ActionContext, Worker
 
 def _load_manifest(path: Path) -> dict[str, Any]:
     raw = path.read_text(encoding="utf-8")
-    man = json.loads(raw)
+    man = msgspec.toml.decode(raw)
     if not isinstance(man, dict):
-        raise ValueError("manifest must be a JSON object")
+        raise ValueError("endpoint.lock must decode to a TOML table")
     return man
 
 
@@ -202,7 +202,7 @@ def _parse_run_body(data: Any) -> tuple[Any, dict[str, Any]]:
 async def serve_http(argv: Optional[list[str]] = None) -> None:
     ap = argparse.ArgumentParser(prog="gen-worker dev serve-http")
     ap.add_argument("--listen", default=os.getenv("GEN_WORKER_HTTP_LISTEN", "127.0.0.1:8081"))
-    ap.add_argument("--manifest", default=os.getenv("GEN_WORKER_MANIFEST_PATH", "/app/.cozy/manifest.json"))
+    ap.add_argument("--manifest", default=os.getenv("GEN_WORKER_MANIFEST_PATH", "/app/.tensorhub/endpoint.lock"))
     ap.add_argument("--endpoint-root", default=os.getenv("GEN_WORKER_ENDPOINT_ROOT", "/app"))
     ap.add_argument("--outputs", default=os.getenv("GEN_WORKER_OUTPUT_DIR", "/outputs"))
     args = ap.parse_args(list(argv) if argv is not None else None)

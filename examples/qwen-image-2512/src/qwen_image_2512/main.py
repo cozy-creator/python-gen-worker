@@ -18,7 +18,7 @@ from gen_worker.types import Asset
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
-qwen_resources = ResourceRequirements(max_concurrency=1)
+qwen_resources = ResourceRequirements()
 _compile_lock = threading.Lock()
 _compiled_transformer = False
 _pipeline_locks_guard = threading.Lock()
@@ -96,12 +96,7 @@ def generate(
     ctx: ActionContext,
     pipeline: Annotated[
         DiffusionPipeline,
-        ModelRef(
-            Src.FIXED,
-            "qwen_image",
-            ref="qwen/qwen-image-2512",
-            dtypes=("bf16", "fp16"),
-        ),
+        ModelRef(Src.FIXED, "qwen_image"),
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:

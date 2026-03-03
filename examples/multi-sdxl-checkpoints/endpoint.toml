@@ -6,7 +6,7 @@ main = "multi_sdxl_checkpoints.main"
 [host.requirements]
 cuda = "12.6"
 
-[functions.generate.models.model_key]
+[models.generate]
 sdxl-base = "stabilityai/stable-diffusion-xl-base-1.0"
 dreamshaper = "lykon/dreamshaper-xl-v2-turbo"
 juggernaut = "rundiffusion/juggernaut-xl-v9"
@@ -22,3 +22,4 @@ vram_gb = 12
 ram_gb = 32
 cpu_cores = 8
 disk_gb = 80
+max_inflight_requests = 1

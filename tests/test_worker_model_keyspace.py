@@ -11,18 +11,18 @@ class _Payload:
 
 
 class TestWorkerModelKeyspace(unittest.TestCase):
-    def test_payload_model_selection_uses_selector_mapping(self) -> None:
+    def test_payload_model_selection_uses_function_mapping(self) -> None:
         w = Worker.__new__(Worker)
-        w._payload_model_id_by_selector_by_function = {
-            "generate": {"model_key": {"sdxl": "stabilityai/stable-diffusion-xl-base-1.0"}}
+        w._payload_model_id_by_key_by_function = {
+            "generate": {"sdxl": "stabilityai/stable-diffusion-xl-base-1.0"}
         }
-        w._fixed_model_id_by_key_by_function = {}
+        w._fixed_model_id_by_key = {}
         w._release_allowed_model_ids = None
 
         inj = InjectionSpec(
             param_name="pipe",
             param_type=object,
-            model_ref=ModelRef(ModelRefSource.INPUT_PAYLOAD, "model_key"),
+            model_ref=ModelRef(ModelRefSource.PAYLOAD, "model_key"),
         )
         payload = _Payload(model_key="sdxl")
 
@@ -32,16 +32,16 @@ class TestWorkerModelKeyspace(unittest.TestCase):
 
     def test_payload_model_selection_rejects_unknown_key(self) -> None:
         w = Worker.__new__(Worker)
-        w._payload_model_id_by_selector_by_function = {
-            "generate": {"model_key": {"sdxl": "stabilityai/stable-diffusion-xl-base-1.0"}}
+        w._payload_model_id_by_key_by_function = {
+            "generate": {"sdxl": "stabilityai/stable-diffusion-xl-base-1.0"}
         }
-        w._fixed_model_id_by_key_by_function = {}
+        w._fixed_model_id_by_key = {}
         w._release_allowed_model_ids = None
 
         inj = InjectionSpec(
             param_name="pipe",
             param_type=object,
-            model_ref=ModelRef(ModelRefSource.INPUT_PAYLOAD, "model_key"),
+            model_ref=ModelRef(ModelRefSource.PAYLOAD, "model_key"),
         )
         payload = _Payload(model_key="nope")
 

@@ -35,7 +35,7 @@ requires-python = ">=3.12"
 dependencies = ["gen-worker"]
 """
                 )
-                (root / "tensorhub.toml").write_text(
+                (root / "endpoint.toml").write_text(
                     """
 schema_version = 1
 name = "test-project"
@@ -92,7 +92,7 @@ requires-python = ">=3.12"
 dependencies = ["gen-worker"]
 """
                 )
-                (root / "tensorhub.toml").write_text(
+                (root / "endpoint.toml").write_text(
                     """
 schema_version = 1
 name = "test-project"
@@ -150,7 +150,7 @@ requires-python = ">=3.12"
 dependencies = ["gen-worker"]
 """
                 )
-                (root / "tensorhub.toml").write_text(
+                (root / "endpoint.toml").write_text(
                     """
 schema_version = 1
 name = "My Cool_Project"

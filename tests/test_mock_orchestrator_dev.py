@@ -54,7 +54,7 @@ def hello(ctx: ActionContext, payload: Input) -> Output:
     # Start a worker process that connects to our mock orchestrator.
     env = dict(os.environ)
     env["SCHEDULER_PUBLIC_ADDR"] = f"127.0.0.1:{port}"
-    (tmp_path / "tensorhub.toml").write_text(
+    (tmp_path / "endpoint.toml").write_text(
         """
 schema_version = 1
 name = "dev-test"
@@ -62,7 +62,7 @@ main = "hello_mod"
 """.lstrip(),
         encoding="utf-8",
     )
-    env["TENSORHUB_TOML_PATH"] = str(tmp_path / "tensorhub.toml")
+    env["ENDPOINT_TOML_PATH"] = str(tmp_path / "endpoint.toml")
     env["PYTHONPATH"] = f"{mod_dir}:{env.get('PYTHONPATH','')}"
     env["WORKER_ID"] = "dev-test"
     env["WORKER_JWT"] = "dev-test-jwt"

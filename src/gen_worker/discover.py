@@ -6,7 +6,7 @@ by scanning .py files and extracting metadata. Run as:
 
     python -m gen_worker.discover
 
-Outputs JSON manifest to stdout.
+Outputs TOML endpoint lock to stdout.
 """
 
 import ast
@@ -31,12 +31,9 @@ from gen_worker.injection import ModelRef
 from gen_worker.tensorhub_toml import (
     TensorhubModelSpec,
     TensorhubToml,
-    _validate_endpoint_model_ref,
     load_tensorhub_toml,
 )
 from gen_worker.names import slugify_endpoint_name, slugify_function_name
-
-_ALLOWED_MODEL_DTYPES: frozenset[str] = frozenset({"fp16", "bf16", "fp8", "fp32", "int8", "int4"})
 
 
 def _type_id(t: type) -> Dict[str, str]:
@@ -183,21 +180,14 @@ def _compute_module_name(filepath: Path, root: Path) -> Optional[str]:
 def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
     """Extract metadata from a worker function."""
     resources = getattr(func, "_worker_resources", None)
-    max_concurrency = None
-    max_inflight_requests = None
-    if resources is not None:
-        max_concurrency = getattr(resources, "max_concurrency", None)
-        max_inflight_requests = getattr(resources, "max_inflight_requests", None)
-
     res_dict: Dict[str, Any] = {}
-    if isinstance(max_concurrency, int):
-        res_dict["max_concurrency"] = max_concurrency
-    if isinstance(max_inflight_requests, int):
-        res_dict["max_inflight_requests"] = max_inflight_requests
-    elif isinstance(max_concurrency, int):
-        # Back-compat: older code may only set max_concurrency; emit canonical
-        # max_inflight_requests for orchestrator runtime hints as well.
-        res_dict["max_inflight_requests"] = max_concurrency
+    if resources is not None and hasattr(resources, "to_dict"):
+        try:
+            raw = resources.to_dict()
+            if isinstance(raw, dict):
+                res_dict.update(raw)
+        except Exception:
+            pass
 
     hints = typing.get_type_hints(func, globalns=func.__globals__, include_extras=True)
     sig = inspect.signature(func)
@@ -300,7 +290,7 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
         delta_schema, delta_sha = _schema_and_hash(delta_type)
 
     # Extract required_models: fixed-source model keys that must be available.
-    # These are keys used by ModelRef(FIXED, "<key>", ...) injections.
+    # These are keys used by ModelRef(FIXED, "<key>") injections.
     required_models = [
         inj["model_ref"]["key"]
         for inj in injections
@@ -313,7 +303,7 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
     seen_fields = set()
     for inj_entry in injections:
         mr_json = inj_entry.get("model_ref", {}) or {}
-        if mr_json.get("source") != "input_payload":
+        if mr_json.get("source") != "payload":
             continue
         field = str(mr_json.get("key") or "").strip()
         if not field or field in seen_fields:
@@ -352,18 +342,18 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
 
 
 def _find_tensorhub_toml_path(root: Path) -> Path | None:
-    env_path = os.getenv("TENSORHUB_TOML_PATH", "").strip()
+    env_path = os.getenv("ENDPOINT_TOML_PATH", "").strip()
     if env_path:
         p = Path(env_path)
         return p if p.exists() else None
-    p = root / "tensorhub.toml"
+    p = root / "endpoint.toml"
     return p if p.exists() else None
 
 
 def _load_tensorhub_manifest_toml(root: Path) -> TensorhubToml:
     p = _find_tensorhub_toml_path(root)
     if p is None:
-        raise ValueError("missing tensorhub.toml (required for discovery)")
+        raise ValueError("missing endpoint.toml (required for discovery)")
     return load_tensorhub_toml(p)
 
 
@@ -429,7 +419,7 @@ def discover_functions(root: Optional[Path] = None, *, main_module: str | None =
         try:
             importlib.import_module(main_module)
         except Exception as e:
-            raise ValueError(f"failed to import tensorhub.toml main module {main_module!r}: {e}") from e
+            raise ValueError(f"failed to import endpoint.toml main module {main_module!r}: {e}") from e
 
         after = set(sys.modules.keys())
         newly_loaded = sorted(after - before)
@@ -538,7 +528,7 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
 
     endpoint_name = slugify_endpoint_name(tensorhub_manifest.name)
     if not endpoint_name:
-        raise ValueError("invalid tensorhub.toml name")
+        raise ValueError("invalid endpoint.toml name")
 
     manifest: Dict[str, Any] = {
         "endpoint_name": endpoint_name,
@@ -548,83 +538,64 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
     if tensorhub_manifest.resources:
         manifest["resources"] = dict(tensorhub_manifest.resources)
 
-    # Build per-function model keyspaces.
+    # Build model keyspaces.
+    fixed_models = dict(tensorhub_manifest.models or {})
     models_by_function: Dict[str, Any] = {}
     for fn in functions:
         fn_name = str(fn.get("name") or "").strip()
         if not fn_name:
             continue
 
-        payload_keyspaces = dict(tensorhub_manifest.function_models.get(fn_name) or {})
+        payload_keyspace = dict(tensorhub_manifest.function_models.get(fn_name) or {})
         payload_selectors = list(fn.get("payload_repo_selectors") or [])
         required_payload_fields = [
             str(sel.get("field") or "").strip()
             for sel in payload_selectors
             if isinstance(sel, dict) and str(sel.get("field") or "").strip()
         ]
-        for field in sorted(set(required_payload_fields)):
-            if field not in payload_keyspaces:
-                raise ValueError(
-                    f"function '{fn_name}' declares ModelRef(INPUT_PAYLOAD, {field!r}) but "
-                    f"tensorhub.toml is missing [functions.{fn_name}.models.{field}] keyspace"
-                )
+        if required_payload_fields and not payload_keyspace:
+            raise ValueError(
+                f"function '{fn_name}' declares ModelRef(PAYLOAD, ...) but "
+                f"endpoint.toml is missing [models.{fn_name}] keyspace"
+            )
 
-        # Fixed refs must be declared in code.
+        # Fixed refs must be declared in top-level [models].
         required_keys = set(fn.get("required_models", []) or [])
         inj_list = list(fn.get("injection_json", []) or [])
-        fixed_specs: Dict[str, TensorhubModelSpec] = {}
         for inj in inj_list:
             mr = dict(inj.get("model_ref", {}) or {})
-            if mr.get("source") != "fixed":
-                continue
             key = str(mr.get("key") or "").strip()
             if not key:
                 continue
             ref = str(mr.get("ref") or "").strip()
-            if not ref:
-                # Fallback: allow using a full repo ref directly as the key.
-                # (Still treated as a FIXED keyspace entry; useful for quick examples.)
-                if "/" in key:
-                    ref = key
-                else:
-                    continue
-            try:
-                _validate_endpoint_model_ref(ref, field=f"function '{fn_name}' model ref for key {key!r}")
-            except ValueError as e:
-                raise ValueError(str(e)) from e
+            src = str(mr.get("source") or "").strip()
             dtypes_raw = mr.get("dtypes")
-            dtypes: tuple[str, ...] = ()
-            if isinstance(dtypes_raw, list):
-                cleaned = tuple(str(x).strip() for x in dtypes_raw if str(x).strip())
-                bad = sorted({x for x in cleaned if x not in _ALLOWED_MODEL_DTYPES})
-                if bad:
-                    raise ValueError(f"function '{fn_name}' has invalid model dtypes for {key!r}: {bad}")
-                dtypes = cleaned
-            if dtypes:
-                fixed_specs[key] = TensorhubModelSpec(ref=ref, dtypes=dtypes)
-            else:
-                fixed_specs[key] = TensorhubModelSpec(ref=ref)
+            has_dtypes = isinstance(dtypes_raw, list) and any(str(x).strip() for x in dtypes_raw)
+            if src in ("fixed", "payload"):
+                if ref or has_dtypes:
+                    raise ValueError(
+                        f"function '{fn_name}' uses ModelRef({src.upper()}, {key!r}) with inline ref/dtypes; "
+                        "declare model refs and dtypes in endpoint.toml [models] / [models.<function_name>]"
+                    )
+            if src == "payload":
+                if key not in required_payload_fields:
+                    # Defensive: keep selector metadata aligned with model refs.
+                    required_payload_fields.append(key)
 
         missing = []
         for k in sorted(required_keys):
-            if k not in fixed_specs:
+            if k not in fixed_models:
                 missing.append(k)
         if missing:
             raise ValueError(
-                f"function '{fn_name}' has FIXED model keys without explicit ref in code: {missing}; "
-                "declare fixed refs as ModelRef(Src.FIXED, key, ref=..., dtypes=...)"
+                f"function '{fn_name}' has FIXED model keys missing from endpoint.toml [models]: {missing}"
             )
-        fn_models: Dict[str, Any] = {}
-        if fixed_specs:
-            fn_models["fixed"] = _models_by_key_to_json(fixed_specs)
-        if payload_keyspaces:
-            payload_json: Dict[str, Any] = {}
-            for field, keyspace in payload_keyspaces.items():
-                payload_json[str(field)] = _models_by_key_to_json(keyspace)
-            fn_models["payload_selectors"] = payload_json
-        if fn_models:
-            models_by_function[fn_name] = fn_models
 
+        if payload_keyspace:
+            models_by_function[fn_name] = _models_by_key_to_json(payload_keyspace)
+
+    if fixed_models:
+        manifest["models"] = _models_by_key_to_json(fixed_models)
     if models_by_function:
         manifest["models_by_function"] = models_by_function
 
@@ -650,7 +621,9 @@ def main() -> None:
     if not manifest.get("functions"):
         print("warning: no @worker_function decorated functions found", file=sys.stderr)
 
-    print(json.dumps(manifest, indent=2))
+    sys.stdout.write(msgspec.toml.encode(manifest).decode("utf-8"))
+    if not sys.stdout.isatty():
+        sys.stdout.write("\n")
 
 
 if __name__ == "__main__":

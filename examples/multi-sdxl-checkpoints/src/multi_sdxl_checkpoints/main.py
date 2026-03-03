@@ -5,9 +5,9 @@ This example demonstrates how to support multiple model fine-tunes (checkpoints)
 efficiently using a single function.
 
 Key concepts:
-- Models are declared per payload selector in tensorhub.toml:
-  - [functions.<name>.models.<payload_field>]
-- ModelRef(Src.INPUT_PAYLOAD, "model_key") resolves the model from payload.model_key
+- Models are declared per function keyspace in endpoint.toml:
+  - [models.<function_name>]
+- ModelRef(Src.PAYLOAD, "model_key") resolves the model from payload.model_key
 - Scheduler uses vram_models/disk_models heartbeat data for smart routing
 - LRU eviction manages VRAM when switching between models
 """
@@ -28,7 +28,7 @@ from gen_worker.types import Asset
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-_sdxl_router_resources = ResourceRequirements(max_concurrency=1)
+_sdxl_router_resources = ResourceRequirements()
 _pipeline_locks_guard = threading.Lock()
 _pipeline_locks: dict[int, threading.Lock] = {}
 
@@ -46,7 +46,7 @@ def _lock_for_pipeline(pipeline: object) -> threading.Lock:
 class GenerateInput(msgspec.Struct):
     """Input for image generation with model selection."""
     prompt: str
-    model_key: str = "sdxl-base"  # Key from [functions.generate.models.model_key]
+    model_key: str = "sdxl-base"  # Key from [models.generate]
     # Optional. If empty, we apply a light default negative prompt to reduce
     # watermarks/text artifacts (common in SDXL outputs).
     negative_prompt: str = ""
@@ -85,7 +85,7 @@ def generate(
     ctx: ActionContext,
     pipeline: Annotated[
         DiffusionPipeline,
-        ModelRef(Src.INPUT_PAYLOAD, "model_key")  # Model key comes from payload.model_key
+        ModelRef(Src.PAYLOAD, "model_key")  # Model key comes from payload.model_key
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:
@@ -93,7 +93,7 @@ def generate(
     Generate an image using the model specified in the payload.
 
     The model_key in the payload must be a key in
-    `tensorhub.toml [functions.generate.models.model_key]`.
+    `endpoint.toml [models.generate]`.
 
     The scheduler routes this request to a worker that has the requested
     model already loaded in VRAM (hot) or on disk (warm). If no worker has

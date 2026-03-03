@@ -10,8 +10,8 @@ class ModelRefSource(str, Enum):
     # FIXED means the model key is fixed by the function signature and does not
     # depend on the request payload.
     FIXED = "fixed"
-    # Input payload selects the model via a payload field key.
-    INPUT_PAYLOAD = "input_payload"
+    # Payload selects the model via a payload field key.
+    PAYLOAD = "payload"
 
 
 @dataclass(frozen=True)

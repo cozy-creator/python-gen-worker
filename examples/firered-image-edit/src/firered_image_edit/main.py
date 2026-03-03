@@ -16,7 +16,7 @@ from gen_worker.types import Asset
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-_firered_resources = ResourceRequirements(max_concurrency=1)
+_firered_resources = ResourceRequirements()
 _pipeline_locks_guard = threading.Lock()
 _pipeline_locks: dict[int, threading.Lock] = {}
 
@@ -50,12 +50,7 @@ def edit(
     ctx: ActionContext,
     pipeline: Annotated[
         QwenImageEditPlusPipeline,
-        ModelRef(
-            Src.FIXED,
-            "firered_image_edit",
-            ref="fireredteam/firered-image-edit-1.0",
-            dtypes=("bf16",),
-        ),
+        ModelRef(Src.FIXED, "firered_image_edit"),
     ],
     payload: EditInput,
 ) -> EditOutput:

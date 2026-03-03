@@ -25,7 +25,7 @@ from gen_worker.types import Asset
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-_z_image_resources = ResourceRequirements(max_concurrency=1)
+_z_image_resources = ResourceRequirements()
 _pipeline_locks_guard = threading.Lock()
 _pipeline_locks: dict[int, threading.Lock] = {}
 
@@ -70,12 +70,7 @@ def generate_with_loras(
     ctx: ActionContext,
     pipeline: Annotated[
         DiffusionPipeline,
-        ModelRef(
-            Src.FIXED,
-            "z-image-turbo",
-            ref="tongyi-mai/z-image-turbo",
-            dtypes=("bf16", "fp16"),
-        ),
+        ModelRef(Src.FIXED, "z-image-turbo"),
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:

@@ -35,13 +35,16 @@ dependencies = ["gen-worker"]
 """.lstrip(),
                     encoding="utf-8",
                 )
-                (root / "tensorhub.toml").write_text(
+                (root / "endpoint.toml").write_text(
                     """
 schema_version = 1
 name = "test-project"
 main = "funcs_a"
 
-[functions.generate_dynamic.models.model_key]
+[models]
+sdxl = { ref = "stabilityai/stable-diffusion-xl-base-1.0", dtypes = ["fp16", "bf16"] }
+
+[models.generate_dynamic]
 base = { ref = "stabilityai/stable-diffusion-xl-base-1.0", dtypes = ["fp16", "bf16"] }
 """.lstrip(),
                     encoding="utf-8",
@@ -69,15 +72,7 @@ class MockPipeline:
 @worker_function()
 def generate_fixed(
     ctx: ActionContext,
-    pipeline: Annotated[
-        MockPipeline,
-        ModelRef(
-            Src.FIXED,
-            "sdxl",
-            ref="stabilityai/stable-diffusion-xl-base-1.0",
-            dtypes=("fp16", "bf16"),
-        ),
-    ],
+    pipeline: Annotated[MockPipeline, ModelRef(Src.FIXED, "sdxl")],
     payload: Input,
 ) -> Output:
     return Output(result="ok")
@@ -85,7 +80,7 @@ def generate_fixed(
 @worker_function()
 def generate_dynamic(
     ctx: ActionContext,
-    pipeline: Annotated[MockPipeline, ModelRef(Src.INPUT_PAYLOAD, "model_key")],
+    pipeline: Annotated[MockPipeline, ModelRef(Src.PAYLOAD, "model_key")],
     payload: Input,
 ) -> Output:
     return Output(result="ok")
@@ -103,17 +98,16 @@ def generate_dynamic(
                     [{"field": "model_key", "kind": "short_key"}],
                 )
 
-                mbf = manifest["models_by_function"]
                 self.assertEqual(
-                    mbf["generate-fixed"]["fixed"]["sdxl"]["ref"],
+                    manifest["models"]["sdxl"]["ref"],
                     "stabilityai/stable-diffusion-xl-base-1.0",
                 )
                 self.assertEqual(
-                    mbf["generate-fixed"]["fixed"]["sdxl"]["dtypes"],
+                    manifest["models"]["sdxl"]["dtypes"],
                     ["fp16", "bf16"],
                 )
                 self.assertEqual(
-                    mbf["generate-dynamic"]["payload_selectors"]["model_key"]["base"]["ref"],
+                    manifest["models_by_function"]["generate-dynamic"]["base"]["ref"],
                     "stabilityai/stable-diffusion-xl-base-1.0",
                 )
 
@@ -122,7 +116,7 @@ def generate_dynamic(
                 sys.path[:] = original_path
                 _cleanup_modules("funcs_a")
 
-    def test_missing_fixed_ref_fails_discovery(self) -> None:
+    def test_missing_fixed_key_fails_discovery(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             original_cwd = os.getcwd()
@@ -141,7 +135,7 @@ dependencies = ["gen-worker"]
 """.lstrip(),
                     encoding="utf-8",
                 )
-                (root / "tensorhub.toml").write_text(
+                (root / "endpoint.toml").write_text(
                     """
 schema_version = 1
 name = "test-project"
@@ -181,7 +175,7 @@ def generate(
 
                 with self.assertRaises(ValueError) as ctx:
                     discover_manifest(root)
-                self.assertIn("FIXED model keys", str(ctx.exception))
+                self.assertIn("missing from endpoint.toml [models]", str(ctx.exception))
 
             finally:
                 os.chdir(original_cwd)
@@ -207,7 +201,7 @@ dependencies = ["gen-worker"]
 """.lstrip(),
                     encoding="utf-8",
                 )
-                (root / "tensorhub.toml").write_text(
+                (root / "endpoint.toml").write_text(
                     """
 schema_version = 1
 name = "test-project"
@@ -238,7 +232,7 @@ class MockPipeline:
 @worker_function()
 def generate(
     ctx: ActionContext,
-    pipeline: Annotated[MockPipeline, ModelRef(Src.INPUT_PAYLOAD, "model_key")],
+    pipeline: Annotated[MockPipeline, ModelRef(Src.PAYLOAD, "model_key")],
     payload: Input,
 ) -> Output:
     return Output(result="ok")
@@ -248,7 +242,7 @@ def generate(
 
                 with self.assertRaises(ValueError) as ctx:
                     discover_manifest(root)
-                self.assertIn("[functions.generate.models.model_key]", str(ctx.exception))
+                self.assertIn("missing [models.generate]", str(ctx.exception))
 
             finally:
                 os.chdir(original_cwd)
@@ -274,7 +268,7 @@ dependencies = ["gen-worker"]
 """.lstrip(),
                     encoding="utf-8",
                 )
-                (root / "tensorhub.toml").write_text(
+                (root / "endpoint.toml").write_text(
                     """
 schema_version = 1
 name = "test-project"
@@ -315,7 +309,7 @@ def caption(ctx: ActionContext, payload: Input) -> Output:
                 sys.path[:] = original_path
                 _cleanup_modules("funcs_d")
 
-    def test_fixed_ref_with_scheme_prefix_fails_discovery(self) -> None:
+    def test_inline_ref_in_modelref_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             original_cwd = os.getcwd()
@@ -334,11 +328,14 @@ dependencies = ["gen-worker"]
 """.lstrip(),
                     encoding="utf-8",
                 )
-                (root / "tensorhub.toml").write_text(
+                (root / "endpoint.toml").write_text(
                     """
 schema_version = 1
 name = "test-project"
 main = "funcs_e"
+
+[models]
+sdxl = "stabilityai/stable-diffusion-xl-base-1.0"
 """.lstrip(),
                     encoding="utf-8",
                 )
@@ -366,7 +363,7 @@ def generate(
     ctx: ActionContext,
     pipeline: Annotated[
         MockPipeline,
-        ModelRef(Src.FIXED, "sdxl", ref="hf:stabilityai/stable-diffusion-xl-base-1.0"),
+        ModelRef(Src.FIXED, "sdxl", ref="stabilityai/stable-diffusion-xl-base-1.0"),
     ],
     payload: Input,
 ) -> Output:
@@ -377,7 +374,7 @@ def generate(
 
                 with self.assertRaises(ValueError) as ctx:
                     discover_manifest(root)
-                self.assertIn("must not include a scheme prefix", str(ctx.exception))
+                self.assertIn("inline ref/dtypes", str(ctx.exception))
 
             finally:
                 os.chdir(original_cwd)

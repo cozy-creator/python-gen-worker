@@ -871,7 +871,6 @@ class Worker:
         self._active_tasks_lock = threading.Lock()
         self._request_batch_context: Dict[str, Tuple[str, str]] = {}  # request_id -> (batch_id, item_id)
         self._request_batch_context_lock = threading.Lock()
-        self._active_function_counts: Dict[str, int] = {}
         self.max_concurrency = int(os.getenv("WORKER_MAX_CONCURRENCY", "0"))
         self._drain_timeout_seconds = int(os.getenv("WORKER_DRAIN_TIMEOUT_SECONDS", "0"))
         self._draining = False
@@ -976,14 +975,14 @@ class Worker:
         # Immutable allowlist derived from the baked discovery manifest (tenant-declared scope).
         # Scheduler config may narrow this set but must never widen it.
         self._manifest_allowed_model_ids: Optional[set[str]] = None
-        # Per-function FIXED model keyspace from baked discovery manifest (short_key -> model_ref).
-        self._fixed_model_id_by_key_by_function: Dict[str, Dict[str, str]] = {}
-        # Per-function payload selector keyspaces from baked discovery manifest.
-        # function_name -> payload_field -> short_key -> model_ref
-        self._payload_model_id_by_selector_by_function: Dict[str, Dict[str, Dict[str, str]]] = {}
+        # Top-level FIXED model keyspace from baked discovery manifest (short_key -> model_ref).
+        self._fixed_model_id_by_key: Dict[str, str] = {}
+        # Per-function payload model keyspaces from baked discovery manifest.
+        # function_name -> short_key -> model_ref
+        self._payload_model_id_by_key_by_function: Dict[str, Dict[str, str]] = {}
         # DType specs tracked in the same shape as model id maps.
-        self._fixed_model_spec_by_key_by_function: Dict[str, Dict[str, Dict[str, Any]]] = {}
-        self._payload_model_spec_by_selector_by_function: Dict[str, Dict[str, Dict[str, Dict[str, Any]]]] = {}
+        self._fixed_model_spec_by_key: Dict[str, Dict[str, Any]] = {}
+        self._payload_model_spec_by_key_by_function: Dict[str, Dict[str, Dict[str, Any]]] = {}
         # Orchestrator-resolved manifests received in EndpointConfig (startup prefetch baseline).
         # Keys should be canonical model ref strings (e.g. "cozy:owner/repo@sha256:<digest>").
         self._resolved_cozy_models_by_id_baseline: Dict[str, Any] = {}
@@ -997,6 +996,28 @@ class Worker:
         # Store manifest and initialize model config from it
         self._manifest = manifest
         if manifest and isinstance(manifest, dict):
+            global_models = manifest.get("models")
+            if isinstance(global_models, dict):
+                out_fixed: Dict[str, str] = {}
+                out_fixed_spec: Dict[str, Dict[str, Any]] = {}
+                for k, v in global_models.items():
+                    key = str(k).strip()
+                    if not key or not isinstance(v, dict):
+                        continue
+                    ref = _canonicalize_model_ref_string(str(v.get("ref") or "").strip())
+                    if not ref:
+                        continue
+                    dtypes = v.get("dtypes")
+                    out_fixed[key] = ref
+                    if isinstance(dtypes, list):
+                        out_fixed_spec[key] = {"ref": ref, "dtypes": [str(x) for x in dtypes if str(x).strip()]}
+                    else:
+                        out_fixed_spec[key] = {"ref": ref, "dtypes": []}
+                if out_fixed:
+                    self._fixed_model_id_by_key = out_fixed
+                if out_fixed_spec:
+                    self._fixed_model_spec_by_key = out_fixed_spec
+
             mbf = manifest.get("models_by_function")
             if isinstance(mbf, dict):
                 for fn_name, mapping in mbf.items():
@@ -1005,77 +1026,41 @@ class Worker:
                     fn = str(fn_name).strip()
                     if not fn:
                         continue
-
-                    fixed_raw = mapping.get("fixed")
-                    if isinstance(fixed_raw, dict):
-                        out_fixed: Dict[str, str] = {}
-                        out_fixed_spec: Dict[str, Dict[str, Any]] = {}
-                        for k, v in fixed_raw.items():
-                            key = str(k).strip()
-                            if not key or not isinstance(v, dict):
-                                continue
-                            ref = _canonicalize_model_ref_string(str(v.get("ref") or "").strip())
-                            if not ref:
-                                continue
-                            dtypes = v.get("dtypes")
-                            out_fixed[key] = ref
-                            if isinstance(dtypes, list):
-                                out_fixed_spec[key] = {"ref": ref, "dtypes": [str(x) for x in dtypes if str(x).strip()]}
-                            else:
-                                out_fixed_spec[key] = {"ref": ref, "dtypes": []}
-                        if out_fixed:
-                            self._fixed_model_id_by_key_by_function[fn] = out_fixed
-                        if out_fixed_spec:
-                            self._fixed_model_spec_by_key_by_function[fn] = out_fixed_spec
-
-                    payload_raw = mapping.get("payload_selectors")
-                    if isinstance(payload_raw, dict):
-                        selectors: Dict[str, Dict[str, str]] = {}
-                        selectors_spec: Dict[str, Dict[str, Dict[str, Any]]] = {}
-                        for selector_name, keyspace_raw in payload_raw.items():
-                            selector = str(selector_name).strip()
-                            if not selector or not isinstance(keyspace_raw, dict):
-                                continue
-                            keyspace: Dict[str, str] = {}
-                            keyspace_spec: Dict[str, Dict[str, Any]] = {}
-                            for k, v in keyspace_raw.items():
-                                key = str(k).strip()
-                                if not key or not isinstance(v, dict):
-                                    continue
-                                ref = _canonicalize_model_ref_string(str(v.get("ref") or "").strip())
-                                if not ref:
-                                    continue
-                                dtypes = v.get("dtypes")
-                                keyspace[key] = ref
-                                if isinstance(dtypes, list):
-                                    keyspace_spec[key] = {"ref": ref, "dtypes": [str(x) for x in dtypes if str(x).strip()]}
-                                else:
-                                    keyspace_spec[key] = {"ref": ref, "dtypes": []}
-                            if keyspace:
-                                selectors[selector] = keyspace
-                            if keyspace_spec:
-                                selectors_spec[selector] = keyspace_spec
-                        if selectors:
-                            self._payload_model_id_by_selector_by_function[fn] = selectors
-                        if selectors_spec:
-                            self._payload_model_spec_by_selector_by_function[fn] = selectors_spec
+                    keyspace: Dict[str, str] = {}
+                    keyspace_spec: Dict[str, Dict[str, Any]] = {}
+                    for k, v in mapping.items():
+                        key = str(k).strip()
+                        if not key or not isinstance(v, dict):
+                            continue
+                        ref = _canonicalize_model_ref_string(str(v.get("ref") or "").strip())
+                        if not ref:
+                            continue
+                        dtypes = v.get("dtypes")
+                        keyspace[key] = ref
+                        if isinstance(dtypes, list):
+                            keyspace_spec[key] = {"ref": ref, "dtypes": [str(x) for x in dtypes if str(x).strip()]}
+                        else:
+                            keyspace_spec[key] = {"ref": ref, "dtypes": []}
+                    if keyspace:
+                        self._payload_model_id_by_key_by_function[fn] = keyspace
+                    if keyspace_spec:
+                        self._payload_model_spec_by_key_by_function[fn] = keyspace_spec
 
             # Compute union allowlist for prefetch/guardrails.
             allowed: set[str] = set()
-            for m in self._fixed_model_id_by_key_by_function.values():
+            allowed.update(self._fixed_model_id_by_key.values())
+            for m in self._payload_model_id_by_key_by_function.values():
                 allowed.update(m.values())
-            for by_selector in self._payload_model_id_by_selector_by_function.values():
-                for m in by_selector.values():
-                    allowed.update(m.values())
             self._manifest_allowed_model_ids = allowed or None
             # Default enforcement scope to what the tenant declared (baked manifest),
             # until the scheduler narrows it further.
             self._release_allowed_model_ids = self._manifest_allowed_model_ids
 
-            if self._fixed_model_id_by_key_by_function or self._payload_model_id_by_selector_by_function:
+            if self._fixed_model_id_by_key or self._payload_model_id_by_key_by_function:
                 logger.info(
-                    "Loaded model mappings from manifest for %d functions",
-                    len(set(self._fixed_model_id_by_key_by_function) | set(self._payload_model_id_by_selector_by_function)),
+                    "Loaded model mappings from manifest (fixed=%d, functions=%d)",
+                    len(self._fixed_model_id_by_key),
+                    len(self._payload_model_id_by_key_by_function),
                 )
 
         if self._model_manager:
@@ -1766,8 +1751,8 @@ class Worker:
             if inj is None:
                 raise ValueError("websocket extra params must be Annotated injections")
             base_t, model_ref = inj
-            if model_ref.source == ModelRefSource.INPUT_PAYLOAD:
-                raise ValueError("websocket handlers cannot use ModelRef(INPUT_PAYLOAD, ...) (no payload for selection)")
+            if model_ref.source == ModelRefSource.PAYLOAD:
+                raise ValueError("websocket handlers cannot use ModelRef(PAYLOAD, ...) (no payload for selection)")
             injections.append(InjectionSpec(param_name=p.name, param_type=base_t, model_ref=model_ref))
 
         return _WebsocketSpec(
@@ -2296,11 +2281,6 @@ class Worker:
                     f"downloading={len(downloading_models)}"
                 ) 
 
-            function_concurrency = {}
-            for func_name, req in self._discovered_resources.items():
-                if req and req.max_concurrency:
-                    function_concurrency[func_name] = int(req.max_concurrency)
-
             cuda_version = os.getenv("WORKER_CUDA_VERSION", "").strip()
             torch_version = os.getenv("WORKER_TORCH_VERSION", "").strip()
             if torch is not None:
@@ -2360,7 +2340,6 @@ class Worker:
                 gpu_name=gpu_name,
                 gpu_driver=gpu_driver,
                 max_concurrency=self.max_concurrency,
-                function_concurrency=function_concurrency,
                 cuda_version=cuda_version,
                 torch_version=torch_version,
                 gpu_sm=gpu_sm,
@@ -2511,11 +2490,6 @@ class Worker:
             caps = dict(req.to_dict() if req else {})
             if not caps:
                 continue
-            if "max_inflight_requests" not in caps and "max_concurrency" in caps:
-                try:
-                    caps["max_inflight_requests"] = int(caps.get("max_concurrency") or 0)
-                except Exception:
-                    pass
             spec = self._task_specs.get(fn_name)
             if spec is not None:
                 caps["output_mode"] = spec.output_mode
@@ -2803,15 +2777,29 @@ class Worker:
                 len(resolved_by_variant),
             )
 
-            # Optional: authoritative per-function model keyspace updates (runtime-editable).
-            # When present, this replaces any baked manifest mapping for payload-driven selection.
+            # Optional: authoritative model keyspace updates (runtime-editable).
+            # - repo_ref_by_key: global fixed keyspace
+            # - models_by_function: per-function payload keyspaces
             has_keyspace_update = False
             try:
+                rbk = dict(getattr(cfg, "repo_ref_by_key", {}) or {})
                 mbf = dict(getattr(cfg, "models_by_function", {}) or {})
-                if mbf:
+                if rbk or mbf:
                     has_keyspace_update = True
-                    new_by_fn: Dict[str, Dict[str, str]] = {}
-                    new_spec_by_fn: Dict[str, Dict[str, Dict[str, Any]]] = {}
+                    new_fixed_by_key: Dict[str, str] = {}
+                    new_fixed_spec_by_key: Dict[str, Dict[str, Any]] = {}
+                    for k, v in rbk.items():
+                        key = str(k).strip()
+                        if not key:
+                            continue
+                        ref = _canonicalize_model_ref_string(str(v or ""))
+                        if not ref:
+                            continue
+                        new_fixed_by_key[key] = ref
+                        new_fixed_spec_by_key[key] = {"ref": ref, "dtypes": []}
+
+                    new_payload_by_fn: Dict[str, Dict[str, str]] = {}
+                    new_payload_spec_by_fn: Dict[str, Dict[str, Dict[str, Any]]] = {}
                     for fn_name, mbk in mbf.items():
                         if not fn_name or mbk is None:
                             continue
@@ -2835,13 +2823,17 @@ class Worker:
                             out[key] = ref
                             out_spec[key] = {"ref": ref, "dtypes": dtypes}
                         if out:
-                            new_by_fn[str(fn_name)] = out
+                            new_payload_by_fn[str(fn_name)] = out
                         if out_spec:
-                            new_spec_by_fn[str(fn_name)] = out_spec
-                    if new_by_fn:
-                        self._fixed_model_id_by_key_by_function = new_by_fn
-                    if new_spec_by_fn:
-                        self._fixed_model_spec_by_key_by_function = new_spec_by_fn
+                            new_payload_spec_by_fn[str(fn_name)] = out_spec
+                    if new_fixed_by_key:
+                        self._fixed_model_id_by_key = new_fixed_by_key
+                    if new_fixed_spec_by_key:
+                        self._fixed_model_spec_by_key = new_fixed_spec_by_key
+                    if new_payload_by_fn:
+                        self._payload_model_id_by_key_by_function = new_payload_by_fn
+                    if new_payload_spec_by_fn:
+                        self._payload_model_spec_by_key_by_function = new_payload_spec_by_fn
             except Exception:
                 has_keyspace_update = False
 
@@ -2876,11 +2868,9 @@ class Worker:
                     # When scheduler supplies an explicit keyspace update, prefer that as the
                     # runtime enforcement scope.
                     scope: set[str] = set()
-                    for m in (self._fixed_model_id_by_key_by_function or {}).values():
+                    scope.update((self._fixed_model_id_by_key or {}).values())
+                    for m in (self._payload_model_id_by_key_by_function or {}).values():
                         scope.update(m.values())
-                    for by_selector in (self._payload_model_id_by_selector_by_function or {}).values():
-                        for m in by_selector.values():
-                            scope.update(m.values())
                     self._release_allowed_model_ids = scope or None
                 else:
                     # If we have a baked manifest scope, never allow widening beyond it.
@@ -3493,21 +3483,7 @@ class Worker:
                   self._emit_task_event(request_id, "task.rejected", {"reason": "max_concurrency_reached"})
                   self._send_task_result(request_id, False, None, "retryable", True, "worker busy", error_msg)
                   return
-             resource_req = self._discovered_resources.get(function_name)
-             func_limit = resource_req.max_concurrency if resource_req and resource_req.max_concurrency else 0
-             if func_limit > 0 and self._active_function_counts.get(function_name, 0) >= func_limit:
-                  error_msg = f"Function concurrency limit reached for {function_name} ({func_limit})."
-                  logger.error(error_msg)
-                  self._emit_task_event(
-                      request_id,
-                      "task.rejected",
-                      {"reason": "function_concurrency_reached", "function_name": function_name},
-                  )
-                  self._send_task_result(request_id, False, None, "retryable", True, "worker busy", error_msg)
-                  return
              self._active_tasks[request_id] = ctx
-             if func_limit > 0:
-                  self._active_function_counts[function_name] = self._active_function_counts.get(function_name, 0) + 1
 
         # Execute function in a separate thread to avoid blocking the receive loop
         thread = threading.Thread(
@@ -3901,17 +3877,15 @@ class Worker:
                 finally:
                     if resolve_watchdog is not None:
                         resolve_watchdog.cancel()
-                # Best-effort: attach dtype preferences from tensorhub.toml-derived manifest mapping.
+                # Best-effort: attach dtype preferences from endpoint.toml-derived manifest mapping.
                 if model_key:
                     try:
                         s = None
                         if inj.model_ref.source == ModelRefSource.FIXED:
-                            fn_specs = self._fixed_model_spec_by_key_by_function.get(spec.name) or {}
-                            s = fn_specs.get(model_key) if isinstance(fn_specs, dict) else None
-                        elif inj.model_ref.source == ModelRefSource.INPUT_PAYLOAD:
-                            by_selector = self._payload_model_spec_by_selector_by_function.get(spec.name) or {}
-                            selector_specs = by_selector.get(inj.model_ref.key) if isinstance(by_selector, dict) else None
-                            s = selector_specs.get(model_key) if isinstance(selector_specs, dict) else None
+                            s = self._fixed_model_spec_by_key.get(model_key)
+                        elif inj.model_ref.source == ModelRefSource.PAYLOAD:
+                            by_fn = self._payload_model_spec_by_key_by_function.get(spec.name) or {}
+                            s = by_fn.get(model_key) if isinstance(by_fn, dict) else None
                         if isinstance(s, dict):
                             dts = s.get("dtypes")
                             if isinstance(dts, list) and canon_model_id:
@@ -4217,13 +4191,6 @@ class Worker:
 
             with self._active_tasks_lock:
                 self._active_tasks.pop(request_id, None)
-                func_limit = spec.resources.max_concurrency or 0
-                if func_limit > 0:
-                    current = self._active_function_counts.get(spec.name, 0) - 1
-                    if current <= 0:
-                        self._active_function_counts.pop(spec.name, None)
-                    else:
-                        self._active_function_counts[spec.name] = current
 
     def _get_local_model_cache(self) -> Optional[Any]:
         """
@@ -4741,13 +4708,12 @@ class Worker:
         raise ValueError(f"no injection provider for type {qn} (model_id={model_id})")
 
     def _resolve_model_id_for_injection(self, fn_name: str, inj: InjectionSpec, payload: msgspec.Struct) -> tuple[str, Optional[str]]:
-        fixed_map = dict((getattr(self, "_fixed_model_id_by_key_by_function", {}) or {}).get(fn_name) or {})
-        payload_maps = dict((getattr(self, "_payload_model_id_by_selector_by_function", {}) or {}).get(fn_name) or {})
+        fixed_map = dict(getattr(self, "_fixed_model_id_by_key", {}) or {})
+        payload_map = dict((getattr(self, "_payload_model_id_by_key_by_function", {}) or {}).get(fn_name) or {})
         allowed_ids: Optional[set[str]] = None
         local_allowed: set[str] = set()
         local_allowed.update(fixed_map.values())
-        for selector_map in payload_maps.values():
-            local_allowed.update(selector_map.values())
+        local_allowed.update(payload_map.values())
         if local_allowed:
             allowed_ids = local_allowed
 
@@ -4757,12 +4723,13 @@ class Worker:
                 raise ValueError(f"empty fixed ModelRef for injection param: {inj.param_name}")
             explicit_ref = _canonicalize_model_ref_string(str(inj.model_ref.ref or "").strip())
             if explicit_ref:
-                self._enforce_model_allowlist(explicit_ref, inj, allowed_ids=allowed_ids)
-                return explicit_ref, raw
+                raise ValueError(
+                    f"function {fn_name!r} uses ModelRef(FIXED, {raw!r}) with inline ref; "
+                    "declare fixed key mappings in endpoint.toml [models]"
+                )
             if not fixed_map:
                 raise ValueError(
-                    f"fixed model selection is not configured for function {fn_name!r}; "
-                    "expected models_by_function.<fn>.fixed in /app/.cozy/manifest.json"
+                    "fixed model selection is not configured; expected top-level models in /app/.tensorhub/endpoint.lock"
                 )
             if raw not in fixed_map:
                 allowed = sorted(fixed_map.keys())
@@ -4777,7 +4744,7 @@ class Worker:
             self._enforce_model_allowlist(model_id, inj, allowed_ids=allowed_ids)
             return model_id, raw
 
-        if inj.model_ref.source == ModelRefSource.INPUT_PAYLOAD:
+        if inj.model_ref.source == ModelRefSource.PAYLOAD:
             field = inj.model_ref.key.strip()
             if not field:
                 raise ValueError(f"empty payload ModelRef for injection param: {inj.param_name}")
@@ -4792,28 +4759,22 @@ class Worker:
             key = chosen.strip()
             if not key:
                 raise ValueError(f"payload field {field!r} is empty; expected a model key")
-            if not payload_maps:
+            if not payload_map:
                 raise ValueError(
                     f"payload model selection is not configured for function {fn_name!r}; "
-                    "expected models_by_function.<fn>.payload_selectors in /app/.cozy/manifest.json"
+                    f"expected models_by_function.{fn_name} in /app/.tensorhub/endpoint.lock"
                 )
-            model_id_by_key = payload_maps.get(field)
-            if not model_id_by_key:
-                selectors = sorted(payload_maps.keys())
-                raise ValueError(
-                    f"no payload model keyspace configured for field {field!r} in function {fn_name!r}; "
-                    f"configured selector fields: {selectors}"
-                )
-            if key not in model_id_by_key:
-                allowed = sorted(model_id_by_key.keys())
+            if key not in payload_map:
+                allowed = sorted(payload_map.keys())
                 head = allowed[:20]
                 suffix = ""
                 if len(allowed) > len(head):
                     suffix = f" (+{len(allowed) - len(head)} more)"
                 raise ValueError(
-                    f"unknown model key {key!r} for payload field {field!r}; allowed keys: {head}{suffix}"
+                    f"unknown model key {key!r} for function {fn_name!r} payload field {field!r}; "
+                    f"allowed keys: {head}{suffix}"
                 )
-            model_id = model_id_by_key[key]
+            model_id = payload_map[key]
             self._enforce_model_allowlist(model_id, inj, allowed_ids=allowed_ids)
             return model_id, key
 

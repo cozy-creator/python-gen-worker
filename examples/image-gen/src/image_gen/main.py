@@ -16,7 +16,7 @@ from gen_worker.types import Asset
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
-sdxl_resources = ResourceRequirements(max_concurrency=1)
+sdxl_resources = ResourceRequirements()
 _pipeline_locks_guard = threading.Lock()
 _pipeline_locks: dict[int, threading.Lock] = {}
 
@@ -49,12 +49,7 @@ def generate_image(
     ctx: ActionContext,
     pipeline: Annotated[
         StableDiffusionXLPipeline,
-        ModelRef(
-            Src.FIXED,
-            "sdxl",
-            ref="stabilityai/stable-diffusion-xl-base-1.0",
-            dtypes=("fp16", "bf16"),
-        ),
+        ModelRef(Src.FIXED, "sdxl"),
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:
