@@ -984,7 +984,7 @@ class Worker:
         self._fixed_model_spec_by_key: Dict[str, Dict[str, Any]] = {}
         self._payload_model_spec_by_key_by_function: Dict[str, Dict[str, Dict[str, Any]]] = {}
         # Orchestrator-resolved manifests received in EndpointConfig (startup prefetch baseline).
-        # Keys should be canonical model ref strings (e.g. "cozy:owner/repo@sha256:<digest>").
+        # Keys should be canonical model ref strings (e.g. "owner/repo@sha256:<digest>").
         self._resolved_cozy_models_by_id_baseline: Dict[str, Any] = {}
         self._prefetch_lock = threading.Lock()
         self._prefetch_thread: Optional[threading.Thread] = None
@@ -3351,7 +3351,9 @@ class Worker:
         invoker_id = str(getattr(request, "invoker_id", "") or "")
         file_base_url = str(getattr(request, "file_base_url", "") or "")
         file_token = str(getattr(request, "file_token", "") or "")
-        resolved_cozy_models_by_id = dict(getattr(request, "resolved_cozy_models_by_id", {}) or {})
+        resolved_cozy_models_by_id = self._canonicalize_resolved_models_map(
+            dict(getattr(request, "resolved_cozy_models_by_id", {}) or {})
+        )
         parent_request_id = str(getattr(request, "parent_request_id", "") or "").strip() or None
         child_request_id = str(getattr(request, "child_request_id", "") or "").strip() or None
         item_id = str(getattr(request, "item_id", "") or "").strip() or None
@@ -3521,7 +3523,9 @@ class Worker:
                 timeout_ms=int(getattr(item, "timeout_ms", 0) or 0),
                 owner=str(getattr(item, "owner", "") or ""),
                 invoker_id=str(getattr(item, "invoker_id", "") or ""),
-                resolved_cozy_models_by_id=dict(getattr(item, "resolved_cozy_models_by_id", {}) or {}),
+                resolved_cozy_models_by_id=self._canonicalize_resolved_models_map(
+                    dict(getattr(item, "resolved_cozy_models_by_id", {}) or {})
+                ),
                 parent_request_id=str(getattr(item, "parent_request_id", "") or ""),
                 child_request_id=str(getattr(item, "child_request_id", "") or ""),
                 item_id=item_id,
@@ -4384,7 +4388,13 @@ class Worker:
                         # If we have an orchestrator-resolved manifest, estimate missing bytes.
                         resolved_entry = None
                         try:
-                            resolved_entry = (getattr(ctx, "resolved_cozy_models_by_id", None) or {}).get(canon)
+                            resolved_map = getattr(ctx, "resolved_cozy_models_by_id", None) or {}
+                            resolved_entry = resolved_map.get(canon)
+                            if resolved_entry is None:
+                                if canon.startswith("cozy:"):
+                                    resolved_entry = resolved_map.get(canon.split(":", 1)[1].strip())
+                                else:
+                                    resolved_entry = resolved_map.get(f"cozy:{canon}")
                         except Exception:
                             resolved_entry = None
                         bytes_dl = None

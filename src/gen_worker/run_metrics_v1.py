@@ -41,6 +41,18 @@ def _extract_snapshot_digest(resolved_entry: Any) -> Optional[str]:
     return snap or None
 
 
+def _resolved_entry_for_model_id(resolved: Mapping[str, Any], canonical_model_id: str) -> Any:
+    key = str(canonical_model_id or "").strip()
+    if not key:
+        return None
+    ent = resolved.get(key)
+    if ent is not None:
+        return ent
+    if key.startswith("cozy:"):
+        return resolved.get(key.split(":", 1)[1].strip())
+    return resolved.get(f"cozy:{key}")
+
+
 def _extract_resolved_files(resolved_entry: Any) -> List[Any]:
     if resolved_entry is None:
         return []
@@ -88,6 +100,17 @@ def _missing_bytes_for_resolved_model(base_dir: Path, resolved_entry: Any) -> Op
 
 def _cache_dir() -> Path:
     return worker_model_cache_dir()
+
+
+def _canonicalize_model_id(raw: str) -> str:
+    s = str(raw or "").strip()
+    if not s:
+        return s
+    try:
+        parsed = parse_model_ref(s)
+        return parsed.canonical()
+    except Exception:
+        return s
 
 
 @dataclass
@@ -357,8 +380,8 @@ def best_effort_init_model_metrics(
     - vram_models/disk_models are the worker-reported canonical lists.
     - For Cozy refs with resolved snapshot digests, we can also check snapshot dirs.
     """
-    vram_set = set(str(x) for x in (vram_models or []))
-    disk_set = set(str(x) for x in (disk_models or []))
+    vram_set = set(_canonicalize_model_id(str(x)) for x in (vram_models or []))
+    disk_set = set(_canonicalize_model_id(str(x)) for x in (disk_models or []))
     base = cache_dir or _cache_dir()
 
     resolved = rm.resolved_cozy_models_by_id or {}
@@ -366,17 +389,11 @@ def best_effort_init_model_metrics(
         mid = str(raw or "").strip()
         if not mid:
             continue
-        canon = mid
+        canon = _canonicalize_model_id(mid)
         snap: Optional[str] = None
         cache_state: Optional[str] = None
-        try:
-            parsed = parse_model_ref(mid)
-            if parsed.scheme == "cozy" and parsed.cozy is not None:
-                canon = parsed.cozy.canonical()
-        except Exception:
-            pass
 
-        resolved_entry = resolved.get(canon) if isinstance(resolved, Mapping) else None
+        resolved_entry = _resolved_entry_for_model_id(resolved, canon) if isinstance(resolved, Mapping) else None
         snap = _extract_snapshot_digest(resolved_entry)
 
         if canon in vram_set:

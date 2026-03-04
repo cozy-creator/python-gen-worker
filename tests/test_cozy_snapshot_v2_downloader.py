@@ -268,12 +268,12 @@ def test_model_ref_downloader_uses_resolved_urls_without_tensorhub_token(tmp_pat
             ],
         )
 
-        # NOTE: canonical() lowercases and adds cozy: prefix.
+        # Accept legacy resolved-map keys that still include a cozy: scheme prefix.
         resolved_by_id = {"cozy:o/r:latest": resolved}
         tok = set_resolved_cozy_models_by_id(resolved_by_id)
         try:
             dl = ModelRefDownloader(cozy_base_url=None, cozy_token=None, allow_tensorhub_api_resolve=False)
-            local = dl.download("cozy:o/r:latest", tmp_path.as_posix())
+            local = dl.download("o/r:latest", tmp_path.as_posix())
             assert (Path(local) / "cozy.pipeline.yaml").read_bytes() == b1
         finally:
             reset_resolved_cozy_models_by_id(tok)

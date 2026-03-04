@@ -16,8 +16,8 @@ class CozyRef:
 
     def canonical(self) -> str:
         if self.digest:
-            return f"cozy:{self.repo_id()}@{self.digest}"
-        return f"cozy:{self.repo_id()}:{self.tag}"
+            return f"{self.repo_id()}@{self.digest}"
+        return f"{self.repo_id()}:{self.tag}"
 
 
 @dataclass(frozen=True)
@@ -36,6 +36,13 @@ class ParsedModelRef:
     scheme: str  # "cozy" | "hf"
     cozy: Optional[CozyRef] = None
     hf: Optional[HuggingFaceRef] = None
+
+    def canonical(self) -> str:
+        if self.scheme == "cozy" and self.cozy is not None:
+            return self.cozy.canonical()
+        if self.scheme == "hf" and self.hf is not None:
+            return self.hf.canonical()
+        raise ValueError("invalid parsed model ref")
 
 
 def _strip_scheme(raw: str) -> tuple[Optional[str], str]:

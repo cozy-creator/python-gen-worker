@@ -59,6 +59,26 @@ def _get_prefs_for_ref(canonical_ref: str) -> Mapping[str, Any]:
     return v if isinstance(v, Mapping) else {}
 
 
+def _lookup_resolved_cozy_entry(resolved_mapping: Optional[Mapping[str, Any]], canonical_ref: str) -> Any:
+    if resolved_mapping is None:
+        return None
+    key = str(canonical_ref or "").strip()
+    if not key:
+        return None
+    candidates = [key]
+    if key.startswith("cozy:"):
+        candidates.append(key.split(":", 1)[1].strip())
+    else:
+        candidates.append(f"cozy:{key}")
+    for cand in candidates:
+        if not cand:
+            continue
+        ent = resolved_mapping.get(cand)
+        if ent is not None:
+            return ent
+    return None
+
+
 class ModelRefDownloader(ModelDownloader):
     """Composite downloader for phase-1 model refs.
 
@@ -128,7 +148,7 @@ class ModelRefDownloader(ModelDownloader):
         if parsed.scheme == "cozy" and parsed.cozy is not None:
             canonical = parsed.cozy.canonical()
             resolved_mapping = _resolved_cozy_models_by_id.get()
-            resolved_entry = resolved_mapping.get(canonical) if resolved_mapping is not None else None
+            resolved_entry = _lookup_resolved_cozy_entry(resolved_mapping, canonical)
 
             if resolved_entry is not None:
                 return ensure_snapshot_sync(
