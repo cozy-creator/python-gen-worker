@@ -1,8 +1,8 @@
 # Tenant-supplied Dockerfile example (CPU).
 #
-# - Installs gen-worker in a stable cacheable layer.
+# - Installs dependencies from pyproject.toml/uv.lock.
 # - Installs torch (CPU) so Cozy Hub can record a stable backend version for tagging.
-# - Installs tenant deps from uv.lock without reinstalling gen-worker.
+# - Installs tenant deps from uv.lock.
 # - Bakes discovered functions into /app/.tensorhub/endpoint.lock at build time.
 #
 ARG PYTHON_VERSION=3.12
@@ -26,14 +26,12 @@ RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
     uv pip install --system --break-system-packages --torch-backend ${UV_TORCH_BACKEND} \
       "torch${TORCH_SPEC}"
 
-RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
-    uv pip install --system --break-system-packages gen-worker==0.3.0
 
 COPY pyproject.toml uv.lock /app/
 
 RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
     uv export --no-dev --no-hashes --no-sources --no-emit-project --no-emit-local \
-      --no-emit-package gen-worker --no-emit-package torch \
+      --no-emit-package torch \
       -o /tmp/requirements.txt \
     && uv pip install --system --break-system-packages --no-deps -r /tmp/requirements.txt
 

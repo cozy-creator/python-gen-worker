@@ -1,16 +1,17 @@
-# Local-dev Dockerfile for the sd15 example.
+# Tenant-supplied Dockerfile example.
 #
-# Difference vs ./Dockerfile:
-# - Installs gen-worker from the local checkout (this repo) so you can test
-#   unreleased changes.
+# - Installs torch in a stable cacheable layer.
+# - Installs tenant deps from uv.lock without replacing torch.
+# - Bakes discovered functions into /app/.tensorhub/endpoint.lock at build time.
 #
-# Build from repo root:
-#   docker build -f examples/sd15/Dockerfile.local -t cozy-example-sd15-local:dev .
+# Local build (GPU):
+#   docker build -t flux2-klein-9b-worker -f Dockerfile .
 #
 ARG PYTHON_VERSION=3.12
 FROM ghcr.io/astral-sh/uv:python${PYTHON_VERSION}-bookworm-slim AS cozy_base
 
-ARG UV_TORCH_BACKEND=cu126
+ARG CUDA_VERSION=12.8
+ARG UV_TORCH_BACKEND=
 ARG TORCH_SPEC="~=2.10.0"
 
 WORKDIR /app
@@ -24,31 +25,27 @@ RUN --mount=type=cache,id=cozy-apt-cache,target=/var/cache/apt,sharing=locked \
     git \
     && apt-get clean
 
+# Stable runtime layers (avoid re-downloading torch/cu libs on every tenant build).
 RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
-    uv pip install --system --break-system-packages --torch-backend ${UV_TORCH_BACKEND} \
+    backend="${UV_TORCH_BACKEND:-cu$(printf '%s' "${CUDA_VERSION}" | tr -d '.')}" \
+    && uv pip install --system --break-system-packages --torch-backend "$backend" \
       "torch${TORCH_SPEC}"
-
-# Install gen-worker from the local checkout.
-COPY pyproject.toml uv.lock README.md /gen-worker/
-COPY src/ /gen-worker/src/
-RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
-    uv pip install --system --break-system-packages /gen-worker
 
 FROM cozy_base AS cozy_final
 
 # Copy lock metadata first so dependency layers are cacheable across source edits.
-COPY examples/sd15/pyproject.toml examples/sd15/uv.lock /app/
+COPY pyproject.toml uv.lock /app/
 
-# Install tenant dependencies into the global environment without replacing torch/gen-worker.
+# Install tenant dependencies into the global environment without replacing torch.
 RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
     uv export --no-dev --no-hashes --no-sources --no-emit-project --no-emit-local \
-      --no-emit-package torch --no-emit-package gen-worker \
+      --no-emit-package torch \
       -o /tmp/requirements.all.txt \
     && grep -Ev '^(torch|triton|nvidia-|cuda-)' /tmp/requirements.all.txt > /tmp/requirements.txt \
     && uv pip install --system --break-system-packages --no-deps -r /tmp/requirements.txt
 
 # Copy app code late so app edits only invalidate the final layers.
-COPY examples/sd15/ /app/
+COPY . /app
 
 # Install the project itself without altering dependency layers.
 RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
@@ -58,15 +55,11 @@ RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
 RUN mkdir -p /app/.tensorhub \
     && python -m gen_worker.discover > /app/.tensorhub/endpoint.lock
 
-# Run as non-root at runtime.
-RUN groupadd --system --gid 10001 cozy \
-    && useradd --system --uid 10001 --gid cozy --create-home --home-dir /home/cozy --shell /usr/sbin/nologin cozy \
-    && chown -R cozy:cozy /app /home/cozy
+# Run as root at runtime (needed for writable mounted cache dirs like /workspace).
 
-ENV HOME=/home/cozy
-ENV XDG_CACHE_HOME=/home/cozy/.cache
-ENV HF_HOME=/home/cozy/.cache/huggingface
+ENV HOME=/root
+ENV XDG_CACHE_HOME=/root/.cache
+ENV HF_HOME=/root/.cache/huggingface
 
-USER cozy:cozy
 
 ENTRYPOINT ["python", "-m", "gen_worker.entrypoint"]

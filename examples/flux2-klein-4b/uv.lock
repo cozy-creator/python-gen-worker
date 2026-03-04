@@ -512,7 +512,7 @@ dev = [
 requires-dist = [
     { name = "accelerate" },
     { name = "diffusers", git = "https://github.com/huggingface/diffusers.git?rev=99e2cfff27dec514a43e260e885c5e6eca038b36" },
-    { name = "gen-worker", extras = ["torch"], specifier = "==0.3.0" },
+    { name = "gen-worker", extras = ["torch"] },
     { name = "pillow" },
     { name = "torchao" },
     { name = "transformers", specifier = ">=4.56,<5" },

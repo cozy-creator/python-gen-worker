@@ -1,13 +1,13 @@
-# flux2-klein-4b
+# flux2-klein-9b
 
-FLUX.2-klein 4B endpoint with separate base/turbo functions and dtype-specific variants.
+FLUX.2-klein 9B endpoint with separate base/turbo functions and dtype-specific variants.
 
 Naming convention in this repo:
 
-- Base model ref: `black-forest-labs/flux.2-klein-4b-base`
-- Turbo model ref: `black-forest-labs/flux.2-klein-4b-turbo`
+- Base model ref: `black-forest-labs/flux.2-klein-9b-base`
+- Turbo model ref: `black-forest-labs/flux.2-klein-9b-turbo`
 
-This avoids ambiguity with upstream naming where `flux.2-klein-4b` is commonly used for turbo variants.
+This avoids ambiguity with upstream naming where `flux.2-klein-9b` is commonly used for turbo variants.
 
 Functions:
 

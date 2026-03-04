@@ -298,7 +298,13 @@ def _safe_symlink_dir(target: Path, link: Path) -> None:
         shutil.copytree(target, link, dirs_exist_ok=True)
 
 
-@backoff.on_exception(backoff.expo, (aiohttp.ClientError, asyncio.TimeoutError, ValueError), max_tries=4)
+@backoff.on_exception(
+    backoff.expo,
+    (aiohttp.ClientError, asyncio.TimeoutError, ValueError, OSError, ConnectionError),
+    max_tries=max(1, int(os.getenv("WORKER_MODEL_DOWNLOAD_MAX_RETRIES", "12") or "12")),
+    max_time=max(30.0, float(os.getenv("WORKER_MODEL_DOWNLOAD_RETRY_MAX_TIME_S", "900") or "900")),
+    max_value=max(1.0, float(os.getenv("WORKER_MODEL_DOWNLOAD_BACKOFF_MAX_S", "8") or "8")),
+)
 async def _download_one_file(url: str, dst: Path, expected_size: int, expected_blake3: str) -> None:
     if dst.exists():
         try:
@@ -313,7 +319,12 @@ async def _download_one_file(url: str, dst: Path, expected_size: int, expected_b
             # Fall through to re-download.
             pass
 
-    timeout = aiohttp.ClientTimeout(total=600)
+    timeout = aiohttp.ClientTimeout(
+        total=None,
+        connect=float(os.getenv("WORKER_MODEL_DOWNLOAD_CONNECT_TIMEOUT_S", "60") or "60"),
+        sock_connect=float(os.getenv("WORKER_MODEL_DOWNLOAD_SOCK_CONNECT_TIMEOUT_S", "60") or "60"),
+        sock_read=float(os.getenv("WORKER_MODEL_DOWNLOAD_SOCK_READ_TIMEOUT_S", "120") or "120"),
+    )
     tmp = dst.with_suffix(dst.suffix + ".part")
     # If we have a partial file, try to resume via HTTP Range.
     offset = 0
@@ -357,7 +368,15 @@ async def _download_one_file(url: str, dst: Path, expected_size: int, expected_b
         async with session.get(url, headers=headers) as resp:
             # If the server ignored our Range request, restart from scratch to avoid
             # duplicating bytes by appending a full response.
-            if offset and resp.status == 200:
+            # Some gateways can return 206 with an unexpected range start.
+            # Treat that the same as a 200-on-resume and restart from byte 0.
+            if offset and (
+                resp.status == 200
+                or (
+                    resp.status == 206
+                    and not str(resp.headers.get("Content-Range") or "").strip().startswith(f"bytes {offset}-")
+                )
+            ):
                 resp.release()
                 async with session.get(url) as resp2:
                     resp2.raise_for_status()

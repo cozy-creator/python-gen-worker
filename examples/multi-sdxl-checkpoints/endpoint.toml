@@ -4,7 +4,7 @@ name = "multi-sdxl-checkpoints"
 main = "multi_sdxl_checkpoints.main"
 
 [host.requirements]
-cuda = "12.6"
+cuda = "12.8"
 
 [models.generate]
 sdxl-base = "stabilityai/stable-diffusion-xl-base-1.0"

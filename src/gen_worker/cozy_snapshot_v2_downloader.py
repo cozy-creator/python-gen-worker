@@ -150,6 +150,7 @@ class CozySnapshotV2Downloader:
         )
 
     async def _ensure_blobs(self, blobs_root: Path, files: List[CozyHubSnapshotFile]) -> None:
+        pending: List[tuple[CozyHubSnapshotFile, str, Path]] = []
         for f in files:
             digest = (f.blake3 or "").strip().lower()
             if not digest:
@@ -160,17 +161,32 @@ class CozySnapshotV2Downloader:
             dst.parent.mkdir(parents=True, exist_ok=True)
             if dst.exists():
                 continue
+            pending.append((f, digest, dst))
 
+        if not pending:
+            return
+
+        # Parallelize shard/blob downloads to reduce first-load latency for
+        # multi-file transformer checkpoints.
+        max_conc = max(1, int(os.getenv("WORKER_MODEL_DOWNLOAD_CONCURRENCY", "4") or "4"))
+        sem = asyncio.Semaphore(max_conc)
+
+        async def _ensure_one(f: CozyHubSnapshotFile, digest: str, dst: Path) -> None:
             lock = self._get_lock(self._blob_locks, digest)
-            async with lock:
-                if dst.exists():
-                    continue
-                await _download_one_file(
-                    f.url,
-                    dst,
-                    expected_size=int(f.size_bytes or 0),
-                    expected_blake3=digest,
-                )
+            async with sem:
+                async with lock:
+                    if dst.exists():
+                        return
+                    await _download_one_file(
+                        f.url,
+                        dst,
+                        expected_size=int(f.size_bytes or 0),
+                        expected_blake3=digest,
+                    )
+
+        # Start larger blobs first for better overlap.
+        pending.sort(key=lambda row: int(row[0].size_bytes or 0), reverse=True)
+        await asyncio.gather(*(_ensure_one(f, digest, dst) for f, digest, dst in pending))
 
     def _get_lock(self, mp: Dict[str, asyncio.Lock], key: str) -> asyncio.Lock:
         with self._locks_lock:

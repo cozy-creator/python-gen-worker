@@ -12,7 +12,7 @@ sd15_int4 = { ref = "stable-diffusion-v1-5/stable-diffusion-v1-5", dtypes = ["in
 
 [host.requirements]
 # If cuda is set, the platform treats this worker as requiring an NVIDIA GPU.
-cuda = "12.6"
+cuda = "12.8"
 
 [resources]
 vram_gb = 8

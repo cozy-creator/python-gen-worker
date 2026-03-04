@@ -103,11 +103,11 @@ def generate(
     ctx: ActionContext,
     pipeline: Annotated[
         Flux2KleinPipeline,
-        ModelRef(Src.FIXED, "flux2-klein-4b-base"),
+        ModelRef(Src.FIXED, "flux2-klein-9b-base"),
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:
-    return _generate(ctx, pipeline, payload, "flux2-klein-4b-base")
+    return _generate(ctx, pipeline, payload, "flux2-klein-9b-base")
 
 
 @worker_function(_flux_resources)
@@ -115,11 +115,11 @@ def generate_turbo(
     ctx: ActionContext,
     pipeline: Annotated[
         Flux2KleinPipeline,
-        ModelRef(Src.FIXED, "flux2-klein-4b-turbo"),
+        ModelRef(Src.FIXED, "flux2-klein-9b-turbo"),
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:
-    return _generate(ctx, pipeline, payload, "flux2-klein-4b-turbo")
+    return _generate(ctx, pipeline, payload, "flux2-klein-9b-turbo")
 
 
 @worker_function(_flux_resources)
@@ -127,11 +127,11 @@ def generate_fp8(
     ctx: ActionContext,
     pipeline: Annotated[
         Flux2KleinPipeline,
-        ModelRef(Src.FIXED, "flux2-klein-4b-base_fp8"),
+        ModelRef(Src.FIXED, "flux2-klein-9b-base_fp8"),
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:
-    return _generate(ctx, pipeline, payload, "flux2-klein-4b-base_fp8")
+    return _generate(ctx, pipeline, payload, "flux2-klein-9b-base_fp8")
 
 
 @worker_function(_flux_resources)
@@ -139,11 +139,11 @@ def generate_turbo_fp8(
     ctx: ActionContext,
     pipeline: Annotated[
         Flux2KleinPipeline,
-        ModelRef(Src.FIXED, "flux2-klein-4b-turbo_fp8"),
+        ModelRef(Src.FIXED, "flux2-klein-9b-turbo_fp8"),
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:
-    return _generate(ctx, pipeline, payload, "flux2-klein-4b-turbo_fp8")
+    return _generate(ctx, pipeline, payload, "flux2-klein-9b-turbo_fp8")
 
 
 @worker_function(_flux_resources)
@@ -151,11 +151,11 @@ def generate_nvfp4(
     ctx: ActionContext,
     pipeline: Annotated[
         Flux2KleinPipeline,
-        ModelRef(Src.FIXED, "flux2-klein-4b-base_nvfp4"),
+        ModelRef(Src.FIXED, "flux2-klein-9b-base_nvfp4"),
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:
-    return _generate(ctx, pipeline, payload, "flux2-klein-4b-base_nvfp4")
+    return _generate(ctx, pipeline, payload, "flux2-klein-9b-base_nvfp4")
 
 
 @worker_function(_flux_resources)
@@ -163,8 +163,8 @@ def generate_turbo_nvfp4(
     ctx: ActionContext,
     pipeline: Annotated[
         Flux2KleinPipeline,
-        ModelRef(Src.FIXED, "flux2-klein-4b-turbo_nvfp4"),
+        ModelRef(Src.FIXED, "flux2-klein-9b-turbo_nvfp4"),
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:
-    return _generate(ctx, pipeline, payload, "flux2-klein-4b-turbo_nvfp4")
+    return _generate(ctx, pipeline, payload, "flux2-klein-9b-turbo_nvfp4")

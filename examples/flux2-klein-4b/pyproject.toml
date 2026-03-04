@@ -1,15 +1,15 @@
 [project]
 name = "flux2-klein-4b"
 version = "0.1.0"
-description = "Flux2-klein-4B example (inference-only; Cozy manifest via endpoint.toml)"
+description = "Flux2-klein-4B endpoint (base+turbo; inference-only; Cozy manifest via endpoint.toml)"
 requires-python = ">=3.12"
 dependencies = [
-    "gen-worker[torch]==0.3.0",
+    "gen-worker[torch]",
     "diffusers @ git+https://github.com/huggingface/diffusers.git@99e2cfff27dec514a43e260e885c5e6eca038b36",
     "transformers>=4.56,<5",
     "accelerate",
     "pillow",
-    # Needed for fp8 weight-only quantization variants (diffusers TorchAoConfig).
+    # Needed for fp8/nvfp4 variants (diffusers TorchAoConfig and/or variant-aware loading).
     "torchao",
 ]
 
