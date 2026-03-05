@@ -181,6 +181,24 @@ class CozySnapshotV2Downloader:
             return lock
 
 
+async def ensure_snapshot_async(
+    *,
+    base_dir: Path,
+    ref: CozyRef,
+    base_url: str,
+    token: Optional[str],
+    resolved: Optional[Any] = None,
+) -> Path:
+    """Async version of ensure_snapshot_sync for use in async contexts."""
+    client: Optional[CozyHubV2Client] = None
+    if resolved is None:
+        if not (base_url or "").strip():
+            raise RuntimeError("cozy downloads require TENSORHUB_URL")
+        client = CozyHubV2Client(base_url=base_url, token=token)
+    dl = CozySnapshotV2Downloader(client)
+    return await dl.ensure_snapshot(base_dir, ref, resolved=resolved)
+
+
 def ensure_snapshot_sync(
     *,
     base_dir: Path,

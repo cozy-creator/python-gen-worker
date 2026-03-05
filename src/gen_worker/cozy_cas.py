@@ -298,7 +298,14 @@ def _safe_symlink_dir(target: Path, link: Path) -> None:
         shutil.copytree(target, link, dirs_exist_ok=True)
 
 
-@backoff.on_exception(backoff.expo, (aiohttp.ClientError, asyncio.TimeoutError, ValueError), max_tries=4)
+@backoff.on_exception(
+    backoff.expo,
+    (aiohttp.ClientError, asyncio.TimeoutError, ValueError, OSError),
+    max_tries=30,
+    max_time=3600,
+    factor=1,
+    max_value=30,  # cap backoff at 30s between retries
+)
 async def _download_one_file(url: str, dst: Path, expected_size: int, expected_blake3: str) -> None:
     if dst.exists():
         try:
@@ -313,7 +320,10 @@ async def _download_one_file(url: str, dst: Path, expected_size: int, expected_b
             # Fall through to re-download.
             pass
 
-    timeout = aiohttp.ClientTimeout(total=600)
+    # Use sock_read instead of total timeout so actively-streaming large files
+    # are not killed.  total=None lets multi-GB downloads run as long as data
+    # keeps flowing; sock_read=120 catches genuine stalls.
+    timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=120)
     tmp = dst.with_suffix(dst.suffix + ".part")
     # If we have a partial file, try to resume via HTTP Range.
     offset = 0

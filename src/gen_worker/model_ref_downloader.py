@@ -9,7 +9,7 @@ import random
 import time
 
 from .cozy_cas import CozyHubClient, CozySnapshotDownloader
-from .cozy_snapshot_v2_downloader import ensure_snapshot_sync
+from .cozy_snapshot_v2_downloader import ensure_snapshot_async, ensure_snapshot_sync
 from .downloader import ModelDownloader
 from .tensorhub_v2 import (
     CozyHubError,
@@ -114,7 +114,7 @@ class ModelRefDownloader(ModelDownloader):
                     canonical = parsed.hf.canonical()
                     prefs = _get_prefs_for_ref(canonical)
                     resolved_artifact = await self._request_public_model_with_wait(canonical, prefs=prefs)
-                    return ensure_snapshot_sync(
+                    return await ensure_snapshot_async(
                         base_dir=dest_dir,
                         ref=CozyRef(owner="public", repo="public", tag="latest"),
                         base_url=self._cozy_base_url or "",
@@ -131,7 +131,7 @@ class ModelRefDownloader(ModelDownloader):
             resolved_entry = resolved_mapping.get(canonical) if resolved_mapping is not None else None
 
             if resolved_entry is not None:
-                return ensure_snapshot_sync(
+                return await ensure_snapshot_async(
                     base_dir=dest_dir,
                     ref=parsed.cozy,
                     base_url=self._cozy_base_url or "",
@@ -144,7 +144,7 @@ class ModelRefDownloader(ModelDownloader):
             if self._cozy_v2 is not None and parsed.cozy.digest is None:
                 prefs = _get_prefs_for_ref(canonical)
                 resolved = await self._request_public_model_with_wait(canonical, prefs=prefs)
-                return ensure_snapshot_sync(
+                return await ensure_snapshot_async(
                     base_dir=dest_dir,
                     ref=parsed.cozy,
                     base_url=self._cozy_base_url or "",
@@ -161,7 +161,7 @@ class ModelRefDownloader(ModelDownloader):
 
             # Prefer Cozy Hub v2 resolve flow.
             try:
-                return ensure_snapshot_sync(
+                return await ensure_snapshot_async(
                     base_dir=dest_dir,
                     ref=parsed.cozy,
                     base_url=self._cozy_base_url,

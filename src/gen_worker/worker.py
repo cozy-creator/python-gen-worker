@@ -2911,6 +2911,17 @@ class Worker:
             # Also keep the raw key if different, to be tolerant of non-canonical senders.
             if raw != canon:
                 out[raw] = v
+            # For digest-based refs (e.g. "cozy:owner/repo@blake3:<hex>"), also add
+            # a tag-based alias (e.g. "cozy:owner/repo:latest") so that lookups by
+            # tag in model_ref_downloader will find the resolved entry.
+            try:
+                parsed = parse_model_ref(canon)
+                if parsed.scheme == "cozy" and parsed.cozy is not None and parsed.cozy.digest:
+                    tag_canon = f"cozy:{parsed.cozy.owner}/{parsed.cozy.repo}:{parsed.cozy.tag}"
+                    if tag_canon not in out:
+                        out[tag_canon] = v
+            except Exception:
+                pass
         return out
 
     def _start_startup_prefetch(self, model_ids: List[str]) -> None:
@@ -3213,10 +3224,19 @@ class Worker:
                     # Timeout for this wait, can be adjusted
                     if not self._model_init_done_event.wait(timeout=300.0): # 5 minutes
                          raise TimeoutError("Timeout waiting for model initialization before VRAM load.")
-                
+
                 logger.info(f"Model Memory Manager attempting to load '{model_id}' into VRAM...")
-                # load_model_into_vram is async
-                success = asyncio.run(self._model_manager.load_model_into_vram(model_id))
+                # Set resolved cozy models context so downloads can use orchestrator-resolved URLs.
+                from .model_ref_downloader import reset_resolved_cozy_models_by_id, set_resolved_cozy_models_by_id
+                per_cmd = dict(getattr(cmd, "resolved_cozy_models_by_id", {}) or {})
+                baseline = self._resolved_cozy_models_by_id_baseline or {}
+                merged = {**baseline, **per_cmd} if per_cmd else dict(baseline)
+                tok = set_resolved_cozy_models_by_id(merged or None)
+                try:
+                    # load_model_into_vram is async
+                    success = asyncio.run(self._model_manager.load_model_into_vram(model_id))
+                finally:
+                    reset_resolved_cozy_models_by_id(tok)
                 if success: logger.info(f"Model '{model_id}' loaded to VRAM by Model Memory Manager.")
                 else: error_msg = f"MMM.load_model_into_vram failed for '{model_id}'."; logger.error(error_msg)
             except Exception as e:
