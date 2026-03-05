@@ -292,9 +292,11 @@ def _run_in_thread(coro: Coroutine[Any, Any, Path]) -> str:
     out: dict[str, str] = {}
     err: dict[str, BaseException] = {}
 
+    ctx = contextvars.copy_context()
+
     def runner() -> None:
         try:
-            out["v"] = asyncio.run(coro).as_posix()
+            out["v"] = ctx.run(asyncio.run, coro).as_posix()
         except BaseException as e:
             err["e"] = e
 
