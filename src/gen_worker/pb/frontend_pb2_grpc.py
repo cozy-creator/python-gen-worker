@@ -40,10 +40,10 @@ class FrontendServiceStub(object):
                 request_serializer=frontend__pb2.ExecuteActionRequest.SerializeToString,
                 response_deserializer=frontend__pb2.ExecuteActionResponse.FromString,
                 _registered_method=True)
-        self.CancelRequest = channel.unary_unary(
-                '/frontend.v1.FrontendService/CancelRequest',
-                request_serializer=frontend__pb2.CancelRequestRequest.SerializeToString,
-                response_deserializer=frontend__pb2.CancelRequestResponse.FromString,
+        self.CancelRun = channel.unary_unary(
+                '/frontend.v1.FrontendService/CancelRun',
+                request_serializer=frontend__pb2.CancelRunRequest.SerializeToString,
+                response_deserializer=frontend__pb2.CancelRunResponse.FromString,
                 _registered_method=True)
         self.RealtimeSession = channel.stream_stream(
                 '/frontend.v1.FrontendService/RealtimeSession',
@@ -63,8 +63,8 @@ class FrontendServiceServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def CancelRequest(self, request, context):
-        """2) Cancel an in-flight request.
+    def CancelRun(self, request, context):
+        """2) Cancel an in-flight action/job.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -85,10 +85,10 @@ def add_FrontendServiceServicer_to_server(servicer, server):
                     request_deserializer=frontend__pb2.ExecuteActionRequest.FromString,
                     response_serializer=frontend__pb2.ExecuteActionResponse.SerializeToString,
             ),
-            'CancelRequest': grpc.unary_unary_rpc_method_handler(
-                    servicer.CancelRequest,
-                    request_deserializer=frontend__pb2.CancelRequestRequest.FromString,
-                    response_serializer=frontend__pb2.CancelRequestResponse.SerializeToString,
+            'CancelRun': grpc.unary_unary_rpc_method_handler(
+                    servicer.CancelRun,
+                    request_deserializer=frontend__pb2.CancelRunRequest.FromString,
+                    response_serializer=frontend__pb2.CancelRunResponse.SerializeToString,
             ),
             'RealtimeSession': grpc.stream_stream_rpc_method_handler(
                     servicer.RealtimeSession,
@@ -135,7 +135,7 @@ class FrontendService(object):
             _registered_method=True)
 
     @staticmethod
-    def CancelRequest(request,
+    def CancelRun(request,
             target,
             options=(),
             channel_credentials=None,
@@ -148,9 +148,9 @@ class FrontendService(object):
         return grpc.experimental.unary_unary(
             request,
             target,
-            '/frontend.v1.FrontendService/CancelRequest',
-            frontend__pb2.CancelRequestRequest.SerializeToString,
-            frontend__pb2.CancelRequestResponse.FromString,
+            '/frontend.v1.FrontendService/CancelRun',
+            frontend__pb2.CancelRunRequest.SerializeToString,
+            frontend__pb2.CancelRunResponse.FromString,
             options,
             channel_credentials,
             insecure,

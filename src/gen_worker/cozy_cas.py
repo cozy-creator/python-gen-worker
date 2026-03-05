@@ -300,10 +300,11 @@ def _safe_symlink_dir(target: Path, link: Path) -> None:
 
 @backoff.on_exception(
     backoff.expo,
-    (aiohttp.ClientError, asyncio.TimeoutError, ValueError, OSError, ConnectionError),
-    max_tries=max(1, int(os.getenv("WORKER_MODEL_DOWNLOAD_MAX_RETRIES", "12") or "12")),
-    max_time=max(30.0, float(os.getenv("WORKER_MODEL_DOWNLOAD_RETRY_MAX_TIME_S", "900") or "900")),
-    max_value=max(1.0, float(os.getenv("WORKER_MODEL_DOWNLOAD_BACKOFF_MAX_S", "8") or "8")),
+    (aiohttp.ClientError, asyncio.TimeoutError, ValueError, OSError),
+    max_tries=30,
+    max_time=3600,
+    factor=1,
+    max_value=30,  # cap backoff at 30s between retries
 )
 async def _download_one_file(url: str, dst: Path, expected_size: int, expected_blake3: str) -> None:
     if dst.exists():
@@ -319,12 +320,10 @@ async def _download_one_file(url: str, dst: Path, expected_size: int, expected_b
             # Fall through to re-download.
             pass
 
-    timeout = aiohttp.ClientTimeout(
-        total=None,
-        connect=float(os.getenv("WORKER_MODEL_DOWNLOAD_CONNECT_TIMEOUT_S", "60") or "60"),
-        sock_connect=float(os.getenv("WORKER_MODEL_DOWNLOAD_SOCK_CONNECT_TIMEOUT_S", "60") or "60"),
-        sock_read=float(os.getenv("WORKER_MODEL_DOWNLOAD_SOCK_READ_TIMEOUT_S", "120") or "120"),
-    )
+    # Use sock_read instead of total timeout so actively-streaming large files
+    # are not killed.  total=None lets multi-GB downloads run as long as data
+    # keeps flowing; sock_read=120 catches genuine stalls.
+    timeout = aiohttp.ClientTimeout(total=None, sock_connect=30, sock_read=120)
     tmp = dst.with_suffix(dst.suffix + ".part")
     # If we have a partial file, try to resume via HTTP Range.
     offset = 0
