@@ -18,6 +18,7 @@ from gen_worker.types import Asset
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 _flux_resources = ResourceRequirements()
+_nvfp4_resources = ResourceRequirements(compute_capability_min=10.0)
 _pipeline_locks_guard = threading.Lock()
 _pipeline_locks: dict[int, threading.Lock] = {}
 
@@ -146,7 +147,7 @@ def generate_turbo_fp8(
     return _generate(ctx, pipeline, payload, "flux2-klein-9b-turbo_fp8")
 
 
-@worker_function(_flux_resources)
+@worker_function(_nvfp4_resources)
 def generate_nvfp4(
     ctx: ActionContext,
     pipeline: Annotated[
@@ -158,7 +159,7 @@ def generate_nvfp4(
     return _generate(ctx, pipeline, payload, "flux2-klein-9b-base_nvfp4")
 
 
-@worker_function(_flux_resources)
+@worker_function(_nvfp4_resources)
 def generate_turbo_nvfp4(
     ctx: ActionContext,
     pipeline: Annotated[

@@ -1,6 +1,32 @@
+import math
 from typing import Any, Callable, Dict, Optional, TypeVar
 
 F = TypeVar("F", bound=Callable[..., Any])
+
+
+def canonicalize_compute_capability_min(raw: Any) -> str:
+    """
+    Normalize function-level compute capability minima into canonical v1 form.
+
+    Canonical form is a decimal string with one fractional digit (for example
+    "10.0", "8.9").
+    """
+    if isinstance(raw, str):
+        v = raw.strip()
+        if v == "":
+            raise ValueError("compute_capability_min must not be empty")
+        try:
+            n = float(v)
+        except Exception as e:  # pragma: no cover - defensive
+            raise ValueError("compute_capability_min must be numeric") from e
+    elif isinstance(raw, (int, float)):
+        n = float(raw)
+    else:
+        raise ValueError("compute_capability_min must be numeric")
+
+    if not math.isfinite(n) or n <= 0:
+        raise ValueError("compute_capability_min must be > 0")
+    return f"{n:.1f}"
 
 class ResourceRequirements:
     """
@@ -19,6 +45,7 @@ class ResourceRequirements:
         memory_hint_mb: Optional[int] = None,
         stage_profile: Optional[str] = None,
         stage_traits: Optional[list[str]] = None,
+        compute_capability_min: Optional[float | str] = None,
     ) -> None:
         self.batch_size_min = batch_size_min
         self.batch_size_target = batch_size_target
@@ -45,6 +72,10 @@ class ResourceRequirements:
             self._requirements["stage_profile"] = str(stage_profile).strip()
         if self.stage_traits:
             self._requirements["stage_traits"] = [str(x).strip() for x in self.stage_traits if str(x).strip()]
+        if compute_capability_min is not None:
+            self._requirements["compute_capability"] = {
+                "min": canonicalize_compute_capability_min(compute_capability_min)
+            }
 
     def to_dict(self) -> Dict[str, Any]:
         """Returns a dictionary representation of the defined requirements."""

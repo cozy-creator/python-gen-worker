@@ -55,11 +55,11 @@ def test_parse_invalid_hf() -> None:
 
 
 def test_cozy_canonical_is_unprefixed_repo_ref() -> None:
-    p = parse_model_ref("cozy:cozy/joycaption@blake3:abcd")
+    p = parse_model_ref("cozy:fancyfeast/llama-joycaption-beta-one-hf-llava@blake3:abcd")
     assert p.scheme == "cozy"
     assert p.cozy is not None
     # Regression guard: canonical cozy refs must not prepend "cozy:".
-    assert p.canonical() == "cozy/joycaption@blake3:abcd"
+    assert p.canonical() == "fancyfeast/llama-joycaption-beta-one-hf-llava@blake3:abcd"
 
 
 def test_parse_hf_double_prefix_tolerated() -> None:
