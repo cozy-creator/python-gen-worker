@@ -19,6 +19,7 @@ from .tensorhub_v2 import (
 )
 from .hf_downloader import HuggingFaceHubDownloader
 from .model_refs import CozyRef, ParsedModelRef, parse_model_ref
+import threading
 
 # Per-task resolved manifests provided by gen-orchestrator (issue #92).
 # Shape: {canonical_model_id: ResolvedCozyModel-like object}
@@ -296,8 +297,6 @@ def _run_in_thread(coro: Coroutine[Any, Any, Path]) -> str:
             out["v"] = asyncio.run(coro).as_posix()
         except BaseException as e:
             err["e"] = e
-
-    import threading
 
     t = threading.Thread(target=runner, daemon=True)
     t.start()
