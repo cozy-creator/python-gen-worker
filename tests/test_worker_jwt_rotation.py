@@ -74,7 +74,7 @@ def hello(ctx: ActionContext, payload: Input) -> Output:
 
         # Send rotation signal over the stream. Worker stores it for next reconnect.
         payload = json.dumps({"worker_jwt": "jwt-2"}, separators=(",", ":"), sort_keys=True).encode("utf-8")
-        sess.send(pb.WorkerSchedulerMessage(worker_event=pb.WorkerEvent(request_id="", event_type="worker.jwt.rotate", payload_json=payload)))
+        sess.send(pb.WorkerSchedulerMessage(worker_event=pb.WorkerEvent(run_id="", event_type="worker.jwt.rotate", payload_json=payload)))
 
         # Ensure the worker processed the rotation signal before we force a reconnect.
         start = time.monotonic()
