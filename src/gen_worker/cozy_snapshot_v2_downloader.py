@@ -177,6 +177,7 @@ class CozySnapshotV2Downloader:
                 async with lock:
                     if dst.exists():
                         return
+                    assert f.url is not None
                     await _download_one_file(
                         f.url,
                         dst,
