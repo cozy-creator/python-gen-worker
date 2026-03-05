@@ -113,7 +113,7 @@ class DevWorker(Worker):
 
         raw = msgspec.msgpack.encode(payload_obj)
         req = pb.TaskExecutionRequest(
-            request_id=rid,
+            run_id=rid,
             function_name=fn,
             input_payload=raw,
             required_variant_refs=[str(v).strip() for v in (required_variant_refs or []) if str(v).strip()],
@@ -152,7 +152,7 @@ class DevWorker(Worker):
                     payload = {}
                 events.append(
                     {
-                        "request_id": str(ev.request_id or ""),
+                        "request_id": str(ev.run_id or ""),
                         "event_type": str(ev.event_type or ""),
                         "payload": payload,
                     }
