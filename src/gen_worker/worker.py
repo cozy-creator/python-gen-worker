@@ -64,7 +64,7 @@ from .errors import AuthError, CanceledError, FatalError, ResourceError, Retryab
 from .model_interface import ModelManagementInterface
 from .downloader import CozyHubDownloader, ModelDownloader
 from .model_ref_downloader import ModelRefDownloader
-from .model_refs import parse_model_ref
+from .model_refs import ParsedModelRef, parse_model_ref
 from .types import Asset
 from .model_cache import ModelCache, ModelCacheStats, ModelLocation
 from .run_metrics_v1 import RunMetricsV1, best_effort_bytes_downloaded, best_effort_init_model_metrics, safe_json_bytes
@@ -4623,28 +4623,28 @@ class Worker:
                     from_pretrained = getattr(requested_type, "from_pretrained")
                     model_source: str = str(model_id)
                     preload_kwargs: dict[str, Any] = {}
-                    parsed = None
+                    _ref: ParsedModelRef | None = None
                     try:
                         p = Path(model_source)
                         if p.exists():
                             model_source = p.as_posix()
                         else:
-                            parsed = parse_model_ref(model_source)
-                            if parsed.scheme in ("cozy", "hf") and self._downloader is not None:
+                            _ref = parse_model_ref(model_source)
+                            if _ref.scheme in ("cozy", "hf") and self._downloader is not None:
                                 model_source = self._downloader.download(model_source, str(worker_model_cache_dir()))
-                            elif parsed.scheme == "hf" and parsed.hf is not None:
+                            elif _ref.scheme == "hf" and _ref.hf is not None:
                                 # Fallback path when downloader is unavailable.
-                                model_source = parsed.hf.repo_id
-                                if parsed.hf.revision:
-                                    preload_kwargs["revision"] = parsed.hf.revision
-                            elif parsed.scheme == "cozy":
+                                model_source = _ref.hf.repo_id
+                                if _ref.hf.revision:
+                                    preload_kwargs["revision"] = _ref.hf.revision
+                            elif _ref.scheme == "cozy":
                                 raise RuntimeError(
                                     f"cozy model resolution requires downloader for ref {model_source!r}"
                                 )
                     except Exception as e:
                         # Never hand raw cozy refs to huggingface loaders; surface the real
                         # download/resolve error instead of falling back to repo-id parsing.
-                        if parsed is not None and getattr(parsed, "scheme", "") == "cozy":
+                        if _ref is not None and getattr(_ref, "scheme", "") == "cozy":
                             raise RuntimeError(
                                 f"cozy model materialization failed for {model_id!r}: {e}"
                             ) from e
