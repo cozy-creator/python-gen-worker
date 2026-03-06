@@ -9,7 +9,7 @@ import random
 import time
 
 from .cozy_cas import CozyHubClient, CozySnapshotDownloader
-from .cozy_snapshot_v2_downloader import ensure_snapshot_sync
+from .cozy_snapshot_v2_downloader import ensure_snapshot_async, ensure_snapshot_sync
 from .downloader import ModelDownloader
 from .tensorhub_v2 import (
     CozyHubError,
@@ -19,6 +19,7 @@ from .tensorhub_v2 import (
 )
 from .hf_downloader import HuggingFaceHubDownloader
 from .model_refs import CozyRef, ParsedModelRef, parse_model_ref
+import threading
 
 # Per-task resolved manifests provided by gen-orchestrator (issue #92).
 # Shape: {canonical_model_id: ResolvedCozyModel-like object}
@@ -134,7 +135,7 @@ class ModelRefDownloader(ModelDownloader):
                     canonical = parsed.hf.canonical()
                     prefs = _get_prefs_for_ref(canonical)
                     resolved_artifact = await self._request_public_model_with_wait(canonical, prefs=prefs)
-                    return ensure_snapshot_sync(
+                    return await ensure_snapshot_async(
                         base_dir=dest_dir,
                         ref=CozyRef(owner="public", repo="public", tag="latest"),
                         base_url=self._cozy_base_url or "",
@@ -151,7 +152,7 @@ class ModelRefDownloader(ModelDownloader):
             resolved_entry = _lookup_resolved_cozy_entry(resolved_mapping, canonical)
 
             if resolved_entry is not None:
-                return ensure_snapshot_sync(
+                return await ensure_snapshot_async(
                     base_dir=dest_dir,
                     ref=parsed.cozy,
                     base_url=self._cozy_base_url or "",
@@ -164,7 +165,7 @@ class ModelRefDownloader(ModelDownloader):
             if self._cozy_v2 is not None and parsed.cozy.digest is None:
                 prefs = _get_prefs_for_ref(canonical)
                 resolved = await self._request_public_model_with_wait(canonical, prefs=prefs)
-                return ensure_snapshot_sync(
+                return await ensure_snapshot_async(
                     base_dir=dest_dir,
                     ref=parsed.cozy,
                     base_url=self._cozy_base_url or "",
@@ -181,7 +182,7 @@ class ModelRefDownloader(ModelDownloader):
 
             # Prefer Cozy Hub v2 resolve flow.
             try:
-                return ensure_snapshot_sync(
+                return await ensure_snapshot_async(
                     base_dir=dest_dir,
                     ref=parsed.cozy,
                     base_url=self._cozy_base_url,
@@ -291,13 +292,13 @@ def _run_in_thread(coro: Coroutine[Any, Any, Path]) -> str:
     out: dict[str, str] = {}
     err: dict[str, BaseException] = {}
 
+    ctx = contextvars.copy_context()
+
     def runner() -> None:
         try:
-            out["v"] = asyncio.run(coro).as_posix()
+            out["v"] = ctx.run(asyncio.run, coro).as_posix()
         except BaseException as e:
             err["e"] = e
-
-    import threading
 
     t = threading.Thread(target=runner, daemon=True)
     t.start()

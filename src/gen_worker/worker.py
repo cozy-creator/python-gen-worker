@@ -2752,7 +2752,7 @@ class Worker:
             self._handle_unload_model_cmd(message.unload_model_cmd)
         elif msg_type == 'interrupt_run_cmd':
             cmd = message.interrupt_run_cmd
-            request_id = cmd.request_id
+            request_id = cmd.run_id
             item_ids = [str(x).strip() for x in list(getattr(cmd, "item_ids", []) or []) if str(x).strip()]
             cancel_queued_only = bool(getattr(cmd, "cancel_queued_only", False))
             self._handle_interrupt_request(request_id, item_ids=item_ids, cancel_queued_only=cancel_queued_only)
@@ -2767,11 +2767,11 @@ class Worker:
         elif msg_type == "worker_event":
             self._handle_worker_event_from_scheduler(message.worker_event)
         # Add handling for other message types if needed (e.g., config updates)
-        elif msg_type == 'endpoint_config':
-            cfg = message.endpoint_config
+        elif msg_type == 'release_artifact_config':
+            cfg = message.release_artifact_config
             resolved_by_variant = dict(getattr(cfg, "resolved_cozy_models_by_variant_ref", {}) or {})
             logger.info(
-                "Received EndpointConfig (supported=%d required=%d resolved=%d)",
+                "Received ReleaseArtifactConfig (supported=%d required=%d resolved=%d)",
                 len(cfg.supported_repo_refs),
                 len(cfg.required_variant_refs),
                 len(resolved_by_variant),
@@ -2911,6 +2911,17 @@ class Worker:
             # Also keep the raw key if different, to be tolerant of non-canonical senders.
             if raw != canon:
                 out[raw] = v
+            # For digest-based refs (e.g. "cozy:owner/repo@blake3:<hex>"), also add
+            # a tag-based alias (e.g. "cozy:owner/repo:latest") so that lookups by
+            # tag in model_ref_downloader will find the resolved entry.
+            try:
+                parsed = parse_model_ref(canon)
+                if parsed.scheme == "cozy" and parsed.cozy is not None and parsed.cozy.digest:
+                    tag_canon = f"cozy:{parsed.cozy.owner}/{parsed.cozy.repo}:{parsed.cozy.tag}"
+                    if tag_canon not in out:
+                        out[tag_canon] = v
+            except Exception:
+                pass
         return out
 
     def _start_startup_prefetch(self, model_ids: List[str]) -> None:
@@ -2973,12 +2984,12 @@ class Worker:
                             ).encode("utf-8")
                             self._send_message(
                                 pb.WorkerSchedulerMessage(
-                                    worker_event=pb.WorkerEvent(request_id="", event_type="model.download.completed", payload_json=payload)
+                                    worker_event=pb.WorkerEvent(run_id="", event_type="model.download.completed", payload_json=payload)
                                 )
                             )
                             self._send_message(
                                 pb.WorkerSchedulerMessage(
-                                    worker_event=pb.WorkerEvent(request_id="", event_type="model.ready", payload_json=json.dumps({"model_id": canon}, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+                                    worker_event=pb.WorkerEvent(run_id="", event_type="model.ready", payload_json=json.dumps({"model_id": canon}, separators=(",", ":"), sort_keys=True).encode("utf-8"))
                                 )
                             )
                         except Exception:
@@ -2992,7 +3003,7 @@ class Worker:
                             ).encode("utf-8")
                             self._send_message(
                                 pb.WorkerSchedulerMessage(
-                                    worker_event=pb.WorkerEvent(request_id="", event_type="model.cached", payload_json=payload)
+                                    worker_event=pb.WorkerEvent(run_id="", event_type="model.cached", payload_json=payload)
                                 )
                             )
                         except Exception:
@@ -3006,7 +3017,7 @@ class Worker:
                         payload = json.dumps({"model_id": canon}, separators=(",", ":"), sort_keys=True).encode("utf-8")
                         self._send_message(
                             pb.WorkerSchedulerMessage(
-                                worker_event=pb.WorkerEvent(request_id="", event_type="model.download.started", payload_json=payload)
+                                worker_event=pb.WorkerEvent(run_id="", event_type="model.download.started", payload_json=payload)
                             )
                         )
                     except Exception:
@@ -3028,7 +3039,7 @@ class Worker:
                         payload = json.dumps({"model_id": canon}, separators=(",", ":"), sort_keys=True).encode("utf-8")
                         self._send_message(
                             pb.WorkerSchedulerMessage(
-                                worker_event=pb.WorkerEvent(request_id="", event_type="model.ready", payload_json=payload)
+                                worker_event=pb.WorkerEvent(run_id="", event_type="model.ready", payload_json=payload)
                             )
                         )
                     except Exception:
@@ -3043,7 +3054,7 @@ class Worker:
                         ).encode("utf-8")
                         self._send_message(
                             pb.WorkerSchedulerMessage(
-                                worker_event=pb.WorkerEvent(request_id="", event_type="model.cached", payload_json=payload)
+                                worker_event=pb.WorkerEvent(run_id="", event_type="model.cached", payload_json=payload)
                             )
                         )
                     except Exception:
@@ -3057,7 +3068,7 @@ class Worker:
                         ).encode("utf-8")
                         self._send_message(
                             pb.WorkerSchedulerMessage(
-                                worker_event=pb.WorkerEvent(request_id="", event_type="model.download.completed", payload_json=payload)
+                                worker_event=pb.WorkerEvent(run_id="", event_type="model.download.completed", payload_json=payload)
                             )
                         )
                     except Exception:
@@ -3078,7 +3089,7 @@ class Worker:
                             payload = json.dumps({"model_id": canon}, separators=(",", ":"), sort_keys=True).encode("utf-8")
                             self._send_message(
                                 pb.WorkerSchedulerMessage(
-                                    worker_event=pb.WorkerEvent(request_id="", event_type="model.url_refresh", payload_json=payload)
+                                    worker_event=pb.WorkerEvent(run_id="", event_type="model.url_refresh", payload_json=payload)
                                 )
                             )
                         except Exception:
@@ -3092,7 +3103,7 @@ class Worker:
                         ).encode("utf-8")
                         self._send_message(
                             pb.WorkerSchedulerMessage(
-                                worker_event=pb.WorkerEvent(request_id="", event_type="model.download.failed", payload_json=payload)
+                                worker_event=pb.WorkerEvent(run_id="", event_type="model.download.failed", payload_json=payload)
                             )
                         )
                     except Exception:
@@ -3195,7 +3206,7 @@ class Worker:
             payload = json.dumps({"model_id": model_id}, separators=(",", ":"), sort_keys=True).encode("utf-8")
             self._send_message(
                 pb.WorkerSchedulerMessage(
-                    worker_event=pb.WorkerEvent(request_id="", event_type="model.load.started", payload_json=payload)
+                    worker_event=pb.WorkerEvent(run_id="", event_type="model.load.started", payload_json=payload)
                 )
             )
         except Exception:
@@ -3213,10 +3224,19 @@ class Worker:
                     # Timeout for this wait, can be adjusted
                     if not self._model_init_done_event.wait(timeout=300.0): # 5 minutes
                          raise TimeoutError("Timeout waiting for model initialization before VRAM load.")
-                
+
                 logger.info(f"Model Memory Manager attempting to load '{model_id}' into VRAM...")
-                # load_model_into_vram is async
-                success = asyncio.run(self._model_manager.load_model_into_vram(model_id))
+                # Set resolved cozy models context so downloads can use orchestrator-resolved URLs.
+                from .model_ref_downloader import reset_resolved_cozy_models_by_id, set_resolved_cozy_models_by_id
+                per_cmd = dict(getattr(cmd, "resolved_cozy_models_by_id", {}) or {})
+                baseline = self._resolved_cozy_models_by_id_baseline or {}
+                merged = {**baseline, **per_cmd} if per_cmd else dict(baseline)
+                tok = set_resolved_cozy_models_by_id(merged or None)
+                try:
+                    # load_model_into_vram is async
+                    success = asyncio.run(self._model_manager.load_model_into_vram(model_id))
+                finally:
+                    reset_resolved_cozy_models_by_id(tok)
                 if success: logger.info(f"Model '{model_id}' loaded to VRAM by Model Memory Manager.")
                 else: error_msg = f"MMM.load_model_into_vram failed for '{model_id}'."; logger.error(error_msg)
             except Exception as e:
@@ -3251,7 +3271,7 @@ class Worker:
             ).encode("utf-8")
             self._send_message(
                 pb.WorkerSchedulerMessage(
-                    worker_event=pb.WorkerEvent(request_id="", event_type=ev_type, payload_json=payload)
+                    worker_event=pb.WorkerEvent(run_id="", event_type=ev_type, payload_json=payload)
                 )
             )
         except Exception:
@@ -3276,7 +3296,7 @@ class Worker:
                 )
                 self._send_message(
                     pb.WorkerSchedulerMessage(
-                        worker_event=pb.WorkerEvent(request_id="", event_type="model.unload.failed", payload_json=payload)
+                        worker_event=pb.WorkerEvent(run_id="", event_type="model.unload.failed", payload_json=payload)
                     )
                 )
             except Exception:
@@ -3287,7 +3307,7 @@ class Worker:
             payload = json.dumps({"model_id": model_id}, separators=(",", ":"), sort_keys=True).encode("utf-8")
             self._send_message(
                 pb.WorkerSchedulerMessage(
-                    worker_event=pb.WorkerEvent(request_id="", event_type="model.unload.started", payload_json=payload)
+                    worker_event=pb.WorkerEvent(run_id="", event_type="model.unload.started", payload_json=payload)
                 )
             )
         except Exception:
@@ -3334,7 +3354,7 @@ class Worker:
             ).encode("utf-8")
             self._send_message(
                 pb.WorkerSchedulerMessage(
-                    worker_event=pb.WorkerEvent(request_id="", event_type=ev_type, payload_json=payload)
+                    worker_event=pb.WorkerEvent(run_id="", event_type=ev_type, payload_json=payload)
                 )
             )
         except Exception:
@@ -3342,7 +3362,7 @@ class Worker:
 
     def _handle_run_request(self, request: TaskExecutionRequest) -> None:
         """Handle a task execution request from the scheduler."""
-        request_id = request.request_id
+        request_id = request.run_id
         function_name = request.function_name
         input_payload = request.input_payload
         required_model_id_for_exec = ""
@@ -4015,7 +4035,7 @@ class Worker:
                     if not emitted:
                         self._send_message(
                             pb.WorkerSchedulerMessage(
-                                worker_event=pb.WorkerEvent(request_id=request_id, event_type="output.delta", payload_json=raw)
+                                worker_event=pb.WorkerEvent(run_id=request_id, event_type="output.delta", payload_json=raw)
                             )
                         )
                     last_item_id = item_id
@@ -4061,7 +4081,7 @@ class Worker:
                 if not emitted_done:
                     self._send_message(
                         pb.WorkerSchedulerMessage(
-                            worker_event=pb.WorkerEvent(request_id=request_id, event_type="output.completed", payload_json=b"{}")
+                            worker_event=pb.WorkerEvent(run_id=request_id, event_type="output.completed", payload_json=b"{}")
                         )
                     )
                 output_payload = b""
@@ -4125,7 +4145,7 @@ class Worker:
                     if not emitted_err:
                         self._send_message(
                             pb.WorkerSchedulerMessage(
-                                worker_event=pb.WorkerEvent(request_id=request_id, event_type="output.error", payload_json=payload)
+                                worker_event=pb.WorkerEvent(run_id=request_id, event_type="output.error", payload_json=payload)
                             )
                         )
                 except Exception:
@@ -4426,7 +4446,7 @@ class Worker:
                                         ).encode("utf-8")
                                         self._send_message(
                                             pb.WorkerSchedulerMessage(
-                                                worker_event=pb.WorkerEvent(request_id="", event_type="model.cached", payload_json=payload)
+                                                worker_event=pb.WorkerEvent(run_id="", event_type="model.cached", payload_json=payload)
                                             )
                                         )
                                     except Exception:
@@ -4845,7 +4865,7 @@ class Worker:
                 )
             else:
                 result = pb.TaskExecutionResult(
-                    request_id=request_id,
+                    run_id=request_id,
                     success=success,
                     output_payload=(output_payload or b'') if success else b'', # Default to b'' if None
                     error_message=error_message if not success else "",

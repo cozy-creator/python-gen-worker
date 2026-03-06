@@ -41,10 +41,18 @@ class DiffusersModelManager(ModelManagementInterface):
             local_path: Optional[str] = None
             if self._downloader is not None:
                 from .cache_paths import worker_model_cache_dir
+                from .model_refs import parse_model_ref
+                from pathlib import Path
 
                 cache_dir = str(worker_model_cache_dir())
                 try:
-                    local_path = self._downloader.download(model_id, cache_dir)
+                    # Use async download path directly to avoid nested event loop issues.
+                    if hasattr(self._downloader, '_download_async'):
+                        parsed = parse_model_ref(model_id)
+                        result = await self._downloader._download_async(parsed, Path(cache_dir))
+                        local_path = result.as_posix()
+                    else:
+                        local_path = self._downloader.download(model_id, cache_dir)
                 except Exception as e:
                     logger.warning("DiffusersModelManager: download failed for %s: %s", model_id, e)
 
