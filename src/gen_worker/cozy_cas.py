@@ -324,7 +324,7 @@ async def _download_one_file(url: str, dst: Path, expected_size: int, expected_b
     # are not killed.  total=None lets multi-GB downloads run as long as data
     # keeps flowing; sock_read=120 catches genuine stalls.
     timeout = aiohttp.ClientTimeout(total=None, sock_connect=float(os.getenv("WORKER_MODEL_DOWNLOAD_SOCK_CONNECT_TIMEOUT_S", "60")),
-                                                                    sock_read=float(os.getenv("WORKER_MODEL_DOWNLOAD_SOCK_READ_TIMEOUT_S", "120")))
+                                                                    sock_read=float(os.getenv("WORKER_MODEL_DOWNLOAD_SOCK_READ_TIMEOUT_S", "180")))
     tmp = dst.with_suffix(dst.suffix + ".part")
     # If we have a partial file, try to resume via HTTP Range.
     offset = 0
