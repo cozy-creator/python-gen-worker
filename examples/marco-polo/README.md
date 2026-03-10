@@ -1,0 +1,1 @@
+Minimal function for testing.

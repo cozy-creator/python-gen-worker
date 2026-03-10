@@ -56,7 +56,7 @@ base = { ref = "stabilityai/stable-diffusion-xl-base-1.0", dtypes = ["fp16", "bf
                     """
 from typing import Annotated
 import msgspec
-from gen_worker import ActionContext, worker_function
+from gen_worker import RequestContext, worker_function
 from gen_worker.injection import ModelRef, ModelRefSource as Src
 
 class Input(msgspec.Struct):
@@ -71,7 +71,7 @@ class MockPipeline:
 
 @worker_function()
 def generate_fixed(
-    ctx: ActionContext,
+    ctx: RequestContext,
     pipeline: Annotated[MockPipeline, ModelRef(Src.FIXED, "sdxl")],
     payload: Input,
 ) -> Output:
@@ -79,7 +79,7 @@ def generate_fixed(
 
 @worker_function()
 def generate_dynamic(
-    ctx: ActionContext,
+    ctx: RequestContext,
     pipeline: Annotated[MockPipeline, ModelRef(Src.PAYLOAD, "model_key")],
     payload: Input,
 ) -> Output:
@@ -150,7 +150,7 @@ main = "funcs_b"
                     """
 from typing import Annotated
 import msgspec
-from gen_worker import ActionContext, worker_function
+from gen_worker import RequestContext, worker_function
 from gen_worker.injection import ModelRef, ModelRefSource as Src
 
 class Input(msgspec.Struct):
@@ -164,7 +164,7 @@ class MockPipeline:
 
 @worker_function()
 def generate(
-    ctx: ActionContext,
+    ctx: RequestContext,
     pipeline: Annotated[MockPipeline, ModelRef(Src.FIXED, "sdxl")],
     payload: Input,
 ) -> Output:
@@ -216,7 +216,7 @@ main = "funcs_c"
                     """
 from typing import Annotated
 import msgspec
-from gen_worker import ActionContext, worker_function
+from gen_worker import RequestContext, worker_function
 from gen_worker.injection import ModelRef, ModelRefSource as Src
 
 class Input(msgspec.Struct):
@@ -231,7 +231,7 @@ class MockPipeline:
 
 @worker_function()
 def generate(
-    ctx: ActionContext,
+    ctx: RequestContext,
     pipeline: Annotated[MockPipeline, ModelRef(Src.PAYLOAD, "model_key")],
     payload: Input,
 ) -> Output:
@@ -285,7 +285,7 @@ batch_dimension = "items"
                 (src_dir / "__init__.py").write_text(
                     """
 import msgspec
-from gen_worker import ActionContext, worker_function
+from gen_worker import RequestContext, worker_function
 
 class Input(msgspec.Struct):
     items: list[str]
@@ -294,7 +294,7 @@ class Output(msgspec.Struct):
     ok: bool
 
 @worker_function()
-def caption(ctx: ActionContext, payload: Input) -> Output:
+def caption(ctx: RequestContext, payload: Input) -> Output:
     return Output(ok=True)
 """.lstrip(),
                     encoding="utf-8",
@@ -346,7 +346,7 @@ sdxl = "stabilityai/stable-diffusion-xl-base-1.0"
                     """
 from typing import Annotated
 import msgspec
-from gen_worker import ActionContext, worker_function
+from gen_worker import RequestContext, worker_function
 from gen_worker.injection import ModelRef, ModelRefSource as Src
 
 class Input(msgspec.Struct):
@@ -360,7 +360,7 @@ class MockPipeline:
 
 @worker_function()
 def generate(
-    ctx: ActionContext,
+    ctx: RequestContext,
     pipeline: Annotated[
         MockPipeline,
         ModelRef(Src.FIXED, "sdxl", ref="stabilityai/stable-diffusion-xl-base-1.0"),

@@ -42,7 +42,7 @@ def test_worker_jwt_rotation_updates_next_reconnect(tmp_path: Path, monkeypatch:
 from __future__ import annotations
 
 import msgspec
-from gen_worker import ActionContext, ResourceRequirements, worker_function
+from gen_worker import RequestContext, ResourceRequirements, worker_function
 
 class Input(msgspec.Struct):
     name: str
@@ -51,7 +51,7 @@ class Output(msgspec.Struct):
     message: str
 
 @worker_function(ResourceRequirements())
-def hello(ctx: ActionContext, payload: Input) -> Output:
+def hello(ctx: RequestContext, payload: Input) -> Output:
     return Output(message=f"hello {payload.name}")
 """.lstrip(),
         encoding="utf-8",
@@ -74,7 +74,7 @@ def hello(ctx: ActionContext, payload: Input) -> Output:
 
         # Send rotation signal over the stream. Worker stores it for next reconnect.
         payload = json.dumps({"worker_jwt": "jwt-2"}, separators=(",", ":"), sort_keys=True).encode("utf-8")
-        sess.send(pb.WorkerSchedulerMessage(worker_event=pb.WorkerEvent(run_id="", event_type="worker.jwt.rotate", payload_json=payload)))
+        sess.send(pb.WorkerSchedulerMessage(worker_event=pb.WorkerEvent(request_id="", event_type="worker.jwt.rotate", payload_json=payload)))
 
         # Ensure the worker processed the rotation signal before we force a reconnect.
         start = time.monotonic()

@@ -18,7 +18,7 @@ The built image MUST:
 2. Bake function discovery output (manifest) at build time:
 
 ```dockerfile
-RUN mkdir -p /app/.cozy && python -m gen_worker.discover > /app/.tensorhub/endpoint.lock
+RUN mkdir -p /app/.tensorhub && python -m gen_worker.discover > /app/.tensorhub/endpoint.lock
 ```
 
 3. Use the Cozy worker runtime as the ENTRYPOINT:
@@ -50,7 +50,7 @@ uv add gen-worker[torch]
 
 ```python
 import msgspec
-from gen_worker import ActionContext, worker_function
+from gen_worker import RequestContext, worker_function
 
 class Input(msgspec.Struct):
     prompt: str
@@ -59,7 +59,7 @@ class Output(msgspec.Struct):
     text: str
 
 @worker_function()
-def generate(ctx: ActionContext, payload: Input) -> Output:
+def generate(ctx: RequestContext, payload: Input) -> Output:
     return Output(text=f"Hello, {payload.prompt}!")
 ```
 
@@ -69,7 +69,7 @@ def generate(ctx: ActionContext, payload: Input) -> Output:
 - **Schema generation** - Input/output schemas extracted from msgspec types
 - **Model injection** - Dependency injection for ML models with caching
 - **Streaming output** - Support for incremental/streaming responses
-- **Progress reporting** - Built-in progress events via `ActionContext`
+- **Progress reporting** - Built-in progress events via `RequestContext`
 - **Perf metrics** - Best-effort per-run metrics emitted to gen-orchestrator (`metrics.*` worker events)
 - **Trainer runtime mode** - SDK-native trainer loop via `WORKER_MODE=trainer`
 - **File handling** - Upload/download assets via Cozy hub file API
@@ -81,7 +81,7 @@ def generate(ctx: ActionContext, payload: Input) -> Output:
 
 ```python
 import msgspec
-from gen_worker import ActionContext, worker_function
+from gen_worker import RequestContext, worker_function
 
 class Input(msgspec.Struct):
     prompt: str
@@ -90,7 +90,7 @@ class Output(msgspec.Struct):
     result: str
 
 @worker_function()
-def my_function(ctx: ActionContext, payload: Input) -> Output:
+def my_function(ctx: RequestContext, payload: Input) -> Output:
     return Output(result=f"Processed: {payload.prompt}")
 ```
 
@@ -103,7 +103,7 @@ class Delta(msgspec.Struct):
     chunk: str
 
 @worker_function()
-def stream(ctx: ActionContext, payload: Input) -> Iterator[Delta]:
+def stream(ctx: RequestContext, payload: Input) -> Iterator[Delta]:
     for word in payload.prompt.split():
         if ctx.is_canceled():
             raise InterruptedError("canceled")
@@ -126,7 +126,7 @@ from gen_worker.injection import ModelRef, ModelRefSource as Src
 
 @worker_function()
 def generate(
-    ctx: ActionContext,
+    ctx: RequestContext,
     pipe: Annotated[DiffusionPipeline, ModelRef(Src.FIXED, "sd15")],
     payload: Input,
 ) -> Output:
@@ -149,7 +149,7 @@ flux = { ref = "black-forest-labs/flux.2-klein-4b", dtypes = ["bf16"] }
 from typing import Annotated
 import msgspec
 from diffusers import DiffusionPipeline
-from gen_worker import ActionContext, worker_function
+from gen_worker import RequestContext, worker_function
 from gen_worker.injection import ModelRef, ModelRefSource as Src
 
 class Input(msgspec.Struct):
@@ -158,7 +158,7 @@ class Input(msgspec.Struct):
 
 @worker_function()
 def generate(
-    ctx: ActionContext,
+    ctx: RequestContext,
     pipe: Annotated[DiffusionPipeline, ModelRef(Src.PAYLOAD, "model")],
     payload: Input,
 ):
@@ -173,7 +173,7 @@ arbitrary repo refs in the payload.
 
 ```python
 @worker_function()
-def process(ctx: ActionContext, payload: Input) -> Output:
+def process(ctx: RequestContext, payload: Input) -> Output:
     # Save bytes and get asset reference
     asset = ctx.save_bytes(f"runs/{ctx.request_id}/outputs/output.png", image_bytes)
     return Output(result=asset.ref)
@@ -278,7 +278,7 @@ Orchestrator-injected (production contract):
 |----------|---------|-------------|
 | `WORKER_MODE` | `inference` | Runtime mode selector (`inference` or `trainer`) |
 | `SCHEDULER_PUBLIC_ADDR` | - | Scheduler address workers should dial |
-| `SCHEDULER_ADDRS` | - | Optional comma-separated seed addresses for leader discovery |
+| `SCHEDULER_ADDRS` | - | Optional comma-separated LB seed addresses |
 | `WORKER_JWT` | - | Worker-connect JWT (required; claims are authoritative) |
 
 Local dev / advanced (not injected by orchestrator):
@@ -289,6 +289,11 @@ Local dev / advanced (not injected by orchestrator):
 | `SCHEDULER_JWT_ISSUER` | - | Optional: expected `iss` when verifying WORKER_JWT locally |
 | `SCHEDULER_JWT_AUDIENCE` | - | Optional: expected `aud` when verifying WORKER_JWT locally |
 | `USE_TLS` | `false` | Local-dev knob for plaintext vs TLS gRPC; production typically terminates TLS upstream |
+| `LB_ONLY_RETRIES` | `true` | Retry via configured LB endpoint(s) only; ignore direct owner redirect hints |
+| `RECONNECT_DELAY` | `0.1` | Base reconnect backoff in seconds (exponential) |
+| `RECONNECT_MAX_DELAY` | `1.0` | Reconnect backoff cap in seconds |
+| `RECONNECT_JITTER_SECONDS` | `0.1` | Added jitter upper bound in seconds, capped by `RECONNECT_MAX_DELAY` |
+| `MAX_RECONNECT_ATTEMPTS` | `0` | Max reconnect attempts (`0` = infinite retries) |
 | `WORKER_MAX_CONCURRENCY` | - | Max concurrent task executions |
 | `WORKER_MAX_INPUT_BYTES` | - | Max input payload size |
 | `WORKER_MAX_OUTPUT_BYTES` | - | Max output payload size |
@@ -451,7 +456,7 @@ cache.get_vram_models()      # ["model-a"]
 from gen_worker.errors import RetryableError, ValidationError, FatalError
 
 @worker_function()
-def process(ctx: ActionContext, payload: Input) -> Output:
+def process(ctx: RequestContext, payload: Input) -> Output:
     if not payload.prompt:
         raise ValidationError("prompt is required")  # 400, no retry
 

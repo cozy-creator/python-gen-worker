@@ -9,7 +9,7 @@ import msgspec
 from diffusers import StableDiffusionXLPipeline
 from PIL import Image
 
-from gen_worker import ActionContext, ResourceRequirements, worker_function
+from gen_worker import RequestContext, ResourceRequirements, worker_function
 from gen_worker.injection import ModelRef, ModelRefSource as Src
 from gen_worker.types import Asset
 
@@ -46,7 +46,7 @@ class GenerateOutput(msgspec.Struct):
 
 @worker_function(sdxl_resources)
 def generate_image(
-    ctx: ActionContext,
+    ctx: RequestContext,
     pipeline: Annotated[
         StableDiffusionXLPipeline,
         ModelRef(Src.FIXED, "sdxl"),
@@ -78,7 +78,7 @@ def generate_image(
 
 
 # @worker_function(resources=sdxl_resources)
-# def generate_image(ctx: ActionContext, pipeline: DiffusionPipeline = None, prompt_details: dict = None) -> bytes:
+# def generate_image(ctx: RequestContext, pipeline: DiffusionPipeline = None, prompt_details: dict = None) -> bytes:
 #     """
 #     Legacy function: Generates an image and returns raw bytes.
 #     Consider using generate_and_upload_image for complete workflows.
@@ -115,7 +115,7 @@ def generate_image(
 # s3_upload_resources = ResourceRequirements()
 
 # @worker_function(resources=s3_upload_resources)
-# def upload_image_to_s3(ctx: ActionContext, upload_details: dict) -> Dict[str, str]:
+# def upload_image_to_s3(ctx: RequestContext, upload_details: dict) -> Dict[str, str]:
 #     """
 #     Legacy function: Uploads image bytes to S3.
 #     Consider using generate_and_upload_image for complete workflows.

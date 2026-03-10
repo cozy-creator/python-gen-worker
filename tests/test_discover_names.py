@@ -49,7 +49,7 @@ main = "endpoint_mod.main"
                 (src_dir / "main.py").write_text(
                     """
 import msgspec
-from gen_worker import ActionContext, worker_function
+from gen_worker import RequestContext, worker_function
 
 class Input(msgspec.Struct):
     x: int
@@ -58,7 +58,7 @@ class Output(msgspec.Struct):
     y: int
 
 @worker_function()
-def medasr_transcribe(ctx: ActionContext, payload: Input) -> Output:
+def medasr_transcribe(ctx: RequestContext, payload: Input) -> Output:
     return Output(y=payload.x)
 """
                 )
@@ -106,7 +106,7 @@ main = "endpoint_mod_collision.main"
                 (src_dir / "main.py").write_text(
                     """
 import msgspec
-from gen_worker import ActionContext, worker_function
+from gen_worker import RequestContext, worker_function
 
 class Input(msgspec.Struct):
     x: int
@@ -115,11 +115,11 @@ class Output(msgspec.Struct):
     y: int
 
 @worker_function()
-def image_worker(ctx: ActionContext, payload: Input) -> Output:
+def image_worker(ctx: RequestContext, payload: Input) -> Output:
     return Output(y=payload.x)
 
 @worker_function()
-def image__worker(ctx: ActionContext, payload: Input) -> Output:
+def image__worker(ctx: RequestContext, payload: Input) -> Output:
     return Output(y=payload.x)
 """
                 )
@@ -164,7 +164,7 @@ main = "endpoint_mod_project_name.main"
                 (src_dir / "main.py").write_text(
                     """
 import msgspec
-from gen_worker import ActionContext, worker_function
+from gen_worker import RequestContext, worker_function
 
 class Input(msgspec.Struct):
     x: int
@@ -173,7 +173,7 @@ class Output(msgspec.Struct):
     y: int
 
 @worker_function()
-def generate(ctx: ActionContext, payload: Input) -> Output:
+def generate(ctx: RequestContext, payload: Input) -> Output:
     return Output(y=payload.x)
 """
                 )

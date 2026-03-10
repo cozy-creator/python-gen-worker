@@ -27,7 +27,7 @@ def test_dev_http_runner_writes_outputs(tmp_path: Path, monkeypatch) -> None:
         """
 import msgspec
 from gen_worker.decorators import worker_function
-from gen_worker.worker import ActionContext
+from gen_worker.worker import RequestContext
 
 class In(msgspec.Struct):
     prompt: str
@@ -36,7 +36,7 @@ class Out(msgspec.Struct):
     ref: str
 
 @worker_function()
-def generate(ctx: ActionContext, payload: In) -> Out:
+def generate(ctx: RequestContext, payload: In) -> Out:
     ref = f"runs/{ctx.request_id}/outputs/out.txt"
     ctx.save_bytes(ref, (payload.prompt + "\\n").encode("utf-8"))
     return Out(ref=ref)

@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from gen_worker.worker import ActionContext
+from gen_worker.worker import RequestContext
 
 
 def test_action_context_local_output_backend(tmp_path: Path) -> None:
-    ctx = ActionContext(
+    ctx = RequestContext(
         "rid1",
         local_output_dir=str(tmp_path),
         owner="o1",

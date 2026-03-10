@@ -17,7 +17,7 @@ import msgspec
 
 from gen_worker.cache_paths import worker_model_cache_dir
 from gen_worker.pb import worker_scheduler_pb2 as pb
-from gen_worker.worker import ActionContext, Worker
+from gen_worker.worker import RequestContext, Worker
 
 
 def _load_manifest(path: Path) -> dict[str, Any]:
@@ -113,7 +113,7 @@ class DevWorker(Worker):
 
         raw = msgspec.msgpack.encode(payload_obj)
         req = pb.TaskExecutionRequest(
-            run_id=rid,
+            request_id=rid,
             function_name=fn,
             input_payload=raw,
             required_variant_refs=[str(v).strip() for v in (required_variant_refs or []) if str(v).strip()],
@@ -123,7 +123,7 @@ class DevWorker(Worker):
         )
 
         # Mirror _handle_run_request's ctx construction, but use local output backend.
-        ctx = ActionContext(
+        ctx = RequestContext(
             rid,
             emitter=self._emit_progress_event,
             owner=str(owner or "") or None,
@@ -152,7 +152,7 @@ class DevWorker(Worker):
                     payload = {}
                 events.append(
                     {
-                        "request_id": str(ev.run_id or ""),
+                        "request_id": str(ev.request_id or ""),
                         "event_type": str(ev.event_type or ""),
                         "payload": payload,
                     }

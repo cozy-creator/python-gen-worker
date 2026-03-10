@@ -11,7 +11,7 @@ import torch
 from diffusers import DiffusionPipeline
 from PIL import Image
 
-from gen_worker import ActionContext, ResourceRequirements, worker_function
+from gen_worker import RequestContext, ResourceRequirements, worker_function
 from gen_worker.injection import ModelRef, ModelRefSource as Src
 from gen_worker.types import Asset
 
@@ -93,7 +93,7 @@ def _try_compile_transformer(pipeline: DiffusionPipeline) -> None:
 
 @worker_function(qwen_resources)
 def generate(
-    ctx: ActionContext,
+    ctx: RequestContext,
     pipeline: Annotated[
         DiffusionPipeline,
         ModelRef(Src.FIXED, "qwen_image"),

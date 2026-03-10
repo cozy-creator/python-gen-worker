@@ -28,6 +28,7 @@ from typing import Any, Callable, Dict, Optional, TypeVar, Iterator, List, Tuple
 from types import ModuleType
 import hashlib
 import msgspec
+from collections import deque
 try:
     import torch
 except Exception:  # pragma: no cover - optional dependency
@@ -143,7 +144,7 @@ class RealtimeSocket:
 class _RealtimeSessionState:
     session_id: str
     spec: _WebsocketSpec
-    ctx: ActionContext
+    ctx: RequestContext
     loop: asyncio.AbstractEventLoop
     in_q: "asyncio.Queue[Optional[bytes]]"
     closed: threading.Event
@@ -377,7 +378,7 @@ class _JWKSCache:
                 return self._keys[kid]
             return None
 
-class ActionContext:
+class RequestContext:
     """Context object passed to action functions, allowing cancellation."""
     def __init__(
         self,
@@ -478,7 +479,7 @@ class ActionContext:
         """
         Dev-only local output backend.
 
-        When local_output_dir is set, ActionContext.save_* will write outputs to disk
+        When local_output_dir is set, RequestContext.save_* will write outputs to disk
         instead of using Cozy Hub's file API.
         """
         base = (self._local_output_dir or "").strip()
@@ -807,8 +808,9 @@ class Worker:
         worker_id: Optional[str] = None,
         worker_jwt: str = "",
         use_tls: bool = False,
-        reconnect_delay: int = 5,
+        reconnect_delay: float = 0.1,
         max_reconnect_attempts: int = 0,  # 0 means infinite retries
+        lb_only_retries: bool = True,
         model_manager: Optional[ModelManagementInterface] = None, # Optional model manager
         downloader: Optional[ModelDownloader] = None,  # Optional model downloader
         manifest: Optional[Dict[str, Any]] = None,  # Optional manifest from build
@@ -822,8 +824,9 @@ class Worker:
             worker_id: Unique ID for this worker (generated if not provided).
             worker_jwt: Worker-connect JWT (required).
             use_tls: Whether to use TLS for the connection.
-            reconnect_delay: Seconds to wait between reconnection attempts.
+            reconnect_delay: Base seconds for exponential reconnect attempts.
             max_reconnect_attempts: Max reconnect attempts (0 = infinite).
+            lb_only_retries: Retry through LB endpoint/seed list only; ignore leader redirects.
             model_manager: Optional model manager.
             downloader: Optional model downloader.
             manifest: Optional manifest dict (baked in at build time) containing models, resources, etc.
@@ -846,6 +849,7 @@ class Worker:
         self.use_tls = use_tls
         self.reconnect_delay = reconnect_delay
         self.max_reconnect_attempts = max_reconnect_attempts
+        self.lb_only_retries = lb_only_retries
         self.max_input_bytes = int(os.getenv("WORKER_MAX_INPUT_BYTES", "0"))
         self.max_output_bytes = int(os.getenv("WORKER_MAX_OUTPUT_BYTES", "0"))
 
@@ -867,8 +871,14 @@ class Worker:
 
         self._task_specs: Dict[str, _TaskSpec] = {}
         self._ws_specs: Dict[str, _WebsocketSpec] = {}
-        self._active_tasks: Dict[str, ActionContext] = {}
+        self._active_tasks: Dict[str, RequestContext] = {}
         self._active_tasks_lock = threading.Lock()
+        self._assignment_epoch_by_request: Dict[str, int] = {}
+        self._stream_seq_by_key: Dict[Tuple[str, str], int] = {}
+        self._stream_replay_buffers_by_request: Dict[str, deque[Tuple[float, bytes]]] = {}
+        self._stream_tracking_lock = threading.Lock()
+        self._stream_replay_max_frames = int(os.getenv("WORKER_STREAM_REPLAY_MAX_FRAMES", "1024") or "1024")
+        self._stream_replay_window_seconds = int(os.getenv("WORKER_STREAM_REPLAY_WINDOW_SECONDS", "900") or "900")
         self._request_batch_context: Dict[str, Tuple[str, str]] = {}  # request_id -> (batch_id, item_id)
         self._request_batch_context_lock = threading.Lock()
         self.max_concurrency = int(os.getenv("WORKER_MAX_CONCURRENCY", "0"))
@@ -927,9 +937,11 @@ class Worker:
         self._realtime_sessions: Dict[str, _RealtimeSessionState] = {}
         self._realtime_lock = threading.Lock()
 
-        self._reconnect_delay_base = max(0, reconnect_delay)
-        self._reconnect_delay_max = int(os.getenv("RECONNECT_MAX_DELAY", "60"))
-        self._reconnect_jitter = float(os.getenv("RECONNECT_JITTER_SECONDS", "1.0"))
+        self._reconnect_delay_base = max(0.0, float(reconnect_delay))
+        self._reconnect_delay_max = float(os.getenv("RECONNECT_MAX_DELAY", "1.0") or "1.0")
+        if self._reconnect_delay_max <= 0:
+            self._reconnect_delay_max = 1.0
+        self._reconnect_jitter_seconds = float(os.getenv("RECONNECT_JITTER_SECONDS", "0.1") or "0.1")
 
         resolved_model_manager = model_manager
         if resolved_model_manager is None:
@@ -1155,6 +1167,8 @@ class Worker:
         if not addr:
             return
         self.scheduler_addr = addr
+        if self.lb_only_retries:
+            return
         if addr not in self.scheduler_addrs:
             self.scheduler_addrs.insert(0, addr)
 
@@ -1612,12 +1626,12 @@ class Worker:
         sig = inspect.signature(func)
         params = list(sig.parameters.values())
         if not params:
-            raise ValueError("must accept ctx: ActionContext as first arg")
+            raise ValueError("must accept ctx: RequestContext as first arg")
 
         ctx_name = params[0].name
         ctx_type = hints.get(ctx_name)
-        if ctx_type is not ActionContext:
-            raise ValueError("first argument must be ctx: ActionContext")
+        if ctx_type is not RequestContext:
+            raise ValueError("first argument must be ctx: RequestContext")
 
         injections: list[InjectionSpec] = []
         payload_type: Optional[type[msgspec.Struct]] = None
@@ -1733,11 +1747,11 @@ class Worker:
         sig = inspect.signature(func)
         params = list(sig.parameters.values())
         if len(params) < 2:
-            raise ValueError("websocket handler must accept (ctx: ActionContext, sock: RealtimeSocket, ...)")
+            raise ValueError("websocket handler must accept (ctx: RequestContext, sock: RealtimeSocket, ...)")
 
         ctx_name = params[0].name
-        if hints.get(ctx_name) is not ActionContext:
-            raise ValueError("first argument must be ctx: ActionContext")
+        if hints.get(ctx_name) is not RequestContext:
+            raise ValueError("first argument must be ctx: RequestContext")
 
         # We do not enforce a concrete socket type here; it is worker-owned and may
         # be provided by the runtime. We only validate that the param exists.
@@ -1825,17 +1839,166 @@ class Worker:
 
         return return_type
 
-    def _send_message(self, message: WorkerSchedulerMessage) -> None:
+    def _next_stream_seq(self, request_id: str, stream_kind: str) -> int:
+        rid = str(request_id or "").strip()
+        kind = str(stream_kind or "").strip() or "worker_event"
+        if not rid:
+            return 0
+        with self._stream_tracking_lock:
+            key = (rid, kind)
+            cur = int(self._stream_seq_by_key.get(key, 0) or 0)
+            nxt = cur + 1
+            self._stream_seq_by_key[key] = nxt
+            return nxt
+
+    def _assignment_epoch_for_request(self, request_id: str) -> int:
+        rid = str(request_id or "").strip()
+        if not rid:
+            return 0
+        with self._stream_tracking_lock:
+            return int(self._assignment_epoch_by_request.get(rid, 0) or 0)
+
+    def _record_replay_message(self, request_id: str, message: WorkerSchedulerMessage) -> None:
+        rid = str(request_id or "").strip()
+        if not rid:
+            return
+        try:
+            raw = bytes(message.SerializeToString())
+        except Exception:
+            return
+        now = time.time()
+        with self._stream_tracking_lock:
+            buf = self._stream_replay_buffers_by_request.get(rid)
+            if buf is None:
+                maxlen = self._stream_replay_max_frames if self._stream_replay_max_frames > 0 else 1024
+                buf = deque(maxlen=maxlen)
+                self._stream_replay_buffers_by_request[rid] = buf
+            buf.append((now, raw))
+            if self._stream_replay_window_seconds > 0:
+                cutoff = now - float(self._stream_replay_window_seconds)
+                while buf and buf[0][0] < cutoff:
+                    buf.popleft()
+
+    def _prepare_stream_contract_fields(self, message: WorkerSchedulerMessage) -> Optional[str]:
+        msg_type = None
+        try:
+            msg_type = message.WhichOneof("msg")
+        except Exception:
+            msg_type = None
+        if msg_type == "run_result":
+            rr = getattr(message, "run_result", None)
+            if rr is None:
+                return None
+            rid = str(getattr(rr, "request_id", "") or "").strip()
+            if not rid:
+                return None
+            epoch = int(getattr(rr, "assignment_attempt_epoch", 0) or 0)
+            if epoch <= 0:
+                epoch = self._assignment_epoch_for_request(rid)
+                if epoch > 0:
+                    rr.assignment_attempt_epoch = int(epoch)
+            if int(getattr(rr, "stream_seq", 0) or 0) <= 0:
+                rr.stream_seq = int(self._next_stream_seq(rid, "run_result"))
+            return rid
+        if msg_type == "worker_event":
+            ev = getattr(message, "worker_event", None)
+            if ev is None:
+                return None
+            rid = str(getattr(ev, "request_id", "") or "").strip()
+            if not rid:
+                return None
+            epoch = int(getattr(ev, "assignment_attempt_epoch", 0) or 0)
+            if epoch <= 0:
+                epoch = self._assignment_epoch_for_request(rid)
+                if epoch > 0:
+                    ev.assignment_attempt_epoch = int(epoch)
+            if int(getattr(ev, "stream_seq", 0) or 0) <= 0:
+                ev.stream_seq = int(self._next_stream_seq(rid, "worker_event"))
+            return rid
+        if msg_type == "incremental_token_delta":
+            ev = getattr(message, "incremental_token_delta", None)
+            if ev is None:
+                return None
+            rid = str(getattr(ev, "request_id", "") or "").strip()
+            if not rid:
+                return None
+            epoch = int(getattr(ev, "assignment_attempt_epoch", 0) or 0)
+            if epoch <= 0:
+                epoch = self._assignment_epoch_for_request(rid)
+                if epoch > 0:
+                    ev.assignment_attempt_epoch = int(epoch)
+            if int(getattr(ev, "sequence", 0) or 0) <= 0:
+                item_id = str(getattr(ev, "item_id", "") or "").strip() or "item-0"
+                ev.sequence = int(self._next_stream_seq(rid, f"incremental:{item_id}"))
+            return rid
+        if msg_type == "incremental_token_stream_done":
+            ev = getattr(message, "incremental_token_stream_done", None)
+            if ev is None:
+                return None
+            rid = str(getattr(ev, "request_id", "") or "").strip()
+            if not rid:
+                return None
+            epoch = int(getattr(ev, "assignment_attempt_epoch", 0) or 0)
+            if epoch <= 0:
+                epoch = self._assignment_epoch_for_request(rid)
+                if epoch > 0:
+                    ev.assignment_attempt_epoch = int(epoch)
+            if int(getattr(ev, "sequence", 0) or 0) <= 0:
+                item_id = str(getattr(ev, "item_id", "") or "").strip() or "item-0"
+                ev.sequence = int(self._next_stream_seq(rid, f"incremental:{item_id}"))
+            return rid
+        if msg_type == "incremental_token_stream_error":
+            ev = getattr(message, "incremental_token_stream_error", None)
+            if ev is None:
+                return None
+            rid = str(getattr(ev, "request_id", "") or "").strip()
+            if not rid:
+                return None
+            epoch = int(getattr(ev, "assignment_attempt_epoch", 0) or 0)
+            if epoch <= 0:
+                epoch = self._assignment_epoch_for_request(rid)
+                if epoch > 0:
+                    ev.assignment_attempt_epoch = int(epoch)
+            if int(getattr(ev, "sequence", 0) or 0) <= 0:
+                item_id = str(getattr(ev, "item_id", "") or "").strip() or "item-0"
+                ev.sequence = int(self._next_stream_seq(rid, f"incremental:{item_id}"))
+            return rid
+        if msg_type == "batch_run_result":
+            br = getattr(message, "batch_run_result", None)
+            if br is None:
+                return None
+            first_request_id: Optional[str] = None
+            for item in list(getattr(br, "items", []) or []):
+                rid = str(getattr(item, "request_id", "") or "").strip()
+                if not rid:
+                    continue
+                if first_request_id is None:
+                    first_request_id = rid
+                epoch = int(getattr(item, "assignment_attempt_epoch", 0) or 0)
+                if epoch <= 0:
+                    epoch = self._assignment_epoch_for_request(rid)
+                    if epoch > 0:
+                        item.assignment_attempt_epoch = int(epoch)
+                if int(getattr(item, "stream_seq", 0) or 0) <= 0:
+                    item_id = str(getattr(item, "item_id", "") or "").strip() or "item-0"
+                    item.stream_seq = int(self._next_stream_seq(rid, f"batch_result:{item_id}"))
+            return first_request_id
+        return None
+
+    def _send_message(self, message: WorkerSchedulerMessage, *, track_replay: bool = True) -> None:
         """Add a message to the outgoing queue."""
+        replay_request_id = self._prepare_stream_contract_fields(message)
         if self._running and not self._stop_event.is_set():
             try:
                 self._outgoing_queue.put_nowait(message)
+                if track_replay and replay_request_id:
+                    self._record_replay_message(replay_request_id, message)
             except queue.Full:
                  logger.error("Outgoing message queue is full. Message dropped!")
         else:
             logger.warning("Attempted to send message while worker is stopping or stopped.")
 
-    def _materialize_assets(self, ctx: ActionContext, obj: Any) -> None:
+    def _materialize_assets(self, ctx: RequestContext, obj: Any) -> None:
         if isinstance(obj, Asset):
             self._materialize_asset(ctx, obj)
             return
@@ -1855,7 +2018,7 @@ class Worker:
                 except Exception:
                     continue
 
-    def _materialize_asset(self, ctx: ActionContext, asset: Asset) -> None:
+    def _materialize_asset(self, ctx: RequestContext, asset: Asset) -> None:
         if asset.local_path:
             return
         ref = (asset.ref or "").strip()
@@ -2088,7 +2251,7 @@ class Worker:
         attempted: set[str] = set()
         while True:
             addr = None
-            if self._leader_hint and self._leader_hint not in attempted:
+            if (not self.lb_only_retries) and self._leader_hint and self._leader_hint not in attempted:
                 addr = self._leader_hint
                 self._leader_hint = None
             else:
@@ -2154,9 +2317,15 @@ class Worker:
             if code == grpc.StatusCode.FAILED_PRECONDITION and self._is_protocol_incompatibility(details):
                 self._handle_protocol_incompatibility(str(details))
             elif code == grpc.StatusCode.FAILED_PRECONDITION and leader:
-                logger.warning(f"Scheduler returned not_leader for {self.scheduler_addr}; redirecting to {leader}")
-                self._leader_hint = leader
-                self._set_scheduler_addr(leader)
+                if self.lb_only_retries:
+                    logger.warning(
+                        "Scheduler returned ownership hint for %s, but LB-only retries are enabled; reconnecting via configured LB seed(s).",
+                        self.scheduler_addr,
+                    )
+                else:
+                    logger.warning(f"Scheduler returned not_leader for {self.scheduler_addr}; redirecting to {leader}")
+                    self._leader_hint = leader
+                    self._set_scheduler_addr(leader)
             else:
                 logger.error(f"Failed to connect to scheduler: {code} - {details}")
             self._emit_startup_phase(
@@ -2209,6 +2378,70 @@ class Worker:
                     logger.error(f"Error sending heartbeat: {e}")
                     self._handle_connection_error()
                     break # Stop heartbeating on error
+
+    def _next_reconnect_delay(self, reconnect_count: int) -> float:
+        backoff = self._reconnect_delay_base * (2 ** max(reconnect_count - 1, 0))
+        backoff = min(backoff, self._reconnect_delay_max)
+        jitter = random.uniform(0, self._reconnect_jitter_seconds) if self._reconnect_jitter_seconds > 0 else 0.0
+        return min(self._reconnect_delay_max, max(0.0, backoff + jitter))
+
+    def _build_active_assignment_resume_hints(self) -> List[Any]:
+        hints: List[Any] = []
+        with self._active_tasks_lock:
+            active_ids = list(self._active_tasks.keys())
+        with self._stream_tracking_lock:
+            for request_id in active_ids:
+                rid = str(request_id or "").strip()
+                if not rid:
+                    continue
+                epoch = int(self._assignment_epoch_by_request.get(rid, 0) or 0)
+                if epoch <= 0:
+                    continue
+                worker_event_seq = int(self._stream_seq_by_key.get((rid, "worker_event"), 0) or 0)
+                run_result_seq = int(self._stream_seq_by_key.get((rid, "run_result"), 0) or 0)
+                incr_max = 0
+                for key, seq in self._stream_seq_by_key.items():
+                    if not key or len(key) != 2:
+                        continue
+                    if key[0] != rid:
+                        continue
+                    if str(key[1]).startswith("incremental:"):
+                        incr_max = max(incr_max, int(seq or 0))
+                hints.append(
+                    pb.ActiveAssignmentResume(
+                        request_id=rid,
+                        assignment_attempt_epoch=epoch,
+                        last_run_result_seq=run_result_seq,
+                        last_worker_event_seq=worker_event_seq,
+                        last_incremental_seq=incr_max,
+                    )
+                )
+        return hints
+
+    def _replay_active_assignment_buffers(self) -> None:
+        now = time.time()
+        replayed = 0
+        with self._stream_tracking_lock:
+            request_ids = list(self._stream_replay_buffers_by_request.keys())
+            for rid in request_ids:
+                buf = self._stream_replay_buffers_by_request.get(rid)
+                if buf is None or len(buf) == 0:
+                    continue
+                if self._stream_replay_window_seconds > 0:
+                    cutoff = now - float(self._stream_replay_window_seconds)
+                    while buf and buf[0][0] < cutoff:
+                        buf.popleft()
+                frames = list(buf)
+                for _, raw in frames:
+                    try:
+                        msg = pb.WorkerSchedulerMessage()
+                        msg.ParseFromString(raw)
+                        self._send_message(msg, track_replay=False)
+                        replayed += 1
+                    except Exception:
+                        continue
+        if replayed > 0:
+            logger.info("Replayed %d buffered worker stream message(s) after reconnect.", replayed)
 
     def _register_worker(self, is_heartbeat: bool = False) -> None:
         """Create and send a registration/heartbeat message."""
@@ -2355,11 +2588,14 @@ class Worker:
                 is_heartbeat=is_heartbeat,
                 protocol_major=WIRE_PROTOCOL_MAJOR,
                 protocol_minor=WIRE_PROTOCOL_MINOR,
+                active_assignments=self._build_active_assignment_resume_hints(),
             )
             message = pb.WorkerSchedulerMessage(worker_registration=registration)
             # logger.info(f"DEBUG: Preparing to send registration. Resource object: {resources}")
             # logger.info(f"DEBUG: Value being sent for runpod_pod_id: '{resources.runpod_pod_id}'")
             self._send_message(message)
+            if not is_heartbeat and self._reconnect_count > 1:
+                self._replay_active_assignment_buffers()
 
             # Best-effort: report disk inventory + volume identity for NFS-aware scheduling/debug.
             # This is intentionally redundant with WorkerResources.disk_models but adds the missing
@@ -2546,11 +2782,7 @@ class Worker:
                         break
 
                     if self._running and not self._stop_event.is_set():
-                        backoff = self._reconnect_delay_base * (2 ** max(self._reconnect_count - 1, 0))
-                        if self._reconnect_delay_max > 0:
-                            backoff = min(backoff, self._reconnect_delay_max)
-                        jitter = random.uniform(0, self._reconnect_jitter) if self._reconnect_jitter > 0 else 0
-                        delay = backoff + jitter
+                        delay = self._next_reconnect_delay(self._reconnect_count)
                         logger.info(f"Connection attempt {self._reconnect_count} failed. Retrying in {delay:.2f} seconds...")
                         # Wait for delay, but break if stop event is set during wait
                         if self._stop_event.wait(delay):
@@ -2752,10 +2984,16 @@ class Worker:
             self._handle_unload_model_cmd(message.unload_model_cmd)
         elif msg_type == 'interrupt_run_cmd':
             cmd = message.interrupt_run_cmd
-            request_id = cmd.run_id
+            request_id = cmd.request_id
             item_ids = [str(x).strip() for x in list(getattr(cmd, "item_ids", []) or []) if str(x).strip()]
             cancel_queued_only = bool(getattr(cmd, "cancel_queued_only", False))
-            self._handle_interrupt_request(request_id, item_ids=item_ids, cancel_queued_only=cancel_queued_only)
+            assignment_attempt_epoch = int(getattr(cmd, "assignment_attempt_epoch", 0) or 0)
+            self._handle_interrupt_request(
+                request_id,
+                item_ids=item_ids,
+                cancel_queued_only=cancel_queued_only,
+                assignment_attempt_epoch=assignment_attempt_epoch,
+            )
         elif msg_type == "runtime_batching_config_cmd":
             self._handle_runtime_batching_config_cmd(message.runtime_batching_config_cmd)
         elif msg_type == "realtime_open_cmd":
@@ -2767,11 +3005,11 @@ class Worker:
         elif msg_type == "worker_event":
             self._handle_worker_event_from_scheduler(message.worker_event)
         # Add handling for other message types if needed (e.g., config updates)
-        elif msg_type == 'release_artifact_config':
-            cfg = message.release_artifact_config
+        elif msg_type == 'endpoint_config':
+            cfg = message.endpoint_config
             resolved_by_variant = dict(getattr(cfg, "resolved_cozy_models_by_variant_ref", {}) or {})
             logger.info(
-                "Received ReleaseArtifactConfig (supported=%d required=%d resolved=%d)",
+                "Received EndpointConfig (endpoint-artifacts) (supported=%d required=%d resolved=%d)",
                 len(cfg.supported_repo_refs),
                 len(cfg.required_variant_refs),
                 len(resolved_by_variant),
@@ -2984,12 +3222,12 @@ class Worker:
                             ).encode("utf-8")
                             self._send_message(
                                 pb.WorkerSchedulerMessage(
-                                    worker_event=pb.WorkerEvent(run_id="", event_type="model.download.completed", payload_json=payload)
+                                    worker_event=pb.WorkerEvent(request_id="", event_type="model.download.completed", payload_json=payload)
                                 )
                             )
                             self._send_message(
                                 pb.WorkerSchedulerMessage(
-                                    worker_event=pb.WorkerEvent(run_id="", event_type="model.ready", payload_json=json.dumps({"model_id": canon}, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+                                    worker_event=pb.WorkerEvent(request_id="", event_type="model.ready", payload_json=json.dumps({"model_id": canon}, separators=(",", ":"), sort_keys=True).encode("utf-8"))
                                 )
                             )
                         except Exception:
@@ -3003,7 +3241,7 @@ class Worker:
                             ).encode("utf-8")
                             self._send_message(
                                 pb.WorkerSchedulerMessage(
-                                    worker_event=pb.WorkerEvent(run_id="", event_type="model.cached", payload_json=payload)
+                                    worker_event=pb.WorkerEvent(request_id="", event_type="model.cached", payload_json=payload)
                                 )
                             )
                         except Exception:
@@ -3017,7 +3255,7 @@ class Worker:
                         payload = json.dumps({"model_id": canon}, separators=(",", ":"), sort_keys=True).encode("utf-8")
                         self._send_message(
                             pb.WorkerSchedulerMessage(
-                                worker_event=pb.WorkerEvent(run_id="", event_type="model.download.started", payload_json=payload)
+                                worker_event=pb.WorkerEvent(request_id="", event_type="model.download.started", payload_json=payload)
                             )
                         )
                     except Exception:
@@ -3039,7 +3277,7 @@ class Worker:
                         payload = json.dumps({"model_id": canon}, separators=(",", ":"), sort_keys=True).encode("utf-8")
                         self._send_message(
                             pb.WorkerSchedulerMessage(
-                                worker_event=pb.WorkerEvent(run_id="", event_type="model.ready", payload_json=payload)
+                                worker_event=pb.WorkerEvent(request_id="", event_type="model.ready", payload_json=payload)
                             )
                         )
                     except Exception:
@@ -3054,7 +3292,7 @@ class Worker:
                         ).encode("utf-8")
                         self._send_message(
                             pb.WorkerSchedulerMessage(
-                                worker_event=pb.WorkerEvent(run_id="", event_type="model.cached", payload_json=payload)
+                                worker_event=pb.WorkerEvent(request_id="", event_type="model.cached", payload_json=payload)
                             )
                         )
                     except Exception:
@@ -3068,7 +3306,7 @@ class Worker:
                         ).encode("utf-8")
                         self._send_message(
                             pb.WorkerSchedulerMessage(
-                                worker_event=pb.WorkerEvent(run_id="", event_type="model.download.completed", payload_json=payload)
+                                worker_event=pb.WorkerEvent(request_id="", event_type="model.download.completed", payload_json=payload)
                             )
                         )
                     except Exception:
@@ -3089,7 +3327,7 @@ class Worker:
                             payload = json.dumps({"model_id": canon}, separators=(",", ":"), sort_keys=True).encode("utf-8")
                             self._send_message(
                                 pb.WorkerSchedulerMessage(
-                                    worker_event=pb.WorkerEvent(run_id="", event_type="model.url_refresh", payload_json=payload)
+                                    worker_event=pb.WorkerEvent(request_id="", event_type="model.url_refresh", payload_json=payload)
                                 )
                             )
                         except Exception:
@@ -3103,7 +3341,7 @@ class Worker:
                         ).encode("utf-8")
                         self._send_message(
                             pb.WorkerSchedulerMessage(
-                                worker_event=pb.WorkerEvent(run_id="", event_type="model.download.failed", payload_json=payload)
+                                worker_event=pb.WorkerEvent(request_id="", event_type="model.download.failed", payload_json=payload)
                             )
                         )
                     except Exception:
@@ -3206,7 +3444,7 @@ class Worker:
             payload = json.dumps({"model_id": model_id}, separators=(",", ":"), sort_keys=True).encode("utf-8")
             self._send_message(
                 pb.WorkerSchedulerMessage(
-                    worker_event=pb.WorkerEvent(run_id="", event_type="model.load.started", payload_json=payload)
+                    worker_event=pb.WorkerEvent(request_id="", event_type="model.load.started", payload_json=payload)
                 )
             )
         except Exception:
@@ -3271,7 +3509,7 @@ class Worker:
             ).encode("utf-8")
             self._send_message(
                 pb.WorkerSchedulerMessage(
-                    worker_event=pb.WorkerEvent(run_id="", event_type=ev_type, payload_json=payload)
+                    worker_event=pb.WorkerEvent(request_id="", event_type=ev_type, payload_json=payload)
                 )
             )
         except Exception:
@@ -3296,7 +3534,7 @@ class Worker:
                 )
                 self._send_message(
                     pb.WorkerSchedulerMessage(
-                        worker_event=pb.WorkerEvent(run_id="", event_type="model.unload.failed", payload_json=payload)
+                        worker_event=pb.WorkerEvent(request_id="", event_type="model.unload.failed", payload_json=payload)
                     )
                 )
             except Exception:
@@ -3307,7 +3545,7 @@ class Worker:
             payload = json.dumps({"model_id": model_id}, separators=(",", ":"), sort_keys=True).encode("utf-8")
             self._send_message(
                 pb.WorkerSchedulerMessage(
-                    worker_event=pb.WorkerEvent(run_id="", event_type="model.unload.started", payload_json=payload)
+                    worker_event=pb.WorkerEvent(request_id="", event_type="model.unload.started", payload_json=payload)
                 )
             )
         except Exception:
@@ -3354,7 +3592,7 @@ class Worker:
             ).encode("utf-8")
             self._send_message(
                 pb.WorkerSchedulerMessage(
-                    worker_event=pb.WorkerEvent(run_id="", event_type=ev_type, payload_json=payload)
+                    worker_event=pb.WorkerEvent(request_id="", event_type=ev_type, payload_json=payload)
                 )
             )
         except Exception:
@@ -3362,9 +3600,10 @@ class Worker:
 
     def _handle_run_request(self, request: TaskExecutionRequest) -> None:
         """Handle a task execution request from the scheduler."""
-        request_id = request.run_id
+        request_id = request.request_id
         function_name = request.function_name
         input_payload = request.input_payload
+        assignment_attempt_epoch = int(getattr(request, "assignment_attempt_epoch", 0) or 0)
         required_model_id_for_exec = ""
         timeout_ms = int(getattr(request, "timeout_ms", 0) or 0)
         owner = str(getattr(request, "owner", "") or "") or (self.owner or "")
@@ -3472,7 +3711,7 @@ class Worker:
             except Exception:
                 pass
 
-        ctx = ActionContext(
+        ctx = RequestContext(
             request_id,
             emitter=self._emit_progress_event,
             owner=owner or None,
@@ -3506,6 +3745,9 @@ class Worker:
                   self._send_task_result(request_id, False, None, "retryable", True, "worker busy", error_msg)
                   return
              self._active_tasks[request_id] = ctx
+        if assignment_attempt_epoch > 0:
+            with self._stream_tracking_lock:
+                self._assignment_epoch_by_request[request_id] = assignment_attempt_epoch
 
         # Execute function in a separate thread to avoid blocking the receive loop
         thread = threading.Thread(
@@ -3550,16 +3792,36 @@ class Worker:
                 child_request_id=str(getattr(item, "child_request_id", "") or ""),
                 item_id=item_id,
                 item_index=int(getattr(item, "item_index", 0) or 0),
+                assignment_attempt_epoch=int(getattr(item, "assignment_attempt_epoch", 0) or 0),
             )
             self._handle_run_request(req)
 
-    def _handle_interrupt_request(self, request_id: str, *, item_ids: Optional[List[str]] = None, cancel_queued_only: bool = False) -> None:
+    def _handle_interrupt_request(
+        self,
+        request_id: str,
+        *,
+        item_ids: Optional[List[str]] = None,
+        cancel_queued_only: bool = False,
+        assignment_attempt_epoch: int = 0,
+    ) -> None:
         """Handle a request to interrupt/cancel a running task."""
+        request_id = str(request_id or "").strip()
+        if assignment_attempt_epoch > 0:
+            expected = self._assignment_epoch_for_request(request_id)
+            if expected > 0 and int(assignment_attempt_epoch) != int(expected):
+                logger.info(
+                    "Ignoring stale interrupt for request_id=%s got_epoch=%d expected_epoch=%d",
+                    request_id,
+                    assignment_attempt_epoch,
+                    expected,
+                )
+                return
         logger.info(
-            "Received interrupt request for request_id=%s item_ids=%s cancel_queued_only=%s",
+            "Received interrupt request for request_id=%s item_ids=%s cancel_queued_only=%s epoch=%d",
             request_id,
             item_ids or [],
             cancel_queued_only,
+            assignment_attempt_epoch,
         )
         with self._active_tasks_lock:
             ctx = self._active_tasks.get(request_id)
@@ -3607,7 +3869,7 @@ class Worker:
                             materialized_input_urls[ks] = vs
             except Exception:
                 pass
-        ctx = ActionContext(
+        ctx = RequestContext(
             session_id,
             emitter=self._emit_progress_event,
             owner=owner or None,
@@ -3729,7 +3991,7 @@ class Worker:
 
     def _execute_task(
         self,
-        ctx: ActionContext,
+        ctx: RequestContext,
         spec: _TaskSpec,
         input_payload: bytes,
     ) -> None:
@@ -3750,7 +4012,7 @@ class Worker:
             required_models=list(getattr(ctx, "required_models", []) or []),
             resolved_cozy_models_by_id=resolved_map,
         )
-        # Attach to ctx so ActionContext.save_* and injection paths can accumulate.
+        # Attach to ctx so RequestContext.save_* and injection paths can accumulate.
         try:
             setattr(ctx, "_run_metrics", rm)
         except Exception:
@@ -4035,7 +4297,7 @@ class Worker:
                     if not emitted:
                         self._send_message(
                             pb.WorkerSchedulerMessage(
-                                worker_event=pb.WorkerEvent(run_id=request_id, event_type="output.delta", payload_json=raw)
+                                worker_event=pb.WorkerEvent(request_id=request_id, event_type="output.delta", payload_json=raw)
                             )
                         )
                     last_item_id = item_id
@@ -4081,7 +4343,7 @@ class Worker:
                 if not emitted_done:
                     self._send_message(
                         pb.WorkerSchedulerMessage(
-                            worker_event=pb.WorkerEvent(run_id=request_id, event_type="output.completed", payload_json=b"{}")
+                            worker_event=pb.WorkerEvent(request_id=request_id, event_type="output.completed", payload_json=b"{}")
                         )
                     )
                 output_payload = b""
@@ -4145,7 +4407,7 @@ class Worker:
                     if not emitted_err:
                         self._send_message(
                             pb.WorkerSchedulerMessage(
-                                worker_event=pb.WorkerEvent(run_id=request_id, event_type="output.error", payload_json=payload)
+                                worker_event=pb.WorkerEvent(request_id=request_id, event_type="output.error", payload_json=payload)
                             )
                         )
                 except Exception:
@@ -4215,6 +4477,11 @@ class Worker:
 
             with self._active_tasks_lock:
                 self._active_tasks.pop(request_id, None)
+            with self._stream_tracking_lock:
+                self._assignment_epoch_by_request.pop(request_id, None)
+                self._stream_replay_buffers_by_request.pop(request_id, None)
+                for key in [k for k in self._stream_seq_by_key.keys() if k and k[0] == request_id]:
+                    self._stream_seq_by_key.pop(key, None)
 
     def _get_local_model_cache(self) -> Optional[Any]:
         """
@@ -4278,7 +4545,7 @@ class Worker:
         except Exception:
             return {}
 
-    def _resolve_injected_value(self, ctx: ActionContext, requested_type: Any, model_id: str, inj: InjectionSpec) -> Any:
+    def _resolve_injected_value(self, ctx: RequestContext, requested_type: Any, model_id: str, inj: InjectionSpec) -> Any:
         qn = type_qualname(requested_type)
         rm: Optional[RunMetricsV1] = getattr(ctx, "_run_metrics", None)
 
@@ -4446,7 +4713,7 @@ class Worker:
                                         ).encode("utf-8")
                                         self._send_message(
                                             pb.WorkerSchedulerMessage(
-                                                worker_event=pb.WorkerEvent(run_id="", event_type="model.cached", payload_json=payload)
+                                                worker_event=pb.WorkerEvent(request_id="", event_type="model.cached", payload_json=payload)
                                             )
                                         )
                                     except Exception:
@@ -4865,7 +5132,7 @@ class Worker:
                 )
             else:
                 result = pb.TaskExecutionResult(
-                    run_id=request_id,
+                    request_id=request_id,
                     success=success,
                     output_payload=(output_payload or b'') if success else b'', # Default to b'' if None
                     error_message=error_message if not success else "",

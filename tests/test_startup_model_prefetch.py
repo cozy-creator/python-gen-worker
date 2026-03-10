@@ -57,7 +57,7 @@ def test_startup_prefetch_warms_disk_and_reports_disk_models(tmp_path: Path, mon
         sess = orch.get_session(timeout_s=30.0)
         assert sess is not None
 
-        cfg = pb.ReleaseArtifactConfig(
+        cfg = pb.EndpointConfig(
             supported_repo_refs=[variant_ref],
             required_variant_refs=[variant_ref],
             resolved_cozy_models_by_variant_ref={
@@ -74,7 +74,7 @@ def test_startup_prefetch_warms_disk_and_reports_disk_models(tmp_path: Path, mon
                 )
             },
         )
-        sess.send(pb.WorkerSchedulerMessage(release_artifact_config=cfg))
+        sess.send(pb.WorkerSchedulerMessage(endpoint_config=cfg))
 
         # The worker prefetch thread triggers an immediate registration update after caching.
         start = time.monotonic()

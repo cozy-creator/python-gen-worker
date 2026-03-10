@@ -19,7 +19,7 @@ import msgspec
 from diffusers import DiffusionPipeline
 from PIL import Image
 
-from gen_worker import ActionContext, ResourceRequirements, worker_function
+from gen_worker import RequestContext, ResourceRequirements, worker_function
 from gen_worker.injection import ModelRef, ModelRefSource as Src
 from gen_worker.types import Asset
 
@@ -67,7 +67,7 @@ class GenerateOutput(msgspec.Struct):
 
 @worker_function(_z_image_resources)
 def generate_with_loras(
-    ctx: ActionContext,
+    ctx: RequestContext,
     pipeline: Annotated[
         DiffusionPipeline,
         ModelRef(Src.FIXED, "z-image-turbo"),
