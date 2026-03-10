@@ -176,7 +176,12 @@ class CozySnapshotV2Downloader:
             parts_manifest_entries = [f for f in res.files if _is_parts_manifest(f.path)]
             part_file_paths = {f.path for f in res.files if _is_part_file(f.path)}
 
+            import logging as _logging
+            _log = _logging.getLogger("gen_worker.download")
+
             for pm_entry in parts_manifest_entries:
+                _log.info("reassemble_start manifest=%s", pm_entry.path)
+                print(f"DEBUG reassemble_start manifest={pm_entry.path}")
                 parts_json_blob = _blob_path(blobs_root, pm_entry.blake3)
                 try:
                     parts_manifest = json.loads(parts_json_blob.read_bytes())
@@ -197,13 +202,17 @@ class CozySnapshotV2Downloader:
                     dst.unlink()
 
                 with open(dst, "wb") as out_f:
-                    for part in parts:
+                    for i, part in enumerate(parts):
                         part_digest = _strip_blake3_prefix(
                             str(part.get("digest") or "").strip().lower()
                         )
                         if not part_digest:
                             raise ValueError(f"part entry in {pm_entry.path} missing digest")
                         part_blob = _blob_path(blobs_root, part_digest)
+                        _log.info("  concat_part index=%d digest=%s exists=%s size=%s",
+                                  i, part_digest[:16], part_blob.exists(),
+                                  part_blob.stat().st_size if part_blob.exists() else -1)
+                        print(f"DEBUG   concat_part index={i} digest={part_digest[:16]} exists={part_blob.exists()} size={part_blob.stat().st_size if part_blob.exists() else -1}")
                         with open(part_blob, "rb") as in_f:
                             shutil.copyfileobj(in_f, out_f)
 
@@ -238,6 +247,15 @@ class CozySnapshotV2Downloader:
         )
 
     async def _ensure_blobs(self, blobs_root: Path, files: List[CozyHubSnapshotFile]) -> None:
+        import logging
+        log = logging.getLogger("gen_worker.download")
+
+        log.info("ensure_blobs total_files=%d", len(files))
+        print(f"DEBUG ensure_blobs total_files={len(files)}")
+        for f in files:
+            log.info("  entry path=%s size=%s digest=%s url_present=%s", f.path, f.size_bytes, (f.blake3 or "")[:16], bool(f.url))
+            print(f"DEBUG   entry path={f.path} size={f.size_bytes} digest={(f.blake3 or '')[:16]} url_present={bool(f.url)}")
+
         pending: List[tuple[CozyHubSnapshotFile, str, Path]] = []
         for f in files:
             digest = (f.blake3 or "").strip().lower()

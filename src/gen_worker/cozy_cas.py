@@ -307,7 +307,15 @@ def _safe_symlink_dir(target: Path, link: Path) -> None:
     max_value=30,  # cap backoff at 30s between retries
 )
 async def _download_one_file(url: str, dst: Path, expected_size: int, expected_blake3: str) -> None:
+    import logging
+    log = logging.getLogger("gen_worker.download")
+
+    log.info("download_start path=%s expected_size=%s expected_blake3=%s", dst.name, expected_size, (expected_blake3 or "")[:16])
+    print(f"DEBUG download_start path={dst.name} expected_size={expected_size} expected_blake3={(expected_blake3 or '')[:16]}")
+
     if dst.exists():
+        log.info("dst_exists path=%s size=%s", dst, dst.stat().st_size)
+        print(f"DEBUG dst_exists path={dst} size={dst.stat().st_size}")
         try:
             if expected_size and dst.stat().st_size != expected_size:
                 raise ValueError("size mismatch")
@@ -333,6 +341,8 @@ async def _download_one_file(url: str, dst: Path, expected_size: int, expected_b
             offset = tmp.stat().st_size
         except Exception:
             offset = 0
+        log.info("resume_attempt path=%s offset=%s expected_size=%s", dst.name, offset, expected_size)
+        print(f"DEBUG resume_attempt path={dst.name} offset={offset} expected_size={expected_size}")
         if expected_size and offset > expected_size:
             tmp.unlink(missing_ok=True)
             offset = 0
@@ -386,11 +396,22 @@ async def _download_one_file(url: str, dst: Path, expected_size: int, expected_b
                 await _stream_to_file(resp, mode=mode, start=offset)
 
     # Validate final file.
-    if expected_size and tmp.stat().st_size != expected_size:
-        raise ValueError(f"size mismatch (expected {expected_size}, got {tmp.stat().st_size})")
+    actual_size = tmp.stat().st_size
+    log.info("download_complete path=%s actual_size=%s expected_size=%s", dst.name, actual_size, expected_size)
+    print(f"DEBUG download_complete path={dst.name} actual_size={actual_size} expected_size={expected_size}")
+    if expected_size and actual_size != expected_size:
+        log.error("size_mismatch path=%s expected=%s got=%s url=%s", dst.name, expected_size, actual_size, url[:80])
+        print(f"DEBUG size_mismatch path={dst.name} expected={expected_size} got={actual_size} url={url[:80]}")
+        tmp.unlink(missing_ok=True)
+        raise ValueError(f"size mismatch (expected {expected_size}, got {actual_size})")
     if expected_blake3:
         got = _blake3_file(tmp)
+        log.info("blake3_check path=%s expected=%s got=%s", dst.name, (expected_blake3 or "")[:16], got[:16])
+        print(f"DEBUG blake3_check path={dst.name} expected={(expected_blake3 or '')[:16]} got={got[:16]}")
         if got.lower() != expected_blake3.lower():
+            log.error("blake3_mismatch path=%s", dst.name)
+            print(f"DEBUG blake3_mismatch path={dst.name}")
+            tmp.unlink(missing_ok=True)
             raise ValueError("blake3 mismatch")
     tmp.rename(dst)
 
