@@ -4371,6 +4371,10 @@ class Worker:
 
         except Exception as e:
             error_type, retryable, safe_message, error_message = self._map_exception(e)
+            if error_type == "internal":
+                logger.exception("task %s FAILED [%s] %s", request_id, spec.name, error_message)
+            else:
+                logger.error("task %s failed [%s] %s: %s", request_id, spec.name, error_type, error_message)
             if inference_watchdog is not None:
                 inference_watchdog.cancel()
             self._emit_task_event(
