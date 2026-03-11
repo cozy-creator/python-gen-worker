@@ -15,6 +15,26 @@ from .tensorhub_policy import default_resolve_preferences, detect_worker_capabil
 from .tensorhub_v2 import CozyHubV2Client, CozyHubResolveArtifactResult, CozyHubSnapshotFile
 from .model_refs import CozyRef
 
+# Module-global blob download locks shared across ALL CozySnapshotV2Downloader
+# instances.  Without this, concurrent callers (startup prefetch, task handler,
+# LoadModelCommand) each create their own downloader instance with separate
+# _blob_locks dicts, allowing parallel writes to the same .part file and
+# causing file corruption (interleaved appends → oversized / invalid blobs).
+_GLOBAL_BLOB_LOCKS_LOCK = threading.Lock()
+_GLOBAL_BLOB_LOCKS: Dict[str, asyncio.Lock] = {}
+_GLOBAL_SNAPSHOT_LOCKS_LOCK = threading.Lock()
+_GLOBAL_SNAPSHOT_LOCKS: Dict[str, asyncio.Lock] = {}
+
+
+def _get_global_lock(lock_guard: threading.Lock, lock_map: Dict[str, asyncio.Lock], key: str) -> asyncio.Lock:
+    """Return (or create) a per-key asyncio.Lock from a module-global map."""
+    with lock_guard:
+        lock = lock_map.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            lock_map[key] = lock
+        return lock
+
 
 def _blob_path(blobs_root: Path, digest: str) -> Path:
     digest = (digest or "").strip().lower()
@@ -134,9 +154,6 @@ class CozySnapshotV2Downloader:
 
     def __init__(self, client: Optional[CozyHubV2Client]) -> None:
         self._client = client
-        self._locks_lock = threading.Lock()
-        self._blob_locks: Dict[str, asyncio.Lock] = {}
-        self._snapshot_locks: Dict[str, asyncio.Lock] = {}
 
     async def ensure_snapshot(
         self,
@@ -159,7 +176,7 @@ class CozySnapshotV2Downloader:
         if snap_dir.exists():
             return snap_dir
 
-        lock = self._get_lock(self._snapshot_locks, res.snapshot_digest)
+        lock = _get_global_lock(_GLOBAL_SNAPSHOT_LOCKS_LOCK, _GLOBAL_SNAPSHOT_LOCKS, res.snapshot_digest)
         async with lock:
             if snap_dir.exists():
                 return snap_dir
@@ -227,7 +244,19 @@ class CozySnapshotV2Downloader:
                 src = _blob_path(blobs_root, f.blake3)
                 _try_hardlink_or_copy(src, dst)
 
-            tmp.rename(snap_dir)
+            # Another concurrent caller (e.g. a different downloader instance) may have
+            # already materialized and renamed the snapshot while we were assembling ours.
+            # In that case, discard our tmp dir and return the existing snapshot.
+            if snap_dir.exists():
+                shutil.rmtree(tmp, ignore_errors=True)
+                return snap_dir
+            try:
+                tmp.rename(snap_dir)
+            except OSError:
+                # Lost the race — snap_dir was created between the exists() check and rename().
+                shutil.rmtree(tmp, ignore_errors=True)
+                if not snap_dir.exists():
+                    raise
             return snap_dir
 
     async def _resolve(self, ref: CozyRef) -> CozyHubResolveArtifactResult:
@@ -256,7 +285,7 @@ class CozySnapshotV2Downloader:
             log.info("  entry path=%s size=%s digest=%s url_present=%s", f.path, f.size_bytes, (f.blake3 or "")[:16], bool(f.url))
             print(f"DEBUG   entry path={f.path} size={f.size_bytes} digest={(f.blake3 or '')[:16]} url_present={bool(f.url)}")
 
-        pending: List[tuple[CozyHubSnapshotFile, str, Path]] = []
+        all_blobs: List[tuple[CozyHubSnapshotFile, str, Path]] = []
         for f in files:
             digest = (f.blake3 or "").strip().lower()
             if not digest:
@@ -265,12 +294,7 @@ class CozySnapshotV2Downloader:
                 raise ValueError(f"missing url for {f.path}")
             dst = _blob_path(blobs_root, digest)
             dst.parent.mkdir(parents=True, exist_ok=True)
-            if dst.exists():
-                continue
-            pending.append((f, digest, dst))
-
-        if not pending:
-            return
+            all_blobs.append((f, digest, dst))
 
         # Parallelize shard/blob downloads to reduce first-load latency for
         # multi-file transformer checkpoints.
@@ -278,9 +302,14 @@ class CozySnapshotV2Downloader:
         sem = asyncio.Semaphore(max_conc)
 
         async def _ensure_one(f: CozyHubSnapshotFile, digest: str, dst: Path) -> None:
-            lock = self._get_lock(self._blob_locks, digest)
-            async with sem:
-                async with lock:
+            # Acquire the GLOBAL per-digest lock so that concurrent callers across
+            # different downloader instances (startup prefetch, task request,
+            # LoadModelCommand) don't write to the same .part file in parallel.
+            lock = _get_global_lock(_GLOBAL_BLOB_LOCKS_LOCK, _GLOBAL_BLOB_LOCKS, digest)
+            async with lock:
+                if dst.exists():
+                    return
+                async with sem:
                     if dst.exists():
                         return
                     assert f.url is not None
@@ -292,16 +321,10 @@ class CozySnapshotV2Downloader:
                     )
 
         # Start larger blobs first for better overlap.
-        pending.sort(key=lambda row: int(row[0].size_bytes or 0), reverse=True)
-        await asyncio.gather(*(_ensure_one(f, digest, dst) for f, digest, dst in pending))
+        all_blobs.sort(key=lambda row: int(row[0].size_bytes or 0), reverse=True)
+        await asyncio.gather(*(_ensure_one(f, digest, dst) for f, digest, dst in all_blobs))
 
-    def _get_lock(self, mp: Dict[str, asyncio.Lock], key: str) -> asyncio.Lock:
-        with self._locks_lock:
-            lock = mp.get(key)
-            if lock is None:
-                lock = asyncio.Lock()
-                mp[key] = lock
-            return lock
+
 
 
 async def ensure_snapshot_async(
