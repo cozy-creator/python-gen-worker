@@ -13,6 +13,7 @@ class MarcoPoloOutput(msgspec.Struct):
 @worker_function()
 def marco_polo(ctx: RequestContext, data: MarcoPoloInput) -> MarcoPoloOutput:
     """Returns 'polo' when input is 'marco'; otherwise a fallback response."""
+    # E2E keepalive: deterministic minimal handler used for latency tests.
     if ctx.is_canceled():
         raise InterruptedError("Request cancelled")
 
@@ -20,4 +21,3 @@ def marco_polo(ctx: RequestContext, data: MarcoPoloInput) -> MarcoPoloOutput:
         return MarcoPoloOutput(response="polo")
     
     return MarcoPoloOutput(response="Bro you're supposed to say 'marco'!")
-

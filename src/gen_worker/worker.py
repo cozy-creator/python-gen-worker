@@ -841,6 +841,9 @@ class Worker:
         self._warn_model_resolve_s = float(os.getenv("WORKER_WARN_MODEL_RESOLVE_S", "30") or "30")
         self._warn_model_load_s = float(os.getenv("WORKER_WARN_MODEL_LOAD_S", "60") or "60")
         self._warn_inference_s = float(os.getenv("WORKER_WARN_INFERENCE_S", "60") or "60")
+        self._emit_detailed_task_events = str(os.getenv("WORKER_EMIT_DETAILED_TASK_EVENTS", "0") or "0").strip().lower() in (
+            "1", "true", "t", "yes", "y", "on",
+        )
         self.user_module_names = user_module_names # Store module names
         self.worker_id = worker_id or f"py-worker-{os.getpid()}"
         self.worker_jwt = (worker_jwt or "").strip()
@@ -1143,6 +1146,22 @@ class Worker:
     def _is_protocol_incompatibility(details: Optional[str]) -> bool:
         return bool(details and details.startswith("unsupported_worker_protocol:"))
 
+    @staticmethod
+    def _is_non_transient_auth_error(code: Any, details: Optional[str]) -> bool:
+        # Authentication/authorization failures are non-transient for the
+        # current worker identity/JWT. Reconnecting in a tight loop only creates
+        # avoidable LB/orchestrator churn.
+        if code in (grpc.StatusCode.UNAUTHENTICATED, grpc.StatusCode.PERMISSION_DENIED):
+            return True
+        d = (details or "").strip()
+        return d in (
+            "worker_not_expected",
+            "invalid worker token claims",
+            "invalid worker token",
+            "missing worker token",
+            "missing auth metadata",
+        )
+
     def _handle_protocol_incompatibility(self, details: str) -> None:
         logger.error(
             "Scheduler rejected worker wire protocol %s (%s). "
@@ -1157,6 +1176,25 @@ class Worker:
             emit_worker_event=False,
             wire_protocol=wire_protocol_version_string(),
             grpc_details=details,
+        )
+        self._running = False
+        self._close_connection()
+        self._stop_event.set()
+
+    def _handle_non_transient_connect_error(self, code: Any, details: str) -> None:
+        logger.error(
+            "Scheduler rejected worker connect as non-transient (%s: %s). "
+            "Stopping worker to avoid reconnect churn.",
+            code,
+            details,
+        )
+        self._emit_startup_phase(
+            "scheduler_connect_non_transient_rejected",
+            status="error",
+            level=logging.ERROR,
+            emit_worker_event=False,
+            grpc_code=str(code),
+            grpc_details=str(details),
         )
         self._running = False
         self._close_connection()
@@ -1256,17 +1294,37 @@ class Worker:
 
     def _emit_worker_event_bytes(self, request_id: str, event_type: str, payload_json: bytes) -> None:
         """Best-effort worker->scheduler WorkerEvent emitter (must never fail a run)."""
+        et = str(event_type or "").strip()
+        if not et:
+            return
+        if not self._should_emit_worker_event(et):
+            return
         try:
             msg = pb.WorkerSchedulerMessage(
                 worker_event=pb.WorkerEvent(
                     request_id=str(request_id or ""),
-                    event_type=str(event_type or ""),
+                    event_type=et,
                     payload_json=bytes(payload_json or b"{}"),
                 )
             )
             self._send_message(msg)
         except Exception:
             return
+
+    def _should_emit_worker_event(self, event_type: str) -> bool:
+        et = str(event_type or "").strip().lower()
+        if et == "":
+            return False
+        if self._emit_detailed_task_events:
+            return True
+
+        # Keep high-signal diagnostics by default and suppress high-volume
+        # lifecycle/metrics chatter on the hot path.
+        if et.startswith("task."):
+            return et.endswith(".failed") or et.endswith(".rejected") or et.endswith(".stuck")
+        if et.startswith("metrics."):
+            return False
+        return True
 
     def _emit_incremental_delta_typed(
         self,
@@ -2316,6 +2374,8 @@ class Worker:
             leader = self._extract_leader_addr(details)
             if code == grpc.StatusCode.FAILED_PRECONDITION and self._is_protocol_incompatibility(details):
                 self._handle_protocol_incompatibility(str(details))
+            elif self._is_non_transient_auth_error(code, details):
+                self._handle_non_transient_connect_error(code, str(details))
             elif code == grpc.StatusCode.FAILED_PRECONDITION and leader:
                 if self.lb_only_retries:
                     logger.warning(
@@ -2936,6 +2996,8 @@ class Worker:
                     self._leader_hint = leader
                     self._set_scheduler_addr(leader)
                 self._handle_connection_error()
+            elif self._is_non_transient_auth_error(code, details):
+                self._handle_non_transient_connect_error(code, str(details))
             elif code == grpc.StatusCode.CANCELLED:
                 logger.warning("gRPC stream unexpectedly cancelled by server or network.")
                 self._handle_connection_error()
