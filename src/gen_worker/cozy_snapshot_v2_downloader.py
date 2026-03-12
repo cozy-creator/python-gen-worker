@@ -20,19 +20,33 @@ from .model_refs import CozyRef
 # LoadModelCommand) each create their own downloader instance with separate
 # _blob_locks dicts, allowing parallel writes to the same .part file and
 # causing file corruption (interleaved appends → oversized / invalid blobs).
+
+# threading.Lock (not asyncio.Lock) is used so that the locks work correctly
+# even when callers run in different event loops (e.g. startup prefetch via
+# asyncio.run() in a thread vs. LoadModelCommand on the main loop).
 _GLOBAL_BLOB_LOCKS_LOCK = threading.Lock()
-_GLOBAL_BLOB_LOCKS: Dict[str, asyncio.Lock] = {}
+_GLOBAL_BLOB_LOCKS: Dict[str, threading.Lock] = {}
+
+
+class _SnapshotEntry:
+    """Coordinates concurrent snapshot builds: one builder, zero-or-more waiters."""
+
+    def __init__(self) -> None:
+        self.event = threading.Event()  # set when snap_dir is ready (or build failed)
+        self.exception: Optional[BaseException] = None
+
+
 _GLOBAL_SNAPSHOT_LOCKS_LOCK = threading.Lock()
-_GLOBAL_SNAPSHOT_LOCKS: Dict[str, asyncio.Lock] = {}
+_GLOBAL_SNAPSHOT_LOCKS: Dict[str, _SnapshotEntry] = {}
 
 
-def _get_global_lock(lock_guard: threading.Lock, lock_map: Dict[str, asyncio.Lock], key: str) -> asyncio.Lock:
-    """Return (or create) a per-key asyncio.Lock from a module-global map."""
-    with lock_guard:
-        lock = lock_map.get(key)
+def _get_blob_lock(digest: str) -> threading.Lock:
+    """Return (or create) a per-digest threading.Lock from the module-global map."""
+    with _GLOBAL_BLOB_LOCKS_LOCK:
+        lock = _GLOBAL_BLOB_LOCKS.get(digest)
         if lock is None:
-            lock = asyncio.Lock()
-            lock_map[key] = lock
+            lock = threading.Lock()
+            _GLOBAL_BLOB_LOCKS[digest] = lock
         return lock
 
 
@@ -176,8 +190,32 @@ class CozySnapshotV2Downloader:
         if snap_dir.exists():
             return snap_dir
 
-        lock = _get_global_lock(_GLOBAL_SNAPSHOT_LOCKS_LOCK, _GLOBAL_SNAPSHOT_LOCKS, res.snapshot_digest)
-        async with lock:
+        # Claim building responsibility or wait for another caller already building
+        # this snapshot.  threading primitives (not asyncio.Lock) are used so that
+        # this works correctly across different event loops (startup prefetch thread
+        # vs. LoadModelCommand on the main loop).
+        loop = asyncio.get_running_loop()
+        with _GLOBAL_SNAPSHOT_LOCKS_LOCK:
+            if snap_dir.exists():  # double-check under the guard
+                return snap_dir
+            _snap_entry = _GLOBAL_SNAPSHOT_LOCKS.get(res.snapshot_digest)
+            if _snap_entry is None:
+                _snap_entry = _SnapshotEntry()
+                _GLOBAL_SNAPSHOT_LOCKS[res.snapshot_digest] = _snap_entry
+                _is_builder = True
+            else:
+                _is_builder = False
+
+        if not _is_builder:
+            # Another caller is already building this snapshot; wait for it.
+            await loop.run_in_executor(None, _snap_entry.event.wait)
+            if _snap_entry.exception is not None:
+                raise RuntimeError(
+                    f"concurrent snapshot build failed for {res.snapshot_digest}"
+                ) from _snap_entry.exception
+            return snap_dir
+
+        try:
             if snap_dir.exists():
                 return snap_dir
 
@@ -258,6 +296,11 @@ class CozySnapshotV2Downloader:
                 if not snap_dir.exists():
                     raise
             return snap_dir
+        except BaseException as _exc:
+            _snap_entry.exception = _exc
+            raise
+        finally:
+            _snap_entry.event.set()
 
     async def _resolve(self, ref: CozyRef) -> CozyHubResolveArtifactResult:
         if self._client is None:
@@ -302,11 +345,15 @@ class CozySnapshotV2Downloader:
         sem = asyncio.Semaphore(max_conc)
 
         async def _ensure_one(f: CozyHubSnapshotFile, digest: str, dst: Path) -> None:
-            # Acquire the GLOBAL per-digest lock so that concurrent callers across
-            # different downloader instances (startup prefetch, task request,
-            # LoadModelCommand) don't write to the same .part file in parallel.
-            lock = _get_global_lock(_GLOBAL_BLOB_LOCKS_LOCK, _GLOBAL_BLOB_LOCKS, digest)
-            async with lock:
+            # Acquire the GLOBAL per-digest threading.Lock (loop-independent) so that
+            # concurrent callers across different downloader instances (startup prefetch,
+            # task request, LoadModelCommand) don't write to the same .part file in
+            # parallel.  run_in_executor is used so that waiting for the lock does not
+            # block the event loop.
+            _lock = _get_blob_lock(digest)
+            _lloop = asyncio.get_running_loop()
+            await _lloop.run_in_executor(None, _lock.acquire)
+            try:
                 if dst.exists():
                     return
                 async with sem:
@@ -319,6 +366,8 @@ class CozySnapshotV2Downloader:
                         expected_size=int(f.size_bytes or 0),
                         expected_blake3=digest,
                     )
+            finally:
+                _lock.release()
 
         # Start larger blobs first for better overlap.
         all_blobs.sort(key=lambda row: int(row[0].size_bytes or 0), reverse=True)

@@ -4550,17 +4550,27 @@ class Worker:
                                     kwargs["custom_pipeline"] = custom_pipeline
                             except Exception:
                                 pass
-                    except Exception:
-                        pass
+                            # Read variant from cozy/pipeline spec (authoritative).
+                            if spec.variant:
+                                kwargs["variant"] = spec.variant
+                                print(f"DEBUG cozy_spec_variant={spec.variant} source={spec.source_path.name}")
+                    except Exception as _spec_exc:
+                        print(f"DEBUG cozy_spec_load_error={_spec_exc}")
 
-                    try:
-                        from gen_worker.pipeline_loader import detect_diffusers_variant
+                    # Fallback: scan files on disk for diffusers variant naming.
+                    if "variant" not in kwargs:
+                        try:
+                            from gen_worker.pipeline_loader import detect_diffusers_variant
 
-                        variant = detect_diffusers_variant(local_path)
-                        if variant is not None:
-                            kwargs["variant"] = variant
-                    except Exception:
-                        pass
+                            variant = detect_diffusers_variant(local_path)
+                            if variant is not None:
+                                kwargs["variant"] = variant
+                                print(f"DEBUG detect_diffusers_variant={variant} path={local_path}")
+                            else:
+                                print(f"DEBUG detect_diffusers_variant=None path={local_path}")
+                        except Exception as _detect_exc:
+                            print(f"DEBUG detect_variant_error={_detect_exc}")
+                    print(f"DEBUG from_pretrained variant={kwargs.get('variant')} path={local_path}")
 
                     # Quantized weight-only inference requires explicit loader hints.
                     #

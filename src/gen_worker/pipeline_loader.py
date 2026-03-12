@@ -552,7 +552,9 @@ def detect_diffusers_variant(model_path: Path) -> Optional[str]:
         name = p.name.lower()
         for v in candidates:
             if f".{v}." in name and name.endswith((".safetensors", ".json")):
+                print(f"DEBUG detect_diffusers_variant matched variant={v} file={p.name}")
                 return v
+    print(f"DEBUG detect_diffusers_variant no variant found in {model_path}")
     return None
 
 
@@ -1456,6 +1458,17 @@ class PipelineLoader:
             raise ModelNotFoundError(model_id, path)
 
         config = config or PipelineConfig(model_path=str(path))
+        if config.variant is None:
+            # Prefer variant from cozy/pipeline spec, fall back to file-name scan.
+            try:
+                from .cozy_pipeline_spec import load_cozy_pipeline_spec
+
+                spec = load_cozy_pipeline_spec(path)
+                if spec is not None and spec.variant:
+                    config.variant = spec.variant
+                    print(f"DEBUG pipeline_loader variant_from_spec={config.variant}")
+            except Exception:
+                pass
         if config.variant is None:
             config.variant = detect_diffusers_variant(path)
 
