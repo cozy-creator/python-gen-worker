@@ -55,6 +55,7 @@ class DiffusersModelManager(ModelManagementInterface):
                         local_path = self._downloader.download(model_id, cache_dir)
                 except Exception as e:
                     logger.warning("DiffusersModelManager: download failed for %s: %s", model_id, e)
+                    return False
 
             loaded = await self._loader.load(model_id, model_path=local_path)
             logger.info(

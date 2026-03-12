@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 import yaml
 
+logger = logging.getLogger(__name__)
 
 COZY_PIPELINE_LOCK_FILENAME = "cozy.pipeline.lock.yaml"
 COZY_PIPELINE_FILENAME = "cozy.pipeline.yaml"
+PIPELINE_LOCK_TOML_FILENAME = "pipeline.lock"
+PIPELINE_TOML_FILENAME = "pipeline.toml"
 DIFFUSERS_MODEL_INDEX_FILENAME = "model_index.json"
 
 
@@ -33,6 +38,13 @@ class CozyPipelineSpec:
         s = str(v).strip()
         return s or None
 
+    @property
+    def variant(self) -> Optional[str]:
+        """Diffusers variant (e.g. 'fp16', 'fp8') from the pipeline spec."""
+        pipe = self.raw.get("pipe") or {}
+        v = str(pipe.get("variant") or "").strip()
+        return v or None
+
 
 def _safe_child_path(root: Path, rel: str) -> Path:
     # Ensure rel doesn't escape root (best-effort).
@@ -50,24 +62,41 @@ def load_cozy_pipeline_spec(model_root: Path) -> Optional[CozyPipelineSpec]:
     This is a worker-side helper used during pipeline loading to implement:
     - prefer `cozy.pipeline.lock.yaml` when present
     - fall back to `cozy.pipeline.yaml` otherwise
+    - fall back to `pipeline.lock` / `pipeline.toml` (TOML) if no YAML found
     """
     root = Path(model_root)
     lock_path = root / COZY_PIPELINE_LOCK_FILENAME
     spec_path = lock_path if lock_path.exists() else (root / COZY_PIPELINE_FILENAME)
-    if not spec_path.exists():
-        return None
+    if spec_path.exists():
+        raw = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise ValueError("invalid cozy pipeline spec (expected mapping)")
+        api = str(raw.get("apiVersion") or "").strip()
+        kind = str(raw.get("kind") or "").strip()
+        if api and api != "v1":
+            raise ValueError(f"unsupported cozy pipeline apiVersion: {api!r}")
+        if kind and kind != "DiffusersPipeline":
+            raise ValueError(f"unsupported cozy pipeline kind: {kind!r}")
+        logger.info("DEBUG loaded cozy pipeline spec from %s", spec_path.name)
+        return CozyPipelineSpec(source_path=spec_path, raw=raw)
 
-    raw = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
-    if not isinstance(raw, dict):
-        raise ValueError("invalid cozy pipeline spec (expected mapping)")
-    api = str(raw.get("apiVersion") or "").strip()
-    kind = str(raw.get("kind") or "").strip()
-    if api and api != "v1":
-        raise ValueError(f"unsupported cozy pipeline apiVersion: {api!r}")
-    if kind and kind != "DiffusersPipeline":
-        raise ValueError(f"unsupported cozy pipeline kind: {kind!r}")
+    # Fallback: read pipeline.lock / pipeline.toml (TOML format, stored by tensorhub ingest).
+    toml_lock = root / PIPELINE_LOCK_TOML_FILENAME
+    toml_spec = toml_lock if toml_lock.exists() else (root / PIPELINE_TOML_FILENAME)
+    if toml_spec.exists():
+        raw = tomllib.loads(toml_spec.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise ValueError("invalid pipeline toml (expected mapping)")
+        api = str(raw.get("apiVersion") or "").strip()
+        kind = str(raw.get("kind") or "").strip()
+        if api and api != "v1":
+            raise ValueError(f"unsupported pipeline toml apiVersion: {api!r}")
+        if kind and kind != "DiffusersPipeline":
+            raise ValueError(f"unsupported pipeline toml kind: {kind!r}")
+        logger.info("DEBUG loaded cozy pipeline spec from %s (toml fallback)", toml_spec.name)
+        return CozyPipelineSpec(source_path=toml_spec, raw=raw)
 
-    return CozyPipelineSpec(source_path=spec_path, raw=raw)
+    return None
 
 
 def cozy_custom_pipeline_arg(model_root: Path, spec: CozyPipelineSpec) -> Optional[str]:

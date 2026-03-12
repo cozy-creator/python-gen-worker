@@ -4133,12 +4133,17 @@ class Worker:
 
         models_in_use: set[str] = set()
         inference_watchdog: Optional[threading.Timer] = None
+        print(f"DEBUG [execute_task] entered request_id={request_id} function={spec.name} payload_bytes={len(input_payload or b'')} timeout_ms={ctx.timeout_ms or 'none'}", flush=True)
         try:
-            if ctx.is_canceled():
+            _is_canceled = ctx.is_canceled()
+            print(f"DEBUG [execute_task] cancellation_check request_id={request_id} is_canceled={_is_canceled} deadline={getattr(ctx, '_deadline', None)}", flush=True)
+            if _is_canceled:
                 raise CanceledError("canceled")
 
             # Decode payload strictly.
+            print(f"DEBUG [execute_task] decoding_payload request_id={request_id} payload_type={spec.payload_type}", flush=True)
             input_obj = msgspec.msgpack.decode(input_payload, type=spec.payload_type)
+            print(f"DEBUG [execute_task] payload_decoded request_id={request_id} input={input_obj!r}", flush=True)
             # Optional post-decode constraints (e.g. clamping) declared on the payload type.
             try:
                 from .payload_constraints import apply_payload_constraints
@@ -4146,7 +4151,9 @@ class Worker:
                 _ = apply_payload_constraints(input_obj)
             except Exception:
                 pass
+            print(f"DEBUG [execute_task] materializing_assets request_id={request_id}", flush=True)
             self._materialize_assets(ctx, input_obj)
+            print(f"DEBUG [execute_task] assets_materialized request_id={request_id}", flush=True)
             # Best-effort extract diffusion-ish numeric fields for metrics.run.
             try:
                 def _get_num(name: str) -> Optional[float]:
@@ -4180,8 +4187,10 @@ class Worker:
             call_kwargs[spec.ctx_param] = ctx
             call_kwargs[spec.payload_param] = input_obj
 
+            print(f"DEBUG [execute_task] injection_loop request_id={request_id} injections={len(spec.injections)}", flush=True)
             for inj in spec.injections:
                 resolve_t0 = time.monotonic()
+                print(f"DEBUG [execute_task] resolving_model request_id={request_id} param={inj.param_name}", flush=True)
                 resolve_watchdog = self._start_task_phase_watchdog(
                     request_id=request_id,
                     phase="model_resolve",
@@ -4264,7 +4273,9 @@ class Worker:
                     },
                 )
                 try:
+                    print(f"DEBUG [execute_task] loading_model request_id={request_id} param={inj.param_name} model_id={canon_model_id}", flush=True)
                     call_kwargs[inj.param_name] = self._resolve_injected_value(ctx, inj.param_type, model_id, inj)
+                    print(f"DEBUG [execute_task] model_loaded request_id={request_id} param={inj.param_name} model_id={canon_model_id} pipeline_type={type(call_kwargs[inj.param_name]).__name__}", flush=True)
                     self._emit_task_event(
                         request_id,
                         "task.model_load.completed",
@@ -4294,10 +4305,18 @@ class Worker:
 
             # Invoke.
             t_infer0 = time.monotonic()
+            _infer_warn_s = float(getattr(self, "_warn_inference_s", 60.0))
+            logger.info(
+                "inference.start request_id=%s function=%s timeout_ms=%s warn_after_s=%.1f",
+                request_id,
+                spec.name,
+                ctx.timeout_ms if ctx.timeout_ms else "none",
+                _infer_warn_s,
+            )
             inference_watchdog = self._start_task_phase_watchdog(
                 request_id=request_id,
                 phase="inference",
-                warn_after_s=float(getattr(self, "_warn_inference_s", 60.0)),
+                warn_after_s=_infer_warn_s,
                 payload={"function_name": spec.name, "output_mode": spec.output_mode},
             )
             self._emit_task_event(
@@ -4305,12 +4324,14 @@ class Worker:
                 "task.inference.started",
                 {"function_name": spec.name, "output_mode": spec.output_mode},
             )
+            print(f"DEBUG [execute_task] calling_func request_id={request_id} function={spec.name} is_canceled={ctx.is_canceled()} kwargs_keys={list(call_kwargs.keys())}", flush=True)
             if inspect.iscoroutinefunction(spec.func):
                 result = asyncio.run(spec.func(**call_kwargs))
             elif inspect.isasyncgenfunction(spec.func):
                 result = spec.func(**call_kwargs)
             else:
                 result = spec.func(**call_kwargs)
+            print(f"DEBUG [execute_task] func_returned request_id={request_id} function={spec.name} result_type={type(result).__name__}", flush=True)
 
             if ctx.is_canceled():
                 raise CanceledError("canceled")
@@ -4862,17 +4883,27 @@ class Worker:
                                     kwargs["custom_pipeline"] = custom_pipeline
                             except Exception:
                                 pass
-                    except Exception:
-                        pass
+                            # Read variant from cozy/pipeline spec (authoritative).
+                            if spec.variant:
+                                kwargs["variant"] = spec.variant
+                                print(f"DEBUG cozy_spec_variant={spec.variant} source={spec.source_path.name}")
+                    except Exception as _spec_exc:
+                        print(f"DEBUG cozy_spec_load_error={_spec_exc}")
 
-                    try:
-                        from gen_worker.pipeline_loader import detect_diffusers_variant
+                    # Fallback: scan files on disk for diffusers variant naming.
+                    if "variant" not in kwargs:
+                        try:
+                            from gen_worker.pipeline_loader import detect_diffusers_variant
 
-                        variant = detect_diffusers_variant(local_path)
-                        if variant is not None:
-                            kwargs["variant"] = variant
-                    except Exception:
-                        pass
+                            variant = detect_diffusers_variant(local_path)
+                            if variant is not None:
+                                kwargs["variant"] = variant
+                                print(f"DEBUG detect_diffusers_variant={variant} path={local_path}")
+                            else:
+                                print(f"DEBUG detect_diffusers_variant=None path={local_path}")
+                        except Exception as _detect_exc:
+                            print(f"DEBUG detect_variant_error={_detect_exc}")
+                    print(f"DEBUG from_pretrained variant={kwargs.get('variant')} path={local_path}")
 
                     # Quantized weight-only inference requires explicit loader hints.
                     #
