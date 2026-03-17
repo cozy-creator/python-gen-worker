@@ -5,7 +5,7 @@ from typing import Annotated, Iterator
 import msgspec
 
 from gen_worker.injection import ModelRef, ModelRefSource as Src
-from gen_worker.worker import ActionContext, Worker
+from gen_worker.worker import RequestContext, Worker
 
 
 class Input(msgspec.Struct):
@@ -67,7 +67,7 @@ def _make_worker() -> Worker:
 
 class TestContractAndIncremental(unittest.TestCase):
     def test_rejects_missing_return_annotation(self) -> None:
-        def bad(ctx: ActionContext, payload: Input):  # type: ignore[no-untyped-def]
+        def bad(ctx: RequestContext, payload: Input):  # type: ignore[no-untyped-def]
             return Delta(delta="x")
 
         w = _make_worker()
@@ -75,7 +75,7 @@ class TestContractAndIncremental(unittest.TestCase):
             w._inspect_task_spec(bad)  # type: ignore[arg-type]
 
     def test_incremental_output_emits_deltas_and_completed(self) -> None:
-        def stream(ctx: ActionContext, payload: Input) -> Iterator[Delta]:
+        def stream(ctx: RequestContext, payload: Input) -> Iterator[Delta]:
             yield Delta(delta=payload.text)
             yield Delta(delta="!")
 
@@ -83,7 +83,7 @@ class TestContractAndIncremental(unittest.TestCase):
         spec = w._inspect_task_spec(stream)  # type: ignore[arg-type]
         self.assertEqual(spec.output_mode, "incremental")
 
-        ctx = ActionContext("run-1", emitter=lambda _e: None)
+        ctx = RequestContext("run-1", emitter=lambda _e: None)
         payload = Input(text="hi")
         b = msgspec.msgpack.encode(msgspec.to_builtins(payload))
         w._execute_task(ctx, spec, b)
@@ -115,13 +115,13 @@ class TestContractAndIncremental(unittest.TestCase):
         self.assertEqual(events[2][0], "output.completed")
 
     def test_incremental_output_emits_typed_token_messages(self) -> None:
-        def stream(ctx: ActionContext, payload: Input) -> Iterator[Delta]:
+        def stream(ctx: RequestContext, payload: Input) -> Iterator[Delta]:
             yield Delta(delta=payload.text)
 
         w = _make_worker()
         spec = w._inspect_task_spec(stream)  # type: ignore[arg-type]
 
-        ctx = ActionContext("run-typed-1", emitter=lambda _e: None)
+        ctx = RequestContext("run-typed-1", emitter=lambda _e: None)
         payload = Input(text="hello")
         b = msgspec.msgpack.encode(msgspec.to_builtins(payload))
         w._execute_task(ctx, spec, b)
@@ -132,7 +132,7 @@ class TestContractAndIncremental(unittest.TestCase):
 
     def test_payload_model_key_resolves_via_endpoint_map(self) -> None:
         def fn(
-            ctx: ActionContext,
+            ctx: RequestContext,
             model: Annotated[FakeModel, ModelRef(Src.PAYLOAD, "model_key")],
             payload: InputWithModel,
         ) -> Output:
@@ -142,7 +142,7 @@ class TestContractAndIncremental(unittest.TestCase):
         w._payload_model_id_by_key_by_function = {"fn": {"a": "google/foo"}}
         w._release_allowed_model_ids = {"google/foo"}
         spec = w._inspect_task_spec(fn)  # type: ignore[arg-type]
-        ctx = ActionContext("run-2", emitter=lambda _e: None)
+        ctx = RequestContext("run-2", emitter=lambda _e: None)
         payload = InputWithModel(text="x", model_key="a")
         b = msgspec.msgpack.encode(msgspec.to_builtins(payload))
         w._execute_task(ctx, spec, b)
@@ -156,7 +156,7 @@ class TestContractAndIncremental(unittest.TestCase):
 
     def test_payload_model_key_rejects_not_allowlisted(self) -> None:
         def fn(
-            ctx: ActionContext,
+            ctx: RequestContext,
             model: Annotated[FakeModel, ModelRef(Src.PAYLOAD, "model_key")],
             payload: InputWithModel,
         ) -> Output:
@@ -166,7 +166,7 @@ class TestContractAndIncremental(unittest.TestCase):
         w._payload_model_id_by_key_by_function = {"fn": {"a": "google/foo", "b": "google/bar"}}
         w._release_allowed_model_ids = {"google/foo"}
         spec = w._inspect_task_spec(fn)  # type: ignore[arg-type]
-        ctx = ActionContext("run-3", emitter=lambda _e: None)
+        ctx = RequestContext("run-3", emitter=lambda _e: None)
         payload = InputWithModel(text="x", model_key="b")
         b = msgspec.msgpack.encode(msgspec.to_builtins(payload))
         w._execute_task(ctx, spec, b)

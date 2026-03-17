@@ -8,7 +8,7 @@ import urllib.error
 
 from gen_worker.errors import AuthError
 from gen_worker.types import Asset
-from gen_worker.worker import ActionContext, Worker
+from gen_worker.worker import RequestContext, Worker
 
 
 class _FakeHeaders(dict):
@@ -55,7 +55,7 @@ class TestFileTokenScoping(unittest.TestCase):
     """Test that per-run file tokens are used instead of env vars."""
 
     def test_save_bytes_uses_per_run_token(self) -> None:
-        """save_bytes should use the token from ActionContext, not env."""
+        """save_bytes should use the token from RequestContext, not env."""
         captured_auth: list[str] = []
 
         def fake_urlopen(req: Any, timeout: int = 0) -> _FakeHTTPResponse:
@@ -70,7 +70,7 @@ class TestFileTokenScoping(unittest.TestCase):
         os.environ["FILE_API_TOKEN"] = "env-token-should-not-be-used"
         os.environ["FILE_API_BASE_URL"] = "https://should-not-be-used.example"
 
-        ctx = ActionContext(
+        ctx = RequestContext(
             "run-123",
             owner="tenant-1",
             file_api_base_url="https://tensorhub.example",
@@ -99,7 +99,7 @@ class TestFileTokenScoping(unittest.TestCase):
         os.environ["FILE_API_TOKEN"] = "env-fallback-token"
         os.environ["FILE_API_BASE_URL"] = "https://tensorhub.example"
 
-        ctx = ActionContext(
+        ctx = RequestContext(
             "run-456",
             owner="tenant-1",
             # No file_api_token provided
@@ -121,7 +121,7 @@ class TestAuthErrorHandling(unittest.TestCase):
         def fake_urlopen(req: Any, timeout: int = 0) -> _FakeHTTPResponse:
             raise _make_http_error(401, "Unauthorized")
 
-        ctx = ActionContext(
+        ctx = RequestContext(
             "run-789",
             owner="tenant-1",
             file_api_base_url="https://tensorhub.example",
@@ -140,7 +140,7 @@ class TestAuthErrorHandling(unittest.TestCase):
         def fake_urlopen(req: Any, timeout: int = 0) -> _FakeHTTPResponse:
             raise _make_http_error(403, "Forbidden")
 
-        ctx = ActionContext(
+        ctx = RequestContext(
             "run-abc",
             owner="tenant-1",
             file_api_base_url="https://tensorhub.example",
@@ -158,7 +158,7 @@ class TestAuthErrorHandling(unittest.TestCase):
         def fake_urlopen(req: Any, timeout: int = 0) -> _FakeHTTPResponse:
             raise _make_http_error(401, "Unauthorized")
 
-        ctx = ActionContext(
+        ctx = RequestContext(
             "run-def",
             owner="tenant-1",
             file_api_base_url="https://tensorhub.example",
@@ -183,7 +183,7 @@ class TestAuthErrorHandling(unittest.TestCase):
             os.environ["WORKER_RUN_DIR"] = td
             os.environ["WORKER_CACHE_DIR"] = os.path.join(td, "cache")
 
-            ctx = ActionContext(
+            ctx = RequestContext(
                 "run-ghi",
                 owner="tenant-1",
                 file_api_base_url="https://tensorhub.example",
@@ -210,7 +210,7 @@ class TestAuthErrorHandling(unittest.TestCase):
             os.environ["WORKER_RUN_DIR"] = td
             os.environ["WORKER_CACHE_DIR"] = os.path.join(td, "cache")
 
-            ctx = ActionContext(
+            ctx = RequestContext(
                 "run-jkl",
                 owner="tenant-1",
                 file_api_base_url="https://tensorhub.example",

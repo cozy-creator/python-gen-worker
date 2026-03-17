@@ -22,7 +22,7 @@ import msgspec
 from diffusers import DiffusionPipeline
 from PIL import Image
 
-from gen_worker import ActionContext, ResourceRequirements, worker_function
+from gen_worker import RequestContext, ResourceRequirements, worker_function
 from gen_worker.injection import ModelRef, ModelRefSource as Src
 from gen_worker.types import Asset
 
@@ -82,7 +82,7 @@ def _set_seed_and_perf(seed: Optional[int]) -> None:
 
 @worker_function(_sdxl_router_resources)
 def generate(
-    ctx: ActionContext,
+    ctx: RequestContext,
     pipeline: Annotated[
         DiffusionPipeline,
         ModelRef(Src.PAYLOAD, "model_key")  # Model key comes from payload.model_key

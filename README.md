@@ -50,7 +50,7 @@ uv add gen-worker[torch]
 
 ```python
 import msgspec
-from gen_worker import ActionContext, worker_function
+from gen_worker import RequestContext, worker_function
 
 class Input(msgspec.Struct):
     prompt: str
@@ -59,7 +59,7 @@ class Output(msgspec.Struct):
     text: str
 
 @worker_function()
-def generate(ctx: ActionContext, payload: Input) -> Output:
+def generate(ctx: RequestContext, payload: Input) -> Output:
     return Output(text=f"Hello, {payload.prompt}!")
 ```
 
@@ -69,7 +69,7 @@ def generate(ctx: ActionContext, payload: Input) -> Output:
 - **Schema generation** - Input/output schemas extracted from msgspec types
 - **Model injection** - Dependency injection for ML models with caching
 - **Streaming output** - Support for incremental/streaming responses
-- **Progress reporting** - Built-in progress events via `ActionContext`
+- **Progress reporting** - Built-in progress events via `RequestContext`
 - **Perf metrics** - Best-effort per-run metrics emitted to gen-orchestrator (`metrics.*` worker events)
 - **Trainer runtime mode** - SDK-native trainer loop via `WORKER_MODE=trainer`
 - **File handling** - Upload/download assets via Cozy hub file API
@@ -81,7 +81,7 @@ def generate(ctx: ActionContext, payload: Input) -> Output:
 
 ```python
 import msgspec
-from gen_worker import ActionContext, worker_function
+from gen_worker import RequestContext, worker_function
 
 class Input(msgspec.Struct):
     prompt: str
@@ -90,7 +90,7 @@ class Output(msgspec.Struct):
     result: str
 
 @worker_function()
-def my_function(ctx: ActionContext, payload: Input) -> Output:
+def my_function(ctx: RequestContext, payload: Input) -> Output:
     return Output(result=f"Processed: {payload.prompt}")
 ```
 
@@ -103,7 +103,7 @@ class Delta(msgspec.Struct):
     chunk: str
 
 @worker_function()
-def stream(ctx: ActionContext, payload: Input) -> Iterator[Delta]:
+def stream(ctx: RequestContext, payload: Input) -> Iterator[Delta]:
     for word in payload.prompt.split():
         if ctx.is_canceled():
             raise InterruptedError("canceled")
@@ -126,7 +126,7 @@ from gen_worker.injection import ModelRef, ModelRefSource as Src
 
 @worker_function()
 def generate(
-    ctx: ActionContext,
+    ctx: RequestContext,
     pipe: Annotated[DiffusionPipeline, ModelRef(Src.FIXED, "sd15")],
     payload: Input,
 ) -> Output:
@@ -149,7 +149,7 @@ flux = { ref = "black-forest-labs/flux.2-klein-4b", dtypes = ["bf16"] }
 from typing import Annotated
 import msgspec
 from diffusers import DiffusionPipeline
-from gen_worker import ActionContext, worker_function
+from gen_worker import RequestContext, worker_function
 from gen_worker.injection import ModelRef, ModelRefSource as Src
 
 class Input(msgspec.Struct):
@@ -158,7 +158,7 @@ class Input(msgspec.Struct):
 
 @worker_function()
 def generate(
-    ctx: ActionContext,
+    ctx: RequestContext,
     pipe: Annotated[DiffusionPipeline, ModelRef(Src.PAYLOAD, "model")],
     payload: Input,
 ):
@@ -173,7 +173,7 @@ arbitrary repo refs in the payload.
 
 ```python
 @worker_function()
-def process(ctx: ActionContext, payload: Input) -> Output:
+def process(ctx: RequestContext, payload: Input) -> Output:
     # Save bytes and get asset reference
     asset = ctx.save_bytes(f"runs/{ctx.request_id}/outputs/output.png", image_bytes)
     return Output(result=asset.ref)
@@ -451,7 +451,7 @@ cache.get_vram_models()      # ["model-a"]
 from gen_worker.errors import RetryableError, ValidationError, FatalError
 
 @worker_function()
-def process(ctx: ActionContext, payload: Input) -> Output:
+def process(ctx: RequestContext, payload: Input) -> Output:
     if not payload.prompt:
         raise ValidationError("prompt is required")  # 400, no retry
 

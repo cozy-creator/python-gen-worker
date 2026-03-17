@@ -11,7 +11,7 @@ import torch
 from diffusers import Flux2KleinPipeline
 from PIL import Image
 
-from gen_worker import ActionContext, ResourceRequirements, worker_function
+from gen_worker import RequestContext, ResourceRequirements, worker_function
 from gen_worker.injection import ModelRef, ModelRefSource as Src
 from gen_worker.types import Asset
 
@@ -53,7 +53,7 @@ def _should_enable_seq_offload() -> bool:
 
 
 def _generate(
-    ctx: ActionContext,
+    ctx: RequestContext,
     pipeline,
     payload: GenerateInput,
     model_key: str,
@@ -101,7 +101,7 @@ def _generate(
 
 @worker_function(_flux_resources)
 def generate(
-    ctx: ActionContext,
+    ctx: RequestContext,
     pipeline: Annotated[
         Flux2KleinPipeline,
         ModelRef(Src.FIXED, "flux2-klein-9b-base"),
@@ -113,7 +113,7 @@ def generate(
 
 @worker_function(_flux_resources)
 def generate_turbo(
-    ctx: ActionContext,
+    ctx: RequestContext,
     pipeline: Annotated[
         Flux2KleinPipeline,
         ModelRef(Src.FIXED, "flux2-klein-9b-turbo"),
@@ -125,7 +125,7 @@ def generate_turbo(
 
 @worker_function(_flux_resources)
 def generate_fp8(
-    ctx: ActionContext,
+    ctx: RequestContext,
     pipeline: Annotated[
         Flux2KleinPipeline,
         ModelRef(Src.FIXED, "flux2-klein-9b-base_fp8"),
@@ -137,7 +137,7 @@ def generate_fp8(
 
 @worker_function(_flux_resources)
 def generate_turbo_fp8(
-    ctx: ActionContext,
+    ctx: RequestContext,
     pipeline: Annotated[
         Flux2KleinPipeline,
         ModelRef(Src.FIXED, "flux2-klein-9b-turbo_fp8"),
@@ -149,7 +149,7 @@ def generate_turbo_fp8(
 
 @worker_function(_nvfp4_resources)
 def generate_nvfp4(
-    ctx: ActionContext,
+    ctx: RequestContext,
     pipeline: Annotated[
         Flux2KleinPipeline,
         ModelRef(Src.FIXED, "flux2-klein-9b-base_nvfp4"),
@@ -161,7 +161,7 @@ def generate_nvfp4(
 
 @worker_function(_nvfp4_resources)
 def generate_turbo_nvfp4(
-    ctx: ActionContext,
+    ctx: RequestContext,
     pipeline: Annotated[
         Flux2KleinPipeline,
         ModelRef(Src.FIXED, "flux2-klein-9b-turbo_nvfp4"),

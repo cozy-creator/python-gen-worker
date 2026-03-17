@@ -10,7 +10,7 @@ import msgspec
 import pytest
 
 from gen_worker.model_cache import ModelCache
-from gen_worker.worker import ActionContext, Worker, pb, _TaskSpec
+from gen_worker.worker import RequestContext, Worker, pb, _TaskSpec
 from gen_worker.decorators import ResourceRequirements
 
 
@@ -22,7 +22,7 @@ class _Output(msgspec.Struct):
     ok: bool
 
 
-def _sleep_fn(ctx: ActionContext, payload: _Input) -> _Output:
+def _sleep_fn(ctx: RequestContext, payload: _Input) -> _Output:
     time.sleep(payload.sleep_s)
     return _Output(ok=True)
 
@@ -54,8 +54,8 @@ def test_gpu_is_busy_refcount_overlapping_inference() -> None:
         injections=(),
     )
 
-    ctx1 = ActionContext("r1", emitter=lambda e: None)
-    ctx2 = ActionContext("r2", emitter=lambda e: None)
+    ctx1 = RequestContext("r1", emitter=lambda e: None)
+    ctx2 = RequestContext("r2", emitter=lambda e: None)
     payload = msgspec.msgpack.encode({"sleep_s": 0.25})
 
     t1 = threading.Thread(target=w._execute_task, args=(ctx1, spec, payload), daemon=True)

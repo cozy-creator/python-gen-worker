@@ -33,7 +33,7 @@ def test_mock_orchestrator_can_run_one_task(tmp_path: Path) -> None:
 from __future__ import annotations
 
 import msgspec
-from gen_worker import ActionContext, ResourceRequirements, worker_function
+from gen_worker import RequestContext, ResourceRequirements, worker_function
 
 
 class Input(msgspec.Struct):
@@ -45,7 +45,7 @@ class Output(msgspec.Struct):
 
 
 @worker_function(ResourceRequirements())
-def hello(ctx: ActionContext, payload: Input) -> Output:
+def hello(ctx: RequestContext, payload: Input) -> Output:
     return Output(message=f"hello {payload.name}")
 """.lstrip(),
         encoding="utf-8",

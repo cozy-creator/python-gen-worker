@@ -1,7 +1,7 @@
 import unittest
 
 from gen_worker.injection import InjectionSpec, ModelRef, ModelRefSource
-from gen_worker.worker import ActionContext, Worker
+from gen_worker.worker import RequestContext, Worker
 
 
 class _StubModelManager:
@@ -20,7 +20,7 @@ class _ActualPipeline:
 class TestInjectionTypeEnforcement(unittest.TestCase):
     def test_rejects_model_manager_type_mismatch(self) -> None:
         w = Worker(user_module_names=[], model_manager=_StubModelManager(), worker_jwt="dummy-worker-jwt")
-        ctx = ActionContext("run-1")
+        ctx = RequestContext("run-1")
         inj = InjectionSpec(
             param_name="pipeline",
             param_type=_ExpectedPipeline,

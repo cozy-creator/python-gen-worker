@@ -97,7 +97,7 @@ def test_run_raises_when_registration_timeout_reached(tmp_path: Path, monkeypatc
 from __future__ import annotations
 import msgspec
 from gen_worker.decorators import worker_function
-from gen_worker.worker import ActionContext
+from gen_worker.worker import RequestContext
 
 class Input(msgspec.Struct):
     name: str
@@ -106,7 +106,7 @@ class Output(msgspec.Struct):
     ok: bool
 
 @worker_function()
-def tiny(ctx: ActionContext, payload: Input) -> Output:
+def tiny(ctx: RequestContext, payload: Input) -> Output:
     return Output(ok=True)
 """.lstrip(),
         encoding="utf-8",

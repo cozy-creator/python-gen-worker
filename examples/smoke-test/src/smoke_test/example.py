@@ -4,7 +4,7 @@ from typing import Iterator, List
 
 import msgspec
 
-from gen_worker import ActionContext, ResourceRequirements, worker_function
+from gen_worker import RequestContext, ResourceRequirements, worker_function
 from gen_worker.types import Asset
 
 
@@ -30,7 +30,7 @@ _PNG_1X1 = base64.b64decode(
 
 
 @worker_function(ResourceRequirements())
-def image_gen_action(ctx: ActionContext, data: ImageGenInput) -> ImageGenOutput:
+def image_gen_action(ctx: RequestContext, data: ImageGenInput) -> ImageGenOutput:
     """Example image generation function that returns real output Assets.
 
     This is a smoke test: it does not run ML inference. It validates:
@@ -58,7 +58,7 @@ class AddOutput(msgspec.Struct):
 
 
 @worker_function(ResourceRequirements())
-def add_numbers(ctx: ActionContext, data: AddInput) -> AddOutput:
+def add_numbers(ctx: RequestContext, data: AddInput) -> AddOutput:
     """Example function that adds two numbers."""
     if ctx.is_canceled():
         raise InterruptedError("Task cancelled")
@@ -76,7 +76,7 @@ class MultiplyOutput(msgspec.Struct):
 
 
 @worker_function(ResourceRequirements())
-def multiply_numbers(ctx: ActionContext, data: MultiplyInput) -> MultiplyOutput:
+def multiply_numbers(ctx: RequestContext, data: MultiplyInput) -> MultiplyOutput:
     """Example function that multiplies two numbers."""
     if ctx.is_canceled():
         raise InterruptedError("Task cancelled")
@@ -94,7 +94,7 @@ class StreamInput(msgspec.Struct):
 
 
 @worker_function(ResourceRequirements())
-def token_stream(ctx: ActionContext, data: StreamInput) -> Iterator[TokenDelta]:
+def token_stream(ctx: RequestContext, data: StreamInput) -> Iterator[TokenDelta]:
     """Example incremental-output function (LLM-style token deltas)."""
     for ch in data.text:
         if ctx.is_canceled():
@@ -122,7 +122,7 @@ class PromptBatchOutput(msgspec.Struct):
 
 
 @worker_function(ResourceRequirements())
-def caption_prompts(ctx: ActionContext, data: PromptBatchInput) -> PromptBatchOutput:
+def caption_prompts(ctx: RequestContext, data: PromptBatchInput) -> PromptBatchOutput:
     """Example multi-item request handler for input.prompts[].
 
     This function is intentionally simple and deterministic so it can be used in

@@ -17,7 +17,7 @@ import msgspec
 
 from gen_worker.cache_paths import worker_model_cache_dir
 from gen_worker.pb import worker_scheduler_pb2 as pb
-from gen_worker.worker import ActionContext, Worker
+from gen_worker.worker import RequestContext, Worker
 
 
 def _load_manifest(path: Path) -> dict[str, Any]:
@@ -123,7 +123,7 @@ class DevWorker(Worker):
         )
 
         # Mirror _handle_run_request's ctx construction, but use local output backend.
-        ctx = ActionContext(
+        ctx = RequestContext(
             rid,
             emitter=self._emit_progress_event,
             owner=str(owner or "") or None,

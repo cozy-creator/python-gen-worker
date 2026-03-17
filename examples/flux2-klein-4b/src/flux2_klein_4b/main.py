@@ -11,7 +11,7 @@ import torch
 from diffusers import Flux2KleinPipeline
 from PIL import Image
 
-from gen_worker import ActionContext, ResourceRequirements, worker_function
+from gen_worker import RequestContext, ResourceRequirements, worker_function
 from gen_worker.injection import ModelRef, ModelRefSource as Src
 from gen_worker.types import Asset
 
@@ -52,7 +52,7 @@ def _should_enable_seq_offload() -> bool:
 
 
 def _generate(
-    ctx: ActionContext,
+    ctx: RequestContext,
     pipeline,
     payload: GenerateInput,
     model_key: str,
@@ -100,7 +100,7 @@ def _generate(
 
 @worker_function(_flux_resources)
 def generate(
-    ctx: ActionContext,
+    ctx: RequestContext,
     pipeline: Annotated[
         Flux2KleinPipeline,
         ModelRef(Src.FIXED, "flux2-klein-4b"),
@@ -112,7 +112,7 @@ def generate(
 
 @worker_function(_flux_resources)
 def generate_fp8(
-    ctx: ActionContext,
+    ctx: RequestContext,
     pipeline: Annotated[
         Flux2KleinPipeline,
         ModelRef(Src.FIXED, "flux2-klein-4b_fp8"),
@@ -130,7 +130,7 @@ def generate_fp8(
 
 @worker_function(_flux_resources)
 def generate_9b(
-    ctx: ActionContext,
+    ctx: RequestContext,
     pipeline: Annotated[
         Flux2KleinPipeline,
         ModelRef(Src.FIXED, "flux2-klein-9b"),
@@ -142,7 +142,7 @@ def generate_9b(
 
 @worker_function(_flux_resources)
 def generate_9b_fp8(
-    ctx: ActionContext,
+    ctx: RequestContext,
     pipeline: Annotated[
         Flux2KleinPipeline,
         ModelRef(Src.FIXED, "flux2-klein-9b_fp8"),
@@ -154,7 +154,7 @@ def generate_9b_fp8(
 
 @worker_function(_flux_resources)
 def generate_int8(
-    ctx: ActionContext,
+    ctx: RequestContext,
     pipeline: Annotated[
         Flux2KleinPipeline,
         ModelRef(Src.FIXED, "flux2-klein-4b_int8"),
@@ -172,7 +172,7 @@ def generate_int8(
 
 @worker_function(_flux_resources)
 def generate_int4(
-    ctx: ActionContext,
+    ctx: RequestContext,
     pipeline: Annotated[
         Flux2KleinPipeline,
         ModelRef(Src.FIXED, "flux2-klein-4b_int4"),

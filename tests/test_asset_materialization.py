@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional
 from unittest.mock import patch
 
 from gen_worker.types import Asset
-from gen_worker.worker import ActionContext, Worker
+from gen_worker.worker import RequestContext, Worker
 
 
 class _FakeHeaders(dict):
@@ -59,7 +59,7 @@ class TestAssetMaterialization(unittest.TestCase):
                     return _FakeHTTPResponse(data)
 
             with patch("urllib.request.build_opener", return_value=_Opener()) as _mock:
-                w._materialize_asset(ActionContext("run-1", owner=w.owner), a)
+                w._materialize_asset(RequestContext("run-1", owner=w.owner), a)
                 self.assertGreaterEqual(_mock.call_count, 1)
 
             self.assertIsNotNone(a.local_path)
@@ -88,7 +88,7 @@ class TestAssetMaterialization(unittest.TestCase):
 
             with patch("urllib.request.build_opener", return_value=_Opener()):
                 with self.assertRaises(Exception):
-                    w._materialize_asset(ActionContext("run-1", owner=w.owner), a)
+                    w._materialize_asset(RequestContext("run-1", owner=w.owner), a)
 
     def test_materialize_tensorhub_ref(self) -> None:
         w = self._worker(owner="tenant-1")
@@ -127,7 +127,7 @@ class TestAssetMaterialization(unittest.TestCase):
             os.environ["WORKER_MAX_INPUT_FILE_BYTES"] = "9999999"
 
             with patch("urllib.request.urlopen", side_effect=fake_urlopen):
-                ctx = ActionContext(
+                ctx = RequestContext(
                     "run-1",
                     owner="tenant-1",
                     file_api_base_url="https://tensorhub.example",

@@ -1,12 +1,12 @@
 import time
 import unittest
 
-from gen_worker.worker import ActionContext, RealtimeSocket, Worker, pb
+from gen_worker.worker import RequestContext, RealtimeSocket, Worker, pb
 from gen_worker.decorators import worker_websocket, ResourceRequirements
 
 
 @worker_websocket(ResourceRequirements())
-async def echo_ws(ctx: ActionContext, sock: RealtimeSocket) -> None:
+async def echo_ws(ctx: RequestContext, sock: RealtimeSocket) -> None:
     await sock.send_json({"status": "ready"})
     async for data in sock.iter_bytes():
         await sock.send_bytes(data)

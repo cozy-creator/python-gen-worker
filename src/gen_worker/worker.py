@@ -143,7 +143,7 @@ class RealtimeSocket:
 class _RealtimeSessionState:
     session_id: str
     spec: _WebsocketSpec
-    ctx: ActionContext
+    ctx: RequestContext
     loop: asyncio.AbstractEventLoop
     in_q: "asyncio.Queue[Optional[bytes]]"
     closed: threading.Event
@@ -377,7 +377,7 @@ class _JWKSCache:
                 return self._keys[kid]
             return None
 
-class ActionContext:
+class RequestContext:
     """Context object passed to action functions, allowing cancellation."""
     def __init__(
         self,
@@ -478,7 +478,7 @@ class ActionContext:
         """
         Dev-only local output backend.
 
-        When local_output_dir is set, ActionContext.save_* will write outputs to disk
+        When local_output_dir is set, RequestContext.save_* will write outputs to disk
         instead of using Cozy Hub's file API.
         """
         base = (self._local_output_dir or "").strip()
@@ -867,7 +867,7 @@ class Worker:
 
         self._task_specs: Dict[str, _TaskSpec] = {}
         self._ws_specs: Dict[str, _WebsocketSpec] = {}
-        self._active_tasks: Dict[str, ActionContext] = {}
+        self._active_tasks: Dict[str, RequestContext] = {}
         self._active_tasks_lock = threading.Lock()
         self._request_batch_context: Dict[str, Tuple[str, str]] = {}  # request_id -> (batch_id, item_id)
         self._request_batch_context_lock = threading.Lock()
@@ -1612,12 +1612,12 @@ class Worker:
         sig = inspect.signature(func)
         params = list(sig.parameters.values())
         if not params:
-            raise ValueError("must accept ctx: ActionContext as first arg")
+            raise ValueError("must accept ctx: RequestContext as first arg")
 
         ctx_name = params[0].name
         ctx_type = hints.get(ctx_name)
-        if ctx_type is not ActionContext:
-            raise ValueError("first argument must be ctx: ActionContext")
+        if ctx_type is not RequestContext:
+            raise ValueError("first argument must be ctx: RequestContext")
 
         injections: list[InjectionSpec] = []
         payload_type: Optional[type[msgspec.Struct]] = None
@@ -1733,11 +1733,11 @@ class Worker:
         sig = inspect.signature(func)
         params = list(sig.parameters.values())
         if len(params) < 2:
-            raise ValueError("websocket handler must accept (ctx: ActionContext, sock: RealtimeSocket, ...)")
+            raise ValueError("websocket handler must accept (ctx: RequestContext, sock: RealtimeSocket, ...)")
 
         ctx_name = params[0].name
-        if hints.get(ctx_name) is not ActionContext:
-            raise ValueError("first argument must be ctx: ActionContext")
+        if hints.get(ctx_name) is not RequestContext:
+            raise ValueError("first argument must be ctx: RequestContext")
 
         # We do not enforce a concrete socket type here; it is worker-owned and may
         # be provided by the runtime. We only validate that the param exists.
@@ -1835,7 +1835,7 @@ class Worker:
         else:
             logger.warning("Attempted to send message while worker is stopping or stopped.")
 
-    def _materialize_assets(self, ctx: ActionContext, obj: Any) -> None:
+    def _materialize_assets(self, ctx: RequestContext, obj: Any) -> None:
         if isinstance(obj, Asset):
             self._materialize_asset(ctx, obj)
             return
@@ -1855,7 +1855,7 @@ class Worker:
                 except Exception:
                     continue
 
-    def _materialize_asset(self, ctx: ActionContext, asset: Asset) -> None:
+    def _materialize_asset(self, ctx: RequestContext, asset: Asset) -> None:
         if asset.local_path:
             return
         ref = (asset.ref or "").strip()
@@ -3470,7 +3470,7 @@ class Worker:
             except Exception:
                 pass
 
-        ctx = ActionContext(
+        ctx = RequestContext(
             request_id,
             emitter=self._emit_progress_event,
             owner=owner or None,
@@ -3603,7 +3603,7 @@ class Worker:
                             materialized_input_urls[ks] = vs
             except Exception:
                 pass
-        ctx = ActionContext(
+        ctx = RequestContext(
             session_id,
             emitter=self._emit_progress_event,
             owner=owner or None,
@@ -3725,7 +3725,7 @@ class Worker:
 
     def _execute_task(
         self,
-        ctx: ActionContext,
+        ctx: RequestContext,
         spec: _TaskSpec,
         input_payload: bytes,
     ) -> None:
@@ -3746,7 +3746,7 @@ class Worker:
             required_models=list(getattr(ctx, "required_models", []) or []),
             resolved_cozy_models_by_id=resolved_map,
         )
-        # Attach to ctx so ActionContext.save_* and injection paths can accumulate.
+        # Attach to ctx so RequestContext.save_* and injection paths can accumulate.
         try:
             setattr(ctx, "_run_metrics", rm)
         except Exception:
@@ -4285,7 +4285,7 @@ class Worker:
         except Exception:
             return {}
 
-    def _resolve_injected_value(self, ctx: ActionContext, requested_type: Any, model_id: str, inj: InjectionSpec) -> Any:
+    def _resolve_injected_value(self, ctx: RequestContext, requested_type: Any, model_id: str, inj: InjectionSpec) -> Any:
         qn = type_qualname(requested_type)
         rm: Optional[RunMetricsV1] = getattr(ctx, "_run_metrics", None)
 

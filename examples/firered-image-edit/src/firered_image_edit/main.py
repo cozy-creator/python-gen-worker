@@ -10,7 +10,7 @@ import torch
 from diffusers import QwenImageEditPlusPipeline
 from PIL import Image
 
-from gen_worker import ActionContext, ResourceRequirements, worker_function
+from gen_worker import RequestContext, ResourceRequirements, worker_function
 from gen_worker.injection import ModelRef, ModelRefSource as Src
 from gen_worker.types import Asset
 
@@ -47,7 +47,7 @@ class EditOutput(msgspec.Struct):
 
 @worker_function(_firered_resources)
 def edit(
-    ctx: ActionContext,
+    ctx: RequestContext,
     pipeline: Annotated[
         QwenImageEditPlusPipeline,
         ModelRef(Src.FIXED, "firered_image_edit"),

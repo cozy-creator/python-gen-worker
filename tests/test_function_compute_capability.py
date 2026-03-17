@@ -57,7 +57,7 @@ main = "endpoint_mod_cc.main"
                 (src_dir / "main.py").write_text(
                     """
 import msgspec
-from gen_worker import ActionContext, ResourceRequirements, worker_function
+from gen_worker import RequestContext, ResourceRequirements, worker_function
 
 class Input(msgspec.Struct):
     x: int
@@ -66,7 +66,7 @@ class Output(msgspec.Struct):
     y: int
 
 @worker_function(resources=ResourceRequirements(compute_capability_min=10))
-def generate_nvfp4(ctx: ActionContext, payload: Input) -> Output:
+def generate_nvfp4(ctx: RequestContext, payload: Input) -> Output:
     return Output(y=payload.x)
 """.lstrip(),
                     encoding="utf-8",

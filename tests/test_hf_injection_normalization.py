@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from gen_worker.injection import InjectionSpec, ModelRef, ModelRefSource as Src
-from gen_worker.worker import ActionContext, Worker
+from gen_worker.worker import RequestContext, Worker
 
 
 class _DummyModel:
@@ -37,7 +37,7 @@ def _bare_worker() -> Worker:
 
 def test_non_diffusers_hf_ref_normalizes_without_downloader() -> None:
     w = _bare_worker()
-    ctx = ActionContext("run-hf-no-downloader")
+    ctx = RequestContext("run-hf-no-downloader")
     inj = InjectionSpec(param_name="model", param_type=_DummyModel, model_ref=ModelRef(Src.FIXED, "joycaption"))
 
     _ = Worker._resolve_injected_value(w, ctx, _DummyModel, "hf:owner/repo@main", inj)  # type: ignore[arg-type]
@@ -50,7 +50,7 @@ def test_non_diffusers_hf_ref_uses_downloader_path_when_available() -> None:
     w = _bare_worker()
     dl = _DownloaderStub("/tmp/cozy-model-cache/hf-owner-repo-main")
     w._downloader = dl
-    ctx = ActionContext("run-hf-downloader")
+    ctx = RequestContext("run-hf-downloader")
     inj = InjectionSpec(param_name="model", param_type=_DummyModel, model_ref=ModelRef(Src.FIXED, "joycaption"))
 
     _ = Worker._resolve_injected_value(w, ctx, _DummyModel, "hf:owner/repo@main", inj)  # type: ignore[arg-type]

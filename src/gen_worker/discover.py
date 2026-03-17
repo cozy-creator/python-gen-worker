@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import msgspec
 
-from gen_worker import ActionContext
+from gen_worker import RequestContext
 from gen_worker.injection import ModelRef
 
 from gen_worker.tensorhub_toml import (
@@ -195,12 +195,12 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
 
     if len(params) < 2:
         raise ValueError(
-            f"{func.__name__}: must accept (ctx: ActionContext, payload: msgspec.Struct, ...)"
+            f"{func.__name__}: must accept (ctx: RequestContext, payload: msgspec.Struct, ...)"
         )
 
     ctx_name = params[0].name
-    if hints.get(ctx_name) is not ActionContext:
-        raise ValueError(f"{func.__name__}: first param must be ctx: ActionContext")
+    if hints.get(ctx_name) is not RequestContext:
+        raise ValueError(f"{func.__name__}: first param must be ctx: RequestContext")
 
     payload_type = None
     payload_param = None
