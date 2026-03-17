@@ -1,7 +1,7 @@
 # Tenant-supplied Dockerfile example: OpenAI Codex CLI worker (Ubuntu 24.04).
 #
 # Contract:
-# - Installs dependencies from pyproject.toml/uv.lock.
+# - Installs gen-worker.
 # - Runs discovery at build time, baking /app/.tensorhub/endpoint.lock into the image.
 # - Uses gen-worker as the image ENTRYPOINT.
 #
@@ -53,12 +53,18 @@ RUN set -eu; \
   chmod +x /usr/local/bin/codex; \
   rm -rf /tmp/codex.tar.gz
 
+# Stable runtime layer.
+RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
+  uv pip install --system --break-system-packages gen-worker==0.3.0
+
 # Copy lock metadata first (cache-friendly).
 COPY pyproject.toml uv.lock /app/
 
 RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
   uv export --no-dev --no-hashes --no-sources --no-emit-project --no-emit-local \
-    -o /tmp/requirements.txt \
+    --no-emit-package gen-worker \
+    -o /tmp/requirements.all.txt \
+  && grep -Ev '^(gen-worker)' /tmp/requirements.all.txt > /tmp/requirements.txt \
   && uv pip install --system --break-system-packages --no-deps -r /tmp/requirements.txt
 
 # Copy app code late.

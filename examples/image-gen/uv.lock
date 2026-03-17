@@ -786,7 +786,7 @@ dev = [
 requires-dist = [
     { name = "accelerate" },
     { name = "diffusers" },
-    { name = "gen-worker", extras = ["torch"] },
+    { name = "gen-worker", extras = ["torch"], specifier = "==0.3.0" },
     { name = "pillow" },
     { name = "transformers" },
 ]

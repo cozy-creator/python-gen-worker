@@ -64,7 +64,7 @@ from .errors import AuthError, CanceledError, FatalError, ResourceError, Retryab
 from .model_interface import ModelManagementInterface
 from .downloader import CozyHubDownloader, ModelDownloader
 from .model_ref_downloader import ModelRefDownloader
-from .model_refs import ParsedModelRef, parse_model_ref
+from .model_refs import parse_model_ref
 from .types import Asset
 from .model_cache import ModelCache, ModelCacheStats, ModelLocation
 from .run_metrics_v1 import RunMetricsV1, best_effort_bytes_downloaded, best_effort_init_model_metrics, safe_json_bytes
@@ -984,7 +984,7 @@ class Worker:
         self._fixed_model_spec_by_key: Dict[str, Dict[str, Any]] = {}
         self._payload_model_spec_by_key_by_function: Dict[str, Dict[str, Dict[str, Any]]] = {}
         # Orchestrator-resolved manifests received in EndpointConfig (startup prefetch baseline).
-        # Keys should be canonical model ref strings (e.g. "owner/repo@sha256:<digest>").
+        # Keys should be canonical model ref strings (e.g. "cozy:owner/repo@sha256:<digest>").
         self._resolved_cozy_models_by_id_baseline: Dict[str, Any] = {}
         self._prefetch_lock = threading.Lock()
         self._prefetch_thread: Optional[threading.Thread] = None
@@ -2266,9 +2266,9 @@ class Worker:
                 vram_models = self._model_manager.get_vram_loaded_models()
                 supports_model_loading_flag = True
             elif self._model_cache:
-                # Cache-only workers can still report VRAM/disk inventory, but
-                # they do not support explicit Load/UnloadModelCommand handling.
+                # Use model cache for VRAM-loaded models if no legacy model_manager
                 vram_models = self._model_cache.get_vram_models()
+                supports_model_loading_flag = True
 
             # Get disk-cached and downloading models from model cache
             if self._model_cache:
@@ -2752,7 +2752,7 @@ class Worker:
             self._handle_unload_model_cmd(message.unload_model_cmd)
         elif msg_type == 'interrupt_run_cmd':
             cmd = message.interrupt_run_cmd
-            request_id = cmd.run_id
+            request_id = cmd.request_id
             item_ids = [str(x).strip() for x in list(getattr(cmd, "item_ids", []) or []) if str(x).strip()]
             cancel_queued_only = bool(getattr(cmd, "cancel_queued_only", False))
             self._handle_interrupt_request(request_id, item_ids=item_ids, cancel_queued_only=cancel_queued_only)
@@ -2767,11 +2767,11 @@ class Worker:
         elif msg_type == "worker_event":
             self._handle_worker_event_from_scheduler(message.worker_event)
         # Add handling for other message types if needed (e.g., config updates)
-        elif msg_type == 'release_artifact_config':
-            cfg = message.release_artifact_config
+        elif msg_type == 'endpoint_config':
+            cfg = message.endpoint_config
             resolved_by_variant = dict(getattr(cfg, "resolved_cozy_models_by_variant_ref", {}) or {})
             logger.info(
-                "Received ReleaseArtifactConfig (supported=%d required=%d resolved=%d)",
+                "Received EndpointConfig (supported=%d required=%d resolved=%d)",
                 len(cfg.supported_repo_refs),
                 len(cfg.required_variant_refs),
                 len(resolved_by_variant),
@@ -2984,12 +2984,12 @@ class Worker:
                             ).encode("utf-8")
                             self._send_message(
                                 pb.WorkerSchedulerMessage(
-                                    worker_event=pb.WorkerEvent(run_id="", event_type="model.download.completed", payload_json=payload)
+                                    worker_event=pb.WorkerEvent(request_id="", event_type="model.download.completed", payload_json=payload)
                                 )
                             )
                             self._send_message(
                                 pb.WorkerSchedulerMessage(
-                                    worker_event=pb.WorkerEvent(run_id="", event_type="model.ready", payload_json=json.dumps({"model_id": canon}, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+                                    worker_event=pb.WorkerEvent(request_id="", event_type="model.ready", payload_json=json.dumps({"model_id": canon}, separators=(",", ":"), sort_keys=True).encode("utf-8"))
                                 )
                             )
                         except Exception:
@@ -3003,7 +3003,7 @@ class Worker:
                             ).encode("utf-8")
                             self._send_message(
                                 pb.WorkerSchedulerMessage(
-                                    worker_event=pb.WorkerEvent(run_id="", event_type="model.cached", payload_json=payload)
+                                    worker_event=pb.WorkerEvent(request_id="", event_type="model.cached", payload_json=payload)
                                 )
                             )
                         except Exception:
@@ -3017,7 +3017,7 @@ class Worker:
                         payload = json.dumps({"model_id": canon}, separators=(",", ":"), sort_keys=True).encode("utf-8")
                         self._send_message(
                             pb.WorkerSchedulerMessage(
-                                worker_event=pb.WorkerEvent(run_id="", event_type="model.download.started", payload_json=payload)
+                                worker_event=pb.WorkerEvent(request_id="", event_type="model.download.started", payload_json=payload)
                             )
                         )
                     except Exception:
@@ -3039,7 +3039,7 @@ class Worker:
                         payload = json.dumps({"model_id": canon}, separators=(",", ":"), sort_keys=True).encode("utf-8")
                         self._send_message(
                             pb.WorkerSchedulerMessage(
-                                worker_event=pb.WorkerEvent(run_id="", event_type="model.ready", payload_json=payload)
+                                worker_event=pb.WorkerEvent(request_id="", event_type="model.ready", payload_json=payload)
                             )
                         )
                     except Exception:
@@ -3054,7 +3054,7 @@ class Worker:
                         ).encode("utf-8")
                         self._send_message(
                             pb.WorkerSchedulerMessage(
-                                worker_event=pb.WorkerEvent(run_id="", event_type="model.cached", payload_json=payload)
+                                worker_event=pb.WorkerEvent(request_id="", event_type="model.cached", payload_json=payload)
                             )
                         )
                     except Exception:
@@ -3068,7 +3068,7 @@ class Worker:
                         ).encode("utf-8")
                         self._send_message(
                             pb.WorkerSchedulerMessage(
-                                worker_event=pb.WorkerEvent(run_id="", event_type="model.download.completed", payload_json=payload)
+                                worker_event=pb.WorkerEvent(request_id="", event_type="model.download.completed", payload_json=payload)
                             )
                         )
                     except Exception:
@@ -3089,7 +3089,7 @@ class Worker:
                             payload = json.dumps({"model_id": canon}, separators=(",", ":"), sort_keys=True).encode("utf-8")
                             self._send_message(
                                 pb.WorkerSchedulerMessage(
-                                    worker_event=pb.WorkerEvent(run_id="", event_type="model.url_refresh", payload_json=payload)
+                                    worker_event=pb.WorkerEvent(request_id="", event_type="model.url_refresh", payload_json=payload)
                                 )
                             )
                         except Exception:
@@ -3103,7 +3103,7 @@ class Worker:
                         ).encode("utf-8")
                         self._send_message(
                             pb.WorkerSchedulerMessage(
-                                worker_event=pb.WorkerEvent(run_id="", event_type="model.download.failed", payload_json=payload)
+                                worker_event=pb.WorkerEvent(request_id="", event_type="model.download.failed", payload_json=payload)
                             )
                         )
                     except Exception:
@@ -3206,7 +3206,7 @@ class Worker:
             payload = json.dumps({"model_id": model_id}, separators=(",", ":"), sort_keys=True).encode("utf-8")
             self._send_message(
                 pb.WorkerSchedulerMessage(
-                    worker_event=pb.WorkerEvent(run_id="", event_type="model.load.started", payload_json=payload)
+                    worker_event=pb.WorkerEvent(request_id="", event_type="model.load.started", payload_json=payload)
                 )
             )
         except Exception:
@@ -3229,7 +3229,7 @@ class Worker:
                 # Set resolved cozy models context so downloads can use orchestrator-resolved URLs.
                 from .model_ref_downloader import reset_resolved_cozy_models_by_id, set_resolved_cozy_models_by_id
                 per_cmd = dict(getattr(cmd, "resolved_cozy_models_by_id", {}) or {})
-                baseline = self._resolved_cozy_models_by_id_baseline or {}
+                baseline = getattr(self, "_resolved_cozy_models_by_id_baseline", None) or {}
                 merged = {**baseline, **per_cmd} if per_cmd else dict(baseline)
                 tok = set_resolved_cozy_models_by_id(merged or None)
                 try:
@@ -3271,7 +3271,7 @@ class Worker:
             ).encode("utf-8")
             self._send_message(
                 pb.WorkerSchedulerMessage(
-                    worker_event=pb.WorkerEvent(run_id="", event_type=ev_type, payload_json=payload)
+                    worker_event=pb.WorkerEvent(request_id="", event_type=ev_type, payload_json=payload)
                 )
             )
         except Exception:
@@ -3296,7 +3296,7 @@ class Worker:
                 )
                 self._send_message(
                     pb.WorkerSchedulerMessage(
-                        worker_event=pb.WorkerEvent(run_id="", event_type="model.unload.failed", payload_json=payload)
+                        worker_event=pb.WorkerEvent(request_id="", event_type="model.unload.failed", payload_json=payload)
                     )
                 )
             except Exception:
@@ -3307,7 +3307,7 @@ class Worker:
             payload = json.dumps({"model_id": model_id}, separators=(",", ":"), sort_keys=True).encode("utf-8")
             self._send_message(
                 pb.WorkerSchedulerMessage(
-                    worker_event=pb.WorkerEvent(run_id="", event_type="model.unload.started", payload_json=payload)
+                    worker_event=pb.WorkerEvent(request_id="", event_type="model.unload.started", payload_json=payload)
                 )
             )
         except Exception:
@@ -3354,7 +3354,7 @@ class Worker:
             ).encode("utf-8")
             self._send_message(
                 pb.WorkerSchedulerMessage(
-                    worker_event=pb.WorkerEvent(run_id="", event_type=ev_type, payload_json=payload)
+                    worker_event=pb.WorkerEvent(request_id="", event_type=ev_type, payload_json=payload)
                 )
             )
         except Exception:
@@ -3362,7 +3362,7 @@ class Worker:
 
     def _handle_run_request(self, request: TaskExecutionRequest) -> None:
         """Handle a task execution request from the scheduler."""
-        request_id = request.run_id
+        request_id = request.request_id
         function_name = request.function_name
         input_payload = request.input_payload
         required_model_id_for_exec = ""
@@ -3371,9 +3371,7 @@ class Worker:
         invoker_id = str(getattr(request, "invoker_id", "") or "")
         file_base_url = str(getattr(request, "file_base_url", "") or "")
         file_token = str(getattr(request, "file_token", "") or "")
-        resolved_cozy_models_by_id = self._canonicalize_resolved_models_map(
-            dict(getattr(request, "resolved_cozy_models_by_id", {}) or {})
-        )
+        resolved_cozy_models_by_id = dict(getattr(request, "resolved_cozy_models_by_id", {}) or {})
         parent_request_id = str(getattr(request, "parent_request_id", "") or "").strip() or None
         child_request_id = str(getattr(request, "child_request_id", "") or "").strip() or None
         item_id = str(getattr(request, "item_id", "") or "").strip() or None
@@ -3543,9 +3541,7 @@ class Worker:
                 timeout_ms=int(getattr(item, "timeout_ms", 0) or 0),
                 owner=str(getattr(item, "owner", "") or ""),
                 invoker_id=str(getattr(item, "invoker_id", "") or ""),
-                resolved_cozy_models_by_id=self._canonicalize_resolved_models_map(
-                    dict(getattr(item, "resolved_cozy_models_by_id", {}) or {})
-                ),
+                resolved_cozy_models_by_id=dict(getattr(item, "resolved_cozy_models_by_id", {}) or {}),
                 parent_request_id=str(getattr(item, "parent_request_id", "") or ""),
                 child_request_id=str(getattr(item, "child_request_id", "") or ""),
                 item_id=item_id,
@@ -3809,17 +3805,12 @@ class Worker:
 
         models_in_use: set[str] = set()
         inference_watchdog: Optional[threading.Timer] = None
-        print(f"DEBUG [execute_task] entered request_id={request_id} function={spec.name} payload_bytes={len(input_payload or b'')} timeout_ms={ctx.timeout_ms or 'none'}", flush=True)
         try:
-            _is_canceled = ctx.is_canceled()
-            print(f"DEBUG [execute_task] cancellation_check request_id={request_id} is_canceled={_is_canceled} deadline={getattr(ctx, '_deadline', None)}", flush=True)
-            if _is_canceled:
+            if ctx.is_canceled():
                 raise CanceledError("canceled")
 
             # Decode payload strictly.
-            print(f"DEBUG [execute_task] decoding_payload request_id={request_id} payload_type={spec.payload_type}", flush=True)
             input_obj = msgspec.msgpack.decode(input_payload, type=spec.payload_type)
-            print(f"DEBUG [execute_task] payload_decoded request_id={request_id} input={input_obj!r}", flush=True)
             # Optional post-decode constraints (e.g. clamping) declared on the payload type.
             try:
                 from .payload_constraints import apply_payload_constraints
@@ -3827,9 +3818,7 @@ class Worker:
                 _ = apply_payload_constraints(input_obj)
             except Exception:
                 pass
-            print(f"DEBUG [execute_task] materializing_assets request_id={request_id}", flush=True)
             self._materialize_assets(ctx, input_obj)
-            print(f"DEBUG [execute_task] assets_materialized request_id={request_id}", flush=True)
             # Best-effort extract diffusion-ish numeric fields for metrics.run.
             try:
                 def _get_num(name: str) -> Optional[float]:
@@ -3863,10 +3852,8 @@ class Worker:
             call_kwargs[spec.ctx_param] = ctx
             call_kwargs[spec.payload_param] = input_obj
 
-            print(f"DEBUG [execute_task] injection_loop request_id={request_id} injections={len(spec.injections)}", flush=True)
             for inj in spec.injections:
                 resolve_t0 = time.monotonic()
-                print(f"DEBUG [execute_task] resolving_model request_id={request_id} param={inj.param_name}", flush=True)
                 resolve_watchdog = self._start_task_phase_watchdog(
                     request_id=request_id,
                     phase="model_resolve",
@@ -3949,9 +3936,12 @@ class Worker:
                     },
                 )
                 try:
-                    print(f"DEBUG [execute_task] loading_model request_id={request_id} param={inj.param_name} model_id={canon_model_id}", flush=True)
                     call_kwargs[inj.param_name] = self._resolve_injected_value(ctx, inj.param_type, model_id, inj)
-                    print(f"DEBUG [execute_task] model_loaded request_id={request_id} param={inj.param_name} model_id={canon_model_id} pipeline_type={type(call_kwargs[inj.param_name]).__name__}", flush=True)
+                    logger.info(
+                        "[request_id=%s] model load resolved: param=%s model=%s duration_ms=%d",
+                        request_id, inj.param_name, canon_model_id,
+                        int((time.monotonic() - load_t0) * 1000),
+                    )
                     self._emit_task_event(
                         request_id,
                         "task.model_load.completed",
@@ -3980,19 +3970,15 @@ class Worker:
                         load_watchdog.cancel()
 
             # Invoke.
-            t_infer0 = time.monotonic()
-            _infer_warn_s = float(getattr(self, "_warn_inference_s", 60.0))
             logger.info(
-                "inference.start request_id=%s function=%s timeout_ms=%s warn_after_s=%.1f",
-                request_id,
-                spec.name,
-                ctx.timeout_ms if ctx.timeout_ms else "none",
-                _infer_warn_s,
+                "[request_id=%s] all injections resolved, entering inference for function=%s canceled=%s",
+                request_id, spec.name, ctx.is_canceled(),
             )
+            t_infer0 = time.monotonic()
             inference_watchdog = self._start_task_phase_watchdog(
                 request_id=request_id,
                 phase="inference",
-                warn_after_s=_infer_warn_s,
+                warn_after_s=float(getattr(self, "_warn_inference_s", 60.0)),
                 payload={"function_name": spec.name, "output_mode": spec.output_mode},
             )
             self._emit_task_event(
@@ -4000,14 +3986,14 @@ class Worker:
                 "task.inference.started",
                 {"function_name": spec.name, "output_mode": spec.output_mode},
             )
-            print(f"DEBUG [execute_task] calling_func request_id={request_id} function={spec.name} is_canceled={ctx.is_canceled()} kwargs_keys={list(call_kwargs.keys())}", flush=True)
+            logger.info("[request_id=%s] calling %s", request_id, spec.name)
             if inspect.iscoroutinefunction(spec.func):
                 result = asyncio.run(spec.func(**call_kwargs))
             elif inspect.isasyncgenfunction(spec.func):
                 result = spec.func(**call_kwargs)
             else:
                 result = spec.func(**call_kwargs)
-            print(f"DEBUG [execute_task] func_returned request_id={request_id} function={spec.name} result_type={type(result).__name__}", flush=True)
+            logger.info("[request_id=%s] %s returned, output_mode=%s", request_id, spec.name, spec.output_mode)
 
             if ctx.is_canceled():
                 raise CanceledError("canceled")
@@ -4056,7 +4042,7 @@ class Worker:
                     if not emitted:
                         self._send_message(
                             pb.WorkerSchedulerMessage(
-                                worker_event=pb.WorkerEvent(run_id=request_id, event_type="output.delta", payload_json=raw)
+                                worker_event=pb.WorkerEvent(request_id=request_id, event_type="output.delta", payload_json=raw)
                             )
                         )
                     last_item_id = item_id
@@ -4102,7 +4088,7 @@ class Worker:
                 if not emitted_done:
                     self._send_message(
                         pb.WorkerSchedulerMessage(
-                            worker_event=pb.WorkerEvent(run_id=request_id, event_type="output.completed", payload_json=b"{}")
+                            worker_event=pb.WorkerEvent(request_id=request_id, event_type="output.completed", payload_json=b"{}")
                         )
                     )
                 output_payload = b""
@@ -4166,7 +4152,7 @@ class Worker:
                     if not emitted_err:
                         self._send_message(
                             pb.WorkerSchedulerMessage(
-                                worker_event=pb.WorkerEvent(run_id=request_id, event_type="output.error", payload_json=payload)
+                                worker_event=pb.WorkerEvent(request_id=request_id, event_type="output.error", payload_json=payload)
                             )
                         )
                 except Exception:
@@ -4429,13 +4415,7 @@ class Worker:
                         # If we have an orchestrator-resolved manifest, estimate missing bytes.
                         resolved_entry = None
                         try:
-                            resolved_map = getattr(ctx, "resolved_cozy_models_by_id", None) or {}
-                            resolved_entry = resolved_map.get(canon)
-                            if resolved_entry is None:
-                                if canon.startswith("cozy:"):
-                                    resolved_entry = resolved_map.get(canon.split(":", 1)[1].strip())
-                                else:
-                                    resolved_entry = resolved_map.get(f"cozy:{canon}")
+                            resolved_entry = (getattr(ctx, "resolved_cozy_models_by_id", None) or {}).get(canon)
                         except Exception:
                             resolved_entry = None
                         bytes_dl = None
@@ -4467,7 +4447,7 @@ class Worker:
                                         ).encode("utf-8")
                                         self._send_message(
                                             pb.WorkerSchedulerMessage(
-                                                worker_event=pb.WorkerEvent(run_id="", event_type="model.cached", payload_json=payload)
+                                                worker_event=pb.WorkerEvent(request_id="", event_type="model.cached", payload_json=payload)
                                             )
                                         )
                                     except Exception:
@@ -4550,27 +4530,17 @@ class Worker:
                                     kwargs["custom_pipeline"] = custom_pipeline
                             except Exception:
                                 pass
-                            # Read variant from cozy/pipeline spec (authoritative).
-                            if spec.variant:
-                                kwargs["variant"] = spec.variant
-                                print(f"DEBUG cozy_spec_variant={spec.variant} source={spec.source_path.name}")
-                    except Exception as _spec_exc:
-                        print(f"DEBUG cozy_spec_load_error={_spec_exc}")
+                    except Exception:
+                        pass
 
-                    # Fallback: scan files on disk for diffusers variant naming.
-                    if "variant" not in kwargs:
-                        try:
-                            from gen_worker.pipeline_loader import detect_diffusers_variant
+                    try:
+                        from gen_worker.pipeline_loader import detect_diffusers_variant
 
-                            variant = detect_diffusers_variant(local_path)
-                            if variant is not None:
-                                kwargs["variant"] = variant
-                                print(f"DEBUG detect_diffusers_variant={variant} path={local_path}")
-                            else:
-                                print(f"DEBUG detect_diffusers_variant=None path={local_path}")
-                        except Exception as _detect_exc:
-                            print(f"DEBUG detect_variant_error={_detect_exc}")
-                    print(f"DEBUG from_pretrained variant={kwargs.get('variant')} path={local_path}")
+                        variant = detect_diffusers_variant(local_path)
+                        if variant is not None:
+                            kwargs["variant"] = variant
+                    except Exception:
+                        pass
 
                     # Quantized weight-only inference requires explicit loader hints.
                     #
@@ -4619,7 +4589,7 @@ class Worker:
                             device_is_cuda = str(ctx.device).startswith("cuda") and torch.cuda.is_available()
                             variant = str(kwargs.get("variant") or "").strip().lower()
                             if device_is_cuda:
-                                if variant in ("fp8", "int8", "int4", "nvfp4") and hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported():
+                                if variant in ("fp8", "int8", "int4") and hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported():
                                     kwargs["torch_dtype"] = torch.bfloat16
                                 else:
                                     kwargs["torch_dtype"] = torch.float16
@@ -4674,31 +4644,20 @@ class Worker:
                     from_pretrained = getattr(requested_type, "from_pretrained")
                     model_source: str = str(model_id)
                     preload_kwargs: dict[str, Any] = {}
-                    _ref: ParsedModelRef | None = None
                     try:
                         p = Path(model_source)
                         if p.exists():
                             model_source = p.as_posix()
                         else:
-                            _ref = parse_model_ref(model_source)
-                            if _ref.scheme in ("cozy", "hf") and self._downloader is not None:
+                            parsed = parse_model_ref(model_source)
+                            if self._downloader is not None and parsed.scheme in ("cozy", "hf"):
                                 model_source = self._downloader.download(model_source, str(worker_model_cache_dir()))
-                            elif _ref.scheme == "hf" and _ref.hf is not None:
+                            elif parsed.scheme == "hf" and parsed.hf is not None:
                                 # Fallback path when downloader is unavailable.
-                                model_source = _ref.hf.repo_id
-                                if _ref.hf.revision:
-                                    preload_kwargs["revision"] = _ref.hf.revision
-                            elif _ref.scheme == "cozy":
-                                raise RuntimeError(
-                                    f"cozy model resolution requires downloader for ref {model_source!r}"
-                                )
-                    except Exception as e:
-                        # Never hand raw cozy refs to huggingface loaders; surface the real
-                        # download/resolve error instead of falling back to repo-id parsing.
-                        if _ref is not None and getattr(_ref, "scheme", "") == "cozy":
-                            raise RuntimeError(
-                                f"cozy model materialization failed for {model_id!r}: {e}"
-                            ) from e
+                                model_source = parsed.hf.repo_id
+                                if parsed.hf.revision:
+                                    preload_kwargs["revision"] = parsed.hf.revision
+                    except Exception:
                         model_source = str(model_id)
                         preload_kwargs = {}
 
@@ -4769,11 +4728,16 @@ class Worker:
                                         # Fallback heuristic when deltas are noisy.
                                         size_gb = float(os.getenv("WORKER_DIFFUSERS_VRAM_GB_FALLBACK", "10") or "10")
                                 self._model_cache.mark_loaded_to_vram(canon, obj, size_gb)
+                                logger.info(
+                                    "pipeline injection resolved: model=%s size_gb=%.1f device=%s",
+                                    canon, size_gb, str(ctx.device),
+                                )
                                 return obj
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
+                        except Exception as _cache_exc:
+                            logger.warning("model_cache mark_loaded_to_vram failed: %s", _cache_exc)
+                except Exception as _to_exc:
+                    logger.error("failed to move pipeline to device=%s: %s", str(ctx.device), _to_exc)
+                    raise
                 self._custom_runtime_cache[key] = obj
                 return obj
 
@@ -4896,7 +4860,7 @@ class Worker:
                 )
             else:
                 result = pb.TaskExecutionResult(
-                    run_id=request_id,
+                    request_id=request_id,
                     success=success,
                     output_payload=(output_payload or b'') if success else b'', # Default to b'' if None
                     error_message=error_message if not success else "",

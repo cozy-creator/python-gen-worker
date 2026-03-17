@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Multi SDXL checkpoints example with payload-based model selection"
 requires-python = ">=3.12"
 dependencies = [
-    "gen-worker[torch]",
+    "gen-worker[torch]==0.3.0",
     "diffusers",
     "transformers",
     "accelerate",

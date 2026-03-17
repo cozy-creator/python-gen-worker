@@ -1212,7 +1212,7 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "gen-worker" }]
+requires-dist = [{ name = "gen-worker", specifier = "==0.3.0" }]
 
 [package.metadata.requires-dev]
 dev = [{ name = "mypy", specifier = ">=1.10.0" }]

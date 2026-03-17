@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Qwen Image 2512 generation function"
 requires-python = ">=3.12"
 dependencies = [
-    "gen-worker[torch]",
+    "gen-worker[torch]==0.3.0",
     "diffusers @ git+https://github.com/huggingface/diffusers",
     "transformers>=4.51.3",
     "accelerate",

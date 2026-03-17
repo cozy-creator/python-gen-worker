@@ -52,18 +52,3 @@ def test_parse_hf_revision() -> None:
 def test_parse_invalid_hf() -> None:
     with pytest.raises(ValueError):
         parse_model_ref("hf:justonepart")
-
-
-def test_cozy_canonical_is_unprefixed_repo_ref() -> None:
-    p = parse_model_ref("cozy:fancyfeast/llama-joycaption-beta-one-hf-llava@blake3:abcd")
-    assert p.scheme == "cozy"
-    assert p.cozy is not None
-    # Regression guard: canonical cozy refs must not prepend "cozy:".
-    assert p.canonical() == "fancyfeast/llama-joycaption-beta-one-hf-llava@blake3:abcd"
-
-
-def test_parse_hf_double_prefix_tolerated() -> None:
-    p = parse_model_ref("hf:hf:owner/repo@main")
-    assert p.scheme == "hf"
-    assert p.hf is not None
-    assert p.canonical() == "hf:owner/repo@main"

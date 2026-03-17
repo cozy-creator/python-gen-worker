@@ -7,7 +7,7 @@ main = "qwen_image_2512.main"
 qwen_image = { ref = "qwen/qwen-image-2512", dtypes = ["bf16", "fp16"] }
 
 [host.requirements]
-cuda = "12.8"
+cuda = "12.6"
 
 [resources]
 vram_gb = 24

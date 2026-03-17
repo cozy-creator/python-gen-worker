@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Image generation with dynamic LoRA loading (z-image pattern)"
 requires-python = ">=3.12"
 dependencies = [
-    "gen-worker[torch]",
+    "gen-worker[torch]==0.3.0",
     "diffusers>=0.36.0",
     "transformers",
     "accelerate",

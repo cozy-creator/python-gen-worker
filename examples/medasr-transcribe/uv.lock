@@ -841,7 +841,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "gen-worker", extras = ["torch"] },
+    { name = "gen-worker", extras = ["torch"], specifier = "==0.3.0" },
     { name = "numpy" },
     { name = "soundfile" },
     { name = "soxr" },

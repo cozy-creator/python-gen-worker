@@ -1,20 +1,20 @@
 schema_version = 1
 
-name = "flux.2-klein-4b"
+name = "flux2-klein-4b"
 # Python import path used for function discovery (not a Docker ENTRYPOINT).
 main = "flux2_klein_4b.main"
 
 [models]
-flux2-klein-4b-base = { ref = "black-forest-labs/flux.2-klein-4b-base", dtypes = ["bf16"] }
-flux2-klein-4b-turbo = { ref = "black-forest-labs/flux.2-klein-4b-turbo", dtypes = ["bf16"] }
-flux2-klein-4b-base_fp8 = { ref = "black-forest-labs/flux.2-klein-4b-base", dtypes = ["fp8"] }
-flux2-klein-4b-turbo_fp8 = { ref = "black-forest-labs/flux.2-klein-4b-turbo", dtypes = ["fp8"] }
-flux2-klein-4b-base_nvfp4 = { ref = "black-forest-labs/flux.2-klein-4b-base", dtypes = ["nvfp4"] }
-flux2-klein-4b-turbo_nvfp4 = { ref = "black-forest-labs/flux.2-klein-4b-turbo", dtypes = ["nvfp4"] }
+flux2-klein-4b = { ref = "black-forest-labs/flux.2-klein-4b", dtypes = ["bf16"] }
+flux2-klein-4b_fp8 = { ref = "black-forest-labs/flux.2-klein-4b", dtypes = ["fp8"] }
+flux2-klein-9b = { ref = "black-forest-labs/flux.2-klein-9b", dtypes = ["bf16"] }
+flux2-klein-9b_fp8 = { ref = "black-forest-labs/flux.2-klein-9b", dtypes = ["fp8"] }
+flux2-klein-4b_int8 = { ref = "black-forest-labs/flux.2-klein-4b", dtypes = ["int8"] }
+flux2-klein-4b_int4 = { ref = "black-forest-labs/flux.2-klein-4b", dtypes = ["int4"] }
 
 [host.requirements]
 # If cuda is set, the platform treats this worker as requiring an NVIDIA GPU.
-cuda = "12.8"
+cuda = "12.6"
 
 [resources]
 vram_gb = 24

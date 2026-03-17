@@ -34,7 +34,6 @@ from gen_worker.tensorhub_toml import (
     load_tensorhub_toml,
 )
 from gen_worker.names import slugify_endpoint_name, slugify_function_name
-from gen_worker.decorators import canonicalize_compute_capability_min
 
 
 def _type_id(t: type) -> Dict[str, str]:
@@ -189,7 +188,6 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
                 res_dict.update(raw)
         except Exception:
             pass
-    _normalize_compute_capability_resource(res_dict, func.__name__)
 
     hints = typing.get_type_hints(func, globalns=func.__globals__, include_extras=True)
     sig = inspect.signature(func)
@@ -447,11 +445,6 @@ def discover_functions(root: Optional[Path] = None, *, main_module: str | None =
                 seen_functions.add(key)
                 fn_meta = _extract_function_metadata(obj, module_name)
                 functions.append(fn_meta)
-        functions.sort(key=lambda fn: (
-            str(fn.get("name") or ""),
-            str(fn.get("python_name") or ""),
-            str(fn.get("module") or ""),
-        ))
         return functions
 
     # Fallback: scan the filesystem for decorated functions.
@@ -484,39 +477,7 @@ def discover_functions(root: Optional[Path] = None, *, main_module: str | None =
                 print(f"warning: failed to extract metadata from {name}: {e}", file=sys.stderr)
                 raise
 
-    functions.sort(key=lambda fn: (
-        str(fn.get("name") or ""),
-        str(fn.get("python_name") or ""),
-        str(fn.get("module") or ""),
-    ))
     return functions
-
-
-def _normalize_compute_capability_resource(resources: Dict[str, Any], fn_name: str) -> None:
-    if not isinstance(resources, dict):
-        return
-
-    # Convenience alias for decorators/configs that use a flat key.
-    if "compute_capability" not in resources and "compute_capability_min" in resources:
-        resources["compute_capability"] = {"min": resources.get("compute_capability_min")}
-    resources.pop("compute_capability_min", None)
-
-    if "compute_capability" not in resources:
-        return
-
-    raw = resources.get("compute_capability")
-    min_raw: Any = None
-    if isinstance(raw, dict):
-        min_raw = raw.get("min")
-    else:
-        min_raw = raw
-    if min_raw is None:
-        raise ValueError(f"{fn_name}: resources.compute_capability.min is required when compute_capability is set")
-    try:
-        min_norm = canonicalize_compute_capability_min(min_raw)
-    except ValueError as e:
-        raise ValueError(f"{fn_name}: invalid resources.compute_capability.min: {e}") from e
-    resources["compute_capability"] = {"min": min_norm}
 
 
 def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
@@ -546,7 +507,6 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
             if isinstance(base, dict):
                 merged.update(base)
             merged.update(hints)
-            _normalize_compute_capability_resource(merged, fn_name)
             fn["resources"] = merged
 
         batch_path = (tensorhub_manifest.function_batch_dimensions.get(fn_name) or "").strip()

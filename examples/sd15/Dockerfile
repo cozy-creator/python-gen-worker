@@ -1,7 +1,7 @@
 # Tenant-supplied Dockerfile example.
 #
-# - Installs torch in a stable cacheable layer.
-# - Installs tenant deps from uv.lock without replacing torch.
+# - Installs torch + gen-worker in stable cacheable layers.
+# - Installs tenant deps from uv.lock without replacing torch/gen-worker.
 # - Bakes discovered functions into /app/.tensorhub/endpoint.lock at build time.
 #
 # Local build (GPU):
@@ -10,8 +10,7 @@
 ARG PYTHON_VERSION=3.12
 FROM ghcr.io/astral-sh/uv:python${PYTHON_VERSION}-bookworm-slim AS cozy_base
 
-ARG CUDA_VERSION=12.8
-ARG UV_TORCH_BACKEND=
+ARG UV_TORCH_BACKEND=cu126
 ARG TORCH_SPEC="~=2.10.0"
 
 WORKDIR /app
@@ -28,19 +27,20 @@ RUN --mount=type=cache,id=cozy-apt-cache,target=/var/cache/apt,sharing=locked \
 
 # Stable runtime layers (avoid re-downloading torch/cu libs on every tenant build).
 RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
-    backend="${UV_TORCH_BACKEND:-cu$(printf '%s' "${CUDA_VERSION}" | tr -d '.')}" \
-    && uv pip install --system --break-system-packages --torch-backend "$backend" \
+    uv pip install --system --break-system-packages --torch-backend ${UV_TORCH_BACKEND} \
       "torch${TORCH_SPEC}"
+RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
+    uv pip install --system --break-system-packages gen-worker
 
 FROM cozy_base AS cozy_final
 
 # Copy lock metadata first so dependency layers are cacheable across source edits.
 COPY pyproject.toml uv.lock /app/
 
-# Install tenant dependencies into the global environment without replacing torch.
+# Install tenant dependencies into the global environment without replacing torch/gen-worker.
 RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
     uv export --no-dev --no-hashes --no-sources --no-emit-project --no-emit-local \
-      --no-emit-package torch \
+      --no-emit-package torch --no-emit-package gen-worker \
       -o /tmp/requirements.all.txt \
     && grep -Ev '^(torch|triton|nvidia-|cuda-)' /tmp/requirements.all.txt > /tmp/requirements.txt \
     && uv pip install --system --break-system-packages --no-deps -r /tmp/requirements.txt

@@ -7,7 +7,7 @@ main = "image_gen.main"
 sdxl = { ref = "stabilityai/stable-diffusion-xl-base-1.0", dtypes = ["fp16", "bf16"] }
 
 [host.requirements]
-cuda = "12.8"
+cuda = "12.6"
 
 [resources]
 vram_gb = 12

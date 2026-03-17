@@ -852,7 +852,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "gen-worker" },
+    { name = "gen-worker", specifier = "==0.3.0" },
     { name = "msgspec" },
 ]
 
