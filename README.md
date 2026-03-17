@@ -18,7 +18,7 @@ The built image MUST:
 2. Bake function discovery output (manifest) at build time:
 
 ```dockerfile
-RUN mkdir -p /app/.cozy && python -m gen_worker.discover > /app/.tensorhub/endpoint.lock
+RUN mkdir -p /app/.tensorhub && python -m gen_worker.discover > /app/.tensorhub/endpoint.lock
 ```
 
 3. Use the Cozy worker runtime as the ENTRYPOINT:
@@ -278,7 +278,7 @@ Orchestrator-injected (production contract):
 |----------|---------|-------------|
 | `WORKER_MODE` | `inference` | Runtime mode selector (`inference` or `trainer`) |
 | `SCHEDULER_PUBLIC_ADDR` | - | Scheduler address workers should dial |
-| `SCHEDULER_ADDRS` | - | Optional comma-separated seed addresses for leader discovery |
+| `SCHEDULER_ADDRS` | - | Optional comma-separated LB seed addresses |
 | `WORKER_JWT` | - | Worker-connect JWT (required; claims are authoritative) |
 
 Local dev / advanced (not injected by orchestrator):
@@ -289,6 +289,11 @@ Local dev / advanced (not injected by orchestrator):
 | `SCHEDULER_JWT_ISSUER` | - | Optional: expected `iss` when verifying WORKER_JWT locally |
 | `SCHEDULER_JWT_AUDIENCE` | - | Optional: expected `aud` when verifying WORKER_JWT locally |
 | `USE_TLS` | `false` | Local-dev knob for plaintext vs TLS gRPC; production typically terminates TLS upstream |
+| `LB_ONLY_RETRIES` | `true` | Retry via configured LB endpoint(s) only; ignore direct owner redirect hints |
+| `RECONNECT_DELAY` | `0.1` | Base reconnect backoff in seconds (exponential) |
+| `RECONNECT_MAX_DELAY` | `1.0` | Reconnect backoff cap in seconds |
+| `RECONNECT_JITTER_SECONDS` | `0.1` | Added jitter upper bound in seconds, capped by `RECONNECT_MAX_DELAY` |
+| `MAX_RECONNECT_ATTEMPTS` | `0` | Max reconnect attempts (`0` = infinite retries) |
 | `WORKER_MAX_CONCURRENCY` | - | Max concurrent task executions |
 | `WORKER_MAX_INPUT_BYTES` | - | Max input payload size |
 | `WORKER_MAX_OUTPUT_BYTES` | - | Max output payload size |

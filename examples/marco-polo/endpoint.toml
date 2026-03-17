@@ -1,0 +1,7 @@
+schema_version = 1
+
+name = "marco_polo"
+main = "marco_polo.main"
+
+[resources]
+max_inflight_requests = 10

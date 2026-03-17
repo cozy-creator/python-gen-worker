@@ -244,8 +244,18 @@ def _run_main() -> int:
     worker_id = os.getenv("WORKER_ID", "").strip()
     worker_jwt = os.getenv("WORKER_JWT", "").strip()
     use_tls_env = os.getenv("USE_TLS")
-    reconnect_delay = int(os.getenv("RECONNECT_DELAY", "5") or "5")
+    def _parse_float_env(name: str, default: float) -> float:
+        raw = (os.getenv(name) or "").strip()
+        if not raw:
+            return default
+        try:
+            return float(raw)
+        except Exception:
+            return default
+
+    reconnect_delay = _parse_float_env("RECONNECT_DELAY", 0.1)
     max_reconnect_attempts = int(os.getenv("MAX_RECONNECT_ATTEMPTS", "0") or "0")
+    lb_only_retries = (os.getenv("LB_ONLY_RETRIES", "true") or "true").strip().lower() in ("1", "true", "t", "yes", "y", "on")
 
     if not scheduler_addr_raw:
         logger.error("SCHEDULER_PUBLIC_ADDR is required (scheduler dial address). Refusing to start worker.")
@@ -266,8 +276,9 @@ def _run_main() -> int:
     logger.info("  User Function Modules: %s", user_modules)
     logger.info("  Worker ID: %s", worker_id or "(from JWT)")
     logger.info("  Use TLS: %s", use_tls)
-    logger.info("  Reconnect Delay: %ss", reconnect_delay)
+    logger.info("  Reconnect Delay (base): %.3fs", reconnect_delay)
     logger.info("  Max Reconnect Attempts: %s", max_reconnect_attempts or "Infinite")
+    logger.info("  LB-only retries: %s", lb_only_retries)
     logger.info("  Model Cache Dir: %s", cache_cfg["model_cache_dir"])
     if cache_cfg["local_model_cache_dir"]:
         logger.info("  Local Model Cache Dir: %s", cache_cfg["local_model_cache_dir"])
@@ -276,7 +287,7 @@ def _run_main() -> int:
         logger.error(
             "No user function modules found. A baked manifest at /app/.tensorhub/endpoint.lock is required.\n"
             "Your Dockerfile should run discovery at build time:\n"
-            "  RUN mkdir -p /app/.cozy && python -m gen_worker.discover > /app/.tensorhub/endpoint.lock"
+            "  RUN mkdir -p /app/.tensorhub && python -m gen_worker.discover > /app/.tensorhub/endpoint.lock"
         )
         return 1
 
@@ -294,6 +305,7 @@ def _run_main() -> int:
             use_tls=use_tls,
             reconnect_delay=reconnect_delay,
             max_reconnect_attempts=max_reconnect_attempts,
+            lb_only_retries=lb_only_retries,
             manifest=manifest,
         )
         worker.run()

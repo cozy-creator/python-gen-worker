@@ -29,6 +29,10 @@ def slugify_name(raw: str) -> str:
     return raw
 
 
+def slugify_owner_name(raw: str) -> str:
+    return slugify_name(raw)
+
+
 def slugify_endpoint_name(raw: str) -> str:
     return slugify_name(raw)
 

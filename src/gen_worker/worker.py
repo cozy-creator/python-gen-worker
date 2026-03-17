@@ -807,8 +807,9 @@ class Worker:
         worker_id: Optional[str] = None,
         worker_jwt: str = "",
         use_tls: bool = False,
-        reconnect_delay: int = 5,
+        reconnect_delay: float = 5,
         max_reconnect_attempts: int = 0,  # 0 means infinite retries
+        lb_only_retries: bool = False,
         model_manager: Optional[ModelManagementInterface] = None, # Optional model manager
         downloader: Optional[ModelDownloader] = None,  # Optional model downloader
         manifest: Optional[Dict[str, Any]] = None,  # Optional manifest from build
@@ -929,7 +930,8 @@ class Worker:
 
         self._reconnect_delay_base = max(0, reconnect_delay)
         self._reconnect_delay_max = int(os.getenv("RECONNECT_MAX_DELAY", "60"))
-        self._reconnect_jitter = float(os.getenv("RECONNECT_JITTER_SECONDS", "1.0"))
+        self._reconnect_jitter_seconds = float(os.getenv("RECONNECT_JITTER_SECONDS", "1.0"))
+        self._lb_only_retries = lb_only_retries
 
         resolved_model_manager = model_manager
         if resolved_model_manager is None:
@@ -1155,8 +1157,15 @@ class Worker:
         if not addr:
             return
         self.scheduler_addr = addr
-        if addr not in self.scheduler_addrs:
+        if not self._lb_only_retries and addr not in self.scheduler_addrs:
             self.scheduler_addrs.insert(0, addr)
+
+    def _next_reconnect_delay(self, attempt: int) -> float:
+        backoff = self._reconnect_delay_base * (2 ** max(attempt - 1, 0))
+        if self._reconnect_delay_max > 0:
+            backoff = min(backoff, self._reconnect_delay_max)
+        jitter = random.uniform(0, self._reconnect_jitter_seconds) if self._reconnect_jitter_seconds > 0 else 0.0
+        return backoff + jitter
 
     def _iter_scheduler_addrs(self) -> Iterator[str]:
         seen = set()
@@ -2546,11 +2555,7 @@ class Worker:
                         break
 
                     if self._running and not self._stop_event.is_set():
-                        backoff = self._reconnect_delay_base * (2 ** max(self._reconnect_count - 1, 0))
-                        if self._reconnect_delay_max > 0:
-                            backoff = min(backoff, self._reconnect_delay_max)
-                        jitter = random.uniform(0, self._reconnect_jitter) if self._reconnect_jitter > 0 else 0
-                        delay = backoff + jitter
+                        delay = self._next_reconnect_delay(self._reconnect_count)
                         logger.info(f"Connection attempt {self._reconnect_count} failed. Retrying in {delay:.2f} seconds...")
                         # Wait for delay, but break if stop event is set during wait
                         if self._stop_event.wait(delay):
