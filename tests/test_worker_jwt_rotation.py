@@ -84,27 +84,19 @@ def hello(ctx: RequestContext, payload: Input) -> Output:
             time.sleep(0.05)
         assert w.worker_jwt == "jwt-2"
 
-        # Trigger reconnect via real transport disruption: stop old server, then restart.
-        server.stop(grace=None)
-        orch2 = _MockOrchestrator()
-        server2 = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
-        pb_grpc.add_SchedulerWorkerServiceServicer_to_server(orch2, server2)
-        rebound = server2.add_insecure_port(f"127.0.0.1:{port}")
-        assert rebound == port
-        server2.start()
+        # Force a reconnect without killing the server. This simulates network interruption.
+        w._handle_connection_error()
 
-        # Wait for a new connection to establish with the rotated token on the restarted server.
+        # Wait for a new connection to establish with the rotated token.
         start = time.monotonic()
         while time.monotonic() - start < 30:
-            sess2 = orch2.get_session(timeout_s=0.5)
+            sess2 = orch.get_session(timeout_s=0.5)
             if sess2 is None:
                 continue
             if _extract_bearer(sess2.metadata) == "jwt-2":
-                server2.stop(grace=None)
                 return
             time.sleep(0.1)
 
-        server2.stop(grace=None)
         raise AssertionError("timed out waiting for reconnect with rotated WORKER_JWT")
     finally:
         try:

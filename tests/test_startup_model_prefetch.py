@@ -43,7 +43,6 @@ def test_startup_prefetch_warms_disk_and_reports_disk_models(tmp_path: Path, mon
     server.start()
 
     variant_ref = "cozy:demo/repo@blake3:snap-1"
-    variant_ref_canon = "demo/repo@blake3:snap-1"
 
     w = Worker(
         scheduler_addr=f"127.0.0.1:{grpc_port}",
@@ -81,7 +80,6 @@ def test_startup_prefetch_warms_disk_and_reports_disk_models(tmp_path: Path, mon
         saw_started = False
         saw_completed = False
         disk_ready = False
-        saw_cache_only_supports_model_loading_false = False
         while time.monotonic() - start < 30:
             msg = sess.recv(timeout_s=0.5)
             if msg is None:
@@ -94,16 +92,12 @@ def test_startup_prefetch_warms_disk_and_reports_disk_models(tmp_path: Path, mon
                     saw_completed = True
             if not msg.HasField("worker_registration"):
                 if disk_ready and saw_started and saw_completed:
-                    assert saw_cache_only_supports_model_loading_false
                     return
                 continue
-            if not msg.worker_registration.resources.supports_model_loading:
-                saw_cache_only_supports_model_loading_false = True
             disk_models = list(msg.worker_registration.resources.disk_models)
-            if variant_ref_canon in disk_models:
+            if variant_ref in disk_models:
                 disk_ready = True
             if disk_ready and saw_started and saw_completed:
-                assert saw_cache_only_supports_model_loading_false
                 return
 
         raise AssertionError("timed out waiting for worker to report disk_models after startup prefetch")

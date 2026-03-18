@@ -19,7 +19,6 @@ from .tensorhub_v2 import (
 )
 from .hf_downloader import HuggingFaceHubDownloader
 from .model_refs import CozyRef, ParsedModelRef, parse_model_ref
-import threading
 
 # Per-task resolved manifests provided by gen-orchestrator (issue #92).
 # Shape: {canonical_model_id: ResolvedCozyModel-like object}
@@ -58,26 +57,6 @@ def _get_prefs_for_ref(canonical_ref: str) -> Mapping[str, Any]:
         return {}
     v = m.get(canonical_ref)
     return v if isinstance(v, Mapping) else {}
-
-
-def _lookup_resolved_cozy_entry(resolved_mapping: Optional[Mapping[str, Any]], canonical_ref: str) -> Any:
-    if resolved_mapping is None:
-        return None
-    key = str(canonical_ref or "").strip()
-    if not key:
-        return None
-    candidates = [key]
-    if key.startswith("cozy:"):
-        candidates.append(key.split(":", 1)[1].strip())
-    else:
-        candidates.append(f"cozy:{key}")
-    for cand in candidates:
-        if not cand:
-            continue
-        ent = resolved_mapping.get(cand)
-        if ent is not None:
-            return ent
-    return None
 
 
 class ModelRefDownloader(ModelDownloader):
@@ -149,7 +128,7 @@ class ModelRefDownloader(ModelDownloader):
         if parsed.scheme == "cozy" and parsed.cozy is not None:
             canonical = parsed.cozy.canonical()
             resolved_mapping = _resolved_cozy_models_by_id.get()
-            resolved_entry = _lookup_resolved_cozy_entry(resolved_mapping, canonical)
+            resolved_entry = resolved_mapping.get(canonical) if resolved_mapping is not None else None
 
             if resolved_entry is not None:
                 return await ensure_snapshot_async(
@@ -292,13 +271,13 @@ def _run_in_thread(coro: Coroutine[Any, Any, Path]) -> str:
     out: dict[str, str] = {}
     err: dict[str, BaseException] = {}
 
-    ctx = contextvars.copy_context()
-
     def runner() -> None:
         try:
-            out["v"] = ctx.run(asyncio.run, coro).as_posix()
+            out["v"] = asyncio.run(coro).as_posix()
         except BaseException as e:
             err["e"] = e
+
+    import threading
 
     t = threading.Thread(target=runner, daemon=True)
     t.start()

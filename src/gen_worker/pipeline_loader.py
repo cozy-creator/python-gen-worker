@@ -537,24 +537,21 @@ def get_torch_dtype(dtype_str: Optional[str], model_id: str) -> Any:
 
 def detect_diffusers_variant(model_path: Path) -> Optional[str]:
     """
-    Detect a diffusers `variant=` value ("bf16", "fp8", "fp16", "int8", "int4", "nvfp4")
-    from files on disk.
+    Detect a diffusers `variant=` value ("bf16", "fp8", "fp16", "int8", "int4") from files on disk.
 
     Many diffusers repos store weights as:
       - `unet/diffusion_pytorch_model.fp16.safetensors`
       - `text_encoder/model.fp16.safetensors`
       - sharded: `*.fp16.safetensors.index.json` + `*.fp16-00001-of-0000N.safetensors`
     """
-    candidates = ["bf16", "fp8", "fp16", "int8", "int4", "nvfp4"]
+    candidates = ["bf16", "fp8", "fp16", "int8", "int4"]
     for p in model_path.rglob("*"):
         if not p.is_file():
             continue
         name = p.name.lower()
         for v in candidates:
             if f".{v}." in name and name.endswith((".safetensors", ".json")):
-                print(f"DEBUG detect_diffusers_variant matched variant={v} file={p.name}")
                 return v
-    print(f"DEBUG detect_diffusers_variant no variant found in {model_path}")
     return None
 
 
@@ -1458,17 +1455,6 @@ class PipelineLoader:
             raise ModelNotFoundError(model_id, path)
 
         config = config or PipelineConfig(model_path=str(path))
-        if config.variant is None:
-            # Prefer variant from cozy/pipeline spec, fall back to file-name scan.
-            try:
-                from .cozy_pipeline_spec import load_cozy_pipeline_spec
-
-                spec = load_cozy_pipeline_spec(path)
-                if spec is not None and spec.variant:
-                    config.variant = spec.variant
-                    print(f"DEBUG pipeline_loader variant_from_spec={config.variant}")
-            except Exception:
-                pass
         if config.variant is None:
             config.variant = detect_diffusers_variant(path)
 

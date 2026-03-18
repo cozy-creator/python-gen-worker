@@ -92,23 +92,6 @@ m = { ref = "o/r", dtypes = ["fp16","wat"] }
             with self.assertRaises(ValueError):
                 load_tensorhub_toml(p)
 
-    def test_nvfp4_dtype_accepted(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            p = Path(td) / "endpoint.toml"
-            p.write_text(
-                """
-schema_version = 1
-name = "x"
-main = "x.main"
-
-[models]
-m = { ref = "o/r", dtypes = ["nvfp4"] }
-""".lstrip(),
-                encoding="utf-8",
-            )
-            cfg = load_tensorhub_toml(p)
-            self.assertEqual(cfg.models["m"].dtypes, ("nvfp4",))
-
     def test_invalid_cuda_constraint_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "endpoint.toml"

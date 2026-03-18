@@ -28,7 +28,6 @@ from typing import Any, Callable, Dict, Optional, TypeVar, Iterator, List, Tuple
 from types import ModuleType
 import hashlib
 import msgspec
-from collections import deque
 try:
     import torch
 except Exception:  # pragma: no cover - optional dependency
@@ -65,7 +64,7 @@ from .errors import AuthError, CanceledError, FatalError, ResourceError, Retryab
 from .model_interface import ModelManagementInterface
 from .downloader import CozyHubDownloader, ModelDownloader
 from .model_ref_downloader import ModelRefDownloader
-from .model_refs import ParsedModelRef, parse_model_ref
+from .model_refs import parse_model_ref
 from .types import Asset
 from .model_cache import ModelCache, ModelCacheStats, ModelLocation
 from .run_metrics_v1 import RunMetricsV1, best_effort_bytes_downloaded, best_effort_init_model_metrics, safe_json_bytes
@@ -808,9 +807,9 @@ class Worker:
         worker_id: Optional[str] = None,
         worker_jwt: str = "",
         use_tls: bool = False,
-        reconnect_delay: float = 0.1,
+        reconnect_delay: float = 5,
         max_reconnect_attempts: int = 0,  # 0 means infinite retries
-        lb_only_retries: bool = True,
+        lb_only_retries: bool = False,
         model_manager: Optional[ModelManagementInterface] = None, # Optional model manager
         downloader: Optional[ModelDownloader] = None,  # Optional model downloader
         manifest: Optional[Dict[str, Any]] = None,  # Optional manifest from build
@@ -824,9 +823,8 @@ class Worker:
             worker_id: Unique ID for this worker (generated if not provided).
             worker_jwt: Worker-connect JWT (required).
             use_tls: Whether to use TLS for the connection.
-            reconnect_delay: Base seconds for exponential reconnect attempts.
+            reconnect_delay: Seconds to wait between reconnection attempts.
             max_reconnect_attempts: Max reconnect attempts (0 = infinite).
-            lb_only_retries: Retry through LB endpoint/seed list only; ignore leader redirects.
             model_manager: Optional model manager.
             downloader: Optional model downloader.
             manifest: Optional manifest dict (baked in at build time) containing models, resources, etc.
@@ -841,9 +839,6 @@ class Worker:
         self._warn_model_resolve_s = float(os.getenv("WORKER_WARN_MODEL_RESOLVE_S", "30") or "30")
         self._warn_model_load_s = float(os.getenv("WORKER_WARN_MODEL_LOAD_S", "60") or "60")
         self._warn_inference_s = float(os.getenv("WORKER_WARN_INFERENCE_S", "60") or "60")
-        self._emit_detailed_task_events = str(os.getenv("WORKER_EMIT_DETAILED_TASK_EVENTS", "0") or "0").strip().lower() in (
-            "1", "true", "t", "yes", "y", "on",
-        )
         self.user_module_names = user_module_names # Store module names
         self.worker_id = worker_id or f"py-worker-{os.getpid()}"
         self.worker_jwt = (worker_jwt or "").strip()
@@ -852,7 +847,6 @@ class Worker:
         self.use_tls = use_tls
         self.reconnect_delay = reconnect_delay
         self.max_reconnect_attempts = max_reconnect_attempts
-        self.lb_only_retries = lb_only_retries
         self.max_input_bytes = int(os.getenv("WORKER_MAX_INPUT_BYTES", "0"))
         self.max_output_bytes = int(os.getenv("WORKER_MAX_OUTPUT_BYTES", "0"))
 
@@ -876,12 +870,6 @@ class Worker:
         self._ws_specs: Dict[str, _WebsocketSpec] = {}
         self._active_tasks: Dict[str, RequestContext] = {}
         self._active_tasks_lock = threading.Lock()
-        self._assignment_epoch_by_request: Dict[str, int] = {}
-        self._stream_seq_by_key: Dict[Tuple[str, str], int] = {}
-        self._stream_replay_buffers_by_request: Dict[str, deque[Tuple[float, bytes]]] = {}
-        self._stream_tracking_lock = threading.Lock()
-        self._stream_replay_max_frames = int(os.getenv("WORKER_STREAM_REPLAY_MAX_FRAMES", "1024") or "1024")
-        self._stream_replay_window_seconds = int(os.getenv("WORKER_STREAM_REPLAY_WINDOW_SECONDS", "900") or "900")
         self._request_batch_context: Dict[str, Tuple[str, str]] = {}  # request_id -> (batch_id, item_id)
         self._request_batch_context_lock = threading.Lock()
         self.max_concurrency = int(os.getenv("WORKER_MAX_CONCURRENCY", "0"))
@@ -940,11 +928,10 @@ class Worker:
         self._realtime_sessions: Dict[str, _RealtimeSessionState] = {}
         self._realtime_lock = threading.Lock()
 
-        self._reconnect_delay_base = max(0.0, float(reconnect_delay))
-        self._reconnect_delay_max = float(os.getenv("RECONNECT_MAX_DELAY", "1.0") or "1.0")
-        if self._reconnect_delay_max <= 0:
-            self._reconnect_delay_max = 1.0
-        self._reconnect_jitter_seconds = float(os.getenv("RECONNECT_JITTER_SECONDS", "0.1") or "0.1")
+        self._reconnect_delay_base = max(0, reconnect_delay)
+        self._reconnect_delay_max = int(os.getenv("RECONNECT_MAX_DELAY", "60"))
+        self._reconnect_jitter_seconds = float(os.getenv("RECONNECT_JITTER_SECONDS", "1.0"))
+        self._lb_only_retries = lb_only_retries
 
         resolved_model_manager = model_manager
         if resolved_model_manager is None:
@@ -999,7 +986,7 @@ class Worker:
         self._fixed_model_spec_by_key: Dict[str, Dict[str, Any]] = {}
         self._payload_model_spec_by_key_by_function: Dict[str, Dict[str, Dict[str, Any]]] = {}
         # Orchestrator-resolved manifests received in EndpointConfig (startup prefetch baseline).
-        # Keys should be canonical model ref strings (e.g. "owner/repo@sha256:<digest>").
+        # Keys should be canonical model ref strings (e.g. "cozy:owner/repo@sha256:<digest>").
         self._resolved_cozy_models_by_id_baseline: Dict[str, Any] = {}
         self._prefetch_lock = threading.Lock()
         self._prefetch_thread: Optional[threading.Thread] = None
@@ -1146,22 +1133,6 @@ class Worker:
     def _is_protocol_incompatibility(details: Optional[str]) -> bool:
         return bool(details and details.startswith("unsupported_worker_protocol:"))
 
-    @staticmethod
-    def _is_non_transient_auth_error(code: Any, details: Optional[str]) -> bool:
-        # Authentication/authorization failures are non-transient for the
-        # current worker identity/JWT. Reconnecting in a tight loop only creates
-        # avoidable LB/orchestrator churn.
-        if code in (grpc.StatusCode.UNAUTHENTICATED, grpc.StatusCode.PERMISSION_DENIED):
-            return True
-        d = (details or "").strip()
-        return d in (
-            "worker_not_expected",
-            "invalid worker token claims",
-            "invalid worker token",
-            "missing worker token",
-            "missing auth metadata",
-        )
-
     def _handle_protocol_incompatibility(self, details: str) -> None:
         logger.error(
             "Scheduler rejected worker wire protocol %s (%s). "
@@ -1181,34 +1152,20 @@ class Worker:
         self._close_connection()
         self._stop_event.set()
 
-    def _handle_non_transient_connect_error(self, code: Any, details: str) -> None:
-        logger.error(
-            "Scheduler rejected worker connect as non-transient (%s: %s). "
-            "Stopping worker to avoid reconnect churn.",
-            code,
-            details,
-        )
-        self._emit_startup_phase(
-            "scheduler_connect_non_transient_rejected",
-            status="error",
-            level=logging.ERROR,
-            emit_worker_event=False,
-            grpc_code=str(code),
-            grpc_details=str(details),
-        )
-        self._running = False
-        self._close_connection()
-        self._stop_event.set()
-
     def _set_scheduler_addr(self, addr: str) -> None:
         addr = addr.strip()
         if not addr:
             return
         self.scheduler_addr = addr
-        if self.lb_only_retries:
-            return
-        if addr not in self.scheduler_addrs:
+        if not self._lb_only_retries and addr not in self.scheduler_addrs:
             self.scheduler_addrs.insert(0, addr)
+
+    def _next_reconnect_delay(self, attempt: int) -> float:
+        backoff = self._reconnect_delay_base * (2 ** max(attempt - 1, 0))
+        if self._reconnect_delay_max > 0:
+            backoff = min(backoff, self._reconnect_delay_max)
+        jitter = random.uniform(0, self._reconnect_jitter_seconds) if self._reconnect_jitter_seconds > 0 else 0.0
+        return backoff + jitter
 
     def _iter_scheduler_addrs(self) -> Iterator[str]:
         seen = set()
@@ -1294,37 +1251,17 @@ class Worker:
 
     def _emit_worker_event_bytes(self, request_id: str, event_type: str, payload_json: bytes) -> None:
         """Best-effort worker->scheduler WorkerEvent emitter (must never fail a run)."""
-        et = str(event_type or "").strip()
-        if not et:
-            return
-        if not self._should_emit_worker_event(et):
-            return
         try:
             msg = pb.WorkerSchedulerMessage(
                 worker_event=pb.WorkerEvent(
                     request_id=str(request_id or ""),
-                    event_type=et,
+                    event_type=str(event_type or ""),
                     payload_json=bytes(payload_json or b"{}"),
                 )
             )
             self._send_message(msg)
         except Exception:
             return
-
-    def _should_emit_worker_event(self, event_type: str) -> bool:
-        et = str(event_type or "").strip().lower()
-        if et == "":
-            return False
-        if self._emit_detailed_task_events:
-            return True
-
-        # Keep high-signal diagnostics by default and suppress high-volume
-        # lifecycle/metrics chatter on the hot path.
-        if et.startswith("task."):
-            return et.endswith(".failed") or et.endswith(".rejected") or et.endswith(".stuck")
-        if et.startswith("metrics."):
-            return False
-        return True
 
     def _emit_incremental_delta_typed(
         self,
@@ -1897,160 +1834,11 @@ class Worker:
 
         return return_type
 
-    def _next_stream_seq(self, request_id: str, stream_kind: str) -> int:
-        rid = str(request_id or "").strip()
-        kind = str(stream_kind or "").strip() or "worker_event"
-        if not rid:
-            return 0
-        with self._stream_tracking_lock:
-            key = (rid, kind)
-            cur = int(self._stream_seq_by_key.get(key, 0) or 0)
-            nxt = cur + 1
-            self._stream_seq_by_key[key] = nxt
-            return nxt
-
-    def _assignment_epoch_for_request(self, request_id: str) -> int:
-        rid = str(request_id or "").strip()
-        if not rid:
-            return 0
-        with self._stream_tracking_lock:
-            return int(self._assignment_epoch_by_request.get(rid, 0) or 0)
-
-    def _record_replay_message(self, request_id: str, message: WorkerSchedulerMessage) -> None:
-        rid = str(request_id or "").strip()
-        if not rid:
-            return
-        try:
-            raw = bytes(message.SerializeToString())
-        except Exception:
-            return
-        now = time.time()
-        with self._stream_tracking_lock:
-            buf = self._stream_replay_buffers_by_request.get(rid)
-            if buf is None:
-                maxlen = self._stream_replay_max_frames if self._stream_replay_max_frames > 0 else 1024
-                buf = deque(maxlen=maxlen)
-                self._stream_replay_buffers_by_request[rid] = buf
-            buf.append((now, raw))
-            if self._stream_replay_window_seconds > 0:
-                cutoff = now - float(self._stream_replay_window_seconds)
-                while buf and buf[0][0] < cutoff:
-                    buf.popleft()
-
-    def _prepare_stream_contract_fields(self, message: WorkerSchedulerMessage) -> Optional[str]:
-        msg_type = None
-        try:
-            msg_type = message.WhichOneof("msg")
-        except Exception:
-            msg_type = None
-        if msg_type == "run_result":
-            rr = getattr(message, "run_result", None)
-            if rr is None:
-                return None
-            rid = str(getattr(rr, "request_id", "") or "").strip()
-            if not rid:
-                return None
-            epoch = int(getattr(rr, "assignment_attempt_epoch", 0) or 0)
-            if epoch <= 0:
-                epoch = self._assignment_epoch_for_request(rid)
-                if epoch > 0:
-                    rr.assignment_attempt_epoch = int(epoch)
-            if int(getattr(rr, "stream_seq", 0) or 0) <= 0:
-                rr.stream_seq = int(self._next_stream_seq(rid, "run_result"))
-            return rid
-        if msg_type == "worker_event":
-            ev = getattr(message, "worker_event", None)
-            if ev is None:
-                return None
-            rid = str(getattr(ev, "request_id", "") or "").strip()
-            if not rid:
-                return None
-            epoch = int(getattr(ev, "assignment_attempt_epoch", 0) or 0)
-            if epoch <= 0:
-                epoch = self._assignment_epoch_for_request(rid)
-                if epoch > 0:
-                    ev.assignment_attempt_epoch = int(epoch)
-            if int(getattr(ev, "stream_seq", 0) or 0) <= 0:
-                ev.stream_seq = int(self._next_stream_seq(rid, "worker_event"))
-            return rid
-        if msg_type == "incremental_token_delta":
-            ev = getattr(message, "incremental_token_delta", None)
-            if ev is None:
-                return None
-            rid = str(getattr(ev, "request_id", "") or "").strip()
-            if not rid:
-                return None
-            epoch = int(getattr(ev, "assignment_attempt_epoch", 0) or 0)
-            if epoch <= 0:
-                epoch = self._assignment_epoch_for_request(rid)
-                if epoch > 0:
-                    ev.assignment_attempt_epoch = int(epoch)
-            if int(getattr(ev, "sequence", 0) or 0) <= 0:
-                item_id = str(getattr(ev, "item_id", "") or "").strip() or "item-0"
-                ev.sequence = int(self._next_stream_seq(rid, f"incremental:{item_id}"))
-            return rid
-        if msg_type == "incremental_token_stream_done":
-            ev = getattr(message, "incremental_token_stream_done", None)
-            if ev is None:
-                return None
-            rid = str(getattr(ev, "request_id", "") or "").strip()
-            if not rid:
-                return None
-            epoch = int(getattr(ev, "assignment_attempt_epoch", 0) or 0)
-            if epoch <= 0:
-                epoch = self._assignment_epoch_for_request(rid)
-                if epoch > 0:
-                    ev.assignment_attempt_epoch = int(epoch)
-            if int(getattr(ev, "sequence", 0) or 0) <= 0:
-                item_id = str(getattr(ev, "item_id", "") or "").strip() or "item-0"
-                ev.sequence = int(self._next_stream_seq(rid, f"incremental:{item_id}"))
-            return rid
-        if msg_type == "incremental_token_stream_error":
-            ev = getattr(message, "incremental_token_stream_error", None)
-            if ev is None:
-                return None
-            rid = str(getattr(ev, "request_id", "") or "").strip()
-            if not rid:
-                return None
-            epoch = int(getattr(ev, "assignment_attempt_epoch", 0) or 0)
-            if epoch <= 0:
-                epoch = self._assignment_epoch_for_request(rid)
-                if epoch > 0:
-                    ev.assignment_attempt_epoch = int(epoch)
-            if int(getattr(ev, "sequence", 0) or 0) <= 0:
-                item_id = str(getattr(ev, "item_id", "") or "").strip() or "item-0"
-                ev.sequence = int(self._next_stream_seq(rid, f"incremental:{item_id}"))
-            return rid
-        if msg_type == "batch_run_result":
-            br = getattr(message, "batch_run_result", None)
-            if br is None:
-                return None
-            first_request_id: Optional[str] = None
-            for item in list(getattr(br, "items", []) or []):
-                rid = str(getattr(item, "request_id", "") or "").strip()
-                if not rid:
-                    continue
-                if first_request_id is None:
-                    first_request_id = rid
-                epoch = int(getattr(item, "assignment_attempt_epoch", 0) or 0)
-                if epoch <= 0:
-                    epoch = self._assignment_epoch_for_request(rid)
-                    if epoch > 0:
-                        item.assignment_attempt_epoch = int(epoch)
-                if int(getattr(item, "stream_seq", 0) or 0) <= 0:
-                    item_id = str(getattr(item, "item_id", "") or "").strip() or "item-0"
-                    item.stream_seq = int(self._next_stream_seq(rid, f"batch_result:{item_id}"))
-            return first_request_id
-        return None
-
-    def _send_message(self, message: WorkerSchedulerMessage, *, track_replay: bool = True) -> None:
+    def _send_message(self, message: WorkerSchedulerMessage) -> None:
         """Add a message to the outgoing queue."""
-        replay_request_id = self._prepare_stream_contract_fields(message)
         if self._running and not self._stop_event.is_set():
             try:
                 self._outgoing_queue.put_nowait(message)
-                if track_replay and replay_request_id:
-                    self._record_replay_message(replay_request_id, message)
             except queue.Full:
                  logger.error("Outgoing message queue is full. Message dropped!")
         else:
@@ -2309,7 +2097,7 @@ class Worker:
         attempted: set[str] = set()
         while True:
             addr = None
-            if (not self.lb_only_retries) and self._leader_hint and self._leader_hint not in attempted:
+            if self._leader_hint and self._leader_hint not in attempted:
                 addr = self._leader_hint
                 self._leader_hint = None
             else:
@@ -2374,18 +2162,10 @@ class Worker:
             leader = self._extract_leader_addr(details)
             if code == grpc.StatusCode.FAILED_PRECONDITION and self._is_protocol_incompatibility(details):
                 self._handle_protocol_incompatibility(str(details))
-            elif self._is_non_transient_auth_error(code, details):
-                self._handle_non_transient_connect_error(code, str(details))
             elif code == grpc.StatusCode.FAILED_PRECONDITION and leader:
-                if self.lb_only_retries:
-                    logger.warning(
-                        "Scheduler returned ownership hint for %s, but LB-only retries are enabled; reconnecting via configured LB seed(s).",
-                        self.scheduler_addr,
-                    )
-                else:
-                    logger.warning(f"Scheduler returned not_leader for {self.scheduler_addr}; redirecting to {leader}")
-                    self._leader_hint = leader
-                    self._set_scheduler_addr(leader)
+                logger.warning(f"Scheduler returned not_leader for {self.scheduler_addr}; redirecting to {leader}")
+                self._leader_hint = leader
+                self._set_scheduler_addr(leader)
             else:
                 logger.error(f"Failed to connect to scheduler: {code} - {details}")
             self._emit_startup_phase(
@@ -2438,70 +2218,6 @@ class Worker:
                     logger.error(f"Error sending heartbeat: {e}")
                     self._handle_connection_error()
                     break # Stop heartbeating on error
-
-    def _next_reconnect_delay(self, reconnect_count: int) -> float:
-        backoff = self._reconnect_delay_base * (2 ** max(reconnect_count - 1, 0))
-        backoff = min(backoff, self._reconnect_delay_max)
-        jitter = random.uniform(0, self._reconnect_jitter_seconds) if self._reconnect_jitter_seconds > 0 else 0.0
-        return min(self._reconnect_delay_max, max(0.0, backoff + jitter))
-
-    def _build_active_assignment_resume_hints(self) -> List[Any]:
-        hints: List[Any] = []
-        with self._active_tasks_lock:
-            active_ids = list(self._active_tasks.keys())
-        with self._stream_tracking_lock:
-            for request_id in active_ids:
-                rid = str(request_id or "").strip()
-                if not rid:
-                    continue
-                epoch = int(self._assignment_epoch_by_request.get(rid, 0) or 0)
-                if epoch <= 0:
-                    continue
-                worker_event_seq = int(self._stream_seq_by_key.get((rid, "worker_event"), 0) or 0)
-                run_result_seq = int(self._stream_seq_by_key.get((rid, "run_result"), 0) or 0)
-                incr_max = 0
-                for key, seq in self._stream_seq_by_key.items():
-                    if not key or len(key) != 2:
-                        continue
-                    if key[0] != rid:
-                        continue
-                    if str(key[1]).startswith("incremental:"):
-                        incr_max = max(incr_max, int(seq or 0))
-                hints.append(
-                    pb.ActiveAssignmentResume(
-                        request_id=rid,
-                        assignment_attempt_epoch=epoch,
-                        last_run_result_seq=run_result_seq,
-                        last_worker_event_seq=worker_event_seq,
-                        last_incremental_seq=incr_max,
-                    )
-                )
-        return hints
-
-    def _replay_active_assignment_buffers(self) -> None:
-        now = time.time()
-        replayed = 0
-        with self._stream_tracking_lock:
-            request_ids = list(self._stream_replay_buffers_by_request.keys())
-            for rid in request_ids:
-                buf = self._stream_replay_buffers_by_request.get(rid)
-                if buf is None or len(buf) == 0:
-                    continue
-                if self._stream_replay_window_seconds > 0:
-                    cutoff = now - float(self._stream_replay_window_seconds)
-                    while buf and buf[0][0] < cutoff:
-                        buf.popleft()
-                frames = list(buf)
-                for _, raw in frames:
-                    try:
-                        msg = pb.WorkerSchedulerMessage()
-                        msg.ParseFromString(raw)
-                        self._send_message(msg, track_replay=False)
-                        replayed += 1
-                    except Exception:
-                        continue
-        if replayed > 0:
-            logger.info("Replayed %d buffered worker stream message(s) after reconnect.", replayed)
 
     def _register_worker(self, is_heartbeat: bool = False) -> None:
         """Create and send a registration/heartbeat message."""
@@ -2559,9 +2275,9 @@ class Worker:
                 vram_models = self._model_manager.get_vram_loaded_models()
                 supports_model_loading_flag = True
             elif self._model_cache:
-                # Cache-only workers can still report VRAM/disk inventory, but
-                # they do not support explicit Load/UnloadModelCommand handling.
+                # Use model cache for VRAM-loaded models if no legacy model_manager
                 vram_models = self._model_cache.get_vram_models()
+                supports_model_loading_flag = True
 
             # Get disk-cached and downloading models from model cache
             if self._model_cache:
@@ -2648,14 +2364,11 @@ class Worker:
                 is_heartbeat=is_heartbeat,
                 protocol_major=WIRE_PROTOCOL_MAJOR,
                 protocol_minor=WIRE_PROTOCOL_MINOR,
-                active_assignments=self._build_active_assignment_resume_hints(),
             )
             message = pb.WorkerSchedulerMessage(worker_registration=registration)
             # logger.info(f"DEBUG: Preparing to send registration. Resource object: {resources}")
             # logger.info(f"DEBUG: Value being sent for runpod_pod_id: '{resources.runpod_pod_id}'")
             self._send_message(message)
-            if not is_heartbeat and self._reconnect_count > 1:
-                self._replay_active_assignment_buffers()
 
             # Best-effort: report disk inventory + volume identity for NFS-aware scheduling/debug.
             # This is intentionally redundant with WorkerResources.disk_models but adds the missing
@@ -2996,8 +2709,6 @@ class Worker:
                     self._leader_hint = leader
                     self._set_scheduler_addr(leader)
                 self._handle_connection_error()
-            elif self._is_non_transient_auth_error(code, details):
-                self._handle_non_transient_connect_error(code, str(details))
             elif code == grpc.StatusCode.CANCELLED:
                 logger.warning("gRPC stream unexpectedly cancelled by server or network.")
                 self._handle_connection_error()
@@ -3049,13 +2760,7 @@ class Worker:
             request_id = cmd.request_id
             item_ids = [str(x).strip() for x in list(getattr(cmd, "item_ids", []) or []) if str(x).strip()]
             cancel_queued_only = bool(getattr(cmd, "cancel_queued_only", False))
-            assignment_attempt_epoch = int(getattr(cmd, "assignment_attempt_epoch", 0) or 0)
-            self._handle_interrupt_request(
-                request_id,
-                item_ids=item_ids,
-                cancel_queued_only=cancel_queued_only,
-                assignment_attempt_epoch=assignment_attempt_epoch,
-            )
+            self._handle_interrupt_request(request_id, item_ids=item_ids, cancel_queued_only=cancel_queued_only)
         elif msg_type == "runtime_batching_config_cmd":
             self._handle_runtime_batching_config_cmd(message.runtime_batching_config_cmd)
         elif msg_type == "realtime_open_cmd":
@@ -3071,7 +2776,7 @@ class Worker:
             cfg = message.endpoint_config
             resolved_by_variant = dict(getattr(cfg, "resolved_cozy_models_by_variant_ref", {}) or {})
             logger.info(
-                "Received EndpointConfig (endpoint-artifacts) (supported=%d required=%d resolved=%d)",
+                "Received EndpointConfig (supported=%d required=%d resolved=%d)",
                 len(cfg.supported_repo_refs),
                 len(cfg.required_variant_refs),
                 len(resolved_by_variant),
@@ -3529,7 +3234,7 @@ class Worker:
                 # Set resolved cozy models context so downloads can use orchestrator-resolved URLs.
                 from .model_ref_downloader import reset_resolved_cozy_models_by_id, set_resolved_cozy_models_by_id
                 per_cmd = dict(getattr(cmd, "resolved_cozy_models_by_id", {}) or {})
-                baseline = self._resolved_cozy_models_by_id_baseline or {}
+                baseline = getattr(self, "_resolved_cozy_models_by_id_baseline", None) or {}
                 merged = {**baseline, **per_cmd} if per_cmd else dict(baseline)
                 tok = set_resolved_cozy_models_by_id(merged or None)
                 try:
@@ -3665,16 +3370,13 @@ class Worker:
         request_id = request.request_id
         function_name = request.function_name
         input_payload = request.input_payload
-        assignment_attempt_epoch = int(getattr(request, "assignment_attempt_epoch", 0) or 0)
         required_model_id_for_exec = ""
         timeout_ms = int(getattr(request, "timeout_ms", 0) or 0)
         owner = str(getattr(request, "owner", "") or "") or (self.owner or "")
         invoker_id = str(getattr(request, "invoker_id", "") or "")
         file_base_url = str(getattr(request, "file_base_url", "") or "")
         file_token = str(getattr(request, "file_token", "") or "")
-        resolved_cozy_models_by_id = self._canonicalize_resolved_models_map(
-            dict(getattr(request, "resolved_cozy_models_by_id", {}) or {})
-        )
+        resolved_cozy_models_by_id = dict(getattr(request, "resolved_cozy_models_by_id", {}) or {})
         parent_request_id = str(getattr(request, "parent_request_id", "") or "").strip() or None
         child_request_id = str(getattr(request, "child_request_id", "") or "").strip() or None
         item_id = str(getattr(request, "item_id", "") or "").strip() or None
@@ -3807,9 +3509,6 @@ class Worker:
                   self._send_task_result(request_id, False, None, "retryable", True, "worker busy", error_msg)
                   return
              self._active_tasks[request_id] = ctx
-        if assignment_attempt_epoch > 0:
-            with self._stream_tracking_lock:
-                self._assignment_epoch_by_request[request_id] = assignment_attempt_epoch
 
         # Execute function in a separate thread to avoid blocking the receive loop
         thread = threading.Thread(
@@ -3847,43 +3546,21 @@ class Worker:
                 timeout_ms=int(getattr(item, "timeout_ms", 0) or 0),
                 owner=str(getattr(item, "owner", "") or ""),
                 invoker_id=str(getattr(item, "invoker_id", "") or ""),
-                resolved_cozy_models_by_id=self._canonicalize_resolved_models_map(
-                    dict(getattr(item, "resolved_cozy_models_by_id", {}) or {})
-                ),
+                resolved_cozy_models_by_id=dict(getattr(item, "resolved_cozy_models_by_id", {}) or {}),
                 parent_request_id=str(getattr(item, "parent_request_id", "") or ""),
                 child_request_id=str(getattr(item, "child_request_id", "") or ""),
                 item_id=item_id,
                 item_index=int(getattr(item, "item_index", 0) or 0),
-                assignment_attempt_epoch=int(getattr(item, "assignment_attempt_epoch", 0) or 0),
             )
             self._handle_run_request(req)
 
-    def _handle_interrupt_request(
-        self,
-        request_id: str,
-        *,
-        item_ids: Optional[List[str]] = None,
-        cancel_queued_only: bool = False,
-        assignment_attempt_epoch: int = 0,
-    ) -> None:
+    def _handle_interrupt_request(self, request_id: str, *, item_ids: Optional[List[str]] = None, cancel_queued_only: bool = False) -> None:
         """Handle a request to interrupt/cancel a running task."""
-        request_id = str(request_id or "").strip()
-        if assignment_attempt_epoch > 0:
-            expected = self._assignment_epoch_for_request(request_id)
-            if expected > 0 and int(assignment_attempt_epoch) != int(expected):
-                logger.info(
-                    "Ignoring stale interrupt for request_id=%s got_epoch=%d expected_epoch=%d",
-                    request_id,
-                    assignment_attempt_epoch,
-                    expected,
-                )
-                return
         logger.info(
-            "Received interrupt request for request_id=%s item_ids=%s cancel_queued_only=%s epoch=%d",
+            "Received interrupt request for request_id=%s item_ids=%s cancel_queued_only=%s",
             request_id,
             item_ids or [],
             cancel_queued_only,
-            assignment_attempt_epoch,
         )
         with self._active_tasks_lock:
             ctx = self._active_tasks.get(request_id)
@@ -4133,17 +3810,12 @@ class Worker:
 
         models_in_use: set[str] = set()
         inference_watchdog: Optional[threading.Timer] = None
-        print(f"DEBUG [execute_task] entered request_id={request_id} function={spec.name} payload_bytes={len(input_payload or b'')} timeout_ms={ctx.timeout_ms or 'none'}", flush=True)
         try:
-            _is_canceled = ctx.is_canceled()
-            print(f"DEBUG [execute_task] cancellation_check request_id={request_id} is_canceled={_is_canceled} deadline={getattr(ctx, '_deadline', None)}", flush=True)
-            if _is_canceled:
+            if ctx.is_canceled():
                 raise CanceledError("canceled")
 
             # Decode payload strictly.
-            print(f"DEBUG [execute_task] decoding_payload request_id={request_id} payload_type={spec.payload_type}", flush=True)
             input_obj = msgspec.msgpack.decode(input_payload, type=spec.payload_type)
-            print(f"DEBUG [execute_task] payload_decoded request_id={request_id} input={input_obj!r}", flush=True)
             # Optional post-decode constraints (e.g. clamping) declared on the payload type.
             try:
                 from .payload_constraints import apply_payload_constraints
@@ -4151,9 +3823,7 @@ class Worker:
                 _ = apply_payload_constraints(input_obj)
             except Exception:
                 pass
-            print(f"DEBUG [execute_task] materializing_assets request_id={request_id}", flush=True)
             self._materialize_assets(ctx, input_obj)
-            print(f"DEBUG [execute_task] assets_materialized request_id={request_id}", flush=True)
             # Best-effort extract diffusion-ish numeric fields for metrics.run.
             try:
                 def _get_num(name: str) -> Optional[float]:
@@ -4187,10 +3857,8 @@ class Worker:
             call_kwargs[spec.ctx_param] = ctx
             call_kwargs[spec.payload_param] = input_obj
 
-            print(f"DEBUG [execute_task] injection_loop request_id={request_id} injections={len(spec.injections)}", flush=True)
             for inj in spec.injections:
                 resolve_t0 = time.monotonic()
-                print(f"DEBUG [execute_task] resolving_model request_id={request_id} param={inj.param_name}", flush=True)
                 resolve_watchdog = self._start_task_phase_watchdog(
                     request_id=request_id,
                     phase="model_resolve",
@@ -4273,9 +3941,12 @@ class Worker:
                     },
                 )
                 try:
-                    print(f"DEBUG [execute_task] loading_model request_id={request_id} param={inj.param_name} model_id={canon_model_id}", flush=True)
                     call_kwargs[inj.param_name] = self._resolve_injected_value(ctx, inj.param_type, model_id, inj)
-                    print(f"DEBUG [execute_task] model_loaded request_id={request_id} param={inj.param_name} model_id={canon_model_id} pipeline_type={type(call_kwargs[inj.param_name]).__name__}", flush=True)
+                    logger.info(
+                        "[request_id=%s] model load resolved: param=%s model=%s duration_ms=%d",
+                        request_id, inj.param_name, canon_model_id,
+                        int((time.monotonic() - load_t0) * 1000),
+                    )
                     self._emit_task_event(
                         request_id,
                         "task.model_load.completed",
@@ -4304,19 +3975,15 @@ class Worker:
                         load_watchdog.cancel()
 
             # Invoke.
-            t_infer0 = time.monotonic()
-            _infer_warn_s = float(getattr(self, "_warn_inference_s", 60.0))
             logger.info(
-                "inference.start request_id=%s function=%s timeout_ms=%s warn_after_s=%.1f",
-                request_id,
-                spec.name,
-                ctx.timeout_ms if ctx.timeout_ms else "none",
-                _infer_warn_s,
+                "[request_id=%s] all injections resolved, entering inference for function=%s canceled=%s",
+                request_id, spec.name, ctx.is_canceled(),
             )
+            t_infer0 = time.monotonic()
             inference_watchdog = self._start_task_phase_watchdog(
                 request_id=request_id,
                 phase="inference",
-                warn_after_s=_infer_warn_s,
+                warn_after_s=float(getattr(self, "_warn_inference_s", 60.0)),
                 payload={"function_name": spec.name, "output_mode": spec.output_mode},
             )
             self._emit_task_event(
@@ -4324,14 +3991,14 @@ class Worker:
                 "task.inference.started",
                 {"function_name": spec.name, "output_mode": spec.output_mode},
             )
-            print(f"DEBUG [execute_task] calling_func request_id={request_id} function={spec.name} is_canceled={ctx.is_canceled()} kwargs_keys={list(call_kwargs.keys())}", flush=True)
+            logger.info("[request_id=%s] calling %s", request_id, spec.name)
             if inspect.iscoroutinefunction(spec.func):
                 result = asyncio.run(spec.func(**call_kwargs))
             elif inspect.isasyncgenfunction(spec.func):
                 result = spec.func(**call_kwargs)
             else:
                 result = spec.func(**call_kwargs)
-            print(f"DEBUG [execute_task] func_returned request_id={request_id} function={spec.name} result_type={type(result).__name__}", flush=True)
+            logger.info("[request_id=%s] %s returned, output_mode=%s", request_id, spec.name, spec.output_mode)
 
             if ctx.is_canceled():
                 raise CanceledError("canceled")
@@ -4454,10 +4121,6 @@ class Worker:
 
         except Exception as e:
             error_type, retryable, safe_message, error_message = self._map_exception(e)
-            if error_type == "internal":
-                logger.exception("task %s FAILED [%s] %s", request_id, spec.name, error_message)
-            else:
-                logger.error("task %s failed [%s] %s: %s", request_id, spec.name, error_type, error_message)
             if inference_watchdog is not None:
                 inference_watchdog.cancel()
             self._emit_task_event(
@@ -4564,11 +4227,6 @@ class Worker:
 
             with self._active_tasks_lock:
                 self._active_tasks.pop(request_id, None)
-            with self._stream_tracking_lock:
-                self._assignment_epoch_by_request.pop(request_id, None)
-                self._stream_replay_buffers_by_request.pop(request_id, None)
-                for key in [k for k in self._stream_seq_by_key.keys() if k and k[0] == request_id]:
-                    self._stream_seq_by_key.pop(key, None)
 
     def _get_local_model_cache(self) -> Optional[Any]:
         """
@@ -4762,13 +4420,7 @@ class Worker:
                         # If we have an orchestrator-resolved manifest, estimate missing bytes.
                         resolved_entry = None
                         try:
-                            resolved_map = getattr(ctx, "resolved_cozy_models_by_id", None) or {}
-                            resolved_entry = resolved_map.get(canon)
-                            if resolved_entry is None:
-                                if canon.startswith("cozy:"):
-                                    resolved_entry = resolved_map.get(canon.split(":", 1)[1].strip())
-                                else:
-                                    resolved_entry = resolved_map.get(f"cozy:{canon}")
+                            resolved_entry = (getattr(ctx, "resolved_cozy_models_by_id", None) or {}).get(canon)
                         except Exception:
                             resolved_entry = None
                         bytes_dl = None
@@ -4883,27 +4535,17 @@ class Worker:
                                     kwargs["custom_pipeline"] = custom_pipeline
                             except Exception:
                                 pass
-                            # Read variant from cozy/pipeline spec (authoritative).
-                            if spec.variant:
-                                kwargs["variant"] = spec.variant
-                                print(f"DEBUG cozy_spec_variant={spec.variant} source={spec.source_path.name}")
-                    except Exception as _spec_exc:
-                        print(f"DEBUG cozy_spec_load_error={_spec_exc}")
+                    except Exception:
+                        pass
 
-                    # Fallback: scan files on disk for diffusers variant naming.
-                    if "variant" not in kwargs:
-                        try:
-                            from gen_worker.pipeline_loader import detect_diffusers_variant
+                    try:
+                        from gen_worker.pipeline_loader import detect_diffusers_variant
 
-                            variant = detect_diffusers_variant(local_path)
-                            if variant is not None:
-                                kwargs["variant"] = variant
-                                print(f"DEBUG detect_diffusers_variant={variant} path={local_path}")
-                            else:
-                                print(f"DEBUG detect_diffusers_variant=None path={local_path}")
-                        except Exception as _detect_exc:
-                            print(f"DEBUG detect_variant_error={_detect_exc}")
-                    print(f"DEBUG from_pretrained variant={kwargs.get('variant')} path={local_path}")
+                        variant = detect_diffusers_variant(local_path)
+                        if variant is not None:
+                            kwargs["variant"] = variant
+                    except Exception:
+                        pass
 
                     # Quantized weight-only inference requires explicit loader hints.
                     #
@@ -4952,7 +4594,7 @@ class Worker:
                             device_is_cuda = str(ctx.device).startswith("cuda") and torch.cuda.is_available()
                             variant = str(kwargs.get("variant") or "").strip().lower()
                             if device_is_cuda:
-                                if variant in ("fp8", "int8", "int4", "nvfp4") and hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported():
+                                if variant in ("fp8", "int8", "int4") and hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported():
                                     kwargs["torch_dtype"] = torch.bfloat16
                                 else:
                                     kwargs["torch_dtype"] = torch.float16
@@ -5007,31 +4649,20 @@ class Worker:
                     from_pretrained = getattr(requested_type, "from_pretrained")
                     model_source: str = str(model_id)
                     preload_kwargs: dict[str, Any] = {}
-                    _ref: ParsedModelRef | None = None
                     try:
                         p = Path(model_source)
                         if p.exists():
                             model_source = p.as_posix()
                         else:
-                            _ref = parse_model_ref(model_source)
-                            if _ref.scheme in ("cozy", "hf") and self._downloader is not None:
+                            parsed = parse_model_ref(model_source)
+                            if self._downloader is not None and parsed.scheme in ("cozy", "hf"):
                                 model_source = self._downloader.download(model_source, str(worker_model_cache_dir()))
-                            elif _ref.scheme == "hf" and _ref.hf is not None:
+                            elif parsed.scheme == "hf" and parsed.hf is not None:
                                 # Fallback path when downloader is unavailable.
-                                model_source = _ref.hf.repo_id
-                                if _ref.hf.revision:
-                                    preload_kwargs["revision"] = _ref.hf.revision
-                            elif _ref.scheme == "cozy":
-                                raise RuntimeError(
-                                    f"cozy model resolution requires downloader for ref {model_source!r}"
-                                )
-                    except Exception as e:
-                        # Never hand raw cozy refs to huggingface loaders; surface the real
-                        # download/resolve error instead of falling back to repo-id parsing.
-                        if _ref is not None and getattr(_ref, "scheme", "") == "cozy":
-                            raise RuntimeError(
-                                f"cozy model materialization failed for {model_id!r}: {e}"
-                            ) from e
+                                model_source = parsed.hf.repo_id
+                                if parsed.hf.revision:
+                                    preload_kwargs["revision"] = parsed.hf.revision
+                    except Exception:
                         model_source = str(model_id)
                         preload_kwargs = {}
 
@@ -5102,11 +4733,16 @@ class Worker:
                                         # Fallback heuristic when deltas are noisy.
                                         size_gb = float(os.getenv("WORKER_DIFFUSERS_VRAM_GB_FALLBACK", "10") or "10")
                                 self._model_cache.mark_loaded_to_vram(canon, obj, size_gb)
+                                logger.info(
+                                    "pipeline injection resolved: model=%s size_gb=%.1f device=%s",
+                                    canon, size_gb, str(ctx.device),
+                                )
                                 return obj
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
+                        except Exception as _cache_exc:
+                            logger.warning("model_cache mark_loaded_to_vram failed: %s", _cache_exc)
+                except Exception as _to_exc:
+                    logger.error("failed to move pipeline to device=%s: %s", str(ctx.device), _to_exc)
+                    raise
                 self._custom_runtime_cache[key] = obj
                 return obj
 
