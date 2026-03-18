@@ -1,40 +1,25 @@
 # flux2-klein-4b
 
-FLUX.2-klein turbo example using Cozy’s injection pattern (4B + 9B variants).
+FLUX.2-klein 4B endpoint with separate base/turbo functions and dtype-specific variants.
 
-- The worker function only defines input/output + runs inference.
-- Fixed model selection is declared in code via `ModelRef(Src.FIXED, "<model-key>")`.
-- Model refs/dtypes are declared in `endpoint.toml [models]`.
-- This model is treated as a turbo model: the worker forces `num_inference_steps=8`.
+Naming convention in this repo:
 
-Steps:
+- Base model ref: `black-forest-labs/flux.2-klein-4b-base`
+- Turbo model ref: `black-forest-labs/flux.2-klein-4b-turbo`
 
-- `num_inference_steps` is accepted in the payload, but it is clamped to `[4, 8]` (rounded) for predictable cost/latency.
-
-Code uses:
-
-```py
-pipeline: Annotated[
-  Flux2KleinPipeline,
-  ModelRef(Src.FIXED, "flux2-klein-4b"),
-]
-```
+This avoids ambiguity with upstream naming where `flux.2-klein-4b` is commonly used for turbo variants.
 
 Functions:
 
-- `generate`: 4B bf16 (regular turbo baseline)
-- `generate_fp8`: 4B fp8
-- `generate_9b`: 9B bf16 (regular turbo baseline)
-- `generate_9b_fp8`: 9B fp8
-- `generate_int8`: int8-only
-- `generate_int4`: int4-only
+- `generate`: base bf16
+- `generate_turbo`: turbo bf16
+- `generate_fp8`: base fp8
+- `generate_turbo_fp8`: turbo fp8
+- `generate_nvfp4`: base nvfp4
+- `generate_turbo_nvfp4`: turbo nvfp4
 
-Notes on FP8:
+Notes:
 
-- FP8 support here is **weight-only** quantization via `torchao` (Diffusers TorchAoConfig).
-- GPUs vary: FP8 acceleration typically requires newer NVIDIA GPUs (e.g. Ada/Hopper class).
-
-Notes on INT8/INT4:
-
-- INT8/INT4 support here is **weight-only** quantization via `torchao` (Diffusers TorchAoConfig).
-- INT4 is experimental for diffusion; expect quality regressions or incompatibilities.
+- Fixed model selection is declared in code via `ModelRef(Src.FIXED, "<model-key>")`.
+- Model refs/dtypes are declared in `endpoint.toml [models]`.
+- `num_inference_steps` is accepted in the payload, but clamped to `[4, 8]`.

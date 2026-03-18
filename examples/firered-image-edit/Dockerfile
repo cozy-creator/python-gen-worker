@@ -1,13 +1,14 @@
 # Tenant-supplied Dockerfile example (GPU).
 #
-# - Installs torch + gen-worker in stable cacheable layers.
-# - Installs tenant deps from uv.lock without replacing torch/gen-worker.
+# - Installs torch in a stable cacheable layer.
+# - Installs tenant deps from uv.lock without replacing torch.
 # - Bakes discovered functions into /app/.tensorhub/endpoint.lock at build time.
 #
 ARG PYTHON_VERSION=3.12
 FROM ghcr.io/astral-sh/uv:python${PYTHON_VERSION}-bookworm-slim AS cozy_base
 
-ARG UV_TORCH_BACKEND=cu126
+ARG CUDA_VERSION=12.8
+ARG UV_TORCH_BACKEND=
 ARG TORCH_SPEC="~=2.10.0"
 
 WORKDIR /app
@@ -22,10 +23,9 @@ RUN --mount=type=cache,id=cozy-apt-cache,target=/var/cache/apt,sharing=locked \
     && apt-get clean
 
 RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
-    uv pip install --system --break-system-packages --torch-backend ${UV_TORCH_BACKEND} \
+    backend="${UV_TORCH_BACKEND:-cu$(printf '%s' "${CUDA_VERSION}" | tr -d '.')}" \
+    && uv pip install --system --break-system-packages --torch-backend "$backend" \
       "torch${TORCH_SPEC}"
-RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
-    uv pip install --system --break-system-packages gen-worker==0.3.0
 
 FROM cozy_base AS cozy_final
 
@@ -33,7 +33,7 @@ COPY pyproject.toml uv.lock /app/
 
 RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
     uv export --no-dev --no-hashes --no-sources --no-emit-project --no-emit-local \
-      --no-emit-package torch --no-emit-package gen-worker \
+      --no-emit-package torch \
       -o /tmp/requirements.all.txt \
     && grep -Ev '^(torch|triton|nvidia-|cuda-)' /tmp/requirements.all.txt > /tmp/requirements.txt \
     && uv pip install --system --break-system-packages --no-deps -r /tmp/requirements.txt

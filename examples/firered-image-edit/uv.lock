@@ -503,7 +503,7 @@ dev = [
 requires-dist = [
     { name = "accelerate" },
     { name = "diffusers", git = "https://github.com/huggingface/diffusers" },
-    { name = "gen-worker", extras = ["torch"], specifier = "==0.3.0" },
+    { name = "gen-worker", extras = ["torch"] },
     { name = "pillow" },
     { name = "protobuf" },
     { name = "sentencepiece" },

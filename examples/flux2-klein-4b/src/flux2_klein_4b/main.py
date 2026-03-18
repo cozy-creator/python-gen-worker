@@ -18,6 +18,7 @@ from gen_worker.types import Asset
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 _flux_resources = ResourceRequirements()
+_nvfp4_resources = ResourceRequirements(compute_capability_min=10.0)
 _pipeline_locks_guard = threading.Lock()
 _pipeline_locks: dict[int, threading.Lock] = {}
 
@@ -103,11 +104,23 @@ def generate(
     ctx: RequestContext,
     pipeline: Annotated[
         Flux2KleinPipeline,
-        ModelRef(Src.FIXED, "flux2-klein-4b"),
+        ModelRef(Src.FIXED, "flux2-klein-4b-base"),
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:
-    return _generate(ctx, pipeline, payload, "flux2-klein-4b")
+    return _generate(ctx, pipeline, payload, "flux2-klein-4b-base")
+
+
+@worker_function(_flux_resources)
+def generate_turbo(
+    ctx: RequestContext,
+    pipeline: Annotated[
+        Flux2KleinPipeline,
+        ModelRef(Src.FIXED, "flux2-klein-4b-turbo"),
+    ],
+    payload: GenerateInput,
+) -> GenerateOutput:
+    return _generate(ctx, pipeline, payload, "flux2-klein-4b-turbo")
 
 
 @worker_function(_flux_resources)
@@ -115,73 +128,44 @@ def generate_fp8(
     ctx: RequestContext,
     pipeline: Annotated[
         Flux2KleinPipeline,
-        ModelRef(Src.FIXED, "flux2-klein-4b_fp8"),
+        ModelRef(Src.FIXED, "flux2-klein-4b-base_fp8"),
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:
-    """
-    FP8 function.
-
-    This endpoint is intended to run against an fp8-weight-only artifact (or an artifact
-    that the worker can load with torchao-backed fp8 quantization enabled).
-    """
-    return _generate(ctx, pipeline, payload, "flux2-klein-4b_fp8")
+    return _generate(ctx, pipeline, payload, "flux2-klein-4b-base_fp8")
 
 
 @worker_function(_flux_resources)
-def generate_9b(
+def generate_turbo_fp8(
     ctx: RequestContext,
     pipeline: Annotated[
         Flux2KleinPipeline,
-        ModelRef(Src.FIXED, "flux2-klein-9b"),
+        ModelRef(Src.FIXED, "flux2-klein-4b-turbo_fp8"),
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:
-    return _generate(ctx, pipeline, payload, "flux2-klein-9b")
+    return _generate(ctx, pipeline, payload, "flux2-klein-4b-turbo_fp8")
 
 
-@worker_function(_flux_resources)
-def generate_9b_fp8(
+@worker_function(_nvfp4_resources)
+def generate_nvfp4(
     ctx: RequestContext,
     pipeline: Annotated[
         Flux2KleinPipeline,
-        ModelRef(Src.FIXED, "flux2-klein-9b_fp8"),
+        ModelRef(Src.FIXED, "flux2-klein-4b-base_nvfp4"),
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:
-    return _generate(ctx, pipeline, payload, "flux2-klein-9b_fp8")
+    return _generate(ctx, pipeline, payload, "flux2-klein-4b-base_nvfp4")
 
 
-@worker_function(_flux_resources)
-def generate_int8(
+@worker_function(_nvfp4_resources)
+def generate_turbo_nvfp4(
     ctx: RequestContext,
     pipeline: Annotated[
         Flux2KleinPipeline,
-        ModelRef(Src.FIXED, "flux2-klein-4b_int8"),
+        ModelRef(Src.FIXED, "flux2-klein-4b-turbo_nvfp4"),
     ],
     payload: GenerateInput,
 ) -> GenerateOutput:
-    """
-    INT8 function (weight-only).
-
-    This endpoint is intended to run against an int8-weight-only artifact (or an artifact
-    that the worker can load with torchao-backed int8 quantization enabled).
-    """
-    return _generate(ctx, pipeline, payload, "flux2-klein-4b_int8")
-
-
-@worker_function(_flux_resources)
-def generate_int4(
-    ctx: RequestContext,
-    pipeline: Annotated[
-        Flux2KleinPipeline,
-        ModelRef(Src.FIXED, "flux2-klein-4b_int4"),
-    ],
-    payload: GenerateInput,
-) -> GenerateOutput:
-    """
-    INT4 function (weight-only).
-
-    This endpoint is experimental; expect quality regressions or incompatibilities.
-    """
-    return _generate(ctx, pipeline, payload, "flux2-klein-4b_int4")
+    return _generate(ctx, pipeline, payload, "flux2-klein-4b-turbo_nvfp4")
