@@ -1525,12 +1525,39 @@ class PipelineLoader:
             # Move to device with OOM handling
             try:
                 if config.device == "cuda" and torch.cuda.is_available():
+                    logger.info(
+                        "Moving pipeline to CUDA for %s (%.1f GB) ...",
+                        model_id,
+                        model_size_gb,
+                    )
                     pipeline = pipeline.to("cuda")
+                    logger.info("Pipeline moved to CUDA successfully for %s", model_id)
+                else:
+                    logger.warning(
+                        "CUDA not available (device=%s, cuda.is_available=%s), "
+                        "pipeline will remain on CPU for %s",
+                        config.device,
+                        torch.cuda.is_available(),
+                        model_id,
+                    )
             except torch.cuda.OutOfMemoryError as e:
                 flush_memory()
                 raise CudaOutOfMemoryError(
                     model_id, model_size_gb, get_available_vram_gb()
                 ) from e
+            except RuntimeError as e:
+                logger.error(
+                    "CUDA RuntimeError moving %s to GPU: %s — falling back to CPU",
+                    model_id,
+                    e,
+                )
+            except Exception as e:
+                logger.error(
+                    "Unexpected error moving %s to GPU (%s: %s) — falling back to CPU",
+                    model_id,
+                    type(e).__name__,
+                    e,
+                )
 
             # Apply VAE optimizations (always enabled)
             if config.enable_vae_tiling or config.enable_vae_slicing:

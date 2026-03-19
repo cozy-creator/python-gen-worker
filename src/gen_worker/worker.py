@@ -4120,6 +4120,7 @@ class Worker:
             logger.info("Task %s completed successfully.", request_id)
 
         except Exception as e:
+            logger.exception("Task %s failed: %s", request_id, e)
             error_type, retryable, safe_message, error_message = self._map_exception(e)
             if inference_watchdog is not None:
                 inference_watchdog.cancel()
@@ -4666,7 +4667,15 @@ class Worker:
                         model_source = str(model_id)
                         preload_kwargs = {}
 
+                    logger.info(
+                        "Loading from_pretrained: source=%s type=%s kwargs=%s",
+                        model_source, type_qualname(requested_type), list(preload_kwargs.keys()),
+                    )
                     obj = from_pretrained(model_source, **preload_kwargs)
+                    logger.info(
+                        "from_pretrained complete: source=%s (%.1fs)",
+                        model_source, time.monotonic() - t_pi0,
+                    )
                     if rm is not None:
                         rm.add_pipeline_init_time(int((time.monotonic() - t_pi0) * 1000))
                 if isinstance(requested_type, type) and not isinstance(obj, requested_type):
@@ -4704,6 +4713,10 @@ class Worker:
                             torch_dtype = kwargs.get("torch_dtype") if isinstance(kwargs, dict) else None
                         except Exception:
                             torch_dtype = None
+                        logger.info(
+                            "Moving model to device=%s dtype=%s model=%s ...",
+                            str(ctx.device), torch_dtype, model_id,
+                        )
                         try:
                             if torch_dtype is not None:
                                 obj = obj.to(str(ctx.device), dtype=torch_dtype)
@@ -4712,6 +4725,10 @@ class Worker:
                         except TypeError:
                             # Some objects implement .to(device) but not dtype kwarg.
                             obj = obj.to(str(ctx.device))
+                        logger.info(
+                            "Model moved to device=%s successfully model=%s",
+                            str(ctx.device), model_id,
+                        )
                         if rm is not None:
                             rm.add_gpu_load_time(int((time.monotonic() - t_to0) * 1000))
 
