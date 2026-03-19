@@ -1,6 +1,6 @@
 [project]
 name = "gen-worker"
-version = "0.3.7"
+version = "0.3.11"
 description = "A library used to build custom functions in Cozy Creator's serverless function platform."
 readme = "README.md"
 license = "MIT"
