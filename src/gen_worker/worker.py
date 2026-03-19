@@ -4120,6 +4120,7 @@ class Worker:
             logger.info("Task %s completed successfully.", request_id)
 
         except Exception as e:
+            logger.exception("Task %s failed: %s", request_id, e)
             error_type, retryable, safe_message, error_message = self._map_exception(e)
             if inference_watchdog is not None:
                 inference_watchdog.cancel()
