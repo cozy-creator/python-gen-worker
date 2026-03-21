@@ -4117,7 +4117,7 @@ class Worker:
                 },
             )
 
-            logger.info("Task %s completed successfully.", request_id)
+            logger.info("Task %s completed successfully. inference_ms=%d", request_id, int((time.monotonic() - t_infer0) * 1000))
 
         except Exception as e:
             logger.exception("Task %s failed: %s", request_id, e)
