@@ -522,17 +522,13 @@ def get_torch_dtype(dtype_str: Optional[str], model_id: str) -> Any:
             "bf16": torch.bfloat16,
             "float32": torch.float32,
             "fp32": torch.float32,
+            # TODO support different dtype, fp8 variants int8 etc.
+            # check better approach than mapping
         }
-        return dtype_map.get(dtype_str.lower(), torch.float16)
+        return dtype_map.get(dtype_str.lower(), torch.bfloat16)
 
-    # Automatic selection based on model type
-    model_lower = model_id.lower()
-    if "flux" in model_lower:
-        return torch.bfloat16
-    elif "sd3" in model_lower or "stable-diffusion-3" in model_lower:
-        return torch.bfloat16
-    else:
-        return torch.float16
+
+    return torch.bfloat16
 
 
 def detect_diffusers_variant(model_path: Path) -> Optional[str]:
