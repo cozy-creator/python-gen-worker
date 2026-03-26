@@ -4595,10 +4595,18 @@ class Worker:
                             device_is_cuda = str(ctx.device).startswith("cuda") and torch.cuda.is_available()
                             variant = str(kwargs.get("variant") or "").strip().lower()
                             if device_is_cuda:
-                                if variant in ("fp8", "int8", "int4") and hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported():
+                                bf16_supported = hasattr(torch.cuda, "is_bf16_supported") and torch.cuda.is_bf16_supported()
+                                if variant in ("fp8", "int8", "int4") and bf16_supported:
+                                    kwargs["torch_dtype"] = torch.bfloat16
+                                elif variant == "bf16" and bf16_supported:
                                     kwargs["torch_dtype"] = torch.bfloat16
                                 else:
-                                    kwargs["torch_dtype"] = torch.float16
+                                    # Fall back to model-name heuristic (catches flux, z-image, sd3, etc.)
+                                    try:
+                                        from gen_worker.pipeline_loader import get_torch_dtype as _get_torch_dtype
+                                        kwargs["torch_dtype"] = _get_torch_dtype(None, canon or model_id)
+                                    except Exception:
+                                        kwargs["torch_dtype"] = torch.float16
                             elif variant == "fp16":
                                 kwargs["torch_dtype"] = torch.float16
                             elif variant == "bf16":
