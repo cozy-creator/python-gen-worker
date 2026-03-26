@@ -58,26 +58,26 @@ LoadModelResult = Any
 UnloadModelResult = Any
 TaskExecutionRequest = Any
 TaskExecutionResult = Any
-from .decorators import ResourceRequirements # Import ResourceRequirements for type hints if needed
-from .errors import AuthError, CanceledError, FatalError, ResourceError, RetryableError, ValidationError
+from .api.decorators import ResourceRequirements
+from .api.errors import AuthError, CanceledError, FatalError, ResourceError, RetryableError, ValidationError
 
-from .model_interface import ModelManagementInterface
-from .downloader import CozyHubDownloader, ModelDownloader
-from .model_ref_downloader import ModelRefDownloader
-from .model_refs import parse_model_ref
-from .types import Asset
-from .model_cache import ModelCache, ModelCacheStats, ModelLocation
+from .models.interface import ModelManagementInterface
+from .models.downloader import CozyHubDownloader, ModelDownloader
+from .models.ref_downloader import ModelRefDownloader
+from .models.refs import parse_model_ref
+from .api.types import Asset
+from .models.cache import ModelCache, ModelCacheStats, ModelLocation
 from .run_metrics_v1 import RunMetricsV1, best_effort_bytes_downloaded, best_effort_init_model_metrics, safe_json_bytes
-from .cache_paths import worker_local_model_cache_dir_default, worker_model_cache_dir
+from .models.cache_paths import worker_local_model_cache_dir_default, worker_model_cache_dir
 from .wire_protocol import WIRE_PROTOCOL_MAJOR, WIRE_PROTOCOL_MINOR, wire_protocol_version_string
-from .injection import (
+from .api.injection import (
     InjectionSpec,
     ModelRef,
     ModelRefSource,
     parse_injection,
     type_qualname,
 )
-from .names import slugify_function_name
+from .discovery.names import slugify_function_name
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')

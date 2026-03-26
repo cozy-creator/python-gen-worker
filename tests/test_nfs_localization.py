@@ -24,7 +24,7 @@ def test_pipeline_loader_localizes_nfs_snapshot_to_local_cache(tmp_path: Path) -
             return MountBackend(mountpoint="/workspace", fstype="nfs4", source="10.0.0.1:/vol")
         return MountBackend(mountpoint="/tmp", fstype="ext4", source="/dev/nvme0n1p1")
 
-    with patch("gen_worker.mount_backend.mount_backend_for_path", side_effect=fake_mount_backend_for_path):
+    with patch("gen_worker.pipeline.mount_backend.mount_backend_for_path", side_effect=fake_mount_backend_for_path):
         loader = PipelineLoader(models_dir=str(models_dir), local_cache_dir=str(local_cache_dir), downloader=None)
         out = asyncio.run(loader.ensure_model_available(model_id))
 

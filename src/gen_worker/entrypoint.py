@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional
 
 import msgspec
 
-from .cache_paths import worker_model_cache_dir
+from .models.cache_paths import worker_model_cache_dir
 try:
     from .worker import Worker
 except ImportError as e:
