@@ -12,7 +12,7 @@ def _normalize_single(arr: np.ndarray) -> np.ndarray:
     return arr.clip(0.0, 1.0)
 
 
-def pipeline_output_to_pil(
+def image_output_sanitizer(
     arr: np.ndarray,
 ) -> Union[Image.Image, List[Image.Image]]:
     """
