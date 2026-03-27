@@ -1185,7 +1185,7 @@ class Worker:
             key = self._jwks_cache.get_key(kid)
             if not key:
                 raise ValueError("JWKS key not found for token")
-            options = {"verify_aud": bool(self._jwt_audience)}
+            options: Any = {"verify_aud": bool(self._jwt_audience)}
             jwt.decode(
                 self.worker_jwt,
                 key=key,

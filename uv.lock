@@ -743,6 +743,8 @@ dependencies = [
     { name = "grpcio" },
     { name = "huggingface-hub" },
     { name = "msgspec" },
+    { name = "numpy" },
+    { name = "pillow" },
     { name = "protobuf" },
     { name = "psutil" },
     { name = "pyjwt", extra = ["crypto"] },
@@ -762,7 +764,6 @@ dev = [
 ]
 torch = [
     { name = "flashpack" },
-    { name = "numpy" },
     { name = "safetensors" },
     { name = "torch", version = "2.11.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
     { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
@@ -784,7 +785,8 @@ requires-dist = [
     { name = "huggingface-hub", specifier = ">=0.26.0" },
     { name = "msgspec", specifier = ">=0.18.6" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10.0" },
-    { name = "numpy", marker = "extra == 'torch'", specifier = ">=2.4.2" },
+    { name = "numpy", specifier = ">=1.24.0" },
+    { name = "pillow", specifier = ">=9.0.0" },
     { name = "protobuf", specifier = ">=6.30.0" },
     { name = "psutil", specifier = ">=7.0.0" },
     { name = "pyarrow", marker = "extra == 'trainer'", specifier = ">=17.0.0" },
