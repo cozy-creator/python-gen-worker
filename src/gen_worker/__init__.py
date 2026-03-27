@@ -16,6 +16,7 @@ from .trainer import (
     TrainingJobSpec,
 )
 from .api.streaming import iter_transformers_text_deltas
+from .utils.image import image_output_sanitizer
 
 # Optional torch-dependent exports
 try:
