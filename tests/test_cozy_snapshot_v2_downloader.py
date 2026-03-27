@@ -7,9 +7,9 @@ from typing import Dict, Optional
 from aiohttp import web
 from blake3 import blake3
 
-from gen_worker.cozy_snapshot_v2_downloader import CozySnapshotV2Downloader
-from gen_worker.tensorhub_v2 import CozyHubV2Client
-from gen_worker.model_refs import CozyRef
+from gen_worker.models.cozy_snapshot_v2 import CozySnapshotV2Downloader
+from gen_worker.models.hub_client import CozyHubV2Client
+from gen_worker.models.refs import CozyRef
 
 
 @dataclass
@@ -237,7 +237,7 @@ def test_snapshot_v2_downloader_uses_orchestrator_resolved_urls(tmp_path: Path) 
 
 
 def test_model_ref_downloader_uses_resolved_urls_without_tensorhub_token(tmp_path: Path) -> None:
-    from gen_worker.model_ref_downloader import ModelRefDownloader, reset_resolved_cozy_models_by_id, set_resolved_cozy_models_by_id
+    from gen_worker.models.ref_downloader import ModelRefDownloader, reset_resolved_cozy_models_by_id, set_resolved_cozy_models_by_id
 
     snap = "c" * 64
 
@@ -282,7 +282,7 @@ def test_model_ref_downloader_uses_resolved_urls_without_tensorhub_token(tmp_pat
 
 
 def test_model_ref_downloader_hf_prefers_tensorhub_public_request(tmp_path: Path) -> None:
-    from gen_worker.model_ref_downloader import ModelRefDownloader
+    from gen_worker.models.ref_downloader import ModelRefDownloader
 
     snap = "blake3:" + ("d" * 64)
 
@@ -343,7 +343,7 @@ def test_model_ref_downloader_hf_prefers_tensorhub_public_request(tmp_path: Path
 
 
 def test_model_ref_downloader_public_request_polls_202_then_200(tmp_path: Path) -> None:
-    from gen_worker.model_ref_downloader import ModelRefDownloader
+    from gen_worker.models.ref_downloader import ModelRefDownloader
 
     snap = "blake3:" + ("e" * 64)
 

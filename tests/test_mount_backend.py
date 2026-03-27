@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from gen_worker.mount_backend import mount_backend_for_path, volume_key_for_path
+from gen_worker.pipeline.mount_backend import mount_backend_for_path, volume_key_for_path
 
 
 def test_mount_backend_for_path_parses_mountinfo_and_classifies_nfs() -> None:

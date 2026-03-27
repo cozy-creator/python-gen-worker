@@ -4,8 +4,8 @@ import asyncio
 from pathlib import Path
 from unittest.mock import patch
 
-from gen_worker.mount_backend import MountBackend
-from gen_worker.pipeline_loader import PipelineLoader
+from gen_worker.pipeline.mount_backend import MountBackend
+from gen_worker.pipeline.loader import PipelineLoader
 
 
 def test_pipeline_loader_localizes_nfs_snapshot_to_local_cache(tmp_path: Path) -> None:

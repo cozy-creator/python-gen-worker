@@ -15,7 +15,7 @@ import aiohttp
 from aiohttp import web
 import msgspec
 
-from gen_worker.cache_paths import worker_model_cache_dir
+from gen_worker.models.cache_paths import worker_model_cache_dir
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.worker import RequestContext, Worker
 
@@ -323,11 +323,11 @@ async def serve_http(argv: Optional[list[str]] = None) -> None:
                 # Best-effort download into the shared cache dir.
                 local_path = ""
                 if getattr(w, "_downloader", None) is not None:
-                    from gen_worker.model_ref_downloader import (
+                    from gen_worker.models.ref_downloader import (
                         reset_cozy_model_download_prefs_by_ref,
                         set_cozy_model_download_prefs_by_ref,
                     )
-                    from gen_worker.model_refs import parse_model_ref
+                    from gen_worker.models.refs import parse_model_ref
 
                     canon = mid
                     try:

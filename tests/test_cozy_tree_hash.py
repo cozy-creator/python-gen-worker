@@ -1,4 +1,4 @@
-from gen_worker.cozy_cas import blake3_tree_hash
+from gen_worker.models.cozy_cas import blake3_tree_hash
 
 
 def test_blake3_tree_hash_stable_sorting() -> None:

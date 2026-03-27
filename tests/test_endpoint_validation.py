@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from gen_worker.endpoint_validation import validate_endpoint
+from gen_worker.discovery.validation import validate_endpoint
 
 
 class TestEndpointValidation(unittest.TestCase):

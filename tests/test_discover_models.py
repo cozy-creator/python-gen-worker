@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from gen_worker.discover import discover_manifest
+from gen_worker.discovery.discover import discover_manifest
 
 
 def _cleanup_modules(prefix: str) -> None:
@@ -57,7 +57,7 @@ base = { ref = "stabilityai/stable-diffusion-xl-base-1.0", dtypes = ["fp16", "bf
 from typing import Annotated
 import msgspec
 from gen_worker import RequestContext, worker_function
-from gen_worker.injection import ModelRef, ModelRefSource as Src
+from gen_worker.api.injection import ModelRef, ModelRefSource as Src
 
 class Input(msgspec.Struct):
     prompt: str
@@ -151,7 +151,7 @@ main = "funcs_b"
 from typing import Annotated
 import msgspec
 from gen_worker import RequestContext, worker_function
-from gen_worker.injection import ModelRef, ModelRefSource as Src
+from gen_worker.api.injection import ModelRef, ModelRefSource as Src
 
 class Input(msgspec.Struct):
     prompt: str
@@ -217,7 +217,7 @@ main = "funcs_c"
 from typing import Annotated
 import msgspec
 from gen_worker import RequestContext, worker_function
-from gen_worker.injection import ModelRef, ModelRefSource as Src
+from gen_worker.api.injection import ModelRef, ModelRefSource as Src
 
 class Input(msgspec.Struct):
     prompt: str
@@ -347,7 +347,7 @@ sdxl = "stabilityai/stable-diffusion-xl-base-1.0"
 from typing import Annotated
 import msgspec
 from gen_worker import RequestContext, worker_function
-from gen_worker.injection import ModelRef, ModelRefSource as Src
+from gen_worker.api.injection import ModelRef, ModelRefSource as Src
 
 class Input(msgspec.Struct):
     prompt: str

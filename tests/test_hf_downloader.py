@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from gen_worker.hf_downloader import HuggingFaceHubDownloader
-from gen_worker.model_refs import HuggingFaceRef
+from gen_worker.models.hf_downloader import HuggingFaceHubDownloader
+from gen_worker.models.refs import HuggingFaceRef
 
 
 def test_hf_downloader_errors_when_hub_missing(monkeypatch: pytest.MonkeyPatch) -> None:
