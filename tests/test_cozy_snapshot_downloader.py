@@ -8,8 +8,8 @@ import pytest
 from aiohttp import web
 from blake3 import blake3
 
-from gen_worker.cozy_cas import CozyHubClient, CozySnapshotDownloader
-from gen_worker.model_refs import CozyRef
+from gen_worker.models.cozy_cas import CozyHubClient, CozySnapshotDownloader
+from gen_worker.models.refs import CozyRef
 
 
 @dataclass

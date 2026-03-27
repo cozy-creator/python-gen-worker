@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from gen_worker.cache_paths import tensorhub_cache_dir, worker_model_cache_dir
+from gen_worker.models.cache_paths import tensorhub_cache_dir, worker_model_cache_dir
 
 
 def test_tensorhub_cache_dir_defaults_to_home_cache(monkeypatch) -> None:

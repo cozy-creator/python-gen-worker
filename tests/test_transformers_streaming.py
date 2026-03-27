@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from gen_worker.transformers_streaming import iter_transformers_text_deltas
+from gen_worker.api.streaming import iter_transformers_text_deltas
 
 
 class FakeStreamer:

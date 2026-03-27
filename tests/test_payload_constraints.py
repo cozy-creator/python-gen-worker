@@ -4,7 +4,7 @@ from typing import Annotated
 
 import msgspec
 
-from gen_worker.payload_constraints import Clamp, apply_payload_constraints
+from gen_worker.api.payload_constraints import Clamp, apply_payload_constraints
 
 
 class P(msgspec.Struct):

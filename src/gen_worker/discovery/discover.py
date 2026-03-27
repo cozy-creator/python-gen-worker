@@ -26,14 +26,14 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import msgspec
 
 from gen_worker import RequestContext
-from gen_worker.injection import ModelRef
+from gen_worker.api.injection import ModelRef
 
-from gen_worker.tensorhub_toml import (
+from gen_worker.discovery.toml_manifest import (
     TensorhubModelSpec,
     TensorhubToml,
     load_tensorhub_toml,
 )
-from gen_worker.names import slugify_endpoint_name, slugify_function_name
+from gen_worker.discovery.names import slugify_endpoint_name, slugify_function_name
 
 
 def _type_id(t: type) -> Dict[str, str]:
@@ -80,7 +80,7 @@ def _schema_and_hash(t: type) -> Tuple[Dict[str, Any], str]:
     """Generate JSON schema and SHA256 hash for a msgspec type."""
     schema = msgspec.json.schema(t)
     try:
-        from .payload_constraints import apply_schema_constraints
+        from gen_worker.api.payload_constraints import apply_schema_constraints
 
         schema = apply_schema_constraints(schema, t)
     except Exception:

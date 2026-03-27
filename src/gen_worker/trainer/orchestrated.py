@@ -12,7 +12,7 @@ from urllib import request
 from urllib.parse import quote, urlparse
 
 from .uploader import ArtifactUploadError, ArtifactUploader
-from ..model_ref_downloader import ModelRefDownloader
+from gen_worker.models.ref_downloader import ModelRefDownloader
 
 
 def is_truthy(value: object) -> bool:

@@ -58,26 +58,26 @@ LoadModelResult = Any
 UnloadModelResult = Any
 TaskExecutionRequest = Any
 TaskExecutionResult = Any
-from .decorators import ResourceRequirements # Import ResourceRequirements for type hints if needed
-from .errors import AuthError, CanceledError, FatalError, ResourceError, RetryableError, ValidationError
+from .api.decorators import ResourceRequirements
+from .api.errors import AuthError, CanceledError, FatalError, ResourceError, RetryableError, ValidationError
 
-from .model_interface import ModelManagementInterface
-from .downloader import CozyHubDownloader, ModelDownloader
-from .model_ref_downloader import ModelRefDownloader
-from .model_refs import parse_model_ref
-from .types import Asset
-from .model_cache import ModelCache, ModelCacheStats, ModelLocation
+from .models.interface import ModelManagementInterface
+from .models.downloader import CozyHubDownloader, ModelDownloader
+from .models.ref_downloader import ModelRefDownloader
+from .models.refs import parse_model_ref
+from .api.types import Asset
+from .models.cache import ModelCache, ModelCacheStats, ModelLocation
 from .run_metrics_v1 import RunMetricsV1, best_effort_bytes_downloaded, best_effort_init_model_metrics, safe_json_bytes
-from .cache_paths import worker_local_model_cache_dir_default, worker_model_cache_dir
+from .models.cache_paths import worker_local_model_cache_dir_default, worker_model_cache_dir
 from .wire_protocol import WIRE_PROTOCOL_MAJOR, WIRE_PROTOCOL_MINOR, wire_protocol_version_string
-from .injection import (
+from .api.injection import (
     InjectionSpec,
     ModelRef,
     ModelRefSource,
     parse_injection,
     type_qualname,
 )
-from .names import slugify_function_name
+from .discovery.names import slugify_function_name
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -1185,7 +1185,7 @@ class Worker:
             key = self._jwks_cache.get_key(kid)
             if not key:
                 raise ValueError("JWKS key not found for token")
-            options = {"verify_aud": bool(self._jwt_audience)}
+            options: Any = {"verify_aud": bool(self._jwt_audience)}
             jwt.decode(
                 self.worker_jwt,
                 key=key,
@@ -1679,7 +1679,7 @@ class Worker:
         input_schema = msgspec.json.schema(payload_type)
         output_schema = msgspec.json.schema(output_type)
         try:
-            from .payload_constraints import apply_schema_constraints
+            from .api.payload_constraints import apply_schema_constraints
 
             input_schema = apply_schema_constraints(input_schema, payload_type)
             output_schema = apply_schema_constraints(output_schema, output_type)
@@ -1691,7 +1691,7 @@ class Worker:
         if delta_type is not None:
             delta_schema = msgspec.json.schema(delta_type)
             try:
-                from .payload_constraints import apply_schema_constraints
+                from .api.payload_constraints import apply_schema_constraints
 
                 delta_schema = apply_schema_constraints(delta_schema, delta_type)
             except Exception:
@@ -2303,7 +2303,7 @@ class Worker:
             gpu_sm = ""
             installed_libs: List[str] = []
             try:
-                from .tensorhub_policy import detect_worker_capabilities
+                from .models.hub_policy import detect_worker_capabilities
 
                 caps = detect_worker_capabilities()
                 installed_libs = list(caps.installed_libs or [])
@@ -2965,7 +2965,7 @@ class Worker:
             q.put_nowait(mid)
 
         def worker() -> None:
-            from .model_ref_downloader import reset_resolved_cozy_models_by_id, set_resolved_cozy_models_by_id
+            from .models.ref_downloader import reset_resolved_cozy_models_by_id, set_resolved_cozy_models_by_id
 
             while not self._stop_event.is_set():
                 try:
@@ -3181,7 +3181,7 @@ class Worker:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
 
-            from .model_ref_downloader import reset_resolved_cozy_models_by_id, set_resolved_cozy_models_by_id
+            from .models.ref_downloader import reset_resolved_cozy_models_by_id, set_resolved_cozy_models_by_id
             tok = set_resolved_cozy_models_by_id(self._resolved_cozy_models_by_id_baseline or None)
             try:
                 loop.run_until_complete(
@@ -3232,7 +3232,7 @@ class Worker:
 
                 logger.info(f"Model Memory Manager attempting to load '{model_id}' into VRAM...")
                 # Set resolved cozy models context so downloads can use orchestrator-resolved URLs.
-                from .model_ref_downloader import reset_resolved_cozy_models_by_id, set_resolved_cozy_models_by_id
+                from .models.ref_downloader import reset_resolved_cozy_models_by_id, set_resolved_cozy_models_by_id
                 per_cmd = dict(getattr(cmd, "resolved_cozy_models_by_id", {}) or {})
                 baseline = getattr(self, "_resolved_cozy_models_by_id_baseline", None) or {}
                 merged = {**baseline, **per_cmd} if per_cmd else dict(baseline)
@@ -3635,7 +3635,7 @@ class Worker:
             async def run_handler() -> None:
                 # Build kwargs for handler.
                 kwargs: Dict[str, Any] = {spec.ctx_param: ctx, spec.socket_param: sock}
-                from .model_ref_downloader import (
+                from .models.ref_downloader import (
                     reset_cozy_model_download_prefs_by_ref,
                     reset_resolved_cozy_models_by_id,
                     set_cozy_model_download_prefs_by_ref,
@@ -3795,7 +3795,7 @@ class Worker:
         # Refcounted BUSY so overlapping runs/model ops can't flip BUSY -> NOT BUSY early.
         self._gpu_busy_enter()
 
-        from .model_ref_downloader import (
+        from .models.ref_downloader import (
             reset_cozy_model_download_prefs_by_ref,
             reset_resolved_cozy_models_by_id,
             set_cozy_model_download_prefs_by_ref,
@@ -3818,7 +3818,7 @@ class Worker:
             input_obj = msgspec.msgpack.decode(input_payload, type=spec.payload_type)
             # Optional post-decode constraints (e.g. clamping) declared on the payload type.
             try:
-                from .payload_constraints import apply_payload_constraints
+                from .api.payload_constraints import apply_payload_constraints
 
                 _ = apply_payload_constraints(input_obj)
             except Exception:
@@ -4242,7 +4242,7 @@ class Worker:
             if self._local_model_cache is not None:
                 return self._local_model_cache
             try:
-                from .mount_backend import mount_backend_for_path
+                from .pipeline.mount_backend import mount_backend_for_path
                 mb = mount_backend_for_path(d)
                 if mb is not None and mb.is_nfs:
                     logger.warning(
@@ -4257,7 +4257,7 @@ class Worker:
                 pass
 
             try:
-                from .pipeline_loader import LocalModelCache  # local import to avoid heavy import at worker init
+                from .pipeline.loader import LocalModelCache  # local import to avoid heavy import at worker init
 
                 max_cache_gb = float(os.environ.get("WORKER_LOCAL_CACHE_GB", "100"))
                 self._local_model_cache = LocalModelCache(d, max_cache_gb)
@@ -4277,7 +4277,7 @@ class Worker:
           that share the same NFS volume.
         """
         try:
-            from .mount_backend import mount_backend_for_path, volume_key_for_path
+            from .pipeline.mount_backend import mount_backend_for_path, volume_key_for_path
 
             p = path or worker_model_cache_dir()
             mb = mount_backend_for_path(p)
@@ -4472,7 +4472,7 @@ class Worker:
 
                     # Detect mount backend (NFS vs local) and localize snapshot to local disk if needed.
                     try:
-                        from .mount_backend import mount_backend_for_path
+                        from .pipeline.mount_backend import mount_backend_for_path
 
                         src_path = Path(local or "")
                         mb_src = mount_backend_for_path(src_path)
@@ -4520,7 +4520,7 @@ class Worker:
                     # Cozy pipeline YAML is authoritative; ensure diffusers can load even
                     # if the artifact only shipped cozy.pipeline.lock.yaml/yaml (no model_index.json).
                     try:
-                        from gen_worker.cozy_pipeline_spec import (
+                        from gen_worker.pipeline.spec import (
                             cozy_custom_pipeline_arg,
                             ensure_diffusers_model_index_json,
                             load_cozy_pipeline_spec,
@@ -4540,7 +4540,7 @@ class Worker:
                         pass
 
                     try:
-                        from gen_worker.pipeline_loader import detect_diffusers_variant
+                        from gen_worker.pipeline.loader import detect_diffusers_variant
 
                         variant = detect_diffusers_variant(local_path)
                         if variant is not None:
@@ -4603,7 +4603,7 @@ class Worker:
                                 else:
                                     # Fall back to model-name heuristic (catches flux, z-image, sd3, etc.)
                                     try:
-                                        from gen_worker.pipeline_loader import get_torch_dtype as _get_torch_dtype
+                                        from gen_worker.pipeline.loader import get_torch_dtype as _get_torch_dtype
                                         kwargs["torch_dtype"] = _get_torch_dtype(None, canon or model_id)
                                     except Exception:
                                         kwargs["torch_dtype"] = torch.float16

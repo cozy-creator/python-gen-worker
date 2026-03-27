@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from gen_worker.pipeline_loader import missing_component_overrides_for_from_pretrained
+from gen_worker.pipeline.loader import missing_component_overrides_for_from_pretrained
 
 
 class _PipelineWithSafetyChecker:

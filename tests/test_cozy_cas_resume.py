@@ -10,7 +10,7 @@ import pytest
 from aiohttp import web
 from blake3 import blake3
 
-from gen_worker.cozy_cas import _download_one_file
+from gen_worker.models.cozy_cas import _download_one_file
 
 
 @dataclass

@@ -9,16 +9,16 @@ import random
 import time
 
 from .cozy_cas import CozyHubClient, CozySnapshotDownloader
-from .cozy_snapshot_v2_downloader import ensure_snapshot_async, ensure_snapshot_sync
+from .cozy_snapshot_v2 import ensure_snapshot_async, ensure_snapshot_sync
 from .downloader import ModelDownloader
-from .tensorhub_v2 import (
+from .hub_client import (
     CozyHubError,
     CozyHubPublicModelPendingError,
     CozyHubResolveArtifactResult,
     CozyHubV2Client,
 )
 from .hf_downloader import HuggingFaceHubDownloader
-from .model_refs import CozyRef, ParsedModelRef, parse_model_ref
+from .refs import CozyRef, ParsedModelRef, parse_model_ref
 
 # Per-task resolved manifests provided by gen-orchestrator (issue #92).
 # Shape: {canonical_model_id: ResolvedCozyModel-like object}

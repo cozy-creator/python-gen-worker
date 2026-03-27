@@ -6,7 +6,7 @@ from typing import Dict, Optional
 import pytest
 from aiohttp import web
 
-from gen_worker.tensorhub_v2 import CozyHubNoCompatibleArtifactError, CozyHubPublicModelPendingError, CozyHubV2Client
+from gen_worker.models.hub_client import CozyHubNoCompatibleArtifactError, CozyHubPublicModelPendingError, CozyHubV2Client
 
 
 @dataclass

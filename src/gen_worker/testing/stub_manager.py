@@ -5,7 +5,7 @@ import inspect
 import os
 from typing import Any, Dict, List, Optional
 
-from gen_worker.model_interface import DownloaderType, ModelManagementInterface
+from gen_worker.models.interface import DownloaderType, ModelManagementInterface
 
 
 class StubModelManager(ModelManagementInterface):

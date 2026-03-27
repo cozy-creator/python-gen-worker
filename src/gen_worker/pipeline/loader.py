@@ -50,7 +50,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 
-from .cache_paths import worker_local_model_cache_dir_default, worker_model_cache_dir
+from gen_worker.models.cache_paths import worker_local_model_cache_dir_default, worker_model_cache_dir
 
 logger = logging.getLogger(__name__)
 
@@ -573,7 +573,7 @@ def get_pipeline_class(
     # Prefer cozy.pipeline.lock.yaml when present; fall back to cozy.pipeline.yaml.
     if class_name is None:
         try:
-            from .cozy_pipeline_spec import (
+            from .spec import (
                 cozy_custom_pipeline_arg,
                 ensure_diffusers_model_index_json,
                 load_cozy_pipeline_spec,

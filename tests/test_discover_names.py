@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from gen_worker.discover import discover_manifest
+from gen_worker.discovery.discover import discover_manifest
 
 
 def _cleanup_modules(prefix: str) -> None:

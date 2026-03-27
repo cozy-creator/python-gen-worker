@@ -26,7 +26,7 @@ def test_dev_http_runner_writes_outputs(tmp_path: Path, monkeypatch) -> None:
     (pkg_dir / "tenant_mod.py").write_text(
         """
 import msgspec
-from gen_worker.decorators import worker_function
+from gen_worker.api.decorators import worker_function
 from gen_worker.worker import RequestContext
 
 class In(msgspec.Struct):

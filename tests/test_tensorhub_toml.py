@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from gen_worker.tensorhub_toml import constraint_satisfied, load_tensorhub_toml
+from gen_worker.discovery.toml_manifest import constraint_satisfied, load_tensorhub_toml
 
 
 class TestTensorhubToml(unittest.TestCase):

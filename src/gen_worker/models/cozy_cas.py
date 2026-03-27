@@ -13,7 +13,7 @@ import aiohttp
 import backoff
 from blake3 import blake3
 
-from .model_refs import CozyRef
+from .refs import CozyRef
 
 
 def _norm_rel_path(p: str) -> str:

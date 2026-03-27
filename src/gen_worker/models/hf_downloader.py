@@ -9,7 +9,7 @@ from typing import Any, Callable, Iterable, List, Optional, Sequence, Set, cast
 
 import requests
 
-from .model_refs import HuggingFaceRef
+from .refs import HuggingFaceRef
 from .hf_selection import HFSelectionPolicy, finalize_diffusers_download, plan_diffusers_download
 
 

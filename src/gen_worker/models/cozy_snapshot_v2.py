@@ -12,9 +12,9 @@ from typing import Any, Coroutine, Dict, List, Optional, Set
 
 from .cozy_cas import _download_one_file as _download_one_file
 from .cozy_cas import _norm_rel_path
-from .tensorhub_policy import default_resolve_preferences, detect_worker_capabilities
-from .tensorhub_v2 import CozyHubV2Client, CozyHubResolveArtifactResult, CozyHubSnapshotFile
-from .model_refs import CozyRef
+from .hub_policy import default_resolve_preferences, detect_worker_capabilities
+from .hub_client import CozyHubV2Client, CozyHubResolveArtifactResult, CozyHubSnapshotFile
+from .refs import CozyRef
 
 _log = logging.getLogger("gen_worker.download")
 

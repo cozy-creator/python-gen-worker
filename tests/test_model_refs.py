@@ -1,6 +1,6 @@
 import pytest
 
-from gen_worker.model_refs import parse_model_ref
+from gen_worker.models.refs import parse_model_ref
 
 
 def test_parse_cozy_default_scheme() -> None:

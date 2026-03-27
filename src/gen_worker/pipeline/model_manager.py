@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 from typing import Any, List, Optional
 
-from .model_interface import ModelManagementInterface
+from gen_worker.models.interface import ModelManagementInterface
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +20,7 @@ class DiffusersModelManager(ModelManagementInterface):
     """Wraps PipelineLoader to satisfy the scheduler's model lifecycle protocol."""
 
     def __init__(self) -> None:
-        from .pipeline_loader import PipelineLoader
+        from .loader import PipelineLoader
 
         self._loader = PipelineLoader()
         self._downloader: Any = None
@@ -40,8 +40,8 @@ class DiffusersModelManager(ModelManagementInterface):
 
             local_path: Optional[str] = None
             if self._downloader is not None:
-                from .cache_paths import worker_model_cache_dir
-                from .model_refs import parse_model_ref
+                from gen_worker.models.cache_paths import worker_model_cache_dir
+                from gen_worker.models.refs import parse_model_ref
                 from pathlib import Path
 
                 cache_dir = str(worker_model_cache_dir())

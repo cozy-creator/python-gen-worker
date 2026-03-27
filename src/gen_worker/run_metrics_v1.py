@@ -7,8 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 
-from .cache_paths import worker_model_cache_dir
-from .model_refs import parse_model_ref
+from .models.cache_paths import worker_model_cache_dir
+from .models.refs import parse_model_ref
 
 
 def _rfc3339_now() -> str:

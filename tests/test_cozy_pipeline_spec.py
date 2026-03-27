@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from gen_worker.cozy_pipeline_spec import (
+from gen_worker.pipeline.spec import (
     COZY_PIPELINE_FILENAME,
     COZY_PIPELINE_LOCK_FILENAME,
     DIFFUSERS_MODEL_INDEX_FILENAME,

@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from gen_worker.hf_selection import HFSelectionPolicy, finalize_diffusers_download, plan_diffusers_download
+from gen_worker.models.hf_selection import HFSelectionPolicy, finalize_diffusers_download, plan_diffusers_download
 
 
 def _load_fixture(name: str) -> dict[str, Any]:
