@@ -83,13 +83,13 @@ def _try_hardlink_or_copy(src: Path, dst: Path) -> None:
     try:
         os.link(src, dst)
         return
-    except Exception:
-        pass
+    except Exception as e:
+        _log.debug("hardlink failed for %s -> %s: %s, trying symlink", src, dst, e)
     try:
         os.symlink(src, dst)
         return
-    except Exception:
-        pass
+    except Exception as e:
+        _log.warning("symlink failed for %s -> %s: %s, falling back to copy", src, dst, e)
     shutil.copy2(src, dst)
 
 
