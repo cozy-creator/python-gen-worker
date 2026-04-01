@@ -62,7 +62,7 @@ class CozyHubDownloader(ModelDownloader):
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
 
-        timeout = aiohttp.ClientTimeout(total=self.timeout_seconds)
+        timeout = aiohttp.ClientTimeout(total=None, sock_read=self.timeout_seconds, connect=30)
         sha256 = hashlib.sha256()
         bytes_written = 0
 

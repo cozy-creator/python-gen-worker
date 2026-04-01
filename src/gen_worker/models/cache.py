@@ -219,7 +219,7 @@ class ModelCache:
             Amount of space freed in GB.
         """
         freed = 0.0
-        available = self._max_vram_gb - self._vram_used_gb
+        available = self._max_vram_gb - max(self._vram_used_gb, self._get_current_vram_used())
 
         if available >= needed_gb:
             return 0.0  # Already have enough space

@@ -35,6 +35,7 @@ References:
 """
 
 import asyncio
+import functools
 import gc
 import hashlib
 import importlib
@@ -211,18 +212,18 @@ class LocalModelCache:
         if needed_gb <= 0:
             return
 
-        # Sort by access time (oldest first)
+        # Sort by modification time (oldest first — .touch() updates mtime, not atime)
         cached = []
         for path in self.cache_dir.iterdir():
             if path.is_dir():
                 try:
                     stat = path.stat()
                     size = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
-                    cached.append((path, stat.st_atime, size / (1024**3)))
+                    cached.append((path, stat.st_mtime, size / (1024**3)))
                 except OSError:
                     continue
 
-        cached.sort(key=lambda x: x[1])  # Sort by access time
+        cached.sort(key=lambda x: x[1])  # Sort by modification time
 
         freed = 0.0
         for path, _, size_gb in cached:
@@ -259,13 +260,6 @@ class LocalModelCache:
         - Async callers should use cache_model(), which delegates to a thread.
         """
         cache_path = self._get_cache_path(model_id)
-        if cache_path.exists():
-            try:
-                cache_path.touch()
-            except Exception:
-                pass
-            return cache_path
-
         with self._cache_lock:
             if cache_path.exists():
                 try:
@@ -311,13 +305,6 @@ class LocalModelCache:
         If the model was already cached, bytes_copied is None.
         """
         cache_path = self._get_cache_path(model_id)
-        if cache_path.exists():
-            try:
-                cache_path.touch()
-            except Exception:
-                pass
-            return cache_path, None
-
         with self._cache_lock:
             if cache_path.exists():
                 try:
@@ -411,8 +398,12 @@ class LocalModelCache:
             finally:
                 self._prefetch_tasks.pop(model_id, None)
 
-        self._prefetch_tasks[model_id] = asyncio.create_task(prefetch())
-        logger.debug(f"Started prefetch for {model_id}")
+        try:
+            loop = asyncio.get_running_loop()
+            self._prefetch_tasks[model_id] = loop.create_task(prefetch())
+            logger.debug("Started prefetch for %s", model_id)
+        except RuntimeError:
+            logger.debug("start_prefetch called outside event loop, skipping for %s", model_id)
 
     async def wait_for_prefetch(self, model_id: str, timeout: float = 60.0) -> bool:
         """Wait for a prefetch to complete."""
@@ -531,6 +522,7 @@ def get_torch_dtype(dtype_str: Optional[str], model_id: str) -> Any:
     return torch.bfloat16
 
 
+@functools.lru_cache(maxsize=32)
 def detect_diffusers_variant(model_path: Path) -> Optional[str]:
     """
     Detect a diffusers `variant=` value ("bf16", "fp8", "fp16", "int8", "int4") from files on disk.

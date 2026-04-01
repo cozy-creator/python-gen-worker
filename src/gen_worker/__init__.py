@@ -1,7 +1,8 @@
 # Make src/gen_worker a Python package
 from .api.decorators import ResourceRequirements, worker_function, worker_websocket
 from .api.injection import ModelRef, ModelRefSource
-from .worker import RequestContext, RealtimeSocket
+from .request_context import RequestContext
+from .worker import RealtimeSocket
 from .api.errors import AuthError, RetryableError, FatalError
 from .api.types import Asset
 from .models.interface import ModelManager
