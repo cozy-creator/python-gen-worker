@@ -4,7 +4,7 @@ from .api.injection import ModelRef, ModelRefSource
 from .request_context import RequestContext
 from .worker import RealtimeSocket
 from .api.errors import AuthError, RetryableError, FatalError
-from .api.types import Asset
+from .api.types import Asset, LoraSpec
 from .models.interface import ModelManager
 from .models.downloader import ModelDownloader, CozyHubDownloader
 from .discovery.validation import EndpointValidationResult, validate_endpoint
@@ -46,6 +46,7 @@ __all__ = [
     "RetryableError",
     "FatalError",
     "Asset",
+    "LoraSpec",
     "ModelManager",
     "ModelDownloader",
     "CozyHubDownloader",
