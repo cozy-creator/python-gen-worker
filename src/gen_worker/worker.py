@@ -1275,9 +1275,11 @@ class Worker:
         if fields and isinstance(fields, (tuple, list)):
             for name in fields:
                 try:
-                    self._materialize_assets(ctx, getattr(obj, name))
-                except Exception:
+                    val = getattr(obj, name)
+                except Exception as e:
+                    logger.warning("_materialize_assets: could not access field %r on %s: %s", name, type(obj).__name__, e)
                     continue
+                self._materialize_assets(ctx, val)
 
     def _materialize_asset(self, ctx: RequestContext, asset: Asset) -> None:
         if asset.local_path:
@@ -1298,14 +1300,48 @@ class Worker:
 
         max_bytes = int(os.getenv("WORKER_MAX_INPUT_FILE_BYTES", str(200 * 1024 * 1024)))
 
-        # External URL inputs (download directly into the run folder).
+        # External URL inputs — check shared cache first, download on miss.
         if ref.startswith("http://") or ref.startswith("https://"):
             if _url_is_blocked(ref):
                 raise RuntimeError("input url blocked")
+            download_token = (asset.download_token or "").strip() or None
             ext = os.path.splitext(urllib.parse.urlparse(ref).path)[1] or os.path.splitext(ref)[1]
-            name_hash = hashlib.sha256(ref.encode("utf-8")).hexdigest()[:32]
+            if not ext:
+                try:
+                    head_req = urllib.request.Request(ref, method="HEAD")
+                    if download_token:
+                        head_req.add_header("Authorization", f"Bearer {download_token}")
+                    with urllib.request.urlopen(head_req, timeout=10) as head_resp:
+                        cd = head_resp.headers.get("Content-Disposition") or ""
+                        fname_match = re.search(r'filename\*?=["\']?(?:UTF-8\'\')?([^"\';\r\n]+)', cd, re.IGNORECASE)
+                        if fname_match:
+                            ext = os.path.splitext(fname_match.group(1).strip())[1]
+                except Exception:
+                    pass
+            cache_key_material = ref
+            if download_token:
+                token_hash = hashlib.sha256(download_token.encode("utf-8")).hexdigest()
+                cache_key_material = f"{ref}\n{token_hash}"
+            name_hash = hashlib.sha256(cache_key_material.encode("utf-8")).hexdigest()[:32]
+            cache_path = os.path.join(cache_dir, f"{name_hash}{ext}")
+            if not os.path.exists(cache_path):
+                size, sha256_hex, mime = self._download_url_to_file(ref, cache_path, max_bytes, token=download_token)
+            else:
+                size = os.path.getsize(cache_path)
+                sha256_hex = name_hash
+                with open(cache_path, "rb") as f:
+                    head = f.read(512)
+                mime = _infer_mime_type(ref, head)
             local_path = os.path.join(local_inputs_dir, f"{name_hash}{ext}")
-            size, sha256_hex, mime = self._download_url_to_file(ref, local_path, max_bytes)
+            if not os.path.exists(local_path):
+                try:
+                    os.link(cache_path, local_path)
+                except Exception:
+                    try:
+                        import shutil
+                        shutil.copyfile(cache_path, local_path)
+                    except Exception:
+                        local_path = cache_path
             asset.local_path = local_path
             if not asset.owner:
                 asset.owner = self.owner
@@ -1396,15 +1432,38 @@ class Worker:
         asset.size_bytes = size or None
         asset.sha256 = sha256_hex or None
 
-    def _download_url_to_file(self, src: str, dst: str, max_bytes: int) -> Tuple[int, str, Optional[str]]:
+    def _download_url_to_file(self, src: str, dst: str, max_bytes: int, token: Optional[str] = None) -> Tuple[int, str, Optional[str]]:
         attempts = int(os.getenv("WORKER_DOWNLOAD_RETRIES", "3"))
         attempt = 0
         last_err: Optional[Exception] = None
         while attempt < max(1, attempts):
             attempt += 1
             try:
-                client = urllib.request.build_opener()
-                req = urllib.request.Request(src, method="GET")
+                class _StripAuthOnRedirect(urllib.request.HTTPRedirectHandler):
+                    def redirect_request(self, req: urllib.request.Request, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> Optional[urllib.request.Request]:
+                        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+                        if new_req is not None:
+                            new_req.headers.pop("Authorization", None)
+                            new_req.unredirected_hdrs.pop("Authorization", None)
+                        return new_req
+
+                client = urllib.request.build_opener(_StripAuthOnRedirect())
+                # CivitAI download endpoints require the token as a query
+                # parameter rather than an Authorization header.
+                parsed = urllib.parse.urlparse(src)
+                _is_civitai = parsed.netloc == "civitai.com" or (parsed.netloc or "").endswith(".civitai.com")
+                if token and _is_civitai:
+                    qs = parsed.query + ("&" if parsed.query else "") + urllib.parse.urlencode({"token": token})
+                    request_src = urllib.parse.urlunparse(parsed._replace(query=qs))
+                    logger.info("_download_url_to_file: appending token (last 4: ...%s) to civitai URL", token[-4:])
+                else:
+                    request_src = src
+                req = urllib.request.Request(request_src, method="GET")
+                # Use a non-Python User-Agent; Cloudflare returns 403 for the default "Python-urllib/x.y" UA.
+                req.add_header("User-Agent", "curl/8.7.1")
+                if token and not _is_civitai:
+                    req.add_header("Authorization", f"Bearer {token}")
+                    logger.info("_download_url_to_file: using token (last 4: ...%s) for %s", token[-4:], src)
                 with client.open(req, timeout=30) as resp:
                     size, sha = self._stream_to_file(resp, dst, max_bytes)
                 with open(dst, "rb") as f:

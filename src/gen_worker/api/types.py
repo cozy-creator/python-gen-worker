@@ -19,6 +19,7 @@ class Asset(msgspec.Struct):
     mime_type: Optional[str] = None
     size_bytes: Optional[int] = None
     sha256: Optional[str] = None
+    download_token: Optional[str] = None
 
     def __fspath__(self) -> str:
         if self.local_path is None:
@@ -45,3 +46,18 @@ class Asset(msgspec.Struct):
         if max_bytes is not None and len(data) > max_bytes:
             raise ValueError("asset too large to read into memory")
         return data
+
+
+class LoraSpec(msgspec.Struct):
+    """A LoRA adapter to load for a single inference request.
+
+    ``file`` is materialized by the worker before the function runs, so
+    ``file.local_path`` is guaranteed to be set when your function executes.
+    ``weight`` controls the adapter scale (fuse strength).
+    ``adapter_name`` is optional; if omitted the worker assigns ``lora_0``,
+    ``lora_1``, ... based on list position.
+    """
+
+    file: Asset
+    weight: float = 1.0
+    adapter_name: Optional[str] = None
