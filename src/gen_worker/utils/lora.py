@@ -4,9 +4,8 @@ import logging
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Generator, Protocol, runtime_checkable
 
-import torch
-
 if TYPE_CHECKING:
+    import torch
     from ..api.types import LoraSpec
 
 logger = logging.getLogger(__name__)
@@ -39,6 +38,7 @@ def load_loras(
             result = pipeline(...)
     """
     from safetensors.torch import load_file as load_safetensors
+    import torch
 
     loaded_adapters: list[str] = []
     try:
