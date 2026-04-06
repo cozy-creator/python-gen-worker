@@ -1318,7 +1318,11 @@ class Worker:
                             ext = os.path.splitext(fname_match.group(1).strip())[1]
                 except Exception:
                     pass
-            name_hash = hashlib.sha256(ref.encode("utf-8")).hexdigest()[:32]
+            cache_key_material = ref
+            if download_token:
+                token_hash = hashlib.sha256(download_token.encode("utf-8")).hexdigest()
+                cache_key_material = f"{ref}\n{token_hash}"
+            name_hash = hashlib.sha256(cache_key_material.encode("utf-8")).hexdigest()[:32]
             cache_path = os.path.join(cache_dir, f"{name_hash}{ext}")
             if not os.path.exists(cache_path):
                 size, sha256_hex, mime = self._download_url_to_file(ref, cache_path, max_bytes, token=download_token)
@@ -1447,7 +1451,8 @@ class Worker:
                 # CivitAI download endpoints require the token as a query
                 # parameter rather than an Authorization header.
                 parsed = urllib.parse.urlparse(src)
-                if token and "civitai.com" in (parsed.netloc or ""):
+                _is_civitai = parsed.netloc == "civitai.com" or (parsed.netloc or "").endswith(".civitai.com")
+                if token and _is_civitai:
                     qs = parsed.query + ("&" if parsed.query else "") + urllib.parse.urlencode({"token": token})
                     request_src = urllib.parse.urlunparse(parsed._replace(query=qs))
                     logger.info("_download_url_to_file: appending token (last 4: ...%s) to civitai URL", token[-4:])
@@ -1456,7 +1461,7 @@ class Worker:
                 req = urllib.request.Request(request_src, method="GET")
                 # Use a non-Python User-Agent; Cloudflare returns 403 for the default "Python-urllib/x.y" UA.
                 req.add_header("User-Agent", "curl/8.7.1")
-                if token and "civitai.com" not in (parsed.netloc or ""):
+                if token and not _is_civitai:
                     req.add_header("Authorization", f"Bearer {token}")
                     logger.info("_download_url_to_file: using token (last 4: ...%s) for %s", token[-4:], src)
                 with client.open(req, timeout=30) as resp:
