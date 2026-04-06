@@ -18,6 +18,7 @@ from .trainer import (
 )
 from .api.streaming import iter_transformers_text_deltas
 from .utils.image import image_output_sanitizer
+from .utils.lora import load_loras
 
 # Optional torch-dependent exports
 try:
