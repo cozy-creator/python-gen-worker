@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Generator
+from typing import TYPE_CHECKING, Any, Generator, Protocol, runtime_checkable
 
 import torch
 
@@ -12,9 +12,16 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+@runtime_checkable
+class LoraCapablePipeline(Protocol):
+    def load_lora_weights(self, *args: Any, **kwargs: Any) -> None: ...
+    def set_adapters(self, *args: Any, **kwargs: Any) -> None: ...
+    def unload_lora_weights(self) -> None: ...
+
+
 @contextmanager
 def load_loras(
-    pipeline: object,
+    pipeline: LoraCapablePipeline,
     loras: list["LoraSpec"],
     request_id: str = "",
 ) -> Generator[None, None, None]:

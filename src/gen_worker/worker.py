@@ -1436,7 +1436,7 @@ class Worker:
             attempt += 1
             try:
                 class _StripAuthOnRedirect(urllib.request.HTTPRedirectHandler):
-                    def redirect_request(self, req, fp, code, msg, headers, newurl):
+                    def redirect_request(self, req: urllib.request.Request, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> Optional[urllib.request.Request]:
                         new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
                         if new_req is not None:
                             new_req.headers.pop("Authorization", None)
