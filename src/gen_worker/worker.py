@@ -1324,14 +1324,34 @@ class Worker:
                 cache_key_material = f"{ref}\n{token_hash}"
             name_hash = hashlib.sha256(cache_key_material.encode("utf-8")).hexdigest()[:32]
             cache_path = os.path.join(cache_dir, f"{name_hash}{ext}")
+            sidecar_path = cache_path + ".sha256"
             if not os.path.exists(cache_path):
                 size, sha256_hex, mime = self._download_url_to_file(ref, cache_path, max_bytes, token=download_token)
+                try:
+                    with open(sidecar_path, "w") as _sf:
+                        _sf.write(sha256_hex)
+                except Exception:
+                    pass
             else:
                 size = os.path.getsize(cache_path)
-                sha256_hex = name_hash
                 with open(cache_path, "rb") as f:
                     head = f.read(512)
                 mime = _infer_mime_type(ref, head)
+                try:
+                    with open(sidecar_path) as _sf:
+                        sha256_hex = _sf.read().strip()
+                except FileNotFoundError:
+                    # Sidecar missing for entries cached before this change — compute from file.
+                    h = hashlib.sha256()
+                    with open(cache_path, "rb") as f:
+                        for chunk in iter(lambda: f.read(1 << 20), b""):
+                            h.update(chunk)
+                    sha256_hex = h.hexdigest()
+                    try:
+                        with open(sidecar_path, "w") as _sf:
+                            _sf.write(sha256_hex)
+                    except Exception:
+                        pass
             local_path = os.path.join(local_inputs_dir, f"{name_hash}{ext}")
             if not os.path.exists(local_path):
                 try:
