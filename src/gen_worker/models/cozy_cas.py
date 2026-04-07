@@ -9,11 +9,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Tuple
 
+import logging
+
 import aiohttp
 import backoff
 from blake3 import blake3
 
 from .refs import CozyRef
+
+_log = logging.getLogger(__name__)
 
 
 def _norm_rel_path(p: str) -> str:
@@ -137,18 +141,20 @@ def _parse_files(v: Any) -> List[CozyFileEntry]:
     if not isinstance(v, list):
         return []
     out: List[CozyFileEntry] = []
-    for ent in v:
+    for i, ent in enumerate(v):
         if not isinstance(ent, dict):
+            _log.warning("_parse_files: entry %d is not a dict, skipping", i)
             continue
         path = str(ent.get("path") or "").strip()
         url = str(ent.get("url") or "").strip()
-        if not path or not url:
+        if not path:
+            _log.warning("_parse_files: entry %d missing path, skipping", i)
+            continue
+        if not url:
+            _log.warning("_parse_files: entry %d (%s) missing url, skipping", i, path)
             continue
         size = int(ent.get("size_bytes") or ent.get("size") or 0)
         b3 = str(ent.get("blake3") or ent.get("blake3_hex") or "").strip()
-        if not b3:
-            # allow missing hash for now, but keep empty to force download-time decision
-            b3 = ""
         out.append(CozyFileEntry(path=path, size_bytes=size, blake3_hex=b3, url=url))
     return out
 

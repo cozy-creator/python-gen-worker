@@ -72,4 +72,7 @@ def load_loras(
 
     finally:
         if loaded_adapters and hasattr(pipeline, "unload_lora_weights"):
-            pipeline.unload_lora_weights()
+            try:
+                pipeline.unload_lora_weights()
+            except Exception:
+                logger.warning("unload_lora_weights failed; pipeline may have stale adapters", exc_info=True)

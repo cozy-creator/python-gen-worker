@@ -199,6 +199,22 @@ class _RealtimeSocketAdapter(RealtimeSocket):
 
 
 # Define the interceptor class correctly
+def _parse_manifest_model_mapping(mapping: Dict[str, Any]) -> tuple[Dict[str, str], Dict[str, Dict[str, Any]]]:
+    ids: Dict[str, str] = {}
+    specs: Dict[str, Dict[str, Any]] = {}
+    for k, v in mapping.items():
+        key = str(k).strip()
+        if not key or not isinstance(v, dict):
+            continue
+        ref = _canonicalize_model_ref_string(str(v.get("ref") or "").strip())
+        if not ref:
+            continue
+        dtypes = v.get("dtypes")
+        ids[key] = ref
+        specs[key] = {"ref": ref, "dtypes": [str(x) for x in dtypes if str(x).strip()] if isinstance(dtypes, list) else []}
+    return ids, specs
+
+
 class _AuthInterceptor(grpc.StreamStreamClientInterceptor):
     def __init__(self, token: str) -> None:
         self._token = token
@@ -415,21 +431,7 @@ class Worker:
         if manifest and isinstance(manifest, dict):
             global_models = manifest.get("models")
             if isinstance(global_models, dict):
-                out_fixed: Dict[str, str] = {}
-                out_fixed_spec: Dict[str, Dict[str, Any]] = {}
-                for k, v in global_models.items():
-                    key = str(k).strip()
-                    if not key or not isinstance(v, dict):
-                        continue
-                    ref = _canonicalize_model_ref_string(str(v.get("ref") or "").strip())
-                    if not ref:
-                        continue
-                    dtypes = v.get("dtypes")
-                    out_fixed[key] = ref
-                    if isinstance(dtypes, list):
-                        out_fixed_spec[key] = {"ref": ref, "dtypes": [str(x) for x in dtypes if str(x).strip()]}
-                    else:
-                        out_fixed_spec[key] = {"ref": ref, "dtypes": []}
+                out_fixed, out_fixed_spec = _parse_manifest_model_mapping(global_models)
                 if out_fixed:
                     self._fixed_model_id_by_key = out_fixed
                 if out_fixed_spec:
@@ -443,21 +445,7 @@ class Worker:
                     fn = str(fn_name).strip()
                     if not fn:
                         continue
-                    keyspace: Dict[str, str] = {}
-                    keyspace_spec: Dict[str, Dict[str, Any]] = {}
-                    for k, v in mapping.items():
-                        key = str(k).strip()
-                        if not key or not isinstance(v, dict):
-                            continue
-                        ref = _canonicalize_model_ref_string(str(v.get("ref") or "").strip())
-                        if not ref:
-                            continue
-                        dtypes = v.get("dtypes")
-                        keyspace[key] = ref
-                        if isinstance(dtypes, list):
-                            keyspace_spec[key] = {"ref": ref, "dtypes": [str(x) for x in dtypes if str(x).strip()]}
-                        else:
-                            keyspace_spec[key] = {"ref": ref, "dtypes": []}
+                    keyspace, keyspace_spec = _parse_manifest_model_mapping(mapping)
                     if keyspace:
                         self._payload_model_id_by_key_by_function[fn] = keyspace
                     if keyspace_spec:
