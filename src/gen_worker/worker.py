@@ -199,6 +199,22 @@ class _RealtimeSocketAdapter(RealtimeSocket):
 
 
 # Define the interceptor class correctly
+def _parse_manifest_model_mapping(mapping: Dict[str, Any]) -> tuple[Dict[str, str], Dict[str, Dict[str, Any]]]:
+    ids: Dict[str, str] = {}
+    specs: Dict[str, Dict[str, Any]] = {}
+    for k, v in mapping.items():
+        key = str(k).strip()
+        if not key or not isinstance(v, dict):
+            continue
+        ref = _canonicalize_model_ref_string(str(v.get("ref") or "").strip())
+        if not ref:
+            continue
+        dtypes = v.get("dtypes")
+        ids[key] = ref
+        specs[key] = {"ref": ref, "dtypes": [str(x) for x in dtypes if str(x).strip()] if isinstance(dtypes, list) else []}
+    return ids, specs
+
+
 class _AuthInterceptor(grpc.StreamStreamClientInterceptor):
     def __init__(self, token: str) -> None:
         self._token = token
@@ -415,21 +431,7 @@ class Worker:
         if manifest and isinstance(manifest, dict):
             global_models = manifest.get("models")
             if isinstance(global_models, dict):
-                out_fixed: Dict[str, str] = {}
-                out_fixed_spec: Dict[str, Dict[str, Any]] = {}
-                for k, v in global_models.items():
-                    key = str(k).strip()
-                    if not key or not isinstance(v, dict):
-                        continue
-                    ref = _canonicalize_model_ref_string(str(v.get("ref") or "").strip())
-                    if not ref:
-                        continue
-                    dtypes = v.get("dtypes")
-                    out_fixed[key] = ref
-                    if isinstance(dtypes, list):
-                        out_fixed_spec[key] = {"ref": ref, "dtypes": [str(x) for x in dtypes if str(x).strip()]}
-                    else:
-                        out_fixed_spec[key] = {"ref": ref, "dtypes": []}
+                out_fixed, out_fixed_spec = _parse_manifest_model_mapping(global_models)
                 if out_fixed:
                     self._fixed_model_id_by_key = out_fixed
                 if out_fixed_spec:
@@ -443,21 +445,7 @@ class Worker:
                     fn = str(fn_name).strip()
                     if not fn:
                         continue
-                    keyspace: Dict[str, str] = {}
-                    keyspace_spec: Dict[str, Dict[str, Any]] = {}
-                    for k, v in mapping.items():
-                        key = str(k).strip()
-                        if not key or not isinstance(v, dict):
-                            continue
-                        ref = _canonicalize_model_ref_string(str(v.get("ref") or "").strip())
-                        if not ref:
-                            continue
-                        dtypes = v.get("dtypes")
-                        keyspace[key] = ref
-                        if isinstance(dtypes, list):
-                            keyspace_spec[key] = {"ref": ref, "dtypes": [str(x) for x in dtypes if str(x).strip()]}
-                        else:
-                            keyspace_spec[key] = {"ref": ref, "dtypes": []}
+                    keyspace, keyspace_spec = _parse_manifest_model_mapping(mapping)
                     if keyspace:
                         self._payload_model_id_by_key_by_function[fn] = keyspace
                     if keyspace_spec:
@@ -1324,14 +1312,34 @@ class Worker:
                 cache_key_material = f"{ref}\n{token_hash}"
             name_hash = hashlib.sha256(cache_key_material.encode("utf-8")).hexdigest()[:32]
             cache_path = os.path.join(cache_dir, f"{name_hash}{ext}")
+            sidecar_path = cache_path + ".sha256"
             if not os.path.exists(cache_path):
                 size, sha256_hex, mime = self._download_url_to_file(ref, cache_path, max_bytes, token=download_token)
+                try:
+                    with open(sidecar_path, "w") as _sf:
+                        _sf.write(sha256_hex)
+                except Exception:
+                    pass
             else:
                 size = os.path.getsize(cache_path)
-                sha256_hex = name_hash
                 with open(cache_path, "rb") as f:
                     head = f.read(512)
                 mime = _infer_mime_type(ref, head)
+                try:
+                    with open(sidecar_path) as _sf:
+                        sha256_hex = _sf.read().strip()
+                except FileNotFoundError:
+                    # Sidecar missing for entries cached before this change — compute from file.
+                    h = hashlib.sha256()
+                    with open(cache_path, "rb") as f:
+                        for chunk in iter(lambda: f.read(1 << 20), b""):
+                            h.update(chunk)
+                    sha256_hex = h.hexdigest()
+                    try:
+                        with open(sidecar_path, "w") as _sf:
+                            _sf.write(sha256_hex)
+                    except Exception:
+                        pass
             local_path = os.path.join(local_inputs_dir, f"{name_hash}{ext}")
             if not os.path.exists(local_path):
                 try:
