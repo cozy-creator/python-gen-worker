@@ -8,7 +8,7 @@ from typing import Any, Coroutine, Mapping, Optional
 import random
 import time
 
-from .cozy_snapshot_v2 import ensure_snapshot_async, ensure_snapshot_sync
+from .cozy_snapshot_v2 import ensure_snapshot_async
 from .downloader import ModelDownloader
 from .hub_client import (
     CozyHubError,
