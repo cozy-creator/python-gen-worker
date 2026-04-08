@@ -272,7 +272,7 @@ def test_model_ref_downloader_uses_resolved_urls_without_tensorhub_token(tmp_pat
         resolved_by_id = {"cozy:o/r:latest": resolved}
         tok = set_resolved_cozy_models_by_id(resolved_by_id)
         try:
-            dl = ModelRefDownloader(cozy_base_url=None, cozy_token=None, allow_tensorhub_api_resolve=False)
+            dl = ModelRefDownloader(cozy_base_url=None, cozy_token=None, )
             local = dl.download("cozy:o/r:latest", tmp_path.as_posix())
             assert (Path(local) / "cozy.pipeline.yaml").read_bytes() == b1
         finally:
@@ -333,7 +333,6 @@ def test_model_ref_downloader_hf_prefers_tensorhub_public_request(tmp_path: Path
         dl = ModelRefDownloader(
             cozy_base_url=base,
             cozy_token=None,
-            allow_tensorhub_api_resolve=False,
         )
         local = Path(dl.download("hf:o/r@main", tmp_path.as_posix()))
         assert (local / "cozy.pipeline.yaml").read_bytes() == b1
@@ -397,7 +396,6 @@ def test_model_ref_downloader_public_request_polls_202_then_200(tmp_path: Path) 
         dl = ModelRefDownloader(
             cozy_base_url=base,
             cozy_token=None,
-            allow_tensorhub_api_resolve=False,
         )
         local = Path(dl.download("hf:o/r@main", tmp_path.as_posix()))
         assert (local / "cozy.pipeline.yaml").read_bytes() == b1
