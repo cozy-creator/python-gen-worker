@@ -8,7 +8,6 @@ from typing import Any, Coroutine, Mapping, Optional
 import random
 import time
 
-from .cozy_cas import CozyHubClient, CozySnapshotDownloader
 from .cozy_snapshot_v2 import ensure_snapshot_async, ensure_snapshot_sync
 from .downloader import ModelDownloader
 from .hub_client import (
@@ -63,15 +62,9 @@ class ModelRefDownloader(ModelDownloader):
     """Composite downloader for phase-1 model refs.
 
     Supported schemes:
-      - Cozy Hub snapshots (default): owner/repo[:tag] or owner/repo@sha256:<digest>
-        optionally prefixed with "cozy:".
+      - Cozy Hub snapshots: owner/repo[:tag] or owner/repo@sha256:<digest>,
+        optionally prefixed with "cozy:". Requires orchestrator-provided presigned URLs.
       - Hugging Face: hf:owner/repo[@revision]
-
-    Security posture (issue #92):
-      - By default, cozy: downloads MUST use orchestrator-provided resolved manifests
-        (presigned URLs). The worker should not call Cozy Hub APIs.
-      - If WORKER_ALLOW_TENSORHUB_API_RESOLVE=1, the worker may call Cozy Hub APIs as
-        a dev-only fallback.
 
     Returns a local directory path for both schemes.
     """
@@ -84,26 +77,15 @@ class ModelRefDownloader(ModelDownloader):
         cozy_token: Optional[str] = None,
         hf_home: Optional[str] = None,
         hf_token: Optional[str] = None,
-        *,
-        allow_tensorhub_api_resolve: bool = False,
     ) -> None:
         self._cozy_base_url = (cozy_base_url or "").strip() or None
         self._cozy_token = (cozy_token or "").strip() or None
-        self._allow_tensorhub_api_resolve = bool(allow_tensorhub_api_resolve)
 
         self._hf = HuggingFaceHubDownloader(hf_home=hf_home, hf_token=hf_token)
 
         self._cozy_v2: Optional[CozyHubV2Client] = None
         if self._cozy_base_url:
-            # Token is optional. If set, it enables ingest-if-missing for public HF models.
             self._cozy_v2 = CozyHubV2Client(base_url=self._cozy_base_url, token=self._cozy_token)
-
-        # Legacy snapshot/object downloader kept for compatibility with older Cozy Hub
-        # routes; only enabled when API resolve is explicitly allowed.
-        self._cozy_legacy: Optional[CozySnapshotDownloader] = None
-        if self._allow_tensorhub_api_resolve and self._cozy_base_url:
-            client = CozyHubClient(self._cozy_base_url, token=self._cozy_token)
-            self._cozy_legacy = CozySnapshotDownloader(client)
 
     async def _download_async(self, parsed: ParsedModelRef, dest_dir: Path) -> Path:
         if parsed.scheme == "hf" and parsed.hf is not None:
@@ -152,27 +134,9 @@ class ModelRefDownloader(ModelDownloader):
                     resolved=resolved,
                 )
 
-            if not self._allow_tensorhub_api_resolve:
-                raise RuntimeError(
-                    "cozy model download requires orchestrator-resolved URLs (missing resolved_cozy_models_by_id entry)"
-                )
-            if not self._cozy_base_url:
-                raise RuntimeError("cozy downloads require TENSORHUB_URL")
-
-            # Prefer Cozy Hub v2 resolve flow.
-            try:
-                return await ensure_snapshot_async(
-                    base_dir=dest_dir,
-                    ref=parsed.cozy,
-                    base_url=self._cozy_base_url,
-                    token=self._cozy_token,
-                    resolved=None,
-                )
-            except Exception:
-                # Fall back to legacy object-based downloader if the hub is old.
-                if self._cozy_legacy is None:
-                    raise
-                return await self._cozy_legacy.ensure_snapshot(dest_dir, parsed.cozy)
+            raise RuntimeError(
+                "cozy model download requires orchestrator-resolved URLs (missing resolved_cozy_models_by_id entry)"
+            )
 
         raise ValueError("invalid parsed model ref")
 
