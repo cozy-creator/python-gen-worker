@@ -267,7 +267,6 @@ class RuntimeInputDownloader:
             cozy_token=os.getenv("TENSORHUB_TOKEN"),
             hf_home=os.getenv("HF_HOME"),
             hf_token=os.getenv("HF_TOKEN"),
-            allow_tensorhub_api_resolve=is_truthy(os.getenv("WORKER_ALLOW_TENSORHUB_API_RESOLVE")),
         )
 
     def _hash_name(self, ref: str) -> str:

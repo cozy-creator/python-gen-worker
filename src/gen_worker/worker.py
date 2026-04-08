@@ -392,15 +392,10 @@ class Worker:
         self._downloader = downloader
         if self._downloader is None:
             base_url = os.getenv("TENSORHUB_URL", "").strip()
-            allow_api = str(os.getenv("WORKER_ALLOW_TENSORHUB_API_RESOLVE", "") or "").strip().lower() in ("1", "true", "t", "yes", "y")
             token = os.getenv("TENSORHUB_TOKEN", "").strip() or None
-            # Default to the composite model-ref downloader:
-            # - Cozy snapshots using orchestrator-resolved URLs (no Cozy Hub API calls)
-            # - Hugging Face refs via huggingface_hub when installed
             self._downloader = ModelRefDownloader(
                 cozy_base_url=base_url,
                 cozy_token=token,
-                allow_tensorhub_api_resolve=allow_api,
             )
         self._supported_model_ids_from_scheduler: Optional[List[str]] = None  # allowlist from scheduler (repo refs)
         self._required_variant_refs_from_scheduler: Optional[List[str]] = None  # warm-start pinned variants
