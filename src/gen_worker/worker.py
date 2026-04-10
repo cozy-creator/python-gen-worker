@@ -99,6 +99,13 @@ def _workspace_scope_id(request_id: str, run_id: Optional[str]) -> str:
     return str(request_id or "").strip()
 
 
+def _extract_worker_capability_token(envelope: Any) -> str:
+    token = str(getattr(envelope, "worker_capability_token", "") or "").strip()
+    if token:
+        return token
+    return str(getattr(envelope, "file_token", "") or "").strip()
+
+
 @dataclass(frozen=True)
 class _TaskSpec:
     name: str
@@ -1444,7 +1451,7 @@ class Worker:
         # Non-URL refs require explicit file API credentials. Standard execution should
         # receive presigned input URLs from orchestrator and avoid this path.
         base = (getattr(ctx, "_file_api_base_url", None) or "").strip()
-        token = (getattr(ctx, "_file_api_token", None) or "").strip()
+        token = (getattr(ctx, "_worker_capability_token", None) or getattr(ctx, "_file_api_token", None) or "").strip()
         if not base or not token:
             raise RuntimeError("input ref was not materialized to URL and no file API credentials were provided")
         base = base.rstrip("/")
@@ -1461,7 +1468,7 @@ class Worker:
         except urllib.error.HTTPError as e:
             code = getattr(e, "code", 0)
             if code in (401, 403):
-                raise AuthError(f"file read unauthorized ({code}): check file_token validity") from e
+                raise AuthError(f"file read unauthorized ({code}): check worker_capability_token validity") from e
             raise RuntimeError(f"failed to stat asset ({code or 'unknown'})") from e
         size = int(size_hdr) if size_hdr.isdigit() else 0
         if max_bytes > 0 and size > max_bytes:
@@ -1496,7 +1503,7 @@ class Worker:
             except urllib.error.HTTPError as e:
                 code = getattr(e, "code", 0)
                 if code in (401, 403):
-                    raise AuthError(f"file read unauthorized ({code}): check file_token validity") from e
+                    raise AuthError(f"file read unauthorized ({code}): check worker_capability_token validity") from e
                 raise RuntimeError(f"failed to download asset ({code or 'unknown'})") from e
 
         local_path = os.path.join(local_inputs_dir, cache_name)
@@ -2941,7 +2948,7 @@ class Worker:
         owner = str(getattr(request, "owner", "") or "") or (self.owner or "")
         invoker_id = str(getattr(request, "invoker_id", "") or "")
         file_base_url = str(getattr(request, "file_base_url", "") or "")
-        file_token = str(getattr(request, "file_token", "") or "")
+        worker_capability_token = _extract_worker_capability_token(request)
         resolved_cozy_models_by_id = dict(getattr(request, "resolved_cozy_models_by_id", {}) or {})
         parent_request_id = str(getattr(request, "parent_request_id", "") or "").strip() or None
         child_request_id = str(getattr(request, "child_request_id", "") or "").strip() or None
@@ -3047,7 +3054,8 @@ class Worker:
             invoker_id=invoker_id or None,
             timeout_ms=timeout_ms if timeout_ms > 0 else None,
             file_api_base_url=file_base_url or None,
-            file_api_token=file_token or None,
+            worker_capability_token=worker_capability_token or None,
+            file_api_token=worker_capability_token or None,
             materialized_input_urls=materialized_input_urls or None,
             local_output_dir=None,
             resolved_cozy_models_by_id=resolved_cozy_models_by_id or None,
@@ -3152,7 +3160,7 @@ class Worker:
         invoker_id = str(getattr(cmd, "invoker_id", "") or "")
         timeout_ms = int(getattr(cmd, "timeout_ms", 0) or 0) or None
         file_base_url = str(getattr(cmd, "file_base_url", "") or "")
-        file_token = str(getattr(cmd, "file_token", "") or "")
+        worker_capability_token = _extract_worker_capability_token(cmd)
         materialized_input_urls: Dict[str, str] = {}
         raw_urls_map = getattr(cmd, "input_ref_urls", None)
         if isinstance(raw_urls_map, cabc.Mapping):
@@ -3180,7 +3188,8 @@ class Worker:
             invoker_id=invoker_id or None,
             timeout_ms=timeout_ms,
             file_api_base_url=file_base_url or None,
-            file_api_token=file_token or None,
+            worker_capability_token=worker_capability_token or None,
+            file_api_token=worker_capability_token or None,
             materialized_input_urls=materialized_input_urls or None,
             resolved_cozy_models_by_id=getattr(self, "_resolved_cozy_models_by_id_baseline", None) or None,
         )

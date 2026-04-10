@@ -5,6 +5,7 @@ import ipaddress
 import json
 import logging
 import os
+import base64
 import shutil
 import socket
 import tempfile
@@ -95,12 +96,76 @@ def _require_file_api_base_url() -> str:
 
 
 def _require_file_api_token() -> str:
-    token = os.getenv("FILE_API_TOKEN", "").strip()
+    token = os.getenv("WORKER_CAPABILITY_TOKEN", "").strip()
     if not token:
-        token = os.getenv("TENSORHUB_TOKEN", "").strip()
+        token = os.getenv("FILE_API_TOKEN", "").strip()
     if not token:
-        raise RuntimeError("FILE_API_TOKEN is required for file operations")
+        raise RuntimeError("WORKER_CAPABILITY_TOKEN (or FILE_API_TOKEN) is required for file operations")
     return token
+
+
+def _parse_owner_repo(value: str) -> tuple[str, str]:
+    raw = str(value or "").strip().strip("/")
+    if "/" not in raw:
+        raise ValueError("destination_repo must be in '<owner>/<repo>' format")
+    owner, repo = raw.split("/", 1)
+    owner = owner.strip()
+    repo = repo.strip()
+    if not owner or not repo:
+        raise ValueError("destination_repo must be in '<owner>/<repo>' format")
+    return owner, repo
+
+
+def _decode_unverified_jwt_claims(token: str) -> Dict[str, Any]:
+    raw = str(token or "").strip()
+    if raw.count(".") < 2:
+        return {}
+    try:
+        parts = raw.split(".")
+        payload_b64 = parts[1]
+        pad = "=" * ((4 - (len(payload_b64) % 4)) % 4)
+        payload = base64.urlsafe_b64decode((payload_b64 + pad).encode("ascii"))
+        parsed = json.loads(payload.decode("utf-8"))
+    except Exception:
+        return {}
+    if isinstance(parsed, dict):
+        return parsed
+    return {}
+
+
+def _normalize_repo_name(value: str) -> str:
+    return str(value or "").strip().strip("/").lower()
+
+
+def _assert_token_repo_scope_matches_destination(token: str, owner: str, repo: str) -> None:
+    claims = _decode_unverified_jwt_claims(token)
+    if not claims:
+        raise ValueError("worker_capability_token must be a structured JWT")
+
+    destination_owner = _normalize_repo_name(owner)
+    destination_repo = _normalize_repo_name(repo)
+    cap_kind = _normalize_repo_name(str(claims.get("cap_kind") or ""))
+    if cap_kind != "worker_capability":
+        raise ValueError("worker_capability_token must have cap_kind=worker_capability")
+    actions = [str(a or "").strip() for a in list(claims.get("actions") or [])]
+    if "revision:create" not in actions:
+        raise ValueError("worker_capability_token missing required action 'revision:create'")
+    claimed_owner = _normalize_repo_name(str(claims.get("owner") or claims.get("org") or ""))
+    claimed_repo = _normalize_repo_name(str(claims.get("repo") or ""))
+
+    if claimed_repo:
+        try:
+            claimed_repo_owner, claimed_repo_name = _parse_owner_repo(claimed_repo)
+        except ValueError as e:
+            raise ValueError("worker_capability_token has invalid repo scope claim") from e
+        if _normalize_repo_name(claimed_repo_owner) != destination_owner or _normalize_repo_name(claimed_repo_name) != destination_repo:
+            raise ValueError("destination_repo does not match worker_capability_token repo scope")
+        if claimed_owner and claimed_owner != destination_owner:
+            raise ValueError("destination_repo owner does not match worker_capability_token owner scope")
+        return
+
+    if claimed_owner and claimed_owner != destination_owner:
+        raise ValueError("destination_repo owner does not match worker_capability_token owner scope")
 
 
 def _http_request(
@@ -305,6 +370,7 @@ class RequestContext:
         invoker_id: Optional[str] = None,
         timeout_ms: Optional[int] = None,
         file_api_base_url: Optional[str] = None,
+        worker_capability_token: Optional[str] = None,
         file_api_token: Optional[str] = None,
         materialized_input_urls: Optional[Dict[str, str]] = None,
         local_output_dir: Optional[str] = None,
@@ -324,7 +390,9 @@ class RequestContext:
         self._invoker_id = invoker_id
         self._timeout_ms = timeout_ms
         self._file_api_base_url = (file_api_base_url or "").strip() or None
-        self._file_api_token = (file_api_token or "").strip() or None
+        self._worker_capability_token = (worker_capability_token or file_api_token or "").strip() or None
+        # Legacy private name retained for compatibility with older call paths.
+        self._file_api_token = self._worker_capability_token
         self._materialized_input_urls = dict(materialized_input_urls or {})
         self._local_output_dir = (local_output_dir or "").strip() or None
         self._resolved_cozy_models_by_id = resolved_cozy_models_by_id
@@ -396,10 +464,14 @@ class RequestContext:
             return self._file_api_base_url.rstrip("/")
         return _require_file_api_base_url()
 
-    def _get_file_api_token(self) -> str:
-        if self._file_api_token:
-            return self._file_api_token
+    def _get_worker_capability_token(self) -> str:
+        if self._worker_capability_token:
+            return self._worker_capability_token
         return _require_file_api_token()
+
+    def _get_file_api_token(self) -> str:
+        # Legacy compatibility alias.
+        return self._get_worker_capability_token()
 
     def _resolve_local_output_path(self, ref: str) -> Optional[str]:
         """
@@ -601,7 +673,7 @@ class RequestContext:
         except urllib.error.HTTPError as e:
             code = getattr(e, 'code', 0)
             if code in (401, 403):
-                raise AuthError(f"file save unauthorized ({code}): check file_token validity") from e
+                raise AuthError(f"file save unauthorized ({code}): check worker_capability_token validity") from e
             raise RuntimeError(f"file save failed ({code or 'unknown'})") from e
         finally:
             rm = getattr(self, "_run_metrics", None)
@@ -665,7 +737,7 @@ class RequestContext:
                 resp = requests.put(url, headers=headers, data=fin, timeout=30)
             code = int(resp.status_code)
             if code in (401, 403):
-                raise AuthError(f"file save unauthorized ({code}): check file_token validity")
+                raise AuthError(f"file save unauthorized ({code}): check worker_capability_token validity")
             if code < 200 or code >= 300:
                 raise RuntimeError(f"file save failed ({code})")
             try:
@@ -783,7 +855,7 @@ class RequestContext:
         except urllib.error.HTTPError as e:
             code = getattr(e, "code", 0)
             if code in (401, 403):
-                raise AuthError(f"file save unauthorized ({code}): check file_token validity") from e
+                raise AuthError(f"file save unauthorized ({code}): check worker_capability_token validity") from e
             if code == 409:
                 raise RuntimeError("output path already exists") from e
             raise RuntimeError(f"file save failed ({code or 'unknown'})") from e
@@ -851,7 +923,7 @@ class RequestContext:
                 resp = requests.post(url, headers=headers, data=fin, timeout=30)
             code = int(resp.status_code)
             if code in (401, 403):
-                raise AuthError(f"file save unauthorized ({code}): check file_token validity")
+                raise AuthError(f"file save unauthorized ({code}): check worker_capability_token validity")
             if code == 409:
                 raise RuntimeError("output path already exists")
             if code < 200 or code >= 300:
@@ -885,3 +957,161 @@ class RequestContext:
 
     def save_file_overwrite(self, ref: str, local_path: str) -> Asset:
         return self.save_file(ref, local_path)
+
+    def publish_repo_revision(
+        self,
+        *,
+        destination_repo: str,
+        artifact_refs: Optional[List[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        create_if_missing: bool = True,
+    ) -> Dict[str, Any]:
+        """Publish conversion lineage to Tensorhub using public HTTP APIs only.
+
+        Uses worker capability auth and never touches DB/internal-only paths.
+        """
+        owner, repo = _parse_owner_repo(destination_repo)
+        base = (self._file_api_base_url or "").strip().rstrip("/")
+        token = (self._worker_capability_token or self._file_api_token or "").strip()
+        if token:
+            _assert_token_repo_scope_matches_destination(token, owner, repo)
+        logger.info(
+            "worker_publish_attempt request_id=%s run_id=%s owner=%s repo=%s",
+            self.request_id,
+            self.run_id or "",
+            owner,
+            repo,
+        )
+        if not base or not token:
+            # Local/dev mode: no remote publish channel configured.
+            return {"ok": False, "skipped": True, "reason": "missing_worker_capability_channel", "owner": owner, "repo": repo}
+
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "X-Cozy-Owner": owner,
+        }
+
+        def _request_json(method: str, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+            url = f"{base}{path}"
+            resp = requests.request(method=method, url=url, headers=headers, data=json.dumps(payload), timeout=30)
+            code = int(resp.status_code)
+            if code in (401, 403):
+                raise AuthError(f"repo publish unauthorized ({code}): check worker_capability_token validity")
+            if code < 200 or code >= 300:
+                # Create may be idempotent and already exists.
+                if path == "/api/v1/repos" and code in (400, 409):
+                    return {"ok": True, "already_exists": True}
+                raise RuntimeError(f"repo publish request failed ({code}) {path}: {resp.text[:256]}")
+            try:
+                parsed = resp.json()
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                pass
+            return {"ok": True}
+
+        if create_if_missing:
+            _request_json("POST", "/api/v1/repos", {"repo_name": repo})
+
+        start = _request_json(
+            "POST",
+            f"/api/v1/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}/runs/start",
+            {"kind": "conversion", "input_versions": []},
+        )
+        run_id = str(start.get("run_id") or "").strip()
+        if run_id == "":
+            raise RuntimeError("repo publish failed: missing run_id from start response")
+
+        metrics = dict(metadata or {})
+        refs = [str(r or "").strip() for r in list(artifact_refs or []) if str(r or "").strip()]
+        if refs:
+            metrics["artifact_refs"] = refs
+        _request_json(
+            "POST",
+            f"/api/v1/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}/runs/{urllib.parse.quote(run_id, safe='')}/finalize",
+            {"status": "succeeded", "metrics_json": metrics, "cost_json": {}, "output_versions": []},
+        )
+
+        logger.info(
+            "worker_publish_succeeded request_id=%s run_id=%s owner=%s repo=%s published_run_id=%s",
+            self.request_id,
+            self.run_id or "",
+            owner,
+            repo,
+            run_id,
+        )
+
+        return {"ok": True, "owner": owner, "repo": repo, "run_id": run_id}
+
+    def read_repo_metadata(self, *, destination_repo: str) -> Dict[str, Any]:
+        """Read repo-level metadata from Tensorhub public HTTP API."""
+        owner, repo = _parse_owner_repo(destination_repo)
+        base = (self._file_api_base_url or "").strip().rstrip("/")
+        token = (self._worker_capability_token or self._file_api_token or "").strip()
+        if token:
+            _assert_token_repo_scope_matches_destination(token, owner, repo)
+        if not base or not token:
+            return {"ok": False, "skipped": True, "reason": "missing_worker_capability_channel", "exists": False, "metadata": {}}
+
+        url = f"{base}/api/v1/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}/metadata"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "X-Cozy-Owner": owner,
+        }
+        resp = requests.get(url, headers=headers, timeout=30)
+        code = int(resp.status_code)
+        if code in (401, 403):
+            raise AuthError(f"repo metadata read unauthorized ({code}): check worker_capability_token validity")
+        if code == 404:
+            return {"ok": True, "exists": False, "metadata": {}}
+        if code < 200 or code >= 300:
+            raise RuntimeError(f"repo metadata read failed ({code}): {resp.text[:256]}")
+
+        try:
+            parsed = resp.json()
+        except Exception:
+            parsed = {}
+        if not isinstance(parsed, dict):
+            parsed = {}
+        metadata = parsed.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        exists = bool(parsed.get("exists", True))
+        return {"ok": True, "exists": exists, "metadata": metadata}
+
+    def write_repo_metadata(self, *, destination_repo: str, metadata: Dict[str, Any]) -> Dict[str, Any]:
+        """Write repo-level metadata via Tensorhub public HTTP API."""
+        owner, repo = _parse_owner_repo(destination_repo)
+        if not isinstance(metadata, dict):
+            raise ValueError("metadata must be an object")
+        base = (self._file_api_base_url or "").strip().rstrip("/")
+        token = (self._worker_capability_token or self._file_api_token or "").strip()
+        if token:
+            _assert_token_repo_scope_matches_destination(token, owner, repo)
+        if not base or not token:
+            return {"ok": False, "skipped": True, "reason": "missing_worker_capability_channel", "owner": owner, "repo": repo}
+
+        url = f"{base}/api/v1/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}/metadata"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "X-Cozy-Owner": owner,
+        }
+        resp = requests.put(url, headers=headers, data=json.dumps({"metadata": metadata}), timeout=30)
+        code = int(resp.status_code)
+        if code in (401, 403):
+            raise AuthError(f"repo metadata write unauthorized ({code}): check worker_capability_token validity")
+        if code < 200 or code >= 300:
+            raise RuntimeError(f"repo metadata write failed ({code}): {resp.text[:256]}")
+
+        try:
+            parsed = resp.json()
+        except Exception:
+            parsed = {}
+        if not isinstance(parsed, dict):
+            parsed = {}
+        returned = parsed.get("metadata")
+        if not isinstance(returned, dict):
+            returned = metadata
+        return {"ok": True, "owner": owner, "repo": repo, "metadata": returned}
