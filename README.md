@@ -179,6 +179,33 @@ def process(ctx: RequestContext, payload: Input) -> Output:
     return Output(result=asset.ref)
 ```
 
+For conversion/training weight artifacts, use `Tensors`:
+
+```python
+from gen_worker import Tensors
+
+@worker_function()
+def convert(ctx: RequestContext, payload: Input) -> Output:
+    local_weights = "/tmp/converted.safetensors"
+    tensors = ctx.save_checkpoint(
+        f"runs/{ctx.request_id}/outputs/weights.safetensors",
+        local_weights,
+    )
+    return Output(weights=tensors)
+```
+
+For large artifacts, stream bytes incrementally and finalize once:
+
+```python
+with ctx.open_checkpoint_stream(
+    f"runs/{ctx.request_id}/outputs/weights.safetensors",
+    format="safetensors",
+) as out:
+    for chunk in generate_chunks():
+        out.write(chunk)
+    tensors = out.finalize()
+```
+
 ### Trainer Mode (Class-Only)
 
 ```python

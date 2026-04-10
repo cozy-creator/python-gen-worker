@@ -64,7 +64,7 @@ from .models.interface import ModelManagementInterface
 from .models.downloader import ModelDownloader
 from .models.ref_downloader import ModelRefDownloader
 from .models.refs import parse_model_ref
-from .api.types import Asset
+from .api.types import Asset, Tensors
 from .models.cache import ModelCache
 from .run_metrics_v1 import RunMetricsV1, best_effort_bytes_downloaded, best_effort_init_model_metrics, safe_json_bytes
 from .models.cache_paths import worker_local_model_cache_dir_default, worker_model_cache_dir
@@ -90,6 +90,13 @@ O = TypeVar('O')  # Output type
 ActionFunc = Callable[[Any, I], O]
 
 HEARTBEAT_INTERVAL = 10  # seconds
+
+
+def _workspace_scope_id(request_id: str, run_id: Optional[str]) -> str:
+    rid = str(run_id or "").strip()
+    if rid:
+        return rid
+    return str(request_id or "").strip()
 
 
 @dataclass(frozen=True)
@@ -1243,7 +1250,7 @@ class Worker:
             logger.warning("Attempted to send message while worker is stopping or stopped.")
 
     def _materialize_assets(self, ctx: RequestContext, obj: Any) -> None:
-        if isinstance(obj, Asset):
+        if isinstance(obj, (Asset, Tensors)):
             self._materialize_asset(ctx, obj)
             return
         if isinstance(obj, list):
@@ -1264,7 +1271,89 @@ class Worker:
                     continue
                 self._materialize_assets(ctx, val)
 
-    def _materialize_asset(self, ctx: RequestContext, asset: Asset) -> None:
+    def _auto_upload_output_assets(self, ctx: RequestContext, output_obj: Any) -> Any:
+        """
+        Auto-persist tenant-returned local assets.
+
+        If a returned Asset/Tensors has local_path set, upload it through RequestContext.
+        save_file()/save_checkpoint() and replace it with persisted metadata. This gives
+        tenant code an optional shorthand: return local artifacts directly and let the
+        worker persist them.
+        """
+        upload_idx = 0
+
+        def _default_ref(local_path: str) -> str:
+            nonlocal upload_idx
+            leaf = os.path.basename(local_path) or "artifact.bin"
+            ref = f"runs/{ctx.request_id}/outputs/auto/{upload_idx:06d}-{leaf}"
+            upload_idx += 1
+            return _normalize_output_ref(ref)
+
+        def _walk(v: Any) -> Any:
+            if isinstance(v, Asset):
+                local = str(getattr(v, "local_path", "") or "").strip()
+                if not local:
+                    return v
+                ref = str(getattr(v, "ref", "") or "").strip() or _default_ref(local)
+                saved = ctx.save_file(ref, local)
+                return saved
+
+            if isinstance(v, Tensors):
+                local = str(getattr(v, "local_path", "") or "").strip()
+                if not local:
+                    return v
+                ref = str(getattr(v, "ref", "") or "").strip() or _default_ref(local)
+                fmt = str(getattr(v, "format", "") or "").strip() or None
+                saved = ctx.save_checkpoint(ref, local, format=fmt)
+                return saved
+
+            if isinstance(v, list):
+                changed = False
+                out: List[Any] = []
+                for it in v:
+                    ni = _walk(it)
+                    out.append(ni)
+                    if ni is not it:
+                        changed = True
+                if changed:
+                    v[:] = out
+                return v
+
+            if isinstance(v, tuple):
+                changed = False
+                out_items: List[Any] = []
+                for it in v:
+                    ni = _walk(it)
+                    out_items.append(ni)
+                    if ni is not it:
+                        changed = True
+                return tuple(out_items) if changed else v
+
+            if isinstance(v, dict):
+                for k in list(v.keys()):
+                    nv = _walk(v[k])
+                    if nv is not v[k]:
+                        v[k] = nv
+                return v
+
+            fields = getattr(v, "__struct_fields__", None)
+            if fields and isinstance(fields, (tuple, list)):
+                for name in fields:
+                    try:
+                        cur = getattr(v, name)
+                    except Exception:
+                        continue
+                    nv = _walk(cur)
+                    if nv is not cur:
+                        try:
+                            setattr(v, name, nv)
+                        except Exception:
+                            pass
+            return v
+
+        return _walk(output_obj)
+
+    def _materialize_asset(self, ctx: RequestContext, asset: Asset | Tensors) -> None:
         if asset.local_path:
             return
         ref = (asset.ref or "").strip()
@@ -1273,10 +1362,9 @@ class Worker:
         if not (ref.startswith("http://") or ref.startswith("https://")):
             if mapped := ctx._materialized_input_url_for_ref(ref):
                 ref = mapped
-        request_id = ctx.request_id
-
         base_dir = os.getenv("WORKER_RUN_DIR", "/tmp/tensorhub/run").rstrip("/")
-        local_inputs_dir = os.path.join(base_dir, request_id, "inputs")
+        scope_id = _workspace_scope_id(ctx.request_id, getattr(ctx, "run_id", None))
+        local_inputs_dir = os.path.join(base_dir, scope_id, "inputs")
         os.makedirs(local_inputs_dir, exist_ok=True)
         cache_dir = os.getenv("WORKER_CACHE_DIR", os.path.join(base_dir, "cache")).rstrip("/")
         os.makedirs(cache_dir, exist_ok=True)
@@ -2845,6 +2933,7 @@ class Worker:
     def _handle_run_request(self, request: TaskExecutionRequest) -> None:
         """Handle a task execution request from the scheduler."""
         request_id = request.request_id
+        run_id = str(getattr(request, "run_id", "") or "").strip() or None
         function_name = request.function_name
         input_payload = request.input_payload
         required_model_id_for_exec = ""
@@ -2895,6 +2984,7 @@ class Worker:
             "task.received",
             {
                 "function_name": function_name,
+                "run_id": run_id or "",
                 "required_variant_refs_count": len(required_models_raw),
                 "input_bytes": len(input_payload or b""),
             },
@@ -2939,21 +3029,19 @@ class Worker:
         runtime_cfg = self._runtime_batching_cfg_for_function(function_name)
         resource_req = self._discovered_resources.get(function_name)
         req_cfg = dict(resource_req.to_dict() if resource_req else {})
-        stage_hints: Dict[str, Any] = {}
-        stage_profile = str(req_cfg.get("stage_profile", "") or "").strip()
-        if stage_profile:
-            stage_hints["stage_profile"] = stage_profile
-        stage_traits = req_cfg.get("stage_traits")
-        if isinstance(stage_traits, list):
-            stage_hints["stage_traits"] = [str(x).strip() for x in stage_traits if str(x).strip()]
+        execution_hints: Dict[str, Any] = {}
+        kind = str(req_cfg.get("kind", "") or "").strip()
+        if kind:
+            execution_hints["kind"] = kind
         if "memory_hint_mb" in req_cfg:
             try:
-                stage_hints["memory_hint_mb"] = int(req_cfg.get("memory_hint_mb") or 0)
+                execution_hints["memory_hint_mb"] = int(req_cfg.get("memory_hint_mb") or 0)
             except Exception:
                 pass
 
         ctx = RequestContext(
             request_id,
+            run_id=run_id,
             emitter=self._emit_progress_event,
             owner=owner or None,
             invoker_id=invoker_id or None,
@@ -2965,7 +3053,7 @@ class Worker:
             resolved_cozy_models_by_id=resolved_cozy_models_by_id or None,
             required_models=required_models or None,
             runtime_batching_config=runtime_cfg or None,
-            stage_execution_hints=stage_hints or None,
+            execution_hints=execution_hints or None,
             parent_request_id=parent_request_id,
             child_request_id=child_request_id,
             item_id=item_id,
@@ -3243,7 +3331,7 @@ class Worker:
                 "function_name": str(spec.name or ""),
                 "required_variant_refs": list(getattr(ctx, "required_models", []) or []),
                 "runtime_batching_config": getattr(ctx, "runtime_batching_config", {}),
-                "stage_execution_hints": getattr(ctx, "stage_execution_hints", {}),
+                "execution_hints": getattr(ctx, "execution_hints", {}),
             },
         )
 
@@ -3483,6 +3571,7 @@ class Worker:
             if spec.output_mode == "single":
                 if spec.output_type is not None and not isinstance(result, spec.output_type):
                     raise TypeError(f"Function {spec.name} returned {type(result)!r}, expected {spec.output_type!r}")
+                result = self._auto_upload_output_assets(ctx, result)
                 output_payload = msgspec.msgpack.encode(msgspec.to_builtins(result))
                 if self.max_output_bytes > 0 and len(output_payload) > self.max_output_bytes:
                     raise ValueError(f"Output payload too large: {len(output_payload)} bytes (max {self.max_output_bytes})")

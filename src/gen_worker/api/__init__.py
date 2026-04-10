@@ -14,7 +14,7 @@ from .errors import (
 from .injection import InjectionSpec, ModelRef, ModelRefSource, parse_injection
 from .payload_constraints import Clamp
 from .streaming import iter_transformers_text_deltas
-from .types import Asset
+from .types import Asset, Tensors
 
 __all__ = [
     "OrtRuntime",
@@ -36,4 +36,5 @@ __all__ = [
     "Clamp",
     "iter_transformers_text_deltas",
     "Asset",
+    "Tensors",
 ]

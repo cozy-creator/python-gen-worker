@@ -223,17 +223,15 @@ def _parse_function_resource_hints(v: Any) -> dict[str, Any]:
             raise ValueError(f"function resource hint {key} must be > 0")
         out[key] = iv
 
-    if "stage_profile" in v:
-        prof = str(v.get("stage_profile") or "").strip()
-        if prof:
-            out["stage_profile"] = prof
-    if "stage_traits" in v:
-        raw_traits = v.get("stage_traits")
-        if not isinstance(raw_traits, list) or not all(isinstance(x, str) for x in raw_traits):
-            raise ValueError("function resource hint stage_traits must be a list of strings")
-        traits = [x.strip() for x in raw_traits if x.strip()]
-        if traits:
-            out["stage_traits"] = traits
+    if "stage_profile" in v or "stage_traits" in v:
+        raise ValueError(
+            "function resource hints stage_profile/stage_traits were removed; "
+            "use a single string hint: kind"
+        )
+    if "kind" in v:
+        kind = str(v.get("kind") or "").strip()
+        if kind:
+            out["kind"] = kind
     return out
 
 

@@ -17,8 +17,7 @@ class ResourceRequirements:
         prefetch_depth: Optional[int] = None,
         max_wait_ms: Optional[int] = None,
         memory_hint_mb: Optional[int] = None,
-        stage_profile: Optional[str] = None,
-        stage_traits: Optional[list[str]] = None,
+        kind: Optional[str] = None,
         compute_capability_min: Optional[float] = None,
     ) -> None:
         self.batch_size_min = batch_size_min
@@ -27,8 +26,7 @@ class ResourceRequirements:
         self.prefetch_depth = prefetch_depth
         self.max_wait_ms = max_wait_ms
         self.memory_hint_mb = memory_hint_mb
-        self.stage_profile = stage_profile
-        self.stage_traits = list(stage_traits or [])
+        self.kind = str(kind or "").strip()
         self.compute_capability_min = compute_capability_min
         self._requirements: Dict[str, Any] = {}
         if batch_size_min is not None:
@@ -43,10 +41,8 @@ class ResourceRequirements:
             self._requirements["max_wait_ms"] = int(max_wait_ms)
         if memory_hint_mb is not None:
             self._requirements["memory_hint_mb"] = int(memory_hint_mb)
-        if stage_profile:
-            self._requirements["stage_profile"] = str(stage_profile).strip()
-        if self.stage_traits:
-            self._requirements["stage_traits"] = [str(x).strip() for x in self.stage_traits if str(x).strip()]
+        if self.kind:
+            self._requirements["kind"] = self.kind
         if compute_capability_min is not None:
             val = float(compute_capability_min)
             if val <= 0:

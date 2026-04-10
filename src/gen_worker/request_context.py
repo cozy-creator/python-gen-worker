@@ -5,7 +5,9 @@ import ipaddress
 import json
 import logging
 import os
+import shutil
 import socket
+import tempfile
 import threading
 import time
 import urllib.error
@@ -14,13 +16,15 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+import requests
+
 try:
     import torch
 except Exception:  # pragma: no cover - optional dependency
     torch = None
 
 from .api.errors import AuthError
-from .api.types import Asset
+from .api.types import Asset, Tensors
 from .models.refs import parse_model_ref
 
 logger = logging.getLogger(__name__)
@@ -62,6 +66,21 @@ def _normalize_output_ref(ref: str) -> str:
     if lower.startswith("http://") or lower.startswith("https://"):
         raise ValueError("output ref must be a logical file ref, not a URL")
     return out.lstrip("/")
+
+
+def _infer_tensors_format(ref_or_path: str) -> str:
+    leaf = str(ref_or_path or "").strip().lower()
+    if leaf.endswith(".safetensors"):
+        return "safetensors"
+    if leaf.endswith(".bin"):
+        return "bin"
+    if leaf.endswith(".pt"):
+        return "pt"
+    if leaf.endswith(".pth"):
+        return "pth"
+    if leaf.endswith(".ckpt"):
+        return "ckpt"
+    return "unknown"
 
 
 def _require_file_api_base_url() -> str:
@@ -161,12 +180,126 @@ def _canonicalize_model_ref_string(raw: str) -> str:
         return s
 
 
+def _sha256_file(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(1024 * 1024)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+class _RequestOutputStream:
+    """Buffered output writer with finalize() -> Asset/Tensors.
+
+    Current implementation writes chunks to a local temp file and delegates final
+    persistence to RequestContext save_* methods. This keeps write() memory-bounded
+    and enables future backend-native append/compose implementations behind the
+    same interface.
+    """
+
+    def __init__(
+        self,
+        *,
+        ctx: "RequestContext",
+        ref: str,
+        kind: str,  # "asset" | "checkpoint"
+        format: Optional[str] = None,
+        create: bool = False,
+    ) -> None:
+        self._ctx = ctx
+        self._ref = _normalize_output_ref(ref)
+        self._kind = str(kind or "asset").strip().lower()
+        self._format = str(format or "").strip() or None
+        self._create = bool(create)
+        suffix = Path(self._ref).suffix or ".bin"
+        fd, tmp = tempfile.mkstemp(prefix=f"gw-out-{ctx.request_id}-", suffix=suffix)
+        os.close(fd)
+        self._tmp_path = tmp
+        self._fh = open(self._tmp_path, "wb")
+        self._bytes_written = 0
+        self._finalized = False
+        self._result: Any = None
+
+    @property
+    def bytes_written(self) -> int:
+        return int(self._bytes_written)
+
+    @property
+    def ref(self) -> str:
+        return self._ref
+
+    def write(self, data: bytes | bytearray | memoryview) -> int:
+        if self._finalized:
+            raise RuntimeError("output stream already finalized")
+        if isinstance(data, memoryview):
+            data = data.tobytes()
+        if not isinstance(data, (bytes, bytearray)):
+            raise TypeError("write expects bytes-like input")
+        b = bytes(data)
+        if not b:
+            return 0
+        n = self._fh.write(b)
+        self._bytes_written += int(n)
+        return int(n)
+
+    def flush(self) -> None:
+        if self._finalized:
+            return
+        self._fh.flush()
+
+    def finalize(self) -> Any:
+        if self._finalized:
+            return self._result
+        self._fh.flush()
+        self._fh.close()
+        try:
+            if self._kind == "checkpoint":
+                self._result = self._ctx.save_checkpoint(self._ref, self._tmp_path, format=self._format)
+            else:
+                if self._create:
+                    self._result = self._ctx.save_file_create(self._ref, self._tmp_path)
+                else:
+                    self._result = self._ctx.save_file(self._ref, self._tmp_path)
+            self._finalized = True
+            return self._result
+        finally:
+            try:
+                os.remove(self._tmp_path)
+            except Exception:
+                pass
+
+    def close(self) -> None:
+        if self._finalized:
+            return
+        try:
+            self._fh.close()
+        finally:
+            try:
+                os.remove(self._tmp_path)
+            except Exception:
+                pass
+
+    def __enter__(self) -> "_RequestOutputStream":
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+        if exc_type is None:
+            self.finalize()
+        else:
+            self.close()
+        return False
+
+
 class RequestContext:
     """Context object passed to action functions, allowing cancellation."""
 
     def __init__(
         self,
         request_id: str,
+        run_id: Optional[str] = None,
         emitter: Optional[Callable[[Dict[str, Any]], None]] = None,
         owner: Optional[str] = None,
         invoker_id: Optional[str] = None,
@@ -178,7 +311,7 @@ class RequestContext:
         resolved_cozy_models_by_id: Optional[Dict[str, Any]] = None,
         required_models: Optional[List[str]] = None,
         runtime_batching_config: Optional[Dict[str, Any]] = None,
-        stage_execution_hints: Optional[Dict[str, Any]] = None,
+        execution_hints: Optional[Dict[str, Any]] = None,
         parent_request_id: Optional[str] = None,
         child_request_id: Optional[str] = None,
         item_id: Optional[str] = None,
@@ -186,6 +319,7 @@ class RequestContext:
         item_span: Optional[Dict[str, int]] = None,
     ) -> None:
         self._request_id = str(request_id or "").strip()
+        self._run_id = str(run_id or "").strip() or None
         self._owner = owner
         self._invoker_id = invoker_id
         self._timeout_ms = timeout_ms
@@ -196,7 +330,7 @@ class RequestContext:
         self._resolved_cozy_models_by_id = resolved_cozy_models_by_id
         self._required_models = list(required_models or [])
         self._runtime_batching_config = dict(runtime_batching_config or {})
-        self._stage_execution_hints = dict(stage_execution_hints or {})
+        self._execution_hints = dict(execution_hints or {})
         self._parent_request_id = str(parent_request_id or "").strip() or None
         self._child_request_id = str(child_request_id or "").strip() or None
         self._item_id = str(item_id or "").strip() or None
@@ -213,6 +347,14 @@ class RequestContext:
     @property
     def request_id(self) -> str:
         return self._request_id
+
+    @property
+    def run_id(self) -> Optional[str]:
+        return self._run_id
+
+    @property
+    def workspace_scope_id(self) -> str:
+        return self._run_id or self._request_id
 
     @property
     def owner(self) -> Optional[str]:
@@ -302,8 +444,8 @@ class RequestContext:
         return dict(self._runtime_batching_config)
 
     @property
-    def stage_execution_hints(self) -> Dict[str, Any]:
-        return dict(self._stage_execution_hints)
+    def execution_hints(self) -> Dict[str, Any]:
+        return dict(self._execution_hints)
 
     @property
     def parent_request_id(self) -> Optional[str]:
@@ -328,6 +470,7 @@ class RequestContext:
     def partition_context(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {
             "request_id": self._request_id,
+            "run_id": self._run_id,
             "parent_request_id": self._parent_request_id,
             "child_request_id": self._child_request_id,
             "item_id": self._item_id,
@@ -478,9 +621,116 @@ class RequestContext:
         )
 
     def save_file(self, ref: str, local_path: str) -> Asset:
-        with open(local_path, "rb") as f:
-            data = f.read()
-        return self.save_bytes(ref, data)
+        ref = _normalize_output_ref(ref)
+        src = str(local_path or "").strip()
+        if not src:
+            raise ValueError("local_path is required")
+        if not os.path.exists(src):
+            raise FileNotFoundError(src)
+
+        size = int(os.path.getsize(src))
+        max_bytes = int(os.getenv("WORKER_MAX_OUTPUT_FILE_BYTES", str(200 * 1024 * 1024)))
+        if max_bytes > 0 and size > max_bytes:
+            raise ValueError("output file too large")
+
+        local_out = self._resolve_local_output_path(ref)
+        if local_out:
+            dst = Path(local_out)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            with open(src, "rb") as fin, open(dst, "wb") as fout:
+                shutil.copyfileobj(fin, fout, length=1024 * 1024)
+            sha = _sha256_file(str(dst))
+            return Asset(
+                ref=ref,
+                owner=self.owner,
+                local_path=str(dst),
+                mime_type=None,
+                size_bytes=size,
+                sha256=sha,
+            )
+
+        base = self._get_file_api_base_url()
+        token = self._get_file_api_token()
+        url = f"{base}/api/v1/file/{_encode_ref_for_url(ref)}"
+        headers: Dict[str, str] = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/octet-stream",
+        }
+        owner = (self.owner or "").strip()
+        if owner:
+            headers["X-Cozy-Owner"] = owner
+        t0 = time.monotonic()
+        try:
+            with open(src, "rb") as fin:
+                resp = requests.put(url, headers=headers, data=fin, timeout=30)
+            code = int(resp.status_code)
+            if code in (401, 403):
+                raise AuthError(f"file save unauthorized ({code}): check file_token validity")
+            if code < 200 or code >= 300:
+                raise RuntimeError(f"file save failed ({code})")
+            try:
+                meta = resp.json()
+            except Exception:
+                meta = {}
+        except requests.RequestException as e:
+            raise RuntimeError("file save failed (network_error)") from e
+        finally:
+            rm = getattr(self, "_run_metrics", None)
+            if rm is not None:
+                try:
+                    rm.add_upload_time(int((time.monotonic() - t0) * 1000))
+                except Exception:
+                    pass
+
+        return Asset(
+            ref=ref,
+            owner=self.owner,
+            local_path=None,
+            mime_type=str(meta.get("mime_type") or "") or None,
+            size_bytes=int(meta.get("size_bytes") or 0) or size,
+            sha256=str(meta.get("sha256") or "") or _sha256_file(src),
+        )
+
+    def save_checkpoint(self, ref: str, local_path: str, format: Optional[str] = None) -> Tensors:
+        """Save checkpoint/model-weight bytes and return a first-class tensor artifact."""
+        asset = self.save_file(ref, local_path)
+        fmt = str(format or "").strip() or _infer_tensors_format(ref or local_path)
+        return Tensors(
+            ref=asset.ref,
+            owner=asset.owner,
+            local_path=asset.local_path,
+            format=fmt,
+            size_bytes=asset.size_bytes,
+            sha256=asset.sha256,
+            download_token=asset.download_token,
+        )
+
+    def save_checkpoint_bytes(self, ref: str, data: bytes, format: Optional[str] = None) -> Tensors:
+        """Save in-memory checkpoint/model-weight bytes."""
+        asset = self.save_bytes(ref, data)
+        fmt = str(format or "").strip() or _infer_tensors_format(ref)
+        return Tensors(
+            ref=asset.ref,
+            owner=asset.owner,
+            local_path=asset.local_path,
+            format=fmt,
+            size_bytes=asset.size_bytes,
+            sha256=asset.sha256,
+            download_token=asset.download_token,
+        )
+
+    def open_output_stream(self, ref: str, *, create: bool = False) -> _RequestOutputStream:
+        """Open a chunk-writable output stream that finalizes to an Asset."""
+        return _RequestOutputStream(ctx=self, ref=ref, kind="asset", create=create)
+
+    def open_checkpoint_stream(
+        self,
+        ref: str,
+        *,
+        format: Optional[str] = None,
+    ) -> _RequestOutputStream:
+        """Open a chunk-writable output stream that finalizes to Tensors."""
+        return _RequestOutputStream(ctx=self, ref=ref, kind="checkpoint", format=format)
 
     def save_bytes_create(self, ref: str, data: bytes) -> Asset:
         if not isinstance(data, (bytes, bytearray)):
@@ -555,9 +805,79 @@ class RequestContext:
         )
 
     def save_file_create(self, ref: str, local_path: str) -> Asset:
-        with open(local_path, "rb") as f:
-            data = f.read()
-        return self.save_bytes_create(ref, data)
+        ref = _normalize_output_ref(ref)
+        src = str(local_path or "").strip()
+        if not src:
+            raise ValueError("local_path is required")
+        if not os.path.exists(src):
+            raise FileNotFoundError(src)
+
+        size = int(os.path.getsize(src))
+        max_bytes = int(os.getenv("WORKER_MAX_OUTPUT_FILE_BYTES", str(200 * 1024 * 1024)))
+        if max_bytes > 0 and size > max_bytes:
+            raise ValueError("output file too large")
+
+        local_out = self._resolve_local_output_path(ref)
+        if local_out:
+            dst = Path(local_out)
+            if dst.exists():
+                raise RuntimeError("output path already exists")
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            with open(src, "rb") as fin, open(dst, "wb") as fout:
+                shutil.copyfileobj(fin, fout, length=1024 * 1024)
+            sha = _sha256_file(str(dst))
+            return Asset(
+                ref=ref,
+                owner=self.owner,
+                local_path=str(dst),
+                mime_type=None,
+                size_bytes=size,
+                sha256=sha,
+            )
+
+        base = self._get_file_api_base_url()
+        token = self._get_file_api_token()
+        url = f"{base}/api/v1/file/{_encode_ref_for_url(ref)}"
+        headers: Dict[str, str] = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/octet-stream",
+        }
+        owner = (self.owner or "").strip()
+        if owner:
+            headers["X-Cozy-Owner"] = owner
+        t0 = time.monotonic()
+        try:
+            with open(src, "rb") as fin:
+                resp = requests.post(url, headers=headers, data=fin, timeout=30)
+            code = int(resp.status_code)
+            if code in (401, 403):
+                raise AuthError(f"file save unauthorized ({code}): check file_token validity")
+            if code == 409:
+                raise RuntimeError("output path already exists")
+            if code < 200 or code >= 300:
+                raise RuntimeError(f"file save failed ({code})")
+            try:
+                meta = resp.json()
+            except Exception:
+                meta = {}
+        except requests.RequestException as e:
+            raise RuntimeError("file save failed (network_error)") from e
+        finally:
+            rm = getattr(self, "_run_metrics", None)
+            if rm is not None:
+                try:
+                    rm.add_upload_time(int((time.monotonic() - t0) * 1000))
+                except Exception:
+                    pass
+
+        return Asset(
+            ref=ref,
+            owner=self.owner,
+            local_path=None,
+            mime_type=str(meta.get("mime_type") or "") or None,
+            size_bytes=int(meta.get("size_bytes") or 0) or size,
+            sha256=str(meta.get("sha256") or "") or _sha256_file(src),
+        )
 
     def save_bytes_overwrite(self, ref: str, data: bytes) -> Asset:
         # Back-compat alias: overwrite is the default save_bytes behavior.
