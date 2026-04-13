@@ -20,6 +20,7 @@ class Asset(msgspec.Struct):
     size_bytes: Optional[int] = None
     sha256: Optional[str] = None
     download_token: Optional[str] = None
+    stream_mode: Optional[str] = None
 
     def __fspath__(self) -> str:
         if self.local_path is None:
@@ -62,6 +63,7 @@ class Tensors(msgspec.Struct):
     size_bytes: Optional[int] = None
     sha256: Optional[str] = None
     download_token: Optional[str] = None
+    stream_mode: Optional[str] = None
 
     def __fspath__(self) -> str:
         if self.local_path is None:

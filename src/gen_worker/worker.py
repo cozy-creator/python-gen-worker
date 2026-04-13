@@ -100,10 +100,7 @@ def _workspace_scope_id(request_id: str, run_id: Optional[str]) -> str:
 
 
 def _extract_worker_capability_token(envelope: Any) -> str:
-    token = str(getattr(envelope, "worker_capability_token", "") or "").strip()
-    if token:
-        return token
-    return str(getattr(envelope, "file_token", "") or "").strip()
+    return str(getattr(envelope, "worker_capability_token", "") or "").strip()
 
 
 @dataclass(frozen=True)
@@ -1451,7 +1448,7 @@ class Worker:
         # Non-URL refs require explicit file API credentials. Standard execution should
         # receive presigned input URLs from orchestrator and avoid this path.
         base = (getattr(ctx, "_file_api_base_url", None) or "").strip()
-        token = (getattr(ctx, "_worker_capability_token", None) or getattr(ctx, "_file_api_token", None) or "").strip()
+        token = (getattr(ctx, "_worker_capability_token", None) or "").strip()
         if not base or not token:
             raise RuntimeError("input ref was not materialized to URL and no file API credentials were provided")
         base = base.rstrip("/")
@@ -3055,7 +3052,6 @@ class Worker:
             timeout_ms=timeout_ms if timeout_ms > 0 else None,
             file_api_base_url=file_base_url or None,
             worker_capability_token=worker_capability_token or None,
-            file_api_token=worker_capability_token or None,
             materialized_input_urls=materialized_input_urls or None,
             local_output_dir=None,
             resolved_cozy_models_by_id=resolved_cozy_models_by_id or None,
@@ -3189,7 +3185,6 @@ class Worker:
             timeout_ms=timeout_ms,
             file_api_base_url=file_base_url or None,
             worker_capability_token=worker_capability_token or None,
-            file_api_token=worker_capability_token or None,
             materialized_input_urls=materialized_input_urls or None,
             resolved_cozy_models_by_id=getattr(self, "_resolved_cozy_models_by_id_baseline", None) or None,
         )

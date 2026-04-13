@@ -3,7 +3,7 @@ from .api.decorators import ResourceRequirements, worker_function, worker_websoc
 from .api.injection import ModelRef, ModelRefSource
 from .request_context import RequestContext
 from .worker import RealtimeSocket
-from .api.errors import AuthError, RetryableError, FatalError
+from .api.errors import AuthError, RetryableError, FatalError, OutputTooLargeError
 from .api.types import Asset, LoraSpec, Tensors
 from .models.interface import ModelManager
 from .models.downloader import ModelDownloader, CozyHubDownloader
@@ -46,6 +46,7 @@ __all__ = [
     "AuthError",
     "RetryableError",
     "FatalError",
+    "OutputTooLargeError",
     "Asset",
     "Tensors",
     "LoraSpec",

@@ -130,7 +130,6 @@ class DevWorker(Worker):
             invoker_id=str(invoker_id or "") or None,
             timeout_ms=int(timeout_ms or 0) or None,
             file_api_base_url=None,
-            file_api_token=None,
             local_output_dir=local_output_dir,
             resolved_cozy_models_by_id=resolved_cozy_models_by_id or None,
             required_models=[str(v).strip() for v in (required_variant_refs or []) if str(v).strip()],

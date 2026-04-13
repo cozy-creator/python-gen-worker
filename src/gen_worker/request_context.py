@@ -6,6 +6,8 @@ import json
 import logging
 import os
 import base64
+import re
+import queue
 import shutil
 import socket
 import tempfile
@@ -24,11 +26,14 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     torch = None
 
-from .api.errors import AuthError
+from .api.errors import AuthError, OutputTooLargeError
 from .api.types import Asset, Tensors
 from .models.refs import parse_model_ref
 
 logger = logging.getLogger(__name__)
+
+_PUBLIC_TAG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
+_STALE_MIRROR_CLAIM_ERROR_CODES = {"source_version_not_found", "source_variants_not_found"}
 
 
 def _encode_ref_for_url(ref: str) -> str:
@@ -84,6 +89,19 @@ def _infer_tensors_format(ref_or_path: str) -> str:
     return "unknown"
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    raw = str(os.getenv(name, "1" if default else "0")).strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = str(os.getenv(name, str(default))).strip()
+    try:
+        return int(raw)
+    except Exception:
+        return int(default)
+
+
 def _require_file_api_base_url() -> str:
     base = os.getenv("FILE_API_BASE_URL", "").strip()
     if not base:
@@ -95,12 +113,10 @@ def _require_file_api_base_url() -> str:
     return base.rstrip("/")
 
 
-def _require_file_api_token() -> str:
+def _require_worker_capability_token() -> str:
     token = os.getenv("WORKER_CAPABILITY_TOKEN", "").strip()
     if not token:
-        token = os.getenv("FILE_API_TOKEN", "").strip()
-    if not token:
-        raise RuntimeError("WORKER_CAPABILITY_TOKEN (or FILE_API_TOKEN) is required for file operations")
+        raise RuntimeError("WORKER_CAPABILITY_TOKEN is required for file operations")
     return token
 
 
@@ -114,6 +130,35 @@ def _parse_owner_repo(value: str) -> tuple[str, str]:
     if not owner or not repo:
         raise ValueError("destination_repo must be in '<owner>/<repo>' format")
     return owner, repo
+
+
+def _parse_owner_repo_with_optional_tag(value: str) -> tuple[str, str, str]:
+    raw = str(value or "").strip().strip("/")
+    tag = ""
+    if ":" in raw:
+        raw, tag = raw.rsplit(":", 1)
+        tag = str(tag or "").strip().lower()
+    owner, repo = _parse_owner_repo(raw)
+    return owner, repo, tag
+
+
+def _normalize_destination_repo_tags(values: Optional[List[str]]) -> List[str]:
+    out: List[str] = []
+    seen: set[str] = set()
+    for item in list(values or []):
+        tag = str(item or "").strip().lower()
+        if not tag:
+            continue
+        if not _PUBLIC_TAG_RE.match(tag):
+            raise ValueError("destination_repo_tags contains an invalid tag")
+        if tag == "latest":
+            raise ValueError("destination_repo_tags must not include latest")
+        if tag in seen:
+            continue
+        seen.add(tag)
+        out.append(tag)
+    out.sort()
+    return out
 
 
 def _decode_unverified_jwt_claims(token: str) -> Dict[str, Any]:
@@ -137,7 +182,29 @@ def _normalize_repo_name(value: str) -> str:
     return str(value or "").strip().strip("/").lower()
 
 
-def _assert_token_repo_scope_matches_destination(token: str, owner: str, repo: str) -> None:
+def _error_code_from_exception(exc: Exception, *, fallback: str = "unknown") -> str:
+    raw = str(exc or "").strip()
+    if not raw:
+        return fallback
+    parts = [p.strip().lower() for p in raw.split(":") if p and p.strip()]
+    if not parts:
+        return fallback
+    if len(parts) >= 2:
+        return parts[1]
+    return parts[0]
+
+
+def _utc_timestamp_rfc3339() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _assert_token_repo_scope_matches_destination(
+    token: str,
+    owner: str,
+    repo: str,
+    *,
+    required_actions: Optional[List[str]] = None,
+) -> None:
     claims = _decode_unverified_jwt_claims(token)
     if not claims:
         raise ValueError("worker_capability_token must be a structured JWT")
@@ -147,25 +214,61 @@ def _assert_token_repo_scope_matches_destination(token: str, owner: str, repo: s
     cap_kind = _normalize_repo_name(str(claims.get("cap_kind") or ""))
     if cap_kind != "worker_capability":
         raise ValueError("worker_capability_token must have cap_kind=worker_capability")
-    actions = [str(a or "").strip() for a in list(claims.get("actions") or [])]
-    if "revision:create" not in actions:
-        raise ValueError("worker_capability_token missing required action 'revision:create'")
-    claimed_owner = _normalize_repo_name(str(claims.get("owner") or claims.get("org") or ""))
-    claimed_repo = _normalize_repo_name(str(claims.get("repo") or ""))
+    if required_actions is None:
+        needed = ["repo-version:create"]
+    else:
+        needed = [str(a or "").strip() for a in list(required_actions) if str(a or "").strip()]
+    repos_read = [str(v or "").strip() for v in list(claims.get("tensor_repos_read") or [])]
+    repos_update_legacy = [str(v or "").strip() for v in list(claims.get("tensor_repos_update") or [])]
+    repos_version_create = [str(v or "").strip() for v in list(claims.get("tensor_repos_version_create") or [])]
+    repos_variant_create = [str(v or "").strip() for v in list(claims.get("tensor_repos_variant_create") or [])]
+    if not repos_version_create:
+        repos_version_create = list(repos_update_legacy)
+    if not repos_variant_create:
+        repos_variant_create = list(repos_update_legacy)
+    create_claim = claims.get("tensor_repo_create")
+    create_policy = create_claim if isinstance(create_claim, dict) else {}
+    create_owner = _normalize_repo_name(str(create_policy.get("owner") or ""))
+    create_allowed_names = [_normalize_repo_name(str(v or "")) for v in list(create_policy.get("allowed_names") or [])]
+    create_allow_any_name = bool(create_policy.get("allow_any_name"))
 
-    if claimed_repo:
-        try:
-            claimed_repo_owner, claimed_repo_name = _parse_owner_repo(claimed_repo)
-        except ValueError as e:
-            raise ValueError("worker_capability_token has invalid repo scope claim") from e
-        if _normalize_repo_name(claimed_repo_owner) != destination_owner or _normalize_repo_name(claimed_repo_name) != destination_repo:
-            raise ValueError("destination_repo does not match worker_capability_token repo scope")
-        if claimed_owner and claimed_owner != destination_owner:
-            raise ValueError("destination_repo owner does not match worker_capability_token owner scope")
-        return
+    def _repo_match(values: List[str]) -> bool:
+        for raw in values:
+            try:
+                scoped_owner, scoped_repo = _parse_owner_repo(_normalize_repo_name(raw))
+            except ValueError:
+                continue
+            if _normalize_repo_name(scoped_owner) == destination_owner and _normalize_repo_name(scoped_repo) == destination_repo:
+                return True
+        return False
 
-    if claimed_owner and claimed_owner != destination_owner:
-        raise ValueError("destination_repo owner does not match worker_capability_token owner scope")
+    for action in needed:
+        if action == "tensor-repo:read":
+            if _repo_match(repos_read) or _repo_match(repos_version_create) or _repo_match(repos_variant_create):
+                continue
+            raise ValueError("destination_repo does not match worker_capability_token read scope")
+        if action == "repo-version:create":
+            if _repo_match(repos_version_create) or _repo_match(repos_variant_create):
+                continue
+            raise ValueError("destination_repo does not match worker_capability_token repo-version:create scope")
+        if action == "repo-variant:create":
+            if _repo_match(repos_variant_create) or _repo_match(repos_version_create):
+                continue
+            raise ValueError("destination_repo does not match worker_capability_token repo-variant:create scope")
+        if action == "tensor-repo:update":
+            # Legacy alias.
+            if _repo_match(repos_version_create) or _repo_match(repos_variant_create):
+                continue
+            raise ValueError("destination_repo does not match worker_capability_token update scope")
+        if action == "tensor-repo:create":
+            if create_owner != destination_owner:
+                raise ValueError("destination_repo owner does not match worker_capability_token create scope")
+            if create_allow_any_name:
+                continue
+            if destination_repo in create_allowed_names:
+                continue
+            raise ValueError("destination_repo is not in worker_capability_token create allow-list")
+        raise ValueError(f"unsupported required action '{action}'")
 
 
 def _http_request(
@@ -257,12 +360,12 @@ def _sha256_file(path: str) -> str:
 
 
 class _RequestOutputStream:
-    """Buffered output writer with finalize() -> Asset/Tensors.
+    """Chunk-writable output writer with finalize() -> Asset/Tensors.
 
-    Current implementation writes chunks to a local temp file and delegates final
-    persistence to RequestContext save_* methods. This keeps write() memory-bounded
-    and enables future backend-native append/compose implementations behind the
-    same interface.
+    Mode selection is internal:
+    - Local/dev: write to local output path.
+    - Remote streaming: push chunks directly to file API while tenant writes.
+    - Fallback: write to temp file and upload at finalize.
     """
 
     def __init__(
@@ -279,18 +382,85 @@ class _RequestOutputStream:
         self._kind = str(kind or "asset").strip().lower()
         self._format = str(format or "").strip() or None
         self._create = bool(create)
-        suffix = Path(self._ref).suffix or ".bin"
-        fd, tmp = tempfile.mkstemp(prefix=f"gw-out-{ctx.request_id}-", suffix=suffix)
-        os.close(fd)
-        self._tmp_path = tmp
-        self._fh = open(self._tmp_path, "wb")
+        self._stream_remote = bool(self._ctx._should_stream_output_to_file_api(self._ref))
+        self._session_upload_enabled = bool(
+            self._stream_remote and _env_bool("WORKER_STREAM_APPEND_SESSION_ENABLED", False)
+        )
+        self._tmp_path: Optional[str] = None
+        self._fh: Optional[Any] = None
+        self._chunk_q: Optional["queue.Queue[Optional[bytes]]"] = None
+        self._uploader_thread: Optional[threading.Thread] = None
+        self._uploader_error: Optional[BaseException] = None
+        self._uploader_meta: Dict[str, Any] = {}
+        self._abort_remote = False
+        self._remote_completed = False
+        self._replay_path: Optional[str] = None
+        self._replay_fh: Optional[Any] = None
+        self._sha = hashlib.sha256()
         self._bytes_written = 0
+        self._bytes_uploaded = 0
+        self._chunks_written = 0
+        self._chunks_uploaded = 0
+        self._stream_error_class: Optional[str] = None
+        self._progress_lock = threading.Lock()
+        self._stream_mode = "remote_append" if self._stream_remote else "local_fallback"
+        self._started_mono = time.monotonic()
+        try:
+            interval = float(os.getenv("WORKER_STREAM_PROGRESS_INTERVAL_S", "0.20") or "0.20")
+        except Exception:
+            interval = 0.20
+        self._progress_interval_s = max(0.0, interval)
+        self._last_progress_emit_mono = self._started_mono
+        self._last_progress_mono = self._started_mono
+        self._last_progress_uploaded = 0
+        self._retry_attempts = max(1, int(os.getenv("WORKER_STREAM_UPLOAD_RETRY_ATTEMPTS", "2") or "2"))
+        self._retry_backoff_ms = max(0, int(os.getenv("WORKER_STREAM_UPLOAD_RETRY_BACKOFF_MS", "250") or "250"))
+        self._session_id: Optional[str] = None
+        self._session_max_chunk_bytes = max(1, _env_int("WORKER_STREAM_SESSION_CHUNK_BYTES", 4 * 1024 * 1024))
         self._finalized = False
         self._result: Any = None
+
+        if self._stream_remote:
+            qsize = int(os.getenv("WORKER_STREAM_UPLOAD_QUEUE_CHUNKS", "16") or "16")
+            if qsize < 1:
+                qsize = 1
+            self._chunk_q = queue.Queue(maxsize=qsize)
+            if not self._session_upload_enabled:
+                suffix = Path(self._ref).suffix or ".bin"
+                fd, tmp = tempfile.mkstemp(prefix=f"gw-out-replay-{ctx.request_id}-", suffix=suffix)
+                os.close(fd)
+                self._replay_path = tmp
+                self._replay_fh = open(self._replay_path, "wb")
+            self._start_remote_uploader()
+        else:
+            suffix = Path(self._ref).suffix or ".bin"
+            fd, tmp = tempfile.mkstemp(prefix=f"gw-out-{ctx.request_id}-", suffix=suffix)
+            os.close(fd)
+            self._tmp_path = tmp
+            self._fh = open(self._tmp_path, "wb")
 
     @property
     def bytes_written(self) -> int:
         return int(self._bytes_written)
+
+    @property
+    def bytes_uploaded(self) -> int:
+        if self._stream_remote:
+            return int(self._bytes_uploaded)
+        return int(self._bytes_written)
+
+    @property
+    def stream_mode(self) -> str:
+        return self._stream_mode
+
+    @property
+    def elapsed_s(self) -> float:
+        return float(max(time.monotonic() - self._started_mono, 0.0))
+
+    @property
+    def average_upload_bps(self) -> float:
+        elapsed = max(self.elapsed_s, 1e-6)
+        return float(self.bytes_uploaded) / elapsed
 
     @property
     def ref(self) -> str:
@@ -299,6 +469,11 @@ class _RequestOutputStream:
     def write(self, data: bytes | bytearray | memoryview) -> int:
         if self._finalized:
             raise RuntimeError("output stream already finalized")
+        if self._ctx.is_canceled():
+            self._abort_due_to_cancel()
+            raise InterruptedError("canceled")
+        if self._uploader_error is not None:
+            raise self._uploader_error
         if isinstance(data, memoryview):
             data = data.tobytes()
         if not isinstance(data, (bytes, bytearray)):
@@ -306,29 +481,78 @@ class _RequestOutputStream:
         b = bytes(data)
         if not b:
             return 0
+        if self._stream_remote:
+            assert self._chunk_q is not None
+            if self._replay_fh is not None:
+                n = self._replay_fh.write(b)
+                if n != len(b):
+                    raise RuntimeError("output stream replay spool short write")
+            while True:
+                if self._ctx.is_canceled():
+                    self._abort_due_to_cancel()
+                    raise InterruptedError("canceled")
+                if self._uploader_error is not None:
+                    raise self._uploader_error
+                try:
+                    self._chunk_q.put(b, timeout=0.5)
+                    break
+                except queue.Full:
+                    continue
+            self._sha.update(b)
+            self._bytes_written += int(len(b))
+            self._chunks_written += 1
+            self._maybe_emit_progress(stage="stream_write")
+            return int(len(b))
+
+        assert self._fh is not None
         n = self._fh.write(b)
+        self._sha.update(b[:n])
         self._bytes_written += int(n)
+        if n > 0:
+            self._chunks_written += 1
+        self._maybe_emit_progress(stage="stream_write")
         return int(n)
 
     def flush(self) -> None:
         if self._finalized:
             return
+        if self._stream_remote:
+            return
+        assert self._fh is not None
         self._fh.flush()
 
     def finalize(self) -> Any:
         if self._finalized:
             return self._result
+        if self._ctx.is_canceled():
+            self.close()
+            raise InterruptedError("canceled")
+        if self._stream_remote:
+            finalize_t0 = time.monotonic()
+            self._result = self._finalize_remote_stream()
+            self._finalized = True
+            self._maybe_emit_progress(
+                stage="stream_finalized",
+                force=True,
+                extra={"finalize_elapsed_s": float(max(time.monotonic() - finalize_t0, 0.0))},
+            )
+            return self._result
+
+        assert self._fh is not None
+        assert self._tmp_path is not None
         self._fh.flush()
         self._fh.close()
         try:
             if self._kind == "checkpoint":
-                self._result = self._ctx.save_checkpoint(self._ref, self._tmp_path, format=self._format)
+                raw = self._ctx.save_checkpoint(self._ref, self._tmp_path, format=self._format)
             else:
                 if self._create:
-                    self._result = self._ctx.save_file_create(self._ref, self._tmp_path)
+                    raw = self._ctx.save_file_create(self._ref, self._tmp_path)
                 else:
-                    self._result = self._ctx.save_file(self._ref, self._tmp_path)
+                    raw = self._ctx.save_file(self._ref, self._tmp_path)
+            self._result = self._with_stream_mode(raw)
             self._finalized = True
+            self._maybe_emit_progress(stage="stream_finalized", force=True)
             return self._result
         finally:
             try:
@@ -339,13 +563,530 @@ class _RequestOutputStream:
     def close(self) -> None:
         if self._finalized:
             return
+        if self._stream_remote:
+            self._abort_remote = True
+            self._signal_remote_done()
+            if self._uploader_thread is not None:
+                self._uploader_thread.join(timeout=5.0)
+            if self._session_upload_enabled:
+                try:
+                    base = self._ctx._get_file_api_base_url()
+                    token = self._ctx._get_worker_capability_token()
+                    headers: Dict[str, str] = {
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/octet-stream",
+                    }
+                    owner = (self._ctx.owner or "").strip()
+                    if owner:
+                        headers["X-Cozy-Owner"] = owner
+                    self._abort_upload_session(base=base, headers=headers)
+                except Exception:
+                    pass
+            self._cleanup_replay_file()
+            self._maybe_emit_progress(stage="stream_aborted", force=True)
+            self._finalized = True
+            return
+        assert self._fh is not None
         try:
             self._fh.close()
         finally:
+            assert self._tmp_path is not None
             try:
                 os.remove(self._tmp_path)
             except Exception:
                 pass
+        self._maybe_emit_progress(stage="stream_closed", force=True)
+        self._finalized = True
+
+    def _abort_due_to_cancel(self) -> None:
+        if self._abort_remote:
+            return
+        self._abort_remote = True
+        self._signal_remote_done()
+        self._maybe_emit_progress(stage="stream_canceled", force=True)
+
+    def _with_stream_mode(self, value: Any) -> Any:
+        if isinstance(value, Asset):
+            return Asset(
+                ref=value.ref,
+                owner=value.owner,
+                local_path=value.local_path,
+                mime_type=value.mime_type,
+                size_bytes=value.size_bytes,
+                sha256=value.sha256,
+                download_token=value.download_token,
+                stream_mode=self.stream_mode,
+            )
+        if isinstance(value, Tensors):
+            return Tensors(
+                ref=value.ref,
+                owner=value.owner,
+                local_path=value.local_path,
+                format=value.format,
+                size_bytes=value.size_bytes,
+                sha256=value.sha256,
+                download_token=value.download_token,
+                stream_mode=self.stream_mode,
+            )
+        return value
+
+    def _maybe_emit_progress(
+        self,
+        *,
+        stage: str,
+        force: bool = False,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        now = time.monotonic()
+        with self._progress_lock:
+            if not force and self._progress_interval_s > 0.0:
+                if (now - self._last_progress_emit_mono) < self._progress_interval_s:
+                    return
+            bytes_written = int(self._bytes_written)
+            bytes_uploaded = int(self._bytes_uploaded if self._stream_remote else self._bytes_written)
+            chunks_written = int(self._chunks_written)
+            chunks_uploaded = int(self._chunks_uploaded if self._stream_remote else self._chunks_written)
+            error_class = str(self._stream_error_class or "").strip()
+            elapsed = max(now - self._started_mono, 1e-6)
+            delta_elapsed = max(now - self._last_progress_mono, 1e-6)
+            delta_uploaded = max(0, bytes_uploaded - int(self._last_progress_uploaded))
+            inst_bps = float(delta_uploaded) / delta_elapsed
+            avg_bps = float(bytes_uploaded) / elapsed
+            self._last_progress_emit_mono = now
+            self._last_progress_mono = now
+            self._last_progress_uploaded = bytes_uploaded
+        payload: Dict[str, Any] = {
+            "stage": stage,
+            "ref": self._ref,
+            "stream_mode": self.stream_mode,
+            "bytes_written": bytes_written,
+            "bytes_uploaded": bytes_uploaded,
+            "chunks_written": chunks_written,
+            "chunks_uploaded": chunks_uploaded,
+            "upload_bps": float(avg_bps),
+            "inst_upload_bps": float(inst_bps),
+            "elapsed_s": float(elapsed),
+        }
+        if error_class:
+            payload["error_class"] = error_class
+        if extra:
+            payload.update(dict(extra))
+        self._ctx.emit("request.upload_progress", payload)
+
+    def _build_remote_asset(self) -> Asset:
+        meta = dict(self._uploader_meta or {})
+        size = int(meta.get("size_bytes") or self._bytes_written)
+        sha = str(meta.get("sha256") or "").strip() or self._sha.hexdigest()
+        return Asset(
+            ref=self._ref,
+            owner=self._ctx.owner,
+            local_path=None,
+            mime_type=str(meta.get("mime_type") or "") or None,
+            size_bytes=size,
+            sha256=sha,
+            stream_mode=self.stream_mode,
+        )
+
+    def _finalize_remote_stream(self) -> Any:
+        self._signal_remote_done()
+        if self._uploader_thread is not None:
+            self._uploader_thread.join()
+        self._close_replay_file()
+        try:
+            if self._session_upload_enabled and not self._abort_remote and self._uploader_error is None:
+                base = self._ctx._get_file_api_base_url()
+                token = self._ctx._get_worker_capability_token()
+                headers: Dict[str, str] = {
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/octet-stream",
+                }
+                owner = (self._ctx.owner or "").strip()
+                if owner:
+                    headers["X-Cozy-Owner"] = owner
+                self._finalize_upload_session(base=base, headers=headers)
+            if self._uploader_error is not None and not self._abort_remote and not self._session_upload_enabled:
+                recovered = self._replay_remote_upload_if_needed()
+                if recovered:
+                    self._uploader_error = None
+                    self._remote_completed = True
+            if self._uploader_error is not None:
+                if self._ctx.is_canceled() or isinstance(self._uploader_error, InterruptedError):
+                    raise InterruptedError("canceled")
+                raise self._uploader_error
+            asset = self._build_remote_asset()
+            if self._kind == "checkpoint":
+                fmt = str(self._format or "").strip() or _infer_tensors_format(self._ref)
+                return Tensors(
+                    ref=asset.ref,
+                    owner=asset.owner,
+                    local_path=asset.local_path,
+                    format=fmt,
+                    size_bytes=asset.size_bytes,
+                    sha256=asset.sha256,
+                    download_token=asset.download_token,
+                    stream_mode=self.stream_mode,
+                )
+            return asset
+        finally:
+            self._cleanup_replay_file()
+
+    def _upload_iter(self) -> Any:
+        assert self._chunk_q is not None
+        while True:
+            item = self._chunk_q.get()
+            if item is None:
+                if self._abort_remote:
+                    raise InterruptedError("canceled")
+                break
+            with self._progress_lock:
+                self._bytes_uploaded += int(len(item))
+                self._chunks_uploaded += 1
+            self._maybe_emit_progress(stage="stream_upload")
+            yield item
+
+    def _signal_remote_done(self) -> None:
+        if self._chunk_q is None:
+            return
+        while True:
+            try:
+                self._chunk_q.put(None, timeout=0.5)
+                return
+            except queue.Full:
+                if self._uploader_error is not None:
+                    return
+                continue
+
+    def _start_remote_uploader(self) -> None:
+        base = self._ctx._get_file_api_base_url()
+        token = self._ctx._get_worker_capability_token()
+        url = f"{base}/api/v1/file/{_encode_ref_for_url(self._ref)}"
+        method = "POST" if self._create else "PUT"
+        headers: Dict[str, str] = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/octet-stream",
+        }
+        owner = (self._ctx.owner or "").strip()
+        if owner:
+            headers["X-Cozy-Owner"] = owner
+
+        def _run() -> None:
+            t0 = time.monotonic()
+            try:
+                if self._session_upload_enabled:
+                    self._open_upload_session(base=base, headers=headers)
+                    sequence = 0
+                    for chunk in self._upload_iter():
+                        sequence = self._append_upload_session_chunk(
+                            base=base,
+                            headers=headers,
+                            sequence_start=sequence,
+                            chunk=chunk,
+                        )
+                    self._remote_completed = True
+                else:
+                    resp = requests.request(method=method, url=url, headers=headers, data=self._upload_iter(), timeout=30)
+                    code = int(resp.status_code)
+                    if code in (401, 403):
+                        raise AuthError(f"file save unauthorized ({code}): check worker_capability_token validity")
+                    if code == 409 and self._create:
+                        raise RuntimeError("output path already exists")
+                    if code < 200 or code >= 300:
+                        raise RuntimeError(f"file save failed ({code})")
+                    try:
+                        parsed = resp.json()
+                    except Exception:
+                        parsed = {}
+                    if isinstance(parsed, dict):
+                        self._uploader_meta = parsed
+                    else:
+                        self._uploader_meta = {}
+                    self._remote_completed = True
+            except requests.RequestException as e:
+                self._uploader_error = RuntimeError("file save failed (network_error)")
+                self._uploader_error.__cause__ = e
+                self._stream_error_class = "network_error"
+                self._maybe_emit_progress(stage="stream_failed", force=True)
+            except InterruptedError as e:
+                self._uploader_error = e
+                self._stream_error_class = "canceled"
+                self._maybe_emit_progress(stage="stream_canceled", force=True)
+            except BaseException as e:  # noqa: BLE001
+                self._uploader_error = e
+                self._stream_error_class = self._classify_error(e)
+                self._maybe_emit_progress(stage="stream_failed", force=True)
+            finally:
+                rm = getattr(self._ctx, "_run_metrics", None)
+                if rm is not None:
+                    try:
+                        rm.add_upload_time(int((time.monotonic() - t0) * 1000))
+                    except Exception:
+                        pass
+
+        self._uploader_thread = threading.Thread(
+            target=_run,
+            name=f"gw-upload-{self._ctx.request_id}",
+            daemon=True,
+        )
+        self._uploader_thread.start()
+
+    def _open_upload_session(self, *, base: str, headers: Dict[str, str]) -> None:
+        request_payload: Dict[str, Any] = {
+            "ref": self._ref,
+            "create": bool(self._create),
+        }
+        req_id = str(self._ctx.request_id or "").strip()
+        if req_id:
+            request_payload["request_id"] = req_id
+        run_id = str(self._ctx.run_id or "").strip()
+        if run_id:
+            request_payload["run_id"] = run_id
+
+        session_headers = dict(headers)
+        session_headers["Content-Type"] = "application/json"
+        url = f"{base}/api/v1/file/upload-sessions"
+        resp = requests.request(
+            method="POST",
+            url=url,
+            headers=session_headers,
+            data=json.dumps(request_payload),
+            timeout=30,
+        )
+        code = int(resp.status_code)
+        if code in (401, 403):
+            raise AuthError(f"file save unauthorized ({code}): check worker_capability_token validity")
+        if code < 200 or code >= 300:
+            raise RuntimeError(f"file save failed ({code})")
+        try:
+            parsed = resp.json()
+        except Exception:
+            parsed = {}
+        session_id = str((parsed or {}).get("session_id") or "").strip()
+        if session_id == "":
+            raise RuntimeError("file save failed (invalid_upload_session)")
+        self._session_id = session_id
+        max_chunk = int((parsed or {}).get("max_chunk_bytes") or 0)
+        if max_chunk > 0:
+            self._session_max_chunk_bytes = max_chunk
+
+    def _append_upload_session_chunk(
+        self,
+        *,
+        base: str,
+        headers: Dict[str, str],
+        sequence_start: int,
+        chunk: bytes,
+    ) -> int:
+        session_id = str(self._session_id or "").strip()
+        if session_id == "":
+            raise RuntimeError("file save failed (invalid_upload_session)")
+        sequence = int(sequence_start)
+        max_chunk = max(1, int(self._session_max_chunk_bytes))
+        for offset in range(0, len(chunk), max_chunk):
+            part = chunk[offset : offset + max_chunk]
+            idem = f"{self._ctx.request_id}:{self._ref}:{sequence}"
+            append_headers = dict(headers)
+            append_headers["Content-Type"] = "application/octet-stream"
+            append_headers["Idempotency-Key"] = idem
+            append_url = f"{base}/api/v1/file/upload-sessions/{session_id}/chunks/{sequence}"
+            last_exc: Optional[BaseException] = None
+            for attempt in range(1, self._retry_attempts + 1):
+                if self._ctx.is_canceled() or self._abort_remote:
+                    raise InterruptedError("canceled")
+                try:
+                    resp = requests.request(
+                        method="PUT",
+                        url=append_url,
+                        headers=append_headers,
+                        data=part,
+                        timeout=30,
+                    )
+                except requests.RequestException as e:
+                    net = RuntimeError("file save failed (network_error)")
+                    net.__cause__ = e
+                    last_exc = net
+                else:
+                    code = int(resp.status_code)
+                    if code in (401, 403):
+                        raise AuthError(f"file save unauthorized ({code}): check worker_capability_token validity")
+                    if code >= 500:
+                        last_exc = RuntimeError(f"file save failed ({code})")
+                    elif code < 200 or code >= 300:
+                        raise RuntimeError(f"file save failed ({code})")
+                    else:
+                        last_exc = None
+                        break
+                if attempt < self._retry_attempts and self._retry_backoff_ms > 0:
+                    time.sleep(float(self._retry_backoff_ms) / 1000.0)
+            if last_exc is not None:
+                raise last_exc
+            sequence += 1
+        return sequence
+
+    def _finalize_upload_session(self, *, base: str, headers: Dict[str, str]) -> None:
+        session_id = str(self._session_id or "").strip()
+        if session_id == "":
+            raise RuntimeError("file save failed (invalid_upload_session)")
+        finalize_headers = dict(headers)
+        finalize_headers["Content-Type"] = "application/json"
+        body = {
+            "final_sha256": self._sha.hexdigest(),
+            "final_size_bytes": int(self._bytes_written),
+        }
+        finalize_url = f"{base}/api/v1/file/upload-sessions/{session_id}/finalize"
+        try:
+            resp = requests.request(
+                method="POST",
+                url=finalize_url,
+                headers=finalize_headers,
+                data=json.dumps(body),
+                timeout=30,
+            )
+        except requests.RequestException as e:
+            net = RuntimeError("file save failed (network_error)")
+            net.__cause__ = e
+            raise net
+        code = int(resp.status_code)
+        if code in (401, 403):
+            raise AuthError(f"file save unauthorized ({code}): check worker_capability_token validity")
+        if code == 409 and self._create:
+            raise RuntimeError("output path already exists")
+        if code < 200 or code >= 300:
+            raise RuntimeError(f"file save failed ({code})")
+        try:
+            parsed = resp.json()
+        except Exception:
+            parsed = {}
+        if isinstance(parsed, dict):
+            self._uploader_meta = parsed
+        else:
+            self._uploader_meta = {}
+
+    def _abort_upload_session(self, *, base: str, headers: Dict[str, str]) -> None:
+        session_id = str(self._session_id or "").strip()
+        if session_id == "":
+            return
+        abort_headers = dict(headers)
+        abort_headers["Content-Type"] = "application/json"
+        abort_url = f"{base}/api/v1/file/upload-sessions/{session_id}/abort"
+        try:
+            requests.request(method="POST", url=abort_url, headers=abort_headers, data="{}", timeout=10)
+        except Exception:
+            return
+
+    def _close_replay_file(self) -> None:
+        if self._replay_fh is None:
+            return
+        try:
+            self._replay_fh.flush()
+        except Exception:
+            pass
+        try:
+            self._replay_fh.close()
+        except Exception:
+            pass
+        self._replay_fh = None
+
+    def _cleanup_replay_file(self) -> None:
+        self._close_replay_file()
+        if self._replay_path:
+            try:
+                os.remove(self._replay_path)
+            except Exception:
+                pass
+        self._replay_path = None
+
+    def _replay_remote_upload_if_needed(self) -> bool:
+        if self._remote_completed:
+            return True
+        replay_path = str(self._replay_path or "").strip()
+        if replay_path == "" or not os.path.exists(replay_path):
+            return False
+        base = self._ctx._get_file_api_base_url()
+        token = self._ctx._get_worker_capability_token()
+        url = f"{base}/api/v1/file/{_encode_ref_for_url(self._ref)}"
+        method = "POST" if self._create else "PUT"
+        headers: Dict[str, str] = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/octet-stream",
+        }
+        owner = (self._ctx.owner or "").strip()
+        if owner:
+            headers["X-Cozy-Owner"] = owner
+
+        last_exc: Optional[BaseException] = None
+        for attempt in range(1, self._retry_attempts + 1):
+            if self._ctx.is_canceled() or self._abort_remote:
+                raise InterruptedError("canceled")
+            self._ctx.emit(
+                "request.upload_replay_attempt",
+                {
+                    "ref": self._ref,
+                    "attempt": attempt,
+                    "max_attempts": self._retry_attempts,
+                },
+            )
+            try:
+                with open(replay_path, "rb") as fin:
+                    resp = requests.request(method=method, url=url, headers=headers, data=fin, timeout=30)
+                code = int(resp.status_code)
+                if code in (401, 403):
+                    raise AuthError(f"file save unauthorized ({code}): check worker_capability_token validity")
+                if code == 409 and self._create:
+                    raise RuntimeError("output path already exists")
+                if code >= 500:
+                    raise RuntimeError(f"file save failed ({code})")
+                if code < 200 or code >= 300:
+                    raise RuntimeError(f"file save failed ({code})")
+                try:
+                    parsed = resp.json()
+                except Exception:
+                    parsed = {}
+                self._uploader_meta = parsed if isinstance(parsed, dict) else {}
+                self._remote_completed = True
+                with self._progress_lock:
+                    self._bytes_uploaded = max(self._bytes_uploaded, self._bytes_written)
+                self._maybe_emit_progress(stage="stream_replay_succeeded", force=True)
+                return True
+            except AuthError:
+                raise
+            except RuntimeError as e:
+                self._stream_error_class = self._classify_error(e)
+                last_exc = e
+            except requests.RequestException as e:
+                net = RuntimeError("file save failed (network_error)")
+                net.__cause__ = e
+                self._stream_error_class = "network_error"
+                last_exc = net
+
+            if attempt < self._retry_attempts and self._retry_backoff_ms > 0:
+                time.sleep(float(self._retry_backoff_ms) / 1000.0)
+
+        if last_exc is not None:
+            self._uploader_error = last_exc
+        self._maybe_emit_progress(stage="stream_replay_failed", force=True)
+        return False
+
+    @staticmethod
+    def _classify_error(exc: BaseException) -> str:
+        msg = str(exc or "").lower()
+        if isinstance(exc, InterruptedError):
+            return "canceled"
+        if isinstance(exc, AuthError):
+            return "auth_error"
+        if "network_error" in msg:
+            return "network_error"
+        if "already exists" in msg:
+            return "conflict"
+        if "unauthorized" in msg:
+            return "auth_error"
+        if "file save failed (" in msg:
+            left = msg.split("file save failed (", 1)[1]
+            code = left.split(")", 1)[0].strip()
+            if code.isdigit() and code.startswith("5"):
+                return "server_error"
+            if code.isdigit() and code.startswith("4"):
+                return "client_error"
+        return "unknown_error"
 
     def __enter__(self) -> "_RequestOutputStream":
         return self
@@ -371,7 +1112,6 @@ class RequestContext:
         timeout_ms: Optional[int] = None,
         file_api_base_url: Optional[str] = None,
         worker_capability_token: Optional[str] = None,
-        file_api_token: Optional[str] = None,
         materialized_input_urls: Optional[Dict[str, str]] = None,
         local_output_dir: Optional[str] = None,
         resolved_cozy_models_by_id: Optional[Dict[str, Any]] = None,
@@ -390,9 +1130,7 @@ class RequestContext:
         self._invoker_id = invoker_id
         self._timeout_ms = timeout_ms
         self._file_api_base_url = (file_api_base_url or "").strip() or None
-        self._worker_capability_token = (worker_capability_token or file_api_token or "").strip() or None
-        # Legacy private name retained for compatibility with older call paths.
-        self._file_api_token = self._worker_capability_token
+        self._worker_capability_token = (worker_capability_token or "").strip() or None
         self._materialized_input_urls = dict(materialized_input_urls or {})
         self._local_output_dir = (local_output_dir or "").strip() or None
         self._resolved_cozy_models_by_id = resolved_cozy_models_by_id
@@ -467,11 +1205,7 @@ class RequestContext:
     def _get_worker_capability_token(self) -> str:
         if self._worker_capability_token:
             return self._worker_capability_token
-        return _require_file_api_token()
-
-    def _get_file_api_token(self) -> str:
-        # Legacy compatibility alias.
-        return self._get_worker_capability_token()
+        return _require_worker_capability_token()
 
     def _resolve_local_output_path(self, ref: str) -> Optional[str]:
         """
@@ -493,6 +1227,19 @@ class RequestContext:
         if root not in out.parents and out != root:
             raise ValueError("path traversal")
         return str(out)
+
+    def _should_stream_output_to_file_api(self, ref: str) -> bool:
+        try:
+            if self._resolve_local_output_path(ref):
+                return False
+        except Exception:
+            return False
+        try:
+            _ = self._get_file_api_base_url()
+            _ = self._get_worker_capability_token()
+        except Exception:
+            return False
+        return True
 
     def _materialized_input_url_for_ref(self, ref: str) -> Optional[str]:
         raw = (ref or "").strip().lstrip("/")
@@ -630,7 +1377,7 @@ class RequestContext:
         data = bytes(data)
         max_bytes = int(os.getenv("WORKER_MAX_OUTPUT_FILE_BYTES", str(200 * 1024 * 1024)))
         if max_bytes > 0 and len(data) > max_bytes:
-            raise ValueError("output file too large")
+            raise OutputTooLargeError(size_bytes=len(data), max_bytes=max_bytes)
         ref = _normalize_output_ref(ref)
 
         local_path = self._resolve_local_output_path(ref)
@@ -649,7 +1396,7 @@ class RequestContext:
             )
 
         base = self._get_file_api_base_url()
-        token = self._get_file_api_token()
+        token = self._get_worker_capability_token()
         url = f"{base}/api/v1/file/{_encode_ref_for_url(ref)}"
         # Default behavior is upsert: PUT to the tenant file store.
         req = _http_request(
@@ -703,7 +1450,7 @@ class RequestContext:
         size = int(os.path.getsize(src))
         max_bytes = int(os.getenv("WORKER_MAX_OUTPUT_FILE_BYTES", str(200 * 1024 * 1024)))
         if max_bytes > 0 and size > max_bytes:
-            raise ValueError("output file too large")
+            raise OutputTooLargeError(size_bytes=size, max_bytes=max_bytes)
 
         local_out = self._resolve_local_output_path(ref)
         if local_out:
@@ -722,7 +1469,7 @@ class RequestContext:
             )
 
         base = self._get_file_api_base_url()
-        token = self._get_file_api_token()
+        token = self._get_worker_capability_token()
         url = f"{base}/api/v1/file/{_encode_ref_for_url(ref)}"
         headers: Dict[str, str] = {
             "Authorization": f"Bearer {token}",
@@ -810,7 +1557,7 @@ class RequestContext:
         data = bytes(data)
         max_bytes = int(os.getenv("WORKER_MAX_OUTPUT_FILE_BYTES", str(200 * 1024 * 1024)))
         if max_bytes > 0 and len(data) > max_bytes:
-            raise ValueError("output file too large")
+            raise OutputTooLargeError(size_bytes=len(data), max_bytes=max_bytes)
         ref = _normalize_output_ref(ref)
 
         local_path = self._resolve_local_output_path(ref)
@@ -832,7 +1579,7 @@ class RequestContext:
             )
 
         base = self._get_file_api_base_url()
-        token = self._get_file_api_token()
+        token = self._get_worker_capability_token()
         url = f"{base}/api/v1/file/{_encode_ref_for_url(ref)}"
         req = _http_request(
             "POST",
@@ -887,7 +1634,7 @@ class RequestContext:
         size = int(os.path.getsize(src))
         max_bytes = int(os.getenv("WORKER_MAX_OUTPUT_FILE_BYTES", str(200 * 1024 * 1024)))
         if max_bytes > 0 and size > max_bytes:
-            raise ValueError("output file too large")
+            raise OutputTooLargeError(size_bytes=size, max_bytes=max_bytes)
 
         local_out = self._resolve_local_output_path(ref)
         if local_out:
@@ -908,7 +1655,7 @@ class RequestContext:
             )
 
         base = self._get_file_api_base_url()
-        token = self._get_file_api_token()
+        token = self._get_worker_capability_token()
         url = f"{base}/api/v1/file/{_encode_ref_for_url(ref)}"
         headers: Dict[str, str] = {
             "Authorization": f"Bearer {token}",
@@ -965,16 +1712,88 @@ class RequestContext:
         artifact_refs: Optional[List[str]] = None,
         metadata: Optional[Dict[str, Any]] = None,
         create_if_missing: bool = True,
+        destination_repo_tags: Optional[List[str]] = None,
+        source_repo: Optional[str] = None,
+        source_version_id: Optional[str] = None,
+        target_version_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Publish conversion lineage to Tensorhub using public HTTP APIs only.
 
         Uses worker capability auth and never touches DB/internal-only paths.
         """
         owner, repo = _parse_owner_repo(destination_repo)
+        source_owner = ""
+        source_name = ""
+        if source_repo and str(source_repo).strip():
+            try:
+                source_owner, source_name, _ = _parse_owner_repo_with_optional_tag(str(source_repo))
+            except ValueError:
+                source_owner, source_name = "", ""
+        normalized_source_version_id = str(source_version_id or "").strip().lower()
+        normalized_target_version_id = str(target_version_id or "").strip().lower()
+        normalized_tags = _normalize_destination_repo_tags(destination_repo_tags)
+
+        version_mode = "new_version"
+        if (
+            normalized_source_version_id
+            and source_owner.strip().lower() == owner.strip().lower()
+            and source_name.strip().lower() == repo.strip().lower()
+        ):
+            version_mode = "same_version_variant"
+
+        input_versions: List[str] = []
+        if normalized_source_version_id:
+            input_versions.append(normalized_source_version_id)
+        output_versions: List[str] = []
+        if normalized_target_version_id:
+            output_versions.append(normalized_target_version_id)
+        if version_mode == "same_version_variant" and normalized_source_version_id:
+            output_versions = [normalized_source_version_id]
+
+        transform_spec: Dict[str, Any] = {}
+        md = dict(metadata or {})
+        if source_repo and str(source_repo).strip():
+            transform_spec["source_repo"] = str(source_repo).strip()
+        for key in ("source_provider", "source_ref", "source_revision", "target_layout", "save_formats"):
+            value = md.get(key)
+            if value is None:
+                continue
+            if isinstance(value, str):
+                value = value.strip()
+            transform_spec[key] = value
+        publish_intent: Dict[str, Any] = {
+            "repo": f"{owner.strip().lower()}/{repo.strip().lower()}",
+            "version_mode": version_mode,
+            "transform_spec": transform_spec,
+            "tag_policy": {
+                "destination_repo_tags": [],
+                "manage_latest": True,
+            },
+        }
+        if normalized_source_version_id:
+            publish_intent["source_version_id"] = normalized_source_version_id
+        if normalized_tags:
+            if output_versions:
+                publish_intent["tag_policy"] = {
+                    "destination_repo_tags": normalized_tags,
+                    "manage_latest": True,
+                }
+            else:
+                logger.warning(
+                    "worker_publish_tags_skipped request_id=%s run_id=%s owner=%s repo=%s reason=missing_target_version tags=%s",
+                    self.request_id,
+                    self.run_id or "",
+                    owner,
+                    repo,
+                    ",".join(normalized_tags),
+                )
         base = (self._file_api_base_url or "").strip().rstrip("/")
-        token = (self._worker_capability_token or self._file_api_token or "").strip()
+        token = (self._worker_capability_token or "").strip()
         if token:
-            _assert_token_repo_scope_matches_destination(token, owner, repo)
+            required_actions = ["repo-version:create"]
+            if create_if_missing:
+                required_actions.insert(0, "tensor-repo:create")
+            _assert_token_repo_scope_matches_destination(token, owner, repo, required_actions=required_actions)
         logger.info(
             "worker_publish_attempt request_id=%s run_id=%s owner=%s repo=%s",
             self.request_id,
@@ -1017,21 +1836,33 @@ class RequestContext:
         start = _request_json(
             "POST",
             f"/api/v1/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}/runs/start",
-            {"kind": "conversion", "input_versions": []},
+            {"kind": "conversion", "input_versions": input_versions, "publish_intent": publish_intent},
         )
         run_id = str(start.get("run_id") or "").strip()
         if run_id == "":
             raise RuntimeError("repo publish failed: missing run_id from start response")
 
-        metrics = dict(metadata or {})
+        metrics = dict(md)
         refs = [str(r or "").strip() for r in list(artifact_refs or []) if str(r or "").strip()]
         if refs:
             metrics["artifact_refs"] = refs
-        _request_json(
+        finalize_payload = {
+            "status": "succeeded",
+            "metrics_json": metrics,
+            "cost_json": {},
+            "output_versions": output_versions,
+            "publish_intent": publish_intent,
+        }
+        finalize_result = _request_json(
             "POST",
             f"/api/v1/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}/runs/{urllib.parse.quote(run_id, safe='')}/finalize",
-            {"status": "succeeded", "metrics_json": metrics, "cost_json": {}, "output_versions": []},
+            finalize_payload,
         )
+        finalize_output_versions = [
+            str(v or "").strip().lower()
+            for v in list((finalize_result or {}).get("output_versions") or [])
+            if str(v or "").strip()
+        ]
 
         logger.info(
             "worker_publish_succeeded request_id=%s run_id=%s owner=%s repo=%s published_run_id=%s",
@@ -1042,15 +1873,22 @@ class RequestContext:
             run_id,
         )
 
-        return {"ok": True, "owner": owner, "repo": repo, "run_id": run_id}
+        out: Dict[str, Any] = {"ok": True, "owner": owner, "repo": repo, "run_id": run_id}
+        if finalize_output_versions:
+            out["output_versions"] = finalize_output_versions
+        elif output_versions:
+            out["output_versions"] = output_versions
+        if normalized_tags:
+            out["destination_repo_tags"] = normalized_tags
+        return out
 
     def read_repo_metadata(self, *, destination_repo: str) -> Dict[str, Any]:
         """Read repo-level metadata from Tensorhub public HTTP API."""
         owner, repo = _parse_owner_repo(destination_repo)
         base = (self._file_api_base_url or "").strip().rstrip("/")
-        token = (self._worker_capability_token or self._file_api_token or "").strip()
+        token = (self._worker_capability_token or "").strip()
         if token:
-            _assert_token_repo_scope_matches_destination(token, owner, repo)
+            _assert_token_repo_scope_matches_destination(token, owner, repo, required_actions=["tensor-repo:read"])
         if not base or not token:
             return {"ok": False, "skipped": True, "reason": "missing_worker_capability_channel", "exists": False, "metadata": {}}
 
@@ -1086,9 +1924,9 @@ class RequestContext:
         if not isinstance(metadata, dict):
             raise ValueError("metadata must be an object")
         base = (self._file_api_base_url or "").strip().rstrip("/")
-        token = (self._worker_capability_token or self._file_api_token or "").strip()
+        token = (self._worker_capability_token or "").strip()
         if token:
-            _assert_token_repo_scope_matches_destination(token, owner, repo)
+            _assert_token_repo_scope_matches_destination(token, owner, repo, required_actions=["repo-version:create"])
         if not base or not token:
             return {"ok": False, "skipped": True, "reason": "missing_worker_capability_channel", "owner": owner, "repo": repo}
 
@@ -1115,3 +1953,525 @@ class RequestContext:
         if not isinstance(returned, dict):
             returned = metadata
         return {"ok": True, "owner": owner, "repo": repo, "metadata": returned}
+
+    def search_metadata_claims(
+        self,
+        *,
+        scope: str = "version",
+        identity_hash: Optional[str] = None,
+        metadata_contains: Optional[Dict[str, Any]] = None,
+        limit: int = 50,
+        cursor: int = 0,
+    ) -> Dict[str, Any]:
+        """Search metadata claims by writer identity (derived server-side from token)."""
+        normalized_scope = str(scope or "").strip().lower() or "version"
+        if normalized_scope not in {"repo", "version"}:
+            raise ValueError("scope must be 'repo' or 'version'")
+        digest = str(identity_hash or "").strip().lower()
+        if digest and ":" not in digest:
+            raise ValueError("identity_hash must be a digest ref")
+        if metadata_contains is not None and not isinstance(metadata_contains, dict):
+            raise ValueError("metadata_contains must be an object")
+        if not digest and not metadata_contains:
+            raise ValueError("identity_hash or metadata_contains is required")
+        if limit <= 0:
+            limit = 50
+        if limit > 200:
+            limit = 200
+        if cursor < 0:
+            cursor = 0
+
+        base = (self._file_api_base_url or "").strip().rstrip("/")
+        token = (self._worker_capability_token or "").strip()
+        if not base or not token:
+            return {"ok": False, "skipped": True, "reason": "missing_worker_capability_channel", "items": []}
+
+        payload: Dict[str, Any] = {
+            "scope": normalized_scope,
+            "limit": int(limit),
+            "cursor": int(cursor),
+        }
+        if digest:
+            payload["identity_hash"] = digest
+        if metadata_contains:
+            payload["metadata_contains"] = metadata_contains
+
+        url = f"{base}/api/v1/metadata/claims/search"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        }
+        resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=30)
+        code = int(resp.status_code)
+        if code in (401, 403):
+            raise AuthError(f"metadata claims search unauthorized ({code}): check worker_capability_token validity")
+        if code < 200 or code >= 300:
+            err_code = ""
+            err_msg = ""
+            try:
+                body = resp.json()
+            except Exception:
+                body = {}
+            if isinstance(body, dict):
+                raw = body.get("error")
+                if isinstance(raw, dict):
+                    err_code = str(raw.get("code") or "").strip()
+                    err_msg = str(raw.get("message") or "").strip()
+                elif isinstance(raw, str):
+                    err_code = raw.strip()
+                if not err_msg:
+                    err_msg = str(body.get("message") or "").strip()
+            detail = err_code or f"status_{code}"
+            if err_msg:
+                raise RuntimeError(f"metadata_claim_search_failed:{detail}:{err_msg}")
+            raise RuntimeError(f"metadata_claim_search_failed:{detail}")
+        try:
+            parsed = resp.json()
+        except Exception:
+            parsed = {}
+        if not isinstance(parsed, dict):
+            parsed = {}
+        items = parsed.get("items")
+        if not isinstance(items, list):
+            items = []
+        return {
+            "ok": True,
+            "scope": str(parsed.get("scope") or normalized_scope),
+            "limit": int(parsed.get("limit") or limit),
+            "cursor": int(parsed.get("cursor") or cursor),
+            "next_cursor": int(parsed.get("next_cursor") or (cursor + len(items))),
+            "items": items,
+        }
+
+    def upsert_version_metadata_claim(
+        self,
+        *,
+        destination_repo: str,
+        version_id: str,
+        identity_hash: Optional[str],
+        metadata_json: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Create/update a version metadata claim for this worker/user writer identity."""
+        owner, repo = _parse_owner_repo(destination_repo)
+        normalized_version_id = str(version_id or "").strip().lower()
+        if ":" not in normalized_version_id:
+            raise ValueError("version_id must be a digest ref")
+        if not isinstance(metadata_json, dict):
+            raise ValueError("metadata_json must be an object")
+        digest = str(identity_hash or "").strip().lower()
+        if digest and ":" not in digest:
+            raise ValueError("identity_hash must be a digest ref")
+
+        base = (self._file_api_base_url or "").strip().rstrip("/")
+        token = (self._worker_capability_token or "").strip()
+        if token:
+            _assert_token_repo_scope_matches_destination(token, owner, repo, required_actions=["repo-version:create"])
+        if not base or not token:
+            return {"ok": False, "skipped": True, "reason": "missing_worker_capability_channel", "owner": owner, "repo": repo}
+
+        payload: Dict[str, Any] = {"metadata_json": metadata_json}
+        if digest:
+            payload["identity_hash"] = digest
+        url = (
+            f"{base}/api/v1/repos/{urllib.parse.quote(owner, safe='')}/"
+            f"{urllib.parse.quote(repo, safe='')}/versions/{urllib.parse.quote(normalized_version_id, safe='')}/metadata/claims"
+        )
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "X-Cozy-Owner": owner,
+        }
+        resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=30)
+        code = int(resp.status_code)
+        if code in (401, 403):
+            raise AuthError(f"version metadata claim write unauthorized ({code}): check worker_capability_token validity")
+        if code < 200 or code >= 300:
+            err_code = ""
+            try:
+                body = resp.json()
+            except Exception:
+                body = {}
+            if isinstance(body, dict):
+                raw = body.get("error")
+                if isinstance(raw, dict):
+                    err_code = str(raw.get("code") or "").strip()
+                elif isinstance(raw, str):
+                    err_code = raw.strip()
+            raise RuntimeError(f"metadata_claim_invalid:{err_code or code}")
+
+        try:
+            parsed = resp.json()
+        except Exception:
+            parsed = {}
+        if not isinstance(parsed, dict):
+            parsed = {}
+        return {"ok": True, **parsed}
+
+    def mirror_dedupe_or_run(
+        self,
+        *,
+        source_identity: Dict[str, Any],
+        destination_repo: str,
+        destination_repo_tags: Optional[List[str]] = None,
+        on_miss: Optional[Callable[[], Dict[str, Any]]] = None,
+    ) -> Dict[str, Any]:
+        """Perform mirror dedupe orchestration with a single high-level API.
+
+        Flow:
+        1) Search claims for canonical source identity.
+        2) Attempt copy-by-reference from matching claim candidates.
+        3) Invalidate stale claims when source lineage no longer exists.
+        4) Run `on_miss` callback when no reusable lineage is found.
+        5) Write/update destination version claim after hit or miss publish.
+        """
+
+        if not isinstance(source_identity, dict):
+            raise ValueError("source_identity must be an object")
+
+        provider = str(source_identity.get("provider") or "").strip().lower()
+        source_ref = str(source_identity.get("source_ref") or "").strip()
+        source_revision = str(source_identity.get("source_revision") or "").strip()
+        identity_hash = str(source_identity.get("identity_hash") or "").strip().lower()
+        dedupe_supported = bool(source_identity.get("dedupe_supported", True))
+
+        if provider == "":
+            raise ValueError("source_identity.provider is required")
+        if source_ref == "":
+            raise ValueError("source_identity.source_ref is required")
+        if identity_hash == "" or ":" not in identity_hash:
+            raise ValueError("source_identity.identity_hash must be a digest ref")
+
+        destination_owner, destination_name = _parse_owner_repo(destination_repo)
+        normalized_destination = f"{destination_owner}/{destination_name}"
+        normalized_tags = _normalize_destination_repo_tags(destination_repo_tags)
+
+        metadata_contains = {
+            "source": {
+                "provider": provider,
+                "source_ref": source_ref,
+                "source_revision": source_revision,
+            }
+        }
+
+        invalidated_claim_ids: List[int] = []
+        warnings: List[Dict[str, Any]] = []
+
+        def _record_warning(*, stage: str, code: str, message: str, payload: Optional[Dict[str, Any]] = None) -> None:
+            item: Dict[str, Any] = {
+                "stage": str(stage or "").strip() or "unknown",
+                "code": str(code or "").strip().lower() or "unknown",
+                "message": str(message or "").strip(),
+            }
+            if payload:
+                item.update(payload)
+            warnings.append(item)
+
+        def _build_claim_metadata(*, version_id: str, primary_ref: str, primary_format: str) -> Dict[str, Any]:
+            return {
+                "source": {
+                    "provider": provider,
+                    "source_ref": source_ref,
+                    "source_revision": source_revision,
+                },
+                "result": {
+                    "destination_repo": normalized_destination,
+                    "version_id": version_id,
+                    "primary_artifact_ref": primary_ref,
+                    "primary_artifact_format": primary_format,
+                },
+                "request_id": str(self.request_id or "").strip(),
+                "written_at": _utc_timestamp_rfc3339(),
+            }
+
+        def _write_claim(*, version_id: str, primary_ref: str, primary_format: str) -> bool:
+            normalized_version = str(version_id or "").strip().lower()
+            if normalized_version == "" or ":" not in normalized_version:
+                return False
+            try:
+                self.upsert_version_metadata_claim(
+                    destination_repo=normalized_destination,
+                    version_id=normalized_version,
+                    identity_hash=identity_hash,
+                    metadata_json=_build_claim_metadata(
+                        version_id=normalized_version,
+                        primary_ref=str(primary_ref or "").strip(),
+                        primary_format=str(primary_format or "").strip(),
+                    ),
+                )
+                return True
+            except Exception as exc:
+                _record_warning(
+                    stage="claim_write",
+                    code=_error_code_from_exception(exc, fallback="metadata_claim_write_failed"),
+                    message=str(exc),
+                    payload={"version_id": normalized_version},
+                )
+                return False
+
+        if dedupe_supported:
+            try:
+                search_out = self.search_metadata_claims(
+                    scope="version",
+                    identity_hash=identity_hash,
+                    metadata_contains=metadata_contains,
+                    limit=20,
+                    cursor=0,
+                )
+            except Exception as exc:
+                code = _error_code_from_exception(exc, fallback="metadata_claim_search_failed")
+                raise RuntimeError(f"mirror_dedupe_search_failed:{code}") from exc
+
+            if not bool((search_out or {}).get("skipped")):
+                for raw in list((search_out or {}).get("items") or []):
+                    if not isinstance(raw, dict):
+                        continue
+                    source_owner = str(raw.get("owner") or "").strip().lower()
+                    source_repo = str(raw.get("repo") or "").strip().lower()
+                    source_version_id = str(raw.get("version_id") or "").strip().lower()
+                    if source_owner == "" or source_repo == "" or source_version_id == "":
+                        continue
+
+                    claim_id_raw = raw.get("claim_id")
+                    claim_id = int(claim_id_raw) if isinstance(claim_id_raw, int) else 0
+                    source_repo_ref = f"{source_owner}/{source_repo}"
+
+                    try:
+                        copy_out = self.copy_repo_by_reference(
+                            source_repo=source_repo_ref,
+                            source_version_id=source_version_id,
+                            destination_repo=normalized_destination,
+                            destination_repo_tags=normalized_tags,
+                            claim_id=claim_id if claim_id > 0 else None,
+                        )
+                    except Exception as exc:
+                        code = _error_code_from_exception(exc, fallback="mirror_copy_failed")
+                        _record_warning(
+                            stage="copy_by_reference",
+                            code=code,
+                            message=str(exc),
+                            payload={
+                                "source_repo": source_repo_ref,
+                                "source_version_id": source_version_id,
+                            },
+                        )
+                        if code in _STALE_MIRROR_CLAIM_ERROR_CODES and claim_id > 0:
+                            try:
+                                self.delete_version_metadata_claim(
+                                    destination_repo=source_repo_ref,
+                                    version_id=source_version_id,
+                                    claim_id=claim_id,
+                                )
+                                invalidated_claim_ids.append(claim_id)
+                            except Exception as delete_exc:
+                                _record_warning(
+                                    stage="claim_invalidation",
+                                    code=_error_code_from_exception(delete_exc, fallback="metadata_claim_delete_failed"),
+                                    message=str(delete_exc),
+                                    payload={
+                                        "claim_id": claim_id,
+                                        "source_repo": source_repo_ref,
+                                        "source_version_id": source_version_id,
+                                    },
+                                )
+                        continue
+
+                    copied_version_id = str((copy_out or {}).get("copied_version_id") or source_version_id).strip().lower()
+                    metadata_json = raw.get("metadata_json") if isinstance(raw.get("metadata_json"), dict) else {}
+                    result_json = metadata_json.get("result") if isinstance(metadata_json.get("result"), dict) else {}
+                    primary_ref = str(result_json.get("primary_artifact_ref") or "").strip()
+                    primary_format = str(result_json.get("primary_artifact_format") or "").strip()
+                    claim_written = _write_claim(
+                        version_id=copied_version_id,
+                        primary_ref=primary_ref,
+                        primary_format=primary_format,
+                    )
+                    return {
+                        "ok": True,
+                        "result_code": "dedupe_copy_hit",
+                        "hit": True,
+                        "source_provider": provider,
+                        "source_ref": source_ref,
+                        "source_revision": source_revision,
+                        "identity_hash": identity_hash,
+                        "copied_from_repo": source_repo_ref,
+                        "copied_from_version_id": source_version_id,
+                        "copied_version_id": copied_version_id,
+                        "primary_artifact_ref": primary_ref,
+                        "primary_artifact_format": primary_format,
+                        "claim_written": claim_written,
+                        "invalidated_claim_ids": invalidated_claim_ids,
+                        "warnings": warnings,
+                    }
+
+        miss_result: Dict[str, Any] = {}
+        if callable(on_miss):
+            try:
+                maybe = on_miss()
+                if isinstance(maybe, dict):
+                    miss_result = maybe
+            except Exception as exc:
+                code = _error_code_from_exception(exc, fallback="on_miss_failed")
+                raise RuntimeError(f"mirror_dedupe_on_miss_failed:{code}") from exc
+
+        published_version_id = str(
+            miss_result.get("version_id")
+            or miss_result.get("published_version_id")
+            or ""
+        ).strip().lower()
+        primary_ref = str(
+            miss_result.get("primary_artifact_ref")
+            or miss_result.get("primary_ref")
+            or ""
+        ).strip()
+        primary_format = str(
+            miss_result.get("primary_artifact_format")
+            or miss_result.get("primary_format")
+            or ""
+        ).strip()
+
+        claim_written = False
+        if published_version_id:
+            claim_written = _write_claim(
+                version_id=published_version_id,
+                primary_ref=primary_ref,
+                primary_format=primary_format,
+            )
+
+        return {
+            "ok": True,
+            "result_code": "dedupe_miss",
+            "hit": False,
+            "source_provider": provider,
+            "source_ref": source_ref,
+            "source_revision": source_revision,
+            "identity_hash": identity_hash,
+            "published_version_id": published_version_id,
+            "primary_artifact_ref": primary_ref,
+            "primary_artifact_format": primary_format,
+            "claim_written": claim_written,
+            "invalidated_claim_ids": invalidated_claim_ids,
+            "warnings": warnings,
+            "miss_result": miss_result,
+        }
+
+    def delete_version_metadata_claim(
+        self,
+        *,
+        destination_repo: str,
+        version_id: str,
+        claim_id: int,
+    ) -> Dict[str, Any]:
+        """Delete a version metadata claim by numeric claim id."""
+        owner, repo = _parse_owner_repo(destination_repo)
+        normalized_version_id = str(version_id or "").strip().lower()
+        if ":" not in normalized_version_id:
+            raise ValueError("version_id must be a digest ref")
+        if int(claim_id) <= 0:
+            raise ValueError("claim_id must be > 0")
+
+        base = (self._file_api_base_url or "").strip().rstrip("/")
+        token = (self._worker_capability_token or "").strip()
+        if token:
+            _assert_token_repo_scope_matches_destination(token, owner, repo, required_actions=["repo-version:create"])
+        if not base or not token:
+            return {"ok": False, "skipped": True, "reason": "missing_worker_capability_channel", "owner": owner, "repo": repo}
+
+        url = (
+            f"{base}/api/v1/repos/{urllib.parse.quote(owner, safe='')}/"
+            f"{urllib.parse.quote(repo, safe='')}/versions/{urllib.parse.quote(normalized_version_id, safe='')}/"
+            f"metadata/claims/{int(claim_id)}"
+        )
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "X-Cozy-Owner": owner,
+        }
+        resp = requests.delete(url, headers=headers, timeout=30)
+        code = int(resp.status_code)
+        if code in (401, 403):
+            raise AuthError(f"version metadata claim delete unauthorized ({code}): check worker_capability_token validity")
+        if code == 404:
+            return {"ok": True, "deleted": False}
+        if code < 200 or code >= 300:
+            raise RuntimeError(f"metadata_claim_delete_failed:{code}")
+        return {"ok": True, "deleted": True, "claim_id": int(claim_id)}
+
+    def copy_repo_by_reference(
+        self,
+        *,
+        source_repo: str,
+        source_version_id: str,
+        destination_repo: str,
+        destination_repo_tags: Optional[List[str]] = None,
+        claim_id: Optional[int] = None,
+        release_visibility: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Copy an existing repo/version snapshot into another repo without re-upload."""
+        source_owner, source_name = _parse_owner_repo(source_repo)
+        destination_owner, destination_name = _parse_owner_repo(destination_repo)
+        normalized_version_id = str(source_version_id or "").strip().lower()
+        if ":" not in normalized_version_id:
+            raise ValueError("source_version_id must be a digest ref")
+        normalized_tags = _normalize_destination_repo_tags(destination_repo_tags)
+        visibility = str(release_visibility or "").strip().lower()
+        if visibility not in {"", "public", "private"}:
+            raise ValueError("release_visibility must be 'public' or 'private'")
+        claim_id_value = int(claim_id or 0)
+        if claim_id_value < 0:
+            raise ValueError("claim_id must be >= 0")
+
+        base = (self._file_api_base_url or "").strip().rstrip("/")
+        token = (self._worker_capability_token or "").strip()
+        if token:
+            _assert_token_repo_scope_matches_destination(token, destination_owner, destination_name, required_actions=["repo-version:create"])
+        if not base or not token:
+            return {"ok": False, "skipped": True, "reason": "missing_worker_capability_channel"}
+
+        payload: Dict[str, Any] = {
+            "source_owner": source_owner,
+            "source_repo": source_name,
+            "source_version_id": normalized_version_id,
+            "destination_owner": destination_owner,
+            "destination_repo": destination_name,
+            "destination_repo_tags": normalized_tags,
+        }
+        if visibility:
+            payload["release_visibility"] = visibility
+        if claim_id_value > 0:
+            payload["claim_id"] = claim_id_value
+        url = f"{base}/api/v1/repos/copy-by-reference"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "X-Cozy-Owner": destination_owner,
+        }
+        resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
+        code = int(resp.status_code)
+        if code in (401, 403):
+            raise AuthError(f"repo copy-by-reference unauthorized ({code}): check worker_capability_token validity")
+        if code < 200 or code >= 300:
+            err_code = ""
+            err_msg = ""
+            try:
+                body = resp.json()
+            except Exception:
+                body = {}
+            if isinstance(body, dict):
+                raw = body.get("error")
+                if isinstance(raw, dict):
+                    err_code = str(raw.get("code") or "").strip()
+                    err_msg = str(raw.get("message") or "").strip()
+                elif isinstance(raw, str):
+                    err_code = raw.strip()
+                if not err_msg:
+                    err_msg = str(body.get("message") or "").strip()
+            detail = err_code or f"status_{code}"
+            if err_msg:
+                raise RuntimeError(f"mirror_copy_forbidden:{detail}:{err_msg}")
+            raise RuntimeError(f"mirror_copy_forbidden:{detail}")
+        try:
+            parsed = resp.json()
+        except Exception:
+            parsed = {}
+        if not isinstance(parsed, dict):
+            parsed = {}
+        return {"ok": True, **parsed}
