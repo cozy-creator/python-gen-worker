@@ -34,6 +34,12 @@ logger = logging.getLogger(__name__)
 
 _PUBLIC_TAG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
 _STALE_MIRROR_CLAIM_ERROR_CODES = {"source_version_not_found", "source_variants_not_found"}
+_MAX_OUTPUT_FILE_BYTES = 20 * 1024 * 1024 * 1024  # 20 GiB hard cap per file.
+_FILE_API_HTTP_TIMEOUT_S = 60
+_FILE_API_STREAM_CHUNK_TIMEOUT_S = 120
+_FILE_API_STREAM_FINALIZE_TIMEOUT_S = 600
+_FILE_API_STREAM_REPLAY_TIMEOUT_S = 600
+_FILE_API_STREAM_ABORT_TIMEOUT_S = 15
 
 
 def _encode_ref_for_url(ref: str) -> str:
@@ -196,6 +202,14 @@ def _error_code_from_exception(exc: Exception, *, fallback: str = "unknown") -> 
 
 def _utc_timestamp_rfc3339() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _enforce_output_file_size_limit(size_bytes: int) -> None:
+    size = int(size_bytes)
+    if size < 0:
+        raise ValueError("size_bytes must be non-negative")
+    if size > _MAX_OUTPUT_FILE_BYTES:
+        raise OutputTooLargeError(size_bytes=size, max_bytes=_MAX_OUTPUT_FILE_BYTES)
 
 
 def _assert_token_repo_scope_matches_destination(
@@ -376,12 +390,18 @@ class _RequestOutputStream:
         kind: str,  # "asset" | "checkpoint"
         format: Optional[str] = None,
         create: bool = False,
+        expected_size_bytes: Optional[int] = None,
     ) -> None:
         self._ctx = ctx
         self._ref = _normalize_output_ref(ref)
         self._kind = str(kind or "asset").strip().lower()
         self._format = str(format or "").strip() or None
         self._create = bool(create)
+        self._expected_size_bytes = int(expected_size_bytes or 0)
+        if self._expected_size_bytes < 0:
+            self._expected_size_bytes = 0
+        if self._expected_size_bytes > 0:
+            _enforce_output_file_size_limit(self._expected_size_bytes)
         self._stream_remote = bool(self._ctx._should_stream_output_to_file_api(self._ref))
         self._session_upload_enabled = bool(
             self._stream_remote and _env_bool("WORKER_STREAM_APPEND_SESSION_ENABLED", False)
@@ -413,10 +433,10 @@ class _RequestOutputStream:
         self._last_progress_emit_mono = self._started_mono
         self._last_progress_mono = self._started_mono
         self._last_progress_uploaded = 0
-        self._retry_attempts = max(1, int(os.getenv("WORKER_STREAM_UPLOAD_RETRY_ATTEMPTS", "2") or "2"))
-        self._retry_backoff_ms = max(0, int(os.getenv("WORKER_STREAM_UPLOAD_RETRY_BACKOFF_MS", "250") or "250"))
+        self._retry_attempts = max(1, int(os.getenv("WORKER_STREAM_UPLOAD_RETRY_ATTEMPTS", "5") or "5"))
+        self._retry_backoff_ms = max(0, int(os.getenv("WORKER_STREAM_UPLOAD_RETRY_BACKOFF_MS", "500") or "500"))
         self._session_id: Optional[str] = None
-        self._session_max_chunk_bytes = max(1, _env_int("WORKER_STREAM_SESSION_CHUNK_BYTES", 4 * 1024 * 1024))
+        self._session_max_chunk_bytes = max(1, _env_int("WORKER_STREAM_SESSION_CHUNK_BYTES", 8 * 1024 * 1024))
         self._finalized = False
         self._result: Any = None
 
@@ -425,12 +445,11 @@ class _RequestOutputStream:
             if qsize < 1:
                 qsize = 1
             self._chunk_q = queue.Queue(maxsize=qsize)
-            if not self._session_upload_enabled:
-                suffix = Path(self._ref).suffix or ".bin"
-                fd, tmp = tempfile.mkstemp(prefix=f"gw-out-replay-{ctx.request_id}-", suffix=suffix)
-                os.close(fd)
-                self._replay_path = tmp
-                self._replay_fh = open(self._replay_path, "wb")
+            suffix = Path(self._ref).suffix or ".bin"
+            fd, tmp = tempfile.mkstemp(prefix=f"gw-out-replay-{ctx.request_id}-", suffix=suffix)
+            os.close(fd)
+            self._replay_path = tmp
+            self._replay_fh = open(self._replay_path, "wb")
             self._start_remote_uploader()
         else:
             suffix = Path(self._ref).suffix or ".bin"
@@ -481,6 +500,7 @@ class _RequestOutputStream:
         b = bytes(data)
         if not b:
             return 0
+        _enforce_output_file_size_limit(self._bytes_written + len(b))
         if self._stream_remote:
             assert self._chunk_q is not None
             if self._replay_fh is not None:
@@ -704,7 +724,7 @@ class _RequestOutputStream:
                 if owner:
                     headers["X-Cozy-Owner"] = owner
                 self._finalize_upload_session(base=base, headers=headers)
-            if self._uploader_error is not None and not self._abort_remote and not self._session_upload_enabled:
+            if self._uploader_error is not None and not self._abort_remote:
                 recovered = self._replay_remote_upload_if_needed()
                 if recovered:
                     self._uploader_error = None
@@ -784,7 +804,13 @@ class _RequestOutputStream:
                         )
                     self._remote_completed = True
                 else:
-                    resp = requests.request(method=method, url=url, headers=headers, data=self._upload_iter(), timeout=30)
+                    resp = requests.request(
+                        method=method,
+                        url=url,
+                        headers=headers,
+                        data=self._upload_iter(),
+                        timeout=_FILE_API_STREAM_REPLAY_TIMEOUT_S,
+                    )
                     code = int(resp.status_code)
                     if code in (401, 403):
                         raise AuthError(f"file save unauthorized ({code}): check worker_capability_token validity")
@@ -833,7 +859,10 @@ class _RequestOutputStream:
         request_payload: Dict[str, Any] = {
             "ref": self._ref,
             "create": bool(self._create),
+            "max_chunk_bytes": int(self._session_max_chunk_bytes),
         }
+        if self._expected_size_bytes > 0:
+            request_payload["expected_size_bytes"] = int(self._expected_size_bytes)
         req_id = str(self._ctx.request_id or "").strip()
         if req_id:
             request_payload["request_id"] = req_id
@@ -849,7 +878,7 @@ class _RequestOutputStream:
             url=url,
             headers=session_headers,
             data=json.dumps(request_payload),
-            timeout=30,
+            timeout=_FILE_API_HTTP_TIMEOUT_S,
         )
         code = int(resp.status_code)
         if code in (401, 403):
@@ -898,7 +927,7 @@ class _RequestOutputStream:
                         url=append_url,
                         headers=append_headers,
                         data=part,
-                        timeout=30,
+                        timeout=_FILE_API_STREAM_CHUNK_TIMEOUT_S,
                     )
                 except requests.RequestException as e:
                     net = RuntimeError("file save failed (network_error)")
@@ -933,33 +962,47 @@ class _RequestOutputStream:
             "final_size_bytes": int(self._bytes_written),
         }
         finalize_url = f"{base}/api/v1/file/upload-sessions/{session_id}/finalize"
-        try:
-            resp = requests.request(
-                method="POST",
-                url=finalize_url,
-                headers=finalize_headers,
-                data=json.dumps(body),
-                timeout=30,
-            )
-        except requests.RequestException as e:
-            net = RuntimeError("file save failed (network_error)")
-            net.__cause__ = e
-            raise net
-        code = int(resp.status_code)
-        if code in (401, 403):
-            raise AuthError(f"file save unauthorized ({code}): check worker_capability_token validity")
-        if code == 409 and self._create:
-            raise RuntimeError("output path already exists")
-        if code < 200 or code >= 300:
-            raise RuntimeError(f"file save failed ({code})")
-        try:
-            parsed = resp.json()
-        except Exception:
-            parsed = {}
-        if isinstance(parsed, dict):
-            self._uploader_meta = parsed
-        else:
-            self._uploader_meta = {}
+        last_exc: Optional[BaseException] = None
+        for attempt in range(1, self._retry_attempts + 1):
+            if self._ctx.is_canceled() or self._abort_remote:
+                raise InterruptedError("canceled")
+            try:
+                resp = requests.request(
+                    method="POST",
+                    url=finalize_url,
+                    headers=finalize_headers,
+                    data=json.dumps(body),
+                    timeout=_FILE_API_STREAM_FINALIZE_TIMEOUT_S,
+                )
+            except requests.RequestException as e:
+                net = RuntimeError("file save failed (network_error)")
+                net.__cause__ = e
+                last_exc = net
+            else:
+                code = int(resp.status_code)
+                if code in (401, 403):
+                    raise AuthError(f"file save unauthorized ({code}): check worker_capability_token validity")
+                if code == 409 and self._create:
+                    raise RuntimeError("output path already exists")
+                if code >= 500:
+                    last_exc = RuntimeError(f"file save failed ({code})")
+                elif code < 200 or code >= 300:
+                    raise RuntimeError(f"file save failed ({code})")
+                else:
+                    try:
+                        parsed = resp.json()
+                    except Exception:
+                        parsed = {}
+                    if isinstance(parsed, dict):
+                        self._uploader_meta = parsed
+                    else:
+                        self._uploader_meta = {}
+                    return
+            if attempt < self._retry_attempts and self._retry_backoff_ms > 0:
+                time.sleep(float(self._retry_backoff_ms) / 1000.0)
+        if last_exc is not None:
+            raise last_exc
+        raise RuntimeError("file save failed (unknown_error)")
 
     def _abort_upload_session(self, *, base: str, headers: Dict[str, str]) -> None:
         session_id = str(self._session_id or "").strip()
@@ -969,7 +1012,13 @@ class _RequestOutputStream:
         abort_headers["Content-Type"] = "application/json"
         abort_url = f"{base}/api/v1/file/upload-sessions/{session_id}/abort"
         try:
-            requests.request(method="POST", url=abort_url, headers=abort_headers, data="{}", timeout=10)
+            requests.request(
+                method="POST",
+                url=abort_url,
+                headers=abort_headers,
+                data="{}",
+                timeout=_FILE_API_STREAM_ABORT_TIMEOUT_S,
+            )
         except Exception:
             return
 
@@ -1003,8 +1052,6 @@ class _RequestOutputStream:
             return False
         base = self._ctx._get_file_api_base_url()
         token = self._ctx._get_worker_capability_token()
-        url = f"{base}/api/v1/file/{_encode_ref_for_url(self._ref)}"
-        method = "POST" if self._create else "PUT"
         headers: Dict[str, str] = {
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/octet-stream",
@@ -1026,22 +1073,50 @@ class _RequestOutputStream:
                 },
             )
             try:
-                with open(replay_path, "rb") as fin:
-                    resp = requests.request(method=method, url=url, headers=headers, data=fin, timeout=30)
-                code = int(resp.status_code)
-                if code in (401, 403):
-                    raise AuthError(f"file save unauthorized ({code}): check worker_capability_token validity")
-                if code == 409 and self._create:
-                    raise RuntimeError("output path already exists")
-                if code >= 500:
-                    raise RuntimeError(f"file save failed ({code})")
-                if code < 200 or code >= 300:
-                    raise RuntimeError(f"file save failed ({code})")
-                try:
-                    parsed = resp.json()
-                except Exception:
-                    parsed = {}
-                self._uploader_meta = parsed if isinstance(parsed, dict) else {}
+                if self._session_upload_enabled:
+                    # Replay through upload-session chunks so retries are resumable and bounded.
+                    self._session_id = None
+                    self._open_upload_session(base=base, headers=headers)
+                    sequence = 0
+                    max_chunk = max(1, int(self._session_max_chunk_bytes))
+                    with open(replay_path, "rb") as fin:
+                        while True:
+                            part = fin.read(max_chunk)
+                            if not part:
+                                break
+                            sequence = self._append_upload_session_chunk(
+                                base=base,
+                                headers=headers,
+                                sequence_start=sequence,
+                                chunk=part,
+                            )
+                    self._finalize_upload_session(base=base, headers=headers)
+                else:
+                    # Legacy replay path for non-session uploads.
+                    url = f"{base}/api/v1/file/{_encode_ref_for_url(self._ref)}"
+                    method = "POST" if self._create else "PUT"
+                    with open(replay_path, "rb") as fin:
+                        resp = requests.request(
+                            method=method,
+                            url=url,
+                            headers=headers,
+                            data=fin,
+                            timeout=_FILE_API_STREAM_REPLAY_TIMEOUT_S,
+                        )
+                    code = int(resp.status_code)
+                    if code in (401, 403):
+                        raise AuthError(f"file save unauthorized ({code}): check worker_capability_token validity")
+                    if code == 409 and self._create:
+                        raise RuntimeError("output path already exists")
+                    if code >= 500:
+                        raise RuntimeError(f"file save failed ({code})")
+                    if code < 200 or code >= 300:
+                        raise RuntimeError(f"file save failed ({code})")
+                    try:
+                        parsed = resp.json()
+                    except Exception:
+                        parsed = {}
+                    self._uploader_meta = parsed if isinstance(parsed, dict) else {}
                 self._remote_completed = True
                 with self._progress_lock:
                     self._bytes_uploaded = max(self._bytes_uploaded, self._bytes_written)
@@ -1375,9 +1450,7 @@ class RequestContext:
         if not isinstance(data, (bytes, bytearray)):
             raise TypeError("save_bytes expects bytes")
         data = bytes(data)
-        max_bytes = int(os.getenv("WORKER_MAX_OUTPUT_FILE_BYTES", str(200 * 1024 * 1024)))
-        if max_bytes > 0 and len(data) > max_bytes:
-            raise OutputTooLargeError(size_bytes=len(data), max_bytes=max_bytes)
+        _enforce_output_file_size_limit(len(data))
         ref = _normalize_output_ref(ref)
 
         local_path = self._resolve_local_output_path(ref)
@@ -1448,9 +1521,7 @@ class RequestContext:
             raise FileNotFoundError(src)
 
         size = int(os.path.getsize(src))
-        max_bytes = int(os.getenv("WORKER_MAX_OUTPUT_FILE_BYTES", str(200 * 1024 * 1024)))
-        if max_bytes > 0 and size > max_bytes:
-            raise OutputTooLargeError(size_bytes=size, max_bytes=max_bytes)
+        _enforce_output_file_size_limit(size)
 
         local_out = self._resolve_local_output_path(ref)
         if local_out:
@@ -1538,26 +1609,43 @@ class RequestContext:
             download_token=asset.download_token,
         )
 
-    def open_output_stream(self, ref: str, *, create: bool = False) -> _RequestOutputStream:
+    def open_output_stream(
+        self,
+        ref: str,
+        *,
+        create: bool = False,
+        expected_size_bytes: Optional[int] = None,
+    ) -> _RequestOutputStream:
         """Open a chunk-writable output stream that finalizes to an Asset."""
-        return _RequestOutputStream(ctx=self, ref=ref, kind="asset", create=create)
+        return _RequestOutputStream(
+            ctx=self,
+            ref=ref,
+            kind="asset",
+            create=create,
+            expected_size_bytes=expected_size_bytes,
+        )
 
     def open_checkpoint_stream(
         self,
         ref: str,
         *,
         format: Optional[str] = None,
+        expected_size_bytes: Optional[int] = None,
     ) -> _RequestOutputStream:
         """Open a chunk-writable output stream that finalizes to Tensors."""
-        return _RequestOutputStream(ctx=self, ref=ref, kind="checkpoint", format=format)
+        return _RequestOutputStream(
+            ctx=self,
+            ref=ref,
+            kind="checkpoint",
+            format=format,
+            expected_size_bytes=expected_size_bytes,
+        )
 
     def save_bytes_create(self, ref: str, data: bytes) -> Asset:
         if not isinstance(data, (bytes, bytearray)):
             raise TypeError("save_bytes_create expects bytes")
         data = bytes(data)
-        max_bytes = int(os.getenv("WORKER_MAX_OUTPUT_FILE_BYTES", str(200 * 1024 * 1024)))
-        if max_bytes > 0 and len(data) > max_bytes:
-            raise OutputTooLargeError(size_bytes=len(data), max_bytes=max_bytes)
+        _enforce_output_file_size_limit(len(data))
         ref = _normalize_output_ref(ref)
 
         local_path = self._resolve_local_output_path(ref)
@@ -1632,9 +1720,7 @@ class RequestContext:
             raise FileNotFoundError(src)
 
         size = int(os.path.getsize(src))
-        max_bytes = int(os.getenv("WORKER_MAX_OUTPUT_FILE_BYTES", str(200 * 1024 * 1024)))
-        if max_bytes > 0 and size > max_bytes:
-            raise OutputTooLargeError(size_bytes=size, max_bytes=max_bytes)
+        _enforce_output_file_size_limit(size)
 
         local_out = self._resolve_local_output_path(ref)
         if local_out:

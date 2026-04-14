@@ -3544,21 +3544,25 @@ class Worker:
                         load_watchdog.cancel()
 
             # Invoke.
+            execution_hints = getattr(ctx, "execution_hints", {}) or {}
+            execution_kind = str(execution_hints.get("kind", "") or "").strip().lower()
+            if execution_kind not in {"inference", "conversion", "training"}:
+                execution_kind = "inference"
             logger.info(
-                "[request_id=%s] all injections resolved, entering inference for function=%s canceled=%s",
-                request_id, spec.name, ctx.is_canceled(),
+                "[request_id=%s] all injections resolved, entering %s phase for function=%s canceled=%s",
+                request_id, execution_kind, spec.name, ctx.is_canceled(),
             )
             t_infer0 = time.monotonic()
             inference_watchdog = self._start_task_phase_watchdog(
                 request_id=request_id,
-                phase="inference",
+                phase=execution_kind,
                 warn_after_s=float(getattr(self, "_warn_inference_s", 60.0)),
-                payload={"function_name": spec.name, "output_mode": spec.output_mode},
+                payload={"function_name": spec.name, "output_mode": spec.output_mode, "phase": execution_kind},
             )
             self._emit_task_event(
                 request_id,
-                "task.inference.started",
-                {"function_name": spec.name, "output_mode": spec.output_mode},
+                f"task.{execution_kind}.started",
+                {"function_name": spec.name, "output_mode": spec.output_mode, "phase": execution_kind},
             )
             logger.info("[request_id=%s] calling %s", request_id, spec.name)
             if inspect.iscoroutinefunction(spec.func):
@@ -3679,10 +3683,11 @@ class Worker:
                 inference_watchdog.cancel()
             self._emit_task_event(
                 request_id,
-                "task.inference.completed",
+                f"task.{execution_kind}.completed",
                 {
                     "function_name": spec.name,
                     "output_mode": spec.output_mode,
+                    "phase": execution_kind,
                     "duration_ms": int((time.monotonic() - t_infer0) * 1000),
                 },
             )
@@ -3707,9 +3712,10 @@ class Worker:
             if "t_infer0" in locals():
                 self._emit_task_event(
                     request_id,
-                    "task.inference.failed",
+                    f"task.{execution_kind}.failed",
                     {
                         "function_name": spec.name,
+                        "phase": execution_kind,
                         "error_type": error_type,
                         "duration_ms": int((time.monotonic() - float(locals().get("t_infer0", time.monotonic()))) * 1000),
                     },

@@ -410,6 +410,7 @@ def test_action_context_open_checkpoint_stream_session_append_finalize(monkeypat
             assert payload["ref"] == "runs/rid13/outputs/final.safetensors"
             assert payload["request_id"] == "rid13"
             assert payload["run_id"] == "run13"
+            assert int(payload.get("expected_size_bytes") or 0) == 4
             return _Resp(200, {"session_id": "sess-1", "max_chunk_bytes": 2})
         if method == "PUT" and "/api/v1/file/upload-sessions/sess-1/chunks/" in url:
             seq = int(url.rsplit("/", 1)[-1])
@@ -424,8 +425,12 @@ def test_action_context_open_checkpoint_stream_session_append_finalize(monkeypat
 
     monkeypatch.setattr(requests, "request", _req)
 
-    writer = ctx.open_checkpoint_stream("runs/rid13/outputs/final.safetensors", format="safetensors")
-    assert getattr(writer, "_replay_path", None) is None
+    writer = ctx.open_checkpoint_stream(
+        "runs/rid13/outputs/final.safetensors",
+        format="safetensors",
+        expected_size_bytes=4,
+    )
+    assert str(getattr(writer, "_replay_path", "")).strip() != ""
     writer.write(b"abcd")
     out = writer.finalize()
     assert out.ref == "runs/rid13/outputs/final.safetensors"
