@@ -100,7 +100,12 @@ def _workspace_scope_id(request_id: str, run_id: Optional[str]) -> str:
 
 
 def _extract_worker_capability_token(envelope: Any) -> str:
-    return str(getattr(envelope, "worker_capability_token", "") or "").strip()
+    # Prefer the dedicated worker_capability_token field; fall back to the legacy
+    # file_token field which older orchestrator versions populate instead.
+    token = str(getattr(envelope, "worker_capability_token", "") or "").strip()
+    if not token:
+        token = str(getattr(envelope, "file_token", "") or "").strip()
+    return token
 
 
 @dataclass(frozen=True)
@@ -317,6 +322,10 @@ class Worker:
         self.max_concurrency = int(os.getenv("WORKER_MAX_CONCURRENCY", "0"))
         self._drain_timeout_seconds = int(os.getenv("WORKER_DRAIN_TIMEOUT_SECONDS", "0"))
         self._draining = False
+        # When set, emit model.ready immediately on connect instead of waiting for a model
+        # load event. Use this for conversion workers that have no GPU model to pre-load.
+        _mroc = (os.getenv("WORKER_MODELS_READY_ON_CONNECT") or "").strip().lower()
+        self._models_ready_on_connect: bool = _mroc in ("1", "true", "yes", "t", "on")
         self._discovered_resources: Dict[str, ResourceRequirements] = {} # Store resources per function
         self._function_schemas: Dict[str, Tuple[bytes, bytes, Optional[bytes], bytes]] = {}  # func_name -> (input_schema_json, output_schema_json, delta_schema_json, injection_json)
         self._runtime_batching_config_by_function: Dict[str, Dict[str, Any]] = {}
@@ -1721,6 +1730,12 @@ class Worker:
 
             logger.info(f"Successfully connected to scheduler at {self.scheduler_addr}")
             self._emit_startup_phase("ready", status="ok", scheduler_addr=self.scheduler_addr)
+            if self._models_ready_on_connect:
+                # Conversion workers: signal ModelsReady immediately since there is
+                # no GPU model to pre-load. Without this the scheduler's ModelsReady
+                # gate would block all job dispatch to this worker indefinitely.
+                self._emit_worker_event_bytes("", "model.ready", safe_json_bytes({}))
+                logger.info("emitted model.ready (WORKER_MODELS_READY_ON_CONNECT=true)")
             self._reconnect_count = 0
             return True
 
@@ -1903,8 +1918,10 @@ class Worker:
                     continue
 
             resources = pb.WorkerResources(
-                # Worker identity is carried in the worker-connect JWT claims. These fields are ignored.
-                worker_id="",
+                # Worker identity is carried in the worker-connect JWT claims when auth is enabled.
+                # When auth is disabled (dev mode), send worker_id directly so the orchestrator
+                # can identify this worker without JWT claims.
+                worker_id=self.worker_id,
                 release_id="",
                 # owner is provided per-request via TaskExecutionRequest/RealtimeOpenCommand.
                 runpod_pod_id=self.runpod_pod_id,
