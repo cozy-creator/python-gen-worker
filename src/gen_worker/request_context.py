@@ -1802,6 +1802,7 @@ class RequestContext:
         source_repo: Optional[str] = None,
         source_version_id: Optional[str] = None,
         target_version_id: Optional[str] = None,
+        snapshot_manifest: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Publish conversion lineage to Tensorhub using public HTTP APIs only.
 
@@ -1939,6 +1940,8 @@ class RequestContext:
             "output_versions": output_versions,
             "publish_intent": publish_intent,
         }
+        if isinstance(snapshot_manifest, dict) and snapshot_manifest:
+            finalize_payload["snapshot_manifest"] = snapshot_manifest
         finalize_result = _request_json(
             "POST",
             f"/api/v1/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}/runs/{urllib.parse.quote(run_id, safe='')}/finalize",
