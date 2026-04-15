@@ -8,6 +8,7 @@ import types
 import pytest
 
 from gen_worker.trainer import StepContext, StepResult
+import gen_worker.trainer.runtime as trainer_runtime
 from gen_worker.trainer.runtime import run_training_runtime_from_env
 
 
@@ -208,3 +209,110 @@ def test_training_runtime_resume_skips_corrupt_higher_checkpoint(
     lines = [json.loads(line) for line in events.read_text(encoding="utf-8").splitlines() if line.strip()]
     resumed = [row for row in lines if row.get("event") == "metric" and row.get("name") == "trainer/resumed_from_step"]
     assert resumed and int(resumed[0].get("step", 0)) == 3
+
+
+def test_training_runtime_passes_repo_job_upload_context_to_uploader(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    trainer_import = _register_simple_trainer_module(monkeypatch, "tmp_runtime_plugin_mod_scope", "ScopeTrainer")
+    captured: dict[str, str] = {}
+
+    class _Uploader:
+        def __init__(self, **kwargs) -> None:  # type: ignore[no-untyped-def]
+            captured["destination_repo"] = str(kwargs.get("destination_repo") or "")
+            captured["job_id"] = str(kwargs.get("job_id") or "")
+            captured["execution_kind"] = str(kwargs.get("execution_kind") or "")
+
+        def upload_checkpoint(self, *, local_path: str, step: int) -> dict[str, object]:
+            _ = local_path
+            _ = step
+            return {"ok": True}
+
+        def upload_terminal(self, *, status: str, step: int, final_checkpoint: str | None, error: str = "") -> dict[str, object]:
+            _ = status
+            _ = step
+            _ = final_checkpoint
+            _ = error
+            return {"ok": True}
+
+        def upload_metrics(self, *, metrics: dict[str, float], step: int) -> dict[str, object]:
+            _ = metrics
+            _ = step
+            return {"ok": True}
+
+        def upload_sample(self, *, local_path: str, step: int) -> dict[str, object]:
+            _ = local_path
+            _ = step
+            return {"ok": True}
+
+    monkeypatch.setattr(trainer_runtime, "JsonHttpArtifactUploader", _Uploader)
+
+    events = tmp_path / "events.jsonl"
+    checkpoints_dir = tmp_path / "checkpoints"
+    samples_dir = tmp_path / "samples"
+    spec = {
+        "trainer_api_version": "v1",
+        "request_id": "run_runtime_scope",
+        "trainer": trainer_import,
+        "max_steps": 1,
+        "metric_every": 1,
+        "checkpoint_every": 0,
+        "sample_every": 0,
+        "mock_batches": [1],
+        "uploads": {"terminal_url": "https://example.invalid/terminal"},
+        "execution_hints": {
+            "kind": "training",
+            "destination_repo": "alice/model-a",
+            "job_id": "job-123",
+        },
+    }
+    spec_path = tmp_path / "trainer_job_scope.json"
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+
+    monkeypatch.setenv("TRAINER_JOB_SPEC_PATH", str(spec_path))
+    monkeypatch.setenv("TRAINER_EVENTS_PATH", str(events))
+    monkeypatch.setenv("TRAINER_CHECKPOINTS_DIR", str(checkpoints_dir))
+    monkeypatch.setenv("TRAINER_SAMPLES_DIR", str(samples_dir))
+    monkeypatch.delenv("TRAINER_UPLOAD_TERMINAL_URL", raising=False)
+
+    assert run_training_runtime_from_env() == 0
+    assert captured == {
+        "destination_repo": "alice/model-a",
+        "job_id": "job-123",
+        "execution_kind": "training",
+    }
+
+
+def test_training_runtime_fails_checkpoint_upload_without_repo_job_scope(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    trainer_import = _register_simple_trainer_module(monkeypatch, "tmp_runtime_plugin_mod_missing_scope", "MissingScopeTrainer")
+    events = tmp_path / "events.jsonl"
+    checkpoints_dir = tmp_path / "checkpoints"
+    samples_dir = tmp_path / "samples"
+    spec = {
+        "trainer_api_version": "v1",
+        "request_id": "run_runtime_missing_scope",
+        "owner": "alice",
+        "trainer": trainer_import,
+        "max_steps": 1,
+        "metric_every": 1,
+        "checkpoint_every": 0,
+        "sample_every": 0,
+        "mock_batches": [1],
+        "uploads": {"checkpoint_url": "https://example.invalid/checkpoint"},
+        "execution_hints": {"kind": "training"},
+    }
+    spec_path = tmp_path / "trainer_job_missing_scope.json"
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+
+    monkeypatch.setenv("TRAINER_JOB_SPEC_PATH", str(spec_path))
+    monkeypatch.setenv("TRAINER_EVENTS_PATH", str(events))
+    monkeypatch.setenv("TRAINER_CHECKPOINTS_DIR", str(checkpoints_dir))
+    monkeypatch.setenv("TRAINER_SAMPLES_DIR", str(samples_dir))
+    monkeypatch.setenv("TRAINER_ORCHESTRATED", "1")
+    monkeypatch.setenv("TRAINER_CAPABILITY_TOKEN", "cap-token")
+    monkeypatch.setenv("TENSORHUB_URL", "https://tensorhub.example.test")
+
+    with pytest.raises(Exception, match="checkpoint upload requires repo-cas job scope"):
+        run_training_runtime_from_env()

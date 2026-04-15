@@ -13,13 +13,13 @@ import socket
 import tempfile
 import threading
 import time
-import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 import requests
+from blake3 import blake3
 
 try:
     import torch
@@ -40,6 +40,24 @@ _FILE_API_STREAM_CHUNK_TIMEOUT_S = 120
 _FILE_API_STREAM_FINALIZE_TIMEOUT_S = 600
 _FILE_API_STREAM_REPLAY_TIMEOUT_S = 600
 _FILE_API_STREAM_ABORT_TIMEOUT_S = 15
+
+
+def _http_request(
+    method: str,
+    url: str,
+    token: str,
+    owner: Optional[str] = None,
+    body: Optional[bytes] = None,
+    content_type: Optional[str] = None,
+) -> urllib.request.Request:
+    req = urllib.request.Request(url, data=body, method=method)
+    req.add_header("Authorization", f"Bearer {token}")
+    owner = (owner or "").strip()
+    if owner:
+        req.add_header("X-Cozy-Owner", owner)
+    if content_type:
+        req.add_header("Content-Type", content_type)
+    return req
 
 
 def _encode_ref_for_url(ref: str) -> str:
@@ -285,24 +303,6 @@ def _assert_token_repo_scope_matches_destination(
         raise ValueError(f"unsupported required action '{action}'")
 
 
-def _http_request(
-    method: str,
-    url: str,
-    token: str,
-    owner: Optional[str] = None,
-    body: Optional[bytes] = None,
-    content_type: Optional[str] = None,
-) -> urllib.request.Request:
-    req = urllib.request.Request(url, data=body, method=method)
-    req.add_header("Authorization", f"Bearer {token}")
-    owner = (owner or "").strip()
-    if owner:
-        req.add_header("X-Cozy-Owner", owner)
-    if content_type:
-        req.add_header("Content-Type", content_type)
-    return req
-
-
 def _is_private_ip_str(ip_str: str) -> bool:
     try:
         ip = ipaddress.ip_address(ip_str)
@@ -376,10 +376,9 @@ def _sha256_file(path: str) -> str:
 class _RequestOutputStream:
     """Chunk-writable output writer with finalize() -> Asset/Tensors.
 
-    Mode selection is internal:
-    - Local/dev: write to local output path.
-    - Remote streaming: push chunks directly to file API while tenant writes.
-    - Fallback: write to temp file and upload at finalize.
+    All writes are buffered to a temp file. On finalize(), the file is hashed
+    with BLAKE3, then uploaded via presigned S3 multipart URLs obtained from
+    TensorHub.
     """
 
     def __init__(
@@ -392,6 +391,8 @@ class _RequestOutputStream:
         create: bool = False,
         expected_size_bytes: Optional[int] = None,
     ) -> None:
+        from .presigned_upload import blake3_hash_file, presigned_upload_file
+
         self._ctx = ctx
         self._ref = _normalize_output_ref(ref)
         self._kind = str(kind or "asset").strip().lower()
@@ -403,27 +404,15 @@ class _RequestOutputStream:
         if self._expected_size_bytes > 0:
             _enforce_output_file_size_limit(self._expected_size_bytes)
         self._stream_remote = bool(self._ctx._should_stream_output_to_file_api(self._ref))
-        self._session_upload_enabled = bool(
-            self._stream_remote and _env_bool("WORKER_STREAM_APPEND_SESSION_ENABLED", False)
-        )
-        self._tmp_path: Optional[str] = None
-        self._fh: Optional[Any] = None
-        self._chunk_q: Optional["queue.Queue[Optional[bytes]]"] = None
-        self._uploader_thread: Optional[threading.Thread] = None
-        self._uploader_error: Optional[BaseException] = None
-        self._uploader_meta: Dict[str, Any] = {}
-        self._abort_remote = False
-        self._remote_completed = False
-        self._replay_path: Optional[str] = None
-        self._replay_fh: Optional[Any] = None
         self._sha = hashlib.sha256()
+        self._blake3_hasher = blake3()
         self._bytes_written = 0
         self._bytes_uploaded = 0
         self._chunks_written = 0
         self._chunks_uploaded = 0
         self._stream_error_class: Optional[str] = None
         self._progress_lock = threading.Lock()
-        self._stream_mode = "remote_append" if self._stream_remote else "local_fallback"
+        self._stream_mode = "presigned" if self._stream_remote else "local_fallback"
         self._started_mono = time.monotonic()
         try:
             interval = float(os.getenv("WORKER_STREAM_PROGRESS_INTERVAL_S", "0.20") or "0.20")
@@ -436,27 +425,18 @@ class _RequestOutputStream:
         self._retry_attempts = max(1, int(os.getenv("WORKER_STREAM_UPLOAD_RETRY_ATTEMPTS", "5") or "5"))
         self._retry_backoff_ms = max(0, int(os.getenv("WORKER_STREAM_UPLOAD_RETRY_BACKOFF_MS", "500") or "500"))
         self._session_id: Optional[str] = None
-        self._session_max_chunk_bytes = max(1, _env_int("WORKER_STREAM_SESSION_CHUNK_BYTES", 8 * 1024 * 1024))
+        self._uploader_meta: Dict[str, Any] = {}
+        self._repo_job_scope = self._ctx._repo_job_upload_scope() if self._kind == "checkpoint" else None
         self._finalized = False
         self._result: Any = None
 
-        if self._stream_remote:
-            qsize = int(os.getenv("WORKER_STREAM_UPLOAD_QUEUE_CHUNKS", "16") or "16")
-            if qsize < 1:
-                qsize = 1
-            self._chunk_q = queue.Queue(maxsize=qsize)
-            suffix = Path(self._ref).suffix or ".bin"
-            fd, tmp = tempfile.mkstemp(prefix=f"gw-out-replay-{ctx.request_id}-", suffix=suffix)
-            os.close(fd)
-            self._replay_path = tmp
-            self._replay_fh = open(self._replay_path, "wb")
-            self._start_remote_uploader()
-        else:
-            suffix = Path(self._ref).suffix or ".bin"
-            fd, tmp = tempfile.mkstemp(prefix=f"gw-out-{ctx.request_id}-", suffix=suffix)
-            os.close(fd)
-            self._tmp_path = tmp
-            self._fh = open(self._tmp_path, "wb")
+        # Always buffer to temp file.
+        suffix = Path(self._ref).suffix or ".bin"
+        prefix = f"gw-out-{ctx.request_id}-"
+        fd, tmp = tempfile.mkstemp(prefix=prefix, suffix=suffix)
+        os.close(fd)
+        self._tmp_path = tmp
+        self._fh: Optional[Any] = open(self._tmp_path, "wb")
 
     @property
     def bytes_written(self) -> int:
@@ -464,9 +444,7 @@ class _RequestOutputStream:
 
     @property
     def bytes_uploaded(self) -> int:
-        if self._stream_remote:
-            return int(self._bytes_uploaded)
-        return int(self._bytes_written)
+        return int(self._bytes_uploaded) if self._bytes_uploaded > 0 else int(self._bytes_written)
 
     @property
     def stream_mode(self) -> str:
@@ -489,10 +467,8 @@ class _RequestOutputStream:
         if self._finalized:
             raise RuntimeError("output stream already finalized")
         if self._ctx.is_canceled():
-            self._abort_due_to_cancel()
+            self.close()
             raise InterruptedError("canceled")
-        if self._uploader_error is not None:
-            raise self._uploader_error
         if isinstance(data, memoryview):
             data = data.tobytes()
         if not isinstance(data, (bytes, bytearray)):
@@ -501,32 +477,10 @@ class _RequestOutputStream:
         if not b:
             return 0
         _enforce_output_file_size_limit(self._bytes_written + len(b))
-        if self._stream_remote:
-            assert self._chunk_q is not None
-            if self._replay_fh is not None:
-                n = self._replay_fh.write(b)
-                if n != len(b):
-                    raise RuntimeError("output stream replay spool short write")
-            while True:
-                if self._ctx.is_canceled():
-                    self._abort_due_to_cancel()
-                    raise InterruptedError("canceled")
-                if self._uploader_error is not None:
-                    raise self._uploader_error
-                try:
-                    self._chunk_q.put(b, timeout=0.5)
-                    break
-                except queue.Full:
-                    continue
-            self._sha.update(b)
-            self._bytes_written += int(len(b))
-            self._chunks_written += 1
-            self._maybe_emit_progress(stage="stream_write")
-            return int(len(b))
-
         assert self._fh is not None
         n = self._fh.write(b)
         self._sha.update(b[:n])
+        self._blake3_hasher.update(b[:n])
         self._bytes_written += int(n)
         if n > 0:
             self._chunks_written += 1
@@ -536,10 +490,8 @@ class _RequestOutputStream:
     def flush(self) -> None:
         if self._finalized:
             return
-        if self._stream_remote:
-            return
-        assert self._fh is not None
-        self._fh.flush()
+        if self._fh is not None:
+            self._fh.flush()
 
     def finalize(self) -> Any:
         if self._finalized:
@@ -547,33 +499,36 @@ class _RequestOutputStream:
         if self._ctx.is_canceled():
             self.close()
             raise InterruptedError("canceled")
-        if self._stream_remote:
-            finalize_t0 = time.monotonic()
-            self._result = self._finalize_remote_stream()
-            self._finalized = True
-            self._maybe_emit_progress(
-                stage="stream_finalized",
-                force=True,
-                extra={"finalize_elapsed_s": float(max(time.monotonic() - finalize_t0, 0.0))},
-            )
-            return self._result
 
         assert self._fh is not None
         assert self._tmp_path is not None
         self._fh.flush()
         self._fh.close()
+        self._fh = None
+
         try:
-            if self._kind == "checkpoint":
-                raw = self._ctx.save_checkpoint(self._ref, self._tmp_path, format=self._format)
+            if self._stream_remote:
+                finalize_t0 = time.monotonic()
+                self._result = self._finalize_presigned_upload()
+                self._finalized = True
+                self._maybe_emit_progress(
+                    stage="stream_finalized",
+                    force=True,
+                    extra={"finalize_elapsed_s": float(max(time.monotonic() - finalize_t0, 0.0))},
+                )
+                return self._result
             else:
-                if self._create:
-                    raw = self._ctx.save_file_create(self._ref, self._tmp_path)
+                if self._kind == "checkpoint":
+                    raw = self._ctx.save_checkpoint(self._ref, self._tmp_path, format=self._format)
                 else:
-                    raw = self._ctx.save_file(self._ref, self._tmp_path)
-            self._result = self._with_stream_mode(raw)
-            self._finalized = True
-            self._maybe_emit_progress(stage="stream_finalized", force=True)
-            return self._result
+                    if self._create:
+                        raw = self._ctx.save_file_create(self._ref, self._tmp_path)
+                    else:
+                        raw = self._ctx.save_file(self._ref, self._tmp_path)
+                self._result = self._with_stream_mode(raw)
+                self._finalized = True
+                self._maybe_emit_progress(stage="stream_finalized", force=True)
+                return self._result
         finally:
             try:
                 os.remove(self._tmp_path)
@@ -583,29 +538,19 @@ class _RequestOutputStream:
     def close(self) -> None:
         if self._finalized:
             return
-        if self._stream_remote:
-            self._abort_remote = True
-            self._signal_remote_done()
-            if self._uploader_thread is not None:
-                self._uploader_thread.join(timeout=5.0)
-            if self._session_upload_enabled:
-                try:
-                    base = self._ctx._get_file_api_base_url()
-                    token = self._ctx._get_worker_capability_token()
-                    headers: Dict[str, str] = {
-                        "Authorization": f"Bearer {token}",
-                        "Content-Type": "application/octet-stream",
-                    }
-                    owner = (self._ctx.owner or "").strip()
-                    if owner:
-                        headers["X-Cozy-Owner"] = owner
-                    self._abort_upload_session(base=base, headers=headers)
-                except Exception:
-                    pass
-            self._cleanup_replay_file()
-            self._maybe_emit_progress(stage="stream_aborted", force=True)
-            self._finalized = True
-            return
+        if self._fh is not None:
+            try:
+                self._fh.close()
+            except Exception:
+                pass
+            self._fh = None
+        if self._tmp_path:
+            try:
+                os.remove(self._tmp_path)
+            except Exception:
+                pass
+        self._maybe_emit_progress(stage="stream_aborted", force=True)
+        self._finalized = True
         assert self._fh is not None
         try:
             self._fh.close()
@@ -645,6 +590,11 @@ class _RequestOutputStream:
                 format=value.format,
                 size_bytes=value.size_bytes,
                 sha256=value.sha256,
+                blake3=value.blake3,
+                blob_digest=value.blob_digest,
+                blob_domain=value.blob_domain,
+                blob_path=value.blob_path,
+                snapshot_digest=value.snapshot_digest,
                 download_token=value.download_token,
                 stream_mode=self.stream_mode,
             )
@@ -693,11 +643,77 @@ class _RequestOutputStream:
             payload.update(dict(extra))
         self._ctx.emit("request.upload_progress", payload)
 
-    def _build_remote_asset(self) -> Asset:
-        meta = dict(self._uploader_meta or {})
-        size = int(meta.get("size_bytes") or self._bytes_written)
+    def _finalize_presigned_upload(self) -> Any:
+        """Hash the buffered temp file, then upload via presigned S3 multipart."""
+        from .presigned_upload import blake3_hash_file, presigned_upload_file
+
+        assert self._tmp_path is not None
+        file_size = os.path.getsize(self._tmp_path)
+        if file_size <= 0:
+            raise RuntimeError("file save failed (empty file)")
+
+        # Use the rolling hash if available (was computed during writes).
+        blake3_hex = self._blake3_hasher.hexdigest()
+
+        # Build auth headers.
+        base = self._ctx._get_file_api_base_url()
+        token = self._ctx._get_worker_capability_token()
+        headers: Dict[str, str] = {"Authorization": f"Bearer {token}"}
+        owner = (self._ctx.owner or "").strip()
+        if owner:
+            headers["X-Cozy-Owner"] = owner
+
+        # Build endpoint and create payload.
+        create_payload: Dict[str, Any] = {}
+        req_id = str(self._ctx.request_id or "").strip()
+        if req_id:
+            create_payload["request_id"] = req_id
+
+        if self._repo_job_scope is None:
+            # Media upload.
+            create_payload["ref"] = self._ref
+            run_id = str(self._ctx.run_id or "").strip()
+            if run_id:
+                create_payload["run_id"] = run_id
+            endpoint_path = "/api/v1/media/uploads"
+        else:
+            # Repo-CAS upload.
+            repo_owner, repo, job_id = self._repo_job_scope
+            create_payload["path"] = self._ref
+            endpoint_path = (
+                f"/api/v1/repos/{urllib.parse.quote(repo_owner, safe='')}/"
+                f"{urllib.parse.quote(repo, safe='')}/jobs/{urllib.parse.quote(job_id, safe='')}/uploads"
+            )
+
+        def _progress_cb(parts_done: int, total_parts: int, bytes_up: int) -> None:
+            with self._progress_lock:
+                self._bytes_uploaded = bytes_up
+                self._chunks_uploaded = parts_done
+            self._maybe_emit_progress(stage="stream_upload")
+
+        result = presigned_upload_file(
+            file_path=self._tmp_path,
+            base_url=base,
+            endpoint_path=endpoint_path,
+            headers=headers,
+            create_payload=create_payload,
+            blake3_hex=blake3_hex,
+            size_bytes=file_size,
+            retry_attempts=self._retry_attempts,
+            retry_backoff_ms=self._retry_backoff_ms,
+            on_progress=_progress_cb,
+            cancel_check=self._ctx.is_canceled,
+        )
+
+        self._uploader_meta = result.meta
+        with self._progress_lock:
+            self._bytes_uploaded = file_size
+
+        # Build return type from metadata.
+        meta = dict(result.meta)
+        size = int(meta.get("size_bytes") or file_size)
         sha = str(meta.get("sha256") or "").strip() or self._sha.hexdigest()
-        return Asset(
+        asset = Asset(
             ref=self._ref,
             owner=self._ctx.owner,
             local_path=None,
@@ -706,440 +722,24 @@ class _RequestOutputStream:
             sha256=sha,
             stream_mode=self.stream_mode,
         )
-
-    def _finalize_remote_stream(self) -> Any:
-        self._signal_remote_done()
-        if self._uploader_thread is not None:
-            self._uploader_thread.join()
-        self._close_replay_file()
-        try:
-            if self._session_upload_enabled and not self._abort_remote and self._uploader_error is None:
-                base = self._ctx._get_file_api_base_url()
-                token = self._ctx._get_worker_capability_token()
-                headers: Dict[str, str] = {
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/octet-stream",
-                }
-                owner = (self._ctx.owner or "").strip()
-                if owner:
-                    headers["X-Cozy-Owner"] = owner
-                self._finalize_upload_session(base=base, headers=headers)
-            if self._uploader_error is not None and not self._abort_remote:
-                recovered = self._replay_remote_upload_if_needed()
-                if recovered:
-                    self._uploader_error = None
-                    self._remote_completed = True
-            if self._uploader_error is not None:
-                if self._ctx.is_canceled() or isinstance(self._uploader_error, InterruptedError):
-                    raise InterruptedError("canceled")
-                raise self._uploader_error
-            asset = self._build_remote_asset()
-            if self._kind == "checkpoint":
-                fmt = str(self._format or "").strip() or _infer_tensors_format(self._ref)
-                return Tensors(
-                    ref=asset.ref,
-                    owner=asset.owner,
-                    local_path=asset.local_path,
-                    format=fmt,
-                    size_bytes=asset.size_bytes,
-                    sha256=asset.sha256,
-                    download_token=asset.download_token,
-                    stream_mode=self.stream_mode,
-                )
-            return asset
-        finally:
-            self._cleanup_replay_file()
-
-    def _upload_iter(self) -> Any:
-        assert self._chunk_q is not None
-        while True:
-            item = self._chunk_q.get()
-            if item is None:
-                if self._abort_remote:
-                    raise InterruptedError("canceled")
-                break
-            with self._progress_lock:
-                self._bytes_uploaded += int(len(item))
-                self._chunks_uploaded += 1
-            self._maybe_emit_progress(stage="stream_upload")
-            yield item
-
-    def _signal_remote_done(self) -> None:
-        if self._chunk_q is None:
-            return
-        while True:
-            try:
-                self._chunk_q.put(None, timeout=0.5)
-                return
-            except queue.Full:
-                if self._uploader_error is not None:
-                    return
-                continue
-
-    def _start_remote_uploader(self) -> None:
-        base = self._ctx._get_file_api_base_url()
-        token = self._ctx._get_worker_capability_token()
-        url = f"{base}/api/v1/file/{_encode_ref_for_url(self._ref)}"
-        method = "POST" if self._create else "PUT"
-        headers: Dict[str, str] = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/octet-stream",
-        }
-        owner = (self._ctx.owner or "").strip()
-        if owner:
-            headers["X-Cozy-Owner"] = owner
-
-        def _run() -> None:
-            t0 = time.monotonic()
-            try:
-                if self._session_upload_enabled:
-                    self._open_upload_session(base=base, headers=headers)
-                    sequence = 0
-                    for chunk in self._upload_iter():
-                        sequence = self._append_upload_session_chunk(
-                            base=base,
-                            headers=headers,
-                            sequence_start=sequence,
-                            chunk=chunk,
-                        )
-                    self._remote_completed = True
-                else:
-                    resp = requests.request(
-                        method=method,
-                        url=url,
-                        headers=headers,
-                        data=self._upload_iter(),
-                        timeout=_FILE_API_STREAM_REPLAY_TIMEOUT_S,
-                    )
-                    code = int(resp.status_code)
-                    if code in (401, 403):
-                        raise AuthError(f"file save unauthorized ({code}): check worker_capability_token validity")
-                    if code == 409 and self._create:
-                        raise RuntimeError("output path already exists")
-                    if code < 200 or code >= 300:
-                        raise RuntimeError(f"file save failed ({code})")
-                    try:
-                        parsed = resp.json()
-                    except Exception:
-                        parsed = {}
-                    if isinstance(parsed, dict):
-                        self._uploader_meta = parsed
-                    else:
-                        self._uploader_meta = {}
-                    self._remote_completed = True
-            except requests.RequestException as e:
-                self._uploader_error = RuntimeError("file save failed (network_error)")
-                self._uploader_error.__cause__ = e
-                self._stream_error_class = "network_error"
-                self._maybe_emit_progress(stage="stream_failed", force=True)
-            except InterruptedError as e:
-                self._uploader_error = e
-                self._stream_error_class = "canceled"
-                self._maybe_emit_progress(stage="stream_canceled", force=True)
-            except BaseException as e:  # noqa: BLE001
-                self._uploader_error = e
-                self._stream_error_class = self._classify_error(e)
-                self._maybe_emit_progress(stage="stream_failed", force=True)
-            finally:
-                rm = getattr(self._ctx, "_run_metrics", None)
-                if rm is not None:
-                    try:
-                        rm.add_upload_time(int((time.monotonic() - t0) * 1000))
-                    except Exception:
-                        pass
-
-        self._uploader_thread = threading.Thread(
-            target=_run,
-            name=f"gw-upload-{self._ctx.request_id}",
-            daemon=True,
-        )
-        self._uploader_thread.start()
-
-    def _open_upload_session(self, *, base: str, headers: Dict[str, str]) -> None:
-        request_payload: Dict[str, Any] = {
-            "ref": self._ref,
-            "create": bool(self._create),
-            "max_chunk_bytes": int(self._session_max_chunk_bytes),
-        }
-        if self._expected_size_bytes > 0:
-            request_payload["expected_size_bytes"] = int(self._expected_size_bytes)
-        req_id = str(self._ctx.request_id or "").strip()
-        if req_id:
-            request_payload["request_id"] = req_id
-        run_id = str(self._ctx.run_id or "").strip()
-        if run_id:
-            request_payload["run_id"] = run_id
-
-        session_headers = dict(headers)
-        session_headers["Content-Type"] = "application/json"
-        url = f"{base}/api/v1/file/upload-sessions"
-        resp = requests.request(
-            method="POST",
-            url=url,
-            headers=session_headers,
-            data=json.dumps(request_payload),
-            timeout=_FILE_API_HTTP_TIMEOUT_S,
-        )
-        code = int(resp.status_code)
-        if code in (401, 403):
-            raise AuthError(f"file save unauthorized ({code}): check worker_capability_token validity")
-        if code < 200 or code >= 300:
-            raise RuntimeError(f"file save failed ({code})")
-        try:
-            parsed = resp.json()
-        except Exception:
-            parsed = {}
-        session_id = str((parsed or {}).get("session_id") or "").strip()
-        if session_id == "":
-            raise RuntimeError("file save failed (invalid_upload_session)")
-        self._session_id = session_id
-        max_chunk = int((parsed or {}).get("max_chunk_bytes") or 0)
-        if max_chunk > 0:
-            self._session_max_chunk_bytes = max_chunk
-
-    def _append_upload_session_chunk(
-        self,
-        *,
-        base: str,
-        headers: Dict[str, str],
-        sequence_start: int,
-        chunk: bytes,
-    ) -> int:
-        session_id = str(self._session_id or "").strip()
-        if session_id == "":
-            raise RuntimeError("file save failed (invalid_upload_session)")
-        sequence = int(sequence_start)
-        max_chunk = max(1, int(self._session_max_chunk_bytes))
-        for offset in range(0, len(chunk), max_chunk):
-            part = chunk[offset : offset + max_chunk]
-            idem = f"{self._ctx.request_id}:{self._ref}:{sequence}"
-            append_headers = dict(headers)
-            append_headers["Content-Type"] = "application/octet-stream"
-            append_headers["Idempotency-Key"] = idem
-            append_url = f"{base}/api/v1/file/upload-sessions/{session_id}/chunks/{sequence}"
-            last_exc: Optional[BaseException] = None
-            for attempt in range(1, self._retry_attempts + 1):
-                if self._ctx.is_canceled() or self._abort_remote:
-                    raise InterruptedError("canceled")
-                try:
-                    resp = requests.request(
-                        method="PUT",
-                        url=append_url,
-                        headers=append_headers,
-                        data=part,
-                        timeout=_FILE_API_STREAM_CHUNK_TIMEOUT_S,
-                    )
-                except requests.RequestException as e:
-                    net = RuntimeError("file save failed (network_error)")
-                    net.__cause__ = e
-                    last_exc = net
-                else:
-                    code = int(resp.status_code)
-                    if code in (401, 403):
-                        raise AuthError(f"file save unauthorized ({code}): check worker_capability_token validity")
-                    if code >= 500:
-                        last_exc = RuntimeError(f"file save failed ({code})")
-                    elif code < 200 or code >= 300:
-                        raise RuntimeError(f"file save failed ({code})")
-                    else:
-                        last_exc = None
-                        break
-                if attempt < self._retry_attempts and self._retry_backoff_ms > 0:
-                    time.sleep(float(self._retry_backoff_ms) / 1000.0)
-            if last_exc is not None:
-                raise last_exc
-            sequence += 1
-        return sequence
-
-    def _finalize_upload_session(self, *, base: str, headers: Dict[str, str]) -> None:
-        session_id = str(self._session_id or "").strip()
-        if session_id == "":
-            raise RuntimeError("file save failed (invalid_upload_session)")
-        finalize_headers = dict(headers)
-        finalize_headers["Content-Type"] = "application/json"
-        body = {
-            "final_sha256": self._sha.hexdigest(),
-            "final_size_bytes": int(self._bytes_written),
-        }
-        finalize_url = f"{base}/api/v1/file/upload-sessions/{session_id}/finalize"
-        last_exc: Optional[BaseException] = None
-        for attempt in range(1, self._retry_attempts + 1):
-            if self._ctx.is_canceled() or self._abort_remote:
-                raise InterruptedError("canceled")
-            try:
-                resp = requests.request(
-                    method="POST",
-                    url=finalize_url,
-                    headers=finalize_headers,
-                    data=json.dumps(body),
-                    timeout=_FILE_API_STREAM_FINALIZE_TIMEOUT_S,
-                )
-            except requests.RequestException as e:
-                net = RuntimeError("file save failed (network_error)")
-                net.__cause__ = e
-                last_exc = net
-            else:
-                code = int(resp.status_code)
-                if code in (401, 403):
-                    raise AuthError(f"file save unauthorized ({code}): check worker_capability_token validity")
-                if code == 409 and self._create:
-                    raise RuntimeError("output path already exists")
-                if code >= 500:
-                    last_exc = RuntimeError(f"file save failed ({code})")
-                elif code < 200 or code >= 300:
-                    raise RuntimeError(f"file save failed ({code})")
-                else:
-                    try:
-                        parsed = resp.json()
-                    except Exception:
-                        parsed = {}
-                    if isinstance(parsed, dict):
-                        self._uploader_meta = parsed
-                    else:
-                        self._uploader_meta = {}
-                    return
-            if attempt < self._retry_attempts and self._retry_backoff_ms > 0:
-                time.sleep(float(self._retry_backoff_ms) / 1000.0)
-        if last_exc is not None:
-            raise last_exc
-        raise RuntimeError("file save failed (unknown_error)")
-
-    def _abort_upload_session(self, *, base: str, headers: Dict[str, str]) -> None:
-        session_id = str(self._session_id or "").strip()
-        if session_id == "":
-            return
-        abort_headers = dict(headers)
-        abort_headers["Content-Type"] = "application/json"
-        abort_url = f"{base}/api/v1/file/upload-sessions/{session_id}/abort"
-        try:
-            requests.request(
-                method="POST",
-                url=abort_url,
-                headers=abort_headers,
-                data="{}",
-                timeout=_FILE_API_STREAM_ABORT_TIMEOUT_S,
+        if self._kind == "checkpoint":
+            fmt = str(self._format or "").strip() or _infer_tensors_format(self._ref)
+            return Tensors(
+                ref=asset.ref,
+                owner=asset.owner,
+                local_path=asset.local_path,
+                format=fmt,
+                size_bytes=asset.size_bytes,
+                sha256=asset.sha256,
+                blake3=str(meta.get("blake3") or blake3_hex).strip() or None,
+                blob_digest=str(meta.get("blob_digest") or "").strip() or None,
+                blob_domain=str(meta.get("blob_domain") or "").strip() or None,
+                blob_path=str(meta.get("blob_path") or "").strip() or None,
+                snapshot_digest=str(meta.get("snapshot_digest") or "").strip() or None,
+                download_token=asset.download_token,
+                stream_mode=self.stream_mode,
             )
-        except Exception:
-            return
-
-    def _close_replay_file(self) -> None:
-        if self._replay_fh is None:
-            return
-        try:
-            self._replay_fh.flush()
-        except Exception:
-            pass
-        try:
-            self._replay_fh.close()
-        except Exception:
-            pass
-        self._replay_fh = None
-
-    def _cleanup_replay_file(self) -> None:
-        self._close_replay_file()
-        if self._replay_path:
-            try:
-                os.remove(self._replay_path)
-            except Exception:
-                pass
-        self._replay_path = None
-
-    def _replay_remote_upload_if_needed(self) -> bool:
-        if self._remote_completed:
-            return True
-        replay_path = str(self._replay_path or "").strip()
-        if replay_path == "" or not os.path.exists(replay_path):
-            return False
-        base = self._ctx._get_file_api_base_url()
-        token = self._ctx._get_worker_capability_token()
-        headers: Dict[str, str] = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/octet-stream",
-        }
-        owner = (self._ctx.owner or "").strip()
-        if owner:
-            headers["X-Cozy-Owner"] = owner
-
-        last_exc: Optional[BaseException] = None
-        for attempt in range(1, self._retry_attempts + 1):
-            if self._ctx.is_canceled() or self._abort_remote:
-                raise InterruptedError("canceled")
-            self._ctx.emit(
-                "request.upload_replay_attempt",
-                {
-                    "ref": self._ref,
-                    "attempt": attempt,
-                    "max_attempts": self._retry_attempts,
-                },
-            )
-            try:
-                if self._session_upload_enabled:
-                    # Replay through upload-session chunks so retries are resumable and bounded.
-                    self._session_id = None
-                    self._open_upload_session(base=base, headers=headers)
-                    sequence = 0
-                    max_chunk = max(1, int(self._session_max_chunk_bytes))
-                    with open(replay_path, "rb") as fin:
-                        while True:
-                            part = fin.read(max_chunk)
-                            if not part:
-                                break
-                            sequence = self._append_upload_session_chunk(
-                                base=base,
-                                headers=headers,
-                                sequence_start=sequence,
-                                chunk=part,
-                            )
-                    self._finalize_upload_session(base=base, headers=headers)
-                else:
-                    # Legacy replay path for non-session uploads.
-                    url = f"{base}/api/v1/file/{_encode_ref_for_url(self._ref)}"
-                    method = "POST" if self._create else "PUT"
-                    with open(replay_path, "rb") as fin:
-                        resp = requests.request(
-                            method=method,
-                            url=url,
-                            headers=headers,
-                            data=fin,
-                            timeout=_FILE_API_STREAM_REPLAY_TIMEOUT_S,
-                        )
-                    code = int(resp.status_code)
-                    if code in (401, 403):
-                        raise AuthError(f"file save unauthorized ({code}): check worker_capability_token validity")
-                    if code == 409 and self._create:
-                        raise RuntimeError("output path already exists")
-                    if code >= 500:
-                        raise RuntimeError(f"file save failed ({code})")
-                    if code < 200 or code >= 300:
-                        raise RuntimeError(f"file save failed ({code})")
-                    try:
-                        parsed = resp.json()
-                    except Exception:
-                        parsed = {}
-                    self._uploader_meta = parsed if isinstance(parsed, dict) else {}
-                self._remote_completed = True
-                with self._progress_lock:
-                    self._bytes_uploaded = max(self._bytes_uploaded, self._bytes_written)
-                self._maybe_emit_progress(stage="stream_replay_succeeded", force=True)
-                return True
-            except AuthError:
-                raise
-            except RuntimeError as e:
-                self._stream_error_class = self._classify_error(e)
-                last_exc = e
-            except requests.RequestException as e:
-                net = RuntimeError("file save failed (network_error)")
-                net.__cause__ = e
-                self._stream_error_class = "network_error"
-                last_exc = net
-
-            if attempt < self._retry_attempts and self._retry_backoff_ms > 0:
-                time.sleep(float(self._retry_backoff_ms) / 1000.0)
-
-        if last_exc is not None:
-            self._uploader_error = last_exc
-        self._maybe_emit_progress(stage="stream_replay_failed", force=True)
-        return False
+        return asset
 
     @staticmethod
     def _classify_error(exc: BaseException) -> str:
@@ -1325,6 +925,56 @@ class RequestContext:
             return out
         return None
 
+    def _repo_job_upload_scope(self) -> Optional[tuple[str, str, str]]:
+        hints = dict(self._execution_hints or {})
+        kind = str(hints.get("kind", "") or "").strip().lower()
+        if kind not in {"conversion", "training"}:
+            return None
+        destination_repo = str(
+            hints.get("destination_repo")
+            or hints.get("repo")
+            or hints.get("output_repo")
+            or ""
+        ).strip()
+        if destination_repo == "":
+            return None
+        job_id = str(
+            hints.get("job_id")
+            or hints.get("conversion_job_id")
+            or hints.get("training_job_id")
+            or self._run_id
+            or ""
+        ).strip()
+        if job_id == "":
+            return None
+        try:
+            owner, repo = _parse_owner_repo(destination_repo)
+        except Exception:
+            return None
+        return owner, repo, job_id
+
+    def _tensor_upload_execution_kind(self) -> str:
+        hints = dict(self._execution_hints or {})
+        return str(hints.get("kind", "") or "").strip().lower()
+
+    def _require_repo_job_scope_for_tensors(self, ref: str) -> None:
+        """
+        For training/conversion checkpoints, remote tensor uploads must be job-scoped
+        repo-cas writes. This prevents silent fallback to user-files/media uploads.
+        """
+        kind = self._tensor_upload_execution_kind()
+        if kind not in {"conversion", "training"}:
+            return
+        try:
+            if self._resolve_local_output_path(ref):
+                return
+        except Exception:
+            pass
+        if self._repo_job_upload_scope() is None:
+            raise RuntimeError(
+                "tensor upload requires repo job scope (execution_hints.kind with destination_repo and job_id)"
+            )
+
     @property
     def resolved_cozy_models_by_id(self) -> Optional[Dict[str, Any]]:
         return self._resolved_cozy_models_by_id
@@ -1467,50 +1117,12 @@ class RequestContext:
                 size_bytes=len(data),
                 sha256=sha,
             )
-
-        base = self._get_file_api_base_url()
-        token = self._get_worker_capability_token()
-        url = f"{base}/api/v1/file/{_encode_ref_for_url(ref)}"
-        # Default behavior is upsert: PUT to the tenant file store.
-        req = _http_request(
-            "PUT",
-            url,
-            token,
-            owner=self.owner,
-            body=data,
-            content_type="application/octet-stream",
-        )
-        t0 = time.monotonic()
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                body = resp.read()
-                if resp.status < 200 or resp.status >= 300:
-                    raise RuntimeError(f"file save failed ({resp.status})")
-                try:
-                    meta = json.loads(body.decode("utf-8"))
-                except Exception:
-                    meta = {}
-        except urllib.error.HTTPError as e:
-            code = getattr(e, 'code', 0)
-            if code in (401, 403):
-                raise AuthError(f"file save unauthorized ({code}): check worker_capability_token validity") from e
-            raise RuntimeError(f"file save failed ({code or 'unknown'})") from e
-        finally:
-            rm = getattr(self, "_run_metrics", None)
-            if rm is not None:
-                try:
-                    rm.add_upload_time(int((time.monotonic() - t0) * 1000))
-                except Exception:
-                    pass
-
-        return Asset(
-            ref=ref,
-            owner=self.owner,
-            local_path=None,
-            mime_type=str(meta.get("mime_type") or "") or None,
-            size_bytes=int(meta.get("size_bytes") or 0) or len(data),
-            sha256=str(meta.get("sha256") or "") or None,
-        )
+        stream = self.open_output_stream(ref, create=False, expected_size_bytes=len(data))
+        stream.write(data)
+        out = stream.finalize()
+        if isinstance(out, Asset):
+            return out
+        raise RuntimeError("file save failed (invalid_asset_response)")
 
     def save_file(self, ref: str, local_path: str) -> Asset:
         ref = _normalize_output_ref(ref)
@@ -1538,53 +1150,47 @@ class RequestContext:
                 size_bytes=size,
                 sha256=sha,
             )
-
-        base = self._get_file_api_base_url()
-        token = self._get_worker_capability_token()
-        url = f"{base}/api/v1/file/{_encode_ref_for_url(ref)}"
-        headers: Dict[str, str] = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/octet-stream",
-        }
-        owner = (self.owner or "").strip()
-        if owner:
-            headers["X-Cozy-Owner"] = owner
-        t0 = time.monotonic()
-        try:
-            with open(src, "rb") as fin:
-                resp = requests.put(url, headers=headers, data=fin, timeout=30)
-            code = int(resp.status_code)
-            if code in (401, 403):
-                raise AuthError(f"file save unauthorized ({code}): check worker_capability_token validity")
-            if code < 200 or code >= 300:
-                raise RuntimeError(f"file save failed ({code})")
-            try:
-                meta = resp.json()
-            except Exception:
-                meta = {}
-        except requests.RequestException as e:
-            raise RuntimeError("file save failed (network_error)") from e
-        finally:
-            rm = getattr(self, "_run_metrics", None)
-            if rm is not None:
-                try:
-                    rm.add_upload_time(int((time.monotonic() - t0) * 1000))
-                except Exception:
-                    pass
-
-        return Asset(
-            ref=ref,
-            owner=self.owner,
-            local_path=None,
-            mime_type=str(meta.get("mime_type") or "") or None,
-            size_bytes=int(meta.get("size_bytes") or 0) or size,
-            sha256=str(meta.get("sha256") or "") or _sha256_file(src),
-        )
+        stream = self.open_output_stream(ref, create=False, expected_size_bytes=size)
+        with open(src, "rb") as fin:
+            while True:
+                chunk = fin.read(8 * 1024 * 1024)
+                if not chunk:
+                    break
+                stream.write(chunk)
+        out = stream.finalize()
+        if isinstance(out, Asset):
+            return out
+        raise RuntimeError("file save failed (invalid_asset_response)")
 
     def save_checkpoint(self, ref: str, local_path: str, format: Optional[str] = None) -> Tensors:
         """Save checkpoint/model-weight bytes and return a first-class tensor artifact."""
-        asset = self.save_file(ref, local_path)
+        ref = _normalize_output_ref(ref)
+        self._require_repo_job_scope_for_tensors(ref)
+        src = str(local_path or "").strip()
+        if not src:
+            raise ValueError("local_path is required")
+        if not os.path.exists(src):
+            raise FileNotFoundError(src)
+        size = int(os.path.getsize(src))
+        _enforce_output_file_size_limit(size)
         fmt = str(format or "").strip() or _infer_tensors_format(ref or local_path)
+
+        # For conversion/training job-scoped writes, force checkpoint-stream path so
+        # tensor uploads use repo-cas job endpoints rather than media upload routes.
+        if self._repo_job_upload_scope() is not None and self._should_stream_output_to_file_api(ref):
+            stream = self.open_checkpoint_stream(ref, format=fmt, expected_size_bytes=size)
+            with open(src, "rb") as fin:
+                while True:
+                    chunk = fin.read(8 * 1024 * 1024)
+                    if not chunk:
+                        break
+                    stream.write(chunk)
+            out = stream.finalize()
+            if isinstance(out, Tensors):
+                return out
+            raise RuntimeError("file save failed (invalid_tensors_response)")
+
+        asset = self.save_file(ref, src)
         return Tensors(
             ref=asset.ref,
             owner=asset.owner,
@@ -1597,8 +1203,23 @@ class RequestContext:
 
     def save_checkpoint_bytes(self, ref: str, data: bytes, format: Optional[str] = None) -> Tensors:
         """Save in-memory checkpoint/model-weight bytes."""
-        asset = self.save_bytes(ref, data)
+        if not isinstance(data, (bytes, bytearray)):
+            raise TypeError("save_checkpoint_bytes expects bytes")
+        payload = bytes(data)
+        _enforce_output_file_size_limit(len(payload))
+        ref = _normalize_output_ref(ref)
+        self._require_repo_job_scope_for_tensors(ref)
         fmt = str(format or "").strip() or _infer_tensors_format(ref)
+
+        if self._repo_job_upload_scope() is not None and self._should_stream_output_to_file_api(ref):
+            stream = self.open_checkpoint_stream(ref, format=fmt, expected_size_bytes=len(payload))
+            stream.write(payload)
+            out = stream.finalize()
+            if isinstance(out, Tensors):
+                return out
+            raise RuntimeError("file save failed (invalid_tensors_response)")
+
+        asset = self.save_bytes(ref, payload)
         return Tensors(
             ref=asset.ref,
             owner=asset.owner,
@@ -1633,6 +1254,8 @@ class RequestContext:
         expected_size_bytes: Optional[int] = None,
     ) -> _RequestOutputStream:
         """Open a chunk-writable output stream that finalizes to Tensors."""
+        ref = _normalize_output_ref(ref)
+        self._require_repo_job_scope_for_tensors(ref)
         return _RequestOutputStream(
             ctx=self,
             ref=ref,
@@ -1665,51 +1288,12 @@ class RequestContext:
                 size_bytes=len(data),
                 sha256=sha,
             )
-
-        base = self._get_file_api_base_url()
-        token = self._get_worker_capability_token()
-        url = f"{base}/api/v1/file/{_encode_ref_for_url(ref)}"
-        req = _http_request(
-            "POST",
-            url,
-            token,
-            owner=self.owner,
-            body=data,
-            content_type="application/octet-stream",
-        )
-        t0 = time.monotonic()
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                body = resp.read()
-                if resp.status < 200 or resp.status >= 300:
-                    raise RuntimeError(f"file save failed ({resp.status})")
-                try:
-                    meta = json.loads(body.decode("utf-8"))
-                except Exception:
-                    meta = {}
-        except urllib.error.HTTPError as e:
-            code = getattr(e, "code", 0)
-            if code in (401, 403):
-                raise AuthError(f"file save unauthorized ({code}): check worker_capability_token validity") from e
-            if code == 409:
-                raise RuntimeError("output path already exists") from e
-            raise RuntimeError(f"file save failed ({code or 'unknown'})") from e
-        finally:
-            rm = getattr(self, "_run_metrics", None)
-            if rm is not None:
-                try:
-                    rm.add_upload_time(int((time.monotonic() - t0) * 1000))
-                except Exception:
-                    pass
-
-        return Asset(
-            ref=ref,
-            owner=self.owner,
-            local_path=None,
-            mime_type=str(meta.get("mime_type") or "") or None,
-            size_bytes=int(meta.get("size_bytes") or 0) or len(data),
-            sha256=str(meta.get("sha256") or "") or None,
-        )
+        stream = self.open_output_stream(ref, create=True, expected_size_bytes=len(data))
+        stream.write(data)
+        out = stream.finalize()
+        if isinstance(out, Asset):
+            return out
+        raise RuntimeError("file save failed (invalid_asset_response)")
 
     def save_file_create(self, ref: str, local_path: str) -> Asset:
         ref = _normalize_output_ref(ref)
@@ -1739,50 +1323,17 @@ class RequestContext:
                 size_bytes=size,
                 sha256=sha,
             )
-
-        base = self._get_file_api_base_url()
-        token = self._get_worker_capability_token()
-        url = f"{base}/api/v1/file/{_encode_ref_for_url(ref)}"
-        headers: Dict[str, str] = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/octet-stream",
-        }
-        owner = (self.owner or "").strip()
-        if owner:
-            headers["X-Cozy-Owner"] = owner
-        t0 = time.monotonic()
-        try:
-            with open(src, "rb") as fin:
-                resp = requests.post(url, headers=headers, data=fin, timeout=30)
-            code = int(resp.status_code)
-            if code in (401, 403):
-                raise AuthError(f"file save unauthorized ({code}): check worker_capability_token validity")
-            if code == 409:
-                raise RuntimeError("output path already exists")
-            if code < 200 or code >= 300:
-                raise RuntimeError(f"file save failed ({code})")
-            try:
-                meta = resp.json()
-            except Exception:
-                meta = {}
-        except requests.RequestException as e:
-            raise RuntimeError("file save failed (network_error)") from e
-        finally:
-            rm = getattr(self, "_run_metrics", None)
-            if rm is not None:
-                try:
-                    rm.add_upload_time(int((time.monotonic() - t0) * 1000))
-                except Exception:
-                    pass
-
-        return Asset(
-            ref=ref,
-            owner=self.owner,
-            local_path=None,
-            mime_type=str(meta.get("mime_type") or "") or None,
-            size_bytes=int(meta.get("size_bytes") or 0) or size,
-            sha256=str(meta.get("sha256") or "") or _sha256_file(src),
-        )
+        stream = self.open_output_stream(ref, create=True, expected_size_bytes=size)
+        with open(src, "rb") as fin:
+            while True:
+                chunk = fin.read(8 * 1024 * 1024)
+                if not chunk:
+                    break
+                stream.write(chunk)
+        out = stream.finalize()
+        if isinstance(out, Asset):
+            return out
+        raise RuntimeError("file save failed (invalid_asset_response)")
 
     def save_bytes_overwrite(self, ref: str, data: bytes) -> Asset:
         # Back-compat alias: overwrite is the default save_bytes behavior.
@@ -1898,12 +1449,23 @@ class RequestContext:
             "X-Cozy-Owner": owner,
         }
 
-        def _request_json(method: str, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        def _request_json(method: str, path: str, payload: Dict[str, Any], *, allow_404: bool = False) -> Dict[str, Any]:
             url = f"{base}{path}"
             resp = requests.request(method=method, url=url, headers=headers, data=json.dumps(payload), timeout=30)
             code = int(resp.status_code)
             if code in (401, 403):
+                detail = ""
+                try:
+                    detail = str((resp.text or "").strip())
+                except Exception:
+                    detail = ""
+                if detail != "":
+                    raise AuthError(
+                        f"repo publish unauthorized ({code}): check worker_capability_token validity; response={detail[:256]}"
+                    )
                 raise AuthError(f"repo publish unauthorized ({code}): check worker_capability_token validity")
+            if allow_404 and code == 404:
+                return {"ok": False, "not_found": True}
             if code < 200 or code >= 300:
                 # Create may be idempotent and already exists.
                 if path == "/api/v1/repos" and code in (400, 409):
@@ -1922,49 +1484,71 @@ class RequestContext:
 
         start = _request_json(
             "POST",
-            f"/api/v1/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}/runs/start",
+            f"/api/v1/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}/conversion-jobs/start",
             {"kind": "conversion", "input_versions": input_versions, "publish_intent": publish_intent},
         )
-        run_id = str(start.get("run_id") or "").strip()
-        if run_id == "":
-            raise RuntimeError("repo publish failed: missing run_id from start response")
+        job_id = str(start.get("job_id") or start.get("run_id") or "").strip()
+        if job_id == "":
+            raise RuntimeError("repo publish failed: missing job_id from start response")
 
         metrics = dict(md)
-        refs = [str(r or "").strip() for r in list(artifact_refs or []) if str(r or "").strip()]
-        if refs:
-            metrics["artifact_refs"] = refs
-        finalize_payload = {
+        commit_output_variants = []
+        raw_output_variants = md.get("output_variants")
+        if isinstance(raw_output_variants, list):
+            for item in raw_output_variants:
+                if isinstance(item, dict):
+                    commit_output_variants.append(dict(item))
+        commit_payload = {
+            "job_id": str(self.request_id or job_id),
+            "run_kind": "conversion",
             "status": "succeeded",
+            "commit_idempotency_key": f"worker:{str(self.request_id or '').strip() or 'request'}:{job_id}:v1",
             "metrics_json": metrics,
             "cost_json": {},
             "output_versions": output_versions,
+            "output_variants": commit_output_variants,
             "publish_intent": publish_intent,
         }
         if isinstance(snapshot_manifest, dict) and snapshot_manifest:
-            finalize_payload["snapshot_manifest"] = snapshot_manifest
-        finalize_result = _request_json(
+            commit_payload["snapshot_manifest"] = snapshot_manifest
+        commit_result = _request_json(
             "POST",
-            f"/api/v1/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}/runs/{urllib.parse.quote(run_id, safe='')}/finalize",
-            finalize_payload,
+            f"/api/v1/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}/jobs/{urllib.parse.quote(job_id, safe='')}/commit",
+            commit_payload,
+            allow_404=True,
         )
-        finalize_output_versions = [
+        if bool(commit_result.get("not_found")):
+            # Back-compat fallback for older Tensorhub deployments.
+            finalize_payload = {
+                "status": "succeeded",
+                "metrics_json": metrics,
+                "cost_json": {},
+                "output_versions": output_versions,
+                "publish_intent": publish_intent,
+            }
+            commit_result = _request_json(
+                "POST",
+                f"/api/v1/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}/jobs/{urllib.parse.quote(job_id, safe='')}/finalize",
+                finalize_payload,
+            )
+        commit_output_versions = [
             str(v or "").strip().lower()
-            for v in list((finalize_result or {}).get("output_versions") or [])
+            for v in list((commit_result or {}).get("output_versions") or [])
             if str(v or "").strip()
         ]
 
         logger.info(
-            "worker_publish_succeeded request_id=%s run_id=%s owner=%s repo=%s published_run_id=%s",
+            "worker_publish_succeeded request_id=%s run_id=%s owner=%s repo=%s published_job_id=%s",
             self.request_id,
             self.run_id or "",
             owner,
             repo,
-            run_id,
+            job_id,
         )
 
-        out: Dict[str, Any] = {"ok": True, "owner": owner, "repo": repo, "run_id": run_id}
-        if finalize_output_versions:
-            out["output_versions"] = finalize_output_versions
+        out: Dict[str, Any] = {"ok": True, "owner": owner, "repo": repo, "job_id": job_id, "run_id": job_id}
+        if commit_output_versions:
+            out["output_versions"] = commit_output_versions
         elif output_versions:
             out["output_versions"] = output_versions
         if normalized_tags:

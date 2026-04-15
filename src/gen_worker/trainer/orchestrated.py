@@ -3,13 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
-import mimetypes
 import os
 from pathlib import Path
 import time
 from typing import Any, Mapping
 from urllib import request
 from urllib.parse import quote, urlparse
+from blake3 import blake3
 
 from .uploader import ArtifactUploadError, ArtifactUploader
 from gen_worker.models.ref_downloader import ModelRefDownloader
@@ -85,12 +85,18 @@ class JsonHttpArtifactUploader(ArtifactUploader):
         endpoints: UploadEndpoints,
         tensorhub_url: str | None = None,
         owner: str = "",
+        destination_repo: str = "",
+        job_id: str = "",
+        execution_kind: str = "training",
     ) -> None:
         self._request_id = request_id
         self._token = (token or "").strip() or None
         self._endpoints = endpoints
         self._tensorhub_url = (tensorhub_url or "").strip().rstrip("/")
         self._owner = str(owner or "").strip()
+        self._destination_repo = str(destination_repo or "").strip().strip("/")
+        self._job_id = str(job_id or "").strip()
+        self._execution_kind = str(execution_kind or "").strip().lower() or "training"
         self._final_uploaded_ref = ""
         self._final_uploaded_sha256 = ""
 
@@ -148,6 +154,8 @@ class JsonHttpArtifactUploader(ArtifactUploader):
                 "final": Path(local_path).name == "final.json",
                 "file_ref": str(uploaded.get("ref") or "") if uploaded else "",
                 "sha256": str(uploaded.get("sha256") or "") if uploaded else "",
+                "blob_digest": str(uploaded.get("blob_digest") or "") if uploaded else "",
+                "snapshot_digest": str(uploaded.get("snapshot_digest") or "") if uploaded else "",
                 "uploaded_size_bytes": int(uploaded.get("size_bytes") or 0) if uploaded else 0,
             },
         )
@@ -215,6 +223,8 @@ class JsonHttpArtifactUploader(ArtifactUploader):
         )
 
     def _upload_artifact_file(self, *, local_path: str, category: str, step: int, final: bool) -> dict[str, object] | None:
+        from gen_worker.presigned_upload import blake3_hash_file, presigned_upload_file
+
         if not self._tensorhub_url or not self._token or not self._owner:
             return None
         p = Path(local_path)
@@ -224,35 +234,66 @@ class JsonHttpArtifactUploader(ArtifactUploader):
         safe_name = p.name.replace("/", "_")
         slot = "final" if final else f"step-{int(step):08d}"
         ref = f"v1/{self._owner}/runs/{self._request_id}/{category}/{slot}-{safe_name}"
-        url = f"{self._tensorhub_url}/api/v1/file/{quote(ref, safe='/')}"
-        mime_type = mimetypes.guess_type(p.name)[0] or "application/octet-stream"
-        body = p.read_bytes()
+        repo_job_scope = None
+        if category == "checkpoints" and self._execution_kind in {"training", "conversion"} and self._destination_repo and self._job_id:
+            if "/" in self._destination_repo:
+                repo_owner, repo_name = self._destination_repo.split("/", 1)
+                repo_owner = repo_owner.strip()
+                repo_name = repo_name.strip()
+                if repo_owner and repo_name:
+                    repo_job_scope = (repo_owner, repo_name, self._job_id)
+        if category == "checkpoints" and self._execution_kind in {"training", "conversion"} and repo_job_scope is None:
+            raise ArtifactUploadError(
+                "checkpoint upload requires repo-cas job scope (destination_repo and job_id)"
+            )
+
+        # Hash the file before uploading.
+        blake3_hex = blake3_hash_file(p)
+        size_bytes = int(p.stat().st_size)
+
         headers = {
-            "Content-Type": mime_type,
             "Authorization": f"Bearer {self._token}",
+            "X-Cozy-Owner": self._owner,
         }
-        req = request.Request(url, data=body, headers=headers, method="PUT")
+
+        if repo_job_scope is None:
+            create_payload: dict[str, object] = {
+                "ref": ref,
+                "request_id": str(self._request_id or ""),
+            }
+            endpoint_path = "/api/v1/media/uploads"
+        else:
+            repo_owner, repo_name, job_id = repo_job_scope
+            artifact_path = f"{category}/{slot}-{safe_name}"
+            create_payload = {
+                "path": artifact_path,
+                "request_id": str(self._request_id or ""),
+            }
+            endpoint_path = (
+                f"/api/v1/repos/{quote(repo_owner, safe='')}/{quote(repo_name, safe='')}/"
+                f"jobs/{quote(job_id, safe='')}/uploads"
+            )
+
         try:
-            with request.urlopen(req, timeout=120) as resp:  # noqa: S310
-                raw = resp.read().decode("utf-8") if resp.length is None or resp.length > 0 else "{}"
-                if resp.status < 200 or resp.status >= 300:
-                    raise ArtifactUploadError(f"tensorhub file upload rejected status={resp.status}")
-                parsed: dict[str, object] = {}
-                if raw:
-                    try:
-                        obj = json.loads(raw)
-                        if isinstance(obj, dict):
-                            parsed = {str(k): v for (k, v) in obj.items()}
-                    except Exception:
-                        parsed = {}
-                return {
-                    "ref": str(parsed.get("ref") or ref),
-                    "sha256": str(parsed.get("sha256") or ""),
-                    "size_bytes": int(parsed.get("size_bytes") or p.stat().st_size),
-                    "final": bool(final),
-                }
-        except ArtifactUploadError:
-            raise
+            result = presigned_upload_file(
+                file_path=str(p),
+                base_url=self._tensorhub_url,
+                endpoint_path=endpoint_path,
+                headers=headers,
+                create_payload=create_payload,
+                blake3_hex=blake3_hex,
+                size_bytes=size_bytes,
+            )
+            meta = result.meta
+            return {
+                "ref": str(meta.get("ref") or meta.get("filename") or ref),
+                "sha256": str(meta.get("sha256") or ""),
+                "blake3": str(meta.get("blake3") or blake3_hex),
+                "size_bytes": int(meta.get("size_bytes") or size_bytes),
+                "blob_digest": str(meta.get("blob_digest") or ""),
+                "snapshot_digest": str(meta.get("snapshot_digest") or ""),
+                "final": bool(final),
+            }
         except Exception as exc:
             raise ArtifactUploadError(f"failed to upload artifact file to tensorhub: {p}") from exc
 

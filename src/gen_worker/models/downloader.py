@@ -10,6 +10,8 @@ import aiohttp
 import backoff
 from tqdm import tqdm
 
+_DOWNLOAD_CHUNK_BYTES = 4 * 1024 * 1024
+
 
 class ModelDownloader(ABC):
     @abstractmethod
@@ -72,7 +74,7 @@ class CozyHubDownloader(ModelDownloader):
                 total = resp.content_length or 0
                 progress = tqdm(total=total, unit="B", unit_scale=True, desc=f"download {target_name}")
                 with open(target_path, "wb") as f:
-                    async for chunk in resp.content.iter_chunked(1 << 20):
+                    async for chunk in resp.content.iter_chunked(_DOWNLOAD_CHUNK_BYTES):
                         if not chunk:
                             continue
                         f.write(chunk)

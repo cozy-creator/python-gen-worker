@@ -360,6 +360,37 @@ def _resolve_batches(spec: dict[str, Any]) -> Any:
     return []
 
 
+def _resolve_repo_job_upload_context(spec: Mapping[str, Any]) -> tuple[str, str, str]:
+    """
+    Resolve repo job upload scope from trainer job spec.
+
+    Supports either top-level fields or execution_hints-style payloads.
+    """
+    raw_hints = spec.get("execution_hints")
+    hints = raw_hints if isinstance(raw_hints, Mapping) else {}
+    kind = str(hints.get("kind") or spec.get("execution_kind") or spec.get("kind") or "training").strip().lower()
+    destination_repo = str(
+        hints.get("destination_repo")
+        or hints.get("repo")
+        or hints.get("output_repo")
+        or spec.get("destination_repo")
+        or spec.get("output_repo")
+        or spec.get("repo")
+        or ""
+    ).strip()
+    job_id = str(
+        hints.get("job_id")
+        or hints.get("training_job_id")
+        or hints.get("conversion_job_id")
+        or spec.get("job_id")
+        or spec.get("training_job_id")
+        or spec.get("conversion_job_id")
+        or spec.get("run_id")
+        or ""
+    ).strip()
+    return kind, destination_repo, job_id
+
+
 def _materialize_input_refs(spec: dict[str, Any], cfg: TrainerRuntimeConfig) -> dict[str, object]:
     """
     Materialize orchestrator-provided refs/URLs to local paths.
@@ -646,12 +677,16 @@ def run_training_runtime_from_env() -> int:
 
     uploader = None
     if cfg.upload_endpoints.enabled():
+        execution_kind, destination_repo, job_id = _resolve_repo_job_upload_context(spec)
         uploader = JsonHttpArtifactUploader(
             request_id=job.request_id,
             token=cfg.capability_token,
             endpoints=cfg.upload_endpoints,
             tensorhub_url=os.getenv("TENSORHUB_URL"),
             owner=job.owner,
+            destination_repo=destination_repo,
+            job_id=job_id,
+            execution_kind=execution_kind,
         )
 
     ctx = StepContext(

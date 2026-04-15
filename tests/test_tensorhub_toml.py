@@ -229,6 +229,53 @@ main = "x.main"
             cfg = load_tensorhub_toml(p)
             self.assertEqual(cfg.resources["max_inflight_requests"], 1)
 
+    def test_function_gpu_hints_parsed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "endpoint.toml"
+            p.write_text(
+                """
+schema_version = 1
+name = "x"
+main = "x.main"
+
+[functions.convert_low_precision.resources]
+kind = "conversion"
+requires_gpu = true
+compute_capability_min = 9.0
+min_vram_gb = 24
+supported_precisions = ["fp8", "nvfp4"]
+supported_conversion_profiles = ["fp8:e4m3", "fp8:mxfp8", "nvfp4"]
+""".lstrip(),
+                encoding="utf-8",
+            )
+            cfg = load_tensorhub_toml(p)
+            hints = cfg.function_resources["convert-low-precision"]
+            self.assertEqual(hints["requires_gpu"], True)
+            self.assertEqual(hints["compute_capability_min"], "9.0")
+            self.assertEqual(hints["min_vram_gb"], 24.0)
+            self.assertEqual(hints["supported_precisions"], ["fp8", "nvfp4"])
+            self.assertEqual(
+                hints["supported_conversion_profiles"],
+                ["fp8:e4m3", "fp8:mxfp8", "nvfp4"],
+            )
+
+    def test_function_requires_gpu_must_be_boolean(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "endpoint.toml"
+            p.write_text(
+                """
+schema_version = 1
+name = "x"
+main = "x.main"
+
+[functions.convert_low_precision.resources]
+requires_gpu = "true"
+""".lstrip(),
+                encoding="utf-8",
+            )
+            with self.assertRaises(ValueError):
+                load_tensorhub_toml(p)
+
 
 if __name__ == "__main__":
     unittest.main()

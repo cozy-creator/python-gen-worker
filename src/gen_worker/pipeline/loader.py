@@ -55,6 +55,8 @@ from gen_worker.models.cache_paths import worker_local_model_cache_dir_default, 
 
 logger = logging.getLogger(__name__)
 
+_DOWNLOAD_CHUNK_BYTES = 4 * 1024 * 1024
+
 
 # =============================================================================
 # Error Classes
@@ -1047,9 +1049,7 @@ class PipelineLoader:
                             async with dl_session.get(file_url) as dl_resp:
                                 dl_resp.raise_for_status()
                                 with open(dest_path, "wb") as f:
-                                    async for chunk in dl_resp.content.iter_chunked(
-                                        1 << 20
-                                    ):
+                                    async for chunk in dl_resp.content.iter_chunked(_DOWNLOAD_CHUNK_BYTES):
                                         f.write(chunk)
 
                     await download_file()

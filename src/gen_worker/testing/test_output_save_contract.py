@@ -5,6 +5,7 @@ import os
 import tempfile
 import threading
 import unittest
+import uuid
 import base64
 import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -17,12 +18,15 @@ class _UploadHandler(BaseHTTPRequestHandler):
     got_authz: str = ""
     got_owner: str = ""
     got_body: bytes = b""
+    upload_sessions: dict[str, dict[str, object]] = {}
+    upload_sessions_lock = threading.Lock()
     repo_metadata_exists: bool = True
     repo_metadata_body: dict[str, object] = {"mirror": {"mode": "mirror"}}
     got_repo_metadata_write: dict[str, object] = {}
     got_repo_create_payload: dict[str, object] = {}
     got_run_start_payload: dict[str, object] = {}
     got_run_finalize_payload: dict[str, object] = {}
+    got_run_commit_payload: dict[str, object] = {}
     got_claims_search_payload: dict[str, object] = {}
     got_claim_upsert_payload: dict[str, object] = {}
     got_claim_delete_path: str = ""
@@ -68,6 +72,21 @@ class _UploadHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    @staticmethod
+    def _media_session_id(path: str, suffix: str = "") -> str:
+        prefix = "/api/v1/media/uploads/"
+        if not path.startswith(prefix):
+            return ""
+        tail = path[len(prefix) :]
+        if suffix:
+            if not tail.endswith(suffix):
+                return ""
+            tail = tail[: -len(suffix)]
+        sid = tail.strip().strip("/")
+        if sid == "" or "/" in sid:
+            return ""
+        return sid
+
     def do_POST(self) -> None:  # noqa: N802
         _UploadHandler.got_path = self.path
         _UploadHandler.got_authz = self.headers.get("Authorization") or ""
@@ -78,6 +97,50 @@ class _UploadHandler(BaseHTTPRequestHandler):
             payload = json.loads(raw.decode("utf-8"))
         except Exception:
             payload = {}
+        if self.path == "/api/v1/media/uploads":
+            ref = str(payload.get("ref") or "").strip()
+            if ref == "":
+                self.send_response(400)
+                self.end_headers()
+                return
+            sid = f"sess-{uuid.uuid4().hex}"
+            with _UploadHandler.upload_sessions_lock:
+                _UploadHandler.upload_sessions[sid] = {
+                    "ref": ref,
+                    "buf": bytearray(),
+                }
+            body = json.dumps({"upload_id": sid, "upload_offset": 0, "max_chunk_bytes": 8 * 1024 * 1024}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        session_id = self._media_session_id(self.path, suffix="/complete")
+        if session_id:
+            with _UploadHandler.upload_sessions_lock:
+                sess = _UploadHandler.upload_sessions.pop(session_id, None)
+            if not isinstance(sess, dict):
+                self.send_response(404)
+                self.end_headers()
+                return
+            buf = sess.get("buf")
+            data = bytes(buf) if isinstance(buf, (bytes, bytearray)) else b""
+            ref = str(sess.get("ref") or "")
+            body = json.dumps(
+                {
+                    "ref": ref,
+                    "size_bytes": len(data),
+                    "sha256": "abc",
+                    "mime_type": "application/octet-stream",
+                }
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path == "/api/v1/repos":
             _UploadHandler.got_repo_create_payload = payload if isinstance(payload, dict) else {}
             body = json.dumps({"ok": True}).encode("utf-8")
@@ -87,18 +150,32 @@ class _UploadHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        if self.path == "/api/v1/repos/alice/model-a/runs/start":
+        if self.path == "/api/v1/repos/alice/model-a/conversion-jobs/start":
             _UploadHandler.got_run_start_payload = payload if isinstance(payload, dict) else {}
-            body = json.dumps({"run_id": "run-start-1", "status": "running"}).encode("utf-8")
+            body = json.dumps({"job_id": "job-start-1", "status": "running"}).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
             return
-        if re.match(r"^/api/v1/repos/alice/model-a/runs/[^/]+/finalize$", self.path):
+        if re.match(r"^/api/v1/repos/alice/model-a/jobs/[^/]+/finalize$", self.path):
             _UploadHandler.got_run_finalize_payload = payload if isinstance(payload, dict) else {}
             body = json.dumps({"ok": True, "status": "succeeded", "output_versions": list((_UploadHandler.got_run_finalize_payload or {}).get("output_versions") or [])}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if re.match(r"^/api/v1/repos/alice/model-a/jobs/[^/]+/commit$", self.path):
+            _UploadHandler.got_run_commit_payload = payload if isinstance(payload, dict) else {}
+            body = json.dumps({
+                "ok": True,
+                "status": "succeeded",
+                "output_versions": list((_UploadHandler.got_run_commit_payload or {}).get("output_versions") or []),
+                "output_variant_count": len(list((_UploadHandler.got_run_commit_payload or {}).get("output_variants") or [])),
+            }).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -153,10 +230,64 @@ class _UploadHandler(BaseHTTPRequestHandler):
         self.send_response(404)
         self.end_headers()
 
+    def do_PATCH(self) -> None:  # noqa: N802
+        _UploadHandler.got_path = self.path
+        _UploadHandler.got_authz = self.headers.get("Authorization") or ""
+        _UploadHandler.got_owner = self.headers.get("X-Cozy-Owner") or ""
+        session_id = self._media_session_id(self.path)
+        if session_id == "":
+            self.send_response(404)
+            self.end_headers()
+            return
+        with _UploadHandler.upload_sessions_lock:
+            sess = _UploadHandler.upload_sessions.get(session_id)
+            if not isinstance(sess, dict):
+                self.send_response(404)
+                self.end_headers()
+                return
+            buf = sess.get("buf")
+            if not isinstance(buf, bytearray):
+                buf = bytearray()
+                sess["buf"] = buf
+            current_offset = len(buf)
+        try:
+            upload_offset = int(self.headers.get("Upload-Offset") or "0")
+        except Exception:
+            upload_offset = 0
+        if upload_offset != current_offset:
+            self.send_response(409)
+            self.send_header("Upload-Offset", str(current_offset))
+            self.end_headers()
+            return
+        n = int(self.headers.get("Content-Length") or "0")
+        chunk = self.rfile.read(n) if n > 0 else b""
+        with _UploadHandler.upload_sessions_lock:
+            sess2 = _UploadHandler.upload_sessions.get(session_id)
+            if not isinstance(sess2, dict):
+                self.send_response(404)
+                self.end_headers()
+                return
+            buf2 = sess2.get("buf")
+            if not isinstance(buf2, bytearray):
+                buf2 = bytearray()
+                sess2["buf"] = buf2
+            buf2.extend(chunk)
+            next_offset = len(buf2)
+        self.send_response(204)
+        self.send_header("Upload-Offset", str(next_offset))
+        self.end_headers()
+
     def do_DELETE(self) -> None:  # noqa: N802
         _UploadHandler.got_path = self.path
         _UploadHandler.got_authz = self.headers.get("Authorization") or ""
         _UploadHandler.got_owner = self.headers.get("X-Cozy-Owner") or ""
+        session_id = self._media_session_id(self.path)
+        if session_id:
+            with _UploadHandler.upload_sessions_lock:
+                _UploadHandler.upload_sessions.pop(session_id, None)
+            self.send_response(204)
+            self.end_headers()
+            return
         if re.match(r"^/api/v1/repos/alice/model-a/versions/[^/]+/metadata/claims/\d+$", self.path):
             _UploadHandler.got_claim_delete_path = self.path
             body = json.dumps({"ok": True}).encode("utf-8")
@@ -231,7 +362,7 @@ class OutputSaveContractTest(unittest.TestCase):
             self.assertEqual(asset.size_bytes, 3)
             self.assertEqual(_UploadHandler.got_authz, "Bearer worker-cap-token")
             self.assertEqual(_UploadHandler.got_owner, "alice")
-            self.assertTrue(_UploadHandler.got_path.startswith("/api/v1/file/"))
+            self.assertTrue(_UploadHandler.got_path.startswith("/api/v1/media/uploads/"))
         finally:
             srv.shutdown()
             srv.server_close()
@@ -253,7 +384,7 @@ class OutputSaveContractTest(unittest.TestCase):
             asset = ctx.save_bytes("refs/env-out.bin", b"ABC")
             self.assertEqual(asset.size_bytes, 3)
             self.assertEqual(_UploadHandler.got_authz, "Bearer worker-cap-env-token")
-            self.assertTrue(_UploadHandler.got_path.startswith("/api/v1/file/"))
+            self.assertTrue(_UploadHandler.got_path.startswith("/api/v1/media/uploads/"))
         finally:
             if prior_base is None:
                 os.environ.pop("FILE_API_BASE_URL", None)
@@ -316,6 +447,7 @@ class OutputSaveContractTest(unittest.TestCase):
         _UploadHandler.got_repo_create_payload = {}
         _UploadHandler.got_run_start_payload = {}
         _UploadHandler.got_run_finalize_payload = {}
+        _UploadHandler.got_run_commit_payload = {}
         srv = ThreadingHTTPServer(("127.0.0.1", 0), _UploadHandler)
         t = threading.Thread(target=srv.serve_forever, daemon=True)
         t.start()
@@ -359,16 +491,14 @@ class OutputSaveContractTest(unittest.TestCase):
                 "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             )
 
-            finalize_payload = dict(_UploadHandler.got_run_finalize_payload)
+            finalize_payload = dict(_UploadHandler.got_run_commit_payload)
             self.assertEqual(
                 finalize_payload.get("output_versions"),
                 ["blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
             )
-            finalize_intent = dict(finalize_payload.get("publish_intent") or {})
-            self.assertEqual(finalize_intent.get("version_mode"), "same_version_variant")
-            tag_policy = dict(finalize_intent.get("tag_policy") or {})
-            self.assertEqual(tag_policy.get("destination_repo_tags"), ["beta", "prod"])
-            self.assertEqual(tag_policy.get("manage_latest"), True)
+            self.assertEqual(finalize_payload.get("run_kind"), "conversion")
+            self.assertEqual(finalize_payload.get("status"), "succeeded")
+            self.assertTrue(str(finalize_payload.get("commit_idempotency_key") or "").startswith("worker:run-10:"))
         finally:
             srv.shutdown()
             srv.server_close()

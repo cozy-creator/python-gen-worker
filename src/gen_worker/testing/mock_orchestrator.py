@@ -26,6 +26,8 @@ class _FileAPIHandler(BaseHTTPRequestHandler):
     # Set by factory
     files_dir: Path
     token: str
+    upload_sessions: Dict[str, Dict[str, Any]] = {}
+    upload_sessions_lock = threading.Lock()
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: A003
         # Silence stdlib http server logs by default; keep output focused on gRPC.
@@ -65,37 +67,148 @@ class _FileAPIHandler(BaseHTTPRequestHandler):
             raise ValueError("path traversal")
         return out
 
+    def _media_session_id_from_path(self, *, suffix: str = "") -> str | None:
+        prefix = "/api/v1/media/uploads/"
+        if not self.path.startswith(prefix):
+            return None
+        tail = self.path[len(prefix) :]
+        if suffix:
+            if not tail.endswith(suffix):
+                return None
+            tail = tail[: -len(suffix)]
+        sid = tail.strip().strip("/")
+        if sid == "" or "/" in sid:
+            return None
+        return sid
+
     def do_PUT(self) -> None:  # noqa: N802
+        self._send_json(404, {"error": "legacy_file_upload_removed", "hint": "use /api/v1/media/uploads"})
+
+    def do_POST(self) -> None:  # noqa: N802
         if not self._check_auth():
             self._send_json(401, {"error": "unauthorized"})
             return
+
+        if self.path == "/api/v1/media/uploads":
+            try:
+                length = int(self.headers.get("Content-Length") or "0")
+            except Exception:
+                length = 0
+            raw = self.rfile.read(length) if length > 0 else b"{}"
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except Exception:
+                payload = {}
+            ref = str(payload.get("ref") or "").strip().lstrip("/")
+            if ref == "":
+                self._send_json(400, {"error": "missing_ref"})
+                return
+            upload_id = f"sess-{uuid.uuid4().hex}"
+            with self.upload_sessions_lock:
+                self.upload_sessions[upload_id] = {
+                    "ref": ref,
+                    "buf": bytearray(),
+                    "max_chunk_bytes": 8 * 1024 * 1024,
+                }
+            self._send_json(
+                200,
+                {
+                    "upload_id": upload_id,
+                    "upload_offset": 0,
+                    "max_chunk_bytes": 8 * 1024 * 1024,
+                },
+            )
+            return
+
+        session_id = self._media_session_id_from_path(suffix="/complete")
+        if session_id:
+            with self.upload_sessions_lock:
+                sess = self.upload_sessions.pop(session_id, None)
+            if not isinstance(sess, dict):
+                self._send_json(404, {"error": "upload_session_not_found"})
+                return
+            ref = str(sess.get("ref") or "").strip()
+            data = bytes(sess.get("buf") or b"")
+            try:
+                dst = self._fs_path(ref)
+            except Exception:
+                self._send_json(400, {"error": "invalid_ref"})
+                return
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            dst.write_bytes(data)
+            sha = hashlib.sha256(data).hexdigest()
+            self._send_json(200, {"ref": ref, "size_bytes": len(data), "sha256": sha})
+            return
+
+        self._send_json(404, {"error": "not_found"})
+
+    def do_PATCH(self) -> None:  # noqa: N802
+        if not self._check_auth():
+            self._send_json(401, {"error": "unauthorized"})
+            return
+        session_id = self._media_session_id_from_path()
+        if not session_id:
+            self._send_json(404, {"error": "not_found"})
+            return
+
+        with self.upload_sessions_lock:
+            sess = self.upload_sessions.get(session_id)
+            if not isinstance(sess, dict):
+                self._send_json(404, {"error": "upload_session_not_found"})
+                return
+            current_offset = len(bytes(sess.get("buf") or b""))
+
         try:
-            ref = self._ref_from_path()
-            dst = self._fs_path(ref)
+            upload_offset = int(self.headers.get("Upload-Offset") or "0")
         except Exception:
-            self._send_json(404, {"error": "not found"})
+            upload_offset = 0
+        if upload_offset != current_offset:
+            self.send_response(409)
+            self.send_header("Upload-Offset", str(current_offset))
+            self.end_headers()
             return
 
         try:
             length = int(self.headers.get("Content-Length") or "0")
         except Exception:
             length = 0
-        body = self.rfile.read(length) if length > 0 else b""
+        chunk = self.rfile.read(length) if length > 0 else b""
+        with self.upload_sessions_lock:
+            sess2 = self.upload_sessions.get(session_id)
+            if not isinstance(sess2, dict):
+                self._send_json(404, {"error": "upload_session_not_found"})
+                return
+            buf = sess2.get("buf")
+            if not isinstance(buf, bytearray):
+                buf = bytearray()
+                sess2["buf"] = buf
+            buf.extend(chunk)
+            next_offset = len(buf)
 
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        dst.write_bytes(body)
-        sha = hashlib.sha256(body).hexdigest()
-        self._send_json(200, {"ref": ref, "size_bytes": len(body), "sha256": sha})
-
-    def do_POST(self) -> None:  # noqa: N802
-        # Create behaves like overwrite for dev.
-        self.do_PUT()
+        self.send_response(204)
+        self.send_header("Upload-Offset", str(next_offset))
+        self.end_headers()
 
     def do_HEAD(self) -> None:  # noqa: N802
         if not self._check_auth():
             self.send_response(401)
             self.end_headers()
             return
+
+        session_id = self._media_session_id_from_path()
+        if session_id:
+            with self.upload_sessions_lock:
+                sess = self.upload_sessions.get(session_id)
+                if not isinstance(sess, dict):
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                offset = len(bytes(sess.get("buf") or b""))
+            self.send_response(200)
+            self.send_header("Upload-Offset", str(offset))
+            self.end_headers()
+            return
+
         try:
             ref = self._ref_from_path()
             dst = self._fs_path(ref)
@@ -111,6 +224,19 @@ class _FileAPIHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Length", str(size))
         self.send_header("Content-Type", "application/octet-stream")
+        self.end_headers()
+
+    def do_DELETE(self) -> None:  # noqa: N802
+        if not self._check_auth():
+            self._send_json(401, {"error": "unauthorized"})
+            return
+        session_id = self._media_session_id_from_path()
+        if not session_id:
+            self._send_json(404, {"error": "not_found"})
+            return
+        with self.upload_sessions_lock:
+            self.upload_sessions.pop(session_id, None)
+        self.send_response(204)
         self.end_headers()
 
     def do_GET(self) -> None:  # noqa: N802

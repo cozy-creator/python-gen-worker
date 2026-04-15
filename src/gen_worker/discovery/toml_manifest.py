@@ -232,6 +232,50 @@ def _parse_function_resource_hints(v: Any) -> dict[str, Any]:
         kind = str(v.get("kind") or "").strip()
         if kind:
             out["kind"] = kind
+
+    if "requires_gpu" in v:
+        raw = v.get("requires_gpu")
+        if isinstance(raw, bool):
+            out["requires_gpu"] = raw
+        else:
+            raise ValueError("function resource hint requires_gpu must be a boolean")
+
+    if "compute_capability_min" in v:
+        raw = str(v.get("compute_capability_min") or "").strip()
+        if raw:
+            try:
+                parsed = float(raw)
+            except Exception:
+                raise ValueError("function resource hint compute_capability_min must be numeric")
+            if parsed <= 0:
+                raise ValueError("function resource hint compute_capability_min must be > 0")
+            out["compute_capability_min"] = f"{parsed:.1f}"
+
+    if "min_vram_gb" in v:
+        raw = v.get("min_vram_gb")
+        try:
+            val = float(raw)
+        except Exception:
+            raise ValueError("function resource hint min_vram_gb must be numeric")
+        if val <= 0:
+            raise ValueError("function resource hint min_vram_gb must be > 0")
+        out["min_vram_gb"] = val
+
+    for key in ("supported_conversion_profiles", "supported_precisions"):
+        if key not in v:
+            continue
+        raw = v.get(key)
+        if not isinstance(raw, list):
+            raise ValueError(f"function resource hint {key} must be a list of strings")
+        items: list[str] = []
+        for item in raw:
+            if not isinstance(item, str):
+                raise ValueError(f"function resource hint {key} must be a list of strings")
+            trimmed = item.strip()
+            if trimmed:
+                items.append(trimmed)
+        if items:
+            out[key] = items
     return out
 
 

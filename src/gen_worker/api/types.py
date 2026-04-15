@@ -62,6 +62,11 @@ class Tensors(msgspec.Struct):
     format: Optional[str] = None
     size_bytes: Optional[int] = None
     sha256: Optional[str] = None
+    blake3: Optional[str] = None
+    blob_digest: Optional[str] = None
+    blob_domain: Optional[str] = None
+    blob_path: Optional[str] = None
+    snapshot_digest: Optional[str] = None
     download_token: Optional[str] = None
     stream_mode: Optional[str] = None
 

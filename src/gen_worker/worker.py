@@ -91,6 +91,8 @@ ActionFunc = Callable[[Any, I], O]
 
 HEARTBEAT_INTERVAL = 10  # seconds
 
+_DOWNLOAD_CHUNK_BYTES = 4 * 1024 * 1024
+
 
 def _workspace_scope_id(request_id: str, run_id: Optional[str]) -> str:
     rid = str(run_id or "").strip()
@@ -1589,7 +1591,7 @@ class Worker:
         try:
             with open(tmp, "wb") as out:
                 while True:
-                    chunk = src.read(1024 * 1024)
+                    chunk = src.read(_DOWNLOAD_CHUNK_BYTES)
                     if not chunk:
                         break
                     total += len(chunk)

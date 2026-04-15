@@ -12,6 +12,8 @@ from blake3 import blake3
 
 _log = logging.getLogger(__name__)
 
+_DOWNLOAD_CHUNK_BYTES = 4 * 1024 * 1024
+
 
 def _norm_rel_path(p: str) -> str:
     s = (p or "").strip().replace("\\", "/")
@@ -112,7 +114,7 @@ async def _download_one_file(url: str, dst: Path, expected_size: int, expected_b
         last_log = start
         log_every = max(expected_size // 10, 50 << 20) if expected_size else (100 << 20)
         with open(tmp, write_mode) as f:
-            async for chunk in resp.content.iter_chunked(1 << 20):
+            async for chunk in resp.content.iter_chunked(_DOWNLOAD_CHUNK_BYTES):
                 if not chunk:
                     continue
                 f.write(chunk)
@@ -164,7 +166,7 @@ async def _download_one_file(url: str, dst: Path, expected_size: int, expected_b
     log.info("download_done path=%s size=%s", dst.name, _human_size(actual_size))
 
 
-def _blake3_file(path: Path, chunk_size: int = 1 << 20) -> str:
+def _blake3_file(path: Path, chunk_size: int = _DOWNLOAD_CHUNK_BYTES) -> str:
     h = blake3()
     with open(path, "rb") as f:
         while True:
