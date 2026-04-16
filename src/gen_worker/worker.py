@@ -1305,7 +1305,7 @@ class Worker:
                 if not local:
                     return v
                 ref = str(getattr(v, "ref", "") or "").strip() or _default_ref(local)
-                saved = ctx.save_file(ref, local)
+                saved: Asset | Tensors = ctx.save_file(ref, local)
                 return saved
 
             if isinstance(v, Tensors):
@@ -1446,7 +1446,8 @@ class Worker:
             asset.local_path = local_path
             if not asset.owner:
                 asset.owner = self.owner
-            asset.mime_type = mime
+            if isinstance(asset, Asset):
+                asset.mime_type = mime
             asset.size_bytes = size
             asset.sha256 = sha256_hex
             return
@@ -1529,7 +1530,8 @@ class Worker:
         asset.local_path = local_path
         if not asset.owner:
             asset.owner = (ctx.owner or self.owner)
-        asset.mime_type = mime or None
+        if isinstance(asset, Asset):
+            asset.mime_type = mime or None
         asset.size_bytes = size or None
         asset.sha256 = sha256_hex or None
 

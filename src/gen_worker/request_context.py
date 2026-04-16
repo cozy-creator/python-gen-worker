@@ -7,7 +7,6 @@ import logging
 import os
 import base64
 import re
-import queue
 import shutil
 import socket
 import tempfile
@@ -16,7 +15,7 @@ import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional
 
 import requests
 from blake3 import blake3
@@ -429,6 +428,7 @@ class _RequestOutputStream:
         self._repo_job_scope = self._ctx._repo_job_upload_scope() if self._kind == "checkpoint" else None
         self._finalized = False
         self._result: Any = None
+        self._abort_remote: bool = False
 
         # Always buffer to temp file.
         suffix = Path(self._ref).suffix or ".bin"
@@ -518,6 +518,7 @@ class _RequestOutputStream:
                 )
                 return self._result
             else:
+                raw: Asset | Tensors
                 if self._kind == "checkpoint":
                     raw = self._ctx.save_checkpoint(self._ref, self._tmp_path, format=self._format)
                 else:
@@ -551,6 +552,9 @@ class _RequestOutputStream:
                 pass
         self._maybe_emit_progress(stage="stream_aborted", force=True)
         self._finalized = True
+
+    def _signal_remote_done(self) -> None:
+        pass
 
     def _abort_due_to_cancel(self) -> None:
         if self._abort_remote:
@@ -755,7 +759,7 @@ class _RequestOutputStream:
     def __enter__(self) -> "_RequestOutputStream":
         return self
 
-    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> Literal[False]:
         if exc_type is None:
             self.finalize()
         else:
@@ -813,6 +817,7 @@ class RequestContext:
         self._canceled = False
         self._cancel_event = threading.Event()
         self._emitter = emitter
+        self._cached_repo_job_scope: Optional[tuple[str, str, str]] = None
 
     @property
     def request_id(self) -> str:
@@ -921,7 +926,7 @@ class RequestContext:
         the repo and lineage record on first upload when the capability token
         is valid.
         """
-        if hasattr(self, "_cached_repo_job_scope"):
+        if self._cached_repo_job_scope is not None:
             return self._cached_repo_job_scope
 
         hints = dict(self._execution_hints or {})
@@ -1986,8 +1991,10 @@ class RequestContext:
                         continue
 
                     copied_version_id = str((copy_out or {}).get("copied_version_id") or source_version_id).strip().lower()
-                    metadata_json = raw.get("metadata_json") if isinstance(raw.get("metadata_json"), dict) else {}
-                    result_json = metadata_json.get("result") if isinstance(metadata_json.get("result"), dict) else {}
+                    _meta_raw = raw.get("metadata_json")
+                    metadata_json: Dict[Any, Any] = _meta_raw if isinstance(_meta_raw, dict) else {}
+                    _result_raw = metadata_json.get("result")
+                    result_json: Dict[Any, Any] = _result_raw if isinstance(_result_raw, dict) else {}
                     primary_ref = str(result_json.get("primary_artifact_ref") or "").strip()
                     primary_format = str(result_json.get("primary_artifact_format") or "").strip()
                     claim_written = _write_claim(

@@ -252,7 +252,7 @@ def _parse_function_resource_hints(v: Any) -> dict[str, Any]:
             out["compute_capability_min"] = f"{parsed:.1f}"
 
     if "min_vram_gb" in v:
-        raw = v.get("min_vram_gb")
+        raw = v["min_vram_gb"]
         try:
             val = float(raw)
         except Exception:
@@ -262,7 +262,7 @@ def _parse_function_resource_hints(v: Any) -> dict[str, Any]:
         out["min_vram_gb"] = val
 
     if "vram_multiplier" in v:
-        raw = v.get("vram_multiplier")
+        raw = v["vram_multiplier"]
         try:
             val = float(raw)
         except Exception:
