@@ -50,20 +50,20 @@ The worker enforces startup registration timeout:
 
 Per-run events emitted:
 
-- `task.received`
-- `task.started`
-- `task.model_resolve.started|completed|failed`
-- `task.model_load.started|completed|failed`
-- `task.inference.started|completed|failed`
-- `task.completed` / `task.failed`
+- `request.received`
+- `request.started`
+- `request.model_resolve.started|completed|failed`
+- `request.model_load.started|completed|failed`
+- `request.inference.started|completed|failed`
+- `request.completed` / `request.failed`
 
 ## Stuck (Soft Watchdog) Signals
 
 Long-running phase warnings emit:
 
-- `task.model_resolve.stuck`
-- `task.model_load.stuck`
-- `task.inference.stuck`
+- `request.model_resolve.stuck`
+- `request.model_load.stuck`
+- `request.inference.stuck`
 
 Each includes `elapsed_ms`, `warn_after_s`, and phase context.
 

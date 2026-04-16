@@ -85,7 +85,7 @@ def _infer_mime_type(ref: str, head: bytes) -> str:
 
 
 def _default_output_prefix(request_id: str) -> str:
-    return f"runs/{request_id}/outputs/"
+    return f"jobs/{request_id}/outputs/"
 
 
 def _normalize_output_ref(ref: str) -> str:
@@ -235,7 +235,7 @@ def _assert_token_repo_scope_matches_destination(
     owner: str,
     repo: str,
     *,
-    required_actions: Optional[List[str]] = None,
+    required_permissions: Optional[List[str]] = None,
 ) -> None:
     claims = _decode_unverified_jwt_claims(token)
     if not claims:
@@ -246,10 +246,10 @@ def _assert_token_repo_scope_matches_destination(
     cap_kind = _normalize_repo_name(str(claims.get("cap_kind") or ""))
     if cap_kind != "worker_capability":
         raise ValueError("worker_capability_token must have cap_kind=worker_capability")
-    if required_actions is None:
+    if required_permissions is None:
         needed = ["repo-version:create"]
     else:
-        needed = [str(a or "").strip() for a in list(required_actions) if str(a or "").strip()]
+        needed = [str(p or "").strip() for p in list(required_permissions) if str(p or "").strip()]
     repos_read = [str(v or "").strip() for v in list(claims.get("tensor_repos_read") or [])]
     repos_update_legacy = [str(v or "").strip() for v in list(claims.get("tensor_repos_update") or [])]
     repos_version_create = [str(v or "").strip() for v in list(claims.get("tensor_repos_version_create") or [])]
@@ -274,25 +274,25 @@ def _assert_token_repo_scope_matches_destination(
                 return True
         return False
 
-    for action in needed:
-        if action == "tensor-repo:read":
+    for permission in needed:
+        if permission == "tensor-repo:read":
             if _repo_match(repos_read) or _repo_match(repos_version_create) or _repo_match(repos_variant_create):
                 continue
             raise ValueError("destination_repo does not match worker_capability_token read scope")
-        if action == "repo-version:create":
+        if permission == "repo-version:create":
             if _repo_match(repos_version_create) or _repo_match(repos_variant_create):
                 continue
             raise ValueError("destination_repo does not match worker_capability_token repo-version:create scope")
-        if action == "repo-variant:create":
+        if permission == "repo-variant:create":
             if _repo_match(repos_variant_create) or _repo_match(repos_version_create):
                 continue
             raise ValueError("destination_repo does not match worker_capability_token repo-variant:create scope")
-        if action == "tensor-repo:update":
+        if permission == "tensor-repo:update":
             # Legacy alias.
             if _repo_match(repos_version_create) or _repo_match(repos_variant_create):
                 continue
             raise ValueError("destination_repo does not match worker_capability_token update scope")
-        if action == "tensor-repo:create":
+        if permission == "tensor-repo:create":
             if create_owner != destination_owner:
                 raise ValueError("destination_repo owner does not match worker_capability_token create scope")
             if create_allow_any_name:
@@ -300,7 +300,7 @@ def _assert_token_repo_scope_matches_destination(
             if destination_repo in create_allowed_names:
                 continue
             raise ValueError("destination_repo is not in worker_capability_token create allow-list")
-        raise ValueError(f"unsupported required action '{action}'")
+        raise ValueError(f"unsupported required permission '{permission}'")
 
 
 def _is_private_ip_str(ip_str: str) -> bool:
@@ -551,17 +551,6 @@ class _RequestOutputStream:
                 pass
         self._maybe_emit_progress(stage="stream_aborted", force=True)
         self._finalized = True
-        assert self._fh is not None
-        try:
-            self._fh.close()
-        finally:
-            assert self._tmp_path is not None
-            try:
-                os.remove(self._tmp_path)
-            except Exception:
-                pass
-        self._maybe_emit_progress(stage="stream_closed", force=True)
-        self._finalized = True
 
     def _abort_due_to_cancel(self) -> None:
         if self._abort_remote:
@@ -672,9 +661,9 @@ class _RequestOutputStream:
         if self._repo_job_scope is None:
             # Media upload.
             create_payload["ref"] = self._ref
-            run_id = str(self._ctx.run_id or "").strip()
-            if run_id:
-                create_payload["run_id"] = run_id
+            job_id = str(self._ctx.job_id or "").strip()
+            if job_id:
+                create_payload["job_id"] = job_id
             endpoint_path = "/api/v1/media/uploads"
         else:
             # Repo-CAS upload.
@@ -775,12 +764,12 @@ class _RequestOutputStream:
 
 
 class RequestContext:
-    """Context object passed to action functions, allowing cancellation."""
+    """Context object passed to request handlers, allowing cancellation."""
 
     def __init__(
         self,
         request_id: str,
-        run_id: Optional[str] = None,
+        job_id: Optional[str] = None,
         emitter: Optional[Callable[[Dict[str, Any]], None]] = None,
         owner: Optional[str] = None,
         invoker_id: Optional[str] = None,
@@ -800,7 +789,7 @@ class RequestContext:
         item_span: Optional[Dict[str, int]] = None,
     ) -> None:
         self._request_id = str(request_id or "").strip()
-        self._run_id = str(run_id or "").strip() or None
+        self._job_id = str(job_id or "").strip() or None
         self._owner = owner
         self._invoker_id = invoker_id
         self._timeout_ms = timeout_ms
@@ -830,12 +819,12 @@ class RequestContext:
         return self._request_id
 
     @property
-    def run_id(self) -> Optional[str]:
-        return self._run_id
+    def job_id(self) -> Optional[str]:
+        return self._job_id
 
     @property
     def workspace_scope_id(self) -> str:
-        return self._run_id or self._request_id
+        return self._job_id or self._request_id
 
     @property
     def owner(self) -> Optional[str]:
@@ -926,6 +915,15 @@ class RequestContext:
         return None
 
     def _repo_job_upload_scope(self) -> Optional[tuple[str, str, str]]:
+        """Return (owner, repo, job_id) for repo-CAS uploads, or None.
+
+        Pure getter — no HTTP calls or side effects. TensorHub auto-creates
+        the repo and lineage record on first upload when the capability token
+        is valid.
+        """
+        if hasattr(self, "_cached_repo_job_scope"):
+            return self._cached_repo_job_scope
+
         hints = dict(self._execution_hints or {})
         kind = str(hints.get("kind", "") or "").strip().lower()
         if kind not in {"conversion", "training"}:
@@ -942,7 +940,7 @@ class RequestContext:
             hints.get("job_id")
             or hints.get("conversion_job_id")
             or hints.get("training_job_id")
-            or self._run_id
+            or self._job_id
             or ""
         ).strip()
         if job_id == "":
@@ -951,7 +949,10 @@ class RequestContext:
             owner, repo = _parse_owner_repo(destination_repo)
         except Exception:
             return None
-        return owner, repo, job_id
+
+        result = (owner, repo, job_id)
+        self._cached_repo_job_scope = result
+        return result
 
     def _tensor_upload_execution_kind(self) -> str:
         hints = dict(self._execution_hints or {})
@@ -1014,7 +1015,7 @@ class RequestContext:
     def partition_context(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {
             "request_id": self._request_id,
-            "run_id": self._run_id,
+            "job_id": self._job_id,
             "parent_request_id": self._parent_request_id,
             "child_request_id": self._child_request_id,
             "item_id": self._item_id,
@@ -1034,7 +1035,7 @@ class RequestContext:
             item_key = f"item-{self._item_index:06d}"
         if not item_key:
             item_key = "item-000000"
-        return f"runs/{self._request_id}/outputs/items/{item_key}/{leaf}"
+        return f"jobs/{self._request_id}/outputs/items/{item_key}/{leaf}"
 
     def preferred_batch_size(self, default: int = 1) -> int:
         cfg = self._runtime_batching_config
@@ -1060,18 +1061,18 @@ class RequestContext:
         return max(0.0, self._deadline - time.time())
 
     def is_canceled(self) -> bool:
-        """Check if the action was canceled."""
+        """Check if the request was canceled."""
         return self._canceled
 
     def cancel(self) -> None:
-        """Mark the action as canceled."""
+        """Mark the request as canceled."""
         if not self._canceled:
             self._canceled = True
             self._cancel_event.set()
             logger.info(f"Action {self.request_id} marked for cancellation.")
 
     def done(self) -> threading.Event:
-        """Returns an event that is set when the action is cancelled."""
+        """Returns an event that is set when the request is cancelled."""
         return self._cancel_event
 
     def emit(self, event_type: str, payload: Optional[Dict[str, Any]] = None) -> None:
@@ -1346,7 +1347,7 @@ class RequestContext:
         self,
         *,
         destination_repo: str,
-        artifact_refs: Optional[List[str]] = None,
+        artifact_refs: Optional[List[Any]] = None,
         metadata: Optional[Dict[str, Any]] = None,
         create_if_missing: bool = True,
         destination_repo_tags: Optional[List[str]] = None,
@@ -1358,6 +1359,11 @@ class RequestContext:
         """Publish conversion lineage to Tensorhub using public HTTP APIs only.
 
         Uses worker capability auth and never touches DB/internal-only paths.
+
+        artifact_refs: list of artifact references. Each item can be:
+          - a dict with keys: digest (required), path, size_bytes, domain
+            (from presigned upload complete response: blob_digest, blob_path, etc.)
+          - a string file ref (legacy, used as path only — no digest validation)
         """
         owner, repo = _parse_owner_repo(destination_repo)
         source_owner = ""
@@ -1418,9 +1424,9 @@ class RequestContext:
                 }
             else:
                 logger.warning(
-                    "worker_publish_tags_skipped request_id=%s run_id=%s owner=%s repo=%s reason=missing_target_version tags=%s",
+                    "worker_publish_tags_skipped request_id=%s job_id=%s owner=%s repo=%s reason=missing_target_version tags=%s",
                     self.request_id,
-                    self.run_id or "",
+                    self.job_id or "",
                     owner,
                     repo,
                     ",".join(normalized_tags),
@@ -1428,14 +1434,14 @@ class RequestContext:
         base = (self._file_api_base_url or "").strip().rstrip("/")
         token = (self._worker_capability_token or "").strip()
         if token:
-            required_actions = ["repo-version:create"]
+            required_permissions = ["repo-version:create"]
             if create_if_missing:
-                required_actions.insert(0, "tensor-repo:create")
-            _assert_token_repo_scope_matches_destination(token, owner, repo, required_actions=required_actions)
+                required_permissions.insert(0, "tensor-repo:create")
+            _assert_token_repo_scope_matches_destination(token, owner, repo, required_permissions=required_permissions)
         logger.info(
-            "worker_publish_attempt request_id=%s run_id=%s owner=%s repo=%s",
+            "worker_publish_attempt request_id=%s job_id=%s owner=%s repo=%s",
             self.request_id,
-            self.run_id or "",
+            self.job_id or "",
             owner,
             repo,
         )
@@ -1479,17 +1485,16 @@ class RequestContext:
                 pass
             return {"ok": True}
 
-        if create_if_missing:
-            _request_json("POST", "/api/v1/repos", {"repo_name": repo})
-
-        start = _request_json(
-            "POST",
-            f"/api/v1/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}/conversion-jobs/start",
-            {"kind": "conversion", "input_versions": input_versions, "publish_intent": publish_intent},
-        )
-        job_id = str(start.get("job_id") or start.get("run_id") or "").strip()
+        # TensorHub auto-creates the repo and lineage record on the upload path,
+        # so no explicit repo creation or conversion-jobs/start call is needed.
+        # The job_id comes from the capability token (via execution_hints).
+        scope = self._repo_job_upload_scope()
+        if scope is not None:
+            _, _, job_id = scope
+        else:
+            job_id = ""
         if job_id == "":
-            raise RuntimeError("repo publish failed: missing job_id from start response")
+            raise RuntimeError("repo publish failed: no job_id in execution_hints (missing destination_repo or job scope)")
 
         metrics = dict(md)
         commit_output_variants = []
@@ -1498,6 +1503,38 @@ class RequestContext:
             for item in raw_output_variants:
                 if isinstance(item, dict):
                     commit_output_variants.append(dict(item))
+
+        # Wire artifact_refs into output_variants if not already present.
+        parsed_artifacts = []
+        for ref in (artifact_refs or []):
+            if isinstance(ref, dict):
+                art: Dict[str, Any] = {}
+                digest = str(ref.get("digest") or ref.get("blob_digest") or "").strip()
+                if digest:
+                    art["digest"] = digest
+                path_val = str(ref.get("path") or ref.get("blob_path") or "").strip()
+                if path_val:
+                    art["path"] = path_val
+                size_val = ref.get("size_bytes")
+                if size_val is not None:
+                    art["size_bytes"] = int(size_val)
+                domain_val = str(ref.get("domain") or ref.get("blob_domain") or "private").strip()
+                art["domain"] = domain_val
+                if art.get("digest"):
+                    parsed_artifacts.append(art)
+            elif isinstance(ref, str) and ref.strip():
+                # Legacy: string ref used as path hint only.
+                parsed_artifacts.append({"path": ref.strip()})
+
+        if parsed_artifacts and commit_output_variants:
+            for variant in commit_output_variants:
+                if not variant.get("artifacts"):
+                    variant["artifacts"] = parsed_artifacts
+        # Only include output_variants when they have the required fields
+        # (version_id, variant_label, etc.). Bare artifact-only variants will
+        # fail TensorHub validation. When we have no structured variants, the
+        # commit relies on output_versions + publish_intent instead.
+
         commit_payload = {
             "job_id": str(self.request_id or job_id),
             "run_kind": "conversion",
@@ -1538,15 +1575,15 @@ class RequestContext:
         ]
 
         logger.info(
-            "worker_publish_succeeded request_id=%s run_id=%s owner=%s repo=%s published_job_id=%s",
+            "worker_publish_succeeded request_id=%s job_id=%s owner=%s repo=%s published_job_id=%s",
             self.request_id,
-            self.run_id or "",
+            self.job_id or "",
             owner,
             repo,
             job_id,
         )
 
-        out: Dict[str, Any] = {"ok": True, "owner": owner, "repo": repo, "job_id": job_id, "run_id": job_id}
+        out: Dict[str, Any] = {"ok": True, "owner": owner, "repo": repo, "job_id": job_id, "job_id": job_id}
         if commit_output_versions:
             out["output_versions"] = commit_output_versions
         elif output_versions:
@@ -1561,7 +1598,7 @@ class RequestContext:
         base = (self._file_api_base_url or "").strip().rstrip("/")
         token = (self._worker_capability_token or "").strip()
         if token:
-            _assert_token_repo_scope_matches_destination(token, owner, repo, required_actions=["tensor-repo:read"])
+            _assert_token_repo_scope_matches_destination(token, owner, repo, required_permissions=["tensor-repo:read"])
         if not base or not token:
             return {"ok": False, "skipped": True, "reason": "missing_worker_capability_channel", "exists": False, "metadata": {}}
 
@@ -1599,7 +1636,7 @@ class RequestContext:
         base = (self._file_api_base_url or "").strip().rstrip("/")
         token = (self._worker_capability_token or "").strip()
         if token:
-            _assert_token_repo_scope_matches_destination(token, owner, repo, required_actions=["repo-version:create"])
+            _assert_token_repo_scope_matches_destination(token, owner, repo, required_permissions=["repo-version:create"])
         if not base or not token:
             return {"ok": False, "skipped": True, "reason": "missing_worker_capability_channel", "owner": owner, "repo": repo}
 
@@ -1738,7 +1775,7 @@ class RequestContext:
         base = (self._file_api_base_url or "").strip().rstrip("/")
         token = (self._worker_capability_token or "").strip()
         if token:
-            _assert_token_repo_scope_matches_destination(token, owner, repo, required_actions=["repo-version:create"])
+            _assert_token_repo_scope_matches_destination(token, owner, repo, required_permissions=["repo-version:create"])
         if not base or not token:
             return {"ok": False, "skipped": True, "reason": "missing_worker_capability_channel", "owner": owner, "repo": repo}
 
@@ -2045,7 +2082,7 @@ class RequestContext:
         base = (self._file_api_base_url or "").strip().rstrip("/")
         token = (self._worker_capability_token or "").strip()
         if token:
-            _assert_token_repo_scope_matches_destination(token, owner, repo, required_actions=["repo-version:create"])
+            _assert_token_repo_scope_matches_destination(token, owner, repo, required_permissions=["repo-version:create"])
         if not base or not token:
             return {"ok": False, "skipped": True, "reason": "missing_worker_capability_channel", "owner": owner, "repo": repo}
 
@@ -2095,7 +2132,7 @@ class RequestContext:
         base = (self._file_api_base_url or "").strip().rstrip("/")
         token = (self._worker_capability_token or "").strip()
         if token:
-            _assert_token_repo_scope_matches_destination(token, destination_owner, destination_name, required_actions=["repo-version:create"])
+            _assert_token_repo_scope_matches_destination(token, destination_owner, destination_name, required_permissions=["repo-version:create"])
         if not base or not token:
             return {"ok": False, "skipped": True, "reason": "missing_worker_capability_channel"}
 

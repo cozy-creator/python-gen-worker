@@ -4,7 +4,7 @@ version = "1.0.0"
 description = "Simple function for testing"
 requires-python = ">=3.12"
 dependencies = [
-    "gen-worker>=0.3.10",
+    "gen-worker>=0.4.3",
 ]
 
 [dependency-groups]

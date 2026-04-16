@@ -142,7 +142,7 @@ def test_training_runtime_samples_contract_supports_t2i_and_instruct_edit(
             "a cinematic portrait",
             {
                 "name": "edit-1",
-                "task": "instruct-edit",
+                "mode": "instruct-edit",
                 "prompt": "make it a watercolor",
                 "instruction": "apply watercolor style",
                 "source_image": "local://source.png",
@@ -166,9 +166,9 @@ def test_training_runtime_samples_contract_supports_t2i_and_instruct_edit(
 
     payload_a = json.loads(sample_a.read_text(encoding="utf-8"))
     payload_b = json.loads(sample_b.read_text(encoding="utf-8"))
-    assert payload_a["task"] == "t2i"
+    assert payload_a["mode"] == "t2i"
     assert payload_a["seed"] == 77
-    assert payload_b["task"] == "instruct-edit"
+    assert payload_b["mode"] == "instruct-edit"
     assert payload_b["instruction"] == "apply watercolor style"
     assert payload_b["source_image"] == "local://source.png"
 

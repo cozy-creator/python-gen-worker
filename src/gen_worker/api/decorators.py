@@ -21,6 +21,7 @@ class ResourceRequirements:
         compute_capability_min: Optional[float] = None,
         requires_gpu: Optional[bool] = None,
         min_vram_gb: Optional[float] = None,
+        vram_multiplier: Optional[float] = None,
         supported_conversion_profiles: Optional[Sequence[str]] = None,
         supported_precisions: Optional[Sequence[str]] = None,
         runtime_hints: Optional[Mapping[str, Any]] = None,
@@ -35,6 +36,7 @@ class ResourceRequirements:
         self.compute_capability_min = compute_capability_min
         self.requires_gpu = requires_gpu
         self.min_vram_gb = min_vram_gb
+        self.vram_multiplier = vram_multiplier
         self._requirements: Dict[str, Any] = {}
         if batch_size_min is not None:
             self._requirements["batch_size_min"] = int(batch_size_min)
@@ -62,6 +64,11 @@ class ResourceRequirements:
             if vram <= 0:
                 raise ValueError(f"min_vram_gb must be positive, got {vram}")
             self._requirements["min_vram_gb"] = vram
+        if vram_multiplier is not None:
+            vm = float(vram_multiplier)
+            if vm <= 0:
+                raise ValueError(f"vram_multiplier must be positive, got {vm}")
+            self._requirements["vram_multiplier"] = vm
         if supported_conversion_profiles is not None:
             profiles = [str(x).strip() for x in supported_conversion_profiles if str(x).strip()]
             if profiles:
@@ -88,7 +95,7 @@ def worker_function(
     resources: Optional[ResourceRequirements] = None,
 ) -> Callable[[F], F]:
     """
-    Decorator to mark a function as a worker task and associate resource requirements.
+    Decorator to mark a function as a worker request handler and associate resource requirements.
 
     Args:
         resources: An optional ResourceRequirements object describing the function's needs.

@@ -467,7 +467,7 @@ class OutputSaveContractTest(unittest.TestCase):
             )
             out = ctx.publish_repo_revision(
                 destination_repo="alice/model-a",
-                artifact_refs=["runs/run-10/outputs/model.safetensors"],
+                artifact_refs=["jobs/run-10/outputs/model.safetensors"],
                 metadata={"source_provider": "cozy", "source_ref": "alice/model-a:prod"},
                 create_if_missing=True,
                 destination_repo_tags=["prod", "beta"],

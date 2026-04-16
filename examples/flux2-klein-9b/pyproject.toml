@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Flux2-klein-9B endpoint (base+turbo; inference-only; Cozy manifest via endpoint.toml)"
 requires-python = ">=3.12"
 dependencies = [
-    "gen-worker[torch]",
+    "gen-worker[torch]>=0.4.3",
     "diffusers @ git+https://github.com/huggingface/diffusers.git@99e2cfff27dec514a43e260e885c5e6eca038b36",
     "transformers>=4.56,<5",
     "accelerate",

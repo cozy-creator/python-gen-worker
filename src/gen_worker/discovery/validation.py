@@ -59,8 +59,8 @@ def validate_endpoint(root: str | Path, *, require_uv_lock: bool = False) -> End
     if not (root_path / "Dockerfile").exists():
         errors.append("missing Dockerfile")
 
-    tensorhub_toml = root_path / "endpoint.toml"
-    if not tensorhub_toml.exists():
+    endpoint_toml = root_path / "endpoint.toml"
+    if not endpoint_toml.exists():
         errors.append("missing endpoint.toml")
 
     pyproject = root_path / "pyproject.toml"
@@ -80,9 +80,9 @@ def validate_endpoint(root: str | Path, *, require_uv_lock: bool = False) -> End
         return EndpointValidationResult(ok=not errors, errors=tuple(errors), warnings=tuple(warnings))
 
     # Validate endpoint.toml (flat schema).
-    if tensorhub_toml.exists():
+    if endpoint_toml.exists():
         try:
-            tensorhub_cfg: dict[str, Any] = tomllib.loads(tensorhub_toml.read_text(encoding="utf-8"))
+            tensorhub_cfg: dict[str, Any] = tomllib.loads(endpoint_toml.read_text(encoding="utf-8"))
         except Exception as exc:
             errors.append(f"failed to parse endpoint.toml: {exc}")
             tensorhub_cfg = {}

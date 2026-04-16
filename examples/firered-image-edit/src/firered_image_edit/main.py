@@ -11,8 +11,8 @@ from diffusers import QwenImageEditPlusPipeline
 from PIL import Image
 
 from gen_worker import RequestContext, ResourceRequirements, worker_function
-from gen_worker.injection import ModelRef, ModelRefSource as Src
-from gen_worker.types import Asset
+from gen_worker.api.injection import ModelRef, ModelRefSource as Src
+from gen_worker.api.types import Asset
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -107,5 +107,5 @@ def edit(
     result: Image.Image = out.images[0]
     buf = BytesIO()
     result.save(buf, format="PNG")
-    asset = ctx.save_bytes(f"runs/{ctx.request_id}/outputs/edited.png", buf.getvalue())
+    asset = ctx.save_bytes(f"jobs/{ctx.request_id}/outputs/edited.png", buf.getvalue())
     return EditOutput(image=asset)

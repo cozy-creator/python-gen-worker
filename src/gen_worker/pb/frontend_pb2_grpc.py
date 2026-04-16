@@ -57,7 +57,7 @@ class FrontendServiceServicer(object):
     """
 
     def ExecuteAction(self, request, context):
-        """1) Submit a new action/job to the scheduler.
+        """1) Submit a new request/job to the scheduler.
         """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')

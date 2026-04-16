@@ -19,13 +19,13 @@ from .hub_client import (
 from .hf_downloader import HuggingFaceHubDownloader
 from .refs import CozyRef, ParsedModelRef, parse_model_ref
 
-# Per-task resolved manifests provided by gen-orchestrator (issue #92).
+# Per-request resolved manifests provided by gen-orchestrator (issue #92).
 # Shape: {canonical_model_id: ResolvedCozyModel-like object}
 _resolved_cozy_models_by_id: contextvars.ContextVar[Optional[Mapping[str, Any]]] = contextvars.ContextVar(
     "resolved_cozy_models_by_id", default=None
 )
 
-# Per-task best-effort model download preferences.
+# Per-request best-effort model download preferences.
 #
 # Shape:
 #   {canonical_model_ref: {"dtypes": ["bf16","fp16"], "file_type": "safetensors"}}

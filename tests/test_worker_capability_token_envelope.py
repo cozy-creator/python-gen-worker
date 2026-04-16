@@ -5,7 +5,7 @@ from gen_worker.worker import _extract_worker_capability_token
 
 
 def test_extract_worker_capability_token_prefers_canonical_field() -> None:
-    req = pb.TaskExecutionRequest(
+    req = pb.JobExecutionRequest(
         request_id="req-1",
         file_token="legacy-token",
         worker_capability_token="canonical-token",
@@ -14,7 +14,7 @@ def test_extract_worker_capability_token_prefers_canonical_field() -> None:
 
 
 def test_extract_worker_capability_token_does_not_use_legacy_alias() -> None:
-    req = pb.TaskExecutionRequest(
+    req = pb.JobExecutionRequest(
         request_id="req-2",
         file_token="legacy-token-only",
     )

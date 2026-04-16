@@ -32,7 +32,7 @@ Overrides remain supported:
 
 - Runtime accepts `sample_prompts` in job spec:
   - string prompt entries (`t2i` default)
-  - object entries with task metadata (`task`, `prompt`, `instruction`,
+  - object entries with sample metadata (`mode`, `prompt`, `instruction`,
     `source_image`, `seed`)
 - Runtime accepts optional `sample_seed` fixed seed fallback.
 - Runtime emits deterministic sample artifact files:

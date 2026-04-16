@@ -49,7 +49,7 @@ class Out(msgspec.Struct):
 
 @worker_function()
 def generate(ctx: RequestContext, payload: In) -> Out:
-    ref = f"runs/{ctx.request_id}/outputs/out.txt"
+    ref = f"jobs/{ctx.request_id}/outputs/out.txt"
     ctx.save_bytes(ref, (payload.prompt + "\\n").encode("utf-8"))
     return Out(ref=ref)
 """.lstrip(),
@@ -104,7 +104,7 @@ def generate(ctx: RequestContext, payload: In) -> Out:
     assert body["success"] is True
     request_id = body["request_id"]
     # The output file should exist on disk.
-    p = outputs / "runs" / request_id / "outputs" / "out.txt"
+    p = outputs / "jobs" / request_id / "outputs" / "out.txt"
     assert p.exists()
     assert p.read_text(encoding="utf-8").strip() == "hello"
 
@@ -185,7 +185,7 @@ def convert_local(ctx: RequestContext, payload: In) -> Out:
 
     out_asset = body["output"]["artifact"]
     out_ref = str(out_asset["ref"])
-    assert out_ref.startswith(f"runs/{request_id}/outputs/auto/")
+    assert out_ref.startswith(f"jobs/{request_id}/outputs/auto/")
     assert out_ref.endswith(".bin")
 
     persisted = outputs / out_ref
@@ -269,7 +269,7 @@ def convert_local(ctx: RequestContext, payload: In) -> Out:
 
     out_tensors = body["output"]["weights"]
     out_ref = str(out_tensors["ref"])
-    assert out_ref.startswith(f"runs/{request_id}/outputs/auto/")
+    assert out_ref.startswith(f"jobs/{request_id}/outputs/auto/")
     assert out_ref.endswith(".safetensors")
     assert out_tensors["format"] == "safetensors"
 

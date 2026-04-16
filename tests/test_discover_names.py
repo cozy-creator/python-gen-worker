@@ -131,7 +131,7 @@ def image__worker(ctx: RequestContext, payload: Input) -> Output:
                 sys.path[:] = original_path
                 _cleanup_modules("endpoint_mod_collision")
 
-    def test_endpoint_name_slugified_from_tensorhub_toml(self) -> None:
+    def test_endpoint_name_slugified_from_endpoint_toml(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             original_cwd = os.getcwd()

@@ -10,7 +10,7 @@ import torch
 from transformers import AutoModelForCTC, AutoProcessor
 
 from gen_worker import RequestContext, Asset, ResourceRequirements, worker_function
-from gen_worker.injection import ModelRef, ModelRefSource as Src
+from gen_worker.api.injection import ModelRef, ModelRefSource as Src
 
 _MODEL_KEY = "medasr"
 

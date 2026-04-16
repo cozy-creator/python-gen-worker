@@ -107,7 +107,12 @@ def presigned_upload_file(
     create_headers = dict(headers)
     create_headers["Content-Type"] = "application/json"
 
-    resp = requests.post(url, headers=create_headers, data=json.dumps(payload), timeout=_CREATE_TIMEOUT_S)
+    try:
+        resp = requests.post(url, headers=create_headers, data=json.dumps(payload), timeout=_CREATE_TIMEOUT_S)
+    except requests.RequestException as e:
+        err = RuntimeError(f"file save failed (network_error): {e}")
+        err.__cause__ = e
+        raise err
     code = resp.status_code
     if code in (401, 403):
         raise AuthError(f"file save unauthorized ({code})")

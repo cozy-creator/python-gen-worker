@@ -30,8 +30,8 @@ from gen_worker.api.injection import ModelRef
 
 from gen_worker.discovery.toml_manifest import (
     TensorhubModelSpec,
-    TensorhubToml,
-    load_tensorhub_toml,
+    EndpointToml,
+    load_endpoint_toml,
 )
 from gen_worker.discovery.names import slugify_endpoint_name, slugify_function_name
 
@@ -341,7 +341,7 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
     return fn
 
 
-def _find_tensorhub_toml_path(root: Path) -> Path | None:
+def _find_endpoint_toml_path(root: Path) -> Path | None:
     env_path = os.getenv("ENDPOINT_TOML_PATH", "").strip()
     if env_path:
         p = Path(env_path)
@@ -350,11 +350,11 @@ def _find_tensorhub_toml_path(root: Path) -> Path | None:
     return p if p.exists() else None
 
 
-def _load_tensorhub_manifest_toml(root: Path) -> TensorhubToml:
-    p = _find_tensorhub_toml_path(root)
+def _load_endpoint_manifest_toml(root: Path) -> EndpointToml:
+    p = _find_endpoint_toml_path(root)
     if p is None:
         raise ValueError("missing endpoint.toml (required for discovery)")
-    return load_tensorhub_toml(p)
+    return load_endpoint_toml(p)
 
 
 def _model_spec_to_json(spec: TensorhubModelSpec) -> Dict[str, Any]:
@@ -493,7 +493,7 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
         root = Path.cwd()
     root = root.resolve()
 
-    tensorhub_manifest = _load_tensorhub_manifest_toml(root)
+    tensorhub_manifest = _load_endpoint_manifest_toml(root)
 
     functions = discover_functions(root, main_module=tensorhub_manifest.main)
     for fn in functions:

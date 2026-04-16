@@ -55,8 +55,8 @@ WorkerRegistration = Any
 LoadModelCommand = Any
 LoadModelResult = Any
 UnloadModelResult = Any
-TaskExecutionRequest = Any
-TaskExecutionResult = Any
+JobExecutionRequest = Any
+JobExecutionResult = Any
 from .api.decorators import ResourceRequirements
 from .api.errors import AuthError, CanceledError, FatalError, ResourceError, RetryableError, ValidationError
 
@@ -86,32 +86,27 @@ logger = logging.getLogger(__name__) # Use __name__ for logger
 I = TypeVar('I')  # Input type
 O = TypeVar('O')  # Output type
 
-# Generic type for action functions
-ActionFunc = Callable[[Any, I], O]
+# Generic type for discovered request handlers
+RequestHandlerFunc = Callable[[Any, I], O]
 
 HEARTBEAT_INTERVAL = 10  # seconds
 
 _DOWNLOAD_CHUNK_BYTES = 4 * 1024 * 1024
 
 
-def _workspace_scope_id(request_id: str, run_id: Optional[str]) -> str:
-    rid = str(run_id or "").strip()
-    if rid:
-        return rid
+def _workspace_scope_id(request_id: str, job_id: Optional[str]) -> str:
+    jid = str(job_id or "").strip()
+    if jid:
+        return jid
     return str(request_id or "").strip()
 
 
 def _extract_worker_capability_token(envelope: Any) -> str:
-    # Prefer the dedicated worker_capability_token field; fall back to the legacy
-    # file_token field which older orchestrator versions populate instead.
-    token = str(getattr(envelope, "worker_capability_token", "") or "").strip()
-    if not token:
-        token = str(getattr(envelope, "file_token", "") or "").strip()
-    return token
+    return str(getattr(envelope, "worker_capability_token", "") or "").strip()
 
 
 @dataclass(frozen=True)
-class _TaskSpec:
+class _RequestSpec:
     name: str
     func: Callable[..., Any]
     resources: ResourceRequirements
@@ -306,7 +301,7 @@ class Worker:
         self._jwks_cache: Optional[_JWKSCache] = _JWKSCache(self._jwks_url, self._jwks_ttl_seconds) if self._jwks_url else None
 
         # Worker containers are treated as untrusted. Do not depend on RELEASE_ID/OWNER env vars.
-        # Release + owner identity come from the scheduler-issued JWT and per-run gRPC envelopes.
+        # Release + owner identity come from the scheduler-issued JWT and per-job gRPC envelopes.
         self.release_id = ""
         self.owner = ""
         self.runpod_pod_id = os.getenv("RUNPOD_POD_ID", "") # Read injected pod ID
@@ -315,10 +310,10 @@ class Worker:
 
         logger.info(f"RUNPOD_POD_ID: {self.runpod_pod_id}")
 
-        self._task_specs: Dict[str, _TaskSpec] = {}
+        self._request_specs: Dict[str, _RequestSpec] = {}
         self._ws_specs: Dict[str, _WebsocketSpec] = {}
-        self._active_tasks: Dict[str, RequestContext] = {}
-        self._active_tasks_lock = threading.Lock()
+        self._active_requests: Dict[str, RequestContext] = {}
+        self._active_requests_lock = threading.Lock()
         self._request_batch_context: Dict[str, Tuple[str, str]] = {}  # request_id -> (batch_id, item_id)
         self._request_batch_context_lock = threading.Lock()
         self.max_concurrency = int(os.getenv("WORKER_MAX_CONCURRENCY", "0"))
@@ -670,7 +665,7 @@ class Worker:
             logger.exception("Failed to emit progress event")
 
     def _emit_worker_event_bytes(self, request_id: str, event_type: str, payload_json: bytes) -> None:
-        """Best-effort worker->scheduler WorkerEvent emitter (must never fail a run)."""
+        """Best-effort worker->scheduler WorkerEvent emitter (must never fail a job)."""
         try:
             msg = pb.WorkerSchedulerMessage(
                 worker_event=pb.WorkerEvent(
@@ -828,7 +823,7 @@ class Worker:
         except Exception:
             pass
 
-    def _emit_task_event(self, request_id: str, event_type: str, payload: Optional[Dict[str, Any]] = None) -> None:
+    def _emit_request_event(self, request_id: str, event_type: str, payload: Optional[Dict[str, Any]] = None) -> None:
         try:
             self._emit_worker_event_bytes(request_id, event_type, safe_json_bytes(payload or {}))
         except Exception:
@@ -843,9 +838,9 @@ class Worker:
         payload: Optional[Dict[str, Any]] = None,
     ) -> Optional[threading.Timer]:
         """
-        Start a soft watchdog for long-running task phases.
+        Start a soft watchdog for long-running request phases.
 
-        Emits `task.<phase>.stuck` if the timer fires.
+        Emits `request.<phase>.stuck` if the timer fires.
         """
         try:
             timeout_s = float(warn_after_s or 0.0)
@@ -862,9 +857,9 @@ class Worker:
             ev_payload["phase"] = str(phase or "")
             ev_payload["warn_after_s"] = timeout_s
             ev_payload["elapsed_ms"] = elapsed_ms
-            self._emit_task_event(request_id, f"task.{phase}.stuck", ev_payload)
+            self._emit_request_event(request_id, f"request.{phase}.stuck", ev_payload)
             logger.warning(
-                "task phase stuck request_id=%s phase=%s elapsed_ms=%d warn_after_s=%.1f payload=%s",
+                "request phase stuck request_id=%s phase=%s elapsed_ms=%d warn_after_s=%.1f payload=%s",
                 request_id,
                 phase,
                 elapsed_ms,
@@ -988,14 +983,14 @@ class Worker:
 
                 if getattr(obj, "_is_worker_function", False) is True:
                     try:
-                        spec = self._inspect_task_spec(obj)
+                        spec = self._inspect_request_spec(obj)
                     except Exception as exc:
                         logger.error("Skipping function '%s': %s", getattr(obj, "__name__", "<unknown>"), exc)
                         continue
-                    if spec.name in self._task_specs or spec.name in self._ws_specs:
+                    if spec.name in self._request_specs or spec.name in self._ws_specs:
                         logger.warning("Handler name conflict for '%s'; skipping", spec.name)
                         continue
-                    self._task_specs[spec.name] = spec
+                    self._request_specs[spec.name] = spec
                     self._discovered_resources[spec.name] = spec.resources
                     self._function_schemas[spec.name] = (
                         spec.input_schema_json,
@@ -1013,7 +1008,7 @@ class Worker:
                     except Exception as exc:
                         logger.error("Skipping websocket '%s': %s", getattr(obj, "__name__", "<unknown>"), exc)
                         continue
-                    if ws_spec.name in self._task_specs or ws_spec.name in self._ws_specs:
+                    if ws_spec.name in self._request_specs or ws_spec.name in self._ws_specs:
                         logger.warning("Handler name conflict for '%s'; skipping", ws_spec.name)
                         continue
                     self._ws_specs[ws_spec.name] = ws_spec
@@ -1026,7 +1021,7 @@ class Worker:
         else:
             logger.info("Discovery complete. Found %d handlers.", discovered)
 
-    def _inspect_task_spec(self, func: Callable[..., Any]) -> _TaskSpec:
+    def _inspect_request_spec(self, func: Callable[..., Any]) -> _RequestSpec:
         python_name = func.__name__
         func_name = slugify_function_name(python_name)
         if not func_name:
@@ -1128,7 +1123,7 @@ class Worker:
         ]
         injection_json = json.dumps(injection_payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
-        return _TaskSpec(
+        return _RequestSpec(
             name=func_name,
             func=func,
             resources=resources,
@@ -1300,7 +1295,7 @@ class Worker:
         def _default_ref(local_path: str) -> str:
             nonlocal upload_idx
             leaf = os.path.basename(local_path) or "artifact.bin"
-            ref = f"runs/{ctx.request_id}/outputs/auto/{upload_idx:06d}-{leaf}"
+            ref = f"jobs/{ctx.request_id}/outputs/auto/{upload_idx:06d}-{leaf}"
             upload_idx += 1
             return _normalize_output_ref(ref)
 
@@ -1377,8 +1372,8 @@ class Worker:
         if not (ref.startswith("http://") or ref.startswith("https://")):
             if mapped := ctx._materialized_input_url_for_ref(ref):
                 ref = mapped
-        base_dir = os.getenv("WORKER_RUN_DIR", "/tmp/tensorhub/run").rstrip("/")
-        scope_id = _workspace_scope_id(ctx.request_id, getattr(ctx, "run_id", None))
+        base_dir = os.getenv("WORKER_JOB_DIR", "/tmp/tensorhub/job").rstrip("/")
+        scope_id = _workspace_scope_id(ctx.request_id, getattr(ctx, "job_id", None))
         local_inputs_dir = os.path.join(base_dir, scope_id, "inputs")
         os.makedirs(local_inputs_dir, exist_ok=True)
         cache_dir = os.getenv("WORKER_CACHE_DIR", os.path.join(base_dir, "cache")).rstrip("/")
@@ -1905,7 +1900,7 @@ class Worker:
             function_schemas = []
             for fname, (in_schema, out_schema, _delta_schema, inj_json) in self._function_schemas.items():
                 try:
-                    spec = self._task_specs.get(fname)
+                    spec = self._request_specs.get(fname)
                     incremental = bool(spec and spec.output_mode == "incremental")
                     function_schemas.append(
                         pb.FunctionSchema(
@@ -1925,7 +1920,7 @@ class Worker:
                 # can identify this worker without JWT claims.
                 worker_id=self.worker_id,
                 release_id="",
-                # owner is provided per-request via TaskExecutionRequest/RealtimeOpenCommand.
+                # owner is provided per-request via JobExecutionRequest/RealtimeOpenCommand.
                 runpod_pod_id=self.runpod_pod_id,
                 gpu_is_busy=self._get_gpu_busy_status(),
                 cpu_cores=cpu_cores,
@@ -1941,7 +1936,7 @@ class Worker:
                 torch_version=torch_version,
                 gpu_sm=gpu_sm,
                 installed_libs=installed_libs,
-                available_functions=list(dict.fromkeys(list(self._task_specs.keys()) + list(self._ws_specs.keys()))),
+                available_functions=list(dict.fromkeys(list(self._request_specs.keys()) + list(self._ws_specs.keys()))),
                 vram_models=vram_models,   # Models in VRAM (hot)
                 disk_models=disk_models,   # Models on disk (warm)
                 supports_model_loading=supports_model_loading_flag,
@@ -2016,7 +2011,7 @@ class Worker:
         error_message = ""
         if not function_name:
             error_message = "missing_function_name"
-        elif function_name not in self._task_specs:
+        elif function_name not in self._request_specs:
             error_message = f"unknown_function:{function_name}"
         else:
             normalized: Dict[str, Any] = {
@@ -2087,7 +2082,7 @@ class Worker:
             caps = dict(req.to_dict() if req else {})
             if not caps:
                 continue
-            spec = self._task_specs.get(fn_name)
+            spec = self._request_specs.get(fn_name)
             if spec is not None:
                 caps["output_mode"] = spec.output_mode
             caps["function_name"] = fn_name
@@ -2181,23 +2176,23 @@ class Worker:
         self._running = False # Signal loops to stop
         self._stop_event.set() # Wake up any waiting threads
 
-        # Cancel any active tasks
-        active_task_ids = []
+        # Cancel any active requests
+        active_request_ids = []
         if self._drain_timeout_seconds > 0:
             deadline = time.time() + self._drain_timeout_seconds
             while time.time() < deadline:
-                with self._active_tasks_lock:
-                    remaining = len(self._active_tasks)
+                with self._active_requests_lock:
+                    remaining = len(self._active_requests)
                 if remaining == 0:
                     break
                 time.sleep(0.2)
 
-        with self._active_tasks_lock:
-            active_task_ids = list(self._active_tasks.keys())
-            for request_id in active_task_ids:
-                ctx = self._active_tasks.get(request_id)
+        with self._active_requests_lock:
+            active_request_ids = list(self._active_requests.keys())
+            for request_id in active_request_ids:
+                ctx = self._active_requests.get(request_id)
                 if ctx:
-                    logger.debug(f"Cancelling active task {request_id} during stop.")
+                    logger.debug(f"Cancelling active request {request_id} during stop.")
                     ctx.cancel()
             # Don't clear here, allow _execute_function to finish and remove
 
@@ -2315,7 +2310,7 @@ class Worker:
              logger.info("Receive loop finished.")
 
     def _handle_connection_error(self) -> None:
-         """Handles actions needed when a connection error occurs during run."""
+         """Handles steps needed when a connection error occurs during run."""
          if self._running and not self._stop_event.is_set():
              logger.warning("Connection error detected. Signaling main loop to reconnect...")
              self._close_connection() # Ensure resources are closed before reconnect attempt
@@ -2329,10 +2324,10 @@ class Worker:
         msg_type = message.WhichOneof('msg')
         # logger.debug(f"Received message of type: {msg_type}")
 
-        if msg_type == 'run_request':
-            self._handle_run_request(message.run_request)
-        elif msg_type == 'batch_run_request':
-            self._handle_batch_run_request(message.batch_run_request)
+        if msg_type == 'job_request':
+            self._handle_job_request(message.job_request)
+        elif msg_type == 'batch_job_request':
+            self._handle_batch_job_request(message.batch_job_request)
         elif msg_type == 'load_model_cmd':
             # TODO: Implement model loading logic
             # model_id = message.load_model_cmd.model_id
@@ -2343,8 +2338,8 @@ class Worker:
             self._handle_load_model_cmd(message.load_model_cmd)
         elif msg_type == 'unload_model_cmd':
             self._handle_unload_model_cmd(message.unload_model_cmd)
-        elif msg_type == 'interrupt_run_cmd':
-            cmd = message.interrupt_run_cmd
+        elif msg_type == 'interrupt_job_cmd':
+            cmd = message.interrupt_job_cmd
             request_id = cmd.request_id
             item_ids = [str(x).strip() for x in list(getattr(cmd, "item_ids", []) or []) if str(x).strip()]
             cancel_queued_only = bool(getattr(cmd, "cancel_queued_only", False))
@@ -2953,10 +2948,10 @@ class Worker:
         except Exception:
             pass
 
-    def _handle_run_request(self, request: TaskExecutionRequest) -> None:
-        """Handle a task execution request from the scheduler."""
+    def _handle_job_request(self, request: JobExecutionRequest) -> None:
+        """Handle a request execution envelope from the scheduler."""
         request_id = request.request_id
-        run_id = str(getattr(request, "run_id", "") or "").strip() or None
+        job_id = str(getattr(request, "job_id", "") or "").strip() or None
         function_name = request.function_name
         input_payload = request.input_payload
         required_model_id_for_exec = ""
@@ -3001,44 +2996,44 @@ class Worker:
         if required_models_raw:
             required_model_id_for_exec = str(required_models_raw[0] or "").strip()
 
-        logger.info(f"Received Task request: request_id={request_id}, function={function_name}, model='{required_model_id_for_exec or 'None'}'")
-        self._emit_task_event(
+        logger.info(f"Received Request: request_id={request_id}, function={function_name}, model='{required_model_id_for_exec or 'None'}'")
+        self._emit_request_event(
             request_id,
-            "task.received",
+            "request.received",
             {
                 "function_name": function_name,
-                "run_id": run_id or "",
+                "job_id": job_id or "",
                 "required_variant_refs_count": len(required_models_raw),
                 "input_bytes": len(input_payload or b""),
             },
         )
 
-        spec = self._task_specs.get(function_name)
+        spec = self._request_specs.get(function_name)
         if not spec:
             error_msg = f"Unknown function requested: {function_name}"
             logger.error(error_msg)
-            self._emit_task_event(
+            self._emit_request_event(
                 request_id,
-                "task.rejected",
+                "request.rejected",
                 {"reason": "unknown_function", "function_name": function_name},
             )
-            self._send_task_result(request_id, False, None, "internal", False, "internal error", error_msg)
+            self._send_request_result(request_id, False, None, "internal", False, "internal error", error_msg)
             return
         if self.max_input_bytes > 0 and len(input_payload) > self.max_input_bytes:
             error_msg = f"Input payload too large: {len(input_payload)} bytes (max {self.max_input_bytes})"
             logger.error(error_msg)
-            self._emit_task_event(
+            self._emit_request_event(
                 request_id,
-                "task.rejected",
+                "request.rejected",
                 {"reason": "input_too_large", "input_bytes": len(input_payload)},
             )
-            self._send_task_result(request_id, False, None, "validation", False, "invalid input", error_msg)
+            self._send_request_result(request_id, False, None, "validation", False, "invalid input", error_msg)
             return
         if self._draining:
             error_msg = "Worker is draining; refusing new tasks"
             logger.warning(error_msg)
-            self._emit_task_event(request_id, "task.rejected", {"reason": "worker_draining"})
-            self._send_task_result(request_id, False, None, "retryable", True, "worker busy", error_msg)
+            self._emit_request_event(request_id, "request.rejected", {"reason": "worker_draining"})
+            self._send_request_result(request_id, False, None, "retryable", True, "worker busy", error_msg)
             return
 
         # required_variant_refs are pinned variant refs chosen by the scheduler; the worker must not guess.
@@ -3061,10 +3056,24 @@ class Worker:
                 execution_hints["memory_hint_mb"] = int(req_cfg.get("memory_hint_mb") or 0)
             except Exception:
                 pass
+        # For conversion/training tasks, extract destination_repo from the input
+        # payload and set job_id from job_id so the request context has repo-job
+        # scope for tensor uploads.
+        if kind.lower() in {"conversion", "training"} and input_payload:
+            try:
+                raw_input = msgspec.msgpack.decode(input_payload)
+                if isinstance(raw_input, dict):
+                    dest = str(raw_input.get("destination_repo") or "").strip()
+                    if dest:
+                        execution_hints["destination_repo"] = dest
+            except Exception:
+                pass
+            if job_id and "job_id" not in execution_hints:
+                execution_hints["job_id"] = job_id
 
         ctx = RequestContext(
             request_id,
-            run_id=run_id,
+            job_id=job_id,
             emitter=self._emit_progress_event,
             owner=owner or None,
             invoker_id=invoker_id or None,
@@ -3082,36 +3091,36 @@ class Worker:
             item_id=item_id,
             item_index=item_index,
         )
-        # Add to active tasks *before* starting thread
-        with self._active_tasks_lock:
-             # Double-check if task is already active (race condition mitigation)
-             if request_id in self._active_tasks:
+        # Add to active requests *before* starting thread
+        with self._active_requests_lock:
+             # Double-check if request is already active (race condition mitigation)
+             if request_id in self._active_requests:
                   error_msg = f"Task with request_id {request_id} is already active (race condition?)."
                   logger.error(error_msg)
-                  self._emit_task_event(request_id, "task.rejected", {"reason": "duplicate_request_id"})
+                  self._emit_request_event(request_id, "request.rejected", {"reason": "duplicate_request_id"})
                   return # Avoid starting duplicate thread
-             if self.max_concurrency > 0 and len(self._active_tasks) >= self.max_concurrency:
+             if self.max_concurrency > 0 and len(self._active_requests) >= self.max_concurrency:
                   error_msg = f"Worker concurrency limit reached ({self.max_concurrency})."
                   logger.error(error_msg)
-                  self._emit_task_event(request_id, "task.rejected", {"reason": "max_concurrency_reached"})
-                  self._send_task_result(request_id, False, None, "retryable", True, "worker busy", error_msg)
+                  self._emit_request_event(request_id, "request.rejected", {"reason": "max_concurrency_reached"})
+                  self._send_request_result(request_id, False, None, "retryable", True, "worker busy", error_msg)
                   return
-             self._active_tasks[request_id] = ctx
+             self._active_requests[request_id] = ctx
 
         # Execute function in a separate thread to avoid blocking the receive loop
         thread = threading.Thread(
-            target=self._execute_task,
+            target=self._execute_request,
             args=(ctx, spec, input_payload),
             daemon=True,
         )
         thread.start()
 
-    def _handle_batch_run_request(self, request: Any) -> None:
+    def _handle_batch_job_request(self, request: Any) -> None:
         batch_id = str(getattr(request, "batch_id", "") or "")
         batch_function_name = str(getattr(request, "function_name", "") or "")
         items = list(getattr(request, "items", []) or [])
         logger.info(
-            "Received batch task request: batch_id=%s function=%s items=%d",
+            "Received batch request: batch_id=%s function=%s items=%d",
             batch_id or "(none)",
             batch_function_name or "(per-item)",
             len(items),
@@ -3126,7 +3135,7 @@ class Worker:
                 continue
             with self._request_batch_context_lock:
                 self._request_batch_context[request_id] = (batch_id, item_id)
-            req = pb.TaskExecutionRequest(
+            req = pb.JobExecutionRequest(
                 request_id=request_id,
                 function_name=function_name,
                 input_payload=bytes(getattr(item, "input_payload", b"") or b""),
@@ -3140,22 +3149,22 @@ class Worker:
                 item_id=item_id,
                 item_index=int(getattr(item, "item_index", 0) or 0),
             )
-            self._handle_run_request(req)
+            self._handle_job_request(req)
 
     def _handle_interrupt_request(self, request_id: str, *, item_ids: Optional[List[str]] = None, cancel_queued_only: bool = False) -> None:
-        """Handle a request to interrupt/cancel a running task."""
+        """Handle a request to interrupt/cancel an active request."""
         logger.info(
             "Received interrupt request for request_id=%s item_ids=%s cancel_queued_only=%s",
             request_id,
             item_ids or [],
             cancel_queued_only,
         )
-        with self._active_tasks_lock:
-            ctx = self._active_tasks.get(request_id)
+        with self._active_requests_lock:
+            ctx = self._active_requests.get(request_id)
             if ctx:
                 ctx.cancel() # Set internal flag and event
             else:
-                logger.warning(f"Could not interrupt task request_id={request_id}: Not found in active tasks.")
+                logger.warning(f"Could not interrupt request request_id={request_id}: Not found in active requests.")
 
     def _handle_realtime_open_cmd(self, cmd: Any) -> None:
         session_id = str(getattr(cmd, "session_id", "") or "")
@@ -3316,13 +3325,13 @@ class Worker:
         except Exception:
             pass
 
-    def _execute_task(
+    def _execute_request(
         self,
         ctx: RequestContext,
-        spec: _TaskSpec,
+        spec: _RequestSpec,
         input_payload: bytes,
     ) -> None:
-        """Execute a discovered task handler and send result/events back."""
+        """Execute a discovered request handler and send result/events back."""
         request_id = ctx.request_id
         output_payload: Optional[bytes] = None
         error_type: str = ""
@@ -3331,7 +3340,7 @@ class Worker:
         retryable = False
         success = False
 
-        # Metrics (best-effort): never fail a run.
+        # Metrics (best-effort): never fail a job.
         resolved_map = getattr(ctx, "resolved_cozy_models_by_id", None) or None
         rm = RunMetricsV1(
             request_id=str(request_id or ""),
@@ -3347,9 +3356,9 @@ class Worker:
         rm.mark_compute_started()
         if rm.compute_started_at:
             self._emit_worker_event_bytes(request_id, "metrics.compute.started", safe_json_bytes({"at": rm.compute_started_at}))
-        self._emit_task_event(
+        self._emit_request_event(
             request_id,
-            "task.started",
+            "request.started",
             {
                 "function_name": str(spec.name or ""),
                 "required_variant_refs": list(getattr(ctx, "required_models", []) or []),
@@ -3380,7 +3389,7 @@ class Worker:
             except Exception:
                 pass
 
-        # Refcounted BUSY so overlapping runs/model ops can't flip BUSY -> NOT BUSY early.
+        # Refcounted BUSY so overlapping jobs/model ops can't flip BUSY -> NOT BUSY early.
         self._gpu_busy_enter()
 
         from .models.ref_downloader import (
@@ -3412,7 +3421,7 @@ class Worker:
             except Exception:
                 pass
             self._materialize_assets(ctx, input_obj)
-            # Best-effort extract diffusion-ish numeric fields for metrics.run.
+            # Best-effort extract diffusion-ish numeric fields for metrics.job.
             try:
                 def _get_num(name: str) -> Optional[float]:
                     try:
@@ -3453,9 +3462,9 @@ class Worker:
                     warn_after_s=float(getattr(self, "_warn_model_resolve_s", 30.0)),
                     payload={"function_name": spec.name, "param_name": inj.param_name},
                 )
-                self._emit_task_event(
+                self._emit_request_event(
                     request_id,
-                    "task.model_resolve.started",
+                    "request.model_resolve.started",
                     {"function_name": spec.name, "param_name": inj.param_name},
                 )
                 model_id = ""
@@ -3464,9 +3473,9 @@ class Worker:
                 try:
                     model_id, model_key = self._resolve_model_id_for_injection(spec.name, inj, payload=input_obj)
                     canon_model_id = _canonicalize_model_ref_string(str(model_id or "").strip()) if model_id else ""
-                    self._emit_task_event(
+                    self._emit_request_event(
                         request_id,
-                        "task.model_resolve.completed",
+                        "request.model_resolve.completed",
                         {
                             "function_name": spec.name,
                             "param_name": inj.param_name,
@@ -3476,9 +3485,9 @@ class Worker:
                         },
                     )
                 except Exception as resolve_exc:
-                    self._emit_task_event(
+                    self._emit_request_event(
                         request_id,
-                        "task.model_resolve.failed",
+                        "request.model_resolve.failed",
                         {
                             "function_name": spec.name,
                             "param_name": inj.param_name,
@@ -3519,9 +3528,9 @@ class Worker:
                         "model_id": canon_model_id,
                     },
                 )
-                self._emit_task_event(
+                self._emit_request_event(
                     request_id,
-                    "task.model_load.started",
+                    "request.model_load.started",
                     {
                         "function_name": spec.name,
                         "param_name": inj.param_name,
@@ -3535,9 +3544,9 @@ class Worker:
                         request_id, inj.param_name, canon_model_id,
                         int((time.monotonic() - load_t0) * 1000),
                     )
-                    self._emit_task_event(
+                    self._emit_request_event(
                         request_id,
-                        "task.model_load.completed",
+                        "request.model_load.completed",
                         {
                             "function_name": spec.name,
                             "param_name": inj.param_name,
@@ -3546,9 +3555,9 @@ class Worker:
                         },
                     )
                 except Exception as load_exc:
-                    self._emit_task_event(
+                    self._emit_request_event(
                         request_id,
-                        "task.model_load.failed",
+                        "request.model_load.failed",
                         {
                             "function_name": spec.name,
                             "param_name": inj.param_name,
@@ -3578,9 +3587,9 @@ class Worker:
                 warn_after_s=float(getattr(self, "_warn_inference_s", 60.0)),
                 payload={"function_name": spec.name, "output_mode": spec.output_mode, "phase": execution_kind},
             )
-            self._emit_task_event(
+            self._emit_request_event(
                 request_id,
-                f"task.{execution_kind}.started",
+                f"request.{execution_kind}.started",
                 {"function_name": spec.name, "output_mode": spec.output_mode, "phase": execution_kind},
             )
             logger.info("[request_id=%s] calling %s", request_id, spec.name)
@@ -3700,9 +3709,9 @@ class Worker:
                 pass
             if inference_watchdog is not None:
                 inference_watchdog.cancel()
-            self._emit_task_event(
+            self._emit_request_event(
                 request_id,
-                f"task.{execution_kind}.completed",
+                f"request.{execution_kind}.completed",
                 {
                     "function_name": spec.name,
                     "output_mode": spec.output_mode,
@@ -3718,9 +3727,9 @@ class Worker:
             error_type, retryable, safe_message, error_message = self._map_exception(e)
             if inference_watchdog is not None:
                 inference_watchdog.cancel()
-            self._emit_task_event(
+            self._emit_request_event(
                 request_id,
-                "task.failed",
+                "request.failed",
                 {
                     "function_name": spec.name,
                     "error_type": error_type,
@@ -3729,9 +3738,9 @@ class Worker:
                 },
             )
             if "t_infer0" in locals():
-                self._emit_task_event(
+                self._emit_request_event(
                     request_id,
-                    f"task.{execution_kind}.failed",
+                    f"request.{execution_kind}.failed",
                     {
                         "function_name": spec.name,
                         "phase": execution_kind,
@@ -3806,23 +3815,23 @@ class Worker:
                     pass
             # Emit extended debug payload at end (best-effort).
             try:
-                self._emit_worker_event_bytes(request_id, "metrics.run", safe_json_bytes(rm.to_metrics_run_payload()))
+                self._emit_worker_event_bytes(request_id, "metrics.job", safe_json_bytes(rm.to_metrics_run_payload()))
             except Exception:
                 pass
             if success:
-                self._emit_task_event(
+                self._emit_request_event(
                     request_id,
-                    "task.completed",
+                    "request.completed",
                     {
                         "function_name": spec.name,
                         "duration_ms": int((time.monotonic() - float(getattr(rm, "_t0_monotonic", time.monotonic()))) * 1000),
                     },
                 )
 
-            self._send_task_result(request_id, success, output_payload, error_type, bool(retryable), safe_message, error_message)
+            self._send_request_result(request_id, success, output_payload, error_type, bool(retryable), safe_message, error_message)
 
-            with self._active_tasks_lock:
-                self._active_tasks.pop(request_id, None)
+            with self._active_requests_lock:
+                self._active_requests.pop(request_id, None)
 
     def _get_local_model_cache(self) -> Optional[Any]:
         """
@@ -4450,7 +4459,7 @@ class Worker:
         if self._release_allowed_model_ids is not None and model_id not in self._release_allowed_model_ids:
             raise ValueError(f"model_id not allowed for release: {model_id!r} (injection param {inj.param_name})")
 
-    def _send_task_result(
+    def _send_request_result(
         self,
         request_id: str,
         success: bool,
@@ -4460,7 +4469,7 @@ class Worker:
         safe_message: str,
         error_message: str,
     ) -> None:
-        """Send a task execution result back to the scheduler via the queue."""
+        """Send a request execution result back to the scheduler via the queue."""
         try:
             batch_ctx: Optional[Tuple[str, str]] = None
             with self._request_batch_context_lock:
@@ -4478,13 +4487,13 @@ class Worker:
                     safe_message=safe_message if not success else "",
                 )
                 msg = pb.WorkerSchedulerMessage(
-                    batch_run_result=pb.BatchExecutionResult(
+                    batch_job_result=pb.BatchExecutionResult(
                         batch_id=batch_id or "",
                         items=[item_result],
                     )
                 )
             else:
-                result = pb.TaskExecutionResult(
+                result = pb.JobExecutionResult(
                     request_id=request_id,
                     success=success,
                     output_payload=(output_payload or b'') if success else b'', # Default to b'' if None
@@ -4493,9 +4502,9 @@ class Worker:
                     retryable=bool(retryable) if not success else False,
                     safe_message=safe_message if not success else "",
                 )
-                msg = pb.WorkerSchedulerMessage(run_result=result)
+                msg = pb.WorkerSchedulerMessage(job_result=result)
             self._send_message(msg)
-            logger.debug(f"Queued task result for request_id={request_id}, success={success}")
+            logger.debug(f"Queued request result for request_id={request_id}, success={success}")
         except Exception as e:
              # This shouldn't generally fail unless message creation has issues
-             logger.error(f"Failed to create or queue task result for request_id={request_id}: {e}")
+             logger.error(f"Failed to create or queue request result for request_id={request_id}: {e}")

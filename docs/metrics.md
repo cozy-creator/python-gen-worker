@@ -25,9 +25,9 @@ All times are milliseconds as integers.
 
 Additionally, the worker emits one extended event at the end of each run:
 
-- `metrics.run` payload: JSON object (schema versioned)
+- `metrics.job` payload: JSON object (schema versioned)
 
-### `metrics.run` payload (schema_version=1)
+### `metrics.job` payload (schema_version=1)
 
 Top-level keys (all optional unless noted):
 

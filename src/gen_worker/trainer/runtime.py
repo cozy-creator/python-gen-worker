@@ -52,7 +52,7 @@ class TrainerRuntimeConfig:
 @dataclass(frozen=True)
 class SampleRequest:
     name: str
-    task: str
+    mode: str
     prompt: str
     negative_prompt: str = ""
     instruction: str | None = None
@@ -208,7 +208,7 @@ class LocalArtifactWriter:
             out = self._samples_dir / f"step-{step:08d}.txt"
             _atomic_write_json(
                 out.with_suffix(".json"),
-                {"step": step, "request_id": ctx.job.request_id, "task": "t2i", "prompt": ""},
+                {"step": step, "request_id": ctx.job.request_id, "mode": "t2i", "prompt": ""},
             )
             out.write_text(f"sample step={step} request_id={ctx.job.request_id}\n", encoding="utf-8")
             return [str(out)]
@@ -221,7 +221,7 @@ class LocalArtifactWriter:
             payload = {
                 "step": step,
                 "request_id": ctx.job.request_id,
-                "task": req.task,
+                "mode": req.mode,
                 "prompt": req.prompt,
                 "negative_prompt": req.negative_prompt,
                 "instruction": req.instruction,
@@ -385,7 +385,7 @@ def _resolve_repo_job_upload_context(spec: Mapping[str, Any]) -> tuple[str, str,
         or spec.get("job_id")
         or spec.get("training_job_id")
         or spec.get("conversion_job_id")
-        or spec.get("run_id")
+        or spec.get("job_id")
         or ""
     ).strip()
     return kind, destination_repo, job_id
@@ -566,7 +566,7 @@ def _try_generate_sample(
         instruction=request.instruction,
         source_image=request.source_image,
         seed=seed,
-        task=request.task,
+        mode=request.mode,
     )
     if isinstance(payload, Mapping):
         return payload
@@ -583,7 +583,7 @@ def _parse_sample_requests(spec: dict[str, Any]) -> tuple[tuple[SampleRequest, .
     requests: list[SampleRequest] = []
     for idx, item in enumerate(raw):
         if isinstance(item, str):
-            requests.append(SampleRequest(name=f"sample-{idx:02d}", task="t2i", prompt=item))
+            requests.append(SampleRequest(name=f"sample-{idx:02d}", mode="t2i", prompt=item))
             continue
         if not isinstance(item, dict):
             continue
@@ -591,7 +591,7 @@ def _parse_sample_requests(spec: dict[str, Any]) -> tuple[tuple[SampleRequest, .
         requests.append(
             SampleRequest(
                 name=str(item.get("name") or f"sample-{idx:02d}"),
-                task=str(item.get("task") or "t2i"),
+                mode=str(item.get("mode") or "t2i"),
                 prompt=str(item.get("prompt") or ""),
                 negative_prompt=str(item.get("negative_prompt") or ""),
                 instruction=str(item.get("instruction")) if item.get("instruction") is not None else None,

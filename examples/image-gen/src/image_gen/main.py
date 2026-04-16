@@ -10,8 +10,8 @@ from diffusers import StableDiffusionXLPipeline
 from PIL import Image
 
 from gen_worker import RequestContext, ResourceRequirements, worker_function
-from gen_worker.injection import ModelRef, ModelRefSource as Src
-from gen_worker.types import Asset
+from gen_worker.api.injection import ModelRef, ModelRefSource as Src
+from gen_worker.api.types import Asset
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
@@ -72,7 +72,7 @@ def generate_image(
 
     buf = BytesIO()
     image.save(buf, format="PNG")
-    out = ctx.save_bytes(f"runs/{ctx.request_id}/outputs/image.png", buf.getvalue())
+    out = ctx.save_bytes(f"jobs/{ctx.request_id}/outputs/image.png", buf.getvalue())
     
     return GenerateOutput(image=out)
 

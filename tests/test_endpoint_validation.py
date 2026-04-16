@@ -8,7 +8,7 @@ from gen_worker.discovery.validation import validate_endpoint
 
 
 class TestEndpointValidation(unittest.TestCase):
-    def test_requires_dockerfile_tensorhub_toml_and_pyproject(self) -> None:
+    def test_requires_dockerfile_endpoint_toml_and_pyproject(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             res = validate_endpoint(root)

@@ -175,7 +175,7 @@ arbitrary repo refs in the payload.
 @worker_function()
 def process(ctx: RequestContext, payload: Input) -> Output:
     # Save bytes and get asset reference
-    asset = ctx.save_bytes(f"runs/{ctx.request_id}/outputs/output.png", image_bytes)
+    asset = ctx.save_bytes(f"jobs/{ctx.request_id}/outputs/output.png", image_bytes)
     return Output(result=asset.ref)
 ```
 
@@ -188,7 +188,7 @@ from gen_worker import Tensors
 def convert(ctx: RequestContext, payload: Input) -> Output:
     local_weights = "/tmp/converted.safetensors"
     tensors = ctx.save_checkpoint(
-        f"runs/{ctx.request_id}/outputs/weights.safetensors",
+        f"jobs/{ctx.request_id}/outputs/weights.safetensors",
         local_weights,
     )
     return Output(weights=tensors)
@@ -198,7 +198,7 @@ For large artifacts, stream bytes incrementally and finalize once:
 
 ```python
 with ctx.open_checkpoint_stream(
-    f"runs/{ctx.request_id}/outputs/weights.safetensors",
+    f"jobs/{ctx.request_id}/outputs/weights.safetensors",
     format="safetensors",
 ) as out:
     for chunk in generate_chunks():
@@ -273,7 +273,7 @@ curl -sS -X POST 'http://localhost:8081/v1/request/generate' \
   -d '{"payload": {"prompt": "a tiny robot watering a bonsai, macro photo"}}'
 ```
 
-Outputs are written under `/outputs/runs/<request_id>/outputs/...` (matching Cozy ref semantics).
+Outputs are written under `/outputs/jobs/<request_id>/outputs/...` (matching Cozy ref semantics).
 
 ## Configuration
 
@@ -321,7 +321,7 @@ Local dev / advanced (not injected by orchestrator):
 | `RECONNECT_MAX_DELAY` | `1.0` | Reconnect backoff cap in seconds |
 | `RECONNECT_JITTER_SECONDS` | `0.1` | Added jitter upper bound in seconds, capped by `RECONNECT_MAX_DELAY` |
 | `MAX_RECONNECT_ATTEMPTS` | `0` | Max reconnect attempts (`0` = infinite retries) |
-| `WORKER_MAX_CONCURRENCY` | - | Max concurrent task executions |
+| `WORKER_MAX_CONCURRENCY` | - | Max concurrent request executions |
 | `WORKER_MAX_INPUT_BYTES` | - | Max input payload size |
 | `WORKER_MAX_OUTPUT_BYTES` | - | Max output payload size |
 | `WORKER_MAX_UPLOAD_BYTES` | - | Max file upload size |
@@ -330,9 +330,9 @@ Local dev / advanced (not injected by orchestrator):
 | `TENSORHUB_CACHE_DIR` | `~/.cache/tensorhub` | TensorHub cache root; worker CAS defaults derive from this (`${TENSORHUB_CACHE_DIR}/cas/...`) |
 | `WORKER_LOCAL_MODEL_CACHE_DIR` | `/tmp/tensorhub/local-model-cache` | Optional local (non-NFS) cache for snapshot localization |
 | `WORKER_REGISTER_TIMEOUT_S` | `90` | Startup watchdog: fail fast if worker never registers with scheduler |
-| `WORKER_WARN_MODEL_RESOLVE_S` | `30` | Emit `task.model_resolve.stuck` warning after this duration |
-| `WORKER_WARN_MODEL_LOAD_S` | `60` | Emit `task.model_load.stuck` warning after this duration |
-| `WORKER_WARN_INFERENCE_S` | `60` | Emit `task.inference.stuck` warning after this duration |
+| `WORKER_WARN_MODEL_RESOLVE_S` | `30` | Emit `request.model_resolve.stuck` warning after this duration |
+| `WORKER_WARN_MODEL_LOAD_S` | `60` | Emit `request.model_load.stuck` warning after this duration |
+| `WORKER_WARN_INFERENCE_S` | `60` | Emit `request.inference.stuck` warning after this duration |
 | `WORKER_MAX_CONCURRENT_DOWNLOADS` | 2 | Max parallel model downloads |
 | `TENSORHUB_URL` | - | Cozy Hub base URL (used for public model requests and, if enabled, Cozy Hub API resolve) |
 | `WORKER_ALLOW_TENSORHUB_API_RESOLVE` | `false` | Local dev only: allow the worker to call Cozy Hub resolve APIs |
@@ -348,7 +348,7 @@ Local dev / advanced (not injected by orchestrator):
 The worker can emit best-effort performance/debug metrics to gen-orchestrator via `WorkerEvent` messages.
 
 See `docs/metrics.md`.
-See `docs/worker-stuck-visibility.md` for startup/task watchdog events used to diagnose stuck workers.
+See `docs/worker-stuck-visibility.md` for startup/request watchdog events used to diagnose stuck workers.
 
 ### Model Download Behavior
 
@@ -445,7 +445,7 @@ Workers report model availability for intelligent job routing:
 
 ## Dev Testing (Mock Orchestrator)
 
-For local end-to-end tests without standing up `gen-orchestrator`, use the one-off mock orchestrator invoke command (curl-like workflow). It starts a temporary scheduler, waits for a worker to connect, sends one `TaskExecutionRequest`, prints the result, and exits.
+For local end-to-end tests without standing up `gen-orchestrator`, use the one-off mock orchestrator invoke command (curl-like workflow). It starts a temporary scheduler, waits for a worker to connect, sends one `JobExecutionRequest`, prints the result, and exits.
 
 Start your worker container first:
 

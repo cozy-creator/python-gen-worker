@@ -323,7 +323,7 @@ class WorkerSession:
         if input_ref_urls:
             payload = _rewrite_refs_to_urls(payload_obj, input_ref_urls)
         raw = msgspec.msgpack.encode(payload)
-        req = pb.TaskExecutionRequest(
+        req = pb.JobExecutionRequest(
             request_id=rid,
             function_name=function_name,
             input_payload=raw,
@@ -332,7 +332,7 @@ class WorkerSession:
             owner=owner,
             invoker_id=invoker_id,
         )
-        self.send(pb.WorkerSchedulerMessage(run_request=req))
+        self.send(pb.WorkerSchedulerMessage(job_request=req))
         return rid
 
 
@@ -460,9 +460,9 @@ def _rewrite_refs_to_urls(obj: Any, input_ref_urls: Dict[str, str]) -> Any:
 def _format_msg(msg: pb.WorkerSchedulerMessage) -> str:
     if msg.HasField("worker_registration"):
         return "worker_registration"
-    if msg.HasField("run_result"):
-        rr = msg.run_result
-        return f"run_result request_id={rr.request_id} success={rr.success} error_type={rr.error_type!r} retryable={rr.retryable}"
+    if msg.HasField("job_result"):
+        rr = msg.job_result
+        return f"job_result request_id={rr.request_id} success={rr.success} error_type={rr.error_type!r} retryable={rr.retryable}"
     if msg.HasField("worker_event"):
         ev = msg.worker_event
         return f"worker_event request_id={ev.request_id} type={ev.event_type}"
@@ -470,8 +470,8 @@ def _format_msg(msg: pb.WorkerSchedulerMessage) -> str:
         return "load_model_result"
     if msg.HasField("unload_model_result"):
         return "unload_model_result"
-    if msg.HasField("interrupt_run_cmd"):
-        return "interrupt_run_cmd"
+    if msg.HasField("interrupt_job_cmd"):
+        return "interrupt_job_cmd"
     if msg.HasField("endpoint_config"):
         return "endpoint_config"
     if msg.HasField("realtime_open_cmd"):
@@ -480,8 +480,8 @@ def _format_msg(msg: pb.WorkerSchedulerMessage) -> str:
         return "realtime_frame"
     if msg.HasField("realtime_close_cmd"):
         return "realtime_close_cmd"
-    if msg.HasField("run_request"):
-        return "run_request"
+    if msg.HasField("job_request"):
+        return "job_request"
     if msg.HasField("load_model_cmd"):
         return "load_model_cmd"
     if msg.HasField("unload_model_cmd"):
@@ -495,7 +495,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         description=(
             "One-off local invoke helper for python-gen-worker. "
             "Starts a temporary mock scheduler, waits for a worker to connect, "
-            "sends one task, prints the result, and exits."
+            "sends one request, prints the result, and exits."
         ),
     )
     ap.add_argument("--listen", default="0.0.0.0:8080", help="address to listen on (host:port)")
@@ -517,12 +517,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         "--input-ref-url",
         action="append",
         default=[],
-        help="repeatable mapping ref=url used to rewrite payload refs before sending run_request",
+        help="repeatable mapping ref=url used to rewrite payload refs before sending job_request",
     )
     ap.add_argument("--serve-files-dir", default="", help="if set, start a tiny dev file API server writing into this directory")
     ap.add_argument("--serve-files-listen", default="0.0.0.0:8081", help="listen address for --serve-files-dir server (host:port)")
 
-    ap.add_argument("--print-events", action="store_true", help="print worker_event messages during run")
+    ap.add_argument("--print-events", action="store_true", help="print worker_event messages during execution")
     ap.add_argument(
         "--print-registrations",
         action="store_true",
@@ -571,7 +571,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             msg = sess.recv(timeout_s=0.5)
             if msg is None:
                 if time.monotonic() - start > max(5.0, float(args.wait_s)):
-                    print("timed out waiting for run_result", file=sys.stderr)
+                    print("timed out waiting for job_result", file=sys.stderr)
                     return 3
                 continue
             if msg.HasField("worker_event") and args.print_events:
@@ -581,8 +581,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                     payload = "<binary>"
                 print(f"[event] {msg.worker_event.event_type}: {payload}")
                 continue
-            if msg.HasField("run_result") and msg.run_result.request_id == request_id:
-                rr = msg.run_result
+            if msg.HasField("job_result") and msg.job_result.request_id == request_id:
+                rr = msg.job_result
                 if rr.output_payload:
                     out_obj = msgspec.msgpack.decode(rr.output_payload)
                     print("[output]", json.dumps(out_obj, indent=2, sort_keys=True))

@@ -12,14 +12,14 @@ from gen_worker.api.types import Tensors
 from gen_worker.worker import RequestContext
 
 
-def test_action_context_local_output_backend(tmp_path: Path) -> None:
+def test_request_context_local_output_backend(tmp_path: Path) -> None:
     ctx = RequestContext(
         "rid1",
         local_output_dir=str(tmp_path),
         owner="o1",
         invoker_id="u1",
     )
-    ref = "runs/rid1/outputs/hello.bin"
+    ref = "jobs/rid1/outputs/hello.bin"
     asset = ctx.save_bytes(ref, b"abc")
     assert asset.ref == ref
     assert asset.local_path is not None
@@ -28,7 +28,7 @@ def test_action_context_local_output_backend(tmp_path: Path) -> None:
     assert p.read_bytes() == b"abc"
 
 
-def test_action_context_save_checkpoint_local_output(tmp_path: Path) -> None:
+def test_request_context_save_checkpoint_local_output(tmp_path: Path) -> None:
     ctx = RequestContext(
         "rid2",
         local_output_dir=str(tmp_path),
@@ -37,39 +37,39 @@ def test_action_context_save_checkpoint_local_output(tmp_path: Path) -> None:
     )
     local = tmp_path / "converted.safetensors"
     local.write_bytes(b"weights")
-    tensors = ctx.save_checkpoint("runs/rid2/outputs/final.safetensors", str(local))
+    tensors = ctx.save_checkpoint("jobs/rid2/outputs/final.safetensors", str(local))
     assert isinstance(tensors, Tensors)
-    assert tensors.ref == "runs/rid2/outputs/final.safetensors"
+    assert tensors.ref == "jobs/rid2/outputs/final.safetensors"
     assert tensors.local_path is not None
     assert tensors.format == "safetensors"
     assert tensors.sha256
 
 
-def test_action_context_open_output_stream_local_output(tmp_path: Path) -> None:
+def test_request_context_open_output_stream_local_output(tmp_path: Path) -> None:
     ctx = RequestContext(
         "rid3",
         local_output_dir=str(tmp_path),
         owner="o1",
         invoker_id="u1",
     )
-    with ctx.open_output_stream("runs/rid3/outputs/chunked.bin") as stream:
+    with ctx.open_output_stream("jobs/rid3/outputs/chunked.bin") as stream:
         stream.write(b"ab")
         stream.write(b"cd")
         assert stream.bytes_written == 4
         asset = stream.finalize()
-    assert asset.ref == "runs/rid3/outputs/chunked.bin"
+    assert asset.ref == "jobs/rid3/outputs/chunked.bin"
     assert asset.local_path is not None
     assert Path(asset.local_path).read_bytes() == b"abcd"
 
 
-def test_action_context_open_checkpoint_stream_local_output(tmp_path: Path) -> None:
+def test_request_context_open_checkpoint_stream_local_output(tmp_path: Path) -> None:
     ctx = RequestContext(
         "rid4",
         local_output_dir=str(tmp_path),
         owner="o1",
         invoker_id="u1",
     )
-    with ctx.open_checkpoint_stream("runs/rid4/outputs/final.safetensors") as stream:
+    with ctx.open_checkpoint_stream("jobs/rid4/outputs/final.safetensors") as stream:
         stream.write(b"we")
         stream.write(b"ights")
         tensors = stream.finalize()
@@ -80,7 +80,7 @@ def test_action_context_open_checkpoint_stream_local_output(tmp_path: Path) -> N
     assert Path(tensors.local_path).read_bytes() == b"weights"
 
 
-def test_action_context_stream_checkpoint_matches_save_checkpoint(tmp_path: Path) -> None:
+def test_request_context_stream_checkpoint_matches_save_checkpoint(tmp_path: Path) -> None:
     ctx = RequestContext(
         "rid5",
         local_output_dir=str(tmp_path),
@@ -90,8 +90,8 @@ def test_action_context_stream_checkpoint_matches_save_checkpoint(tmp_path: Path
     source = tmp_path / "source.bin"
     source.write_bytes(b"abcdefgh")
 
-    saved_file = ctx.save_checkpoint("runs/rid5/outputs/by-file.safetensors", str(source))
-    with ctx.open_checkpoint_stream("runs/rid5/outputs/by-stream.safetensors", format="safetensors") as stream:
+    saved_file = ctx.save_checkpoint("jobs/rid5/outputs/by-file.safetensors", str(source))
+    with ctx.open_checkpoint_stream("jobs/rid5/outputs/by-stream.safetensors", format="safetensors") as stream:
         stream.write(b"abcd")
         stream.write(b"efgh")
         saved_stream = stream.finalize()
@@ -101,7 +101,7 @@ def test_action_context_stream_checkpoint_matches_save_checkpoint(tmp_path: Path
     assert Path(saved_file.local_path).read_bytes() == Path(saved_stream.local_path).read_bytes()
 
 
-def test_action_context_stream_finalize_failure_cleans_temp_file(tmp_path: Path, monkeypatch) -> None:
+def test_request_context_stream_finalize_failure_cleans_temp_file(tmp_path: Path, monkeypatch) -> None:
     stream_tmp = tmp_path / "stream-tmp.bin"
 
     def _mkstemp(*, prefix: str, suffix: str) -> tuple[int, str]:
@@ -122,14 +122,14 @@ def test_action_context_stream_finalize_failure_cleans_temp_file(tmp_path: Path,
 
     monkeypatch.setattr(ctx, "save_checkpoint", _fail_save_checkpoint)
 
-    writer = ctx.open_checkpoint_stream("runs/rid6/outputs/fail.safetensors", format="safetensors")
+    writer = ctx.open_checkpoint_stream("jobs/rid6/outputs/fail.safetensors", format="safetensors")
     writer.write(b"weights")
     with pytest.raises(RuntimeError, match="boom"):
         writer.finalize()
     assert not stream_tmp.exists()
 
 
-def test_action_context_save_file_network_error_is_deterministic(tmp_path: Path, monkeypatch) -> None:
+def test_request_context_save_file_network_error_is_deterministic(tmp_path: Path, monkeypatch) -> None:
     src = tmp_path / "upload.bin"
     src.write_bytes(b"abc")
     ctx = RequestContext(
@@ -139,18 +139,18 @@ def test_action_context_save_file_network_error_is_deterministic(tmp_path: Path,
         owner="o1",
     )
 
-    def _fail_put(*args, **kwargs):  # type: ignore[no-untyped-def]
+    def _fail_post(*args, **kwargs):  # type: ignore[no-untyped-def]
         _ = args
         _ = kwargs
         raise requests.ConnectionError("network down")
 
-    monkeypatch.setattr(requests, "put", _fail_put)
+    monkeypatch.setattr(requests, "post", _fail_post)
 
     with pytest.raises(RuntimeError, match="file save failed \\(network_error\\)"):
-        ctx.save_file("runs/rid7/outputs/upload.bin", str(src))
+        ctx.save_file("jobs/rid7/outputs/upload.bin", str(src))
 
 
-def test_action_context_open_checkpoint_stream_remote_presigned_upload(monkeypatch) -> None:
+def test_request_context_open_checkpoint_stream_remote_presigned_upload(monkeypatch) -> None:
     from gen_worker.presigned_upload import PresignedUploadResult
     import gen_worker.presigned_upload as pu
 
@@ -169,12 +169,12 @@ def test_action_context_open_checkpoint_stream_remote_presigned_upload(monkeypat
 
     monkeypatch.setattr(pu, "presigned_upload_file", _mock_presigned_upload)
 
-    writer = ctx.open_checkpoint_stream("runs/rid8/outputs/final.safetensors", format="safetensors")
+    writer = ctx.open_checkpoint_stream("jobs/rid8/outputs/final.safetensors", format="safetensors")
     writer.write(b"ab")
     writer.write(b"cd")
     out = writer.finalize()
 
-    assert out.ref == "runs/rid8/outputs/final.safetensors"
+    assert out.ref == "jobs/rid8/outputs/final.safetensors"
     assert out.local_path is None
     assert out.format == "safetensors"
     assert out.stream_mode == "presigned"
@@ -183,7 +183,7 @@ def test_action_context_open_checkpoint_stream_remote_presigned_upload(monkeypat
     assert upload_calls[0]["endpoint"] == "/api/v1/media/uploads"
 
 
-def test_action_context_open_checkpoint_stream_requires_repo_job_scope_for_conversion() -> None:
+def test_request_context_open_checkpoint_stream_requires_repo_job_scope_for_conversion() -> None:
     ctx = RequestContext(
         "rid8-scope",
         file_api_base_url="https://files.example.test",
@@ -192,10 +192,10 @@ def test_action_context_open_checkpoint_stream_requires_repo_job_scope_for_conve
         execution_hints={"kind": "conversion"},
     )
     with pytest.raises(RuntimeError, match="tensor upload requires repo job scope"):
-        ctx.open_checkpoint_stream("runs/rid8-scope/outputs/final.safetensors")
+        ctx.open_checkpoint_stream("jobs/rid8-scope/outputs/final.safetensors")
 
 
-def test_action_context_save_checkpoint_requires_repo_job_scope_for_training(tmp_path: Path) -> None:
+def test_request_context_save_checkpoint_requires_repo_job_scope_for_training(tmp_path: Path) -> None:
     src = tmp_path / "model.safetensors"
     src.write_bytes(b"abcd")
     ctx = RequestContext(
@@ -206,10 +206,10 @@ def test_action_context_save_checkpoint_requires_repo_job_scope_for_training(tmp
         execution_hints={"kind": "training"},
     )
     with pytest.raises(RuntimeError, match="tensor upload requires repo job scope"):
-        ctx.save_checkpoint("runs/rid8-save-scope/outputs/final.safetensors", str(src))
+        ctx.save_checkpoint("jobs/rid8-save-scope/outputs/final.safetensors", str(src))
 
 
-def test_action_context_open_checkpoint_stream_emits_upload_progress(monkeypatch) -> None:
+def test_request_context_open_checkpoint_stream_emits_upload_progress(monkeypatch) -> None:
     pytest.skip("TODO(#213): rewrite for presigned multipart upload flow")
     events: list[dict[str, object]] = []
 
@@ -253,7 +253,7 @@ def test_action_context_open_checkpoint_stream_emits_upload_progress(monkeypatch
     monkeypatch.setattr(requests, "request", _req)
     monkeypatch.setenv("WORKER_STREAM_PROGRESS_INTERVAL_S", "0")
 
-    writer = ctx.open_checkpoint_stream("runs/rid8-progress/outputs/final.safetensors", format="safetensors")
+    writer = ctx.open_checkpoint_stream("jobs/rid8-progress/outputs/final.safetensors", format="safetensors")
     writer.write(b"ab")
     writer.write(b"cd")
     out = writer.finalize()
@@ -270,7 +270,7 @@ def test_action_context_open_checkpoint_stream_emits_upload_progress(monkeypatch
     assert float(last_payload.get("finalize_elapsed_s") or 0.0) >= 0.0
 
 
-def test_action_context_open_output_stream_remote_network_error_is_deterministic(monkeypatch) -> None:
+def test_request_context_open_output_stream_remote_network_error_is_deterministic(monkeypatch) -> None:
     pytest.skip("TODO(#213): rewrite for presigned multipart upload flow")
     ctx = RequestContext(
         "rid9",
@@ -300,13 +300,13 @@ def test_action_context_open_output_stream_remote_network_error_is_deterministic
 
     monkeypatch.setattr(requests, "request", _req)
 
-    writer = ctx.open_output_stream("runs/rid9/outputs/upload.bin")
+    writer = ctx.open_output_stream("jobs/rid9/outputs/upload.bin")
     with pytest.raises(RuntimeError, match="file save failed \\(network_error\\)"):
         writer.write(b"abcd")
         writer.finalize()
 
 
-def test_action_context_open_checkpoint_stream_remote_replay_recovery(monkeypatch) -> None:
+def test_request_context_open_checkpoint_stream_remote_replay_recovery(monkeypatch) -> None:
     pytest.skip("TODO(#213): replay mechanism removed in presigned flow")
     ctx = RequestContext(
         "rid10",
@@ -352,19 +352,19 @@ def test_action_context_open_checkpoint_stream_remote_replay_recovery(monkeypatc
     monkeypatch.setattr(requests, "request", _req)
     monkeypatch.setenv("WORKER_STREAM_UPLOAD_RETRY_ATTEMPTS", "2")
 
-    writer = ctx.open_checkpoint_stream("runs/rid10/outputs/final.safetensors", format="safetensors")
+    writer = ctx.open_checkpoint_stream("jobs/rid10/outputs/final.safetensors", format="safetensors")
     try:
         writer.write(b"ab")
         writer.write(b"cd")
     except RuntimeError:
         pass
     out = writer.finalize()
-    assert out.ref == "runs/rid10/outputs/final.safetensors"
+    assert out.ref == "jobs/rid10/outputs/final.safetensors"
     assert out.stream_mode == "remote_append"
     assert calls["patch"] >= 3
 
 
-def test_action_context_open_checkpoint_stream_cancel_aborts_remote(monkeypatch) -> None:
+def test_request_context_open_checkpoint_stream_cancel_aborts_remote(monkeypatch) -> None:
     pytest.skip("TODO(#213): rewrite for presigned multipart upload flow")
     events: list[dict[str, object]] = []
 
@@ -406,7 +406,7 @@ def test_action_context_open_checkpoint_stream_cancel_aborts_remote(monkeypatch)
 
     monkeypatch.setattr(requests, "request", _req)
 
-    writer = ctx.open_checkpoint_stream("runs/rid11/outputs/final.safetensors", format="safetensors")
+    writer = ctx.open_checkpoint_stream("jobs/rid11/outputs/final.safetensors", format="safetensors")
     writer.write(b"ab")
     ctx.cancel()
     with pytest.raises(InterruptedError, match="canceled"):
@@ -418,7 +418,7 @@ def test_action_context_open_checkpoint_stream_cancel_aborts_remote(monkeypatch)
     assert any((e.get("payload") or {}).get("stage") in {"stream_canceled", "stream_aborted"} for e in progress_events)
 
 
-def test_action_context_open_output_stream_remote_finalize_recovery_failure_is_deterministic(monkeypatch) -> None:
+def test_request_context_open_output_stream_remote_finalize_recovery_failure_is_deterministic(monkeypatch) -> None:
     pytest.skip("TODO(#213): replay mechanism removed in presigned flow")
     ctx = RequestContext(
         "rid12",
@@ -450,17 +450,17 @@ def test_action_context_open_output_stream_remote_finalize_recovery_failure_is_d
     monkeypatch.setenv("WORKER_STREAM_UPLOAD_RETRY_ATTEMPTS", "2")
     monkeypatch.setenv("WORKER_STREAM_UPLOAD_RETRY_BACKOFF_MS", "0")
 
-    writer = ctx.open_output_stream("runs/rid12/outputs/upload.bin")
+    writer = ctx.open_output_stream("jobs/rid12/outputs/upload.bin")
     with pytest.raises(RuntimeError, match="file save failed \\(network_error\\)"):
         writer.write(b"abcd")
         writer.finalize()
 
 
-def test_action_context_open_checkpoint_stream_session_append_finalize(monkeypatch) -> None:
+def test_request_context_open_checkpoint_stream_session_append_finalize(monkeypatch) -> None:
     pytest.skip("TODO(#213): rewrite for presigned multipart upload flow")
     ctx = RequestContext(
         "rid13",
-        run_id="run13",
+        job_id="run13",
         file_api_base_url="https://files.example.test",
         worker_capability_token="token",
         owner="o1",
@@ -483,9 +483,9 @@ def test_action_context_open_checkpoint_stream_session_append_finalize(monkeypat
         _ = timeout
         if method == "POST" and url.endswith("/api/v1/media/uploads"):
             payload = json.loads(data)
-            assert payload["ref"] == "runs/rid13/outputs/final.safetensors"
+            assert payload["ref"] == "jobs/rid13/outputs/final.safetensors"
             assert payload["request_id"] == "rid13"
-            assert payload["run_id"] == "run13"
+            assert payload["job_id"] == "run13"
             assert int(payload.get("upload_length") or 0) == 4
             return _Resp(201, {"upload_id": "sess-1", "upload_offset": 0, "max_chunk_bytes": 2})
         if method == "PATCH" and url.endswith("/api/v1/media/uploads/sess-1"):
@@ -504,25 +504,25 @@ def test_action_context_open_checkpoint_stream_session_append_finalize(monkeypat
     monkeypatch.setattr(requests, "request", _req)
 
     writer = ctx.open_checkpoint_stream(
-        "runs/rid13/outputs/final.safetensors",
+        "jobs/rid13/outputs/final.safetensors",
         format="safetensors",
         expected_size_bytes=4,
     )
     assert str(getattr(writer, "_replay_path", "")).strip() != ""
     writer.write(b"abcd")
     out = writer.finalize()
-    assert out.ref == "runs/rid13/outputs/final.safetensors"
+    assert out.ref == "jobs/rid13/outputs/final.safetensors"
     assert out.stream_mode == "remote_append"
     assert seen_chunks == [(0, b"ab"), (1, b"cd")]
     assert len(finalize_payloads) == 1
     assert int(finalize_payloads[0].get("final_size_bytes") or 0) == 4
 
 
-def test_action_context_open_checkpoint_stream_repo_job_upload(monkeypatch) -> None:
+def test_request_context_open_checkpoint_stream_repo_job_upload(monkeypatch) -> None:
     pytest.skip("TODO(#213): rewrite for presigned multipart upload flow")
     ctx = RequestContext(
         "rid13-job",
-        run_id="job13",
+        job_id="job13",
         file_api_base_url="https://files.example.test",
         worker_capability_token="token",
         owner="alice",
@@ -550,9 +550,9 @@ def test_action_context_open_checkpoint_stream_repo_job_upload(monkeypatch) -> N
         _ = timeout
         if method == "POST" and url.endswith("/api/v1/repos/alice/model-a/jobs/job13/uploads"):
             payload = json.loads(data)
-            assert payload["path"] == "runs/rid13-job/outputs/final.safetensors"
+            assert payload["path"] == "jobs/rid13-job/outputs/final.safetensors"
             assert payload["request_id"] == "rid13-job"
-            assert payload.get("run_id") is None
+            assert payload.get("job_id") is None
             assert int(payload.get("upload_length") or 0) == 4
             return _Resp(201, {"upload_id": "sess-1", "upload_offset": 0, "max_chunk_bytes": 2})
         if method == "PATCH" and url.endswith("/api/v1/repos/alice/model-a/jobs/job13/uploads/sess-1"):
@@ -583,13 +583,13 @@ def test_action_context_open_checkpoint_stream_repo_job_upload(monkeypatch) -> N
     monkeypatch.setattr(requests, "request", _req)
 
     writer = ctx.open_checkpoint_stream(
-        "runs/rid13-job/outputs/final.safetensors",
+        "jobs/rid13-job/outputs/final.safetensors",
         format="safetensors",
         expected_size_bytes=4,
     )
     writer.write(b"abcd")
     out = writer.finalize()
-    assert out.ref == "runs/rid13-job/outputs/final.safetensors"
+    assert out.ref == "jobs/rid13-job/outputs/final.safetensors"
     assert out.stream_mode == "remote_append"
     assert out.blob_digest is not None and out.blob_digest.startswith("blake3:")
     assert out.snapshot_digest == "blake3:snapshot1234"
@@ -597,13 +597,13 @@ def test_action_context_open_checkpoint_stream_repo_job_upload(monkeypatch) -> N
     assert len(finalize_payloads) == 1
 
 
-def test_action_context_save_checkpoint_repo_job_upload(monkeypatch, tmp_path: Path) -> None:
+def test_request_context_save_checkpoint_repo_job_upload(monkeypatch, tmp_path: Path) -> None:
     pytest.skip("TODO(#213): rewrite for presigned multipart upload flow")
     src = tmp_path / "model.safetensors"
     src.write_bytes(b"abcd")
     ctx = RequestContext(
         "rid13-save-job",
-        run_id="job13save",
+        job_id="job13save",
         file_api_base_url="https://files.example.test",
         worker_capability_token="token",
         owner="alice",
@@ -633,7 +633,7 @@ def test_action_context_save_checkpoint_repo_job_upload(monkeypatch, tmp_path: P
         calls.append((method, url))
         if method == "POST" and url.endswith("/api/v1/repos/alice/model-a/jobs/job13save/uploads"):
             payload = json.loads(data)
-            assert payload["path"] == "runs/rid13-save-job/outputs/final.safetensors"
+            assert payload["path"] == "jobs/rid13-save-job/outputs/final.safetensors"
             return _Resp(201, {"upload_id": "sess-1", "upload_offset": 0, "max_chunk_bytes": 2})
         if method == "PATCH" and url.endswith("/api/v1/repos/alice/model-a/jobs/job13save/uploads/sess-1"):
             offset += len(data)
@@ -656,15 +656,15 @@ def test_action_context_save_checkpoint_repo_job_upload(monkeypatch, tmp_path: P
 
     monkeypatch.setattr(requests, "request", _req)
 
-    out = ctx.save_checkpoint("runs/rid13-save-job/outputs/final.safetensors", str(src))
-    assert out.ref == "runs/rid13-save-job/outputs/final.safetensors"
+    out = ctx.save_checkpoint("jobs/rid13-save-job/outputs/final.safetensors", str(src))
+    assert out.ref == "jobs/rid13-save-job/outputs/final.safetensors"
     assert out.stream_mode == "remote_append"
     assert out.blob_digest is not None and out.blob_digest.startswith("blake3:")
     assert out.snapshot_digest == "blake3:snapshot5678"
     assert any(url.endswith("/api/v1/repos/alice/model-a/jobs/job13save/uploads") for _, url in calls)
 
 
-def test_action_context_mirror_dedupe_or_run_hit_copies_and_writes_claim(monkeypatch) -> None:
+def test_request_context_mirror_dedupe_or_run_hit_copies_and_writes_claim(monkeypatch) -> None:
     ctx = RequestContext("rid14", owner="alice")
     calls: dict[str, object] = {
         "search": None,
@@ -684,7 +684,7 @@ def test_action_context_mirror_dedupe_or_run_hit_copies_and_writes_claim(monkeyp
                     "version_id": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                     "metadata_json": {
                         "result": {
-                            "primary_artifact_ref": "runs/seed/outputs/weights.bin",
+                            "primary_artifact_ref": "jobs/seed/outputs/weights.bin",
                             "primary_artifact_format": "bin",
                         }
                     },
@@ -739,7 +739,7 @@ def test_action_context_mirror_dedupe_or_run_hit_copies_and_writes_claim(monkeyp
     assert (calls["upsert"] or {}).get("destination_repo") == "alice/model-a"
 
 
-def test_action_context_mirror_dedupe_or_run_invalidates_stale_claim_and_runs_miss(monkeypatch) -> None:
+def test_request_context_mirror_dedupe_or_run_invalidates_stale_claim_and_runs_miss(monkeypatch) -> None:
     ctx = RequestContext("rid15", owner="alice")
     deleted: list[dict[str, object]] = []
     upserts: list[dict[str, object]] = []
@@ -786,7 +786,7 @@ def test_action_context_mirror_dedupe_or_run_invalidates_stale_claim_and_runs_mi
         destination_repo_tags=["prod"],
         on_miss=lambda: {
             "version_id": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-            "primary_artifact_ref": "runs/rid15/outputs/ingested-source.bin",
+            "primary_artifact_ref": "jobs/rid15/outputs/ingested-source.bin",
             "primary_artifact_format": "bin",
         },
     )

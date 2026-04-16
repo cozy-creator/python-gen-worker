@@ -233,7 +233,7 @@ class JsonHttpArtifactUploader(ArtifactUploader):
 
         safe_name = p.name.replace("/", "_")
         slot = "final" if final else f"step-{int(step):08d}"
-        ref = f"v1/{self._owner}/runs/{self._request_id}/{category}/{slot}-{safe_name}"
+        ref = f"v1/{self._owner}/jobs/{self._request_id}/{category}/{slot}-{safe_name}"
         repo_job_scope = None
         if category == "checkpoints" and self._execution_kind in {"training", "conversion"} and self._destination_repo and self._job_id:
             if "/" in self._destination_repo:

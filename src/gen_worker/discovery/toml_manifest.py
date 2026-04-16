@@ -24,7 +24,7 @@ class TensorhubModelSpec:
 
 
 @dataclass(frozen=True)
-class TensorhubToml:
+class EndpointToml:
     schema_version: int
     name: str
     main: str
@@ -261,6 +261,16 @@ def _parse_function_resource_hints(v: Any) -> dict[str, Any]:
             raise ValueError("function resource hint min_vram_gb must be > 0")
         out["min_vram_gb"] = val
 
+    if "vram_multiplier" in v:
+        raw = v.get("vram_multiplier")
+        try:
+            val = float(raw)
+        except Exception:
+            raise ValueError("function resource hint vram_multiplier must be numeric")
+        if val <= 0:
+            raise ValueError("function resource hint vram_multiplier must be > 0")
+        out["vram_multiplier"] = val
+
     for key in ("supported_conversion_profiles", "supported_precisions"):
         if key not in v:
             continue
@@ -347,7 +357,7 @@ def _parse_function_batch_dimension(v: Any, *, field_prefix: str) -> str | None:
     return _parse_batch_dimension_path(v.get("batch_dimension"), field=f"{field_prefix}.batch_dimension")
 
 
-def load_tensorhub_toml(path: Path) -> TensorhubToml:
+def load_endpoint_toml(path: Path) -> EndpointToml:
     data = tomllib.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError("endpoint.toml must be a TOML table at root")
@@ -453,7 +463,7 @@ def load_tensorhub_toml(path: Path) -> TensorhubToml:
     if "max_inflight_requests" not in resources:
         resources["max_inflight_requests"] = 1
 
-    return TensorhubToml(
+    return EndpointToml(
         schema_version=1,
         name=name,
         main=main,

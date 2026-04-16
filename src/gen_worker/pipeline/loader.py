@@ -409,12 +409,12 @@ class LocalModelCache:
 
     async def wait_for_prefetch(self, model_id: str, timeout: float = 60.0) -> bool:
         """Wait for a prefetch to complete."""
-        task = self._prefetch_tasks.get(model_id)
-        if task is None:
+        prefetch_future = self._prefetch_tasks.get(model_id)
+        if prefetch_future is None:
             return self.is_cached(model_id)
 
         try:
-            await asyncio.wait_for(task, timeout=timeout)
+            await asyncio.wait_for(prefetch_future, timeout=timeout)
             return True
         except asyncio.TimeoutError:
             logger.warning(f"Prefetch timeout for {model_id}")

@@ -56,7 +56,7 @@ def _maybe_add_pythonpath(root: Optional[str]) -> None:
 
 
 @dataclass
-class DevRunResult:
+class DevRequestResult:
     request_id: str
     success: bool
     output: Any
@@ -90,7 +90,7 @@ class DevWorker(Worker):
                 break
         return out
 
-    def run_task_sync(
+    def run_request_sync(
         self,
         *,
         function_name: str,
@@ -102,17 +102,17 @@ class DevWorker(Worker):
         required_variant_refs: Optional[list[str]] = None,
         resolved_cozy_models_by_id: Optional[dict[str, Any]] = None,
         local_output_dir: Optional[str] = None,
-    ) -> DevRunResult:
+    ) -> DevRequestResult:
         rid = (request_id or "").strip() or str(uuid.uuid4())
         fn = (function_name or "").strip()
-        spec = self._task_specs.get(fn)
+        spec = self._request_specs.get(fn)
         if spec is None:
             raise web.HTTPNotFound(text="unknown function")
 
         self._drain_messages()
 
         raw = msgspec.msgpack.encode(payload_obj)
-        req = pb.TaskExecutionRequest(
+        req = pb.JobExecutionRequest(
             request_id=rid,
             function_name=fn,
             input_payload=raw,
@@ -122,7 +122,7 @@ class DevWorker(Worker):
             invoker_id=str(invoker_id or ""),
         )
 
-        # Mirror _handle_run_request's ctx construction, but use local output backend.
+        # Mirror _handle_job_request's ctx construction, but use local output backend.
         ctx = RequestContext(
             rid,
             emitter=self._emit_progress_event,
@@ -136,11 +136,11 @@ class DevWorker(Worker):
         )
 
         # Execute synchronously.
-        self._execute_task(ctx, spec, req.input_payload)
+        self._execute_request(ctx, spec, req.input_payload)
 
         msgs = self._drain_messages()
         events: list[dict[str, Any]] = []
-        result: Optional[pb.TaskExecutionResult] = None
+        result: Optional[pb.JobExecutionResult] = None
         for m in msgs:
             mt = m.WhichOneof("msg")
             if mt == "worker_event" and m.worker_event is not None:
@@ -156,11 +156,11 @@ class DevWorker(Worker):
                         "payload": payload,
                     }
                 )
-            if mt == "run_result" and m.run_result is not None:
-                result = m.run_result
+            if mt == "job_result" and m.job_result is not None:
+                result = m.job_result
 
         if result is None:
-            raise RuntimeError("missing run_result (dev worker internal error)")
+            raise RuntimeError("missing job_result (dev worker internal error)")
 
         out_obj: Any = None
         if result.success and result.output_payload:
@@ -169,7 +169,7 @@ class DevWorker(Worker):
             except Exception:
                 out_obj = None
 
-        return DevRunResult(
+        return DevRequestResult(
             request_id=rid,
             success=bool(result.success),
             output=out_obj,
@@ -185,7 +185,7 @@ def _json_response(obj: Any, *, status: int = 200) -> web.Response:
     return web.Response(body=raw, status=status, content_type="application/json")
 
 
-def _parse_run_body(data: Any) -> tuple[Any, dict[str, Any]]:
+def _parse_request_body(data: Any) -> tuple[Any, dict[str, Any]]:
     """
     Accept either:
       - raw payload object, OR
@@ -242,7 +242,7 @@ async def serve_http(argv: Optional[list[str]] = None) -> None:
 
     @routes.get("/v1/status")
     async def status(_req: web.Request) -> web.Response:
-        fns = sorted(list(w._task_specs.keys()))
+        fns = sorted(list(w._request_specs.keys()))
         stats = w._model_cache.get_stats().to_dict() if getattr(w, "_model_cache", None) is not None else {}
         return _json_response(
             {
@@ -350,14 +350,14 @@ async def serve_http(argv: Optional[list[str]] = None) -> None:
         return _json_response({"results": out})
 
     @routes.post("/v1/request/{function_name}")
-    async def run(req: web.Request) -> web.Response:
+    async def invoke_request(req: web.Request) -> web.Response:
         fn = str(req.match_info.get("function_name") or "").strip()
         try:
             body = await req.json()
         except Exception:
             return _json_response({"error": "invalid_json"}, status=400)
 
-        payload, env = _parse_run_body(body)
+        payload, env = _parse_request_body(body)
 
         rid = str(env.get("request_id") or "").strip() or str(uuid.uuid4())
         timeout_ms = int(env.get("timeout_ms") or 0)
@@ -376,7 +376,7 @@ async def serve_http(argv: Optional[list[str]] = None) -> None:
 
         t0 = time.monotonic()
         try:
-            res = w.run_task_sync(
+            res = w.run_request_sync(
                 function_name=fn,
                 payload_obj=payload,
                 request_id=rid,
@@ -411,10 +411,10 @@ async def serve_http(argv: Optional[list[str]] = None) -> None:
         # Alias of /v1/request that discards output but forces init/compiles.
         fn = str(req.match_info.get("function_name") or "").strip()
         body = await req.json()
-        payload, env = _parse_run_body(body)
+        payload, env = _parse_request_body(body)
         rid = str(env.get("request_id") or "").strip() or str(uuid.uuid4())
         t0 = time.monotonic()
-        res = w.run_task_sync(
+        res = w.run_request_sync(
             function_name=fn,
             payload_obj=payload,
             request_id=rid,
