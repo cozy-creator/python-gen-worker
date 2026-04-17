@@ -5,6 +5,8 @@ from typing import Any, Dict, List, Mapping, Optional
 
 import aiohttp
 
+from .refs import parse_model_ref
+
 
 class CozyHubError(RuntimeError):
     pass
@@ -144,11 +146,12 @@ class CozyHubV2Client:
         """
         Request a (public) model via Cozy Hub.
 
-        Endpoint:
-          - POST /api/v1/public/models/request
+        Route selection:
+          - cozy: refs -> POST /api/v1/repos/<owner>/<repo>/resolve
+          - hf: refs   -> POST /api/v1/public/models/request (best-effort legacy path)
 
         Responses:
-          - 200: {owner,repo,tag,variant_label,snapshot_digest,snapshot_manifest:{files:[...]}}
+          - 200: resolved snapshot payload
           - 202: {ingest_job_id,...} (pending)
           - 403: forbidden (model not mirrored and invoker not authenticated)
           - 409: no compatible variant
@@ -156,6 +159,28 @@ class CozyHubV2Client:
         model_ref = (model_ref or "").strip()
         if not model_ref:
             raise ValueError("model_ref required")
+
+        parsed = parse_model_ref(model_ref)
+        if parsed.scheme == "cozy" and parsed.cozy is not None:
+            preferences: Dict[str, Any] = {}
+            dtypes = [str(x).strip() for x in (dtypes or []) if str(x).strip()]
+            file_types = [str(x).strip() for x in (file_types or []) if str(x).strip()]
+            file_layouts = [str(x).strip() for x in (file_layouts or []) if str(x).strip()]
+            if file_types:
+                preferences["file_type_preference"] = file_types
+            if dtypes:
+                preferences["quantization_preference"] = dtypes
+            if file_layouts:
+                preferences["file_layout_preference"] = file_layouts
+            return await self.resolve_artifact(
+                owner=parsed.cozy.owner,
+                repo=parsed.cozy.repo,
+                tag=parsed.cozy.tag,
+                digest=parsed.cozy.digest,
+                include_urls=include_urls,
+                preferences=preferences,
+                capabilities={},
+            )
 
         url = f"{self.base_url}/api/v1/public/models/request"
         payload = {
@@ -196,7 +221,9 @@ class CozyHubV2Client:
                     if isinstance(data, dict):
                         msg = str(data.get("message") or data.get("error") or msg)
                     raise CozyHubError(msg)
-                resp.raise_for_status()
+                if resp.status >= 400:
+                    body = await resp.text()
+                    raise CozyHubError(f"public model request failed: {resp.status} {body}".strip())
                 data = await resp.json()
                 if not isinstance(data, dict):
                     raise ValueError("unexpected response shape")

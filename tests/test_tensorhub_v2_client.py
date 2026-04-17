@@ -6,7 +6,7 @@ from typing import Dict, Optional
 import pytest
 from aiohttp import web
 
-from gen_worker.models.hub_client import CozyHubNoCompatibleArtifactError, CozyHubPublicModelPendingError, CozyHubV2Client
+from gen_worker.models.hub_client import CozyHubError, CozyHubNoCompatibleArtifactError, CozyHubPublicModelPendingError, CozyHubV2Client
 
 
 @dataclass
@@ -140,23 +140,25 @@ def test_resolve_artifact_no_compatible() -> None:
 def test_request_public_model_success() -> None:
     async def handler(req: web.Request) -> web.Response:
         body = await req.json()
-        assert body["model_ref"] == "hf:o/r@main"
-        assert body["constraints"]["dtypes"] == ["bf16", "fp16"]
-        assert body["constraints"]["file_types"] == ["safetensors"]
-        assert body["constraints"]["file_layouts"] == ["diffusers"]
+        assert body["tag"] == "latest"
+        assert body["include_urls"] is True
+        assert body["preferences"]["quantization_preference"] == ["bf16", "fp16"]
+        assert body["preferences"]["file_type_preference"] == ["safetensors"]
+        assert body["preferences"]["file_layout_preference"] == ["diffusers"]
         assert body["include_urls"] is True
         return web.json_response(
             {
-                "cozy_repo_ref": "cozy:hf/o--r:latest",
-                "owner": "hf",
-                "repo": "o--r",
-                "tag": "latest",
                 "repo_revision_seq": 3,
-                "variant_label": "safetensors-bf16",
-                "snapshot_digest": "blake3:" + ("a" * 64),
+                "version_id": "blake3:" + ("a" * 64),
+                "variant": {
+                    "label": "safetensors-bf16",
+                    "file_layout": "diffusers",
+                    "file_type": "safetensors",
+                    "quantization": "bf16",
+                },
                 "snapshot_manifest": {
                     "version": 1,
-                    "files": [
+                    "entries": [
                         {
                             "path": "cozy.pipeline.yaml",
                             "size_bytes": 123,
@@ -168,12 +170,12 @@ def test_request_public_model_success() -> None:
             }
         )
 
-    srv = _start_server({"/api/v1/public/models/request": handler})  # type: ignore[arg-type]
+    srv = _start_server({"/api/v1/repos/o/r/resolve": handler})  # type: ignore[arg-type]
     try:
         client = CozyHubV2Client(srv.base_url)
         res = asyncio.run(
             client.request_public_model(
-                model_ref="hf:o/r@main",
+                model_ref="cozy:o/r:latest",
                 dtypes=["bf16", "fp16"],
                 file_types=["safetensors"],
                 file_layouts=["diffusers"],
@@ -197,5 +199,18 @@ def test_request_public_model_pending_202() -> None:
         with pytest.raises(CozyHubPublicModelPendingError) as e:
             asyncio.run(client.request_public_model(model_ref="hf:o/r@main", include_urls=True))
         assert e.value.ingest_job_id == "sess1"
+    finally:
+        _stop_server(srv)
+
+
+def test_request_public_model_hf_missing_route_raises_cozy_error() -> None:
+    async def handler(_req: web.Request) -> web.Response:
+        return web.json_response({"error": "not_found"}, status=404)
+
+    srv = _start_server({"/api/v1/public/models/request": handler})  # type: ignore[arg-type]
+    try:
+        client = CozyHubV2Client(srv.base_url)
+        with pytest.raises(CozyHubError):
+            asyncio.run(client.request_public_model(model_ref="hf:o/r@main", include_urls=True))
     finally:
         _stop_server(srv)

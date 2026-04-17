@@ -402,3 +402,38 @@ def test_model_ref_downloader_public_request_polls_202_then_200(tmp_path: Path) 
         assert call_count["n"] >= 2
     finally:
         _stop_server(srv)
+
+
+def test_model_ref_downloader_hf_falls_back_when_public_route_missing(tmp_path: Path, monkeypatch) -> None:
+    from gen_worker.models.ref_downloader import ModelRefDownloader
+
+    routes: Dict[str, web.StreamResponse] = {}
+
+    async def request_public_model(_req: web.Request) -> web.Response:
+        return web.json_response({"error": "not_found"}, status=404)
+
+    routes["/api/v1/public/models/request"] = request_public_model  # type: ignore[assignment]
+
+    srv = _start_server(routes)
+    try:
+        dl = ModelRefDownloader(cozy_base_url=srv.base_url, cozy_token=None)
+
+        class _HFResult:
+            local_dir = tmp_path / "hf-fallback"
+
+        _HFResult.local_dir.mkdir(parents=True, exist_ok=True)
+        (_HFResult.local_dir / "ok.txt").write_text("ok", encoding="utf-8")
+
+        called = {"n": 0}
+
+        def fake_download(_parsed):
+            called["n"] += 1
+            return _HFResult()
+
+        monkeypatch.setattr(dl._hf, "download", fake_download)
+        local = Path(dl.download("hf:o/r@main", tmp_path.as_posix()))
+        assert local == _HFResult.local_dir
+        assert (local / "ok.txt").read_text(encoding="utf-8") == "ok"
+        assert called["n"] == 1
+    finally:
+        _stop_server(srv)
