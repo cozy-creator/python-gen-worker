@@ -53,6 +53,10 @@ def _normalize_grpc_addr(addr: str) -> tuple[str, bool]:
     return a, tls
 
 
+def _scheduler_public_addr_from_env() -> str:
+    return (os.getenv("PUBLIC_ORCHESTRATOR_GRPC_ADDR") or "").strip()
+
+
 def _startup_payload(phase: str, status: str = "ok", **extra: Any) -> Dict[str, Any]:
     payload: Dict[str, Any] = {
         "phase": str(phase or "").strip(),
@@ -239,7 +243,7 @@ def _run_main() -> int:
         logger.error(str(e))
         return 1
 
-    scheduler_addr_raw = (os.getenv("SCHEDULER_PUBLIC_ADDR") or "").strip()
+    scheduler_addr_raw = _scheduler_public_addr_from_env()
     scheduler_addrs_raw = os.getenv("SCHEDULER_ADDRS", "")
     worker_id = os.getenv("WORKER_ID", "").strip()
     worker_jwt = os.getenv("WORKER_JWT", "").strip()
@@ -258,7 +262,7 @@ def _run_main() -> int:
     lb_only_retries = (os.getenv("LB_ONLY_RETRIES", "true") or "true").strip().lower() in ("1", "true", "t", "yes", "y", "on")
 
     if not scheduler_addr_raw:
-        logger.error("SCHEDULER_PUBLIC_ADDR is required (scheduler dial address). Refusing to start worker.")
+        logger.error("PUBLIC_ORCHESTRATOR_GRPC_ADDR is required (scheduler dial address). Refusing to start worker.")
         return 1
 
     seed_addrs = [addr.strip() for addr in scheduler_addrs_raw.split(",") if addr.strip()]

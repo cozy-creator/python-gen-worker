@@ -304,7 +304,7 @@ Orchestrator-injected (production contract):
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `WORKER_MODE` | `inference` | Runtime mode selector (`inference` or `trainer`) |
-| `SCHEDULER_PUBLIC_ADDR` | - | Scheduler address workers should dial |
+| `PUBLIC_ORCHESTRATOR_GRPC_ADDR` | - | Scheduler address workers should dial |
 | `SCHEDULER_ADDRS` | - | Optional comma-separated LB seed addresses |
 | `WORKER_JWT` | - | Worker-connect JWT (required; claims are authoritative) |
 
@@ -384,7 +384,7 @@ docker build -t sd15-worker -f Dockerfile examples/sd15
 
 # Run
 docker run \
-  -e SCHEDULER_PUBLIC_ADDR=orchestrator:8080 \
+  -e PUBLIC_ORCHESTRATOR_GRPC_ADDR=orchestrator:8080 \
   -e WORKER_JWT='<worker-connect-jwt>' \
   sd15-worker
 ```
@@ -452,7 +452,7 @@ Start your worker container first:
 ```bash
 docker run --rm \
   --add-host=host.docker.internal:host-gateway \
-  -e SCHEDULER_PUBLIC_ADDR=host.docker.internal:8080 \
+  -e PUBLIC_ORCHESTRATOR_GRPC_ADDR=host.docker.internal:8080 \
   -e WORKER_JWT='dev-worker-jwt' \
   <your-worker-image>
 ```
