@@ -114,7 +114,7 @@ def test_snapshot_v2_downloader_materializes(tmp_path: Path) -> None:
     async def get_unet_config(_req: web.Request) -> web.Response:
         return web.Response(body=b2, headers={"Content-Type": "application/octet-stream"})
 
-    routes["/api/v1/repos/o/r/resolve"] = resolve_artifact  # type: ignore[assignment]
+    routes["/api/v1/inference/repos/o/r/resolve"] = resolve_artifact  # type: ignore[assignment]
     routes["/files/pipeline"] = get_pipeline  # type: ignore[assignment]
     routes["/files/unet_config"] = get_unet_config  # type: ignore[assignment]
 
@@ -165,7 +165,7 @@ def test_snapshot_v2_downloader_digest_pin_uses_resolve_endpoint(tmp_path: Path)
     async def get_pipeline(_req: web.Request) -> web.Response:
         return web.Response(body=b1, headers={"Content-Type": "application/octet-stream"})
 
-    routes["/api/v1/repos/o/r/resolve"] = resolve_artifact  # type: ignore[assignment]
+    routes["/api/v1/inference/repos/o/r/resolve"] = resolve_artifact  # type: ignore[assignment]
     routes["/files/pipeline"] = get_pipeline  # type: ignore[assignment]
 
     srv = _start_server(routes)

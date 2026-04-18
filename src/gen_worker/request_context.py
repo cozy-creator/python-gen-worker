@@ -1553,6 +1553,17 @@ class RequestContext:
         }
         if isinstance(snapshot_manifest, dict) and snapshot_manifest:
             commit_payload["snapshot_manifest"] = snapshot_manifest
+        logger.info(
+            "worker_publish_commit request_id=%s job_id=%s owner=%s repo=%s output_versions=%d output_variants=%d variant_labels=%s snapshot_manifest=%s",
+            self.request_id,
+            job_id,
+            owner,
+            repo,
+            len(output_versions),
+            len(commit_output_variants),
+            [str(v.get("variant_label") or "").strip() for v in commit_output_variants if isinstance(v, dict)],
+            bool(commit_payload.get("snapshot_manifest")),
+        )
         commit_result = _request_json(
             "POST",
             f"/api/v1/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}/jobs/{urllib.parse.quote(job_id, safe='')}/commit",
@@ -1578,6 +1589,15 @@ class RequestContext:
             for v in list((commit_result or {}).get("output_versions") or [])
             if str(v or "").strip()
         ]
+        logger.info(
+            "worker_publish_commit_result request_id=%s job_id=%s owner=%s repo=%s output_versions=%d output_variant_count=%s",
+            self.request_id,
+            job_id,
+            owner,
+            repo,
+            len(commit_output_versions),
+            commit_result.get("output_variant_count"),
+        )
 
         logger.info(
             "worker_publish_succeeded request_id=%s job_id=%s owner=%s repo=%s published_job_id=%s",
