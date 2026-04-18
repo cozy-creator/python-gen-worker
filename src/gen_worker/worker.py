@@ -2418,10 +2418,19 @@ class Worker:
                             new_payload_spec_by_fn[str(fn_name)] = out_spec
                     if new_fixed_by_key:
                         self._fixed_model_id_by_key = new_fixed_by_key
+                        logger.info(
+                            "EndpointConfig fixed model map updated keys=%s refs=%s",
+                            sorted(new_fixed_by_key.keys()),
+                            sorted(new_fixed_by_key.values()),
+                        )
                     if new_fixed_spec_by_key:
                         self._fixed_model_spec_by_key = new_fixed_spec_by_key
                     if new_payload_by_fn:
                         self._payload_model_id_by_key_by_function = new_payload_by_fn
+                        logger.info(
+                            "EndpointConfig function model maps updated functions=%s",
+                            sorted(new_payload_by_fn.keys()),
+                        )
                     if new_payload_spec_by_fn:
                         self._payload_model_spec_by_key_by_function = new_payload_spec_by_fn
             except Exception:
@@ -4413,6 +4422,15 @@ class Worker:
                     f"unknown fixed model key {raw!r}; allowed keys: {head}{suffix}"
                 )
             model_id = fixed_map[raw]
+            logger.info(
+                "Resolved fixed model key function=%s param=%s key=%s model_id=%s scheduler_required_refs=%s fixed_refs=%s",
+                fn_name,
+                inj.param_name,
+                raw,
+                model_id,
+                list(getattr(self, "_required_variant_refs_from_scheduler", []) or []),
+                sorted(fixed_map.values()),
+            )
             self._enforce_model_allowlist(model_id, inj, allowed_ids=allowed_ids)
             return model_id, raw
 

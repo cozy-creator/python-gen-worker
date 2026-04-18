@@ -90,7 +90,7 @@ def test_resolve_artifact_success() -> None:
             }
         )
 
-    srv = _start_server({"/api/v1/repos/o/r/resolve": handler})  # type: ignore[arg-type]
+    srv = _start_server({"/api/v1/inference/repos/o/r/resolve": handler})  # type: ignore[arg-type]
     try:
         client = CozyHubV2Client(srv.base_url)
         res = asyncio.run(
@@ -116,7 +116,7 @@ def test_resolve_artifact_no_compatible() -> None:
     async def handler(_req: web.Request) -> web.Response:
         return web.json_response({"error": "no_compatible_artifact", "debug": {"why": "missing_lib"}}, status=409)
 
-    srv = _start_server({"/api/v1/repos/o/r/resolve": handler})  # type: ignore[arg-type]
+    srv = _start_server({"/api/v1/inference/repos/o/r/resolve": handler})  # type: ignore[arg-type]
     try:
         client = CozyHubV2Client(srv.base_url)
         with pytest.raises(CozyHubNoCompatibleArtifactError) as e:
@@ -170,7 +170,7 @@ def test_request_public_model_success() -> None:
             }
         )
 
-    srv = _start_server({"/api/v1/repos/o/r/resolve": handler})  # type: ignore[arg-type]
+    srv = _start_server({"/api/v1/inference/repos/o/r/resolve": handler})  # type: ignore[arg-type]
     try:
         client = CozyHubV2Client(srv.base_url)
         res = asyncio.run(

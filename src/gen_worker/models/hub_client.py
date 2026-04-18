@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import logging
 from typing import Any, Dict, List, Mapping, Optional
 
 import aiohttp
 
 from .refs import parse_model_ref
+
+
+logger = logging.getLogger("CozyHubV2Client")
 
 
 class CozyHubError(RuntimeError):
@@ -54,7 +58,7 @@ class CozyHubV2Client:
     Cozy Hub v2 model APIs (resolve).
 
     Endpoint:
-      - POST /api/v1/repos/<owner>/<repo>/resolve
+      - POST /api/v1/inference/repos/<owner>/<repo>/resolve
 
     Response compatibility:
       - Current shape: {version_id, repo_revision_seq, variant, snapshot_manifest:{entries:[...]}}
@@ -88,7 +92,7 @@ class CozyHubV2Client:
         tag = (tag or "").strip() or "latest"
         digest = (digest or "").strip() or None
 
-        url = f"{self.base_url}/api/v1/repos/{owner}/{repo}/resolve"
+        url = f"{self.base_url}/api/v1/inference/repos/{owner}/{repo}/resolve"
         payload = {
             "tag": tag,
             "include_urls": bool(include_urls),
@@ -97,6 +101,17 @@ class CozyHubV2Client:
         }
         if digest:
             payload["digest"] = digest
+
+        logger.info(
+            "resolve_artifact request owner=%s repo=%s tag=%s digest=%s include_urls=%s preferences=%s capabilities_keys=%s",
+            owner,
+            repo,
+            tag,
+            digest or "",
+            bool(include_urls),
+            dict(preferences),
+            sorted(str(k) for k in dict(capabilities).keys()),
+        )
 
         timeout = aiohttp.ClientTimeout(total=self.timeout_s)
         async with aiohttp.ClientSession(timeout=timeout, headers=self._headers()) as session:
@@ -110,7 +125,18 @@ class CozyHubV2Client:
                         "no compatible artifact for worker",
                         debug=data.get("debug") if isinstance(data, dict) else None,
                     )
-                resp.raise_for_status()
+                if resp.status >= 400:
+                    body = await resp.text()
+                    logger.error(
+                        "resolve_artifact failed status=%s owner=%s repo=%s tag=%s digest=%s body=%s",
+                        resp.status,
+                        owner,
+                        repo,
+                        tag,
+                        digest or "",
+                        body[:500],
+                    )
+                    resp.raise_for_status()
                 data = await resp.json()
                 if not isinstance(data, dict):
                     raise ValueError("unexpected response shape")
@@ -147,7 +173,7 @@ class CozyHubV2Client:
         Request a (public) model via Cozy Hub.
 
         Route selection:
-          - cozy: refs -> POST /api/v1/repos/<owner>/<repo>/resolve
+          - cozy: refs -> POST /api/v1/inference/repos/<owner>/<repo>/resolve
           - hf: refs   -> POST /api/v1/public/models/request (best-effort legacy path)
 
         Responses:
