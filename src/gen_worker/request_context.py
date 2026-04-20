@@ -1533,7 +1533,7 @@ class RequestContext:
 
         if parsed_artifacts and commit_output_variants:
             for variant in commit_output_variants:
-                if not variant.get("artifacts"):
+                if "artifacts" not in variant:
                     variant["artifacts"] = parsed_artifacts
         # Only include output_variants when they have the required fields
         # (version_id, variant_label, etc.). Bare artifact-only variants will
