@@ -35,6 +35,7 @@ from ._worker_auth import _JWKSCache
 from .request_context import (
     RequestContext,
     _canonicalize_model_ref_string,
+    _decode_unverified_jwt_claims,
     _encode_ref_for_url,
     _http_request,
     _infer_mime_type,
@@ -284,10 +285,12 @@ class Worker:
         self._warn_model_load_s = float(os.getenv("WORKER_WARN_MODEL_LOAD_S", "60") or "60")
         self._warn_inference_s = float(os.getenv("WORKER_WARN_INFERENCE_S", "60") or "60")
         self.user_module_names = user_module_names # Store module names
-        self.worker_id = worker_id or f"py-worker-{os.getpid()}"
         self.worker_jwt = (worker_jwt or "").strip()
         if not self.worker_jwt:
             raise ValueError("WORKER_JWT is required (worker-connect JWT); refusing to run unauthenticated worker")
+        self._worker_claims = _decode_unverified_jwt_claims(self.worker_jwt)
+        jwt_worker_id = str(self._worker_claims.get("sub") or "").strip()
+        self.worker_id = worker_id or jwt_worker_id or f"py-worker-{os.getpid()}"
         self.use_tls = use_tls
         self.reconnect_delay = reconnect_delay
         self.max_reconnect_attempts = max_reconnect_attempts
@@ -302,7 +305,7 @@ class Worker:
 
         # Worker containers are treated as untrusted. Do not depend on RELEASE_ID/OWNER env vars.
         # Release + owner identity come from the scheduler-issued JWT and per-job gRPC envelopes.
-        self.release_id = ""
+        self.release_id = str(self._worker_claims.get("release_id") or "").strip()
         self.owner = ""
         self.runpod_pod_id = os.getenv("RUNPOD_POD_ID", "") # Read injected pod ID
         if not self.runpod_pod_id:
@@ -1921,7 +1924,7 @@ class Worker:
                 # When auth is disabled (dev mode), send worker_id directly so the orchestrator
                 # can identify this worker without JWT claims.
                 worker_id=self.worker_id,
-                release_id="",
+                release_id=self.release_id,
                 # owner is provided per-request via JobExecutionRequest/RealtimeOpenCommand.
                 runpod_pod_id=self.runpod_pod_id,
                 gpu_is_busy=self._get_gpu_busy_status(),
