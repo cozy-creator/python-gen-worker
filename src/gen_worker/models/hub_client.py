@@ -70,10 +70,11 @@ class CozyHubV2Client:
         self.token = (token or "").strip() or None
         self.timeout_s = timeout_s
 
-    def _headers(self) -> Dict[str, str]:
+    def _headers(self, override_token: Optional[str] = None) -> Dict[str, str]:
         h: Dict[str, str] = {"Content-Type": "application/json"}
-        if self.token:
-            h["Authorization"] = f"Bearer {self.token}"
+        tok = (override_token or "").strip() or self.token
+        if tok:
+            h["Authorization"] = f"Bearer {tok}"
         return h
 
     async def resolve_artifact(
@@ -86,6 +87,7 @@ class CozyHubV2Client:
         include_urls: bool,
         preferences: Mapping[str, Any],
         capabilities: Mapping[str, Any],
+        capability_token: Optional[str] = None,
     ) -> CozyHubResolveArtifactResult:
         if not owner or not repo:
             raise ValueError("owner/repo required")
@@ -114,7 +116,7 @@ class CozyHubV2Client:
         )
 
         timeout = aiohttp.ClientTimeout(total=self.timeout_s)
-        async with aiohttp.ClientSession(timeout=timeout, headers=self._headers()) as session:
+        async with aiohttp.ClientSession(timeout=timeout, headers=self._headers(capability_token)) as session:
             async with session.post(url, json=payload) as resp:
                 if resp.status == 409:
                     try:

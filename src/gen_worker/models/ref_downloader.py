@@ -33,6 +33,20 @@ _cozy_model_download_prefs_by_ref: contextvars.ContextVar[Optional[Mapping[str, 
     "cozy_model_download_prefs_by_ref", default=None
 )
 
+# Per-request worker capability token. Set by Worker._materialize_source_for_conversion
+# so the ref_downloader can authenticate tensorhub resolve calls as the invoker.
+_cozy_worker_capability_token: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
+    "cozy_worker_capability_token", default=None
+)
+
+
+def set_cozy_worker_capability_token(token: Optional[str]) -> contextvars.Token:
+    return _cozy_worker_capability_token.set(token)
+
+
+def reset_cozy_worker_capability_token(token: contextvars.Token) -> None:
+    _cozy_worker_capability_token.reset(token)
+
 
 def set_resolved_cozy_models_by_id(mapping: Optional[Mapping[str, Any]]) -> contextvars.Token:
     return _resolved_cozy_models_by_id.set(mapping)
@@ -121,11 +135,43 @@ class ModelRefDownloader(ModelDownloader):
                     resolved=resolved_entry,
                 )
 
-            # Public model request path.
-            # This is allowed even when api-resolve is disabled, but requires TENSORHUB_URL.
-            if self._cozy_v2 is not None and parsed.cozy.digest is None:
+            # Direct-resolve fallback against tensorhub's public /repos resolve route.
+            # Used by conversion/training jobs where the orchestrator doesn't pre-populate
+            # resolved_cozy_models_by_id (reserved-name source.ref path). Calls
+            # CozyHubV2Client.resolve_artifact(...) with dtype/file_layout/file_type
+            # preferences from the download-prefs contextvar (populated by
+            # Worker._materialize_source_for_conversion). The worker's capability
+            # token authenticates the read against tensorhub.
+            if self._cozy_v2 is not None:
                 prefs = _get_prefs_for_ref(canonical)
-                resolved = await self._request_public_model_with_wait(canonical, prefs=prefs)
+                resolve_prefs: dict[str, Any] = {}
+                if prefs:
+                    dtypes = self._dtype_candidates(prefs)
+                    if dtypes:
+                        resolve_prefs["dtypes"] = dtypes
+                    file_types = self._file_type_candidates(prefs)
+                    if file_types:
+                        resolve_prefs["file_types"] = file_types
+                    file_layouts = self._file_layout_candidates(prefs)
+                    if file_layouts:
+                        resolve_prefs["file_layouts"] = file_layouts
+                cap_token = _cozy_worker_capability_token.get()
+                try:
+                    resolved = await self._cozy_v2.resolve_artifact(
+                        owner=parsed.cozy.owner,
+                        repo=parsed.cozy.repo,
+                        tag=parsed.cozy.tag or "latest",
+                        digest=parsed.cozy.digest,
+                        include_urls=True,
+                        preferences=resolve_prefs,
+                        capabilities={},
+                        capability_token=cap_token,
+                    )
+                except CozyHubError:
+                    raise RuntimeError(
+                        f"cozy model download failed: tensorhub resolve rejected "
+                        f"ref={canonical!r} prefs={resolve_prefs!r}"
+                    )
                 return await ensure_snapshot_async(
                     base_dir=dest_dir,
                     ref=parsed.cozy,
@@ -135,7 +181,8 @@ class ModelRefDownloader(ModelDownloader):
                 )
 
             raise RuntimeError(
-                "cozy model download requires orchestrator-resolved URLs (missing resolved_cozy_models_by_id entry)"
+                "cozy model download requires orchestrator-resolved URLs "
+                "(missing resolved_cozy_models_by_id entry; TENSORHUB_URL not set for direct-resolve fallback)"
             )
 
         raise ValueError("invalid parsed model ref")

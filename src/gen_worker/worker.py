@@ -106,6 +106,44 @@ def _extract_worker_capability_token(envelope: Any) -> str:
     return str(getattr(envelope, "worker_capability_token", "") or "").strip()
 
 
+def _normalize_materialized_input_urls(envelope: Any) -> Dict[str, str]:
+    """Collect materialized input-ref URLs from a scheduler envelope.
+
+    Supports both `input_ref_urls` (protobuf map) and the legacy
+    `input_ref_urls_json` (JSON-string) shape; merges both with the JSON
+    shape overriding the map on collision. Every key is leading-slash-
+    stripped; empty keys/values are dropped. Unparseable JSON is ignored
+    silently.
+
+    Used by both `_handle_job_request` and `_handle_realtime_open_cmd`
+    — prior copy-paste.
+    """
+    out: Dict[str, str] = {}
+
+    raw_urls_map = getattr(envelope, "input_ref_urls", None)
+    if isinstance(raw_urls_map, cabc.Mapping):
+        for k, v in raw_urls_map.items():
+            ks = str(k or "").strip().lstrip("/")
+            vs = str(v or "").strip()
+            if ks and vs:
+                out[ks] = vs
+
+    raw_urls = getattr(envelope, "input_ref_urls_json", None)
+    if isinstance(raw_urls, str) and raw_urls.strip():
+        try:
+            parsed = json.loads(raw_urls)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, dict):
+            for k, v in parsed.items():
+                ks = str(k or "").strip().lstrip("/")
+                vs = str(v or "").strip()
+                if ks and vs:
+                    out[ks] = vs
+
+    return out
+
+
 def _extract_checkpoint_id_from_result(result: Any) -> str:
     """Best-effort: find the snapshot_digest of the produced checkpoint inside
     a ConversionOutput-like struct so the library can tag it. Returns "" when
@@ -711,6 +749,23 @@ class Worker:
         except Exception:
             return
 
+    def _emit_typed_worker_event(self, *, pb_type: str, msg_field: str, **fields: Any) -> bool:
+        """Build and best-effort-send a typed `WorkerSchedulerMessage` oneof.
+
+        Returns False when the proto class is unavailable (wire-version skew
+        with the scheduler) or when the send fails. Never raises — this is a
+        notification path; failures must not fail the job.
+        """
+        cls = getattr(pb, pb_type, None)
+        if cls is None:
+            return False
+        try:
+            msg = pb.WorkerSchedulerMessage(**{msg_field: cls(**fields)})
+            self._send_message(msg)
+            return True
+        except Exception:
+            return False
+
     def _emit_incremental_delta_typed(
         self,
         *,
@@ -722,24 +777,17 @@ class Worker:
         delta_text: str,
         payload_json: bytes,
     ) -> bool:
-        if not hasattr(pb, "IncrementalTokenDelta"):
-            return False
-        try:
-            msg = pb.WorkerSchedulerMessage(
-                incremental_token_delta=pb.IncrementalTokenDelta(
-                    request_id=str(request_id or ""),
-                    item_id=str(item_id or ""),
-                    function_name=str(function_name or ""),
-                    sequence=int(sequence),
-                    timestamp_unix_ms=int(timestamp_unix_ms),
-                    delta_text=str(delta_text or ""),
-                    payload_json=bytes(payload_json or b"{}"),
-                )
-            )
-            self._send_message(msg)
-            return True
-        except Exception:
-            return False
+        return self._emit_typed_worker_event(
+            pb_type="IncrementalTokenDelta",
+            msg_field="incremental_token_delta",
+            request_id=str(request_id or ""),
+            item_id=str(item_id or ""),
+            function_name=str(function_name or ""),
+            sequence=int(sequence),
+            timestamp_unix_ms=int(timestamp_unix_ms),
+            delta_text=str(delta_text or ""),
+            payload_json=bytes(payload_json or b"{}"),
+        )
 
     def _emit_incremental_done_typed(
         self,
@@ -750,22 +798,15 @@ class Worker:
         sequence: int,
         timestamp_unix_ms: int,
     ) -> bool:
-        if not hasattr(pb, "IncrementalTokenStreamDone"):
-            return False
-        try:
-            msg = pb.WorkerSchedulerMessage(
-                incremental_token_stream_done=pb.IncrementalTokenStreamDone(
-                    request_id=str(request_id or ""),
-                    item_id=str(item_id or ""),
-                    function_name=str(function_name or ""),
-                    sequence=int(sequence),
-                    timestamp_unix_ms=int(timestamp_unix_ms),
-                )
-            )
-            self._send_message(msg)
-            return True
-        except Exception:
-            return False
+        return self._emit_typed_worker_event(
+            pb_type="IncrementalTokenStreamDone",
+            msg_field="incremental_token_stream_done",
+            request_id=str(request_id or ""),
+            item_id=str(item_id or ""),
+            function_name=str(function_name or ""),
+            sequence=int(sequence),
+            timestamp_unix_ms=int(timestamp_unix_ms),
+        )
 
     def _emit_incremental_error_typed(
         self,
@@ -777,23 +818,16 @@ class Worker:
         timestamp_unix_ms: int,
         error_message: str,
     ) -> bool:
-        if not hasattr(pb, "IncrementalTokenStreamError"):
-            return False
-        try:
-            msg = pb.WorkerSchedulerMessage(
-                incremental_token_stream_error=pb.IncrementalTokenStreamError(
-                    request_id=str(request_id or ""),
-                    item_id=str(item_id or ""),
-                    function_name=str(function_name or ""),
-                    sequence=int(sequence),
-                    timestamp_unix_ms=int(timestamp_unix_ms),
-                    error_message=str(error_message or ""),
-                )
-            )
-            self._send_message(msg)
-            return True
-        except Exception:
-            return False
+        return self._emit_typed_worker_event(
+            pb_type="IncrementalTokenStreamError",
+            msg_field="incremental_token_stream_error",
+            request_id=str(request_id or ""),
+            item_id=str(item_id or ""),
+            function_name=str(function_name or ""),
+            sequence=int(sequence),
+            timestamp_unix_ms=int(timestamp_unix_ms),
+            error_message=str(error_message or ""),
+        )
 
     def _emit_startup_phase(
         self,
@@ -1726,7 +1760,10 @@ class Worker:
     def _connect_once(self) -> bool:
         try:
             if self.use_tls:
-                # TODO: Add proper credential loading if needed
+                # Default system CA bundle — adequate for orchestrator endpoints
+                # reachable via a trusted public certificate. Pass custom creds
+                # explicitly via the orchestrator deployment if a private CA is
+                # involved.
                 creds = grpc.ssl_channel_credentials()
                 self._channel = grpc.secure_channel(self.scheduler_addr, creds)
             else:
@@ -1835,119 +1872,151 @@ class Worker:
                     self._handle_connection_error()
                     break # Stop heartbeating on error
 
+    def _collect_gpu_and_memory_info(self) -> Dict[str, Any]:
+        """Gather CPU/memory/GPU/cuda/torch metadata for WorkerResources.
+
+        Honors `WORKER_FAKE_GPU_*` env overrides (for CI and local dev without
+        a real GPU), then augments with `detect_worker_capabilities()` which
+        fills in gpu_sm and installed_libs.
+        """
+        mem = psutil.virtual_memory()
+        info: Dict[str, Any] = {
+            "cpu_cores": os.cpu_count() or 0,
+            "memory_bytes": mem.total,
+            "gpu_count": 0,
+            "gpu_total_mem": 0,
+            "gpu_used_mem": 0,
+            "gpu_free_mem": 0,
+            "gpu_name": "",
+            "gpu_driver": "",
+            "gpu_sm": "",
+            "cuda_version": os.getenv("WORKER_CUDA_VERSION", "").strip(),
+            "torch_version": os.getenv("WORKER_TORCH_VERSION", "").strip(),
+            "installed_libs": [],
+        }
+
+        if torch and torch.cuda.is_available():
+            info["gpu_count"] = torch.cuda.device_count()
+            if info["gpu_count"] > 0:
+                try:
+                    props = torch.cuda.get_device_properties(0)
+                    info["gpu_total_mem"] = props.total_memory
+                    info["gpu_used_mem"] = torch.cuda.memory_allocated(0)
+                    info["gpu_name"] = props.name
+                    info["gpu_driver"] = torch.version.cuda or ""
+                    try:
+                        free_mem, total_mem = torch.cuda.mem_get_info(0)
+                        info["gpu_total_mem"] = total_mem
+                        info["gpu_used_mem"] = total_mem - free_mem
+                        info["gpu_free_mem"] = free_mem
+                    except Exception:
+                        pass
+                    logger.debug(
+                        f"GPU: {props.name}, VRAM total={info['gpu_total_mem']}, used={info['gpu_used_mem']}, cuda={torch.version.cuda}"
+                    )
+                except Exception as gpu_err:
+                    logger.warning(f"Could not get GPU properties: {gpu_err}")
+
+        fake_gpu_count = os.getenv("WORKER_FAKE_GPU_COUNT")
+        if fake_gpu_count:
+            try:
+                count = int(fake_gpu_count)
+                if count > 0:
+                    fake_mem = int(os.getenv("WORKER_FAKE_GPU_MEMORY_BYTES", str(24 * 1024 * 1024 * 1024)))
+                    info["gpu_count"] = count
+                    info["gpu_total_mem"] = fake_mem
+                    info["gpu_used_mem"] = 0
+                    info["gpu_free_mem"] = fake_mem
+                    info["gpu_name"] = os.getenv("WORKER_FAKE_GPU_NAME", "FakeGPU")
+                    info["gpu_driver"] = os.getenv("WORKER_FAKE_GPU_DRIVER", "fake")
+            except ValueError:
+                logger.warning("Invalid WORKER_FAKE_GPU_COUNT; ignoring fake GPU override.")
+
+        if torch is not None:
+            if not info["torch_version"]:
+                info["torch_version"] = getattr(torch, "__version__", "") or ""
+            if not info["cuda_version"]:
+                info["cuda_version"] = getattr(torch.version, "cuda", "") or ""
+        if not info["cuda_version"]:
+            info["cuda_version"] = os.getenv("CUDA_VERSION", "").strip() or os.getenv("NVIDIA_CUDA_VERSION", "").strip()
+
+        try:
+            from .models.hub_policy import detect_worker_capabilities
+
+            caps = detect_worker_capabilities()
+            info["installed_libs"] = list(caps.installed_libs or [])
+            if caps.gpu_sm:
+                info["gpu_sm"] = str(int(caps.gpu_sm))
+            if not info["cuda_version"]:
+                info["cuda_version"] = str(caps.cuda_version or "")
+            if not info["torch_version"]:
+                info["torch_version"] = str(caps.torch_version or "")
+        except Exception:
+            pass
+
+        return info
+
+    def _collect_model_inventory(self) -> tuple[List[str], List[str], List[str], bool]:
+        """Return `(vram_models, disk_models, downloading_models, supports_model_loading)`.
+
+        Prefers `self._model_manager` for VRAM info; falls back to the newer
+        `self._model_cache` when the legacy manager isn't wired. Disk and
+        downloading-model lists come from the model cache when present.
+        """
+        vram_models: List[str] = []
+        disk_models: List[str] = []
+        downloading_models: List[str] = []
+        supports_model_loading_flag = False
+
+        if self._model_manager:
+            vram_models = self._model_manager.get_vram_loaded_models()
+            supports_model_loading_flag = True
+        elif self._model_cache:
+            vram_models = self._model_cache.get_vram_models()
+            supports_model_loading_flag = True
+
+        if self._model_cache:
+            disk_models = self._model_cache.get_disk_models()
+            stats = self._model_cache.get_stats()
+            downloading_models = stats.downloading_models
+            logger.debug(
+                f"Model cache: vram={len(vram_models)}, disk={len(disk_models)}, "
+                f"downloading={len(downloading_models)}"
+            )
+
+        return vram_models, disk_models, downloading_models, supports_model_loading_flag
+
+    def _build_function_schemas(self) -> List[Any]:
+        """Serialize the registered `_function_schemas` dict into FunctionSchema
+        proto messages. Skips any entry whose spec lookup raises so one bad
+        function can't block registration of the others."""
+        function_schemas: List[Any] = []
+        for fname, (in_schema, out_schema, _delta_schema, inj_json) in self._function_schemas.items():
+            try:
+                spec = self._request_specs.get(fname)
+                incremental = bool(spec and spec.output_mode == "incremental")
+                function_schemas.append(
+                    pb.FunctionSchema(
+                        name=fname,
+                        input_schema_json=in_schema,
+                        output_schema_json=out_schema,
+                        injection_json=inj_json,
+                        incremental_output=incremental,
+                    )
+                )
+            except Exception:
+                continue
+        return function_schemas
+
     def _register_worker(self, is_heartbeat: bool = False) -> None:
         """Create and send a registration/heartbeat message."""
         try:
-            mem = psutil.virtual_memory()
-            cpu_cores = os.cpu_count() or 0
-
-            gpu_count = 0
-            gpu_total_mem = 0
-            vram_models = []
-            gpu_used_mem = 0
-            gpu_free_mem = 0
-            gpu_name = ""
-            gpu_driver = ""
-
-            if torch and torch.cuda.is_available():
-                gpu_count = torch.cuda.device_count()
-                if gpu_count > 0:
-                    try:
-                        props = torch.cuda.get_device_properties(0)
-                        gpu_total_mem = props.total_memory
-                        gpu_used_mem = torch.cuda.memory_allocated(0)
-                        gpu_name = props.name
-                        gpu_driver = torch.version.cuda or ""
-                        try:
-                            free_mem, total_mem = torch.cuda.mem_get_info(0)
-                            gpu_total_mem = total_mem
-                            gpu_used_mem = total_mem - free_mem
-                            gpu_free_mem = free_mem
-                        except Exception:
-                            pass
-                        logger.debug(f"GPU: {props.name}, VRAM total={gpu_total_mem}, used={gpu_used_mem}, cuda={torch.version.cuda}")
-                    except Exception as gpu_err:
-                         logger.warning(f"Could not get GPU properties: {gpu_err}")
-
-            fake_gpu_count = os.getenv("WORKER_FAKE_GPU_COUNT")
-            if fake_gpu_count:
-                try:
-                    gpu_count = int(fake_gpu_count)
-                    if gpu_count > 0:
-                        fake_mem = int(os.getenv("WORKER_FAKE_GPU_MEMORY_BYTES", str(24 * 1024 * 1024 * 1024)))
-                        gpu_total_mem = fake_mem
-                        gpu_used_mem = 0
-                        gpu_free_mem = fake_mem
-                        gpu_name = os.getenv("WORKER_FAKE_GPU_NAME", "FakeGPU")
-                        gpu_driver = os.getenv("WORKER_FAKE_GPU_DRIVER", "fake")
-                except ValueError:
-                    logger.warning("Invalid WORKER_FAKE_GPU_COUNT; ignoring fake GPU override.")
-
-            supports_model_loading_flag = False
-            disk_models: List[str] = []  # Models on disk, ready to load
-            downloading_models: List[str] = []  # Models being downloaded
-
-            if self._model_manager:
-                vram_models = self._model_manager.get_vram_loaded_models()
-                supports_model_loading_flag = True
-            elif self._model_cache:
-                # Use model cache for VRAM-loaded models if no legacy model_manager
-                vram_models = self._model_cache.get_vram_models()
-                supports_model_loading_flag = True
-
-            # Get disk-cached and downloading models from model cache
-            if self._model_cache:
-                disk_models = self._model_cache.get_disk_models()
-                stats = self._model_cache.get_stats()
-                downloading_models = stats.downloading_models
-                # Log model cache stats for debugging
-                logger.debug(
-                    f"Model cache: vram={len(vram_models)}, disk={len(disk_models)}, "
-                    f"downloading={len(downloading_models)}"
-                ) 
-
-            cuda_version = os.getenv("WORKER_CUDA_VERSION", "").strip()
-            torch_version = os.getenv("WORKER_TORCH_VERSION", "").strip()
-            if torch is not None:
-                if not torch_version:
-                    torch_version = getattr(torch, "__version__", "") or ""
-                if not cuda_version:
-                    cuda_version = getattr(torch.version, "cuda", "") or ""
-            if not cuda_version:
-                cuda_version = os.getenv("CUDA_VERSION", "").strip() or os.getenv("NVIDIA_CUDA_VERSION", "").strip()
-
-            gpu_sm = ""
-            installed_libs: List[str] = []
-            try:
-                from .models.hub_policy import detect_worker_capabilities
-
-                caps = detect_worker_capabilities()
-                installed_libs = list(caps.installed_libs or [])
-                if caps.gpu_sm:
-                    gpu_sm = str(int(caps.gpu_sm))
-                if not cuda_version:
-                    cuda_version = str(caps.cuda_version or "")
-                if not torch_version:
-                    torch_version = str(caps.torch_version or "")
-            except Exception:
-                pass
-
-            function_schemas = []
-            for fname, (in_schema, out_schema, _delta_schema, inj_json) in self._function_schemas.items():
-                try:
-                    spec = self._request_specs.get(fname)
-                    incremental = bool(spec and spec.output_mode == "incremental")
-                    function_schemas.append(
-                        pb.FunctionSchema(
-                            name=fname,
-                            input_schema_json=in_schema,
-                            output_schema_json=out_schema,
-                            injection_json=inj_json,
-                            incremental_output=incremental,
-                        )
-                    )
-                except Exception:
-                    continue
+            gpu_info = self._collect_gpu_and_memory_info()
+            vram_models, disk_models, downloading_models, supports_model_loading_flag = (
+                self._collect_model_inventory()
+            )
+            _ = downloading_models  # not currently sent on WorkerResources
+            function_schemas = self._build_function_schemas()
 
             resources = pb.WorkerResources(
                 # Worker identity is carried in the worker-connect JWT claims when auth is enabled.
@@ -1958,19 +2027,19 @@ class Worker:
                 # owner is provided per-request via JobExecutionRequest/RealtimeOpenCommand.
                 runpod_pod_id=self.runpod_pod_id,
                 gpu_is_busy=self._get_gpu_busy_status(),
-                cpu_cores=cpu_cores,
-                memory_bytes=mem.total,
-                gpu_count=gpu_count,
-                gpu_memory_bytes=gpu_total_mem,
-                gpu_memory_used_bytes=gpu_used_mem,
-                gpu_memory_free_bytes=gpu_free_mem,
-                gpu_name=gpu_name,
-                gpu_driver=gpu_driver,
+                cpu_cores=gpu_info["cpu_cores"],
+                memory_bytes=gpu_info["memory_bytes"],
+                gpu_count=gpu_info["gpu_count"],
+                gpu_memory_bytes=gpu_info["gpu_total_mem"],
+                gpu_memory_used_bytes=gpu_info["gpu_used_mem"],
+                gpu_memory_free_bytes=gpu_info["gpu_free_mem"],
+                gpu_name=gpu_info["gpu_name"],
+                gpu_driver=gpu_info["gpu_driver"],
                 max_concurrency=self.max_concurrency,
-                cuda_version=cuda_version,
-                torch_version=torch_version,
-                gpu_sm=gpu_sm,
-                installed_libs=installed_libs,
+                cuda_version=gpu_info["cuda_version"],
+                torch_version=gpu_info["torch_version"],
+                gpu_sm=gpu_info["gpu_sm"],
+                installed_libs=gpu_info["installed_libs"],
                 available_functions=list(dict.fromkeys(list(self._request_specs.keys()) + list(self._ws_specs.keys()))),
                 vram_models=vram_models,   # Models in VRAM (hot)
                 disk_models=disk_models,   # Models on disk (warm)
@@ -2364,12 +2433,6 @@ class Worker:
         elif msg_type == 'batch_job_request':
             self._handle_batch_job_request(message.batch_job_request)
         elif msg_type == 'load_model_cmd':
-            # TODO: Implement model loading logic
-            # model_id = message.load_model_cmd.model_id
-            # logger.warning(f"Received load_model_cmd for {model_id}, but not yet implemented.")
-            # # Send result back (failure for now)
-            # result = pb.LoadModelResult(model_id=model_id, success=False, error_message="Model loading not implemented")
-            # self._send_message(pb.WorkerSchedulerMessage(load_model_result=result))
             self._handle_load_model_cmd(message.load_model_cmd)
         elif msg_type == 'unload_model_cmd':
             self._handle_unload_model_cmd(message.unload_model_cmd)
@@ -3015,26 +3078,7 @@ class Worker:
                 item_index = int(raw_item_index)
             except Exception:
                 item_index = None
-        materialized_input_urls: Dict[str, str] = {}
-        raw_urls_map = getattr(request, "input_ref_urls", None)
-        if isinstance(raw_urls_map, cabc.Mapping):
-            for k, v in raw_urls_map.items():
-                ks = str(k or "").strip().lstrip("/")
-                vs = str(v or "").strip()
-                if ks and vs:
-                    materialized_input_urls[ks] = vs
-        raw_urls = getattr(request, "input_ref_urls_json", None)
-        if isinstance(raw_urls, str) and raw_urls.strip():
-            try:
-                parsed = json.loads(raw_urls)
-                if isinstance(parsed, dict):
-                    for k, v in parsed.items():
-                        ks = str(k or "").strip().lstrip("/")
-                        vs = str(v or "").strip()
-                        if ks and vs:
-                            materialized_input_urls[ks] = vs
-            except Exception:
-                pass
+        materialized_input_urls = _normalize_materialized_input_urls(request)
 
         required_models_raw = list(getattr(request, "required_variant_refs", []) or [])
         if required_models_raw:
@@ -3249,26 +3293,7 @@ class Worker:
         timeout_ms = int(getattr(cmd, "timeout_ms", 0) or 0) or None
         file_base_url = str(getattr(cmd, "file_base_url", "") or "")
         worker_capability_token = _extract_worker_capability_token(cmd)
-        materialized_input_urls: Dict[str, str] = {}
-        raw_urls_map = getattr(cmd, "input_ref_urls", None)
-        if isinstance(raw_urls_map, cabc.Mapping):
-            for k, v in raw_urls_map.items():
-                ks = str(k or "").strip().lstrip("/")
-                vs = str(v or "").strip()
-                if ks and vs:
-                    materialized_input_urls[ks] = vs
-        raw_urls = getattr(cmd, "input_ref_urls_json", None)
-        if isinstance(raw_urls, str) and raw_urls.strip():
-            try:
-                parsed = json.loads(raw_urls)
-                if isinstance(parsed, dict):
-                    for k, v in parsed.items():
-                        ks = str(k or "").strip().lstrip("/")
-                        vs = str(v or "").strip()
-                        if ks and vs:
-                            materialized_input_urls[ks] = vs
-            except Exception:
-                pass
+        materialized_input_urls = _normalize_materialized_input_urls(cmd)
         ctx = RequestContext(
             session_id,
             emitter=self._emit_progress_event,
@@ -3963,7 +3988,7 @@ class Worker:
                 pass
 
             try:
-                from .pipeline.loader import LocalModelCache  # local import to avoid heavy import at worker init
+                from .pipeline.local_cache import LocalModelCache  # local import to avoid heavy import at worker init
 
                 max_cache_gb = float(os.environ.get("WORKER_LOCAL_CACHE_GB", "100"))
                 self._local_model_cache = LocalModelCache(d, max_cache_gb)
@@ -4047,12 +4072,22 @@ class Worker:
         if canonical.startswith("cozy:"):
             parsed_canonical = canonical[len("cozy:"):]
 
-        token = set_cozy_model_download_prefs_by_ref({parsed_canonical: prefs} if prefs else None)
+        from .models.ref_downloader import (
+            reset_cozy_worker_capability_token,
+            set_cozy_worker_capability_token,
+        )
+
+        prefs_tok = set_cozy_model_download_prefs_by_ref({parsed_canonical: prefs} if prefs else None)
+        # Plumb the per-job capability token into the downloader's tensorhub-resolve
+        # fallback so the resolve-artifact call authenticates as the invoker.
+        cap_token_raw = str(getattr(ctx, "_worker_capability_token", "") or "").strip()
+        cap_tok = set_cozy_worker_capability_token(cap_token_raw or None)
         try:
             cache_dir = str(worker_model_cache_dir())
             local = self._downloader.download(canonical, cache_dir)
         finally:
-            reset_cozy_model_download_prefs_by_ref(token)
+            reset_cozy_model_download_prefs_by_ref(prefs_tok)
+            reset_cozy_worker_capability_token(cap_tok)
 
         if not local or not Path(local).exists():
             raise RuntimeError(f"source materialization returned missing path: {local!r}")
@@ -4097,7 +4132,7 @@ class Worker:
             return
         base_url = base_url.rstrip("/")
 
-        token = str(getattr(ctx, "worker_capability_token", "") or "").strip()
+        token = str(getattr(ctx, "_worker_capability_token", "") or "").strip()
         if not token:
             logger.warning("[request_id=%s] no worker_capability_token; skipping destination tag apply", ctx.request_id)
             return
