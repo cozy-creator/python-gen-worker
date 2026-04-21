@@ -110,3 +110,55 @@ class LoraSpec(msgspec.Struct):
     file: Asset
     weight: float = 1.0
     adapter_name: Optional[str] = None
+
+
+class SourceRepo(msgspec.Struct):
+    """Reserved-name source descriptor for conversion/training job payloads.
+
+    gen-orchestrator inspects ``payload.source`` by name before dispatching a
+    conversion or training job. Endpoints embed this type in their Input struct
+    as the reserved-name field ``source``.
+
+    Fields:
+      - ref: "owner/repo" | "owner/repo:tag" | "owner/repo@<checkpoint-digest>"
+      - variant_id: explicit repo_version_variants.id; highest-priority selector
+      - attributes: subset-containment selector against the variant's attributes
+        map. Well-known keys include dtype, file_layout, file_type, quant_library,
+        plus family-specific keys (quant_bits, quant_group_size, quant_sym,
+        quant_desc_act, quant_block_size, quant_double_quant, quant_compute_dtype,
+        quant_layout, quant_granularity, quant_activation_scheme, etc.). See
+        tensorhub ``docs/variant_attributes.md`` for the namespace.
+    """
+
+    ref: str
+    variant_id: Optional[str] = None
+    attributes: dict = msgspec.field(default_factory=dict)
+
+
+class DestinationRepo(msgspec.Struct):
+    """Reserved-name destination descriptor for conversion/training job payloads.
+
+    gen-orchestrator inspects ``payload.destination`` by name before dispatch.
+    The library applies ``tags`` against the newly-produced checkpoint after the
+    tenant function returns success (atomic per-tag move; empty list = no-op).
+    """
+
+    ref: str
+    tags: list = msgspec.field(default_factory=list)
+
+
+class OutputSpec(msgspec.Struct):
+    """Describes one variant a conversion endpoint will emit into the destination checkpoint.
+
+    Every entry in ``payload.outputs`` produces one variant on the destination
+    repo's new checkpoint. Tenant code may augment ``attributes`` at upload time
+    (e.g. record runtime-discovered provenance like quant_library_version);
+    the final stored attribute bag is OutputSpec.attributes ∪ tenant-augmented.
+
+    The attribute map must be complete enough to pass tensorhub's per-family
+    variant-attribute validation — missing required keys for the declared
+    quant_library (bitsandbytes, gptqmodel, autoawq, torchao, modelopt, gguf)
+    are rejected at commit time. See tensorhub ``docs/variant_attributes.md``.
+    """
+
+    attributes: dict = msgspec.field(default_factory=dict)

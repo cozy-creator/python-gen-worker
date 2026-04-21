@@ -4,7 +4,7 @@ from .api.injection import ModelRef, ModelRefSource
 from .request_context import RequestContext
 from .worker import RealtimeSocket
 from .api.errors import AuthError, RetryableError, FatalError, OutputTooLargeError
-from .api.types import Asset, LoraSpec, Tensors
+from .api.types import Asset, DestinationRepo, LoraSpec, OutputSpec, SourceRepo, Tensors
 from .models.interface import ModelManager
 from .models.downloader import ModelDownloader, CozyHubDownloader
 from .discovery.validation import EndpointValidationResult, validate_endpoint
@@ -50,6 +50,9 @@ __all__ = [
     "Asset",
     "Tensors",
     "LoraSpec",
+    "SourceRepo",
+    "DestinationRepo",
+    "OutputSpec",
     "ModelManager",
     "ModelDownloader",
     "CozyHubDownloader",

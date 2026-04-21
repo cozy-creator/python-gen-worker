@@ -106,6 +106,36 @@ def _extract_worker_capability_token(envelope: Any) -> str:
     return str(getattr(envelope, "worker_capability_token", "") or "").strip()
 
 
+def _extract_checkpoint_id_from_result(result: Any) -> str:
+    """Best-effort: find the snapshot_digest of the produced checkpoint inside
+    a ConversionOutput-like struct so the library can tag it. Returns "" when
+    no digest is findable — caller logs a warning and skips tag apply.
+
+    Recognizes:
+      - result.weights.snapshot_digest (ConversionOutput with single Tensors)
+      - result.weights[0].snapshot_digest (ConversionOutput with list[Tensors])
+      - result.checkpoint_id (generic output carrying a digest string)
+    """
+    if result is None:
+        return ""
+    # Direct checkpoint_id attribute.
+    cid = getattr(result, "checkpoint_id", None)
+    if isinstance(cid, str) and cid.strip():
+        return cid.strip()
+    weights = getattr(result, "weights", None)
+    if weights is not None:
+        if isinstance(weights, (list, tuple)):
+            for w in weights:
+                d = getattr(w, "snapshot_digest", None)
+                if isinstance(d, str) and d.strip():
+                    return d.strip()
+        else:
+            d = getattr(weights, "snapshot_digest", None)
+            if isinstance(d, str) and d.strip():
+                return d.strip()
+    return ""
+
+
 @dataclass(frozen=True)
 class _RequestSpec:
     name: str
@@ -3070,16 +3100,34 @@ class Worker:
                 execution_hints["memory_hint_mb"] = int(req_cfg.get("memory_hint_mb") or 0)
             except Exception:
                 pass
-        # For conversion/training tasks, extract destination_repo from the input
-        # payload and set job_id from job_id so the request context has repo-job
-        # scope for tensor uploads.
+        # For conversion/training tasks, extract the reserved-name fields
+        # (`source` and `destination`) from the input payload so RequestContext
+        # can expose them to tenant code via ctx.source, ctx.source_path,
+        # ctx.destination, and so the repo-job upload scope can resolve. Falls
+        # back to the legacy scalar `destination_repo` field when present.
+        source_info_raw: Optional[Dict[str, Any]] = None
+        destination_info_raw: Optional[Dict[str, Any]] = None
         if kind.lower() in {"conversion", "training"} and input_payload:
             try:
                 raw_input = msgspec.msgpack.decode(input_payload)
                 if isinstance(raw_input, dict):
-                    dest = str(raw_input.get("destination_repo") or "").strip()
-                    if dest:
-                        execution_hints["destination_repo"] = dest
+                    # New contract: payload.destination is a struct with {ref, tags}.
+                    dest_obj = raw_input.get("destination")
+                    if isinstance(dest_obj, dict):
+                        destination_info_raw = dict(dest_obj)
+                        dest_ref = str(dest_obj.get("ref") or "").strip()
+                        if dest_ref:
+                            execution_hints["destination_repo"] = dest_ref
+                    else:
+                        # Legacy scalar destination_repo field.
+                        dest = str(raw_input.get("destination_repo") or "").strip()
+                        if dest:
+                            execution_hints["destination_repo"] = dest
+                            destination_info_raw = {"ref": dest, "tags": []}
+                    # New contract: payload.source is a struct with {ref, variant_id?, attributes}.
+                    src_obj = raw_input.get("source")
+                    if isinstance(src_obj, dict):
+                        source_info_raw = dict(src_obj)
             except Exception:
                 pass
             if job_id and "job_id" not in execution_hints:
@@ -3104,6 +3152,8 @@ class Worker:
             child_request_id=child_request_id,
             item_id=item_id,
             item_index=item_index,
+            source_info=source_info_raw,
+            destination_info=destination_info_raw,
         )
         # Add to active requests *before* starting thread
         with self._active_requests_lock:
@@ -3606,6 +3656,24 @@ class Worker:
                 f"request.{execution_kind}.started",
                 {"function_name": spec.name, "output_mode": spec.output_mode, "phase": execution_kind},
             )
+
+            # Reserved-name source materialization for conversion/training jobs.
+            # If the payload declared payload.source (a SourceRepo-shaped dict),
+            # resolve it against tensorhub via the worker's downloader and
+            # populate ctx.source_path with the local snapshot dir. See
+            # e2e/agents/progress.json issue #5.
+            if execution_kind in {"conversion", "training"}:
+                src_info = getattr(ctx, "source", None) or {}
+                if isinstance(src_info, dict) and str(src_info.get("ref") or "").strip():
+                    try:
+                        self._materialize_source_for_conversion(ctx, src_info)
+                    except Exception as exc:
+                        logger.exception(
+                            "[request_id=%s] source materialization failed: %s",
+                            request_id, exc,
+                        )
+                        raise
+
             logger.info("[request_id=%s] calling %s", request_id, spec.name)
             if inspect.iscoroutinefunction(spec.func):
                 result = asyncio.run(spec.func(**call_kwargs))
@@ -3626,6 +3694,26 @@ class Worker:
                 if self.max_output_bytes > 0 and len(output_payload) > self.max_output_bytes:
                     raise ValueError(f"Output payload too large: {len(output_payload)} bytes (max {self.max_output_bytes})")
                 success = True
+
+                # Conversion/training: apply destination.tags to the produced
+                # checkpoint. Non-fatal on failure — upload already succeeded.
+                if execution_kind in {"conversion", "training"}:
+                    dest_info = getattr(ctx, "destination", None) or {}
+                    if isinstance(dest_info, dict) and dest_info.get("tags"):
+                        checkpoint_id = _extract_checkpoint_id_from_result(result)
+                        if checkpoint_id:
+                            try:
+                                self._apply_destination_tags(ctx, dest_info, checkpoint_id)
+                            except Exception as exc:
+                                logger.warning(
+                                    "[request_id=%s] tag apply raised (non-fatal): %s",
+                                    request_id, exc,
+                                )
+                        else:
+                            logger.warning(
+                                "[request_id=%s] destination.tags set but could not extract checkpoint_id from result",
+                                request_id,
+                            )
             else:
                 # Incremental output: the function returns an iterator of delta structs.
                 max_delta_bytes = int(os.getenv("WORKER_MAX_OUTPUT_DELTA_BYTES", "65536"))
@@ -3908,6 +3996,144 @@ class Worker:
             }
         except Exception:
             return {}
+
+    def _materialize_source_for_conversion(self, ctx: RequestContext, source: Dict[str, Any]) -> None:
+        """Materialize the source snapshot for a conversion/training job.
+
+        Called just before tenant code runs when the job payload has a
+        reserved-name `source` field. Resolves source.ref against tensorhub,
+        downloads the variant matching source.attributes (subset-containment),
+        and populates ctx.source_path with the local snapshot directory.
+
+        If source.variant_id is set, it takes priority over the attributes
+        selector (future: wired through when tensorhub's resolve API accepts
+        variant_id selectors; today dtype-prefs is the best proxy).
+        """
+        ref = str(source.get("ref") or "").strip()
+        if not ref:
+            return
+        if self._downloader is None:
+            raise RuntimeError(
+                "source materialization requires a model downloader "
+                "(set TENSORHUB_URL so the worker can resolve cozy refs)"
+            )
+        # Canonicalize refs that omit the cozy: prefix so the downloader treats
+        # them as cozy snapshots, not HF refs.
+        canonical = _canonicalize_model_ref_string(ref)
+        if not canonical.startswith(("cozy:", "hf:")):
+            canonical = "cozy:" + canonical
+
+        # Thread attribute-based download prefs through the contextvar so
+        # ref_downloader.py can honor dtype/file_type/file_layout selectors
+        # while resolving the variant. Attribute keys not recognized by the
+        # current resolver are ignored (forward-compat for #229).
+        attrs = source.get("attributes") or {}
+        prefs: Dict[str, Any] = {}
+        if isinstance(attrs, dict):
+            if attrs.get("dtype"):
+                prefs["dtypes"] = [str(attrs["dtype"]).strip().lower()]
+            if attrs.get("file_type"):
+                prefs["file_type"] = str(attrs["file_type"]).strip().lower()
+            if attrs.get("file_layout"):
+                prefs["file_layout"] = str(attrs["file_layout"]).strip().lower()
+
+        from .models.ref_downloader import (
+            set_cozy_model_download_prefs_by_ref,
+            reset_cozy_model_download_prefs_by_ref,
+        )
+
+        # Parse canonical to identify the downloader's per-ref key.
+        parsed_canonical = canonical
+        if canonical.startswith("cozy:"):
+            parsed_canonical = canonical[len("cozy:"):]
+
+        token = set_cozy_model_download_prefs_by_ref({parsed_canonical: prefs} if prefs else None)
+        try:
+            cache_dir = str(worker_model_cache_dir())
+            local = self._downloader.download(canonical, cache_dir)
+        finally:
+            reset_cozy_model_download_prefs_by_ref(token)
+
+        if not local or not Path(local).exists():
+            raise RuntimeError(f"source materialization returned missing path: {local!r}")
+
+        ctx._set_source_path(local)
+        logger.info(
+            "[request_id=%s] conversion source materialized at %s (ref=%s, attrs=%s)",
+            ctx.request_id, local, ref, prefs,
+        )
+
+    def _apply_destination_tags(self, ctx: RequestContext, destination: Dict[str, Any], checkpoint_id: str) -> None:
+        """Apply destination.tags to the newly-produced checkpoint.
+
+        Called after the tenant function returns success and at least one
+        variant upload has committed. For each tag in destination.tags, PUTs
+        to tensorhub's `/repos/:owner/:repo/tags?tag=<tag>` route using the
+        job's capability token. Tag-move failures log + surface as a job
+        warning rather than failing the job (upload already succeeded).
+        """
+        if not isinstance(destination, dict):
+            return
+        tags = destination.get("tags") or []
+        if not isinstance(tags, list) or not tags:
+            return
+        dest_ref = str(destination.get("ref") or "").strip()
+        if not dest_ref:
+            return
+        if "/" not in dest_ref:
+            logger.warning("[request_id=%s] destination.ref %r has no owner/repo shape; skipping tag apply", ctx.request_id, dest_ref)
+            return
+        owner, repo = dest_ref.split("/", 1)
+        owner = owner.strip()
+        repo = repo.strip()
+        checkpoint_id = str(checkpoint_id or "").strip()
+        if not owner or not repo or not checkpoint_id:
+            logger.warning("[request_id=%s] tag apply skipped: owner=%r repo=%r checkpoint=%r", ctx.request_id, owner, repo, checkpoint_id)
+            return
+
+        base_url = os.getenv("TENSORHUB_URL", "").strip()
+        if not base_url:
+            logger.warning("[request_id=%s] TENSORHUB_URL unset; skipping destination tag apply", ctx.request_id)
+            return
+        base_url = base_url.rstrip("/")
+
+        token = str(getattr(ctx, "worker_capability_token", "") or "").strip()
+        if not token:
+            logger.warning("[request_id=%s] no worker_capability_token; skipping destination tag apply", ctx.request_id)
+            return
+
+        import urllib.parse
+        import urllib.request
+
+        for raw_tag in tags:
+            tag = str(raw_tag or "").strip()
+            if not tag:
+                continue
+            url = (
+                f"{base_url}/api/v1/repos/{urllib.parse.quote(owner, safe='')}/"
+                f"{urllib.parse.quote(repo, safe='')}/tags?tag={urllib.parse.quote(tag, safe='')}"
+            )
+            body = json.dumps({"checkpoint_id": checkpoint_id}).encode("utf-8")
+            req = urllib.request.Request(url, data=body, method="PUT")
+            req.add_header("Authorization", f"Bearer {token}")
+            req.add_header("Content-Type", "application/json")
+            try:
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    if resp.status >= 300:
+                        logger.warning(
+                            "[request_id=%s] tag apply %r returned HTTP %s (non-fatal)",
+                            ctx.request_id, tag, resp.status,
+                        )
+                    else:
+                        logger.info(
+                            "[request_id=%s] tag %r moved to checkpoint %s on %s/%s",
+                            ctx.request_id, tag, checkpoint_id[:16], owner, repo,
+                        )
+            except Exception as exc:
+                logger.warning(
+                    "[request_id=%s] tag apply %r failed (non-fatal): %s",
+                    ctx.request_id, tag, exc,
+                )
 
     def _resolve_injected_value(self, ctx: RequestContext, requested_type: Any, model_id: str, inj: InjectionSpec) -> Any:
         qn = type_qualname(requested_type)

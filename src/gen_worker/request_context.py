@@ -791,6 +791,8 @@ class RequestContext:
         item_id: Optional[str] = None,
         item_index: Optional[int] = None,
         item_span: Optional[Dict[str, int]] = None,
+        source_info: Optional[Dict[str, Any]] = None,
+        destination_info: Optional[Dict[str, Any]] = None,
     ) -> None:
         self._request_id = str(request_id or "").strip()
         self._job_id = str(job_id or "").strip() or None
@@ -818,6 +820,14 @@ class RequestContext:
         self._cancel_event = threading.Event()
         self._emitter = emitter
         self._cached_repo_job_scope: Optional[tuple[str, str, str]] = None
+        # Reserved-name conversion/training contract attributes. Populated by
+        # Worker._handle_job_request before invoking tenant code when the
+        # endpoint is kind=conversion|training and the payload declares the
+        # reserved `source`/`destination` struct fields. See e2e progress.json
+        # issue #5.
+        self._source_info = dict(source_info or {})
+        self._destination_info = dict(destination_info or {})
+        self._source_path: Optional[str] = None
 
     @property
     def request_id(self) -> str:
@@ -996,6 +1006,37 @@ class RequestContext:
     @property
     def execution_hints(self) -> Dict[str, Any]:
         return dict(self._execution_hints)
+
+    # Reserved-name conversion/training contract. `source` and `destination`
+    # come from the job payload's reserved fields (the Worker extracts and
+    # populates them before invoking tenant code). `source_path` is populated
+    # by the library after it materializes the source snapshot to local disk.
+    # Tenant code reads these; writes happen only inside the library.
+    @property
+    def source(self) -> Dict[str, Any]:
+        """Echoed source descriptor: {ref, variant_id?, attributes}. Empty dict
+        if this isn't a conversion/training job or the payload didn't supply
+        the reserved `source` field."""
+        return dict(self._source_info)
+
+    @property
+    def source_path(self) -> Optional[str]:
+        """Local path to the materialized source snapshot. Populated by the
+        library after resolve+download; None before materialization or when
+        this isn't a conversion/training job."""
+        return self._source_path
+
+    @property
+    def destination(self) -> Dict[str, Any]:
+        """Echoed destination descriptor: {ref, tags}. Empty dict if this isn't
+        a conversion/training job or the payload didn't supply the reserved
+        `destination` field."""
+        return dict(self._destination_info)
+
+    def _set_source_path(self, path: str) -> None:
+        """Library-internal: called by Worker after the source snapshot has
+        been materialized locally. Tenant code must not call this."""
+        self._source_path = str(path) if path else None
 
     @property
     def parent_request_id(self) -> Optional[str]:
