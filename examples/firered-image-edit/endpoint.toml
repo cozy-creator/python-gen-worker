@@ -4,7 +4,7 @@ name = "firered-image-edit"
 main = "firered_image_edit.main"
 
 [models]
-firered_image_edit = { ref = "fireredteam/firered-image-edit-1.0", dtypes = ["bf16"] }
+firered_image_edit = { ref = "fireredteam/firered-image-edit-1.0", attributes = { dtype = ["bf16"] } }
 
 [host.requirements]
 cuda = "12.8"

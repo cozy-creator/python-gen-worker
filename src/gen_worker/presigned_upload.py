@@ -80,6 +80,7 @@ def presigned_upload_file(
     max_parallel: int = _MAX_PARALLEL_PARTS,
     on_progress: Optional[Any] = None,
     cancel_check: Optional[Any] = None,
+    complete_extra: Optional[Dict[str, Any]] = None,
 ) -> PresignedUploadResult:
     """Upload a file to TensorHub via presigned S3 multipart.
 
@@ -96,6 +97,11 @@ def presigned_upload_file(
         max_parallel: Max concurrent part uploads.
         on_progress: Optional callback(parts_done, total_parts, bytes_uploaded).
         cancel_check: Optional callable that returns True if canceled.
+        complete_extra: Optional extra fields merged into the /complete POST
+            body (after the `parts` array). Used by repo-cas uploads to carry
+            lineage metadata — step_number, epoch_number, output_kind,
+            target_dtype, variant_label, produced_by_kind. Tensorhub persists
+            these into checkpoint_lineage (e2e issue #8).
     """
     url = f"{base_url}{endpoint_path}"
 
@@ -165,9 +171,17 @@ def presigned_upload_file(
 
     # --- Step 3: Complete ---
     complete_url = f"{url}/{session_id}/complete"
-    complete_payload = {
+    complete_payload: Dict[str, Any] = {
         "parts": [{"part_number": pn, "etag": et} for pn, et in etags],
     }
+    if complete_extra:
+        for k, v in complete_extra.items():
+            if v is None:
+                continue
+            # Reserved name — never let caller smuggle in a fake parts list.
+            if k == "parts":
+                continue
+            complete_payload[k] = v
     complete_headers = dict(headers)
     complete_headers["Content-Type"] = "application/json"
 

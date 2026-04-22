@@ -4,7 +4,7 @@ name = "qwen-image-2512"
 main = "qwen_image_2512.main"
 
 [models]
-qwen_image = { ref = "qwen/qwen-image-2512", dtypes = ["bf16", "fp16"] }
+qwen_image = { ref = "qwen/qwen-image-2512", attributes = { dtype = ["bf16", "fp16"] } }
 
 [host.requirements]
 cuda = "12.8"

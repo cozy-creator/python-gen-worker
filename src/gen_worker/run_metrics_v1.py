@@ -192,12 +192,24 @@ class RunMetricsV1:
         if snapshot_digest:
             ent.snapshot_digest = snapshot_digest
 
-    def add_fetch_time(self, model_id: str, ms: int, bytes_downloaded: Optional[int] = None) -> None:
+    @staticmethod
+    def _coerce_nonneg_ms(ms: object) -> Optional[int]:
+        """Coerce `ms` to a non-negative int; return None if invalid.
+
+        Shared by every `add_*_time` accumulator so the `try/except/if<0`
+        dance isn't copy-pasted five times.
+        """
         try:
-            ms_i = int(ms)
+            ms_i = int(ms)  # type: ignore[arg-type]
         except Exception:
-            return
+            return None
         if ms_i < 0:
+            return None
+        return ms_i
+
+    def add_fetch_time(self, model_id: str, ms: int, bytes_downloaded: Optional[int] = None) -> None:
+        ms_i = self._coerce_nonneg_ms(ms)
+        if ms_i is None:
             return
         self._fetch_ms_accum += ms_i
         ent = self._get_model_entry(model_id)
@@ -235,31 +247,19 @@ class RunMetricsV1:
                 pass
 
     def add_pipeline_init_time(self, ms: int) -> None:
-        try:
-            ms_i = int(ms)
-        except Exception:
-            return
-        if ms_i < 0:
-            return
-        self._pipeline_init_ms_accum += ms_i
+        ms_i = self._coerce_nonneg_ms(ms)
+        if ms_i is not None:
+            self._pipeline_init_ms_accum += ms_i
 
     def add_gpu_load_time(self, ms: int) -> None:
-        try:
-            ms_i = int(ms)
-        except Exception:
-            return
-        if ms_i < 0:
-            return
-        self._gpu_load_ms_accum += ms_i
+        ms_i = self._coerce_nonneg_ms(ms)
+        if ms_i is not None:
+            self._gpu_load_ms_accum += ms_i
 
     def add_upload_time(self, ms: int) -> None:
-        try:
-            ms_i = int(ms)
-        except Exception:
-            return
-        if ms_i < 0:
-            return
-        self._upload_ms_accum += ms_i
+        ms_i = self._coerce_nonneg_ms(ms)
+        if ms_i is not None:
+            self._upload_ms_accum += ms_i
 
     def finalize(self) -> None:
         # Avoid emitting misleading zeros: only set *_ms fields when we observed

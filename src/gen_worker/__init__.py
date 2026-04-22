@@ -4,7 +4,7 @@ from .api.injection import ModelRef, ModelRefSource
 from .request_context import RequestContext
 from .worker import RealtimeSocket
 from .api.errors import AuthError, RetryableError, FatalError, OutputTooLargeError
-from .api.types import Asset, DestinationRepo, LoraSpec, OutputSpec, SourceRepo, Tensors
+from .api.types import Asset, DatasetRef, DestinationRepo, LoraSpec, OutputSpec, SourceRepo, Tensors
 from .models.interface import ModelManager
 from .models.downloader import ModelDownloader, CozyHubDownloader
 from .discovery.validation import EndpointValidationResult, validate_endpoint
@@ -24,11 +24,8 @@ from .utils.lora import load_loras
 try:
     from .pipeline.loader import (
         PipelineLoader,
-        PipelineConfig,
-        LoadedPipeline,
         PipelineLoaderError,
         ModelNotFoundError,
-        CudaOutOfMemoryError,
     )
 except ImportError:
     # torch not installed - pipeline_loader not available
@@ -52,6 +49,7 @@ __all__ = [
     "LoraSpec",
     "SourceRepo",
     "DestinationRepo",
+    "DatasetRef",
     "OutputSpec",
     "ModelManager",
     "ModelDownloader",
@@ -70,9 +68,6 @@ __all__ = [
     "iter_transformers_text_deltas",
     # Pipeline loader (torch-dependent, may not be available)
     "PipelineLoader",
-    "PipelineConfig",
-    "LoadedPipeline",
     "PipelineLoaderError",
     "ModelNotFoundError",
-    "CudaOutOfMemoryError",
 ]

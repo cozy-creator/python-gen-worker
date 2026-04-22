@@ -5,10 +5,7 @@ from .spec import CozyPipelineSpec, load_cozy_pipeline_spec
 
 try:
     from .loader import (
-        CudaOutOfMemoryError,
-        LoadedPipeline,
         ModelNotFoundError,
-        PipelineConfig,
         PipelineLoader,
         PipelineLoaderError,
     )
@@ -21,10 +18,7 @@ __all__ = [
     "mount_backend_for_path",
     "CozyPipelineSpec",
     "load_cozy_pipeline_spec",
-    "CudaOutOfMemoryError",
-    "LoadedPipeline",
     "ModelNotFoundError",
-    "PipelineConfig",
     "PipelineLoader",
     "PipelineLoaderError",
     "DiffusersModelManager",

@@ -5,10 +5,10 @@ name = "sd15"
 main = "sd15.main"
 
 [models]
-sd15 = { ref = "stable-diffusion-v1-5/stable-diffusion-v1-5", dtypes = ["fp16", "bf16"] }
-sd15_fp8 = { ref = "stable-diffusion-v1-5/stable-diffusion-v1-5", dtypes = ["fp8"] }
-sd15_int8 = { ref = "stable-diffusion-v1-5/stable-diffusion-v1-5", dtypes = ["int8"] }
-sd15_int4 = { ref = "stable-diffusion-v1-5/stable-diffusion-v1-5", dtypes = ["int4"] }
+sd15 = { ref = "stable-diffusion-v1-5/stable-diffusion-v1-5", attributes = { dtype = ["fp16", "bf16"] } }
+sd15_fp8 = { ref = "stable-diffusion-v1-5/stable-diffusion-v1-5", attributes = { dtype = ["fp8"] } }
+sd15_int8 = { ref = "stable-diffusion-v1-5/stable-diffusion-v1-5", attributes = { dtype = ["int8"] } }
+sd15_int4 = { ref = "stable-diffusion-v1-5/stable-diffusion-v1-5", attributes = { dtype = ["int4"] } }
 
 [host.requirements]
 # If cuda is set, the platform treats this worker as requiring an NVIDIA GPU.

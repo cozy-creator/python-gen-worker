@@ -366,28 +366,22 @@ def _resolve_repo_job_upload_context(spec: Mapping[str, Any]) -> tuple[str, str,
 
     Supports either top-level fields or execution_hints-style payloads.
     """
+    from gen_worker.request_context import (
+        _HINT_KEYS_DESTINATION_REPO,
+        _HINT_KEYS_EXECUTION_KIND,
+        _HINT_KEYS_JOB_ID,
+        _resolve_hint_first_string,
+    )
+
     raw_hints = spec.get("execution_hints")
     hints = raw_hints if isinstance(raw_hints, Mapping) else {}
-    kind = str(hints.get("kind") or spec.get("execution_kind") or spec.get("kind") or "training").strip().lower()
-    destination_repo = str(
-        hints.get("destination_repo")
-        or hints.get("repo")
-        or hints.get("output_repo")
-        or spec.get("destination_repo")
-        or spec.get("output_repo")
-        or spec.get("repo")
-        or ""
-    ).strip()
-    job_id = str(
-        hints.get("job_id")
-        or hints.get("training_job_id")
-        or hints.get("conversion_job_id")
-        or spec.get("job_id")
-        or spec.get("training_job_id")
-        or spec.get("conversion_job_id")
-        or spec.get("job_id")
-        or ""
-    ).strip()
+    kind = _resolve_hint_first_string(
+        hints, spec, keys=_HINT_KEYS_EXECUTION_KIND, fallback="training"
+    ).lower()
+    destination_repo = _resolve_hint_first_string(
+        hints, spec, keys=_HINT_KEYS_DESTINATION_REPO
+    )
+    job_id = _resolve_hint_first_string(hints, spec, keys=_HINT_KEYS_JOB_ID)
     return kind, destination_repo, job_id
 
 

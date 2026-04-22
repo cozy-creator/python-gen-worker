@@ -4,7 +4,7 @@ name = "image-gen"
 main = "image_gen.main"
 
 [models]
-sdxl = { ref = "stabilityai/stable-diffusion-xl-base-1.0", dtypes = ["fp16", "bf16"] }
+sdxl = { ref = "stabilityai/stable-diffusion-xl-base-1.0", attributes = { dtype = ["fp16", "bf16"] } }
 
 [host.requirements]
 cuda = "12.8"

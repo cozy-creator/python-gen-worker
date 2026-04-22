@@ -128,23 +128,25 @@ def _find_python_files(root: Path, skip_patterns: Optional[Set[str]] = None) -> 
 
 
 def _file_uses_worker_decorator(filepath: Path) -> bool:
-    """Quick AST check if file uses @worker_function decorator."""
+    """Quick AST check if file uses @worker_function or @conversion_function."""
     try:
         source = filepath.read_text(encoding="utf-8")
         tree = ast.parse(source, filename=str(filepath))
     except (SyntaxError, UnicodeDecodeError):
         return False
 
+    target_names = {"worker_function", "conversion_function"}
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef):
             for decorator in node.decorator_list:
-                # Check for @worker_function or @worker_function(...)
-                if isinstance(decorator, ast.Name) and decorator.id == "worker_function":
+                # @worker_function, @conversion_function (bare)
+                if isinstance(decorator, ast.Name) and decorator.id in target_names:
                     return True
+                # @worker_function(...), @conversion_function(kind=...)
                 if isinstance(decorator, ast.Call):
-                    if isinstance(decorator.func, ast.Name) and decorator.func.id == "worker_function":
+                    if isinstance(decorator.func, ast.Name) and decorator.func.id in target_names:
                         return True
-                    if isinstance(decorator.func, ast.Attribute) and decorator.func.attr == "worker_function":
+                    if isinstance(decorator.func, ast.Attribute) and decorator.func.attr in target_names:
                         return True
     return False
 
@@ -341,6 +343,84 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
     return fn
 
 
+def _extract_conversion_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
+    """Extract endpoint.lock metadata from a @conversion_function-decorated tenant.
+
+    Reads ``__conversion_spec__`` attached by the decorator — fetches the
+    tenant-declared ``kind`` (issue #10), the full wire-payload JSON schema
+    (issue #5), and the ref_registry for capability-token scoping. Returns a
+    dict compatible with the endpoint.lock ``functions`` entry shape used by
+    @worker_function discovery, so downstream consumers (orchestrator
+    ``FunctionMetadata``, tensorhub publish-time validator) can read one
+    unified format.
+    """
+    spec = getattr(func, "__conversion_spec__", None)
+    if spec is None:
+        raise ValueError(f"{func.__name__}: missing __conversion_spec__ (expected @conversion_function decoration)")
+
+    resources = getattr(func, "_worker_resources", None)
+    res_dict: Dict[str, Any] = {}
+    if resources is not None and hasattr(resources, "to_dict"):
+        try:
+            raw = resources.to_dict()
+            if isinstance(raw, dict):
+                res_dict.update(raw)
+        except Exception:
+            pass
+
+    function_name = slugify_function_name(func.__name__)
+    if not function_name:
+        raise ValueError(f"{func.__name__}: function name cannot be normalized")
+
+    input_schema = dict(spec.input_schema or {})
+    input_schema_bytes = json.dumps(input_schema, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    input_sha = hashlib.sha256(input_schema_bytes).hexdigest()
+
+    # Synthesize injection_json from ref_registry — each PAYLOAD-bound
+    # secondary Source param becomes a `payload`-source injection entry so
+    # orchestrator can extend the capability-token reads set.
+    injections: List[Dict[str, Any]] = []
+    payload_repo_selectors: List[Dict[str, Any]] = []
+    for wire_field, param_name in sorted(spec.ref_registry.items()):
+        injections.append({
+            "param": param_name,
+            "type": "gen_worker.conversion.Source",
+            "model_ref": {"source": "payload", "key": wire_field, "ref": "", "dtypes": []},
+        })
+        payload_repo_selectors.append({"field": wire_field, "kind": "short_key"})
+
+    fn: Dict[str, Any] = {
+        "name": function_name,
+        "python_name": func.__name__,
+        "module": module_name,
+        "resources": res_dict,
+        # Conversion functions have a single structured return (list[ProducedVariant])
+        # that the library uploads. Tenant input schema captures the full wire
+        # payload (source, destination, datasets, specs, PAYLOAD-model refs,
+        # tenant-named params); issue #5 bakes it into endpoint.lock so
+        # orchestrator validates submit-time.
+        "payload_type": {"module": "", "qualname": "gen_worker.conversion.WirePayload"},
+        "payload_schema_sha256": input_sha,
+        "input_schema": input_schema,
+        "output_mode": "single",
+        "output_type": {"module": "gen_worker.conversion", "qualname": "list[ProducedVariant]"},
+        "output_schema_sha256": "",
+        "output_schema": {},
+        "incremental_output": False,
+        "injection_json": injections,
+        "required_models": [],
+        "payload_repo_selectors": payload_repo_selectors,
+        # Issue #10: tenant-declared job-kind label — orchestrator reads this
+        # at dispatch to populate training_jobs.kind.
+        "kind": spec.kind,
+        # Mark which decorator produced this entry so downstream consumers
+        # can distinguish @worker_function (inference) from @conversion_function
+        # (conversion/training) when the decorator-based branch matters.
+        "decorator": "conversion_function",
+    }
+    return fn
+
+
 def _find_endpoint_toml_path(root: Path) -> Path | None:
     env_path = os.getenv("ENDPOINT_TOML_PATH", "").strip()
     if env_path:
@@ -358,7 +438,18 @@ def _load_endpoint_manifest_toml(root: Path) -> EndpointToml:
 
 
 def _model_spec_to_json(spec: TensorhubModelSpec) -> Dict[str, Any]:
-    return {"ref": spec.ref, "dtypes": list(spec.dtypes)}
+    """Emit a [models] entry for endpoint.lock.
+
+    Attribute values are always lists (ordered preferences); single-valued
+    attributes are 1-element lists. Tensorhub's resolver flips list-valued
+    attributes to ordered preference selection (first preference with a
+    matching variant wins).
+    """
+    out: Dict[str, Any] = {"ref": spec.ref}
+    attrs = spec.attributes_as_dict()
+    if attrs:
+        out["attributes"] = attrs
+    return out
 
 
 def _models_by_key_to_json(models: Dict[str, TensorhubModelSpec]) -> Dict[str, Any]:
@@ -437,13 +528,20 @@ def discover_functions(root: Optional[Path] = None, *, main_module: str | None =
                 continue
             # Iterate module dict to avoid triggering module-level __getattr__.
             for obj in mod.__dict__.values():
-                if not inspect.isfunction(obj) or not getattr(obj, "_is_worker_function", False):
+                if not inspect.isfunction(obj):
+                    continue
+                is_worker = getattr(obj, "_is_worker_function", False)
+                is_conversion = getattr(obj, "_is_conversion_function", False)
+                if not (is_worker or is_conversion):
                     continue
                 key = (getattr(obj, "__module__", ""), getattr(obj, "__name__", ""))
                 if key in seen_functions:
                     continue
                 seen_functions.add(key)
-                fn_meta = _extract_function_metadata(obj, module_name)
+                if is_conversion:
+                    fn_meta = _extract_conversion_function_metadata(obj, module_name)
+                else:
+                    fn_meta = _extract_function_metadata(obj, module_name)
                 functions.append(fn_meta)
         return functions
 
@@ -461,17 +559,24 @@ def discover_functions(root: Optional[Path] = None, *, main_module: str | None =
             print(f"warning: failed to import {computed_module_name}: {e}", file=sys.stderr)
             continue
 
-        # Find decorated functions
+        # Find decorated functions (both @worker_function and @conversion_function).
         # Iterate module dict to avoid triggering module-level __getattr__.
         for name, obj in mod.__dict__.items():
-            if not inspect.isfunction(obj) or not getattr(obj, "_is_worker_function", False):
+            if not inspect.isfunction(obj):
+                continue
+            is_worker = getattr(obj, "_is_worker_function", False)
+            is_conversion = getattr(obj, "_is_conversion_function", False)
+            if not (is_worker or is_conversion):
                 continue
             key = (getattr(obj, "__module__", ""), getattr(obj, "__name__", ""))
             if key in seen_functions:
                 continue
             seen_functions.add(key)
             try:
-                fn_meta = _extract_function_metadata(obj, computed_module_name)
+                if is_conversion:
+                    fn_meta = _extract_conversion_function_metadata(obj, computed_module_name)
+                else:
+                    fn_meta = _extract_function_metadata(obj, computed_module_name)
                 functions.append(fn_meta)
             except Exception as e:
                 print(f"warning: failed to extract metadata from {name}: {e}", file=sys.stderr)
@@ -569,13 +674,11 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
                 continue
             ref = str(mr.get("ref") or "").strip()
             src = str(mr.get("source") or "").strip()
-            dtypes_raw = mr.get("dtypes")
-            has_dtypes = isinstance(dtypes_raw, list) and any(str(x).strip() for x in dtypes_raw)
             if src in ("fixed", "payload"):
-                if ref or has_dtypes:
+                if ref:
                     raise ValueError(
-                        f"function '{fn_name}' uses ModelRef({src.upper()}, {key!r}) with inline ref/dtypes; "
-                        "declare model refs and dtypes in endpoint.toml [models] / [models.<function_name>]"
+                        f"function '{fn_name}' uses ModelRef({src.upper()}, {key!r}) with inline ref; "
+                        "declare model refs in endpoint.toml [models] / [models.<function_name>]"
                     )
             if src == "payload":
                 if key not in required_payload_fields:

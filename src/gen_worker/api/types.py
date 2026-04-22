@@ -147,6 +147,31 @@ class DestinationRepo(msgspec.Struct):
     tags: list = msgspec.field(default_factory=list)
 
 
+class DatasetRef(msgspec.Struct):
+    """Reserved-name dataset descriptor for transform-kind job payloads.
+
+    Each entry in ``payload.datasets`` materializes into a :class:`Dataset`
+    object the tenant function receives. Used by calibration-based quant,
+    pruning with gradient scoring, distillation, and fine-tuning.
+
+    Capability-token scope: orchestrator adds each dataset's repo_id to the
+    token's ``reads`` claim alongside the primary source.
+
+    Fields:
+      - ref: "owner/dataset" | "owner/dataset:tag" | "owner/dataset@<digest>"
+      - variant_id: explicit dataset variant id; highest-priority selector
+      - attributes: subset-containment selector against the dataset variant's
+        attributes map (tensorhub #229).
+      - split: "train" | "validation" | "test" | "calibration" | ... — the
+        dataset split the tenant wants. Library materializes only this split.
+    """
+
+    ref: str
+    variant_id: Optional[str] = None
+    attributes: dict = msgspec.field(default_factory=dict)
+    split: str = "train"
+
+
 class OutputSpec(msgspec.Struct):
     """Describes one variant a conversion endpoint will emit into the destination checkpoint.
 

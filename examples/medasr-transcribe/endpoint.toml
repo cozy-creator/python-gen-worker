@@ -4,7 +4,7 @@ name = "medasr-transcribe"
 main = "medasr_transcribe.main"
 
 [models]
-medasr = { ref = "google/medasr", dtypes = ["fp16", "bf16"] }
+medasr = { ref = "google/medasr", attributes = { dtype = ["fp16", "bf16"] } }
 
 [host.requirements]
 cuda = "12.8"

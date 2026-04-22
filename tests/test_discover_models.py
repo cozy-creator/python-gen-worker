@@ -42,10 +42,10 @@ name = "test-project"
 main = "funcs_a"
 
 [models]
-sdxl = { ref = "stabilityai/stable-diffusion-xl-base-1.0", dtypes = ["fp16", "bf16"] }
+sdxl = { ref = "stabilityai/stable-diffusion-xl-base-1.0", attributes = { dtype = "bf16" } }
 
 [models.generate_dynamic]
-base = { ref = "stabilityai/stable-diffusion-xl-base-1.0", dtypes = ["fp16", "bf16"] }
+base = { ref = "stabilityai/stable-diffusion-xl-base-1.0", attributes = { dtype = "bf16" } }
 """.lstrip(),
                     encoding="utf-8",
                 )
@@ -102,10 +102,13 @@ def generate_dynamic(
                     manifest["models"]["sdxl"]["ref"],
                     "stabilityai/stable-diffusion-xl-base-1.0",
                 )
+                # Attributes-map shape: the canonical tensorhub #229 selector.
+                # Values are preference lists (single-entry for a strict match).
                 self.assertEqual(
-                    manifest["models"]["sdxl"]["dtypes"],
-                    ["fp16", "bf16"],
+                    manifest["models"]["sdxl"]["attributes"],
+                    {"dtype": ["bf16"]},
                 )
+                self.assertNotIn("dtypes", manifest["models"]["sdxl"])
                 self.assertEqual(
                     manifest["models_by_function"]["generate-dynamic"]["base"]["ref"],
                     "stabilityai/stable-diffusion-xl-base-1.0",
@@ -374,7 +377,7 @@ def generate(
 
                 with self.assertRaises(ValueError) as ctx:
                     discover_manifest(root)
-                self.assertIn("inline ref/dtypes", str(ctx.exception))
+                self.assertIn("inline ref", str(ctx.exception))
 
             finally:
                 os.chdir(original_cwd)

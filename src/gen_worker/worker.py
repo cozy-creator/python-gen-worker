@@ -32,6 +32,18 @@ import asyncio
 
 import jwt
 from ._worker_auth import _JWKSCache
+from ._worker_support import (
+    RealtimeSocket,
+    _AuthInterceptor,
+    _RealtimeSessionState,
+    _RequestSpec,
+    _WebsocketSpec,
+    _extract_checkpoint_id_from_result,
+    _extract_worker_capability_token,
+    _normalize_materialized_input_urls,
+    _parse_manifest_model_mapping,
+    _workspace_scope_id,
+)
 from .request_context import (
     RequestContext,
     _canonicalize_model_ref_string,
@@ -95,141 +107,6 @@ HEARTBEAT_INTERVAL = 10  # seconds
 _DOWNLOAD_CHUNK_BYTES = 4 * 1024 * 1024
 
 
-def _workspace_scope_id(request_id: str, job_id: Optional[str]) -> str:
-    jid = str(job_id or "").strip()
-    if jid:
-        return jid
-    return str(request_id or "").strip()
-
-
-def _extract_worker_capability_token(envelope: Any) -> str:
-    return str(getattr(envelope, "worker_capability_token", "") or "").strip()
-
-
-def _normalize_materialized_input_urls(envelope: Any) -> Dict[str, str]:
-    """Collect materialized input-ref URLs from a scheduler envelope.
-
-    Supports both `input_ref_urls` (protobuf map) and the legacy
-    `input_ref_urls_json` (JSON-string) shape; merges both with the JSON
-    shape overriding the map on collision. Every key is leading-slash-
-    stripped; empty keys/values are dropped. Unparseable JSON is ignored
-    silently.
-
-    Used by both `_handle_job_request` and `_handle_realtime_open_cmd`
-    — prior copy-paste.
-    """
-    out: Dict[str, str] = {}
-
-    raw_urls_map = getattr(envelope, "input_ref_urls", None)
-    if isinstance(raw_urls_map, cabc.Mapping):
-        for k, v in raw_urls_map.items():
-            ks = str(k or "").strip().lstrip("/")
-            vs = str(v or "").strip()
-            if ks and vs:
-                out[ks] = vs
-
-    raw_urls = getattr(envelope, "input_ref_urls_json", None)
-    if isinstance(raw_urls, str) and raw_urls.strip():
-        try:
-            parsed = json.loads(raw_urls)
-        except Exception:
-            parsed = None
-        if isinstance(parsed, dict):
-            for k, v in parsed.items():
-                ks = str(k or "").strip().lstrip("/")
-                vs = str(v or "").strip()
-                if ks and vs:
-                    out[ks] = vs
-
-    return out
-
-
-def _extract_checkpoint_id_from_result(result: Any) -> str:
-    """Best-effort: find the snapshot_digest of the produced checkpoint inside
-    a ConversionOutput-like struct so the library can tag it. Returns "" when
-    no digest is findable — caller logs a warning and skips tag apply.
-
-    Recognizes:
-      - result.weights.snapshot_digest (ConversionOutput with single Tensors)
-      - result.weights[0].snapshot_digest (ConversionOutput with list[Tensors])
-      - result.checkpoint_id (generic output carrying a digest string)
-    """
-    if result is None:
-        return ""
-    # Direct checkpoint_id attribute.
-    cid = getattr(result, "checkpoint_id", None)
-    if isinstance(cid, str) and cid.strip():
-        return cid.strip()
-    weights = getattr(result, "weights", None)
-    if weights is not None:
-        if isinstance(weights, (list, tuple)):
-            for w in weights:
-                d = getattr(w, "snapshot_digest", None)
-                if isinstance(d, str) and d.strip():
-                    return d.strip()
-        else:
-            d = getattr(weights, "snapshot_digest", None)
-            if isinstance(d, str) and d.strip():
-                return d.strip()
-    return ""
-
-
-@dataclass(frozen=True)
-class _RequestSpec:
-    name: str
-    func: Callable[..., Any]
-    resources: ResourceRequirements
-    ctx_param: str
-    payload_param: str
-    payload_type: type[msgspec.Struct]
-    output_mode: str  # "single" | "incremental"
-    output_type: Optional[type[msgspec.Struct]] = None
-    delta_type: Optional[type[msgspec.Struct]] = None
-    injections: Tuple[InjectionSpec, ...] = ()
-    input_schema_json: bytes = b""
-    output_schema_json: bytes = b""
-    delta_schema_json: Optional[bytes] = None
-    injection_json: bytes = b""
-
-
-@dataclass(frozen=True)
-class _WebsocketSpec:
-    name: str
-    func: Callable[..., Any]
-    resources: ResourceRequirements
-    ctx_param: str
-    socket_param: str
-    injections: Tuple[InjectionSpec, ...] = ()
-
-
-class RealtimeSocket:
-    """
-    Worker-owned socket interface for realtime handlers (no FastAPI dependency).
-    """
-
-    async def send_bytes(self, data: bytes) -> None:  # pragma: no cover - interface
-        raise NotImplementedError
-
-    async def send_json(self, obj: Any) -> None:  # pragma: no cover - interface
-        raise NotImplementedError
-
-    def iter_bytes(self) -> typing.AsyncIterator[bytes]:  # pragma: no cover - interface
-        raise NotImplementedError
-
-    async def close(self) -> None:  # pragma: no cover - interface
-        raise NotImplementedError
-
-
-@dataclass
-class _RealtimeSessionState:
-    session_id: str
-    spec: _WebsocketSpec
-    ctx: RequestContext
-    loop: asyncio.AbstractEventLoop
-    in_q: "asyncio.Queue[Optional[bytes]]"
-    closed: threading.Event
-
-
 class _RealtimeSocketAdapter(RealtimeSocket):
     def __init__(self, worker: "Worker", session_id: str, loop: asyncio.AbstractEventLoop, in_q: "asyncio.Queue[Optional[bytes]]") -> None:
         self._worker = worker
@@ -276,36 +153,7 @@ class _RealtimeSocketAdapter(RealtimeSocket):
             )
         except Exception:
             pass
-# RequestContext, _JWKSCache, and related helpers live in their own modules.
-# They are imported above via from ._worker_auth import ... and from .request_context import ...
 
-
-# Define the interceptor class correctly
-def _parse_manifest_model_mapping(mapping: Dict[str, Any]) -> tuple[Dict[str, str], Dict[str, Dict[str, Any]]]:
-    ids: Dict[str, str] = {}
-    specs: Dict[str, Dict[str, Any]] = {}
-    for k, v in mapping.items():
-        key = str(k).strip()
-        if not key or not isinstance(v, dict):
-            continue
-        ref = _canonicalize_model_ref_string(str(v.get("ref") or "").strip())
-        if not ref:
-            continue
-        dtypes = v.get("dtypes")
-        ids[key] = ref
-        specs[key] = {"ref": ref, "dtypes": [str(x) for x in dtypes if str(x).strip()] if isinstance(dtypes, list) else []}
-    return ids, specs
-
-
-class _AuthInterceptor(grpc.StreamStreamClientInterceptor):
-    def __init__(self, token: str) -> None:
-        self._token = token
-
-    def intercept_stream_stream(self, continuation: Any, client_call_details: Any, request_iterator: Any) -> Any:
-        metadata = list(client_call_details.metadata or [])
-        metadata.append(('authorization', f'Bearer {self._token}'))
-        new_details = client_call_details._replace(metadata=metadata)
-        return continuation(new_details, request_iterator)
 
 class Worker:
     """Worker implementation that connects to the scheduler via gRPC."""
@@ -383,6 +231,10 @@ class Worker:
 
         self._request_specs: Dict[str, _RequestSpec] = {}
         self._ws_specs: Dict[str, _WebsocketSpec] = {}
+        # Transform-kind (@conversion_function) handlers, keyed by function
+        # name. Dispatch shape is (request_context, payload_dict) → list[ProducedVariant];
+        # see gen_worker/conversion/dispatch.py for the contract.
+        self._conversion_specs: Dict[str, Callable[..., Any]] = {}
         self._active_requests: Dict[str, RequestContext] = {}
         self._active_requests_lock = threading.Lock()
         self._request_batch_context: Dict[str, Tuple[str, str]] = {}  # request_id -> (batch_id, item_id)
@@ -503,6 +355,19 @@ class Worker:
         # Keys should be canonical model ref strings (e.g. "cozy:owner/repo@sha256:<digest>").
         self._resolved_cozy_models_by_id_baseline: Dict[str, Any] = {}
         self._prefetch_lock = threading.Lock()
+        # Orchestrator-reported availability state received with each
+        # EndpointConfig. See e2e/agents/progress.json issue #6 for the
+        # FIXED vs PAYLOAD binding split.
+        #   _disabled_functions_by_name: function_name -> metadata for
+        #     functions whose FIXED refs failed terminally. Worker skips
+        #     prefetch for refs used ONLY by these functions and omits the
+        #     functions from its advertised spec.
+        #   _payload_ref_availability_by_function: function_name ->
+        #     short_key -> status dict. Worker consults this before
+        #     dispatching a request; if the invocation names a short_key
+        #     whose status is terminal-non-resolved it rejects locally.
+        self._disabled_functions_by_name: Dict[str, Dict[str, Any]] = {}
+        self._payload_ref_availability_by_function: Dict[str, Dict[str, Dict[str, Any]]] = {}
         self._prefetch_thread: Optional[threading.Thread] = None
         self._model_init_done_event = threading.Event() # To signal model init is complete
 
@@ -1046,6 +911,26 @@ class Worker:
 
             for _, obj in inspect.getmembers(module):
                 if not inspect.isfunction(obj):
+                    continue
+
+                # Transform-kind endpoints: @conversion_function decorated.
+                # The wrapper's (request_context, payload) signature isn't a
+                # regular worker_function shape; register via ConversionFunctionSpec
+                # without running _inspect_request_spec.
+                if getattr(obj, "_is_conversion_function", False) is True:
+                    name = getattr(obj, "__name__", None)
+                    if not name:
+                        logger.error("Skipping unnamed @conversion_function in %s", module_name)
+                        continue
+                    if name in self._conversion_specs:
+                        logger.warning("Handler name conflict for '%s'; skipping", name)
+                        continue
+                    resources = getattr(obj, "_worker_resources", None)
+                    self._conversion_specs[name] = obj
+                    if resources is not None:
+                        self._discovered_resources[name] = resources
+                    discovered += 1
+                    logger.info("Registered conversion_function: '%s'", name)
                     continue
 
                 if getattr(obj, "_is_worker_function", False) is True:
@@ -2578,9 +2463,73 @@ class Worker:
                 _canonicalize_model_ref_string(str(v)) for v in list(cfg.required_variant_refs)
             ]
 
+            # Honor orchestrator-reported degradation state:
+            #   - disabled_functions: per-function entries whose FIXED refs
+            #     failed terminally. Worker MUST skip prefetch for models
+            #     that belong ONLY to disabled functions (nothing else
+            #     needs them) AND must NOT advertise those functions in
+            #     its registration spec so the orchestrator won't route
+            #     invocations to this worker.
+            #   - ref_availability_by_function: per-PAYLOAD-key status
+            #     map on otherwise-runnable functions. Worker stores this
+            #     on a per-function dispatch map so if a request with a
+            #     broken key slips past the orchestrator gate (race
+            #     during refresh), it can reject locally with the same
+            #     424 shape.
+            # See e2e/agents/progress.json issue #6 for the FIXED vs
+            # PAYLOAD distinction.
+            self._disabled_functions_by_name = {}
+            for df in list(getattr(cfg, "disabled_functions", []) or []):
+                name = str(getattr(df, "function_name", "") or "").strip()
+                if not name:
+                    continue
+                self._disabled_functions_by_name[name] = {
+                    "function_name": name,
+                    "model_key": str(getattr(df, "model_key", "") or ""),
+                    "ref": str(getattr(df, "ref", "") or ""),
+                    "reason": str(getattr(df, "reason", "") or ""),
+                    "detail": str(getattr(df, "detail", "") or ""),
+                    "detected_at_unix": int(getattr(df, "detected_at_unix", 0) or 0),
+                }
+            if self._disabled_functions_by_name:
+                logger.info(
+                    "EndpointConfig disabled_functions: %s",
+                    sorted(self._disabled_functions_by_name.keys()),
+                )
+
+            self._payload_ref_availability_by_function = {}
+            for fn_name, fn_avail in dict(
+                getattr(cfg, "ref_availability_by_function", {}) or {}
+            ).items():
+                name = str(fn_name or "").strip()
+                if not name or fn_avail is None:
+                    continue
+                by_key = dict(getattr(fn_avail, "by_model_key", {}) or {})
+                out = {}
+                for k, rs in by_key.items():
+                    key = str(k or "").strip()
+                    if not key or rs is None:
+                        continue
+                    out[key] = {
+                        "ref": str(getattr(rs, "ref", "") or ""),
+                        "status": str(getattr(rs, "status", "") or ""),
+                        "reason": str(getattr(rs, "reason", "") or ""),
+                        "detail": str(getattr(rs, "detail", "") or ""),
+                        "last_checked_unix": int(getattr(rs, "last_checked_unix", 0) or 0),
+                    }
+                if out:
+                    self._payload_ref_availability_by_function[name] = out
+
+            # Filter out refs that belong ONLY to disabled functions from
+            # the prefetch set. Refs referenced by at least one enabled
+            # function still prefetch (they serve that enabled path).
+            prefetch_refs = self._filter_prefetch_for_disabled_functions(
+                self._required_variant_refs_from_scheduler or []
+            )
+
             # Start background prefetch regardless of model manager; disk readiness is useful even
             # for lightweight workers and enables cache-aware routing.
-            self._start_startup_prefetch(self._required_variant_refs_from_scheduler or [])
+            self._start_startup_prefetch(prefetch_refs)
 
             if self._model_manager:
                 # Legacy/model-manager-specific config hook (may load/prep models).
@@ -2618,6 +2567,70 @@ class Worker:
             except Exception:
                 pass
         return out
+
+    def _filter_prefetch_for_disabled_functions(self, refs: List[str]) -> List[str]:
+        """Drop refs from the prefetch set when they belong ONLY to disabled
+        functions (no enabled function references them anymore).
+
+        Refs that are shared between a disabled function and at least one
+        enabled function still prefetch — they serve the enabled path.
+        """
+        if not refs or not self._disabled_functions_by_name:
+            return refs
+        # Collect the ref set referenced by each disabled function. For now
+        # we only have the top-level offending ref in DisabledFunction; the
+        # full keyspace-by-function map lives on the release manifest (not
+        # plumbed to the worker yet). So we do a simple filter: if a ref
+        # appears in ANY disabled-function record AND we don't have
+        # evidence of it being used by an enabled function, skip it.
+        disabled_refs = {
+            d.get("ref", "") for d in self._disabled_functions_by_name.values()
+            if d.get("ref")
+        }
+        if not disabled_refs:
+            return refs
+        # Conservative: we don't have enough info to know which refs are
+        # shared. For now, keep all refs; the orchestrator already narrows
+        # required_variant_refs on disable (via BuildEndpointConfig dropping
+        # the entries that only resolve for disabled functions). This hook
+        # exists as a forward-compat point. Future: plumb the full
+        # fn->refs map from the release manifest to enable actual filter.
+        logger.debug(
+            "prefetch filter: disabled-function refs detected %s; retaining all refs pending keyspace plumbing",
+            sorted(disabled_refs),
+        )
+        return refs
+
+    def is_function_runnable(self, function_name: str) -> bool:
+        """Return False when the orchestrator has reported the function as
+        disabled (a FIXED ref failed terminally). Used by spec advertisement
+        to omit non-runnable functions and by request dispatch as a second
+        line of defense in case a request slipped past the orchestrator
+        gate during a refresh race.
+        """
+        name = (function_name or "").strip()
+        if not name:
+            return True
+        return name not in self._disabled_functions_by_name
+
+    def payload_key_status(self, function_name: str, model_key: str) -> Optional[str]:
+        """Return the status string for a PAYLOAD-bound short_key on a
+        function, or None when no status is tracked. A terminal status
+        other than "resolved" means the worker should reject the request
+        locally before invoking the tenant function.
+        """
+        fn = (function_name or "").strip()
+        key = (model_key or "").strip()
+        if not fn or not key:
+            return None
+        byKey = self._payload_ref_availability_by_function.get(fn)
+        if not byKey:
+            return None
+        entry = byKey.get(key)
+        if not entry:
+            return None
+        s = entry.get("status", "")
+        return str(s) if s else None
 
     def _start_startup_prefetch(self, model_ids: List[str]) -> None:
         model_ids = [str(m or "").strip() for m in (model_ids or []) if str(m or "").strip()]

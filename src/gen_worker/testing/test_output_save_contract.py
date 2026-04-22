@@ -24,8 +24,6 @@ class _UploadHandler(BaseHTTPRequestHandler):
     repo_metadata_body: dict[str, object] = {"mirror": {"mode": "mirror"}}
     got_repo_metadata_write: dict[str, object] = {}
     got_repo_create_payload: dict[str, object] = {}
-    got_run_start_payload: dict[str, object] = {}
-    got_run_finalize_payload: dict[str, object] = {}
     got_run_commit_payload: dict[str, object] = {}
     got_claims_search_payload: dict[str, object] = {}
     got_claim_upsert_payload: dict[str, object] = {}
@@ -150,38 +148,10 @@ class _UploadHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        if self.path == "/api/v1/repos/alice/model-a/conversion-jobs/start":
-            _UploadHandler.got_run_start_payload = payload if isinstance(payload, dict) else {}
-            body = json.dumps({"job_id": "job-start-1", "status": "running"}).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
-        if re.match(r"^/api/v1/repos/alice/model-a/jobs/[^/]+/finalize$", self.path):
-            _UploadHandler.got_run_finalize_payload = payload if isinstance(payload, dict) else {}
-            body = json.dumps({"ok": True, "status": "succeeded", "output_versions": list((_UploadHandler.got_run_finalize_payload or {}).get("output_versions") or [])}).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
-        if re.match(r"^/api/v1/repos/alice/model-a/jobs/[^/]+/commit$", self.path):
-            _UploadHandler.got_run_commit_payload = payload if isinstance(payload, dict) else {}
-            body = json.dumps({
-                "ok": True,
-                "status": "succeeded",
-                "output_versions": list((_UploadHandler.got_run_commit_payload or {}).get("output_versions") or []),
-                "output_variant_count": len(list((_UploadHandler.got_run_commit_payload or {}).get("output_variants") or [])),
-            }).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
+        # /jobs/:id/commit, /jobs/start, /jobs/:id/finalize, /conversion-jobs/start
+        # were all removed from tensorhub (e2e issues #7/#8). The worker-side
+        # publish_repo_revision is now a no-op stub; this mock no longer needs
+        # to handle any job lifecycle endpoint. /uploads/... handled elsewhere.
         if self.path == "/api/v1/metadata/claims/search":
             _UploadHandler.got_claims_search_payload = payload if isinstance(payload, dict) else {}
             body = json.dumps({
@@ -445,8 +415,6 @@ class OutputSaveContractTest(unittest.TestCase):
 
     def test_publish_repo_revision_sends_publish_intent_for_same_version_variant(self) -> None:
         _UploadHandler.got_repo_create_payload = {}
-        _UploadHandler.got_run_start_payload = {}
-        _UploadHandler.got_run_finalize_payload = {}
         _UploadHandler.got_run_commit_payload = {}
         srv = ThreadingHTTPServer(("127.0.0.1", 0), _UploadHandler)
         t = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -474,31 +442,16 @@ class OutputSaveContractTest(unittest.TestCase):
                 source_repo="alice/model-a:prod",
                 source_version_id="blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             )
+            # Post e2e issue #8, publish_repo_revision is a no-op stub —
+            # it no longer POSTs /jobs/:id/commit or /finalize to tensorhub.
+            # It should succeed, echo output_versions, and leave the commit
+            # payload mock untouched.
             self.assertEqual(out.get("ok"), True)
-            self.assertEqual(_UploadHandler.got_repo_create_payload.get("repo_name"), "model-a")
-
-            start_payload = dict(_UploadHandler.got_run_start_payload)
-            self.assertEqual(start_payload.get("kind"), "conversion")
             self.assertEqual(
-                start_payload.get("input_versions"),
+                out.get("output_versions"),
                 ["blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
             )
-            start_intent = dict(start_payload.get("publish_intent") or {})
-            self.assertEqual(start_intent.get("repo"), "alice/model-a")
-            self.assertEqual(start_intent.get("version_mode"), "same_version_variant")
-            self.assertEqual(
-                start_intent.get("source_version_id"),
-                "blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            )
-
-            finalize_payload = dict(_UploadHandler.got_run_commit_payload)
-            self.assertEqual(
-                finalize_payload.get("output_versions"),
-                ["blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
-            )
-            self.assertEqual(finalize_payload.get("run_kind"), "conversion")
-            self.assertEqual(finalize_payload.get("status"), "succeeded")
-            self.assertTrue(str(finalize_payload.get("commit_idempotency_key") or "").startswith("worker:run-10:"))
+            self.assertEqual(_UploadHandler.got_run_commit_payload, {})
         finally:
             srv.shutdown()
             srv.server_close()

@@ -4,7 +4,7 @@ name = "z-image-lora"
 main = "z_image_lora.main"
 
 [models]
-z-image-turbo = { ref = "tongyi-mai/z-image-turbo", dtypes = ["bf16", "fp16"] }
+z-image-turbo = { ref = "tongyi-mai/z-image-turbo", attributes = { dtype = ["bf16", "fp16"] } }
 
 [host.requirements]
 cuda = "12.8"

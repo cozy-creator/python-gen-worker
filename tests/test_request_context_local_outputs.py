@@ -114,7 +114,7 @@ def test_request_context_stream_finalize_failure_cleans_temp_file(tmp_path: Path
 
     ctx = RequestContext("rid6", local_output_dir=str(tmp_path), owner="o1", invoker_id="u1")
 
-    def _fail_save_checkpoint(ref: str, local_path: str, format: str | None = None) -> Tensors:
+    def _fail_save_checkpoint(ref: str, local_path: str, format: str | None = None, **_kwargs: object) -> Tensors:
         _ = ref
         _ = local_path
         _ = format

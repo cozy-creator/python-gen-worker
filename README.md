@@ -75,172 +75,22 @@ def generate(ctx: RequestContext, payload: Input) -> Output:
 - **File handling** - Upload/download assets via Cozy hub file API
 - **Model caching** - LRU cache with VRAM/disk management and cache-aware routing
 
-## Usage
+## Authoring Endpoints
 
-### Basic Function
+Three endpoint types are supported — **inference**, **conversion**, and
+**training**. See `docs/endpoint-authoring.md` for the full manual covering
+`RequestContext`, model injection (fixed and payload-selected), streaming
+output, file persistence, conversion reserved-name payloads
+(`source`/`destination`/`outputs`), and the trainer class contract
+(`setup`/`configure`/`prepare_batch`/`train_step`/`state_dict`/`load_state_dict`).
 
-```python
-import msgspec
-from gen_worker import RequestContext, worker_function
-
-class Input(msgspec.Struct):
-    prompt: str
-
-class Output(msgspec.Struct):
-    result: str
-
-@worker_function()
-def my_function(ctx: RequestContext, payload: Input) -> Output:
-    return Output(result=f"Processed: {payload.prompt}")
-```
-
-### Streaming Output
-
-```python
-from typing import Iterator
-
-class Delta(msgspec.Struct):
-    chunk: str
-
-@worker_function()
-def stream(ctx: RequestContext, payload: Input) -> Iterator[Delta]:
-    for word in payload.prompt.split():
-        if ctx.is_canceled():
-            raise InterruptedError("canceled")
-        yield Delta(chunk=word)
-```
-
-### Model Injection
-
-Declare fixed model keys in code, with refs/dtypes in `endpoint.toml [models]`:
-
-```toml
-[models]
-sd15 = { ref = "stable-diffusion-v1-5/stable-diffusion-v1-5", dtypes = ["fp16", "bf16"] }
-```
-
-```python
-from typing import Annotated
-from diffusers import DiffusionPipeline
-from gen_worker.injection import ModelRef, ModelRefSource as Src
-
-@worker_function()
-def generate(
-    ctx: RequestContext,
-    pipe: Annotated[DiffusionPipeline, ModelRef(Src.FIXED, "sd15")],
-    payload: Input,
-) -> Output:
-    # Use the injected pipeline (loaded/cached by the worker's model manager).
-    return Output(result="done")
-```
-
-### Payload-Selected Model (Short Key)
-
-If you want the client payload to choose which repo to run, declare selector
-keyspaces in `endpoint.toml` and use `ModelRef(PAYLOAD, ...)`:
-
-```toml
-[models.generate]
-sd15 = { ref = "stable-diffusion-v1-5/stable-diffusion-v1-5", dtypes = ["fp16", "bf16"] }
-flux = { ref = "black-forest-labs/flux.2-klein-4b", dtypes = ["bf16"] }
-```
-
-```python
-from typing import Annotated
-import msgspec
-from diffusers import DiffusionPipeline
-from gen_worker import RequestContext, worker_function
-from gen_worker.injection import ModelRef, ModelRefSource as Src
-
-class Input(msgspec.Struct):
-    prompt: str
-    model: str  # must be one of: "sd15" | "flux"
-
-@worker_function()
-def generate(
-    ctx: RequestContext,
-    pipe: Annotated[DiffusionPipeline, ModelRef(Src.PAYLOAD, "model")],
-    payload: Input,
-):
-    ...
-```
-
-Note: by default the worker requires payload model selection to use a known
-short-key from the function keyspace in `endpoint.toml`. It will not accept
-arbitrary repo refs in the payload.
-
-### Saving Files
-
-```python
-@worker_function()
-def process(ctx: RequestContext, payload: Input) -> Output:
-    # Save bytes and get asset reference
-    asset = ctx.save_bytes(f"jobs/{ctx.request_id}/outputs/output.png", image_bytes)
-    return Output(result=asset.ref)
-```
-
-For conversion/training weight artifacts, use `Tensors`:
-
-```python
-from gen_worker import Tensors
-
-@worker_function()
-def convert(ctx: RequestContext, payload: Input) -> Output:
-    local_weights = "/tmp/converted.safetensors"
-    tensors = ctx.save_checkpoint(
-        f"jobs/{ctx.request_id}/outputs/weights.safetensors",
-        local_weights,
-    )
-    return Output(weights=tensors)
-```
-
-For large artifacts, stream bytes incrementally and finalize once:
-
-```python
-with ctx.open_checkpoint_stream(
-    f"jobs/{ctx.request_id}/outputs/weights.safetensors",
-    format="safetensors",
-) as out:
-    for chunk in generate_chunks():
-        out.write(chunk)
-    tensors = out.finalize()
-```
-
-### Trainer Mode (Class-Only)
-
-```python
-from gen_worker import StepContext, StepResult
-
-class MyTrainer:
-    def setup(self, ctx: StepContext) -> None:
-        pass
-
-    def configure(self, ctx: StepContext) -> dict[str, object]:
-        return {"step": 0}
-
-    def prepare_batch(self, raw_batch: object, state: dict[str, object], ctx: StepContext) -> object:
-        return raw_batch
-
-    def train_step(self, batch: object, state: dict[str, object], ctx: StepContext) -> StepResult:
-        return StepResult(metrics={"train/loss": 0.123})
-
-    def state_dict(self, state: dict[str, object]) -> dict[str, object]:
-        return dict(state)
-
-    def load_state_dict(self, state: dict[str, object], payload: dict[str, object], ctx: StepContext) -> None:
-        state.update(payload)
-```
-
-Run trainer mode:
+Training runs use trainer mode:
 
 ```bash
 WORKER_MODE=trainer \
 TRAINER_JOB_SPEC_PATH=/app/.cozy/trainer_job.json \
 python -m gen_worker.entrypoint
 ```
-
-Full authoring guide: `docs/custom-trainer-authoring.md`.
-Orchestrated runtime contract: `docs/issue-081-orchestrated-trainer-runtime.md`.
 
 ## Dev HTTP Runner (Local Inference Without gen-orchestrator)
 
@@ -288,10 +138,10 @@ main = "my_pkg.main"
 batch_dimension = "items"  # optional
 
 [models]
-sdxl = { ref = "stabilityai/stable-diffusion-xl-base-1.0", dtypes = ["fp16", "bf16"] }
+sdxl = { ref = "stabilityai/stable-diffusion-xl-base-1.0", attributes = { dtype = ["fp16", "bf16"] } }
 
 [models.generate]
-dreamshaper = { ref = "lykon/dreamshaper-xl-v2-turbo", dtypes = ["fp16", "bf16"] }
+dreamshaper = { ref = "lykon/dreamshaper-xl-v2-turbo", attributes = { dtype = ["fp16", "bf16"] } }
 
 [resources]
 max_inflight_requests = 1
@@ -347,8 +197,7 @@ Local dev / advanced (not injected by orchestrator):
 
 The worker can emit best-effort performance/debug metrics to gen-orchestrator via `WorkerEvent` messages.
 
-See `docs/metrics.md`.
-See `docs/worker-stuck-visibility.md` for startup/request watchdog events used to diagnose stuck workers.
+See the **Observability** section in `docs/endpoint-authoring.md` for the event catalog (request lifecycle, startup phases, per-run `metrics.*`, and cache inventory).
 
 ### Model Download Behavior
 
