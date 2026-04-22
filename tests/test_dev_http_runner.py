@@ -38,7 +38,7 @@ def test_dev_http_runner_writes_outputs(tmp_path: Path, monkeypatch) -> None:
     (pkg_dir / "tenant_mod_auto.py").write_text(
         """
 import msgspec
-from gen_worker.api.decorators import worker_function
+from gen_worker.api.decorators import inference_function
 from gen_worker.worker import RequestContext
 
 class In(msgspec.Struct):
@@ -118,7 +118,7 @@ def test_dev_http_runner_auto_uploads_returned_local_asset(tmp_path: Path, monke
 from pathlib import Path
 
 import msgspec
-from gen_worker.api.decorators import worker_function
+from gen_worker.api.decorators import inference_function
 from gen_worker.api.types import Asset
 from gen_worker.worker import RequestContext
 
@@ -202,7 +202,7 @@ def test_dev_http_runner_auto_uploads_returned_local_tensors(tmp_path: Path, mon
 from pathlib import Path
 
 import msgspec
-from gen_worker.api.decorators import worker_function
+from gen_worker.api.decorators import inference_function
 from gen_worker.api.types import Tensors
 from gen_worker.worker import RequestContext
 

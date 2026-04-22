@@ -49,7 +49,7 @@ main = "endpoint_mod.main"
                 (src_dir / "main.py").write_text(
                     """
 import msgspec
-from gen_worker import RequestContext, worker_function
+from gen_worker import RequestContext, inference_function
 
 class Input(msgspec.Struct):
     x: int
@@ -106,7 +106,7 @@ main = "endpoint_mod_collision.main"
                 (src_dir / "main.py").write_text(
                     """
 import msgspec
-from gen_worker import RequestContext, worker_function
+from gen_worker import RequestContext, inference_function
 
 class Input(msgspec.Struct):
     x: int
@@ -164,7 +164,7 @@ main = "endpoint_mod_project_name.main"
                 (src_dir / "main.py").write_text(
                     """
 import msgspec
-from gen_worker import RequestContext, worker_function
+from gen_worker import RequestContext, inference_function
 
 class Input(msgspec.Struct):
     x: int

@@ -1,771 +1,83 @@
 from __future__ import annotations
 
 import hashlib
-import ipaddress
 import json
 import logging
 import os
 import base64
 import re
 import shutil
-import socket
 import tempfile
 import threading
 import time
 import urllib.parse
-import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Optional
 
 import requests
-from blake3 import blake3
 
 try:
     import torch
 except Exception:  # pragma: no cover - optional dependency
     torch = None
 
-from .api.errors import AuthError, OutputTooLargeError
-from .api.types import Asset, Tensors
-from .models.refs import parse_model_ref
+from ..api.errors import AuthError
+from ..api.types import Asset, Compute, Tensors
+
+
+def _default_compute() -> Compute:
+    """Sentinel Compute used when the orchestrator didn't attach resolved_compute.
+
+    Tenants can safely read ``ctx.compute.vram_gb`` etc. without None-checks;
+    zero / empty values are the "not specified" signal.
+    """
+    return Compute()
 
 logger = logging.getLogger(__name__)
 
-_PUBLIC_TAG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
-_STALE_MIRROR_CLAIM_ERROR_CODES = {"source_version_not_found", "source_variants_not_found"}
-_MAX_OUTPUT_FILE_BYTES = 20 * 1024 * 1024 * 1024  # 20 GiB hard cap per file.
-_FILE_API_HTTP_TIMEOUT_S = 60
-_FILE_API_STREAM_CHUNK_TIMEOUT_S = 120
-_FILE_API_STREAM_FINALIZE_TIMEOUT_S = 600
-_FILE_API_STREAM_REPLAY_TIMEOUT_S = 600
-_FILE_API_STREAM_ABORT_TIMEOUT_S = 15
-
-
-def _http_request(
-    method: str,
-    url: str,
-    token: str,
-    owner: Optional[str] = None,
-    body: Optional[bytes] = None,
-    content_type: Optional[str] = None,
-) -> urllib.request.Request:
-    req = urllib.request.Request(url, data=body, method=method)
-    req.add_header("Authorization", f"Bearer {token}")
-    owner = (owner or "").strip()
-    if owner:
-        req.add_header("X-Cozy-Owner", owner)
-    if content_type:
-        req.add_header("Content-Type", content_type)
-    return req
-
-
-def _encode_ref_for_url(ref: str) -> str:
-    ref = ref.strip().lstrip("/")
-    parts = [urllib.parse.quote(p, safe="") for p in ref.split("/") if p]
-    return "/".join(parts)
-
-
-def _infer_mime_type(ref: str, head: bytes) -> str:
-    # Prefer magic bytes when available.
-    if head.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if head.startswith(b"\xff\xd8\xff"):
-        return "image/jpeg"
-    if head.startswith(b"GIF87a") or head.startswith(b"GIF89a"):
-        return "image/gif"
-    if len(head) >= 12 and head[0:4] == b"RIFF" and head[8:12] == b"WEBP":
-        return "image/webp"
-
-    # Fall back to extension.
-    import mimetypes
-
-    guessed, _ = mimetypes.guess_type(ref)
-    return guessed or "application/octet-stream"
-
-
-def _default_output_prefix(request_id: str) -> str:
-    return f"jobs/{request_id}/outputs/"
-
-
-def _normalize_output_ref(ref: str) -> str:
-    out = str(ref or "").strip()
-    if not out:
-        raise ValueError("invalid ref")
-    lower = out.lower()
-    if lower.startswith("http://") or lower.startswith("https://"):
-        raise ValueError("output ref must be a logical file ref, not a URL")
-    return out.lstrip("/")
-
-
-def _infer_tensors_format(ref_or_path: str) -> str:
-    leaf = str(ref_or_path or "").strip().lower()
-    if leaf.endswith(".safetensors"):
-        return "safetensors"
-    if leaf.endswith(".bin"):
-        return "bin"
-    if leaf.endswith(".pt"):
-        return "pt"
-    if leaf.endswith(".pth"):
-        return "pth"
-    if leaf.endswith(".ckpt"):
-        return "ckpt"
-    return "unknown"
-
-
-def _env_bool(name: str, default: bool) -> bool:
-    raw = str(os.getenv(name, "1" if default else "0")).strip().lower()
-    return raw in {"1", "true", "yes", "on"}
-
-
-def _env_int(name: str, default: int) -> int:
-    raw = str(os.getenv(name, str(default))).strip()
-    try:
-        return int(raw)
-    except Exception:
-        return int(default)
-
-
-def _require_file_api_base_url() -> str:
-    base = os.getenv("FILE_API_BASE_URL", "").strip()
-    if not base:
-        base = os.getenv("ORCHESTRATOR_HTTP_URL", "").strip()
-    if not base:
-        base = os.getenv("TENSORHUB_URL", "").strip()
-    if not base:
-        raise RuntimeError("FILE_API_BASE_URL is required for file operations")
-    return base.rstrip("/")
-
-
-def _require_worker_capability_token() -> str:
-    token = os.getenv("WORKER_CAPABILITY_TOKEN", "").strip()
-    if not token:
-        raise RuntimeError("WORKER_CAPABILITY_TOKEN is required for file operations")
-    return token
-
-
-def _parse_owner_repo(value: str) -> tuple[str, str]:
-    raw = str(value or "").strip().strip("/")
-    if "/" not in raw:
-        raise ValueError("destination_repo must be in '<owner>/<repo>' format")
-    owner, repo = raw.split("/", 1)
-    owner = owner.strip()
-    repo = repo.strip()
-    if not owner or not repo:
-        raise ValueError("destination_repo must be in '<owner>/<repo>' format")
-    return owner, repo
-
-
-def _parse_owner_repo_with_optional_tag(value: str) -> tuple[str, str, str]:
-    raw = str(value or "").strip().strip("/")
-    tag = ""
-    if ":" in raw:
-        raw, tag = raw.rsplit(":", 1)
-        tag = str(tag or "").strip().lower()
-    owner, repo = _parse_owner_repo(raw)
-    return owner, repo, tag
-
-
-def _normalize_destination_repo_tags(values: Optional[List[str]]) -> List[str]:
-    out: List[str] = []
-    seen: set[str] = set()
-    for item in list(values or []):
-        tag = str(item or "").strip().lower()
-        if not tag:
-            continue
-        if not _PUBLIC_TAG_RE.match(tag):
-            raise ValueError("destination_repo_tags contains an invalid tag")
-        if tag == "latest":
-            raise ValueError("destination_repo_tags must not include latest")
-        if tag in seen:
-            continue
-        seen.add(tag)
-        out.append(tag)
-    out.sort()
-    return out
-
-
-def _decode_unverified_jwt_claims(token: str) -> Dict[str, Any]:
-    raw = str(token or "").strip()
-    if raw.count(".") < 2:
-        return {}
-    try:
-        parts = raw.split(".")
-        payload_b64 = parts[1]
-        pad = "=" * ((4 - (len(payload_b64) % 4)) % 4)
-        payload = base64.urlsafe_b64decode((payload_b64 + pad).encode("ascii"))
-        parsed = json.loads(payload.decode("utf-8"))
-    except Exception:
-        return {}
-    if isinstance(parsed, dict):
-        return parsed
-    return {}
-
-
-def _normalize_repo_name(value: str) -> str:
-    return str(value or "").strip().strip("/").lower()
-
-
-def _error_code_from_exception(exc: Exception, *, fallback: str = "unknown") -> str:
-    raw = str(exc or "").strip()
-    if not raw:
-        return fallback
-    parts = [p.strip().lower() for p in raw.split(":") if p and p.strip()]
-    if not parts:
-        return fallback
-    if len(parts) >= 2:
-        return parts[1]
-    return parts[0]
-
-
-def _utc_timestamp_rfc3339() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-
-
-def _enforce_output_file_size_limit(size_bytes: int) -> None:
-    size = int(size_bytes)
-    if size < 0:
-        raise ValueError("size_bytes must be non-negative")
-    if size > _MAX_OUTPUT_FILE_BYTES:
-        raise OutputTooLargeError(size_bytes=size, max_bytes=_MAX_OUTPUT_FILE_BYTES)
-
-
-def _assert_token_repo_scope_matches_destination(
-    token: str,
-    owner: str,
-    repo: str,
-    *,
-    required_permissions: Optional[List[str]] = None,
-) -> None:
-    claims = _decode_unverified_jwt_claims(token)
-    if not claims:
-        raise ValueError("worker_capability_token must be a structured JWT")
-
-    destination_owner = _normalize_repo_name(owner)
-    destination_repo = _normalize_repo_name(repo)
-    cap_kind = _normalize_repo_name(str(claims.get("cap_kind") or ""))
-    if cap_kind != "worker_capability":
-        raise ValueError("worker_capability_token must have cap_kind=worker_capability")
-    if required_permissions is None:
-        needed = ["repo-version:create"]
-    else:
-        needed = [str(p or "").strip() for p in list(required_permissions) if str(p or "").strip()]
-    repos_read = [str(v or "").strip() for v in list(claims.get("tensor_repos_read") or [])]
-    repos_update_legacy = [str(v or "").strip() for v in list(claims.get("tensor_repos_update") or [])]
-    repos_version_create = [str(v or "").strip() for v in list(claims.get("tensor_repos_version_create") or [])]
-    repos_variant_create = [str(v or "").strip() for v in list(claims.get("tensor_repos_variant_create") or [])]
-    if not repos_version_create:
-        repos_version_create = list(repos_update_legacy)
-    if not repos_variant_create:
-        repos_variant_create = list(repos_update_legacy)
-    create_claim = claims.get("tensor_repo_create")
-    create_policy = create_claim if isinstance(create_claim, dict) else {}
-    create_owner = _normalize_repo_name(str(create_policy.get("owner") or ""))
-    create_allowed_names = [_normalize_repo_name(str(v or "")) for v in list(create_policy.get("allowed_names") or [])]
-    create_allow_any_name = bool(create_policy.get("allow_any_name"))
-
-    def _repo_match(values: List[str]) -> bool:
-        for raw in values:
-            try:
-                scoped_owner, scoped_repo = _parse_owner_repo(_normalize_repo_name(raw))
-            except ValueError:
-                continue
-            if _normalize_repo_name(scoped_owner) == destination_owner and _normalize_repo_name(scoped_repo) == destination_repo:
-                return True
-        return False
-
-    for permission in needed:
-        if permission == "tensor-repo:read":
-            if _repo_match(repos_read) or _repo_match(repos_version_create) or _repo_match(repos_variant_create):
-                continue
-            raise ValueError("destination_repo does not match worker_capability_token read scope")
-        if permission == "repo-version:create":
-            if _repo_match(repos_version_create) or _repo_match(repos_variant_create):
-                continue
-            raise ValueError("destination_repo does not match worker_capability_token repo-version:create scope")
-        if permission == "repo-variant:create":
-            if _repo_match(repos_variant_create) or _repo_match(repos_version_create):
-                continue
-            raise ValueError("destination_repo does not match worker_capability_token repo-variant:create scope")
-        if permission == "tensor-repo:update":
-            # Legacy alias.
-            if _repo_match(repos_version_create) or _repo_match(repos_variant_create):
-                continue
-            raise ValueError("destination_repo does not match worker_capability_token update scope")
-        if permission == "tensor-repo:create":
-            if create_owner != destination_owner:
-                raise ValueError("destination_repo owner does not match worker_capability_token create scope")
-            if create_allow_any_name:
-                continue
-            if destination_repo in create_allowed_names:
-                continue
-            raise ValueError("destination_repo is not in worker_capability_token create allow-list")
-        raise ValueError(f"unsupported required permission '{permission}'")
-
-
-def _is_private_ip_str(ip_str: str) -> bool:
-    try:
-        ip = ipaddress.ip_address(ip_str)
-    except Exception:
-        return True
-    return bool(
-        ip.is_private
-        or ip.is_loopback
-        or ip.is_link_local
-        or ip.is_multicast
-        or ip.is_reserved
-        or ip.is_unspecified
-    )
-
-
-def _url_is_blocked(url_str: str) -> bool:
-    try:
-        u = urllib.parse.urlparse(url_str)
-    except Exception:
-        return True
-    if u.scheme not in ("http", "https"):
-        return True
-    host = (u.hostname or "").strip()
-    if not host:
-        return True
-    try:
-        infos = socket.getaddrinfo(host, None)
-    except Exception:
-        return True
-    for info in infos:
-        sockaddr = info[4]
-        if not sockaddr:
-            continue
-        ip_str = str(sockaddr[0])
-        if _is_private_ip_str(ip_str):
-            return True
-    return False
-
-
-def _canonicalize_model_ref_string(raw: str) -> str:
-    """
-    Best-effort normalization of Cozy/HF model ref strings for allowlisting and caching identity.
-
-    If the string doesn't parse as a phase-1 model ref, return it unchanged.
-    """
-    s = (raw or "").strip()
-    if not s:
-        return s
-    try:
-        parsed = parse_model_ref(s)
-        if parsed.scheme == "cozy" and parsed.cozy is not None:
-            return parsed.cozy.canonical()
-        if parsed.scheme == "hf" and parsed.hf is not None:
-            return parsed.hf.canonical()
-        return s
-    except Exception:
-        return s
-
-
-def _sha256_file(path: str) -> str:
-    h = hashlib.sha256()
-    with open(path, "rb") as f:
-        while True:
-            chunk = f.read(1024 * 1024)
-            if not chunk:
-                break
-            h.update(chunk)
-    return h.hexdigest()
-
-
-class _RequestOutputStream:
-    """Chunk-writable output writer with finalize() -> Asset/Tensors.
-
-    All writes are buffered to a temp file. On finalize(), the file is hashed
-    with BLAKE3, then uploaded via presigned S3 multipart URLs obtained from
-    TensorHub.
-    """
-
-    def __init__(
-        self,
-        *,
-        ctx: "RequestContext",
-        ref: str,
-        kind: str,  # "asset" | "checkpoint"
-        format: Optional[str] = None,
-        create: bool = False,
-        expected_size_bytes: Optional[int] = None,
-    ) -> None:
-        from .presigned_upload import blake3_hash_file, presigned_upload_file
-
-        self._ctx = ctx
-        self._ref = _normalize_output_ref(ref)
-        self._kind = str(kind or "asset").strip().lower()
-        self._format = str(format or "").strip() or None
-        self._create = bool(create)
-        self._expected_size_bytes = int(expected_size_bytes or 0)
-        if self._expected_size_bytes < 0:
-            self._expected_size_bytes = 0
-        if self._expected_size_bytes > 0:
-            _enforce_output_file_size_limit(self._expected_size_bytes)
-        self._stream_remote = bool(self._ctx._should_stream_output_to_file_api(self._ref))
-        self._sha = hashlib.sha256()
-        self._blake3_hasher = blake3()
-        self._bytes_written = 0
-        self._bytes_uploaded = 0
-        self._chunks_written = 0
-        self._chunks_uploaded = 0
-        self._stream_error_class: Optional[str] = None
-        self._progress_lock = threading.Lock()
-        self._stream_mode = "presigned" if self._stream_remote else "local_fallback"
-        self._started_mono = time.monotonic()
-        try:
-            interval = float(os.getenv("WORKER_STREAM_PROGRESS_INTERVAL_S", "0.20") or "0.20")
-        except Exception:
-            interval = 0.20
-        self._progress_interval_s = max(0.0, interval)
-        self._last_progress_emit_mono = self._started_mono
-        self._last_progress_mono = self._started_mono
-        self._last_progress_uploaded = 0
-        self._retry_attempts = max(1, int(os.getenv("WORKER_STREAM_UPLOAD_RETRY_ATTEMPTS", "5") or "5"))
-        self._retry_backoff_ms = max(0, int(os.getenv("WORKER_STREAM_UPLOAD_RETRY_BACKOFF_MS", "500") or "500"))
-        self._session_id: Optional[str] = None
-        self._uploader_meta: Dict[str, Any] = {}
-        self._repo_job_scope = self._ctx._repo_job_upload_scope() if self._kind == "checkpoint" else None
-        self._finalized = False
-        self._result: Any = None
-        self._abort_remote: bool = False
-
-        # Always buffer to temp file.
-        suffix = Path(self._ref).suffix or ".bin"
-        prefix = f"gw-out-{ctx.request_id}-"
-        fd, tmp = tempfile.mkstemp(prefix=prefix, suffix=suffix)
-        os.close(fd)
-        self._tmp_path = tmp
-        self._fh: Optional[Any] = open(self._tmp_path, "wb")
-
-    @property
-    def bytes_written(self) -> int:
-        return int(self._bytes_written)
-
-    @property
-    def bytes_uploaded(self) -> int:
-        return int(self._bytes_uploaded) if self._bytes_uploaded > 0 else int(self._bytes_written)
-
-    @property
-    def stream_mode(self) -> str:
-        return self._stream_mode
-
-    @property
-    def elapsed_s(self) -> float:
-        return float(max(time.monotonic() - self._started_mono, 0.0))
-
-    @property
-    def average_upload_bps(self) -> float:
-        elapsed = max(self.elapsed_s, 1e-6)
-        return float(self.bytes_uploaded) / elapsed
-
-    @property
-    def ref(self) -> str:
-        return self._ref
-
-    def write(self, data: bytes | bytearray | memoryview) -> int:
-        if self._finalized:
-            raise RuntimeError("output stream already finalized")
-        if self._ctx.is_canceled():
-            self.close()
-            raise InterruptedError("canceled")
-        if isinstance(data, memoryview):
-            data = data.tobytes()
-        if not isinstance(data, (bytes, bytearray)):
-            raise TypeError("write expects bytes-like input")
-        b = bytes(data)
-        if not b:
-            return 0
-        _enforce_output_file_size_limit(self._bytes_written + len(b))
-        assert self._fh is not None
-        n = self._fh.write(b)
-        self._sha.update(b[:n])
-        self._blake3_hasher.update(b[:n])
-        self._bytes_written += int(n)
-        if n > 0:
-            self._chunks_written += 1
-        self._maybe_emit_progress(stage="stream_write")
-        return int(n)
-
-    def flush(self) -> None:
-        if self._finalized:
-            return
-        if self._fh is not None:
-            self._fh.flush()
-
-    def finalize(self) -> Any:
-        if self._finalized:
-            return self._result
-        if self._ctx.is_canceled():
-            self.close()
-            raise InterruptedError("canceled")
-
-        assert self._fh is not None
-        assert self._tmp_path is not None
-        self._fh.flush()
-        self._fh.close()
-        self._fh = None
-
-        try:
-            if self._stream_remote:
-                finalize_t0 = time.monotonic()
-                self._result = self._finalize_presigned_upload()
-                self._finalized = True
-                self._maybe_emit_progress(
-                    stage="stream_finalized",
-                    force=True,
-                    extra={"finalize_elapsed_s": float(max(time.monotonic() - finalize_t0, 0.0))},
-                )
-                return self._result
-            else:
-                raw: Asset | Tensors
-                if self._kind == "checkpoint":
-                    raw = self._ctx.save_checkpoint(self._ref, self._tmp_path, format=self._format)
-                else:
-                    if self._create:
-                        raw = self._ctx.save_file_create(self._ref, self._tmp_path)
-                    else:
-                        raw = self._ctx.save_file(self._ref, self._tmp_path)
-                self._result = self._with_stream_mode(raw)
-                self._finalized = True
-                self._maybe_emit_progress(stage="stream_finalized", force=True)
-                return self._result
-        finally:
-            try:
-                os.remove(self._tmp_path)
-            except Exception:
-                pass
-
-    def close(self) -> None:
-        if self._finalized:
-            return
-        if self._fh is not None:
-            try:
-                self._fh.close()
-            except Exception:
-                pass
-            self._fh = None
-        if self._tmp_path:
-            try:
-                os.remove(self._tmp_path)
-            except Exception:
-                pass
-        self._maybe_emit_progress(stage="stream_aborted", force=True)
-        self._finalized = True
-
-    def _signal_remote_done(self) -> None:
-        pass
-
-    def _abort_due_to_cancel(self) -> None:
-        if self._abort_remote:
-            return
-        self._abort_remote = True
-        self._signal_remote_done()
-        self._maybe_emit_progress(stage="stream_canceled", force=True)
-
-    def _with_stream_mode(self, value: Any) -> Any:
-        if isinstance(value, Asset):
-            return Asset(
-                ref=value.ref,
-                owner=value.owner,
-                local_path=value.local_path,
-                mime_type=value.mime_type,
-                size_bytes=value.size_bytes,
-                sha256=value.sha256,
-                download_token=value.download_token,
-                stream_mode=self.stream_mode,
-            )
-        if isinstance(value, Tensors):
-            return Tensors(
-                ref=value.ref,
-                owner=value.owner,
-                local_path=value.local_path,
-                format=value.format,
-                size_bytes=value.size_bytes,
-                sha256=value.sha256,
-                blake3=value.blake3,
-                blob_digest=value.blob_digest,
-                blob_domain=value.blob_domain,
-                blob_path=value.blob_path,
-                snapshot_digest=value.snapshot_digest,
-                download_token=value.download_token,
-                stream_mode=self.stream_mode,
-            )
-        return value
-
-    def _maybe_emit_progress(
-        self,
-        *,
-        stage: str,
-        force: bool = False,
-        extra: Optional[Dict[str, Any]] = None,
-    ) -> None:
-        now = time.monotonic()
-        with self._progress_lock:
-            if not force and self._progress_interval_s > 0.0:
-                if (now - self._last_progress_emit_mono) < self._progress_interval_s:
-                    return
-            bytes_written = int(self._bytes_written)
-            bytes_uploaded = int(self._bytes_uploaded if self._stream_remote else self._bytes_written)
-            chunks_written = int(self._chunks_written)
-            chunks_uploaded = int(self._chunks_uploaded if self._stream_remote else self._chunks_written)
-            error_class = str(self._stream_error_class or "").strip()
-            elapsed = max(now - self._started_mono, 1e-6)
-            delta_elapsed = max(now - self._last_progress_mono, 1e-6)
-            delta_uploaded = max(0, bytes_uploaded - int(self._last_progress_uploaded))
-            inst_bps = float(delta_uploaded) / delta_elapsed
-            avg_bps = float(bytes_uploaded) / elapsed
-            self._last_progress_emit_mono = now
-            self._last_progress_mono = now
-            self._last_progress_uploaded = bytes_uploaded
-        payload: Dict[str, Any] = {
-            "stage": stage,
-            "ref": self._ref,
-            "stream_mode": self.stream_mode,
-            "bytes_written": bytes_written,
-            "bytes_uploaded": bytes_uploaded,
-            "chunks_written": chunks_written,
-            "chunks_uploaded": chunks_uploaded,
-            "upload_bps": float(avg_bps),
-            "inst_upload_bps": float(inst_bps),
-            "elapsed_s": float(elapsed),
-        }
-        if error_class:
-            payload["error_class"] = error_class
-        if extra:
-            payload.update(dict(extra))
-        self._ctx.emit("request.upload_progress", payload)
-
-    def _finalize_presigned_upload(self) -> Any:
-        """Hash the buffered temp file, then upload via presigned S3 multipart."""
-        from .presigned_upload import blake3_hash_file, presigned_upload_file
-
-        assert self._tmp_path is not None
-        file_size = os.path.getsize(self._tmp_path)
-        if file_size <= 0:
-            raise RuntimeError("file save failed (empty file)")
-
-        # Use the rolling hash if available (was computed during writes).
-        blake3_hex = self._blake3_hasher.hexdigest()
-
-        # Build auth headers.
-        base = self._ctx._get_file_api_base_url()
-        token = self._ctx._get_worker_capability_token()
-        headers: Dict[str, str] = {"Authorization": f"Bearer {token}"}
-        owner = (self._ctx.owner or "").strip()
-        if owner:
-            headers["X-Cozy-Owner"] = owner
-
-        # Build endpoint and create payload.
-        create_payload: Dict[str, Any] = {}
-        req_id = str(self._ctx.request_id or "").strip()
-        if req_id:
-            create_payload["request_id"] = req_id
-
-        if self._repo_job_scope is None:
-            # Media upload.
-            create_payload["ref"] = self._ref
-            job_id = str(self._ctx.job_id or "").strip()
-            if job_id:
-                create_payload["job_id"] = job_id
-            endpoint_path = "/api/v1/media/uploads"
-        else:
-            # Repo-CAS upload.
-            repo_owner, repo, job_id = self._repo_job_scope
-            create_payload["path"] = self._ref
-            endpoint_path = (
-                f"/api/v1/repos/{urllib.parse.quote(repo_owner, safe='')}/"
-                f"{urllib.parse.quote(repo, safe='')}/jobs/{urllib.parse.quote(job_id, safe='')}/uploads"
-            )
-
-        def _progress_cb(parts_done: int, total_parts: int, bytes_up: int) -> None:
-            with self._progress_lock:
-                self._bytes_uploaded = bytes_up
-                self._chunks_uploaded = parts_done
-            self._maybe_emit_progress(stage="stream_upload")
-
-        result = presigned_upload_file(
-            file_path=self._tmp_path,
-            base_url=base,
-            endpoint_path=endpoint_path,
-            headers=headers,
-            create_payload=create_payload,
-            blake3_hex=blake3_hex,
-            size_bytes=file_size,
-            retry_attempts=self._retry_attempts,
-            retry_backoff_ms=self._retry_backoff_ms,
-            on_progress=_progress_cb,
-            cancel_check=self._ctx.is_canceled,
-        )
-
-        self._uploader_meta = result.meta
-        with self._progress_lock:
-            self._bytes_uploaded = file_size
-
-        # Build return type from metadata.
-        meta = dict(result.meta)
-        size = int(meta.get("size_bytes") or file_size)
-        sha = str(meta.get("sha256") or "").strip() or self._sha.hexdigest()
-        asset = Asset(
-            ref=self._ref,
-            owner=self._ctx.owner,
-            local_path=None,
-            mime_type=str(meta.get("mime_type") or "") or None,
-            size_bytes=size,
-            sha256=sha,
-            stream_mode=self.stream_mode,
-        )
-        if self._kind == "checkpoint":
-            fmt = str(self._format or "").strip() or _infer_tensors_format(self._ref)
-            return Tensors(
-                ref=asset.ref,
-                owner=asset.owner,
-                local_path=asset.local_path,
-                format=fmt,
-                size_bytes=asset.size_bytes,
-                sha256=asset.sha256,
-                blake3=str(meta.get("blake3") or blake3_hex).strip() or None,
-                blob_digest=str(meta.get("blob_digest") or "").strip() or None,
-                blob_domain=str(meta.get("blob_domain") or "").strip() or None,
-                blob_path=str(meta.get("blob_path") or "").strip() or None,
-                snapshot_digest=str(meta.get("snapshot_digest") or "").strip() or None,
-                download_token=asset.download_token,
-                stream_mode=self.stream_mode,
-            )
-        return asset
-
-    @staticmethod
-    def _classify_error(exc: BaseException) -> str:
-        msg = str(exc or "").lower()
-        if isinstance(exc, InterruptedError):
-            return "canceled"
-        if isinstance(exc, AuthError):
-            return "auth_error"
-        if "network_error" in msg:
-            return "network_error"
-        if "already exists" in msg:
-            return "conflict"
-        if "unauthorized" in msg:
-            return "auth_error"
-        if "file save failed (" in msg:
-            left = msg.split("file save failed (", 1)[1]
-            code = left.split(")", 1)[0].strip()
-            if code.isdigit() and code.startswith("5"):
-                return "server_error"
-            if code.isdigit() and code.startswith("4"):
-                return "client_error"
-        return "unknown_error"
-
-    def __enter__(self) -> "_RequestOutputStream":
-        return self
-
-    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> Literal[False]:
-        if exc_type is None:
-            self.finalize()
-        else:
-            self.close()
-        return False
-
+# Helpers, constants, and JWT/SSRF utilities live in _helpers.py. They are
+# re-exported here so existing `from gen_worker.request_context import _foo`
+# call sites (worker.py, trainer/runtime.py, tests) keep working.
+from ._helpers import (
+    _HINT_KEYS_DESTINATION_REPO,
+    _HINT_KEYS_EXECUTION_KIND,
+    _HINT_KEYS_JOB_ID,
+    _MAX_OUTPUT_FILE_BYTES,
+    _FILE_API_HTTP_TIMEOUT_S,
+    _FILE_API_STREAM_ABORT_TIMEOUT_S,
+    _FILE_API_STREAM_CHUNK_TIMEOUT_S,
+    _FILE_API_STREAM_FINALIZE_TIMEOUT_S,
+    _FILE_API_STREAM_REPLAY_TIMEOUT_S,
+    _PUBLIC_TAG_RE,
+    _STALE_MIRROR_CLAIM_ERROR_CODES,
+    _assert_token_repo_scope_matches_destination,
+    _canonicalize_model_ref_string,
+    _decode_unverified_jwt_claims,
+    _default_output_prefix,
+    _encode_ref_for_url,
+    _enforce_output_file_size_limit,
+    _env_bool,
+    _env_int,
+    _error_code_from_exception,
+    _http_request,
+    _infer_mime_type,
+    _infer_tensors_format,
+    _is_private_ip_str,
+    _normalize_destination_repo_tags,
+    _normalize_output_ref,
+    _normalize_repo_name,
+    _parse_owner_repo,
+    _parse_owner_repo_with_optional_tag,
+    _require_file_api_base_url,
+    _require_worker_capability_token,
+    _resolve_hint_first_string,
+    _sha256_file,
+    _url_is_blocked,
+    _utc_timestamp_rfc3339,
+)
+
+
+from ._stream import _RequestOutputStream
 
 class RequestContext:
     """Context object passed to request handlers, allowing cancellation."""
@@ -793,6 +105,7 @@ class RequestContext:
         item_span: Optional[Dict[str, int]] = None,
         source_info: Optional[Dict[str, Any]] = None,
         destination_info: Optional[Dict[str, Any]] = None,
+        compute: Optional["Compute"] = None,
     ) -> None:
         self._request_id = str(request_id or "").strip()
         self._job_id = str(job_id or "").strip() or None
@@ -828,6 +141,11 @@ class RequestContext:
         self._source_info = dict(source_info or {})
         self._destination_info = dict(destination_info or {})
         self._source_path: Optional[str] = None
+        # Resolved hardware for this invocation (tensorhub #232). Populated by
+        # Worker._handle_job_request from JobExecutionRequest.resolved_compute.
+        # Sentinel defaults when unset — tenants can safely read fields without
+        # None-checks.
+        self._compute: "Compute" = compute if compute is not None else _default_compute()
 
     @property
     def request_id(self) -> str:
@@ -856,6 +174,19 @@ class RequestContext:
     @property
     def deadline(self) -> Optional[float]:
         return self._deadline
+
+    @property
+    def compute(self) -> Compute:
+        """Resolved hardware for this invocation (tensorhub #232).
+
+        Read-only. For inference this equals the endpoint's ``[resources]``.
+        For training this is the endpoint resources merged with the invoker's
+        ``compute`` overrides from the wire payload. Fields default to zero /
+        empty strings when the orchestrator hasn't attached resolved_compute
+        (older protobuf, inference-only callpath, etc) — tenants can branch
+        on ``ctx.compute.gpu_count`` etc without None-checks.
+        """
+        return self._compute
 
     @property
     def device(self) -> "torch.device":
@@ -912,11 +243,13 @@ class RequestContext:
             if self._resolve_local_output_path(ref):
                 return False
         except Exception:
+            logger.debug("_should_stream_output_to_file_api: local path resolve failed for ref=%r", ref, exc_info=True)
             return False
         try:
             _ = self._get_file_api_base_url()
             _ = self._get_worker_capability_token()
         except Exception:
+            logger.debug("_should_stream_output_to_file_api: file_api base or capability token unavailable", exc_info=True)
             return False
         return True
 
@@ -941,28 +274,18 @@ class RequestContext:
 
         hints = dict(self._execution_hints or {})
         kind = str(hints.get("kind", "") or "").strip().lower()
-        if kind not in {"conversion", "training"}:
+        if kind != "training":
             return None
-        destination_repo = str(
-            hints.get("destination_repo")
-            or hints.get("repo")
-            or hints.get("output_repo")
-            or ""
-        ).strip()
+        destination_repo = _resolve_hint_first_string(hints, keys=_HINT_KEYS_DESTINATION_REPO)
         if destination_repo == "":
             return None
-        job_id = str(
-            hints.get("job_id")
-            or hints.get("conversion_job_id")
-            or hints.get("training_job_id")
-            or self._job_id
-            or ""
-        ).strip()
+        job_id = _resolve_hint_first_string(hints, keys=_HINT_KEYS_JOB_ID, fallback=self._job_id)
         if job_id == "":
             return None
         try:
             owner, repo = _parse_owner_repo(destination_repo)
         except Exception:
+            logger.debug("_repo_job_upload_scope: destination_repo=%r did not parse as owner/repo", destination_repo, exc_info=True)
             return None
 
         result = (owner, repo, job_id)
@@ -979,7 +302,7 @@ class RequestContext:
         repo-cas writes. This prevents silent fallback to user-files/media uploads.
         """
         kind = self._tensor_upload_execution_kind()
-        if kind not in {"conversion", "training"}:
+        if kind != "training":
             return
         try:
             if self._resolve_local_output_path(ref):
@@ -1209,7 +532,19 @@ class RequestContext:
             return out
         raise RuntimeError("file save failed (invalid_asset_response)")
 
-    def save_checkpoint(self, ref: str, local_path: str, format: Optional[str] = None) -> Tensors:
+    def save_checkpoint(
+        self,
+        ref: str,
+        local_path: str,
+        format: Optional[str] = None,
+        *,
+        produced_by_kind: Optional[str] = None,
+        step_number: Optional[int] = None,
+        epoch_number: Optional[int] = None,
+        output_kind: Optional[str] = None,
+        target_dtype: Optional[str] = None,
+        variant_label: Optional[str] = None,
+    ) -> Tensors:
         """Save checkpoint/model-weight bytes and return a first-class tensor artifact."""
         ref = _normalize_output_ref(ref)
         self._require_repo_job_scope_for_tensors(ref)
@@ -1225,7 +560,17 @@ class RequestContext:
         # For conversion/training job-scoped writes, force checkpoint-stream path so
         # tensor uploads use repo-cas job endpoints rather than media upload routes.
         if self._repo_job_upload_scope() is not None and self._should_stream_output_to_file_api(ref):
-            stream = self.open_checkpoint_stream(ref, format=fmt, expected_size_bytes=size)
+            stream = self.open_checkpoint_stream(
+                ref,
+                format=fmt,
+                expected_size_bytes=size,
+                produced_by_kind=produced_by_kind,
+                step_number=step_number,
+                epoch_number=epoch_number,
+                output_kind=output_kind,
+                target_dtype=target_dtype,
+                variant_label=variant_label,
+            )
             with open(src, "rb") as fin:
                 while True:
                     chunk = fin.read(8 * 1024 * 1024)
@@ -1248,7 +593,19 @@ class RequestContext:
             download_token=asset.download_token,
         )
 
-    def save_checkpoint_bytes(self, ref: str, data: bytes, format: Optional[str] = None) -> Tensors:
+    def save_checkpoint_bytes(
+        self,
+        ref: str,
+        data: bytes,
+        format: Optional[str] = None,
+        *,
+        produced_by_kind: Optional[str] = None,
+        step_number: Optional[int] = None,
+        epoch_number: Optional[int] = None,
+        output_kind: Optional[str] = None,
+        target_dtype: Optional[str] = None,
+        variant_label: Optional[str] = None,
+    ) -> Tensors:
         """Save in-memory checkpoint/model-weight bytes."""
         if not isinstance(data, (bytes, bytearray)):
             raise TypeError("save_checkpoint_bytes expects bytes")
@@ -1259,7 +616,17 @@ class RequestContext:
         fmt = str(format or "").strip() or _infer_tensors_format(ref)
 
         if self._repo_job_upload_scope() is not None and self._should_stream_output_to_file_api(ref):
-            stream = self.open_checkpoint_stream(ref, format=fmt, expected_size_bytes=len(payload))
+            stream = self.open_checkpoint_stream(
+                ref,
+                format=fmt,
+                expected_size_bytes=len(payload),
+                produced_by_kind=produced_by_kind,
+                step_number=step_number,
+                epoch_number=epoch_number,
+                output_kind=output_kind,
+                target_dtype=target_dtype,
+                variant_label=variant_label,
+            )
             stream.write(payload)
             out = stream.finalize()
             if isinstance(out, Tensors):
@@ -1299,6 +666,12 @@ class RequestContext:
         *,
         format: Optional[str] = None,
         expected_size_bytes: Optional[int] = None,
+        produced_by_kind: Optional[str] = None,
+        step_number: Optional[int] = None,
+        epoch_number: Optional[int] = None,
+        output_kind: Optional[str] = None,
+        target_dtype: Optional[str] = None,
+        variant_label: Optional[str] = None,
     ) -> _RequestOutputStream:
         """Open a chunk-writable output stream that finalizes to Tensors."""
         ref = _normalize_output_ref(ref)
@@ -1309,6 +682,12 @@ class RequestContext:
             kind="checkpoint",
             format=format,
             expected_size_bytes=expected_size_bytes,
+            produced_by_kind=produced_by_kind,
+            step_number=step_number,
+            epoch_number=epoch_number,
+            output_kind=output_kind,
+            target_dtype=target_dtype,
+            variant_label=variant_label,
         )
 
     def save_bytes_create(self, ref: str, data: bytes) -> Asset:
@@ -1401,15 +780,28 @@ class RequestContext:
         source_version_id: Optional[str] = None,
         target_version_id: Optional[str] = None,
         snapshot_manifest: Optional[Dict[str, Any]] = None,
+        # HARD-CUT issue #14: the new /publish endpoint shape takes a list of
+        # checkpoints + per-checkpoint lineage + a tags map. Existing callers
+        # (clone_pipeline.py) still pass the legacy args; we translate them
+        # into the new shape here so the wire format is always current.
+        relationship_kind: str = "import",
+        release_visibility: str = "private",
+        auto_create_external_parent: bool = True,
+        merge_with_existing: bool = True,
     ) -> Dict[str, Any]:
-        """Publish conversion lineage to Tensorhub using public HTTP APIs only.
+        """Publish checkpoints + lineage to Tensorhub via the worker-cap /publish endpoint.
 
-        Uses worker capability auth and never touches DB/internal-only paths.
+        Every entry in metadata['output_variants'] becomes one row in
+        tensorhub.repo_checkpoints (checkpoint_id IS the snapshot digest).
+        `source_repo` + `source_version_id` (if set) produce one lineage
+        edge per checkpoint with relationship_kind. Tags in
+        `destination_repo_tags` all get pointed at the first checkpoint in
+        the list (typical case: one output_spec with tag='prod').
 
-        artifact_refs: list of artifact references. Each item can be:
-          - a dict with keys: digest (required), path, size_bytes, domain
-            (from presigned upload complete response: blob_digest, blob_path, etc.)
-          - a string file ref (legacy, used as path only — no digest validation)
+        For imports (clone_huggingface), pass source_repo as
+        'external-sources/upstream' and source_version_id as the external
+        reference like 'hf:black-forest-labs/FLUX.2-klein-4B'; set
+        `relationship_kind='import'` + `auto_create_external_parent=True`.
         """
         owner, repo = _parse_owner_repo(destination_repo)
         source_owner = ""
@@ -1581,79 +973,140 @@ class RequestContext:
         # fail TensorHub validation. When we have no structured variants, the
         # commit relies on output_versions + publish_intent instead.
 
-        commit_payload = {
-            "job_id": str(self.request_id or job_id),
-            "run_kind": "conversion",
-            "status": "succeeded",
-            "commit_idempotency_key": f"worker:{str(self.request_id or '').strip() or 'request'}:{job_id}:v1",
-            "metrics_json": metrics,
-            "cost_json": {},
-            "output_versions": output_versions,
-            "output_variants": commit_output_variants,
-            "publish_intent": publish_intent,
-        }
-        if isinstance(snapshot_manifest, dict) and snapshot_manifest:
-            commit_payload["snapshot_manifest"] = snapshot_manifest
-        logger.info(
-            "worker_publish_commit request_id=%s job_id=%s owner=%s repo=%s output_versions=%d output_variants=%d variant_labels=%s snapshot_manifest=%s",
-            self.request_id,
-            job_id,
-            owner,
-            repo,
-            len(output_versions),
-            len(commit_output_variants),
-            [str(v.get("variant_label") or "").strip() for v in commit_output_variants if isinstance(v, dict)],
-            bool(commit_payload.get("snapshot_manifest")),
-        )
-        commit_result = _request_json(
-            "POST",
-            f"/api/v1/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}/jobs/{urllib.parse.quote(job_id, safe='')}/commit",
-            commit_payload,
-            allow_404=True,
-        )
-        if bool(commit_result.get("not_found")):
-            # Back-compat fallback for older Tensorhub deployments.
-            finalize_payload = {
-                "status": "succeeded",
-                "metrics_json": metrics,
-                "cost_json": {},
-                "output_versions": output_versions,
-                "publish_intent": publish_intent,
-            }
-            commit_result = _request_json(
-                "POST",
-                f"/api/v1/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}/jobs/{urllib.parse.quote(job_id, safe='')}/finalize",
-                finalize_payload,
+        # ----- Build the /publish request body (issue #14 shape). -----
+        _ = publish_intent
+        _ = metrics
+
+        manifest_entries: List[Dict[str, Any]] = []
+        if isinstance(snapshot_manifest, dict):
+            raw_entries = snapshot_manifest.get("entries")
+            if isinstance(raw_entries, list):
+                manifest_entries = [e for e in raw_entries if isinstance(e, dict)]
+
+        # Each commit_output_variants entry becomes one checkpoint row. The
+        # entry's snapshot_digest IS the checkpoint_id (content-addressed).
+        publish_checkpoints: List[Dict[str, Any]] = []
+        parent_repo_ref = ""
+        if source_repo and str(source_repo).strip():
+            parent_repo_ref = str(source_repo).strip()
+        parent_checkpoint_id = normalized_source_version_id
+
+        for v in commit_output_variants:
+            snap = str(v.get("snapshot_digest") or "").strip()
+            if not snap:
+                continue
+            dtype = str(v.get("quantization") or "").strip()
+            file_layout = str(v.get("file_layout") or "").strip()
+            file_type = str(v.get("file_type") or "").strip()
+            # Mirror the structured fields into the attributes jsonb so
+            # endpoint.toml-style `[models] ref + attributes = { dtype = [...] }`
+            # selectors still hit a GIN-indexed match in repo_checkpoints.
+            attrs: Dict[str, str] = {}
+            label = str(v.get("variant_label") or "").strip()
+            if label:
+                attrs["variant_label"] = label
+            if dtype:
+                attrs["dtype"] = dtype
+            if file_layout:
+                attrs["file_layout"] = file_layout
+            if file_type:
+                attrs["file_type"] = file_type
+            lineage: List[Dict[str, Any]] = []
+            if parent_repo_ref and parent_checkpoint_id:
+                lineage.append({
+                    "parent_repo":          parent_repo_ref,
+                    "parent_checkpoint_id": parent_checkpoint_id,
+                    "relationship_kind":    relationship_kind or "import",
+                })
+            publish_checkpoints.append({
+                "checkpoint_id":     snap,
+                "snapshot_manifest": manifest_entries,
+                "kind":              str(md.get("kind") or "model"),
+                "library":           str(md.get("library") or md.get("library_name") or ""),
+                "dtype":             dtype,
+                "file_layout":       file_layout,
+                "file_type":         file_type,
+                "attributes":        attrs,
+                "display_label":     label,
+                "size_bytes":        int(v.get("size_bytes") or 0),
+                "lineage":           lineage,
+            })
+
+        # Fallback: no commit_output_variants supplied (e.g., a simple one-off
+        # publish). Emit exactly one checkpoint from target_version_id +
+        # aggregate snapshot_manifest.
+        if not publish_checkpoints and normalized_target_version_id:
+            fallback_kind = str(md.get("kind") or "model")
+            lineage: List[Dict[str, Any]] = []
+            if parent_repo_ref and parent_checkpoint_id:
+                lineage.append({
+                    "parent_repo":          parent_repo_ref,
+                    "parent_checkpoint_id": parent_checkpoint_id,
+                    "relationship_kind":    relationship_kind or "import",
+                })
+            publish_checkpoints.append({
+                "checkpoint_id":     normalized_target_version_id,
+                "snapshot_manifest": manifest_entries,
+                "kind":              fallback_kind,
+                "library":           str(md.get("library") or md.get("library_name") or ""),
+                "dtype":             "",
+                "file_layout":       "",
+                "file_type":         "",
+                "attributes":        {},
+                "display_label":     "",
+                "size_bytes":        0,
+                "lineage":           lineage,
+            })
+
+        tags_map: Dict[str, str] = {}
+        if publish_checkpoints and normalized_tags:
+            primary_checkpoint_id = publish_checkpoints[0]["checkpoint_id"]
+            for t in normalized_tags:
+                if str(t or "").strip():
+                    tags_map[str(t).strip()] = primary_checkpoint_id
+
+        if not publish_checkpoints:
+            logger.warning(
+                "worker_publish_skipped request_id=%s job_id=%s owner=%s repo=%s reason=no_checkpoints",
+                self.request_id, self.job_id or "", owner, repo,
             )
-        commit_output_versions = [
-            str(v or "").strip().lower()
-            for v in list((commit_result or {}).get("output_versions") or [])
-            if str(v or "").strip()
-        ]
+        else:
+            publish_req_body = {
+                "release_visibility":          release_visibility or "private",
+                "tags":                        tags_map,
+                "checkpoints":                 publish_checkpoints,
+                "auto_create_external_parent": bool(auto_create_external_parent),
+                "merge_with_existing":         bool(merge_with_existing),
+            }
+            try:
+                _request_json(
+                    "POST",
+                    f"/api/v1/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}/jobs/{urllib.parse.quote(job_id, safe='')}/publish",
+                    publish_req_body,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "worker_publish_catalog_failed request_id=%s job_id=%s owner=%s repo=%s error=%r",
+                    self.request_id, self.job_id or "", owner, repo, exc,
+                )
+                raise
+
+        published_ids = [c["checkpoint_id"] for c in publish_checkpoints]
         logger.info(
-            "worker_publish_commit_result request_id=%s job_id=%s owner=%s repo=%s output_versions=%d output_variant_count=%s",
-            self.request_id,
-            job_id,
-            owner,
-            repo,
-            len(commit_output_versions),
-            commit_result.get("output_variant_count"),
+            "worker_publish_succeeded request_id=%s job_id=%s owner=%s repo=%s checkpoints=%d primary=%s",
+            self.request_id, self.job_id or "", owner, repo,
+            len(published_ids), published_ids[0] if published_ids else "",
         )
 
-        logger.info(
-            "worker_publish_succeeded request_id=%s job_id=%s owner=%s repo=%s published_job_id=%s",
-            self.request_id,
-            self.job_id or "",
-            owner,
-            repo,
-            job_id,
-        )
-
-        out: Dict[str, Any] = {"ok": True, "owner": owner, "repo": repo, "job_id": job_id, "job_id": job_id}
-        if commit_output_versions:
-            out["output_versions"] = commit_output_versions
-        elif output_versions:
-            out["output_versions"] = output_versions
+        out: Dict[str, Any] = {
+            "ok":                 True,
+            "owner":              owner,
+            "repo":               repo,
+            "job_id":             job_id,
+            "checkpoint_ids":     published_ids,
+            "output_versions":    published_ids,
+            "release_visibility": release_visibility or "private",
+        }
         if normalized_tags:
             out["destination_repo_tags"] = normalized_tags
         return out

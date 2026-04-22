@@ -942,7 +942,7 @@ class Worker:
                     logger.info("Registered training_function: '%s'", name)
                     continue
 
-                if getattr(obj, "_is_worker_function", False) is True:
+                if getattr(obj, "_is_inference_function", False) is True:
                     try:
                         spec = self._inspect_request_spec(obj)
                     except Exception as exc:
@@ -3335,6 +3335,10 @@ class Worker:
         file_base_url = str(getattr(cmd, "file_base_url", "") or "")
         worker_capability_token = _extract_worker_capability_token(cmd)
         materialized_input_urls = _normalize_materialized_input_urls(cmd)
+        # Tensorhub #232: resolved hardware also populated for realtime sessions
+        # (RealtimeOpenCommand carries the same resolved_compute protobuf field
+        # as JobExecutionRequest). Tenants read via ctx.compute.
+        compute = _extract_resolved_compute(cmd)
         ctx = RequestContext(
             session_id,
             emitter=self._emit_progress_event,
@@ -3345,6 +3349,7 @@ class Worker:
             worker_capability_token=worker_capability_token or None,
             materialized_input_urls=materialized_input_urls or None,
             resolved_cozy_models_by_id=getattr(self, "_resolved_cozy_models_by_id_baseline", None) or None,
+            compute=compute,
         )
 
         max_frame = int(os.getenv("WORKER_MAX_WS_FRAME_BYTES", "0") or 0)

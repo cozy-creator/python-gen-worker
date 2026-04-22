@@ -65,6 +65,45 @@ class TensorhubModelSpec:
 
 
 @dataclass(frozen=True)
+class EndpointResources:
+    """Endpoint-level hardware spec from endpoint.toml [resources] (tensorhub #232).
+
+    Single source of truth for hardware. Size axes (vram_gb, gpu_count,
+    memory_gb, cpu_cores, disk_gb) are invoker-overridable for training
+    invocations; architecture axes (accelerator, cuda_compute_min) are
+    always pinned at the endpoint level.
+    """
+    accelerator: str = ""                    # "cuda" | "none" | ""
+    cuda_compute_min: str = ""               # e.g. "8.0"
+    vram_gb: int = 0
+    gpu_count: int = 0
+    memory_gb: int = 0
+    cpu_cores: int = 0
+    disk_gb: int = 0
+    max_inflight_requests: int = 1
+
+    def to_dict(self) -> dict[str, Any]:
+        """Serialize non-default fields for the manifest wire shape."""
+        out: dict[str, Any] = {}
+        if self.accelerator:
+            out["accelerator"] = self.accelerator
+        if self.cuda_compute_min:
+            out["cuda_compute_min"] = self.cuda_compute_min
+        if self.vram_gb:
+            out["vram_gb"] = self.vram_gb
+        if self.gpu_count:
+            out["gpu_count"] = self.gpu_count
+        if self.memory_gb:
+            out["memory_gb"] = self.memory_gb
+        if self.cpu_cores:
+            out["cpu_cores"] = self.cpu_cores
+        if self.disk_gb:
+            out["disk_gb"] = self.disk_gb
+        out["max_inflight_requests"] = self.max_inflight_requests
+        return out
+
+
+@dataclass(frozen=True)
 class EndpointToml:
     schema_version: int
     name: str
@@ -77,7 +116,7 @@ class EndpointToml:
     # function payload keyspace: function_name -> model_key -> spec
     function_resources: dict[str, dict[str, Any]]  # function_name -> runtime/resource hints
     function_batch_dimensions: dict[str, str]  # function_name -> payload-root batch dimension path
-    resources: dict[str, Any]
+    resources: EndpointResources
 
 
 def _validate_constraint(raw: str, *, field: str) -> None:
@@ -369,7 +408,7 @@ def _parse_function_resource_hints(v: Any) -> dict[str, Any]:
             out["compute_capability_min"] = f"{parsed:.1f}"
 
     if "min_vram_gb" in v:
-        raw = v["min_vram_gb"]
+        raw = v.get("min_vram_gb")
         try:
             val = float(raw)
         except Exception:
@@ -379,7 +418,7 @@ def _parse_function_resource_hints(v: Any) -> dict[str, Any]:
         out["min_vram_gb"] = val
 
     if "vram_multiplier" in v:
-        raw = v["vram_multiplier"]
+        raw = v.get("vram_multiplier")
         try:
             val = float(raw)
         except Exception:
@@ -611,29 +650,20 @@ def load_endpoint_toml_with_warnings(path: Path) -> tuple[EndpointToml, list[str
     # for hardware. Size axes (vram_gb, gpu_count, memory_gb, cpu_cores, disk_gb)
     # are invoker-overridable for training invocations; architecture axes
     # (accelerator, cuda_compute_min) are always pinned.
-    resources: dict[str, Any] = {}
     raw_resources = data.get("resources")
+    res_kwargs: dict[str, Any] = {}
     if isinstance(raw_resources, dict):
-        # Hardware fields (canonical set per issue #232).
-        hardware_keys = (
-            "accelerator",
-            "cuda_compute_min",
-            "vram_gb",
-            "gpu_count",
-            "memory_gb",
-            "cpu_cores",
-            "disk_gb",
-        )
-        for k in hardware_keys:
+        for k in ("accelerator", "cuda_compute_min"):
             if k in raw_resources:
-                resources[k] = raw_resources[k]
-        # ``ram_gb`` is the legacy name for memory_gb — accept it as an alias
-        # when memory_gb isn't explicitly set.
-        if "memory_gb" not in resources and "ram_gb" in raw_resources:
-            resources["memory_gb"] = raw_resources["ram_gb"]
-        # max_inflight_requests: legacy platform-wide cap. Retain for now —
-        # scheduler concurrency is primarily decorator-driven, but this is a
-        # hard ceiling on concurrent requests per worker.
+                res_kwargs[k] = str(raw_resources[k])
+        for k in ("vram_gb", "gpu_count", "memory_gb", "cpu_cores", "disk_gb"):
+            if k in raw_resources:
+                res_kwargs[k] = int(raw_resources[k])
+        # ``ram_gb`` is the legacy name for memory_gb — accept as alias when
+        # memory_gb isn't explicitly set.
+        if "memory_gb" not in res_kwargs and "ram_gb" in raw_resources:
+            res_kwargs["memory_gb"] = int(raw_resources["ram_gb"])
+        # max_inflight_requests: hard ceiling on concurrent requests per worker.
         if "max_inflight_requests" in raw_resources:
             try:
                 iv = int(raw_resources["max_inflight_requests"])
@@ -641,10 +671,8 @@ def load_endpoint_toml_with_warnings(path: Path) -> tuple[EndpointToml, list[str
                 raise ValueError("resources.max_inflight_requests must be an integer")
             if iv <= 0:
                 raise ValueError("resources.max_inflight_requests must be > 0")
-            resources["max_inflight_requests"] = iv
-    # Endpoint-level inflight default: sequential unless explicitly raised.
-    if "max_inflight_requests" not in resources:
-        resources["max_inflight_requests"] = 1
+            res_kwargs["max_inflight_requests"] = iv
+    resources = EndpointResources(**res_kwargs)
 
     return (
         EndpointToml(

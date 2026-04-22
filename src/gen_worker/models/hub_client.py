@@ -94,6 +94,8 @@ class CozyHubV2Client:
         tag = (tag or "").strip() or "latest"
         digest = (digest or "").strip() or None
 
+        # Worker-facing route: capability-token authenticated (no user membership check).
+        # The user-JWT counterpart lives at /api/v1/repos/:owner/:repo/resolve.
         url = f"{self.base_url}/api/v1/inference/repos/{owner}/{repo}/resolve"
         payload = {
             "tag": tag,
@@ -261,7 +263,14 @@ class CozyHubV2Client:
 
 def _parse_resolve_artifact_response(data: Mapping[str, Any], *, include_urls: bool) -> CozyHubResolveArtifactResult:
     repo_revision_seq = _coerce_int(data.get("repo_revision_seq")) or _coerce_int(data.get("revision")) or _coerce_int(data.get("version")) or 0
-    snapshot_digest = str(data.get("snapshot_digest") or data.get("version_id") or "").strip()
+    # Post-refactor (e2e issues #11-14): checkpoint_id IS the snapshot digest.
+    # Accept the new shape while still reading legacy keys for compat.
+    snapshot_digest = str(
+        data.get("checkpoint_id")
+        or data.get("snapshot_digest")
+        or data.get("version_id")
+        or ""
+    ).strip()
     if not snapshot_digest:
         raise ValueError("missing snapshot_digest/version_id")
 

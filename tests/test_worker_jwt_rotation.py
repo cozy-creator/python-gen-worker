@@ -42,7 +42,7 @@ def test_worker_jwt_rotation_updates_next_reconnect(tmp_path: Path, monkeypatch:
 from __future__ import annotations
 
 import msgspec
-from gen_worker import RequestContext, ResourceRequirements, worker_function
+from gen_worker import RequestContext, ResourceRequirements, inference_function
 
 class Input(msgspec.Struct):
     name: str

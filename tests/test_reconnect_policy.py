@@ -14,7 +14,7 @@ def _make_worker(tmp_path: Path, **kwargs) -> Worker:
 from __future__ import annotations
 
 import msgspec
-from gen_worker import RequestContext, ResourceRequirements, worker_function
+from gen_worker import RequestContext, ResourceRequirements, inference_function
 
 class Input(msgspec.Struct):
     name: str

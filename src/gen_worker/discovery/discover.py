@@ -559,7 +559,7 @@ def discover_functions(root: Optional[Path] = None, *, main_module: str | None =
             for obj in mod.__dict__.values():
                 if not inspect.isfunction(obj):
                     continue
-                is_worker = getattr(obj, "_is_worker_function", False)
+                is_worker = getattr(obj, "_is_inference_function", False)
                 is_conversion = getattr(obj, "_is_training_function", False)
                 if not (is_worker or is_conversion):
                     continue
@@ -593,7 +593,7 @@ def discover_functions(root: Optional[Path] = None, *, main_module: str | None =
         for name, obj in mod.__dict__.items():
             if not inspect.isfunction(obj):
                 continue
-            is_worker = getattr(obj, "_is_worker_function", False)
+            is_worker = getattr(obj, "_is_inference_function", False)
             is_conversion = getattr(obj, "_is_training_function", False)
             if not (is_worker or is_conversion):
                 continue
@@ -669,8 +669,7 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
         "functions": functions,
     }
 
-    if tensorhub_manifest.resources:
-        manifest["resources"] = dict(tensorhub_manifest.resources)
+    manifest["resources"] = tensorhub_manifest.resources.to_dict()
 
     # Build model keyspaces.
     fixed_models = dict(tensorhub_manifest.models or {})

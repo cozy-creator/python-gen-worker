@@ -172,7 +172,7 @@ def inference_function(
 
     def apply(func: F) -> F:
         mode = concurrency or _infer_concurrency_mode(func, is_training=False)
-        setattr(func, "_is_worker_function", True)
+        setattr(func, "_is_inference_function", True)
         setattr(func, "_concurrency_mode", mode)
         setattr(func, "_function_label", (label or "").strip() or None)
         setattr(func, "_function_description", (description or "").strip() or None)
@@ -195,7 +195,7 @@ def inference_function(
 
 # Realtime/WebSocket endpoints retain their own decorator. Tenants handling
 # realtime sessions declare ``@realtime_function`` (renamed from
-# ``@realtime_function``) for the same reason inference + training got their
+# ``@worker_websocket``) for the same reason inference + training got their
 # own decorator names — the kind is part of the tenant's function metadata.
 def realtime_function(
     fn: Optional[F] = None,

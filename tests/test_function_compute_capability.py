@@ -57,7 +57,7 @@ main = "endpoint_mod_cc.main"
                 (src_dir / "main.py").write_text(
                     """
 import msgspec
-from gen_worker import RequestContext, ResourceRequirements, worker_function
+from gen_worker import RequestContext, ResourceRequirements, inference_function
 
 class Input(msgspec.Struct):
     x: int

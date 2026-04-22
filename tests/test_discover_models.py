@@ -56,7 +56,7 @@ base = { ref = "stabilityai/stable-diffusion-xl-base-1.0", attributes = { dtype 
                     """
 from typing import Annotated
 import msgspec
-from gen_worker import RequestContext, worker_function
+from gen_worker import RequestContext, inference_function
 from gen_worker.api.injection import ModelRef, ModelRefSource as Src
 
 class Input(msgspec.Struct):
@@ -153,7 +153,7 @@ main = "funcs_b"
                     """
 from typing import Annotated
 import msgspec
-from gen_worker import RequestContext, worker_function
+from gen_worker import RequestContext, inference_function
 from gen_worker.api.injection import ModelRef, ModelRefSource as Src
 
 class Input(msgspec.Struct):
@@ -219,7 +219,7 @@ main = "funcs_c"
                     """
 from typing import Annotated
 import msgspec
-from gen_worker import RequestContext, worker_function
+from gen_worker import RequestContext, inference_function
 from gen_worker.api.injection import ModelRef, ModelRefSource as Src
 
 class Input(msgspec.Struct):
@@ -288,7 +288,7 @@ batch_dimension = "items"
                 (src_dir / "__init__.py").write_text(
                     """
 import msgspec
-from gen_worker import RequestContext, worker_function
+from gen_worker import RequestContext, inference_function
 
 class Input(msgspec.Struct):
     items: list[str]
@@ -349,7 +349,7 @@ sdxl = "stabilityai/stable-diffusion-xl-base-1.0"
                     """
 from typing import Annotated
 import msgspec
-from gen_worker import RequestContext, worker_function
+from gen_worker import RequestContext, inference_function
 from gen_worker.api.injection import ModelRef, ModelRefSource as Src
 
 class Input(msgspec.Struct):
