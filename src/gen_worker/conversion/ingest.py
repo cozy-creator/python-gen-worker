@@ -828,7 +828,7 @@ def download_huggingface_repo_files(
     # as fp32, but HF repos routinely ship it bf16-native. Without this
     # refinement, an unsuffixed bf16 source + `target=bf16` would run a
     # wasteful identity conversion instead of taking the passthrough path.
-    from .dtype_detection import (
+    from .dtype_utils import (
         parse_weight_file,
         read_safetensors_header_dtype,
     )

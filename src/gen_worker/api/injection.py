@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-import inspect
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Optional, get_args, get_origin, Annotated
+from typing import Any, Optional, get_args, get_origin, Annotated
 
 
 class ModelRefSource(str, Enum):
@@ -63,7 +62,3 @@ def type_qualname(t: Any) -> str:
     if hasattr(t, "__module__") and hasattr(t, "__name__"):
         return f"{t.__module__}.{t.__name__}"
     return repr(t)
-
-
-def is_async_callable(fn: Callable[..., Any]) -> bool:
-    return inspect.iscoroutinefunction(fn) or inspect.isasyncgenfunction(fn)

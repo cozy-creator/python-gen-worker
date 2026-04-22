@@ -57,7 +57,7 @@ class Input(msgspec.Struct):
 class Output(msgspec.Struct):
     y: int
 
-@worker_function()
+@inference_function()
 def medasr_transcribe(ctx: RequestContext, payload: Input) -> Output:
     return Output(y=payload.x)
 """
@@ -114,11 +114,11 @@ class Input(msgspec.Struct):
 class Output(msgspec.Struct):
     y: int
 
-@worker_function()
+@inference_function()
 def image_worker(ctx: RequestContext, payload: Input) -> Output:
     return Output(y=payload.x)
 
-@worker_function()
+@inference_function()
 def image__worker(ctx: RequestContext, payload: Input) -> Output:
     return Output(y=payload.x)
 """
@@ -172,7 +172,7 @@ class Input(msgspec.Struct):
 class Output(msgspec.Struct):
     y: int
 
-@worker_function()
+@inference_function()
 def generate(ctx: RequestContext, payload: Input) -> Output:
     return Output(y=payload.x)
 """

@@ -1,6 +1,64 @@
+import inspect
+import typing
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, TypeVar
 
 F = TypeVar("F", bound=Callable[..., Any])
+
+
+# Concurrency modes for @inference_function / @training_function (tensorhub
+# #232). These are the scheduler-facing capability declarations:
+#   - "sequential": one request at a time per worker (safe default).
+#   - "batched":    worker accepts batched requests grouped by the scheduler.
+#   - "concurrent": worker handles N reentrant requests in parallel.
+# Worker-reported FunctionCapacity at handshake tells the scheduler how many
+# to dispatch within each mode.
+CONCURRENCY_MODES = ("sequential", "batched", "concurrent")
+
+
+def _infer_concurrency_mode(func: Callable[..., Any], *, is_training: bool) -> str:
+    """Signature-based default when the decorator omits ``concurrency=``.
+
+    Training functions always default to ``sequential`` — training workloads
+    are typically long-running, non-reentrant, one-at-a-time per worker.
+
+    Inference functions infer from the signature:
+      - ``list[Input] → list[Output]`` (second positional is list, return is list)
+        → ``batched``
+      - Everything else → ``sequential``. Tenants who have verified their
+        function is reentrant bump explicitly to ``concurrent``.
+    """
+    if is_training:
+        return "sequential"
+    try:
+        hints = typing.get_type_hints(func, include_extras=True)
+    except Exception:
+        hints = {}
+    try:
+        sig = inspect.signature(func)
+    except (TypeError, ValueError):
+        return "sequential"
+    params = [p for p in sig.parameters.values() if p.name not in ("self", "cls")]
+    # Skip the ctx param; consider the first tenant-declared input.
+    if params and params[0].name in ("ctx", "context"):
+        params = params[1:]
+    if not params:
+        return "sequential"
+    first_ann = hints.get(params[0].name)
+    return_ann = hints.get("return")
+    if _is_list_type(first_ann) and _is_list_type(return_ann):
+        return "batched"
+    return "sequential"
+
+
+def _is_list_type(ann: Any) -> bool:
+    if ann is None:
+        return False
+    # Bare ``list`` annotation (no element type) — common enough that we
+    # accept it as batched too.
+    if ann is list:
+        return True
+    origin = typing.get_origin(ann)
+    return origin is list
 
 class ResourceRequirements:
     """
@@ -26,17 +84,7 @@ class ResourceRequirements:
         supported_precisions: Optional[Sequence[str]] = None,
         runtime_hints: Optional[Mapping[str, Any]] = None,
     ) -> None:
-        self.batch_size_min = batch_size_min
-        self.batch_size_target = batch_size_target
-        self.batch_size_max = batch_size_max
-        self.prefetch_depth = prefetch_depth
-        self.max_wait_ms = max_wait_ms
-        self.memory_hint_mb = memory_hint_mb
         self.kind = str(kind or "").strip()
-        self.compute_capability_min = compute_capability_min
-        self.requires_gpu = requires_gpu
-        self.min_vram_gb = min_vram_gb
-        self.vram_multiplier = vram_multiplier
         self._requirements: Dict[str, Any] = {}
         if batch_size_min is not None:
             self._requirements["batch_size_min"] = int(batch_size_min)
@@ -91,49 +139,82 @@ class ResourceRequirements:
         return f"ResourceRequirements({self._requirements})"
 
 
-def worker_function(
+def inference_function(
+    fn: Optional[F] = None,
+    *,
+    concurrency: Optional[str] = None,
+    label: Optional[str] = None,
+    description: Optional[str] = None,
     resources: Optional[ResourceRequirements] = None,
-) -> Callable[[F], F]:
-    """
-    Decorator to mark a function as a worker request handler and associate resource requirements.
+) -> Any:
+    """Mark a function as an inference endpoint (tensorhub #232).
+
+    Usable as ``@inference_function`` (bare) or ``@inference_function(...)``
+    with kwargs.
 
     Args:
-        resources: An optional ResourceRequirements object describing the function's needs.
+        concurrency: ``"sequential"`` | ``"batched"`` | ``"concurrent"``.
+            Omitted → inferred from signature (``list→list`` → batched;
+            everything else → sequential).
+        label: Optional short label surfaced in the endpoint UI / search
+            (e.g. ``"text-to-image"``). Non-functional.
+        description: Optional free-text description. Non-functional.
+        resources: Legacy per-function ResourceRequirements. Retained only
+            for batching / runtime hints — NOT for hardware selection.
+            Hardware is declared endpoint-wide in ``[resources]``.
     """
-    if resources is None:
-        resources = ResourceRequirements() # Default empty requirements
-
-    def decorator(func: F) -> F:
-        # Attach metadata directly to the function object.
-        # The SDK's runner component will look for these attributes.
-        setattr(func, '_is_worker_function', True)
-        setattr(func, '_worker_resources', resources)
-
-        # Return the original function, now marked with attributes.
-        #
-        # Important: do not wrap the function; we want `inspect.signature()`
-        # to reflect the tenant-authored callable, and self-wrapping can create
-        # `inspect.unwrap()` loops.
-        return func
-
-    return decorator
-
-
-def worker_websocket(
-    resources: Optional[ResourceRequirements] = None,
-) -> Callable[[F], F]:
-    """
-    Decorator to mark an async function as a WebSocket realtime handler.
-
-    WebSocket handlers are invoked via a worker-owned socket interface (no FastAPI
-    dependency) when the scheduler/orchestrator starts a realtime session.
-    """
+    if concurrency is not None and concurrency not in CONCURRENCY_MODES:
+        raise ValueError(
+            f"@inference_function: concurrency={concurrency!r} not in {CONCURRENCY_MODES}"
+        )
     if resources is None:
         resources = ResourceRequirements()
 
-    def decorator(func: F) -> F:
-        setattr(func, "_is_worker_websocket", True)
+    def apply(func: F) -> F:
+        mode = concurrency or _infer_concurrency_mode(func, is_training=False)
+        setattr(func, "_is_worker_function", True)
+        setattr(func, "_concurrency_mode", mode)
+        setattr(func, "_function_label", (label or "").strip() or None)
+        setattr(func, "_function_description", (description or "").strip() or None)
         setattr(func, "_worker_resources", resources)
         return func
 
-    return decorator
+    if fn is not None:
+        return apply(fn)
+    return apply
+
+
+# NOTE: @training_function lives in ``gen_worker.conversion.dispatch`` (imported
+# by tenants as ``from gen_worker import training_function``). It's a richer
+# decorator than @inference_function — it handles the reserved-name contract
+# (ctx / source / datasets) and signature-introspected dispatch per e2e issue
+# #5. Keeping it in the conversion submodule avoids importing the heavy
+# conversion stack (Source materialization, StreamingWriter, etc) for inference
+# endpoints.
+
+
+# Realtime/WebSocket endpoints retain their own decorator. Tenants handling
+# realtime sessions declare ``@realtime_function`` (renamed from
+# ``@realtime_function``) for the same reason inference + training got their
+# own decorator names — the kind is part of the tenant's function metadata.
+def realtime_function(
+    fn: Optional[F] = None,
+    *,
+    label: Optional[str] = None,
+    description: Optional[str] = None,
+    resources: Optional[ResourceRequirements] = None,
+) -> Any:
+    """Mark an async function as a WebSocket realtime handler."""
+    if resources is None:
+        resources = ResourceRequirements()
+
+    def apply(func: F) -> F:
+        setattr(func, "_is_worker_websocket", True)
+        setattr(func, "_function_label", (label or "").strip() or None)
+        setattr(func, "_function_description", (description or "").strip() or None)
+        setattr(func, "_worker_resources", resources)
+        return func
+
+    if fn is not None:
+        return apply(fn)
+    return apply

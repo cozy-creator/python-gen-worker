@@ -187,3 +187,28 @@ class OutputSpec(msgspec.Struct):
     """
 
     attributes: dict = msgspec.field(default_factory=dict)
+
+
+class Compute(msgspec.Struct, frozen=True):
+    """The resolved hardware specification for one invocation.
+
+    Populated by gen-orchestrator at dispatch:
+      - For inference functions: equals the endpoint's ``[resources]``.
+      - For training functions: endpoint ``[resources]`` merged with the
+        invoker's ``compute`` overrides from the wire payload.
+
+    Surfaced to tenant code read-only via ``RequestContext.compute``.
+    Architecture axes (accelerator, cuda_compute_min) are always pinned by
+    the endpoint image; invoker overrides on those are rejected at submit.
+
+    See tensorhub issue #232 for the full contract.
+    """
+
+    accelerator: str = ""
+    cuda_compute_min: str = ""
+    vram_gb: int = 0
+    gpu_count: int = 0
+    gpu_tier: Optional[str] = None
+    memory_gb: int = 0
+    cpu_cores: int = 0
+    disk_gb: int = 0

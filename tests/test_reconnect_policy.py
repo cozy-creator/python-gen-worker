@@ -22,7 +22,7 @@ class Input(msgspec.Struct):
 class Output(msgspec.Struct):
     message: str
 
-@worker_function(ResourceRequirements())
+@inference_function(ResourceRequirements())
 def hello(ctx: RequestContext, payload: Input) -> Output:
     return Output(message=f"hello {payload.name}")
 """.lstrip(),

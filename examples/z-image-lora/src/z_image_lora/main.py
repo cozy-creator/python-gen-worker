@@ -19,7 +19,7 @@ import msgspec
 from diffusers import DiffusionPipeline
 from PIL import Image
 
-from gen_worker import RequestContext, ResourceRequirements, worker_function
+from gen_worker import RequestContext, ResourceRequirements, inference_function
 from gen_worker.api.injection import ModelRef, ModelRefSource as Src
 from gen_worker.api.types import Asset
 
@@ -65,7 +65,7 @@ class GenerateOutput(msgspec.Struct):
     image: Asset
 
 
-@worker_function(_z_image_resources)
+@inference_function(resources=_z_image_resources)
 def generate_with_loras(
     ctx: RequestContext,
     pipeline: Annotated[

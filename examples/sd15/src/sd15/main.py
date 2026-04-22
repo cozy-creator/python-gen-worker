@@ -9,7 +9,7 @@ import msgspec
 from diffusers import StableDiffusionPipeline
 from PIL import Image
 
-from gen_worker import RequestContext, ResourceRequirements, worker_function
+from gen_worker import RequestContext, ResourceRequirements, inference_function
 from gen_worker.api.injection import ModelRef, ModelRefSource as Src
 from gen_worker.api.types import Asset
 
@@ -44,7 +44,7 @@ class GenerateOutput(msgspec.Struct):
     image: Asset
 
 
-@worker_function(_sd15_resources)
+@inference_function(resources=_sd15_resources)
 def generate(
     ctx: RequestContext,
     pipeline: Annotated[
@@ -94,7 +94,7 @@ def generate(
     return GenerateOutput(image=out)
 
 
-@worker_function(_sd15_resources)
+@inference_function(resources=_sd15_resources)
 def generate_fp8(
     ctx: RequestContext,
     pipeline: Annotated[
@@ -112,7 +112,7 @@ def generate_fp8(
     return generate(ctx, pipeline, payload)
 
 
-@worker_function(_sd15_resources)
+@inference_function(resources=_sd15_resources)
 def generate_int8(
     ctx: RequestContext,
     pipeline: Annotated[
@@ -130,7 +130,7 @@ def generate_int8(
     return generate(ctx, pipeline, payload)
 
 
-@worker_function(_sd15_resources)
+@inference_function(resources=_sd15_resources)
 def generate_int4(
     ctx: RequestContext,
     pipeline: Annotated[

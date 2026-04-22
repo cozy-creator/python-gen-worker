@@ -11,7 +11,7 @@ import torch
 from diffusers import Flux2KleinPipeline
 from PIL import Image
 
-from gen_worker import RequestContext, ResourceRequirements, worker_function
+from gen_worker import RequestContext, ResourceRequirements, inference_function
 from gen_worker.api.injection import ModelRef, ModelRefSource as Src
 from gen_worker.api.types import Asset
 
@@ -99,7 +99,7 @@ def _generate(
     return GenerateOutput(image=out)
 
 
-@worker_function(_flux_resources)
+@inference_function(resources=_flux_resources)
 def generate(
     ctx: RequestContext,
     pipeline: Annotated[
@@ -111,7 +111,7 @@ def generate(
     return _generate(ctx, pipeline, payload, "flux2-klein-9b-base")
 
 
-@worker_function(_flux_resources)
+@inference_function(resources=_flux_resources)
 def generate_turbo(
     ctx: RequestContext,
     pipeline: Annotated[
@@ -123,7 +123,7 @@ def generate_turbo(
     return _generate(ctx, pipeline, payload, "flux2-klein-9b-turbo")
 
 
-@worker_function(_flux_resources)
+@inference_function(resources=_flux_resources)
 def generate_fp8(
     ctx: RequestContext,
     pipeline: Annotated[
@@ -135,7 +135,7 @@ def generate_fp8(
     return _generate(ctx, pipeline, payload, "flux2-klein-9b-base_fp8")
 
 
-@worker_function(_flux_resources)
+@inference_function(resources=_flux_resources)
 def generate_turbo_fp8(
     ctx: RequestContext,
     pipeline: Annotated[
@@ -147,7 +147,7 @@ def generate_turbo_fp8(
     return _generate(ctx, pipeline, payload, "flux2-klein-9b-turbo_fp8")
 
 
-@worker_function(_nvfp4_resources)
+@inference_function(resources=_nvfp4_resources)
 def generate_nvfp4(
     ctx: RequestContext,
     pipeline: Annotated[
@@ -159,7 +159,7 @@ def generate_nvfp4(
     return _generate(ctx, pipeline, payload, "flux2-klein-9b-base_nvfp4")
 
 
-@worker_function(_nvfp4_resources)
+@inference_function(resources=_nvfp4_resources)
 def generate_turbo_nvfp4(
     ctx: RequestContext,
     pipeline: Annotated[

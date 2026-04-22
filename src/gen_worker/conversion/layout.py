@@ -285,7 +285,7 @@ def select_huggingface_source_files(
     # by `(component, base_name)` and keep only the preferred dtype sibling.
     # Non-weight files (configs/tokenizers/scheduler configs) pass through
     # unconditionally.
-    from .dtype_detection import filter_by_source_dtype_preference, parse_weight_file
+    from .dtype_utils import filter_by_source_dtype_preference, parse_weight_file
 
     weight_infos = []
     non_weight_paths = []

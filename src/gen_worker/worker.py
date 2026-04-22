@@ -39,6 +39,7 @@ from ._worker_support import (
     _RequestSpec,
     _WebsocketSpec,
     _extract_checkpoint_id_from_result,
+    _extract_resolved_compute,
     _extract_worker_capability_token,
     _normalize_materialized_input_urls,
     _parse_manifest_model_mapping,
@@ -180,7 +181,7 @@ class Worker:
         Args:
             scheduler_addr: Address of the scheduler service.
             scheduler_addrs: Optional list of seed scheduler addresses.
-            user_module_names: List of Python module names containing user-defined @worker_function functions.
+            user_module_names: List of Python module names containing user-defined @inference_function functions.
             worker_id: Unique ID for this worker (generated if not provided).
             worker_jwt: Worker-connect JWT (required).
             use_tls: Whether to use TLS for the connection.
@@ -231,10 +232,10 @@ class Worker:
 
         self._request_specs: Dict[str, _RequestSpec] = {}
         self._ws_specs: Dict[str, _WebsocketSpec] = {}
-        # Transform-kind (@conversion_function) handlers, keyed by function
+        # Transform-kind (@training_function) handlers, keyed by function
         # name. Dispatch shape is (request_context, payload_dict) → list[ProducedVariant];
         # see gen_worker/conversion/dispatch.py for the contract.
-        self._conversion_specs: Dict[str, Callable[..., Any]] = {}
+        self._training_specs: Dict[str, Callable[..., Any]] = {}
         self._active_requests: Dict[str, RequestContext] = {}
         self._active_requests_lock = threading.Lock()
         self._request_batch_context: Dict[str, Tuple[str, str]] = {}  # request_id -> (batch_id, item_id)
@@ -898,7 +899,7 @@ class Worker:
 
 
     def _discover_and_register_functions(self) -> None:
-        """Discover and register functions marked with @worker_function / @worker_websocket."""
+        """Discover and register functions marked with @inference_function / @realtime_function."""
         logger.info("Discovering worker handlers in modules: %s...", self.user_module_names)
         discovered = 0
 
@@ -913,24 +914,32 @@ class Worker:
                 if not inspect.isfunction(obj):
                     continue
 
-                # Transform-kind endpoints: @conversion_function decorated.
+                # Transform-kind endpoints: @training_function decorated.
                 # The wrapper's (request_context, payload) signature isn't a
-                # regular worker_function shape; register via ConversionFunctionSpec
+                # regular @inference_function shape; register via TrainingFunctionSpec
                 # without running _inspect_request_spec.
-                if getattr(obj, "_is_conversion_function", False) is True:
-                    name = getattr(obj, "__name__", None)
-                    if not name:
-                        logger.error("Skipping unnamed @conversion_function in %s", module_name)
+                if getattr(obj, "_is_training_function", False) is True:
+                    python_name = getattr(obj, "__name__", None)
+                    if not python_name:
+                        logger.error("Skipping unnamed @training_function in %s", module_name)
                         continue
-                    if name in self._conversion_specs:
+                    # Slugify the Python name to match what orchestrator dispatches
+                    # (matches the inference-function registration convention so
+                    # function_name lookups agree at RPC time).
+                    name = slugify_function_name(python_name)
+                    if not name:
+                        logger.error("@training_function '%s' in %s: function name cannot be normalized",
+                                     python_name, module_name)
+                        continue
+                    if name in self._training_specs:
                         logger.warning("Handler name conflict for '%s'; skipping", name)
                         continue
                     resources = getattr(obj, "_worker_resources", None)
-                    self._conversion_specs[name] = obj
+                    self._training_specs[name] = obj
                     if resources is not None:
                         self._discovered_resources[name] = resources
                     discovered += 1
-                    logger.info("Registered conversion_function: '%s'", name)
+                    logger.info("Registered training_function: '%s'", name)
                     continue
 
                 if getattr(obj, "_is_worker_function", False) is True:
@@ -1925,7 +1934,11 @@ class Worker:
                 torch_version=gpu_info["torch_version"],
                 gpu_sm=gpu_info["gpu_sm"],
                 installed_libs=gpu_info["installed_libs"],
-                available_functions=list(dict.fromkeys(list(self._request_specs.keys()) + list(self._ws_specs.keys()))),
+                available_functions=list(dict.fromkeys(
+                    list(self._request_specs.keys())
+                    + list(self._ws_specs.keys())
+                    + list(self._training_specs.keys())
+                )),
                 vram_models=vram_models,   # Models in VRAM (hot)
                 disk_models=disk_models,   # Models on disk (warm)
                 supports_model_loading=supports_model_loading_flag,
@@ -3081,6 +3094,9 @@ class Worker:
         file_base_url = str(getattr(request, "file_base_url", "") or "")
         worker_capability_token = _extract_worker_capability_token(request)
         resolved_cozy_models_by_id = dict(getattr(request, "resolved_cozy_models_by_id", {}) or {})
+        # Tensorhub #232: resolved hardware spec populated by the orchestrator.
+        # Surfaced to tenant code read-only via ctx.compute.
+        compute = _extract_resolved_compute(request)
         parent_request_id = str(getattr(request, "parent_request_id", "") or "").strip() or None
         child_request_id = str(getattr(request, "child_request_id", "") or "").strip() or None
         item_id = str(getattr(request, "item_id", "") or "").strip() or None
@@ -3110,7 +3126,8 @@ class Worker:
         )
 
         spec = self._request_specs.get(function_name)
-        if not spec:
+        training_fn = self._training_specs.get(function_name) if spec is None else None
+        if spec is None and training_fn is None:
             error_msg = f"Unknown function requested: {function_name}"
             logger.error(error_msg)
             self._emit_request_event(
@@ -3157,14 +3174,14 @@ class Worker:
                 execution_hints["memory_hint_mb"] = int(req_cfg.get("memory_hint_mb") or 0)
             except Exception:
                 pass
-        # For conversion/training tasks, extract the reserved-name fields
+        # For training tasks, extract the reserved-name fields
         # (`source` and `destination`) from the input payload so RequestContext
         # can expose them to tenant code via ctx.source, ctx.source_path,
         # ctx.destination, and so the repo-job upload scope can resolve. Falls
         # back to the legacy scalar `destination_repo` field when present.
         source_info_raw: Optional[Dict[str, Any]] = None
         destination_info_raw: Optional[Dict[str, Any]] = None
-        if kind.lower() in {"conversion", "training"} and input_payload:
+        if kind.lower() == "training" and input_payload:
             try:
                 raw_input = msgspec.msgpack.decode(input_payload)
                 if isinstance(raw_input, dict):
@@ -3211,6 +3228,7 @@ class Worker:
             item_index=item_index,
             source_info=source_info_raw,
             destination_info=destination_info_raw,
+            compute=compute,
         )
         # Add to active requests *before* starting thread
         with self._active_requests_lock:
@@ -3228,12 +3246,22 @@ class Worker:
                   return
              self._active_requests[request_id] = ctx
 
-        # Execute function in a separate thread to avoid blocking the receive loop
-        thread = threading.Thread(
-            target=self._execute_request,
-            args=(ctx, spec, input_payload),
-            daemon=True,
-        )
+        # Execute function in a separate thread to avoid blocking the receive loop.
+        # Training-function handlers take a different dispatch path — the
+        # dispatch wrapper already owns msgspec-decode of the raw payload dict,
+        # tenant-call, and ProducedVariant upload via RequestContext.save_checkpoint.
+        if training_fn is not None:
+            thread = threading.Thread(
+                target=self._execute_training_request,
+                args=(ctx, function_name, training_fn, input_payload),
+                daemon=True,
+            )
+        else:
+            thread = threading.Thread(
+                target=self._execute_request,
+                args=(ctx, spec, input_payload),
+                daemon=True,
+            )
         thread.start()
 
     def _handle_batch_job_request(self, request: Any) -> None:
@@ -3458,6 +3486,62 @@ class Worker:
         rm.mark_compute_started()
         if rm.compute_started_at:
             self._emit_worker_event_bytes(request_id, "metrics.compute.started", safe_json_bytes({"at": rm.compute_started_at}))
+
+        # Tensorhub #232: auto-bind the dispatched hardware into per-job logs
+        # so operators grep "dispatched_tier=A100-80" for incident response
+        # without needing tenant-side logging cooperation. Best-effort; uses
+        # the ctx.compute sentinel defaults when the orchestrator didn't
+        # attach resolved_compute.
+        _c = getattr(ctx, "compute", None)
+        if _c is not None and (_c.accelerator or _c.vram_gb or _c.gpu_count or _c.gpu_tier):
+            logger.info(
+                "request.dispatched rid=%s fn=%s dispatched_accelerator=%s "
+                "dispatched_tier=%s dispatched_vram_gb=%s dispatched_gpu_count=%s "
+                "dispatched_memory_gb=%s dispatched_cpu_cores=%s",
+                request_id,
+                spec.name,
+                _c.accelerator or "none",
+                _c.gpu_tier or "",
+                _c.vram_gb,
+                _c.gpu_count,
+                _c.memory_gb,
+                _c.cpu_cores,
+            )
+            # One-shot hardware_match_check — cross-reference the orchestrator's
+            # selected tier against the worker's actual GPU name. WARN on
+            # mismatch; doesn't fail the job. Catches scheduler bugs where a
+            # job lands on unintended hardware without surfacing failure-mode
+            # noise to tenants.
+            if _c.gpu_tier and _c.accelerator == "cuda":
+                try:
+                    # Use the module-level `torch` (None when torch is
+                    # unavailable). A function-local `import torch` here
+                    # shadows the module binding and turns later references
+                    # (e.g. the peak-mem tracker) into UnboundLocalError.
+                    if torch is not None and torch.cuda.is_available():
+                        actual = torch.cuda.get_device_name(0)
+                        # Tier strings are heuristic (e.g. "A100-80") — accept
+                        # any SUBSTRING match against the driver-reported name
+                        # (e.g. "NVIDIA A100-SXM4-80GB"). Canonicalize both
+                        # sides by lowercasing + stripping non-alnum before
+                        # the contains-check.
+                        import re  # noqa: PLC0415
+                        def _canon(s: str) -> str:
+                            return re.sub(r"[^a-z0-9]+", "", s.lower())
+                        canon_tier = _canon(_c.gpu_tier.split("-", 1)[0])  # "A100"
+                        canon_actual = _canon(actual)
+                        if canon_tier and canon_tier not in canon_actual:
+                            logger.warning(
+                                "hardware_match_check rid=%s tier=%s actual=%r — "
+                                "scheduler dispatched to unexpected hardware; "
+                                "job proceeds but investigate scheduler placement",
+                                request_id, _c.gpu_tier, actual,
+                            )
+                except Exception:
+                    # torch missing / cuda not available / any inspection
+                    # error — skip the check entirely, don't fail the job.
+                    pass
+
         self._emit_request_event(
             request_id,
             "request.started",
@@ -3676,7 +3760,7 @@ class Worker:
             # Invoke.
             execution_hints = getattr(ctx, "execution_hints", {}) or {}
             execution_kind = str(execution_hints.get("kind", "") or "").strip().lower()
-            if execution_kind not in {"inference", "conversion", "training"}:
+            if execution_kind not in {"inference", "training"}:
                 execution_kind = "inference"
             logger.info(
                 "[request_id=%s] all injections resolved, entering %s phase for function=%s canceled=%s",
@@ -3695,16 +3779,16 @@ class Worker:
                 {"function_name": spec.name, "output_mode": spec.output_mode, "phase": execution_kind},
             )
 
-            # Reserved-name source materialization for conversion/training jobs.
+            # Reserved-name source materialization for training jobs.
             # If the payload declared payload.source (a SourceRepo-shaped dict),
             # resolve it against tensorhub via the worker's downloader and
             # populate ctx.source_path with the local snapshot dir. See
             # e2e/agents/progress.json issue #5.
-            if execution_kind in {"conversion", "training"}:
+            if execution_kind == "training":
                 src_info = getattr(ctx, "source", None) or {}
                 if isinstance(src_info, dict) and str(src_info.get("ref") or "").strip():
                     try:
-                        self._materialize_source_for_conversion(ctx, src_info)
+                        self._materialize_source_for_training(ctx, src_info)
                     except Exception as exc:
                         logger.exception(
                             "[request_id=%s] source materialization failed: %s",
@@ -3733,9 +3817,9 @@ class Worker:
                     raise ValueError(f"Output payload too large: {len(output_payload)} bytes (max {self.max_output_bytes})")
                 success = True
 
-                # Conversion/training: apply destination.tags to the produced
+                # Training: apply destination.tags to the produced
                 # checkpoint. Non-fatal on failure — upload already succeeded.
-                if execution_kind in {"conversion", "training"}:
+                if execution_kind == "training":
                     dest_info = getattr(ctx, "destination", None) or {}
                     if isinstance(dest_info, dict) and dest_info.get("tags"):
                         checkpoint_id = _extract_checkpoint_id_from_result(result)
@@ -3973,6 +4057,179 @@ class Worker:
             with self._active_requests_lock:
                 self._active_requests.pop(request_id, None)
 
+    def _execute_training_request(
+        self,
+        ctx: RequestContext,
+        function_name: str,
+        training_fn: Callable[..., Any],
+        input_payload: bytes,
+    ) -> None:
+        """Dispatch a @training_function handler.
+
+        The dispatch wrapper (conversion/dispatch.py) owns tenant-call plumbing:
+        msgspec-decoding each tenant parameter, building Source/Dataset helpers,
+        invoking the tenant function, and uploading each returned
+        ProducedVariant via ctx.save_checkpoint. The worker's job here is the
+        outer shell — metrics, events, source materialization, destination tag
+        application, and the success/fail RPC response.
+        """
+        request_id = ctx.request_id
+        output_payload: Optional[bytes] = None
+        error_type: str = ""
+        safe_message: str = ""
+        error_message: str = ""
+        retryable = False
+        success = False
+
+        rm = RunMetricsV1(
+            request_id=str(request_id or ""),
+            function_name=str(function_name or ""),
+            required_models=list(getattr(ctx, "required_models", []) or []),
+            resolved_cozy_models_by_id=getattr(ctx, "resolved_cozy_models_by_id", None) or None,
+        )
+        try:
+            setattr(ctx, "_run_metrics", rm)
+        except Exception:
+            pass
+        rm.mark_compute_started()
+        if rm.compute_started_at:
+            self._emit_worker_event_bytes(request_id, "metrics.compute.started", safe_json_bytes({"at": rm.compute_started_at}))
+
+        self._emit_request_event(
+            request_id,
+            "request.started",
+            {
+                "function_name": function_name,
+                "required_variant_refs": list(getattr(ctx, "required_models", []) or []),
+                "execution_hints": getattr(ctx, "execution_hints", {}),
+            },
+        )
+
+        self._gpu_busy_enter()
+        t_infer0 = time.monotonic()
+        self._emit_request_event(
+            request_id,
+            "request.training.started",
+            {"function_name": function_name, "phase": "training"},
+        )
+
+        try:
+            if ctx.is_canceled():
+                raise CanceledError("canceled")
+
+            # Decode the raw payload dict. Training dispatch wrapper handles
+            # msgspec.convert per tenant-declared field itself — we don't
+            # pre-type the top-level dict.
+            raw_payload: Any = msgspec.msgpack.decode(input_payload) if input_payload else {}
+
+            # Reserved-name source materialization — populate ctx.source_path
+            # with the local snapshot dir so the dispatch wrapper can build
+            # Source helpers on top of it.
+            src_info = getattr(ctx, "source", None) or {}
+            if isinstance(src_info, dict) and str(src_info.get("ref") or "").strip():
+                self._materialize_source_for_training(ctx, src_info)
+
+            logger.info("[request_id=%s] calling training_function %s", request_id, function_name)
+            result = training_fn(ctx, raw_payload)
+            logger.info("[request_id=%s] training_function %s returned (%d variants)",
+                        request_id, function_name, len(result) if isinstance(result, list) else -1)
+
+            if ctx.is_canceled():
+                raise CanceledError("canceled")
+
+            # Apply destination.tags to the produced checkpoint. Dispatch wrapper
+            # skips tag apply when RequestContext.apply_destination_tag isn't set;
+            # handle it here against the tensorhub API instead.
+            destination_info = getattr(ctx, "destination", None) or {}
+            if isinstance(destination_info, dict) and destination_info.get("tags"):
+                checkpoint_id = _extract_checkpoint_id_from_result(result)
+                if checkpoint_id:
+                    try:
+                        self._apply_destination_tags(ctx, destination_info, checkpoint_id)
+                    except Exception as exc:
+                        logger.warning(
+                            "[request_id=%s] tag apply raised (non-fatal): %s",
+                            request_id, exc,
+                        )
+
+            # Synthesize a minimal success payload. Training functions don't
+            # emit a canonical response body — uploads + the job record are the
+            # durable outputs. Send an empty msgpack map so orchestrator sees
+            # structured output.
+            output_payload = msgspec.msgpack.encode({})
+            success = True
+
+        except CanceledError:
+            error_type = "cancelled"
+            retryable = False
+            safe_message = "cancelled"
+            error_message = "cancelled"
+            self._emit_request_event(
+                request_id,
+                "request.cancelled",
+                {"function_name": function_name},
+            )
+            success = False
+
+        except Exception as exc:
+            error_type = "internal"
+            retryable = False
+            safe_message = f"{type(exc).__name__}: {exc}"
+            error_message = safe_message
+            logger.exception("[request_id=%s] training_function %s failed: %s",
+                             request_id, function_name, exc)
+            self._emit_request_event(
+                request_id,
+                "request.failed",
+                {
+                    "function_name": function_name,
+                    "error_type": error_type,
+                    "retryable": retryable,
+                    "safe_message": safe_message,
+                },
+            )
+            self._emit_request_event(
+                request_id,
+                "request.training.failed",
+                {
+                    "function_name": function_name,
+                    "phase": "training",
+                    "error_type": error_type,
+                    "duration_ms": int((time.monotonic() - t_infer0) * 1000),
+                },
+            )
+            success = False
+
+        finally:
+            self._gpu_busy_exit()
+            rm.mark_compute_completed()
+            if rm.compute_completed_at:
+                self._emit_worker_event_bytes(request_id, "metrics.compute.completed", safe_json_bytes({"at": rm.compute_completed_at}))
+            try:
+                rm.finalize()
+                for ev_type, event_payload in rm.canonical_events():
+                    if ev_type in ("metrics.compute.started", "metrics.compute.completed"):
+                        continue
+                    self._emit_worker_event_bytes(request_id, ev_type, safe_json_bytes(event_payload))
+            except Exception:
+                pass
+            try:
+                self._emit_worker_event_bytes(request_id, "metrics.job", safe_json_bytes(rm.to_metrics_run_payload()))
+            except Exception:
+                pass
+            if success:
+                self._emit_request_event(
+                    request_id,
+                    "request.completed",
+                    {
+                        "function_name": function_name,
+                        "duration_ms": int((time.monotonic() - t_infer0) * 1000),
+                    },
+                )
+            self._send_request_result(request_id, success, output_payload, error_type, bool(retryable), safe_message, error_message)
+            with self._active_requests_lock:
+                self._active_requests.pop(request_id, None)
+
     def _get_local_model_cache(self) -> Optional[Any]:
         """
         Best-effort initialize a local (non-NFS) model cache for NFS->local localization.
@@ -4035,7 +4292,7 @@ class Worker:
         except Exception:
             return {}
 
-    def _materialize_source_for_conversion(self, ctx: RequestContext, source: Dict[str, Any]) -> None:
+    def _materialize_source_for_training(self, ctx: RequestContext, source: Dict[str, Any]) -> None:
         """Materialize the source snapshot for a conversion/training job.
 
         Called just before tenant code runs when the job payload has a

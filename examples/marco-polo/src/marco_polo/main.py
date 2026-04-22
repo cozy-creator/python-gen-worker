@@ -1,5 +1,5 @@
 import msgspec
-from gen_worker import RequestContext, worker_function
+from gen_worker import RequestContext, inference_function
 
 
 class MarcoPoloInput(msgspec.Struct):
@@ -10,7 +10,7 @@ class MarcoPoloOutput(msgspec.Struct):
     response: str
 
 
-@worker_function()
+@inference_function()
 def marco_polo(ctx: RequestContext, data: MarcoPoloInput) -> MarcoPoloOutput:
     """Returns 'polo' when input is 'marco'; otherwise a fallback response."""
     # E2E keepalive: deterministic minimal handler used for latency tests.

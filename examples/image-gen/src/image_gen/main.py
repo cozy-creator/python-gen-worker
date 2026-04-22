@@ -9,7 +9,7 @@ import msgspec
 from diffusers import StableDiffusionXLPipeline
 from PIL import Image
 
-from gen_worker import RequestContext, ResourceRequirements, worker_function
+from gen_worker import RequestContext, ResourceRequirements, inference_function
 from gen_worker.api.injection import ModelRef, ModelRefSource as Src
 from gen_worker.api.types import Asset
 
@@ -44,7 +44,7 @@ class GenerateOutput(msgspec.Struct):
     image: Asset
 
 
-@worker_function(sdxl_resources)
+@inference_function(resources=sdxl_resources)
 def generate_image(
     ctx: RequestContext,
     pipeline: Annotated[
@@ -77,7 +77,7 @@ def generate_image(
     return GenerateOutput(image=out)
 
 
-# @worker_function(resources=sdxl_resources)
+# @inference_function(resources=sdxl_resources)
 # def generate_image(ctx: RequestContext, pipeline: DiffusionPipeline = None, prompt_details: dict = None) -> bytes:
 #     """
 #     Legacy function: Generates an image and returns raw bytes.
@@ -114,7 +114,7 @@ def generate_image(
 
 # s3_upload_resources = ResourceRequirements()
 
-# @worker_function(resources=s3_upload_resources)
+# @inference_function(resources=s3_upload_resources)
 # def upload_image_to_s3(ctx: RequestContext, upload_details: dict) -> Dict[str, str]:
 #     """
 #     Legacy function: Uploads image bytes to S3.

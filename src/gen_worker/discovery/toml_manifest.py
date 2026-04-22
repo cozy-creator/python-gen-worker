@@ -553,6 +553,41 @@ def load_endpoint_toml_with_warnings(path: Path) -> tuple[EndpointToml, list[str
                 continue
             models[key] = _parse_model_spec(value_raw, warnings=warnings)
 
+    # Tensorhub #232: reject legacy endpoint.toml blocks that moved onto the
+    # decorator or became platform-controlled. Hard cut, no compat window.
+    # Surface a clear error with the migration target so publishers can fix.
+    _REJECTED_ENDPOINT_BLOCKS = {
+        "scaling": (
+            "autoscaling is platform-controlled; remove the [scaling] block from "
+            "endpoint.toml. If you need policy knobs, request them via platform config."
+        ),
+    }
+    _REJECTED_FUNCTION_BLOCKS = {
+        "resources": (
+            "per-function [functions.<fn>.resources] was removed in tensorhub #232. "
+            "Declare hardware at the endpoint level in top-level [resources]; "
+            "training invocations override size axes at runtime via the wire payload's `compute` field."
+        ),
+        "runtime": (
+            "per-function [functions.<fn>.runtime] numerics (batch_size_max, prefetch_depth, etc) "
+            "were removed in tensorhub #232. Concurrency lives on the decorator "
+            "(@inference_function(concurrency=\"batched\"|\"concurrent\"|\"sequential\")); "
+            "runtime capacity is reported by the worker at handshake."
+        ),
+        "compute_envelope": (
+            "compute_envelope (min/max/default) was removed in tensorhub #232. "
+            "Declare a single hardware default at endpoint-level [resources]; invokers "
+            "override size axes at runtime via wire-payload `compute`."
+        ),
+        "concurrency": (
+            "per-function [functions.<fn>.concurrency] was removed in tensorhub #232. "
+            "Concurrency is now declared on the decorator: @inference_function(concurrency=\"batched\")."
+        ),
+    }
+    for block_name, message in _REJECTED_ENDPOINT_BLOCKS.items():
+        if block_name in data:
+            raise ValueError(f"endpoint.toml: [{block_name}] is no longer accepted — {message}")
+
     function_resources: dict[str, dict[str, Any]] = {}
     function_batch_dimensions: dict[str, str] = {}
     raw_functions = data.get("functions")
@@ -562,37 +597,52 @@ def load_endpoint_toml_with_warnings(path: Path) -> tuple[EndpointToml, list[str
             if not fn or not isinstance(fn_cfg, dict):
                 continue
 
-            merged_hints: dict[str, Any] = {}
-            runtime_hints = _parse_function_resource_hints(fn_cfg.get("runtime"))
-            if runtime_hints:
-                merged_hints.update(runtime_hints)
-            resource_hints = _parse_function_resource_hints(fn_cfg.get("resources"))
-            if resource_hints:
-                merged_hints.update(resource_hints)
-            if merged_hints:
-                function_resources[fn] = merged_hints
+            for rejected_key, reject_msg in _REJECTED_FUNCTION_BLOCKS.items():
+                if rejected_key in fn_cfg:
+                    raise ValueError(
+                        f"endpoint.toml: [functions.{fn}.{rejected_key}] is no longer accepted — {reject_msg}"
+                    )
 
             batch_path = _parse_function_batch_dimension(fn_cfg, field_prefix=f"functions.{fn}")
             if batch_path:
                 function_batch_dimensions[fn] = batch_path
 
+    # Tensorhub #232: endpoint-level [resources] is the single source of truth
+    # for hardware. Size axes (vram_gb, gpu_count, memory_gb, cpu_cores, disk_gb)
+    # are invoker-overridable for training invocations; architecture axes
+    # (accelerator, cuda_compute_min) are always pinned.
     resources: dict[str, Any] = {}
     raw_resources = data.get("resources")
     if isinstance(raw_resources, dict):
-        for k in ("vram_gb", "ram_gb", "cpu_cores", "disk_gb", "max_inflight_requests"):
+        # Hardware fields (canonical set per issue #232).
+        hardware_keys = (
+            "accelerator",
+            "cuda_compute_min",
+            "vram_gb",
+            "gpu_count",
+            "memory_gb",
+            "cpu_cores",
+            "disk_gb",
+        )
+        for k in hardware_keys:
             if k in raw_resources:
-                val = raw_resources[k]
-                if k == "max_inflight_requests":
-                    try:
-                        iv = int(val)
-                    except Exception:
-                        raise ValueError("resources.max_inflight_requests must be an integer")
-                    if iv <= 0:
-                        raise ValueError("resources.max_inflight_requests must be > 0")
-                    resources[k] = iv
-                else:
-                    resources[k] = val
-    # Endpoint-level inflight default: sequential by default unless explicitly raised.
+                resources[k] = raw_resources[k]
+        # ``ram_gb`` is the legacy name for memory_gb — accept it as an alias
+        # when memory_gb isn't explicitly set.
+        if "memory_gb" not in resources and "ram_gb" in raw_resources:
+            resources["memory_gb"] = raw_resources["ram_gb"]
+        # max_inflight_requests: legacy platform-wide cap. Retain for now —
+        # scheduler concurrency is primarily decorator-driven, but this is a
+        # hard ceiling on concurrent requests per worker.
+        if "max_inflight_requests" in raw_resources:
+            try:
+                iv = int(raw_resources["max_inflight_requests"])
+            except Exception:
+                raise ValueError("resources.max_inflight_requests must be an integer")
+            if iv <= 0:
+                raise ValueError("resources.max_inflight_requests must be > 0")
+            resources["max_inflight_requests"] = iv
+    # Endpoint-level inflight default: sequential unless explicitly raised.
     if "max_inflight_requests" not in resources:
         resources["max_inflight_requests"] = 1
 

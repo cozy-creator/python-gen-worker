@@ -69,7 +69,7 @@ class Output(msgspec.Struct):
 class MockPipeline:
     pass
 
-@worker_function()
+@inference_function()
 def generate_fixed(
     ctx: RequestContext,
     pipeline: Annotated[MockPipeline, ModelRef(Src.FIXED, "sdxl")],
@@ -77,7 +77,7 @@ def generate_fixed(
 ) -> Output:
     return Output(result="ok")
 
-@worker_function()
+@inference_function()
 def generate_dynamic(
     ctx: RequestContext,
     pipeline: Annotated[MockPipeline, ModelRef(Src.PAYLOAD, "model_key")],
@@ -165,7 +165,7 @@ class Output(msgspec.Struct):
 class MockPipeline:
     pass
 
-@worker_function()
+@inference_function()
 def generate(
     ctx: RequestContext,
     pipeline: Annotated[MockPipeline, ModelRef(Src.FIXED, "sdxl")],
@@ -232,7 +232,7 @@ class Output(msgspec.Struct):
 class MockPipeline:
     pass
 
-@worker_function()
+@inference_function()
 def generate(
     ctx: RequestContext,
     pipeline: Annotated[MockPipeline, ModelRef(Src.PAYLOAD, "model_key")],
@@ -296,7 +296,7 @@ class Input(msgspec.Struct):
 class Output(msgspec.Struct):
     ok: bool
 
-@worker_function()
+@inference_function()
 def caption(ctx: RequestContext, payload: Input) -> Output:
     return Output(ok=True)
 """.lstrip(),
@@ -361,7 +361,7 @@ class Output(msgspec.Struct):
 class MockPipeline:
     pass
 
-@worker_function()
+@inference_function()
 def generate(
     ctx: RequestContext,
     pipeline: Annotated[

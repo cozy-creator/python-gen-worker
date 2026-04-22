@@ -22,7 +22,7 @@ import msgspec
 from diffusers import DiffusionPipeline
 from PIL import Image
 
-from gen_worker import RequestContext, ResourceRequirements, worker_function
+from gen_worker import RequestContext, ResourceRequirements, inference_function
 from gen_worker.api.injection import ModelRef, ModelRefSource as Src
 from gen_worker.api.types import Asset
 
@@ -80,7 +80,7 @@ def _set_seed_and_perf(seed: Optional[int]) -> None:
         torch.backends.cudnn.allow_tf32 = True
 
 
-@worker_function(_sdxl_router_resources)
+@inference_function(resources=_sdxl_router_resources)
 def generate(
     ctx: RequestContext,
     pipeline: Annotated[

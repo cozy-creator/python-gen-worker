@@ -65,7 +65,7 @@ class Input(msgspec.Struct):
 class Output(msgspec.Struct):
     y: int
 
-@worker_function(resources=ResourceRequirements(compute_capability_min=10))
+@inference_function(resources=ResourceRequirements(compute_capability_min=10))
 def generate_nvfp4(ctx: RequestContext, payload: Input) -> Output:
     return Output(y=payload.x)
 """.lstrip(),

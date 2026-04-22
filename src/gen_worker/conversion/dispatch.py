@@ -1,4 +1,4 @@
-"""@conversion_function — unified decorator for transform-kind endpoints.
+"""@training_function — unified decorator for transform-kind endpoints.
 
 Signature-introspected dispatch: reserved parameter names bound to library-
 injected types (ctx, source, datasets), everything else decoded by msgspec
@@ -26,11 +26,14 @@ See e2e progress.json issue #5 for the full contract.
 from __future__ import annotations
 
 import inspect
+import logging
 import typing
 from pathlib import Path
 from typing import Any, Callable, Optional, TYPE_CHECKING, get_args, get_origin
 
 import msgspec
+
+_log = logging.getLogger(__name__)
 
 from ..api.decorators import ResourceRequirements
 from ..api.injection import ModelRef, ModelRefSource, parse_injection
@@ -64,13 +67,13 @@ RECOMMENDED_KINDS = frozenset({
     "format-conversion",
 })
 
-# Default when @conversion_function is used without kind=. Fine-tuning is
+# Default when @training_function is used without kind=. Fine-tuning is
 # the most common case for new tenants; quantization / format-conversion /
 # fusion endpoints must declare explicitly.
 DEFAULT_KIND = "fine-tuning"
 
 
-class ConversionFunctionSpec:
+class TrainingFunctionSpec:
     """Per-function metadata built at decorator time.
 
     ``ref_registry`` maps wire-field-name -> parameter-name for every
@@ -116,45 +119,61 @@ class ConversionFunctionSpec:
         self.kind = kind
 
 
-def conversion_function(
+def training_function(
     fn: Callable[..., list[ProducedVariant]] | None = None,
     *,
     kind: str = DEFAULT_KIND,
+    concurrency: str = "sequential",
+    label: str | None = None,
+    description: str | None = None,
 ) -> Callable[..., list[ProducedVariant]]:
-    """Mark a tenant function as a conversion/training endpoint.
+    """Mark a tenant function as a training endpoint (tensorhub #232).
 
-    Usable as a plain decorator (``@conversion_function``) or with a kind
-    argument (``@conversion_function(kind='quantization')``). The kind
-    populates ``training_jobs.kind`` at dispatch (issue #10); see
-    ``RECOMMENDED_KINDS`` for the coarse label set. Sub-labels via
-    ``kind='quantization:gptq-w4'`` are permitted.
+    Usable as a plain decorator (``@training_function``) or with kwargs
+    (``@training_function(kind='quantization')``).
+
+    Args:
+        kind: Populates ``training_jobs.kind`` at dispatch (e2e issue #10).
+            See ``RECOMMENDED_KINDS`` for the coarse label set; sub-labels
+            via ``kind='quantization:gptq-w4'`` permitted.
+        concurrency: ``"sequential"`` (default — training workloads aren't
+            typically reentrant) | ``"batched"`` | ``"concurrent"``. See
+            tensorhub #232 for the scheduler dispatch model.
+        label: Optional author-supplied UI / search label. Non-functional.
+        description: Optional free-text description. Non-functional.
 
     At decorator time: validates the signature and attaches a
-    ``ConversionFunctionSpec`` to the function as ``__conversion_spec__``.
+    ``TrainingFunctionSpec`` to the function as ``__training_spec__``.
     Raises TypeError for reserved-name/wrong-type violations or missing
     required params.
 
     The returned callable is a dispatch wrapper the library invokes with
-    ``(request_context, payload)`` at runtime.
+    ``(request_context, payload)`` at runtime. Reserved-name parameters
+    (ctx / source / datasets) are library-injected; the rest of the
+    signature decodes from the wire payload. See e2e issue #5 for the
+    reserved-name contract.
     """
-    # Support both @conversion_function and @conversion_function(kind=...).
+    # Support both @training_function and @training_function(kind=...).
     if fn is None:
         def _apply(real_fn: Callable[..., list[ProducedVariant]]) -> Callable[..., list[ProducedVariant]]:
-            return _build_dispatch(real_fn, kind=kind)
+            return _build_dispatch(
+                real_fn, kind=kind, concurrency=concurrency,
+                label=label, description=description,
+            )
         return _apply  # type: ignore[return-value]
-    return _build_dispatch(fn, kind=kind)
+    return _build_dispatch(fn, kind=kind, concurrency=concurrency, label=label, description=description)
 
 
 def _validate_kind(fn_name: str, kind: str) -> None:
     """Warn on typos against RECOMMENDED_KINDS. Free-form labels are allowed."""
     import warnings
     if not isinstance(kind, str) or not kind.strip():
-        raise TypeError(f"{fn_name}: @conversion_function kind= must be a non-empty string")
+        raise TypeError(f"{fn_name}: @training_function kind= must be a non-empty string")
     # Split off sub-label if present (e.g. 'quantization:gptq-w4').
     coarse = kind.split(":", 1)[0]
     if coarse not in RECOMMENDED_KINDS:
         warnings.warn(
-            f"{fn_name}: @conversion_function kind={kind!r} is not in the "
+            f"{fn_name}: @training_function kind={kind!r} is not in the "
             f"recommended set {sorted(RECOMMENDED_KINDS)}. "
             f"Free-form is allowed, but check for typos (did you mean 'fine-tuning'?).",
             stacklevel=3,
@@ -165,11 +184,21 @@ def _build_dispatch(
     fn: Callable[..., list[ProducedVariant]],
     *,
     kind: str,
+    concurrency: str = "sequential",
+    label: str | None = None,
+    description: str | None = None,
 ) -> Callable[..., list[ProducedVariant]]:
-    """Inner: build the dispatch wrapper. Split from ``conversion_function`` so
-    the same body serves both ``@conversion_function`` and
-    ``@conversion_function(kind=...)`` entry paths."""
+    """Inner: build the dispatch wrapper. Split from ``training_function`` so
+    the same body serves both ``@training_function`` and
+    ``@training_function(kind=...)`` entry paths."""
     _validate_kind(fn.__name__, kind)
+    # Concurrency enum sanity check — matches CONCURRENCY_MODES in the
+    # inference_function decorator. Tensorhub #232.
+    if concurrency not in ("sequential", "batched", "concurrent"):
+        raise ValueError(
+            f"@training_function: concurrency={concurrency!r} must be one of "
+            "('sequential', 'batched', 'concurrent')"
+        )
     # Resolve string-form annotations (from __future__ import annotations) so
     # reserved-type comparisons work against actual class objects, not strings.
     sig = inspect.signature(fn)
@@ -222,7 +251,7 @@ def _build_dispatch(
         ref_registry=ref_registry,
     )
 
-    spec = ConversionFunctionSpec(
+    spec = TrainingFunctionSpec(
         fn=fn,
         signature=sig,
         ref_registry=ref_registry,
@@ -235,17 +264,23 @@ def _build_dispatch(
         return _run(spec, request_context, payload)
 
     # Attach metadata so discovery / publish-time validation can read it.
-    # Setting _is_conversion_function + _worker_resources makes the existing
+    # Setting _is_training_function + _worker_resources makes the existing
     # gen-worker discovery pick this up as a registered handler. Discovery
-    # treats _is_conversion_function specially — it doesn't try to parse the
+    # treats _is_training_function specially — it doesn't try to parse the
     # dispatch wrapper's (request_context, payload) signature as a regular
-    # worker function; instead it reads ConversionFunctionSpec directly.
-    dispatch.__conversion_spec__ = spec  # type: ignore[attr-defined]
+    # worker function; instead it reads TrainingFunctionSpec directly.
+    dispatch.__training_spec__ = spec  # type: ignore[attr-defined]
     dispatch.__wrapped__ = fn  # type: ignore[attr-defined]
     dispatch.__name__ = fn.__name__
     dispatch.__doc__ = fn.__doc__
-    dispatch._is_conversion_function = True  # type: ignore[attr-defined]
-    dispatch._worker_resources = ResourceRequirements(kind="conversion")  # type: ignore[attr-defined]
+    dispatch._is_training_function = True  # type: ignore[attr-defined]
+    dispatch._worker_resources = ResourceRequirements(kind="training")  # type: ignore[attr-defined]
+    # Tensorhub #232: scheduler-facing capability metadata. Discovery emits
+    # these into endpoint.lock; orchestrator reads them onto FunctionMetadata
+    # for per-function routing decisions.
+    dispatch._concurrency_mode = concurrency  # type: ignore[attr-defined]
+    dispatch._function_label = (label or "").strip() or None  # type: ignore[attr-defined]
+    dispatch._function_description = (description or "").strip() or None  # type: ignore[attr-defined]
     return dispatch
 
 
@@ -255,7 +290,7 @@ def _build_dispatch(
 
 
 def _run(
-    spec: ConversionFunctionSpec,
+    spec: TrainingFunctionSpec,
     request_context: "RequestContext",
     payload: Any,
 ) -> list[ProducedVariant]:
@@ -319,25 +354,25 @@ def _finalize_produced_variants(
     *,
     kind: str,
 ) -> None:
-    """Upload every variant, append library provenance, apply destination.tags.
+    """Upload each ProducedVariant's files, build its manifest + snapshot_digest,
+    and publish one repo_checkpoints row per variant via publish_repo_revision.
 
-    Uploads via ``ctx.save_checkpoint(attributes=...)`` when the variant path
-    is a single file; walks the directory tree for dir-shaped variants
-    (save_pretrained / diffusers component trees). For each upload:
+    For every ProducedVariant the dispatch:
+      1. Walks the variant's output dir (or single file) and uploads each file
+         via ``ctx.save_checkpoint``, capturing the blake3-keyed Tensors handle
+         the upload returns.
+      2. Builds a snapshot_manifest entry list from those handles:
+         ``[{path, digest, size_bytes}]``.
+      3. Computes ``snapshot_digest = sha256(canonical_json(entries))`` —
+         content-addresses the whole variant snapshot. That digest becomes the
+         ``checkpoint_id`` tensorhub stores.
+      4. Calls ``publish_repo_revision`` with the (snapshot_digest, manifest,
+         attributes) payload; server creates one ``tensorhub.repo_checkpoints``
+         row per variant, plus one lineage edge to the source checkpoint.
 
-      - Tenant-declared ``ProducedVariant.attributes`` passed through.
-      - Library appends ``produced_by_job_id`` pointing at request_context.job_id
-        (or request_id as fallback). One join-key is enough; the orchestrator
-        job record carries source ref / datasets / specs / hyperparameters /
-        timestamps — duplicating them onto the variant drifts.
-      - Tenant ``@conversion_function(kind=...)`` label propagates as
-        ``produced_by_kind`` for observability (issue #10).
-
-    After all variants upload, applies each ``ctx.destination.tags`` entry to
-    the produced checkpoint. Tag-move failures surface as job warnings
-    (upload already succeeded); the per-destination-tag move endpoint on
-    tensorhub is currently called via a non-exported attribute of the
-    RequestContext — the host framework wires this in.
+    ``destination.tags`` (e.g. ``:prod``) are forwarded to
+    ``publish_repo_revision`` so the tag + checkpoint land atomically. The
+    server manages ``:latest`` automatically.
     """
     if not variants:
         return
@@ -348,41 +383,183 @@ def _finalize_produced_variants(
     if kind:
         library_provenance["produced_by_kind"] = kind
 
+    # ctx.destination / ctx.source are dicts ({ref, tags, ...} / {ref, attributes, ...}).
+    destination = getattr(request_context, "destination", None) or {}
+    if not isinstance(destination, dict):
+        destination = {}
+    dest_ref = str(destination.get("ref") or "").strip()
+
+    source_info = getattr(request_context, "source", None) or {}
+    if not isinstance(source_info, dict):
+        source_info = {}
+    source_ref = str(source_info.get("ref") or "").strip()
+    source_checkpoint_id = str(
+        source_info.get("checkpoint_id")
+        or source_info.get("variant_id")
+        or ""
+    ).strip()
+    # Fallback: extract the snapshot_digest from the materialized source path.
+    # _materialize_source_for_training caches under
+    # ``<cache>/cas/snapshots/<algo>:<hex>``; the last path segment IS the
+    # checkpoint_id. Covers attribute-selector resolves where the caller
+    # didn't know the concrete checkpoint_id up front.
+    if not source_checkpoint_id:
+        src_path = getattr(request_context, "source_path", None)
+        if src_path:
+            tail = Path(str(src_path)).name
+            if tail and (":" in tail or len(tail) == 64):
+                source_checkpoint_id = tail
+
+    relationship_map = {
+        "quantization":      "quantization",
+        "format-conversion": "format-conversion",
+        "fine-tune":         "fine-tune",
+        "fine-tuning":       "fine-tune",
+        "distillation":      "distillation",
+        "pruning":           "pruning",
+    }
+    rel_kind = relationship_map.get(str(kind or "").lower(), "manual-fork")
+
+    publish_fn = getattr(request_context, "publish_repo_revision", None)
+    destination_tags = list(destination.get("tags") or [])
+    release_visibility = "private"
+    dest_vis = str(destination.get("release_visibility") or destination.get("visibility") or "").strip().lower()
+    if dest_vis in ("private", "public"):
+        release_visibility = dest_vis
+
     for variant in variants:
         merged_attrs = {**library_provenance, **dict(variant.attributes or {})}
         path = variant.path
+        _log.info("finalize variant: path=%s is_file=%s is_dir=%s dest=%s", path, path.is_file() if path else False, path.is_dir() if path else False, dest_ref)
+
+        # Upload every file under the variant and collect the returned Tensors.
+        # Each Tensors handle carries the blake3 digest + size_bytes that
+        # tensorhub's CAS upload flow committed — that's what we put in the
+        # snapshot_manifest.
+        uploaded: list[tuple[str, Any]] = []
         if path.is_file():
-            _upload_single_file_variant(
+            t = _upload_single_file_variant(
                 request_context, path, attributes=merged_attrs,
             )
+            if t is not None:
+                uploaded.append((path.name, t))
         elif path.is_dir():
-            _upload_directory_variant(
+            uploaded.extend(_upload_directory_variant(
                 request_context, path, attributes=merged_attrs,
-            )
+            ))
         else:
             raise FileNotFoundError(f"ProducedVariant.path does not exist: {path}")
+        _log.info("finalize uploaded %d files for variant at %s", len(uploaded), path)
 
-    # Tag application runs after every upload succeeds so partial-tag moves
-    # can't happen. ctx.destination exposed as an attribute on request_context
-    # by the host framework; fall back to no-op if absent (tests).
-    destination = getattr(request_context, "destination", None)
-    if destination is None:
-        return
-    tags = list(getattr(destination, "tags", None) or [])
-    ref = str(getattr(destination, "ref", "") or "")
-    apply_fn = getattr(request_context, "apply_destination_tag", None)
-    if not (tags and ref and apply_fn is not None):
-        return
-    for tag in tags:
-        try:
-            apply_fn(ref, str(tag))
-        except Exception as exc:  # noqa: BLE001 — best-effort; surface as job warning
-            emit = getattr(request_context, "emit", None)
-            if emit is not None:
-                emit("transform.tag_apply_failed", {
-                    "ref": ref, "tag": str(tag),
-                    "error": f"{type(exc).__name__}: {exc}",
-                })
+        # Build manifest entries from the uploaded Tensors. Each entry is
+        # {path, digest, size_bytes}. Entries without a digest (e.g. save_fn
+        # stubbed out in tests) are dropped — they can't participate in the
+        # content-addressed snapshot.
+        manifest_entries: list[dict[str, Any]] = []
+        for rel_path, t in uploaded:
+            digest = _tensors_blake3_digest(t)
+            if not digest:
+                continue
+            entry = {
+                "path":       rel_path,
+                "digest":     digest,
+                "size_bytes": int(getattr(t, "size_bytes", 0) or 0),
+            }
+            manifest_entries.append(entry)
+
+        # snapshot_digest = sha256 of the canonical manifest. Canonical =
+        # entries sorted by path so the same inputs always produce the same
+        # digest regardless of upload order.
+        snapshot_digest = _compute_snapshot_digest(manifest_entries)
+        _log.info("finalize: manifest_entries=%d snapshot_digest=%s publish_callable=%s dest_ref=%s", len(manifest_entries), snapshot_digest or "<empty>", callable(publish_fn), dest_ref)
+        if snapshot_digest:
+            # Stamp onto variant.attributes so downstream consumers (tests,
+            # logs) can read it back; also published as attributes jsonb on
+            # the checkpoint row.
+            variant.attributes["snapshot_digest"] = snapshot_digest
+
+        # Publish one checkpoint per variant. Per-variant manifest ensures
+        # each checkpoint_id's LoadSnapshotManifest returns only that
+        # variant's files (plus anything merge_with_existing pulls from the
+        # prior :latest).
+        if callable(publish_fn) and dest_ref and snapshot_digest:
+            v_attrs = dict(variant.attributes or {})
+            publish_output_variant = {
+                "snapshot_digest": snapshot_digest,
+                "variant_label":   str(v_attrs.get("variant_label") or variant.path.name),
+                "file_layout":     str(v_attrs.get("file_layout") or ""),
+                "file_type":       str(v_attrs.get("file_type") or ""),
+                "quantization":    str(v_attrs.get("dtype") or v_attrs.get("quantization") or ""),
+                "size_bytes":      sum(e.get("size_bytes", 0) for e in manifest_entries),
+            }
+            metadata = {
+                "output_variants": [publish_output_variant],
+                "kind":            "model",
+            }
+            snapshot_manifest = {
+                "version":         1,
+                "snapshot_digest": snapshot_digest,
+                "entries":         manifest_entries,
+            }
+            try:
+                publish_fn(
+                    destination_repo=dest_ref,
+                    metadata=metadata,
+                    source_repo=source_ref,
+                    source_version_id=source_checkpoint_id,
+                    snapshot_manifest=snapshot_manifest,
+                    relationship_kind=rel_kind,
+                    release_visibility=release_visibility,
+                    auto_create_external_parent=False,
+                    destination_repo_tags=destination_tags,
+                    merge_with_existing=True,
+                )
+            except Exception as exc:  # noqa: BLE001 — surface via event, don't fail the job
+                emit = getattr(request_context, "emit", None)
+                if emit is not None:
+                    emit("transform.publish_failed", {
+                        "ref": dest_ref,
+                        "error": f"{type(exc).__name__}: {exc}",
+                    })
+
+
+def _tensors_blake3_digest(t: Any) -> str:
+    """Return a canonical ``blake3:<hex>`` digest for a Tensors handle.
+
+    Tensorhub's ``blobs`` / ``blob_reverse_lookup`` tables are keyed on
+    blake3; the upload flow commits each blob at its blake3 digest. Accept
+    pre-prefixed ``blob_digest`` or bare ``blake3`` attr from the Tensors
+    object; return ``""`` when neither is present (tests / stubbed uploads).
+    """
+    bd = str(getattr(t, "blob_digest", "") or "").strip()
+    if bd:
+        return bd if ":" in bd else f"blake3:{bd}"
+    b3 = str(getattr(t, "blake3", "") or "").strip()
+    if b3:
+        return b3 if ":" in b3 else f"blake3:{b3}"
+    return ""
+
+
+def _compute_snapshot_digest(entries: list[dict[str, Any]]) -> str:
+    """Hash the canonical manifest JSON to produce the variant's snapshot_digest.
+
+    The same set of files + digests always produces the same snapshot_digest
+    so re-runs of the same deterministic conversion dedupe naturally.
+    """
+    if not entries:
+        return ""
+    import hashlib
+    import json as _json
+    canonical = sorted(entries, key=lambda e: str(e.get("path") or ""))
+    payload = _json.dumps(
+        [{"path": str(e.get("path") or ""),
+          "digest": str(e.get("digest") or ""),
+          "size_bytes": int(e.get("size_bytes") or 0)}
+         for e in canonical],
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return f"sha256:{hashlib.sha256(payload).hexdigest()}"
 
 
 def _upload_single_file_variant(
@@ -390,23 +567,21 @@ def _upload_single_file_variant(
     path: Path,
     *,
     attributes: dict[str, str],
-) -> None:
-    """Upload one safetensors/gguf/flashpack file, threading attributes through.
+) -> Any:
+    """Upload one safetensors/gguf/flashpack file; return the Tensors handle.
 
-    Graceful when ``request_context.save_checkpoint`` is missing: tests that
-    use a mock RequestContext without the upload machinery skip the upload
-    silently. Production RequestContexts always have it.
+    Returns ``None`` when ``save_checkpoint`` is missing (test stubs).
     """
     save_fn = getattr(request_context, "save_checkpoint", None)
     if save_fn is None:
-        return
+        return None
     ref = _default_variant_ref(request_context, path)
     format_hint = path.suffix.lstrip(".") or "bin"
     try:
-        save_fn(ref, str(path), format=format_hint, attributes=attributes)
+        return save_fn(ref, str(path), format=format_hint, attributes=attributes)
     except TypeError:
         # Older RequestContext builds without the attributes kwarg — fall back.
-        save_fn(ref, str(path), format=format_hint)
+        return save_fn(ref, str(path), format=format_hint)
 
 
 def _upload_directory_variant(
@@ -414,12 +589,13 @@ def _upload_directory_variant(
     dir_path: Path,
     *,
     attributes: dict[str, str],
-) -> None:
-    """Upload every file under a directory variant (diffusers tree / save_pretrained output)."""
+) -> list[tuple[str, Any]]:
+    """Upload every file under a directory variant; return ``[(rel_path, Tensors)]``."""
     save_fn = getattr(request_context, "save_checkpoint", None)
     if save_fn is None:
-        return
+        return []
     base_ref = _default_variant_ref(request_context, dir_path)
+    uploaded: list[tuple[str, Any]] = []
     for f in sorted(dir_path.rglob("*")):
         if not f.is_file():
             continue
@@ -427,9 +603,11 @@ def _upload_directory_variant(
         ref = f"{base_ref}/{rel}"
         format_hint = f.suffix.lstrip(".") or "bin"
         try:
-            save_fn(ref, str(f), format=format_hint, attributes=attributes)
+            t = save_fn(ref, str(f), format=format_hint, attributes=attributes)
         except TypeError:
-            save_fn(ref, str(f), format=format_hint)
+            t = save_fn(ref, str(f), format=format_hint)
+        uploaded.append((rel, t))
+    return uploaded
 
 
 def _default_variant_ref(request_context: "RequestContext", path: Path) -> str:
@@ -445,9 +623,9 @@ def _build_source(request_context: "RequestContext", payload: Any) -> Source:
     source_path = getattr(request_context, "source_path", None)
     if source_path is None:
         raise RuntimeError(
-            "@conversion_function requires request_context.source_path to be set "
-            "(endpoint_kind must be 'transform'/'conversion'/'training' and the "
-            "gen-worker reserved-name dispatch must have materialized the source)"
+            "@training_function requires request_context.source_path to be set "
+            "(endpoint_kind must be 'training' and the gen-worker reserved-name "
+            "dispatch must have materialized the source)"
         )
     ctx_source = getattr(request_context, "source", None)
     attrs: dict = {}
@@ -654,7 +832,7 @@ def _build_wire_payload_schema(
 
 
 __all__ = [
-    "ConversionFunctionSpec",
+    "TrainingFunctionSpec",
     "RESERVED_TYPES",
-    "conversion_function",
+    "training_function",
 ]

@@ -47,7 +47,7 @@ class In(msgspec.Struct):
 class Out(msgspec.Struct):
     ref: str
 
-@worker_function()
+@inference_function()
 def generate(ctx: RequestContext, payload: In) -> Out:
     ref = f"jobs/{ctx.request_id}/outputs/out.txt"
     ctx.save_bytes(ref, (payload.prompt + "\\n").encode("utf-8"))
@@ -128,7 +128,7 @@ class In(msgspec.Struct):
 class Out(msgspec.Struct):
     artifact: Asset
 
-@worker_function()
+@inference_function()
 def convert_local(ctx: RequestContext, payload: In) -> Out:
     local_file = Path(f"/tmp/{ctx.request_id}-converted.bin")
     local_file.write_bytes((payload.payload + "\\n").encode("utf-8"))
@@ -212,7 +212,7 @@ class In(msgspec.Struct):
 class Out(msgspec.Struct):
     weights: Tensors
 
-@worker_function()
+@inference_function()
 def convert_local(ctx: RequestContext, payload: In) -> Out:
     local_file = Path(f"/tmp/{ctx.request_id}-converted.safetensors")
     local_file.write_bytes((payload.payload + "\\n").encode("utf-8"))

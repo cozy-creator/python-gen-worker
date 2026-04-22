@@ -6,14 +6,14 @@ them as one structured result — catches ALL errors in one report rather
 than failing on the first one.
 
 Validation checks:
-  1. Decorator-time errors (TypeError from @conversion_function): reserved
+  1. Decorator-time errors (TypeError from @training_function): reserved
      name + wrong type, missing required ctx/source.
   2. Tenant-named params must have resolvable annotations msgspec can decode
      (no bare `Any`, no unresolved forward refs).
   3. No two transform functions in the same endpoint with the same name.
   4. Endpoint.toml ``endpoint_kind`` coherence: if 'transform' / 'conversion' /
-     'training', every exported function must be @conversion_function; if
-     'inference', no @conversion_function.
+     'training', every exported function must be @training_function; if
+     'inference', no @training_function.
 
 Designed to run in a fresh subprocess with the same interpreter the worker
 uses at runtime — so import failures (missing dep, broken install) surface
@@ -28,7 +28,7 @@ import typing
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from .dispatch import ConversionFunctionSpec
+from .dispatch import TrainingFunctionSpec
 
 
 @dataclass
@@ -95,7 +95,7 @@ def validate_transform_module(
     *,
     expected_kind: str | None = None,
 ) -> ValidationReport:
-    """Import ``module_name``, find @conversion_function decorations, validate each.
+    """Import ``module_name``, find @training_function decorations, validate each.
 
     Args:
         module_name: dotted module path, e.g. 'conversion.main' or
@@ -103,7 +103,7 @@ def validate_transform_module(
             Python path.
         expected_kind: if set, must be one of ``'transform'``, ``'conversion'``,
             ``'training'``, or ``'inference'``. When 'inference', the module
-            is expected to have NO @conversion_function decorations; otherwise
+            is expected to have NO @training_function decorations; otherwise
             exported functions SHOULD be decorated.
 
     Returns:
@@ -123,12 +123,12 @@ def validate_transform_module(
         return report
 
     seen_names: set[str] = set()
-    transform_funcs: list[tuple[str, Callable, ConversionFunctionSpec]] = []
+    transform_funcs: list[tuple[str, Callable, TrainingFunctionSpec]] = []
     for name in dir(mod):
         if name.startswith("_"):
             continue
         obj = getattr(mod, name, None)
-        spec = getattr(obj, "__conversion_spec__", None)
+        spec = getattr(obj, "__training_spec__", None)
         if spec is None:
             continue
         fqname = f"{module_name}.{name}"
@@ -136,7 +136,7 @@ def validate_transform_module(
         if name in seen_names:
             report.violations.append(ValidationViolation(
                 function=fqname, kind="duplicate_function_name",
-                message=f"two conversion_function decorations share name {name!r}",
+                message=f"two @training_function decorations share name {name!r}",
             ))
         seen_names.add(name)
         transform_funcs.append((fqname, obj, spec))
@@ -200,13 +200,12 @@ def validate_transform_module(
     # endpoint_kind coherence
     if expected_kind is not None:
         kind = expected_kind.lower()
-        transform_kinds = {"transform", "conversion", "training"}
-        if kind in transform_kinds and not transform_funcs:
+        if kind == "training" and not transform_funcs:
             report.violations.append(ValidationViolation(
                 function="<module>", kind="endpoint_kind_mismatch",
                 message=(
                     f"endpoint_kind={kind!r} but module has no "
-                    "@conversion_function decorations"
+                    "@training_function decorations"
                 ),
             ))
         elif kind == "inference" and transform_funcs:
@@ -215,7 +214,7 @@ def validate_transform_module(
                     function=fqname, kind="endpoint_kind_mismatch",
                     message=(
                         f"endpoint_kind='inference' but {fqname} is decorated "
-                        "with @conversion_function"
+                        "with @training_function"
                     ),
                 ))
         elif kind not in transform_kinds | {"inference"}:

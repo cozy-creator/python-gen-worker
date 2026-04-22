@@ -9,7 +9,7 @@ import soxr
 import torch
 from transformers import AutoModelForCTC, AutoProcessor
 
-from gen_worker import RequestContext, Asset, ResourceRequirements, worker_function
+from gen_worker import RequestContext, Asset, ResourceRequirements, inference_function
 from gen_worker.api.injection import ModelRef, ModelRefSource as Src
 
 _MODEL_KEY = "medasr"
@@ -23,7 +23,7 @@ class MedASROutput(msgspec.Struct):
     text: str
 
 
-@worker_function(ResourceRequirements())
+@inference_function(resources=ResourceRequirements())
 def medasr_transcribe(
     ctx: RequestContext,
     model: Annotated[AutoModelForCTC, ModelRef(Src.FIXED, _MODEL_KEY)],

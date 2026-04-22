@@ -1,7 +1,10 @@
 """Public SDK surface: decorators, types, errors, and helpers for tenant code."""
 
-from .backends import OrtRuntime, TrtRuntime
-from .decorators import ResourceRequirements, worker_function, worker_websocket
+from .decorators import (
+    ResourceRequirements,
+    inference_function,
+    realtime_function,
+)
 from .errors import (
     AuthError,
     CanceledError,
@@ -18,11 +21,9 @@ from .streaming import iter_transformers_text_deltas
 from .types import Asset, Tensors
 
 __all__ = [
-    "OrtRuntime",
-    "TrtRuntime",
     "ResourceRequirements",
-    "worker_function",
-    "worker_websocket",
+    "inference_function",
+    "realtime_function",
     "AuthError",
     "CanceledError",
     "FatalError",

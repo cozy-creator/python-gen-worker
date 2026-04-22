@@ -21,6 +21,7 @@ import msgspec
 
 from .api.decorators import ResourceRequirements
 from .api.injection import InjectionSpec
+from .api.types import Compute
 from .request_context import RequestContext, _canonicalize_model_ref_string
 
 if TYPE_CHECKING:
@@ -36,6 +37,44 @@ def _workspace_scope_id(request_id: str, job_id: Optional[str]) -> str:
 
 def _extract_worker_capability_token(envelope: Any) -> str:
     return str(getattr(envelope, "worker_capability_token", "") or "").strip()
+
+
+def _extract_resolved_compute(envelope: Any) -> Optional[Compute]:
+    """Pull the ResolvedCompute protobuf field off a JobExecutionRequest /
+    BatchExecutionItem / RealtimeOpenCommand envelope and return the
+    ``gen_worker.Compute`` Python dataclass the tenant sees on
+    ``RequestContext.compute``.
+
+    Returns None when the orchestrator didn't attach resolved_compute
+    (older builds without tensorhub #232 support). Caller passes None
+    through to RequestContext; the ctx substitutes a sentinel default.
+    """
+    rc = getattr(envelope, "resolved_compute", None)
+    if rc is None:
+        return None
+    # Detect the "all zero-valued" protobuf case (scheduler didn't populate).
+    # Protobuf defaults: empty strings + zero ints. If every axis is empty,
+    # treat as unset.
+    accel = str(getattr(rc, "accelerator", "") or "")
+    cuda_min = str(getattr(rc, "cuda_compute_min", "") or "")
+    vram = int(getattr(rc, "vram_gb", 0) or 0)
+    gpus = int(getattr(rc, "gpu_count", 0) or 0)
+    tier = str(getattr(rc, "gpu_tier", "") or "") or None
+    mem = int(getattr(rc, "memory_gb", 0) or 0)
+    cpus = int(getattr(rc, "cpu_cores", 0) or 0)
+    disk = int(getattr(rc, "disk_gb", 0) or 0)
+    if not accel and not cuda_min and not vram and not gpus and not mem and not cpus and not disk and not tier:
+        return None
+    return Compute(
+        accelerator=accel,
+        cuda_compute_min=cuda_min,
+        vram_gb=vram,
+        gpu_count=gpus,
+        gpu_tier=tier,
+        memory_gb=mem,
+        cpu_cores=cpus,
+        disk_gb=disk,
+    )
 
 
 def _normalize_materialized_input_urls(envelope: Any) -> Dict[str, str]:

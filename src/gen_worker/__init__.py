@@ -1,10 +1,19 @@
 # Make src/gen_worker a Python package
-from .api.decorators import ResourceRequirements, worker_function, worker_websocket
+from .api.decorators import (
+    ResourceRequirements,
+    inference_function,
+    realtime_function,
+)
+# NOTE: @training_function lives in ``gen_worker.conversion`` (not re-exported
+# at top level because it pulls in torch / diffusers / transformers via the
+# Source + Dataset machinery it dispatches to). Tenants writing training
+# endpoints import it directly:
+#     from gen_worker.conversion import training_function
 from .api.injection import ModelRef, ModelRefSource
 from .request_context import RequestContext
 from .worker import RealtimeSocket
 from .api.errors import AuthError, RetryableError, FatalError, OutputTooLargeError
-from .api.types import Asset, DatasetRef, DestinationRepo, LoraSpec, OutputSpec, SourceRepo, Tensors
+from .api.types import Asset, Compute, DatasetRef, DestinationRepo, LoraSpec, OutputSpec, SourceRepo, Tensors
 from .models.interface import ModelManager
 from .models.downloader import ModelDownloader, CozyHubDownloader
 from .discovery.validation import EndpointValidationResult, validate_endpoint
@@ -32,9 +41,9 @@ except ImportError:
     pass
 
 __all__ = [
-    # Core exports
-    "worker_function",
-    "worker_websocket",
+    # Core exports (training_function in gen_worker.conversion — see import note)
+    "inference_function",
+    "realtime_function",
     "ResourceRequirements",
     "ModelRef",
     "ModelRefSource",
@@ -45,6 +54,7 @@ __all__ = [
     "FatalError",
     "OutputTooLargeError",
     "Asset",
+    "Compute",
     "Tensors",
     "LoraSpec",
     "SourceRepo",

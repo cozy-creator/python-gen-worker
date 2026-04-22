@@ -1,7 +1,7 @@
 """
 Function discovery module for Cozy workers.
 
-This module auto-discovers all @worker_function decorated functions in the project
+This module auto-discovers all @inference_function decorated functions in the project
 by scanning .py files and extracting metadata. Run as:
 
     python -m gen_worker.discover
@@ -128,21 +128,21 @@ def _find_python_files(root: Path, skip_patterns: Optional[Set[str]] = None) -> 
 
 
 def _file_uses_worker_decorator(filepath: Path) -> bool:
-    """Quick AST check if file uses @worker_function or @conversion_function."""
+    """Quick AST check if file uses @inference_function or @training_function."""
     try:
         source = filepath.read_text(encoding="utf-8")
         tree = ast.parse(source, filename=str(filepath))
     except (SyntaxError, UnicodeDecodeError):
         return False
 
-    target_names = {"worker_function", "conversion_function"}
+    target_names = {"inference_function", "training_function", "realtime_function"}
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef):
             for decorator in node.decorator_list:
-                # @worker_function, @conversion_function (bare)
+                # @inference_function, @training_function (bare)
                 if isinstance(decorator, ast.Name) and decorator.id in target_names:
                     return True
-                # @worker_function(...), @conversion_function(kind=...)
+                # @inference_function(...), @training_function(kind=...)
                 if isinstance(decorator, ast.Call):
                     if isinstance(decorator.func, ast.Name) and decorator.func.id in target_names:
                         return True
@@ -203,6 +203,18 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
     ctx_name = params[0].name
     if hints.get(ctx_name) is not RequestContext:
         raise ValueError(f"{func.__name__}: first param must be ctx: RequestContext")
+
+    # Tensorhub #232: ``compute`` is a reserved payload key the orchestrator
+    # strips before dispatch. Tenants who want the resolved hardware read
+    # ``ctx.compute`` — not a reserved parameter. Reject the name to catch
+    # the confusion early at publish.
+    for p in params[1:]:
+        if p.name == "compute":
+            raise ValueError(
+                f"{func.__name__}: `compute` is a reserved parameter name "
+                "(tensorhub #232). Read the resolved hardware via ctx.compute "
+                "instead of declaring it on the function signature."
+            )
 
     payload_type = None
     payload_param = None
@@ -317,6 +329,13 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
     if not function_name:
         raise ValueError(f"{func.__name__}: function name cannot be normalized")
 
+    # Tensorhub #232: per-function decorator metadata (concurrency mode,
+    # author-supplied label/description). Baked into endpoint.lock so
+    # orchestrator can route per concurrency_mode at dispatch.
+    concurrency_mode = str(getattr(func, "_concurrency_mode", None) or "sequential")
+    fn_label = getattr(func, "_function_label", None) or None
+    fn_description = getattr(func, "_function_description", None) or None
+
     fn: Dict[str, Any] = {
         "name": function_name,
         "python_name": func.__name__,
@@ -333,6 +352,10 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
         "injection_json": injections,
         "required_models": required_models,  # release model keys needed by this function
         "payload_repo_selectors": payload_repo_selectors,
+        "decorator": "inference_function",
+        "concurrency_mode": concurrency_mode,
+        "label": fn_label,
+        "description": fn_description,
     }
 
     if delta_type is not None:
@@ -344,19 +367,19 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
 
 
 def _extract_conversion_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
-    """Extract endpoint.lock metadata from a @conversion_function-decorated tenant.
+    """Extract endpoint.lock metadata from a @training_function-decorated tenant.
 
-    Reads ``__conversion_spec__`` attached by the decorator — fetches the
+    Reads ``__training_spec__`` attached by the decorator — fetches the
     tenant-declared ``kind`` (issue #10), the full wire-payload JSON schema
     (issue #5), and the ref_registry for capability-token scoping. Returns a
     dict compatible with the endpoint.lock ``functions`` entry shape used by
-    @worker_function discovery, so downstream consumers (orchestrator
+    @inference_function discovery, so downstream consumers (orchestrator
     ``FunctionMetadata``, tensorhub publish-time validator) can read one
     unified format.
     """
-    spec = getattr(func, "__conversion_spec__", None)
+    spec = getattr(func, "__training_spec__", None)
     if spec is None:
-        raise ValueError(f"{func.__name__}: missing __conversion_spec__ (expected @conversion_function decoration)")
+        raise ValueError(f"{func.__name__}: missing __training_spec__ (expected @training_function decoration)")
 
     resources = getattr(func, "_worker_resources", None)
     res_dict: Dict[str, Any] = {}
@@ -414,9 +437,15 @@ def _extract_conversion_function_metadata(func: Any, module_name: str) -> Dict[s
         # at dispatch to populate training_jobs.kind.
         "kind": spec.kind,
         # Mark which decorator produced this entry so downstream consumers
-        # can distinguish @worker_function (inference) from @conversion_function
+        # can distinguish @inference_function (inference) from @training_function
         # (conversion/training) when the decorator-based branch matters.
-        "decorator": "conversion_function",
+        "decorator": "training_function",
+        # Tensorhub #232: concurrency_mode + label/description ride alongside
+        # the rest of the per-function metadata. Training functions default to
+        # sequential (see @training_function decorator implementation).
+        "concurrency_mode": str(getattr(func, "_concurrency_mode", None) or "sequential"),
+        "label": getattr(func, "_function_label", None) or None,
+        "description": getattr(func, "_function_description", None) or None,
     }
     return fn
 
@@ -461,7 +490,7 @@ def _models_by_key_to_json(models: Dict[str, TensorhubModelSpec]) -> Dict[str, A
 
 def discover_functions(root: Optional[Path] = None, *, main_module: str | None = None) -> List[Dict[str, Any]]:
     """
-    Discover all @worker_function decorated functions in the project.
+    Discover all @inference_function decorated functions in the project.
 
     Args:
         root: Project root directory. Defaults to current working directory.
@@ -531,7 +560,7 @@ def discover_functions(root: Optional[Path] = None, *, main_module: str | None =
                 if not inspect.isfunction(obj):
                     continue
                 is_worker = getattr(obj, "_is_worker_function", False)
-                is_conversion = getattr(obj, "_is_conversion_function", False)
+                is_conversion = getattr(obj, "_is_training_function", False)
                 if not (is_worker or is_conversion):
                     continue
                 key = (getattr(obj, "__module__", ""), getattr(obj, "__name__", ""))
@@ -559,13 +588,13 @@ def discover_functions(root: Optional[Path] = None, *, main_module: str | None =
             print(f"warning: failed to import {computed_module_name}: {e}", file=sys.stderr)
             continue
 
-        # Find decorated functions (both @worker_function and @conversion_function).
+        # Find decorated functions (both @inference_function and @training_function).
         # Iterate module dict to avoid triggering module-level __getattr__.
         for name, obj in mod.__dict__.items():
             if not inspect.isfunction(obj):
                 continue
             is_worker = getattr(obj, "_is_worker_function", False)
-            is_conversion = getattr(obj, "_is_conversion_function", False)
+            is_conversion = getattr(obj, "_is_training_function", False)
             if not (is_worker or is_conversion):
                 continue
             key = (getattr(obj, "__module__", ""), getattr(obj, "__name__", ""))
@@ -731,7 +760,7 @@ def main() -> None:
         sys.exit(1)
 
     if not manifest.get("functions"):
-        print("warning: no @worker_function decorated functions found", file=sys.stderr)
+        print("warning: no @inference_function decorated functions found", file=sys.stderr)
 
     sys.stdout.write(msgspec.toml.encode(_strip_none(manifest)).decode("utf-8"))
     if not sys.stdout.isatty():

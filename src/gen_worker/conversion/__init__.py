@@ -1,12 +1,12 @@
-"""gen_worker.conversion — tenant API for transform-kind endpoints.
+"""gen_worker.conversion — tenant API for training-kind endpoints.
 
 Tenant authors write functions like:
 
-    from gen_worker.conversion import (
-        conversion_function, ConversionContext, Source, Dataset, ProducedVariant,
+    from gen_worker import (
+        training_function, ConversionContext, Source, Dataset, ProducedVariant,
     )
 
-    @conversion_function
+    @training_function
     def convert_dtype(ctx: ConversionContext, source: Source, specs: list[DTypeSpec]):
         ...
 
@@ -31,8 +31,8 @@ from .dataset import Dataset
 from .dispatch import (
     DEFAULT_KIND,
     RECOMMENDED_KINDS,
-    ConversionFunctionSpec,
-    conversion_function,
+    TrainingFunctionSpec,
+    training_function,
 )
 from .produced import ProducedVariant
 from .safetensors_io import (
@@ -52,7 +52,7 @@ __all__ = [
     # Tenant-facing contract types
     "Component",
     "ConversionContext",
-    "ConversionFunctionSpec",
+    "TrainingFunctionSpec",
     "DEFAULT_KIND",
     "RECOMMENDED_KINDS",
     "Dataset",
@@ -60,7 +60,7 @@ __all__ = [
     "ProducedVariant",
     "Source",
     "StreamingWriter",
-    "conversion_function",
+    "training_function",
     # Publish-time validation
     "ValidationReport",
     "ValidationViolation",
@@ -72,7 +72,7 @@ __all__ = [
     "ConversionOutput",
     "IngestResult",
     "tensors_with",
-    # Path-in-path-out safetensors primitives (for non-@conversion_function
+    # Path-in-path-out safetensors primitives (for non-@training_function
     # flows like clone_pipeline's external-URL ingest)
     "materialize_safetensors_input",
     "persist_safetensors_output",

@@ -49,13 +49,6 @@ def blake3_hash_file(path: str | Path, chunk_size: int = 8 * 1024 * 1024) -> str
     return h.hexdigest()
 
 
-def blake3_hash_bytes(data: bytes) -> str:
-    """Compute BLAKE3 hash of bytes."""
-    h = blake3()
-    h.update(data)
-    return h.hexdigest()
-
-
 class PresignedUploadResult:
     """Result of a presigned upload."""
 

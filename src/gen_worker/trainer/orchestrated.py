@@ -235,14 +235,14 @@ class JsonHttpArtifactUploader(ArtifactUploader):
         slot = "final" if final else f"step-{int(step):08d}"
         ref = f"v1/{self._owner}/jobs/{self._request_id}/{category}/{slot}-{safe_name}"
         repo_job_scope = None
-        if category == "checkpoints" and self._execution_kind in {"training", "conversion"} and self._destination_repo and self._job_id:
+        if category == "checkpoints" and self._execution_kind == "training" and self._destination_repo and self._job_id:
             if "/" in self._destination_repo:
                 repo_owner, repo_name = self._destination_repo.split("/", 1)
                 repo_owner = repo_owner.strip()
                 repo_name = repo_name.strip()
                 if repo_owner and repo_name:
                     repo_job_scope = (repo_owner, repo_name, self._job_id)
-        if category == "checkpoints" and self._execution_kind in {"training", "conversion"} and repo_job_scope is None:
+        if category == "checkpoints" and self._execution_kind == "training" and repo_job_scope is None:
             raise ArtifactUploadError(
                 "checkpoint upload requires repo-cas job scope (destination_repo and job_id)"
             )

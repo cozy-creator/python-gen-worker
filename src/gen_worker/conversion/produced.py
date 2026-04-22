@@ -1,6 +1,6 @@
 """ProducedVariant — what a tenant transform function returns per output.
 
-A tenant's ``@conversion_function`` returns ``list[ProducedVariant]`` — one
+A tenant's ``@training_function`` returns ``list[ProducedVariant]`` — one
 entry per variant the job produces into the destination checkpoint. The
 library uploads each variant's ``path`` (file OR directory) and attaches the
 declared ``attributes`` to the upload-commit.
