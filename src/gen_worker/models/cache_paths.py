@@ -23,11 +23,6 @@ def tensorhub_cas_dir() -> Path:
     return tensorhub_cache_dir() / "cas"
 
 
-def worker_model_cache_dir() -> Path:
-    """Effective model cache root used by worker download/materialization code."""
-    return tensorhub_cas_dir()
-
-
 def worker_local_model_cache_dir_default() -> Path:
     """Default local (non-NFS) cache for NFS->local localization."""
     return Path(DEFAULT_WORKER_LOCAL_MODEL_CACHE_DIR)

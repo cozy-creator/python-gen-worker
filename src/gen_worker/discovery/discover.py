@@ -33,7 +33,7 @@ from gen_worker.discovery.toml_manifest import (
     EndpointToml,
     load_endpoint_toml,
 )
-from gen_worker.discovery.names import slugify_endpoint_name, slugify_function_name
+from gen_worker.discovery.names import slugify_name
 
 
 def _type_id(t: type) -> Dict[str, str]:
@@ -325,7 +325,7 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
         seen_fields.add(field)
         payload_repo_selectors.append({"field": field, "kind": "short_key"})
 
-    function_name = slugify_function_name(func.__name__)
+    function_name = slugify_name(func.__name__)
     if not function_name:
         raise ValueError(f"{func.__name__}: function name cannot be normalized")
 
@@ -391,7 +391,7 @@ def _extract_conversion_function_metadata(func: Any, module_name: str) -> Dict[s
         except Exception:
             pass
 
-    function_name = slugify_function_name(func.__name__)
+    function_name = slugify_name(func.__name__)
     if not function_name:
         raise ValueError(f"{func.__name__}: function name cannot be normalized")
 
@@ -660,7 +660,7 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
             )
         seen_fn[fn_name] = py_name
 
-    endpoint_name = slugify_endpoint_name(tensorhub_manifest.name)
+    endpoint_name = slugify_name(tensorhub_manifest.name)
     if not endpoint_name:
         raise ValueError("invalid endpoint.toml name")
 

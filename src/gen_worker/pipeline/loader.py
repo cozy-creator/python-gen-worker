@@ -50,7 +50,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 
-from gen_worker.models.cache_paths import worker_local_model_cache_dir_default, worker_model_cache_dir
+from gen_worker.models.cache_paths import worker_local_model_cache_dir_default, tensorhub_cas_dir
 
 from .local_cache import LocalModelCache  # re-exported for external callers
 
@@ -482,7 +482,7 @@ class PipelineLoader:
         """
         if models_dir is None:
             # Standard shared disk cache root.
-            models_dir = str(worker_model_cache_dir())
+            models_dir = str(tensorhub_cas_dir())
         self.models_dir = Path(models_dir) if models_dir else None
         self.local_cache_dir: Optional[Path] = None
         self.vram_safety_margin_gb = vram_safety_margin_gb

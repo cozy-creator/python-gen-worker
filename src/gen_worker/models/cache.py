@@ -28,7 +28,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-from .cache_paths import worker_model_cache_dir
+from .cache_paths import tensorhub_cas_dir
 
 logger = logging.getLogger(__name__)
 
@@ -121,7 +121,7 @@ class ModelCache:
         self._vram_safety_margin = vram_safety_margin_gb or float(
             os.getenv("WORKER_VRAM_SAFETY_MARGIN_GB", str(DEFAULT_VRAM_SAFETY_MARGIN_GB))
         )
-        cache_dir = model_cache_dir or str(worker_model_cache_dir())
+        cache_dir = model_cache_dir or str(tensorhub_cas_dir())
         self._model_cache_dir = Path(os.path.expanduser(cache_dir))
         self._model_cache_dir.mkdir(parents=True, exist_ok=True)
 

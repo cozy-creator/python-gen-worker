@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional
 
 import msgspec
 
-from .models.cache_paths import worker_model_cache_dir
+from .models.cache_paths import tensorhub_cas_dir
 try:
     from .worker import Worker
 except ImportError as e:
@@ -162,7 +162,7 @@ def _preflight_cache_dirs() -> Dict[str, str]:
     - Primary: ${TENSORHUB_CACHE_DIR}/cas (default TENSORHUB_CACHE_DIR=~/.cache/tensorhub)
     - Optional local cache: WORKER_LOCAL_MODEL_CACHE_DIR (if set)
     """
-    default_primary = str(worker_model_cache_dir())
+    default_primary = str(tensorhub_cas_dir())
     primary = default_primary
     local_cache = (os.getenv("WORKER_LOCAL_MODEL_CACHE_DIR", "") or "").strip()
 

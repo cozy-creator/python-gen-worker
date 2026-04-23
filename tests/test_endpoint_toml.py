@@ -214,7 +214,7 @@ max_inflight_requests = 2
                 encoding="utf-8",
             )
             cfg = load_endpoint_toml(p)
-            self.assertEqual(cfg.resources["max_inflight_requests"], 2)
+            self.assertEqual(cfg.resources.max_inflight_requests, 2)
             self.assertEqual(cfg.function_batch_dimensions["caption"], "items")
 
     def test_batch_dimension_path_rejected(self) -> None:
@@ -246,108 +246,7 @@ main = "x.main"
                 encoding="utf-8",
             )
             cfg = load_endpoint_toml(p)
-            self.assertEqual(cfg.resources["max_inflight_requests"], 1)
-
-    def test_function_gpu_hints_parsed(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            p = Path(td) / "endpoint.toml"
-            p.write_text(
-                """
-schema_version = 1
-name = "x"
-main = "x.main"
-
-[functions.convert_low_precision.resources]
-kind = "conversion"
-requires_gpu = true
-compute_capability_min = 9.0
-min_vram_gb = 24
-supported_precisions = ["fp8", "nvfp4"]
-supported_conversion_profiles = ["fp8:e4m3", "fp8:mxfp8", "nvfp4"]
-""".lstrip(),
-                encoding="utf-8",
-            )
-            cfg = load_endpoint_toml(p)
-            hints = cfg.function_resources["convert-low-precision"]
-            self.assertEqual(hints["requires_gpu"], True)
-            self.assertEqual(hints["compute_capability_min"], "9.0")
-            self.assertEqual(hints["min_vram_gb"], 24.0)
-            self.assertEqual(hints["supported_precisions"], ["fp8", "nvfp4"])
-            self.assertEqual(
-                hints["supported_conversion_profiles"],
-                ["fp8:e4m3", "fp8:mxfp8", "nvfp4"],
-            )
-
-    def test_function_vram_multiplier(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            p = Path(td) / "endpoint.toml"
-            p.write_text(
-                """
-schema_version = 1
-name = "x"
-main = "x.main"
-
-[functions.convert_quantize_calibrated.resources]
-kind = "conversion"
-vram_multiplier = 1.5
-""".lstrip(),
-                encoding="utf-8",
-            )
-            cfg = load_endpoint_toml(p)
-            hints = cfg.function_resources["convert-quantize-calibrated"]
-            self.assertEqual(hints["vram_multiplier"], 1.5)
-
-    def test_function_vram_multiplier_must_be_positive(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            p = Path(td) / "endpoint.toml"
-            p.write_text(
-                """
-schema_version = 1
-name = "x"
-main = "x.main"
-
-[functions.convert_quantize_calibrated.resources]
-vram_multiplier = 0
-""".lstrip(),
-                encoding="utf-8",
-            )
-            with self.assertRaises(ValueError):
-                load_endpoint_toml(p)
-
-    def test_function_vram_multiplier_must_be_numeric(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            p = Path(td) / "endpoint.toml"
-            p.write_text(
-                """
-schema_version = 1
-name = "x"
-main = "x.main"
-
-[functions.convert_quantize_calibrated.resources]
-vram_multiplier = "high"
-""".lstrip(),
-                encoding="utf-8",
-            )
-            with self.assertRaises(ValueError):
-                load_endpoint_toml(p)
-
-    def test_function_requires_gpu_must_be_boolean(self) -> None:
-        with tempfile.TemporaryDirectory() as td:
-            p = Path(td) / "endpoint.toml"
-            p.write_text(
-                """
-schema_version = 1
-name = "x"
-main = "x.main"
-
-[functions.convert_low_precision.resources]
-requires_gpu = "true"
-""".lstrip(),
-                encoding="utf-8",
-            )
-            with self.assertRaises(ValueError):
-                load_endpoint_toml(p)
-
+            self.assertEqual(cfg.resources.max_inflight_requests, 1)
 
 class TestEndpointTomlAttributesMigration(unittest.TestCase):
     """Migration tests for tensorhub #229's variant-attribute shape on

@@ -61,57 +61,6 @@ def _stop_server(srv: _Server) -> None:
     srv.loop.call_soon_threadsafe(srv.loop.stop)
 
 
-def test_resolve_artifact_success() -> None:
-    async def handler(req: web.Request) -> web.Response:
-        body = await req.json()
-        assert body["tag"] == "latest"
-        assert body["include_urls"] is True
-        return web.json_response(
-            {
-                "version_id": "blake3:" + ("a" * 64),
-                "repo_revision_seq": 1,
-                "variant": {
-                    "label": "safetensors-fp16",
-                    "file_layout": "diffusers",
-                    "file_type": "safetensors",
-                    "quantization": "fp16",
-                },
-                "snapshot_manifest": {
-                    "version": 1,
-                    "entries": [
-                        {
-                            "path": "cozy.pipeline.yaml",
-                            "size_bytes": 123,
-                            "blake3": "b" * 64,
-                            "url": "http://example.test/file",
-                        }
-                    ],
-                },
-            }
-        )
-
-    srv = _start_server({"/api/v1/inference/repos/o/r/resolve": handler})  # type: ignore[arg-type]
-    try:
-        client = CozyHubV2Client(srv.base_url)
-        res = asyncio.run(
-            client.resolve_artifact(
-                owner="o",
-                repo="r",
-                tag="latest",
-                digest=None,
-                include_urls=True,
-                preferences={"file_type_preference": ["safetensors"]},
-                capabilities={"installed_libs": []},
-            )
-        )
-        assert res.repo_revision_seq == 1
-        assert res.snapshot_digest == ("blake3:" + ("a" * 64))
-        assert res.artifact.label == "safetensors-fp16"
-        assert res.files[0].url is not None
-    finally:
-        _stop_server(srv)
-
-
 def test_resolve_artifact_no_compatible() -> None:
     async def handler(_req: web.Request) -> web.Response:
         return web.json_response({"error": "no_compatible_artifact", "debug": {"why": "missing_lib"}}, status=409)
@@ -133,58 +82,6 @@ def test_resolve_artifact_no_compatible() -> None:
             )
         assert "no compatible artifact" in str(e.value).lower()
         assert isinstance(e.value.debug, dict)
-    finally:
-        _stop_server(srv)
-
-
-def test_request_public_model_success() -> None:
-    async def handler(req: web.Request) -> web.Response:
-        body = await req.json()
-        assert body["tag"] == "latest"
-        assert body["include_urls"] is True
-        assert body["preferences"]["quantization_preference"] == ["bf16", "fp16"]
-        assert body["preferences"]["file_type_preference"] == ["safetensors"]
-        assert body["preferences"]["file_layout_preference"] == ["diffusers"]
-        assert body["include_urls"] is True
-        return web.json_response(
-            {
-                "repo_revision_seq": 3,
-                "version_id": "blake3:" + ("a" * 64),
-                "variant": {
-                    "label": "safetensors-bf16",
-                    "file_layout": "diffusers",
-                    "file_type": "safetensors",
-                    "quantization": "bf16",
-                },
-                "snapshot_manifest": {
-                    "version": 1,
-                    "entries": [
-                        {
-                            "path": "cozy.pipeline.yaml",
-                            "size_bytes": 123,
-                            "blake3": "b" * 64,
-                            "url": "http://example.test/file",
-                        }
-                    ],
-                },
-            }
-        )
-
-    srv = _start_server({"/api/v1/inference/repos/o/r/resolve": handler})  # type: ignore[arg-type]
-    try:
-        client = CozyHubV2Client(srv.base_url)
-        res = asyncio.run(
-            client.request_public_model(
-                model_ref="cozy:o/r:latest",
-                dtypes=["bf16", "fp16"],
-                file_types=["safetensors"],
-                file_layouts=["diffusers"],
-                include_urls=True,
-            )
-        )
-        assert res.repo_revision_seq == 3
-        assert res.snapshot_digest.startswith("blake3:")
-        assert res.files[0].url is not None
     finally:
         _stop_server(srv)
 

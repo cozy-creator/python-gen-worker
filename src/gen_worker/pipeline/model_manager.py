@@ -40,10 +40,10 @@ class DiffusersModelManager(ModelManagementInterface):
 
             local_path: Optional[str] = None
             if self._downloader is not None:
-                from gen_worker.models.cache_paths import worker_model_cache_dir
+                from gen_worker.models.cache_paths import tensorhub_cas_dir
                 import asyncio
 
-                cache_dir = str(worker_model_cache_dir())
+                cache_dir = str(tensorhub_cas_dir())
                 try:
                     local_path = await asyncio.to_thread(
                         self._downloader.download, model_id, cache_dir

@@ -68,24 +68,6 @@ def _infer_source_ext_from_url(source_url: str) -> str:
     return ".bin"
 
 
-def save_checkpoint_chunked(
-    ctx: RequestContext,
-    *,
-    input_path: Path,
-    ref: str,
-    format: str,
-) -> Tensors:
-    """Upload ``input_path`` as a checkpoint under ``ref``.
-
-    Thin wrapper over ``ctx.save_checkpoint`` — kept as a stable name for
-    clone_pipeline callers. The library itself handles chunking, streaming,
-    retries, and progress emission.
-    """
-    return ctx.save_checkpoint(ref, str(input_path), format=format)
-
-
-
-
 def ingest_from_url(
     ctx: RequestContext,
     *,
@@ -102,7 +84,7 @@ def ingest_from_url(
     raw = Path(td) / f"ingested{ext}"
     info = source_url_to_cas(src, raw, progress_callback=progress_callback)
     ref = str(output_ref or "").strip() or default_output_ref(ctx, "ingested-source", ext=ext)
-    saved = save_checkpoint_chunked(ctx, input_path=raw, ref=ref, format=ext.lstrip(".") or "bin")
+    saved = ctx.save_checkpoint(ref, str(raw), format=ext.lstrip(".") or "bin")
     if str(saved.local_path or "").strip() == "":
         saved = tensors_with(saved, local_path=str(raw))
     return ConversionOutput(
@@ -158,12 +140,7 @@ def ingest_from_source(
             "model_family": guessed_family,
         }
         ref = str(output_ref or "").strip() or default_output_ref(ctx, "ingested-source", ext=source_ext)
-        saved = save_checkpoint_chunked(
-            ctx,
-            input_path=raw,
-            ref=ref,
-            format=source_ext.lstrip(".") or "bin",
-        )
+        saved = ctx.save_checkpoint(ref, str(raw), format=source_ext.lstrip(".") or "bin")
         if str(saved.local_path or "").strip() == "":
             saved = tensors_with(saved, local_path=str(raw))
         source_meta["sha256"] = str(info.get("sha256") or "")
@@ -257,12 +234,7 @@ def ingest_from_source(
             rel_path = str(row["rel_path"])
             local_path = str(row["local_path"])
             ref = f"jobs/{ctx.request_id}/outputs/source-repo/{rel_path}"
-            saved = save_checkpoint_chunked(
-                ctx,
-                input_path=Path(local_path),
-                ref=ref,
-                format=Path(rel_path).suffix.lstrip(".") or "bin",
-            )
+            saved = ctx.save_checkpoint(ref, local_path, format=Path(rel_path).suffix.lstrip(".") or "bin")
             if str(saved.local_path or "").strip() == "":
                 saved = tensors_with(saved, local_path=local_path)
             refs.append(str(saved.ref or ref))
@@ -286,7 +258,7 @@ def ingest_from_source(
 
         # For weight files, synthesise "local-only" Tensors (with local_path +
         # size_bytes but no blob_digest yet). `_finalize_clone` calls
-        # `save_checkpoint_chunked` on the subset actually required by the
+        # `ctx.save_checkpoint` on the subset actually required by the
         # requested OutputSpec list, so weight bytes that nobody references
         # never hit repo-CAS.
         for row in weight_items:
@@ -396,12 +368,7 @@ def ingest_from_source(
             if ".." in rel_path.split("/"):
                 continue
             ref = f"jobs/{ctx.request_id}/outputs/source-repo/{rel_path}"
-            saved = save_checkpoint_chunked(
-                ctx,
-                input_path=Path(local_path),
-                ref=ref,
-                format=Path(rel_path).suffix.lstrip(".") or "bin",
-            )
+            saved = ctx.save_checkpoint(ref, local_path, format=Path(rel_path).suffix.lstrip(".") or "bin")
             if str(saved.local_path or "").strip() == "":
                 saved = tensors_with(saved, local_path=local_path)
             refs.append(str(saved.ref or ref))
@@ -501,7 +468,6 @@ __all__ = [
     # Clone-pipeline-local helpers
     "require_local_weights",
     "default_output_ref",
-    "save_checkpoint_chunked",
     "ingest_from_url",
     "ingest_from_source",
 ]

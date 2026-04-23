@@ -35,7 +35,7 @@ def test_pipeline_loader_localizes_nfs_snapshot_to_local_cache(tmp_path: Path) -
     assert (src / "weights.bin").read_bytes() == b"abc"
 
 
-def test_pipeline_loader_downloads_into_worker_model_cache_dir(tmp_path: Path) -> None:
+def test_pipeline_loader_downloads_into_tensorhub_cas_dir(tmp_path: Path) -> None:
     models_dir = tmp_path / "models"
     models_dir.mkdir(parents=True, exist_ok=True)
 

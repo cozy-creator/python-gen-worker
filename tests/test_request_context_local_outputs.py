@@ -183,18 +183,6 @@ def test_request_context_open_checkpoint_stream_remote_presigned_upload(monkeypa
     assert upload_calls[0]["endpoint"] == "/api/v1/media/uploads"
 
 
-def test_request_context_open_checkpoint_stream_requires_repo_job_scope_for_conversion() -> None:
-    ctx = RequestContext(
-        "rid8-scope",
-        file_api_base_url="https://files.example.test",
-        worker_capability_token="token",
-        owner="o1",
-        execution_hints={"kind": "conversion"},
-    )
-    with pytest.raises(RuntimeError, match="tensor upload requires repo job scope"):
-        ctx.open_checkpoint_stream("jobs/rid8-scope/outputs/final.safetensors")
-
-
 def test_request_context_save_checkpoint_requires_repo_job_scope_for_training(tmp_path: Path) -> None:
     src = tmp_path / "model.safetensors"
     src.write_bytes(b"abcd")

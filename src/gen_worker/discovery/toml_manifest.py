@@ -7,7 +7,7 @@ from typing import Any, Mapping
 import tomllib
 import re
 
-from .names import slugify_function_name
+from .names import slugify_name
 
 _DEFAULT_DTYPES: tuple[str, ...] = ("fp16", "bf16")
 
@@ -578,7 +578,7 @@ def load_endpoint_toml_with_warnings(path: Path) -> tuple[EndpointToml, list[str
                 and "attributes" not in value_raw
                 and "dtypes" not in value_raw
             ):
-                fn = slugify_function_name(key)
+                fn = slugify_name(key)
                 if not fn:
                     raise ValueError(f"invalid function keyspace name under [models]: {key!r}")
                 keyspace: dict[str, TensorhubModelSpec] = {}
@@ -632,7 +632,7 @@ def load_endpoint_toml_with_warnings(path: Path) -> tuple[EndpointToml, list[str
     raw_functions = data.get("functions")
     if isinstance(raw_functions, dict):
         for fn_name, fn_cfg in raw_functions.items():
-            fn = slugify_function_name(str(fn_name).strip())
+            fn = slugify_name(str(fn_name).strip())
             if not fn or not isinstance(fn_cfg, dict):
                 continue
 

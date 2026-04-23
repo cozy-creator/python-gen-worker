@@ -81,7 +81,7 @@ from .models.refs import parse_model_ref
 from .api.types import Asset, Tensors
 from .models.cache import ModelCache
 from .run_metrics_v1 import RunMetricsV1, best_effort_bytes_downloaded, best_effort_init_model_metrics, safe_json_bytes
-from .models.cache_paths import worker_local_model_cache_dir_default, worker_model_cache_dir
+from .models.cache_paths import worker_local_model_cache_dir_default, tensorhub_cas_dir
 from .wire_protocol import WIRE_PROTOCOL_MAJOR, WIRE_PROTOCOL_MINOR, wire_protocol_version_string
 from .api.injection import (
     InjectionSpec,
@@ -90,7 +90,7 @@ from .api.injection import (
     parse_injection,
     type_qualname,
 )
-from .discovery.names import slugify_function_name
+from .discovery.names import slugify_name
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -926,7 +926,7 @@ class Worker:
                     # Slugify the Python name to match what orchestrator dispatches
                     # (matches the inference-function registration convention so
                     # function_name lookups agree at RPC time).
-                    name = slugify_function_name(python_name)
+                    name = slugify_name(python_name)
                     if not name:
                         logger.error("@training_function '%s' in %s: function name cannot be normalized",
                                      python_name, module_name)
@@ -984,7 +984,7 @@ class Worker:
 
     def _inspect_request_spec(self, func: Callable[..., Any]) -> _RequestSpec:
         python_name = func.__name__
-        func_name = slugify_function_name(python_name)
+        func_name = slugify_name(python_name)
         if not func_name:
             raise ValueError(f"{python_name}: function name cannot be normalized")
         resources: ResourceRequirements = getattr(func, "_worker_resources", ResourceRequirements())
@@ -1103,7 +1103,7 @@ class Worker:
 
     def _inspect_websocket_spec(self, func: Callable[..., Any]) -> _WebsocketSpec:
         python_name = func.__name__
-        func_name = slugify_function_name(python_name)
+        func_name = slugify_name(python_name)
         if not func_name:
             raise ValueError(f"{python_name}: function name cannot be normalized")
         resources: ResourceRequirements = getattr(func, "_worker_resources", ResourceRequirements())
@@ -2676,7 +2676,7 @@ class Worker:
 
         This warms the disk cache and increments readiness via disk_models in the next heartbeat.
         """
-        cache_dir = worker_model_cache_dir()
+        cache_dir = tensorhub_cas_dir()
         cache_dir.mkdir(parents=True, exist_ok=True)
 
         # Concurrency cap (best-effort). download() itself is blocking, so we use worker threads.
@@ -3235,7 +3235,14 @@ class Worker:
         # back to the legacy scalar `destination_repo` field when present.
         source_info_raw: Optional[Dict[str, Any]] = None
         destination_info_raw: Optional[Dict[str, Any]] = None
-        if kind.lower() == "training" and input_payload:
+        # Widened past the original kind=="training" gate: clone_huggingface /
+        # clone_civitai are @inference_function but still need destination_repo
+        # + job_id in execution_hints so publish_repo_revision can open a repo
+        # job scope at finalize time. Actual file uploads continue to route
+        # through media (see save_checkpoint — we intentionally don't lift to
+        # repo-cas here because tensorhub's session-open auth currently 403s
+        # cap-token callers with `missing_session_id`).
+        if input_payload:
             try:
                 raw_input = msgspec.msgpack.decode(input_payload)
                 if isinstance(raw_input, dict):
@@ -3621,7 +3628,7 @@ class Worker:
                 rm.required_models,
                 vram_models=vram,
                 disk_models=disk,
-                cache_dir=worker_model_cache_dir(),
+                cache_dir=tensorhub_cas_dir(),
             )
         except Exception:
             pass
@@ -4348,7 +4355,7 @@ class Worker:
         try:
             from .pipeline.mount_backend import mount_backend_for_path, volume_key_for_path
 
-            p = path or worker_model_cache_dir()
+            p = path or tensorhub_cas_dir()
             mb = mount_backend_for_path(p)
             if mb is None:
                 return {}
@@ -4428,7 +4435,7 @@ class Worker:
         cap_token_raw = str(getattr(ctx, "_worker_capability_token", "") or "").strip()
         cap_tok = set_cozy_worker_capability_token(cap_token_raw or None)
         try:
-            cache_dir = str(worker_model_cache_dir())
+            cache_dir = str(tensorhub_cas_dir())
             local = self._downloader.download(canonical, cache_dir)
         finally:
             reset_cozy_model_download_prefs_by_ref(prefs_tok)
@@ -4630,7 +4637,7 @@ class Worker:
                     if local is None:
                         if self._downloader is None:
                             raise ValueError("diffusers pipeline injection requires a model downloader")
-                        cache_dir = str(worker_model_cache_dir())
+                        cache_dir = str(tensorhub_cas_dir())
                         # Best-effort download timing.
                         t_dl0 = time.monotonic()
                         local = self._downloader.download(model_id, cache_dir)
@@ -4889,7 +4896,7 @@ class Worker:
                         else:
                             parsed = parse_model_ref(model_source)
                             if self._downloader is not None and parsed.scheme in ("cozy", "hf"):
-                                model_source = self._downloader.download(model_source, str(worker_model_cache_dir()))
+                                model_source = self._downloader.download(model_source, str(tensorhub_cas_dir()))
                             elif parsed.scheme == "hf" and parsed.hf is not None:
                                 # Fallback path when downloader is unavailable.
                                 model_source = parsed.hf.repo_id

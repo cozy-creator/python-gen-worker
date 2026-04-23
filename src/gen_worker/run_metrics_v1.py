@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 
-from .models.cache_paths import worker_model_cache_dir
+from .models.cache_paths import tensorhub_cas_dir
 from .models.refs import parse_model_ref
 
 
@@ -87,7 +87,7 @@ def _missing_bytes_for_resolved_model(base_dir: Path, resolved_entry: Any) -> Op
 
 
 def _cache_dir() -> Path:
-    return worker_model_cache_dir()
+    return tensorhub_cas_dir()
 
 
 @dataclass

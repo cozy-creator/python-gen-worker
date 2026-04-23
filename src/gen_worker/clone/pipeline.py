@@ -34,7 +34,7 @@ from gen_worker.conversion.repackage import (
     diffusers_to_singlefile,
     singlefile_to_diffusers,
 )
-from ._shared import ConversionOutput, IngestResult, default_output_ref, ingest_from_source, save_checkpoint_chunked, tensors_with
+from ._shared import ConversionOutput, IngestResult, default_output_ref, ingest_from_source, tensors_with
 
 
 _PUBLIC_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{0,127}$")
@@ -1234,7 +1234,7 @@ def _run_layout_repackage(
     Uploads the result (directory for diffusers, single safetensors for
     singlefile) via ctx.save_checkpoint / a directory-tree walk.
     """
-    from ._shared import require_local_weights, save_checkpoint_chunked
+    from ._shared import require_local_weights
 
     td = Path(tempfile.mkdtemp(prefix=f"clone-repackage-{ctx.request_id}-"))
     try:
@@ -1250,8 +1250,8 @@ def _run_layout_repackage(
                 if not f.is_file():
                     continue
                 rel = f.relative_to(out_dir).as_posix()
-                saved = save_checkpoint_chunked(
-                    ctx, input_path=f, ref=f"{ref_root}/{rel}", format=f.suffix.lstrip(".") or "bin",
+                saved = ctx.save_checkpoint(
+                    f"{ref_root}/{rel}", str(f), format=f.suffix.lstrip(".") or "bin",
                 )
                 if primary_saved is None and rel.endswith(".safetensors"):
                     primary_saved = saved
@@ -1269,7 +1269,7 @@ def _run_layout_repackage(
             out_file = td / "model.safetensors"
             diffusers_to_singlefile(Path(source_repo_dir), out_file, model_family=model_family)
             ref = default_output_ref(ctx, "weights-singlefile", ext=".safetensors")
-            saved = save_checkpoint_chunked(ctx, input_path=out_file, ref=ref, format="safetensors")
+            saved = ctx.save_checkpoint(ref, str(out_file), format="safetensors")
             return ConversionOutput(
                 weights=saved,
                 metadata={"file_layout": "singlefile", "model_family": model_family},
@@ -1341,6 +1341,15 @@ def _finalize_clone(
             return False
         if spec.file_layout != source_layout:
             return False
+        # Bail out of the fast-path when any source weight exceeds the
+        # safetensors shard cap. Passthrough uploads the file as-is, which
+        # hits tensorhub's per-file upload cap (5 GB on the media domain).
+        # `_apply_save_format` with streaming_dtype_cast will re-shard on
+        # write; prefer paying the rewrite cost over a 413 at upload time.
+        from gen_worker.conversion._sharding import MAX_SAFETENSORS_SHARD_BYTES
+        for _tensors, _rel_path, fsize in ingest_result.all_weight_files:
+            if int(fsize or 0) > int(MAX_SAFETENSORS_SHARD_BYTES):
+                return False
         return True
 
     # Per-spec fan-out: save_format_outputs is indexed by output_spec.label
@@ -1386,10 +1395,9 @@ def _finalize_clone(
                 if str(getattr(saved_tensors, "local_path", "") or "").strip() == "":
                     continue
                 up_ref = str(saved_tensors.ref or f"jobs/{ctx.request_id}/outputs/source-repo/{rel_path}")
-                up = save_checkpoint_chunked(
-                    ctx,
-                    input_path=Path(str(saved_tensors.local_path)),
-                    ref=up_ref,
+                up = ctx.save_checkpoint(
+                    up_ref,
+                    str(saved_tensors.local_path),
                     format=str(saved_tensors.format or Path(rel_path).suffix.lstrip(".") or "safetensors"),
                 )
                 if str(up.local_path or "").strip() == "":
@@ -1515,7 +1523,7 @@ def _finalize_clone(
     # ingest no longer uploads source weights). Only append its ref to the
     # publish artifact refs when we actually have a CAS-bound blob, i.e. when
     # layout_output produced a repackaged file that did upload via
-    # save_checkpoint_chunked.
+    # ctx.save_checkpoint.
     if layout_output is not None and str(output.weights.ref or "").strip():
         publish_artifact_refs.append(str(output.weights.ref).strip())
     if layout_output is not None:

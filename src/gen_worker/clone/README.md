@@ -88,7 +88,7 @@ blob digests, manifests). All of that is library-internal.
 
 The public surface on `ctx` for tenants is:
 
-- `ctx.save_file` / `save_file_create` / `save_file_overwrite` / `save_bytes`
+- `ctx.save_file` / `save_file_create` / `save_bytes`
 - `ctx.save_checkpoint` / `save_checkpoint_bytes` / `open_output_stream`
 - `ctx.publish_checkpoint(repo, id)` / `ctx.unpublish_checkpoint(repo, id)`
 

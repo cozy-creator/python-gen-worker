@@ -194,14 +194,6 @@ def _env_first_nonempty(names: tuple[str, ...]) -> str:
     return ""
 
 
-def get_mirror_hf_token() -> str:
-    return _env_first_nonempty(_HF_TOKEN_ENV_ALIASES)
-
-
-def get_mirror_civitai_api_key() -> str:
-    return _env_first_nonempty(_CIVITAI_TOKEN_ENV_ALIASES)
-
-
 def _http_host_allowed(host: str, allowed_hosts: set[str]) -> bool:
     host_norm = str(host or "").strip().lower()
     if host_norm == "":
@@ -230,8 +222,8 @@ def _source_auth_fallback(host: str, *, provider: str | None = None) -> tuple[st
     provider_norm = str(provider or "").strip().lower()
     host_lc = str(host or "").strip().lower()
 
-    hf_token = get_mirror_hf_token()
-    civitai_token = get_mirror_civitai_api_key()
+    hf_token = _env_first_nonempty(_HF_TOKEN_ENV_ALIASES)
+    civitai_token = _env_first_nonempty(_CIVITAI_TOKEN_ENV_ALIASES)
 
     if provider_norm == "huggingface" and hf_token != "":
         return hf_token, set(_HF_SOURCE_AUTH_HOSTS)
@@ -630,7 +622,7 @@ def resolve_huggingface_source_identity(source_repo: str, *, source_revision: st
 
     repo_id, embedded_revision = _split_hf_repo_ref(source_repo)
     revision = str(source_revision or "").strip() or embedded_revision or "main"
-    token = get_mirror_hf_token() or None
+    token = _env_first_nonempty(_HF_TOKEN_ENV_ALIASES) or None
     api = HfApi(token=token)
     info = api.model_info(repo_id=repo_id, revision=revision)
     resolved_revision = str(getattr(info, "sha", "") or "").strip() or revision
@@ -675,7 +667,7 @@ def list_huggingface_repo_files(
         raise RuntimeError("huggingface_hub is required for clone_huggingface source_repo ingestion") from exc
 
     repo_id, revision = resolve_huggingface_source_identity(source_repo, source_revision=source_revision)
-    token = get_mirror_hf_token() or None
+    token = _env_first_nonempty(_HF_TOKEN_ENV_ALIASES) or None
     api = HfApi(token=token)
     tree = api.list_repo_tree(
         repo_id=repo_id,
@@ -773,7 +765,7 @@ def download_huggingface_repo_files(
 
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    token = get_mirror_hf_token() or None
+    token = _env_first_nonempty(_HF_TOKEN_ENV_ALIASES) or None
     downloaded = 0
     materialized: list[dict[str, object]] = []
     for item in files:
@@ -890,7 +882,7 @@ def source_huggingface_to_cas(
         raise RuntimeError("huggingface_hub is required for clone_huggingface source_repo ingestion") from exc
 
     repo_id, revision = resolve_huggingface_source_identity(source_repo, source_revision=source_revision)
-    token = get_mirror_hf_token() or None
+    token = _env_first_nonempty(_HF_TOKEN_ENV_ALIASES) or None
     files = list_repo_files(repo_id=repo_id, revision=revision, token=token)
     filename = _pick_hf_weight_file([str(v or "") for v in files])
     local_file = hf_hub_download(
@@ -1719,21 +1711,14 @@ def download_civitai_model_version_files(
     }
 
 
-def copy_local_to_cas(input_path: Path, output_path: Path) -> dict[str, str | int]:
-    return _copy_with_hash_and_progress(input_path, output_path)
-
-
 __all__ = [
     "CivitaiFrontendURLInfo",
     "CivitaiImportCandidate",
     "CivitaiResolvedIdentity",
-    "copy_local_to_cas",
     "download_civitai_model_version_files",
     "download_huggingface_repo_files",
     "fetch_civitai_model",
     "fetch_civitai_model_version",
-    "get_mirror_civitai_api_key",
-    "get_mirror_hf_token",
     "infer_model_family_from_civitai_metadata",
     "infer_model_family_variant_from_civitai_metadata",
     "infer_singlefile_pipeline_hint_from_civitai_metadata",
