@@ -294,8 +294,20 @@ class Worker:
         self._outgoing_queue: queue.Queue[Any] = queue.Queue()
         self._leader_hint: Optional[str] = None
 
+        # Heartbeats ride on a SEPARATE gRPC channel so long-running tenant work
+        # (safetensors.load_file on 7 GB, streaming_dtype_cast, large job_output
+        # chunks) on the primary data stream can't starve them. The scheduler
+        # only uses the heartbeat message's WorkerId to look up the existing
+        # WorkerInfo and bump LastActiveAt, so the second stream is transparent
+        # to the rest of the dispatch flow. See e2e #31.
+        self._heartbeat_channel: Optional[Any] = None
+        self._heartbeat_stub: Optional[Any] = None
+        self._heartbeat_stream: Optional[Any] = None
+        self._heartbeat_outgoing_queue: queue.Queue[Any] = queue.Queue()
+
         self._receive_thread: Optional[threading.Thread] = None
         self._heartbeat_thread: Optional[threading.Thread] = None
+        self._heartbeat_drain_thread: Optional[threading.Thread] = None
 
         self._realtime_sessions: Dict[str, _RealtimeSessionState] = {}
         self._realtime_lock = threading.Lock()
@@ -1683,6 +1695,24 @@ class Worker:
             self._registered_event.set()
             self._emit_startup_phase("registered", status="ok", scheduler_addr=self.scheduler_addr)
 
+            # Dedicated heartbeat channel + stream (e2e #31). Opens a second
+            # HTTP/2 connection to the scheduler so heartbeats aren't subject
+            # to flow control or Python-level queue head-of-line blocking from
+            # the primary data stream. Scheduler treats heartbeats on any
+            # stream as "bump LastActiveAt for the WorkerId carried in the
+            # message" so two parallel streams per worker are safe.
+            if self.use_tls:
+                hb_creds = grpc.ssl_channel_credentials()
+                self._heartbeat_channel = grpc.secure_channel(self.scheduler_addr, hb_creds)
+            else:
+                self._heartbeat_channel = grpc.insecure_channel(self.scheduler_addr)
+            if interceptors:
+                self._heartbeat_channel = grpc.intercept_channel(self._heartbeat_channel, *interceptors)
+            self._heartbeat_stub = pb_grpc.SchedulerWorkerServiceStub(self._heartbeat_channel)
+            self._heartbeat_stream = self._heartbeat_stub.ConnectWorker(self._heartbeat_outgoing_iterator())
+            self._heartbeat_drain_thread = threading.Thread(target=self._heartbeat_drain_loop, daemon=True)
+            self._heartbeat_drain_thread.start()
+
             # Start the receive loop in a separate thread *after* stream is initiated
             self._receive_thread = threading.Thread(target=self._receive_loop, daemon=True)
             self._receive_thread.start()
@@ -1754,8 +1784,54 @@ class Worker:
                      self._handle_connection_error()
                      break # Exit iterator on error
 
+    def _heartbeat_outgoing_iterator(self) -> Iterator[WorkerSchedulerMessage]:
+        """Yields heartbeat messages onto the dedicated heartbeat stream."""
+        while not self._stop_event.is_set():
+            try:
+                message = self._heartbeat_outgoing_queue.get(timeout=0.1)
+                yield message
+            except queue.Empty:
+                continue
+            except Exception as e:
+                if not self._stop_event.is_set():
+                    logger.exception(f"Error in heartbeat outgoing iterator: {e}")
+                    # Don't call _handle_connection_error — losing the heartbeat
+                    # stream alone shouldn't tear down the primary data stream.
+                    break
+
+    def _heartbeat_drain_loop(self) -> None:
+        """Silently drains any server→client messages on the heartbeat stream.
+
+        The scheduler's ConnectWorker handler is bidirectional; it may push
+        messages back to the worker after seeing a WorkerRegistration. Since
+        this stream is dedicated to heartbeats, anything the scheduler sends
+        us here is either duplicative (a dispatch that will also arrive on the
+        primary stream) or irrelevant. We must keep reading, though — gRPC's
+        flow control blocks the upstream sends if the downstream reader stops.
+        """
+        stream = self._heartbeat_stream
+        if stream is None:
+            return
+        try:
+            for _ in stream:
+                if self._stop_event.is_set():
+                    return
+                # discard — primary receive loop handles real traffic
+        except Exception:
+            # Stream closed or errored; nothing to recover here. Main loop
+            # will notice via its own health checks.
+            return
+
+    def _send_heartbeat_message(self, message: WorkerSchedulerMessage) -> None:
+        """Add a message to the dedicated heartbeat queue."""
+        if self._running and not self._stop_event.is_set():
+            try:
+                self._heartbeat_outgoing_queue.put_nowait(message)
+            except queue.Full:
+                logger.error("Heartbeat outgoing queue is full. Heartbeat dropped!")
+
     def _heartbeat_loop(self) -> None:
-        """Periodically sends heartbeat messages."""
+        """Periodically sends heartbeat messages on the dedicated heartbeat stream."""
         while not self._stop_event.wait(HEARTBEAT_INTERVAL):
             try:
                 self._register_worker(is_heartbeat=True)
@@ -1953,7 +2029,14 @@ class Worker:
             message = pb.WorkerSchedulerMessage(worker_registration=registration)
             # logger.info(f"DEBUG: Preparing to send registration. Resource object: {resources}")
             # logger.info(f"DEBUG: Value being sent for runpod_pod_id: '{resources.runpod_pod_id}'")
-            self._send_message(message)
+            if is_heartbeat:
+                # Route heartbeats on the dedicated heartbeat stream (e2e #31).
+                # The primary data stream can back up behind huge job_output
+                # chunks or long GIL-held tenant code; the heartbeat stream is
+                # kept idle so every 10 s tick gets through.
+                self._send_heartbeat_message(message)
+            else:
+                self._send_message(message)
 
             # Best-effort: report disk inventory + volume identity for NFS-aware scheduling/debug.
             # This is intentionally redundant with WorkerResources.disk_models but adds the missing
@@ -2214,6 +2297,11 @@ class Worker:
             logger.debug("Joining receive thread...")
             self._receive_thread.join(timeout=2.0)
 
+        # Wait for heartbeat-stream drain thread (e2e #31)
+        if self._heartbeat_drain_thread and self._heartbeat_drain_thread.is_alive():
+            logger.debug("Joining heartbeat drain thread...")
+            self._heartbeat_drain_thread.join(timeout=1.0)
+
         if self._registration_watchdog_thread and self._registration_watchdog_thread.is_alive():
             logger.debug("Joining registration watchdog thread...")
             self._registration_watchdog_thread.join(timeout=1.0)
@@ -2252,6 +2340,28 @@ class Worker:
                  logger.error(f"Error closing gRPC channel: {e}")
         self._channel = None
         self._stub = None
+
+        # Tear down the dedicated heartbeat channel too (e2e #31).
+        if self._heartbeat_stream:
+            try:
+                if hasattr(self._heartbeat_stream, 'cancel') and callable(self._heartbeat_stream.cancel):
+                    self._heartbeat_stream.cancel()
+            except Exception as e:
+                logger.warning(f"Error cancelling heartbeat stream: {e}")
+        self._heartbeat_stream = None
+        if self._heartbeat_channel:
+            try:
+                self._heartbeat_channel.close()
+            except Exception as e:
+                logger.warning(f"Error closing heartbeat channel: {e}")
+        self._heartbeat_channel = None
+        self._heartbeat_stub = None
+        # Drain any leftover heartbeat messages so they don't resurface on reconnect.
+        while not self._heartbeat_outgoing_queue.empty():
+            try:
+                self._heartbeat_outgoing_queue.get_nowait()
+            except queue.Empty:
+                break
 
 
     def _receive_loop(self) -> None:

@@ -606,14 +606,38 @@ class RequestContext:
         _enforce_output_file_size_limit(size)
         fmt = str(format or "").strip() or _infer_tensors_format(ref or local_path)
 
-        # Historical behavior routed job-scoped writes through repo-CAS
-        # upload-sessions. Currently disabled because tensorhub's
-        # `handleOpenUploadSession` denies cap-token callers with
-        # `missing_session_id` (the middleware reads `:session_id` from the
-        # URL, which isn't set on the session-open POST). Falling through to
-        # save_file/media keeps HF clone flows alive while the tensorhub
-        # auth bug is being fixed; the scope value itself is still used by
-        # publish_repo_revision for metadata.
+        # Job-scoped writes go through the repo-CAS upload-session stream so
+        # the returned Tensors carries a blake3 digest + blob_digest + the
+        # session tracks completed_files for the finalize manifest. (Earlier
+        # media-route fallback was a workaround for tensorhub's
+        # `handleOpenUploadSession` rejecting cap-token callers — that server
+        # bug is fixed now; media-route is no longer needed, and it also
+        # broke `_build_snapshot_manifest` because save_file returns an Asset
+        # without blake3 and the clone pipeline's manifest builder requires a
+        # blake3 digest per entry.)
+        if self._repo_job_upload_scope() is not None and self._should_stream_output_to_file_api(ref):
+            stream = self.open_checkpoint_stream(
+                ref,
+                format=fmt,
+                expected_size_bytes=size,
+                produced_by_kind=produced_by_kind,
+                step_number=step_number,
+                epoch_number=epoch_number,
+                output_kind=output_kind,
+                target_dtype=target_dtype,
+                variant_label=variant_label,
+            )
+            with open(src, "rb") as fin:
+                while True:
+                    chunk = fin.read(8 * 1024 * 1024)
+                    if not chunk:
+                        break
+                    stream.write(chunk)
+            out = stream.finalize()
+            if isinstance(out, Tensors):
+                return out
+            raise RuntimeError("file save failed (invalid_tensors_response)")
+
         asset = self.save_file(ref, src)
         return Tensors(
             ref=asset.ref,
@@ -647,8 +671,26 @@ class RequestContext:
         self._require_repo_job_scope_for_tensors(ref)
         fmt = str(format or "").strip() or _infer_tensors_format(ref)
 
-        # Mirror save_checkpoint: route through media/save_bytes while the
-        # tensorhub session-open cap auth bug blocks the repo-CAS path.
+        # Job-scoped writes go through the repo-CAS upload-session stream;
+        # see save_checkpoint for the rationale.
+        if self._repo_job_upload_scope() is not None and self._should_stream_output_to_file_api(ref):
+            stream = self.open_checkpoint_stream(
+                ref,
+                format=fmt,
+                expected_size_bytes=len(payload),
+                produced_by_kind=produced_by_kind,
+                step_number=step_number,
+                epoch_number=epoch_number,
+                output_kind=output_kind,
+                target_dtype=target_dtype,
+                variant_label=variant_label,
+            )
+            stream.write(payload)
+            out = stream.finalize()
+            if isinstance(out, Tensors):
+                return out
+            raise RuntimeError("file save failed (invalid_tensors_response)")
+
         asset = self.save_bytes(ref, payload)
         return Tensors(
             ref=asset.ref,
