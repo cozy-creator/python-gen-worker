@@ -1090,6 +1090,49 @@ def _stage_sharded_input(
     return idx_dest
 
 
+def _derive_output_stem(
+    *, snapshot_rel_path: str | None, weights_rel_path: str | None, fallback: str
+) -> tuple[str, str]:
+    """Derive ``(component, stem)`` for a converted output.
+
+    HuggingFace/diffusers convention: each component directory (``transformer``,
+    ``text_encoder``, ``vae``, ...) holds a ``<stem>.safetensors`` (or its
+    ``<stem>-00001-of-NNN.safetensors`` + ``<stem>.safetensors.index.json``
+    shards). We want our conversion outputs to use the SAME stem as the source
+    so e.g. a ``transformer/diffusion_pytorch_model.safetensors`` input still
+    lands at ``transformer/diffusion_pytorch_model-<N>-of-<NN>.safetensors``
+    after a dtype cast — not at ``weights-bf16-<N>-of-<NN>.safetensors``.
+
+    Returns ``(component, stem)`` where either may be ``""`` for the Civitai
+    single-file case (caller falls back to ``fallback``).
+    """
+    snap = (snapshot_rel_path or "").strip().replace("\\", "/").lstrip("/")
+    if snap:
+        parts = snap.rsplit("/", 1)
+        if len(parts) == 2:
+            component, filename = parts
+        else:
+            component, filename = "", parts[0]
+        stem = filename
+        for suffix in (".safetensors.index.json", ".safetensors"):
+            if stem.endswith(suffix):
+                stem = stem[: -len(suffix)]
+                break
+        if stem == "":
+            stem = fallback
+        return component, stem
+    rel = (weights_rel_path or "").strip()
+    if rel:
+        stem = Path(rel).name
+        for suffix in (".safetensors.index.json", ".safetensors"):
+            if stem.endswith(suffix):
+                stem = stem[: -len(suffix)]
+                break
+        if stem != "":
+            return "", stem
+    return "", fallback
+
+
 def _apply_save_format(
     ctx: RequestContext,
     *,
@@ -1100,6 +1143,7 @@ def _apply_save_format(
     extra_shards: list[Tensors] | None = None,
     shard_rel_paths: list[str] | None = None,
     weights_rel_path: str | None = None,
+    snapshot_rel_path: str | None = None,
 ) -> ConversionOutput:
     """Apply one conversion (bf16 / flashpack / fp8 / nvfp4 / gguf) to local weights.
 
@@ -1109,8 +1153,10 @@ def _apply_save_format(
     Tensors that's already been ingested from an external URL).
     """
     from ._shared import require_local_weights
-    from gen_worker.conversion.safetensors_io import persist_safetensors_output
-    from gen_worker.conversion.safetensors_io import materialize_safetensors_input
+    from gen_worker.conversion.safetensors_io import (
+        materialize_safetensors_input,
+        persist_safetensors_output,
+    )
     from ._flashpack import convert_safetensors_to_flashpack
     from gen_worker.conversion.streaming_primitives import (
         streaming_dtype_cast,
@@ -1123,6 +1169,29 @@ def _apply_save_format(
     inp = require_local_weights(weights)
     shards = list(extra_shards or [])
     shard_names = list(shard_rel_paths or [])
+
+    def _output_ref(*, ext: str = ".safetensors", fallback_stem: str) -> tuple[str, str]:
+        """Compute ``(output_ref, shard_prefix)`` for one conversion.
+
+        Shard filenames use the source stem so the published paths match
+        HF/diffusers convention:
+          * source ``transformer/diffusion_pytorch_model.safetensors`` →
+            single shard published at
+            ``transformer/diffusion_pytorch_model.safetensors``;
+          * shardable → ``transformer/diffusion_pytorch_model-00001-of-NN.safetensors``
+            + ``transformer/diffusion_pytorch_model.safetensors.index.json``.
+        """
+        component, stem = _derive_output_stem(
+            snapshot_rel_path=snapshot_rel_path,
+            weights_rel_path=weights_rel_path,
+            fallback=fallback_stem,
+        )
+        suffix = ext if ext.startswith(".") else f".{ext}"
+        if component:
+            ref = f"jobs/{ctx.request_id}/outputs/{component}/{stem}{suffix}"
+        else:
+            ref = default_output_ref(ctx, stem, ext=ext)
+        return ref, stem
 
     td = Path(tempfile.mkdtemp(prefix=f"clone-{ctx.request_id}-{tag}-"))
     try:
@@ -1140,16 +1209,27 @@ def _apply_save_format(
 
         if tag == "bf16":
             import torch
-            converted = td / "converted.safetensors"
-            streaming_dtype_cast(prepared, converted, target_dtype=torch.bfloat16)
-            ref = default_output_ref(ctx, "weights-bf16")
-            saved, additional, sharding_meta = persist_safetensors_output(ctx, converted_path=converted, output_ref=ref)
-            return ConversionOutput(weights=saved, metadata={**sharded_meta, **sharding_meta}, additional_artifacts=additional)
+            ref, shard_prefix = _output_ref(fallback_stem="weights-bf16")
+            shard_dir = td / "shards"
+            result = streaming_dtype_cast(
+                prepared, shard_dir, target_dtype=torch.bfloat16, shard_prefix=shard_prefix,
+            )
+            saved, additional, sharding_meta = persist_safetensors_output(
+                ctx,
+                shard_paths=result["output_paths"],
+                index_path=result["index_path"],
+                output_ref=ref,
+            )
+            return ConversionOutput(
+                weights=saved,
+                metadata={**sharded_meta, **sharding_meta},
+                additional_artifacts=additional,
+            )
 
         if tag == "flashpack":
+            ref, _stem = _output_ref(ext=".flashpack", fallback_stem="weights-flashpack")
             converted = td / "converted.flashpack"
             convert_safetensors_to_flashpack(prepared, converted, target_dtype="preserve")
-            ref = default_output_ref(ctx, "weights-flashpack", ext=".flashpack")
             saved = ctx.save_checkpoint(ref, str(converted), format="flashpack")
             return ConversionOutput(weights=saved, metadata={"output_format": "flashpack"})
 
@@ -1163,10 +1243,17 @@ def _apply_save_format(
             dtype_name = _FP8_PROFILE_TO_TORCH_DTYPE[profile]
             if not hasattr(torch, dtype_name):
                 raise RuntimeError(f"fp8_dtype_unavailable:{profile}")
-            converted = td / "converted.safetensors"
-            streaming_dtype_cast(prepared, converted, target_dtype=getattr(torch, dtype_name))
-            ref = default_output_ref(ctx, "weights-fp8")
-            saved, additional, sharding_meta = persist_safetensors_output(ctx, converted_path=converted, output_ref=ref)
+            ref, shard_prefix = _output_ref(fallback_stem="weights-fp8")
+            shard_dir = td / "shards"
+            result = streaming_dtype_cast(
+                prepared, shard_dir, target_dtype=getattr(torch, dtype_name), shard_prefix=shard_prefix,
+            )
+            saved, additional, sharding_meta = persist_safetensors_output(
+                ctx,
+                shard_paths=result["output_paths"],
+                index_path=result["index_path"],
+                output_ref=ref,
+            )
             return ConversionOutput(
                 weights=saved,
                 metadata={"profile": profile, **sharded_meta, **sharding_meta},
@@ -1176,10 +1263,15 @@ def _apply_save_format(
         if tag == "nvfp4":
             if len(parts) > 2:
                 raise ValueError(f"unsupported save format: {save_format}")
-            converted = td / "converted.safetensors"
-            streaming_nvfp4_quantize(prepared, converted)
-            ref = default_output_ref(ctx, "weights-nvfp4")
-            saved, additional, sharding_meta = persist_safetensors_output(ctx, converted_path=converted, output_ref=ref)
+            ref, shard_prefix = _output_ref(fallback_stem="weights-nvfp4")
+            shard_dir = td / "shards"
+            result = streaming_nvfp4_quantize(prepared, shard_dir, shard_prefix=shard_prefix)
+            saved, additional, sharding_meta = persist_safetensors_output(
+                ctx,
+                shard_paths=result["output_paths"],
+                index_path=result["index_path"],
+                output_ref=ref,
+            )
             return ConversionOutput(
                 weights=saved,
                 metadata={"profile": "nvfp4", **sharded_meta, **sharding_meta},
@@ -1333,6 +1425,11 @@ def _finalize_clone(
     homogeneous_source_dtype = next(iter(distinct_source_dtypes)) if len(distinct_source_dtypes) == 1 else ""
 
     def _is_passthrough_spec(spec: OutputSpec) -> bool:
+        # Passthrough fires when the target output bytes would be
+        # byte-for-byte identical to the source bytes. That holds when
+        # dtype/file_type/file_layout all match the source. Size never
+        # disqualifies — oversize safetensors get sharded by byte offset
+        # at upload time (shard_safetensors_by_offset), still zero decode.
         if homogeneous_source_dtype == "":
             return False
         if spec.dtype != homogeneous_source_dtype:
@@ -1341,15 +1438,6 @@ def _finalize_clone(
             return False
         if spec.file_layout != source_layout:
             return False
-        # Bail out of the fast-path when any source weight exceeds the
-        # safetensors shard cap. Passthrough uploads the file as-is, which
-        # hits tensorhub's per-file upload cap (5 GB on the media domain).
-        # `_apply_save_format` with streaming_dtype_cast will re-shard on
-        # write; prefer paying the rewrite cost over a 413 at upload time.
-        from gen_worker.conversion._sharding import MAX_SAFETENSORS_SHARD_BYTES
-        for _tensors, _rel_path, fsize in ingest_result.all_weight_files:
-            if int(fsize or 0) > int(MAX_SAFETENSORS_SHARD_BYTES):
-                return False
         return True
 
     # Per-spec fan-out: save_format_outputs is indexed by output_spec.label
@@ -1390,21 +1478,77 @@ def _finalize_clone(
     for spec in output_specs:
         if _is_passthrough_spec(spec):
             uploaded_for_spec: list[tuple[Any, str]] = []
+            from gen_worker.conversion._sharding import MAX_SAFETENSORS_SHARD_BYTES
+            from gen_worker.conversion.safetensors_io import shard_safetensors_by_offset
             # Upload every source weight file (they arrived local-only from ingest).
+            # Files ≤ MAX_SAFETENSORS_SHARD_BYTES go up as-is. Oversize
+            # safetensors get split via shard_safetensors_by_offset — raw byte
+            # copy, no tensor decode, emits HF-canonical
+            # `{base}-00001-of-NNNNN.safetensors` + `{base}.safetensors.index.json`
+            # under the source's parent directory (preserving the component
+            # path: `transformer/diffusion_pytorch_model.safetensors` →
+            # `transformer/diffusion_pytorch_model-00001-of-00002.safetensors`).
             for saved_tensors, rel_path, file_size in ingest_result.all_weight_files:
-                if str(getattr(saved_tensors, "local_path", "") or "").strip() == "":
+                local_path = str(getattr(saved_tensors, "local_path", "") or "").strip()
+                if local_path == "":
                     continue
+                fmt = str(saved_tensors.format or Path(rel_path).suffix.lstrip(".") or "safetensors")
                 up_ref = str(saved_tensors.ref or f"jobs/{ctx.request_id}/outputs/source-repo/{rel_path}")
-                up = ctx.save_checkpoint(
-                    up_ref,
-                    str(saved_tensors.local_path),
-                    format=str(saved_tensors.format or Path(rel_path).suffix.lstrip(".") or "safetensors"),
+
+                # Passthrough fast path for normal-sized files.
+                needs_shard = (
+                    fmt == "safetensors"
+                    and int(file_size or 0) > int(MAX_SAFETENSORS_SHARD_BYTES)
                 )
-                if str(up.local_path or "").strip() == "":
-                    up = tensors_with(up, local_path=str(saved_tensors.local_path))
-                uploaded_for_spec.append((up, rel_path))
-                if str(up.ref or "").strip():
-                    publish_artifact_refs.append(str(up.ref).strip())
+                if not needs_shard:
+                    up = ctx.save_checkpoint(up_ref, local_path, format=fmt)
+                    if str(up.local_path or "").strip() == "":
+                        up = tensors_with(up, local_path=local_path)
+                    uploaded_for_spec.append((up, rel_path))
+                    if str(up.ref or "").strip():
+                        publish_artifact_refs.append(str(up.ref).strip())
+                    continue
+
+                # Oversize safetensors: shard by byte offset, upload each
+                # shard + the index.json. No decode; no combined intermediate.
+                rel_path_obj = Path(rel_path)
+                base_name = rel_path_obj.stem  # e.g. "diffusion_pytorch_model"
+                shard_stage = Path(local_path).parent / f".__shard_stage__{base_name}"
+                shard_stage.mkdir(parents=True, exist_ok=True)
+                try:
+                    shard_paths, index_path, _shard_sizes = shard_safetensors_by_offset(
+                        Path(local_path),
+                        shard_stage,
+                        max_shard_bytes=MAX_SAFETENSORS_SHARD_BYTES,
+                        shard_prefix=base_name,
+                    )
+                    rel_dir = rel_path_obj.parent
+                    for shard_path in shard_paths:
+                        shard_rel = str((rel_dir / shard_path.name).as_posix())
+                        shard_ref = f"jobs/{ctx.request_id}/outputs/source-repo/{shard_rel}"
+                        up = ctx.save_checkpoint(shard_ref, str(shard_path), format="safetensors")
+                        if str(up.local_path or "").strip() == "":
+                            up = tensors_with(up, local_path=str(shard_path))
+                        uploaded_for_spec.append((up, shard_rel))
+                        if str(up.ref or "").strip():
+                            publish_artifact_refs.append(str(up.ref).strip())
+                    # Only upload the index when we actually sharded into
+                    # multiple files (planner may return a single-shard plan
+                    # if the file happens to fit).
+                    if len(shard_paths) > 1:
+                        index_rel = str((rel_dir / index_path.name).as_posix())
+                        index_ref = f"jobs/{ctx.request_id}/outputs/source-repo/{index_rel}"
+                        idx_up = ctx.save_checkpoint(index_ref, str(index_path), format="json")
+                        if str(idx_up.local_path or "").strip() == "":
+                            idx_up = tensors_with(idx_up, local_path=str(index_path))
+                        uploaded_for_spec.append((idx_up, index_rel))
+                        if str(idx_up.ref or "").strip():
+                            publish_artifact_refs.append(str(idx_up.ref).strip())
+                finally:
+                    # Leave shard files on disk so the stream upload's retry
+                    # path can re-read; caller (worker-level temp dir cleanup)
+                    # wipes the whole request tmp at end of request.
+                    pass
             passthrough_uploads[spec.label] = uploaded_for_spec
             conversion_idx += max(1, len(conversion_jobs))
             emit_stage("clone.save_format.completed",
@@ -1435,6 +1579,7 @@ def _finalize_clone(
                 extra_shards=job.get("extra_shards") or [],
                 shard_rel_paths=job.get("shard_rel_paths") or [],
                 weights_rel_path=job.get("weights_rel_path"),
+                snapshot_rel_path=job.get("snapshot_rel_path"),
             )
             if str(out.weights.ref or "").strip():
                 publish_artifact_refs.append(str(out.weights.ref).strip())
@@ -1649,13 +1794,6 @@ def _finalize_clone(
             return "singlefile"
         return default_layout or "diffusers"
 
-    # Tensorhub binds all variant artifacts under a single snapshot row per
-    # version (see `persistSnapshotManifest` + `UpsertSnapshotIndex`). Every
-    # variant emitted below uses version_id as its snapshot_digest so
-    # `validateSnapshotArtifacts` finds the per-blob reverse lookups that
-    # persistSnapshotManifest writes for every manifest entry.
-    variant_snapshot_digest = version_id
-
     # Non-weight files (configs/tokenizers/scheduler/model_index.json/README/
     # LICENSE) always belong to every emitted variant so inference can load
     # the pipeline regardless of which dtype/layout/filetype was picked.
@@ -1710,13 +1848,14 @@ def _finalize_clone(
             # the metadata below instead of emitting an invalid row.
             continue
 
+        # e2e #36: server owns checkpoint_id + inferred metadata. Workers
+        # send only tenant-owned fields (variant_label → attributes, the
+        # artifact list drives the manifest).
         commit_output_variants.append({
-            "version_id": version_id,
             "variant_label": spec.label,
             "file_layout": spec.file_layout,
             "file_type": spec.file_type,
             "quantization": spec.dtype,
-            "snapshot_digest": variant_snapshot_digest,
             "artifacts": artifacts,
         })
 

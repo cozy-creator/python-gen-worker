@@ -8,8 +8,8 @@ are exposed for the legacy clone_pipeline path and any tenant that needs
 finer-grained control.
 
 Combines three formerly-separate conversion-endpoints modules:
-  - streaming_convert.py  → streaming_dtype_cast, streaming_convert_safetensors,
-                            streaming_gpu_quantize, streaming_nvfp4_quantize
+  - streaming_convert.py  → streaming_dtype_cast, streaming_gpu_quantize,
+                            streaming_nvfp4_quantize
   - incremental_safetensors.py → IncrementalSafetensorsWriter
   - sharded_index.py → list_shard_files_from_index
 
@@ -68,7 +68,6 @@ __all__ = [
     "list_shard_files_from_index",
     "IncrementalSafetensorsWriter",
     "streaming_dtype_cast",
-    "streaming_convert_safetensors",
     "streaming_gpu_quantize",
     "streaming_nvfp4_quantize",
 ]
@@ -78,8 +77,7 @@ def __getattr__(name: str):  # lazy-load the torch-dependent primitives
     if name == "IncrementalSafetensorsWriter":
         from ._streaming_incremental import IncrementalSafetensorsWriter
         return IncrementalSafetensorsWriter
-    if name in {"streaming_dtype_cast", "streaming_convert_safetensors",
-                "streaming_gpu_quantize", "streaming_nvfp4_quantize"}:
+    if name in {"streaming_dtype_cast", "streaming_gpu_quantize", "streaming_nvfp4_quantize"}:
         from . import _streaming_convert
         return getattr(_streaming_convert, name)
     raise AttributeError(name)

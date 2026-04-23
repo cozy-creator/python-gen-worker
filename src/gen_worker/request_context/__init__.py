@@ -1241,7 +1241,8 @@ class RequestContext:
                 manifest_entries = [e for e in raw_entries if isinstance(e, dict)]
 
         # Each commit_output_variants entry becomes one checkpoint row. The
-        # entry's snapshot_digest IS the checkpoint_id (content-addressed).
+        # server computes checkpoint_id from the per-variant snapshot_manifest
+        # (e2e #36).
         publish_checkpoints: List[Dict[str, Any]] = []
         parent_repo_ref = ""
         if source_repo and str(source_repo).strip():
@@ -1249,22 +1250,17 @@ class RequestContext:
         parent_checkpoint_id = normalized_source_version_id
 
         for v in commit_output_variants:
-            dtype = str(v.get("quantization") or "").strip()
-            file_layout = str(v.get("file_layout") or "").strip()
-            file_type = str(v.get("file_type") or "").strip()
-            # Mirror the structured fields into the attributes jsonb so
-            # endpoint.toml-style `[models] ref + attributes = { dtype = [...] }`
-            # selectors still hit a GIN-indexed match in repo_checkpoints.
+            # e2e #36: the wire schema dropped every server-derivable field
+            # (checkpoint_id, kind, library, dtype, file_layout, file_type,
+            # size_bytes). The server infers metadata from the uploaded
+            # bytes and computes checkpoint_id = sha256(canonical(manifest)).
+            # Tenant-owned fields remaining on the wire: attributes (except
+            # reserved `_*` keys, which the server owns), display_label,
+            # lineage, snapshot_manifest.
             attrs: Dict[str, str] = {}
             label = str(v.get("variant_label") or "").strip()
             if label:
                 attrs["variant_label"] = label
-            if dtype:
-                attrs["dtype"] = dtype
-            if file_layout:
-                attrs["file_layout"] = file_layout
-            if file_type:
-                attrs["file_type"] = file_type
             lineage: List[Dict[str, Any]] = []
             if parent_repo_ref and parent_checkpoint_id:
                 lineage.append({
@@ -1272,33 +1268,25 @@ class RequestContext:
                     "parent_checkpoint_id": parent_checkpoint_id,
                     "relationship_kind":    relationship_kind or "import",
                 })
-            # checkpoint_id is left empty — the server computes it from
-            # sha256(canonical(snapshot_manifest.entries)) and echoes the
-            # value back. Per-variant snapshot_manifest is taken from the
-            # caller's v["snapshot_manifest"] when present; otherwise falls
-            # back to the shared top-level manifest_entries (clone path).
+            # Per-variant snapshot_manifest is taken from the caller's
+            # v["snapshot_manifest"] when present; otherwise falls back to
+            # the shared top-level manifest_entries (clone path).
             v_manifest = v.get("snapshot_manifest")
             if isinstance(v_manifest, list):
                 per_variant_entries = [e for e in v_manifest if isinstance(e, dict)]
             else:
                 per_variant_entries = manifest_entries
-            supplied_checkpoint_id = str(v.get("snapshot_digest") or "").strip()
-            # Issue #22: kind / library / dtype / file_layout / file_type
-            # dropped from the finalize body. Server infers them from the
-            # uploaded files; client-supplied values are ignored there.
             publish_checkpoints.append({
-                "checkpoint_id":     supplied_checkpoint_id,
                 "snapshot_manifest": per_variant_entries,
                 "attributes":        attrs,
                 "display_label":     label,
-                "size_bytes":        int(v.get("size_bytes") or 0),
                 "lineage":           lineage,
             })
 
         # Fallback: no commit_output_variants supplied (e.g., a simple one-off
-        # publish). Emit exactly one checkpoint from target_version_id +
-        # aggregate snapshot_manifest.
-        if not publish_checkpoints and normalized_target_version_id:
+        # publish). Emit exactly one checkpoint from the aggregate
+        # snapshot_manifest. Server computes the checkpoint_id.
+        if not publish_checkpoints and manifest_entries:
             lineage: List[Dict[str, Any]] = []
             if parent_repo_ref and parent_checkpoint_id:
                 lineage.append({
@@ -1306,23 +1294,19 @@ class RequestContext:
                     "parent_checkpoint_id": parent_checkpoint_id,
                     "relationship_kind":    relationship_kind or "import",
                 })
-            # Issue #22: server-authoritative metadata; no kind/library/dtype
-            # /file_layout/file_type in the body.
             publish_checkpoints.append({
-                "checkpoint_id":     normalized_target_version_id,
                 "snapshot_manifest": manifest_entries,
                 "attributes":        {},
                 "display_label":     "",
-                "size_bytes":        0,
                 "lineage":           lineage,
             })
 
+        # Tags beyond `:latest` can't go in the initial finalize body — the
+        # worker doesn't know the server's computed checkpoint_id until the
+        # finalize response comes back. The tags_map therefore stays empty
+        # here; caller-supplied tags are applied in a follow-up loop after
+        # parsing the response's `checkpoints[].checkpoint_id`.
         tags_map: Dict[str, str] = {}
-        if publish_checkpoints and normalized_tags:
-            primary_checkpoint_id = publish_checkpoints[0]["checkpoint_id"]
-            for t in normalized_tags:
-                if str(t or "").strip():
-                    tags_map[str(t).strip()] = primary_checkpoint_id
 
         if not publish_checkpoints:
             logger.warning(
@@ -1340,13 +1324,14 @@ class RequestContext:
             # Issue #20: finalize hits the session-scoped URL. The session
             # was opened lazily on the first save_* call to this repo and
             # cached in the ctx-level manager.
+            finalize_resp: Dict[str, Any] = {}
             try:
                 session_id = self._checkpoint_session_id(owner, repo)
-                _request_json(
+                finalize_resp = _request_json(
                     "POST",
                     f"/api/v1/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}/upload-sessions/{urllib.parse.quote(session_id, safe='')}/finalize",
                     publish_req_body,
-                )
+                ) or {}
                 # Finalize succeeded — drop the session from the manager's
                 # cache so close_all at request end doesn't try to abort it.
                 mgr = self._upload_session_manager()
@@ -1361,7 +1346,40 @@ class RequestContext:
                 )
                 raise
 
-        published_ids = [c["checkpoint_id"] for c in publish_checkpoints]
+            # e2e #36: extract server-computed checkpoint_ids from the
+            # finalize response so callers (and the post-finalize tag
+            # promotion below) can reference them.
+            resp_checkpoints = finalize_resp.get("checkpoints")
+            if isinstance(resp_checkpoints, list):
+                for idx, rc in enumerate(resp_checkpoints):
+                    if idx < len(publish_checkpoints) and isinstance(rc, dict):
+                        cid = str(rc.get("checkpoint_id") or "").strip()
+                        if cid:
+                            publish_checkpoints[idx]["checkpoint_id"] = cid
+
+            # Apply caller-supplied tags beyond `:latest` via the promote
+            # endpoint. `:latest` is auto-retargeted server-side on every
+            # finalize; caller-supplied extra tags (e.g. `prod`) ride on top
+            # of the newly-published primary checkpoint.
+            primary_cid = str(publish_checkpoints[0].get("checkpoint_id") or "").strip() if publish_checkpoints else ""
+            if primary_cid and normalized_tags:
+                for t in normalized_tags:
+                    tag = str(t or "").strip()
+                    if not tag or tag.lower() == "latest":
+                        continue
+                    try:
+                        _request_json(
+                            "POST",
+                            f"/api/v1/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}/checkpoints/{urllib.parse.quote(primary_cid, safe='')}/promote?tag={urllib.parse.quote(tag, safe='')}",
+                            {},
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "worker_finalize_tag_promote_failed request_id=%s owner=%s repo=%s checkpoint_id=%s tag=%s error=%r",
+                            self.request_id, owner, repo, primary_cid, tag, exc,
+                        )
+
+        published_ids = [str(c.get("checkpoint_id") or "") for c in publish_checkpoints]
         logger.info(
             "worker_finalize_succeeded request_id=%s job_id=%s owner=%s repo=%s checkpoints=%d primary=%s",
             self.request_id, self.job_id or "", owner, repo,
