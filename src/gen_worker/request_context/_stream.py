@@ -343,12 +343,16 @@ class _RequestOutputStream:
                 create_payload["job_id"] = job_id
             endpoint_path = "/api/v1/media/uploads"
         else:
-            # Repo-CAS upload.
-            repo_owner, repo, job_id = self._repo_job_scope
+            # Repo-CAS upload — issue #20 session-scoped URL shape. The
+            # session is opened lazily by the ctx-level manager on first use
+            # and cached so subsequent uploads to the same repo reuse it.
+            repo_owner, repo, _job_id = self._repo_job_scope
             create_payload["path"] = self._ref
+            session_id = self._ctx._checkpoint_session_id(repo_owner, repo)
             endpoint_path = (
                 f"/api/v1/repos/{urllib.parse.quote(repo_owner, safe='')}/"
-                f"{urllib.parse.quote(repo, safe='')}/jobs/{urllib.parse.quote(job_id, safe='')}/uploads"
+                f"{urllib.parse.quote(repo, safe='')}/upload-sessions/"
+                f"{urllib.parse.quote(session_id, safe='')}/uploads"
             )
 
         def _progress_cb(parts_done: int, total_parts: int, bytes_up: int) -> None:

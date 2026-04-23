@@ -1,6 +1,6 @@
 [project]
 name = "gen-worker"
-version = "0.5.3"
+version = "0.5.4"
 description = "A library used to build custom functions in Cozy Creator's serverless function platform."
 readme = "README.md"
 license = "MIT"
@@ -44,9 +44,9 @@ Issues = "https://github.com/cozy-creator/python-gen-worker/issues"
 
 [project.optional-dependencies]
 torch = [
-    "torch>=2.10.0",
+    "torch>=2.11.0",
     "torchvision>=0.25.0",
-    "torchaudio>=2.10.0",
+    "torchaudio>=2.11.0",
     "safetensors>=0.7.0",
     "flashpack>=0.2.1",
 ]

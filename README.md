@@ -229,16 +229,16 @@ For production, use the `cozyctl` CLI to build and deploy worker-images to our n
 
 ```bash
 # Build an example using the same root Dockerfile
-docker build -t sd15-worker -f Dockerfile examples/sd15
+docker build -t medasr-worker -f Dockerfile examples/medasr-transcribe
 
 # Run
 docker run \
   -e PUBLIC_ORCHESTRATOR_GRPC_ADDR=orchestrator:8080 \
   -e WORKER_JWT='<worker-connect-jwt>' \
-  sd15-worker
+  medasr-worker
 ```
 
-Canonical local dev build args (GPU, CUDA 12.6, torch 2.10.x, Python 3.12):
+Canonical local dev build args (GPU, CUDA 12.6, torch 2.11.x, Python 3.12):
 
 ```bash
 cd ~/cozy/python-gen-worker
@@ -246,10 +246,10 @@ cd ~/cozy/python-gen-worker
 docker build \
   --build-arg PYTHON_VERSION=3.12 \
   --build-arg UV_TORCH_BACKEND=cu126 \
-  --build-arg TORCH_SPEC='~=2.10.0' \
+  --build-arg TORCH_SPEC='~=2.11.0' \
   -f Dockerfile \
   -t my-worker:dev \
-  examples/sd15
+  examples/medasr-transcribe
 ```
 
 Optional build args:
@@ -259,7 +259,7 @@ docker build \
   --build-arg PYTHON_VERSION=3.12 \
   --build-arg UV_TORCH_BACKEND=cu128 \
   --build-arg TORCH_SPEC=">=2.9,<3" \
-  -t my-worker -f Dockerfile examples/sd15
+  -t my-worker -f Dockerfile examples/medasr-transcribe
 ```
 
 ### Build Base

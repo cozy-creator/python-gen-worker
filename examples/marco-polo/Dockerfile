@@ -20,6 +20,6 @@ COPY . /app
 RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
     uv pip install --system --break-system-packages --no-deps --no-sources /app \
     && mkdir -p /app/.tensorhub \
-    && python -m gen_worker.discover > /app/.tensorhub/endpoint.lock
+    && python -m gen_worker.discovery > /app/.tensorhub/endpoint.lock
 
 ENTRYPOINT ["python", "-m", "gen_worker.entrypoint"]

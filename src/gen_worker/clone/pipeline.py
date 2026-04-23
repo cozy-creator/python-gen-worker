@@ -1,0 +1,2362 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import shutil
+import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from gen_worker import RequestContext, Tensors
+
+# clone_pipeline calls the library streaming primitives directly (see
+# _apply_save_format) instead of going through the transform-endpoint tenant
+# functions — those use a different dispatch shape (@training_function) that
+# expects ctx.source_path to point at a materialized tensorhub snapshot, but
+# clone_pipeline works from a local Tensors object that's already been
+# ingested from an external URL.
+from gen_worker.conversion.ingest import (
+    CivitaiResolvedIdentity,
+    resolve_civitai_source_identity,
+    resolve_huggingface_source_identity,
+)
+# Layout repackage (singlefile↔diffusers) calls library primitives directly
+# for the same reason _apply_save_format does — clone_pipeline works on local
+# paths, not a tensorhub snapshot.
+from gen_worker.conversion.repackage import (
+    diffusers_to_singlefile,
+    singlefile_to_diffusers,
+)
+from ._shared import ConversionOutput, IngestResult, default_output_ref, ingest_from_source, save_checkpoint_chunked, tensors_with
+
+
+_PUBLIC_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{0,127}$")
+_PUBLIC_TAG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
+_LAYOUT_POLICY = "diffusers->diffusers,diffusers->singlefile,singlefile->diffusers,singlefile->singlefile"
+_SOURCE_LAYOUT_PREFERENCE_POLICY = "auto,diffusers,aio"
+
+
+def normalize_destination_repo_name(value: str) -> str:
+    destination_repo_name = str(value or "").strip().lower()
+    if destination_repo_name == "":
+        raise ValueError("destination_repo is invalid")
+    if _PUBLIC_NAME_RE.match(destination_repo_name) is None:
+        raise ValueError("destination_repo is invalid")
+    return destination_repo_name
+
+
+def normalize_destination_owner(value: str) -> str:
+    destination_owner = str(value or "").strip().lower()
+    if destination_owner == "":
+        raise ValueError("invoker owner is required")
+    if _PUBLIC_NAME_RE.match(destination_owner) is None:
+        raise ValueError("invoker owner is invalid")
+    return destination_owner
+
+
+def normalize_destination_ref(value: str) -> str:
+    destination_ref = str(value or "").strip().lower()
+    if destination_ref == "":
+        raise ValueError("destination_repo is required")
+    # Strip the optional "cozy:" scheme prefix (e.g. "cozy:owner/repo" -> "owner/repo")
+    if destination_ref.startswith("cozy:"):
+        destination_ref = destination_ref[len("cozy:"):]
+    parts = destination_ref.split("/", 1)
+    if len(parts) != 2:
+        raise ValueError("destination_repo must be in '<owner>/<repo>' format")
+    _ = normalize_destination_owner(parts[0])
+    _ = normalize_destination_repo_name(parts[1])
+    return destination_ref
+
+
+def normalize_target_layout(value: str | None) -> str:
+    layout = str(value or "diffusers").strip().lower()
+    if layout == "":
+        layout = "diffusers"
+    if layout not in {"singlefile", "diffusers"}:
+        raise ValueError("target_layout must be one of: singlefile, diffusers")
+    return layout
+
+
+def normalize_source_layout_preference(value: str | None) -> str:
+    mode = str(value or "auto").strip().lower()
+    if mode == "":
+        mode = "auto"
+    if mode not in {"auto", "diffusers", "aio"}:
+        raise ValueError("source_layout_preference must be one of: auto, diffusers, aio")
+    return mode
+
+
+def normalize_save_formats(values: Iterable[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        fmt = str(raw or "").strip().lower()
+        if fmt == "" or fmt in seen:
+            continue
+        seen.add(fmt)
+        out.append(fmt)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# OutputSpec: the canonical per-variant request.
+# ---------------------------------------------------------------------------
+
+# Canonical output dtypes recognized by the conversion pipeline. "pt" dtypes
+# like fp16/fp32 are passthrough-eligible when the source weights already
+# match; bf16/fp8:*/nvfp4 always require a conversion pass.
+_KNOWN_DTYPES = {
+    "fp32",
+    "fp16",
+    "bf16",
+    "fp8",
+    "fp8:e4m3",
+    "fp8:e5m2",
+    "nvfp4",
+    "int8",
+    "nf4",
+}
+
+_KNOWN_FILE_LAYOUTS = {"diffusers", "singlefile", "aio"}
+_KNOWN_FILE_TYPES = {"safetensors", "flashpack", "gguf", "bin"}
+
+
+@dataclass(frozen=True)
+class OutputSpec:
+    """One requested output variant: dtype + file layout + container format."""
+
+    dtype: str
+    file_layout: str
+    file_type: str
+
+    @property
+    def label(self) -> str:
+        """Canonical `variant_label` used on `repo_version_variants`."""
+        return f"{self.dtype}-{self.file_layout}-{self.file_type}".replace(":", "-")
+
+
+_DEFAULT_OUTPUT_SPEC = OutputSpec(dtype="bf16", file_layout="diffusers", file_type="safetensors")
+
+
+def _normalize_dtype_token(raw: str) -> str:
+    s = str(raw or "").strip().lower()
+    if s in {"fp8-e4m3", "fp8_e4m3"}:
+        return "fp8:e4m3"
+    if s in {"fp8-e5m2", "fp8_e5m2"}:
+        return "fp8:e5m2"
+    return s
+
+
+def normalize_outputs(
+    values: Iterable[Any],
+    *,
+    target_layout_hint: str = "diffusers",
+) -> list[OutputSpec]:
+    """Accept a list of dicts/OutputSpec/None; return deduped OutputSpec list.
+
+    Unknown dtype/layout/filetype tokens raise ValueError so the client gets a
+    clean error at submit time rather than a silent fallthrough later.
+    """
+    raw_items = list(values or [])
+    out: list[OutputSpec] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in raw_items:
+        if item is None:
+            continue
+        if isinstance(item, OutputSpec):
+            dtype = _normalize_dtype_token(item.dtype)
+            layout = str(item.file_layout or "").strip().lower() or target_layout_hint
+            ftype = str(item.file_type or "").strip().lower() or "safetensors"
+        elif isinstance(item, dict):
+            dtype = _normalize_dtype_token(str(item.get("dtype") or ""))
+            layout = str(item.get("file_layout") or "").strip().lower() or target_layout_hint
+            ftype = str(item.get("file_type") or "").strip().lower() or "safetensors"
+        else:
+            # Struct-like (msgspec.Struct) — duck-type via getattr.
+            dtype = _normalize_dtype_token(str(getattr(item, "dtype", "") or ""))
+            layout = str(getattr(item, "file_layout", "") or "").strip().lower() or target_layout_hint
+            ftype = str(getattr(item, "file_type", "") or "").strip().lower() or "safetensors"
+        if dtype == "":
+            raise ValueError("output.dtype is required")
+        if dtype not in _KNOWN_DTYPES:
+            raise ValueError(f"unsupported output.dtype: {dtype!r}")
+        if layout not in _KNOWN_FILE_LAYOUTS:
+            raise ValueError(f"unsupported output.file_layout: {layout!r}")
+        if ftype not in _KNOWN_FILE_TYPES:
+            raise ValueError(f"unsupported output.file_type: {ftype!r}")
+        key = (dtype, layout, ftype)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(OutputSpec(dtype=dtype, file_layout=layout, file_type=ftype))
+    if not out:
+        out.append(OutputSpec(
+            dtype=_DEFAULT_OUTPUT_SPEC.dtype,
+            file_layout=target_layout_hint if target_layout_hint in _KNOWN_FILE_LAYOUTS else _DEFAULT_OUTPUT_SPEC.file_layout,
+            file_type=_DEFAULT_OUTPUT_SPEC.file_type,
+        ))
+    return out
+
+
+def save_formats_to_outputs(
+    save_formats: Iterable[str],
+    *,
+    target_layout: str,
+) -> list[OutputSpec]:
+    """Translate the legacy `save_formats` list into OutputSpec entries.
+
+    Preserves ordering and dedupes. Used as a compatibility bridge while
+    callers still send `save_formats` instead of `outputs`.
+    """
+    layout = str(target_layout or "").strip().lower() or "diffusers"
+    if layout not in _KNOWN_FILE_LAYOUTS:
+        layout = "diffusers"
+    specs: list[OutputSpec] = []
+    for raw in save_formats or []:
+        fmt = str(raw or "").strip().lower()
+        if fmt == "":
+            continue
+        if fmt == "flashpack":
+            specs.append(OutputSpec(dtype="bf16", file_layout="singlefile", file_type="flashpack"))
+        elif fmt == "bf16":
+            specs.append(OutputSpec(dtype="bf16", file_layout=layout, file_type="safetensors"))
+        elif fmt == "fp16":
+            specs.append(OutputSpec(dtype="fp16", file_layout=layout, file_type="safetensors"))
+        elif fmt == "fp32":
+            specs.append(OutputSpec(dtype="fp32", file_layout=layout, file_type="safetensors"))
+        elif fmt == "nvfp4":
+            specs.append(OutputSpec(dtype="nvfp4", file_layout=layout, file_type="safetensors"))
+        elif fmt.startswith("fp8"):
+            specs.append(OutputSpec(dtype=fmt, file_layout=layout, file_type="safetensors"))
+        elif fmt.startswith("gguf"):
+            encoding = fmt.split(":", 1)[1] if ":" in fmt else "f16"
+            dtype = "fp16" if encoding in {"f16", "fp16"} else ("bf16" if encoding in {"bf16"} else "fp16")
+            specs.append(OutputSpec(dtype=dtype, file_layout="singlefile", file_type="gguf"))
+        else:
+            raise ValueError(f"unsupported legacy save_format: {fmt!r}")
+    return normalize_outputs(specs, target_layout_hint=layout) if specs else []
+
+
+def output_spec_to_save_format(spec: OutputSpec) -> str:
+    """Map OutputSpec → legacy save_format string for `_apply_save_format`.
+
+    Only intended for non-passthrough outputs. Passthrough outputs should
+    bypass `_apply_save_format` entirely and upload source weights directly.
+    """
+    if spec.file_type == "flashpack":
+        return "flashpack"
+    if spec.file_type == "gguf":
+        return f"gguf:{spec.dtype.split(':', 1)[0]}" if spec.dtype in {"fp16", "bf16"} else "gguf:f16"
+    # safetensors container — dispatch by dtype.
+    if spec.dtype == "bf16":
+        return "bf16"
+    if spec.dtype.startswith("fp8"):
+        return spec.dtype  # "fp8:e4m3", "fp8:e5m2"
+    if spec.dtype == "nvfp4":
+        return "nvfp4"
+    # fp16/fp32 output in safetensors: no existing save_format maps directly
+    # because the legacy pipeline assumed bf16/fp8/nvfp4 targets. Return an
+    # empty string so callers know to treat this as passthrough-only.
+    return ""
+
+
+def normalize_destination_repo_tags(values: Iterable[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        tag = str(raw or "").strip().lower()
+        if tag == "" or tag in seen:
+            continue
+        if _PUBLIC_TAG_RE.match(tag) is None:
+            raise ValueError("destination_repo_tags contains an invalid tag")
+        if tag == "latest":
+            raise ValueError("destination_repo_tags must not include latest")
+        seen.add(tag)
+        out.append(tag)
+    out.sort()
+    return out
+
+
+def normalize_source_ref(value: str) -> str:
+    source_ref = str(value or "").strip()
+    if source_ref == "":
+        raise ValueError("source_ref is required")
+    return source_ref
+
+
+def compute_source_hash(*, provider: str, source_ref: str, source_revision: str | None) -> str:
+    normalized = "\n".join(
+        [
+            str(provider or "").strip().lower(),
+            str(source_ref or "").strip().lower(),
+            str(source_revision or "").strip(),
+        ]
+    )
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _compute_identity_hash(*, provider: str, source_ref: str, source_revision: str | None) -> str:
+    return "sha256:" + compute_source_hash(
+        provider=provider,
+        source_ref=source_ref,
+        source_revision=source_revision,
+    )
+
+
+def _normalize_sha256(raw: str | None) -> str:
+    value = str(raw or "").strip().lower()
+    if value.startswith("sha256:"):
+        value = value.split(":", 1)[1].strip().lower()
+    if len(value) == 64 and all(ch in "0123456789abcdef" for ch in value):
+        return value
+    return ""
+
+
+def _parse_positive_int(raw: object) -> int | None:
+    try:
+        parsed = int(str(raw or "").strip())
+    except Exception:
+        return None
+    if parsed <= 0:
+        return None
+    return parsed
+
+
+def _is_http_source(source_ref: str) -> bool:
+    raw = str(source_ref or "").strip().lower()
+    return raw.startswith("http://") or raw.startswith("https://")
+
+
+@dataclass(frozen=True)
+class MirrorPreflight:
+    destination_exists: bool
+    destination_metadata: dict[str, Any]
+    noop: bool
+    mirror_metadata: dict[str, str]
+
+
+@dataclass(frozen=True)
+class SourceIdentity:
+    provider: str
+    source_ref: str
+    source_revision: str
+    identity_hash: str
+    dedupe_supported: bool
+    civitai_model_version_id: int | None
+    civitai_file_id: int | None
+    source_metadata: dict[str, str]
+    resolved_civitai_identity: CivitaiResolvedIdentity | None
+
+
+@dataclass(frozen=True)
+class FinalizeCloneResult:
+    output: ConversionOutput
+    published_version_id: str
+
+
+def _ctx_file_api_channel(ctx: RequestContext) -> tuple[str, str]:
+    base = str(getattr(ctx, "_file_api_base_url", "") or "").strip().rstrip("/")
+    token = str(getattr(ctx, "_worker_capability_token", "") or "").strip()
+    if base == "" or token == "":
+        return "", ""
+    return base, token
+
+
+def _ctx_http_json(
+    ctx: RequestContext,
+    *,
+    method: str,
+    path: str,
+    payload: dict[str, Any] | None = None,
+    timeout_s: float = 20.0,
+) -> dict[str, Any] | None:
+    base, token = _ctx_file_api_channel(ctx)
+    if base == "" or token == "":
+        return None
+    url = f"{base}{path}"
+    data: bytes | None = None
+    headers = {
+        "Authorization": f"Bearer {token}",
+    }
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(
+        url,
+        data=data,
+        headers=headers,
+        method=str(method or "GET").strip().upper() or "GET",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+            raw = resp.read()
+    except urllib.error.HTTPError:
+        return None
+    except urllib.error.URLError:
+        return None
+    try:
+        parsed = json.loads(raw.decode("utf-8"))
+    except Exception:
+        return None
+    if isinstance(parsed, dict):
+        return parsed
+    return None
+
+
+def _list_version_claims(
+    ctx: RequestContext,
+    *,
+    destination_owner: str,
+    destination_repo_name: str,
+    version_id: str,
+) -> list[dict[str, Any]]:
+    owner = str(destination_owner or "").strip().lower()
+    repo = str(destination_repo_name or "").strip().lower()
+    version = str(version_id or "").strip().lower()
+    if owner == "" or repo == "" or version == "":
+        return []
+    if ":" not in version:
+        return []
+
+    items: list[dict[str, Any]] = []
+    cursor = 0
+    limit = 100
+    for _ in range(4):
+        path = (
+            "/api/v1/repos/"
+            f"{urllib.parse.quote(owner, safe='')}/"
+            f"{urllib.parse.quote(repo, safe='')}/"
+            f"versions/{urllib.parse.quote(version, safe='')}/metadata/claims"
+            f"?limit={limit}&cursor={cursor}"
+        )
+        payload = _ctx_http_json(ctx, method="GET", path=path, payload=None)
+        if not isinstance(payload, dict):
+            break
+        raw_items = payload.get("items")
+        if not isinstance(raw_items, list):
+            break
+        chunk: list[dict[str, Any]] = []
+        for raw in raw_items:
+            if isinstance(raw, dict):
+                chunk.append(raw)
+        if not chunk:
+            break
+        items.extend(chunk)
+        next_cursor_raw = payload.get("next_cursor")
+        try:
+            next_cursor = int(next_cursor_raw)
+        except Exception:
+            break
+        if next_cursor <= cursor:
+            break
+        cursor = next_cursor
+    return items
+
+
+def _find_destination_claim_hit(
+    *,
+    claims: list[dict[str, Any]],
+    source_identity: SourceIdentity,
+    destination_owner: str,
+    destination_repo_name: str,
+) -> dict[str, Any] | None:
+    expected_identity = str(source_identity.identity_hash or "").strip().lower()
+    expected_provider = str(source_identity.provider or "").strip().lower()
+    expected_ref = str(source_identity.source_ref or "").strip()
+    expected_revision = str(source_identity.source_revision or "").strip()
+    expected_owner = str(destination_owner or "").strip().lower()
+    expected_repo = str(destination_repo_name or "").strip().lower()
+    expected_version = expected_identity
+    if expected_identity == "" or expected_provider == "" or expected_ref == "":
+        return None
+
+    for claim in claims:
+        if not isinstance(claim, dict):
+            continue
+        owner = str(claim.get("owner") or "").strip().lower()
+        repo = str(claim.get("repo") or "").strip().lower()
+        if owner != expected_owner or repo != expected_repo:
+            continue
+        identity_hash = str(claim.get("identity_hash") or "").strip().lower()
+        if identity_hash != expected_identity:
+            continue
+        claim_version = str(claim.get("version_id") or "").strip().lower()
+        if claim_version != "" and claim_version != expected_version:
+            continue
+        metadata = claim.get("metadata_json")
+        if not isinstance(metadata, dict):
+            continue
+        source = metadata.get("source")
+        if not isinstance(source, dict):
+            continue
+        provider = str(source.get("provider") or "").strip().lower()
+        source_ref = str(source.get("source_ref") or "").strip()
+        source_revision = str(source.get("source_revision") or "").strip()
+        if provider != expected_provider:
+            continue
+        if source_ref != expected_ref:
+            continue
+        if source_revision != expected_revision:
+            continue
+        result = metadata.get("result")
+        if not isinstance(result, dict):
+            continue
+        primary_ref = str(result.get("primary_artifact_ref") or "").strip()
+        if primary_ref == "":
+            continue
+        primary_format = str(result.get("primary_artifact_format") or "").strip()
+        result_version = str(result.get("version_id") or "").strip().lower()
+        if result_version != "" and result_version != expected_version:
+            continue
+        return {
+            "primary_artifact_ref": primary_ref,
+            "primary_artifact_format": (primary_format or None),
+            "copied_from_repo": f"{expected_owner}/{expected_repo}",
+            "copied_from_version_id": expected_version,
+            "copied_version_id": expected_version,
+            "claim_id": int(claim.get("claim_id") or 0),
+        }
+    return None
+
+
+def _maybe_reuse_destination_private_version(
+    ctx: RequestContext,
+    *,
+    source_identity: SourceIdentity,
+    destination_repo: str,
+    destination_owner: str,
+    destination_repo_name: str,
+    destination_repo_tags: list[str],
+) -> ConversionOutput | None:
+    if not source_identity.dedupe_supported:
+        return None
+    claims = _list_version_claims(
+        ctx,
+        destination_owner=destination_owner,
+        destination_repo_name=destination_repo_name,
+        version_id=source_identity.identity_hash,
+    )
+    hit = _find_destination_claim_hit(
+        claims=claims,
+        source_identity=source_identity,
+        destination_owner=destination_owner,
+        destination_repo_name=destination_repo_name,
+    )
+    if hit is None:
+        return None
+
+    claim_written = False
+    upsert_claim = getattr(ctx, "upsert_version_metadata_claim", None)
+    if callable(upsert_claim):
+        try:
+            metadata_json = {
+                "source": {
+                    "provider": source_identity.provider,
+                    "source_ref": source_identity.source_ref,
+                    "source_revision": source_identity.source_revision,
+                },
+                "result": {
+                    "destination_repo": destination_repo,
+                    "version_id": source_identity.identity_hash,
+                    "primary_artifact_ref": str(hit.get("primary_artifact_ref") or ""),
+                    "primary_artifact_format": str(hit.get("primary_artifact_format") or ""),
+                },
+                "request_id": str(getattr(ctx, "request_id", "") or "").strip(),
+                "written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+            _ = upsert_claim(
+                destination_repo=destination_repo,
+                version_id=source_identity.identity_hash,
+                identity_hash=source_identity.identity_hash,
+                metadata_json=metadata_json,
+            )
+            claim_written = True
+        except Exception:
+            claim_written = False
+
+    if destination_repo_tags:
+        publish_fn = getattr(ctx, "publish_repo_revision", None)
+        if callable(publish_fn):
+            try:
+                _ = publish_fn(
+                    destination_repo=destination_repo,
+                    artifact_refs=[str(hit.get("primary_artifact_ref") or "")],
+                    metadata={},
+                    create_if_missing=True,
+                    destination_repo_tags=destination_repo_tags,
+                    source_repo=destination_repo,
+                    source_version_id=source_identity.identity_hash,
+                    target_version_id=source_identity.identity_hash,
+                )
+            except Exception:
+                pass
+
+    dedupe_result = {
+        "result_code": "dedupe_copy_hit",
+        "primary_artifact_ref": str(hit.get("primary_artifact_ref") or "").strip(),
+        "primary_artifact_format": str(hit.get("primary_artifact_format") or "").strip(),
+        "copied_from_repo": str(hit.get("copied_from_repo") or "").strip(),
+        "copied_from_version_id": str(hit.get("copied_from_version_id") or "").strip(),
+        "copied_version_id": str(hit.get("copied_version_id") or "").strip(),
+        "claim_written": bool(claim_written),
+        "warnings": [],
+    }
+    output = _build_dedupe_hit_output(
+        ctx=ctx,
+        dedupe_result=dedupe_result,
+        source_identity=source_identity,
+        destination_repo=destination_repo,
+        destination_owner=destination_owner,
+        destination_repo_name=destination_repo_name,
+        destination_repo_tags=destination_repo_tags,
+    )
+    output.metadata["dedupe_strategy"] = "destination_version_claim_hit"
+    return output
+
+
+def _resolve_source_identity(
+    *,
+    provider: str,
+    source_ref: str,
+    source_revision: str | None,
+    civitai_model_version_id: int | None = None,
+    civitai_file_id: int | None = None,
+    source_metadata_overrides: dict[str, str] | None = None,
+) -> SourceIdentity:
+    provider_norm = str(provider or "").strip().lower()
+    source_ref_norm = normalize_source_ref(source_ref)
+    source_revision_norm = str(source_revision or "").strip()
+    dedupe_supported = False
+    civitai_model_version_norm = int(civitai_model_version_id or 0)
+    civitai_file_norm = int(civitai_file_id or 0)
+    source_metadata: dict[str, str] = {}
+    resolved_civitai_identity: CivitaiResolvedIdentity | None = None
+    override_expected_sha = ""
+    override_expected_size: int | None = None
+
+    if provider_norm == "civitai" and civitai_model_version_norm > 0:
+        resolved_civitai_identity = resolve_civitai_source_identity(
+            civitai_model_version_norm,
+            civitai_file_id=(civitai_file_norm or None),
+        )
+        source_ref_norm = resolved_civitai_identity.source_ref
+        source_revision_norm = resolved_civitai_identity.source_revision
+        dedupe_supported = bool(source_revision_norm)
+        source_metadata = {
+            "source_kind": "civitai_model_version",
+            "civitai_model_version_id": str(resolved_civitai_identity.model_version_id),
+            "civitai_model_id": str(resolved_civitai_identity.model_id),
+            "civitai_base_model": str(resolved_civitai_identity.base_model),
+            "civitai_base_model_type": str(resolved_civitai_identity.base_model_type),
+            "civitai_air": str(resolved_civitai_identity.air),
+            "civitai_source_manifest_sha256": str(resolved_civitai_identity.source_manifest_sha256),
+            "civitai_selected_file_count": str(len(resolved_civitai_identity.selected_files)),
+            "civitai_file_fingerprints_json": json.dumps(
+                dict(resolved_civitai_identity.file_fingerprints),
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        }
+        if resolved_civitai_identity.selected_file_id is not None:
+            source_metadata["civitai_file_id"] = str(int(resolved_civitai_identity.selected_file_id))
+        selected_manifest = [
+            {
+                "file_id": int(item.file_id),
+                "path": str(item.rel_path),
+                "name": str(item.name),
+                "size_bytes": int(item.size_bytes or 0),
+                "primary": bool(item.primary),
+                "fingerprint": str(item.fingerprint),
+                "hashes": dict(item.hashes),
+            }
+            for item in list(resolved_civitai_identity.selected_files)
+        ]
+        source_metadata["civitai_selected_files_json"] = json.dumps(
+            selected_manifest,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        source_metadata["civitai_pipeline_hint"] = str(resolved_civitai_identity.pipeline_hint)
+        source_metadata["civitai_model_family_hint"] = str(resolved_civitai_identity.model_family)
+        source_metadata["civitai_model_family_variant_hint"] = str(resolved_civitai_identity.model_family_variant)
+
+    # Tenant-owned source identity normalization stays in endpoint code.
+    if provider_norm == "huggingface" and not _is_http_source(source_ref_norm):
+        repo_id, resolved_revision = resolve_huggingface_source_identity(
+            source_ref_norm,
+            source_revision=source_revision_norm or None,
+        )
+        source_ref_norm = str(repo_id).strip()
+        source_revision_norm = str(resolved_revision).strip()
+        dedupe_supported = source_revision_norm != ""
+
+    if source_metadata_overrides:
+        override_expected_sha = _normalize_sha256(source_metadata_overrides.get("source_expected_sha256"))
+        override_expected_size = _parse_positive_int(source_metadata_overrides.get("source_expected_size_bytes"))
+        for key, value in source_metadata_overrides.items():
+            k = str(key or "").strip()
+            if k == "":
+                continue
+            if k in {"source_expected_sha256", "source_expected_size_bytes"}:
+                continue
+            source_metadata[k] = str(value or "")
+
+    if _is_http_source(source_ref_norm) and override_expected_sha != "":
+        source_revision_norm = f"sha256:{override_expected_sha}"
+        dedupe_supported = True
+        source_metadata["source_expected_sha256"] = override_expected_sha
+        if isinstance(override_expected_size, int) and override_expected_size > 0:
+            source_metadata["source_expected_size_bytes"] = str(override_expected_size)
+
+    return SourceIdentity(
+        provider=provider_norm,
+        source_ref=source_ref_norm,
+        source_revision=source_revision_norm,
+        identity_hash=_compute_identity_hash(
+            provider=provider_norm,
+            source_ref=source_ref_norm,
+            source_revision=source_revision_norm,
+        ),
+        dedupe_supported=dedupe_supported,
+        civitai_model_version_id=(civitai_model_version_norm if civitai_model_version_norm > 0 else None),
+        civitai_file_id=(civitai_file_norm if civitai_file_norm > 0 else None),
+        source_metadata=source_metadata,
+        resolved_civitai_identity=resolved_civitai_identity,
+    )
+
+
+
+
+# Skip files under 100 MB — small configs, embeddings, etc. not worth quantizing.
+_MIN_QUANTIZE_BYTES = 100 * 1024 * 1024
+
+
+def _component_name_from_rel_path(rel_path: str) -> str:
+    """Extract the top-level component name (e.g. `"transformer"`) from a
+    relative path like `transformer/model.safetensors`. Returns empty string
+    if the path has no directory prefix (which can happen for flat sources).
+    """
+    parts = [p for p in rel_path.replace("\\", "/").split("/") if p]
+    return parts[0].lower() if parts else ""
+
+
+def _build_conversion_jobs(
+    *,
+    output_specs: list[OutputSpec],
+    ingested: ConversionOutput,
+    component_groups: dict[str, Any],
+    all_weight_files: list[Any],
+    quantize_components: list[str] | None,
+    is_passthrough_spec: Callable[[OutputSpec], bool],
+) -> list[dict[str, Any]]:
+    """Build the list of per-component conversion jobs.
+
+    One job per weight component that needs a non-passthrough conversion.
+    Three code paths, in preference order:
+
+    1. Diffusers-layout sources with per-component groups (HF clones): one job
+       per component; sharded components emit a single index-anchored job
+       whose `snapshot_rel_path` points at the de-sharded output location.
+    2. Flat weight-file lists without component grouping (fallback): one job
+       per file that meets the minimum-size threshold.
+    3. Single-file sources (Civitai): one job for the primary artifact with
+       `component="primary"` and no snapshot prefix.
+
+    Each job is a dict with the shape consumed by `_apply_save_format`:
+    `{component, weights, extra_shards, shard_rel_paths, weights_rel_path,
+    snapshot_rel_path, size_bytes}`.
+    """
+    target_components = list(quantize_components or ["transformer", "text_encoder"])
+    use_all = "all" in target_components
+    need_conversion_jobs = any(not is_passthrough_spec(spec) for spec in output_specs)
+    conversion_jobs: list[dict[str, Any]] = []
+
+    if not need_conversion_jobs:
+        return conversion_jobs
+
+    if component_groups:
+        for component, group in component_groups.items():
+            if not (use_all or component in target_components):
+                continue
+            shards = group.get("shards") or []
+            if not shards:
+                continue
+            total_size = sum(int(s[2]) for s in shards)
+            if total_size < _MIN_QUANTIZE_BYTES:
+                continue
+            is_sharded = (
+                bool(group.get("is_sharded"))
+                and len(shards) > 1
+                and group.get("index_tensors") is not None
+            )
+            if is_sharded:
+                index_tensors = group["index_tensors"]
+                index_rel_path = str(group.get("index_rel_path") or "")
+                idx_name, snapshot_rel = _derive_sharded_snapshot_path(index_rel_path, component)
+                conversion_jobs.append({
+                    "component": component,
+                    "weights": index_tensors,
+                    "extra_shards": [s[0] for s in shards],
+                    # Shard basenames are passed to `_apply_save_format` to name
+                    # the staged shard symlinks under the tempdir; they are NOT
+                    # the final snapshot paths (the output is de-sharded).
+                    "shard_rel_paths": [Path(s[1]).name for s in shards],
+                    "weights_rel_path": idx_name,
+                    "snapshot_rel_path": snapshot_rel,
+                    "size_bytes": total_size,
+                })
+            else:
+                for saved_tensors, rel_path, file_size in shards:
+                    if file_size < _MIN_QUANTIZE_BYTES:
+                        continue
+                    conversion_jobs.append({
+                        "component": component,
+                        "weights": saved_tensors,
+                        "extra_shards": [],
+                        "shard_rel_paths": [],
+                        # `weights_rel_path` is the basename for staging; the
+                        # full `snapshot_rel_path` places the converted output
+                        # at `<component>/<file>` in the published snapshot.
+                        "weights_rel_path": Path(rel_path).name,
+                        "snapshot_rel_path": rel_path,
+                        "size_bytes": file_size,
+                    })
+        return conversion_jobs
+
+    if all_weight_files:
+        for saved_tensors, rel_path, file_size in all_weight_files:
+            component = _component_name_from_rel_path(rel_path)
+            if (use_all or component in target_components) and file_size >= _MIN_QUANTIZE_BYTES:
+                conversion_jobs.append({
+                    "component": component,
+                    "weights": saved_tensors,
+                    "extra_shards": [],
+                    "shard_rel_paths": [],
+                    "weights_rel_path": Path(rel_path).name,
+                    "snapshot_rel_path": rel_path,
+                    "size_bytes": file_size,
+                })
+        return conversion_jobs
+
+    # Civitai / single-file path: convert the primary artifact.
+    conversion_jobs.append({
+        "component": "primary",
+        "weights": ingested.weights,
+        "extra_shards": [],
+        "shard_rel_paths": [],
+        "weights_rel_path": None,
+        "snapshot_rel_path": None,
+        "size_bytes": int(ingested.weights.size_bytes or 0),
+    })
+    return conversion_jobs
+
+
+def _derive_sharded_snapshot_path(index_rel_path: str, component: str) -> tuple[str, str]:
+    """Derive the index basename and snapshot path for a sharded component.
+
+    `streaming_dtype_cast` de-shards the conversion input, so the canonical
+    output path is a single `<component>/<stem>.safetensors` (the `.index.json`
+    suffix of the source's index is stripped). This is the inverse of
+    Bug 1: the earlier code stashed only the index basename on the
+    `conversion_jobs` entry, which caused the manifest builder to place the
+    index JSON at the snapshot root (`model.safetensors.index.json`) instead
+    of the expected `<component>/<stem>.safetensors` path.
+
+    Returns `(idx_name, snapshot_rel)` where:
+      - `idx_name` is the basename of the index file (used to stage the
+        conversion input; may still be an `.index.json` filename).
+      - `snapshot_rel` is the component-prefixed full path the converted
+        single-file output should land at in the published snapshot.
+    """
+    idx_name = Path(index_rel_path).name if index_rel_path else "model.safetensors.index.json"
+    if idx_name.endswith(".safetensors.index.json"):
+        deshard_name = idx_name[: -len(".index.json")]
+    else:
+        deshard_name = "model.safetensors"
+    idx_parent = str(Path(index_rel_path).parent).replace("\\", "/") if index_rel_path else component
+    if idx_parent and idx_parent != ".":
+        snapshot_rel = f"{idx_parent}/{deshard_name}"
+    else:
+        snapshot_rel = deshard_name
+    return idx_name, snapshot_rel
+
+
+def _compute_stale_source_index_paths(save_format_outputs: list[dict[str, Any]]) -> set[str]:
+    """Return the set of source-side `.safetensors.index.json` snapshot paths
+    that must be dropped from the manifest because their component was
+    converted to a single de-sharded `.safetensors` file.
+
+    For every converted output whose `snapshot_rel_path` is
+    `<component>/<name>.safetensors`, the corresponding stale source index is
+    `<component>/<name>.safetensors.index.json`. Diffusers prefers an index.json
+    when both exist and will then attempt sharded loading against shard paths
+    that don't exist in our snapshot — so we drop the source index up front.
+    """
+    stale: set[str] = set()
+    for entry in save_format_outputs:
+        snap = str(entry.get("snapshot_rel_path") or "").strip()
+        if snap.endswith(".safetensors") and not snap.endswith(".index.json"):
+            stale.add(snap + ".index.json")
+    return stale
+
+
+def _manifest_entry_path(weights_ref: str, metadata: dict[str, Any]) -> str:
+    source_filename = str(metadata.get("source_filename") or "").strip()
+    if source_filename:
+        return source_filename
+    ref = str(weights_ref or "").strip()
+    if ref:
+        return ref.rsplit("/", 1)[-1] or ref
+    return "weights.bin"
+
+
+def _weights_blake3_digest(weights: Any) -> str:
+    """Return a canonical `blake3:<hex>` digest for a Tensors-like object.
+
+    Tensorhub's `blobs`/`blob_reverse_lookup` tables are keyed on blake3 because
+    that is what the CAS upload flow verified against. Using sha256 (as an
+    older iteration of this helper did) fails the commit-time binding check
+    silently — the variant row is never written. Return "" only when the
+    upload path didn't populate any digest at all.
+    """
+    bd = str(getattr(weights, "blob_digest", "") or "").strip()
+    if bd:
+        return bd if ":" in bd else f"blake3:{bd}"
+    b3 = str(getattr(weights, "blake3", "") or "").strip()
+    if b3:
+        return b3 if ":" in b3 else f"blake3:{b3}"
+    return ""
+
+
+def _manifest_entry_for_weights(
+    weights: Any,
+    *,
+    path_override: str | None,
+    metadata: dict[str, Any],
+) -> dict[str, Any] | None:
+    digest = _weights_blake3_digest(weights)
+    if digest == "":
+        return None
+    ref = str(getattr(weights, "ref", "") or "").strip()
+    if path_override and str(path_override).strip():
+        path = str(path_override).strip()
+    elif ref:
+        path = ref.rsplit("/", 1)[-1] or ref
+    else:
+        path = _manifest_entry_path(ref, metadata)
+    entry: dict[str, Any] = {
+        "path": path,
+        "digest": digest,
+    }
+    size_bytes = int(getattr(weights, "size_bytes", 0) or 0)
+    if size_bytes > 0:
+        entry["size_bytes"] = size_bytes
+    return entry
+
+
+def _log_manifest_debug(msg: str) -> None:
+    """Single-line debug for manifest assembly; visible in worker logs."""
+    import sys
+    print(f"[clone_pipeline.snapshot_manifest] {msg}", file=sys.stderr, flush=True)
+
+
+def _build_snapshot_manifest(
+    output: ConversionOutput,
+    snapshot_digest: str,
+    metadata: dict[str, Any],
+    *,
+    extra_outputs: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Build the snapshot manifest that `persistSnapshotManifest` will expand into
+    `tensorhub.snapshots` + `tensorhub.blobs` + `tensorhub.blob_reverse_lookup`.
+
+    Must include every blob that any `output_variants[i].artifacts[j]` will
+    reference — otherwise `validateSnapshotArtifacts` rejects the variant at
+    upload-complete time (see `tensorhub/internal/api/repo_job_presigned.go`).
+
+    Entries are keyed on blake3 digest to match the CAS storage. Duplicate
+    digests (e.g. dedup across save_format outputs) are de-duped by digest.
+    """
+    entries: list[dict[str, Any]] = []
+    seen_digests: set[str] = set()
+
+    skipped_no_digest = 0
+    skipped_dupe = 0
+
+    def _append(entry: dict[str, Any] | None) -> None:
+        nonlocal skipped_no_digest, skipped_dupe
+        if entry is None:
+            skipped_no_digest += 1
+            return
+        digest = str(entry.get("digest") or "").strip()
+        if digest == "":
+            skipped_no_digest += 1
+            return
+        if digest in seen_digests:
+            skipped_dupe += 1
+            return
+        seen_digests.add(digest)
+        entries.append(entry)
+
+    _append(_manifest_entry_for_weights(
+        output.weights,
+        path_override=_manifest_entry_path(str(getattr(output.weights, "ref", "") or ""), metadata),
+        metadata=metadata,
+    ))
+
+    extras_list = list(extra_outputs or [])
+    for extra in extras_list:
+        weights = extra.get("weights")
+        if weights is None:
+            continue
+        bd = str(getattr(weights, "blob_digest", "") or "").strip()
+        b3 = str(getattr(weights, "blake3", "") or "").strip()
+        _log_manifest_debug(
+            f"extra path={extra.get('path')!r} ref={getattr(weights, 'ref', '')!r} "
+            f"blob_digest={bd!r} blake3={b3!r} size={getattr(weights, 'size_bytes', None)!r}"
+        )
+        _append(_manifest_entry_for_weights(
+            weights,
+            path_override=extra.get("path"),
+            metadata=metadata,
+        ))
+
+    _log_manifest_debug(
+        f"built: entries={len(entries)} extras_in={len(extras_list)} "
+        f"skipped_no_digest={skipped_no_digest} skipped_dupe={skipped_dupe}"
+    )
+
+    return {
+        "version": 1,
+        "snapshot_digest": str(snapshot_digest or "").strip(),
+        "entries": entries,
+    }
+
+
+def preflight_clone(
+    ctx: RequestContext,
+    *,
+    provider: str,
+    source_ref: str,
+    source_revision: str | None,
+    destination_repo: str,
+) -> MirrorPreflight:
+    _ = ctx
+    _ = provider
+    _ = source_ref
+    _ = source_revision
+    _ = destination_repo
+    return MirrorPreflight(destination_exists=False, destination_metadata={}, noop=False, mirror_metadata={})
+
+
+_FP8_PROFILE_TO_TORCH_DTYPE = {"e4m3": "float8_e4m3fn", "e5m2": "float8_e5m2"}
+
+
+def _stage_sharded_input(
+    ctx: RequestContext,
+    td: Path,
+    primary: Path,
+    *,
+    weights_rel_path: str | None,
+    extra_shards: list[Tensors],
+    shard_rel_paths: list[str],
+) -> Path:
+    """Symlink the index.json + all shards into a single dir so streaming readers see them co-located."""
+    from ._shared import require_local_weights
+    import os
+    if len(extra_shards) != len(shard_rel_paths):
+        raise ValueError("extra_shards and shard_rel_paths must have matching length")
+    shard_dir = td / "sharded-input"
+    shard_dir.mkdir(parents=True, exist_ok=True)
+    idx_name = (weights_rel_path or "").strip() or primary.name
+    idx_dest = shard_dir / idx_name
+    if not idx_dest.exists():
+        os.symlink(primary, idx_dest)
+    for shard_tensors, shard_name in zip(extra_shards, shard_rel_paths):
+        bare = Path(shard_name).name
+        if not bare:
+            raise ValueError("shard_rel_paths entries must be non-empty filenames")
+        dest = shard_dir / bare
+        if not dest.exists():
+            os.symlink(require_local_weights(shard_tensors), dest)
+    return idx_dest
+
+
+def _apply_save_format(
+    ctx: RequestContext,
+    *,
+    weights: Tensors,
+    save_format: str,
+    source_repo_dir: str | None = None,
+    source_revision: str | None = None,
+    extra_shards: list[Tensors] | None = None,
+    shard_rel_paths: list[str] | None = None,
+    weights_rel_path: str | None = None,
+) -> ConversionOutput:
+    """Apply one conversion (bf16 / flashpack / fp8 / nvfp4 / gguf) to local weights.
+
+    Calls gen_worker.conversion streaming primitives directly rather than
+    dispatching through the @training_function tenant path (those expect
+    a materialized tensorhub snapshot; clone_pipeline works from a local
+    Tensors that's already been ingested from an external URL).
+    """
+    from ._shared import require_local_weights
+    from gen_worker.conversion.safetensors_io import persist_safetensors_output
+    from gen_worker.conversion.safetensors_io import materialize_safetensors_input
+    from ._flashpack import convert_safetensors_to_flashpack
+    from gen_worker.conversion.streaming_primitives import (
+        streaming_dtype_cast,
+        streaming_nvfp4_quantize,
+    )
+
+    value = (save_format or "").strip().lower()
+    parts = value.split(":")
+    tag = parts[0]
+    inp = require_local_weights(weights)
+    shards = list(extra_shards or [])
+    shard_names = list(shard_rel_paths or [])
+
+    td = Path(tempfile.mkdtemp(prefix=f"clone-{ctx.request_id}-{tag}-"))
+    try:
+        # Materialize input into a safetensors-file path the streaming readers can open.
+        if shards:
+            prepared = _stage_sharded_input(
+                ctx, td, inp,
+                weights_rel_path=weights_rel_path,
+                extra_shards=shards,
+                shard_rel_paths=shard_names,
+            )
+            sharded_meta = {"input_sharded": "1", "input_shard_count": str(len(shards))}
+        else:
+            prepared, sharded_meta = materialize_safetensors_input(inp, td)
+
+        if tag == "bf16":
+            import torch
+            converted = td / "converted.safetensors"
+            streaming_dtype_cast(prepared, converted, target_dtype=torch.bfloat16)
+            ref = default_output_ref(ctx, "weights-bf16")
+            saved, additional, sharding_meta = persist_safetensors_output(ctx, converted_path=converted, output_ref=ref)
+            return ConversionOutput(weights=saved, metadata={**sharded_meta, **sharding_meta}, additional_artifacts=additional)
+
+        if tag == "flashpack":
+            converted = td / "converted.flashpack"
+            convert_safetensors_to_flashpack(prepared, converted, target_dtype="preserve")
+            ref = default_output_ref(ctx, "weights-flashpack", ext=".flashpack")
+            saved = ctx.save_checkpoint(ref, str(converted), format="flashpack")
+            return ConversionOutput(weights=saved, metadata={"output_format": "flashpack"})
+
+        if tag == "fp8":
+            if len(parts) > 3:
+                raise ValueError(f"unsupported save format: {save_format}")
+            profile = (parts[1] if len(parts) >= 2 else "e4m3").strip().lower() or "e4m3"
+            if profile not in _FP8_PROFILE_TO_TORCH_DTYPE:
+                raise ValueError(f"unsupported fp8 profile: {profile}")
+            import torch
+            dtype_name = _FP8_PROFILE_TO_TORCH_DTYPE[profile]
+            if not hasattr(torch, dtype_name):
+                raise RuntimeError(f"fp8_dtype_unavailable:{profile}")
+            converted = td / "converted.safetensors"
+            streaming_dtype_cast(prepared, converted, target_dtype=getattr(torch, dtype_name))
+            ref = default_output_ref(ctx, "weights-fp8")
+            saved, additional, sharding_meta = persist_safetensors_output(ctx, converted_path=converted, output_ref=ref)
+            return ConversionOutput(
+                weights=saved,
+                metadata={"profile": profile, **sharded_meta, **sharding_meta},
+                additional_artifacts=additional,
+            )
+
+        if tag == "nvfp4":
+            if len(parts) > 2:
+                raise ValueError(f"unsupported save format: {save_format}")
+            converted = td / "converted.safetensors"
+            streaming_nvfp4_quantize(prepared, converted)
+            ref = default_output_ref(ctx, "weights-nvfp4")
+            saved, additional, sharding_meta = persist_safetensors_output(ctx, converted_path=converted, output_ref=ref)
+            return ConversionOutput(
+                weights=saved,
+                metadata={"profile": "nvfp4", **sharded_meta, **sharding_meta},
+                additional_artifacts=additional,
+            )
+
+        if tag == "gguf":
+            if len(parts) > 2:
+                raise ValueError(f"unsupported save format: {save_format}")
+            encoding = (parts[1] if len(parts) == 2 else "f16").strip().lower() or "f16"
+            from gen_worker.conversion.gguf_utils import (
+                prepare_hf_source_tree_for_gguf,
+                resolve_gguf_convert_script,
+                run_hf_to_gguf_conversion,
+            )
+            script_path = resolve_gguf_convert_script()
+            hf_model_dir, _arch = prepare_hf_source_tree_for_gguf(
+                work_dir=td,
+                input_weights=prepared,
+                source_repo_dir=(source_repo_dir or "").strip() or None,
+            )
+            converted = td / f"converted-{encoding}.gguf"
+            run_hf_to_gguf_conversion(
+                script_path=script_path,
+                hf_model_dir=hf_model_dir,
+                output_path=converted,
+                encoding=encoding,
+            )
+            ref = default_output_ref(ctx, f"weights-gguf-{encoding}", ext=".gguf")
+            saved = ctx.save_checkpoint(ref, str(converted), format="gguf")
+            return ConversionOutput(
+                weights=saved,
+                metadata={"encoding": encoding, "output_format": "gguf"},
+            )
+
+        raise ValueError(f"unsupported save format: {save_format}")
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+
+def _run_layout_repackage(
+    ctx: RequestContext,
+    *,
+    source_weights: Tensors,
+    source_layout: str,
+    target_layout: str,
+    model_family: str,
+    source_repo_dir: str | None,
+) -> ConversionOutput:
+    """Run singlefile↔diffusers layout transform against a local source dir.
+
+    Uploads the result (directory for diffusers, single safetensors for
+    singlefile) via ctx.save_checkpoint / a directory-tree walk.
+    """
+    from ._shared import require_local_weights, save_checkpoint_chunked
+
+    td = Path(tempfile.mkdtemp(prefix=f"clone-repackage-{ctx.request_id}-"))
+    try:
+        if source_layout == "singlefile" and target_layout == "diffusers":
+            primary = require_local_weights(source_weights)
+            out_dir = td / "diffusers"
+            singlefile_to_diffusers(primary, out_dir, model_family=model_family)
+            # Upload every file in the diffusers tree under a common prefix.
+            ref_root = f"jobs/{ctx.request_id}/outputs/weights-diffusers"
+            primary_saved: Tensors | None = None
+            additional: list[Any] = []
+            for f in sorted(out_dir.rglob("*")):
+                if not f.is_file():
+                    continue
+                rel = f.relative_to(out_dir).as_posix()
+                saved = save_checkpoint_chunked(
+                    ctx, input_path=f, ref=f"{ref_root}/{rel}", format=f.suffix.lstrip(".") or "bin",
+                )
+                if primary_saved is None and rel.endswith(".safetensors"):
+                    primary_saved = saved
+                else:
+                    additional.append(saved)
+            if primary_saved is None:
+                raise RuntimeError("singlefile_to_diffusers_emitted_no_safetensors")
+            return ConversionOutput(
+                weights=primary_saved,
+                metadata={"file_layout": "diffusers", "model_family": model_family},
+            )
+        if source_layout == "diffusers" and target_layout == "singlefile":
+            if not source_repo_dir:
+                raise ValueError("diffusers→singlefile repackage requires source_repo_dir")
+            out_file = td / "model.safetensors"
+            diffusers_to_singlefile(Path(source_repo_dir), out_file, model_family=model_family)
+            ref = default_output_ref(ctx, "weights-singlefile", ext=".safetensors")
+            saved = save_checkpoint_chunked(ctx, input_path=out_file, ref=ref, format="safetensors")
+            return ConversionOutput(
+                weights=saved,
+                metadata={"file_layout": "singlefile", "model_family": model_family},
+            )
+        raise ValueError(
+            f"unsupported repackage: {source_layout} -> {target_layout}"
+        )
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+
+def _finalize_clone(
+    ctx: RequestContext,
+    *,
+    source_identity: SourceIdentity,
+    source_version_id: str | None,
+    destination_repo: str,
+    destination_owner: str,
+    destination_repo_name: str,
+    destination_repo_tags: list[str],
+    target_layout: str,
+    outputs: list[OutputSpec] | None = None,
+    save_formats: list[str] | None = None,
+    ingested: ConversionOutput,
+    ingest_result: "IngestResult | None" = None,
+    emit_stage: Any = None,
+    quantize_components: list[str] | None = None,
+    auto_publish_public: bool = False,
+    overwrite_repo: bool = False,
+) -> FinalizeCloneResult:
+    if ingest_result is None:
+        ingest_result = IngestResult()
+    selected_layout = normalize_target_layout(target_layout)
+    # Resolve the final `outputs` list: callers may send either `outputs`
+    # (canonical) or legacy `save_formats` (translated here). Empty → default
+    # to `[bf16 / diffusers / safetensors]`.
+    if outputs is not None and len(list(outputs)) > 0:
+        output_specs = normalize_outputs(outputs, target_layout_hint=selected_layout)
+    else:
+        legacy = list(save_formats or [])
+        if legacy:
+            output_specs = save_formats_to_outputs(legacy, target_layout=selected_layout)
+            if not output_specs:
+                output_specs = normalize_outputs([], target_layout_hint=selected_layout)
+        else:
+            output_specs = normalize_outputs([], target_layout_hint=selected_layout)
+    # Internal save_format list derived from OutputSpecs for the existing
+    # per-component conversion loop. One save_format per non-passthrough spec;
+    # passthrough specs are handled separately (source weight upload).
+    source_layout = str(ingested.metadata.get("source_layout") or "unknown").strip().lower()
+    if source_layout not in {"singlefile", "diffusers"}:
+        source_layout = "unknown"
+    model_family = str(ingested.metadata.get("model_family") or "unknown").strip().lower() or "unknown"
+
+    # Detect per-component source dtype (from ingest's dtype-filtered selection).
+    # When all components share a dtype we can cleanly mark an output "passthrough".
+    source_dtype_by_base: dict[str, str] = dict(
+        ingest_result.source_dtype_by_component
+    )
+    distinct_source_dtypes = {str(v or "").strip().lower() for v in source_dtype_by_base.values() if v}
+    homogeneous_source_dtype = next(iter(distinct_source_dtypes)) if len(distinct_source_dtypes) == 1 else ""
+
+    def _is_passthrough_spec(spec: OutputSpec) -> bool:
+        if homogeneous_source_dtype == "":
+            return False
+        if spec.dtype != homogeneous_source_dtype:
+            return False
+        if spec.file_type != "safetensors":
+            return False
+        if spec.file_layout != source_layout:
+            return False
+        return True
+
+    # Per-spec fan-out: save_format_outputs is indexed by output_spec.label
+    # so the variant emission pass below can assemble each variant's artifact
+    # list independently.
+    save_format_outputs: list[dict[str, Any]] = []  # one per (component, output_spec) conversion
+    passthrough_uploads: dict[str, list[tuple[Any, str]]] = {}  # spec.label -> [(Tensors, rel_path)]
+    variant_refs: list[str] = []
+
+    # publish_artifact_refs tracks every CAS-bound ref that accumulates during
+    # finalize (for the publish call's artifact_refs list). Only include
+    # things that are actually uploaded — source weight tensors arrive
+    # "local-only" from ingest so we don't reference them unless a passthrough
+    # spec uploads them in this function.
+    publish_artifact_refs: list[str] = []
+    extra_source_refs_raw = str(ingested.metadata.get("source_artifact_refs") or "").strip()
+    if extra_source_refs_raw != "":
+        for raw_ref in extra_source_refs_raw.split(";"):
+            ref = str(raw_ref or "").strip()
+            if ref != "":
+                publish_artifact_refs.append(ref)
+
+    conversion_jobs = _build_conversion_jobs(
+        output_specs=output_specs,
+        ingested=ingested,
+        component_groups=ingest_result.component_groups,
+        all_weight_files=ingest_result.all_weight_files,
+        quantize_components=quantize_components,
+        is_passthrough_spec=_is_passthrough_spec,
+    )
+
+    # Per-OutputSpec execution:
+    #   - passthrough specs upload the ingested source weight files as-is.
+    #   - non-passthrough specs run `_apply_save_format` on each component
+    #     with the spec translated back to the legacy save_format token.
+    total_conversions = max(1, len(output_specs) * max(1, len(conversion_jobs)))
+    conversion_idx = 0
+    for spec in output_specs:
+        if _is_passthrough_spec(spec):
+            uploaded_for_spec: list[tuple[Any, str]] = []
+            # Upload every source weight file (they arrived local-only from ingest).
+            for saved_tensors, rel_path, file_size in ingest_result.all_weight_files:
+                if str(getattr(saved_tensors, "local_path", "") or "").strip() == "":
+                    continue
+                up_ref = str(saved_tensors.ref or f"jobs/{ctx.request_id}/outputs/source-repo/{rel_path}")
+                up = save_checkpoint_chunked(
+                    ctx,
+                    input_path=Path(str(saved_tensors.local_path)),
+                    ref=up_ref,
+                    format=str(saved_tensors.format or Path(rel_path).suffix.lstrip(".") or "safetensors"),
+                )
+                if str(up.local_path or "").strip() == "":
+                    up = tensors_with(up, local_path=str(saved_tensors.local_path))
+                uploaded_for_spec.append((up, rel_path))
+                if str(up.ref or "").strip():
+                    publish_artifact_refs.append(str(up.ref).strip())
+            passthrough_uploads[spec.label] = uploaded_for_spec
+            conversion_idx += max(1, len(conversion_jobs))
+            emit_stage("clone.save_format.completed",
+                0.60 + (0.25 * float(conversion_idx) / float(total_conversions)),
+                {
+                    "save_format": spec.label,
+                    "component": "all",
+                    "passthrough": True,
+                },
+            )
+            continue
+
+        legacy_fmt = output_spec_to_save_format(spec)
+        if legacy_fmt == "":
+            raise ValueError(
+                f"output dtype={spec.dtype} file_layout={spec.file_layout} "
+                f"file_type={spec.file_type} is not supported yet (no converter wired)"
+            )
+        for job in conversion_jobs:
+            component = str(job["component"])
+            fmt_started = time.monotonic()
+            out = _apply_save_format(
+                ctx,
+                weights=job["weights"],
+                save_format=legacy_fmt,
+                source_repo_dir=ingest_result.source_repo_dir,
+                source_revision=source_identity.source_revision,
+                extra_shards=job.get("extra_shards") or [],
+                shard_rel_paths=job.get("shard_rel_paths") or [],
+                weights_rel_path=job.get("weights_rel_path"),
+            )
+            if str(out.weights.ref or "").strip():
+                publish_artifact_refs.append(str(out.weights.ref).strip())
+            extra_variant_refs_raw = str(out.metadata.get("source_artifact_refs") or "").strip()
+            if extra_variant_refs_raw != "":
+                for raw_ref in extra_variant_refs_raw.split(";"):
+                    ref = str(raw_ref or "").strip()
+                    if ref != "":
+                        publish_artifact_refs.append(ref)
+            variant_refs.append(f"{spec.label}:{component}={out.weights.ref}")
+            save_format_outputs.append({
+                "spec_label": spec.label,
+                "component": component,
+                "save_format": legacy_fmt,
+                "output": out,
+                "weights_rel_path": job.get("weights_rel_path"),
+                "snapshot_rel_path": job.get("snapshot_rel_path"),
+            })
+            elapsed = max(time.monotonic() - fmt_started, 0.0)
+            size_bytes = int(out.weights.size_bytes or 0)
+            conversion_idx += 1
+            emit_stage("clone.save_format.completed",
+                0.60 + (0.25 * float(conversion_idx) / float(total_conversions)),
+                {
+                    "save_format": legacy_fmt,
+                    "output_spec": spec.label,
+                    "component": component,
+                    "elapsed_s": float(elapsed),
+                    "avg_bytes_per_sec": float(size_bytes) / max(elapsed, 1e-6),
+                },
+            )
+
+    # Families that support singlefile↔diffusers layout repackaging.
+    _REPACKAGE_FAMILIES = {
+        "stable-diffusion", "sd", "sd15", "sd1", "sd2", "sdxl",
+        "flux", "pixart", "dit", "kandinsky", "playground",
+    }
+
+    layout_output: ConversionOutput | None = None
+    repackaged = False
+    repackage_toolchain = "none"
+    if (
+        source_layout in {"singlefile", "diffusers"}
+        and selected_layout != source_layout
+        and model_family in _REPACKAGE_FAMILIES
+    ):
+        emit_stage("clone.repackage.started",
+            0.90,
+            {
+                "source_layout": source_layout,
+                "target_layout": selected_layout,
+                "model_family": model_family,
+            },
+        )
+        layout_output = _run_layout_repackage(
+            ctx,
+            source_weights=ingested.weights,
+            source_layout=source_layout,
+            target_layout=selected_layout,
+            model_family=model_family,
+            source_repo_dir=ingest_result.source_repo_dir,
+        )
+        repackaged = True
+        repackage_toolchain = f"{source_layout}_to_{selected_layout}:v1"
+        emit_stage("clone.repackage.completed",
+            0.94,
+            {
+                "source_layout": source_layout,
+                "target_layout": selected_layout,
+                "model_family": model_family,
+                "repackage_toolchain": repackage_toolchain,
+            },
+        )
+    emit_stage("clone.layout.completed",
+        0.95,
+        {
+            "source_layout": source_layout,
+            "target_layout": selected_layout,
+            "model_family": model_family,
+            "repackaged": bool(repackaged),
+        },
+    )
+
+    output = layout_output if layout_output is not None else ingested
+    # `output.weights` is local-only when `output is ingested` (post-refactor:
+    # ingest no longer uploads source weights). Only append its ref to the
+    # publish artifact refs when we actually have a CAS-bound blob, i.e. when
+    # layout_output produced a repackaged file that did upload via
+    # save_checkpoint_chunked.
+    if layout_output is not None and str(output.weights.ref or "").strip():
+        publish_artifact_refs.append(str(output.weights.ref).strip())
+    if layout_output is not None:
+        layout_refs_raw = str(layout_output.metadata.get("source_artifact_refs") or "").strip()
+        if layout_refs_raw != "":
+            for raw_ref in layout_refs_raw.split(";"):
+                ref = str(raw_ref or "").strip()
+                if ref != "":
+                    publish_artifact_refs.append(ref)
+
+    # `_internal_*` filter no longer needed — those values now flow via the
+    # typed `IngestResult` sidecar instead of the metadata dict.
+    metadata = dict(ingested.metadata)
+    if layout_output is not None:
+        metadata.update(layout_output.metadata)
+    metadata.update({k: str(v) for k, v in dict(source_identity.source_metadata).items()})
+    metadata.update(
+        {
+            "source_provider": source_identity.provider,
+            "source_ref": source_identity.source_ref,
+            "source_version_id": str(source_version_id or "").strip(),
+            "source_revision": source_identity.source_revision,
+            "source_hash": source_identity.identity_hash,
+            "destination_repo": destination_repo,
+            "destination_owner": destination_owner,
+            "destination_repo_name": destination_repo_name,
+            "destination_repo_tags": ",".join(destination_repo_tags),
+            "mirror.mode": "mirror",
+            "mirror.provider": source_identity.provider,
+            "mirror.source_ref": source_identity.source_ref,
+            "mirror.source_revision": source_identity.source_revision,
+            "mirror.source_hash": source_identity.identity_hash,
+            "source_layout": source_layout,
+            "target_layout": selected_layout,
+            "model_family": model_family,
+            "repackage_toolchain": repackage_toolchain,
+            "layout_policy": _LAYOUT_POLICY,
+            "outputs": ",".join(spec.label for spec in output_specs),
+            "source_dtype_preference": ",".join(
+                str(v or "").strip().lower()
+                for v in (ingest_result.source_dtype_preference)
+            ),
+            "source_dtype_by_component": ",".join(
+                f"{k}={v}" for k, v in sorted(source_dtype_by_base.items())
+            ),
+        }
+    )
+    if variant_refs:
+        metadata["variant_refs"] = ";".join(variant_refs)
+
+    dedup_refs: list[str] = []
+    seen_refs: set[str] = set()
+    for ref in publish_artifact_refs:
+        clean = str(ref or "").strip()
+        if clean == "" or clean in seen_refs:
+            continue
+        seen_refs.add(clean)
+        dedup_refs.append(clean)
+
+    # Build structured output_variants for the TensorHub commit.
+    # The identity_hash must use algo:hex format for TensorHub's digest validation.
+    identity_hash_raw = str(source_identity.identity_hash or "").strip().lower()
+    version_id = f"sha256:{identity_hash_raw}" if identity_hash_raw and ":" not in identity_hash_raw else identity_hash_raw
+
+    def _tensors_artifact(t: Any) -> dict[str, Any]:
+        """Extract artifact dict from a Tensors object."""
+        art: dict[str, Any] = {}
+        digest = str(getattr(t, "blob_digest", "") or getattr(t, "blake3", "") or "").strip()
+        if digest and ":" not in digest:
+            digest = f"blake3:{digest}"
+        if digest:
+            art["digest"] = digest
+        path = str(getattr(t, "ref", "") or "").strip()
+        if path:
+            art["path"] = path
+        size = getattr(t, "size_bytes", None)
+        if size is not None:
+            art["size_bytes"] = int(size)
+        domain = str(getattr(t, "blob_domain", "") or "private").strip()
+        art["domain"] = domain
+        return art
+
+    def _snapshot_digest(t: Any) -> str:
+        """Get snapshot_digest from a Tensors object in algo:hex format."""
+        sd = str(getattr(t, "snapshot_digest", "") or getattr(t, "blob_digest", "") or getattr(t, "blake3", "") or "").strip()
+        if sd and ":" not in sd:
+            sd = f"blake3:{sd}"
+        return sd
+
+    def _file_type_from_tensors(t: Any) -> str:
+        fmt = str(getattr(t, "format", "") or "").strip().lower()
+        if fmt in {"safetensors", "bin", "pt", "pth", "ckpt", "gguf"}:
+            return fmt
+        ref = str(getattr(t, "ref", "") or "").strip().lower()
+        if ref.endswith(".safetensors"):
+            return "safetensors"
+        if ref.endswith(".bin") or ref.endswith(".pt") or ref.endswith(".pth"):
+            return "bin"
+        if ref.endswith(".gguf"):
+            return "gguf"
+        return "safetensors"
+
+    commit_output_variants: list[dict[str, Any]] = []
+
+    def _variant_quantization(save_format: str) -> str:
+        """Normalize a save_format string into the canonical quantization label
+        stored on `repo_version_variants.quantization`."""
+        s = str(save_format or "").strip().lower()
+        if s == "":
+            return "none"
+        # fp8:e4m3 → fp8-e4m3; gguf:f16 → gguf-f16; nvfp4 → nvfp4; bf16 → bf16.
+        return s.replace(":", "-")
+
+    def _variant_file_layout(save_format: str, tensors: Any, default_layout: str) -> str:
+        """Derive file_layout for a save_format output: single-file containers
+        (flashpack, gguf) emit as 'singlefile'; everything else inherits the
+        clone's selected layout (usually 'diffusers')."""
+        s = str(save_format or "").strip().lower()
+        if s.startswith("gguf") or s == "flashpack":
+            return "singlefile"
+        ref = str(getattr(tensors, "ref", "") or "").strip().lower()
+        if ref.endswith(".flashpack") or ref.endswith(".gguf"):
+            return "singlefile"
+        return default_layout or "diffusers"
+
+    # Tensorhub binds all variant artifacts under a single snapshot row per
+    # version (see `persistSnapshotManifest` + `UpsertSnapshotIndex`). Every
+    # variant emitted below uses version_id as its snapshot_digest so
+    # `validateSnapshotArtifacts` finds the per-blob reverse lookups that
+    # persistSnapshotManifest writes for every manifest entry.
+    variant_snapshot_digest = version_id
+
+    # Non-weight files (configs/tokenizers/scheduler/model_index.json/README/
+    # LICENSE) always belong to every emitted variant so inference can load
+    # the pipeline regardless of which dtype/layout/filetype was picked.
+    # Source-side `.safetensors.index.json` files whose component had a
+    # non-passthrough conversion become stale: the converted output is a
+    # single de-sharded file, so the source's sharded index points at
+    # `model-00001-of-0000N.safetensors` shard paths that don't exist in
+    # the snapshot. Diffusers' `from_pretrained` prefers index.json over
+    # the single file, tries sharded load, and dies. Drop those.
+    stale_index_paths = _compute_stale_source_index_paths(save_format_outputs)
+    non_weight_file_tensors: list[Any] = []
+    for t, _rel, _sz in list(ingest_result.all_file_tensors):
+        digest = str(getattr(t, "blob_digest", "") or getattr(t, "blake3", "") or "").strip()
+        if digest == "":
+            # Weight files were kept local-only earlier; they don't have a blob
+            # digest unless the passthrough path uploaded them below.
+            continue
+        if _rel in stale_index_paths:
+            continue
+        non_weight_file_tensors.append(t)
+
+    # One `repo_version_variants` row per OutputSpec. Artifacts for a variant =
+    # converted weights produced by that spec's conversions (or passthrough
+    # source weights) + every non-weight file.
+    for spec in output_specs:
+        artifact_tensors: list[Any] = []
+        if _is_passthrough_spec(spec):
+            for tensors, _rel in passthrough_uploads.get(spec.label, []):
+                artifact_tensors.append(tensors)
+        else:
+            for entry in save_format_outputs:
+                if str(entry.get("spec_label") or "") != spec.label:
+                    continue
+                out_obj = entry.get("output")
+                if out_obj is None:
+                    continue
+                artifact_tensors.append(out_obj.weights)
+        artifact_tensors.extend(non_weight_file_tensors)
+
+        artifacts: list[dict[str, Any]] = []
+        seen_digests: set[str] = set()
+        for t in artifact_tensors:
+            art = _tensors_artifact(t)
+            digest = str(art.get("digest") or "").strip()
+            if digest == "" or digest in seen_digests:
+                continue
+            seen_digests.add(digest)
+            artifacts.append(art)
+
+        if not version_id or not artifacts:
+            # Nothing uploaded for this spec — surface as a soft warning in
+            # the metadata below instead of emitting an invalid row.
+            continue
+
+        commit_output_variants.append({
+            "version_id": version_id,
+            "variant_label": spec.label,
+            "file_layout": spec.file_layout,
+            "file_type": spec.file_type,
+            "quantization": spec.dtype,
+            "snapshot_digest": variant_snapshot_digest,
+            "artifacts": artifacts,
+        })
+
+    # Forward the full variant list to publish_repo_revision. If for some reason
+    # we produced nothing (no digests at all), still omit the key and let the
+    # publish path fall back — but that's a bug worth surfacing in logs.
+    if commit_output_variants:
+        metadata["output_variants"] = commit_output_variants
+
+    publish_fn = getattr(ctx, "publish_repo_revision", None)
+    if not callable(publish_fn):
+        metadata["publish_skipped_reason"] = "publish_repo_revision_missing"
+        result = ConversionOutput(weights=tensors_with(output.weights, local_path=None), metadata=metadata)
+        emit_stage("clone.completed", 1.0)
+        return FinalizeCloneResult(output=result, published_version_id="")
+
+    # Build snapshot manifest for the publish. Entries must include every blob
+    # referenced by `commit_output_variants[i].artifacts` plus every file the
+    # ingested repo produced (configs, tokenizers, schedulers) — otherwise the
+    # commit-time `validateSnapshotArtifacts` check on Tensorhub rejects the
+    # variant, AND inference (e.g. `StableDiffusionPipeline.from_pretrained`)
+    # later fails with `model_index.json not found`.
+    snapshot_digest = version_id  # Align with the version_id used on variant rows.
+    extra_manifest_outputs: list[dict[str, Any]] = []
+    # Non-weight files uploaded during ingest (model_index.json, configs,
+    # tokenizers, scheduler, README, LICENSE). Local-only weight Tensors are
+    # also in this list but get skipped by `_build_snapshot_manifest`
+    # because they have no blob_digest.
+    # `stale_index_paths` was computed above when building
+    # `non_weight_file_tensors`. Reuse the same set here so the manifest and
+    # per-variant artifacts agree on which source index files to drop.
+    all_file_tensors = ingest_result.all_file_tensors
+    for tensors, rel_path, _size in list(all_file_tensors):
+        if rel_path in stale_index_paths:
+            continue
+        extra_manifest_outputs.append({
+            "weights": tensors,
+            "path": rel_path,
+        })
+    # Passthrough uploads (source weights that a passthrough OutputSpec pushed
+    # to CAS just now).
+    for passthrough_list in passthrough_uploads.values():
+        for tensors, rel_path in passthrough_list:
+            extra_manifest_outputs.append({
+                "weights": tensors,
+                "path": rel_path,
+            })
+    # Converted save-format outputs (one entry per (output_spec, component)).
+    # Use the FULL `snapshot_rel_path` (e.g. `text_encoder/model.fp16.safetensors`)
+    # so the diffusers loader finds the file under the expected component
+    # directory. `weights_rel_path` is only the basename (used to stage the
+    # conversion input).
+    for entry in save_format_outputs:
+        out_obj = entry.get("output")
+        if out_obj is None:
+            continue
+        full_path = entry.get("snapshot_rel_path")
+        if not full_path:
+            # Civitai / single-file path legitimately has no component prefix;
+            # accept the basename in that one case. Every diffusers-layout
+            # conversion must set `snapshot_rel_path` explicitly so we do not
+            # silently publish bare basenames that diffusers can't resolve.
+            if entry.get("component") == "primary":
+                full_path = entry.get("weights_rel_path") or None
+            else:
+                raise RuntimeError(
+                    f"_finalize_clone: conversion output missing snapshot_rel_path "
+                    f"(component={entry.get('component')!r}, save_format={entry.get('save_format')!r}). "
+                    f"This would publish at a bare basename and diffusers inference would fail."
+                )
+        # Sharded output handling: when `persist_safetensors_output` re-sharded
+        # the conversion result (output > _MAX_SAFETENSORS_SHARD_BYTES or the
+        # caller requested a specific shard count), `out_obj.weights` is the
+        # `.index.json` and `out_obj.additional_artifacts` holds per-shard
+        # Tensors. We emit one manifest entry per file under the component's
+        # parent directory (`<component>/<rel_name>`); the primary index sits
+        # at `<full_path>.index.json`.
+        sharded_output = bool(getattr(out_obj, "additional_artifacts", None))
+        if sharded_output:
+            parent = str(Path(full_path or "").parent).replace("\\", "/")
+            if parent == "." or parent == "":
+                parent = ""
+            index_path = str(full_path) + ".index.json" if full_path else None
+            extra_manifest_outputs.append({
+                "weights": out_obj.weights,
+                "path": index_path,
+            })
+            for art in out_obj.additional_artifacts:
+                art_rel = str(getattr(art, "rel_name", "") or "").strip()
+                if art_rel == "":
+                    continue
+                # The `additional_artifacts` list from
+                # `persist_safetensors_output` includes the index as its first
+                # entry; skip that when we've already emitted it above to
+                # avoid duplicate manifest entries at the same path.
+                if art_rel.endswith(".index.json"):
+                    continue
+                art_full = f"{parent}/{art_rel}" if parent else art_rel
+                extra_manifest_outputs.append({
+                    "weights": art.tensors,
+                    "path": art_full,
+                })
+        else:
+            extra_manifest_outputs.append({
+                "weights": out_obj.weights,
+                "path": full_path or None,
+            })
+    snapshot_manifest = _build_snapshot_manifest(
+        output,
+        snapshot_digest,
+        metadata,
+        extra_outputs=extra_manifest_outputs,
+    )
+
+    # Prefix identity_hash for target_version_id.
+    target_vid = ""
+    if source_identity.dedupe_supported and identity_hash_raw:
+        target_vid = version_id
+
+    # HARD-CUT issue #14: imports land with lineage edge
+    # external-sources/upstream@hf:<org>/<name> -> destination checkpoint,
+    # relationship_kind='import'. The publish endpoint auto-creates the
+    # placeholder parent when auto_create_external_parent=True.
+    provider = (source_identity.provider or "").strip().lower()
+    source_ref = (source_identity.source_ref or "").strip()
+    if provider in ("huggingface", "hf"):
+        parent_repo = "external-sources/upstream"
+        parent_checkpoint_id = f"hf:{source_ref}"
+    elif provider == "civitai":
+        parent_repo = "external-sources/upstream"
+        parent_checkpoint_id = f"civitai:{source_ref}"
+    else:
+        parent_repo = source_ref
+        parent_checkpoint_id = str(source_version_id or "").strip()
+
+    publish_kwargs: dict[str, Any] = {
+        "destination_repo": destination_repo,
+        "artifact_refs": dedup_refs,
+        "metadata": metadata,
+        "create_if_missing": True,
+        "source_repo": parent_repo,
+        "source_version_id": parent_checkpoint_id,
+        "snapshot_manifest": snapshot_manifest,
+        "relationship_kind": "import",
+        "auto_create_external_parent": True,
+        # Issue #18: caller toggles public at publish time + chooses whether
+        # to merge new files with any prior checkpoint in the same repo.
+        "release_visibility": "public" if auto_publish_public else "private",
+        "merge_with_existing": not overwrite_repo,
+    }
+    if destination_repo_tags:
+        publish_kwargs["destination_repo_tags"] = destination_repo_tags
+    if target_vid:
+        publish_kwargs["target_version_id"] = target_vid
+
+    publish_result = publish_fn(**publish_kwargs)
+    if not isinstance(publish_result, dict):
+        publish_result = {"ok": True}
+
+    job_id = str((publish_result or {}).get("job_id") or "").strip()
+    if job_id:
+        metadata["publish_job_id"] = job_id
+    outputs = [
+        str(v or "").strip().lower()
+        for v in list((publish_result or {}).get("output_versions") or [])
+        if str(v or "").strip()
+    ]
+    published_version_id = outputs[0] if outputs else ""
+
+    result = ConversionOutput(weights=tensors_with(output.weights, local_path=None), metadata=metadata)
+    emit_stage("clone.completed", 1.0)
+    return FinalizeCloneResult(output=result, published_version_id=published_version_id)
+
+
+def finalize_clone(
+    ctx: RequestContext,
+    *,
+    source_identity: SourceIdentity,
+    source_version_id: str | None,
+    destination_repo: str,
+    destination_owner: str,
+    destination_repo_name: str,
+    destination_repo_tags: list[str],
+    target_layout: str,
+    outputs: list[OutputSpec] | None = None,
+    save_formats: list[str] | None = None,
+    ingested: ConversionOutput,
+    emit_stage: Any = None,
+    quantize_components: list[str] | None = None,
+) -> ConversionOutput:
+    finalized = _finalize_clone(
+        ctx,
+        source_identity=source_identity,
+        source_version_id=source_version_id,
+        destination_repo=destination_repo,
+        destination_owner=destination_owner,
+        destination_repo_name=destination_repo_name,
+        destination_repo_tags=destination_repo_tags,
+        target_layout=target_layout,
+        outputs=outputs,
+        save_formats=save_formats,
+        ingested=ingested,
+        emit_stage=emit_stage,
+        quantize_components=quantize_components,
+    )
+    return finalized.output
+
+
+def _build_dedupe_hit_output(
+    *,
+    ctx: RequestContext,
+    dedupe_result: dict[str, Any],
+    source_identity: SourceIdentity,
+    destination_repo: str,
+    destination_owner: str,
+    destination_repo_name: str,
+    destination_repo_tags: list[str],
+) -> ConversionOutput:
+    primary_ref = str(dedupe_result.get("primary_artifact_ref") or "").strip()
+    primary_format = str(dedupe_result.get("primary_artifact_format") or "").strip() or None
+    copied_from_repo = str(dedupe_result.get("copied_from_repo") or "").strip()
+    copied_from_version_id = str(dedupe_result.get("copied_from_version_id") or "").strip().lower()
+    copied_version_id = str(
+        dedupe_result.get("copied_version_id") or copied_from_version_id
+    ).strip().lower()
+    warnings = list(dedupe_result.get("warnings") or [])
+
+    out_ref = primary_ref or f"jobs/{ctx.request_id}/outputs/dedupe-copy.bin"
+    metadata = {
+        "result_code": "dedupe_copy_hit",
+        "source_provider": source_identity.provider,
+        "source_ref": source_identity.source_ref,
+        "source_revision": source_identity.source_revision,
+        "source_hash": source_identity.identity_hash,
+        "destination_repo": destination_repo,
+        "destination_owner": destination_owner,
+        "destination_repo_name": destination_repo_name,
+        "destination_repo_tags": ",".join(destination_repo_tags),
+        "copied_from_repo": copied_from_repo,
+        "copied_from_version_id": copied_from_version_id,
+        "copied_version_id": copied_version_id,
+        "claim_written": "1" if bool(dedupe_result.get("claim_written")) else "0",
+        "mirror.mode": "mirror",
+        "mirror.provider": source_identity.provider,
+        "mirror.source_ref": source_identity.source_ref,
+        "mirror.source_revision": source_identity.source_revision,
+        "mirror.source_hash": source_identity.identity_hash,
+    }
+    metadata.update({k: str(v) for k, v in dict(source_identity.source_metadata).items()})
+    if warnings:
+        metadata["dedupe_warning_count"] = str(len(warnings))
+
+    return ConversionOutput(
+        weights=Tensors(ref=out_ref, format=primary_format),
+        metadata=metadata,
+    )
+
+
+def run_clone(
+    ctx: RequestContext,
+    *,
+    provider: str,
+    source_ref: str,
+    source_version_id: str | None,
+    source_revision: str | None,
+    civitai_model_version_id: int | None = None,
+    civitai_file_id: int | None = None,
+    source_metadata_overrides: dict[str, str] | None = None,
+    destination_repo: str,
+    destination_repo_tags: list[str],
+    target_layout: str,
+    source_layout_preference: str,
+    source_dtype_preference: list[str] | None = None,
+    outputs: list[OutputSpec] | None = None,
+    save_formats: list[str] | None = None,
+    output_ref: str | None = None,
+    quantize_components: list[str] | None = None,
+    auto_publish_public: bool = False,
+    overwrite_repo: bool = False,
+) -> ConversionOutput:
+    started_at = time.monotonic()
+    stage_emit_state: dict[str, Any] = {
+        "stage": "",
+        "progress_pct": None,
+        "last_emit_ts": 0.0,
+    }
+    download_stage_heartbeat_s = 5.0
+
+    def emit_stage(stage: str, progress: float, extra: dict[str, Any] | None = None) -> None:
+        now = time.monotonic()
+        # Deduplicate noisy stage updates while preserving meaningful progress changes.
+        progress_clamped = max(0.0, min(1.0, float(progress)))
+        progress_pct = int(round(progress_clamped * 100.0))
+        last_stage = str(stage_emit_state.get("stage") or "")
+        last_progress_pct = stage_emit_state.get("progress_pct")
+        last_emit_ts = float(stage_emit_state.get("last_emit_ts") or 0.0)
+
+        if stage == last_stage and progress_pct == last_progress_pct:
+            if stage != "clone.ingest.downloading":
+                return
+            if (now - last_emit_ts) < download_stage_heartbeat_s:
+                return
+
+        stage_emit_state["stage"] = stage
+        stage_emit_state["progress_pct"] = progress_pct
+        stage_emit_state["last_emit_ts"] = now
+
+        payload: dict[str, Any] = {
+            "stage": stage,
+            "progress": float(progress_clamped),
+            "elapsed_s": float(max(now - started_at, 0.0)),
+        }
+        if extra:
+            payload.update(extra)
+        if hasattr(ctx, "emit"):
+            ctx.emit("conversion.clone_progress", payload)
+        if hasattr(ctx, "progress"):
+            ctx.progress(float(progress_clamped), stage=stage)
+
+    emit_stage("clone.started", 0.05, {"provider": str(provider or "").strip().lower()})
+
+    normalized_source = normalize_source_ref(source_ref)
+    normalized_destination = normalize_destination_ref(destination_repo)
+    destination_owner, normalized_destination_name = normalized_destination.split("/", 1)
+    normalized_tags = normalize_destination_repo_tags(destination_repo_tags)
+    normalized_layout = normalize_target_layout(target_layout)
+    normalized_source_layout_preference = normalize_source_layout_preference(source_layout_preference)
+    normalized_save_formats = normalize_save_formats(save_formats or [])
+    normalized_source_dtype_preference = [
+        str(p or "").strip().lower() for p in (source_dtype_preference or []) if str(p or "").strip()
+    ]
+    # Resolve the canonical OutputSpec list once at entry, so downstream calls
+    # see a consistent view regardless of whether the client sent `outputs`
+    # or legacy `save_formats`.
+    if outputs is not None and len(list(outputs)) > 0:
+        resolved_outputs = normalize_outputs(outputs, target_layout_hint=normalized_layout)
+    elif normalized_save_formats:
+        resolved_outputs = save_formats_to_outputs(normalized_save_formats, target_layout=normalized_layout)
+        if not resolved_outputs:
+            resolved_outputs = normalize_outputs([], target_layout_hint=normalized_layout)
+    else:
+        resolved_outputs = normalize_outputs([], target_layout_hint=normalized_layout)
+
+    source_identity = _resolve_source_identity(
+        provider=provider,
+        source_ref=normalized_source,
+        source_revision=source_revision,
+        civitai_model_version_id=civitai_model_version_id,
+        civitai_file_id=civitai_file_id,
+        source_metadata_overrides=source_metadata_overrides,
+    )
+    emit_stage(
+        "clone.source_identity_resolved",
+        0.15,
+        {
+            "source_ref": source_identity.source_ref,
+            "source_revision": source_identity.source_revision,
+            "dedupe_supported": bool(source_identity.dedupe_supported),
+            "civitai_model_version_id": source_identity.civitai_model_version_id,
+            "civitai_file_id": source_identity.civitai_file_id,
+        },
+    )
+
+    emit_stage("clone.ingest.mode_selected",
+        0.17,
+        {
+            "ingest_mode": "auto",
+            "source_layout_preference": normalized_source_layout_preference,
+        },
+    )
+
+    dl_state = {"last_ts": time.monotonic(), "last_bytes": 0}
+
+    def on_download_progress(bytes_written: int, total_bytes: int | None) -> None:
+        now = time.monotonic()
+        elapsed = max(now - started_at, 1e-6)
+        delta_t = max(now - float(dl_state["last_ts"]), 1e-6)
+        delta_b = max(0, int(bytes_written) - int(dl_state["last_bytes"]))
+        avg_bps = float(bytes_written) / elapsed
+        inst_bps = float(delta_b) / delta_t
+        total_int = int(total_bytes) if total_bytes is not None else None
+        download_ratio: float | None = None
+        progress = 0.25
+        if total_int is not None and total_int > 0:
+            download_ratio = min(1.0, float(bytes_written) / float(total_int))
+            progress += download_ratio * 0.30
+        remaining_bytes = None
+        if total_int is not None and total_int > 0:
+            remaining_bytes = max(0, total_int - int(bytes_written))
+        payload: dict[str, Any] = {
+            "bytes_written": int(bytes_written),
+            "bytes_total": total_int,
+            "bytes_remaining": remaining_bytes,
+            "avg_bytes_per_sec": float(avg_bps),
+            "inst_bytes_per_sec": float(inst_bps),
+            "download_bytes_downloaded": int(bytes_written),
+            "download_bytes_total": total_int,
+            "download_bytes_remaining": remaining_bytes,
+            "download_bps_avg": float(avg_bps),
+            "download_bps_inst": float(inst_bps),
+        }
+        if download_ratio is not None:
+            progress_pct = int(round(download_ratio * 100.0))
+            payload["stage_progress"] = float(download_ratio)
+            payload["stage_progress_pct"] = progress_pct
+            payload["download_progress"] = float(download_ratio)
+            payload["download_progress_pct"] = progress_pct
+        emit_stage(
+            "clone.ingest.downloading",
+            progress,
+            payload,
+        )
+        dl_state["last_ts"] = now
+        dl_state["last_bytes"] = int(bytes_written)
+
+    def execute_miss() -> dict[str, Any]:
+        source_expected_sha256 = str(source_identity.source_metadata.get("source_expected_sha256") or "").strip()
+        source_expected_size_bytes = _parse_positive_int(
+            source_identity.source_metadata.get("source_expected_size_bytes")
+        )
+        ingested, ingest_result = ingest_from_source(
+            ctx,
+            provider=source_identity.provider,
+            source_ref=source_identity.source_ref,
+            source_revision=source_identity.source_revision,
+            source_layout_preference=normalized_source_layout_preference,
+            source_dtype_preference=list(normalized_source_dtype_preference),
+            source_expected_sha256=(source_expected_sha256 if source_expected_sha256 != "" else None),
+            source_expected_size_bytes=source_expected_size_bytes,
+            civitai_model_version_id=source_identity.civitai_model_version_id,
+            civitai_file_id=source_identity.civitai_file_id,
+            resolved_civitai_identity=source_identity.resolved_civitai_identity,
+            output_ref=output_ref,
+            progress_callback=on_download_progress,
+        )
+        emit_stage("clone.layout.detected",
+            0.58,
+            {
+                "source_layout": str(ingested.metadata.get("source_layout") or "unknown"),
+                "model_family": str(ingested.metadata.get("model_family") or "unknown"),
+                "target_layout": normalized_layout,
+            },
+        )
+        emit_stage("clone.ingest.completed", 0.60)
+
+        finalized = _finalize_clone(
+            ctx,
+            source_identity=source_identity,
+            source_version_id=source_version_id,
+            destination_repo=normalized_destination,
+            destination_owner=destination_owner,
+            destination_repo_name=normalized_destination_name,
+            destination_repo_tags=normalized_tags,
+            target_layout=normalized_layout,
+            outputs=list(resolved_outputs),
+            save_formats=None,
+            ingested=ingested,
+            ingest_result=ingest_result,
+            emit_stage=emit_stage,
+            quantize_components=quantize_components,
+            auto_publish_public=auto_publish_public,
+            overwrite_repo=overwrite_repo,
+        )
+        return {
+            "output": finalized.output,
+            "version_id": finalized.published_version_id,
+            "primary_artifact_ref": str(finalized.output.weights.ref or "").strip(),
+            "primary_artifact_format": str(finalized.output.weights.format or "").strip(),
+        }
+
+    dedupe_helper = getattr(ctx, "mirror_dedupe_or_run", None)
+    local_reuse = _maybe_reuse_destination_private_version(
+        ctx,
+        source_identity=source_identity,
+        destination_repo=normalized_destination,
+        destination_owner=destination_owner,
+        destination_repo_name=normalized_destination_name,
+        destination_repo_tags=normalized_tags,
+    )
+    if isinstance(local_reuse, ConversionOutput):
+        emit_stage(
+            "clone.dedupe.destination_hit",
+            0.22,
+            {
+                "result_code": "dedupe_copy_hit",
+                "strategy": "destination_version_claim_hit",
+            },
+        )
+        emit_stage("clone.completed", 1.0, {"result_code": "dedupe_copy_hit"})
+        return local_reuse
+
+    if callable(dedupe_helper):
+        emit_stage("clone.dedupe.lookup_started", 0.18)
+        try:
+            dedupe_result = dedupe_helper(
+                source_identity={
+                    "provider": source_identity.provider,
+                    "source_ref": source_identity.source_ref,
+                    "source_revision": source_identity.source_revision,
+                    "identity_hash": source_identity.identity_hash,
+                    "dedupe_supported": source_identity.dedupe_supported,
+                    "civitai_model_version_id": source_identity.civitai_model_version_id,
+                    "civitai_file_id": source_identity.civitai_file_id,
+                },
+                destination_repo=normalized_destination,
+                destination_repo_tags=normalized_tags,
+                on_miss=execute_miss,
+            )
+        except Exception as exc:
+            err_raw = str(exc or "").strip()
+            if not err_raw.startswith("mirror_dedupe_search_failed:"):
+                raise
+            emit_stage("clone.dedupe.skipped",
+                0.18,
+                {
+                    "reason": "helper_error",
+                    "error_code": str(type(exc).__name__ or "dedupe_helper_error"),
+                    "error_message": err_raw,
+                },
+            )
+            return execute_miss()["output"]
+        if not isinstance(dedupe_result, dict):
+            dedupe_result = {"result_code": "dedupe_miss", "miss_result": execute_miss()}
+
+        invalidated = [
+            int(v)
+            for v in list(dedupe_result.get("invalidated_claim_ids") or [])
+            if isinstance(v, int) and int(v) > 0
+        ]
+        if invalidated:
+            emit_stage(
+                "clone.dedupe.claim_invalidated",
+                0.23,
+                {
+                    "count": len(invalidated),
+                    "claim_ids": ",".join(str(v) for v in invalidated),
+                },
+            )
+
+        result_code = str(dedupe_result.get("result_code") or "").strip().lower()
+        if result_code == "dedupe_copy_hit":
+            emit_stage(
+                "clone.dedupe.copy_completed",
+                0.28,
+                {
+                    "copied_from_repo": str(dedupe_result.get("copied_from_repo") or "").strip(),
+                    "copied_from_version_id": str(dedupe_result.get("copied_from_version_id") or "").strip(),
+                    "claim_written": bool(dedupe_result.get("claim_written")),
+                },
+            )
+            out = _build_dedupe_hit_output(
+                ctx=ctx,
+                dedupe_result=dedupe_result,
+                source_identity=source_identity,
+                destination_repo=normalized_destination,
+                destination_owner=destination_owner,
+                destination_repo_name=normalized_destination_name,
+                destination_repo_tags=normalized_tags,
+            )
+            emit_stage("clone.completed", 1.0, {"result_code": "dedupe_copy_hit"})
+            return out
+
+        miss_result = dedupe_result.get("miss_result") if isinstance(dedupe_result.get("miss_result"), dict) else {}
+        out = miss_result.get("output")
+        if isinstance(out, ConversionOutput):
+            metadata = dict(out.metadata)
+            if result_code != "":
+                metadata.setdefault("result_code", result_code)
+            metadata.setdefault("claim_written", "1" if bool(dedupe_result.get("claim_written")) else "0")
+            warnings = list(dedupe_result.get("warnings") or [])
+            if warnings:
+                metadata.setdefault("dedupe_warning_count", str(len(warnings)))
+            return ConversionOutput(weights=tensors_with(out.weights, local_path=None), metadata=metadata)
+
+    emit_stage("clone.dedupe.skipped",
+        0.18,
+        {"reason": "helper_unavailable"},
+    )
+    return execute_miss()["output"]
+
+
+def maybe_noop(
+    preflight: MirrorPreflight,
+    *,
+    destination_owner: str,
+    destination_repo_name: str,
+) -> ConversionOutput | None:
+    _ = preflight
+    _ = destination_owner
+    _ = destination_repo_name
+    return None
+
+
+__all__ = [
+    "MirrorPreflight",
+    "SourceIdentity",
+    "compute_source_hash",
+    "finalize_clone",
+    "maybe_noop",
+    "normalize_destination_owner",
+    "normalize_destination_repo_name",
+    "normalize_destination_repo_tags",
+    "normalize_save_formats",
+    "normalize_source_ref",
+    "normalize_source_layout_preference",
+    "normalize_target_layout",
+    "preflight_clone",
+    "run_clone",
+]
+
+
+# ---------------------------------------------------------------------------
+# Intermediate API stubs (issue #20 — `gen_worker.clone` six-method surface).
+# These expose library-internal pieces of the clone pipeline as public
+# entry points for tenants who need custom flows. Currently stubs pending
+# refactor of the pipeline to expose these cleanly — `from_huggingface` /
+# `from_civitai` are the documented stable surface.
+# ---------------------------------------------------------------------------
+
+
+def _fetch_hf_snapshot_only(
+    *,
+    source_ref: str,
+    revision: str | None = None,
+    dest_dir: str | None = None,
+    include: list[str] | None = None,
+    exclude: list[str] | None = None,
+) -> str:
+    raise NotImplementedError(
+        "fetch_huggingface_snapshot is pending extraction from pipeline internals; "
+        "use clone.from_huggingface(ctx, payload) for the full clone flow."
+    )
+
+
+def _fetch_civitai_file_only(*, model_version_id: int, file_id: int, dest_dir: str) -> str:
+    raise NotImplementedError(
+        "fetch_civitai_file is pending extraction from pipeline internals; "
+        "use clone.from_civitai(ctx, payload) for the full clone flow."
+    )
+
+
+def _parse_hf_metadata_only(*, source_ref: str, revision: str | None = None) -> dict[str, Any]:
+    raise NotImplementedError(
+        "parse_huggingface_metadata is pending extraction; use clone.from_huggingface for now."
+    )
+
+
+def _parse_civitai_metadata_only(*, model_version_id: int) -> dict[str, Any]:
+    raise NotImplementedError(
+        "parse_civitai_metadata is pending extraction; use clone.from_civitai for now."
+    )

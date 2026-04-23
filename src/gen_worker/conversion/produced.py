@@ -2,16 +2,20 @@
 
 A tenant's ``@training_function`` returns ``list[ProducedVariant]`` — one
 entry per variant the job produces into the destination checkpoint. The
-library uploads each variant's ``path`` (file OR directory) and attaches the
-declared ``attributes`` to the upload-commit.
+library uploads each variant's ``path`` (file OR directory) and attaches
+the declared ``attributes`` to the upload-commit.
 
-Attribute-bag ownership:
-  - Tenant declares only keys that identify the variant or are read at
-    inference/load time (dtype, file_layout, file_type, technique config,
-    quant_library + family-required keys, etc.).
-  - Library appends a single provenance key (``produced_by_job_id``) that
-    joins to everything else (source ref, datasets, specs, training
-    hyperparameters, timestamps) in the orchestrator job record.
+Attribute-bag ownership (issue #22 — server-authoritative metadata):
+  - Tenant declares ONLY tenant-specific attributes (technique config,
+    quant_library + family-required keys, human-readable labels).
+  - dtype / file_layout / file_type / kind / library are SERVER-INFERRED
+    from the uploaded files — tenant SHOULD NOT emit them. The server
+    reads the bytes and writes canonical values regardless of what the
+    tenant supplies. Tenant-supplied values are logged as divergence but
+    not used.
+  - Attributes with keys starting with ``_`` are REJECTED by the server
+    (reserved for server-computed reserved fields like
+    ``_tensor_key_fingerprint``).
   - Do NOT duplicate inputs-to-the-job on the variant — that's drift.
 """
 

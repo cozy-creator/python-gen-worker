@@ -99,6 +99,43 @@ class JsonHttpArtifactUploader(ArtifactUploader):
         self._execution_kind = str(execution_kind or "").strip().lower() or "training"
         self._final_uploaded_ref = ""
         self._final_uploaded_sha256 = ""
+        # Issue #20: session_id cached per (repo_owner, repo_name). Lazily
+        # opened on first repo-CAS upload, reused across subsequent checkpoint
+        # uploads within the same trainer lifecycle.
+        self._session_id_by_repo: dict[tuple[str, str], str] = {}
+
+    def _get_or_open_session(self, repo_owner: str, repo_name: str) -> str:
+        key = (repo_owner, repo_name)
+        if key in self._session_id_by_repo:
+            return self._session_id_by_repo[key]
+        url = (
+            f"{self._tensorhub_url}/api/v1/repos/{quote(repo_owner, safe='')}/"
+            f"{quote(repo_name, safe='')}/upload-sessions"
+        )
+        body: dict[str, object] = {}
+        if self._job_id:
+            body["job_id"] = self._job_id
+        headers = {"Content-Type": "application/json"}
+        if self._token:
+            headers["Authorization"] = f"Bearer {self._token}"
+        if self._owner:
+            headers["X-Cozy-Owner"] = self._owner
+        data = json.dumps(body).encode("utf-8")
+        req = request.Request(url, data=data, headers=headers, method="POST")
+        try:
+            with request.urlopen(req, timeout=30) as resp:  # noqa: S310
+                if resp.status < 200 or resp.status >= 300:
+                    raise ArtifactUploadError(f"upload_session open failed: status={resp.status}")
+                parsed = json.loads(resp.read().decode("utf-8") or "{}")
+        except ArtifactUploadError:
+            raise
+        except Exception as exc:
+            raise ArtifactUploadError(f"failed to open upload session at {url}") from exc
+        session_id = str(parsed.get("session_id") or "").strip()
+        if not session_id:
+            raise ArtifactUploadError("upload_session open returned no session_id")
+        self._session_id_by_repo[key] = session_id
+        return session_id
 
     def _post_json(self, url: str, payload: Mapping[str, object]) -> dict[str, object]:
         url = (url or "").strip()
@@ -263,15 +300,20 @@ class JsonHttpArtifactUploader(ArtifactUploader):
             }
             endpoint_path = "/api/v1/media/uploads"
         else:
-            repo_owner, repo_name, job_id = repo_job_scope
+            # Issue #20: repo-CAS uploads use the session-scoped URL shape.
+            # The trainer subsystem owns the session lifecycle here (checkpoint
+            # emissions during long-running training); the session is opened
+            # via ctx._checkpoint_session_id on first use.
+            repo_owner, repo_name, _job_id = repo_job_scope
             artifact_path = f"{category}/{slot}-{safe_name}"
             create_payload = {
                 "path": artifact_path,
                 "request_id": str(self._request_id or ""),
             }
+            session_id = self._get_or_open_session(repo_owner, repo_name)
             endpoint_path = (
                 f"/api/v1/repos/{quote(repo_owner, safe='')}/{quote(repo_name, safe='')}/"
-                f"jobs/{quote(job_id, safe='')}/uploads"
+                f"upload-sessions/{quote(session_id, safe='')}/uploads"
             )
 
         try:

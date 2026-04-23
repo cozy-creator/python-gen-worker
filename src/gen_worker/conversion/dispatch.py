@@ -467,39 +467,40 @@ def _finalize_produced_variants(
             }
             manifest_entries.append(entry)
 
-        # snapshot_digest = sha256 of the canonical manifest. Canonical =
-        # entries sorted by path so the same inputs always produce the same
-        # digest regardless of upload order.
-        snapshot_digest = _compute_snapshot_digest(manifest_entries)
-        _log.info("finalize: manifest_entries=%d snapshot_digest=%s publish_callable=%s dest_ref=%s", len(manifest_entries), snapshot_digest or "<empty>", callable(publish_fn), dest_ref)
-        if snapshot_digest:
-            # Stamp onto variant.attributes so downstream consumers (tests,
-            # logs) can read it back; also published as attributes jsonb on
-            # the checkpoint row.
-            variant.attributes["snapshot_digest"] = snapshot_digest
-
-        # Publish one checkpoint per variant. Per-variant manifest ensures
-        # each checkpoint_id's LoadSnapshotManifest returns only that
-        # variant's files (plus anything merge_with_existing pulls from the
-        # prior :latest).
-        if callable(publish_fn) and dest_ref and snapshot_digest:
+        # Hand the manifest to tensorhub — the server computes checkpoint_id
+        # as sha256(canonical(entries)) and persists the checkpoint row. The
+        # worker intentionally doesn't know the hashing rule; that lives in
+        # one place server-side.
+        _log.info("finalize: manifest_entries=%d publish_callable=%s dest_ref=%s", len(manifest_entries), callable(publish_fn), dest_ref)
+        if callable(publish_fn) and dest_ref and manifest_entries:
             v_attrs = dict(variant.attributes or {})
+            # Issue #22: server-authoritative metadata. The body
+            # carries the manifest + variant_label + size only; server
+            # infers kind / library / dtype / file_layout / file_type
+            # from the uploaded file contents and writes the canonical
+            # values. file_type / file_layout / quantization / kind are
+            # deliberately omitted — any caller-side value would be
+            # ignored by the server anyway.
             publish_output_variant = {
-                "snapshot_digest": snapshot_digest,
-                "variant_label":   str(v_attrs.get("variant_label") or variant.path.name),
-                "file_layout":     str(v_attrs.get("file_layout") or ""),
-                "file_type":       str(v_attrs.get("file_type") or ""),
-                "quantization":    str(v_attrs.get("dtype") or v_attrs.get("quantization") or ""),
-                "size_bytes":      sum(e.get("size_bytes", 0) for e in manifest_entries),
+                # checkpoint_id left empty — server fills it in from
+                # sha256(canonical(manifest.entries)).
+                "snapshot_digest":   "",
+                "variant_label":     str(v_attrs.get("variant_label") or variant.path.name),
+                "size_bytes":        sum(e.get("size_bytes", 0) for e in manifest_entries),
+                # Per-variant manifest — publish_repo_revision forwards this
+                # to tensorhub so each checkpoint_id is hashed from only
+                # this variant's files, not an aggregate across variants.
+                "snapshot_manifest": manifest_entries,
             }
             metadata = {
                 "output_variants": [publish_output_variant],
-                "kind":            "model",
             }
+            # Top-level snapshot_manifest is still provided for the clone/
+            # legacy callers that only send one; it's ignored here because
+            # publish_output_variant carries the manifest inline.
             snapshot_manifest = {
-                "version":         1,
-                "snapshot_digest": snapshot_digest,
-                "entries":         manifest_entries,
+                "version": 1,
+                "entries": manifest_entries,
             }
             try:
                 publish_fn(
@@ -524,12 +525,11 @@ def _finalize_produced_variants(
 
 
 def _tensors_blake3_digest(t: Any) -> str:
-    """Return a canonical ``blake3:<hex>`` digest for a Tensors handle.
-
-    Tensorhub's ``blobs`` / ``blob_reverse_lookup`` tables are keyed on
-    blake3; the upload flow commits each blob at its blake3 digest. Accept
-    pre-prefixed ``blob_digest`` or bare ``blake3`` attr from the Tensors
-    object; return ``""`` when neither is present (tests / stubbed uploads).
+    """Return the ``blake3:<hex>`` digest the upload flow bound for this
+    Tensors handle. Tensorhub's CAS indexes blobs by blake3; the commit step
+    verifies the uploaded bytes hashed to this digest, so we trust it here.
+    Returns ``""`` when the upload path didn't populate a digest (e.g. test
+    stubs), in which case the manifest entry is dropped.
     """
     bd = str(getattr(t, "blob_digest", "") or "").strip()
     if bd:
@@ -538,28 +538,6 @@ def _tensors_blake3_digest(t: Any) -> str:
     if b3:
         return b3 if ":" in b3 else f"blake3:{b3}"
     return ""
-
-
-def _compute_snapshot_digest(entries: list[dict[str, Any]]) -> str:
-    """Hash the canonical manifest JSON to produce the variant's snapshot_digest.
-
-    The same set of files + digests always produces the same snapshot_digest
-    so re-runs of the same deterministic conversion dedupe naturally.
-    """
-    if not entries:
-        return ""
-    import hashlib
-    import json as _json
-    canonical = sorted(entries, key=lambda e: str(e.get("path") or ""))
-    payload = _json.dumps(
-        [{"path": str(e.get("path") or ""),
-          "digest": str(e.get("digest") or ""),
-          "size_bytes": int(e.get("size_bytes") or 0)}
-         for e in canonical],
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode("utf-8")
-    return f"sha256:{hashlib.sha256(payload).hexdigest()}"
 
 
 def _upload_single_file_variant(

@@ -2380,7 +2380,17 @@ class Worker:
                         if not ref:
                             continue
                         new_fixed_by_key[key] = ref
-                        new_fixed_spec_by_key[key] = {"ref": ref, "dtypes": []}
+                        # Scheduler updates only carry the ref — preserve the
+                        # attribute selectors (dtype/file_type/file_layout)
+                        # that came from the baked endpoint.lock manifest so
+                        # we don't lose them on every EndpointConfig tick.
+                        prior = self._fixed_model_spec_by_key.get(key) or {}
+                        new_fixed_spec_by_key[key] = {
+                            "ref": ref,
+                            "dtypes": list(prior.get("dtypes") or []),
+                            "file_type": list(prior.get("file_type") or []),
+                            "file_layout": list(prior.get("file_layout") or []),
+                        }
 
                     new_payload_by_fn: Dict[str, Dict[str, str]] = {}
                     new_payload_spec_by_fn: Dict[str, Dict[str, Dict[str, Any]]] = {}
@@ -2745,10 +2755,23 @@ class Worker:
                         pass
 
                     tok = set_resolved_cozy_models_by_id(self._resolved_cozy_models_by_id_baseline or None)
+                    # Thread dtype/file_type/file_layout preferences from the
+                    # baked endpoint.lock into the download so resolve picks
+                    # the right variant. Without this the downloader falls
+                    # back to :latest, which may point at a private checkpoint.
+                    prefs = self._prefs_for_canonical(canon)
+                    logger.info("startup_prefetch canon=%s prefs=%s fixed_spec_keys=%s", canon, prefs, list(self._fixed_model_spec_by_key.keys()))
+                    prefs_tok = None
+                    if prefs:
+                        from .models.ref_downloader import set_cozy_model_download_prefs_by_ref
+                        prefs_tok = set_cozy_model_download_prefs_by_ref({canon: prefs})
                     try:
                         local_path = self._downloader.download(canon, str(cache_dir)) if self._downloader else ""
                     finally:
                         reset_resolved_cozy_models_by_id(tok)
+                        if prefs_tok is not None:
+                            from .models.ref_downloader import reset_cozy_model_download_prefs_by_ref
+                            reset_cozy_model_download_prefs_by_ref(prefs_tok)
 
                     lp = Path(local_path) if local_path else None
                     if lp is None or not lp.exists():
@@ -2836,6 +2859,37 @@ class Worker:
             t.start()
         for t in threads:
             t.join()
+
+    def _prefs_for_canonical(self, canonical_ref: str) -> Dict[str, Any]:
+        """Lookup the baked endpoint.lock attributes (dtype/file_type/file_layout)
+        for the model whose canonical ref matches ``canonical_ref``. Returns the
+        shape the ref_downloader's prefs contextvar expects.
+        """
+        prefs: Dict[str, Any] = {}
+        # Both fixed and per-function model keyspaces can reference the same
+        # ref, so walk all of them and take the first match.
+        keyspace_specs: List[Dict[str, Dict[str, Any]]] = []
+        if self._fixed_model_spec_by_key:
+            keyspace_specs.append(self._fixed_model_spec_by_key)
+        for per_fn in self._payload_model_spec_by_key_by_function.values():
+            keyspace_specs.append(per_fn)
+        for ks in keyspace_specs:
+            for _key, spec in ks.items():
+                spec_ref = str(spec.get("ref") or "").strip()
+                if _canonicalize_model_ref_string(spec_ref) != canonical_ref:
+                    continue
+                dtypes = spec.get("dtypes") or []
+                file_type = spec.get("file_type") or []
+                file_layout = spec.get("file_layout") or []
+                if dtypes:
+                    prefs["dtypes"] = list(dtypes)
+                if file_type:
+                    prefs["file_types"] = list(file_type)
+                if file_layout:
+                    prefs["file_layouts"] = list(file_layout)
+                if prefs:
+                    return prefs
+        return prefs
 
     def _try_find_existing_cozy_snapshot_dir(self, canonical_model_id: str, cache_dir: Path) -> Optional[Path]:
         # Only applies to cozy:@sha256 refs where the snapshot digest is known.
@@ -4059,6 +4113,15 @@ class Worker:
 
             self._send_request_result(request_id, success, output_payload, error_type, bool(retryable), safe_message, error_message)
 
+            # Issue #20: close any still-open upload sessions at request end.
+            # Successful finalize removes the session from the cache so this
+            # is a no-op for the happy path; aborts any lingering sessions
+            # from partial failures (tenant function raised before finalize).
+            try:
+                ctx._close_upload_sessions(abort_open=True)
+            except Exception:
+                logger.debug("upload_session_close_on_request_end_failed", exc_info=True)
+
             with self._active_requests_lock:
                 self._active_requests.pop(request_id, None)
 
@@ -4336,16 +4399,23 @@ class Worker:
                 prefs["file_type"] = str(attrs["file_type"]).strip().lower()
             if attrs.get("file_layout"):
                 prefs["file_layout"] = str(attrs["file_layout"]).strip().lower()
+        logger.info("materialize_source source=%s parsed_attrs=%s prefs=%s", source, attrs, prefs)
 
         from .models.ref_downloader import (
             set_cozy_model_download_prefs_by_ref,
             reset_cozy_model_download_prefs_by_ref,
         )
 
-        # Parse canonical to identify the downloader's per-ref key.
+        # Parse canonical to identify the downloader's per-ref key. The
+        # downloader looks up prefs using ``CozyRef.canonical()``, which is
+        # ``cozy:<owner>/<repo>:<tag>`` (tag defaults to "latest"). Build the
+        # same form here so the contextvar lookup hits — previously we
+        # stripped the prefix + tag which silently dropped every pref.
         parsed_canonical = canonical
-        if canonical.startswith("cozy:"):
-            parsed_canonical = canonical[len("cozy:"):]
+        if not parsed_canonical.startswith("cozy:"):
+            parsed_canonical = "cozy:" + parsed_canonical
+        if "@" not in parsed_canonical and ":" not in parsed_canonical[len("cozy:"):]:
+            parsed_canonical = parsed_canonical + ":latest"
 
         from .models.ref_downloader import (
             reset_cozy_worker_capability_token,

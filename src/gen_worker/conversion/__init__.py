@@ -7,7 +7,7 @@ Tenant authors write functions like:
     )
 
     @training_function
-    def convert_dtype(ctx: ConversionContext, source: Source, specs: list[DTypeSpec]):
+    def cast_dtype(ctx: ConversionContext, source: Source, specs: list[DtypeCastSpec]):
         ...
 
 See e2e progress.json issue #5 for the full contract:

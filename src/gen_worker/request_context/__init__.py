@@ -147,6 +147,12 @@ class RequestContext:
         # None-checks.
         self._compute: "Compute" = compute if compute is not None else _default_compute()
 
+        # Upload-session manager (issue #20). Lazy-created on first
+        # ctx.save_file / ctx.save_checkpoint / ctx.save_output_stream use.
+        # Tenant-invisible; library-internal machinery for the session
+        # lifecycle (open → per-file uploads → finalize).
+        self._upload_sessions = None  # type: Optional["_UploadSessionManager"]
+
     @property
     def request_id(self) -> str:
         return self._request_id
@@ -211,6 +217,49 @@ class RequestContext:
         if self._file_api_base_url:
             return self._file_api_base_url.rstrip("/")
         return _require_file_api_base_url()
+
+    def _upload_session_manager(self):
+        """Lazy-instantiate the upload session manager for this request.
+
+        Library-internal (issue #20). Tenants don't touch this — they use
+        ctx.save_file / save_checkpoint / save_output_stream / save_checkpoint_release
+        which route through the manager implicitly.
+        """
+        if self._upload_sessions is None:
+            from ._upload_session import _UploadSessionManager
+            base = self._get_file_api_base_url()
+
+            def _hdrs() -> Dict[str, str]:
+                token = self._get_worker_capability_token()
+                h: Dict[str, str] = {"Authorization": f"Bearer {token}"}
+                if self._owner:
+                    h["X-Cozy-Owner"] = self._owner
+                return h
+
+            self._upload_sessions = _UploadSessionManager(
+                base_url=base,
+                headers_provider=_hdrs,
+                job_id=self._job_id,
+            )
+        return self._upload_sessions
+
+    def _checkpoint_session_id(self, repo_owner: str, repo_name: str) -> str:
+        """Return the session_id for a checkpoint upload session on this
+        destination repo, opening it lazily on first call. Cached per ctx —
+        subsequent uploads to the same repo reuse the session."""
+        mgr = self._upload_session_manager()
+        return mgr.session_id_for(
+            "checkpoint",
+            {"repo_owner": repo_owner, "repo_name": repo_name},
+        )
+
+    def _close_upload_sessions(self, *, abort_open: bool = True) -> None:
+        """Called at request end (by worker.py). Aborts any still-open
+        sessions — a finalize call removes the session from the cache so
+        this is a no-op for successfully-finalized requests."""
+        if self._upload_sessions is not None:
+            self._upload_sessions.close_all(abort_open=abort_open)
+            self._upload_sessions = None
 
     def _get_worker_capability_token(self) -> str:
         if self._worker_capability_token:
@@ -651,13 +700,35 @@ class RequestContext:
         create: bool = False,
         expected_size_bytes: Optional[int] = None,
     ) -> _RequestOutputStream:
-        """Open a chunk-writable output stream that finalizes to an Asset."""
+        """Open a chunk-writable output stream that finalizes to an Asset.
+
+        Public API name (issue #20): prefer ``ctx.save_output_stream(...)``
+        — same behavior, the preferred name for consistency with other
+        save_* methods.
+        """
         return _RequestOutputStream(
             ctx=self,
             ref=ref,
             kind="asset",
             create=create,
             expected_size_bytes=expected_size_bytes,
+        )
+
+    def save_output_stream(
+        self,
+        ref: str,
+        *,
+        create: bool = False,
+        expected_size_bytes: Optional[int] = None,
+    ) -> _RequestOutputStream:
+        """Open a chunk-writable output stream that finalizes to an Asset.
+
+        Issue #20: preferred name for streaming writes, consistent with
+        other ``ctx.save_*`` methods. Alias for
+        ``ctx.open_output_stream(...)``.
+        """
+        return self.open_output_stream(
+            ref, create=create, expected_size_bytes=expected_size_bytes,
         )
 
     def open_checkpoint_stream(
@@ -768,6 +839,190 @@ class RequestContext:
     def save_file_overwrite(self, ref: str, local_path: str) -> Asset:
         return self.save_file(ref, local_path)
 
+    # ------------------------------------------------------------------
+    # Visibility controls (issue #20). `publish` means "make publicly
+    # available" — the new semantics after the terminology cleanup.
+    # ------------------------------------------------------------------
+
+    def publish_checkpoint(self, destination_repo: str, checkpoint_id: str) -> Dict[str, Any]:
+        """Flip a finalized checkpoint's visibility to 'public'. Idempotent.
+
+        `destination_repo` is 'owner/repo'; `checkpoint_id` is the content-addressed
+        digest returned by finalize. Hits POST /api/v1/repos/:owner/:repo/checkpoints/:id/publish.
+        """
+        owner, repo = _parse_owner_repo(destination_repo)
+        cid = str(checkpoint_id or "").strip()
+        if not cid:
+            raise ValueError("checkpoint_id is required")
+        base = self._get_file_api_base_url()
+        token = self._get_worker_capability_token()
+        url = (
+            f"{base}/api/v1/repos/{urllib.parse.quote(owner, safe='')}/"
+            f"{urllib.parse.quote(repo, safe='')}/checkpoints/{urllib.parse.quote(cid, safe='')}/publish"
+        )
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        if self._owner:
+            headers["X-Cozy-Owner"] = self._owner
+        resp = requests.post(url, headers=headers, data=b"{}", timeout=30)
+        if resp.status_code in (401, 403):
+            raise AuthError(f"publish_checkpoint unauthorized ({resp.status_code})")
+        if resp.status_code < 200 or resp.status_code >= 300:
+            raise RuntimeError(f"publish_checkpoint failed ({resp.status_code}): {resp.text[:256]}")
+        return resp.json() if resp.text else {"ok": True}
+
+    def unpublish_checkpoint(self, destination_repo: str, checkpoint_id: str) -> Dict[str, Any]:
+        """Flip a public checkpoint back to 'private'. Idempotent."""
+        owner, repo = _parse_owner_repo(destination_repo)
+        cid = str(checkpoint_id or "").strip()
+        if not cid:
+            raise ValueError("checkpoint_id is required")
+        base = self._get_file_api_base_url()
+        token = self._get_worker_capability_token()
+        url = (
+            f"{base}/api/v1/repos/{urllib.parse.quote(owner, safe='')}/"
+            f"{urllib.parse.quote(repo, safe='')}/checkpoints/{urllib.parse.quote(cid, safe='')}/unpublish"
+        )
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        if self._owner:
+            headers["X-Cozy-Owner"] = self._owner
+        resp = requests.post(url, headers=headers, data=b"{}", timeout=30)
+        if resp.status_code in (401, 403):
+            raise AuthError(f"unpublish_checkpoint unauthorized ({resp.status_code})")
+        if resp.status_code < 200 or resp.status_code >= 300:
+            raise RuntimeError(f"unpublish_checkpoint failed ({resp.status_code}): {resp.text[:256]}")
+        return resp.json() if resp.text else {"ok": True}
+
+    # Issue #21: per-primitive publish/unpublish for datasets, endpoints,
+    # endpoint source-code releases, and media. All route to matching
+    # tensorhub endpoints with uniform semantics (empty body; idempotent;
+    # returns ok + new visibility).
+
+    def _visibility_flip(self, op: str, url: str) -> Dict[str, Any]:
+        token = self._get_worker_capability_token()
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+        if self._owner:
+            headers["X-Cozy-Owner"] = self._owner
+        resp = requests.post(url, headers=headers, data=b"{}", timeout=30)
+        if resp.status_code in (401, 403):
+            raise AuthError(f"{op} unauthorized ({resp.status_code})")
+        if resp.status_code < 200 or resp.status_code >= 300:
+            raise RuntimeError(f"{op} failed ({resp.status_code}): {resp.text[:256]}")
+        return resp.json() if resp.text else {"ok": True}
+
+    def publish_dataset(self, dataset_id: str) -> Dict[str, Any]:
+        """Flip a dataset's visibility to 'public'. Idempotent."""
+        did = str(dataset_id or "").strip()
+        if not did:
+            raise ValueError("dataset_id is required")
+        base = self._get_file_api_base_url()
+        url = f"{base}/api/v1/datasets/{urllib.parse.quote(did, safe='')}/publish"
+        return self._visibility_flip("publish_dataset", url)
+
+    def unpublish_dataset(self, dataset_id: str) -> Dict[str, Any]:
+        """Flip a dataset's visibility back to 'private'. Idempotent."""
+        did = str(dataset_id or "").strip()
+        if not did:
+            raise ValueError("dataset_id is required")
+        base = self._get_file_api_base_url()
+        url = f"{base}/api/v1/datasets/{urllib.parse.quote(did, safe='')}/unpublish"
+        return self._visibility_flip("unpublish_dataset", url)
+
+    def publish_endpoint(self, owner: str, endpoint_name: str) -> Dict[str, Any]:
+        """Flip an endpoint's endpoint-level visibility to 'public' (anyone can call/list). Idempotent."""
+        own = str(owner or "").strip()
+        name = str(endpoint_name or "").strip()
+        if not own or not name:
+            raise ValueError("owner and endpoint_name are required")
+        base = self._get_file_api_base_url()
+        url = (
+            f"{base}/api/v1/endpoints/{urllib.parse.quote(own, safe='')}/"
+            f"{urllib.parse.quote(name, safe='')}/publish"
+        )
+        return self._visibility_flip("publish_endpoint", url)
+
+    def unpublish_endpoint(self, owner: str, endpoint_name: str) -> Dict[str, Any]:
+        """Flip an endpoint's endpoint-level visibility back to 'private'. Idempotent."""
+        own = str(owner or "").strip()
+        name = str(endpoint_name or "").strip()
+        if not own or not name:
+            raise ValueError("owner and endpoint_name are required")
+        base = self._get_file_api_base_url()
+        url = (
+            f"{base}/api/v1/endpoints/{urllib.parse.quote(own, safe='')}/"
+            f"{urllib.parse.quote(name, safe='')}/unpublish"
+        )
+        return self._visibility_flip("unpublish_endpoint", url)
+
+    def publish_endpoint_release(
+        self, owner: str, endpoint_name: str, release_id: str
+    ) -> Dict[str, Any]:
+        """Flip an endpoint release's source-code visibility to 'public' (bundle publicly readable). Idempotent.
+
+        Orthogonal to publish_endpoint — an endpoint can be publicly callable
+        while individual release sources stay private, or vice versa.
+        """
+        own = str(owner or "").strip()
+        name = str(endpoint_name or "").strip()
+        rid = str(release_id or "").strip()
+        if not own or not name or not rid:
+            raise ValueError("owner, endpoint_name, and release_id are required")
+        base = self._get_file_api_base_url()
+        url = (
+            f"{base}/api/v1/endpoints/{urllib.parse.quote(own, safe='')}/"
+            f"{urllib.parse.quote(name, safe='')}/releases/"
+            f"{urllib.parse.quote(rid, safe='')}/publish"
+        )
+        return self._visibility_flip("publish_endpoint_release", url)
+
+    def unpublish_endpoint_release(
+        self, owner: str, endpoint_name: str, release_id: str
+    ) -> Dict[str, Any]:
+        """Flip an endpoint release's source-code visibility back to 'private'. Idempotent."""
+        own = str(owner or "").strip()
+        name = str(endpoint_name or "").strip()
+        rid = str(release_id or "").strip()
+        if not own or not name or not rid:
+            raise ValueError("owner, endpoint_name, and release_id are required")
+        base = self._get_file_api_base_url()
+        url = (
+            f"{base}/api/v1/endpoints/{urllib.parse.quote(own, safe='')}/"
+            f"{urllib.parse.quote(name, safe='')}/releases/"
+            f"{urllib.parse.quote(rid, safe='')}/unpublish"
+        )
+        return self._visibility_flip("unpublish_endpoint_release", url)
+
+    def publish_media(self, media_id: str) -> Dict[str, Any]:
+        """Flip a media asset's visibility to 'public'. Idempotent."""
+        mid = str(media_id or "").strip()
+        if not mid:
+            raise ValueError("media_id is required")
+        base = self._get_file_api_base_url()
+        url = f"{base}/api/v1/media/{urllib.parse.quote(mid, safe='')}/publish"
+        return self._visibility_flip("publish_media", url)
+
+    def unpublish_media(self, media_id: str) -> Dict[str, Any]:
+        """Flip a media asset's visibility back to 'private'. Idempotent."""
+        mid = str(media_id or "").strip()
+        if not mid:
+            raise ValueError("media_id is required")
+        base = self._get_file_api_base_url()
+        url = f"{base}/api/v1/media/{urllib.parse.quote(mid, safe='')}/unpublish"
+        return self._visibility_flip("unpublish_media", url)
+
+    def finalize_checkpoints(
+        self,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Issue #20: preferred name for the catalog-commit operation.
+
+        Forwards to ``publish_repo_revision`` (which now routes to
+        ``POST /upload-sessions/:session_id/finalize`` internally via the
+        session manager). Kept as an alias so tenant code can adopt the
+        new terminology at their pace; ``publish_repo_revision`` remains
+        functional for back-compat within this module.
+        """
+        return self.publish_repo_revision(**kwargs)
+
     def publish_repo_revision(
         self,
         *,
@@ -862,7 +1117,7 @@ class RequestContext:
                 }
             else:
                 logger.warning(
-                    "worker_publish_tags_skipped request_id=%s job_id=%s owner=%s repo=%s reason=missing_target_version tags=%s",
+                    "worker_finalize_tags_skipped request_id=%s job_id=%s owner=%s repo=%s reason=missing_target_version tags=%s",
                     self.request_id,
                     self.job_id or "",
                     owner,
@@ -877,7 +1132,7 @@ class RequestContext:
                 required_permissions.insert(0, "tensor-repo:create")
             _assert_token_repo_scope_matches_destination(token, owner, repo, required_permissions=required_permissions)
         logger.info(
-            "worker_publish_attempt request_id=%s job_id=%s owner=%s repo=%s",
+            "worker_finalize_attempt request_id=%s job_id=%s owner=%s repo=%s",
             self.request_id,
             self.job_id or "",
             owner,
@@ -992,9 +1247,6 @@ class RequestContext:
         parent_checkpoint_id = normalized_source_version_id
 
         for v in commit_output_variants:
-            snap = str(v.get("snapshot_digest") or "").strip()
-            if not snap:
-                continue
             dtype = str(v.get("quantization") or "").strip()
             file_layout = str(v.get("file_layout") or "").strip()
             file_type = str(v.get("file_type") or "").strip()
@@ -1018,14 +1270,23 @@ class RequestContext:
                     "parent_checkpoint_id": parent_checkpoint_id,
                     "relationship_kind":    relationship_kind or "import",
                 })
+            # checkpoint_id is left empty — the server computes it from
+            # sha256(canonical(snapshot_manifest.entries)) and echoes the
+            # value back. Per-variant snapshot_manifest is taken from the
+            # caller's v["snapshot_manifest"] when present; otherwise falls
+            # back to the shared top-level manifest_entries (clone path).
+            v_manifest = v.get("snapshot_manifest")
+            if isinstance(v_manifest, list):
+                per_variant_entries = [e for e in v_manifest if isinstance(e, dict)]
+            else:
+                per_variant_entries = manifest_entries
+            supplied_checkpoint_id = str(v.get("snapshot_digest") or "").strip()
+            # Issue #22: kind / library / dtype / file_layout / file_type
+            # dropped from the finalize body. Server infers them from the
+            # uploaded files; client-supplied values are ignored there.
             publish_checkpoints.append({
-                "checkpoint_id":     snap,
-                "snapshot_manifest": manifest_entries,
-                "kind":              str(md.get("kind") or "model"),
-                "library":           str(md.get("library") or md.get("library_name") or ""),
-                "dtype":             dtype,
-                "file_layout":       file_layout,
-                "file_type":         file_type,
+                "checkpoint_id":     supplied_checkpoint_id,
+                "snapshot_manifest": per_variant_entries,
                 "attributes":        attrs,
                 "display_label":     label,
                 "size_bytes":        int(v.get("size_bytes") or 0),
@@ -1036,7 +1297,6 @@ class RequestContext:
         # publish). Emit exactly one checkpoint from target_version_id +
         # aggregate snapshot_manifest.
         if not publish_checkpoints and normalized_target_version_id:
-            fallback_kind = str(md.get("kind") or "model")
             lineage: List[Dict[str, Any]] = []
             if parent_repo_ref and parent_checkpoint_id:
                 lineage.append({
@@ -1044,14 +1304,11 @@ class RequestContext:
                     "parent_checkpoint_id": parent_checkpoint_id,
                     "relationship_kind":    relationship_kind or "import",
                 })
+            # Issue #22: server-authoritative metadata; no kind/library/dtype
+            # /file_layout/file_type in the body.
             publish_checkpoints.append({
                 "checkpoint_id":     normalized_target_version_id,
                 "snapshot_manifest": manifest_entries,
-                "kind":              fallback_kind,
-                "library":           str(md.get("library") or md.get("library_name") or ""),
-                "dtype":             "",
-                "file_layout":       "",
-                "file_type":         "",
                 "attributes":        {},
                 "display_label":     "",
                 "size_bytes":        0,
@@ -1067,7 +1324,7 @@ class RequestContext:
 
         if not publish_checkpoints:
             logger.warning(
-                "worker_publish_skipped request_id=%s job_id=%s owner=%s repo=%s reason=no_checkpoints",
+                "worker_finalize_skipped request_id=%s job_id=%s owner=%s repo=%s reason=no_checkpoints",
                 self.request_id, self.job_id or "", owner, repo,
             )
         else:
@@ -1078,22 +1335,33 @@ class RequestContext:
                 "auto_create_external_parent": bool(auto_create_external_parent),
                 "merge_with_existing":         bool(merge_with_existing),
             }
+            # Issue #20: finalize hits the session-scoped URL. The session
+            # was opened lazily on the first save_* call to this repo and
+            # cached in the ctx-level manager.
             try:
+                session_id = self._checkpoint_session_id(owner, repo)
                 _request_json(
                     "POST",
-                    f"/api/v1/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}/jobs/{urllib.parse.quote(job_id, safe='')}/publish",
+                    f"/api/v1/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}/upload-sessions/{urllib.parse.quote(session_id, safe='')}/finalize",
                     publish_req_body,
                 )
+                # Finalize succeeded — drop the session from the manager's
+                # cache so close_all at request end doesn't try to abort it.
+                mgr = self._upload_session_manager()
+                sess = mgr.get("checkpoint", {"repo_owner": owner, "repo_name": repo})
+                if sess is not None:
+                    # Finalize endpoint already returned; just forget cache.
+                    mgr._sessions.pop(sess.scope_key, None)  # type: ignore[attr-defined]
             except Exception as exc:
                 logger.warning(
-                    "worker_publish_catalog_failed request_id=%s job_id=%s owner=%s repo=%s error=%r",
+                    "worker_finalize_catalog_failed request_id=%s job_id=%s owner=%s repo=%s error=%r",
                     self.request_id, self.job_id or "", owner, repo, exc,
                 )
                 raise
 
         published_ids = [c["checkpoint_id"] for c in publish_checkpoints]
         logger.info(
-            "worker_publish_succeeded request_id=%s job_id=%s owner=%s repo=%s checkpoints=%d primary=%s",
+            "worker_finalize_succeeded request_id=%s job_id=%s owner=%s repo=%s checkpoints=%d primary=%s",
             self.request_id, self.job_id or "", owner, repo,
             len(published_ids), published_ids[0] if published_ids else "",
         )

@@ -9,8 +9,8 @@ ARG PYTHON_VERSION=3.12
 FROM ghcr.io/astral-sh/uv:python${PYTHON_VERSION}-bookworm-slim AS cozy_base
 
 ARG CUDA_VERSION=12.8
-ARG UV_TORCH_BACKEND=
-ARG TORCH_SPEC="~=2.10.0"
+ARG UV_TORCH_BACKEND
+ARG TORCH_SPEC="~=2.11.0"
 
 WORKDIR /app
 
@@ -53,7 +53,7 @@ RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
     uv pip install --system --break-system-packages --no-deps --no-sources /app
 
 RUN mkdir -p /app/.tensorhub \
-    && python -m gen_worker.discover > /app/.tensorhub/endpoint.lock
+    && python -m gen_worker.discovery > /app/.tensorhub/endpoint.lock
 
 
 ENV HOME=/root

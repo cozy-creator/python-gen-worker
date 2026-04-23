@@ -1,0 +1,15 @@
+[endpoint]
+name = "from-scratch"
+main = "from_scratch"
+version = "0.1.0"
+
+[resources]
+accelerator = "none"
+vram_gb = 0
+gpu_count = 0
+memory_gb = 8
+cpu_cores = 2
+disk_gb = 20
+
+[[functions]]
+name = "generate"

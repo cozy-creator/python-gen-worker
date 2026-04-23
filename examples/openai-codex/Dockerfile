@@ -70,7 +70,7 @@ RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
 
 # Bake discovered functions into the image.
 RUN mkdir -p /app/.tensorhub \
-  && python3 -m gen_worker.discover > /app/.tensorhub/endpoint.lock
+  && python3 -m gen_worker.discovery > /app/.tensorhub/endpoint.lock
 
 # Run as root at runtime (needed for writable mounted cache dirs like /workspace).
 

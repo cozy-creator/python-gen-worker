@@ -97,24 +97,44 @@ class CozyHubV2Client:
         # Worker-facing route: capability-token authenticated (no user membership check).
         # The user-JWT counterpart lives at /api/v1/repos/:owner/:repo/resolve.
         url = f"{self.base_url}/api/v1/inference/repos/{owner}/{repo}/resolve"
-        payload = {
-            "tag": tag,
-            "include_urls": bool(include_urls),
-            "preferences": dict(preferences),
-            "capabilities": dict(capabilities),
-        }
+        # Map the legacy `preferences={dtypes, file_types, file_layouts}` shape
+        # onto the post-refactor `attributes={dtype, file_type, file_layout}`
+        # jsonb selector. The server's resolve precedence is
+        # digest > attributes > tag — when the caller supplies attributes we
+        # clear the tag so the attribute path runs (otherwise :latest wins and
+        # selects the newest checkpoint regardless of dtype).
+        attributes: Dict[str, str] = {}
+        prefs_dict = dict(preferences)
+        dtypes = prefs_dict.get("dtypes") or []
+        if dtypes:
+            attributes["dtype"] = str(dtypes[0])
+        file_types = prefs_dict.get("file_types") or prefs_dict.get("file_type")
+        if isinstance(file_types, list) and file_types:
+            attributes["file_type"] = str(file_types[0])
+        elif isinstance(file_types, str) and file_types:
+            attributes["file_type"] = file_types
+        file_layouts = prefs_dict.get("file_layouts") or prefs_dict.get("file_layout")
+        if isinstance(file_layouts, list) and file_layouts:
+            attributes["file_layout"] = str(file_layouts[0])
+        elif isinstance(file_layouts, str) and file_layouts:
+            attributes["file_layout"] = file_layouts
+
+        payload: Dict[str, Any] = {}
         if digest:
             payload["digest"] = digest
+        elif attributes:
+            payload["tag"] = ""
+            payload["attributes"] = attributes
+        else:
+            payload["tag"] = tag
 
         logger.info(
-            "resolve_artifact request owner=%s repo=%s tag=%s digest=%s include_urls=%s preferences=%s capabilities_keys=%s",
+            "resolve_artifact request owner=%s repo=%s tag=%s digest=%s attributes=%s",
             owner,
             repo,
-            tag,
+            payload.get("tag", ""),
             digest or "",
-            bool(include_urls),
-            dict(preferences),
-            sorted(str(k) for k in dict(capabilities).keys()),
+            attributes,
         )
 
         timeout = aiohttp.ClientTimeout(total=self.timeout_s)

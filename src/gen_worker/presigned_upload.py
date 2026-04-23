@@ -1,12 +1,29 @@
 """Presigned S3 multipart upload client for TensorHub.
 
-New upload flow:
-1. Client computes BLAKE3 hash of file.
-2. POST to TensorHub with blake3 + size_bytes -> get presigned S3 part URLs.
-3. PUT parts directly to S3 using presigned URLs.
-4. POST to TensorHub /complete with part ETags.
+Upload flow (one file):
+  1. Client computes BLAKE3 hash of the file.
+  2. POST {base_url}{endpoint_path} with {path, blake3, size_bytes}
+     → either `{dedup: true, ...}` (CAS hit) or `{upload_id, part_urls[],
+     part_size, total_parts}` (multipart session opened).
+  3. PUT parts directly to S3 via the presigned URLs (tensorhub not in
+     the data path).
+  4. POST {base_url}{endpoint_path}/{upload_id}/complete with part ETags
+     → tensorhub calls S3 CompleteMultipartUpload, runs commit-time
+     validation, and returns the finalized blob/snapshot metadata.
 
-This replaces the old PATCH-based streaming upload flow.
+Used by BOTH worker callers (via ctx.save_file / ctx.save_checkpoint /
+ctx.open_output_stream in python-gen-worker) AND user-CLI callers
+(via `e2e` upload commands). Same endpoints on tensorhub's side — the
+caller authenticates with either a worker capability token or a user JWT.
+The orchestrator is NOT in the upload path: clients talk directly to
+tensorhub, and tensorhub's presigned URLs let bytes go straight to S3.
+
+This is the standard tensorhub multipart-upload client. The same shape
+is used at different route prefixes for repo checkpoints
+(/api/v1/repos/:owner/:repo/jobs/:job_id/uploads), datasets
+(/api/v1/datasets/:dataset_id/uploads), endpoint source
+(/api/v1/endpoints/:owner/:endpoint/releases/uploads), and user media
+(/api/v1/media/uploads).
 """
 
 from __future__ import annotations
