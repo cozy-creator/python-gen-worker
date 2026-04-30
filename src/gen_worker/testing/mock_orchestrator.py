@@ -315,7 +315,7 @@ class WorkerSession:
         owner: str = "",
         invoker_id: str = "",
         timeout_ms: int = 0,
-        required_variant_refs: Tuple[str, ...] = (),
+        required_flavor_refs: Tuple[str, ...] = (),
         input_ref_urls: Optional[Dict[str, str]] = None,
     ) -> str:
         rid = request_id or str(uuid.uuid4())
@@ -327,7 +327,7 @@ class WorkerSession:
             request_id=rid,
             function_name=function_name,
             input_payload=raw,
-            required_variant_refs=list(required_variant_refs),
+            required_flavor_refs=list(required_flavor_refs),
             timeout_ms=timeout_ms,
             owner=owner,
             invoker_id=invoker_id,
@@ -560,7 +560,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             timeout_ms=int(args.timeout_ms),
             owner=args.owner,
             invoker_id=args.invoker_id,
-            required_variant_refs=tuple(args.required_model),
+            required_flavor_refs=tuple(args.required_model),
             input_ref_urls=input_ref_urls or None,
         )
         print(f"[sent] request_id={request_id} function={args.function_name!r}")

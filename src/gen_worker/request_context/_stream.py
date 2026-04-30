@@ -14,7 +14,7 @@ import time
 import tempfile
 import urllib.parse
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional
 
 from blake3 import blake3
 
@@ -49,7 +49,8 @@ class _RequestOutputStream:
         epoch_number: Optional[int] = None,
         output_kind: Optional[str] = None,
         target_dtype: Optional[str] = None,
-        variant_label: Optional[str] = None,
+        flavor: Optional[str] = None,
+        attributes: Optional[Mapping[str, str]] = None,
     ) -> None:
         from ..presigned_upload import blake3_hash_file, presigned_upload_file
 
@@ -65,7 +66,17 @@ class _RequestOutputStream:
         self._lineage_epoch_number = epoch_number if isinstance(epoch_number, int) else None
         self._lineage_output_kind = (str(output_kind or "").strip() or None)
         self._lineage_target_dtype = (str(target_dtype or "").strip() or None)
-        self._lineage_variant_label = (str(variant_label or "").strip() or None)
+        self._lineage_flavor = (str(flavor or "").strip() or None)
+        # Free-form attribute map. Carried onto /complete alongside structured
+        # lineage so tenants can attach extension metadata (provenance, recipe
+        # hints, etc.) without requiring new wire fields per attribute. Server
+        # may or may not currently consume; field is forward-compatible.
+        if attributes:
+            self._lineage_attributes: Dict[str, str] = {
+                str(k): str(v) for k, v in dict(attributes).items() if str(k).strip()
+            }
+        else:
+            self._lineage_attributes = {}
         if self._expected_size_bytes < 0:
             self._expected_size_bytes = 0
         if self._expected_size_bytes > 0:
@@ -195,7 +206,8 @@ class _RequestOutputStream:
                         epoch_number=self._lineage_epoch_number,
                         output_kind=self._lineage_output_kind,
                         target_dtype=self._lineage_target_dtype,
-                        variant_label=self._lineage_variant_label,
+                        flavor=self._lineage_flavor,
+                        attributes=self._lineage_attributes or None,
                     )
                 else:
                     if self._create:
@@ -377,8 +389,10 @@ class _RequestOutputStream:
                 extra["output_kind"] = self._lineage_output_kind
             if self._lineage_target_dtype:
                 extra["target_dtype"] = self._lineage_target_dtype
-            if self._lineage_variant_label:
-                extra["variant_label"] = self._lineage_variant_label
+            if self._lineage_flavor:
+                extra["flavor"] = self._lineage_flavor
+            if self._lineage_attributes:
+                extra["attributes"] = dict(self._lineage_attributes)
             if extra:
                 complete_extra = extra
 

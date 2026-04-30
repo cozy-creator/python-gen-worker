@@ -13,11 +13,22 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+from .hf_classifier import (
+    ClassificationInputs,
+    RepoClassification,
+    RepoRefusal,
+    RepoTooLarge,
+    SelectionResult,
+    _SIZE_REFUSE_BYTES,
+    _SIZE_WARN_BYTES,
+    classify_huggingface_repo,
+    select_for_classification,
+)
 from .layout import (
     canonical_model_family_from_variant,
     infer_model_family_variant_from_hint,
-    select_huggingface_source_files,
 )
+from .safetensors_header import read_safetensors_header_metadata_from_hf
 
 _log = logging.getLogger(__name__)
 
@@ -576,33 +587,6 @@ def _split_hf_repo_ref(source_repo: str) -> tuple[str, str | None]:
     return raw, revision
 
 
-def _pick_hf_weight_file(files: list[str]) -> str:
-    if not files:
-        raise ValueError("huggingface repo has no files")
-    ranked: list[tuple[int, int, str]] = []
-    for item in files:
-        name = str(item or "").strip()
-        if name == "":
-            continue
-        lower = name.lower()
-        score = 9999
-        if lower.endswith(".safetensors"):
-            score = 0
-        elif lower.endswith(".ckpt"):
-            score = 1
-        elif lower.endswith(".pt"):
-            score = 2
-        elif lower.endswith(".bin"):
-            score = 3
-        if score >= 9999:
-            continue
-        ranked.append((score, len(name), name))
-    if not ranked:
-        raise ValueError("huggingface repo has no supported weight file (.safetensors/.ckpt/.pt/.bin)")
-    ranked.sort()
-    return ranked[0][2]
-
-
 def _sha256_file(path: Path) -> str:
     hasher = hashlib.sha256()
     with path.open("rb") as f:
@@ -728,64 +712,386 @@ def list_huggingface_repo_files(
     }
 
 
+def _fetch_classification_inputs(
+    repo_id: str,
+    revision: str,
+    listing_files: list[dict[str, object]],
+    *,
+    token: str | None,
+    work_dir: Path,
+) -> ClassificationInputs:
+    """Pull just the cheap signals the classifier needs.
+
+    - file paths + sizes (from the listing the caller already fetched)
+    - tiny root config files (model_index.json / config.json /
+      adapter_config.json / modules.json / config_sentence_transformers.json) —
+      only when present in the listing
+    - README YAML frontmatter (parsed via HfApi.model_info().card_data)
+    - safetensors `__metadata__` block from the largest root .safetensors —
+      only when the listing has any root .safetensors and no structured
+      config (i.e. native-LoRA candidate territory)
+
+    No weight bytes are downloaded.
+    """
+    from huggingface_hub import HfApi, hf_hub_download
+
+    paths: list[str] = []
+    sizes: dict[str, int] = {}
+    for item in listing_files:
+        rel = str(item.get("path") or "").strip().replace("\\", "/").lstrip("/")
+        if not rel:
+            continue
+        paths.append(rel)
+        size = item.get("size_bytes")
+        if isinstance(size, int):
+            sizes[rel] = int(size)
+
+    root_set = {p for p in paths if "/" not in p}
+
+    def _maybe_load_json(filename: str) -> Mapping[str, object] | None:
+        if filename not in root_set:
+            return None
+        try:
+            local = hf_hub_download(
+                repo_id=repo_id, filename=filename, revision=revision,
+                local_dir=str(work_dir), local_dir_use_symlinks=False, token=token,
+            )
+        except Exception as exc:
+            _log.debug("could not fetch %s for classification: %s", filename, exc)
+            return None
+        try:
+            with open(local, "r", encoding="utf-8") as fh:
+                return json.load(fh)
+        except Exception as exc:
+            _log.debug("could not parse %s as JSON: %s", filename, exc)
+            return None
+
+    def _maybe_load_modules_json() -> Mapping[str, object] | list | None:
+        # modules.json is typically a top-level list, not an object
+        if "modules.json" not in root_set:
+            return None
+        try:
+            local = hf_hub_download(
+                repo_id=repo_id, filename="modules.json", revision=revision,
+                local_dir=str(work_dir), local_dir_use_symlinks=False, token=token,
+            )
+            with open(local, "r", encoding="utf-8") as fh:
+                return json.load(fh)
+        except Exception as exc:
+            _log.debug("could not load modules.json: %s", exc)
+            return None
+
+    model_index = _maybe_load_json("model_index.json")
+    config = _maybe_load_json("config.json")
+    adapter_config = _maybe_load_json("adapter_config.json")
+    modules = _maybe_load_modules_json()
+    cfg_st = _maybe_load_json("config_sentence_transformers.json")
+
+    # README YAML frontmatter via HfApi.model_info (one HTTP call).
+    frontmatter: dict[str, object] = {}
+    try:
+        api = HfApi(token=token)
+        info = api.model_info(repo_id=repo_id, revision=revision or None)
+        card_data = getattr(info, "card_data", None)
+        if card_data is not None:
+            # ModelCardData supports to_dict(); fall back to vars() if not
+            try:
+                frontmatter = dict(card_data.to_dict())  # type: ignore[union-attr]
+            except Exception:
+                try:
+                    frontmatter = {k: v for k, v in vars(card_data).items()
+                                   if not k.startswith("_")}
+                except Exception:
+                    frontmatter = {}
+    except Exception as exc:
+        _log.debug("could not fetch model_info for frontmatter: %s", exc)
+
+    # Safetensors __metadata__ peek for native-LoRA detection.
+    # Only relevant when there's a root .safetensors AND no structured
+    # signals (model_index/config/adapter/modules) — that's the only path
+    # native_lora classification could fire on.
+    root_st_metadata: Mapping[str, str] | None = None
+    root_st_path: str | None = None
+    has_structured = bool(model_index or config or adapter_config or modules or cfg_st)
+    if not has_structured:
+        root_st = sorted(
+            (p for p in root_set if p.lower().endswith(".safetensors")),
+            key=lambda p: -int(sizes.get(p, 0)),
+        )
+        for candidate in root_st[:1]:  # only the largest
+            md = read_safetensors_header_metadata_from_hf(
+                repo_id=repo_id,
+                filename=candidate,
+                revision=revision or "main",
+                token=token,
+            )
+            if md:
+                root_st_metadata = md
+                root_st_path = candidate
+                break
+
+    return ClassificationInputs(
+        file_paths=paths,
+        file_sizes=sizes,
+        model_index_json=model_index,
+        config_json=config,
+        adapter_config_json=adapter_config,
+        modules_json=modules,  # type: ignore[arg-type]
+        config_sentence_transformers_json=cfg_st,
+        readme_frontmatter=frontmatter,
+        root_safetensors_metadata=root_st_metadata,
+        root_safetensors_path=root_st_path,
+    )
+
+
 def download_huggingface_repo_files(
     source_repo: str,
     output_dir: Path,
     *,
     source_revision: str | None = None,
-    source_layout_preference: str | None = None,
     source_dtype_preference: list[str] | None = None,
+    gguf_quant: str | None = None,
+    allow_large: bool = False,
     progress_callback: Callable[[int, int | None], None] | None = None,
+    # Legacy parameter kept for compatibility — ignored under the new
+    # classifier-driven flow. The classifier picks the strategy from the
+    # repo's structured signals; there is no per-call layout override.
+    source_layout_preference: str | None = None,
+    # e2e progress.json #72: when the user requested multiple concrete
+    # dtypes from a single repo (`outputs: [{dtype: f16}, {dtype: q4_k_m}]`),
+    # the per-strategy selectors are run once per dtype and the results
+    # union'd into the download set. The return dict carries `selections`
+    # (list[dict]), one entry per requested dtype, so the caller can publish
+    # N checkpoints under the same destination tag with distinct attributes.
+    # Empty / None falls back to the single-dtype path (back-compat).
+    dtype_outputs: list[str] | None = None,
 ) -> dict[str, object]:
+    """Classify the HF repo, select the minimal file set, and download it.
+
+    See gen_worker.conversion.hf_classifier for the strategy table.
+    """
     try:
         from huggingface_hub import hf_hub_download
     except Exception as exc:
         raise RuntimeError("huggingface_hub is required for clone_huggingface source_repo ingestion") from exc
 
-    normalized_layout_preference = str(source_layout_preference or "auto").strip().lower() or "auto"
-    normalized_dtype_preference = [
+    _ = source_layout_preference  # accepted for back-compat, no longer consulted
+    dtype_pref = tuple(
         str(p or "").strip().lower() for p in (source_dtype_preference or []) if str(p or "").strip()
-    ]
+    ) or ("bf16", "fp16", "fp32")
+
     listing = list_huggingface_repo_files(source_repo, source_revision=source_revision)
     repo_id = str(listing.get("source_repo") or "")
     revision = str(listing.get("source_revision") or "")
-    all_files = [dict(item) for item in list(listing.get("files") or []) if isinstance(item, dict)]
-    selection = select_huggingface_source_files(
-        files=[str(item.get("path") or "") for item in all_files],
-        source_layout_preference=normalized_layout_preference,
-        source_dtype_preference=normalized_dtype_preference,
-    )
-    selected_paths = set(selection.selected_paths)
-    files = [dict(item) for item in all_files if str(item.get("path") or "") in selected_paths]
-    if not files:
-        raise ValueError("huggingface repo has no files after source layout selection")
-    total_bytes_hint = sum(int(item.get("size_bytes") or 0) for item in files)
-    if total_bytes_hint <= 0:
-        total_bytes_hint = None
+    all_files_list = [dict(item) for item in list(listing.get("files") or []) if isinstance(item, dict)]
 
     output_dir.mkdir(parents=True, exist_ok=True)
-
     token = _env_first_nonempty(_HF_TOKEN_ENV_ALIASES) or None
-    downloaded = 0
-    materialized: list[dict[str, object]] = []
-    for item in files:
-        rel_path = str(item.get("path") or "").strip()
-        if rel_path == "":
+
+    # Classification (no weight downloads).
+    classification_inputs = _fetch_classification_inputs(
+        repo_id, revision, all_files_list, token=token, work_dir=output_dir,
+    )
+    classification = classify_huggingface_repo(classification_inputs)
+    if classification.refusal is not None:
+        # Refusal is informative — propagate to caller.
+        raise classification.refusal
+
+    # Strategy-specific selection.
+    # e2e progress.json #72: when caller passes dtype_outputs with >1 entry,
+    # run the per-strategy selector once per dtype and union the file set.
+    # Each entry carries its own attrs (with the concrete dtype stamped),
+    # surfaced in `selections` of the return dict for the caller to publish
+    # N checkpoints under the same tag.
+    requested_dtypes = [str(d or "").strip().lower() for d in (dtype_outputs or []) if str(d or "").strip()]
+    multi_selections: list[SelectionResult] = []
+    if len(requested_dtypes) > 1:
+        if classification.strategy == "gguf":
+            from .hf_classifier import select_for_classification_multi
+            multi_selections = select_for_classification_multi(
+                classification, classification_inputs,
+                gguf_quants=requested_dtypes,
+                weight_index_json_by_file=None,
+            )
+        else:
+            # transformers/diffusers Phase 2: detect side-by-side dtype
+            # variants (`model.bf16.safetensors` + `model.fp16.safetensors`)
+            # by re-running the selector with each requested dtype as the
+            # primary preference; entries that don't resolve fall through
+            # to the existing convert/quantize flow downstream.
+            for dt in requested_dtypes:
+                single_pref = (dt,) + tuple(p for p in dtype_pref if p != dt)
+                try:
+                    sel = select_for_classification(
+                        classification, classification_inputs,
+                        dtype_pref=single_pref,
+                        gguf_quant=None,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    _log.info(
+                        "multi-dtype selector skipped dtype=%s: %s — caller falls "
+                        "through to convert/quantize flow",
+                        dt, exc,
+                    )
+                    continue
+                # Stamp the concrete dtype on the per-checkpoint attrs.
+                attrs = dict(sel.attrs)
+                attrs.setdefault("dtype", dt)
+                multi_selections.append(SelectionResult(
+                    selected_paths=list(sel.selected_paths),
+                    skipped_paths=list(sel.skipped_paths),
+                    attrs=attrs,
+                    pickle_files_refused=list(sel.pickle_files_refused),
+                ))
+
+    if multi_selections:
+        # Union the file sets and dedupe; one download per unique path.
+        union_paths: set[str] = set()
+        for s in multi_selections:
+            for p in s.selected_paths:
+                union_paths.add(p)
+        # Use the first selection's attrs as the canonical "primary" for
+        # back-compat with single-dtype consumers; each per-checkpoint
+        # attrs is preserved in `selections` of the return dict.
+        selection = SelectionResult(
+            selected_paths=sorted(union_paths),
+            skipped_paths=[],
+            attrs=dict(multi_selections[0].attrs),
+            pickle_files_refused=list(multi_selections[0].pickle_files_refused),
+        )
+    else:
+        selection = select_for_classification(
+            classification, classification_inputs,
+            dtype_pref=dtype_pref,
+            gguf_quant=gguf_quant,
+        )
+
+    # Map the new selection back to the listing rows so we have sizes + sha256.
+    selected_set = set(selection.selected_paths)
+    files_to_download = [
+        item for item in all_files_list
+        if str(item.get("path") or "").strip().replace("\\", "/").lstrip("/") in selected_set
+    ]
+    if not files_to_download:
+        raise ValueError("huggingface classification produced empty selection")
+
+    # Size budget gate.
+    total_bytes_hint = sum(int(item.get("size_bytes") or 0) for item in files_to_download)
+    if total_bytes_hint > _SIZE_REFUSE_BYTES and not allow_large:
+        raise RepoTooLarge(
+            files_seen=[str(item.get("path") or "") for item in files_to_download],
+            extra=f"selected_bytes={total_bytes_hint} cap={_SIZE_REFUSE_BYTES}",
+        )
+    if total_bytes_hint > _SIZE_WARN_BYTES:
+        _log.warning(
+            "clone selected size %.1f GB exceeds soft warn threshold (%d GB)",
+            total_bytes_hint / (1024 ** 3),
+            _SIZE_WARN_BYTES // (1024 ** 3),
+        )
+
+    # Structured selection summary log.
+    skipped_bytes = sum(
+        int(item.get("size_bytes") or 0)
+        for item in all_files_list
+        if str(item.get("path") or "").strip().replace("\\", "/").lstrip("/") not in selected_set
+    )
+    _log.info(
+        "clone.ingest.selection_summary repo_type=%s runtime_library=%s subtype=%s "
+        "selected_count=%d selected_bytes=%d skipped_count=%d skipped_bytes=%d "
+        "pickle_files_refused=%d lineage_source=%s",
+        classification.strategy,
+        classification.runtime_library,
+        classification.subtype or "",
+        len(selection.selected_paths),
+        total_bytes_hint,
+        len(selection.skipped_paths),
+        skipped_bytes,
+        len(selection.pickle_files_refused),
+        selection.attrs.get("lineage_source", ""),
+    )
+
+    # Pre-filter pickle files (defense-in-depth — selector should have already).
+    cleaned: list[dict[str, object]] = []
+    for item in files_to_download:
+        rel_path = str(item.get("path") or "").strip().replace("\\", "/").lstrip("/")
+        if not rel_path:
+            continue
+        low = rel_path.lower()
+        if low.endswith((".bin", ".ckpt", ".pt", ".pth")):
+            _log.error("pickle_blocklist_violation: %s slipped past selector", rel_path)
             continue
         size_bytes = item.get("size_bytes")
         if isinstance(size_bytes, int) and size_bytes > _MAX_SOURCE_FILE_BYTES:
             raise ValueError(
                 f"huggingface source file exceeds 20GB policy limit: {rel_path} ({size_bytes} bytes)"
             )
+        cleaned.append(item)
+    files_to_download = cleaned
+    files_total = len(files_to_download)
 
-        local_path = hf_hub_download(
-            repo_id=repo_id,
-            filename=rel_path,
-            revision=revision,
-            local_dir=str(output_dir),
-            local_dir_use_symlinks=False,
-            token=token,
-        )
+    # Parallel download with aggregate progress (e2e progress.json #69).
+    # Default parallelism=4; HF hub rate-limits aggressively above ~8.
+    # Per-file hash + size verification is preserved.
+    import threading
+    import time as _time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    max_workers_env = os.getenv("GEN_WORKER_HF_DOWNLOAD_PARALLELISM", "4")
+    try:
+        max_workers = max(1, int(max_workers_env))
+    except ValueError:
+        max_workers = 4
+    if files_total < max_workers:
+        max_workers = max(1, files_total)
+
+    state_lock = threading.Lock()
+    state = {
+        "bytes_completed": 0,
+        "files_completed": 0,
+        "files_in_flight": 0,
+        "start_ts": _time.monotonic(),
+        "last_emit_ts": 0.0,
+    }
+
+    def _emit_progress() -> None:
+        if progress_callback is None:
+            return
+        with state_lock:
+            now = _time.monotonic()
+            if now - state["last_emit_ts"] < 1.5:
+                return
+            state["last_emit_ts"] = now
+            elapsed = max(now - state["start_ts"], 1e-3)
+            payload = {
+                "bytes_written": state["bytes_completed"],
+                "bytes_total": total_bytes_hint,
+                "files_completed": state["files_completed"],
+                "files_total": files_total,
+                "files_in_flight": state["files_in_flight"],
+                "bytes_per_sec_avg": float(state["bytes_completed"]) / elapsed,
+            }
+        # Best-effort — older callers expect (bytes_written, total_bytes) only;
+        # newer callers can introspect a richer dict by checking the type.
+        try:
+            progress_callback(payload["bytes_written"], payload["bytes_total"])  # type: ignore[arg-type]
+        except Exception:
+            pass
+
+    def _download_one(item: dict) -> dict:
+        rel_path = str(item.get("path") or "").strip().replace("\\", "/").lstrip("/")
+        size_bytes = item.get("size_bytes")
+        with state_lock:
+            state["files_in_flight"] += 1
+        try:
+            local_path = hf_hub_download(
+                repo_id=repo_id,
+                filename=rel_path,
+                revision=revision,
+                local_dir=str(output_dir),
+                local_dir_use_symlinks=False,
+                token=token,
+            )
+        finally:
+            pass
         local_size = int(os.path.getsize(local_path))
         if local_size > _MAX_SOURCE_FILE_BYTES:
             raise ValueError(
@@ -793,17 +1099,16 @@ def download_huggingface_repo_files(
             )
         if isinstance(size_bytes, int) and size_bytes > 0 and local_size != size_bytes:
             raise ValueError(f"source_download_size_mismatch: expected={size_bytes} got={local_size}")
-
         expected_sha256 = _normalize_sha256(item.get("expected_sha256"))
         if expected_sha256 != "":
             got_sha = _sha256_file(Path(local_path))
             if got_sha != expected_sha256:
                 raise ValueError(f"source_download_sha256_mismatch: expected={expected_sha256} got={got_sha}")
-
-        downloaded += local_size
-        if progress_callback is not None:
-            progress_callback(downloaded, total_bytes_hint)
-
+        with state_lock:
+            state["bytes_completed"] += local_size
+            state["files_completed"] += 1
+            state["files_in_flight"] -= 1
+        _emit_progress()
         row: dict[str, object] = {
             "path": rel_path,
             "local_path": str(local_path),
@@ -811,91 +1116,98 @@ def download_huggingface_repo_files(
         }
         if expected_sha256 != "":
             row["expected_sha256"] = expected_sha256
-        materialized.append(row)
+        return row
+
+    materialized: list[dict[str, object]] = []
+    if max_workers <= 1 or files_total <= 1:
+        # Single-thread path (legacy behavior; same code path)
+        for item in files_to_download:
+            materialized.append(_download_one(item))
+    else:
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = [pool.submit(_download_one, item) for item in files_to_download]
+            try:
+                for fut in as_completed(futures):
+                    materialized.append(fut.result())
+            except Exception:
+                # Cancel remaining work; let the ThreadPoolExecutor wind down.
+                for fut in futures:
+                    fut.cancel()
+                raise
 
     total_bytes = sum(int(v.get("size_bytes") or 0) for v in materialized)
+    # Final progress flush (overrides the 1.5s rate limit) so callers see the
+    # last 100% tick.
+    if progress_callback is not None:
+        try:
+            progress_callback(total_bytes, total_bytes_hint)
+        except Exception:
+            pass
 
-    # Refine dtype for unsuffixed safetensors via header peek. The filename
-    # heuristic labels `diffusion_pytorch_model.safetensors` (no dtype suffix)
-    # as fp32, but HF repos routinely ship it bf16-native. Without this
-    # refinement, an unsuffixed bf16 source + `target=bf16` would run a
-    # wasteful identity conversion instead of taking the passthrough path.
-    from .dtype_utils import (
-        parse_weight_file,
-        read_safetensors_header_dtype,
+    # Lineage-resolved log event (LoRA-only meaningful but always emit).
+    _log.info(
+        "clone.ingest.lineage_resolved repo=%s strategy=%s runtime=%s lineage=%s source_kind=%s",
+        repo_id,
+        classification.strategy,
+        classification.runtime_library,
+        selection.attrs.get("base_model_lineage", ""),
+        selection.attrs.get("lineage_source", ""),
     )
 
-    refined_dtype_by_component = dict(selection.dtype_by_component or {})
-    for item in materialized:
-        rel_path = str(item.get("path") or "")
-        local_path = str(item.get("local_path") or "")
-        if not rel_path or not local_path or not local_path.endswith(".safetensors"):
-            continue
-        info = parse_weight_file(rel_path)
-        if info is None:
-            continue
-        header_dtype = read_safetensors_header_dtype(local_path)
-        if not header_dtype:
-            continue
-        if header_dtype != info.dtype:
-            # Filename suffix and safetensors header disagree. The header is
-            # authoritative (it's what the file actually contains); the
-            # suffix is a naming convention callers are free to violate.
-            # Most common case: `*.safetensors` (unsuffixed) → labeled fp32
-            # from filename but actually bf16 in the bytes. Also covers the
-            # less common `*.fp16.safetensors` that's really bf16.
-            _log.warning(
-                "source dtype disagreement: %s filename→%s vs header→%s; trusting header",
-                rel_path,
-                info.dtype,
-                header_dtype,
-            )
-            refined_dtype_by_component[info.base_key] = header_dtype
+    # Map strategy → legacy `selected_source_layout` value used by callers
+    # that haven't been ported to attrs yet.
+    legacy_layout = {
+        "diffusers": "diffusers",
+        "transformers": "transformers",
+        "peft_canonical": "peft",
+        "native_lora": "native_lora",
+        "sentence_transformers": "sentence_transformers",
+        "gguf": "gguf",
+        "aio_singlefile": "singlefile",
+    }.get(classification.strategy, "unknown")
 
     return {
         "source_repo": repo_id,
         "source_revision": revision,
-        "source_layout_preference": normalized_layout_preference,
-        "source_dtype_preference": normalized_dtype_preference,
-        "selected_source_layout": selection.selected_source_layout,
-        "selected_aio_path": selection.selected_aio_path,
-        "source_layout_selection_reason": selection.selection_reason,
-        "source_layout_detection_reason": selection.detection_reason,
-        "source_dtype_by_component": refined_dtype_by_component,
-        "source_dtype_dropped_paths": list(selection.dropped_paths or ()),
         "files": materialized,
         "file_count": len(materialized),
         "total_bytes": int(total_bytes),
+        # New classification fields.
+        "strategy": classification.strategy,
+        "runtime_library": classification.runtime_library,
+        "subtype": classification.subtype,
+        "attrs": dict(selection.attrs),
+        "pickle_files_refused": list(selection.pickle_files_refused),
+        "selected_count": len(selection.selected_paths),
+        "skipped_count": len(selection.skipped_paths),
+        "selected_bytes": int(total_bytes_hint),
+        "skipped_bytes": int(skipped_bytes),
+        # Legacy fields for back-compat with _shared.py + downstream consumers
+        # that haven't been updated to the new attrs/runtime_library shape.
+        "selected_source_layout": legacy_layout,
+        "selected_aio_path": (
+            selection.selected_paths[0]
+            if classification.strategy == "aio_singlefile" and selection.selected_paths
+            else ""
+        ),
+        "source_layout_selection_reason": classification.detection_reason,
+        "source_layout_detection_reason": classification.detection_reason,
+        "source_dtype_by_component": {},
+        "source_dtype_dropped_paths": [],
+        "source_dtype_preference": list(dtype_pref),
+        # e2e progress.json #72: per-checkpoint selections when the caller
+        # requested multiple concrete dtypes from a single repo. Empty when
+        # `dtype_outputs` is empty / single-element. Each entry mirrors the
+        # singleton fields above scoped to one resolved dtype.
+        "selections": [
+            {
+                "attrs": dict(s.attrs),
+                "selected_paths": list(s.selected_paths),
+                "selected_count": len(s.selected_paths),
+            }
+            for s in multi_selections
+        ],
     }
-
-
-def source_huggingface_to_cas(
-    source_repo: str,
-    output_path: Path,
-    *,
-    source_revision: str | None = None,
-    progress_callback: Callable[[int, int | None], None] | None = None,
-) -> dict[str, str | int]:
-    try:
-        from huggingface_hub import hf_hub_download, list_repo_files
-    except Exception as exc:
-        raise RuntimeError("huggingface_hub is required for clone_huggingface source_repo ingestion") from exc
-
-    repo_id, revision = resolve_huggingface_source_identity(source_repo, source_revision=source_revision)
-    token = _env_first_nonempty(_HF_TOKEN_ENV_ALIASES) or None
-    files = list_repo_files(repo_id=repo_id, revision=revision, token=token)
-    filename = _pick_hf_weight_file([str(v or "") for v in files])
-    local_file = hf_hub_download(
-        repo_id=repo_id,
-        filename=filename,
-        revision=revision,
-        token=token,
-    )
-    info = _copy_with_hash_and_progress(Path(local_file), output_path, progress_callback=progress_callback)
-    info["source_repo"] = repo_id
-    info["source_revision"] = revision
-    info["source_filename"] = filename
-    return info
 
 
 def _parse_civitai_size_bytes(raw: object) -> int | None:
@@ -1727,6 +2039,5 @@ __all__ = [
     "resolve_civitai_source_identity",
     "resolve_civitai_frontend_model_url",
     "resolve_huggingface_source_identity",
-    "source_huggingface_to_cas",
     "source_url_to_cas",
 ]

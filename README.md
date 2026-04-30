@@ -177,6 +177,14 @@ Local dev / advanced (not injected by orchestrator):
 | `WORKER_MAX_UPLOAD_BYTES` | - | Max file upload size |
 | `WORKER_MAX_VRAM_GB` | Auto | Maximum VRAM for models |
 | `WORKER_VRAM_SAFETY_MARGIN_GB` | 3.5 | Reserved VRAM for working memory |
+| `COZY_INFERENCE_MEMORY_MODE` | `auto` | Force a low-VRAM ladder step: `auto`, `off`, `vae_only`, `model_offload`, `group_offload`, `sequential` |
+| `COZY_INFERENCE_VRAM_SAFETY_MARGIN_GB` | `2.0` | VRAM headroom (GB) the worker reserves for activations in the low-VRAM preflight |
+| `COZY_INFERENCE_VAE_SLICE_VRAM_GB` | `10.0` | Total-VRAM threshold below which `auto` enables VAE slicing/tiling + attention slicing |
+| `COZY_INFERENCE_MODEL_OFFLOAD_VRAM_GB` | `8.0` | Total-VRAM threshold below which `auto` enables `enable_model_cpu_offload()` |
+| `COZY_INFERENCE_GROUP_OFFLOAD_VRAM_GB` | `6.0` | Total-VRAM threshold below which `auto` enables leaf-level group offload |
+| `COZY_INFERENCE_AUTO_DISK_OFFLOAD` | `1` | Auto-enable disk offload when CPU RAM is tight; set to `0` to disable |
+| `COZY_INFERENCE_DISK_OFFLOAD_RAM_GB` | `16.0` | Available-RAM threshold below which disk offload activates |
+| `COZY_OFFLOAD_DIR` | `/tmp/cozy-offload` | Directory used by group offload when CPU RAM is insufficient |
 | `TENSORHUB_CACHE_DIR` | `~/.cache/tensorhub` | TensorHub cache root; worker CAS defaults derive from this (`${TENSORHUB_CACHE_DIR}/cas/...`) |
 | `WORKER_LOCAL_MODEL_CACHE_DIR` | `/tmp/tensorhub/local-model-cache` | Optional local (non-NFS) cache for snapshot localization |
 | `WORKER_REGISTER_TIMEOUT_S` | `90` | Startup watchdog: fail fast if worker never registers with scheduler |
@@ -193,6 +201,76 @@ Local dev / advanced (not injected by orchestrator):
 | `TRAINER_SAMPLES_DIR` | `/tmp/training/samples` | Local sample output directory in trainer mode |
 | `TRAINER_EVENTS_PATH` | - | Optional line-delimited JSON lifecycle event log for trainer mode |
 
+## Robust low-VRAM inference
+
+When a pipeline is larger than the available VRAM on the host, the worker
+does not crash with `torch.cuda.OutOfMemoryError`. It applies a progressive
+offload ladder:
+
+    off          no optimizations
+    vae_only     VAE slicing + VAE tiling (+ attention slicing where available)
+    model_offload  enable_model_cpu_offload()         (~10% slower)
+    group_offload  leaf-level group offload w/ CUDA streams (~25% slower)
+    sequential   enable_sequential_cpu_offload()     (~50%+ slower)
+
+### Worker baseline (always on)
+
+After a diffusers pipeline is injected via a `ModelRef` annotation, the
+worker in `_inject_pipeline()` runs:
+
+1. A VRAM preflight — if the estimated model size does not fit in free VRAM
+   (minus a safety margin), it skips `.to("cuda")` and installs
+   `enable_model_cpu_offload()` (or leaf-level group offload on very-small
+   GPUs) directly on the CPU-resident pipeline.
+2. `.to(device)` wrapped in up to three attempts. On
+   `torch.cuda.OutOfMemoryError` it flushes memory, escalates the pipeline
+   one ladder step (model → group → sequential), and retries.
+3. A baseline `apply_low_vram_config(pipeline, mode="auto")` pass that turns
+   on VAE tiling/slicing + attention slicing. Safe no-ops on pipelines that
+   don't expose those methods.
+
+Around the tenant's inference call, the worker additionally catches
+`torch.cuda.OutOfMemoryError` (for single-output functions), escalates each
+injected pipeline one step up the ladder, and retries the call up to twice.
+Each transition emits a `low_vram_mode_applied` or `inference.oom_retry`
+worker event.
+
+### Endpoint-authoring helper
+
+Endpoints that want explicit control over the mode can call
+`gen_worker.apply_low_vram_config(pipeline, mode=...)`. The default
+`mode="auto"` uses `COZY_INFERENCE_MEMORY_MODE` when set and otherwise picks
+the least-aggressive ladder step that fits the total VRAM of the host:
+
+```python
+from gen_worker import apply_low_vram_config, with_oom_retry
+
+with _lock_for_pipeline(pipeline):
+    apply_low_vram_config(pipeline, mode="sequential", logger=logger)
+    result = with_oom_retry(pipeline, prompt="...", num_inference_steps=8, pipelines=[pipeline])
+```
+
+### Disk offload (tight CPU RAM)
+
+When `COZY_INFERENCE_AUTO_DISK_OFFLOAD=1` (default) and available RAM is
+below `COZY_INFERENCE_DISK_OFFLOAD_RAM_GB` (default 16 GB), group offload
+stores offloaded weights on disk at `COZY_OFFLOAD_DIR`
+(default `/tmp/cozy-offload`) instead of CPU RAM. This is the only path
+that handles FLUX-class models on 8 GB-VRAM + 16 GB-RAM hosts, at the cost
+of much higher inference latency.
+
+### Operator observability
+
+Worker events emitted by the ladder:
+
+- `low_vram_mode_applied` — payload includes `model_id`, `stage`
+  (`preflight` | `baseline` | `oom_escalation`), `requested_mode`, and the
+  booleans for each enabler that was applied.
+- `inference.oom_retry` — payload includes `function_name` and `attempt`.
+
+Operators diagnosing "why is my endpoint slow" on undersized hardware should
+grep for these two event types.
+
 ## Metrics
 
 The worker can emit best-effort performance/debug metrics to gen-orchestrator via `WorkerEvent` messages.
@@ -204,9 +282,11 @@ See the **Observability** section in `docs/endpoint-authoring.md` for the event 
 Model refs are plain lower-case strings:
 - `owner/repo`
 - `owner/repo:tag`
+- `owner/repo:tag#flavor`
 - `owner/repo@blake3:<digest>`
+- `owner/repo@blake3:<digest>#flavor`
 
-Tags are mutable pointers that resolve to published versions.
+Tags are mutable pointers that resolve to published checkpoints. Flavors select a concrete artifact within that checkpoint, such as `bf16`, `fp8`, or `int4`.
 
 Cozy snapshot/object file downloads are written to `*.part` and then atomically renamed on success. If a `*.part` file exists from a previous interrupted download, the worker attempts to resume it using HTTP `Range` requests (if supported by the presigned object-store URL), and falls back to a full re-download if Range is not supported.
 

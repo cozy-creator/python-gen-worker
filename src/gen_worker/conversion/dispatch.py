@@ -18,7 +18,7 @@ At dispatch time:
   - For each non-reserved param: decode from payload[name] using msgspec,
     or materialize via ModelRef-PAYLOAD if annotated.
   - Call fn(**kwargs) with only the names the tenant declared.
-  - Upload each returned ProducedVariant; apply destination.tags on success.
+  - Upload each returned ProducedFlavor; apply destination.tags on success.
 
 See e2e progress.json issue #5 for the full contract.
 """
@@ -37,9 +37,10 @@ _log = logging.getLogger(__name__)
 
 from ..api.decorators import ResourceRequirements
 from ..api.injection import ModelRef, ModelRefSource, parse_injection
+from .calibration import CalibrationPolicy, lookup_policy, validate_policy_map
 from .context import ConversionContext
 from .dataset import Dataset
-from .produced import ProducedVariant
+from .produced import ProducedFlavor
 from .source import Source
 
 if TYPE_CHECKING:
@@ -65,6 +66,10 @@ RECOMMENDED_KINDS = frozenset({
     "fine-tuning",
     "fusion",
     "format-conversion",
+    # E2E issue #41 — dataset-generation endpoints (calibration dataset
+    # generator, eval-set builder, etc.) emit a dataset artifact, not a
+    # model checkpoint, but share the @training_function dispatch path.
+    "dataset-generation",
 })
 
 # Default when @training_function is used without kind=. Fine-tuning is
@@ -92,17 +97,21 @@ class TrainingFunctionSpec:
     string; see ``RECOMMENDED_KINDS`` for the coarse label set.
     """
 
-    __slots__ = ("fn", "signature", "ref_registry", "other_params", "input_schema", "kind")
+    __slots__ = (
+        "fn", "signature", "ref_registry", "other_params", "input_schema",
+        "kind", "calibration",
+    )
 
     def __init__(
         self,
         *,
-        fn: Callable[..., list[ProducedVariant]],
+        fn: Callable[..., list[ProducedFlavor]],
         signature: inspect.Signature,
         ref_registry: dict[str, str],
         other_params: dict[str, inspect.Parameter],
         input_schema: dict,
         kind: str,
+        calibration: dict[str, CalibrationPolicy] | None = None,
     ) -> None:
         self.fn = fn
         self.signature = signature
@@ -117,16 +126,24 @@ class TrainingFunctionSpec:
         # → JSON schema `enum` mapping.
         self.input_schema = input_schema
         self.kind = kind
+        # Per-scheme calibration policy (e2e #41/#42). See
+        # gen_worker.conversion.calibration for the three policies
+        # (required / beneficial / unsupported) and the resolver helper.
+        # Empty dict for non-quantization functions; discovery emits this
+        # into endpoint.lock so orchestrator / UI can surface "needs a
+        # dataset" to callers up-front.
+        self.calibration: dict[str, CalibrationPolicy] = dict(calibration or {})
 
 
 def training_function(
-    fn: Callable[..., list[ProducedVariant]] | None = None,
+    fn: Callable[..., list[ProducedFlavor]] | None = None,
     *,
     kind: str = DEFAULT_KIND,
     concurrency: str = "sequential",
     label: str | None = None,
     description: str | None = None,
-) -> Callable[..., list[ProducedVariant]]:
+    calibration: dict[str, CalibrationPolicy] | None = None,
+) -> Callable[..., list[ProducedFlavor]]:
     """Mark a tenant function as a training endpoint (tensorhub #232).
 
     Usable as a plain decorator (``@training_function``) or with kwargs
@@ -141,6 +158,16 @@ def training_function(
             tensorhub #232 for the scheduler dispatch model.
         label: Optional author-supplied UI / search label. Non-functional.
         description: Optional free-text description. Non-functional.
+        calibration: Per-scheme calibration policy (e2e #41/#42), as a
+            ``{scheme_name: "required"|"beneficial"|"unsupported"}`` dict.
+            Tenants that quantize use this to declare, for each scheme
+            their function supports, whether a calibration dataset is
+            required (e.g. int4_awq), beneficial (e.g. modelopt fp8), or
+            unsupported (torchao int4_wo). Discovery bakes this into
+            endpoint.lock so the orchestrator / UI can tell callers up-
+            front "supply a dataset." At runtime the tenant calls
+            ``gen_worker.conversion.calibration.resolve_calibration_action``
+            to enforce policy per spec.
 
     At decorator time: validates the signature and attaches a
     ``TrainingFunctionSpec`` to the function as ``__training_spec__``.
@@ -155,13 +182,18 @@ def training_function(
     """
     # Support both @training_function and @training_function(kind=...).
     if fn is None:
-        def _apply(real_fn: Callable[..., list[ProducedVariant]]) -> Callable[..., list[ProducedVariant]]:
+        def _apply(real_fn: Callable[..., list[ProducedFlavor]]) -> Callable[..., list[ProducedFlavor]]:
             return _build_dispatch(
                 real_fn, kind=kind, concurrency=concurrency,
                 label=label, description=description,
+                calibration=calibration,
             )
         return _apply  # type: ignore[return-value]
-    return _build_dispatch(fn, kind=kind, concurrency=concurrency, label=label, description=description)
+    return _build_dispatch(
+        fn, kind=kind, concurrency=concurrency,
+        label=label, description=description,
+        calibration=calibration,
+    )
 
 
 def _validate_kind(fn_name: str, kind: str) -> None:
@@ -181,17 +213,21 @@ def _validate_kind(fn_name: str, kind: str) -> None:
 
 
 def _build_dispatch(
-    fn: Callable[..., list[ProducedVariant]],
+    fn: Callable[..., list[ProducedFlavor]],
     *,
     kind: str,
     concurrency: str = "sequential",
     label: str | None = None,
     description: str | None = None,
-) -> Callable[..., list[ProducedVariant]]:
+    calibration: dict[str, CalibrationPolicy] | None = None,
+) -> Callable[..., list[ProducedFlavor]]:
     """Inner: build the dispatch wrapper. Split from ``training_function`` so
     the same body serves both ``@training_function`` and
     ``@training_function(kind=...)`` entry paths."""
     _validate_kind(fn.__name__, kind)
+    validated_calibration: dict[str, CalibrationPolicy] = (
+        validate_policy_map(fn.__name__, calibration) if calibration else {}
+    )
     # Concurrency enum sanity check — matches CONCURRENCY_MODES in the
     # inference_function decorator. Tensorhub #232.
     if concurrency not in ("sequential", "batched", "concurrent"):
@@ -239,11 +275,18 @@ def _build_dispatch(
         # Plain tenant-named param — library decodes from payload at dispatch
         other_params[name] = p
 
-    for required in ("ctx", "source"):
-        if required not in sig.parameters:
-            raise TypeError(
-                f"{fn.__name__}: must declare required parameter '{required}'"
-            )
+    # ``ctx`` is always required. ``source`` is required for tenant
+    # functions that operate on a model checkpoint (cast_dtype, quantization,
+    # fine-tuning, ...). Dataset-generation tenants (e2e #45) don't need
+    # a source — prompt corpora are model-agnostic — so source is optional
+    # when kind starts with "dataset-generation".
+    if "ctx" not in sig.parameters:
+        raise TypeError(f"{fn.__name__}: must declare required parameter 'ctx'")
+    if "source" not in sig.parameters and not kind.startswith("dataset-generation"):
+        raise TypeError(
+            f"{fn.__name__}: must declare required parameter 'source' "
+            f"(only kind='dataset-generation' tenants may omit it)"
+        )
 
     input_schema = _build_wire_payload_schema(
         signature=sig,
@@ -258,9 +301,10 @@ def _build_dispatch(
         other_params=other_params,
         input_schema=input_schema,
         kind=kind,
+        calibration=validated_calibration,
     )
 
-    def dispatch(request_context: "RequestContext", payload: Any) -> list[ProducedVariant]:
+    def dispatch(request_context: "RequestContext", payload: Any) -> list[ProducedFlavor]:
         return _run(spec, request_context, payload)
 
     # Attach metadata so discovery / publish-time validation can read it.
@@ -281,6 +325,11 @@ def _build_dispatch(
     dispatch._concurrency_mode = concurrency  # type: ignore[attr-defined]
     dispatch._function_label = (label or "").strip() or None  # type: ignore[attr-defined]
     dispatch._function_description = (description or "").strip() or None  # type: ignore[attr-defined]
+    # Per-scheme calibration policy (e2e #41/#42). Discovery / endpoint.lock
+    # propagates this up so orchestrator + UI can flag calibrated schemes
+    # without a dataset BEFORE dispatch (faster than waiting for the worker
+    # to reject). Empty dict for functions that don't quantize.
+    dispatch._calibration_policy = dict(validated_calibration)  # type: ignore[attr-defined]
     return dispatch
 
 
@@ -293,17 +342,49 @@ def _run(
     spec: TrainingFunctionSpec,
     request_context: "RequestContext",
     payload: Any,
-) -> list[ProducedVariant]:
+) -> list[ProducedFlavor]:
     """Build kwargs from payload + inject library helpers; call the tenant."""
-    source = _build_source(request_context, payload)
+    # Only build the Source if the tenant declared it. Dataset-generation
+    # tenants (e2e #45) skip source to keep corpus generation model-agnostic.
+    source: Source | None = None
+    if "source" in spec.signature.parameters:
+        source = _build_source(request_context, payload)
     ctx = ConversionContext(request_context=request_context, source=source)
     datasets = _build_datasets(request_context, payload)
 
+    # Auto-enforce calibration policy. When a scheme's policy is
+    # ``unsupported``, reject any submitted datasets here so tenants don't
+    # need to repeat ``resolve_calibration_action`` calls in their bodies.
+    if datasets and spec.calibration:
+        raw_fields = _payload_as_dict(payload)
+        specs_field = raw_fields.get("specs") or []
+        if not isinstance(specs_field, list):
+            specs_field = []
+        for s in specs_field:
+            scheme = ""
+            if isinstance(s, dict):
+                scheme = str(s.get("scheme") or "")
+            if not scheme:
+                continue
+            policy = lookup_policy(spec.calibration, scheme)
+            if policy == "unsupported":
+                raise ValueError(
+                    f"{spec.fn.__name__}: scheme={scheme!r} does not accept a "
+                    f"calibration dataset (calibration='unsupported'); drop "
+                    f"--dataset and retry. For calibrated quantization use "
+                    f"modelopt_quantization."
+                )
+
     injected: dict[str, Any] = {
         "ctx": ctx,
-        "source": source,
-        "datasets": datasets,
     }
+    # Only inject ``datasets`` when the tenant declares the parameter.
+    # Tenants that don't accept calibration data (e.g. weight-only quant)
+    # can omit the parameter entirely.
+    if "datasets" in spec.signature.parameters:
+        injected["datasets"] = datasets
+    if source is not None:
+        injected["source"] = source
 
     raw_fields = _payload_as_dict(payload)
     kwargs: dict[str, Any] = {}
@@ -336,10 +417,10 @@ def _run(
     result = spec.fn(**kwargs)
     if not isinstance(result, list):
         raise TypeError(
-            f"{spec.fn.__name__}: must return list[ProducedVariant]; got "
+            f"{spec.fn.__name__}: must return list[ProducedFlavor]; got "
             f"{type(result).__name__}"
         )
-    # Upload each ProducedVariant to the destination + apply tags on success.
+    # Upload each ProducedFlavor to the destination + apply tags on success.
     # Library appends exactly one provenance key (`produced_by_job_id`) — see
     # e2e progress.json #5 for the rationale (every other input-to-the-job
     # lives in the orchestrator job record; duplicating onto the variant
@@ -350,31 +431,45 @@ def _run(
 
 def _finalize_produced_variants(
     request_context: "RequestContext",
-    variants: list[ProducedVariant],
+    variants: list[ProducedFlavor],
     *,
     kind: str,
 ) -> None:
-    """Upload each ProducedVariant's files, build its manifest + snapshot_digest,
-    and publish one repo_checkpoints row per variant via publish_repo_revision.
+    """Upload each ProducedFlavor's files, build its manifest + snapshot_digest,
+    and publish to the correct tensorhub subsystem based on ``kind``.
 
-    For every ProducedVariant the dispatch:
+    Routes by kind (e2e #45):
+
+    - ``kind.startswith("dataset-generation")`` → publish into
+      ``tensorhub.datasets`` via ``publish_dataset_revision``. Used by
+      ``generate_prompt_corpus`` / ``generate_eval_set``. File bytes land in
+      CAS same as checkpoints; the difference is the publish target —
+      dataset artifacts shouldn't pollute the model-checkpoint search space.
+    - everything else → publish into ``tensorhub.repo_checkpoints`` via
+      ``publish_repo_revision`` (the original path — model weights).
+
+    Upload flow in both branches:
       1. Walks the variant's output dir (or single file) and uploads each file
          via ``ctx.save_checkpoint``, capturing the blake3-keyed Tensors handle
          the upload returns.
       2. Builds a snapshot_manifest entry list from those handles:
          ``[{path, digest, size_bytes}]``.
       3. Computes ``snapshot_digest = sha256(canonical_json(entries))`` —
-         content-addresses the whole variant snapshot. That digest becomes the
-         ``checkpoint_id`` tensorhub stores.
-      4. Calls ``publish_repo_revision`` with the (snapshot_digest, manifest,
-         attributes) payload; server creates one ``tensorhub.repo_checkpoints``
-         row per variant, plus one lineage edge to the source checkpoint.
+         content-addresses the whole variant snapshot.
+      4. Calls the appropriate publish method with the snapshot_manifest
+         + attributes payload.
 
     ``destination.tags`` (e.g. ``:prod``) are forwarded to
-    ``publish_repo_revision`` so the tag + checkpoint land atomically. The
-    server manages ``:latest`` automatically.
+    ``publish_repo_revision`` in the checkpoint path so the tag + checkpoint
+    land atomically. Datasets use naming-based versioning (e2e #45 decision),
+    not tags — the publish_dataset_revision path ignores destination.tags.
     """
     if not variants:
+        return
+
+    is_dataset_gen = (kind or "").startswith("dataset-generation")
+    if is_dataset_gen:
+        _finalize_dataset_variants(request_context, variants, kind=kind)
         return
 
     job_id = str(getattr(request_context, "job_id", "") or "") \
@@ -395,7 +490,6 @@ def _finalize_produced_variants(
     source_ref = str(source_info.get("ref") or "").strip()
     source_checkpoint_id = str(
         source_info.get("checkpoint_id")
-        or source_info.get("variant_id")
         or ""
     ).strip()
     # Fallback: extract the snapshot_digest from the materialized source path.
@@ -427,10 +521,32 @@ def _finalize_produced_variants(
     if dest_vis in ("private", "public"):
         release_visibility = dest_vis
 
+    publish_checkpoint_flavors: list[dict[str, Any]] = []
+    aggregate_manifest_entries: list[dict[str, Any]] = []
+
     for variant in variants:
         merged_attrs = {**library_provenance, **dict(variant.attributes or {})}
+        flavor = str(
+            getattr(variant, "flavor", "")
+            or merged_attrs.get("flavor")
+            or merged_attrs.get("flavor")
+            or ""
+        ).strip()
+        flavors: list[str] = []
+        raw_flavors = getattr(variant, "flavors", []) or []
+        if isinstance(raw_flavors, list):
+            for raw_flavor in raw_flavors:
+                item = str(raw_flavor or "").strip()
+                if item and item not in flavors:
+                    flavors.append(item)
+        if flavor and flavor not in flavors:
+            flavors.insert(0, flavor)
+        if flavor:
+            merged_attrs["flavor"] = flavor
+        if flavors:
+            merged_attrs["flavors"] = ",".join(flavors)
         path = variant.path
-        _log.info("finalize variant: path=%s is_file=%s is_dir=%s dest=%s", path, path.is_file() if path else False, path.is_dir() if path else False, dest_ref)
+        _log.info("finalize flavor: path=%s flavor=%s is_file=%s is_dir=%s dest=%s", path, flavor, path.is_file() if path else False, path.is_dir() if path else False, dest_ref)
 
         # Upload every file under the variant and collect the returned Tensors.
         # Each Tensors handle carries the blake3 digest + size_bytes that
@@ -438,17 +554,17 @@ def _finalize_produced_variants(
         # snapshot_manifest.
         uploaded: list[tuple[str, Any]] = []
         if path.is_file():
-            t = _upload_single_file_variant(
+            t = _upload_single_file_flavor(
                 request_context, path, attributes=merged_attrs,
             )
             if t is not None:
                 uploaded.append((path.name, t))
         elif path.is_dir():
-            uploaded.extend(_upload_directory_variant(
+            uploaded.extend(_upload_directory_flavor(
                 request_context, path, attributes=merged_attrs,
             ))
         else:
-            raise FileNotFoundError(f"ProducedVariant.path does not exist: {path}")
+            raise FileNotFoundError(f"ProducedFlavor.path does not exist: {path}")
         _log.info("finalize uploaded %d files for variant at %s", len(uploaded), path)
 
         # Build manifest entries from the uploaded Tensors. Each entry is
@@ -475,53 +591,196 @@ def _finalize_produced_variants(
         if callable(publish_fn) and dest_ref and manifest_entries:
             v_attrs = dict(variant.attributes or {})
             # Issue #22: server-authoritative metadata. The body
-            # carries the manifest + variant_label + size only; server
+            # carries the manifest + flavor labels + size only; server
             # infers kind / library / dtype / file_layout / file_type
             # from the uploaded file contents and writes the canonical
             # values. file_type / file_layout / quantization / kind are
             # deliberately omitted — any caller-side value would be
             # ignored by the server anyway.
-            publish_output_variant = {
+            # Derive a meaningful display label from the recipe attrs the
+            # tenant supplied. Falls back to the output-dir basename only
+            # when no recipe info is available — that fallback used to leak
+            # `tmpXXXXXX` Python tempdir names into the catalog.
+            label = str(flavor or "").strip()
+            if not label:
+                recipe = str(v_attrs.get("quant_recipe") or "").strip()
+                if recipe:
+                    label = recipe.replace(":", "-").replace("/", "-")
+            if not label:
+                label = variant.path.name
+            publish_checkpoint_flavor = {
                 # checkpoint_id left empty — server fills it in from
                 # sha256(canonical(manifest.entries)).
                 "snapshot_digest":   "",
-                "variant_label":     str(v_attrs.get("variant_label") or variant.path.name),
+                "flavor":            flavor or label,
+                "flavors":           flavors or ([flavor or label] if flavor or label else []),
                 "size_bytes":        sum(e.get("size_bytes", 0) for e in manifest_entries),
                 # Per-variant manifest — publish_repo_revision forwards this
                 # to tensorhub so each checkpoint_id is hashed from only
-                # this variant's files, not an aggregate across variants.
+                # this flavor's files, not an aggregate across flavors.
                 "snapshot_manifest": manifest_entries,
+                # Issue #63: per-flavor tenant attributes (recipe ids, calib
+                # set refs, library version stamps). Merged with library_provenance
+                # on the publish_repo_revision body so they land on the catalog
+                # row alongside flavor/flavors/display_label.
+                "attributes":        dict(merged_attrs),
             }
-            metadata = {
-                "output_variants": [publish_output_variant],
-            }
-            # Top-level snapshot_manifest is still provided for the clone/
-            # legacy callers that only send one; it's ignored here because
-            # publish_output_variant carries the manifest inline.
-            snapshot_manifest = {
-                "version": 1,
-                "entries": manifest_entries,
-            }
+            publish_checkpoint_flavors.append(publish_checkpoint_flavor)
+            aggregate_manifest_entries.extend(manifest_entries)
+
+    if callable(publish_fn) and dest_ref and publish_checkpoint_flavors:
+        metadata = {
+            "checkpoint_flavors": publish_checkpoint_flavors,
+        }
+        # Each checkpoint flavor carries its own per-flavor manifest above;
+        # the aggregate manifest is kept only as request-level context.
+        snapshot_manifest = {
+            "version": 1,
+            "entries": aggregate_manifest_entries,
+        }
+        try:
+            publish_fn(
+                destination_repo=dest_ref,
+                metadata=metadata,
+                source_repo=source_ref,
+                source_version_id=source_checkpoint_id,
+                snapshot_manifest=snapshot_manifest,
+                relationship_kind=rel_kind,
+                release_visibility=release_visibility,
+                auto_create_external_parent=False,
+                destination_repo_tags=destination_tags,
+                merge_with_existing=True,
+            )
+        except Exception as exc:  # noqa: BLE001 — surface via event, don't fail the job
+            emit = getattr(request_context, "emit", None)
+            if emit is not None:
+                emit("transform.publish_failed", {
+                    "ref": dest_ref,
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
+
+
+def _finalize_dataset_variants(
+    request_context: "RequestContext",
+    variants: list[ProducedFlavor],
+    *,
+    kind: str,
+) -> None:
+    """Publish dataset-generation tenant outputs into ``tensorhub.datasets``.
+
+    E2E #45. Called from ``_finalize_produced_variants`` when the tenant's
+    kind starts with ``dataset-generation``. The flow:
+
+      1. Upload every file under the variant via ``ctx.save_checkpoint``
+         (reuses the same blob-CAS path as checkpoints; the bytes are
+         identical, only the catalog metadata differs).
+      2. Read ``dataset_info.json`` at the variant root — it's the
+         authoritative source of truth for features_json / kind / num_rows.
+      3. Call ``publish_dataset_revision`` to create (or update) the
+         ``tensorhub.datasets`` row. Per e2e #45's design decision, the
+         dataset table is mutable; versioning is by naming convention
+         (``partiprompts-256-v1`` vs ``partiprompts-256-v2`` are separate
+         dataset rows).
+
+    Failures in publish are surfaced as ``dataset.publish_failed`` events
+    rather than re-raised — the blob uploads already landed, so the
+    content is recoverable even if the catalog update fails.
+    """
+    import json as _json
+
+    destination = getattr(request_context, "destination", None) or {}
+    if not isinstance(destination, dict):
+        destination = {}
+    dest_ref = str(destination.get("ref") or "").strip()
+    if not dest_ref:
+        _log.warning("dataset publish: no destination.ref; uploads will succeed but no dataset row created")
+        return
+
+    release_visibility = str(destination.get("release_visibility") or destination.get("visibility") or "").strip().lower()
+    if release_visibility not in ("private", "public"):
+        release_visibility = "private"
+
+    job_id = str(getattr(request_context, "job_id", "") or "") \
+        or str(getattr(request_context, "request_id", "") or "")
+    library_provenance: dict[str, str] = {"produced_by_job_id": job_id, "produced_by_kind": kind}
+
+    publish_fn = getattr(request_context, "publish_dataset_revision", None)
+
+    for variant in variants:
+        merged_attrs = {**library_provenance, **dict(variant.attributes or {})}
+        path = variant.path
+        _log.info("dataset finalize: path=%s dest=%s", path, dest_ref)
+
+        # Upload files — same as checkpoint path, just lands in CAS.
+        uploaded: list[tuple[str, Any]] = []
+        if path.is_file():
+            t = _upload_single_file_flavor(request_context, path, attributes=merged_attrs)
+            if t is not None:
+                uploaded.append((path.name, t))
+        elif path.is_dir():
+            uploaded.extend(_upload_directory_flavor(request_context, path, attributes=merged_attrs))
+        else:
+            raise FileNotFoundError(f"ProducedFlavor.path does not exist: {path}")
+
+        # Build the snapshot_manifest from uploaded blob digests — records
+        # content identity for the revision even though the dataset row
+        # is mutable.
+        manifest_entries: list[dict[str, Any]] = []
+        for rel_path, t in uploaded:
+            digest = _tensors_blake3_digest(t)
+            if not digest:
+                continue
+            manifest_entries.append({
+                "path": rel_path,
+                "digest": digest,
+                "size_bytes": int(getattr(t, "size_bytes", 0) or 0),
+            })
+
+        # Parse dataset_info.json for features_json + kind. Falls back to
+        # a minimal schema if the file is missing (shouldn't happen — the
+        # tenants write it — but don't let a malformed snapshot nuke
+        # publish).
+        info_path = path / "dataset_info.json" if path.is_dir() else None
+        features_json: dict[str, Any] = {}
+        dataset_kind: str = ""
+        dataset_info: dict[str, Any] = {}
+        if info_path is not None and info_path.exists():
             try:
-                publish_fn(
-                    destination_repo=dest_ref,
-                    metadata=metadata,
-                    source_repo=source_ref,
-                    source_version_id=source_checkpoint_id,
-                    snapshot_manifest=snapshot_manifest,
-                    relationship_kind=rel_kind,
-                    release_visibility=release_visibility,
-                    auto_create_external_parent=False,
-                    destination_repo_tags=destination_tags,
-                    merge_with_existing=True,
-                )
-            except Exception as exc:  # noqa: BLE001 — surface via event, don't fail the job
-                emit = getattr(request_context, "emit", None)
-                if emit is not None:
-                    emit("transform.publish_failed", {
-                        "ref": dest_ref,
-                        "error": f"{type(exc).__name__}: {exc}",
-                    })
+                with open(info_path) as f:
+                    dataset_info = _json.load(f)
+                if isinstance(dataset_info, dict):
+                    features_json = dict(dataset_info.get("features") or {})
+                    dataset_kind = str(dataset_info.get("kind") or "")
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("dataset finalize: failed to parse dataset_info.json (%s)", exc)
+
+        if not callable(publish_fn):
+            _log.warning(
+                "dataset finalize: request_context.publish_dataset_revision missing; "
+                "blobs uploaded to CAS but no tensorhub.datasets row created. "
+                "gen-worker release needs bump."
+            )
+            continue
+
+        try:
+            result = publish_fn(
+                destination_dataset=dest_ref,
+                features_json=features_json,
+                row_artifacts_json=None,
+                snapshot_manifest=manifest_entries,
+                visibility=release_visibility,
+                kind=dataset_kind,
+                dataset_info=dataset_info,
+            )
+            _log.info("dataset finalize: published %s → %s", dest_ref, result)
+        except Exception as exc:  # noqa: BLE001
+            emit = getattr(request_context, "emit", None)
+            if emit is not None:
+                emit("dataset.publish_failed", {
+                    "ref": dest_ref,
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
+            _log.warning("dataset finalize: publish failed for %s: %s", dest_ref, exc)
 
 
 def _tensors_blake3_digest(t: Any) -> str:
@@ -540,7 +799,7 @@ def _tensors_blake3_digest(t: Any) -> str:
     return ""
 
 
-def _upload_single_file_variant(
+def _upload_single_file_flavor(
     request_context: "RequestContext",
     path: Path,
     *,
@@ -553,26 +812,22 @@ def _upload_single_file_variant(
     save_fn = getattr(request_context, "save_checkpoint", None)
     if save_fn is None:
         return None
-    ref = _default_variant_ref(request_context, path)
+    ref = _default_flavor_ref(request_context, path)
     format_hint = path.suffix.lstrip(".") or "bin"
-    try:
-        return save_fn(ref, str(path), format=format_hint, attributes=attributes)
-    except TypeError:
-        # Older RequestContext builds without the attributes kwarg — fall back.
-        return save_fn(ref, str(path), format=format_hint)
+    return save_fn(ref, str(path), format=format_hint, attributes=attributes)
 
 
-def _upload_directory_variant(
+def _upload_directory_flavor(
     request_context: "RequestContext",
     dir_path: Path,
     *,
     attributes: dict[str, str],
 ) -> list[tuple[str, Any]]:
-    """Upload every file under a directory variant; return ``[(rel_path, Tensors)]``."""
+    """Upload every file under a directory flavor; return ``[(rel_path, Tensors)]``."""
     save_fn = getattr(request_context, "save_checkpoint", None)
     if save_fn is None:
         return []
-    base_ref = _default_variant_ref(request_context, dir_path)
+    base_ref = _default_flavor_ref(request_context, dir_path)
     uploaded: list[tuple[str, Any]] = []
     for f in sorted(dir_path.rglob("*")):
         if not f.is_file():
@@ -580,16 +835,13 @@ def _upload_directory_variant(
         rel = f.relative_to(dir_path).as_posix()
         ref = f"{base_ref}/{rel}"
         format_hint = f.suffix.lstrip(".") or "bin"
-        try:
-            t = save_fn(ref, str(f), format=format_hint, attributes=attributes)
-        except TypeError:
-            t = save_fn(ref, str(f), format=format_hint)
+        t = save_fn(ref, str(f), format=format_hint, attributes=attributes)
         uploaded.append((rel, t))
     return uploaded
 
 
-def _default_variant_ref(request_context: "RequestContext", path: Path) -> str:
-    """Return a job-scoped ref for a produced variant."""
+def _default_flavor_ref(request_context: "RequestContext", path: Path) -> str:
+    """Return a job-scoped ref for a produced flavor."""
     job_id = str(getattr(request_context, "job_id", "") or "") \
         or str(getattr(request_context, "request_id", "r")) \
         or "r"
@@ -615,7 +867,21 @@ def _build_source(request_context: "RequestContext", payload: Any) -> Source:
 
 
 def _build_datasets(request_context: "RequestContext", payload: Any) -> list[Dataset]:
-    """Materialize each DatasetRef in payload.datasets into a Dataset."""
+    """Materialize each DatasetRef in payload.datasets into a Dataset.
+
+    Resolution order (e2e #45):
+
+    1. ``request_context.dataset_paths[ref]`` — when the orchestrator
+       pre-materialized the dataset, the local path is already in-hand.
+       This is the fast path used in tests + when the orchestrator's
+       dataset-resolver has wired the download before dispatch.
+    2. ``request_context.resolve_dataset(ref)`` — when the
+       gen-worker / orchestrator side has the resolver-helper method
+       wired (the e2e #45 target state). Downloads the dataset's
+       parquet + dataset_info.json into the worker's local cache and
+       returns the path.
+    3. Error out — the caller needs to wire one of the above.
+    """
     raw = _payload_as_dict(payload).get("datasets") or []
     out: list[Dataset] = []
     for entry in raw:
@@ -627,16 +893,41 @@ def _build_datasets(request_context: "RequestContext", payload: Any) -> list[Dat
             ref = str(getattr(entry, "ref", ""))
             split = str(getattr(entry, "split", "train"))
             attributes = dict(getattr(entry, "attributes", {}) or {})
-        # TODO(dataset-materialization): once gen-worker's ref-downloader learns
-        # dataset resolution, look up the materialized path here. For MVP, the
-        # host framework injects dataset_paths by ref onto the request_context.
+
+        local_path: str | None = None
+        # Path 1: orchestrator-injected cache.
         dataset_paths = getattr(request_context, "dataset_paths", {}) or {}
-        local_path = dataset_paths.get(ref)
+        if ref in dataset_paths:
+            local_path = dataset_paths[ref]
+
+        # Path 2: gen-worker's own resolver (e2e #45 target path). When the
+        # worker runtime has ``resolve_dataset`` wired, call it and cache
+        # the returned path on the request_context so subsequent calls
+        # don't re-download.
+        if local_path is None:
+            resolver = getattr(request_context, "resolve_dataset", None)
+            if callable(resolver):
+                try:
+                    local_path = str(resolver(ref))
+                    # Cache for future lookups in the same request.
+                    dataset_paths = dict(dataset_paths)
+                    dataset_paths[ref] = local_path
+                    try:
+                        request_context.dataset_paths = dataset_paths  # type: ignore[attr-defined]
+                    except Exception:
+                        pass  # read-only RC; first lookup path is sole cache.
+                except Exception as exc:  # noqa: BLE001
+                    raise RuntimeError(
+                        f"dataset {ref!r}: resolver failed ({exc})"
+                    ) from exc
+
         if local_path is None:
             raise RuntimeError(
-                f"dataset {ref!r} not materialized: request_context.dataset_paths "
-                f"missing this ref. Orchestrator must have resolved + materialized "
-                f"each payload.datasets entry before dispatching the tenant function."
+                f"dataset {ref!r} not materialized: neither "
+                f"request_context.dataset_paths[{ref!r}] nor "
+                f"request_context.resolve_dataset({ref!r}) is wired. "
+                f"Orchestrator must materialize datasets before dispatch, "
+                f"OR the worker runtime must expose a resolver helper."
             )
         out.append(Dataset(
             ref=ref, split=split, path=Path(local_path), attributes=attributes,
@@ -748,7 +1039,15 @@ def _build_wire_payload_schema(
     # can emit one consolidated $defs block.
     types_to_schema: list[Any] = [SourceRepo, DestinationRepo]
     properties: dict[str, dict] = {}
-    required: list[str] = ["source", "destination"]
+    # `source` is required only when the tenant signature declares a `source`
+    # parameter. Dataset-generation tenants (e2e #45) deliberately omit it —
+    # forcing `source` into required there would reject every valid request
+    # at the orchestrator schema gate (e2e #51 hit this).
+    has_source_param = "source" in signature.parameters
+    required: list[str] = []
+    if has_source_param:
+        required.append("source")
+    required.append("destination")
 
     # datasets
     has_datasets_param = "datasets" in signature.parameters
@@ -782,8 +1081,12 @@ def _build_wire_payload_schema(
     for t, s in zip(types_to_schema, schemas_list):
         type_to_schema[id(t)] = s
 
-    # Top-level properties
-    properties["source"] = type_to_schema[id(SourceRepo)]
+    # Top-level properties. Mirror `has_source_param` from above — emit the
+    # `source` slot only when the tenant signature declares it. Dataset-
+    # generation tenants (e2e #45) get a schema without `source`, so the
+    # orchestrator gate accepts wire payloads that omit the field.
+    if has_source_param:
+        properties["source"] = type_to_schema[id(SourceRepo)]
     properties["destination"] = type_to_schema[id(DestinationRepo)]
     if has_datasets_param:
         properties["datasets"] = {

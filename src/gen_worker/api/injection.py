@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional, get_args, get_origin, Annotated
 
@@ -9,8 +9,15 @@ class ModelRefSource(str, Enum):
     # FIXED means the model key is fixed by the function signature and does not
     # depend on the request payload.
     FIXED = "fixed"
-    # Payload selects the model via a payload field key.
+    # PAYLOAD selects the model via a payload field key. The key value resolves
+    # against a pre-declared keyspace (endpoint.toml [models]) at publish time.
     PAYLOAD = "payload"
+    # PAYLOAD_REF accepts an arbitrary caller-supplied canonical ref at
+    # invoke time (e2e #46). Orchestrator resolves the ref against tensorhub
+    # with the caller's JWT (access check) + runs a compat validation chain
+    # (file_layout / pipeline_class / architectures / components / lineage /
+    # attributes) before dispatch. No pre-declared keyspace required.
+    PAYLOAD_REF = "payload_ref"
 
 
 @dataclass(frozen=True)
@@ -19,6 +26,11 @@ class ModelRef:
     Metadata marker for signature-driven model selection/injection.
 
     This is intended to be used inside `typing.Annotated[..., ModelRef(...)]`.
+
+    For PAYLOAD_REF (e2e #46), the common case requires zero scoping
+    declarations — discovery auto-derives the expected pipeline class /
+    architectures from the parameter's type annotation. Optional overrides
+    below cover edge cases and stricter-than-default scoping.
     """
 
     source: ModelRefSource
@@ -27,6 +39,41 @@ class ModelRef:
     # If set, discovery includes this in the baked manifest fixed keyspace.
     ref: Optional[str] = None
     dtypes: tuple[str, ...] = ()
+
+    # e2e #46 — PAYLOAD_REF scoping. All fields are optional; ignored for
+    # FIXED / PAYLOAD sources.
+
+    # Explicit pipeline-class / architectures allowlist. Overrides the
+    # signature-derived gate. Use when the tenant's annotated type is
+    # narrower than what the endpoint should actually accept (e.g. a custom
+    # subclass that should also accept the standard parent class).
+    allow_pipeline_classes: tuple[str, ...] = ()
+    allow_architectures: tuple[str, ...] = ()
+
+    # File-layout gate. "diffusers" | "singlefile" | "". Empty = no file-layout
+    # restriction.
+    required_file_layout: str = ""
+
+    # Per-component class map for diffusers pipelines. Keys match
+    # model_index.json top-level component names (unet / vae / text_encoder /
+    # etc.); values are the expected class (UNet2DConditionModel /
+    # AutoencoderKL / ...). Orchestrator matches against the ref's
+    # `_diffusers_components` attribute. Empty = no per-component check.
+    required_components: tuple = ()
+
+    # Lineage scoping. When `require_lineage_descendant_of` is a non-empty
+    # canonical ref (e.g. "stabilityai/stable-diffusion-xl-base-1.0"),
+    # orchestrator walks the caller's ref's ancestor chain via
+    # tensorhub.ListAncestors and rejects when the declared ancestor is not
+    # in the walk. `require_lineage_verified=True` further restricts to
+    # edges whose verification_status is "verified" (rejects user-asserted-
+    # only edges).
+    require_lineage_descendant_of: str = ""
+    require_lineage_verified: bool = False
+
+    # Attribute scoping — subset-containment against the checkpoint's
+    # attributes. {key: [allowed_values]} semantics.
+    required_attributes: tuple = ()  # tuple of (key, allowed_values_tuple)
 
 
 @dataclass(frozen=True)

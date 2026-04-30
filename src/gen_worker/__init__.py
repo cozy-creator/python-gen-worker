@@ -28,6 +28,7 @@ from .trainer import (
 from .api.streaming import iter_transformers_text_deltas
 from .utils.image import image_output_sanitizer
 from .utils.lora import load_loras
+from .inference_memory import apply_low_vram_config, with_oom_retry
 
 # Optional torch-dependent exports
 try:
@@ -80,4 +81,7 @@ __all__ = [
     "PipelineLoader",
     "PipelineLoaderError",
     "ModelNotFoundError",
+    # Low-VRAM inference helpers
+    "apply_low_vram_config",
+    "with_oom_retry",
 ]

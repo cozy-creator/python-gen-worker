@@ -18,6 +18,25 @@ def test_parse_cozy_tag() -> None:
     assert p.cozy is not None
     assert p.cozy.tag == "v1"
     assert p.cozy.digest is None
+    assert p.cozy.flavor is None
+
+
+def test_parse_cozy_tag_flavor() -> None:
+    p = parse_model_ref("cozy:owner/repo:v1#int4")
+    assert p.scheme == "cozy"
+    assert p.cozy is not None
+    assert p.cozy.tag == "v1"
+    assert p.cozy.flavor == "int4"
+    assert p.cozy.canonical() == "cozy:owner/repo:v1#int4"
+
+
+def test_parse_cozy_default_tag_flavor() -> None:
+    p = parse_model_ref("owner/repo#bf16")
+    assert p.scheme == "cozy"
+    assert p.cozy is not None
+    assert p.cozy.tag == "latest"
+    assert p.cozy.flavor == "bf16"
+    assert p.cozy.canonical() == "cozy:owner/repo:latest#bf16"
 
 
 def test_parse_cozy_digest() -> None:
@@ -25,6 +44,15 @@ def test_parse_cozy_digest() -> None:
     assert p.scheme == "cozy"
     assert p.cozy is not None
     assert p.cozy.digest == "sha256:abcd"
+
+
+def test_parse_cozy_digest_flavor() -> None:
+    p = parse_model_ref("owner/repo@sha256:abcd#fp8")
+    assert p.scheme == "cozy"
+    assert p.cozy is not None
+    assert p.cozy.digest == "sha256:abcd"
+    assert p.cozy.flavor == "fp8"
+    assert p.cozy.canonical() == "cozy:owner/repo@sha256:abcd#fp8"
 
 
 def test_parse_cozy_digest_blake3() -> None:

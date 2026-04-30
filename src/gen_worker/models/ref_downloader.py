@@ -162,6 +162,7 @@ class ModelRefDownloader(ModelDownloader):
                         repo=parsed.cozy.repo,
                         tag=parsed.cozy.tag or "latest",
                         digest=parsed.cozy.digest,
+                        flavor=parsed.cozy.flavor,
                         include_urls=True,
                         preferences=resolve_prefs,
                         capabilities={},

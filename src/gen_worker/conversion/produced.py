@@ -1,8 +1,8 @@
-"""ProducedVariant — what a tenant transform function returns per output.
+"""ProducedFlavor — what a tenant transform returns per output.
 
-A tenant's ``@training_function`` returns ``list[ProducedVariant]`` — one
-entry per variant the job produces into the destination checkpoint. The
-library uploads each variant's ``path`` (file OR directory) and attaches
+A tenant's ``@training_function`` returns ``list[ProducedFlavor]`` — one
+entry per flavor the job produces into the destination checkpoint. The
+library uploads each flavor's ``path`` (file OR directory) and attaches
 the declared ``attributes`` to the upload-commit.
 
 Attribute-bag ownership (issue #22 — server-authoritative metadata):
@@ -26,21 +26,29 @@ from pathlib import Path
 import msgspec
 
 
-class ProducedVariant(msgspec.Struct):
-    """One variant emitted by a transform tenant function.
+class ProducedFlavor(msgspec.Struct):
+    """One checkpoint flavor emitted by a transform tenant function.
 
     Fields:
       - path: file (e.g. ``model.safetensors``, ``model.q4_k_m.gguf``) OR
         directory (e.g. a ``save_pretrained`` output tree).
-      - attributes: per-variant attribute bag. See module docstring for
+      - attributes: per-flavor attribute bag. See module docstring for
         what belongs here vs what belongs in the orchestrator job record.
       - extra_files: rare escape hatch — sibling artifacts attached to the
-        same variant (e.g. a tokenizer.json next to a non-tree output).
+        same flavor (e.g. a tokenizer.json next to a non-tree output).
+      - flavor: optional owner-facing row label such as ``bf16``, ``fp8``,
+        or ``int4``. When empty, the library falls back to attributes such
+        as ``flavor``.
+      - flavors: optional full flavor-label set such as
+        ``["fp8", "flashpack", "aio"]``. ``flavor`` is kept as the primary
+        compatibility label and is included automatically when present.
     """
 
     path: Path
     attributes: dict = msgspec.field(default_factory=dict)
     extra_files: list[Path] = msgspec.field(default_factory=list)
+    flavor: str = ""
+    flavors: list[str] = msgspec.field(default_factory=list)
 
 
-__all__ = ["ProducedVariant"]
+__all__ = ["ProducedFlavor"]

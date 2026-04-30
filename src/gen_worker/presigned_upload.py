@@ -110,7 +110,7 @@ def presigned_upload_file(
         complete_extra: Optional extra fields merged into the /complete POST
             body (after the `parts` array). Used by repo-cas uploads to carry
             lineage metadata — step_number, epoch_number, output_kind,
-            target_dtype, variant_label, produced_by_kind. Tensorhub persists
+            target_dtype, flavor, produced_by_kind. Tensorhub persists
             these into checkpoint_lineage (e2e issue #8).
     """
     url = f"{base_url}{endpoint_path}"

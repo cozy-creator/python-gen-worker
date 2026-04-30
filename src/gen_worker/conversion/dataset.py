@@ -7,10 +7,56 @@ via the reserved ``datasets: list[Dataset]`` parameter.
 Used by calibration-based quant (GPTQ/AWQ/modelopt-ptq-static), pruning with
 gradient scoring, distillation (both teacher/student training loops), and
 fine-tuning (LoRA / full-parameter / continued pretraining).
+
+## Supported artifact shapes
+
+Three shapes are recognized. All three live on local disk after the library
+has materialized the ``DatasetRef`` — tenants see a unified interface.
+
+### 1. HF-datasets layout (``load_from_disk``-compatible)
+
+Typical for LLM calibration (wikitext / c4) and fine-tuning (image+caption /
+instruction data). Exposed via ``iter_examples`` / ``as_dataloader`` /
+``as_hf_dataset``.
+
+### 2. Prompt corpus (e2e #45, supersedes #41 "calibration_dataset")
+
+```
+<root>/
+├── dataset_info.json      # {kind: "prompt_corpus", features, num_rows, ...}
+└── data/
+    └── train-00000.parquet     # columns: prompt, category, length_bucket, seed
+```
+
+Produced by ``conversion-cpu.generate_prompt_corpus``. One corpus is reused
+across every source model + every calibrated-quant recipe. Exposed via
+``is_prompt_corpus`` / ``dataset_info`` / ``iter_prompts``.
+
+### 3. Eval set (e2e #45, supersedes #41 "comparison images")
+
+```
+<root>/
+├── dataset_info.json      # {kind: "eval_set", features, variants, prompt_corpus, ...}
+└── data/
+    └── train-00000.parquet     # columns: prompt, seed, category, image_<variant>: Image
+```
+
+Produced by ``conversion-gpu.generate_eval_set``. Source+variant-specific —
+bf16 vs int4_awq side-by-side renders for A/B eval. Exposed via
+``is_eval_set`` / ``dataset_info`` / ``iter_rows``.
+
+## Detection
+
+``is_prompt_corpus`` / ``is_eval_set`` feature-detect via
+``dataset_info.json`` at the snapshot root. Earlier revisions (#41 shipped
+with ``manifest.json`` + ``prompts.jsonl``) are handled transparently for
+readback compat — we do NOT require callers to migrate existing artifacts,
+but new artifacts write ``dataset_info.json`` + parquet.
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable, Iterator, Optional
 
@@ -26,13 +72,27 @@ class Dataset:
     + the resolved dataset-variant snapshot on local disk.
 
     Public surface:
-      ref, split, attributes, path  -- simple accessors
-      iter_examples()               -- yield raw dataset rows
-      as_dataloader(...)            -- torch DataLoader of tokenized batches
-                                       (for modelopt / GPTQ / AWQ calibration)
-      as_hf_dataset(...)            -- tokenized datasets.Dataset
-                                       (for transformers.Trainer / peft /
-                                        accelerate training flows)
+      ref, split, attributes, path   -- simple accessors
+      iter_examples()                -- yield raw dataset rows (HF layout)
+      as_dataloader(...)             -- torch DataLoader of tokenized batches
+                                        (for modelopt / GPTQ / AWQ LLM
+                                         calibration)
+      as_hf_dataset(...)             -- tokenized datasets.Dataset
+                                        (for transformers.Trainer / peft /
+                                         accelerate training flows)
+
+    Prompt-corpus + eval-set shapes (e2e #45):
+
+      dataset_info()                 -- parsed dataset_info.json (the new
+                                        e2e #45 format) or legacy manifest.json
+      kind                           -- "prompt_corpus" | "eval_set" | ""
+      is_prompt_corpus()             -- True if kind == "prompt_corpus"
+      is_eval_set()                  -- True if kind == "eval_set"
+      iter_prompts()                 -- yield prompt rows from the parquet
+                                        data/ shard (or legacy prompts.jsonl)
+      iter_rows()                    -- yield full rows with image columns
+                                        (for eval sets)
+      parquet_shards()               -- list[Path] of parquet files under data/
     """
 
     def __init__(
@@ -47,6 +107,7 @@ class Dataset:
         self._split = split
         self._path = Path(path)
         self._attributes = dict(attributes or {})
+        self._info_cache: dict | None | str = "unloaded"
 
     @property
     def ref(self) -> str:
@@ -149,6 +210,191 @@ class Dataset:
             )
 
         return ds.map(_tok, batched=True, remove_columns=[text_field])
+
+    # ---- prompt-corpus + eval-set (e2e #45) ------------------------------
+
+    def dataset_info(self) -> dict:
+        """Return the parsed ``dataset_info.json`` at ``path`` or ``{}``.
+
+        The e2e #45 layout writes a ``dataset_info.json`` at the snapshot
+        root with ``{kind, features, num_rows, ...}``. HF-datasets
+        snapshots and LLM-text datasets don't have this file —
+        ``dataset_info()`` returns ``{}`` for them so callers can use
+        ``dataset_info().get("kind")`` as a feature test.
+
+        Readback compat: if ``dataset_info.json`` is absent but the legacy
+        ``manifest.json`` from the shipped-then-rolled-back #41 format is
+        present, return that. ``kind`` is normalized to e2e #45 values
+        (``calibration_dataset`` → ``prompt_corpus``).
+        """
+        if self._info_cache == "unloaded":
+            self._info_cache = _load_dataset_info(self._path)
+        if isinstance(self._info_cache, dict):
+            return self._info_cache
+        return {}
+
+    @property
+    def kind(self) -> str:
+        """One of ``"prompt_corpus"``, ``"eval_set"``, or ``""`` (unknown)."""
+        return str(self.dataset_info().get("kind") or "")
+
+    def is_prompt_corpus(self) -> bool:
+        """True iff this artifact is a prompt corpus (e2e #45)."""
+        return self.kind == "prompt_corpus"
+
+    def is_eval_set(self) -> bool:
+        """True iff this artifact is an eval set (e2e #45)."""
+        return self.kind == "eval_set"
+
+    def parquet_shards(self) -> list[Path]:
+        """Return the list of parquet shard files under ``data/``.
+
+        Convention: ``<root>/data/train-*.parquet``. Returns sorted shard
+        paths so iteration is deterministic. Empty list if the snapshot
+        isn't in the parquet layout (e.g. legacy jsonl shape).
+        """
+        data_dir = self._path / "data"
+        if not data_dir.is_dir():
+            return []
+        return sorted(data_dir.glob("*.parquet"))
+
+    def iter_prompts(self) -> Iterator[dict]:
+        """Yield prompt rows — ``{prompt, category, length_bucket, seed}``.
+
+        Primary path: read the parquet shard(s) under ``data/`` using
+        pyarrow, pushing down the prompt + metadata columns only. Image
+        columns on eval sets are skipped automatically — calibration
+        reads only the text it needs.
+
+        Fallback: if the snapshot is in the legacy shape from the
+        rolled-back #41 format (``prompts.jsonl`` at the root), iterate
+        that directly. Kept for forward-compat on any dataset that might
+        still be in flight.
+
+        Raises ``FileNotFoundError`` if neither shape is present —
+        callers should guard with ``is_prompt_corpus() or is_eval_set()``.
+        """
+        shards = self.parquet_shards()
+        if shards:
+            yield from _iter_parquet_prompt_columns(shards)
+            return
+        legacy = self._path / "prompts.jsonl"
+        if legacy.exists():
+            with open(legacy) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    yield json.loads(line)
+            return
+        raise FileNotFoundError(
+            f"dataset {self._ref!r} has no prompts — expected parquet "
+            f"shards under {self._path}/data/ or legacy prompts.jsonl"
+        )
+
+    def iter_rows(self) -> Iterator[dict]:
+        """Yield ALL rows (including image columns on eval sets).
+
+        Unlike ``iter_prompts``, this does not push down columns — image
+        bytes are decoded for each row. Suitable for eval-set consumers
+        (human review UI, VLM eval jobs) that need the rendered outputs.
+
+        For prompt-corpus datasets this is equivalent to ``iter_prompts``
+        since there are no image columns.
+        """
+        shards = self.parquet_shards()
+        if not shards:
+            # Fall back to iter_prompts for legacy jsonl.
+            yield from self.iter_prompts()
+            return
+        import pyarrow.parquet as pq
+        for shard in shards:
+            table = pq.read_table(str(shard))
+            for row in table.to_pylist():
+                yield row
+
+    # ---- legacy aliases (e2e #41 shipped but superseded) -----------------
+
+    def manifest(self) -> dict:
+        """Back-compat alias: parsed ``dataset_info.json`` or legacy
+        ``manifest.json`` at ``path``, whichever exists.
+
+        Issue #45 migrates to ``dataset_info.json`` as the canonical name;
+        ``manifest()`` now returns the same dict as ``dataset_info()``.
+        Kept as an alias so any caller still written against #41 continues
+        to work during the transition.
+        """
+        return self.dataset_info()
+
+    def is_calibration_dataset(self) -> bool:
+        """Deprecated alias for ``is_prompt_corpus()`` (e2e #41 → #45).
+
+        Kept for one release so rolled-back-but-not-yet-torn-down call
+        sites don't error. New code should use ``is_prompt_corpus()``.
+        """
+        return self.is_prompt_corpus()
+
+
+def _load_dataset_info(path: Path) -> dict | None:
+    """Read ``dataset_info.json`` at ``path``, falling back to
+    ``manifest.json`` (legacy #41 shape) with field normalization.
+
+    Returns ``None`` when neither file exists or either is unparseable —
+    the caller treats that as "not a prompt-corpus / eval-set artifact."
+    """
+    info_path = path / "dataset_info.json"
+    if info_path.exists():
+        try:
+            with open(info_path) as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except json.JSONDecodeError:
+            return None
+
+    # Legacy #41 shape: manifest.json with kind=calibration_dataset.
+    # Normalize the kind to the e2e #45 vocabulary so downstream
+    # branching (is_prompt_corpus) still fires.
+    legacy = path / "manifest.json"
+    if legacy.exists():
+        try:
+            with open(legacy) as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                kind = str(data.get("kind") or "")
+                if kind == "calibration_dataset":
+                    data = dict(data)
+                    data["kind"] = "prompt_corpus"
+                return data
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
+def _iter_parquet_prompt_columns(shards: list[Path]) -> Iterator[dict]:
+    """Yield rows from parquet shards using the pyarrow column pushdown.
+
+    Reads only the lightweight text/metadata columns present in the schema
+    (prompt / category / length_bucket / seed). Image columns — which on
+    an eval set can be tens of MB per row — are NOT materialized. This
+    keeps the calibration-read cost linear in prompt count, not total
+    snapshot size.
+    """
+    import pyarrow.parquet as pq
+
+    wanted_cols = ("prompt", "category", "length_bucket", "seed")
+    for shard in shards:
+        pf = pq.ParquetFile(str(shard))
+        available = set(pf.schema_arrow.names)
+        cols = [c for c in wanted_cols if c in available]
+        if "prompt" not in cols:
+            raise ValueError(
+                f"parquet shard {shard} is missing the required 'prompt' "
+                f"column (have: {sorted(available)})"
+            )
+        for batch in pf.iter_batches(columns=cols):
+            for row in batch.to_pylist():
+                yield row
 
 
 def _guess_text_field(example: dict) -> str:

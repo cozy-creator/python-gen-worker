@@ -63,14 +63,14 @@ still zero lines touching upload contract.
 
 ```python
 @training_function(kind='fine-tune')
-def train_and_commit(ctx: TrainingContext, source: Source, payload: MyInput) -> list[ProducedVariant]:
+def train_and_commit(ctx: TrainingContext, source: Source, payload: MyInput) -> list[ProducedFlavor]:
     snapshot_path = clone.fetch_huggingface_snapshot(
         source_ref=payload.base_model,
         revision=payload.base_revision,
         dest_dir="/tmp/base",
     )
     # ... do custom training that produces new weights in /tmp/output/ ...
-    return [ProducedVariant(
+    return [ProducedFlavor(
         dtype="fp16", file_layout="diffusers", file_type="safetensors",
         files={"unet.safetensors": "/tmp/output/unet.safetensors"},
         kind="model",
@@ -78,7 +78,7 @@ def train_and_commit(ctx: TrainingContext, source: Source, payload: MyInput) -> 
 ```
 
 Library's `dispatch._finalize_produced_variants` handles session +
-upload + finalize on the returned `ProducedVariant` list.
+upload + finalize on the returned `ProducedFlavor` list.
 
 ## Architectural principle
 

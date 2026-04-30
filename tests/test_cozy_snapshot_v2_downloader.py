@@ -78,16 +78,12 @@ def test_snapshot_v2_downloader_materializes(tmp_path: Path) -> None:
     async def resolve_artifact(req: web.Request) -> web.Response:
         body = await req.json()
         assert body["tag"] == "latest"
+        assert body["flavor"] == "int4"
         return web.json_response(
             {
-                "version_id": "blake3:" + snap,
+                "checkpoint_id": "blake3:" + snap,
                 "repo_revision_seq": 1,
-                "variant": {
-                    "label": "safetensors-fp16",
-                    "file_layout": "diffusers",
-                    "file_type": "safetensors",
-                    "quantization": "fp16",
-                },
+                "flavors": ["fp16", "diffusers", "safetensors"],
                 "snapshot_manifest": {
                     "version": 1,
                     "entries": [
@@ -123,7 +119,7 @@ def test_snapshot_v2_downloader_materializes(tmp_path: Path) -> None:
         base = srv.base_url
         client = CozyHubV2Client(base_url=base)
         dl = CozySnapshotV2Downloader(client)
-        ref = CozyRef(owner="o", repo="r", tag="latest")
+        ref = CozyRef(owner="o", repo="r", tag="latest", flavor="int4")
         local = asyncio.run(dl.ensure_snapshot(tmp_path, ref))
         assert (local / "cozy.pipeline.yaml").read_bytes() == b1
         assert (local / "unet" / "config.json").read_bytes() == b2
@@ -147,7 +143,7 @@ def test_snapshot_v2_downloader_digest_pin_uses_resolve_endpoint(tmp_path: Path)
         assert body.get("digest") == snap
         return web.json_response(
             {
-                "version_id": snap,
+                "checkpoint_id": snap,
                 "snapshot_manifest": {
                     "version": 1,
                     "entries": [
@@ -305,7 +301,7 @@ def test_model_ref_downloader_hf_prefers_tensorhub_public_request(tmp_path: Path
                 "repo": "o--r",
                 "tag": "latest",
                 "repo_revision_seq": 1,
-                "variant_label": "safetensors-bf16",
+                "checkpoint_id": snap,
                 "snapshot_digest": snap,
                 "snapshot_manifest": {
                     "version": 1,
@@ -368,7 +364,7 @@ def test_model_ref_downloader_public_request_polls_202_then_200(tmp_path: Path) 
                 "repo": "o--r",
                 "tag": "latest",
                 "repo_revision_seq": 1,
-                "variant_label": "safetensors-bf16",
+                "checkpoint_id": snap,
                 "snapshot_digest": snap,
                 "snapshot_manifest": {
                     "version": 1,

@@ -69,6 +69,7 @@ def from_huggingface(ctx: Any, payload: Any) -> Any:
         quantize_components=getattr(payload, "quantize_components", None),
         auto_publish_public=bool(getattr(payload, "auto_publish_public", False)),
         overwrite_repo=bool(getattr(payload, "overwrite_repo", False)),
+        gguf_quant=getattr(payload, "gguf_quant", None),
     )
 
 
@@ -109,6 +110,7 @@ def from_civitai(ctx: Any, payload: Any) -> Any:
         quantize_components=getattr(payload, "quantize_components", None),
         auto_publish_public=bool(getattr(payload, "auto_publish_public", False)),
         overwrite_repo=bool(getattr(payload, "overwrite_repo", False)),
+        gguf_quant=None,  # not relevant for civitai (no GGUF on that platform)
     )
 
 

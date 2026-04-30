@@ -120,18 +120,18 @@ class SourceRepo(msgspec.Struct):
     as the reserved-name field ``source``.
 
     Fields:
-      - ref: "owner/repo" | "owner/repo:tag" | "owner/repo@<checkpoint-digest>"
-      - variant_id: explicit repo_version_variants.id; highest-priority selector
-      - attributes: subset-containment selector against the variant's attributes
+      - ref: "owner/repo" | "owner/repo:tag[#flavor...]" | "owner/repo@<checkpoint-id>"
+      - checkpoint_id: explicit content-addressed checkpoint id; highest-priority selector
+      - attributes: subset-containment selector against the checkpoint flavor's attributes
         map. Well-known keys include dtype, file_layout, file_type, quant_library,
         plus family-specific keys (quant_bits, quant_group_size, quant_sym,
         quant_desc_act, quant_block_size, quant_double_quant, quant_compute_dtype,
         quant_layout, quant_granularity, quant_activation_scheme, etc.). See
-        tensorhub ``docs/variant_attributes.md`` for the namespace.
+        tensorhub ``docs/checkpoint-flavors.md`` for the namespace.
     """
 
     ref: str
-    variant_id: Optional[str] = None
+    checkpoint_id: Optional[str] = None
     attributes: dict = msgspec.field(default_factory=dict)
 
 
@@ -158,16 +158,16 @@ class DatasetRef(msgspec.Struct):
     token's ``reads`` claim alongside the primary source.
 
     Fields:
-      - ref: "owner/dataset" | "owner/dataset:tag" | "owner/dataset@<digest>"
-      - variant_id: explicit dataset variant id; highest-priority selector
-      - attributes: subset-containment selector against the dataset variant's
+      - ref: "owner/dataset" | "owner/dataset:tag" | "owner/dataset@<checkpoint-id>"
+      - checkpoint_id: explicit dataset checkpoint id; highest-priority selector
+      - attributes: subset-containment selector against the dataset checkpoint's
         attributes map (tensorhub #229).
       - split: "train" | "validation" | "test" | "calibration" | ... — the
         dataset split the tenant wants. Library materializes only this split.
     """
 
     ref: str
-    variant_id: Optional[str] = None
+    checkpoint_id: Optional[str] = None
     attributes: dict = msgspec.field(default_factory=dict)
     split: str = "train"
 

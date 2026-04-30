@@ -14,11 +14,45 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterable, Iterator, Literal
 
 from .component import Component
+from .loaded_component import LoadedComponent
 
 if TYPE_CHECKING:
     import torch
 
 FileLayout = Literal["singlefile", "diffusers"]
+
+
+# Default set of component subdirs that the iter_hf_components passthrough
+# path covers when the tenant doesn't explicitly opt them out. These are
+# config / tokenizer / scheduler / non-quantizable bits that should travel
+# verbatim into the output snapshot. vae is here because most quant tenants
+# (bnb / torchao) leave the vae bf16; modelopt may override per spec.
+_DEFAULT_PASSTHROUGH_COMPONENTS: frozenset[str] = frozenset({
+    "vae", "scheduler",
+    "tokenizer", "tokenizer_2", "tokenizer_3",
+    "feature_extractor", "safety_checker",
+})
+
+# Components that are candidates for quantization. text_encoder_3 is in here
+# because flux.2-klein-9b / SD3 use three text encoders; older tenants that
+# hardcoded ('transformer', 'unet', 'text_encoder', 'text_encoder_2', 'vae')
+# silently skipped text_encoder_3.
+_DEFAULT_QUANT_CANDIDATE_COMPONENTS: frozenset[str] = frozenset({
+    "transformer", "unet",
+    "text_encoder", "text_encoder_2", "text_encoder_3",
+    "image_encoder", "prior", "controlnet",
+})
+
+# Top-level file basenames yielded by the synthetic '_root' LoadedComponent.
+# model_index.json is the diffusers pipeline manifest; everything else is
+# documentation / license that callers expect to travel with the snapshot.
+_ROOT_PASSTHROUGH_FILES: tuple[str, ...] = (
+    "model_index.json",
+    "README.md",
+    "LICENSE.md",
+    "LICENSE",
+    "USAGE_POLICY.md",
+)
 
 
 _DIFFUSERS_COMPONENT_DIRS: frozenset[str] = frozenset({
@@ -215,6 +249,310 @@ class Source:
         prepare_hf_source_tree_for_gguf fixup).
         """
         return self._path
+
+    def weights_size_bytes(self) -> int:
+        """Approximate on-disk size of all weight files in this snapshot.
+
+        Walks the weight-bearing component dirs (transformer / unet / vae /
+        text_encoder* / image_encoder / prior / controlnet) for
+        diffusers-layout sources, or the entire snapshot for singlefile
+        sources, and sums the file sizes of any ``.safetensors``,
+        ``.bin``, ``.pt``, ``.pth``, ``.ckpt`` files found.
+
+        Used by quant tenants to compute per-scheme `require_vram(...)` gates
+        without depending on the snapshot manifest plumbing — the loader
+        only needs a number of bytes to reason about. For bf16 sources
+        this number ≈ ``num_params * 2``, which is the right multiplicand
+        for the heuristic ``required_vram = scheme_factor * source_size +
+        working_overhead``.
+        """
+        weight_exts = (".safetensors", ".bin", ".pt", ".pth", ".ckpt")
+        total = 0
+        if self._file_layout == "diffusers":
+            for comp_name in _WEIGHT_COMPONENT_DIRS:
+                comp_path = self._path / comp_name
+                if not comp_path.is_dir():
+                    continue
+                for f in comp_path.rglob("*"):
+                    if f.is_file() and f.suffix in weight_exts:
+                        try:
+                            total += f.stat().st_size
+                        except OSError:
+                            continue
+        else:
+            for f in self._path.rglob("*"):
+                if f.is_file() and f.suffix in weight_exts:
+                    try:
+                        total += f.stat().st_size
+                    except OSError:
+                        continue
+        return total
+
+    # ----- streaming, offload-aware quantization loop ------------------
+
+    def iter_hf_components(
+        self,
+        *,
+        quant_only: Iterable[str] | None = None,
+        quantization_config: Any = None,
+        compute_dtype: "torch.dtype" | None = None,
+        offload_folder: Path | str | None = None,
+        passthrough_only: Iterable[str] | None = None,
+    ) -> Iterator[LoadedComponent]:
+        """Yield ``LoadedComponent`` payloads in arrival / discovery order.
+
+        This is the recommended path for quant tenants (bnb / torchao /
+        modelopt). It pushes three concerns into the library:
+
+          1. **Per-component HF loading.** Each heavy component is loaded
+             via ``<Class>.from_pretrained(component_path,
+             quantization_config=..., torch_dtype=compute_dtype,
+             device_map='auto', offload_folder=offload_folder)``. The
+             quantization_config is what triggers bnb / torchao / modelopt
+             to swap weights in-place during load. ``device_map='auto'``
+             plus ``offload_folder`` lets accelerate spill to disk when
+             VRAM is tight — that's how a 4 GB transformer fits on a 7 GB
+             card without OOM-walks in tenant code.
+
+          2. **Layout dispatch.** The same iteration shape works for
+             diffusers-layout (multiple component subdirs), diffusers
+             singlefile (one .safetensors reconstructed via
+             ``from_single_file``), and transformers singlefile (one
+             ``AutoModelForCausalLM.from_pretrained``). The tenant doesn't
+             care which it is.
+
+          3. **Passthrough vs quant decision.** Components matching
+             ``quant_only`` are loaded + quantized; the rest are yielded
+             with ``kind='passthrough'`` and ``save_to`` does a verbatim
+             ``shutil.copytree``. A final synthetic ``LoadedComponent
+             (name='_root')`` carries top-level files (``model_index.json``,
+             README, LICENSE).
+
+        Args:
+          quant_only: Iterable of component names to quantize. Default is
+            the library's "all weight-bearing components" set
+            (``transformer``, ``unet``, ``text_encoder``, ``text_encoder_2``,
+            ``text_encoder_3``, ``image_encoder``, ``prior``,
+            ``controlnet``). Passing an explicit iterable narrows or
+            widens.
+          quantization_config: HuggingFace quant config object —
+            ``BitsAndBytesConfig``, ``TorchAoConfig``,
+            ``ModeloptQuantizationConfig``, etc. ``None`` skips quant
+            (then ``quant_only`` becomes a passthrough-on-load filter,
+            useful for dtype-cast tenants).
+          compute_dtype: torch dtype used as ``torch_dtype`` on the
+            ``from_pretrained`` call. For bnb 4-bit this is the bf16/fp16
+            compute dtype the dequant uses at inference.
+          offload_folder: Path accelerate uses when ``device_map='auto'``
+            decides to spill layers off-GPU during load. Pass
+            ``ctx.mktemp() / 'offload'``; the library does NOT clean it
+            up — caller controls lifetime via ctx.
+          passthrough_only: Iterable of component names that bypass the
+            loader entirely and are copied verbatim. Defaults to
+            ``vae / scheduler / tokenizer* / feature_extractor /
+            safety_checker``. Anything in ``passthrough_only`` AND
+            ``quant_only`` is treated as quant_only (explicit wins).
+
+        Yields LoadedComponent objects. Order is loosely the diffusers
+        component-discovery order; expect ``passthrough`` components to
+        arrive before heavy ``quantized`` ones because the loader work
+        dominates wall-clock.
+        """
+        quant_set = (
+            frozenset(quant_only)
+            if quant_only is not None
+            else _DEFAULT_QUANT_CANDIDATE_COMPONENTS
+        )
+        passthrough_set = (
+            frozenset(passthrough_only)
+            if passthrough_only is not None
+            else _DEFAULT_PASSTHROUGH_COMPONENTS
+        )
+        offload_path = Path(offload_folder) if offload_folder is not None else None
+        if offload_path is not None:
+            offload_path.mkdir(parents=True, exist_ok=True)
+
+        if self._file_layout == "diffusers":
+            yield from _iter_diffusers_components(
+                self._path,
+                quant_set=quant_set,
+                passthrough_set=passthrough_set,
+                quantization_config=quantization_config,
+                compute_dtype=compute_dtype,
+                offload_folder=offload_path,
+            )
+        else:
+            yield from _iter_singlefile_components(
+                self._path,
+                quantization_config=quantization_config,
+                compute_dtype=compute_dtype,
+                offload_folder=offload_path,
+            )
+
+
+def _iter_diffusers_components(
+    snapshot_path: Path,
+    *,
+    quant_set: frozenset[str],
+    passthrough_set: frozenset[str],
+    quantization_config: Any,
+    compute_dtype: Any,
+    offload_folder: Path | None,
+) -> Iterator[LoadedComponent]:
+    """Walk a diffusers-layout snapshot directory and yield LoadedComponents.
+
+    Each subdir under ``snapshot_path`` whose name is in the diffusers
+    component allowlist is yielded once. ``quant_set`` decides quantize-vs-
+    passthrough. A final ``_root`` LoadedComponent carries the top-level
+    files (model_index.json, README, etc).
+    """
+    from ._hf_load import load_component_module
+
+    if not snapshot_path.is_dir():
+        return
+
+    seen: set[str] = set()
+    for entry in sorted(snapshot_path.iterdir()):
+        if not entry.is_dir() or entry.name not in _DIFFUSERS_COMPONENT_DIRS:
+            continue
+        seen.add(entry.name)
+        if entry.name in quant_set and quantization_config is not None:
+            # device_map shape — when the caller passed an offload_folder the
+            # intent is "spill to CPU/disk if needed", so use accelerate's
+            # auto-placement. When no offload_folder is set, the caller has
+            # already gated VRAM availability (typically via require_vram on
+            # the tenant) and asks for hard GPU-only placement: failing loud
+            # on OOM is cleaner than silent spillage that bnb can't honor for
+            # nf4/fp4 unless `llm_int8_enable_fp32_cpu_offload=True`.
+            kwargs: dict[str, Any] = {"quantization_config": quantization_config}
+            if compute_dtype is not None:
+                kwargs["torch_dtype"] = compute_dtype
+            if offload_folder is not None:
+                kwargs["device_map"] = "auto"
+                # Per-component subdir under the shared offload root, so
+                # parallel components don't clobber each other if accelerate
+                # uses identical layer-key names across submodules.
+                comp_offload = offload_folder / entry.name
+                comp_offload.mkdir(parents=True, exist_ok=True)
+                kwargs["offload_folder"] = str(comp_offload)
+            else:
+                kwargs["device_map"] = {"": 0}
+            module = load_component_module(entry, _read_component_config(entry), **kwargs)
+            yield LoadedComponent(
+                name=entry.name,
+                kind="quantized",
+                _module=module,
+                metadata={
+                    "loader": "from_pretrained",
+                    "quantization_config_class": type(quantization_config).__name__,
+                },
+            )
+            continue
+        # Default: copy verbatim. We don't load passthrough components into
+        # memory. Anything not in quant_set lands here even if it's also
+        # not in passthrough_set — being explicit about passthrough_set is
+        # documentation-only; the absence of quant intent is what triggers
+        # the copy.
+        yield LoadedComponent(
+            name=entry.name,
+            kind="passthrough",
+            _source_path=entry,
+            metadata={"loader": "passthrough_copy"},
+        )
+
+    # Heads-up if the snapshot contains a quant_set member that doesn't
+    # exist on disk — usually means a hardcoded enumeration drifted vs the
+    # actual model. Don't raise; just don't yield it.
+    missing_from_quant_set = quant_set - seen
+    if missing_from_quant_set:
+        # The Source.iter_hf_components docstring warns tenants to expect
+        # only-yielded-when-present semantics; this comment locks in that
+        # behavior.
+        pass
+
+    # Final synthetic _root: the top-level files that don't live under any
+    # component subdir. model_index.json is the diffusers pipeline manifest;
+    # without it the saved snapshot won't reload as a pipeline.
+    root_files = [
+        snapshot_path / fname
+        for fname in _ROOT_PASSTHROUGH_FILES
+        if (snapshot_path / fname).is_file()
+    ]
+    if root_files:
+        yield LoadedComponent(name="_root", kind="root", _root_files=root_files)
+
+
+def _iter_singlefile_components(
+    snapshot_path: Path,
+    *,
+    quantization_config: Any,
+    compute_dtype: Any,
+    offload_folder: Path | None,
+) -> Iterator[LoadedComponent]:
+    """Yield a single LoadedComponent for a singlefile-layout snapshot.
+
+    Two flavors handled here:
+      - **transformers singlefile** — directory with ``config.json`` +
+        weights at the top level (e.g. a llama / qwen model dump). Loaded
+        via ``AutoModelForCausalLM.from_pretrained(path, quantization_config=
+        ..., torch_dtype=..., device_map='auto', offload_folder=...)``.
+      - **diffusers singlefile** — one ``.safetensors`` file reconstructible
+        via ``from_single_file``. Less common; the library defers to the
+        diffusers-layout caller (``StableDiffusionPipeline.from_single_file``)
+        and yields the resulting pipeline as a single ``LoadedComponent
+        (name='model')``.
+
+    For now the diffusers singlefile path raises NotImplementedError if
+    invoked — the calling tenant can fall back to the legacy ``as_hf_model``
+    + manual quant path. Wiring it up is a small follow-up.
+    """
+    if (snapshot_path / "config.json").is_file():
+        # See _iter_diffusers_components for the device_map rationale —
+        # offload_folder=None means GPU-only (VRAM-gated tenant).
+        kwargs: dict[str, Any] = {}
+        if quantization_config is not None:
+            kwargs["quantization_config"] = quantization_config
+        if compute_dtype is not None:
+            kwargs["torch_dtype"] = compute_dtype
+        if offload_folder is not None:
+            kwargs["device_map"] = "auto"
+            kwargs["offload_folder"] = str(offload_folder)
+        else:
+            kwargs["device_map"] = {"": 0}
+        from transformers import AutoModelForCausalLM
+        module = AutoModelForCausalLM.from_pretrained(str(snapshot_path), **kwargs)
+        yield LoadedComponent(
+            name="model",
+            kind="quantized" if quantization_config is not None else "passthrough",
+            _module=module if quantization_config is not None else None,
+            _source_path=snapshot_path if quantization_config is None else None,
+            metadata={
+                "loader": "from_pretrained",
+                "layout": "transformers_singlefile",
+                "quantization_config_class": (
+                    type(quantization_config).__name__
+                    if quantization_config is not None else None
+                ),
+            },
+        )
+        return
+
+    raise NotImplementedError(
+        "iter_hf_components: diffusers-singlefile sources are not yet "
+        "supported. Use the legacy Source.as_hf_model() path and quantize "
+        "the resulting DiffusionPipeline manually for now."
+    )
+
+
+def _read_component_config(component_path: Path) -> dict:
+    cfg_path = component_path / "config.json"
+    if not cfg_path.is_file():
+        return {}
+    try:
+        with open(cfg_path) as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
 
 
 __all__ = ["Source", "FileLayout"]

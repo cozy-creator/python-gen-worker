@@ -299,7 +299,7 @@ def convert(ctx: RequestContext, payload: ConvertInput) -> ConvertOutput:
 
 ### Reserved types
 
-- **`SourceRepo`**: `ref` (`owner/repo[:tag][@<digest>]`), optional `variant_id`
+- **`SourceRepo`**: `ref` (`owner/repo[:tag][#flavor...][@<checkpoint_id>]`), optional `checkpoint_id`
   (highest-priority explicit variant selector), optional `attributes` dict
   (subset-containment match; well-known keys include `dtype`, `file_layout`,
   `file_type`, `quant_library`, plus family-specific `quant_*` keys — see

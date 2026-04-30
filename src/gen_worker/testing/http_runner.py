@@ -99,7 +99,7 @@ class DevWorker(Worker):
         owner: str = "",
         invoker_id: str = "",
         timeout_ms: int = 0,
-        required_variant_refs: Optional[list[str]] = None,
+        required_flavor_refs: Optional[list[str]] = None,
         resolved_cozy_models_by_id: Optional[dict[str, Any]] = None,
         local_output_dir: Optional[str] = None,
     ) -> DevRequestResult:
@@ -116,7 +116,7 @@ class DevWorker(Worker):
             request_id=rid,
             function_name=fn,
             input_payload=raw,
-            required_variant_refs=[str(v).strip() for v in (required_variant_refs or []) if str(v).strip()],
+            required_flavor_refs=[str(v).strip() for v in (required_flavor_refs or []) if str(v).strip()],
             timeout_ms=int(timeout_ms or 0),
             owner=str(owner or ""),
             invoker_id=str(invoker_id or ""),
@@ -132,7 +132,7 @@ class DevWorker(Worker):
             file_api_base_url=None,
             local_output_dir=local_output_dir,
             resolved_cozy_models_by_id=resolved_cozy_models_by_id or None,
-            required_models=[str(v).strip() for v in (required_variant_refs or []) if str(v).strip()],
+            required_models=[str(v).strip() for v in (required_flavor_refs or []) if str(v).strip()],
         )
 
         # Execute synchronously.
@@ -363,12 +363,12 @@ async def serve_http(argv: Optional[list[str]] = None) -> None:
         timeout_ms = int(env.get("timeout_ms") or 0)
         owner = str(env.get("owner") or "").strip()
         invoker_id = str(env.get("invoker_id") or "").strip()
-        required_variant_refs = env.get("required_variant_refs")
-        if required_variant_refs is None:
-            required_variant_refs = env.get("required_models")  # alias
+        required_flavor_refs = env.get("required_flavor_refs")
+        if required_flavor_refs is None:
+            required_flavor_refs = env.get("required_models")
         rvr: list[str] = []
-        if isinstance(required_variant_refs, list):
-            rvr = [str(v).strip() for v in required_variant_refs if str(v).strip()]
+        if isinstance(required_flavor_refs, list):
+            rvr = [str(v).strip() for v in required_flavor_refs if str(v).strip()]
 
         resolved = env.get("resolved_cozy_models_by_id")
         if resolved is not None and not isinstance(resolved, dict):
@@ -383,7 +383,7 @@ async def serve_http(argv: Optional[list[str]] = None) -> None:
                 owner=owner,
                 invoker_id=invoker_id,
                 timeout_ms=timeout_ms,
-                required_variant_refs=rvr,
+                required_flavor_refs=rvr,
                 resolved_cozy_models_by_id=resolved if isinstance(resolved, dict) else None,
                 local_output_dir=str(out_dir),
             )
@@ -419,8 +419,8 @@ async def serve_http(argv: Optional[list[str]] = None) -> None:
             payload_obj=payload,
             request_id=rid,
             timeout_ms=int(env.get("timeout_ms") or 0),
-            required_variant_refs=[str(v).strip() for v in (env.get("required_variant_refs") or []) if str(v).strip()]
-            if isinstance(env.get("required_variant_refs"), list)
+            required_flavor_refs=[str(v).strip() for v in (env.get("required_flavor_refs") or []) if str(v).strip()]
+            if isinstance(env.get("required_flavor_refs"), list)
             else [],
             local_output_dir=str(out_dir),
         )

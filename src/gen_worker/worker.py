@@ -72,7 +72,16 @@ UnloadModelResult = Any
 JobExecutionRequest = Any
 JobExecutionResult = Any
 from .api.decorators import ResourceRequirements
-from .api.errors import AuthError, CanceledError, FatalError, ResourceError, RetryableError, ValidationError
+from .api.errors import (
+    AuthError,
+    CanceledError,
+    FatalError,
+    RefCompatibilitySurprise,
+    ResourceError,
+    RetryableError,
+    ValidationError,
+)
+from .capability import HardwareUnmetError
 
 from .models.interface import ModelManagementInterface
 from .models.downloader import ModelDownloader
@@ -233,7 +242,7 @@ class Worker:
         self._request_specs: Dict[str, _RequestSpec] = {}
         self._ws_specs: Dict[str, _WebsocketSpec] = {}
         # Transform-kind (@training_function) handlers, keyed by function
-        # name. Dispatch shape is (request_context, payload_dict) → list[ProducedVariant];
+        # name. Dispatch shape is (request_context, payload_dict) → list[ProducedFlavor];
         # see gen_worker/conversion/dispatch.py for the contract.
         self._training_specs: Dict[str, Callable[..., Any]] = {}
         self._active_requests: Dict[str, RequestContext] = {}
@@ -293,6 +302,15 @@ class Worker:
         self._reconnect_count = 0
         self._outgoing_queue: queue.Queue[Any] = queue.Queue()
         self._leader_hint: Optional[str] = None
+        # Cap redirect bounces (e2e #50). When a worker connects to the wrong
+        # gen-orchestrator replica the orch responds with FAILED_PRECONDITION
+        # not_leader:<addr> and closes the stream. The worker reconnects to the
+        # advertised addr. If the redirect chain doesn't terminate within this
+        # many hops something is wrong (stale lease addr, network partition,
+        # misconfigured PUBLIC_ORCHESTRATOR_GRPC_ADDR) and we should fail loud
+        # rather than spinning forever.
+        self._max_redirect_chain = 5
+        self._redirect_chain_count = 0
 
         # Heartbeats ride on a SEPARATE gRPC channel so long-running tenant work
         # (safetensors.load_file on 7 GB, streaming_dtype_cast, large job_output
@@ -336,7 +354,7 @@ class Worker:
         if resolved_model_manager is None:
             try:
                 import diffusers  # noqa: F401
-                from .diffusers_model_manager import DiffusersModelManager
+                from .pipeline.model_manager import DiffusersModelManager
                 resolved_model_manager = DiffusersModelManager()
                 logger.info("Auto-wired DiffusersModelManager (diffusers detected)")
             except ImportError:
@@ -351,7 +369,7 @@ class Worker:
                 cozy_token=token,
             )
         self._supported_model_ids_from_scheduler: Optional[List[str]] = None  # allowlist from scheduler (repo refs)
-        self._required_variant_refs_from_scheduler: Optional[List[str]] = None  # warm-start pinned variants
+        self._required_flavor_refs_from_scheduler: Optional[List[str]] = None  # warm-start pinned flavors
         self._release_allowed_model_ids: Optional[set[str]] = None
         # Immutable allowlist derived from the baked discovery manifest (tenant-declared scope).
         # Scheduler config may narrow this set but must never widen it.
@@ -381,6 +399,13 @@ class Worker:
         #     whose status is terminal-non-resolved it rejects locally.
         self._disabled_functions_by_name: Dict[str, Dict[str, Any]] = {}
         self._payload_ref_availability_by_function: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        # E2E #46: per-request tracking of which caller-supplied refs the
+        # active invocation bound via Src.PAYLOAD_REF. Set by the dispatch
+        # path BEFORE the tenant body runs; read by `_map_exception` to
+        # classify post-download failures as `ref_compatibility_surprise`
+        # rather than generic `validation` / `internal`. Empty dict = no
+        # caller refs on this request; the classifier returns False.
+        self._current_payload_ref_keys: Dict[str, str] = {}
         self._prefetch_thread: Optional[threading.Thread] = None
         self._model_init_done_event = threading.Event() # To signal model init is complete
 
@@ -563,6 +588,76 @@ class Worker:
             logger.error(f"Worker-connect JWT verification failed: {e}")
             raise
 
+    def _looks_like_ref_compatibility_surprise(self, exc: BaseException) -> bool:
+        """Heuristic — classify load-time errors as e2e #46
+        ``ref_compatibility_surprise`` when the current request carried a
+        caller-supplied ref.
+
+        Runs only when ``_current_payload_ref_keys`` is populated (meaning
+        the function's signature had a ``Src.PAYLOAD_REF`` binding and the
+        dispatch path recorded which keys the caller supplied). Without
+        that flag we don't want to false-positive on requests that never
+        involved a caller ref — an internal fine-tune or a FIXED-only
+        endpoint's state_dict mismatch is NOT a compatibility surprise,
+        it's a real bug.
+
+        Detection patterns (sufficient, not exhaustive):
+
+        - ``RuntimeError`` whose message starts with ``Error(s) in
+          loading state_dict`` — the canonical PyTorch load failure when
+          tensor names don't match.
+        - ``KeyError`` on a diffusers component name (text_encoder,
+          text_encoder_2, unet, vae, transformer, scheduler) — the repo's
+          model_index declared a layout the pipeline class doesn't
+          understand, or the tenant looked up a component that isn't
+          there.
+        - ``OSError`` / ``FileNotFoundError`` mentioning ``config.json``,
+          ``model_index.json``, or a known diffusers component dir — the
+          ref doesn't have the expected file layout despite having the
+          right top-level class name.
+        - The substrings ``"Cannot load"`` / ``"does not appear to be a
+          valid"`` / ``"missing keys"`` / ``"unexpected keys"`` /
+          ``"size mismatch for"`` anywhere in the message.
+        """
+        if not getattr(self, "_current_payload_ref_keys", None):
+            return False
+        msg = str(exc or "")
+        lowered = msg.lower()
+        # 1. State-dict key / shape mismatches — the reliable signal.
+        if "error(s) in loading state_dict" in lowered:
+            return True
+        if "missing keys" in lowered or "unexpected keys" in lowered:
+            return True
+        if "size mismatch for" in lowered:
+            return True
+        # 2. Diffusers component KeyError during pipeline construction.
+        if isinstance(exc, KeyError):
+            comp_names = {
+                "text_encoder", "text_encoder_2", "text_encoder_3",
+                "unet", "transformer", "vae", "scheduler",
+                "tokenizer", "tokenizer_2", "image_encoder", "prior",
+            }
+            # KeyError's str is the repr of the key — peel the quotes.
+            key = msg.strip().strip("'\"")
+            if key in comp_names:
+                return True
+        # 3. Missing config at from_pretrained.
+        if isinstance(exc, (OSError, FileNotFoundError)):
+            for tok in ("config.json", "model_index.json", "pytorch_model.bin",
+                        "diffusion_pytorch_model", "safetensors"):
+                if tok in lowered:
+                    return True
+        # 4. Free-form diffusers / transformers load errors.
+        for tok in (
+            "cannot load",
+            "does not appear to be a valid",
+            "cannot instantiate",
+            "tried to load but failed",
+        ):
+            if tok in lowered:
+                return True
+        return False
+
     def _sanitize_safe_message(self, message: str) -> str:
         message = (message or "").strip()
         if not message:
@@ -578,6 +673,42 @@ class Worker:
         internal = f"{type(exc).__name__}: {str(exc)}".strip()
         if isinstance(exc, CanceledError) or isinstance(exc, InterruptedError):
             return "canceled", False, "canceled", internal
+        if isinstance(exc, HardwareUnmetError):
+            # Terminal: function self-disables on this worker (e2e #40). Not
+            # retryable on the same worker; the orchestrator narrows future
+            # dispatches away.
+            return (
+                "hardware_unmet",
+                False,
+                self._sanitize_safe_message(str(exc) or "hardware unmet"),
+                internal,
+            )
+        # E2E #46 — explicit RefCompatibilitySurprise raised by tenant code
+        # or auto-detected via the heuristic below. Subclasses ValidationError
+        # so `isinstance` checks that expect "validation" still match, but
+        # the classification is narrower: the caller's ref passed pre-
+        # dispatch compat gates but failed at load time.
+        if isinstance(exc, RefCompatibilitySurprise):
+            return (
+                "ref_compatibility_surprise",
+                False,
+                self._sanitize_safe_message(str(exc) or "ref compatibility failure"),
+                internal,
+            )
+        # Heuristic: common load-time errors that almost always mean the
+        # caller's ref doesn't match the function's expected shape. Runs
+        # only when the current request carried a caller-supplied ref
+        # (set via `_current_payload_ref_keys` in the dispatch path).
+        if self._looks_like_ref_compatibility_surprise(exc):
+            msg = str(exc) or ""
+            if len(msg) > 240:
+                msg = msg[:240] + "…"
+            return (
+                "ref_compatibility_surprise",
+                False,
+                self._sanitize_safe_message(msg or "ref compatibility failure"),
+                internal,
+            )
         if isinstance(exc, ValidationError) or isinstance(exc, ValueError):
             return "validation", False, self._sanitize_safe_message(str(exc) or "invalid input"), internal
         if isinstance(exc, RetryableError):
@@ -592,6 +723,55 @@ class Worker:
         if type(exc).__name__ in {"OutOfMemoryError", "CUDAOutOfMemoryError"}:
             return "resource", False, "out of memory", internal
         return "internal", False, "internal error", internal
+
+    def _emit_function_unavailable_signal(
+        self,
+        *,
+        function_name: str,
+        exc: HardwareUnmetError,
+    ) -> None:
+        """Emit WorkerFunctionUnavailableSignal for a hardware-gated self-disable (e2e #40).
+
+        Also prunes the function from the worker's advertised spec (via
+        ``_disabled_functions_by_name``) so an orchestrator reconnect
+        does not re-dispatch the same failing function before the
+        availability-snapshot update round-trips.
+        """
+        try:
+            reason = getattr(exc, "reason", "") or "hardware_unmet"
+            detail = str(exc)
+            axes = exc.axes() if hasattr(exc, "axes") else {}
+            signal = pb.WorkerFunctionUnavailableSignal(
+                worker_id=str(self.worker_id or ""),
+                release_id=str(self.release_id or ""),
+                function_name=str(function_name or ""),
+                reason=str(reason or ""),
+                detail=self._sanitize_safe_message(detail)[:1024],
+                detected_at_unix=int(time.time()),
+                axes={str(k): str(v) for k, v in (axes or {}).items()},
+            )
+            self._send_message(pb.WorkerSchedulerMessage(worker_function_unavailable=signal))
+            logger.warning(
+                "function_unavailable_signal emitted: fn=%s reason=%s axes=%s",
+                function_name,
+                reason,
+                axes,
+            )
+        except Exception:
+            logger.exception("failed to emit WorkerFunctionUnavailableSignal for %s", function_name)
+
+        # Locally mark this function disabled so subsequent dispatches on this
+        # worker (before the orchestrator processes the upstream signal) are
+        # rejected by the worker-side gate rather than being re-attempted.
+        try:
+            self._disabled_functions_by_name[str(function_name or "")] = {
+                "function_name": str(function_name or ""),
+                "reason": str(getattr(exc, "reason", "") or "hardware_unmet"),
+                "detail": str(exc)[:1024],
+                "self_disabled": True,
+            }
+        except Exception:
+            pass
 
     def _emit_progress_event(self, event: Dict[str, Any]) -> None:
         try:
@@ -1723,6 +1903,9 @@ class Worker:
 
             logger.info(f"Successfully connected to scheduler at {self.scheduler_addr}")
             self._emit_startup_phase("ready", status="ok", scheduler_addr=self.scheduler_addr)
+            # Reset redirect chain on a successful registration so a future
+            # owner change (legitimate failover) starts with a fresh budget.
+            self._redirect_chain_count = 0
             if self._models_ready_on_connect:
                 # Conversion workers: signal ModelsReady immediately since there is
                 # no GPU model to pre-load. Without this the scheduler's ModelsReady
@@ -1740,9 +1923,22 @@ class Worker:
             if code == grpc.StatusCode.FAILED_PRECONDITION and self._is_protocol_incompatibility(details):
                 self._handle_protocol_incompatibility(str(details))
             elif code == grpc.StatusCode.FAILED_PRECONDITION and leader:
-                logger.warning(f"Scheduler returned not_leader for {self.scheduler_addr}; redirecting to {leader}")
-                self._leader_hint = leader
-                self._set_scheduler_addr(leader)
+                self._redirect_chain_count += 1
+                if self._redirect_chain_count > self._max_redirect_chain:
+                    logger.error(
+                        "Scheduler redirect chain exceeded %d hops (last leader=%s); aborting reconnect loop",
+                        self._max_redirect_chain,
+                        leader,
+                    )
+                    self._running = False
+                    self._stop_event.set()
+                else:
+                    logger.warning(
+                        f"Scheduler returned not_leader for {self.scheduler_addr}; redirecting to {leader} (hop %d/%d)",
+                        self._redirect_chain_count, self._max_redirect_chain,
+                    )
+                    self._leader_hint = leader
+                    self._set_scheduler_addr(leader)
             else:
                 logger.error(f"Failed to connect to scheduler: {code} - {details}")
             self._emit_startup_phase(
@@ -2400,9 +2596,22 @@ class Worker:
                 if self._is_protocol_incompatibility(details):
                     self._handle_protocol_incompatibility(str(details))
                 elif leader:
-                    logger.warning(f"Scheduler redirect received; reconnecting to leader at {leader}")
-                    self._leader_hint = leader
-                    self._set_scheduler_addr(leader)
+                    self._redirect_chain_count += 1
+                    if self._redirect_chain_count > self._max_redirect_chain:
+                        logger.error(
+                            "Scheduler redirect chain exceeded %d hops (last leader=%s); aborting reconnect loop",
+                            self._max_redirect_chain,
+                            leader,
+                        )
+                        self._running = False
+                        self._stop_event.set()
+                    else:
+                        logger.warning(
+                            f"Scheduler redirect received; reconnecting to leader at {leader} (hop %d/%d)",
+                            self._redirect_chain_count, self._max_redirect_chain,
+                        )
+                        self._leader_hint = leader
+                        self._set_scheduler_addr(leader)
                 self._handle_connection_error()
             elif code == grpc.StatusCode.CANCELLED:
                 logger.warning("gRPC stream unexpectedly cancelled by server or network.")
@@ -2452,6 +2661,8 @@ class Worker:
             self._handle_interrupt_request(request_id, item_ids=item_ids, cancel_queued_only=cancel_queued_only)
         elif msg_type == "runtime_batching_config_cmd":
             self._handle_runtime_batching_config_cmd(message.runtime_batching_config_cmd)
+        elif msg_type == "worker_drain_cmd":
+            self._handle_worker_drain_cmd(message.worker_drain_cmd)
         elif msg_type == "realtime_open_cmd":
             self._handle_realtime_open_cmd(message.realtime_open_cmd)
         elif msg_type == "realtime_frame":
@@ -2463,12 +2674,13 @@ class Worker:
         # Add handling for other message types if needed (e.g., config updates)
         elif msg_type == 'endpoint_config':
             cfg = message.endpoint_config
-            resolved_by_variant = dict(getattr(cfg, "resolved_cozy_models_by_variant_ref", {}) or {})
+            resolved_by_flavor = dict(getattr(cfg, "resolved_cozy_models_by_flavor_ref", {}) or {})
+            required_ref_list = list(getattr(cfg, "required_flavor_refs", []) or [])
             logger.info(
                 "Received EndpointConfig (supported=%d required=%d resolved=%d)",
                 len(cfg.supported_repo_refs),
-                len(cfg.required_variant_refs),
-                len(resolved_by_variant),
+                len(required_ref_list),
+                len(resolved_by_flavor),
             )
 
             # Optional: authoritative model keyspace updates (runtime-editable).
@@ -2569,7 +2781,7 @@ class Worker:
 
             # Baseline resolved manifests for Cozy model downloads (issue #66/#238).
             self._resolved_cozy_models_by_id_baseline = self._canonicalize_resolved_models_map(
-                resolved_by_variant
+                resolved_by_flavor
             )
 
             # Allowlist semantics:
@@ -2592,8 +2804,8 @@ class Worker:
                 if self._manifest_allowed_model_ids is not None and not has_keyspace_update:
                     allow &= self._manifest_allowed_model_ids
                 self._release_allowed_model_ids = allow or self._manifest_allowed_model_ids
-            self._required_variant_refs_from_scheduler = [
-                _canonicalize_model_ref_string(str(v)) for v in list(cfg.required_variant_refs)
+            self._required_flavor_refs_from_scheduler = [
+                _canonicalize_model_ref_string(str(v)) for v in required_ref_list
             ]
 
             # Honor orchestrator-reported degradation state:
@@ -2657,7 +2869,7 @@ class Worker:
             # the prefetch set. Refs referenced by at least one enabled
             # function still prefetch (they serve that enabled path).
             prefetch_refs = self._filter_prefetch_for_disabled_functions(
-                self._required_variant_refs_from_scheduler or []
+                self._required_flavor_refs_from_scheduler or []
             )
 
             # Start background prefetch regardless of model manager; disk readiness is useful even
@@ -2675,6 +2887,59 @@ class Worker:
              logger.warning("Received empty message from scheduler.")
         else:
             logger.warning(f"Received unhandled message type: {msg_type}")
+
+    def _active_request_count(self) -> int:
+        with self._active_requests_lock:
+            return len(self._active_requests)
+
+    def _emit_worker_drain_result(self, reason: str, status: str) -> None:
+        active = self._active_request_count()
+        self._send_message(
+            pb.WorkerSchedulerMessage(
+                worker_drain_result=pb.WorkerDrainResult(
+                    worker_id=self.worker_id,
+                    reason=reason,
+                    status=status,
+                    active_requests=active,
+                    emitted_at_unix_ms=int(time.time() * 1000),
+                )
+            )
+        )
+        self._emit_worker_event_bytes(
+            "",
+            "worker.drain.status",
+            safe_json_bytes({"reason": reason, "status": status, "active_requests": active}),
+        )
+
+    def _handle_worker_drain_cmd(self, cmd: Any) -> None:
+        reason = str(getattr(cmd, "reason", "") or "scheduler_drain")
+        deadline_ms = int(getattr(cmd, "deadline_unix_ms", 0) or 0)
+        terminate_after_deadline = bool(getattr(cmd, "terminate_after_deadline", True))
+        now_ms = int(time.time() * 1000)
+        drain_seconds = max(0.0, (deadline_ms - now_ms) / 1000.0) if deadline_ms > 0 else float(self._drain_timeout_seconds or 0)
+
+        logger.info(
+            "Received worker drain command reason=%s deadline_ms=%s active_requests=%d",
+            reason,
+            deadline_ms,
+            self._active_request_count(),
+        )
+        self._draining = True
+        self._emit_worker_drain_result(reason, "draining")
+
+        def _drain_then_stop() -> None:
+            deadline = time.time() + drain_seconds
+            while drain_seconds > 0 and time.time() < deadline:
+                if self._active_request_count() == 0:
+                    break
+                time.sleep(0.2)
+            final_status = "drained" if self._active_request_count() == 0 else "deadline_exceeded"
+            self._emit_worker_drain_result(reason, final_status)
+            time.sleep(0.2)
+            if terminate_after_deadline or final_status == "drained":
+                self.stop()
+
+        threading.Thread(target=_drain_then_stop, daemon=True, name="worker-drain").start()
 
     @staticmethod
     def _canonicalize_resolved_models_map(mp: Dict[str, Any]) -> Dict[str, Any]:
@@ -2695,6 +2960,8 @@ class Worker:
                 parsed = parse_model_ref(canon)
                 if parsed.scheme == "cozy" and parsed.cozy is not None and parsed.cozy.digest:
                     tag_canon = f"cozy:{parsed.cozy.owner}/{parsed.cozy.repo}:{parsed.cozy.tag}"
+                    if parsed.cozy.flavor:
+                        tag_canon = f"{tag_canon}#{parsed.cozy.flavor}"
                     if tag_canon not in out:
                         out[tag_canon] = v
             except Exception:
@@ -2724,7 +2991,7 @@ class Worker:
             return refs
         # Conservative: we don't have enough info to know which refs are
         # shared. For now, keep all refs; the orchestrator already narrows
-        # required_variant_refs on disable (via BuildEndpointConfig dropping
+        # required_flavor_refs on disable (via BuildEndpointConfig dropping
         # the entries that only resolve for disabled functions). This hook
         # exists as a forward-compat point. Future: plumb the full
         # fn->refs map from the release manifest to enable actual filter.
@@ -2849,8 +3116,9 @@ class Worker:
                             )
                         except Exception:
                             pass
-                        # Push a registration update promptly (do not wait for the 10s heartbeat tick).
-                        self._register_worker(is_heartbeat=True)
+                        # Push a primary-stream registration update promptly (do not wait for
+                        # the 10s heartbeat tick) so schedulers see disk inventory changes.
+                        self._register_worker(is_heartbeat=False)
                         continue
 
                     self._model_cache.mark_downloading(canon, progress=0.0)
@@ -2899,7 +3167,7 @@ class Worker:
                     except Exception:
                         pass
                     # Volume inventory signal (gen-orchestrator issue #236).
-                    # model_variant_id should match what the scheduler uses in required_variant_refs.
+                    # model id should match what the scheduler uses in required_flavor_refs.
                     try:
                         payload = json.dumps(
                             {"model_variant_id": canon, **self._shared_disk_volume_info(lp)},
@@ -2927,8 +3195,9 @@ class Worker:
                         )
                     except Exception:
                         pass
-                    # Push a registration update promptly (do not wait for the 10s heartbeat tick).
-                    self._register_worker(is_heartbeat=True)
+                    # Push a primary-stream registration update promptly (do not wait for
+                    # the 10s heartbeat tick) so schedulers see disk inventory changes.
+                    self._register_worker(is_heartbeat=False)
                 except Exception as e:
                     try:
                         # Clear "downloading" state on failure so we don't report a stuck download forever.
@@ -3273,7 +3542,7 @@ class Worker:
                 item_index = None
         materialized_input_urls = _normalize_materialized_input_urls(request)
 
-        required_models_raw = list(getattr(request, "required_variant_refs", []) or [])
+        required_models_raw = list(getattr(request, "required_flavor_refs", []) or [])
         if required_models_raw:
             required_model_id_for_exec = str(required_models_raw[0] or "").strip()
 
@@ -3284,7 +3553,7 @@ class Worker:
             {
                 "function_name": function_name,
                 "job_id": job_id or "",
-                "required_variant_refs_count": len(required_models_raw),
+                "required_flavor_refs_count": len(required_models_raw),
                 "input_bytes": len(input_payload or b""),
             },
         )
@@ -3318,7 +3587,7 @@ class Worker:
             self._send_request_result(request_id, False, None, "retryable", True, "worker busy", error_msg)
             return
 
-        # required_variant_refs are pinned variant refs chosen by the scheduler; the worker must not guess.
+        # required_flavor_refs are pinned flavor refs chosen by the scheduler; the worker must not guess.
         required_models: List[str] = []
         for raw in required_models_raw:
             s = str(raw or "").strip()
@@ -3369,7 +3638,7 @@ class Worker:
                         if dest:
                             execution_hints["destination_repo"] = dest
                             destination_info_raw = {"ref": dest, "tags": []}
-                    # New contract: payload.source is a struct with {ref, variant_id?, attributes}.
+                    # New contract: payload.source is a struct with {ref, checkpoint_id?, attributes}.
                     src_obj = raw_input.get("source")
                     if isinstance(src_obj, dict):
                         source_info_raw = dict(src_obj)
@@ -3420,7 +3689,7 @@ class Worker:
         # Execute function in a separate thread to avoid blocking the receive loop.
         # Training-function handlers take a different dispatch path — the
         # dispatch wrapper already owns msgspec-decode of the raw payload dict,
-        # tenant-call, and ProducedVariant upload via RequestContext.save_checkpoint.
+        # tenant-call, and ProducedFlavor upload via RequestContext.save_checkpoint.
         if training_fn is not None:
             thread = threading.Thread(
                 target=self._execute_training_request,
@@ -3459,7 +3728,7 @@ class Worker:
                 request_id=request_id,
                 function_name=function_name,
                 input_payload=bytes(getattr(item, "input_payload", b"") or b""),
-                required_variant_refs=list(getattr(item, "required_variant_refs", []) or []),
+                required_flavor_refs=list(getattr(item, "required_flavor_refs", []) or []),
                 timeout_ms=int(getattr(item, "timeout_ms", 0) or 0),
                 owner=str(getattr(item, "owner", "") or ""),
                 invoker_id=str(getattr(item, "invoker_id", "") or ""),
@@ -3548,11 +3817,11 @@ class Worker:
                 resolved_tok = set_resolved_cozy_models_by_id(getattr(ctx, "resolved_cozy_models_by_id", None) or baseline)
                 prefs_tok = set_cozy_model_download_prefs_by_ref({})
                 try:
-                    required_variant_refs = list(getattr(cmd, "required_variant_refs", []) or [])
+                    required_flavor_refs = list(getattr(cmd, "required_flavor_refs", []) or [])
                     for idx, inj in enumerate(spec.injections):
-                        if idx >= len(required_variant_refs) or not str(required_variant_refs[idx]).strip():
-                            raise ValueError(f"missing required_variant_refs for injection param: {inj.param_name}")
-                        model_id = _canonicalize_model_ref_string(str(required_variant_refs[idx]).strip())
+                        if idx >= len(required_flavor_refs) or not str(required_flavor_refs[idx]).strip():
+                            raise ValueError(f"missing required_flavor_refs for injection param: {inj.param_name}")
+                        model_id = _canonicalize_model_ref_string(str(required_flavor_refs[idx]).strip())
                         self._enforce_model_allowlist(model_id, inj)
                         kwargs[inj.param_name] = self._resolve_injected_value(ctx, inj.param_type, model_id, inj)
                     await spec.func(**kwargs)
@@ -3723,7 +3992,7 @@ class Worker:
             "request.started",
             {
                 "function_name": str(spec.name or ""),
-                "required_variant_refs": list(getattr(ctx, "required_models", []) or []),
+                "required_flavor_refs": list(getattr(ctx, "required_models", []) or []),
                 "runtime_batching_config": getattr(ctx, "runtime_batching_config", {}),
                 "execution_hints": getattr(ctx, "execution_hints", {}),
             },
@@ -3815,6 +4084,29 @@ class Worker:
             call_kwargs: Dict[str, Any] = {}
             call_kwargs[spec.ctx_param] = ctx
             call_kwargs[spec.payload_param] = input_obj
+
+            # E2E #46: record which caller-supplied refs (Src.PAYLOAD_REF)
+            # are bound on this request so _map_exception can classify
+            # post-download load failures as `ref_compatibility_surprise`.
+            # Cleared in the outer `except` / `finally` via
+            # `_current_payload_ref_keys = {}`.
+            payload_ref_keys_this_request: Dict[str, str] = {}
+            for inj in spec.injections:
+                try:
+                    if inj.model_ref.source == ModelRefSource.PAYLOAD_REF:
+                        key = str(inj.model_ref.key or "").strip()
+                        if key:
+                            try:
+                                ref_val = getattr(input_obj, key, "") or ""
+                            except Exception:
+                                ref_val = ""
+                            if isinstance(ref_val, dict):
+                                ref_val = str(ref_val.get("ref") or "")
+                            payload_ref_keys_this_request[key] = str(ref_val or "")
+                except Exception:
+                    # Older InjectionSpec builds without PAYLOAD_REF just skip.
+                    pass
+            self._current_payload_ref_keys = payload_ref_keys_this_request
 
             for inj in spec.injections:
                 resolve_t0 = time.monotonic()
@@ -3973,12 +4265,85 @@ class Worker:
                         raise
 
             logger.info("[request_id=%s] calling %s", request_id, spec.name)
-            if inspect.iscoroutinefunction(spec.func):
-                result = asyncio.run(spec.func(**call_kwargs))
-            elif inspect.isasyncgenfunction(spec.func):
-                result = spec.func(**call_kwargs)
-            else:
-                result = spec.func(**call_kwargs)
+            # OOM-retry: escalate offload on injected pipelines if the tenant call
+            # raises torch.cuda.OutOfMemoryError. Only meaningful for non-generator
+            # single-output functions — streaming/incremental runs can't be rewound.
+            try:
+                from .inference_memory import (
+                    _escalate_pipeline_mode as _escalate_pipeline_mode,
+                    flush_memory as _flush_memory,
+                )
+            except Exception:
+                _escalate_pipeline_mode = None  # type: ignore[assignment]
+                _flush_memory = None  # type: ignore[assignment]
+
+            _injected_pipes: List[Any] = []
+            try:
+                for _inj in spec.injections:
+                    v = call_kwargs.get(_inj.param_name)
+                    if v is not None and hasattr(v, "__class__"):
+                        _injected_pipes.append(v)
+            except Exception:
+                _injected_pipes = []
+
+            _oom_types: tuple[type, ...] = ()
+            try:
+                if torch is not None:
+                    _oom_types = (torch.cuda.OutOfMemoryError,)  # type: ignore[attr-defined]
+            except Exception:
+                _oom_types = ()
+
+            _can_retry_oom = (
+                spec.output_mode == "single"
+                and not inspect.isasyncgenfunction(spec.func)
+                and _escalate_pipeline_mode is not None
+                and _oom_types
+            )
+            _max_oom_retries = 2
+            _oom_attempt = 0
+            while True:
+                try:
+                    if inspect.iscoroutinefunction(spec.func):
+                        result = asyncio.run(spec.func(**call_kwargs))
+                    elif inspect.isasyncgenfunction(spec.func):
+                        result = spec.func(**call_kwargs)
+                    else:
+                        result = spec.func(**call_kwargs)
+                    break
+                except _oom_types as _oom_exc:  # type: ignore[misc]
+                    _oom_attempt += 1
+                    if _flush_memory is not None:
+                        _flush_memory()
+                    if not _can_retry_oom or _oom_attempt > _max_oom_retries:
+                        logger.error(
+                            "[request_id=%s] inference OOM (attempt %d); giving up",
+                            request_id, _oom_attempt,
+                        )
+                        raise
+                    escalated = False
+                    for _pipe in _injected_pipes:
+                        try:
+                            if _escalate_pipeline_mode(_pipe, logger=logger, escalation=("vae_only", "model_offload", "group_offload", "sequential")):
+                                escalated = True
+                        except Exception:
+                            pass
+                    if not escalated:
+                        logger.warning(
+                            "[request_id=%s] inference OOM (attempt %d); no further escalation possible, re-raising",
+                            request_id, _oom_attempt,
+                        )
+                        raise
+                    logger.warning(
+                        "[request_id=%s] inference OOM (attempt %d); retrying with escalated offload",
+                        request_id, _oom_attempt,
+                    )
+                    try:
+                        self._emit_worker_event_bytes(request_id, "inference.oom_retry", safe_json_bytes({
+                            "function_name": spec.name,
+                            "attempt": _oom_attempt,
+                        }))
+                    except Exception:
+                        pass
             logger.info("[request_id=%s] %s returned, output_mode=%s", request_id, spec.name, spec.output_mode)
 
             if ctx.is_canceled():
@@ -4125,6 +4490,10 @@ class Worker:
         except Exception as e:
             logger.exception("Task %s failed: %s", request_id, e)
             error_type, retryable, safe_message, error_message = self._map_exception(e)
+            if isinstance(e, HardwareUnmetError):
+                # e2e #40: tell the orchestrator to stop dispatching this
+                # function to this worker.
+                self._emit_function_unavailable_signal(function_name=str(spec.name or ""), exc=e)
             if inference_watchdog is not None:
                 inference_watchdog.cancel()
             self._emit_request_event(
@@ -4180,6 +4549,10 @@ class Worker:
                 except Exception:
                     pass
             self._gpu_busy_exit()
+            # E2E #46: clear the per-request PAYLOAD_REF tracking so the
+            # classifier doesn't mis-fire on the next request that didn't
+            # involve caller refs.
+            self._current_payload_ref_keys = {}
 
             # Best-effort resource peaks.
             try:
@@ -4254,7 +4627,7 @@ class Worker:
         The dispatch wrapper (conversion/dispatch.py) owns tenant-call plumbing:
         msgspec-decoding each tenant parameter, building Source/Dataset helpers,
         invoking the tenant function, and uploading each returned
-        ProducedVariant via ctx.save_checkpoint. The worker's job here is the
+        ProducedFlavor via ctx.save_checkpoint. The worker's job here is the
         outer shell — metrics, events, source materialization, destination tag
         application, and the success/fail RPC response.
         """
@@ -4285,7 +4658,7 @@ class Worker:
             "request.started",
             {
                 "function_name": function_name,
-                "required_variant_refs": list(getattr(ctx, "required_models", []) or []),
+                "required_flavor_refs": list(getattr(ctx, "required_models", []) or []),
                 "execution_hints": getattr(ctx, "execution_hints", {}),
             },
         )
@@ -4357,12 +4730,27 @@ class Worker:
             success = False
 
         except Exception as exc:
-            error_type = "internal"
-            retryable = False
-            safe_message = f"{type(exc).__name__}: {exc}"
-            error_message = safe_message
-            logger.exception("[request_id=%s] training_function %s failed: %s",
-                             request_id, function_name, exc)
+            # e2e #40: HardwareUnmetError → function-level self-disable terminal.
+            # Classify separately before the catch-all so (a) the error_type is
+            # hardware_unmet (not internal), (b) the WorkerFunctionUnavailableSignal
+            # goes upstream so the orchestrator narrows dispatch.
+            if isinstance(exc, HardwareUnmetError):
+                error_type = "hardware_unmet"
+                retryable = False
+                safe_message = self._sanitize_safe_message(str(exc) or "hardware unmet")
+                error_message = f"{type(exc).__name__}: {exc}"
+                self._emit_function_unavailable_signal(function_name=function_name, exc=exc)
+                logger.warning(
+                    "[request_id=%s] training_function %s self-disabled: %s",
+                    request_id, function_name, exc,
+                )
+            else:
+                error_type = "internal"
+                retryable = False
+                safe_message = f"{type(exc).__name__}: {exc}"
+                error_message = safe_message
+                logger.exception("[request_id=%s] training_function %s failed: %s",
+                                 request_id, function_name, exc)
             self._emit_request_event(
                 request_id,
                 "request.failed",
@@ -4482,12 +4870,11 @@ class Worker:
 
         Called just before tenant code runs when the job payload has a
         reserved-name `source` field. Resolves source.ref against tensorhub,
-        downloads the variant matching source.attributes (subset-containment),
+        downloads the checkpoint flavor matching source.attributes (subset-containment),
         and populates ctx.source_path with the local snapshot directory.
 
-        If source.variant_id is set, it takes priority over the attributes
-        selector (future: wired through when tensorhub's resolve API accepts
-        variant_id selectors; today dtype-prefs is the best proxy).
+        If source.checkpoint_id is set, it takes priority over the attributes
+        selector.
         """
         ref = str(source.get("ref") or "").strip()
         if not ref:
@@ -5034,7 +5421,17 @@ class Worker:
                         f"model injection type mismatch for {inj.param_name}: expected {expected_qn}, got {got_qn} (model_id={model_id})"
                     )
                 # Best-effort move to worker device if supported.
+                # Tenants that know their pipeline won't fit in VRAM can set
+                # WORKER_SKIP_PIPELINE_TO=1 so the pipeline stays on CPU
+                # and the tenant function can call
+                # ``pipeline.enable_sequential_cpu_offload()`` (or equivalent)
+                # to stream submodules to GPU on demand.
+                _skip_pipeline_to_env = (os.getenv("WORKER_SKIP_PIPELINE_TO") or "").strip().lower()
+                _skip_pipeline_to = _skip_pipeline_to_env in {"1", "true", "yes", "y", "t"}
                 try:
+                    if _skip_pipeline_to:
+                        logger.info("WORKER_SKIP_PIPELINE_TO set; leaving pipeline on CPU for tenant offload model=%s", model_id)
+                        return obj
                     if torch is not None and hasattr(obj, "to") and callable(getattr(obj, "to", None)):
                         # For diffusers pipelines, evict older VRAM pipelines before moving a new one
                         # to GPU to avoid transient OOMs during `.to("cuda")`.
@@ -5062,24 +5459,130 @@ class Worker:
                             torch_dtype = kwargs.get("torch_dtype") if isinstance(kwargs, dict) else None
                         except Exception:
                             torch_dtype = None
-                        logger.info(
-                            "Moving model to device=%s dtype=%s model=%s ...",
-                            str(ctx.device), torch_dtype, model_id,
+
+                        # Low-VRAM preflight: if the model won't fit in VRAM, skip
+                        # moving to CUDA and apply model/group offload directly.
+                        # Also handles escalating offload on OOM during .to().
+                        from .inference_memory import (
+                            apply_low_vram_config as _apply_low_vram_config,
+                            estimate_pipeline_size_gb as _estimate_pipeline_size_gb,
+                            flush_memory as _flush_memory,
+                            get_available_vram_gb as _get_available_vram_gb,
+                            get_total_vram_gb as _get_total_vram_gb,
                         )
-                        try:
-                            if torch_dtype is not None:
-                                obj = obj.to(str(ctx.device), dtype=torch_dtype)
-                            else:
-                                obj = obj.to(str(ctx.device))
-                        except TypeError:
-                            # Some objects implement .to(device) but not dtype kwarg.
-                            obj = obj.to(str(ctx.device))
-                        logger.info(
-                            "Model moved to device=%s successfully model=%s",
-                            str(ctx.device), model_id,
-                        )
-                        if rm is not None:
-                            rm.add_gpu_load_time(int((time.monotonic() - t_to0) * 1000))
+
+                        device_is_cuda_target = str(ctx.device).startswith("cuda") and torch.cuda.is_available()
+                        preflight_offload_mode: Optional[str] = None
+                        if device_is_cuda_target and is_diffusers_pipeline_type:
+                            model_gb = _estimate_pipeline_size_gb(obj)
+                            total_vram = _get_total_vram_gb()
+                            free_vram = _get_available_vram_gb()
+                            safety_margin = 2.0
+                            try:
+                                safety_margin = float(
+                                    os.getenv("COZY_INFERENCE_VRAM_SAFETY_MARGIN_GB", "2.0") or "2.0"
+                                )
+                            except ValueError:
+                                safety_margin = 2.0
+                            if model_gb > 0 and model_gb > max(0.0, free_vram - safety_margin):
+                                logger.warning(
+                                    "low_vram preflight: model=%s size=%.1fGB free_vram=%.1fGB total_vram=%.1fGB -> enabling offload before .to()",
+                                    model_id, model_gb, free_vram, total_vram,
+                                )
+                                # Pick the right offload based on how tight we are.
+                                if total_vram > 0 and total_vram <= 6.0:
+                                    preflight_offload_mode = "group_offload"
+                                else:
+                                    preflight_offload_mode = "model_offload"
+
+                        if preflight_offload_mode is not None:
+                            applied = _apply_low_vram_config(
+                                obj, mode=preflight_offload_mode, logger=logger,
+                                model_size_gb=_estimate_pipeline_size_gb(obj),
+                            )
+                            try:
+                                self._emit_worker_event_bytes("", "low_vram_mode_applied", json.dumps({
+                                    "model_id": model_id,
+                                    "stage": "preflight",
+                                    "requested_mode": preflight_offload_mode,
+                                    **{k: v for k, v in applied.items() if isinstance(v, (bool, str))},
+                                }).encode("utf-8"))
+                            except Exception:
+                                pass
+                            # Do NOT call .to(cuda) after offload hooks are installed.
+                            if rm is not None:
+                                rm.add_gpu_load_time(int((time.monotonic() - t_to0) * 1000))
+                        else:
+                            logger.info(
+                                "Moving model to device=%s dtype=%s model=%s ...",
+                                str(ctx.device), torch_dtype, model_id,
+                            )
+                            _move_attempts = 0
+                            while True:
+                                try:
+                                    if torch_dtype is not None:
+                                        obj = obj.to(str(ctx.device), dtype=torch_dtype)
+                                    else:
+                                        obj = obj.to(str(ctx.device))
+                                    break
+                                except TypeError:
+                                    obj = obj.to(str(ctx.device))
+                                    break
+                                except torch.cuda.OutOfMemoryError as _oom:
+                                    _move_attempts += 1
+                                    _flush_memory()
+                                    if _move_attempts >= 3 or not is_diffusers_pipeline_type:
+                                        logger.error(
+                                            "OOM moving %s to CUDA after %d attempt(s); giving up",
+                                            model_id, _move_attempts,
+                                        )
+                                        raise
+                                    # Escalate: 1st OOM -> model_offload; 2nd -> sequential.
+                                    escalate_to = "model_offload" if _move_attempts == 1 else "sequential"
+                                    logger.warning(
+                                        "OOM moving %s to CUDA (attempt %d); escalating to %s",
+                                        model_id, _move_attempts, escalate_to,
+                                    )
+                                    applied = _apply_low_vram_config(
+                                        obj, mode=escalate_to, logger=logger,
+                                    )
+                                    try:
+                                        self._emit_worker_event_bytes("", "low_vram_mode_applied", json.dumps({
+                                            "model_id": model_id,
+                                            "stage": "oom_escalation",
+                                            "attempt": _move_attempts,
+                                            "requested_mode": escalate_to,
+                                            **{k: v for k, v in applied.items() if isinstance(v, (bool, str))},
+                                        }).encode("utf-8"))
+                                    except Exception:
+                                        pass
+                                    # Offload hooks are installed; skip .to(cuda) and exit loop.
+                                    preflight_offload_mode = escalate_to
+                                    break
+                            logger.info(
+                                "Model moved to device=%s successfully model=%s",
+                                str(ctx.device), model_id,
+                            )
+                            if rm is not None:
+                                rm.add_gpu_load_time(int((time.monotonic() - t_to0) * 1000))
+
+                        # Baseline VAE/attention-slicing pass for diffusers pipelines
+                        # that did not hit an offload path above.
+                        if is_diffusers_pipeline_type and preflight_offload_mode is None:
+                            try:
+                                applied = _apply_low_vram_config(
+                                    obj, mode="auto", logger=logger,
+                                )
+                                try:
+                                    self._emit_worker_event_bytes("", "low_vram_mode_applied", json.dumps({
+                                        "model_id": model_id,
+                                        "stage": "baseline",
+                                        **{k: v for k, v in applied.items() if isinstance(v, (bool, str))},
+                                    }).encode("utf-8"))
+                                except Exception:
+                                    pass
+                            except Exception as _lv_exc:
+                                logger.debug("apply_low_vram_config(auto) failed: %s", _lv_exc)
 
                         # Cache diffusers pipelines in the worker's ModelCache (LRU + heartbeats)
                         # instead of the generic from_pretrained object cache, otherwise VRAM
@@ -5154,7 +5657,7 @@ class Worker:
                 inj.param_name,
                 raw,
                 model_id,
-                list(getattr(self, "_required_variant_refs_from_scheduler", []) or []),
+                list(getattr(self, "_required_flavor_refs_from_scheduler", []) or []),
                 sorted(fixed_map.values()),
             )
             self._enforce_model_allowlist(model_id, inj, allowed_ids=allowed_ids)

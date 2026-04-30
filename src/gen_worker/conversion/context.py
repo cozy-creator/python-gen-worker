@@ -36,9 +36,13 @@ class ConversionContext:
         self,
         *,
         request_context: "RequestContext",
-        source: "Source",
+        source: "Source | None",
     ) -> None:
         self._req = request_context
+        # Source is None for dataset-generation tenants (e2e #45) that are
+        # model-agnostic. Tenants that operate on a checkpoint declare
+        # ``source: Source`` in their signature; the library builds it and
+        # passes it here.
         self._source = source
         # Lazy-created temp roots; one per job invocation.
         self._mktemp_root: Path | None = None

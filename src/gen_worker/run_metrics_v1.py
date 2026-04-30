@@ -93,7 +93,7 @@ def _cache_dir() -> Path:
 @dataclass
 class ModelMetricsV1:
     model_id: str
-    variant_label: Optional[str] = None
+    flavor: Optional[str] = None
     snapshot_digest: Optional[str] = None
     cache_state: Optional[str] = None  # hot_vram|warm_disk|cold_remote
     bytes_downloaded: Optional[int] = None
@@ -107,8 +107,8 @@ class ModelMetricsV1:
 
     def to_json(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {"model_id": self.model_id}
-        if self.variant_label is not None:
-            out["variant_label"] = self.variant_label
+        if self.flavor is not None:
+            out["flavor"] = self.flavor
         if self.snapshot_digest is not None:
             out["snapshot_digest"] = self.snapshot_digest
         if self.cache_state is not None:

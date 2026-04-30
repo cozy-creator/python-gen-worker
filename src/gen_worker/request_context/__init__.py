@@ -12,7 +12,7 @@ import threading
 import time
 import urllib.parse
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Literal, Optional
+from typing import Any, Callable, Dict, List, Literal, Mapping, Optional
 
 import requests
 
@@ -153,6 +153,13 @@ class RequestContext:
         # lifecycle (open → per-file uploads → finalize).
         self._upload_sessions = None  # type: Optional["_UploadSessionManager"]
 
+        # Repo kind declared by the ingest pipeline (e2e progress.json #70).
+        # Set via `set_repo_kind` after the HF classifier runs and BEFORE the
+        # first save_checkpoint call. Forwarded to tensorhub on session-open
+        # so the destination repo gets the right `repo_kind` + derived
+        # `library_name`. Empty = inherit / let server pick.
+        self._repo_kind: str = ""
+
     @property
     def request_id(self) -> str:
         return self._request_id
@@ -236,12 +243,28 @@ class RequestContext:
                     h["X-Cozy-Owner"] = self._owner
                 return h
 
+            def _kind_provider() -> str:
+                return self._repo_kind or ""
+
             self._upload_sessions = _UploadSessionManager(
                 base_url=base,
                 headers_provider=_hdrs,
                 job_id=self._job_id,
+                repo_kind_provider=_kind_provider,
             )
         return self._upload_sessions
+
+    def set_repo_kind(self, kind: str) -> None:
+        """Set the destination repo's `repo_kind` for upload sessions opened
+        from this ctx. Called by the ingest pipeline after the HF classifier
+        determines the runtime_library. e2e progress.json #70.
+
+        Must be called BEFORE the first save_checkpoint / save_file / etc.
+        — the kind is consumed at upload-session-open time. Setting it after
+        the session is already open is a no-op (the session was already
+        created with whatever kind was set then).
+        """
+        self._repo_kind = str(kind or "").strip()
 
     def _checkpoint_session_id(self, repo_owner: str, repo_name: str) -> str:
         """Return the session_id for a checkpoint upload session on this
@@ -386,7 +409,7 @@ class RequestContext:
     # Tenant code reads these; writes happen only inside the library.
     @property
     def source(self) -> Dict[str, Any]:
-        """Echoed source descriptor: {ref, variant_id?, attributes}. Empty dict
+        """Echoed source descriptor: {ref, checkpoint_id?, attributes}. Empty dict
         if this isn't a conversion/training job or the payload didn't supply
         the reserved `source` field."""
         return dict(self._source_info)
@@ -592,9 +615,18 @@ class RequestContext:
         epoch_number: Optional[int] = None,
         output_kind: Optional[str] = None,
         target_dtype: Optional[str] = None,
-        variant_label: Optional[str] = None,
+        flavor: Optional[str] = None,
+        attributes: Optional[Mapping[str, str]] = None,
     ) -> Tensors:
-        """Save checkpoint/model-weight bytes and return a first-class tensor artifact."""
+        """Save checkpoint/model-weight bytes and return a first-class tensor artifact.
+
+        ``attributes`` is a free-form per-blob metadata map carried onto the
+        upload-session /complete payload (alongside structured lineage). The
+        server may persist it on the resulting Tensors record; unknown keys
+        are forward-compatible. Use this instead of inventing new structured
+        kwargs for one-off provenance fields (recipe hashes, calibration
+        dataset refs, library versions, etc.).
+        """
         ref = _normalize_output_ref(ref)
         self._require_repo_job_scope_for_tensors(ref)
         src = str(local_path or "").strip()
@@ -625,7 +657,8 @@ class RequestContext:
                 epoch_number=epoch_number,
                 output_kind=output_kind,
                 target_dtype=target_dtype,
-                variant_label=variant_label,
+                flavor=flavor,
+                attributes=attributes,
             )
             with open(src, "rb") as fin:
                 while True:
@@ -660,7 +693,7 @@ class RequestContext:
         epoch_number: Optional[int] = None,
         output_kind: Optional[str] = None,
         target_dtype: Optional[str] = None,
-        variant_label: Optional[str] = None,
+        flavor: Optional[str] = None,
     ) -> Tensors:
         """Save in-memory checkpoint/model-weight bytes."""
         if not isinstance(data, (bytes, bytearray)):
@@ -683,7 +716,7 @@ class RequestContext:
                 epoch_number=epoch_number,
                 output_kind=output_kind,
                 target_dtype=target_dtype,
-                variant_label=variant_label,
+                flavor=flavor,
             )
             stream.write(payload)
             out = stream.finalize()
@@ -751,7 +784,8 @@ class RequestContext:
         epoch_number: Optional[int] = None,
         output_kind: Optional[str] = None,
         target_dtype: Optional[str] = None,
-        variant_label: Optional[str] = None,
+        flavor: Optional[str] = None,
+        attributes: Optional[Mapping[str, str]] = None,
     ) -> _RequestOutputStream:
         """Open a chunk-writable output stream that finalizes to Tensors."""
         ref = _normalize_output_ref(ref)
@@ -767,7 +801,8 @@ class RequestContext:
             epoch_number=epoch_number,
             output_kind=output_kind,
             target_dtype=target_dtype,
-            variant_label=variant_label,
+            flavor=flavor,
+            attributes=attributes,
         )
 
     def save_bytes_create(self, ref: str, data: bytes) -> Asset:
@@ -1037,10 +1072,8 @@ class RequestContext:
         source_version_id: Optional[str] = None,
         target_version_id: Optional[str] = None,
         snapshot_manifest: Optional[Dict[str, Any]] = None,
-        # HARD-CUT issue #14: the new /publish endpoint shape takes a list of
-        # checkpoints + per-checkpoint lineage + a tags map. Existing callers
-        # (clone_pipeline.py) still pass the legacy args; we translate them
-        # into the new shape here so the wire format is always current.
+        # HARD-CUT issue #14: the /publish endpoint takes checkpoint_flavors
+        # plus per-checkpoint lineage and a tags map.
         relationship_kind: str = "import",
         release_visibility: str = "private",
         auto_create_external_parent: bool = True,
@@ -1048,7 +1081,8 @@ class RequestContext:
     ) -> Dict[str, Any]:
         """Publish checkpoints + lineage to Tensorhub via the worker-cap /publish endpoint.
 
-        Every entry in metadata['output_variants'] becomes one row in
+        Every entry in metadata['checkpoint_flavors'] becomes one concrete
+        checkpoint attached to the destination tag group in Tensorhub.
         tensorhub.repo_checkpoints (checkpoint_id IS the snapshot digest).
         `source_repo` + `source_version_id` (if set) produce one lineage
         edge per checkpoint with relationship_kind. Tags in
@@ -1192,14 +1226,14 @@ class RequestContext:
             raise RuntimeError("repo publish failed: no job_id in execution_hints (missing destination_repo or job scope)")
 
         metrics = dict(md)
-        commit_output_variants = []
-        raw_output_variants = md.get("output_variants")
-        if isinstance(raw_output_variants, list):
-            for item in raw_output_variants:
+        commit_checkpoint_flavors = []
+        raw_checkpoint_flavors = md.get("checkpoint_flavors")
+        if isinstance(raw_checkpoint_flavors, list):
+            for item in raw_checkpoint_flavors:
                 if isinstance(item, dict):
-                    commit_output_variants.append(dict(item))
+                    commit_checkpoint_flavors.append(dict(item))
 
-        # Wire artifact_refs into output_variants if not already present.
+        # Wire artifact_refs into checkpoint_flavors if not already present.
         parsed_artifacts = []
         for ref in (artifact_refs or []):
             if isinstance(ref, dict):
@@ -1218,17 +1252,12 @@ class RequestContext:
                 if art.get("digest"):
                     parsed_artifacts.append(art)
             elif isinstance(ref, str) and ref.strip():
-                # Legacy: string ref used as path hint only.
                 parsed_artifacts.append({"path": ref.strip()})
 
-        if parsed_artifacts and commit_output_variants:
-            for variant in commit_output_variants:
-                if "artifacts" not in variant:
-                    variant["artifacts"] = parsed_artifacts
-        # Only include output_variants when they have the required fields
-        # (version_id, variant_label, etc.). Bare artifact-only variants will
-        # fail TensorHub validation. When we have no structured variants, the
-        # commit relies on output_versions + publish_intent instead.
+        if parsed_artifacts and commit_checkpoint_flavors:
+            for flavor_item in commit_checkpoint_flavors:
+                if "artifacts" not in flavor_item:
+                    flavor_item["artifacts"] = parsed_artifacts
 
         # ----- Build the /publish request body (issue #14 shape). -----
         _ = publish_intent
@@ -1240,8 +1269,8 @@ class RequestContext:
             if isinstance(raw_entries, list):
                 manifest_entries = [e for e in raw_entries if isinstance(e, dict)]
 
-        # Each commit_output_variants entry becomes one checkpoint row. The
-        # server computes checkpoint_id from the per-variant snapshot_manifest
+        # Each commit_checkpoint_flavors entry becomes one checkpoint row. The
+        # server computes checkpoint_id from the per-flavor snapshot_manifest
         # (e2e #36).
         publish_checkpoints: List[Dict[str, Any]] = []
         parent_repo_ref = ""
@@ -1249,7 +1278,7 @@ class RequestContext:
             parent_repo_ref = str(source_repo).strip()
         parent_checkpoint_id = normalized_source_version_id
 
-        for v in commit_output_variants:
+        for v in commit_checkpoint_flavors:
             # e2e #36: the wire schema dropped every server-derivable field
             # (checkpoint_id, kind, library, dtype, file_layout, file_type,
             # size_bytes). The server infers metadata from the uploaded
@@ -1258,9 +1287,33 @@ class RequestContext:
             # reserved `_*` keys, which the server owns), display_label,
             # lineage, snapshot_manifest.
             attrs: Dict[str, str] = {}
-            label = str(v.get("variant_label") or "").strip()
-            if label:
-                attrs["variant_label"] = label
+            flavor = str(v.get("flavor") or "").strip()
+            raw_flavors = v.get("flavors")
+            flavors: List[str] = []
+            if isinstance(raw_flavors, list):
+                for raw_flavor in raw_flavors:
+                    item = str(raw_flavor or "").strip()
+                    if item and item not in flavors:
+                        flavors.append(item)
+            if flavor and flavor not in flavors:
+                flavors.insert(0, flavor)
+            label = str(v.get("display_label") or flavor).strip()
+            if flavor:
+                attrs["flavor"] = flavor
+            if flavors:
+                attrs["flavors"] = ",".join(flavors)
+            # Issue #63: merge in per-flavor tenant attributes set by the
+            # dispatch layer (library_provenance + variant.attributes). The
+            # canonical attrs dict above (flavor/flavors) wins on collision
+            # because they're server-validated structural fields; tenant
+            # provenance keys are advisory and shouldn't shadow them.
+            v_attributes = v.get("attributes")
+            if isinstance(v_attributes, dict):
+                for k, val in v_attributes.items():
+                    key = str(k).strip()
+                    if not key or key in attrs:
+                        continue
+                    attrs[key] = str(val)
             lineage: List[Dict[str, Any]] = []
             if parent_repo_ref and parent_checkpoint_id:
                 lineage.append({
@@ -1268,45 +1321,39 @@ class RequestContext:
                     "parent_checkpoint_id": parent_checkpoint_id,
                     "relationship_kind":    relationship_kind or "import",
                 })
-            # Per-variant snapshot_manifest is taken from the caller's
+            # Per-flavor snapshot_manifest is taken from the caller's
             # v["snapshot_manifest"] when present; otherwise falls back to
             # the shared top-level manifest_entries (clone path).
             v_manifest = v.get("snapshot_manifest")
             if isinstance(v_manifest, list):
-                per_variant_entries = [e for e in v_manifest if isinstance(e, dict)]
+                per_flavor_entries = [e for e in v_manifest if isinstance(e, dict)]
             else:
-                per_variant_entries = manifest_entries
+                per_flavor_entries = manifest_entries
             publish_checkpoints.append({
-                "snapshot_manifest": per_variant_entries,
+                "snapshot_manifest": per_flavor_entries,
                 "attributes":        attrs,
                 "display_label":     label,
+                "flavor":            flavor,
+                "flavors":           flavors,
                 "lineage":           lineage,
             })
 
-        # Fallback: no commit_output_variants supplied (e.g., a simple one-off
-        # publish). Emit exactly one checkpoint from the aggregate
-        # snapshot_manifest. Server computes the checkpoint_id.
-        if not publish_checkpoints and manifest_entries:
-            lineage: List[Dict[str, Any]] = []
-            if parent_repo_ref and parent_checkpoint_id:
-                lineage.append({
-                    "parent_repo":          parent_repo_ref,
-                    "parent_checkpoint_id": parent_checkpoint_id,
-                    "relationship_kind":    relationship_kind or "import",
-                })
-            publish_checkpoints.append({
-                "snapshot_manifest": manifest_entries,
-                "attributes":        {},
-                "display_label":     "",
-                "lineage":           lineage,
-            })
-
-        # Tags beyond `:latest` can't go in the initial finalize body — the
-        # worker doesn't know the server's computed checkpoint_id until the
-        # finalize response comes back. The tags_map therefore stays empty
-        # here; caller-supplied tags are applied in a follow-up loop after
-        # parsing the response's `checkpoints[].checkpoint_id`.
-        tags_map: Dict[str, str] = {}
+        primary_default_flavor = ""
+        if publish_checkpoints:
+            primary_default_flavor = str(publish_checkpoints[0].get("flavor") or "").strip()
+            if not primary_default_flavor:
+                raw_primary_flavors = publish_checkpoints[0].get("flavors")
+                if isinstance(raw_primary_flavors, list) and raw_primary_flavors:
+                    primary_default_flavor = str(raw_primary_flavors[0] or "").strip()
+        tag_groups: List[Dict[str, Any]] = []
+        for tag in normalized_tags:
+            clean_tag = str(tag or "").strip()
+            if not clean_tag or clean_tag.lower() == "latest":
+                continue
+            group: Dict[str, Any] = {"tag": clean_tag}
+            if primary_default_flavor:
+                group["default_flavor"] = primary_default_flavor
+            tag_groups.append(group)
 
         if not publish_checkpoints:
             logger.warning(
@@ -1316,8 +1363,8 @@ class RequestContext:
         else:
             publish_req_body = {
                 "release_visibility":          release_visibility or "private",
-                "tags":                        tags_map,
-                "checkpoints":                 publish_checkpoints,
+                "tag_groups":                  tag_groups,
+                "checkpoint_flavors":          publish_checkpoints,
                 "auto_create_external_parent": bool(auto_create_external_parent),
                 "merge_with_existing":         bool(merge_with_existing),
             }
@@ -1357,28 +1404,6 @@ class RequestContext:
                         if cid:
                             publish_checkpoints[idx]["checkpoint_id"] = cid
 
-            # Apply caller-supplied tags beyond `:latest` via the promote
-            # endpoint. `:latest` is auto-retargeted server-side on every
-            # finalize; caller-supplied extra tags (e.g. `prod`) ride on top
-            # of the newly-published primary checkpoint.
-            primary_cid = str(publish_checkpoints[0].get("checkpoint_id") or "").strip() if publish_checkpoints else ""
-            if primary_cid and normalized_tags:
-                for t in normalized_tags:
-                    tag = str(t or "").strip()
-                    if not tag or tag.lower() == "latest":
-                        continue
-                    try:
-                        _request_json(
-                            "POST",
-                            f"/api/v1/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}/checkpoints/{urllib.parse.quote(primary_cid, safe='')}/promote?tag={urllib.parse.quote(tag, safe='')}",
-                            {},
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            "worker_finalize_tag_promote_failed request_id=%s owner=%s repo=%s checkpoint_id=%s tag=%s error=%r",
-                            self.request_id, owner, repo, primary_cid, tag, exc,
-                        )
-
         published_ids = [str(c.get("checkpoint_id") or "") for c in publish_checkpoints]
         logger.info(
             "worker_finalize_succeeded request_id=%s job_id=%s owner=%s repo=%s checkpoints=%d primary=%s",
@@ -1398,6 +1423,276 @@ class RequestContext:
         if normalized_tags:
             out["destination_repo_tags"] = normalized_tags
         return out
+
+    def publish_dataset_revision(
+        self,
+        *,
+        destination_dataset: str,
+        features_json: Dict[str, Any],
+        row_artifacts_json: Optional[Dict[str, Any]] = None,
+        snapshot_manifest: Optional[List[Dict[str, Any]]] = None,
+        visibility: str = "private",
+        kind: str = "",
+        dataset_info: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Publish a dataset revision into ``tensorhub.datasets`` (e2e #45).
+
+        Parallel to ``publish_repo_revision`` but writes to the datasets
+        subsystem instead of ``repo_checkpoints``. The flow:
+
+        1. Resolve ``destination_dataset`` (owner/name) against tensorhub.
+        2. If the dataset row doesn't exist: ``POST /api/v1/datasets`` with
+           ``{owner, name, visibility, schema: features_json}``.
+        3. Otherwise: ``PATCH /api/v1/datasets/:id`` to update the schema
+           + row_artifacts_json.
+
+        The individual file bytes are expected to already be in CAS via
+        prior ``save_checkpoint`` calls — this method just records the
+        dataset-level metadata pointing at those blobs. The server
+        cross-references by blob digest at materialize time.
+
+        Args:
+            destination_dataset: ``owner/name`` or ``owner/name:tag`` ref.
+            features_json: HF-style features schema, e.g.
+                ``{"prompt": {"_type": "Value", "dtype": "string"}, ...}``.
+            row_artifacts_json: Optional mapping of row IDs → artifact
+                refs for datasets that reference external image blobs.
+            snapshot_manifest: Optional list of ``{path, digest, size_bytes}``
+                entries — the parquet shards + any sidecar files that
+                comprise this dataset revision. Used for provenance /
+                content-identity tracking (naming-based versioning means
+                the dataset row is mutable, but the manifest captures what
+                content was active at publish time).
+            visibility: ``"private"`` (default) or ``"public"``.
+            kind: Free-form kind string (``"prompt_corpus"`` / ``"eval_set"``).
+                Stored in features_json.__cozy_kind__ for now until
+                tensorhub grows a dedicated kind column.
+            dataset_info: Full ``dataset_info.json`` payload to record
+                as tenant metadata.
+
+        Returns:
+            ``{ok: True, dataset_id: str, owner: str, name: str, existed: bool}``.
+
+        Raises ``RuntimeError`` on HTTP failure. Callers in
+        ``_finalize_produced_variants`` wrap with try/except so a failed
+        dataset publish doesn't crash the job; the blob uploads already
+        landed by that point.
+        """
+        owner, name = _parse_owner_repo(destination_dataset)
+        base = (self._file_api_base_url or "").strip().rstrip("/")
+        if not base:
+            raise RuntimeError("publish_dataset_revision: no file_api_base_url")
+        token = self._get_worker_capability_token()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "X-Cozy-Owner": owner,
+        }
+
+        # Stash the kind (+ dataset_info if provided) inside features_json
+        # using a reserved `__cozy_*__` key so it survives through the
+        # server's features_json passthrough. Once tensorhub adds a
+        # dedicated `kind` column, migrate these to top-level fields.
+        raw_schema = dict(features_json or {})
+        if isinstance(raw_schema.get("features"), dict):
+            features_payload = dict(raw_schema)
+        else:
+            features_payload = {"features": raw_schema}
+        if kind:
+            features_payload["__cozy_kind__"] = kind
+        if dataset_info:
+            features_payload["__cozy_dataset_info__"] = dataset_info
+        if snapshot_manifest:
+            features_payload["__cozy_snapshot_manifest__"] = snapshot_manifest
+
+        # Step 1: look up any existing dataset by (owner, name). tensorhub
+        # currently lists by owner and filters client-side; this is O(N)
+        # but N is small (typically <100 datasets per org in practice).
+        list_url = (
+            f"{base}/api/v1/datasets?owner={urllib.parse.quote(owner, safe='')}"
+        )
+        list_resp = requests.get(list_url, headers=headers, timeout=30)
+        existing_id = ""
+        if 200 <= list_resp.status_code < 300:
+            try:
+                items = list_resp.json().get("items") or []
+                for it in items:
+                    if str(it.get("name") or "").lower() == name.lower():
+                        existing_id = str(it.get("id") or "")
+                        break
+            except Exception:
+                pass
+
+        if not existing_id:
+            # Step 2a: create.
+            create_url = f"{base}/api/v1/datasets"
+            create_body = {
+                "owner": owner,
+                "name": name,
+                "visibility": visibility,
+                "schema": features_payload,
+            }
+            resp = requests.post(
+                create_url,
+                headers=headers,
+                data=json.dumps(create_body).encode("utf-8"),
+                timeout=30,
+            )
+            if resp.status_code in (401, 403):
+                raise AuthError(f"dataset create unauthorized ({resp.status_code})")
+            if resp.status_code < 200 or resp.status_code >= 300:
+                raise RuntimeError(
+                    f"dataset create failed ({resp.status_code}): {resp.text[:256]}"
+                )
+            data = resp.json() if resp.text else {}
+            dataset_id = str(data.get("id") or "")
+            return {
+                "ok": True,
+                "dataset_id": dataset_id,
+                "owner": owner,
+                "name": name,
+                "existed": False,
+            }
+
+        # Step 2b: update via PATCH.
+        patch_url = f"{base}/api/v1/datasets/{urllib.parse.quote(existing_id, safe='')}"
+        patch_body: Dict[str, Any] = {
+            "schema": features_payload,
+        }
+        if row_artifacts_json is not None:
+            patch_body["row_artifacts"] = row_artifacts_json
+        if visibility in ("private", "public"):
+            patch_body["visibility"] = visibility
+        resp = requests.patch(
+            patch_url,
+            headers=headers,
+            data=json.dumps(patch_body).encode("utf-8"),
+            timeout=30,
+        )
+        if resp.status_code in (401, 403):
+            raise AuthError(f"dataset patch unauthorized ({resp.status_code})")
+        if resp.status_code < 200 or resp.status_code >= 300:
+            raise RuntimeError(
+                f"dataset patch failed ({resp.status_code}): {resp.text[:256]}"
+            )
+        return {
+            "ok": True,
+            "dataset_id": existing_id,
+            "owner": owner,
+            "name": name,
+            "existed": True,
+        }
+
+    def resolve_dataset(self, ref: str) -> str:
+        """Download a dataset by ref into local cache; return the root path.
+
+        E2E #45 — paired with ``publish_dataset_revision``. Flow:
+
+        1. Parse ``ref`` (``owner/name``).
+        2. ``GET /api/v1/datasets?owner=<owner>`` → find the dataset row by name.
+        3. Read the embedded ``__cozy_snapshot_manifest__`` in features_json
+           (set by ``publish_dataset_revision``) to get the list of
+           ``{path, digest, size_bytes}`` entries.
+        4. For each entry: resolve the blob digest via the repo-CAS download
+           machinery (since ``_finalize_dataset_variants`` routed bytes there),
+           write into a local cache dir at ``<cache>/datasets/<owner>/<name>/<rel_path>``.
+        5. Return the cache dir.
+
+        The full "download via tensorhub's dataset_blobs + dataset CAS"
+        flow is more work on the server side (tasks #45.2/.3); for now we
+        reuse the repo-CAS path because that's where the publish tenants
+        actually uploaded the bytes.
+
+        Raises ``RuntimeError`` when the dataset isn't found, the manifest
+        is missing, or any download fails. Callers in `_build_datasets`
+        upgrade the error to a helpful message.
+        """
+        owner, name = _parse_owner_repo(ref)
+        base = (self._file_api_base_url or "").strip().rstrip("/")
+        if not base:
+            raise RuntimeError(f"resolve_dataset({ref!r}): no file_api_base_url")
+        token = self._get_worker_capability_token()
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "X-Cozy-Owner": owner,
+        }
+
+        # Step 1-2: look up the row.
+        list_url = f"{base}/api/v1/datasets?owner={urllib.parse.quote(owner, safe='')}"
+        list_resp = requests.get(list_url, headers=headers, timeout=30)
+        if list_resp.status_code in (401, 403):
+            raise AuthError(f"dataset lookup unauthorized ({list_resp.status_code})")
+        if list_resp.status_code < 200 or list_resp.status_code >= 300:
+            raise RuntimeError(f"dataset lookup failed ({list_resp.status_code}): {list_resp.text[:256]}")
+        items = list_resp.json().get("items") or []
+        row: Optional[Dict[str, Any]] = None
+        for it in items:
+            if str(it.get("name") or "").lower() == name.lower():
+                row = it
+                break
+        if row is None:
+            raise RuntimeError(f"resolve_dataset({ref!r}): dataset not found for owner={owner} name={name}")
+
+        # Step 3: parse embedded snapshot_manifest.
+        features = row.get("features") or row.get("schema") or {}
+        if not isinstance(features, dict):
+            features = {}
+        manifest = features.get("__cozy_snapshot_manifest__") or []
+        if not isinstance(manifest, list) or not manifest:
+            raise RuntimeError(
+                f"resolve_dataset({ref!r}): no __cozy_snapshot_manifest__ in features_json. "
+                f"Dataset exists but wasn't published via publish_dataset_revision."
+            )
+
+        # Step 4: write each blob to a stable cache path. Use the sha-based
+        # cache layout so identical content across datasets dedupes.
+        import tempfile
+        cache_root = Path(os.environ.get("GEN_WORKER_DATASET_CACHE") or (Path(tempfile.gettempdir()) / "gen_worker_datasets"))
+        target_root = cache_root / owner / name
+        target_root.mkdir(parents=True, exist_ok=True)
+
+        for entry in manifest:
+            if not isinstance(entry, dict):
+                continue
+            rel_path = str(entry.get("path") or "").strip()
+            digest = str(entry.get("digest") or "").strip()
+            if not rel_path or not digest:
+                continue
+            dest_file = target_root / rel_path
+            dest_file.parent.mkdir(parents=True, exist_ok=True)
+            if dest_file.exists() and dest_file.stat().st_size > 0:
+                continue  # already cached
+            # Download via the existing blob-fetch path (repo-CAS digest).
+            self._download_blob_by_digest(digest, dest_file)
+
+        return str(target_root)
+
+    def _download_blob_by_digest(self, digest: str, dest: Path) -> None:
+        """Fetch a blob by ``<algo>:<hex>`` digest to ``dest``.
+
+        Uses the repo-CAS by-digest read endpoint — works for any blob
+        uploaded via ``save_checkpoint`` regardless of whether it's a
+        checkpoint file or a dataset file. The server indexes all CAS
+        content by blake3 digest; callers that know the digest can fetch
+        without needing to know which subsystem the blob belongs to.
+        """
+        base = (self._file_api_base_url or "").strip().rstrip("/")
+        token = self._get_worker_capability_token()
+        # Normalize digest format for URL.
+        digest_norm = digest if ":" in digest else f"blake3:{digest}"
+        url = f"{base}/api/v1/blobs/{urllib.parse.quote(digest_norm, safe=':')}/content"
+        headers = {"Authorization": f"Bearer {token}"}
+        with requests.get(url, headers=headers, stream=True, timeout=300) as resp:
+            if resp.status_code in (401, 403):
+                raise AuthError(f"blob fetch unauthorized ({resp.status_code}) digest={digest}")
+            if resp.status_code == 404:
+                raise RuntimeError(f"blob fetch 404 for digest={digest}")
+            if resp.status_code < 200 or resp.status_code >= 300:
+                raise RuntimeError(f"blob fetch failed ({resp.status_code}) digest={digest}: {resp.text[:256]}")
+            with open(dest, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
 
     def read_repo_metadata(self, *, destination_repo: str) -> Dict[str, Any]:
         """Read repo-level metadata from Tensorhub public HTTP API."""

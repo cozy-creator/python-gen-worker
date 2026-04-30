@@ -58,8 +58,8 @@ def test_startup_prefetch_warms_disk_and_reports_disk_models(tmp_path: Path, mon
 
         cfg = pb.EndpointConfig(
             supported_repo_refs=[variant_ref],
-            required_variant_refs=[variant_ref],
-            resolved_cozy_models_by_variant_ref={
+            required_flavor_refs=[variant_ref],
+            resolved_cozy_models_by_flavor_ref={
                 variant_ref: pb.ResolvedCozyModel(
                     snapshot_digest="snap-1",
                     files=[

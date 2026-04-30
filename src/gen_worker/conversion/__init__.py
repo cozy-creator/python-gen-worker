@@ -3,7 +3,7 @@
 Tenant authors write functions like:
 
     from gen_worker import (
-        training_function, ConversionContext, Source, Dataset, ProducedVariant,
+        training_function, ConversionContext, Source, Dataset, ProducedFlavor,
     )
 
     @training_function
@@ -14,11 +14,16 @@ See e2e progress.json issue #5 for the full contract:
   - Reserved names (ctx, source, datasets) bound to library-injected types.
   - Everything else decoded from wire payload by name via msgspec.
   - Secondary-model loads via Annotated[Source, ModelRef(Src.PAYLOAD, '...')].
-  - Return list[ProducedVariant]; library handles upload + destination.tags.
+  - Return list[ProducedFlavor]; library handles upload + destination.tags.
 """
 
 from __future__ import annotations
 
+from .calibration import (
+    CalibrationAction,
+    CalibrationPolicy,
+    resolve_calibration_action,
+)
 from .component import Component
 from .context import ConversionContext
 from .core_types import (
@@ -34,7 +39,7 @@ from .dispatch import (
     TrainingFunctionSpec,
     training_function,
 )
-from .produced import ProducedVariant
+from .produced import ProducedFlavor
 from .safetensors_io import (
     materialize_safetensors_input,
     persist_safetensors_output,
@@ -57,10 +62,14 @@ __all__ = [
     "RECOMMENDED_KINDS",
     "Dataset",
     "FileLayout",
-    "ProducedVariant",
+    "ProducedFlavor",
     "Source",
     "StreamingWriter",
     "training_function",
+    # Calibration policy (e2e #41/#42)
+    "CalibrationAction",
+    "CalibrationPolicy",
+    "resolve_calibration_action",
     # Publish-time validation
     "ValidationReport",
     "ValidationViolation",

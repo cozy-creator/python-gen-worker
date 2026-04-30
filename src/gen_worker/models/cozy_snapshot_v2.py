@@ -344,6 +344,7 @@ class CozySnapshotV2Downloader:
             repo=ref.repo,
             tag=ref.tag,
             digest=ref.digest,
+            flavor=ref.flavor,
             include_urls=True,
             preferences=prefs,
             capabilities=caps.to_dict(),

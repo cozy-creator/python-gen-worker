@@ -2,7 +2,7 @@
 
 Moved from conversion-endpoints/shared.py as part of e2e progress.json #9.
 Tenants using the new @training_function contract typically don't touch
-these directly — they return ``list[ProducedVariant]`` which the library
+these directly — they return ``list[ProducedFlavor]`` which the library
 adapts. But legacy clone_pipeline + any tenant that needs richer output
 metadata (multi-artifact outputs with sharded indices) can import these.
 """
@@ -34,7 +34,7 @@ class ConversionOutput(msgspec.Struct):
     """The legacy transform/clone function return type.
 
     For new @training_function tenants, prefer returning
-    ``list[ProducedVariant]`` and let the library handle upload +
+    ``list[ProducedFlavor]`` and let the library handle upload +
     attributes. ``ConversionOutput`` remains for clone_pipeline + any code
     path that needs a single primary artifact with a typed metadata dict.
     """
@@ -64,6 +64,22 @@ class IngestResult:
     all_file_tensors: list[Any] = field(default_factory=list)
     source_dtype_by_component: dict[str, str] = field(default_factory=dict)
     source_dtype_preference: list[str] = field(default_factory=list)
+    # Per-strategy attributes from the HF classifier (e2e progress.json #67):
+    # runtime_library, subtype, base_model_lineage, lineage_source,
+    # quant_scheme, etc. Threaded onto every published checkpoint flavor's
+    # `attributes` field so inference workers can dispatch on runtime_library
+    # without sniffing files. Empty for non-HF ingest paths (Civitai / URL).
+    classifier_attrs: dict[str, str] = field(default_factory=dict)
+
+    # e2e progress.json #72: when the HF classifier resolves multiple
+    # concrete dtypes from a single repo (multi-quant GGUF, or transformers
+    # repos that ship `model.bf16.safetensors` + `model.fp16.safetensors`
+    # side-by-side), each requested dtype becomes a separate checkpoint
+    # under the same destination tag. This list holds the per-checkpoint
+    # attribute bag (always includes a `dtype` key); empty list means
+    # single-checkpoint behavior — `classifier_attrs` above is the bag
+    # used for that lone flavor.
+    classifier_attrs_per_checkpoint: list[dict[str, str]] = field(default_factory=list)
 
 
 def tensors_with(t: Tensors, **overrides: Any) -> Tensors:

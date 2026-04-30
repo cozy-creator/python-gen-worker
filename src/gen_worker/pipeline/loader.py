@@ -155,6 +155,120 @@ class PipelineConfig:
     scheduler_class: Optional[str] = None
     warmup_steps: int = 4
     variant: Optional[str] = None  # "fp16", etc.
+    # e2e #43: the resolved checkpoint's attributes (from tensorhub). Used by
+    # `_synthesize_quantization_config` to auto-apply a quantization_config
+    # kwarg for bnb / torchao checkpoints when the on-disk config.json
+    # doesn't already carry one. Populated by the caller (ctx.pipeline
+    # injection machinery in the worker) with the Tensors.attrs dict.
+    quant_attributes: Optional[Dict[str, str]] = None
+
+
+# e2e #43: quant-library→import-side-effect hooks. torchao registers its
+# tensor subclasses on import; loading a torchao-quantized state_dict
+# BEFORE torchao is imported fails with ATen/dispatcher errors. Keep this
+# list authoritative; new quant libraries that rely on tensor-subclass
+# registration should be added here.
+_QUANT_LIBRARY_IMPORT_HOOKS: Dict[str, str] = {
+    "torchao": "torchao",
+}
+
+
+def _ensure_quant_library_imported(attrs: Optional[Dict[str, str]]) -> None:
+    """Best-effort preload of the quant library whose tensor subclasses
+    need to be registered before `torch.load` / `safetensors.safe_open`
+    touches the weights. No-op when no relevant attrs or the library
+    isn't installed — load path proceeds and fails downstream if truly
+    missing, which is a clearer signal than a silent registration gap.
+    """
+    if not attrs:
+        return
+    lib = str(attrs.get("quant_library") or "").strip().lower()
+    mod = _QUANT_LIBRARY_IMPORT_HOOKS.get(lib)
+    if not mod:
+        return
+    try:
+        importlib.import_module(mod)
+        logger.info("e2e #43: pre-imported %s for tensor-subclass registration", mod)
+    except ImportError as exc:
+        logger.warning("e2e #43: failed to pre-import %s: %s", mod, exc)
+
+
+def _read_on_disk_quant_config(model_path: Path) -> bool:
+    """True when any of the model_index.json / component config.json files
+    on disk carries a top-level `quantization_config` block. In that case
+    diffusers' from_pretrained auto-picks it up — we don't need to
+    synthesize one from attrs.
+    """
+    candidates: List[Path] = []
+    if model_path.is_dir():
+        idx = model_path / "model_index.json"
+        if idx.exists():
+            candidates.append(idx)
+        # Diffusers puts the per-component quantization_config on each
+        # component's own config.json (transformer/ text_encoder/ vae/ unet).
+        for sub in ("transformer", "unet", "text_encoder", "text_encoder_2", "vae"):
+            cfg = model_path / sub / "config.json"
+            if cfg.exists():
+                candidates.append(cfg)
+        # singlefile transformers model
+        root_cfg = model_path / "config.json"
+        if root_cfg.exists():
+            candidates.append(root_cfg)
+    for p in candidates:
+        try:
+            with open(p, "r") as f:
+                data = json.load(f)
+        except Exception:
+            continue
+        if isinstance(data, dict) and data.get("quantization_config"):
+            return True
+    return False
+
+
+def _synthesize_quantization_config(attrs: Optional[Dict[str, str]]) -> Optional[Any]:
+    """Build a BitsAndBytesConfig / equivalent from the resolved checkpoint's
+    attrs when the on-disk config doesn't already carry one (e2e #43
+    task 1). Returns None when the attrs don't indicate a library that
+    NEEDS a synthesized config at from_pretrained time.
+
+    bnb: diffusers' from_pretrained accepts `quantization_config=BitsAndBytesConfig(...)`
+         at pipeline level (post diffusers 0.30ish). For older diffusers
+         versions, the caller should pass it per-component via
+         `from_pretrained(subfolder=..., quantization_config=...)`.
+    torchao: no synthesized config needed — torchao-quantized weights
+             are stored as torchao tensor subclasses and auto-restore on
+             from_pretrained IF torchao was imported first (handled by
+             `_ensure_quant_library_imported`).
+    """
+    if not attrs:
+        return None
+    lib = str(attrs.get("quant_library") or "").strip().lower()
+    if lib != "bitsandbytes":
+        return None
+    recipe = str(attrs.get("quant_recipe") or "").strip().lower()
+    # "bnb:nf4" / "bnb:fp4" / "bnb:int8" — strip the prefix.
+    scheme = recipe.split(":", 1)[-1] if ":" in recipe else recipe
+    if scheme not in ("nf4", "fp4", "int8"):
+        return None
+    try:
+        import torch
+        from transformers import BitsAndBytesConfig
+    except ImportError as exc:
+        logger.warning("e2e #43: bnb quant detected but BitsAndBytesConfig unavailable: %s", exc)
+        return None
+    compute_dtype_name = str(attrs.get("quant_compute_dtype") or "bfloat16").strip().lower()
+    compute_dtype = getattr(torch, compute_dtype_name, torch.bfloat16)
+    double_quant = str(attrs.get("quant_double_quant") or "true").strip().lower() in ("1", "true", "yes")
+    if scheme in ("nf4", "fp4"):
+        return BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type=scheme,
+            bnb_4bit_compute_dtype=compute_dtype,
+            bnb_4bit_use_double_quant=double_quant,
+        )
+    if scheme == "int8":
+        return BitsAndBytesConfig(load_in_8bit=True)
+    return None
 
 
 def _check_torch_available() -> bool:
@@ -504,6 +618,11 @@ class PipelineLoader:
 
         # Track loaded pipelines for memory management
         self._loaded_pipelines: Dict[str, LoadedPipeline] = {}
+
+        # e2e #43: per-model_id quant attributes registered by upstream code
+        # (worker model-resolution path) before load(). Keys are the same
+        # model_id strings passed to load_model_into_vram / load.
+        self._quant_attrs_by_model_id: Dict[str, Dict[str, str]] = {}
 
         # Local NVMe cache for NFS optimization
         self._local_cache: Optional[LocalModelCache] = None
@@ -905,9 +1024,23 @@ class PipelineLoader:
         custom_pipeline: Optional[str],
         torch_dtype: Any,
         variant: Optional[str],
+        quant_attributes: Optional[Dict[str, str]] = None,
     ) -> Any:
-        """Load a pipeline using from_pretrained."""
+        """Load a pipeline using from_pretrained.
+
+        e2e #43: when ``quant_attributes`` is provided (from the resolved
+        checkpoint's Tensors.attrs), auto-apply the quantization machinery:
+          - Pre-import torchao when ``quant_library=torchao`` so its tensor
+            subclasses register before safetensors deserialization touches
+            the weights (otherwise dispatcher errors on int4/fp8 tensors).
+          - Synthesize a ``BitsAndBytesConfig`` from attrs when the on-disk
+            config lacks a ``quantization_config`` block and ``quant_library=
+            bitsandbytes``. Pass it as a kwarg to from_pretrained.
+        """
         logger.info(f"Loading from pretrained: {model_path}")
+
+        # e2e #43 task 2: register torchao's tensor subclasses before load.
+        _ensure_quant_library_imported(quant_attributes)
 
         kwargs: Dict[str, Any] = {
             "torch_dtype": torch_dtype,
@@ -920,6 +1053,19 @@ class PipelineLoader:
 
         if variant:
             kwargs["variant"] = variant
+
+        # e2e #43 task 0 + task 1: let the on-disk quantization_config win
+        # when present; synthesize from attrs only as fallback.
+        if not _read_on_disk_quant_config(model_path):
+            synthesized = _synthesize_quantization_config(quant_attributes)
+            if synthesized is not None:
+                logger.info(
+                    "e2e #43: synthesized quantization_config for %s from attrs (library=%s recipe=%s)",
+                    pipeline_class.__name__,
+                    (quant_attributes or {}).get("quant_library"),
+                    (quant_attributes or {}).get("quant_recipe"),
+                )
+                kwargs["quantization_config"] = synthesized
 
         # Resolve _cozy_ref components
         cozy_refs = resolve_cozy_refs(model_path, self.models_dir)
@@ -1111,10 +1257,7 @@ class PipelineLoader:
 
         Raises:
             ModelNotFoundError: Model not found at specified path
-            IncompatibleFormatError: Model format doesn't match expected pipeline
-            CudaOutOfMemoryError: Not enough VRAM to load model
-            ComponentMissingError: Required component missing from model
-            PipelineLoaderError: General loading error
+            PipelineLoaderError: General loading error (including OOM, format issues)
         """
         if not _check_torch_available() or not _check_diffusers_available():
             raise ImportError("torch and diffusers are required for pipeline loading")
@@ -1135,6 +1278,12 @@ class PipelineLoader:
         config = config or PipelineConfig(model_path=str(path))
         if config.variant is None:
             config.variant = detect_diffusers_variant(path)
+        # e2e #43: fold any upstream-registered quant attrs into the config
+        # if the caller didn't set them explicitly. Lets the worker's model-
+        # resolution path stash attrs via register_quant_attributes() once
+        # and have every subsequent load() pick them up automatically.
+        if config.quant_attributes is None and model_id in self._quant_attrs_by_model_id:
+            config.quant_attributes = self._quant_attrs_by_model_id.get(model_id)
 
         # Determine dtype
         torch_dtype = get_torch_dtype(config.dtype, model_id)
@@ -1188,16 +1337,9 @@ class PipelineLoader:
                         custom_pipeline,
                         torch_dtype,
                         config.variant,
+                        quant_attributes=config.quant_attributes,
                     )
-            except FileNotFoundError as e:
-                # Missing component file
-                raise ComponentMissingError(model_id, str(e))
             except Exception as e:
-                error_msg = str(e).lower()
-                if "safetensor" in error_msg or "checkpoint" in error_msg:
-                    raise IncompatibleFormatError(
-                        model_id, load_format, "unknown"
-                    ) from e
                 raise PipelineLoaderError(f"Failed to load {model_id}: {e}") from e
 
             # Move to device with OOM handling
@@ -1220,8 +1362,9 @@ class PipelineLoader:
                     )
             except torch.cuda.OutOfMemoryError as e:
                 flush_memory()
-                raise CudaOutOfMemoryError(
-                    model_id, model_size_gb, get_available_vram_gb()
+                raise PipelineLoaderError(
+                    f"OOM moving {model_id} ({model_size_gb:.1f} GB) to CUDA "
+                    f"(available {get_available_vram_gb():.1f} GB)"
                 ) from e
             except RuntimeError as e:
                 logger.error(
@@ -1285,19 +1428,13 @@ class PipelineLoader:
             logger.info(f"Successfully loaded {model_id}")
             return loaded
 
-        except (
-            ModelNotFoundError,
-            IncompatibleFormatError,
-            CudaOutOfMemoryError,
-            ComponentMissingError,
-            PipelineLoaderError,
-        ):
-            # Re-raise our custom exceptions
+        except (ModelNotFoundError, PipelineLoaderError):
             raise
         except torch.cuda.OutOfMemoryError as e:
             flush_memory()
-            raise CudaOutOfMemoryError(
-                model_id, model_size_gb, get_available_vram_gb()
+            raise PipelineLoaderError(
+                f"OOM loading {model_id} ({model_size_gb:.1f} GB, "
+                f"{get_available_vram_gb():.1f} GB VRAM available)"
             ) from e
         except Exception as e:
             raise PipelineLoaderError(f"Failed to load {model_id}: {e}") from e
@@ -1346,6 +1483,30 @@ class PipelineLoader:
         """Get a loaded pipeline by model ID."""
         loaded = self._loaded_pipelines.get(model_id)
         return loaded.pipeline if loaded else None
+
+    def register_quant_attributes(self, model_id: str, attrs: Optional[Dict[str, str]]) -> None:
+        """e2e #43: stash the resolved checkpoint's attributes (from
+        tensorhub) so the next ``load()`` call for this model_id can
+        auto-apply a ``quantization_config`` kwarg or pre-import a quant
+        library. Called by the worker's model-resolution path once per
+        incoming checkpoint. Passing ``None`` / empty dict clears the entry.
+        """
+        if not attrs:
+            self._quant_attrs_by_model_id.pop(model_id, None)
+            return
+        # Only store the quant_* subset — other attrs are irrelevant to the
+        # loader and can change per-invocation. Keeping a narrow subset
+        # makes the stored state predictable for operators reading logs.
+        filtered: Dict[str, str] = {}
+        for k, v in attrs.items():
+            if not isinstance(k, str) or not isinstance(v, (str, int, float)):
+                continue
+            k_lower = k.lower()
+            if k_lower.startswith("quant_") or k_lower == "file_layout" or k_lower == "file_type" or k_lower == "dtype":
+                filtered[k] = str(v)
+        if filtered:
+            self._quant_attrs_by_model_id[model_id] = filtered
+            logger.info("e2e #43: registered quant attrs for %s: %s", model_id, filtered)
 
     def get_for_inference(self, model_id: str) -> Optional[Any]:
         """

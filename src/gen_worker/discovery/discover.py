@@ -242,10 +242,56 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
                 ref = str(getattr(mr, "ref", "") or "").strip()
             except Exception:
                 ref = ""
+            mr_entry: Dict[str, Any] = {"source": src, "key": mr.key, "ref": ref, "dtypes": dtypes}
+            # e2e #46: PAYLOAD_REF binding ships a compat_spec object that
+            # carries the scoping the orchestrator enforces at invoke time.
+            # The derived pipeline class comes straight from the parameter's
+            # annotated type; non-restricting base classes (DiffusionPipeline,
+            # AutoModelForCausalLM, ...) produce NO derived gate.
+            if src == "payload_ref":
+                from .known_pipelines import (
+                    KNOWN_PIPELINES_REVISION,
+                    is_non_restricting,
+                )
+                base_class_name = getattr(base_t, "__name__", "") or ""
+                derived_pipeline_class = ""
+                derived_architectures: list[str] = []
+                if base_class_name and not is_non_restricting(base_class_name):
+                    # For diffusers pipelines we emit pipeline_class; for
+                    # transformers models we emit architectures. Discovery
+                    # doesn't know which family the class belongs to without
+                    # importing the libraries, so it emits BOTH — the
+                    # orchestrator picks whichever axis matches the ref's
+                    # checkpoint attributes.
+                    derived_pipeline_class = base_class_name
+                    derived_architectures = [base_class_name]
+                mr_entry["compat_spec"] = {
+                    "_revision": KNOWN_PIPELINES_REVISION,
+                    "derived_pipeline_class": derived_pipeline_class,
+                    "derived_architectures": derived_architectures,
+                    "allow_pipeline_classes": [
+                        str(x).strip()
+                        for x in list(getattr(mr, "allow_pipeline_classes", ()) or ())
+                        if str(x).strip()
+                    ],
+                    "allow_architectures": [
+                        str(x).strip()
+                        for x in list(getattr(mr, "allow_architectures", ()) or ())
+                        if str(x).strip()
+                    ],
+                    "required_file_layout": str(getattr(mr, "required_file_layout", "") or "").strip(),
+                    "required_components": dict(getattr(mr, "required_components", ()) or ()),
+                    "require_lineage_descendant_of": str(getattr(mr, "require_lineage_descendant_of", "") or "").strip(),
+                    "require_lineage_verified": bool(getattr(mr, "require_lineage_verified", False)),
+                    "required_attributes": {
+                        str(k): [str(v) for v in list(vs or [])]
+                        for k, vs in dict(getattr(mr, "required_attributes", ()) or ()).items()
+                    },
+                }
             injections.append({
                 "param": p.name,
                 "type": _type_qualname(base_t),
-                "model_ref": {"source": src, "key": mr.key, "ref": ref, "dtypes": dtypes},
+                "model_ref": mr_entry,
             })
             continue
 
@@ -417,7 +463,7 @@ def _extract_conversion_function_metadata(func: Any, module_name: str) -> Dict[s
         "python_name": func.__name__,
         "module": module_name,
         "resources": res_dict,
-        # Conversion functions have a single structured return (list[ProducedVariant])
+        # Conversion functions have a single structured return (list[ProducedFlavor])
         # that the library uploads. Tenant input schema captures the full wire
         # payload (source, destination, datasets, specs, PAYLOAD-model refs,
         # tenant-named params); issue #5 bakes it into endpoint.lock so
@@ -426,7 +472,7 @@ def _extract_conversion_function_metadata(func: Any, module_name: str) -> Dict[s
         "payload_schema_sha256": input_sha,
         "input_schema": input_schema,
         "output_mode": "single",
-        "output_type": {"module": "gen_worker.conversion", "qualname": "list[ProducedVariant]"},
+        "output_type": {"module": "gen_worker.conversion", "qualname": "list[ProducedFlavor]"},
         "output_schema_sha256": "",
         "output_schema": {},
         "incremental_output": False,

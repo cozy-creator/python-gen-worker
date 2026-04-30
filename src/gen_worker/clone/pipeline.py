@@ -122,7 +122,16 @@ _KNOWN_DTYPES = {
     "fp8:e5m2",
     "nvfp4",
     "int8",
+    "int8:awq",
+    "int8:gptq",
+    "int4",
+    "int4:wo",
+    "int4:nf4",
+    "int4:fp4",
+    "int4:awq",
+    "int4:gptq",
     "nf4",
+    "fp4",
 }
 
 _KNOWN_FILE_LAYOUTS = {"diffusers", "singlefile", "aio"}
@@ -131,7 +140,7 @@ _KNOWN_FILE_TYPES = {"safetensors", "flashpack", "gguf", "bin"}
 
 @dataclass(frozen=True)
 class OutputSpec:
-    """One requested output variant: dtype + file layout + container format."""
+    """One requested output flavor: dtype + file layout + container format."""
 
     dtype: str
     file_layout: str
@@ -139,7 +148,7 @@ class OutputSpec:
 
     @property
     def label(self) -> str:
-        """Canonical `variant_label` used on `repo_version_variants`."""
+        """Canonical flavor label used for checkpoint publish."""
         return f"{self.dtype}-{self.file_layout}-{self.file_type}".replace(":", "-")
 
 
@@ -236,6 +245,11 @@ def save_formats_to_outputs(
             specs.append(OutputSpec(dtype="nvfp4", file_layout=layout, file_type="safetensors"))
         elif fmt.startswith("fp8"):
             specs.append(OutputSpec(dtype=fmt, file_layout=layout, file_type="safetensors"))
+        elif fmt in {"int8", "int4", "nf4", "fp4"} or fmt.startswith("int8:") or fmt.startswith("int4:"):
+            # Issue #73 inline weight-only quantization. int8 → torchao Int8Tensor;
+            # int4/nf4/fp4 → bitsandbytes Params4bit (CPU-friendly); int4:awq /
+            # int4:gptq → calibrated, refused downstream with separate-job hint.
+            specs.append(OutputSpec(dtype=fmt, file_layout=layout, file_type="safetensors"))
         elif fmt.startswith("gguf"):
             encoding = fmt.split(":", 1)[1] if ":" in fmt else "f16"
             dtype = "fp16" if encoding in {"f16", "fp16"} else ("bf16" if encoding in {"bf16"} else "fp16")
@@ -254,17 +268,20 @@ def output_spec_to_save_format(spec: OutputSpec) -> str:
     if spec.file_type == "flashpack":
         return "flashpack"
     if spec.file_type == "gguf":
-        return f"gguf:{spec.dtype.split(':', 1)[0]}" if spec.dtype in {"fp16", "bf16"} else "gguf:f16"
+        # GGUF outputs route by their dtype directly — q4_k_m, q8_0, f16, bf16.
+        # The inline gguf converter handles both direct encodings (f16/bf16/q8_0)
+        # and llama-quantize two-step targets (q4_k_m, q5_k_m, …).
+        return f"gguf:{spec.dtype}"
     # safetensors container — dispatch by dtype.
-    if spec.dtype == "bf16":
-        return "bf16"
+    if spec.dtype in {"bf16", "fp16", "fp32"}:
+        return spec.dtype
     if spec.dtype.startswith("fp8"):
         return spec.dtype  # "fp8:e4m3", "fp8:e5m2"
     if spec.dtype == "nvfp4":
         return "nvfp4"
-    # fp16/fp32 output in safetensors: no existing save_format maps directly
-    # because the legacy pipeline assumed bf16/fp8/nvfp4 targets. Return an
-    # empty string so callers know to treat this as passthrough-only.
+    if spec.dtype in {"int8", "int4", "nf4", "fp4"} or spec.dtype.startswith("int4:") or spec.dtype.startswith("int8:"):
+        return spec.dtype
+    # Unknown safetensors dtype — caller treats this as passthrough-only.
     return ""
 
 
@@ -360,6 +377,492 @@ class SourceIdentity:
 class FinalizeCloneResult:
     output: ConversionOutput
     published_version_id: str
+
+
+def _pick_primary_source_file(repo_dir: Path) -> Path:
+    """Pick the canonical safetensors entry-point for inline conversion.
+
+    Preference order:
+      1. ``model.safetensors.index.json`` (sharded transformers)
+      2. ``model.safetensors`` (single-file transformers)
+      3. The largest ``*.safetensors`` file in the repo root
+      4. The largest ``*.safetensors`` file anywhere under repo_dir
+
+    Used by the publish-as-is path's inline conversion to give
+    ``streaming_dtype_cast`` an entry point. The streaming reader
+    handles the index → shards expansion internally.
+    """
+    repo_dir = Path(repo_dir)
+    if not repo_dir.is_dir():
+        raise FileNotFoundError(f"source repo dir is not a directory: {repo_dir}")
+    canonical_index = repo_dir / "model.safetensors.index.json"
+    if canonical_index.is_file():
+        return canonical_index
+    canonical_single = repo_dir / "model.safetensors"
+    if canonical_single.is_file():
+        return canonical_single
+    root_safetensors = sorted(
+        (p for p in repo_dir.iterdir() if p.is_file() and p.suffix == ".safetensors"),
+        key=lambda p: p.stat().st_size, reverse=True,
+    )
+    if root_safetensors:
+        return root_safetensors[0]
+    nested_safetensors = sorted(
+        (p for p in repo_dir.rglob("*.safetensors") if p.is_file()),
+        key=lambda p: p.stat().st_size, reverse=True,
+    )
+    if nested_safetensors:
+        return nested_safetensors[0]
+    raise FileNotFoundError(f"no .safetensors entry point found under {repo_dir}")
+
+
+def _tensors_artifact_module(t: Any) -> dict[str, Any]:
+    """Extract artifact dict from a Tensors object. Module-level mirror of the
+    inner `_tensors_artifact` defined inside `_finalize_clone` — used by
+    `_finalize_publish_as_is` (e2e progress.json #70 thin path) which is at
+    module scope and can't see the inner function."""
+    art: dict[str, Any] = {}
+    digest = str(getattr(t, "blob_digest", "") or getattr(t, "blake3", "") or "").strip()
+    if digest and ":" not in digest:
+        digest = f"blake3:{digest}"
+    if digest:
+        art["digest"] = digest
+    path = str(getattr(t, "ref", "") or "").strip()
+    if path:
+        art["path"] = path
+    size = getattr(t, "size_bytes", None)
+    if size is not None:
+        art["size_bytes"] = int(size)
+    domain = str(getattr(t, "blob_domain", "") or "private").strip()
+    art["domain"] = domain
+    return art
+
+
+def _finalize_publish_as_is(
+    ctx: RequestContext,
+    *,
+    source_identity: SourceIdentity,
+    source_version_id: str | None,
+    destination_repo: str,
+    destination_repo_name: str,
+    destination_repo_tags: list[str],
+    ingested: ConversionOutput,
+    ingest_result: IngestResult,
+    emit_stage: Any,
+    auto_publish_public: bool,
+    overwrite_repo: bool,
+    output_specs: list[OutputSpec] | None = None,
+) -> FinalizeCloneResult:
+    """Thin finalize for non-diffusers repo kinds (e2e progress.json #70).
+
+    Uploads every ingested file to repo CAS, builds a snapshot manifest from
+    the upload set, attaches the classifier-derived attributes, publishes.
+    For requested OutputSpecs whose dtype the source already ships, this is
+    a direct passthrough; for non-matching dtypes we run inline conversion
+    via gen_worker.conversion.inline_convert (issue #73) — same library
+    code paths the standalone cast_dtype / torchao_quantization /
+    convert_gguf tenants use. Calibrated quants (int4:awq etc.) raise
+    InlineConversionNotPossible upstream; this path catches them and
+    surfaces failed_flavors in metadata.
+
+    The diffusers-aware monolith in `_finalize_clone` keeps handling
+    `repo_kind=diffusers` (multi-component layout-repackage + per-output
+    save-format conversion). Everything else lands here.
+    """
+    classifier_attrs = dict(ingest_result.classifier_attrs or {})
+    runtime_library = str(classifier_attrs.get("runtime_library") or "").strip().lower()
+    requested_specs = list(output_specs or [])
+
+    # Promote every locally-staged weight tensor to a real CAS upload, and
+    # build the snapshot_manifest using REPO-RELATIVE paths (`config.json`,
+    # `unet/diffusion_pytorch_model.safetensors`, etc.) — not the upload
+    # `ref` paths which are `jobs/<rid>/outputs/source-repo/<rel>`. Tensorhub's
+    # layout-contract validator inspects manifest path strings; entries must
+    # be canonical or the validator's `path == "config.json"` check fails.
+    promoted_artifacts: list[dict[str, Any]] = []
+    snapshot_manifest: list[dict[str, Any]] = []
+    seen_keys: set[tuple[str, str]] = set()  # (path, digest) dedup
+
+    for t, rel_path, _size in list(ingest_result.all_file_tensors or []):
+        rel_path = str(rel_path or "").strip().replace("\\", "/").lstrip("/")
+        if not rel_path:
+            continue
+        # If the tensor already has a blob_digest, it was uploaded during
+        # the ingest's non-weight-file pass. Reuse the digest.
+        if t.blob_digest:
+            saved = t
+        else:
+            local_path = str(t.local_path or "").strip()
+            if not local_path:
+                continue
+            ref = f"jobs/{ctx.request_id}/outputs/source-repo/{rel_path}"
+            ext = Path(rel_path).suffix.lstrip(".") or "bin"
+            try:
+                saved = ctx.save_checkpoint(ref, local_path, format=ext)
+            except Exception as exc:
+                raise RuntimeError(f"finalize_publish_as_is: failed to upload {rel_path}: {exc}") from exc
+
+        art = _tensors_artifact_module(saved)
+        digest = str(art.get("digest") or "").strip()
+        if not digest:
+            continue
+        size = int(art.get("size_bytes") or 0)
+        # Manifest entry uses the repo-relative path so the layout-contract
+        # validator and downstream resolvers see the canonical structure.
+        # Tensorhub's SnapshotManifestFile struct strict-decodes; only
+        # path / type / size_bytes / digest / blake3 / url / validator* are
+        # accepted.
+        manifest_entry: dict[str, Any] = {
+            "path": rel_path,
+            "digest": digest,
+            "size_bytes": size,
+        }
+        # Artifact entry (artifact_refs) keeps the upload-side `path` so
+        # publish_repo_revision can build artifact_refs correctly.
+        artifact_entry = dict(art)
+        # Override `path` on the artifact to be the rel_path too — that's
+        # what publish_repo_revision propagates as "path" into snapshot
+        # entries when no per-flavor manifest is supplied; aligning both
+        # avoids a mismatch.
+        artifact_entry["path"] = rel_path
+
+        key = (rel_path, digest)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        promoted_artifacts.append(artifact_entry)
+        snapshot_manifest.append(manifest_entry)
+
+    if not promoted_artifacts:
+        raise RuntimeError("finalize_publish_as_is: no artifacts produced")
+
+    # Single flavor entry covering everything we ingested. The classifier
+    # attrs (runtime_library, base_model_lineage, quant_scheme, etc.) ride
+    # on `attributes` — issue #67's wire — and tensorhub validates
+    # `runtime_library` against the enum.
+    primary_dtype = str(classifier_attrs.get("dtype") or ingested.metadata.get("dtype") or "bf16").strip().lower()
+    primary_filetype = str(classifier_attrs.get("file_type") or "safetensors").strip().lower()
+    # `file_layout` is the tensorhub-validated axis (e2e progress.json #228).
+    # Only diffusers uses non-empty values (`multi-file` / `single-file`).
+    # transformers / peft / sentence-transformers / gguf / native_lora — empty.
+    # The classifier may have stamped a strategy-name into `file_layout` for
+    # tagging purposes; that label rides under a different attr key
+    # (`layout_kind`) so it doesn't collide with the validator's enum.
+    classifier_layout = str(classifier_attrs.get("file_layout") or "").strip().lower()
+    primary_layout = ""  # empty for non-diffusers; validator requires this
+    primary_label_layout = classifier_layout or runtime_library or "transformers"
+    flavor_label_parts = [primary_dtype, primary_label_layout, primary_filetype]
+    flavor_label = "-".join([p for p in flavor_label_parts if p])
+
+    flavor_attrs = {
+        "dtype": primary_dtype,
+        "file_layout": primary_layout,
+        "file_type": primary_filetype,
+    }
+    if classifier_layout:
+        # Preserve the classifier's strategy-name as a separate attribute so
+        # consumers can still see it (`layout_kind=transformers` etc.) without
+        # tripping the layout-contract validator.
+        flavor_attrs["layout_kind"] = classifier_layout
+    for k, v in classifier_attrs.items():
+        if k in flavor_attrs:
+            continue
+        if v is None or str(v) == "":
+            continue
+        flavor_attrs[str(k)] = str(v)
+
+    commit_checkpoint_flavors: list[dict[str, Any]] = [{
+        "flavor": flavor_label,
+        "flavors": [primary_dtype, primary_layout, primary_filetype],
+        "display_label": flavor_label,
+        "attributes": flavor_attrs,
+        "artifacts": promoted_artifacts,
+        # The publish_repo_revision wrapper looks at v.get("snapshot_manifest")
+        # per-flavor before falling back to the top-level manifest entries.
+        # Put the manifest here so it lands on the publish request body.
+        "snapshot_manifest": snapshot_manifest,
+    }]
+
+    # e2e progress.json #72: when the HF classifier resolved multiple
+    # concrete dtypes in the source repo (multi-quant GGUF, side-by-side
+    # transformers variants), publish one flavor per resolved dtype under
+    # the same destination tag. Each per-checkpoint attrs dict comes from
+    # `IngestResult.classifier_attrs_per_checkpoint` and carries its own
+    # `dtype` value; we filter to entries whose dtype != primary_dtype
+    # (the primary flavor above already covers that one) and synthesize
+    # one extra flavor per remaining dtype, sharing the snapshot_manifest
+    # since the union of files was downloaded once.
+    per_checkpoint_attrs = list(ingest_result.classifier_attrs_per_checkpoint or [])
+    for ck_attrs in per_checkpoint_attrs:
+        ck_dtype = str(ck_attrs.get("dtype") or "").strip().lower()
+        if not ck_dtype or ck_dtype == primary_dtype:
+            continue
+        ck_filetype = str(ck_attrs.get("file_type") or primary_filetype).strip().lower()
+        ck_label_layout = str(ck_attrs.get("layout_kind") or runtime_library or "transformers").strip().lower()
+        ck_label = "-".join([p for p in (ck_dtype, ck_label_layout, ck_filetype) if p])
+        ck_flavor_attrs = {
+            "dtype": ck_dtype,
+            "file_layout": "",
+            "file_type": ck_filetype,
+        }
+        ck_layout_kind = str(ck_attrs.get("file_layout") or "").strip().lower()
+        if ck_layout_kind:
+            ck_flavor_attrs["layout_kind"] = ck_layout_kind
+        for k, v in ck_attrs.items():
+            if k in ck_flavor_attrs:
+                continue
+            if v is None or str(v) == "":
+                continue
+            ck_flavor_attrs[str(k)] = str(v)
+        commit_checkpoint_flavors.append({
+            "flavor": ck_label,
+            "flavors": [ck_dtype, "", ck_filetype],
+            "display_label": ck_label,
+            "attributes": ck_flavor_attrs,
+            "artifacts": promoted_artifacts,
+            "snapshot_manifest": snapshot_manifest,
+        })
+
+    # Issue #73: for each requested OutputSpec whose dtype DIFFERS from the
+    # source, run inline conversion (cast_dtype / torchao quant / GGUF) and
+    # emit a per-spec flavor entry. Specs whose dtype matches the source's
+    # primary dtype are already covered by the passthrough flavor above.
+    # Calibrated quants raise InlineConversionNotPossible; we catch and
+    # record them in failed_flavors so the caller can render a clean hint.
+    failed_flavors: list[dict[str, str]] = []
+    if requested_specs:
+        from gen_worker.conversion.inline_convert import (
+            InlineConversionNotPossible,
+            run_inline_conversion,
+        )
+        repo_dir_str = str(ingest_result.source_repo_dir or "").strip()
+        repo_dir = Path(repo_dir_str) if repo_dir_str else None
+
+        # Tag the existing primary flavor with the spec.label that matches its
+        # dtype, so callers can map "spec → flavor" cleanly. If no spec
+        # matches, the primary flavor stays as-is (legacy behavior).
+        primary_matched_spec: OutputSpec | None = None
+        for spec in requested_specs:
+            if str(spec.dtype or "").strip().lower() == primary_dtype:
+                primary_matched_spec = spec
+                break
+        if primary_matched_spec is not None:
+            commit_checkpoint_flavors[0]["flavor"] = primary_matched_spec.label
+            commit_checkpoint_flavors[0]["display_label"] = primary_matched_spec.label
+
+        for spec in requested_specs:
+            if spec is primary_matched_spec:
+                continue  # already covered by the passthrough flavor
+            spec_dtype = str(spec.dtype or "").strip().lower()
+            if spec_dtype == "" or spec_dtype == primary_dtype:
+                continue
+            if repo_dir is None or not repo_dir.exists():
+                failed_flavors.append({
+                    "spec_label": spec.label,
+                    "dtype": spec.dtype,
+                    "file_type": spec.file_type,
+                    "reason": "source repo dir is not available for inline conversion",
+                    "suggested_command": "",
+                })
+                continue
+            try:
+                inline_out_dir = repo_dir.parent / f"_inline_{spec.label}"
+                inline_out_dir.mkdir(parents=True, exist_ok=True)
+                # Pick a "primary" weight file from the source for the cast
+                # path's input. For transformers / sentence-transformers /
+                # peft this is usually `model.safetensors` (or the index).
+                primary_source = _pick_primary_source_file(repo_dir)
+                inline_result = run_inline_conversion(
+                    source_path=primary_source,
+                    out_dir=inline_out_dir,
+                    target_dtype=spec_dtype,
+                    target_file_type=str(spec.file_type or "safetensors").strip().lower(),
+                    source_repo_dir=repo_dir,
+                    source_ref=source_identity.source_ref,
+                    destination_ref=destination_repo,
+                )
+            except InlineConversionNotPossible as exc:
+                failed_flavors.append({
+                    "spec_label": spec.label,
+                    "dtype": spec.dtype,
+                    "file_type": spec.file_type,
+                    "reason": exc.reason,
+                    "suggested_command": exc.suggested_command,
+                })
+                if emit_stage is not None:
+                    emit_stage("clone.save_format.skipped", 0.85, {
+                        "output_spec": spec.label,
+                        "reason": exc.reason,
+                        "suggested_command": exc.suggested_command,
+                    })
+                continue
+            except Exception as exc:  # noqa: BLE001 — record + continue
+                import traceback
+                tb = traceback.format_exc()
+                failed_flavors.append({
+                    "spec_label": spec.label,
+                    "dtype": spec.dtype,
+                    "file_type": spec.file_type,
+                    "reason": f"inline conversion failed: {exc}",
+                    "traceback": tb,
+                    "suggested_command": "",
+                })
+                # Print a structured worker-side log so operators can see WHAT
+                # failed (the failed_flavors map only reaches the API caller's
+                # response payload — inline conversion failures are common
+                # enough during ramp-up that we want them in the worker log).
+                import sys
+                print(
+                    f"[inline-convert] flavor={spec.label} FAILED: {exc}\n{tb}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                if emit_stage is not None:
+                    emit_stage("clone.save_format.failed", 0.85, {
+                        "output_spec": spec.label,
+                        "reason": str(exc),
+                    })
+                continue
+
+            # Promote the converted output files to CAS and build a per-spec
+            # flavor entry. Each output file lives at
+            # `<repo>/<filename>` for the destination snapshot.
+            spec_artifacts: list[dict[str, Any]] = []
+            spec_manifest: list[dict[str, Any]] = []
+            for out_path in inline_result.output_paths:
+                rel = out_path.name
+                ref_key = f"jobs/{ctx.request_id}/outputs/inline-{spec.label}/{rel}"
+                ext = Path(rel).suffix.lstrip(".") or "bin"
+                try:
+                    saved = ctx.save_checkpoint(ref_key, str(out_path), format=ext)
+                except Exception as exc:
+                    failed_flavors.append({
+                        "spec_label": spec.label,
+                        "dtype": spec.dtype,
+                        "file_type": spec.file_type,
+                        "reason": f"inline conversion produced output but upload failed: {exc}",
+                        "suggested_command": "",
+                    })
+                    spec_artifacts = []
+                    spec_manifest = []
+                    break
+                art = _tensors_artifact_module(saved)
+                digest = str(art.get("digest") or "").strip()
+                if not digest:
+                    continue
+                size = int(art.get("size_bytes") or 0)
+                spec_manifest.append({
+                    "path": rel,
+                    "digest": digest,
+                    "size_bytes": size,
+                })
+                art_entry = dict(art)
+                art_entry["path"] = rel
+                spec_artifacts.append(art_entry)
+            # Carry every non-weight source file (config.json, tokenizer
+            # files, …) onto the converted flavor too — without these the
+            # inference loader can't reconstruct the model.
+            for src_art in promoted_artifacts:
+                src_rel = str(src_art.get("path") or "").strip()
+                if not src_rel:
+                    continue
+                # Skip weight files from the source; the inline conversion
+                # produced the converted equivalents.
+                if src_rel.endswith(".safetensors") or src_rel.endswith(".bin"):
+                    continue
+                if src_rel.endswith(".safetensors.index.json"):
+                    continue
+                spec_artifacts.append(dict(src_art))
+                # Mirror the file into the per-spec manifest too.
+                src_manifest_entry = next(
+                    (
+                        dict(m) for m in snapshot_manifest
+                        if str(m.get("path") or "") == src_rel
+                    ),
+                    None,
+                )
+                if src_manifest_entry is not None:
+                    spec_manifest.append(src_manifest_entry)
+            if not spec_artifacts:
+                failed_flavors.append({
+                    "spec_label": spec.label,
+                    "dtype": spec.dtype,
+                    "file_type": spec.file_type,
+                    "reason": "inline conversion produced no uploadable artifacts",
+                    "suggested_command": "",
+                })
+                continue
+
+            spec_attrs = dict(flavor_attrs)
+            spec_attrs.update(inline_result.attributes)
+            spec_attrs["dtype"] = spec_dtype
+            spec_attrs["file_type"] = str(spec.file_type or "safetensors").strip().lower()
+            spec_attrs["file_layout"] = primary_layout
+            commit_checkpoint_flavors.append({
+                "flavor": spec.label,
+                "flavors": [spec_dtype, primary_layout, spec_attrs["file_type"]],
+                "display_label": spec.label,
+                "attributes": spec_attrs,
+                "artifacts": spec_artifacts,
+                "snapshot_manifest": spec_manifest,
+            })
+
+    # Lineage: pin the upstream as parent if known.
+    parent_repo = ""
+    parent_checkpoint_id = ""
+    src_ref = str(source_identity.source_ref or "").strip()
+    if src_ref:
+        parent_repo = src_ref
+        parent_checkpoint_id = str(source_version_id or "").strip()
+
+    metadata: dict[str, Any] = {}
+    metadata.update(ingested.metadata or {})
+    metadata["destination_repo"] = destination_repo
+    metadata["checkpoint_flavors"] = commit_checkpoint_flavors
+    if failed_flavors:
+        metadata["failed_flavors"] = failed_flavors
+        metadata["failed_flavor_count"] = str(len(failed_flavors))
+
+    publish_fn = getattr(ctx, "publish_repo_revision", None)
+    if not callable(publish_fn):
+        metadata["publish_skipped_reason"] = "publish_repo_revision_missing"
+        result = ConversionOutput(weights=tensors_with(ingested.weights, local_path=None), metadata=metadata)
+        if emit_stage is not None:
+            emit_stage("clone.completed", 1.0)
+        return FinalizeCloneResult(output=result, published_version_id="")
+
+    publish_kwargs: dict[str, Any] = {
+        "destination_repo": destination_repo,
+        "artifact_refs": [str(art.get("ref") or art.get("path") or "") for art in promoted_artifacts if art.get("ref") or art.get("path")],
+        "metadata": metadata,
+        "create_if_missing": True,
+        "source_repo": parent_repo,
+        "source_version_id": parent_checkpoint_id,
+        "snapshot_manifest": snapshot_manifest,
+        "relationship_kind": "import",
+        "auto_create_external_parent": True,
+        "release_visibility": "public" if auto_publish_public else "private",
+        "merge_with_existing": not overwrite_repo,
+    }
+    if destination_repo_tags:
+        publish_kwargs["destination_repo_tags"] = destination_repo_tags
+
+    publish_result = publish_fn(**publish_kwargs)
+    if not isinstance(publish_result, dict):
+        publish_result = {"ok": True}
+    outputs = [
+        str(v or "").strip().lower()
+        for v in list((publish_result or {}).get("output_versions") or [])
+        if str(v or "").strip()
+    ]
+    published_version_id = outputs[0] if outputs else ""
+    if published_version_id:
+        metadata["published_version_id"] = published_version_id
+
+    result = ConversionOutput(weights=tensors_with(ingested.weights, local_path=None), metadata=metadata)
+    if emit_stage is not None:
+        emit_stage("clone.completed", 1.0)
+    return FinalizeCloneResult(output=result, published_version_id=published_version_id)
 
 
 def _ctx_file_api_channel(ctx: RequestContext) -> tuple[str, str]:
@@ -978,7 +1481,7 @@ def _build_snapshot_manifest(
     """Build the snapshot manifest that `persistSnapshotManifest` will expand into
     `tensorhub.snapshots` + `tensorhub.blobs` + `tensorhub.blob_reverse_lookup`.
 
-    Must include every blob that any `output_variants[i].artifacts[j]` will
+    Must include every blob that any `checkpoint_flavors[i].artifacts[j]` will
     reference — otherwise `validateSnapshotArtifacts` rejects the variant at
     upload-complete time (see `tensorhub/internal/api/repo_job_presigned.go`).
 
@@ -1207,12 +1710,13 @@ def _apply_save_format(
         else:
             prepared, sharded_meta = materialize_safetensors_input(inp, td)
 
-        if tag == "bf16":
+        if tag in {"bf16", "fp16", "fp32"}:
             import torch
-            ref, shard_prefix = _output_ref(fallback_stem="weights-bf16")
+            target_dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}[tag]
+            ref, shard_prefix = _output_ref(fallback_stem=f"weights-{tag}")
             shard_dir = td / "shards"
             result = streaming_dtype_cast(
-                prepared, shard_dir, target_dtype=torch.bfloat16, shard_prefix=shard_prefix,
+                prepared, shard_dir, target_dtype=target_dtype, shard_prefix=shard_prefix,
             )
             saved, additional, sharding_meta = persist_safetensors_output(
                 ctx,
@@ -1233,79 +1737,116 @@ def _apply_save_format(
             saved = ctx.save_checkpoint(ref, str(converted), format="flashpack")
             return ConversionOutput(weights=saved, metadata={"output_format": "flashpack"})
 
-        if tag == "fp8":
-            if len(parts) > 3:
-                raise ValueError(f"unsupported save format: {save_format}")
-            profile = (parts[1] if len(parts) >= 2 else "e4m3").strip().lower() or "e4m3"
-            if profile not in _FP8_PROFILE_TO_TORCH_DTYPE:
-                raise ValueError(f"unsupported fp8 profile: {profile}")
-            import torch
-            dtype_name = _FP8_PROFILE_TO_TORCH_DTYPE[profile]
-            if not hasattr(torch, dtype_name):
-                raise RuntimeError(f"fp8_dtype_unavailable:{profile}")
-            ref, shard_prefix = _output_ref(fallback_stem="weights-fp8")
-            shard_dir = td / "shards"
-            result = streaming_dtype_cast(
-                prepared, shard_dir, target_dtype=getattr(torch, dtype_name), shard_prefix=shard_prefix,
+        if (
+            tag in {"fp8", "int8", "int4", "nf4", "fp4"}
+            or save_format.startswith("fp8:")
+            or save_format.startswith("int4:")
+            or save_format.startswith("int8:")
+        ):
+            # Inline weight-only quantization via torchao (e2e progress.json #73).
+            # Loads the component as an HF model with a TorchAoConfig, runs the
+            # quant pass, and re-shards through the streaming writer so the
+            # output matches the rest of the clone snapshot. Calibrated quants
+            # (int4:awq / int4:gptq) raise InlineConversionNotPossible upstream.
+            from gen_worker.conversion.inline_convert import (
+                InlineConversionNotPossible,
+                run_inline_conversion,
             )
+            ref, shard_prefix = _output_ref(fallback_stem=f"weights-{tag}")
+            shard_dir = td / "shards"
+            # Per-component scope: when called from the diffusers monolith
+            # path (`_finalize_clone` builds one job per component), the
+            # full repo dir IS a diffusers tree (has model_index.json), but
+            # we only want to quantize THIS component. Derive the component
+            # subdir from `weights_rel_path` and pass that as the scope so
+            # `run_inline_conversion` takes the transformers path against
+            # the component's config.json — not the whole-repo fan-out.
+            scoped_repo_dir = Path(source_repo_dir) if source_repo_dir else None
+            comp, _stem = _derive_output_stem(
+                snapshot_rel_path=snapshot_rel_path,
+                weights_rel_path=weights_rel_path,
+                fallback="",
+            )
+            if scoped_repo_dir is not None and comp:
+                comp_dir = scoped_repo_dir / comp
+                if (comp_dir / "config.json").is_file():
+                    scoped_repo_dir = comp_dir
+            inline_result = run_inline_conversion(
+                source_path=prepared,
+                out_dir=shard_dir,
+                target_dtype=save_format,
+                target_file_type="safetensors",
+                source_repo_dir=scoped_repo_dir,
+                shard_prefix=shard_prefix,
+            )
+            # Inline torchao/bnb produce a directory of files (sharded
+            # safetensors + tokenizer/config sidecars). For per-component
+            # diffusers calls, only the safetensors counts as "the
+            # component's weights" — the persist_safetensors_output path
+            # expects a list of safetensors files. Filter accordingly.
+            shard_paths = [
+                p for p in inline_result.output_paths
+                if p.suffix == ".safetensors"
+                and not p.name.endswith(".safetensors.index.json")
+            ]
+            if not shard_paths:
+                shard_paths = list(inline_result.output_paths)
             saved, additional, sharding_meta = persist_safetensors_output(
                 ctx,
-                shard_paths=result["output_paths"],
-                index_path=result["index_path"],
+                shard_paths=shard_paths,
+                index_path=inline_result.index_path,
                 output_ref=ref,
             )
+            meta = {**sharded_meta, **sharding_meta, **inline_result.attributes}
             return ConversionOutput(
                 weights=saved,
-                metadata={"profile": profile, **sharded_meta, **sharding_meta},
+                metadata=meta,
                 additional_artifacts=additional,
             )
 
         if tag == "nvfp4":
-            if len(parts) > 2:
-                raise ValueError(f"unsupported save format: {save_format}")
-            ref, shard_prefix = _output_ref(fallback_stem="weights-nvfp4")
-            shard_dir = td / "shards"
-            result = streaming_nvfp4_quantize(prepared, shard_dir, shard_prefix=shard_prefix)
-            saved, additional, sharding_meta = persist_safetensors_output(
-                ctx,
-                shard_paths=result["output_paths"],
-                index_path=result["index_path"],
-                output_ref=ref,
+            # nvfp4 needs a calibration dataset to be useful at inference; the
+            # raw streaming primitive emits int8+scale sidecars that diffusers/
+            # transformers loaders can't materialize. Refuse cleanly and point
+            # at the separate modelopt job. The CLI surfaces this as a
+            # one-paragraph hint.
+            from gen_worker.conversion.inline_convert import (
+                InlineConversionNotPossible,
+                suggested_separate_job,
             )
-            return ConversionOutput(
-                weights=saved,
-                metadata={"profile": "nvfp4", **sharded_meta, **sharding_meta},
-                additional_artifacts=additional,
+            raise InlineConversionNotPossible(
+                reason=(
+                    "nvfp4 needs a calibration dataset; the clone path doesn't "
+                    "run dataset-dependent quantization inline"
+                ),
+                suggested_command=suggested_separate_job(
+                    "nvfp4", source_ref="<owner>/<repo>", destination_ref="<owner>/<repo>",
+                ),
+                target_dtype="nvfp4",
             )
 
         if tag == "gguf":
             if len(parts) > 2:
-                raise ValueError(f"unsupported save format: {save_format}")
-            encoding = (parts[1] if len(parts) == 2 else "f16").strip().lower() or "f16"
-            from gen_worker.conversion.gguf_utils import (
-                prepare_hf_source_tree_for_gguf,
-                resolve_gguf_convert_script,
-                run_hf_to_gguf_conversion,
+                # Per-quant encoding may itself contain a colon (rare). Reassemble.
+                encoding = ":".join(parts[1:])
+            else:
+                encoding = (parts[1] if len(parts) == 2 else "f16").strip().lower() or "f16"
+            # Single inline-convert path handles both direct encodings (f16/
+            # bf16/q8_0) and llama-quantize two-step targets (q4_k_m, q6_k, …).
+            from gen_worker.conversion.inline_convert import run_inline_conversion
+            inline_result = run_inline_conversion(
+                source_path=prepared,
+                out_dir=td / "gguf-out",
+                target_dtype=encoding,
+                target_file_type="gguf",
+                source_repo_dir=Path(source_repo_dir) if source_repo_dir else None,
             )
-            script_path = resolve_gguf_convert_script()
-            hf_model_dir, _arch = prepare_hf_source_tree_for_gguf(
-                work_dir=td,
-                input_weights=prepared,
-                source_repo_dir=(source_repo_dir or "").strip() or None,
-            )
-            converted = td / f"converted-{encoding}.gguf"
-            run_hf_to_gguf_conversion(
-                script_path=script_path,
-                hf_model_dir=hf_model_dir,
-                output_path=converted,
-                encoding=encoding,
-            )
+            converted = inline_result.output_paths[0]
             ref = default_output_ref(ctx, f"weights-gguf-{encoding}", ext=".gguf")
             saved = ctx.save_checkpoint(ref, str(converted), format="gguf")
-            return ConversionOutput(
-                weights=saved,
-                metadata={"encoding": encoding, "output_format": "gguf"},
-            )
+            meta: dict[str, str] = {"encoding": encoding, "output_format": "gguf"}
+            meta.update(inline_result.attributes)
+            return ConversionOutput(weights=saved, metadata=meta)
 
         raise ValueError(f"unsupported save format: {save_format}")
     finally:
@@ -1394,10 +1935,13 @@ def _finalize_clone(
 ) -> FinalizeCloneResult:
     if ingest_result is None:
         ingest_result = IngestResult()
+
     selected_layout = normalize_target_layout(target_layout)
     # Resolve the final `outputs` list: callers may send either `outputs`
     # (canonical) or legacy `save_formats` (translated here). Empty → default
-    # to `[bf16 / diffusers / safetensors]`.
+    # to `[bf16 / diffusers / safetensors]`. Computed before the dispatch on
+    # runtime_library so the publish-as-is path also gets per-spec inline
+    # conversion (issue #73).
     if outputs is not None and len(list(outputs)) > 0:
         output_specs = normalize_outputs(outputs, target_layout_hint=selected_layout)
     else:
@@ -1408,6 +1952,50 @@ def _finalize_clone(
                 output_specs = normalize_outputs([], target_layout_hint=selected_layout)
         else:
             output_specs = normalize_outputs([], target_layout_hint=selected_layout)
+
+    # e2e progress.json #70: dispatch on the classifier's runtime_library.
+    # Non-diffusers kinds (transformers / peft / sentence-transformers / gguf
+    # / diffusers-lora) take a thin "publish what we ingested" path that
+    # skips layout-repackage and save-format conversion. Today's monolithic
+    # _finalize_clone code below assumes everything is a diffusers tree —
+    # that's only true for repo_kind=diffusers.
+    runtime_library = str((ingest_result.classifier_attrs or {}).get("runtime_library") or "").strip().lower()
+    if runtime_library not in {"", "diffusers", "diffusers-single-file"}:
+        # e2e progress.json #70 task: reject `--save-formats` with
+        # non-default values when the destination is not a diffusers
+        # repo. The default OutputSpec for a transformers/peft/llama.cpp
+        # source is "ingest as-is", which is what _finalize_publish_as_is
+        # already does. Anything else (`fp8:e4m3`, `int4:awq`, …) means
+        # the caller wants quantization, which clone won't do for these
+        # kinds — point them at the right separate-job flow.
+        non_default_save_formats = [
+            f
+            for f in normalize_save_formats(save_formats or [])
+            if f and f.lower() not in {"bf16", "fp16", "default"}
+        ]
+        if non_default_save_formats:
+            raise ValueError(
+                "save_formats with non-default values is only supported for "
+                f"repo_kind=diffusers; got runtime_library={runtime_library!r} "
+                f"and save_formats={non_default_save_formats!r}. "
+                "Run a separate `e2e convert` job (e.g. "
+                "`--function torchao_quantization --spec scheme=fp8_wo`) "
+                "against the cloned destination for those dtypes."
+            )
+        return _finalize_publish_as_is(
+            ctx,
+            source_identity=source_identity,
+            source_version_id=source_version_id,
+            destination_repo=destination_repo,
+            destination_repo_name=destination_repo_name,
+            destination_repo_tags=destination_repo_tags,
+            ingested=ingested,
+            ingest_result=ingest_result,
+            emit_stage=emit_stage,
+            auto_publish_public=auto_publish_public,
+            overwrite_repo=overwrite_repo,
+            output_specs=output_specs,
+        )
     # Internal save_format list derived from OutputSpecs for the existing
     # per-component conversion loop. One save_format per non-passthrough spec;
     # passthrough specs are handled separately (source weight upload).
@@ -1445,7 +2033,14 @@ def _finalize_clone(
     # list independently.
     save_format_outputs: list[dict[str, Any]] = []  # one per (component, output_spec) conversion
     passthrough_uploads: dict[str, list[tuple[Any, str]]] = {}  # spec.label -> [(Tensors, rel_path)]
-    variant_refs: list[str] = []
+    flavor_refs: list[str] = []
+    # Failed flavors recorded during partial-success conversion (#73). Each
+    # entry: {"spec_label": str, "reason": str, "suggested_command": str}.
+    # Surfaces in the clone result so the caller can render a per-flavor
+    # warning instead of either crashing the whole job or silently dropping
+    # the failed dtype.
+    failed_flavors: list[dict[str, str]] = []
+    failed_spec_labels: set[str] = set()
 
     # publish_artifact_refs tracks every CAS-bound ref that accumulates during
     # finalize (for the publish call's artifact_refs list). Only include
@@ -1567,29 +2162,62 @@ def _finalize_clone(
                 f"output dtype={spec.dtype} file_layout={spec.file_layout} "
                 f"file_type={spec.file_type} is not supported yet (no converter wired)"
             )
+        # Partial-success: if any component conversion raises
+        # InlineConversionNotPossible (calibrated quant, missing toolchain),
+        # record the failure and skip the rest of THIS spec's components —
+        # we never publish a half-converted flavor. Other specs continue.
+        from gen_worker.conversion.inline_convert import InlineConversionNotPossible
+        spec_failed_exc: InlineConversionNotPossible | None = None
+        spec_outputs: list[tuple[dict[str, Any], ConversionOutput, float]] = []
         for job in conversion_jobs:
-            component = str(job["component"])
             fmt_started = time.monotonic()
-            out = _apply_save_format(
-                ctx,
-                weights=job["weights"],
-                save_format=legacy_fmt,
-                source_repo_dir=ingest_result.source_repo_dir,
-                source_revision=source_identity.source_revision,
-                extra_shards=job.get("extra_shards") or [],
-                shard_rel_paths=job.get("shard_rel_paths") or [],
-                weights_rel_path=job.get("weights_rel_path"),
-                snapshot_rel_path=job.get("snapshot_rel_path"),
+            try:
+                out = _apply_save_format(
+                    ctx,
+                    weights=job["weights"],
+                    save_format=legacy_fmt,
+                    source_repo_dir=ingest_result.source_repo_dir,
+                    source_revision=source_identity.source_revision,
+                    extra_shards=job.get("extra_shards") or [],
+                    shard_rel_paths=job.get("shard_rel_paths") or [],
+                    weights_rel_path=job.get("weights_rel_path"),
+                    snapshot_rel_path=job.get("snapshot_rel_path"),
+                )
+            except InlineConversionNotPossible as exc:
+                spec_failed_exc = exc
+                break
+            spec_outputs.append((job, out, fmt_started))
+        if spec_failed_exc is not None:
+            failed_flavors.append({
+                "spec_label": spec.label,
+                "dtype": spec.dtype,
+                "file_type": spec.file_type,
+                "reason": spec_failed_exc.reason,
+                "suggested_command": spec_failed_exc.suggested_command,
+            })
+            failed_spec_labels.add(spec.label)
+            conversion_idx += max(1, len(conversion_jobs))
+            emit_stage("clone.save_format.skipped",
+                0.60 + (0.25 * float(conversion_idx) / float(total_conversions)),
+                {
+                    "save_format": legacy_fmt,
+                    "output_spec": spec.label,
+                    "reason": spec_failed_exc.reason,
+                    "suggested_command": spec_failed_exc.suggested_command,
+                },
             )
+            continue
+        for job, out, fmt_started in spec_outputs:
+            component = str(job["component"])
             if str(out.weights.ref or "").strip():
                 publish_artifact_refs.append(str(out.weights.ref).strip())
-            extra_variant_refs_raw = str(out.metadata.get("source_artifact_refs") or "").strip()
-            if extra_variant_refs_raw != "":
-                for raw_ref in extra_variant_refs_raw.split(";"):
+            extra_flavor_refs_raw = str(out.metadata.get("source_artifact_refs") or "").strip()
+            if extra_flavor_refs_raw != "":
+                for raw_ref in extra_flavor_refs_raw.split(";"):
                     ref = str(raw_ref or "").strip()
                     if ref != "":
                         publish_artifact_refs.append(ref)
-            variant_refs.append(f"{spec.label}:{component}={out.weights.ref}")
+            flavor_refs.append(f"{spec.label}:{component}={out.weights.ref}")
             save_format_outputs.append({
                 "spec_label": spec.label,
                 "component": component,
@@ -1716,8 +2344,8 @@ def _finalize_clone(
             ),
         }
     )
-    if variant_refs:
-        metadata["variant_refs"] = ";".join(variant_refs)
+    if flavor_refs:
+        metadata["flavor_refs"] = ";".join(flavor_refs)
 
     dedup_refs: list[str] = []
     seen_refs: set[str] = set()
@@ -1728,8 +2356,8 @@ def _finalize_clone(
         seen_refs.add(clean)
         dedup_refs.append(clean)
 
-    # Build structured output_variants for the TensorHub commit.
-    # The identity_hash must use algo:hex format for TensorHub's digest validation.
+    # Build structured checkpoint_flavors for the TensorHub publish call.
+    # The identity_hash must use algo:hex format for TensorHub lineage validation.
     identity_hash_raw = str(source_identity.identity_hash or "").strip().lower()
     version_id = f"sha256:{identity_hash_raw}" if identity_hash_raw and ":" not in identity_hash_raw else identity_hash_raw
 
@@ -1771,18 +2399,18 @@ def _finalize_clone(
             return "gguf"
         return "safetensors"
 
-    commit_output_variants: list[dict[str, Any]] = []
+    commit_checkpoint_flavors: list[dict[str, Any]] = []
 
-    def _variant_quantization(save_format: str) -> str:
+    def _flavor_quantization(save_format: str) -> str:
         """Normalize a save_format string into the canonical quantization label
-        stored on `repo_version_variants.quantization`."""
+        stored in flavor attributes."""
         s = str(save_format or "").strip().lower()
         if s == "":
             return "none"
         # fp8:e4m3 → fp8-e4m3; gguf:f16 → gguf-f16; nvfp4 → nvfp4; bf16 → bf16.
         return s.replace(":", "-")
 
-    def _variant_file_layout(save_format: str, tensors: Any, default_layout: str) -> str:
+    def _flavor_file_layout(save_format: str, tensors: Any, default_layout: str) -> str:
         """Derive file_layout for a save_format output: single-file containers
         (flashpack, gguf) emit as 'singlefile'; everything else inherits the
         clone's selected layout (usually 'diffusers')."""
@@ -1795,7 +2423,7 @@ def _finalize_clone(
         return default_layout or "diffusers"
 
     # Non-weight files (configs/tokenizers/scheduler/model_index.json/README/
-    # LICENSE) always belong to every emitted variant so inference can load
+    # LICENSE) always belong to every emitted flavor so inference can load
     # the pipeline regardless of which dtype/layout/filetype was picked.
     # Source-side `.safetensors.index.json` files whose component had a
     # non-passthrough conversion become stale: the converted output is a
@@ -1815,10 +2443,14 @@ def _finalize_clone(
             continue
         non_weight_file_tensors.append(t)
 
-    # One `repo_version_variants` row per OutputSpec. Artifacts for a variant =
+    # One checkpoint flavor per OutputSpec. Artifacts for a flavor =
     # converted weights produced by that spec's conversions (or passthrough
-    # source weights) + every non-weight file.
+    # source weights) + every non-weight file. Specs that failed inline
+    # conversion are skipped here — they're surfaced via `failed_flavors`
+    # in metadata so the caller can render per-flavor warnings.
     for spec in output_specs:
+        if spec.label in failed_spec_labels:
+            continue
         artifact_tensors: list[Any] = []
         if _is_passthrough_spec(spec):
             for tensors, _rel in passthrough_uploads.get(spec.label, []):
@@ -1848,22 +2480,41 @@ def _finalize_clone(
             # the metadata below instead of emitting an invalid row.
             continue
 
-        # e2e #36: server owns checkpoint_id + inferred metadata. Workers
-        # send only tenant-owned fields (variant_label → attributes, the
-        # artifact list drives the manifest).
-        commit_output_variants.append({
-            "variant_label": spec.label,
+        attrs = {
+            "dtype": spec.dtype,
             "file_layout": spec.file_layout,
             "file_type": spec.file_type,
             "quantization": spec.dtype,
+        }
+        # Thread classifier-derived attributes (runtime_library,
+        # base_model_lineage, quant_scheme, peft_type, etc.) onto the
+        # destination flavor so inference workers can dispatch on
+        # `runtime_library` without sniffing files. e2e progress.json #67.
+        # Per-spec keys (dtype/file_layout/file_type) win over classifier
+        # defaults if they collide.
+        for ck, cv in (ingest_result.classifier_attrs or {}).items():
+            attrs.setdefault(str(ck), str(cv))
+        commit_checkpoint_flavors.append({
+            "flavor": spec.label,
+            "flavors": [spec.dtype, spec.file_layout, spec.file_type],
+            "display_label": spec.label,
+            "attributes": attrs,
             "artifacts": artifacts,
         })
 
-    # Forward the full variant list to publish_repo_revision. If for some reason
+    # Forward the full flavor list to publish_repo_revision. If for some reason
     # we produced nothing (no digests at all), still omit the key and let the
     # publish path fall back — but that's a bug worth surfacing in logs.
-    if commit_output_variants:
-        metadata["output_variants"] = commit_output_variants
+    if commit_checkpoint_flavors:
+        metadata["checkpoint_flavors"] = commit_checkpoint_flavors
+
+    # Issue #73: surface partial-success failures (calibrated quants etc.)
+    # so the e2e CLI / API caller can render per-flavor warnings. Each entry
+    # carries the requested dtype/file_type, the reason, and the suggested
+    # separate-job command. Empty when every requested flavor landed cleanly.
+    if failed_flavors:
+        metadata["failed_flavors"] = failed_flavors
+        metadata["failed_flavor_count"] = str(len(failed_flavors))
 
     publish_fn = getattr(ctx, "publish_repo_revision", None)
     if not callable(publish_fn):
@@ -1873,10 +2524,10 @@ def _finalize_clone(
         return FinalizeCloneResult(output=result, published_version_id="")
 
     # Build snapshot manifest for the publish. Entries must include every blob
-    # referenced by `commit_output_variants[i].artifacts` plus every file the
+    # referenced by `commit_checkpoint_flavors[i].artifacts` plus every file the
     # ingested repo produced (configs, tokenizers, schedulers) — otherwise the
     # commit-time `validateSnapshotArtifacts` check on Tensorhub rejects the
-    # variant, AND inference (e.g. `StableDiffusionPipeline.from_pretrained`)
+    # flavor, AND inference (e.g. `StableDiffusionPipeline.from_pretrained`)
     # later fails with `model_index.json not found`.
     snapshot_digest = version_id  # Align with the version_id used on variant rows.
     extra_manifest_outputs: list[dict[str, Any]] = []
@@ -2135,6 +2786,7 @@ def run_clone(
     quantize_components: list[str] | None = None,
     auto_publish_public: bool = False,
     overwrite_repo: bool = False,
+    gguf_quant: str | None = None,
 ) -> ConversionOutput:
     started_at = time.monotonic()
     stage_emit_state: dict[str, Any] = {
@@ -2276,6 +2928,16 @@ def run_clone(
         source_expected_size_bytes = _parse_positive_int(
             source_identity.source_metadata.get("source_expected_size_bytes")
         )
+        # e2e progress.json #72: thread the requested concrete dtypes
+        # from `resolved_outputs` so the HF downloader can multi-select
+        # when N>1. Single-element / unset falls back to single-checkpoint
+        # behavior. Drop entries with empty `dtype` (defaults from the
+        # `[]` no-outputs case).
+        dtype_outputs_pref = [
+            str(s.dtype or "").strip().lower()
+            for s in resolved_outputs
+            if str(s.dtype or "").strip()
+        ]
         ingested, ingest_result = ingest_from_source(
             ctx,
             provider=source_identity.provider,
@@ -2290,6 +2952,8 @@ def run_clone(
             resolved_civitai_identity=source_identity.resolved_civitai_identity,
             output_ref=output_ref,
             progress_callback=on_download_progress,
+            gguf_quant=gguf_quant,
+            dtype_outputs=dtype_outputs_pref,
         )
         emit_stage("clone.layout.detected",
             0.58,

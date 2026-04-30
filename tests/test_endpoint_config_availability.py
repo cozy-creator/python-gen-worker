@@ -97,5 +97,19 @@ class TestFilterPrefetchForDisabledFunctions(unittest.TestCase, _WorkerAvailabil
         self.assertEqual(w._filter_prefetch_for_disabled_functions(refs), refs)
 
 
+class TestCanonicalizeResolvedModelsMap(unittest.TestCase):
+    def test_digest_ref_with_flavor_adds_matching_tag_alias(self) -> None:
+        from gen_worker.worker import Worker
+
+        resolved = object()
+        out = Worker._canonicalize_resolved_models_map(
+            {"cozy:owner/repo@blake3:snap#int4": resolved}
+        )
+
+        self.assertIs(out["cozy:owner/repo@blake3:snap#int4"], resolved)
+        self.assertIs(out["cozy:owner/repo:latest#int4"], resolved)
+        self.assertNotIn("cozy:owner/repo:latest", out)
+
+
 if __name__ == "__main__":
     unittest.main()

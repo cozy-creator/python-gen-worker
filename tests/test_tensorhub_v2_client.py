@@ -86,6 +86,28 @@ def test_resolve_artifact_no_compatible() -> None:
         _stop_server(srv)
 
 
+def test_request_public_model_cozy_ref_sends_flavor() -> None:
+    seen: dict[str, object] = {}
+
+    async def handler(req: web.Request) -> web.Response:
+        seen["body"] = await req.json()
+        return web.json_response(
+            {
+                "snapshot_digest": "blake3:abc",
+                "snapshot_manifest": {"entries": [{"path": "model.safetensors", "blake3": "abc", "url": "https://cdn/x"}]},
+            }
+        )
+
+    srv = _start_server({"/api/v1/inference/repos/o/r/resolve": handler})  # type: ignore[arg-type]
+    try:
+        client = CozyHubV2Client(srv.base_url)
+        res = asyncio.run(client.request_public_model(model_ref="cozy:o/r:latest#int4", include_urls=True))
+        assert res.snapshot_digest == "blake3:abc"
+        assert seen["body"] == {"tag": "latest", "flavor": "int4"}
+    finally:
+        _stop_server(srv)
+
+
 def test_request_public_model_pending_202() -> None:
     async def handler(_req: web.Request) -> web.Response:
         return web.json_response({"ingest_job_id": "sess1"}, status=202)

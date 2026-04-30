@@ -10,14 +10,16 @@ class CozyRef:
     repo: str
     tag: str = "latest"
     digest: Optional[str] = None  # snapshot digest, including algorithm prefix (e.g. "blake3:<hex>")
+    flavor: Optional[str] = None
 
     def repo_id(self) -> str:
         return f"{self.owner}/{self.repo}"
 
     def canonical(self) -> str:
+        flavor = f"#{self.flavor}" if self.flavor else ""
         if self.digest:
-            return f"cozy:{self.repo_id()}@{self.digest}"
-        return f"cozy:{self.repo_id()}:{self.tag}"
+            return f"cozy:{self.repo_id()}@{self.digest}{flavor}"
+        return f"cozy:{self.repo_id()}:{self.tag}{flavor}"
 
 
 @dataclass(frozen=True)
@@ -54,7 +56,8 @@ def parse_model_ref(raw: str) -> ParsedModelRef:
     Parse a model ref string.
 
     Phase 1 supported schemes:
-      - Cozy Hub (default): "owner/repo", "owner/repo:tag", "owner/repo@sha256:<hex>",
+      - Cozy Hub (default): "owner/repo", "owner/repo:tag", "owner/repo:tag#flavor",
+        "owner/repo@sha256:<hex>", "owner/repo@sha256:<hex>#flavor",
         optionally prefixed with "cozy:".
       - Hugging Face: "hf:owner/repo" or "hf:owner/repo@revision".
 
@@ -88,7 +91,20 @@ def parse_model_ref(raw: str) -> ParsedModelRef:
         if not s:
             raise ValueError("empty cozy model ref")
         digest = None
+        flavor = None
         tag = "latest"
+
+        if "#" in s:
+            s, flavor_part = s.split("#", 1)
+            flavor_part = flavor_part.strip()
+            if not flavor_part:
+                raise ValueError("cozy ref flavor is empty")
+            if "?" in flavor_part:
+                flavor_part = flavor_part.split("?", 1)[0].strip()
+            flavor = flavor_part or None
+            if flavor is None:
+                raise ValueError("cozy ref flavor is empty")
+
         low = s.lower()
         if "@sha256:" in low:
             idx = low.index("@sha256:")
@@ -118,12 +134,12 @@ def parse_model_ref(raw: str) -> ParsedModelRef:
         else:
             repo_id = s
         if "/" not in repo_id:
-            raise ValueError("cozy ref must be 'owner/repo' (optionally with :tag or @sha256:<hex> or @blake3:<hex>)")
+            raise ValueError("cozy ref must be 'owner/repo' (optionally with :tag, #flavor, @sha256:<hex>, or @blake3:<hex>)")
         owner, repo = repo_id.split("/", 1)
         owner = owner.strip()
         repo = repo.strip()
         if not owner or not repo:
             raise ValueError("cozy ref must be 'owner/repo'")
-        return ParsedModelRef(scheme="cozy", cozy=CozyRef(owner=owner, repo=repo, tag=tag, digest=digest))
+        return ParsedModelRef(scheme="cozy", cozy=CozyRef(owner=owner, repo=repo, tag=tag, digest=digest, flavor=flavor))
 
     raise ValueError(f"unsupported model ref scheme: {scheme!r}")

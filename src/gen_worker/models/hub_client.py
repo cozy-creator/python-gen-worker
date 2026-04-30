@@ -84,6 +84,7 @@ class CozyHubV2Client:
         repo: str,
         tag: str,
         digest: Optional[str] = None,
+        flavor: Optional[str] = None,
         include_urls: bool,
         preferences: Mapping[str, Any],
         capabilities: Mapping[str, Any],
@@ -93,6 +94,7 @@ class CozyHubV2Client:
             raise ValueError("owner/repo required")
         tag = (tag or "").strip() or "latest"
         digest = (digest or "").strip() or None
+        flavor = (flavor or "").strip() or None
 
         # Worker-facing route: capability-token authenticated (no user membership check).
         # The user-JWT counterpart lives at /api/v1/repos/:owner/:repo/resolve.
@@ -122,18 +124,25 @@ class CozyHubV2Client:
         payload: Dict[str, Any] = {}
         if digest:
             payload["digest"] = digest
+            if flavor:
+                payload["flavor"] = flavor
         elif attributes:
             payload["tag"] = ""
             payload["attributes"] = attributes
+            if flavor:
+                payload["flavor"] = flavor
         else:
             payload["tag"] = tag
+            if flavor:
+                payload["flavor"] = flavor
 
         logger.info(
-            "resolve_artifact request owner=%s repo=%s tag=%s digest=%s attributes=%s",
+            "resolve_artifact request owner=%s repo=%s tag=%s digest=%s flavor=%s attributes=%s",
             owner,
             repo,
             payload.get("tag", ""),
             digest or "",
+            flavor or "",
             attributes,
         )
 
@@ -178,6 +187,7 @@ class CozyHubV2Client:
             repo=repo,
             tag="latest",
             digest=digest,
+            flavor=None,
             include_urls=True,
             preferences={},
             capabilities={},
@@ -227,6 +237,7 @@ class CozyHubV2Client:
                 repo=parsed.cozy.repo,
                 tag=parsed.cozy.tag,
                 digest=parsed.cozy.digest,
+                flavor=parsed.cozy.flavor,
                 include_urls=include_urls,
                 preferences=preferences,
                 capabilities={},
@@ -283,16 +294,9 @@ class CozyHubV2Client:
 
 def _parse_resolve_artifact_response(data: Mapping[str, Any], *, include_urls: bool) -> CozyHubResolveArtifactResult:
     repo_revision_seq = _coerce_int(data.get("repo_revision_seq")) or _coerce_int(data.get("revision")) or _coerce_int(data.get("version")) or 0
-    # Post-refactor (e2e issues #11-14): checkpoint_id IS the snapshot digest.
-    # Accept the new shape while still reading legacy keys for compat.
-    snapshot_digest = str(
-        data.get("checkpoint_id")
-        or data.get("snapshot_digest")
-        or data.get("version_id")
-        or ""
-    ).strip()
+    snapshot_digest = str(data.get("checkpoint_id") or data.get("snapshot_digest") or "").strip()
     if not snapshot_digest:
-        raise ValueError("missing snapshot_digest/version_id")
+        raise ValueError("missing checkpoint_id/snapshot_digest")
 
     artifact = _parse_artifact_meta(data)
     files = _parse_snapshot_files(data, include_urls=include_urls)
@@ -304,20 +308,15 @@ def _parse_resolve_artifact_response(data: Mapping[str, Any], *, include_urls: b
 
 def _parse_request_public_model_response(data: Mapping[str, Any], *, include_urls: bool) -> CozyHubResolveArtifactResult:
     repo_revision_seq = _coerce_int(data.get("repo_revision_seq")) or _coerce_int(data.get("revision")) or _coerce_int(data.get("version")) or 0
-    snapshot_digest = str(data.get("snapshot_digest") or data.get("version_id") or "").strip()
+    snapshot_digest = str(data.get("checkpoint_id") or data.get("snapshot_digest") or "").strip()
     if not snapshot_digest:
-        raise ValueError("missing snapshot_digest/version_id")
-
-    variant_label = str(data.get("variant_label") or "").strip()
-    artifact = None
-    if variant_label:
-        artifact = CozyHubArtifact(label=variant_label, file_layout="", file_type="", quantization="")
+        raise ValueError("missing checkpoint_id/snapshot_digest")
 
     files = _parse_snapshot_files(data, include_urls=include_urls)
     if not files:
         raise ValueError("empty snapshot file list")
 
-    return CozyHubResolveArtifactResult(repo_revision_seq=repo_revision_seq, snapshot_digest=snapshot_digest, artifact=artifact, files=files)
+    return CozyHubResolveArtifactResult(repo_revision_seq=repo_revision_seq, snapshot_digest=snapshot_digest, artifact=None, files=files)
 
 
 def _coerce_int(v: Any) -> Optional[int]:
