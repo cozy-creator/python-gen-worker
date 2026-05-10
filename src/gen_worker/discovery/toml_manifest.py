@@ -9,8 +9,6 @@ import re
 
 from .names import slugify_name
 
-_DEFAULT_DTYPES: tuple[str, ...] = ("fp16", "bf16")
-
 _RE_CLAUSE = re.compile(r"^\s*(>=|<=|==|~=|>|<)?\s*([0-9]+(?:\.[0-9]+)*)\s*$")
 _RE_VERSION_PREFIX = re.compile(r"^\s*([0-9]+(?:\.[0-9]+)*)")
 _RE_MODEL_SEGMENT = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
@@ -20,48 +18,17 @@ _RE_MODEL_SEGMENT = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 class TensorhubModelSpec:
     """Endpoint.toml [models] entry.
 
-    `attributes` is the tensorhub #229 variant-attribute selector. Each value
-    is an ordered preference list: ("bf16",) means strict bf16; ("bf16", "fp16")
-    means prefer bf16 but fall back to fp16 if no bf16 variant exists. At most
-    ONE attribute per entry may have more than one preference — the others
-    must be single-valued. Stored as a hashable tuple-of-(key, tuple-of-values)
-    so the dataclass stays frozen + equality-comparable.
-
-    Use `.attributes_as_dict()` for dict-keyed-by-str access (values are
-    lists). Use `.strict_attributes_as_dict()` when you know every attribute
-    is single-valued (raises if any has preferences); the tensorhub resolver
-    API accepts single-valued selectors directly.
-
-    `dtypes` is populated from `attributes["dtype"]` preferences for the
-    backward-compat migration window. New code should read `attributes`
-    instead; dtypes will be removed two releases after the attributes-map
-    shape ships.
+    `flavor` selects a named checkpoint inside the resolved checkpoint group.
+    `flavors` is an ordered fallback list. The concrete selector fields are
+    kept explicit; there is no free-form attributes bag in endpoint.toml.
     """
 
     ref: str
-    attributes: tuple[tuple[str, tuple[str, ...]], ...] = ()
-    # DEPRECATED: derived from attributes["dtype"] during the migration window.
-    # For multi-preference dtype lists, contains the full list in declared
-    # order. Kept populated so downstream consumers relying on the old shape
-    # keep working. Will be removed in a future release.
-    dtypes: tuple[str, ...] = _DEFAULT_DTYPES
-
-    def attributes_as_dict(self) -> dict[str, list[str]]:
-        """Canonical dict form: key → ordered preference list."""
-        return {k: list(v) for k, v in self.attributes}
-
-    def strict_attributes_as_dict(self) -> dict[str, str]:
-        """Dict form assuming every attribute is single-valued. Raises
-        ValueError if any attribute has multiple preferences."""
-        out: dict[str, str] = {}
-        for k, v in self.attributes:
-            if len(v) != 1:
-                raise ValueError(
-                    f"attribute {k!r} has multiple preferences {list(v)!r}; "
-                    "caller expected single-valued attributes"
-                )
-            out[k] = v[0]
-        return out
+    flavor: str = ""
+    flavors: tuple[str, ...] = ()
+    dtype: str = ""
+    file_layout: str = ""
+    file_type: str = ""
 
 
 @dataclass(frozen=True)
@@ -216,101 +183,91 @@ def _parse_model_spec(v: Any, *, warnings: list[str] | None = None) -> Tensorhub
     """Parse a single endpoint.toml [models] entry.
 
     Two accepted input shapes:
-      1. Bare string "owner/repo" → Attributes empty.
-      2. Table: {ref, attributes={...}} — the tensorhub #229 attributes-map shape.
+      1. Bare string "owner/repo" or "owner/repo#flavor".
+      2. Table: {ref, flavor?, flavors?, dtype?, file_layout?, file_type?}.
     """
-    del warnings  # no deprecation warnings emitted — 'dtypes' is hard-rejected below
+    del warnings
     if isinstance(v, str):
-        ref = v.strip()
+        ref, flavor = _split_model_ref_flavor(v.strip(), field="model ref")
         _validate_endpoint_model_ref(ref, field="model ref")
-        return TensorhubModelSpec(ref=ref, attributes=(), dtypes=())
+        return TensorhubModelSpec(ref=ref, flavor=flavor)
 
     if isinstance(v, Mapping):
-        ref = str(v.get("ref") or "").strip()
+        ref, ref_flavor = _split_model_ref_flavor(
+            str(v.get("ref") or "").strip(),
+            field="model spec ref",
+        )
         _validate_endpoint_model_ref(ref, field="model spec ref")
 
         if "dtypes" in v:
             raise ValueError(
-                "model spec 'dtypes' field removed — use attributes={dtype=[...]} instead"
+                "model spec 'dtypes' field removed — use flavor/flavors or dtype/file_layout/file_type"
             )
-
         if "attributes" in v:
-            attrs = _parse_attributes_map(v["attributes"])
-            dtypes = tuple(attrs.get("dtype", []))
-            return TensorhubModelSpec(
-                ref=ref,
-                attributes=_freeze_attributes(attrs),
-                dtypes=dtypes,
-            )
-
-        return TensorhubModelSpec(ref=ref, attributes=(), dtypes=())
-
-    raise ValueError("model spec must be a string or a table {ref=..., attributes={...}}")
-
-
-def _parse_attributes_map(raw: Any) -> dict[str, list[str]]:
-    """Decode a tensorhub #229 attribute selector. Each value is either a
-    string (strict match) or a list of strings (ordered preferences: first
-    match wins). AT MOST ONE attribute per entry may be list-valued; the rest
-    must be single-valued. Normalized to dict[str, list[str]] where
-    single-valued entries become 1-element lists.
-
-    Unknown keys are accepted (forward-compat with new #229 axes); commit-time
-    validation on tensorhub enforces per-family required keys.
-    """
-    if raw is None:
-        return {}
-    if not isinstance(raw, Mapping):
-        raise ValueError("attributes must be a table of string → (string | list[string])")
-    out: dict[str, list[str]] = {}
-    list_valued_keys: list[str] = []
-    for k_raw, v_raw in raw.items():
-        k = str(k_raw).strip()
-        if not k:
-            raise ValueError("attributes keys must be non-empty strings")
-        if isinstance(v_raw, str):
-            v = v_raw.strip()
-            if not v:
-                raise ValueError(f"attributes[{k!r}] must be a non-empty string")
-            out[k] = [v]
-        elif isinstance(v_raw, list):
-            values: list[str] = []
-            for item in v_raw:
-                if not isinstance(item, str):
-                    raise ValueError(
-                        f"attributes[{k!r}] preference-list entries must be strings "
-                        f"(got {type(item).__name__})"
-                    )
-                item_trimmed = item.strip()
-                if not item_trimmed:
-                    raise ValueError(f"attributes[{k!r}] preference entries must be non-empty strings")
-                if item_trimmed in values:
-                    # De-duplicate while preserving first-seen order.
-                    continue
-                values.append(item_trimmed)
-            if not values:
-                raise ValueError(f"attributes[{k!r}] preference list cannot be empty")
-            out[k] = values
-            if len(values) > 1:
-                list_valued_keys.append(k)
-        else:
             raise ValueError(
-                f"attributes[{k!r}] must be a string or list of strings "
-                f"(got {type(v_raw).__name__})"
+                "model spec 'attributes' field removed — use flavor/flavors or dtype/file_layout/file_type"
             )
-    if len(list_valued_keys) > 1:
-        raise ValueError(
-            "at most one attribute per [models] entry may carry a multi-value "
-            "preference list; declare separate keyspace entries for multi-axis "
-            f"preferences (got list-valued: {sorted(list_valued_keys)!r})"
+
+        flavor = _string_field(v, "flavor")
+        if ref_flavor and flavor:
+            raise ValueError("model spec cannot set both ref#flavor and flavor")
+        flavors = _string_list_field(v, "flavors")
+        if (ref_flavor or flavor) and flavors:
+            raise ValueError("model spec cannot set both flavor and flavors")
+
+        return TensorhubModelSpec(
+            ref=ref,
+            flavor=flavor or ref_flavor,
+            flavors=tuple(flavors),
+            dtype=_string_field(v, "dtype"),
+            file_layout=_string_field(v, "file_layout"),
+            file_type=_string_field(v, "file_type"),
         )
+
+    raise ValueError("model spec must be a string or a table {ref=...}")
+
+
+def _split_model_ref_flavor(raw: str, *, field: str) -> tuple[str, str]:
+    if "#" not in raw:
+        return raw, ""
+    if raw.count("#") != 1:
+        raise ValueError(f"{field} has invalid flavor selector: {raw!r}")
+    ref, flavor = raw.rsplit("#", 1)
+    flavor = flavor.strip()
+    if not flavor:
+        raise ValueError(f"{field} has empty flavor selector: {raw!r}")
+    return ref.strip(), flavor
+
+
+def _string_field(raw: Mapping[str, Any], key: str) -> str:
+    if key not in raw:
+        return ""
+    value = raw.get(key)
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise ValueError(f"model spec {key!r} must be a string")
+    return value.strip()
+
+
+def _string_list_field(raw: Mapping[str, Any], key: str) -> list[str]:
+    if key not in raw:
+        return []
+    value = raw.get(key)
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"model spec {key!r} must be a list of strings")
+    out: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ValueError(f"model spec {key!r} entries must be strings")
+        s = item.strip()
+        if not s:
+            raise ValueError(f"model spec {key!r} entries must be non-empty")
+        if s not in out:
+            out.append(s)
     return out
-
-
-def _freeze_attributes(attrs: dict[str, list[str]]) -> tuple[tuple[str, tuple[str, ...]], ...]:
-    """Hashable, deterministically-ordered representation of an attribute
-    selector so TensorhubModelSpec can stay `@dataclass(frozen=True)`."""
-    return tuple((k, tuple(attrs[k])) for k in sorted(attrs))
 
 
 def _validate_endpoint_model_ref(ref: str, *, field: str) -> None:
@@ -389,6 +346,24 @@ def _parse_function_resource_hints(v: Any) -> dict[str, Any]:
         if kind:
             out["kind"] = kind
 
+    if "accelerator" in v:
+        accelerator = str(v.get("accelerator") or "").strip().lower()
+        if accelerator == "gpu":
+            accelerator = "cuda"
+        elif accelerator == "cpu":
+            accelerator = "none"
+        if accelerator and accelerator not in {"none", "cuda"}:
+            raise ValueError("function resource hint accelerator must be 'none' or 'cuda'")
+        if accelerator:
+            out["accelerator"] = accelerator
+
+    if "accelerator_preference" in v:
+        preference = str(v.get("accelerator_preference") or "").strip().lower()
+        if preference and preference not in {"required", "preferred"}:
+            raise ValueError("function resource hint accelerator_preference must be 'required' or 'preferred'")
+        if preference:
+            out["accelerator_preference"] = preference
+
     if "requires_gpu" in v:
         raw = v.get("requires_gpu")
         if isinstance(raw, bool):
@@ -396,8 +371,11 @@ def _parse_function_resource_hints(v: Any) -> dict[str, Any]:
         else:
             raise ValueError("function resource hint requires_gpu must be a boolean")
 
-    if "compute_capability_min" in v:
-        raw = str(v.get("compute_capability_min") or "").strip()
+    compute_min_raw = v.get("compute_capability_min")
+    if compute_min_raw is None:
+        compute_min_raw = v.get("cuda_compute_min")
+    if compute_min_raw is not None:
+        raw = str(compute_min_raw or "").strip()
         if raw:
             try:
                 parsed = float(raw)
@@ -406,6 +384,8 @@ def _parse_function_resource_hints(v: Any) -> dict[str, Any]:
             if parsed <= 0:
                 raise ValueError("function resource hint compute_capability_min must be > 0")
             out["compute_capability_min"] = f"{parsed:.1f}"
+            if "cuda_compute_min" in v:
+                out["cuda_compute_min"] = f"{parsed:.1f}"
 
     if "min_vram_gb" in v:
         raw = v.get("min_vram_gb")
@@ -427,7 +407,7 @@ def _parse_function_resource_hints(v: Any) -> dict[str, Any]:
             raise ValueError("function resource hint vram_multiplier must be > 0")
         out["vram_multiplier"] = val
 
-    for key in ("supported_conversion_profiles", "supported_precisions"):
+    for key in ("supported_conversion_profiles", "supported_precisions", "required_libraries"):
         if key not in v:
             continue
         raw = v.get(key)
@@ -569,14 +549,18 @@ def load_endpoint_toml_with_warnings(path: Path) -> tuple[EndpointToml, list[str
             key = str(key_raw).strip()
             if not key:
                 continue
-            # [models.<function_name>] subtable support:
-            # entries that are maps without any model-spec keys (ref / attributes
-            # / dtypes) are treated as function keyspaces.
+            # [models.<function_name>] subtable support: maps without any
+            # model-spec keys are treated as function keyspaces.
             if (
                 isinstance(value_raw, Mapping)
                 and "ref" not in value_raw
-                and "attributes" not in value_raw
                 and "dtypes" not in value_raw
+                and "attributes" not in value_raw
+                and "flavor" not in value_raw
+                and "flavors" not in value_raw
+                and "dtype" not in value_raw
+                and "file_layout" not in value_raw
+                and "file_type" not in value_raw
             ):
                 fn = slugify_name(key)
                 if not fn:
@@ -592,9 +576,10 @@ def load_endpoint_toml_with_warnings(path: Path) -> tuple[EndpointToml, list[str
                 continue
             models[key] = _parse_model_spec(value_raw, warnings=warnings)
 
-    # Tensorhub #232: reject legacy endpoint.toml blocks that moved onto the
-    # decorator or became platform-controlled. Hard cut, no compat window.
-    # Surface a clear error with the migration target so publishers can fix.
+    # Reject legacy endpoint.toml blocks that moved onto the decorator or
+    # became platform-controlled. Function-scoped [resources] is accepted for
+    # mixed CPU/GPU endpoints; concurrency inside it remains rejected by
+    # _parse_function_resource_hints.
     _REJECTED_ENDPOINT_BLOCKS = {
         "scaling": (
             "autoscaling is platform-controlled; remove the [scaling] block from "
@@ -602,11 +587,6 @@ def load_endpoint_toml_with_warnings(path: Path) -> tuple[EndpointToml, list[str
         ),
     }
     _REJECTED_FUNCTION_BLOCKS = {
-        "resources": (
-            "per-function [functions.<fn>.resources] was removed in tensorhub #232. "
-            "Declare hardware at the endpoint level in top-level [resources]; "
-            "training invocations override size axes at runtime via the wire payload's `compute` field."
-        ),
         "runtime": (
             "per-function [functions.<fn>.runtime] numerics (batch_size_max, prefetch_depth, etc) "
             "were removed in tensorhub #232. Concurrency lives on the decorator "
@@ -645,11 +625,13 @@ def load_endpoint_toml_with_warnings(path: Path) -> tuple[EndpointToml, list[str
             batch_path = _parse_function_batch_dimension(fn_cfg, field_prefix=f"functions.{fn}")
             if batch_path:
                 function_batch_dimensions[fn] = batch_path
+            if "resources" in fn_cfg:
+                parsed = _parse_function_resource_hints(fn_cfg.get("resources"))
+                if parsed:
+                    function_resources[fn] = parsed
 
-    # Tensorhub #232: endpoint-level [resources] is the single source of truth
-    # for hardware. Size axes (vram_gb, gpu_count, memory_gb, cpu_cores, disk_gb)
-    # are invoker-overridable for training invocations; architecture axes
-    # (accelerator, cuda_compute_min) are always pinned.
+    # Endpoint-level [resources] is the default. Function-level [resources]
+    # may narrow/override hardware for mixed CPU/GPU endpoints.
     raw_resources = data.get("resources")
     res_kwargs: dict[str, Any] = {}
     if isinstance(raw_resources, dict):

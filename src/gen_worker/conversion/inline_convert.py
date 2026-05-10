@@ -2,9 +2,8 @@
 
 When the user requests an output dtype the source repo doesn't ship, the
 clone path runs the conversion in-process — the same library code paths
-the standalone `cast_dtype` / `torchao_quantization` / `convert_gguf`
-tenant entrypoints use. The clone reuses its existing upload session so
-all flavors land atomically under the same destination tag group.
+other worker functions can call. The clone reuses its existing upload
+session so all flavors land atomically under the same destination tag group.
 
 Three buckets:
 
@@ -18,14 +17,14 @@ Three buckets:
    - GGUF quants (``q4_k_m``, ``q8_0``, …) via convert_hf_to_gguf + llama-quantize
 
 3. **Calibration-required** — raise ``InlineConversionNotPossible`` with a
-   clear suggested separate-job command:
+   clear structured refusal:
    - ``int4:awq`` / ``int4:gptq`` (modelopt + dataset)
    - ``nvfp4`` calibrated (modelopt + dataset)
    - ``int8:awq`` / ``int8:gptq``
 
-The exception's ``suggested_command`` is rendered by the e2e CLI as a
-one-paragraph hint; the underlying gen-worker error log keeps the full
-message for operators.
+The exception carries structured requirements so callers can render their own
+guidance without this worker package knowing about any particular published
+endpoint.
 """
 
 from __future__ import annotations
@@ -39,21 +38,56 @@ from typing import Any
 # Exceptions
 # ---------------------------------------------------------------------------
 
+@dataclass(frozen=True)
+class DeferredConversionRequirement:
+    """Structured follow-up requirement for work the clone path will not run.
+
+    This deliberately avoids endpoint names, operator commands, and tenant
+    function names. Those are deployment choices owned outside the gen-worker
+    library.
+    """
+
+    kind: str
+    target_dtype: str
+    scheme: str = ""
+    requires_calibration: bool = False
+    requires_gpu: bool = False
+    runtime: str = ""
+
+    def as_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "kind": self.kind,
+            "target_dtype": self.target_dtype,
+        }
+        if self.scheme:
+            out["scheme"] = self.scheme
+        if self.requires_calibration:
+            out["requires_calibration"] = True
+        if self.requires_gpu:
+            out["requires_gpu"] = True
+        if self.runtime:
+            out["runtime"] = self.runtime
+        return out
+
+
 class InlineConversionNotPossible(Exception):
     """Requested target dtype can't be produced inline by the clone path.
 
-    Carries a ``suggested_command`` the caller can render to the user so
-    they know which separate `e2e convert ...` job to run.
+    Carries an optional structured ``deferred_requirement`` the caller can
+    render using its own product surface.
     """
 
-    def __init__(self, reason: str, *, suggested_command: str = "", target_dtype: str = "") -> None:
+    def __init__(
+        self,
+        reason: str,
+        *,
+        target_dtype: str = "",
+        deferred_requirement: DeferredConversionRequirement | None = None,
+    ) -> None:
         self.reason = str(reason or "").strip()
-        self.suggested_command = str(suggested_command or "").strip()
         self.target_dtype = str(target_dtype or "").strip().lower()
-        msg = self.reason
-        if self.suggested_command:
-            msg = f"{self.reason} → run: {self.suggested_command}"
-        super().__init__(msg)
+        self.deferred_requirement = deferred_requirement
+        super().__init__(self.reason)
 
 
 # ---------------------------------------------------------------------------
@@ -101,14 +135,49 @@ _INLINE_GGUF_ENCODINGS: frozenset[str] = frozenset({
 
 # Calibration-required quants. We refuse these inline — they need a calibration
 # dataset and (for some) a GPU; running them silently as part of clone would
-# either hang or produce garbage. The caller renders the suggested separate job.
-_CALIBRATED_DTYPES: dict[str, tuple[str, str]] = {
-    # target_dtype → (scheme_label, conversion_function_name)
-    "int4:awq":     ("int4_awq",     "modelopt_quantization"),
-    "int4:gptq":    ("int4_gptq",    "modelopt_quantization"),
-    "int8:awq":     ("int8_awq",     "modelopt_quantization"),
-    "int8:gptq":    ("int8_gptq",    "modelopt_quantization"),
-    "nvfp4":        ("nvfp4",        "modelopt_quantization"),
+# either hang or produce garbage. The caller renders any product-specific
+# follow-up guidance from the structured requirement.
+_CALIBRATED_DTYPES: dict[str, DeferredConversionRequirement] = {
+    "int4:awq": DeferredConversionRequirement(
+        kind="calibrated_quantization",
+        target_dtype="int4:awq",
+        scheme="int4_awq",
+        requires_calibration=True,
+        requires_gpu=True,
+        runtime="modelopt",
+    ),
+    "int4:gptq": DeferredConversionRequirement(
+        kind="calibrated_quantization",
+        target_dtype="int4:gptq",
+        scheme="int4_gptq",
+        requires_calibration=True,
+        requires_gpu=True,
+        runtime="modelopt",
+    ),
+    "int8:awq": DeferredConversionRequirement(
+        kind="calibrated_quantization",
+        target_dtype="int8:awq",
+        scheme="int8_awq",
+        requires_calibration=True,
+        requires_gpu=True,
+        runtime="modelopt",
+    ),
+    "int8:gptq": DeferredConversionRequirement(
+        kind="calibrated_quantization",
+        target_dtype="int8:gptq",
+        scheme="int8_gptq",
+        requires_calibration=True,
+        requires_gpu=True,
+        runtime="modelopt",
+    ),
+    "nvfp4": DeferredConversionRequirement(
+        kind="calibrated_quantization",
+        target_dtype="nvfp4",
+        scheme="nvfp4",
+        requires_calibration=True,
+        requires_gpu=True,
+        runtime="modelopt",
+    ),
 }
 
 
@@ -116,7 +185,7 @@ def is_calibration_required(target_dtype: str) -> bool:
     """True if the target dtype needs a calibration dataset.
 
     These dtypes require a calibration corpus and (often) GPU; the clone
-    path refuses them and the caller renders the suggested separate job.
+    path refuses them and returns structured follow-up requirements.
     """
     return _normalize(target_dtype) in _CALIBRATED_DTYPES
 
@@ -138,19 +207,9 @@ def is_inline_supported(target_dtype: str, *, target_file_type: str = "safetenso
     return False
 
 
-def suggested_separate_job(target_dtype: str, *, source_ref: str, destination_ref: str) -> str:
-    """Render the e2e CLI command the user should run for a calibrated dtype."""
-    dtype = _normalize(target_dtype)
-    if dtype not in _CALIBRATED_DTYPES:
-        return ""
-    scheme, fn = _CALIBRATED_DTYPES[dtype]
-    src = str(source_ref or "<source>").strip() or "<source>"
-    dst = str(destination_ref or "<destination>").strip() or "<destination>"
-    endpoint = "conversion-gpu"
-    return (
-        f"e2e convert --endpoint-name {endpoint} --function {fn} "
-        f"--spec scheme={scheme} --source-ref {src} --destination-ref {dst}"
-    )
+def deferred_conversion_requirement(target_dtype: str) -> DeferredConversionRequirement | None:
+    """Return structured follow-up requirements for dtypes refused inline."""
+    return _CALIBRATED_DTYPES.get(_normalize(target_dtype))
 
 
 # ---------------------------------------------------------------------------
@@ -187,8 +246,6 @@ def run_inline_conversion(
     component_name: str = "",
     shard_prefix: str = "model",
     source_repo_dir: Path | None = None,
-    source_ref: str = "",
-    destination_ref: str = "",
 ) -> InlineConversionResult:
     """Run the appropriate inline conversion for the requested target_dtype.
 
@@ -203,8 +260,8 @@ def run_inline_conversion(
     omitted we fall back to ``source_path.parent``.
 
     Raises ``InlineConversionNotPossible`` for calibrated dtypes; the
-    exception carries a ``suggested_command`` the caller can render to
-    the user.
+    exception carries structured requirements the caller can render to the
+    user.
     """
     dtype = _normalize(target_dtype)
     ftype = _normalize(target_file_type) or "safetensors"
@@ -218,12 +275,8 @@ def run_inline_conversion(
                 f"requested {dtype} needs a calibration dataset; the clone "
                 f"path doesn't run dataset-dependent quantization inline"
             ),
-            suggested_command=suggested_separate_job(
-                dtype,
-                source_ref=source_ref,
-                destination_ref=destination_ref,
-            ),
             target_dtype=dtype,
+            deferred_requirement=deferred_conversion_requirement(dtype),
         )
 
     out_dir = Path(out_dir)
@@ -269,10 +322,9 @@ def run_inline_conversion(
             target_dtype=dtype,
         )
 
-    # Fallthrough: dtype is not in any known bucket → refuse with a generic hint.
+    # Fallthrough: dtype is not in any known bucket.
     raise InlineConversionNotPossible(
         reason=f"target dtype {dtype!r} is not recognized as a runnable inline conversion",
-        suggested_command="",
         target_dtype=dtype,
     )
 
@@ -288,7 +340,7 @@ def _run_cast_inline(
     target_dtype: str,
     shard_prefix: str,
 ) -> InlineConversionResult:
-    """bf16/fp16/fp32 streaming dtype cast — same primitive `cast_dtype` uses."""
+    """bf16/fp16/fp32 streaming dtype cast."""
     import torch
 
     from .streaming_primitives import streaming_dtype_cast
@@ -420,7 +472,6 @@ def _run_torchao_inline(
                 f"torchao or transformers not installed — can't run inline "
                 f"{dtype} quantization: {exc}"
             ),
-            suggested_command="",
             target_dtype=dtype,
         ) from exc
 
@@ -472,10 +523,6 @@ def _run_torchao_inline(
     except Exception as exc:
         raise InlineConversionNotPossible(
             reason=f"failed to load source model for inline {dtype}: {exc}",
-            suggested_command=(
-                f"e2e convert --endpoint-name conversion-cpu "
-                f"--function torchao_quantization --spec scheme={scheme}"
-            ),
             target_dtype=dtype,
         ) from exc
 
@@ -495,27 +542,15 @@ def _run_torchao_inline(
                     f"(not available on this CPU-only worker). Run on a GPU "
                     f"worker, or use fp8:e4m3 / int8 which work on CPU."
                 ),
-                suggested_command=(
-                    f"e2e convert --endpoint-name conversion-gpu "
-                    f"--function torchao_quantization --spec scheme={scheme}"
-                ),
                 target_dtype=dtype,
             ) from exc
         raise InlineConversionNotPossible(
             reason=f"torchao quantize_ ImportError for {dtype}: {exc}",
-            suggested_command=(
-                f"e2e convert --endpoint-name conversion-cpu "
-                f"--function torchao_quantization --spec scheme={scheme}"
-            ),
             target_dtype=dtype,
         ) from exc
     except Exception as exc:
         raise InlineConversionNotPossible(
             reason=f"torchao quantize_ failed for {dtype}: {exc}",
-            suggested_command=(
-                f"e2e convert --endpoint-name conversion-cpu "
-                f"--function torchao_quantization --spec scheme={scheme}"
-            ),
             target_dtype=dtype,
         ) from exc
 
@@ -527,12 +562,8 @@ def _run_torchao_inline(
             reason=(
                 f"torchao flatten_tensor_state_dict failed for {dtype}: {exc} "
                 f"(this is usually a torchao version-bump issue; the "
-                f"standalone torchao_quantization job uses the same flatten "
-                f"helper internally)"
-            ),
-            suggested_command=(
-                f"e2e convert --endpoint-name conversion-cpu "
-                f"--function torchao_quantization --spec scheme={scheme}"
+                f"same flatten helper is used by packaged conversion "
+                f"entrypoints)"
             ),
             target_dtype=dtype,
         ) from exc
@@ -664,7 +695,6 @@ def _run_bnb_inline(
     except ImportError as exc:
         raise InlineConversionNotPossible(
             reason=f"transformers/bitsandbytes not installed for {dtype}: {exc}",
-            suggested_command="",
             target_dtype=dtype,
         ) from exc
 
@@ -678,8 +708,7 @@ def _run_bnb_inline(
         )
 
     # bnb_4bit_compute_dtype=bf16 keeps activations in bf16 during dequant
-    # at inference time. Standard recipe; matches what the standalone
-    # bitsandbytes_quantization tenant uses.
+    # at inference time. Standard bitsandbytes 4-bit recipe.
     cfg = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type=bnb_quant_type,
@@ -699,11 +728,6 @@ def _run_bnb_inline(
     except Exception as exc:
         raise InlineConversionNotPossible(
             reason=f"bitsandbytes load failed for {dtype}: {exc}",
-            suggested_command=(
-                f"e2e convert --endpoint-name conversion-cpu "
-                f"--function bitsandbytes_quantization "
-                f"--spec scheme={bnb_quant_type}"
-            ),
             target_dtype=dtype,
         ) from exc
 
@@ -712,11 +736,6 @@ def _run_bnb_inline(
     except Exception as exc:
         raise InlineConversionNotPossible(
             reason=f"bitsandbytes save_pretrained failed for {dtype}: {exc}",
-            suggested_command=(
-                f"e2e convert --endpoint-name conversion-cpu "
-                f"--function bitsandbytes_quantization "
-                f"--spec scheme={bnb_quant_type}"
-            ),
             target_dtype=dtype,
         ) from exc
 
@@ -831,10 +850,6 @@ def _run_torchao_diffusers_inline(
                         f"failed to load diffusers component {comp_name!r} for "
                         f"inline {dtype}: {exc}"
                     ),
-                    suggested_command=(
-                        f"e2e convert --endpoint-name conversion-cpu "
-                        f"--function torchao_quantization --spec scheme={scheme}"
-                    ),
                     target_dtype=dtype,
                 ) from exc
 
@@ -847,10 +862,6 @@ def _run_torchao_diffusers_inline(
                         reason=(
                             f"{dtype} quantization requires fbgemm_gpu + CUDA "
                             f"(component {comp_name!r}). Run on a GPU worker."
-                        ),
-                        suggested_command=(
-                            f"e2e convert --endpoint-name conversion-gpu "
-                            f"--function torchao_quantization --spec scheme={scheme}"
                         ),
                         target_dtype=dtype,
                     ) from exc
@@ -1024,11 +1035,6 @@ def _run_bnb_diffusers_inline(
                         f"failed to load diffusers component {comp_name!r} for "
                         f"inline {dtype}: {exc}"
                     ),
-                    suggested_command=(
-                        f"e2e convert --endpoint-name conversion-cpu "
-                        f"--function bitsandbytes_quantization "
-                        f"--spec scheme={bnb_quant_type}"
-                    ),
                     target_dtype=dtype,
                 ) from exc
 
@@ -1040,11 +1046,6 @@ def _run_bnb_diffusers_inline(
                     reason=(
                         f"bitsandbytes save_pretrained failed for component "
                         f"{comp_name!r} ({dtype}): {exc}"
-                    ),
-                    suggested_command=(
-                        f"e2e convert --endpoint-name conversion-cpu "
-                        f"--function bitsandbytes_quantization "
-                        f"--spec scheme={bnb_quant_type}"
                     ),
                     target_dtype=dtype,
                 ) from exc
@@ -1209,8 +1210,9 @@ def _normalize(value: str) -> str:
 __all__ = [
     "InlineConversionNotPossible",
     "InlineConversionResult",
+    "DeferredConversionRequirement",
+    "deferred_conversion_requirement",
     "is_calibration_required",
     "is_inline_supported",
     "run_inline_conversion",
-    "suggested_separate_job",
 ]

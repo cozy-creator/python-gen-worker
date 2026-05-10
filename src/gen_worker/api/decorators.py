@@ -76,10 +76,14 @@ class ResourceRequirements:
         max_wait_ms: Optional[int] = None,
         memory_hint_mb: Optional[int] = None,
         kind: Optional[str] = None,
+        accelerator: Optional[str] = None,
+        accelerator_preference: Optional[str] = None,
+        cuda_compute_min: Optional[float] = None,
         compute_capability_min: Optional[float] = None,
         requires_gpu: Optional[bool] = None,
         min_vram_gb: Optional[float] = None,
         vram_multiplier: Optional[float] = None,
+        required_libraries: Optional[Sequence[str]] = None,
         supported_conversion_profiles: Optional[Sequence[str]] = None,
         supported_precisions: Optional[Sequence[str]] = None,
         runtime_hints: Optional[Mapping[str, Any]] = None,
@@ -100,6 +104,33 @@ class ResourceRequirements:
             self._requirements["memory_hint_mb"] = int(memory_hint_mb)
         if self.kind:
             self._requirements["kind"] = self.kind
+        if accelerator is not None:
+            accel = str(accelerator or "").strip().lower()
+            if accel == "gpu":
+                accel = "cuda"
+            elif accel == "cpu":
+                accel = "none"
+            if accel not in ("", "none", "cuda"):
+                raise ValueError(f"accelerator must be 'none' or 'cuda', got {accelerator!r}")
+            if accel:
+                self._requirements["accelerator"] = accel
+                if accel == "cuda" and requires_gpu is None:
+                    requires_gpu = True
+        if accelerator_preference is not None:
+            pref = str(accelerator_preference or "").strip().lower()
+            if pref and pref not in ("required", "preferred"):
+                raise ValueError(
+                    f"accelerator_preference must be 'required' or 'preferred', got {accelerator_preference!r}"
+                )
+            if pref:
+                self._requirements["accelerator_preference"] = pref
+        if cuda_compute_min is not None:
+            val = float(cuda_compute_min)
+            if val <= 0:
+                raise ValueError(f"cuda_compute_min must be positive, got {val}")
+            self._requirements["cuda_compute_min"] = f"{val:.1f}"
+            if compute_capability_min is None:
+                compute_capability_min = val
         if compute_capability_min is not None:
             val = float(compute_capability_min)
             if val <= 0:
@@ -117,6 +148,10 @@ class ResourceRequirements:
             if vm <= 0:
                 raise ValueError(f"vram_multiplier must be positive, got {vm}")
             self._requirements["vram_multiplier"] = vm
+        if required_libraries is not None:
+            libs = [str(x).strip() for x in required_libraries if str(x).strip()]
+            if libs:
+                self._requirements["required_libraries"] = libs
         if supported_conversion_profiles is not None:
             profiles = [str(x).strip() for x in supported_conversion_profiles if str(x).strip()]
             if profiles:
@@ -159,9 +194,10 @@ def inference_function(
         label: Optional short label surfaced in the endpoint UI / search
             (e.g. ``"text-to-image"``). Non-functional.
         description: Optional free-text description. Non-functional.
-        resources: Legacy per-function ResourceRequirements. Retained only
-            for batching / runtime hints — NOT for hardware selection.
-            Hardware is declared endpoint-wide in ``[resources]``.
+        resources: Per-function ResourceRequirements. Hardware declarations
+            such as ``accelerator="cuda"``, compute capability, VRAM, and
+            optional library requirements are used by the worker to advertise
+            only functions runnable on the current host.
     """
     if concurrency is not None and concurrency not in CONCURRENCY_MODES:
         raise ValueError(
@@ -184,13 +220,11 @@ def inference_function(
     return apply
 
 
-# NOTE: @training_function lives in ``gen_worker.conversion.dispatch`` (imported
-# by tenants as ``from gen_worker import training_function``). It's a richer
-# decorator than @inference_function — it handles the reserved-name contract
-# (ctx / source / datasets) and signature-introspected dispatch per e2e issue
-# #5. Keeping it in the conversion submodule avoids importing the heavy
-# conversion stack (Source materialization, StreamingWriter, etc) for inference
-# endpoints.
+# NOTE: @training_function lives in ``gen_worker.conversion``. It's a richer
+# decorator than @inference_function: it handles the reserved-name contract
+# (ctx / source / datasets) and signature-introspected dispatch. Keeping it out
+# of the top-level package avoids presenting conversion internals to inference
+# endpoint authors.
 
 
 # Realtime/WebSocket endpoints retain their own decorator. Tenants handling

@@ -302,7 +302,7 @@ class Worker:
         self._reconnect_count = 0
         self._outgoing_queue: queue.Queue[Any] = queue.Queue()
         self._leader_hint: Optional[str] = None
-        # Cap redirect bounces (e2e #50). When a worker connects to the wrong
+        # Cap redirect bounces. When a worker connects to the wrong
         # gen-orchestrator replica the orch responds with FAILED_PRECONDITION
         # not_leader:<addr> and closes the stream. The worker reconnects to the
         # advertised addr. If the redirect chain doesn't terminate within this
@@ -317,7 +317,7 @@ class Worker:
         # chunks) on the primary data stream can't starve them. The scheduler
         # only uses the heartbeat message's WorkerId to look up the existing
         # WorkerInfo and bump LastActiveAt, so the second stream is transparent
-        # to the rest of the dispatch flow. See e2e #31.
+        # to the rest of the dispatch flow.
         self._heartbeat_channel: Optional[Any] = None
         self._heartbeat_stub: Optional[Any] = None
         self._heartbeat_stream: Optional[Any] = None
@@ -387,7 +387,7 @@ class Worker:
         self._resolved_cozy_models_by_id_baseline: Dict[str, Any] = {}
         self._prefetch_lock = threading.Lock()
         # Orchestrator-reported availability state received with each
-        # EndpointConfig. See e2e/agents/progress.json issue #6 for the
+        # EndpointConfig. See  for the
         # FIXED vs PAYLOAD binding split.
         #   _disabled_functions_by_name: function_name -> metadata for
         #     functions whose FIXED refs failed terminally. Worker skips
@@ -398,11 +398,12 @@ class Worker:
         #     dispatching a request; if the invocation names a short_key
         #     whose status is terminal-non-resolved it rejects locally.
         self._disabled_functions_by_name: Dict[str, Dict[str, Any]] = {}
+        self._worker_local_unavailable_functions_by_name: Dict[str, Dict[str, Any]] = {}
         self._payload_ref_availability_by_function: Dict[str, Dict[str, Dict[str, Any]]] = {}
-        # E2E #46: per-request tracking of which caller-supplied refs the
-        # active invocation bound via Src.PAYLOAD_REF. Set by the dispatch
-        # path BEFORE the tenant body runs; read by `_map_exception` to
-        # classify post-download failures as `ref_compatibility_surprise`
+        # Per-request tracking of which caller-supplied refs the active
+        # invocation bound via Src.PAYLOAD_REF. Set by the dispatch path before
+        # the tenant body runs; read by `_map_exception` to classify
+        # post-download failures as `ref_compatibility_surprise`.
         # rather than generic `validation` / `internal`. Empty dict = no
         # caller refs on this request; the classifier returns False.
         self._current_payload_ref_keys: Dict[str, str] = {}
@@ -589,8 +590,9 @@ class Worker:
             raise
 
     def _looks_like_ref_compatibility_surprise(self, exc: BaseException) -> bool:
-        """Heuristic — classify load-time errors as e2e #46
-        ``ref_compatibility_surprise`` when the current request carried a
+        """Classify load-time errors as ``ref_compatibility_surprise``.
+
+        Runs when the current request carried a
         caller-supplied ref.
 
         Runs only when ``_current_payload_ref_keys`` is populated (meaning
@@ -674,7 +676,7 @@ class Worker:
         if isinstance(exc, CanceledError) or isinstance(exc, InterruptedError):
             return "canceled", False, "canceled", internal
         if isinstance(exc, HardwareUnmetError):
-            # Terminal: function self-disables on this worker (e2e #40). Not
+            # Terminal: function self-disables on this worker. Not
             # retryable on the same worker; the orchestrator narrows future
             # dispatches away.
             return (
@@ -683,8 +685,8 @@ class Worker:
                 self._sanitize_safe_message(str(exc) or "hardware unmet"),
                 internal,
             )
-        # E2E #46 — explicit RefCompatibilitySurprise raised by tenant code
-        # or auto-detected via the heuristic below. Subclasses ValidationError
+        # Explicit RefCompatibilitySurprise raised by tenant code or
+        # auto-detected via the heuristic below. Subclasses ValidationError
         # so `isinstance` checks that expect "validation" still match, but
         # the classification is narrower: the caller's ref passed pre-
         # dispatch compat gates but failed at load time.
@@ -730,7 +732,7 @@ class Worker:
         function_name: str,
         exc: HardwareUnmetError,
     ) -> None:
-        """Emit WorkerFunctionUnavailableSignal for a hardware-gated self-disable (e2e #40).
+        """Emit WorkerFunctionUnavailableSignal for a hardware-gated self-disable.
 
         Also prunes the function from the worker's advertised spec (via
         ``_disabled_functions_by_name``) so an orchestrator reconnect
@@ -1863,9 +1865,10 @@ class Worker:
                 self._channel = grpc.intercept_channel(self._channel, *interceptors)
 
             self._stub = pb_grpc.SchedulerWorkerServiceStub(self._channel)
+            self._reset_outgoing_queues()
 
             # Start the bidirectional stream
-            request_iterator = self._outgoing_message_iterator()
+            request_iterator = self._outgoing_message_iterator(self._outgoing_queue)
             self._stream = self._stub.ConnectWorker(request_iterator)
 
             logger.info(f"Attempting to connect to scheduler at {self.scheduler_addr}...")
@@ -1875,7 +1878,7 @@ class Worker:
             self._registered_event.set()
             self._emit_startup_phase("registered", status="ok", scheduler_addr=self.scheduler_addr)
 
-            # Dedicated heartbeat channel + stream (e2e #31). Opens a second
+            # Dedicated heartbeat channel + stream. Opens a second
             # HTTP/2 connection to the scheduler so heartbeats aren't subject
             # to flow control or Python-level queue head-of-line blocking from
             # the primary data stream. Scheduler treats heartbeats on any
@@ -1889,7 +1892,9 @@ class Worker:
             if interceptors:
                 self._heartbeat_channel = grpc.intercept_channel(self._heartbeat_channel, *interceptors)
             self._heartbeat_stub = pb_grpc.SchedulerWorkerServiceStub(self._heartbeat_channel)
-            self._heartbeat_stream = self._heartbeat_stub.ConnectWorker(self._heartbeat_outgoing_iterator())
+            self._heartbeat_stream = self._heartbeat_stub.ConnectWorker(
+                self._heartbeat_outgoing_iterator(self._heartbeat_outgoing_queue)
+            )
             self._heartbeat_drain_thread = threading.Thread(target=self._heartbeat_drain_loop, daemon=True)
             self._heartbeat_drain_thread.start()
 
@@ -1964,12 +1969,22 @@ class Worker:
             self._close_connection()
             return False
 
-    def _outgoing_message_iterator(self) -> Iterator[WorkerSchedulerMessage]:
+    def _reset_outgoing_queues(self) -> None:
+        """Give a new gRPC stream fresh queues before re-registering.
+
+        The previous stream iterator may still be unwinding after a reconnect
+        signal. Reusing the same queue lets that stale iterator consume the new
+        registration, leaving the replacement stream to send only later events.
+        """
+        self._outgoing_queue = queue.Queue()
+        self._heartbeat_outgoing_queue = queue.Queue()
+
+    def _outgoing_message_iterator(self, outbound_queue: queue.Queue[Any]) -> Iterator[WorkerSchedulerMessage]:
         """Yields messages from the outgoing queue to send to the scheduler."""
         while not self._stop_event.is_set():
             try:
                 # Block for a short time to allow stopping gracefully
-                message = self._outgoing_queue.get(timeout=0.1)
+                message = outbound_queue.get(timeout=0.1)
                 yield message
                 # self._outgoing_queue.task_done() # Not needed if not joining queue
             except queue.Empty:
@@ -1980,11 +1995,11 @@ class Worker:
                      self._handle_connection_error()
                      break # Exit iterator on error
 
-    def _heartbeat_outgoing_iterator(self) -> Iterator[WorkerSchedulerMessage]:
+    def _heartbeat_outgoing_iterator(self, outbound_queue: queue.Queue[Any]) -> Iterator[WorkerSchedulerMessage]:
         """Yields heartbeat messages onto the dedicated heartbeat stream."""
         while not self._stop_event.is_set():
             try:
-                message = self._heartbeat_outgoing_queue.get(timeout=0.1)
+                message = outbound_queue.get(timeout=0.1)
                 yield message
             except queue.Empty:
                 continue
@@ -2122,6 +2137,131 @@ class Worker:
 
         return info
 
+    @staticmethod
+    def _parse_compute_capability_value(value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        if isinstance(value, dict):
+            value = value.get("min")
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        try:
+            if "." in raw:
+                return float(raw)
+            iv = int(float(raw))
+            # WorkerResources.gpu_sm is commonly "90"/"120"; normalize to
+            # CUDA compute capability 9.0/12.0 so decorator requirements use
+            # the same vocabulary as torch.cuda.get_device_capability().
+            if iv >= 100:
+                return float(iv) / 10.0
+            if iv >= 20:
+                return float(iv) / 10.0
+            return float(iv)
+        except Exception:
+            return None
+
+    def _function_host_availability(
+        self,
+        function_name: str,
+        req: Optional[ResourceRequirements],
+        gpu_info: Dict[str, Any],
+    ) -> tuple[bool, Dict[str, Any]]:
+        cfg = dict(req.to_dict() if req else {})
+        accelerator = str(cfg.get("accelerator", "") or "").strip().lower()
+        if accelerator == "gpu":
+            accelerator = "cuda"
+        if accelerator == "cpu":
+            accelerator = "none"
+        requires_gpu = bool(cfg.get("requires_gpu") is True or accelerator == "cuda")
+        if cfg.get("compute_capability") or cfg.get("compute_capability_min") or cfg.get("cuda_compute_min"):
+            requires_gpu = True
+        if cfg.get("min_vram_gb") is not None:
+            requires_gpu = True
+
+        gpu_count = int(gpu_info.get("gpu_count") or 0)
+        axes: Dict[str, str] = {
+            "accelerator": accelerator or ("cuda" if requires_gpu else "none"),
+            "gpu_count": str(gpu_count),
+        }
+        if requires_gpu and gpu_count <= 0:
+            return False, {
+                "function_name": function_name,
+                "reason": "cuda_unavailable",
+                "detail": "function requires CUDA but this worker reported no GPU",
+                "axes": axes,
+            }
+
+        min_cc = (
+            self._parse_compute_capability_value(cfg.get("compute_capability"))
+            or self._parse_compute_capability_value(cfg.get("compute_capability_min"))
+            or self._parse_compute_capability_value(cfg.get("cuda_compute_min"))
+        )
+        if min_cc is not None:
+            detected_cc = self._parse_compute_capability_value(gpu_info.get("gpu_sm"))
+            axes["required_compute_capability"] = f"{min_cc:.1f}"
+            if detected_cc is not None:
+                axes["detected_compute_capability"] = f"{detected_cc:.1f}"
+            if detected_cc is None or detected_cc < min_cc:
+                return False, {
+                    "function_name": function_name,
+                    "reason": "compute_capability_unmet",
+                    "detail": f"function requires compute capability {min_cc:.1f}+",
+                    "axes": axes,
+                }
+
+        min_vram_gb = cfg.get("min_vram_gb")
+        if min_vram_gb is not None:
+            try:
+                required_gb = float(min_vram_gb)
+            except Exception:
+                required_gb = 0.0
+            available_gb = float(int(gpu_info.get("gpu_total_mem") or 0)) / float(1024 ** 3)
+            axes["required_vram_gb"] = f"{required_gb:.3f}"
+            axes["detected_vram_gb"] = f"{available_gb:.3f}"
+            if required_gb > 0 and available_gb < required_gb:
+                return False, {
+                    "function_name": function_name,
+                    "reason": "insufficient_vram",
+                    "detail": f"function requires {required_gb:g} GiB VRAM",
+                    "axes": axes,
+                }
+
+        required_libs = cfg.get("required_libraries") or cfg.get("required_libs") or []
+        if isinstance(required_libs, str):
+            required_libs = [required_libs]
+        required = {str(x).strip().lower() for x in required_libs if str(x).strip()}
+        if required:
+            installed = {
+                str(x).strip().lower()
+                for x in (gpu_info.get("installed_libs") or [])
+                if str(x).strip()
+            }
+            missing = sorted(required - installed)
+            if missing:
+                axes["missing_libraries"] = ",".join(missing)
+                return False, {
+                    "function_name": function_name,
+                    "reason": "missing_optional_library",
+                    "detail": "function requires optional libraries not installed on this worker: " + ", ".join(missing),
+                    "axes": axes,
+                }
+
+        return True, {}
+
+    def _refresh_worker_local_function_availability(self, gpu_info: Dict[str, Any]) -> None:
+        unavailable: Dict[str, Dict[str, Any]] = {}
+        for fn_name, req in self._discovered_resources.items():
+            ok, status = self._function_host_availability(fn_name, req, gpu_info)
+            if not ok:
+                unavailable[fn_name] = status
+        self._worker_local_unavailable_functions_by_name = unavailable
+        if unavailable:
+            logger.info(
+                "Worker-local unavailable functions: %s",
+                sorted(unavailable.keys()),
+            )
+
     def _collect_model_inventory(self) -> tuple[List[str], List[str], List[str], bool]:
         """Return `(vram_models, disk_models, downloading_models, supports_model_loading)`.
 
@@ -2158,6 +2298,8 @@ class Worker:
         function can't block registration of the others."""
         function_schemas: List[Any] = []
         for fname, (in_schema, out_schema, _delta_schema, inj_json) in self._function_schemas.items():
+            if not self.is_function_runnable(fname):
+                continue
             try:
                 spec = self._request_specs.get(fname)
                 incremental = bool(spec and spec.output_mode == "incremental")
@@ -2174,10 +2316,15 @@ class Worker:
                 continue
         return function_schemas
 
+    def _available_function_names(self) -> List[str]:
+        names = list(self._request_specs.keys()) + list(self._ws_specs.keys()) + list(self._training_specs.keys())
+        return [name for name in dict.fromkeys(names) if self.is_function_runnable(name)]
+
     def _register_worker(self, is_heartbeat: bool = False) -> None:
         """Create and send a registration/heartbeat message."""
         try:
             gpu_info = self._collect_gpu_and_memory_info()
+            self._refresh_worker_local_function_availability(gpu_info)
             vram_models, disk_models, downloading_models, supports_model_loading_flag = (
                 self._collect_model_inventory()
             )
@@ -2206,11 +2353,7 @@ class Worker:
                 torch_version=gpu_info["torch_version"],
                 gpu_sm=gpu_info["gpu_sm"],
                 installed_libs=gpu_info["installed_libs"],
-                available_functions=list(dict.fromkeys(
-                    list(self._request_specs.keys())
-                    + list(self._ws_specs.keys())
-                    + list(self._training_specs.keys())
-                )),
+                available_functions=self._available_function_names(),
                 vram_models=vram_models,   # Models in VRAM (hot)
                 disk_models=disk_models,   # Models on disk (warm)
                 supports_model_loading=supports_model_loading_flag,
@@ -2226,7 +2369,7 @@ class Worker:
             # logger.info(f"DEBUG: Preparing to send registration. Resource object: {resources}")
             # logger.info(f"DEBUG: Value being sent for runpod_pod_id: '{resources.runpod_pod_id}'")
             if is_heartbeat:
-                # Route heartbeats on the dedicated heartbeat stream (e2e #31).
+                # Route heartbeats on the dedicated heartbeat stream.
                 # The primary data stream can back up behind huge job_output
                 # chunks or long GIL-held tenant code; the heartbeat stream is
                 # kept idle so every 10 s tick gets through.
@@ -2359,14 +2502,25 @@ class Worker:
 
     def _emit_function_capabilities_event(self) -> None:
         functions: List[Dict[str, Any]] = []
-        for fn_name, req in self._discovered_resources.items():
+        all_names = dict.fromkeys(
+            list(self._discovered_resources.keys())
+            + list(self._request_specs.keys())
+            + list(self._ws_specs.keys())
+            + list(self._training_specs.keys())
+        )
+        for fn_name in all_names:
+            req = self._discovered_resources.get(fn_name)
             caps = dict(req.to_dict() if req else {})
-            if not caps:
-                continue
             spec = self._request_specs.get(fn_name)
             if spec is not None:
                 caps["output_mode"] = spec.output_mode
             caps["function_name"] = fn_name
+            unavailable = self._function_unavailable_entry(fn_name)
+            caps["available"] = unavailable is None
+            if unavailable is not None:
+                caps["unavailable_reason"] = str(unavailable.get("reason", "") or "")
+                caps["unavailable_detail"] = str(unavailable.get("detail", "") or "")
+                caps["unavailable_axes"] = dict(unavailable.get("axes") or {})
             functions.append(caps)
         if not functions:
             return
@@ -2493,7 +2647,7 @@ class Worker:
             logger.debug("Joining receive thread...")
             self._receive_thread.join(timeout=2.0)
 
-        # Wait for heartbeat-stream drain thread (e2e #31)
+        # Wait for heartbeat-stream drain thread
         if self._heartbeat_drain_thread and self._heartbeat_drain_thread.is_alive():
             logger.debug("Joining heartbeat drain thread...")
             self._heartbeat_drain_thread.join(timeout=1.0)
@@ -2537,7 +2691,7 @@ class Worker:
         self._channel = None
         self._stub = None
 
-        # Tear down the dedicated heartbeat channel too (e2e #31).
+        # Tear down the dedicated heartbeat channel too.
         if self._heartbeat_stream:
             try:
                 if hasattr(self._heartbeat_stream, 'cancel') and callable(self._heartbeat_stream.cancel):
@@ -2821,8 +2975,9 @@ class Worker:
             #     broken key slips past the orchestrator gate (race
             #     during refresh), it can reject locally with the same
             #     424 shape.
-            # See e2e/agents/progress.json issue #6 for the FIXED vs
-            # PAYLOAD distinction.
+            # Fixed-model disables and payload-ref availability have different
+            # ownership: fixed keys are release config, payload refs are caller
+            # supplied.
             self._disabled_functions_by_name = {}
             for df in list(getattr(cfg, "disabled_functions", []) or []):
                 name = str(getattr(df, "function_name", "") or "").strip()
@@ -3003,15 +3158,28 @@ class Worker:
 
     def is_function_runnable(self, function_name: str) -> bool:
         """Return False when the orchestrator has reported the function as
-        disabled (a FIXED ref failed terminally). Used by spec advertisement
-        to omit non-runnable functions and by request dispatch as a second
-        line of defense in case a request slipped past the orchestrator
-        gate during a refresh race.
+        disabled (a FIXED ref failed terminally) or the local worker has
+        detected that this host cannot satisfy the function's hardware/runtime
+        requirements. Used by spec advertisement to omit non-runnable
+        functions and by request dispatch as a second line of defense in case
+        a request slipped past the orchestrator gate during a refresh race.
         """
         name = (function_name or "").strip()
         if not name:
             return True
-        return name not in self._disabled_functions_by_name
+        return self._function_unavailable_entry(name) is None
+
+    def _function_unavailable_entry(self, function_name: str) -> Optional[Dict[str, Any]]:
+        name = (function_name or "").strip()
+        if not name:
+            return None
+        entry = getattr(self, "_disabled_functions_by_name", {}).get(name)
+        if entry:
+            return entry
+        entry = getattr(self, "_worker_local_unavailable_functions_by_name", {}).get(name)
+        if entry:
+            return entry
+        return None
 
     def payload_key_status(self, function_name: str, model_key: str) -> Optional[str]:
         """Return the status string for a PAYLOAD-bound short_key on a
@@ -3570,6 +3738,36 @@ class Worker:
             )
             self._send_request_result(request_id, False, None, "internal", False, "internal error", error_msg)
             return
+        unavailable = self._function_unavailable_entry(function_name)
+        if unavailable is not None:
+            reason = str(unavailable.get("reason", "") or "function_unavailable")
+            detail = str(unavailable.get("detail", "") or "")
+            error_msg = f"Function unavailable on this worker: {function_name} ({reason})"
+            if detail:
+                error_msg = f"{error_msg}: {detail}"
+            logger.warning(error_msg)
+            self._emit_request_event(
+                request_id,
+                "request.rejected",
+                {"reason": reason, "function_name": function_name},
+            )
+            error_type = "hardware_unmet" if reason in {
+                "cuda_unavailable",
+                "compute_capability_unmet",
+                "insufficient_vram",
+                "missing_optional_library",
+                "hardware_unmet",
+            } else "function_unavailable"
+            self._send_request_result(
+                request_id,
+                False,
+                None,
+                error_type,
+                False,
+                self._sanitize_safe_message(detail or "function unavailable on this worker"),
+                error_msg,
+            )
+            return
         if self.max_input_bytes > 0 and len(input_payload) > self.max_input_bytes:
             error_msg = f"Input payload too large: {len(input_payload)} bytes (max {self.max_input_bytes})"
             logger.error(error_msg)
@@ -4085,11 +4283,10 @@ class Worker:
             call_kwargs[spec.ctx_param] = ctx
             call_kwargs[spec.payload_param] = input_obj
 
-            # E2E #46: record which caller-supplied refs (Src.PAYLOAD_REF)
-            # are bound on this request so _map_exception can classify
-            # post-download load failures as `ref_compatibility_surprise`.
-            # Cleared in the outer `except` / `finally` via
-            # `_current_payload_ref_keys = {}`.
+            # Record which caller-supplied refs (Src.PAYLOAD_REF) are bound on
+            # this request so _map_exception can classify post-download load
+            # failures as `ref_compatibility_surprise`. Cleared in the outer
+            # `except` / `finally` via `_current_payload_ref_keys = {}`.
             payload_ref_keys_this_request: Dict[str, str] = {}
             for inj in spec.injections:
                 try:
@@ -4250,8 +4447,7 @@ class Worker:
             # Reserved-name source materialization for training jobs.
             # If the payload declared payload.source (a SourceRepo-shaped dict),
             # resolve it against tensorhub via the worker's downloader and
-            # populate ctx.source_path with the local snapshot dir. See
-            # e2e/agents/progress.json issue #5.
+            # populate ctx.source_path with the local snapshot dir.
             if execution_kind == "training":
                 src_info = getattr(ctx, "source", None) or {}
                 if isinstance(src_info, dict) and str(src_info.get("ref") or "").strip():
@@ -4491,7 +4687,7 @@ class Worker:
             logger.exception("Task %s failed: %s", request_id, e)
             error_type, retryable, safe_message, error_message = self._map_exception(e)
             if isinstance(e, HardwareUnmetError):
-                # e2e #40: tell the orchestrator to stop dispatching this
+                # tell the orchestrator to stop dispatching this
                 # function to this worker.
                 self._emit_function_unavailable_signal(function_name=str(spec.name or ""), exc=e)
             if inference_watchdog is not None:
@@ -4549,9 +4745,8 @@ class Worker:
                 except Exception:
                     pass
             self._gpu_busy_exit()
-            # E2E #46: clear the per-request PAYLOAD_REF tracking so the
-            # classifier doesn't mis-fire on the next request that didn't
-            # involve caller refs.
+            # Clear per-request PAYLOAD_REF tracking so the classifier doesn't
+            # mis-fire on the next request that didn't involve caller refs.
             self._current_payload_ref_keys = {}
 
             # Best-effort resource peaks.
@@ -4730,7 +4925,7 @@ class Worker:
             success = False
 
         except Exception as exc:
-            # e2e #40: HardwareUnmetError → function-level self-disable terminal.
+            # HardwareUnmetError → function-level self-disable terminal.
             # Classify separately before the catch-all so (a) the error_type is
             # hardware_unmet (not internal), (b) the WorkerFunctionUnavailableSignal
             # goes upstream so the orchestrator narrows dispatch.

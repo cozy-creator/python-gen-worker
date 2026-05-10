@@ -20,7 +20,7 @@ At dispatch time:
   - Call fn(**kwargs) with only the names the tenant declared.
   - Upload each returned ProducedFlavor; apply destination.tags on success.
 
-See e2e progress.json issue #5 for the full contract.
+This module owns the transform/training dispatch contract used by endpoint code.
 """
 
 from __future__ import annotations
@@ -66,9 +66,8 @@ RECOMMENDED_KINDS = frozenset({
     "fine-tuning",
     "fusion",
     "format-conversion",
-    # E2E issue #41 — dataset-generation endpoints (calibration dataset
-    # generator, eval-set builder, etc.) emit a dataset artifact, not a
-    # model checkpoint, but share the @training_function dispatch path.
+    # Dataset-generation endpoints emit a dataset artifact, not a model
+    # checkpoint, but share the @training_function dispatch path.
     "dataset-generation",
 })
 
@@ -126,7 +125,7 @@ class TrainingFunctionSpec:
         # → JSON schema `enum` mapping.
         self.input_schema = input_schema
         self.kind = kind
-        # Per-scheme calibration policy (e2e #41/#42). See
+        # Per-scheme calibration policy. See
         # gen_worker.conversion.calibration for the three policies
         # (required / beneficial / unsupported) and the resolver helper.
         # Empty dict for non-quantization functions; discovery emits this
@@ -150,7 +149,7 @@ def training_function(
     (``@training_function(kind='quantization')``).
 
     Args:
-        kind: Populates ``training_jobs.kind`` at dispatch (e2e issue #10).
+        kind: Populates ``training_jobs.kind`` at dispatch.
             See ``RECOMMENDED_KINDS`` for the coarse label set; sub-labels
             via ``kind='quantization:gptq-w4'`` permitted.
         concurrency: ``"sequential"`` (default — training workloads aren't
@@ -158,7 +157,7 @@ def training_function(
             tensorhub #232 for the scheduler dispatch model.
         label: Optional author-supplied UI / search label. Non-functional.
         description: Optional free-text description. Non-functional.
-        calibration: Per-scheme calibration policy (e2e #41/#42), as a
+        calibration: Per-scheme calibration policy, as a
             ``{scheme_name: "required"|"beneficial"|"unsupported"}`` dict.
             Tenants that quantize use this to declare, for each scheme
             their function supports, whether a calibration dataset is
@@ -177,8 +176,7 @@ def training_function(
     The returned callable is a dispatch wrapper the library invokes with
     ``(request_context, payload)`` at runtime. Reserved-name parameters
     (ctx / source / datasets) are library-injected; the rest of the
-    signature decodes from the wire payload. See e2e issue #5 for the
-    reserved-name contract.
+    signature decodes from the wire payload.
     """
     # Support both @training_function and @training_function(kind=...).
     if fn is None:
@@ -276,8 +274,8 @@ def _build_dispatch(
         other_params[name] = p
 
     # ``ctx`` is always required. ``source`` is required for tenant
-    # functions that operate on a model checkpoint (cast_dtype, quantization,
-    # fine-tuning, ...). Dataset-generation tenants (e2e #45) don't need
+    # functions that operate on a model checkpoint (dtype conversion,
+    # quantization, fine-tuning, ...). Dataset-generation tenants don't need
     # a source — prompt corpora are model-agnostic — so source is optional
     # when kind starts with "dataset-generation".
     if "ctx" not in sig.parameters:
@@ -325,7 +323,7 @@ def _build_dispatch(
     dispatch._concurrency_mode = concurrency  # type: ignore[attr-defined]
     dispatch._function_label = (label or "").strip() or None  # type: ignore[attr-defined]
     dispatch._function_description = (description or "").strip() or None  # type: ignore[attr-defined]
-    # Per-scheme calibration policy (e2e #41/#42). Discovery / endpoint.lock
+    # Per-scheme calibration policy. Discovery / endpoint.lock
     # propagates this up so orchestrator + UI can flag calibrated schemes
     # without a dataset BEFORE dispatch (faster than waiting for the worker
     # to reject). Empty dict for functions that don't quantize.
@@ -345,7 +343,7 @@ def _run(
 ) -> list[ProducedFlavor]:
     """Build kwargs from payload + inject library helpers; call the tenant."""
     # Only build the Source if the tenant declared it. Dataset-generation
-    # tenants (e2e #45) skip source to keep corpus generation model-agnostic.
+    # tenants skip source to keep corpus generation model-agnostic.
     source: Source | None = None
     if "source" in spec.signature.parameters:
         source = _build_source(request_context, payload)
@@ -370,9 +368,8 @@ def _run(
             if policy == "unsupported":
                 raise ValueError(
                     f"{spec.fn.__name__}: scheme={scheme!r} does not accept a "
-                    f"calibration dataset (calibration='unsupported'); drop "
-                    f"--dataset and retry. For calibrated quantization use "
-                    f"modelopt_quantization."
+                    f"calibration dataset (calibration='unsupported'); remove "
+                    f"the dataset or choose a calibrated quantization recipe."
                 )
 
     injected: dict[str, Any] = {
@@ -421,10 +418,9 @@ def _run(
             f"{type(result).__name__}"
         )
     # Upload each ProducedFlavor to the destination + apply tags on success.
-    # Library appends exactly one provenance key (`produced_by_job_id`) — see
-    # e2e progress.json #5 for the rationale (every other input-to-the-job
-    # lives in the orchestrator job record; duplicating onto the variant
-    # drifts).
+    # Library appends exactly one provenance key (`produced_by_job_id`).
+    # Every other input-to-the-job lives in the orchestrator job record;
+    # duplicating it onto the variant drifts.
     _finalize_produced_variants(request_context, result, kind=spec.kind)
     return result
 
@@ -438,12 +434,11 @@ def _finalize_produced_variants(
     """Upload each ProducedFlavor's files, build its manifest + snapshot_digest,
     and publish to the correct tensorhub subsystem based on ``kind``.
 
-    Routes by kind (e2e #45):
+    Routes by kind:
 
     - ``kind.startswith("dataset-generation")`` → publish into
-      ``tensorhub.datasets`` via ``publish_dataset_revision``. Used by
-      ``generate_prompt_corpus`` / ``generate_eval_set``. File bytes land in
-      CAS same as checkpoints; the difference is the publish target —
+      ``tensorhub.datasets`` via ``publish_dataset_revision``. File bytes land
+      in CAS same as checkpoints; the difference is the publish target:
       dataset artifacts shouldn't pollute the model-checkpoint search space.
     - everything else → publish into ``tensorhub.repo_checkpoints`` via
       ``publish_repo_revision`` (the original path — model weights).
@@ -461,7 +456,7 @@ def _finalize_produced_variants(
 
     ``destination.tags`` (e.g. ``:prod``) are forwarded to
     ``publish_repo_revision`` in the checkpoint path so the tag + checkpoint
-    land atomically. Datasets use naming-based versioning (e2e #45 decision),
+    land atomically. Datasets use naming-based versioning,
     not tags — the publish_dataset_revision path ignores destination.tags.
     """
     if not variants:
@@ -516,10 +511,6 @@ def _finalize_produced_variants(
 
     publish_fn = getattr(request_context, "publish_repo_revision", None)
     destination_tags = list(destination.get("tags") or [])
-    release_visibility = "private"
-    dest_vis = str(destination.get("release_visibility") or destination.get("visibility") or "").strip().lower()
-    if dest_vis in ("private", "public"):
-        release_visibility = dest_vis
 
     publish_checkpoint_flavors: list[dict[str, Any]] = []
     aggregate_manifest_entries: list[dict[str, Any]] = []
@@ -609,21 +600,13 @@ def _finalize_produced_variants(
             if not label:
                 label = variant.path.name
             publish_checkpoint_flavor = {
-                # checkpoint_id left empty — server fills it in from
-                # sha256(canonical(manifest.entries)).
-                "snapshot_digest":   "",
                 "flavor":            flavor or label,
                 "flavors":           flavors or ([flavor or label] if flavor or label else []),
-                "size_bytes":        sum(e.get("size_bytes", 0) for e in manifest_entries),
                 # Per-variant manifest — publish_repo_revision forwards this
                 # to tensorhub so each checkpoint_id is hashed from only
                 # this flavor's files, not an aggregate across flavors.
                 "snapshot_manifest": manifest_entries,
-                # Issue #63: per-flavor tenant attributes (recipe ids, calib
-                # set refs, library version stamps). Merged with library_provenance
-                # on the publish_repo_revision body so they land on the catalog
-                # row alongside flavor/flavors/display_label.
-                "attributes":        dict(merged_attrs),
+                "display_label":      label,
             }
             publish_checkpoint_flavors.append(publish_checkpoint_flavor)
             aggregate_manifest_entries.extend(manifest_entries)
@@ -646,7 +629,6 @@ def _finalize_produced_variants(
                 source_version_id=source_checkpoint_id,
                 snapshot_manifest=snapshot_manifest,
                 relationship_kind=rel_kind,
-                release_visibility=release_visibility,
                 auto_create_external_parent=False,
                 destination_repo_tags=destination_tags,
                 merge_with_existing=True,
@@ -668,8 +650,8 @@ def _finalize_dataset_variants(
 ) -> None:
     """Publish dataset-generation tenant outputs into ``tensorhub.datasets``.
 
-    E2E #45. Called from ``_finalize_produced_variants`` when the tenant's
-    kind starts with ``dataset-generation``. The flow:
+    Called from ``_finalize_produced_variants`` when the tenant's kind starts
+    with ``dataset-generation``. The flow:
 
       1. Upload every file under the variant via ``ctx.save_checkpoint``
          (reuses the same blob-CAS path as checkpoints; the bytes are
@@ -677,7 +659,7 @@ def _finalize_dataset_variants(
       2. Read ``dataset_info.json`` at the variant root — it's the
          authoritative source of truth for features_json / kind / num_rows.
       3. Call ``publish_dataset_revision`` to create (or update) the
-         ``tensorhub.datasets`` row. Per e2e #45's design decision, the
+         ``tensorhub.datasets`` row. The
          dataset table is mutable; versioning is by naming convention
          (``partiprompts-256-v1`` vs ``partiprompts-256-v2`` are separate
          dataset rows).
@@ -696,9 +678,9 @@ def _finalize_dataset_variants(
         _log.warning("dataset publish: no destination.ref; uploads will succeed but no dataset row created")
         return
 
-    release_visibility = str(destination.get("release_visibility") or destination.get("visibility") or "").strip().lower()
-    if release_visibility not in ("private", "public"):
-        release_visibility = "private"
+    visibility = str(destination.get("visibility") or "").strip().lower()
+    if visibility not in ("private", "public"):
+        visibility = "private"
 
     job_id = str(getattr(request_context, "job_id", "") or "") \
         or str(getattr(request_context, "request_id", "") or "")
@@ -768,7 +750,7 @@ def _finalize_dataset_variants(
                 features_json=features_json,
                 row_artifacts_json=None,
                 snapshot_manifest=manifest_entries,
-                visibility=release_visibility,
+                visibility=visibility,
                 kind=dataset_kind,
                 dataset_info=dataset_info,
             )
@@ -869,7 +851,7 @@ def _build_source(request_context: "RequestContext", payload: Any) -> Source:
 def _build_datasets(request_context: "RequestContext", payload: Any) -> list[Dataset]:
     """Materialize each DatasetRef in payload.datasets into a Dataset.
 
-    Resolution order (e2e #45):
+    Resolution order:
 
     1. ``request_context.dataset_paths[ref]`` — when the orchestrator
        pre-materialized the dataset, the local path is already in-hand.
@@ -877,7 +859,7 @@ def _build_datasets(request_context: "RequestContext", payload: Any) -> list[Dat
        dataset-resolver has wired the download before dispatch.
     2. ``request_context.resolve_dataset(ref)`` — when the
        gen-worker / orchestrator side has the resolver-helper method
-       wired (the e2e #45 target state). Downloads the dataset's
+       wired. Downloads the dataset's
        parquet + dataset_info.json into the worker's local cache and
        returns the path.
     3. Error out — the caller needs to wire one of the above.
@@ -900,7 +882,7 @@ def _build_datasets(request_context: "RequestContext", payload: Any) -> list[Dat
         if ref in dataset_paths:
             local_path = dataset_paths[ref]
 
-        # Path 2: gen-worker's own resolver (e2e #45 target path). When the
+        # Path 2: gen-worker's own resolver. When the
         # worker runtime has ``resolve_dataset`` wired, call it and cache
         # the returned path on the request_context so subsequent calls
         # don't re-download.
@@ -1040,9 +1022,9 @@ def _build_wire_payload_schema(
     types_to_schema: list[Any] = [SourceRepo, DestinationRepo]
     properties: dict[str, dict] = {}
     # `source` is required only when the tenant signature declares a `source`
-    # parameter. Dataset-generation tenants (e2e #45) deliberately omit it —
+    # parameter. Dataset-generation tenants deliberately omit it —
     # forcing `source` into required there would reject every valid request
-    # at the orchestrator schema gate (e2e #51 hit this).
+    # at the orchestrator schema gate.
     has_source_param = "source" in signature.parameters
     required: list[str] = []
     if has_source_param:
@@ -1083,7 +1065,7 @@ def _build_wire_payload_schema(
 
     # Top-level properties. Mirror `has_source_param` from above — emit the
     # `source` slot only when the tenant signature declares it. Dataset-
-    # generation tenants (e2e #45) get a schema without `source`, so the
+    # generation tenants get a schema without `source`, so the
     # orchestrator gate accepts wire payloads that omit the field.
     if has_source_param:
         properties["source"] = type_to_schema[id(SourceRepo)]

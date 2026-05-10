@@ -22,6 +22,21 @@ class TestFunctionComputeCapability(unittest.TestCase):
             {"compute_capability": {"min": "10.0"}},
         )
 
+    def test_resource_requirements_emits_function_hardware_axes(self) -> None:
+        req = ResourceRequirements(
+            accelerator="cuda",
+            accelerator_preference="required",
+            cuda_compute_min=9,
+            min_vram_gb=24,
+            required_libraries=["modelopt"],
+        )
+        self.assertEqual(req.to_dict()["accelerator"], "cuda")
+        self.assertEqual(req.to_dict()["accelerator_preference"], "required")
+        self.assertEqual(req.to_dict()["cuda_compute_min"], "9.0")
+        self.assertEqual(req.to_dict()["compute_capability"], {"min": "9.0"})
+        self.assertEqual(req.to_dict()["min_vram_gb"], 24.0)
+        self.assertEqual(req.to_dict()["required_libraries"], ["modelopt"])
+
     def test_resource_requirements_rejects_invalid_compute_capability_min(self) -> None:
         with self.assertRaises(ValueError):
             ResourceRequirements(compute_capability_min=0)

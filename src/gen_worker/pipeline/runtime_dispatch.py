@@ -30,9 +30,7 @@ from __future__ import annotations
 from typing import Optional
 
 
-# Mirror of the gen-worker → tensorhub repo_kind → library_name map so
-# inference-side dispatch doesn't have to re-derive it from `repo_kind`.
-# Keep the values in sync with `tensorhub.repos.library_name` enum.
+# Keep the values in sync with `tensorhub.repos.library_name`.
 _LIBRARY_NAME_TO_LOADER_KIND: dict[str, str] = {
     "diffusers": "diffusers",
     "transformers": "transformers",

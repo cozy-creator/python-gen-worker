@@ -1,9 +1,9 @@
 """HuggingFace repo classifier and per-strategy file selectors.
 
-Implements the design from e2e progress.json #67: classify a HuggingFace repo
-by shape (diffusers / transformers / peft / native-LoRA / sentence-transformers
-/ gguf / aio-singlefile), then run the strategy-specific selector that returns
-the minimum file set needed to load the model.
+Classifies a HuggingFace repo by shape (diffusers / transformers / peft /
+native-LoRA / sentence-transformers / gguf / aio-singlefile), then runs the
+strategy-specific selector that returns the minimum file set needed to load the
+model.
 
 Hard policy: pickle weight formats (.bin / .ckpt / .pt / .pth /
 consolidated.*.pth) are NEVER downloaded. A repo whose only weights are pickle
@@ -301,9 +301,9 @@ class ClassificationInputs:
 def classify_huggingface_repo(inputs: ClassificationInputs) -> RepoClassification:
     """Classify a HF repo by shape using cheap signals only.
 
-    First-match-wins per the algorithm in e2e progress.json #67. Returns a
-    RepoClassification; refusals carry a `refusal` field set to the appropriate
-    exception (caller decides whether to raise).
+    First-match-wins. Returns a RepoClassification; refusals carry a
+    `refusal` field set to the appropriate exception (caller decides whether
+    to raise).
     """
     paths = [_normalize(p) for p in inputs.file_paths if _normalize(p)]
     root = _root_files(paths)
@@ -528,7 +528,7 @@ def select_for_classification_multi(
     gguf_quants: Sequence[str] = (),
     weight_index_json_by_file: Optional[Mapping[str, Mapping[str, object]]] = None,
 ) -> list[SelectionResult]:
-    """Multi-dtype variant of `select_for_classification` (e2e #72).
+    """Multi-dtype variant of `select_for_classification`.
 
     Returns one `SelectionResult` per requested concrete dtype. Today
     multi-dtype is only meaningful for GGUF (one checkpoint per quant
@@ -851,7 +851,7 @@ def _select_peft_canonical(inputs: ClassificationInputs) -> SelectionResult:
         attrs["peft_type"] = str(cfg["peft_type"])
     if cfg.get("task_type"):
         attrs["task_type"] = str(cfg["task_type"])
-    # e2e progress.json #71: structured base-model lineage.
+    # structured base-model lineage.
     base_repo = str(cfg.get("base_model_name_or_path") or "").strip()
     if base_repo:
         # Strip optional @revision suffix for the repo id; keep revision separate.
@@ -918,7 +918,7 @@ def _select_native_lora(inputs: ClassificationInputs) -> SelectionResult:
         "file_type": "safetensors",
     }
 
-    # Lineage extraction (priority order, e2e progress.json #71):
+    # Lineage extraction priority order:
     # 1. README YAML frontmatter `base_model:` (specific repo, highest fidelity)
     # 2. safetensors __metadata__ kohya signature: ss_base_model_version (family) +
     #    ss_sd_model_name (specific community fine-tune filename)
@@ -1145,10 +1145,9 @@ def _select_sentence_transformers(
 
 # --- GGUF ---
 
-# Known quant levels in PRECISION-FIRST order. e2e progress.json #72 flipped
-# the default from lossy-first (Q4_K_M) to high-fidelity-first (F16/BF16) so
-# clones default to ingesting the source-of-truth precision when both lossy
-# and high-precision variants exist upstream.
+# Known quant levels in PRECISION-FIRST order. Clones default to ingesting the
+# source-of-truth precision when both lossy and high-precision variants exist
+# upstream.
 _GGUF_QUANT_PREFERENCE = (
     "F16", "BF16",
     "Q8_0",
@@ -1180,7 +1179,7 @@ def _select_gguf(
     chosen_quant: Optional[str] = None
     if requested_quant:
         rq = requested_quant.strip()
-        # e2e progress.json #72: accept fuzzy bit-width tokens (`4bit`, `8bit`,
+        # accept fuzzy bit-width tokens (`4bit`, `8bit`,
         # `16bit`) and resolve to a concrete quant available in the repo.
         from .dtype_vocab import is_fuzzy_bitwidth, resolve_fuzzy_to_concrete
         if is_fuzzy_bitwidth(rq):
@@ -1214,7 +1213,6 @@ def _select_gguf(
                 )
     else:
         # Default: pick the first preferred quant available. Skip unknown.
-        # e2e #72 changed this to precision-first (F16/BF16 before Q*).
         for pref in _GGUF_QUANT_PREFERENCE:
             for k in by_quant:
                 if k.lower() == pref.lower():
@@ -1233,7 +1231,7 @@ def _select_gguf(
     if "tokenizer.json" in root:
         selected.append("tokenizer.json")
 
-    # e2e #72: dtype is the unified axis. The chosen GGUF quant token
+    # dtype is the unified axis. The chosen GGUF quant token
     # (`q4_k_m`, `q8_0`, `f16`, `bf16`) is the dtype value; keep `quant_scheme`
     # as an alias for back-compat with consumers that haven't migrated.
     attrs: dict[str, str] = {
@@ -1316,39 +1314,6 @@ def _select_aio_singlefile(inputs: ClassificationInputs) -> SelectionResult:
 # Public exports
 # ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# runtime_library → repo_kind mapping (e2e progress.json #70)
-#
-# Tensorhub's `repo_kind` enum is the file-layout shape (6 values). The
-# classifier emits 7 `runtime_library` values (diffusers / diffusers-single-file
-# / transformers / peft / sentence-transformers / llama-cpp / diffusers-lora).
-# This map collapses the 7 onto the 6 by treating diffusers-single-file as a
-# per-checkpoint variant of `repo_kind=diffusers` (carried via per-checkpoint
-# `file_layout=singlefile`).
-# ---------------------------------------------------------------------------
-
-_RUNTIME_LIBRARY_TO_REPO_KIND: Mapping[str, str] = {
-    "diffusers": "diffusers",
-    "diffusers-single-file": "diffusers",
-    "transformers": "transformers",
-    "peft": "peft-adapter",
-    "sentence-transformers": "sentence-transformers",
-    "llama-cpp": "gguf",
-    "diffusers-lora": "diffusers-lora",
-}
-
-
-def runtime_library_to_repo_kind(runtime_library: str) -> str:
-    """Map a classifier `runtime_library` value to tensorhub's `repo_kind` enum.
-    Returns "" when the input is empty or not recognized — caller should
-    inherit the existing repo's kind (or fall through to tensorhub's default).
-    """
-    s = str(runtime_library or "").strip().lower()
-    if s == "":
-        return ""
-    return _RUNTIME_LIBRARY_TO_REPO_KIND.get(s, "")
-
-
 __all__ = [
     # Constants
     "_PICKLE_EXTS",
@@ -1357,8 +1322,6 @@ __all__ = [
     "_ALWAYS_INCLUDE_FILENAMES",
     "_SIZE_WARN_BYTES",
     "_SIZE_REFUSE_BYTES",
-    # Runtime-library → repo_kind map
-    "runtime_library_to_repo_kind",
     # Refusals
     "RepoRefusal",
     "RepoPickleOnly",

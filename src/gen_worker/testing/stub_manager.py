@@ -10,7 +10,7 @@ from gen_worker.models.interface import DownloaderType, ModelManagementInterface
 
 class StubModelManager(ModelManagementInterface):
     """
-    Minimal model manager for E2E testing.
+    Minimal model manager for integration testing.
 
     Downloads model artifacts via the provided downloader and returns a
     lightweight "pipeline" dict containing the local path.

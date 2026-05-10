@@ -9,10 +9,11 @@ emits a ``WorkerFunctionUnavailableSignal`` upstream, and the orchestrator
 narrows subsequent dispatches for that function to workers where the gate
 has not triggered.
 
-This is the general mechanism behind e2e issue #40. Initial consumers:
-- ``conversion-gpu.modelopt_quantization`` — ``require_compute_capability((10, 0))``
-  for ``scheme=nvfp4`` (Blackwell only), ``(9, 0)`` for ``scheme=fp8`` (Hopper+).
-- Inference endpoints with large-model functions — ``require_vram(N * 1024**3)``
+Example consumers:
+- Quantization functions with hardware-specific kernels can call
+  ``require_compute_capability((10, 0))`` for Blackwell-only recipes or
+  ``(9, 0)`` for Hopper+ recipes.
+- Large-model inference functions can call ``require_vram(N * 1024**3)``
   at function entry so a function declaring ``required_vram_gb=28`` refuses to
   run on a 24 GB GPU while sibling 20 GB functions on the same endpoint stay
   dispatchable.

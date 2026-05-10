@@ -1,4 +1,4 @@
-"""Regression tests for the e2e progress.json #72 multi-dtype clone path.
+"""Regression tests for the multi-dtype clone path.
 
 Covers:
   - GGUF default is now F16 (precision-first) — already in test_hf_classifier.
@@ -71,7 +71,7 @@ def test_fuzzy_resolution_falls_through_when_no_match() -> None:
 
 
 # -------------------------------------------------------------------
-# select_for_classification_multi shape (e2e #72)
+# select_for_classification_multi shape
 # -------------------------------------------------------------------
 
 def _make_classification(strategy: str = "gguf"):

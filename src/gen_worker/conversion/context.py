@@ -39,7 +39,7 @@ class ConversionContext:
         source: "Source | None",
     ) -> None:
         self._req = request_context
-        # Source is None for dataset-generation tenants (e2e #45) that are
+        # Source is None for dataset-generation tenants that are
         # model-agnostic. Tenants that operate on a checkpoint declare
         # ``source: Source`` in their signature; the library builds it and
         # passes it here.

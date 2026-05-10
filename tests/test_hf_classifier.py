@@ -1,6 +1,6 @@
 """Regression tests for gen_worker.conversion.hf_classifier.
 
-Covers every strategy from e2e progress.json #67's design + every refusal
+Covers every classifier strategy and refusal
 path. Tests use synthetic file listings (no HF network calls) so they're fast
 and deterministic.
 """
@@ -858,7 +858,7 @@ def test_always_include_license_when_present():
 
 
 def test_gguf_default_now_picks_f16_not_q4():
-    # e2e #72: default flipped from Q4_K_M (lossy) to F16 (highest fidelity)
+    # Default prefers F16 (highest fidelity) over Q4_K_M (lossy).
     # when both are available.
     paths = [
         "README.md",
@@ -879,7 +879,7 @@ def test_gguf_default_now_picks_f16_not_q4():
 
 
 def test_gguf_fuzzy_4bit_resolves_to_q4_k_m():
-    # e2e #72: fuzzy `4bit` token resolves to Q4_K_M when available.
+    # Fuzzy `4bit` token resolves to Q4_K_M when available.
     paths = ["README.md", "model-Q4_K_M.gguf", "model-Q4_K_S.gguf", "model-f16.gguf"]
     inputs = _ci(paths)
     cls = classify_huggingface_repo(inputs)
@@ -890,7 +890,7 @@ def test_gguf_fuzzy_4bit_resolves_to_q4_k_m():
 
 
 def test_gguf_fuzzy_4bit_falls_back_to_q4_k_s_when_q4_k_m_missing():
-    # e2e #72: fuzzy table cascades through alternatives.
+    # Fuzzy table cascades through alternatives.
     paths = ["README.md", "model-Q4_K_S.gguf", "model-f16.gguf"]
     inputs = _ci(paths)
     cls = classify_huggingface_repo(inputs)
@@ -917,19 +917,6 @@ def test_gguf_fuzzy_unresolvable_raises_clear_error():
     import pytest
     with pytest.raises(ValueError, match="could not resolve"):
         select_for_classification(cls, inputs, gguf_quant="5bit")
-
-
-def test_runtime_library_to_repo_kind_mapping():
-    from gen_worker.conversion.hf_classifier import runtime_library_to_repo_kind
-    assert runtime_library_to_repo_kind("diffusers") == "diffusers"
-    assert runtime_library_to_repo_kind("diffusers-single-file") == "diffusers"
-    assert runtime_library_to_repo_kind("diffusers-lora") == "diffusers-lora"
-    assert runtime_library_to_repo_kind("transformers") == "transformers"
-    assert runtime_library_to_repo_kind("peft") == "peft-adapter"
-    assert runtime_library_to_repo_kind("sentence-transformers") == "sentence-transformers"
-    assert runtime_library_to_repo_kind("llama-cpp") == "gguf"
-    assert runtime_library_to_repo_kind("") == ""
-    assert runtime_library_to_repo_kind("unknown") == ""
 
 
 # ---------------------------------------------------------------------------

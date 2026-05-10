@@ -42,10 +42,10 @@ name = "test-project"
 main = "funcs_a"
 
 [models]
-sdxl = { ref = "stabilityai/stable-diffusion-xl-base-1.0", attributes = { dtype = "bf16" } }
+sdxl = { ref = "stabilityai/stable-diffusion-xl-base-1.0", flavor = "bf16", dtype = "bf16" }
 
 [models.generate_dynamic]
-base = { ref = "stabilityai/stable-diffusion-xl-base-1.0", attributes = { dtype = "bf16" } }
+base = { ref = "stabilityai/stable-diffusion-xl-base-1.0#bf16" }
 """.lstrip(),
                     encoding="utf-8",
                 )
@@ -102,12 +102,8 @@ def generate_dynamic(
                     manifest["models"]["sdxl"]["ref"],
                     "stabilityai/stable-diffusion-xl-base-1.0",
                 )
-                # Attributes-map shape: the canonical tensorhub #229 selector.
-                # Values are preference lists (single-entry for a strict match).
-                self.assertEqual(
-                    manifest["models"]["sdxl"]["attributes"],
-                    {"dtype": ["bf16"]},
-                )
+                self.assertEqual(manifest["models"]["sdxl"]["flavor"], "bf16")
+                self.assertEqual(manifest["models"]["sdxl"]["dtype"], "bf16")
                 self.assertNotIn("dtypes", manifest["models"]["sdxl"])
                 self.assertEqual(
                     manifest["models_by_function"]["generate-dynamic"]["base"]["ref"],

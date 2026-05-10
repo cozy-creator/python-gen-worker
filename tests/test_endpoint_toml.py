@@ -31,30 +31,24 @@ name = "x"
 main = "x.main"
 
 [models]
-joycaption = { ref = "fancyfeast/llama-joycaption-beta-one-hf-llava", attributes = { dtype = "bf16", file_layout = "diffusers" } }
+joycaption = { ref = "fancyfeast/llama-joycaption-beta-one-hf-llava", flavor = "bf16", dtype = "bf16", file_layout = "diffusers" }
 
 [models.generate]
-sdxl = { ref = "stabilityai/stable-diffusion-xl-base-1.0", attributes = { dtype = "fp16" } }
+sdxl = { ref = "stabilityai/stable-diffusion-xl-base-1.0#fp16" }
 """.lstrip(),
                 encoding="utf-8",
             )
             cfg = load_endpoint_toml(p)
             self.assertIn("joycaption", cfg.models)
-            self.assertEqual(
-                cfg.models["joycaption"].attributes_as_dict(),
-                {"dtype": ["bf16"], "file_layout": ["diffusers"]},
-            )
-            # DTypes back-filled from attributes["dtype"] during migration.
-            self.assertEqual(cfg.models["joycaption"].dtypes, ("bf16",))
+            self.assertEqual(cfg.models["joycaption"].flavor, "bf16")
+            self.assertEqual(cfg.models["joycaption"].dtype, "bf16")
+            self.assertEqual(cfg.models["joycaption"].file_layout, "diffusers")
             self.assertIn("generate", cfg.function_models)
             self.assertEqual(
                 cfg.function_models["generate"]["sdxl"].ref,
                 "stabilityai/stable-diffusion-xl-base-1.0",
             )
-            self.assertEqual(
-                cfg.function_models["generate"]["sdxl"].attributes_as_dict(),
-                {"dtype": ["fp16"]},
-            )
+            self.assertEqual(cfg.function_models["generate"]["sdxl"].flavor, "fp16")
 
     def test_legacy_function_models_under_functions_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -66,7 +60,7 @@ name = "x"
 main = "x.main"
 
 [functions.generate.models.model_key]
-sdxl = { ref = "stabilityai/stable-diffusion-xl-base-1.0", attributes = { dtype = "fp16" } }
+sdxl = { ref = "stabilityai/stable-diffusion-xl-base-1.0", flavor = "fp16" }
 """.lstrip(),
                 encoding="utf-8",
             )
@@ -83,7 +77,7 @@ name = "x"
 main = "x.main"
 
 [models]
-sdxl = { ref = "cozy:stabilityai/stable-diffusion-xl-base-1.0", attributes = { dtype = "fp16" } }
+sdxl = { ref = "cozy:stabilityai/stable-diffusion-xl-base-1.0", flavor = "fp16" }
 """.lstrip(),
                 encoding="utf-8",
             )
@@ -92,8 +86,7 @@ sdxl = { ref = "cozy:stabilityai/stable-diffusion-xl-base-1.0", attributes = { d
             self.assertIn("must not include a scheme prefix", str(ctx.exception))
 
     def test_legacy_dtypes_field_is_rejected(self) -> None:
-        """The legacy `dtypes = [...]` field has been hard-cut. Publishers must
-        migrate to `attributes = { dtype = [...] }`."""
+        """The legacy `dtypes = [...]` field has been hard-cut."""
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "endpoint.toml"
             p.write_text(
@@ -196,6 +189,41 @@ max_inflight_requests = 2
             with self.assertRaises(ValueError):
                 load_endpoint_toml(p)
 
+    def test_function_hardware_resources_parsed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "endpoint.toml"
+            p.write_text(
+                """
+schema_version = 1
+name = "x"
+main = "x.main"
+
+[functions.cpu_convert.resources]
+accelerator = "none"
+
+[functions.gpu_convert.resources]
+accelerator = "cuda"
+accelerator_preference = "required"
+cuda_compute_min = 9
+min_vram_gb = 24
+vram_multiplier = 1.75
+supported_precisions = ["fp8", "nvfp4"]
+required_libraries = ["gpu_quant_lib"]
+""".lstrip(),
+                encoding="utf-8",
+            )
+            cfg = load_endpoint_toml(p)
+            self.assertEqual(cfg.function_resources["cpu-convert"]["accelerator"], "none")
+            gpu = cfg.function_resources["gpu-convert"]
+            self.assertEqual(gpu["accelerator"], "cuda")
+            self.assertEqual(gpu["accelerator_preference"], "required")
+            self.assertEqual(gpu["compute_capability_min"], "9.0")
+            self.assertEqual(gpu["cuda_compute_min"], "9.0")
+            self.assertEqual(gpu["min_vram_gb"], 24.0)
+            self.assertEqual(gpu["vram_multiplier"], 1.75)
+            self.assertEqual(gpu["supported_precisions"], ["fp8", "nvfp4"])
+            self.assertEqual(gpu["required_libraries"], ["gpu_quant_lib"])
+
     def test_function_batch_dimension_and_endpoint_max_inflight_parsed(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "endpoint.toml"
@@ -248,9 +276,8 @@ main = "x.main"
             cfg = load_endpoint_toml(p)
             self.assertEqual(cfg.resources.max_inflight_requests, 1)
 
-class TestEndpointTomlAttributesMigration(unittest.TestCase):
-    """Migration tests for tensorhub #229's variant-attribute shape on
-    [models] entries. See e2e/agents/progress.json issue #6."""
+class TestEndpointTomlModelSelectors(unittest.TestCase):
+    """Hard-cut model selector shape on [models] entries."""
 
     def _load(self, body: str):
         with tempfile.TemporaryDirectory() as td:
@@ -258,7 +285,7 @@ class TestEndpointTomlAttributesMigration(unittest.TestCase):
             p.write_text(body.lstrip(), encoding="utf-8")
             return load_endpoint_toml_with_warnings(p)
 
-    def test_attributes_shape_parses(self) -> None:
+    def test_explicit_selector_fields_parse(self) -> None:
         cfg, warnings = self._load(
             """
 schema_version = 1
@@ -266,30 +293,18 @@ name = "x"
 main = "x.main"
 
 [models]
-klein = { ref = "paul/klein-4b", attributes = { dtype = "bf16", file_layout = "diffusers", file_type = "safetensors" } }
+klein = { ref = "paul/klein-4b", flavor = "bf16", dtype = "bf16", file_layout = "diffusers", file_type = "safetensors" }
 """
         )
         spec = cfg.models["klein"]
-        self.assertEqual(
-            spec.attributes_as_dict(),
-            {"dtype": ["bf16"], "file_layout": ["diffusers"], "file_type": ["safetensors"]},
-        )
-        # strict_attributes_as_dict unwraps single-valued preferences to str.
-        self.assertEqual(
-            spec.strict_attributes_as_dict(),
-            {"dtype": "bf16", "file_layout": "diffusers", "file_type": "safetensors"},
-        )
-        # DTypes back-filled from attributes["dtype"].
-        self.assertEqual(spec.dtypes, ("bf16",))
-        # No deprecation warning for the new shape.
-        self.assertTrue(
-            all("deprecated" not in w for w in warnings),
-            f"unexpected deprecation warning: {warnings!r}",
-        )
+        self.assertEqual(spec.ref, "paul/klein-4b")
+        self.assertEqual(spec.flavor, "bf16")
+        self.assertEqual(spec.dtype, "bf16")
+        self.assertEqual(spec.file_layout, "diffusers")
+        self.assertEqual(spec.file_type, "safetensors")
+        self.assertEqual(warnings, [])
 
-    def test_attribute_value_preference_list_parses(self) -> None:
-        """Canonical multi-preference shape on one axis: prefer bf16, fall
-        back to fp16. Other axes stay single-valued."""
+    def test_flavor_fallback_list_parses(self) -> None:
         cfg, _ = self._load(
             """
 schema_version = 1
@@ -297,37 +312,11 @@ name = "x"
 main = "x.main"
 
 [models]
-klein = { ref = "paul/klein-4b", attributes = { dtype = ["bf16", "fp16"], file_layout = "diffusers" } }
+klein = { ref = "paul/klein-4b", flavors = ["bf16", "fp8"] }
 """
         )
         spec = cfg.models["klein"]
-        self.assertEqual(
-            spec.attributes_as_dict(),
-            {"dtype": ["bf16", "fp16"], "file_layout": ["diffusers"]},
-        )
-        # strict_attributes_as_dict must raise when any attribute has multiple
-        # preferences — resolver callers that want the strict form should
-        # handle preference selection themselves.
-        with self.assertRaises(ValueError):
-            spec.strict_attributes_as_dict()
-        # Legacy DTypes back-fill preserves the full preference list.
-        self.assertEqual(spec.dtypes, ("bf16", "fp16"))
-
-    def test_multi_axis_preference_lists_rejected(self) -> None:
-        """At most one attribute per entry may have multiple preferences;
-        two-or-more multi-valued axes require separate keyspace entries."""
-        with self.assertRaises(ValueError) as ctx:
-            self._load(
-                """
-schema_version = 1
-name = "x"
-main = "x.main"
-
-[models]
-klein = { ref = "paul/klein-4b", attributes = { dtype = ["bf16", "fp16"], file_layout = ["diffusers", "singlefile"] } }
-"""
-            )
-        self.assertIn("at most one attribute", str(ctx.exception))
+        self.assertEqual(spec.flavors, ("bf16", "fp8"))
 
     def test_legacy_dtypes_field_rejected(self) -> None:
         with self.assertRaises(ValueError) as ctx:
@@ -340,8 +329,22 @@ main = "x.main"
 [models]
 klein = { ref = "paul/klein-4b", dtypes = ["bf16"] }
 """
-            )
+        )
         self.assertIn("'dtypes' field removed", str(ctx.exception))
+
+    def test_legacy_attributes_field_rejected(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            self._load(
+                """
+schema_version = 1
+name = "x"
+main = "x.main"
+
+[models]
+klein = { ref = "paul/klein-4b", attributes = { dtype = "bf16" } }
+"""
+            )
+        self.assertIn("'attributes' field removed", str(ctx.exception))
 
     def test_bare_string_ref_still_works(self) -> None:
         cfg, warnings = self._load(
@@ -356,71 +359,25 @@ klein = "paul/klein-4b"
         )
         spec = cfg.models["klein"]
         self.assertEqual(spec.ref, "paul/klein-4b")
-        # Bare ref → empty attributes (matches any variant).
-        self.assertEqual(spec.attributes_as_dict(), {})
-        self.assertEqual(spec.dtypes, ())
+        self.assertEqual(spec.flavor, "")
         self.assertEqual(warnings, [])
 
-    def test_non_string_attribute_value_rejected_accepts_list(self) -> None:
-        """int / bool attribute values are rejected; list-of-strings is
-        accepted (preference list)."""
-        # ints rejected
-        with self.assertRaises(ValueError) as ctx:
-            self._load(
-                """
+    def test_ref_flavor_selector_parses(self) -> None:
+        cfg, _ = self._load(
+            """
 schema_version = 1
 name = "x"
 main = "x.main"
 
 [models]
-klein = { ref = "paul/klein-4b", attributes = { quant_bits = 4 } }
+klein = "paul/klein-4b#bf16"
 """
-            )
-        self.assertIn("must be a string or list of strings", str(ctx.exception))
+        )
+        spec = cfg.models["klein"]
+        self.assertEqual(spec.ref, "paul/klein-4b")
+        self.assertEqual(spec.flavor, "bf16")
 
-    def test_preference_list_with_empty_entry_rejected(self) -> None:
-        with self.assertRaises(ValueError) as ctx:
-            self._load(
-                """
-schema_version = 1
-name = "x"
-main = "x.main"
-
-[models]
-klein = { ref = "paul/klein-4b", attributes = { dtype = ["bf16", ""] } }
-"""
-            )
-        self.assertIn("non-empty", str(ctx.exception))
-
-    def test_preference_list_empty_rejected(self) -> None:
-        with self.assertRaises(ValueError) as ctx:
-            self._load(
-                """
-schema_version = 1
-name = "x"
-main = "x.main"
-
-[models]
-klein = { ref = "paul/klein-4b", attributes = { dtype = [] } }
-"""
-            )
-        self.assertIn("cannot be empty", str(ctx.exception))
-
-    def test_empty_attribute_value_rejected(self) -> None:
-        with self.assertRaises(ValueError) as ctx:
-            self._load(
-                """
-schema_version = 1
-name = "x"
-main = "x.main"
-
-[models]
-klein = { ref = "paul/klein-4b", attributes = { dtype = "" } }
-"""
-            )
-        self.assertIn("non-empty", str(ctx.exception))
-
-    def test_attributes_on_function_keyspace(self) -> None:
+    def test_selectors_on_function_keyspace(self) -> None:
         cfg, _ = self._load(
             """
 schema_version = 1
@@ -428,33 +385,14 @@ name = "x"
 main = "x.main"
 
 [models.generate]
-small = { ref = "paul/model-small", attributes = { dtype = "bf16" } }
-large = { ref = "paul/model-large", attributes = { dtype = "fp16", file_layout = "diffusers" } }
+small = { ref = "paul/model-small", flavor = "bf16" }
+large = { ref = "paul/model-large", dtype = "fp16", file_layout = "diffusers" }
 """
         )
         fn = cfg.function_models["generate"]
-        self.assertEqual(fn["small"].attributes_as_dict(), {"dtype": ["bf16"]})
-        self.assertEqual(
-            fn["large"].attributes_as_dict(),
-            {"dtype": ["fp16"], "file_layout": ["diffusers"]},
-        )
-
-    def test_unknown_attribute_key_accepted(self) -> None:
-        """Forward-compat with future #229 axes — unknown keys pass through."""
-        cfg, _ = self._load(
-            """
-schema_version = 1
-name = "x"
-main = "x.main"
-
-[models]
-klein = { ref = "paul/klein-4b", attributes = { dtype = "bf16", future_axis = "hypothetical" } }
-"""
-        )
-        self.assertEqual(
-            cfg.models["klein"].attributes_as_dict()["future_axis"],
-            ["hypothetical"],
-        )
+        self.assertEqual(fn["small"].flavor, "bf16")
+        self.assertEqual(fn["large"].dtype, "fp16")
+        self.assertEqual(fn["large"].file_layout, "diffusers")
 
 
 if __name__ == "__main__":

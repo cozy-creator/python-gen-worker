@@ -17,7 +17,7 @@ Codex `exec` supports `CODEX_API_KEY` in headless mode.
 ```bash
 docker run --rm \
   -e WORKER_JWT="..." \
-  -e SCHEDULER_PUBLIC_ADDR="host.docker.internal:8080" \
+  -e PUBLIC_ORCHESTRATOR_GRPC_ADDR="host.docker.internal:8080" \
   -e CODEX_API_KEY="..." \
   cozy-example-openai-codex:dev
 ```

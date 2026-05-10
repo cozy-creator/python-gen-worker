@@ -1,5 +1,7 @@
-ARG PYTHON_VERSION=3.12
-FROM ghcr.io/astral-sh/uv:python${PYTHON_VERSION}-bookworm-slim
+ARG BASE_IMAGE=python:3.12-slim
+FROM ${BASE_IMAGE}
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 WORKDIR /app
 

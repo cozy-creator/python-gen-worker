@@ -49,7 +49,6 @@ from ._helpers import (
     _FILE_API_STREAM_FINALIZE_TIMEOUT_S,
     _FILE_API_STREAM_REPLAY_TIMEOUT_S,
     _PUBLIC_TAG_RE,
-    _STALE_MIRROR_CLAIM_ERROR_CODES,
     _assert_token_repo_scope_matches_destination,
     _canonicalize_model_ref_string,
     _decode_unverified_jwt_claims,
@@ -73,7 +72,6 @@ from ._helpers import (
     _resolve_hint_first_string,
     _sha256_file,
     _url_is_blocked,
-    _utc_timestamp_rfc3339,
 )
 
 
@@ -136,8 +134,7 @@ class RequestContext:
         # Reserved-name conversion/training contract attributes. Populated by
         # Worker._handle_job_request before invoking tenant code when the
         # endpoint is kind=conversion|training and the payload declares the
-        # reserved `source`/`destination` struct fields. See e2e progress.json
-        # issue #5.
+        # reserved `source`/`destination` struct fields.
         self._source_info = dict(source_info or {})
         self._destination_info = dict(destination_info or {})
         self._source_path: Optional[str] = None
@@ -153,12 +150,10 @@ class RequestContext:
         # lifecycle (open → per-file uploads → finalize).
         self._upload_sessions = None  # type: Optional["_UploadSessionManager"]
 
-        # Repo kind declared by the ingest pipeline (e2e progress.json #70).
-        # Set via `set_repo_kind` after the HF classifier runs and BEFORE the
-        # first save_checkpoint call. Forwarded to tensorhub on session-open
-        # so the destination repo gets the right `repo_kind` + derived
-        # `library_name`. Empty = inherit / let server pick.
-        self._repo_kind: str = ""
+        # Repo fields declared by the ingest pipeline before the first upload
+        # session opens. Empty values are omitted and tensorhub keeps/inherits
+        # existing repo values.
+        self._repo_spec: Dict[str, str] = {}
 
     @property
     def request_id(self) -> str:
@@ -243,28 +238,44 @@ class RequestContext:
                     h["X-Cozy-Owner"] = self._owner
                 return h
 
-            def _kind_provider() -> str:
-                return self._repo_kind or ""
+            def _repo_spec_provider() -> Dict[str, str]:
+                return dict(self._repo_spec)
 
             self._upload_sessions = _UploadSessionManager(
                 base_url=base,
                 headers_provider=_hdrs,
                 job_id=self._job_id,
-                repo_kind_provider=_kind_provider,
+                repo_spec_provider=_repo_spec_provider,
             )
         return self._upload_sessions
 
-    def set_repo_kind(self, kind: str) -> None:
-        """Set the destination repo's `repo_kind` for upload sessions opened
-        from this ctx. Called by the ingest pipeline after the HF classifier
-        determines the runtime_library. e2e progress.json #70.
+    def set_repo_spec(
+        self,
+        *,
+        kind: str = "",
+        library_name: str = "",
+        model_family: str = "",
+        class_name: str = "",
+        adapter_for: str = "",
+    ) -> None:
+        """Set destination repo fields for upload sessions opened from this ctx.
 
-        Must be called BEFORE the first save_checkpoint / save_file / etc.
-        — the kind is consumed at upload-session-open time. Setting it after
-        the session is already open is a no-op (the session was already
-        created with whatever kind was set then).
+        Must be called before the first save_checkpoint / save_file call for
+        the destination repo because these fields are sent when the upload
+        session opens.
         """
-        self._repo_kind = str(kind or "").strip()
+        spec = {
+            "kind": kind,
+            "library_name": library_name,
+            "model_family": model_family,
+            "class_name": class_name,
+            "adapter_for": adapter_for,
+        }
+        self._repo_spec = {
+            k: str(v or "").strip()
+            for k, v in spec.items()
+            if str(v or "").strip()
+        }
 
     def _checkpoint_session_id(self, repo_owner: str, repo_name: str) -> str:
         """Return the session_id for a checkpoint upload session on this
@@ -1075,7 +1086,6 @@ class RequestContext:
         # HARD-CUT issue #14: the /publish endpoint takes checkpoint_flavors
         # plus per-checkpoint lineage and a tags map.
         relationship_kind: str = "import",
-        release_visibility: str = "private",
         auto_create_external_parent: bool = True,
         merge_with_existing: bool = True,
     ) -> Dict[str, Any]:
@@ -1270,8 +1280,7 @@ class RequestContext:
                 manifest_entries = [e for e in raw_entries if isinstance(e, dict)]
 
         # Each commit_checkpoint_flavors entry becomes one checkpoint row. The
-        # server computes checkpoint_id from the per-flavor snapshot_manifest
-        # (e2e #36).
+        # server computes checkpoint_id from the per-flavor snapshot_manifest.
         publish_checkpoints: List[Dict[str, Any]] = []
         parent_repo_ref = ""
         if source_repo and str(source_repo).strip():
@@ -1279,14 +1288,9 @@ class RequestContext:
         parent_checkpoint_id = normalized_source_version_id
 
         for v in commit_checkpoint_flavors:
-            # e2e #36: the wire schema dropped every server-derivable field
-            # (checkpoint_id, kind, library, dtype, file_layout, file_type,
-            # size_bytes). The server infers metadata from the uploaded
-            # bytes and computes checkpoint_id = sha256(canonical(manifest)).
-            # Tenant-owned fields remaining on the wire: attributes (except
-            # reserved `_*` keys, which the server owns), display_label,
-            # lineage, snapshot_manifest.
-            attrs: Dict[str, str] = {}
+            # The server computes checkpoint_id from the per-flavor
+            # snapshot_manifest. Checkpoint rows carry only concrete fields and
+            # flavor pointers; no arbitrary checkpoint attributes are sent.
             flavor = str(v.get("flavor") or "").strip()
             raw_flavors = v.get("flavors")
             flavors: List[str] = []
@@ -1298,22 +1302,6 @@ class RequestContext:
             if flavor and flavor not in flavors:
                 flavors.insert(0, flavor)
             label = str(v.get("display_label") or flavor).strip()
-            if flavor:
-                attrs["flavor"] = flavor
-            if flavors:
-                attrs["flavors"] = ",".join(flavors)
-            # Issue #63: merge in per-flavor tenant attributes set by the
-            # dispatch layer (library_provenance + variant.attributes). The
-            # canonical attrs dict above (flavor/flavors) wins on collision
-            # because they're server-validated structural fields; tenant
-            # provenance keys are advisory and shouldn't shadow them.
-            v_attributes = v.get("attributes")
-            if isinstance(v_attributes, dict):
-                for k, val in v_attributes.items():
-                    key = str(k).strip()
-                    if not key or key in attrs:
-                        continue
-                    attrs[key] = str(val)
             lineage: List[Dict[str, Any]] = []
             if parent_repo_ref and parent_checkpoint_id:
                 lineage.append({
@@ -1331,7 +1319,6 @@ class RequestContext:
                 per_flavor_entries = manifest_entries
             publish_checkpoints.append({
                 "snapshot_manifest": per_flavor_entries,
-                "attributes":        attrs,
                 "display_label":     label,
                 "flavor":            flavor,
                 "flavors":           flavors,
@@ -1362,7 +1349,6 @@ class RequestContext:
             )
         else:
             publish_req_body = {
-                "release_visibility":          release_visibility or "private",
                 "tag_groups":                  tag_groups,
                 "checkpoint_flavors":          publish_checkpoints,
                 "auto_create_external_parent": bool(auto_create_external_parent),
@@ -1393,7 +1379,7 @@ class RequestContext:
                 )
                 raise
 
-            # e2e #36: extract server-computed checkpoint_ids from the
+            # extract server-computed checkpoint_ids from the
             # finalize response so callers (and the post-finalize tag
             # promotion below) can reference them.
             resp_checkpoints = finalize_resp.get("checkpoints")
@@ -1418,7 +1404,6 @@ class RequestContext:
             "job_id":             job_id,
             "checkpoint_ids":     published_ids,
             "output_versions":    published_ids,
-            "release_visibility": release_visibility or "private",
         }
         if normalized_tags:
             out["destination_repo_tags"] = normalized_tags
@@ -1435,7 +1420,7 @@ class RequestContext:
         kind: str = "",
         dataset_info: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Publish a dataset revision into ``tensorhub.datasets`` (e2e #45).
+        """Publish a dataset revision into ``tensorhub.datasets``.
 
         Parallel to ``publish_repo_revision`` but writes to the datasets
         subsystem instead of ``repo_checkpoints``. The flow:
@@ -1586,7 +1571,7 @@ class RequestContext:
     def resolve_dataset(self, ref: str) -> str:
         """Download a dataset by ref into local cache; return the root path.
 
-        E2E #45 — paired with ``publish_dataset_revision``. Flow:
+        Paired with ``publish_dataset_revision``. Flow:
 
         1. Parse ``ref`` (``owner/name``).
         2. ``GET /api/v1/datasets?owner=<owner>`` → find the dataset row by name.
@@ -1765,527 +1750,3 @@ class RequestContext:
         if not isinstance(returned, dict):
             returned = metadata
         return {"ok": True, "owner": owner, "repo": repo, "metadata": returned}
-
-    def search_metadata_claims(
-        self,
-        *,
-        scope: str = "version",
-        identity_hash: Optional[str] = None,
-        metadata_contains: Optional[Dict[str, Any]] = None,
-        limit: int = 50,
-        cursor: int = 0,
-    ) -> Dict[str, Any]:
-        """Search metadata claims by writer identity (derived server-side from token)."""
-        normalized_scope = str(scope or "").strip().lower() or "version"
-        if normalized_scope not in {"repo", "version"}:
-            raise ValueError("scope must be 'repo' or 'version'")
-        digest = str(identity_hash or "").strip().lower()
-        if digest and ":" not in digest:
-            raise ValueError("identity_hash must be a digest ref")
-        if metadata_contains is not None and not isinstance(metadata_contains, dict):
-            raise ValueError("metadata_contains must be an object")
-        if not digest and not metadata_contains:
-            raise ValueError("identity_hash or metadata_contains is required")
-        if limit <= 0:
-            limit = 50
-        if limit > 200:
-            limit = 200
-        if cursor < 0:
-            cursor = 0
-
-        base = (self._file_api_base_url or "").strip().rstrip("/")
-        token = (self._worker_capability_token or "").strip()
-        if not base or not token:
-            return {"ok": False, "skipped": True, "reason": "missing_worker_capability_channel", "items": []}
-
-        payload: Dict[str, Any] = {
-            "scope": normalized_scope,
-            "limit": int(limit),
-            "cursor": int(cursor),
-        }
-        if digest:
-            payload["identity_hash"] = digest
-        if metadata_contains:
-            payload["metadata_contains"] = metadata_contains
-
-        url = f"{base}/api/v1/metadata/claims/search"
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        }
-        resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=30)
-        code = int(resp.status_code)
-        if code in (401, 403):
-            raise AuthError(f"metadata claims search unauthorized ({code}): check worker_capability_token validity")
-        if code < 200 or code >= 300:
-            err_code = ""
-            err_msg = ""
-            try:
-                body = resp.json()
-            except Exception:
-                body = {}
-            if isinstance(body, dict):
-                raw = body.get("error")
-                if isinstance(raw, dict):
-                    err_code = str(raw.get("code") or "").strip()
-                    err_msg = str(raw.get("message") or "").strip()
-                elif isinstance(raw, str):
-                    err_code = raw.strip()
-                if not err_msg:
-                    err_msg = str(body.get("message") or "").strip()
-            detail = err_code or f"status_{code}"
-            if err_msg:
-                raise RuntimeError(f"metadata_claim_search_failed:{detail}:{err_msg}")
-            raise RuntimeError(f"metadata_claim_search_failed:{detail}")
-        try:
-            parsed = resp.json()
-        except Exception:
-            parsed = {}
-        if not isinstance(parsed, dict):
-            parsed = {}
-        items = parsed.get("items")
-        if not isinstance(items, list):
-            items = []
-        return {
-            "ok": True,
-            "scope": str(parsed.get("scope") or normalized_scope),
-            "limit": int(parsed.get("limit") or limit),
-            "cursor": int(parsed.get("cursor") or cursor),
-            "next_cursor": int(parsed.get("next_cursor") or (cursor + len(items))),
-            "items": items,
-        }
-
-    def upsert_version_metadata_claim(
-        self,
-        *,
-        destination_repo: str,
-        version_id: str,
-        identity_hash: Optional[str],
-        metadata_json: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """Create/update a version metadata claim for this worker/user writer identity."""
-        owner, repo = _parse_owner_repo(destination_repo)
-        normalized_version_id = str(version_id or "").strip().lower()
-        if ":" not in normalized_version_id:
-            raise ValueError("version_id must be a digest ref")
-        if not isinstance(metadata_json, dict):
-            raise ValueError("metadata_json must be an object")
-        digest = str(identity_hash or "").strip().lower()
-        if digest and ":" not in digest:
-            raise ValueError("identity_hash must be a digest ref")
-
-        base = (self._file_api_base_url or "").strip().rstrip("/")
-        token = (self._worker_capability_token or "").strip()
-        if token:
-            _assert_token_repo_scope_matches_destination(token, owner, repo, required_permissions=["repo-version:create"])
-        if not base or not token:
-            return {"ok": False, "skipped": True, "reason": "missing_worker_capability_channel", "owner": owner, "repo": repo}
-
-        payload: Dict[str, Any] = {"metadata_json": metadata_json}
-        if digest:
-            payload["identity_hash"] = digest
-        url = (
-            f"{base}/api/v1/repos/{urllib.parse.quote(owner, safe='')}/"
-            f"{urllib.parse.quote(repo, safe='')}/versions/{urllib.parse.quote(normalized_version_id, safe='')}/metadata/claims"
-        )
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "X-Cozy-Owner": owner,
-        }
-        resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=30)
-        code = int(resp.status_code)
-        if code in (401, 403):
-            raise AuthError(f"version metadata claim write unauthorized ({code}): check worker_capability_token validity")
-        if code < 200 or code >= 300:
-            err_code = ""
-            try:
-                body = resp.json()
-            except Exception:
-                body = {}
-            if isinstance(body, dict):
-                raw = body.get("error")
-                if isinstance(raw, dict):
-                    err_code = str(raw.get("code") or "").strip()
-                elif isinstance(raw, str):
-                    err_code = raw.strip()
-            raise RuntimeError(f"metadata_claim_invalid:{err_code or code}")
-
-        try:
-            parsed = resp.json()
-        except Exception:
-            parsed = {}
-        if not isinstance(parsed, dict):
-            parsed = {}
-        return {"ok": True, **parsed}
-
-    def mirror_dedupe_or_run(
-        self,
-        *,
-        source_identity: Dict[str, Any],
-        destination_repo: str,
-        destination_repo_tags: Optional[List[str]] = None,
-        on_miss: Optional[Callable[[], Dict[str, Any]]] = None,
-    ) -> Dict[str, Any]:
-        """Perform mirror dedupe orchestration with a single high-level API.
-
-        Flow:
-        1) Search claims for canonical source identity.
-        2) Attempt copy-by-reference from matching claim candidates.
-        3) Invalidate stale claims when source lineage no longer exists.
-        4) Run `on_miss` callback when no reusable lineage is found.
-        5) Write/update destination version claim after hit or miss publish.
-        """
-
-        if not isinstance(source_identity, dict):
-            raise ValueError("source_identity must be an object")
-
-        provider = str(source_identity.get("provider") or "").strip().lower()
-        source_ref = str(source_identity.get("source_ref") or "").strip()
-        source_revision = str(source_identity.get("source_revision") or "").strip()
-        identity_hash = str(source_identity.get("identity_hash") or "").strip().lower()
-        dedupe_supported = bool(source_identity.get("dedupe_supported", True))
-
-        if provider == "":
-            raise ValueError("source_identity.provider is required")
-        if source_ref == "":
-            raise ValueError("source_identity.source_ref is required")
-        if identity_hash == "" or ":" not in identity_hash:
-            raise ValueError("source_identity.identity_hash must be a digest ref")
-
-        destination_owner, destination_name = _parse_owner_repo(destination_repo)
-        normalized_destination = f"{destination_owner}/{destination_name}"
-        normalized_tags = _normalize_destination_repo_tags(destination_repo_tags)
-
-        metadata_contains = {
-            "source": {
-                "provider": provider,
-                "source_ref": source_ref,
-                "source_revision": source_revision,
-            }
-        }
-
-        invalidated_claim_ids: List[int] = []
-        warnings: List[Dict[str, Any]] = []
-
-        def _record_warning(*, stage: str, code: str, message: str, payload: Optional[Dict[str, Any]] = None) -> None:
-            item: Dict[str, Any] = {
-                "stage": str(stage or "").strip() or "unknown",
-                "code": str(code or "").strip().lower() or "unknown",
-                "message": str(message or "").strip(),
-            }
-            if payload:
-                item.update(payload)
-            warnings.append(item)
-
-        def _build_claim_metadata(*, version_id: str, primary_ref: str, primary_format: str) -> Dict[str, Any]:
-            return {
-                "source": {
-                    "provider": provider,
-                    "source_ref": source_ref,
-                    "source_revision": source_revision,
-                },
-                "result": {
-                    "destination_repo": normalized_destination,
-                    "version_id": version_id,
-                    "primary_artifact_ref": primary_ref,
-                    "primary_artifact_format": primary_format,
-                },
-                "request_id": str(self.request_id or "").strip(),
-                "written_at": _utc_timestamp_rfc3339(),
-            }
-
-        def _write_claim(*, version_id: str, primary_ref: str, primary_format: str) -> bool:
-            normalized_version = str(version_id or "").strip().lower()
-            if normalized_version == "" or ":" not in normalized_version:
-                return False
-            try:
-                self.upsert_version_metadata_claim(
-                    destination_repo=normalized_destination,
-                    version_id=normalized_version,
-                    identity_hash=identity_hash,
-                    metadata_json=_build_claim_metadata(
-                        version_id=normalized_version,
-                        primary_ref=str(primary_ref or "").strip(),
-                        primary_format=str(primary_format or "").strip(),
-                    ),
-                )
-                return True
-            except Exception as exc:
-                _record_warning(
-                    stage="claim_write",
-                    code=_error_code_from_exception(exc, fallback="metadata_claim_write_failed"),
-                    message=str(exc),
-                    payload={"version_id": normalized_version},
-                )
-                return False
-
-        if dedupe_supported:
-            try:
-                search_out = self.search_metadata_claims(
-                    scope="version",
-                    identity_hash=identity_hash,
-                    metadata_contains=metadata_contains,
-                    limit=20,
-                    cursor=0,
-                )
-            except Exception as exc:
-                code = _error_code_from_exception(exc, fallback="metadata_claim_search_failed")
-                raise RuntimeError(f"mirror_dedupe_search_failed:{code}") from exc
-
-            if not bool((search_out or {}).get("skipped")):
-                for raw in list((search_out or {}).get("items") or []):
-                    if not isinstance(raw, dict):
-                        continue
-                    source_owner = str(raw.get("owner") or "").strip().lower()
-                    source_repo = str(raw.get("repo") or "").strip().lower()
-                    source_version_id = str(raw.get("version_id") or "").strip().lower()
-                    if source_owner == "" or source_repo == "" or source_version_id == "":
-                        continue
-
-                    claim_id_raw = raw.get("claim_id")
-                    claim_id = int(claim_id_raw) if isinstance(claim_id_raw, int) else 0
-                    source_repo_ref = f"{source_owner}/{source_repo}"
-
-                    try:
-                        copy_out = self.copy_repo_by_reference(
-                            source_repo=source_repo_ref,
-                            source_version_id=source_version_id,
-                            destination_repo=normalized_destination,
-                            destination_repo_tags=normalized_tags,
-                            claim_id=claim_id if claim_id > 0 else None,
-                        )
-                    except Exception as exc:
-                        code = _error_code_from_exception(exc, fallback="mirror_copy_failed")
-                        _record_warning(
-                            stage="copy_by_reference",
-                            code=code,
-                            message=str(exc),
-                            payload={
-                                "source_repo": source_repo_ref,
-                                "source_version_id": source_version_id,
-                            },
-                        )
-                        if code in _STALE_MIRROR_CLAIM_ERROR_CODES and claim_id > 0:
-                            try:
-                                self.delete_version_metadata_claim(
-                                    destination_repo=source_repo_ref,
-                                    version_id=source_version_id,
-                                    claim_id=claim_id,
-                                )
-                                invalidated_claim_ids.append(claim_id)
-                            except Exception as delete_exc:
-                                _record_warning(
-                                    stage="claim_invalidation",
-                                    code=_error_code_from_exception(delete_exc, fallback="metadata_claim_delete_failed"),
-                                    message=str(delete_exc),
-                                    payload={
-                                        "claim_id": claim_id,
-                                        "source_repo": source_repo_ref,
-                                        "source_version_id": source_version_id,
-                                    },
-                                )
-                        continue
-
-                    copied_version_id = str((copy_out or {}).get("copied_version_id") or source_version_id).strip().lower()
-                    _meta_raw = raw.get("metadata_json")
-                    metadata_json: Dict[Any, Any] = _meta_raw if isinstance(_meta_raw, dict) else {}
-                    _result_raw = metadata_json.get("result")
-                    result_json: Dict[Any, Any] = _result_raw if isinstance(_result_raw, dict) else {}
-                    primary_ref = str(result_json.get("primary_artifact_ref") or "").strip()
-                    primary_format = str(result_json.get("primary_artifact_format") or "").strip()
-                    claim_written = _write_claim(
-                        version_id=copied_version_id,
-                        primary_ref=primary_ref,
-                        primary_format=primary_format,
-                    )
-                    return {
-                        "ok": True,
-                        "result_code": "dedupe_copy_hit",
-                        "hit": True,
-                        "source_provider": provider,
-                        "source_ref": source_ref,
-                        "source_revision": source_revision,
-                        "identity_hash": identity_hash,
-                        "copied_from_repo": source_repo_ref,
-                        "copied_from_version_id": source_version_id,
-                        "copied_version_id": copied_version_id,
-                        "primary_artifact_ref": primary_ref,
-                        "primary_artifact_format": primary_format,
-                        "claim_written": claim_written,
-                        "invalidated_claim_ids": invalidated_claim_ids,
-                        "warnings": warnings,
-                    }
-
-        miss_result: Dict[str, Any] = {}
-        if callable(on_miss):
-            try:
-                maybe = on_miss()
-                if isinstance(maybe, dict):
-                    miss_result = maybe
-            except Exception as exc:
-                code = _error_code_from_exception(exc, fallback="on_miss_failed")
-                raise RuntimeError(f"mirror_dedupe_on_miss_failed:{code}") from exc
-
-        published_version_id = str(
-            miss_result.get("version_id")
-            or miss_result.get("published_version_id")
-            or ""
-        ).strip().lower()
-        primary_ref = str(
-            miss_result.get("primary_artifact_ref")
-            or miss_result.get("primary_ref")
-            or ""
-        ).strip()
-        primary_format = str(
-            miss_result.get("primary_artifact_format")
-            or miss_result.get("primary_format")
-            or ""
-        ).strip()
-
-        claim_written = False
-        if published_version_id:
-            claim_written = _write_claim(
-                version_id=published_version_id,
-                primary_ref=primary_ref,
-                primary_format=primary_format,
-            )
-
-        return {
-            "ok": True,
-            "result_code": "dedupe_miss",
-            "hit": False,
-            "source_provider": provider,
-            "source_ref": source_ref,
-            "source_revision": source_revision,
-            "identity_hash": identity_hash,
-            "published_version_id": published_version_id,
-            "primary_artifact_ref": primary_ref,
-            "primary_artifact_format": primary_format,
-            "claim_written": claim_written,
-            "invalidated_claim_ids": invalidated_claim_ids,
-            "warnings": warnings,
-            "miss_result": miss_result,
-        }
-
-    def delete_version_metadata_claim(
-        self,
-        *,
-        destination_repo: str,
-        version_id: str,
-        claim_id: int,
-    ) -> Dict[str, Any]:
-        """Delete a version metadata claim by numeric claim id."""
-        owner, repo = _parse_owner_repo(destination_repo)
-        normalized_version_id = str(version_id or "").strip().lower()
-        if ":" not in normalized_version_id:
-            raise ValueError("version_id must be a digest ref")
-        if int(claim_id) <= 0:
-            raise ValueError("claim_id must be > 0")
-
-        base = (self._file_api_base_url or "").strip().rstrip("/")
-        token = (self._worker_capability_token or "").strip()
-        if token:
-            _assert_token_repo_scope_matches_destination(token, owner, repo, required_permissions=["repo-version:create"])
-        if not base or not token:
-            return {"ok": False, "skipped": True, "reason": "missing_worker_capability_channel", "owner": owner, "repo": repo}
-
-        url = (
-            f"{base}/api/v1/repos/{urllib.parse.quote(owner, safe='')}/"
-            f"{urllib.parse.quote(repo, safe='')}/versions/{urllib.parse.quote(normalized_version_id, safe='')}/"
-            f"metadata/claims/{int(claim_id)}"
-        )
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "X-Cozy-Owner": owner,
-        }
-        resp = requests.delete(url, headers=headers, timeout=30)
-        code = int(resp.status_code)
-        if code in (401, 403):
-            raise AuthError(f"version metadata claim delete unauthorized ({code}): check worker_capability_token validity")
-        if code == 404:
-            return {"ok": True, "deleted": False}
-        if code < 200 or code >= 300:
-            raise RuntimeError(f"metadata_claim_delete_failed:{code}")
-        return {"ok": True, "deleted": True, "claim_id": int(claim_id)}
-
-    def copy_repo_by_reference(
-        self,
-        *,
-        source_repo: str,
-        source_version_id: str,
-        destination_repo: str,
-        destination_repo_tags: Optional[List[str]] = None,
-        claim_id: Optional[int] = None,
-        release_visibility: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """Copy an existing repo/version snapshot into another repo without re-upload."""
-        source_owner, source_name = _parse_owner_repo(source_repo)
-        destination_owner, destination_name = _parse_owner_repo(destination_repo)
-        normalized_version_id = str(source_version_id or "").strip().lower()
-        if ":" not in normalized_version_id:
-            raise ValueError("source_version_id must be a digest ref")
-        normalized_tags = _normalize_destination_repo_tags(destination_repo_tags)
-        visibility = str(release_visibility or "").strip().lower()
-        if visibility not in {"", "public", "private"}:
-            raise ValueError("release_visibility must be 'public' or 'private'")
-        claim_id_value = int(claim_id or 0)
-        if claim_id_value < 0:
-            raise ValueError("claim_id must be >= 0")
-
-        base = (self._file_api_base_url or "").strip().rstrip("/")
-        token = (self._worker_capability_token or "").strip()
-        if token:
-            _assert_token_repo_scope_matches_destination(token, destination_owner, destination_name, required_permissions=["repo-version:create"])
-        if not base or not token:
-            return {"ok": False, "skipped": True, "reason": "missing_worker_capability_channel"}
-
-        payload: Dict[str, Any] = {
-            "source_owner": source_owner,
-            "source_repo": source_name,
-            "source_version_id": normalized_version_id,
-            "destination_owner": destination_owner,
-            "destination_repo": destination_name,
-            "destination_repo_tags": normalized_tags,
-        }
-        if visibility:
-            payload["release_visibility"] = visibility
-        if claim_id_value > 0:
-            payload["claim_id"] = claim_id_value
-        url = f"{base}/api/v1/repos/copy-by-reference"
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "X-Cozy-Owner": destination_owner,
-        }
-        resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
-        code = int(resp.status_code)
-        if code in (401, 403):
-            raise AuthError(f"repo copy-by-reference unauthorized ({code}): check worker_capability_token validity")
-        if code < 200 or code >= 300:
-            err_code = ""
-            err_msg = ""
-            try:
-                body = resp.json()
-            except Exception:
-                body = {}
-            if isinstance(body, dict):
-                raw = body.get("error")
-                if isinstance(raw, dict):
-                    err_code = str(raw.get("code") or "").strip()
-                    err_msg = str(raw.get("message") or "").strip()
-                elif isinstance(raw, str):
-                    err_code = raw.strip()
-                if not err_msg:
-                    err_msg = str(body.get("message") or "").strip()
-            detail = err_code or f"status_{code}"
-            if err_msg:
-                raise RuntimeError(f"mirror_copy_forbidden:{detail}:{err_msg}")
-            raise RuntimeError(f"mirror_copy_forbidden:{detail}")
-        try:
-            parsed = resp.json()
-        except Exception:
-            parsed = {}
-        if not isinstance(parsed, dict):
-            parsed = {}
-        return {"ok": True, **parsed}

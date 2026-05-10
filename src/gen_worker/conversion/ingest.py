@@ -857,7 +857,7 @@ def download_huggingface_repo_files(
     # classifier-driven flow. The classifier picks the strategy from the
     # repo's structured signals; there is no per-call layout override.
     source_layout_preference: str | None = None,
-    # e2e progress.json #72: when the user requested multiple concrete
+    # when the user requested multiple concrete
     # dtypes from a single repo (`outputs: [{dtype: f16}, {dtype: q4_k_m}]`),
     # the per-strategy selectors are run once per dtype and the results
     # union'd into the download set. The return dict carries `selections`
@@ -898,7 +898,7 @@ def download_huggingface_repo_files(
         raise classification.refusal
 
     # Strategy-specific selection.
-    # e2e progress.json #72: when caller passes dtype_outputs with >1 entry,
+    # when caller passes dtype_outputs with >1 entry,
     # run the per-strategy selector once per dtype and union the file set.
     # Each entry carries its own attrs (with the concrete dtype stamped),
     # surfaced in `selections` of the return dict for the caller to publish
@@ -1029,7 +1029,7 @@ def download_huggingface_repo_files(
     files_to_download = cleaned
     files_total = len(files_to_download)
 
-    # Parallel download with aggregate progress (e2e progress.json #69).
+    # Parallel download with aggregate progress.
     # Default parallelism=4; HF hub rate-limits aggressively above ~8.
     # Per-file hash + size verification is preserved.
     import threading
@@ -1195,7 +1195,7 @@ def download_huggingface_repo_files(
         "source_dtype_by_component": {},
         "source_dtype_dropped_paths": [],
         "source_dtype_preference": list(dtype_pref),
-        # e2e progress.json #72: per-checkpoint selections when the caller
+        # per-checkpoint selections when the caller
         # requested multiple concrete dtypes from a single repo. Empty when
         # `dtype_outputs` is empty / single-element. Each entry mirrors the
         # singleton fields above scoped to one resolved dtype.

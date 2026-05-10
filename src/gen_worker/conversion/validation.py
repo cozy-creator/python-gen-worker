@@ -99,7 +99,7 @@ def validate_transform_module(
 
     Args:
         module_name: dotted module path, e.g. 'conversion.main' or
-            'conversion_cpu.cast_dtype'. Must be importable from the current
+            'conversion.transforms'. Must be importable from the current
             Python path.
         expected_kind: if set, must be one of ``'transform'``, ``'conversion'``,
             ``'training'``, or ``'inference'``. When 'inference', the module

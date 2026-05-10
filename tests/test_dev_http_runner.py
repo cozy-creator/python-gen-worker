@@ -84,9 +84,9 @@ def generate(ctx: RequestContext, payload: In) -> Out:
 
     # Start server in background thread.
     def run_server() -> None:
-        from gen_worker.testing.http_runner import main
+        from gen_worker.testing.http_runner import run_dev_http_server
 
-        main([])
+        run_dev_http_server()
 
     t = threading.Thread(target=run_server, daemon=True)
     t.start()
@@ -163,9 +163,9 @@ def convert_local(ctx: RequestContext, payload: In) -> Out:
     monkeypatch.setenv("GEN_WORKER_OUTPUT_DIR", str(outputs))
 
     def run_server() -> None:
-        from gen_worker.testing.http_runner import main
+        from gen_worker.testing.http_runner import run_dev_http_server
 
-        main([])
+        run_dev_http_server()
 
     t = threading.Thread(target=run_server, daemon=True)
     t.start()
@@ -247,9 +247,9 @@ def convert_local(ctx: RequestContext, payload: In) -> Out:
     monkeypatch.setenv("GEN_WORKER_OUTPUT_DIR", str(outputs))
 
     def run_server() -> None:
-        from gen_worker.testing.http_runner import main
+        from gen_worker.testing.http_runner import run_dev_http_server
 
-        main([])
+        run_dev_http_server()
 
     t = threading.Thread(target=run_server, daemon=True)
     t.start()

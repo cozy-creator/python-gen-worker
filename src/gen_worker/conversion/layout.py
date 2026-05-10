@@ -1,10 +1,9 @@
 """Model-family / variant detection from a HuggingFace repo's file listing.
 
-File-selection logic moved to :mod:`gen_worker.conversion.hf_classifier` (see
-e2e progress.json #67). This module now only contains downstream metadata
-inference: given a repo_dir + file list, what model family / variant is this?
-The output feeds the destination checkpoint's tags so inference workers can
-pick the right pipeline class.
+File-selection logic lives in :mod:`gen_worker.conversion.hf_classifier`.
+This module only contains downstream metadata inference: given a repo_dir +
+file list, what model family / variant is this? The output feeds destination
+checkpoint tags so inference workers can pick the right pipeline class.
 
 The legacy ``select_huggingface_source_files`` / ``HFSourceFileSelection``
 that lived here were replaced by :mod:`hf_classifier`'s classify_huggingface_repo

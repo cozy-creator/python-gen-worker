@@ -74,7 +74,7 @@ class _ConcurrencyTracker:
 @pytest.fixture
 def hf_module_stubbed(monkeypatch):
     """Lazy-import ingest.py so we can patch its huggingface_hub dependency.
-    The real `huggingface_hub` is in conversion-cpu's deps, not directly in
+    The real `huggingface_hub` is in conversion's deps, not directly in
     python-gen-worker, so we have to stub it for unit tests."""
     # Pre-stub a minimal `huggingface_hub` module on sys.modules so the
     # `from huggingface_hub import hf_hub_download` inside the function

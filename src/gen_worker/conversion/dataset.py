@@ -19,7 +19,7 @@ Typical for LLM calibration (wikitext / c4) and fine-tuning (image+caption /
 instruction data). Exposed via ``iter_examples`` / ``as_dataloader`` /
 ``as_hf_dataset``.
 
-### 2. Prompt corpus (e2e #45, supersedes #41 "calibration_dataset")
+### 2. Prompt corpus
 
 ```
 <root>/
@@ -28,11 +28,10 @@ instruction data). Exposed via ``iter_examples`` / ``as_dataloader`` /
     └── train-00000.parquet     # columns: prompt, category, length_bucket, seed
 ```
 
-Produced by ``conversion-cpu.generate_prompt_corpus``. One corpus is reused
-across every source model + every calibrated-quant recipe. Exposed via
-``is_prompt_corpus`` / ``dataset_info`` / ``iter_prompts``.
+One corpus can be reused across source models and calibrated-quant recipes.
+Exposed via ``is_prompt_corpus`` / ``dataset_info`` / ``iter_prompts``.
 
-### 3. Eval set (e2e #45, supersedes #41 "comparison images")
+### 3. Eval set
 
 ```
 <root>/
@@ -41,9 +40,8 @@ across every source model + every calibrated-quant recipe. Exposed via
     └── train-00000.parquet     # columns: prompt, seed, category, image_<variant>: Image
 ```
 
-Produced by ``conversion-gpu.generate_eval_set``. Source+variant-specific —
-bf16 vs int4_awq side-by-side renders for A/B eval. Exposed via
-``is_eval_set`` / ``dataset_info`` / ``iter_rows``.
+Source+variant-specific eval sets can hold side-by-side renders for A/B eval.
+Exposed via ``is_eval_set`` / ``dataset_info`` / ``iter_rows``.
 
 ## Detection
 
@@ -81,10 +79,10 @@ class Dataset:
                                         (for transformers.Trainer / peft /
                                          accelerate training flows)
 
-    Prompt-corpus + eval-set shapes (e2e #45):
+    Prompt-corpus + eval-set shapes:
 
       dataset_info()                 -- parsed dataset_info.json (the new
-                                        e2e #45 format) or legacy manifest.json
+                                        format) or legacy manifest.json
       kind                           -- "prompt_corpus" | "eval_set" | ""
       is_prompt_corpus()             -- True if kind == "prompt_corpus"
       is_eval_set()                  -- True if kind == "eval_set"
@@ -211,12 +209,12 @@ class Dataset:
 
         return ds.map(_tok, batched=True, remove_columns=[text_field])
 
-    # ---- prompt-corpus + eval-set (e2e #45) ------------------------------
+    # ---- prompt-corpus + eval-set ------------------------------
 
     def dataset_info(self) -> dict:
         """Return the parsed ``dataset_info.json`` at ``path`` or ``{}``.
 
-        The e2e #45 layout writes a ``dataset_info.json`` at the snapshot
+        The layout writes a ``dataset_info.json`` at the snapshot
         root with ``{kind, features, num_rows, ...}``. HF-datasets
         snapshots and LLM-text datasets don't have this file —
         ``dataset_info()`` returns ``{}`` for them so callers can use
@@ -224,7 +222,7 @@ class Dataset:
 
         Readback compat: if ``dataset_info.json`` is absent but the legacy
         ``manifest.json`` from the shipped-then-rolled-back #41 format is
-        present, return that. ``kind`` is normalized to e2e #45 values
+        present, return that. ``kind`` is normalized to values
         (``calibration_dataset`` → ``prompt_corpus``).
         """
         if self._info_cache == "unloaded":
@@ -239,11 +237,11 @@ class Dataset:
         return str(self.dataset_info().get("kind") or "")
 
     def is_prompt_corpus(self) -> bool:
-        """True iff this artifact is a prompt corpus (e2e #45)."""
+        """True iff this artifact is a prompt corpus."""
         return self.kind == "prompt_corpus"
 
     def is_eval_set(self) -> bool:
-        """True iff this artifact is an eval set (e2e #45)."""
+        """True iff this artifact is an eval set."""
         return self.kind == "eval_set"
 
     def parquet_shards(self) -> list[Path]:
@@ -313,24 +311,22 @@ class Dataset:
             for row in table.to_pylist():
                 yield row
 
-    # ---- legacy aliases (e2e #41 shipped but superseded) -----------------
+    # ---- legacy aliases ------------------------------------------
 
     def manifest(self) -> dict:
         """Back-compat alias: parsed ``dataset_info.json`` or legacy
         ``manifest.json`` at ``path``, whichever exists.
 
-        Issue #45 migrates to ``dataset_info.json`` as the canonical name;
-        ``manifest()`` now returns the same dict as ``dataset_info()``.
-        Kept as an alias so any caller still written against #41 continues
-        to work during the transition.
+        ``dataset_info.json`` is the canonical name; ``manifest()`` now
+        returns the same dict as ``dataset_info()``. Kept as an alias for
+        older callers.
         """
         return self.dataset_info()
 
     def is_calibration_dataset(self) -> bool:
-        """Deprecated alias for ``is_prompt_corpus()`` (e2e #41 → #45).
+        """Deprecated alias for ``is_prompt_corpus()``.
 
-        Kept for one release so rolled-back-but-not-yet-torn-down call
-        sites don't error. New code should use ``is_prompt_corpus()``.
+        New code should use ``is_prompt_corpus()``.
         """
         return self.is_prompt_corpus()
 
@@ -352,9 +348,8 @@ def _load_dataset_info(path: Path) -> dict | None:
         except json.JSONDecodeError:
             return None
 
-    # Legacy #41 shape: manifest.json with kind=calibration_dataset.
-    # Normalize the kind to the e2e #45 vocabulary so downstream
-    # branching (is_prompt_corpus) still fires.
+    # Legacy shape: manifest.json with kind=calibration_dataset. Normalize
+    # the kind to the current vocabulary so downstream branching still fires.
     legacy = path / "manifest.json"
     if legacy.exists():
         try:

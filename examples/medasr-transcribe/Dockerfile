@@ -1,16 +1,14 @@
 # Tenant-supplied Dockerfile example.
 #
-# - Installs torch in a stable cacheable layer.
-# - Installs tenant deps from uv.lock without replacing torch.
+# - Uses Tensorhub-resolved PyTorch base images for shared Torch/CUDA layers.
+# - Installs tenant deps from uv.lock without replacing base-provided Torch.
 # - Installs required system libs (libsndfile1) for soundfile.
 # - Bakes discovered functions into /app/.tensorhub/endpoint.lock at build time.
 #
-ARG PYTHON_VERSION=3.12
-FROM ghcr.io/astral-sh/uv:python${PYTHON_VERSION}-bookworm-slim AS cozy_base
+ARG BASE_IMAGE=python:3.12-slim
+FROM ${BASE_IMAGE} AS cozy_base
 
-ARG CUDA_VERSION=12.8
-ARG UV_TORCH_BACKEND
-ARG TORCH_SPEC="~=2.11.0"
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 WORKDIR /app
 
@@ -23,11 +21,6 @@ RUN --mount=type=cache,id=cozy-apt-cache,target=/var/cache/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
     git \
     && apt-get clean
-
-RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
-    backend="${UV_TORCH_BACKEND:-cu$(printf '%s' "${CUDA_VERSION}" | tr -d '.')}" \
-    && uv pip install --system --break-system-packages --torch-backend "$backend" \
-      "torch${TORCH_SPEC}"
 
 FROM cozy_base AS cozy_final
 
@@ -43,8 +36,10 @@ COPY pyproject.toml uv.lock /app/
 RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
     uv export --no-dev --no-hashes --no-sources --no-emit-project --no-emit-local \
       --no-emit-package torch \
+      --no-emit-package torchvision \
+      --no-emit-package torchaudio \
       -o /tmp/requirements.all.txt \
-    && grep -Ev '^(torch|triton|nvidia-|cuda-)' /tmp/requirements.all.txt > /tmp/requirements.txt \
+    && grep -Ev '^(torch==|torchvision==|torchaudio==|triton==|nvidia-|cuda-)' /tmp/requirements.all.txt > /tmp/requirements.txt \
     && uv pip install --system --break-system-packages --no-deps -r /tmp/requirements.txt
 
 COPY . /app

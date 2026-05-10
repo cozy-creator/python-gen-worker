@@ -5,7 +5,7 @@ Contents:
 - `src/medasr_transcribe` with a single `@worker_function` (`medasr_transcribe`).
 - `pyproject.toml` with deps.
 - `endpoint.toml` with Cozy build-time metadata (name/main, optional host/resources/function config).
-- `Dockerfile` that installs deps and bakes `/app/.tensorhub/endpoint.lock` via `python -m gen_worker.discover`.
+- `Dockerfile` that installs deps and bakes `/app/.tensorhub/endpoint.lock` via `python -m gen_worker.discovery`.
 
 Notes:
 

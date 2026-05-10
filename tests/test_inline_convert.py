@@ -1,13 +1,13 @@
-"""Tests for gen_worker.conversion.inline_convert (e2e progress.json #73).
+"""Tests for gen_worker.conversion.inline_convert.
 
 Covers the dispatch table:
   - Direct passthrough is the caller's responsibility (we don't test it here)
   - Inline-supported: cast (bf16/fp16/fp32), torchao (fp8/int8/int4_wo), GGUF
   - Calibration-required: int4:awq / int4:gptq / nvfp4 → InlineConversionNotPossible
 
-Heavy lifters (streaming_dtype_cast / torchao / convert_hf_to_gguf) are
-exercised in their own module-level tests; here we just verify the
-dispatcher routes correctly and the suggested_command shape stays stable.
+Heavy lifters (streaming dtype cast / torchao / GGUF conversion) are exercised
+in their own module-level tests; here we verify the dispatcher routes correctly
+and returns structured refusal metadata without depending on deployed endpoints.
 """
 
 from __future__ import annotations
@@ -19,10 +19,10 @@ import pytest
 from gen_worker.conversion.inline_convert import (
     InlineConversionNotPossible,
     InlineConversionResult,
+    deferred_conversion_requirement,
     is_calibration_required,
     is_inline_supported,
     run_inline_conversion,
-    suggested_separate_job,
 )
 
 
@@ -67,54 +67,45 @@ class TestSupportTables:
         assert is_calibration_required("INT4:AWQ") is True
 
 
-class TestSuggestedCommand:
-    """The CLI renders these as one-paragraph hints."""
+class TestDeferredRequirement:
+    """Calibrated refusals expose structured metadata, not endpoint commands."""
 
-    def test_int4_awq_routes_to_modelopt(self) -> None:
-        cmd = suggested_separate_job(
-            "int4:awq", source_ref="user/repo-src", destination_ref="user/repo-dst",
-        )
-        assert "modelopt_quantization" in cmd
-        assert "scheme=int4_awq" in cmd
-        assert "--source-ref user/repo-src" in cmd
-        assert "--destination-ref user/repo-dst" in cmd
-        assert "conversion-gpu" in cmd  # calibrated quants need GPU
+    def test_int4_awq_describes_calibrated_requirement(self) -> None:
+        req = deferred_conversion_requirement("int4:awq")
+        assert req is not None
+        assert req.kind == "calibrated_quantization"
+        assert req.scheme == "int4_awq"
+        assert req.requires_calibration is True
+        assert req.requires_gpu is True
+        assert req.runtime == "modelopt"
 
-    def test_nvfp4_routes_to_modelopt(self) -> None:
-        cmd = suggested_separate_job(
-            "nvfp4", source_ref="x/y", destination_ref="x/y",
-        )
-        assert "modelopt_quantization" in cmd
-        assert "scheme=nvfp4" in cmd
+    def test_nvfp4_describes_calibrated_requirement(self) -> None:
+        req = deferred_conversion_requirement("nvfp4")
+        assert req is not None
+        assert req.scheme == "nvfp4"
+        assert req.as_dict()["requires_calibration"] is True
 
-    def test_non_calibrated_returns_empty(self) -> None:
-        # Non-calibrated dtypes don't need a separate job — they can run inline.
-        assert suggested_separate_job("bf16", source_ref="a", destination_ref="b") == ""
-        assert suggested_separate_job("fp8:e4m3", source_ref="a", destination_ref="b") == ""
-
-    def test_missing_refs_use_placeholders(self) -> None:
-        cmd = suggested_separate_job("int4:awq", source_ref="", destination_ref="")
-        assert "<source>" in cmd
-        assert "<destination>" in cmd
+    def test_non_calibrated_has_no_deferred_requirement(self) -> None:
+        assert deferred_conversion_requirement("bf16") is None
+        assert deferred_conversion_requirement("fp8:e4m3") is None
 
 
 class TestDispatchRefuses:
     """Calibrated dtypes raise InlineConversionNotPossible upfront."""
 
     @pytest.mark.parametrize("dtype", ["int4:awq", "int4:gptq", "nvfp4"])
-    def test_refuses_calibrated_with_clear_hint(self, dtype: str, tmp_path: Path) -> None:
+    def test_refuses_calibrated_with_structured_requirement(self, dtype: str, tmp_path: Path) -> None:
         with pytest.raises(InlineConversionNotPossible) as excinfo:
             run_inline_conversion(
                 source_path=tmp_path / "model.safetensors",
                 out_dir=tmp_path / "out",
                 target_dtype=dtype,
-                source_ref="src/repo",
-                destination_ref="dst/repo",
             )
         exc = excinfo.value
         assert exc.target_dtype == dtype
         assert "calibration dataset" in exc.reason
-        assert exc.suggested_command != ""
+        assert exc.deferred_requirement is not None
+        assert exc.deferred_requirement.requires_calibration is True
         # Reason gets folded into the str() so the operator log is informative.
         assert "calibration" in str(exc).lower()
 
@@ -125,9 +116,6 @@ class TestDispatchRefuses:
                 out_dir=tmp_path / "out",
                 target_dtype="totally_made_up_dtype",
             )
-        # Unknown dtypes don't have a known separate-job command path, so the
-        # suggested_command is empty; the reason still describes the problem.
-        assert excinfo.value.suggested_command == ""
         assert "not recognized" in excinfo.value.reason
 
     def test_missing_target_dtype_raises_value_error(self, tmp_path: Path) -> None:
@@ -142,23 +130,19 @@ class TestDispatchRefuses:
 class TestExceptionStr:
     """The runtime str() of InlineConversionNotPossible is what lands in error logs."""
 
-    def test_includes_suggested_command_when_present(self) -> None:
+    def test_uses_reason_only(self) -> None:
         exc = InlineConversionNotPossible(
             reason="needs calibration",
-            suggested_command="e2e convert ...",
             target_dtype="int4:awq",
         )
-        s = str(exc)
-        assert "needs calibration" in s
-        assert "e2e convert ..." in s
+        assert str(exc) == "needs calibration"
 
-    def test_omits_arrow_when_no_suggested_command(self) -> None:
+    def test_omits_command_rendering(self) -> None:
         exc = InlineConversionNotPossible(
             reason="weird path",
             target_dtype="x",
         )
-        # When suggested_command is empty, the str() is just the reason —
-        # no trailing "→ run: " noise.
+        # The string is just the reason; command rendering belongs to callers.
         assert str(exc) == "weird path"
 
 

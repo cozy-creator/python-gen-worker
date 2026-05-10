@@ -132,16 +132,15 @@ class _UploadSessionManager:
         base_url: str,
         headers_provider: Callable[[], Dict[str, str]],
         job_id: Optional[str] = None,
-        repo_kind_provider: Optional[Callable[[], str]] = None,
+        repo_spec_provider: Optional[Callable[[], Dict[str, str]]] = None,
     ) -> None:
         self._base_url = base_url.rstrip("/")
         self._headers_provider = headers_provider
         self._job_id = (job_id or "").strip() or None
-        # Pulls the current ctx's repo_kind at session-open time. Threaded
-        # into the request body as `repo_kind` so tensorhub can persist the
-        # kind on the destination repo (and validate match on subsequent
-        # sessions). e2e progress.json #70.
-        self._repo_kind_provider = repo_kind_provider
+        # Pulls the current ctx's repo spec at session-open time. Threaded into
+        # the request body so tensorhub can create/update the destination repo
+        # without legacy library inference.
+        self._repo_spec_provider = repo_spec_provider
         self._lock = threading.Lock()
         self._sessions: Dict[Tuple, _UploadSession] = {}
 
@@ -181,16 +180,15 @@ class _UploadSessionManager:
         body: Dict[str, Any] = {}
         if self._job_id:
             body["job_id"] = self._job_id
-        # Thread `repo_kind` (e2e progress.json #70) so tensorhub records the
-        # right kind + library_name on auto-create / validates kind match on
-        # subsequent uploads. Empty value is safe — server inherits.
-        if self._repo_kind_provider is not None:
+        if self._repo_spec_provider is not None:
             try:
-                kind_val = str(self._repo_kind_provider() or "").strip()
+                repo_spec = dict(self._repo_spec_provider() or {})
             except Exception:
-                kind_val = ""
-            if kind_val:
-                body["repo_kind"] = kind_val
+                repo_spec = {}
+            for key in ("kind", "library_name", "model_family", "class_name", "adapter_for"):
+                val = str(repo_spec.get(key) or "").strip()
+                if val:
+                    body[key] = val
         headers = dict(self._headers_provider())
         headers["Content-Type"] = "application/json"
         try:

@@ -99,36 +99,30 @@ class CozyHubV2Client:
         # Worker-facing route: capability-token authenticated (no user membership check).
         # The user-JWT counterpart lives at /api/v1/repos/:owner/:repo/resolve.
         url = f"{self.base_url}/api/v1/inference/repos/{owner}/{repo}/resolve"
-        # Map the legacy `preferences={dtypes, file_types, file_layouts}` shape
-        # onto the post-refactor `attributes={dtype, file_type, file_layout}`
-        # jsonb selector. The server's resolve precedence is
-        # digest > attributes > tag — when the caller supplies attributes we
-        # clear the tag so the attribute path runs (otherwise :latest wins and
-        # selects the newest checkpoint regardless of dtype).
-        attributes: Dict[str, str] = {}
+        selector: Dict[str, str] = {}
         prefs_dict = dict(preferences)
         dtypes = prefs_dict.get("dtypes") or []
         if dtypes:
-            attributes["dtype"] = str(dtypes[0])
+            selector["dtype"] = str(dtypes[0])
         file_types = prefs_dict.get("file_types") or prefs_dict.get("file_type")
         if isinstance(file_types, list) and file_types:
-            attributes["file_type"] = str(file_types[0])
+            selector["file_type"] = str(file_types[0])
         elif isinstance(file_types, str) and file_types:
-            attributes["file_type"] = file_types
+            selector["file_type"] = file_types
         file_layouts = prefs_dict.get("file_layouts") or prefs_dict.get("file_layout")
         if isinstance(file_layouts, list) and file_layouts:
-            attributes["file_layout"] = str(file_layouts[0])
+            selector["file_layout"] = str(file_layouts[0])
         elif isinstance(file_layouts, str) and file_layouts:
-            attributes["file_layout"] = file_layouts
+            selector["file_layout"] = file_layouts
 
         payload: Dict[str, Any] = {}
         if digest:
             payload["digest"] = digest
             if flavor:
                 payload["flavor"] = flavor
-        elif attributes:
-            payload["tag"] = ""
-            payload["attributes"] = attributes
+        elif selector:
+            payload["tag"] = tag
+            payload.update(selector)
             if flavor:
                 payload["flavor"] = flavor
         else:
@@ -137,13 +131,13 @@ class CozyHubV2Client:
                 payload["flavor"] = flavor
 
         logger.info(
-            "resolve_artifact request owner=%s repo=%s tag=%s digest=%s flavor=%s attributes=%s",
+            "resolve_artifact request owner=%s repo=%s tag=%s digest=%s flavor=%s selector=%s",
             owner,
             repo,
             payload.get("tag", ""),
             digest or "",
             flavor or "",
-            attributes,
+            selector,
         )
 
         timeout = aiohttp.ClientTimeout(total=self.timeout_s)

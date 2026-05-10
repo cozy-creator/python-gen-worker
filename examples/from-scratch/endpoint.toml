@@ -1,5 +1,4 @@
 [endpoint]
-name = "from-scratch"
 main = "from_scratch"
 version = "0.1.0"
 

@@ -155,7 +155,7 @@ class PipelineConfig:
     scheduler_class: Optional[str] = None
     warmup_steps: int = 4
     variant: Optional[str] = None  # "fp16", etc.
-    # e2e #43: the resolved checkpoint's attributes (from tensorhub). Used by
+    # the resolved checkpoint's attributes (from tensorhub). Used by
     # `_synthesize_quantization_config` to auto-apply a quantization_config
     # kwarg for bnb / torchao checkpoints when the on-disk config.json
     # doesn't already carry one. Populated by the caller (ctx.pipeline
@@ -163,7 +163,7 @@ class PipelineConfig:
     quant_attributes: Optional[Dict[str, str]] = None
 
 
-# e2e #43: quant-library→import-side-effect hooks. torchao registers its
+# quant-library→import-side-effect hooks. torchao registers its
 # tensor subclasses on import; loading a torchao-quantized state_dict
 # BEFORE torchao is imported fails with ATen/dispatcher errors. Keep this
 # list authoritative; new quant libraries that rely on tensor-subclass
@@ -188,9 +188,9 @@ def _ensure_quant_library_imported(attrs: Optional[Dict[str, str]]) -> None:
         return
     try:
         importlib.import_module(mod)
-        logger.info("e2e #43: pre-imported %s for tensor-subclass registration", mod)
+        logger.info("pre-imported %s for tensor-subclass registration", mod)
     except ImportError as exc:
-        logger.warning("e2e #43: failed to pre-import %s: %s", mod, exc)
+        logger.warning("failed to pre-import %s: %s", mod, exc)
 
 
 def _read_on_disk_quant_config(model_path: Path) -> bool:
@@ -227,7 +227,7 @@ def _read_on_disk_quant_config(model_path: Path) -> bool:
 
 def _synthesize_quantization_config(attrs: Optional[Dict[str, str]]) -> Optional[Any]:
     """Build a BitsAndBytesConfig / equivalent from the resolved checkpoint's
-    attrs when the on-disk config doesn't already carry one (e2e #43
+    attrs when the on-disk config doesn't already carry one (
     task 1). Returns None when the attrs don't indicate a library that
     NEEDS a synthesized config at from_pretrained time.
 
@@ -254,7 +254,7 @@ def _synthesize_quantization_config(attrs: Optional[Dict[str, str]]) -> Optional
         import torch
         from transformers import BitsAndBytesConfig
     except ImportError as exc:
-        logger.warning("e2e #43: bnb quant detected but BitsAndBytesConfig unavailable: %s", exc)
+        logger.warning("bnb quant detected but BitsAndBytesConfig unavailable: %s", exc)
         return None
     compute_dtype_name = str(attrs.get("quant_compute_dtype") or "bfloat16").strip().lower()
     compute_dtype = getattr(torch, compute_dtype_name, torch.bfloat16)
@@ -619,7 +619,7 @@ class PipelineLoader:
         # Track loaded pipelines for memory management
         self._loaded_pipelines: Dict[str, LoadedPipeline] = {}
 
-        # e2e #43: per-model_id quant attributes registered by upstream code
+        # per-model_id quant attributes registered by upstream code
         # (worker model-resolution path) before load(). Keys are the same
         # model_id strings passed to load_model_into_vram / load.
         self._quant_attrs_by_model_id: Dict[str, Dict[str, str]] = {}
@@ -1028,7 +1028,7 @@ class PipelineLoader:
     ) -> Any:
         """Load a pipeline using from_pretrained.
 
-        e2e #43: when ``quant_attributes`` is provided (from the resolved
+        when ``quant_attributes`` is provided (from the resolved
         checkpoint's Tensors.attrs), auto-apply the quantization machinery:
           - Pre-import torchao when ``quant_library=torchao`` so its tensor
             subclasses register before safetensors deserialization touches
@@ -1039,7 +1039,7 @@ class PipelineLoader:
         """
         logger.info(f"Loading from pretrained: {model_path}")
 
-        # e2e #43 task 2: register torchao's tensor subclasses before load.
+        # task 2: register torchao's tensor subclasses before load.
         _ensure_quant_library_imported(quant_attributes)
 
         kwargs: Dict[str, Any] = {
@@ -1054,13 +1054,13 @@ class PipelineLoader:
         if variant:
             kwargs["variant"] = variant
 
-        # e2e #43 task 0 + task 1: let the on-disk quantization_config win
+        # task 0 + task 1: let the on-disk quantization_config win
         # when present; synthesize from attrs only as fallback.
         if not _read_on_disk_quant_config(model_path):
             synthesized = _synthesize_quantization_config(quant_attributes)
             if synthesized is not None:
                 logger.info(
-                    "e2e #43: synthesized quantization_config for %s from attrs (library=%s recipe=%s)",
+                    "synthesized quantization_config for %s from attrs (library=%s recipe=%s)",
                     pipeline_class.__name__,
                     (quant_attributes or {}).get("quant_library"),
                     (quant_attributes or {}).get("quant_recipe"),
@@ -1278,7 +1278,7 @@ class PipelineLoader:
         config = config or PipelineConfig(model_path=str(path))
         if config.variant is None:
             config.variant = detect_diffusers_variant(path)
-        # e2e #43: fold any upstream-registered quant attrs into the config
+        # fold any upstream-registered quant attrs into the config
         # if the caller didn't set them explicitly. Lets the worker's model-
         # resolution path stash attrs via register_quant_attributes() once
         # and have every subsequent load() pick them up automatically.
@@ -1485,7 +1485,7 @@ class PipelineLoader:
         return loaded.pipeline if loaded else None
 
     def register_quant_attributes(self, model_id: str, attrs: Optional[Dict[str, str]]) -> None:
-        """e2e #43: stash the resolved checkpoint's attributes (from
+        """stash the resolved checkpoint's attributes (from
         tensorhub) so the next ``load()`` call for this model_id can
         auto-apply a ``quantization_config`` kwarg or pre-import a quant
         library. Called by the worker's model-resolution path once per
@@ -1506,7 +1506,7 @@ class PipelineLoader:
                 filtered[k] = str(v)
         if filtered:
             self._quant_attrs_by_model_id[model_id] = filtered
-            logger.info("e2e #43: registered quant attrs for %s: %s", model_id, filtered)
+            logger.info("registered quant attrs for %s: %s", model_id, filtered)
 
     def get_for_inference(self, model_id: str) -> Optional[Any]:
         """

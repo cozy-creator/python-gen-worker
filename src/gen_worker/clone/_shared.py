@@ -1,14 +1,13 @@
 """Clone-pipeline-specific helpers.
 
-The transform-endpoint tenants (cast_dtype / torchao_quantization / ...) use
-gen_worker.conversion (library-side). This file is the narrower slice used
-only by clone_huggingface / clone_civitai / clone_pipeline for the
-external-URL ingest path.
+Transform endpoints use gen_worker.conversion on the library side. This file is
+the narrower slice used only by clone_huggingface / clone_civitai /
+clone_pipeline for the external-URL ingest path.
 
 Legacy progress-tracking machinery (_emit_upload_progress + 300 LOC of
 stream-mode detection, retry env defaults, chunked-upload orchestration)
 was removed: gen-worker's ctx.save_checkpoint already emits progress events
-and handles retries itself. See e2e progress.json #9.
+and handles retries itself.
 """
 
 from __future__ import annotations
@@ -115,7 +114,7 @@ def ingest_from_source(
     output_ref: Optional[str],
     progress_callback: Callable[[int, int | None], None] | None = None,
     gguf_quant: str | None = None,
-    # e2e progress.json #72: when set with len > 1, the HF branch runs
+    # When set with len > 1, the HF branch runs
     # the per-strategy selector once per concrete dtype and emits
     # `IngestResult.classifier_attrs_per_checkpoint` so finalize can
     # publish N checkpoints under one tag with distinct dtype attrs.
@@ -167,21 +166,6 @@ def ingest_from_source(
             progress_callback=progress_callback,
             dtype_outputs=list(dtype_outputs or []),
         )
-
-        # e2e progress.json #70: declare the destination repo's `repo_kind`
-        # (mapped from the classifier's `runtime_library`) before we open the
-        # first upload session. Tensorhub records this on auto-create and
-        # validates kind match on subsequent uploads.
-        try:
-            from gen_worker.conversion.hf_classifier import runtime_library_to_repo_kind
-            rk = runtime_library_to_repo_kind(str(info.get("runtime_library") or ""))
-            if rk:
-                ctx.set_repo_kind(rk)
-        except Exception:
-            # Best-effort — non-fatal. If the kind isn't set, tensorhub will
-            # default to 'diffusers' and the layout validator will reject any
-            # non-diffusers manifests with a clear error.
-            pass
 
         files = [dict(item) for item in list(info.get("files") or []) if isinstance(item, dict)]
         if not files:
@@ -336,14 +320,33 @@ def ingest_from_source(
             files=[str(item.get("path") or "") for item in files],
         )
 
-        # Per-strategy classifier attrs (runtime_library, base_model_lineage,
-        # quant_scheme, …) — go onto every published checkpoint's attributes
-        # field so inference workers know what loader to use.
         classifier_attrs = {
             str(k): str(v)
             for k, v in (info.get("attrs") or {}).items()
             if v is not None and str(v) != ""
         }
+        runtime_library = str(info.get("runtime_library") or classifier_attrs.get("runtime_library") or "").strip()
+        library_name = {
+            "diffusers-single-file": "diffusers",
+            "diffusers-lora": "diffusers",
+            "llama-cpp": "llama.cpp",
+        }.get(runtime_library, runtime_library)
+        repo_type = "adapter" if runtime_library in {"peft", "diffusers-lora"} else "model"
+        class_name = str(
+            classifier_attrs.get("pipeline_class")
+            or classifier_attrs.get("architecture")
+            or ""
+        ).strip()
+        model_family = str(layout_info.model_family or "").strip()
+        if repo_type == "adapter":
+            model_family = str(classifier_attrs.get("base_model_family") or model_family).strip()
+        if hasattr(ctx, "set_repo_spec"):
+            ctx.set_repo_spec(
+                kind=repo_type,
+                library_name=library_name,
+                model_family=model_family,
+                class_name=class_name,
+            )
         source_meta = {
             "source_repo": str(info.get("source_repo") or src),
             "source_revision": str(info.get("source_revision") or str(source_revision or "").strip()),
@@ -363,7 +366,7 @@ def ingest_from_source(
             "ingested_total_bytes": str(int(info.get("total_bytes") or 0)),
             "source_manifest_sha256": manifest_hash,
             "source_artifact_refs": ";".join(refs),
-            # Classifier-derived metadata (e2e progress.json #67). These are
+            # Classifier-derived metadata. These are
             # also available on IngestResult.classifier_attrs for finalize to
             # thread onto each ProducedFlavor.attributes.
             "ingest_strategy": str(info.get("strategy") or ""),
@@ -379,7 +382,7 @@ def ingest_from_source(
         # they don't collide with the legacy keys above.
         for k, v in classifier_attrs.items():
             source_meta.setdefault(f"classifier_{k}", v)
-        # e2e progress.json #72: surface per-checkpoint attrs from the
+        # Surface per-checkpoint attrs from the
         # downloader's `selections` field so the finalize layer can
         # publish N checkpoints (one per resolved concrete dtype) under
         # the same destination tag.
@@ -483,7 +486,7 @@ def ingest_from_source(
         if model_family_variant == "":
             model_family_variant = "unknown"
 
-        # e2e progress.json #71: populate the structured base-model
+        # Populate the structured base-model
         # lineage attributes from the Civitai API response. The
         # `baseModel` enum is the family signal; the `air` URN is the
         # specific reference within civitai's universe (not directly
@@ -525,7 +528,7 @@ def ingest_from_source(
             "civitai_air": str(info.get("air") or ""),
             "civitai_pipeline_hint": str(info.get("pipeline_hint") or ""),
             "civitai_model_family_variant": str(info.get("model_family_variant") or model_family_variant),
-            # e2e progress.json #71: structured lineage attrs (see
+            # Structured lineage attrs (see
             # gen_worker/conversion/base_model_families.py for the family
             # enum). These are mirrored into IngestResult.classifier_attrs
             # below so the destination checkpoint catalog row carries the
@@ -551,7 +554,7 @@ def ingest_from_source(
         if selected_id > 0:
             source_meta["civitai_file_id"] = str(selected_id)
 
-        # e2e progress.json #71: thread the structured base-model
+        # Thread the structured base-model
         # lineage onto IngestResult.classifier_attrs so the finalize
         # path stamps the same fields onto the destination checkpoint
         # the HF clone path does (`base_model_family`,

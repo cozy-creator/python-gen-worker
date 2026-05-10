@@ -14,14 +14,11 @@ dispatch._finalize_produced_variants.
 
 from __future__ import annotations
 
-import tempfile
 from pathlib import Path
 
 import msgspec
 
-from gen_worker import training_function
-from gen_worker.conversion.context import ConversionContext
-from gen_worker.conversion.core_types import ProducedVariant
+from gen_worker.conversion import ConversionContext, ProducedFlavor, training_function
 
 
 class FromScratchInput(msgspec.Struct, forbid_unknown_fields=True):
@@ -34,7 +31,7 @@ class FromScratchInput(msgspec.Struct, forbid_unknown_fields=True):
 def generate(
     ctx: ConversionContext,
     payload: FromScratchInput,
-) -> list[ProducedVariant]:
+) -> list[ProducedFlavor]:
     """Generate random weights and emit as an orphan checkpoint.
 
     No source repo, no parent lineage. The `kind='from-scratch'`
@@ -53,7 +50,7 @@ def generate(
         "linear.bias": torch.zeros(payload.hidden_dim, dtype=torch.float32),
     }
 
-    tmpdir = Path(tempfile.mkdtemp(prefix="from_scratch_"))
+    tmpdir = ctx.mktemp()
     weights_path = tmpdir / "weights.safetensors"
     try:
         from safetensors.torch import save_file  # noqa: WPS433
@@ -62,12 +59,14 @@ def generate(
     save_file(weights, str(weights_path))
 
     return [
-        ProducedVariant(
-            dtype="fp32",
-            file_layout="singlefile",
-            file_type="safetensors",
-            files={"weights.safetensors": str(weights_path)},
-            kind="model",
-            # lineage=[] — empty; this is an orphan checkpoint.
+        ProducedFlavor(
+            path=weights_path,
+            flavor="fp32",
+            attributes={
+                "dtype": "fp32",
+                "file_layout": "singlefile",
+                "file_type": "safetensors",
+                "kind": "model",
+            },
         )
     ]

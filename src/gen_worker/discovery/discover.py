@@ -4,7 +4,7 @@ Function discovery module for Cozy workers.
 This module auto-discovers all @inference_function decorated functions in the project
 by scanning .py files and extracting metadata. Run as:
 
-    python -m gen_worker.discover
+    python -m gen_worker.discovery
 
 Outputs TOML endpoint lock to stdout.
 """
@@ -243,7 +243,7 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
             except Exception:
                 ref = ""
             mr_entry: Dict[str, Any] = {"source": src, "key": mr.key, "ref": ref, "dtypes": dtypes}
-            # e2e #46: PAYLOAD_REF binding ships a compat_spec object that
+            # PAYLOAD_REF binding ships a compat_spec object that
             # carries the scoping the orchestrator enforces at invoke time.
             # The derived pipeline class comes straight from the parameter's
             # annotated type; non-restricting base classes (DiffusionPipeline,
@@ -515,15 +515,20 @@ def _load_endpoint_manifest_toml(root: Path) -> EndpointToml:
 def _model_spec_to_json(spec: TensorhubModelSpec) -> Dict[str, Any]:
     """Emit a [models] entry for endpoint.lock.
 
-    Attribute values are always lists (ordered preferences); single-valued
-    attributes are 1-element lists. Tensorhub's resolver flips list-valued
-    attributes to ordered preference selection (first preference with a
-    matching variant wins).
+    The lock keeps checkpoint-group selection explicit: flavor/flavors for
+    named variants, plus concrete selector axes when a flavor is not enough.
     """
     out: Dict[str, Any] = {"ref": spec.ref}
-    attrs = spec.attributes_as_dict()
-    if attrs:
-        out["attributes"] = attrs
+    if spec.flavor:
+        out["flavor"] = spec.flavor
+    if spec.flavors:
+        out["flavors"] = list(spec.flavors)
+    if spec.dtype:
+        out["dtype"] = spec.dtype
+    if spec.file_layout:
+        out["file_layout"] = spec.file_layout
+    if spec.file_type:
+        out["file_type"] = spec.file_type
     return out
 
 
@@ -789,7 +794,7 @@ def _strip_none(obj: Any) -> Any:
 
 
 def main() -> None:
-    """Main entry point for CLI usage."""
+    """Write the build-time endpoint manifest to stdout."""
     # Check for legacy COZY_FUNCTION_MODULES env var
     legacy_modules = os.getenv("COZY_FUNCTION_MODULES", "").strip()
     if legacy_modules:
@@ -810,7 +815,3 @@ def main() -> None:
     sys.stdout.write(msgspec.toml.encode(_strip_none(manifest)).decode("utf-8"))
     if not sys.stdout.isatty():
         sys.stdout.write("\n")
-
-
-if __name__ == "__main__":
-    main()

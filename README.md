@@ -1,6 +1,8 @@
 # gen-worker
 
-A Python SDK for building serverless functions for AI inference. Write your function, declare required model refs, publish an endpoint release, and invoke it via Cozy's control plane.
+A Python SDK for building Cozy worker functions. Write your function, declare
+required model refs, publish an endpoint release, and invoke it via Cozy's
+control plane.
 
 ## Tenant Worker Build Contract (Dockerfile-First)
 
@@ -18,7 +20,7 @@ The built image MUST:
 2. Bake function discovery output (manifest) at build time:
 
 ```dockerfile
-RUN mkdir -p /app/.tensorhub && python -m gen_worker.discover > /app/.tensorhub/endpoint.lock
+RUN mkdir -p /app/.tensorhub && python -m gen_worker.discovery > /app/.tensorhub/endpoint.lock
 ```
 
 3. Use the Cozy worker runtime as the ENTRYPOINT:
@@ -31,6 +33,7 @@ Notes:
 
 - `endpoint.toml` is **not required** to be present in the final image; it is a build-time input.
 - The platform reads `/app/.tensorhub/endpoint.lock` from the built image and stores it in Cozy Hub DB for routing/invocation.
+- System ownership boundaries are documented in `docs/system-boundaries.md`.
 
 ## Installation
 
@@ -75,6 +78,19 @@ def generate(ctx: RequestContext, payload: Input) -> Output:
 - **File handling** - Upload/download assets via Cozy hub file API
 - **Model caching** - LRU cache with VRAM/disk management and cache-aware routing
 
+## System Boundaries
+
+`gen-worker` is a reusable worker library. It owns worker authoring APIs,
+build-time `endpoint.lock` discovery, runtime scheduler communication,
+Tensorhub protocol integration, and generic conversion primitives/metadata.
+
+It does not own published endpoint catalogs, product conversion functions,
+operator commands, or hardcoded assumptions about sibling endpoint repos.
+Calibrated quantization workflows such as modelopt live in endpoint code, for
+example the canonical conversion endpoint in `training-endpoints/conversion`.
+
+See `docs/system-boundaries.md` for the full boundary contract.
+
 ## Authoring Endpoints
 
 Three endpoint types are supported — **inference**, **conversion**, and
@@ -92,38 +108,10 @@ TRAINER_JOB_SPEC_PATH=/app/.cozy/trainer_job.json \
 python -m gen_worker.entrypoint
 ```
 
-## Dev HTTP Runner (Local Inference Without gen-orchestrator)
+## Local Test Helpers
 
-For local testing of a built worker image (without standing up gen-orchestrator),
-run the dev HTTP runner and write outputs to a mounted local directory.
-
-Container example:
-
-```bash
-docker run --rm --gpus all -p 8081:8081 \
-  -v "$(pwd)/out:/outputs" \
-  -e TENSORHUB_URL='http://host.docker.internal:7777' \
-  <your-worker-image> \
-  python -m gen_worker.testing.http_runner --listen 0.0.0.0:8081 --outputs /outputs
-```
-
-Prefetch a public model (example: SD1.5):
-
-```bash
-curl -sS -X POST 'http://localhost:8081/v1/models/prefetch' \
-  -H 'content-type: application/json' \
-  -d '{"models":[{"ref":"runwayml/stable-diffusion-v1-5","dtypes":["bf16","fp16"]}]}'
-```
-
-Invoke a function:
-
-```bash
-curl -sS -X POST 'http://localhost:8081/v1/request/generate' \
-  -H 'content-type: application/json' \
-  -d '{"payload": {"prompt": "a tiny robot watering a bonsai, macro photo"}}'
-```
-
-Outputs are written under `/outputs/jobs/<request_id>/outputs/...` (matching Cozy ref semantics).
+`gen_worker.testing` exposes import-only helpers for tests and smoke harnesses.
+The package does not publish general-purpose development commands.
 
 ## Configuration
 
@@ -321,7 +309,7 @@ docker run \
 Canonical local dev build args (GPU, CUDA 12.6, torch 2.11.x, Python 3.12):
 
 ```bash
-cd ~/cozy/python-gen-worker
+cd <python-gen-worker-repo>
 
 docker build \
   --build-arg PYTHON_VERSION=3.12 \
@@ -372,44 +360,14 @@ Workers report model availability for intelligent job routing:
 | Warm | Disk | Seconds |
 | Cold | None | Minutes (download required) |
 
-## Dev Testing (Mock Orchestrator)
-
-For local end-to-end tests without standing up `gen-orchestrator`, use the one-off mock orchestrator invoke command (curl-like workflow). It starts a temporary scheduler, waits for a worker to connect, sends one `JobExecutionRequest`, prints the result, and exits.
-
-Start your worker container first:
-
-```bash
-docker run --rm \
-  --add-host=host.docker.internal:host-gateway \
-  -e PUBLIC_ORCHESTRATOR_GRPC_ADDR=host.docker.internal:8080 \
-  -e WORKER_JWT='dev-worker-jwt' \
-  <your-worker-image>
-```
-
-In another terminal, send one request:
-
-```bash
-python -m gen_worker.testing.mock_orchestrator \
-  --listen 0.0.0.0:8080 \
-  --run hello \
-  --payload-json '{"name":"world"}'
-```
-
-Run the command again with a different payload whenever you want to send another request.
-
-```python
-from gen_worker.model_cache import ModelCache
-
-cache = ModelCache(max_vram_gb=20.0)
-cache.mark_loaded_to_vram("model-a", pipeline, size_gb=8.0)
-cache.is_in_vram("model-a")  # True
-cache.get_vram_models()      # ["model-a"]
-```
+Model cache internals live under `gen_worker.models` for platform/runtime code.
+Endpoint authors normally interact with model availability through
+`ModelRef` injection and `RequestContext`.
 
 ## Error Handling
 
 ```python
-from gen_worker.errors import RetryableError, ValidationError, FatalError
+from gen_worker import RetryableError, ValidationError, FatalError
 
 @worker_function()
 def process(ctx: RequestContext, payload: Input) -> Output:

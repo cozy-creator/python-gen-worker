@@ -36,7 +36,7 @@ class OutputTooLargeError(ValidationError):
 
 
 class RefCompatibilitySurprise(ValidationError):
-    """Post-download runtime mismatch on a caller-supplied PAYLOAD_REF (e2e #46).
+    """Post-download runtime mismatch on a caller-supplied PAYLOAD_REF.
 
     Raised by the worker (or tenant code) when a ref passed the
     orchestrator's pre-dispatch compat gates — so file_layout / pipeline-

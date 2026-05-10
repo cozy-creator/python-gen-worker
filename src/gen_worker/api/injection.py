@@ -13,7 +13,7 @@ class ModelRefSource(str, Enum):
     # against a pre-declared keyspace (endpoint.toml [models]) at publish time.
     PAYLOAD = "payload"
     # PAYLOAD_REF accepts an arbitrary caller-supplied canonical ref at
-    # invoke time (e2e #46). Orchestrator resolves the ref against tensorhub
+    # invoke time. The orchestrator resolves the ref against tensorhub
     # with the caller's JWT (access check) + runs a compat validation chain
     # (file_layout / pipeline_class / architectures / components / lineage /
     # attributes) before dispatch. No pre-declared keyspace required.
@@ -27,7 +27,7 @@ class ModelRef:
 
     This is intended to be used inside `typing.Annotated[..., ModelRef(...)]`.
 
-    For PAYLOAD_REF (e2e #46), the common case requires zero scoping
+    For PAYLOAD_REF, the common case requires zero scoping
     declarations — discovery auto-derives the expected pipeline class /
     architectures from the parameter's type annotation. Optional overrides
     below cover edge cases and stricter-than-default scoping.
@@ -40,8 +40,8 @@ class ModelRef:
     ref: Optional[str] = None
     dtypes: tuple[str, ...] = ()
 
-    # e2e #46 — PAYLOAD_REF scoping. All fields are optional; ignored for
-    # FIXED / PAYLOAD sources.
+    # PAYLOAD_REF scoping. All fields are optional; ignored for FIXED /
+    # PAYLOAD sources.
 
     # Explicit pipeline-class / architectures allowlist. Overrides the
     # signature-derived gate. Use when the tenant's annotated type is

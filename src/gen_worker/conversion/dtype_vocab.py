@@ -1,4 +1,4 @@
-"""Canonical dtype vocabulary + fuzzy bit-width resolution (e2e progress.json #72).
+"""Canonical dtype vocabulary + fuzzy bit-width resolution.
 
 The HTTP API caller declares `OutputSpec.dtype` as either:
 - A concrete value: `bf16`, `fp16`, `fp32`, `fp8:e4m3`, `fp8:e5m2`, `nvfp4`,
@@ -40,8 +40,13 @@ _CONCRETE_INT: frozenset[str] = frozenset({
     "int8:awq", "int8:gptq",
 })
 
-# GGUF quant tokens (per llama.cpp naming)
+# GGUF quant tokens (per llama.cpp naming).
+# q1_0 / iq1_* are extreme low-bit experimentals (rare; some community
+# repos like Bonsai-8B ship them). Including for completeness — the
+# server-side validator rejects unknown tokens, so the set must mirror
+# every quant a HF repo might legitimately advertise.
 _CONCRETE_GGUF: frozenset[str] = frozenset({
+    "q1_0",
     "q2_k",
     "q3_k_s", "q3_k_m", "q3_k_l", "q3_k_xl",
     "q4_0", "q4_1", "q4_k_s", "q4_k_m", "q4_k_l",
@@ -49,6 +54,11 @@ _CONCRETE_GGUF: frozenset[str] = frozenset({
     "q5_0", "q5_1", "q5_k_s", "q5_k_m", "q5_k_l",
     "q6_k", "q6_k_l",
     "q8_0",
+    # i-quants (importance-matrix quants) — newer llama.cpp variants.
+    "iq1_s", "iq1_m",
+    "iq2_xs", "iq2_xxs", "iq2_s", "iq2_m",
+    "iq3_xs", "iq3_xxs", "iq3_s", "iq3_m",
+    "iq4_xs", "iq4_nl",
 })
 
 CONCRETE_DTYPES: frozenset[str] = (
@@ -179,7 +189,7 @@ def default_dtype_for_source(
     """Pick the highest-fidelity dtype available for this source kind.
 
     Used when the invoker doesn't specify `outputs` — we default to the
-    best precision the source ships. e2e progress.json #72 default change
+    best precision the source ships. default change
     (was: lowest-precision quant for GGUF; now: highest-precision).
     """
     kind = str(source_kind or "").strip().lower()

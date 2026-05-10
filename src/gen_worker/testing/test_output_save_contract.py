@@ -148,10 +148,9 @@ class _UploadHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        # /jobs/:id/commit, /jobs/start, /jobs/:id/finalize, /conversion-jobs/start
-        # were all removed from tensorhub (e2e issues #7/#8). The worker-side
-        # publish_repo_revision is now a no-op stub; this mock no longer needs
-        # to handle any job lifecycle endpoint. /uploads/... handled elsewhere.
+        # Legacy job lifecycle endpoints are not part of the worker-side
+        # publish path. The mock only needs to cover upload and metadata
+        # routes used by RequestContext.
         if self.path == "/api/v1/metadata/claims/search":
             _UploadHandler.got_claims_search_payload = payload if isinstance(payload, dict) else {}
             body = json.dumps({
@@ -182,15 +181,6 @@ class _UploadHandler(BaseHTTPRequestHandler):
         if re.match(r"^/api/v1/repos/alice/model-a/versions/[^/]+/metadata/claims$", self.path):
             _UploadHandler.got_claim_upsert_payload = payload if isinstance(payload, dict) else {}
             body = json.dumps({"ok": True, "claim_id": 77}).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
-        if self.path == "/api/v1/repos/copy-by-reference":
-            _UploadHandler.got_copy_by_ref_payload = payload if isinstance(payload, dict) else {}
-            body = json.dumps({"ok": True, "copied_version_id": str((_UploadHandler.got_copy_by_ref_payload or {}).get("source_version_id") or "")}).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
@@ -442,8 +432,8 @@ class OutputSaveContractTest(unittest.TestCase):
                 source_repo="alice/model-a:prod",
                 source_version_id="blake3:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             )
-            # Post e2e issue #8, publish_repo_revision is a no-op stub —
-            # it no longer POSTs /jobs/:id/commit or /finalize to tensorhub.
+            # publish_repo_revision is a no-op stub; it no longer POSTs
+            # /jobs/:id/commit or /finalize to tensorhub.
             # It should succeed, echo output_versions, and leave the commit
             # payload mock untouched.
             self.assertEqual(out.get("ok"), True)
@@ -513,94 +503,3 @@ class OutputSaveContractTest(unittest.TestCase):
         finally:
             srv.shutdown()
             srv.server_close()
-
-
-    def test_search_metadata_claims_and_copy_by_reference_use_capability_channel(self) -> None:
-        _UploadHandler.got_claims_search_payload = {}
-        _UploadHandler.got_copy_by_ref_payload = {}
-        srv = ThreadingHTTPServer(("127.0.0.1", 0), _UploadHandler)
-        t = threading.Thread(target=srv.serve_forever, daemon=True)
-        t.start()
-        try:
-            token = self._fake_jwt({
-                "cap_kind": "worker_capability",
-                "org": "alice",
-                "tensor_repos_read": ["alice/seed-model"],
-                "tensor_repos_version_create": ["alice/model-a"],
-            })
-            base = f"http://127.0.0.1:{srv.server_address[1]}"
-            ctx = RequestContext(
-                request_id="run-claims-search",
-                owner="alice",
-                file_api_base_url=base,
-                worker_capability_token=token,
-            )
-            search_out = ctx.search_metadata_claims(
-                scope="version",
-                identity_hash="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                metadata_contains={"source": {"provider": "huggingface"}},
-            )
-            self.assertEqual(search_out.get("ok"), True)
-            self.assertEqual((_UploadHandler.got_claims_search_payload or {}).get("scope"), "version")
-            self.assertEqual((_UploadHandler.got_claims_search_payload or {}).get("identity_hash"), "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-
-            copy_out = ctx.copy_repo_by_reference(
-                source_repo="alice/seed-model",
-                source_version_id="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                destination_repo="alice/model-a",
-                destination_repo_tags=["prod"],
-                release_visibility="public",
-            )
-            self.assertEqual(copy_out.get("ok"), True)
-            self.assertEqual((_UploadHandler.got_copy_by_ref_payload or {}).get("source_owner"), "alice")
-            self.assertEqual((_UploadHandler.got_copy_by_ref_payload or {}).get("source_repo"), "seed-model")
-            self.assertEqual((_UploadHandler.got_copy_by_ref_payload or {}).get("destination_repo"), "model-a")
-            self.assertEqual((_UploadHandler.got_copy_by_ref_payload or {}).get("destination_repo_tags"), ["prod"])
-            self.assertEqual(_UploadHandler.got_authz, f"Bearer {token}")
-        finally:
-            srv.shutdown()
-            srv.server_close()
-
-    def test_upsert_and_delete_version_metadata_claim_use_capability_channel(self) -> None:
-        _UploadHandler.got_claim_upsert_payload = {}
-        _UploadHandler.got_claim_delete_path = ""
-        srv = ThreadingHTTPServer(("127.0.0.1", 0), _UploadHandler)
-        t = threading.Thread(target=srv.serve_forever, daemon=True)
-        t.start()
-        try:
-            token = self._fake_jwt({
-                "cap_kind": "worker_capability",
-                "org": "alice",
-                "tensor_repos_version_create": ["alice/model-a"],
-            })
-            base = f"http://127.0.0.1:{srv.server_address[1]}"
-            ctx = RequestContext(
-                request_id="run-claims-write",
-                owner="alice",
-                file_api_base_url=base,
-                worker_capability_token=token,
-            )
-            upsert_out = ctx.upsert_version_metadata_claim(
-                destination_repo="alice/model-a",
-                version_id="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                identity_hash="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-                metadata_json={"source": {"provider": "huggingface", "source_ref": "hf/model", "source_revision": "main"}},
-            )
-            self.assertEqual(upsert_out.get("ok"), True)
-            self.assertEqual((_UploadHandler.got_claim_upsert_payload or {}).get("identity_hash"), "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-
-            delete_out = ctx.delete_version_metadata_claim(
-                destination_repo="alice/model-a",
-                version_id="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                claim_id=77,
-            )
-            self.assertEqual(delete_out.get("ok"), True)
-            self.assertIn("/metadata/claims/77", _UploadHandler.got_claim_delete_path)
-            self.assertEqual(_UploadHandler.got_authz, f"Bearer {token}")
-        finally:
-            srv.shutdown()
-            srv.server_close()
-
-
-if __name__ == "__main__":
-    unittest.main()

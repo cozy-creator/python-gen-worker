@@ -1,13 +1,10 @@
 """Lower-level streaming-conversion primitives.
 
-Moved from conversion-endpoints/conversions/ as part of e2e progress.json #9.
-These are lower-level than StreamingWriter — they operate on raw safetensors
-files and let callers (clone_pipeline) drive the conversion loop themselves.
-New transform-endpoint tenants use StreamingWriter instead; these primitives
-are exposed for the legacy clone_pipeline path and any tenant that needs
-finer-grained control.
+These are lower-level than StreamingWriter: they operate on raw safetensors
+files and let callers drive the conversion loop themselves. They are exposed
+for clone paths and any endpoint code that needs finer-grained control.
 
-Combines three formerly-separate conversion-endpoints modules:
+Combines three primitive areas:
   - streaming_convert.py  → streaming_dtype_cast, streaming_gpu_quantize,
                             streaming_nvfp4_quantize
   - incremental_safetensors.py → IncrementalSafetensorsWriter
@@ -26,9 +23,8 @@ from pathlib import Path
 class ConversionImplementationError(RuntimeError):
     """Raised when a conversion primitive can't proceed.
 
-    Moved from conversion-endpoints/conversions/common.py. Same semantics —
-    a runtime error flavor that callers can distinguish from unrelated
-    exceptions via isinstance.
+    Runtime error flavor that callers can distinguish from unrelated
+    exceptions via ``isinstance``.
     """
 
 

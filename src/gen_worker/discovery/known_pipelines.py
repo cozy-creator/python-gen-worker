@@ -1,4 +1,4 @@
-"""Non-restricting pipeline / model base classes (e2e progress.json #46).
+"""Non-restricting pipeline / model base classes.
 
 When a ``@inference_function`` uses ``Src.PAYLOAD_REF`` on a parameter whose
 type annotation is one of these deliberately-broad base classes, discovery

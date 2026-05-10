@@ -291,7 +291,7 @@ def _run_main() -> int:
         logger.error(
             "No user function modules found. A baked manifest at /app/.tensorhub/endpoint.lock is required.\n"
             "Your Dockerfile should run discovery at build time:\n"
-            "  RUN mkdir -p /app/.tensorhub && python -m gen_worker.discover > /app/.tensorhub/endpoint.lock"
+            "  RUN mkdir -p /app/.tensorhub && python -m gen_worker.discovery > /app/.tensorhub/endpoint.lock"
         )
         return 1
 

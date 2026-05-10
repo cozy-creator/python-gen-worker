@@ -26,9 +26,10 @@ whether to calibrate, skip, or run dummy (or raise on invalid combos).
 
 The metadata is ALSO introspectable — discovery bakes it into
 ``endpoint.lock`` so the orchestrator / UI can tell callers "this function
-at scheme=X needs a --dataset" before minting capability tokens.
+at scheme=X needs a calibration dataset" before minting capability tokens.
 
-See e2e issues #41 (dataset generator) + #42 (dataset consumer).
+The worker library only decides whether calibration is required, optional, or
+unsupported for a requested scheme; callers own how datasets are selected.
 """
 
 from __future__ import annotations
@@ -133,8 +134,7 @@ def resolve_calibration_action(
     asked for a scheme whose policy declares calibration *helpful* but didn't
     supply a dataset and didn't explicitly opt out. Falling through silently
     shipped uncalibrated weights to invokers who didn't realize the difference.
-    Force the choice — pass ``--dataset <ref>`` (the conversion-gpu endpoint
-    auto-attaches a default corpus when one isn't supplied), or set
+    Force the choice by supplying a calibration dataset, or set
     ``skip_calibration=True`` on the spec.
 
     Tenants typically take the returned action + any ``WARN-``-tagged notes
@@ -156,10 +156,9 @@ def resolve_calibration_action(
             return "dummy"
         raise ValueError(
             f"calibration{label}: scheme requires a calibration dataset "
-            f"(policy='required'). Pass `--dataset <ref>` on the e2e CLI, "
-            f"or set allow_dummy_calibration=True on the spec for smoke "
-            f"tests. See docs/calibration-dataset-schema.md for the "
-            f"dataset shape."
+            f"(policy='required'). Supply a calibration dataset, or set "
+            f"allow_dummy_calibration=True on the spec for smoke tests. "
+            f"See docs/calibration-dataset-schema.md for the dataset shape."
         )
 
     if policy == "beneficial":
@@ -189,9 +188,8 @@ def resolve_calibration_action(
             f"calibration dataset was supplied. Default is calibrate — "
             f"silently falling back to weight-only would ship uncalibrated "
             f"weights to invokers who didn't realize the difference. Pass "
-            f"`--dataset <ref>` on the e2e CLI (the endpoint auto-attaches a "
-            f"default corpus when one isn't supplied), or set "
-            f"skip_calibration=True on the spec to opt out explicitly."
+            f"a calibration dataset, or set skip_calibration=True on the spec "
+            f"to opt out explicitly."
         )
 
     if policy == "unsupported":
@@ -199,8 +197,8 @@ def resolve_calibration_action(
             raise ValueError(
                 f"calibration{label}: scheme is weight-only (policy="
                 f"'unsupported') — a calibration dataset is not used. Drop "
-                f"the --dataset flag, or switch to a calibrated function "
-                f"(e.g. modelopt_quantization with int4_awq / w4a8_awq)."
+                f"the calibration dataset, or switch to a calibrated "
+                f"quantization recipe such as int4_awq / w4a8_awq."
             )
         return "skip"
 

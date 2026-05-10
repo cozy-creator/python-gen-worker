@@ -11,10 +11,10 @@ Upload flow (one file):
      → tensorhub calls S3 CompleteMultipartUpload, runs commit-time
      validation, and returns the finalized blob/snapshot metadata.
 
-Used by BOTH worker callers (via ctx.save_file / ctx.save_checkpoint /
-ctx.open_output_stream in python-gen-worker) AND user-CLI callers
-(via `e2e` upload commands). Same endpoints on tensorhub's side — the
-caller authenticates with either a worker capability token or a user JWT.
+Used by worker callers via ctx.save_file / ctx.save_checkpoint /
+ctx.open_output_stream. Tensorhub also exposes the same upload protocol to
+other authenticated clients; the caller authenticates with either a worker
+capability token or a user JWT.
 The orchestrator is NOT in the upload path: clients talk directly to
 tensorhub, and tensorhub's presigned URLs let bytes go straight to S3.
 
@@ -111,7 +111,7 @@ def presigned_upload_file(
             body (after the `parts` array). Used by repo-cas uploads to carry
             lineage metadata — step_number, epoch_number, output_kind,
             target_dtype, flavor, produced_by_kind. Tensorhub persists
-            these into checkpoint_lineage (e2e issue #8).
+            these into checkpoint_lineage.
     """
     url = f"{base_url}{endpoint_path}"
 

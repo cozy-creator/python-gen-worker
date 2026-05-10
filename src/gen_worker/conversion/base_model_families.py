@@ -1,4 +1,4 @@
-"""Base-model family enum + cross-format mapping tables (e2e progress.json #71).
+"""Base-model family enum + cross-format mapping tables.
 
 Records the destination LoRA / PEFT checkpoint's lineage on two axes:
   - `base_model_family`: a finite canonical enum (`sdxl`, `flux2-klein-4b`,

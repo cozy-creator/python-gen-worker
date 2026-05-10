@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import queue
@@ -64,6 +63,23 @@ class DevRequestResult:
     safe_message: str
     error_message: str
     events: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class DevHttpRunnerConfig:
+    listen: str = "127.0.0.1:8081"
+    manifest: str = "/app/.tensorhub/endpoint.lock"
+    endpoint_root: str = "/app"
+    outputs: str = "/outputs"
+
+    @classmethod
+    def from_env(cls) -> "DevHttpRunnerConfig":
+        return cls(
+            listen=os.getenv("GEN_WORKER_HTTP_LISTEN", cls.listen),
+            manifest=os.getenv("GEN_WORKER_MANIFEST_PATH", cls.manifest),
+            endpoint_root=os.getenv("GEN_WORKER_ENDPOINT_ROOT", cls.endpoint_root),
+            outputs=os.getenv("GEN_WORKER_OUTPUT_DIR", cls.outputs),
+        )
 
 
 class DevWorker(Worker):
@@ -198,31 +214,26 @@ def _parse_request_body(data: Any) -> tuple[Any, dict[str, Any]]:
     return data, {}
 
 
-async def serve_http(argv: Optional[list[str]] = None) -> None:
-    ap = argparse.ArgumentParser(prog="gen-worker dev serve-http")
-    ap.add_argument("--listen", default=os.getenv("GEN_WORKER_HTTP_LISTEN", "127.0.0.1:8081"))
-    ap.add_argument("--manifest", default=os.getenv("GEN_WORKER_MANIFEST_PATH", "/app/.tensorhub/endpoint.lock"))
-    ap.add_argument("--endpoint-root", default=os.getenv("GEN_WORKER_ENDPOINT_ROOT", "/app"))
-    ap.add_argument("--outputs", default=os.getenv("GEN_WORKER_OUTPUT_DIR", "/outputs"))
-    args = ap.parse_args(list(argv) if argv is not None else None)
+async def serve_http(config: Optional[DevHttpRunnerConfig] = None) -> None:
+    cfg = config or DevHttpRunnerConfig.from_env()
 
-    listen = str(args.listen).strip()
+    listen = str(cfg.listen).strip()
     if ":" not in listen:
-        raise SystemExit("--listen must be host:port")
+        raise ValueError("listen must be host:port")
     host, port_s = listen.rsplit(":", 1)
     port = int(port_s)
 
-    manifest_path = Path(str(args.manifest)).expanduser()
+    manifest_path = Path(str(cfg.manifest)).expanduser()
     if not manifest_path.exists():
-        raise SystemExit(f"manifest not found: {manifest_path}")
+        raise FileNotFoundError(f"manifest not found: {manifest_path}")
     manifest = _load_manifest(manifest_path)
 
-    _maybe_add_pythonpath(str(args.endpoint_root))
+    _maybe_add_pythonpath(str(cfg.endpoint_root))
     user_modules = _get_modules_from_manifest(manifest)
     if not user_modules:
-        raise SystemExit("manifest contains no function modules")
+        raise ValueError("manifest contains no function modules")
 
-    out_dir = Path(str(args.outputs)).expanduser()
+    out_dir = Path(str(cfg.outputs)).expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # Do not verify JWT in dev HTTP runner. Provide a dummy token.
@@ -442,12 +453,8 @@ async def serve_http(argv: Optional[list[str]] = None) -> None:
         await asyncio.sleep(3600)
 
 
-def main(argv: Optional[list[str]] = None) -> None:
-    # asyncio entrypoint wrapper (avoid importing asyncio at module import time in prod).
+def run_dev_http_server(config: Optional[DevHttpRunnerConfig] = None) -> None:
+    """Run the import-only dev HTTP harness until the process exits."""
     import asyncio
 
-    asyncio.run(serve_http(argv=argv))
-
-
-if __name__ == "__main__":
-    main()
+    asyncio.run(serve_http(config=config))

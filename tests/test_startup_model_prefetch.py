@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import queue
+import threading
 import time
 from concurrent import futures
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
+from typing import Iterator
+from urllib.parse import unquote
 
 import grpc
 import pytest
@@ -11,8 +16,114 @@ from blake3 import blake3
 
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.pb import worker_scheduler_pb2_grpc as pb_grpc
-from gen_worker.testing.mock_orchestrator import _MockOrchestrator, _start_file_api_server
 from gen_worker.worker import Worker
+
+
+class _FileHandler(BaseHTTPRequestHandler):
+    files_dir: Path
+
+    def log_message(self, format: str, *args: object) -> None:  # noqa: A003
+        return
+
+    def do_GET(self) -> None:  # noqa: N802
+        prefix = "/api/v1/file/"
+        if not self.path.startswith(prefix):
+            self.send_response(404)
+            self.end_headers()
+            return
+        rel = unquote(self.path[len(prefix) :]).lstrip("/")
+        dst = (self.files_dir / rel).resolve()
+        root = self.files_dir.resolve()
+        if (root not in dst.parents and dst != root) or not dst.exists():
+            self.send_response(404)
+            self.end_headers()
+            return
+        data = dst.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Type", "application/octet-stream")
+        self.end_headers()
+        self.wfile.write(data)
+
+
+def _start_file_server(files_dir: Path) -> ThreadingHTTPServer:
+    files_dir.mkdir(parents=True, exist_ok=True)
+    _FileHandler.files_dir = files_dir
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), _FileHandler)
+    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    return httpd
+
+
+class _WorkerSession:
+    def __init__(
+        self,
+        out_q: "queue.Queue[pb.WorkerSchedulerMessage]",
+        in_q: "queue.Queue[pb.WorkerSchedulerMessage]",
+    ) -> None:
+        self._out_q = out_q
+        self._in_q = in_q
+
+    def send(self, msg: pb.WorkerSchedulerMessage) -> None:
+        self._out_q.put_nowait(msg)
+
+    def recv(self, timeout_s: float) -> pb.WorkerSchedulerMessage | None:
+        try:
+            return self._in_q.get(timeout=timeout_s)
+        except queue.Empty:
+            return None
+
+
+class _Scheduler(pb_grpc.SchedulerWorkerServiceServicer):
+    def __init__(self) -> None:
+        self._ready = threading.Event()
+        self._session: _WorkerSession | None = None
+
+    def get_session(self, timeout_s: float) -> _WorkerSession | None:
+        if not self._ready.wait(timeout=timeout_s):
+            return None
+        return self._session
+
+    def ConnectWorker(  # type: ignore[override]
+        self,
+        request_iterator: Iterator[pb.WorkerSchedulerMessage],
+        context: grpc.ServicerContext,
+    ) -> Iterator[pb.WorkerSchedulerMessage]:
+        del context
+        out_q: "queue.Queue[pb.WorkerSchedulerMessage]" = queue.Queue()
+        in_q: "queue.Queue[pb.WorkerSchedulerMessage]" = queue.Queue()
+        closed = threading.Event()
+
+        def reader() -> None:
+            try:
+                for msg in request_iterator:
+                    in_q.put_nowait(msg)
+            except Exception:
+                pass
+            finally:
+                closed.set()
+
+        threading.Thread(target=reader, daemon=True).start()
+
+        start = time.monotonic()
+        while time.monotonic() - start < 30:
+            if closed.is_set():
+                break
+            msg = None
+            try:
+                msg = in_q.get(timeout=0.25)
+            except queue.Empty:
+                continue
+            if msg is not None and msg.HasField("worker_registration"):
+                self._session = _WorkerSession(out_q, in_q)
+                self._ready.set()
+                break
+
+        while not closed.is_set():
+            try:
+                yield out_q.get(timeout=0.25)
+            except queue.Empty:
+                continue
 
 
 def test_startup_prefetch_warms_disk_and_reports_disk_models(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -22,7 +133,7 @@ def test_startup_prefetch_warms_disk_and_reports_disk_models(tmp_path: Path, mon
 
     # Start a tiny HTTP file server to act as the "presigned URL" origin.
     files_dir = tmp_path / "files"
-    httpd = _start_file_api_server("127.0.0.1:0", files_dir=str(files_dir), token="")
+    httpd = _start_file_server(files_dir)
     host, port = httpd.server_address
 
     # Create one small file that our resolved manifest will reference.
@@ -36,7 +147,7 @@ def test_startup_prefetch_warms_disk_and_reports_disk_models(tmp_path: Path, mon
     b3 = blake3(data).hexdigest()
 
     # Start mock orchestrator gRPC server.
-    orch = _MockOrchestrator()
+    orch = _Scheduler()
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
     pb_grpc.add_SchedulerWorkerServiceServicer_to_server(orch, server)
     grpc_port = server.add_insecure_port("127.0.0.1:0")

@@ -1,6 +1,5 @@
 """Core types shared by transform tenants, clone_pipeline, and library internals.
 
-Moved from conversion-endpoints/shared.py as part of e2e progress.json #9.
 Tenants using the new @training_function contract typically don't touch
 these directly — they return ``list[ProducedFlavor]`` which the library
 adapts. But legacy clone_pipeline + any tenant that needs richer output
@@ -64,14 +63,14 @@ class IngestResult:
     all_file_tensors: list[Any] = field(default_factory=list)
     source_dtype_by_component: dict[str, str] = field(default_factory=dict)
     source_dtype_preference: list[str] = field(default_factory=list)
-    # Per-strategy attributes from the HF classifier (e2e progress.json #67):
+    # Per-strategy attributes from the HF classifier:
     # runtime_library, subtype, base_model_lineage, lineage_source,
     # quant_scheme, etc. Threaded onto every published checkpoint flavor's
     # `attributes` field so inference workers can dispatch on runtime_library
     # without sniffing files. Empty for non-HF ingest paths (Civitai / URL).
     classifier_attrs: dict[str, str] = field(default_factory=dict)
 
-    # e2e progress.json #72: when the HF classifier resolves multiple
+    # when the HF classifier resolves multiple
     # concrete dtypes from a single repo (multi-quant GGUF, or transformers
     # repos that ship `model.bf16.safetensors` + `model.fp16.safetensors`
     # side-by-side), each requested dtype becomes a separate checkpoint

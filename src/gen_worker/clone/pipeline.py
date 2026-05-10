@@ -6,9 +6,6 @@ import re
 import shutil
 import tempfile
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -419,7 +416,7 @@ def _pick_primary_source_file(repo_dir: Path) -> Path:
 def _tensors_artifact_module(t: Any) -> dict[str, Any]:
     """Extract artifact dict from a Tensors object. Module-level mirror of the
     inner `_tensors_artifact` defined inside `_finalize_clone` — used by
-    `_finalize_publish_as_is` (e2e progress.json #70 thin path) which is at
+    `_finalize_publish_as_is` which is at
     module scope and can't see the inner function."""
     art: dict[str, Any] = {}
     digest = str(getattr(t, "blob_digest", "") or getattr(t, "blake3", "") or "").strip()
@@ -453,21 +450,20 @@ def _finalize_publish_as_is(
     overwrite_repo: bool,
     output_specs: list[OutputSpec] | None = None,
 ) -> FinalizeCloneResult:
-    """Thin finalize for non-diffusers repo kinds (e2e progress.json #70).
+    """Thin finalize for non-diffusers library classes.
 
     Uploads every ingested file to repo CAS, builds a snapshot manifest from
     the upload set, attaches the classifier-derived attributes, publishes.
     For requested OutputSpecs whose dtype the source already ships, this is
     a direct passthrough; for non-matching dtypes we run inline conversion
-    via gen_worker.conversion.inline_convert (issue #73) — same library
-    code paths the standalone cast_dtype / torchao_quantization /
-    convert_gguf tenants use. Calibrated quants (int4:awq etc.) raise
+    via gen_worker.conversion.inline_convert — the same library code paths
+    other worker functions can call. Calibrated quants (int4:awq etc.) raise
     InlineConversionNotPossible upstream; this path catches them and
     surfaces failed_flavors in metadata.
 
     The diffusers-aware monolith in `_finalize_clone` keeps handling
-    `repo_kind=diffusers` (multi-component layout-repackage + per-output
-    save-format conversion). Everything else lands here.
+    diffusers trees that need multi-component layout repackage and per-output
+    save-format conversion. Everything else lands here.
     """
     classifier_attrs = dict(ingest_result.classifier_attrs or {})
     runtime_library = str(classifier_attrs.get("runtime_library") or "").strip().lower()
@@ -536,13 +532,10 @@ def _finalize_publish_as_is(
     if not promoted_artifacts:
         raise RuntimeError("finalize_publish_as_is: no artifacts produced")
 
-    # Single flavor entry covering everything we ingested. The classifier
-    # attrs (runtime_library, base_model_lineage, quant_scheme, etc.) ride
-    # on `attributes` — issue #67's wire — and tensorhub validates
-    # `runtime_library` against the enum.
+    # Single flavor entry covering everything we ingested.
     primary_dtype = str(classifier_attrs.get("dtype") or ingested.metadata.get("dtype") or "bf16").strip().lower()
     primary_filetype = str(classifier_attrs.get("file_type") or "safetensors").strip().lower()
-    # `file_layout` is the tensorhub-validated axis (e2e progress.json #228).
+    # `file_layout` is the tensorhub-validated axis.
     # Only diffusers uses non-empty values (`multi-file` / `single-file`).
     # transformers / peft / sentence-transformers / gguf / native_lora — empty.
     # The classifier may have stamped a strategy-name into `file_layout` for
@@ -554,28 +547,10 @@ def _finalize_publish_as_is(
     flavor_label_parts = [primary_dtype, primary_label_layout, primary_filetype]
     flavor_label = "-".join([p for p in flavor_label_parts if p])
 
-    flavor_attrs = {
-        "dtype": primary_dtype,
-        "file_layout": primary_layout,
-        "file_type": primary_filetype,
-    }
-    if classifier_layout:
-        # Preserve the classifier's strategy-name as a separate attribute so
-        # consumers can still see it (`layout_kind=transformers` etc.) without
-        # tripping the layout-contract validator.
-        flavor_attrs["layout_kind"] = classifier_layout
-    for k, v in classifier_attrs.items():
-        if k in flavor_attrs:
-            continue
-        if v is None or str(v) == "":
-            continue
-        flavor_attrs[str(k)] = str(v)
-
     commit_checkpoint_flavors: list[dict[str, Any]] = [{
         "flavor": flavor_label,
         "flavors": [primary_dtype, primary_layout, primary_filetype],
         "display_label": flavor_label,
-        "attributes": flavor_attrs,
         "artifacts": promoted_artifacts,
         # The publish_repo_revision wrapper looks at v.get("snapshot_manifest")
         # per-flavor before falling back to the top-level manifest entries.
@@ -583,7 +558,7 @@ def _finalize_publish_as_is(
         "snapshot_manifest": snapshot_manifest,
     }]
 
-    # e2e progress.json #72: when the HF classifier resolved multiple
+    # When the HF classifier resolved multiple
     # concrete dtypes in the source repo (multi-quant GGUF, side-by-side
     # transformers variants), publish one flavor per resolved dtype under
     # the same destination tag. Each per-checkpoint attrs dict comes from
@@ -600,36 +575,20 @@ def _finalize_publish_as_is(
         ck_filetype = str(ck_attrs.get("file_type") or primary_filetype).strip().lower()
         ck_label_layout = str(ck_attrs.get("layout_kind") or runtime_library or "transformers").strip().lower()
         ck_label = "-".join([p for p in (ck_dtype, ck_label_layout, ck_filetype) if p])
-        ck_flavor_attrs = {
-            "dtype": ck_dtype,
-            "file_layout": "",
-            "file_type": ck_filetype,
-        }
-        ck_layout_kind = str(ck_attrs.get("file_layout") or "").strip().lower()
-        if ck_layout_kind:
-            ck_flavor_attrs["layout_kind"] = ck_layout_kind
-        for k, v in ck_attrs.items():
-            if k in ck_flavor_attrs:
-                continue
-            if v is None or str(v) == "":
-                continue
-            ck_flavor_attrs[str(k)] = str(v)
         commit_checkpoint_flavors.append({
             "flavor": ck_label,
             "flavors": [ck_dtype, "", ck_filetype],
             "display_label": ck_label,
-            "attributes": ck_flavor_attrs,
             "artifacts": promoted_artifacts,
             "snapshot_manifest": snapshot_manifest,
         })
 
-    # Issue #73: for each requested OutputSpec whose dtype DIFFERS from the
-    # source, run inline conversion (cast_dtype / torchao quant / GGUF) and
-    # emit a per-spec flavor entry. Specs whose dtype matches the source's
-    # primary dtype are already covered by the passthrough flavor above.
-    # Calibrated quants raise InlineConversionNotPossible; we catch and
-    # record them in failed_flavors so the caller can render a clean hint.
-    failed_flavors: list[dict[str, str]] = []
+    # For each requested OutputSpec whose dtype differs from the source, run
+    # inline conversion and emit a per-spec flavor entry. Specs whose dtype
+    # matches the source's primary dtype are already covered by the passthrough
+    # flavor above. Calibrated quants raise InlineConversionNotPossible; we
+    # record structured requirements so callers can render their own guidance.
+    failed_flavors: list[dict[str, Any]] = []
     if requested_specs:
         from gen_worker.conversion.inline_convert import (
             InlineConversionNotPossible,
@@ -662,7 +621,6 @@ def _finalize_publish_as_is(
                     "dtype": spec.dtype,
                     "file_type": spec.file_type,
                     "reason": "source repo dir is not available for inline conversion",
-                    "suggested_command": "",
                 })
                 continue
             try:
@@ -678,23 +636,25 @@ def _finalize_publish_as_is(
                     target_dtype=spec_dtype,
                     target_file_type=str(spec.file_type or "safetensors").strip().lower(),
                     source_repo_dir=repo_dir,
-                    source_ref=source_identity.source_ref,
-                    destination_ref=destination_repo,
                 )
             except InlineConversionNotPossible as exc:
-                failed_flavors.append({
+                failed: dict[str, Any] = {
                     "spec_label": spec.label,
                     "dtype": spec.dtype,
                     "file_type": spec.file_type,
                     "reason": exc.reason,
-                    "suggested_command": exc.suggested_command,
-                })
+                }
+                if exc.deferred_requirement is not None:
+                    failed["deferred_requirement"] = exc.deferred_requirement.as_dict()
+                failed_flavors.append(failed)
                 if emit_stage is not None:
-                    emit_stage("clone.save_format.skipped", 0.85, {
+                    payload: dict[str, Any] = {
                         "output_spec": spec.label,
                         "reason": exc.reason,
-                        "suggested_command": exc.suggested_command,
-                    })
+                    }
+                    if exc.deferred_requirement is not None:
+                        payload["deferred_requirement"] = exc.deferred_requirement.as_dict()
+                    emit_stage("clone.save_format.skipped", 0.85, payload)
                 continue
             except Exception as exc:  # noqa: BLE001 — record + continue
                 import traceback
@@ -705,7 +665,6 @@ def _finalize_publish_as_is(
                     "file_type": spec.file_type,
                     "reason": f"inline conversion failed: {exc}",
                     "traceback": tb,
-                    "suggested_command": "",
                 })
                 # Print a structured worker-side log so operators can see WHAT
                 # failed (the failed_flavors map only reaches the API caller's
@@ -741,7 +700,6 @@ def _finalize_publish_as_is(
                         "dtype": spec.dtype,
                         "file_type": spec.file_type,
                         "reason": f"inline conversion produced output but upload failed: {exc}",
-                        "suggested_command": "",
                     })
                     spec_artifacts = []
                     spec_manifest = []
@@ -789,20 +747,13 @@ def _finalize_publish_as_is(
                     "dtype": spec.dtype,
                     "file_type": spec.file_type,
                     "reason": "inline conversion produced no uploadable artifacts",
-                    "suggested_command": "",
                 })
                 continue
 
-            spec_attrs = dict(flavor_attrs)
-            spec_attrs.update(inline_result.attributes)
-            spec_attrs["dtype"] = spec_dtype
-            spec_attrs["file_type"] = str(spec.file_type or "safetensors").strip().lower()
-            spec_attrs["file_layout"] = primary_layout
             commit_checkpoint_flavors.append({
                 "flavor": spec.label,
-                "flavors": [spec_dtype, primary_layout, spec_attrs["file_type"]],
+                "flavors": [spec_dtype, primary_layout, str(spec.file_type or "safetensors").strip().lower()],
                 "display_label": spec.label,
-                "attributes": spec_attrs,
                 "artifacts": spec_artifacts,
                 "snapshot_manifest": spec_manifest,
             })
@@ -841,7 +792,6 @@ def _finalize_publish_as_is(
         "snapshot_manifest": snapshot_manifest,
         "relationship_kind": "import",
         "auto_create_external_parent": True,
-        "release_visibility": "public" if auto_publish_public else "private",
         "merge_with_existing": not overwrite_repo,
     }
     if destination_repo_tags:
@@ -863,266 +813,6 @@ def _finalize_publish_as_is(
     if emit_stage is not None:
         emit_stage("clone.completed", 1.0)
     return FinalizeCloneResult(output=result, published_version_id=published_version_id)
-
-
-def _ctx_file_api_channel(ctx: RequestContext) -> tuple[str, str]:
-    base = str(getattr(ctx, "_file_api_base_url", "") or "").strip().rstrip("/")
-    token = str(getattr(ctx, "_worker_capability_token", "") or "").strip()
-    if base == "" or token == "":
-        return "", ""
-    return base, token
-
-
-def _ctx_http_json(
-    ctx: RequestContext,
-    *,
-    method: str,
-    path: str,
-    payload: dict[str, Any] | None = None,
-    timeout_s: float = 20.0,
-) -> dict[str, Any] | None:
-    base, token = _ctx_file_api_channel(ctx)
-    if base == "" or token == "":
-        return None
-    url = f"{base}{path}"
-    data: bytes | None = None
-    headers = {
-        "Authorization": f"Bearer {token}",
-    }
-    if payload is not None:
-        data = json.dumps(payload).encode("utf-8")
-        headers["Content-Type"] = "application/json"
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers=headers,
-        method=str(method or "GET").strip().upper() or "GET",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-            raw = resp.read()
-    except urllib.error.HTTPError:
-        return None
-    except urllib.error.URLError:
-        return None
-    try:
-        parsed = json.loads(raw.decode("utf-8"))
-    except Exception:
-        return None
-    if isinstance(parsed, dict):
-        return parsed
-    return None
-
-
-def _list_version_claims(
-    ctx: RequestContext,
-    *,
-    destination_owner: str,
-    destination_repo_name: str,
-    version_id: str,
-) -> list[dict[str, Any]]:
-    owner = str(destination_owner or "").strip().lower()
-    repo = str(destination_repo_name or "").strip().lower()
-    version = str(version_id or "").strip().lower()
-    if owner == "" or repo == "" or version == "":
-        return []
-    if ":" not in version:
-        return []
-
-    items: list[dict[str, Any]] = []
-    cursor = 0
-    limit = 100
-    for _ in range(4):
-        path = (
-            "/api/v1/repos/"
-            f"{urllib.parse.quote(owner, safe='')}/"
-            f"{urllib.parse.quote(repo, safe='')}/"
-            f"versions/{urllib.parse.quote(version, safe='')}/metadata/claims"
-            f"?limit={limit}&cursor={cursor}"
-        )
-        payload = _ctx_http_json(ctx, method="GET", path=path, payload=None)
-        if not isinstance(payload, dict):
-            break
-        raw_items = payload.get("items")
-        if not isinstance(raw_items, list):
-            break
-        chunk: list[dict[str, Any]] = []
-        for raw in raw_items:
-            if isinstance(raw, dict):
-                chunk.append(raw)
-        if not chunk:
-            break
-        items.extend(chunk)
-        next_cursor_raw = payload.get("next_cursor")
-        try:
-            next_cursor = int(next_cursor_raw)
-        except Exception:
-            break
-        if next_cursor <= cursor:
-            break
-        cursor = next_cursor
-    return items
-
-
-def _find_destination_claim_hit(
-    *,
-    claims: list[dict[str, Any]],
-    source_identity: SourceIdentity,
-    destination_owner: str,
-    destination_repo_name: str,
-) -> dict[str, Any] | None:
-    expected_identity = str(source_identity.identity_hash or "").strip().lower()
-    expected_provider = str(source_identity.provider or "").strip().lower()
-    expected_ref = str(source_identity.source_ref or "").strip()
-    expected_revision = str(source_identity.source_revision or "").strip()
-    expected_owner = str(destination_owner or "").strip().lower()
-    expected_repo = str(destination_repo_name or "").strip().lower()
-    expected_version = expected_identity
-    if expected_identity == "" or expected_provider == "" or expected_ref == "":
-        return None
-
-    for claim in claims:
-        if not isinstance(claim, dict):
-            continue
-        owner = str(claim.get("owner") or "").strip().lower()
-        repo = str(claim.get("repo") or "").strip().lower()
-        if owner != expected_owner or repo != expected_repo:
-            continue
-        identity_hash = str(claim.get("identity_hash") or "").strip().lower()
-        if identity_hash != expected_identity:
-            continue
-        claim_version = str(claim.get("version_id") or "").strip().lower()
-        if claim_version != "" and claim_version != expected_version:
-            continue
-        metadata = claim.get("metadata_json")
-        if not isinstance(metadata, dict):
-            continue
-        source = metadata.get("source")
-        if not isinstance(source, dict):
-            continue
-        provider = str(source.get("provider") or "").strip().lower()
-        source_ref = str(source.get("source_ref") or "").strip()
-        source_revision = str(source.get("source_revision") or "").strip()
-        if provider != expected_provider:
-            continue
-        if source_ref != expected_ref:
-            continue
-        if source_revision != expected_revision:
-            continue
-        result = metadata.get("result")
-        if not isinstance(result, dict):
-            continue
-        primary_ref = str(result.get("primary_artifact_ref") or "").strip()
-        if primary_ref == "":
-            continue
-        primary_format = str(result.get("primary_artifact_format") or "").strip()
-        result_version = str(result.get("version_id") or "").strip().lower()
-        if result_version != "" and result_version != expected_version:
-            continue
-        return {
-            "primary_artifact_ref": primary_ref,
-            "primary_artifact_format": (primary_format or None),
-            "copied_from_repo": f"{expected_owner}/{expected_repo}",
-            "copied_from_version_id": expected_version,
-            "copied_version_id": expected_version,
-            "claim_id": int(claim.get("claim_id") or 0),
-        }
-    return None
-
-
-def _maybe_reuse_destination_private_version(
-    ctx: RequestContext,
-    *,
-    source_identity: SourceIdentity,
-    destination_repo: str,
-    destination_owner: str,
-    destination_repo_name: str,
-    destination_repo_tags: list[str],
-) -> ConversionOutput | None:
-    if not source_identity.dedupe_supported:
-        return None
-    claims = _list_version_claims(
-        ctx,
-        destination_owner=destination_owner,
-        destination_repo_name=destination_repo_name,
-        version_id=source_identity.identity_hash,
-    )
-    hit = _find_destination_claim_hit(
-        claims=claims,
-        source_identity=source_identity,
-        destination_owner=destination_owner,
-        destination_repo_name=destination_repo_name,
-    )
-    if hit is None:
-        return None
-
-    claim_written = False
-    upsert_claim = getattr(ctx, "upsert_version_metadata_claim", None)
-    if callable(upsert_claim):
-        try:
-            metadata_json = {
-                "source": {
-                    "provider": source_identity.provider,
-                    "source_ref": source_identity.source_ref,
-                    "source_revision": source_identity.source_revision,
-                },
-                "result": {
-                    "destination_repo": destination_repo,
-                    "version_id": source_identity.identity_hash,
-                    "primary_artifact_ref": str(hit.get("primary_artifact_ref") or ""),
-                    "primary_artifact_format": str(hit.get("primary_artifact_format") or ""),
-                },
-                "request_id": str(getattr(ctx, "request_id", "") or "").strip(),
-                "written_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            }
-            _ = upsert_claim(
-                destination_repo=destination_repo,
-                version_id=source_identity.identity_hash,
-                identity_hash=source_identity.identity_hash,
-                metadata_json=metadata_json,
-            )
-            claim_written = True
-        except Exception:
-            claim_written = False
-
-    if destination_repo_tags:
-        publish_fn = getattr(ctx, "publish_repo_revision", None)
-        if callable(publish_fn):
-            try:
-                _ = publish_fn(
-                    destination_repo=destination_repo,
-                    artifact_refs=[str(hit.get("primary_artifact_ref") or "")],
-                    metadata={},
-                    create_if_missing=True,
-                    destination_repo_tags=destination_repo_tags,
-                    source_repo=destination_repo,
-                    source_version_id=source_identity.identity_hash,
-                    target_version_id=source_identity.identity_hash,
-                )
-            except Exception:
-                pass
-
-    dedupe_result = {
-        "result_code": "dedupe_copy_hit",
-        "primary_artifact_ref": str(hit.get("primary_artifact_ref") or "").strip(),
-        "primary_artifact_format": str(hit.get("primary_artifact_format") or "").strip(),
-        "copied_from_repo": str(hit.get("copied_from_repo") or "").strip(),
-        "copied_from_version_id": str(hit.get("copied_from_version_id") or "").strip(),
-        "copied_version_id": str(hit.get("copied_version_id") or "").strip(),
-        "claim_written": bool(claim_written),
-        "warnings": [],
-    }
-    output = _build_dedupe_hit_output(
-        ctx=ctx,
-        dedupe_result=dedupe_result,
-        source_identity=source_identity,
-        destination_repo=destination_repo,
-        destination_owner=destination_owner,
-        destination_repo_name=destination_repo_name,
-        destination_repo_tags=destination_repo_tags,
-    )
-    output.metadata["dedupe_strategy"] = "destination_version_claim_hit"
-    return output
 
 
 def _resolve_source_identity(
@@ -1743,7 +1433,7 @@ def _apply_save_format(
             or save_format.startswith("int4:")
             or save_format.startswith("int8:")
         ):
-            # Inline weight-only quantization via torchao (e2e progress.json #73).
+            # Inline weight-only quantization via torchao.
             # Loads the component as an HF model with a TorchAoConfig, runs the
             # quant pass, and re-shards through the streaming writer so the
             # output matches the rest of the clone snapshot. Calibrated quants
@@ -1807,22 +1497,20 @@ def _apply_save_format(
         if tag == "nvfp4":
             # nvfp4 needs a calibration dataset to be useful at inference; the
             # raw streaming primitive emits int8+scale sidecars that diffusers/
-            # transformers loaders can't materialize. Refuse cleanly and point
-            # at the separate modelopt job. The CLI surfaces this as a
-            # one-paragraph hint.
+            # transformers loaders can't materialize. Refuse cleanly with
+            # structured requirements; deployment-specific rendering belongs
+            # outside gen-worker.
             from gen_worker.conversion.inline_convert import (
                 InlineConversionNotPossible,
-                suggested_separate_job,
+                deferred_conversion_requirement,
             )
             raise InlineConversionNotPossible(
                 reason=(
                     "nvfp4 needs a calibration dataset; the clone path doesn't "
                     "run dataset-dependent quantization inline"
                 ),
-                suggested_command=suggested_separate_job(
-                    "nvfp4", source_ref="<owner>/<repo>", destination_ref="<owner>/<repo>",
-                ),
                 target_dtype="nvfp4",
+                deferred_requirement=deferred_conversion_requirement("nvfp4"),
             )
 
         if tag == "gguf":
@@ -1953,21 +1641,19 @@ def _finalize_clone(
         else:
             output_specs = normalize_outputs([], target_layout_hint=selected_layout)
 
-    # e2e progress.json #70: dispatch on the classifier's runtime_library.
+    # Dispatch on the classifier's runtime_library.
     # Non-diffusers kinds (transformers / peft / sentence-transformers / gguf
     # / diffusers-lora) take a thin "publish what we ingested" path that
     # skips layout-repackage and save-format conversion. Today's monolithic
-    # _finalize_clone code below assumes everything is a diffusers tree —
-    # that's only true for repo_kind=diffusers.
+    # _finalize_clone code below assumes everything is a diffusers tree.
     runtime_library = str((ingest_result.classifier_attrs or {}).get("runtime_library") or "").strip().lower()
     if runtime_library not in {"", "diffusers", "diffusers-single-file"}:
-        # e2e progress.json #70 task: reject `--save-formats` with
-        # non-default values when the destination is not a diffusers
-        # repo. The default OutputSpec for a transformers/peft/llama.cpp
+        # Reject `--save-formats` with non-default values when the destination
+        # is not a diffusers repo. The default OutputSpec for a
+        # transformers/peft/llama.cpp
         # source is "ingest as-is", which is what _finalize_publish_as_is
         # already does. Anything else (`fp8:e4m3`, `int4:awq`, …) means
-        # the caller wants quantization, which clone won't do for these
-        # kinds — point them at the right separate-job flow.
+        # the caller wants quantization, which clone won't do for these kinds.
         non_default_save_formats = [
             f
             for f in normalize_save_formats(save_formats or [])
@@ -1976,11 +1662,10 @@ def _finalize_clone(
         if non_default_save_formats:
             raise ValueError(
                 "save_formats with non-default values is only supported for "
-                f"repo_kind=diffusers; got runtime_library={runtime_library!r} "
+                f"diffusers sources; got runtime_library={runtime_library!r} "
                 f"and save_formats={non_default_save_formats!r}. "
-                "Run a separate `e2e convert` job (e.g. "
-                "`--function torchao_quantization --spec scheme=fp8_wo`) "
-                "against the cloned destination for those dtypes."
+                "Run a separate conversion job against the cloned destination "
+                "for those dtypes."
             )
         return _finalize_publish_as_is(
             ctx,
@@ -2034,12 +1719,12 @@ def _finalize_clone(
     save_format_outputs: list[dict[str, Any]] = []  # one per (component, output_spec) conversion
     passthrough_uploads: dict[str, list[tuple[Any, str]]] = {}  # spec.label -> [(Tensors, rel_path)]
     flavor_refs: list[str] = []
-    # Failed flavors recorded during partial-success conversion (#73). Each
-    # entry: {"spec_label": str, "reason": str, "suggested_command": str}.
+    # Failed flavors recorded during partial-success conversion. Each entry
+    # carries reason plus optional structured deferred_requirement metadata.
     # Surfaces in the clone result so the caller can render a per-flavor
     # warning instead of either crashing the whole job or silently dropping
     # the failed dtype.
-    failed_flavors: list[dict[str, str]] = []
+    failed_flavors: list[dict[str, Any]] = []
     failed_spec_labels: set[str] = set()
 
     # publish_artifact_refs tracks every CAS-bound ref that accumulates during
@@ -2188,23 +1873,28 @@ def _finalize_clone(
                 break
             spec_outputs.append((job, out, fmt_started))
         if spec_failed_exc is not None:
-            failed_flavors.append({
+            failed: dict[str, Any] = {
                 "spec_label": spec.label,
                 "dtype": spec.dtype,
                 "file_type": spec.file_type,
                 "reason": spec_failed_exc.reason,
-                "suggested_command": spec_failed_exc.suggested_command,
-            })
+            }
+            if spec_failed_exc.deferred_requirement is not None:
+                failed["deferred_requirement"] = spec_failed_exc.deferred_requirement.as_dict()
+            failed_flavors.append(failed)
             failed_spec_labels.add(spec.label)
             conversion_idx += max(1, len(conversion_jobs))
-            emit_stage("clone.save_format.skipped",
+            payload: dict[str, Any] = {
+                "save_format": legacy_fmt,
+                "output_spec": spec.label,
+                "reason": spec_failed_exc.reason,
+            }
+            if spec_failed_exc.deferred_requirement is not None:
+                payload["deferred_requirement"] = spec_failed_exc.deferred_requirement.as_dict()
+            emit_stage(
+                "clone.save_format.skipped",
                 0.60 + (0.25 * float(conversion_idx) / float(total_conversions)),
-                {
-                    "save_format": legacy_fmt,
-                    "output_spec": spec.label,
-                    "reason": spec_failed_exc.reason,
-                    "suggested_command": spec_failed_exc.suggested_command,
-                },
+                payload,
             )
             continue
         for job, out, fmt_started in spec_outputs:
@@ -2480,25 +2170,10 @@ def _finalize_clone(
             # the metadata below instead of emitting an invalid row.
             continue
 
-        attrs = {
-            "dtype": spec.dtype,
-            "file_layout": spec.file_layout,
-            "file_type": spec.file_type,
-            "quantization": spec.dtype,
-        }
-        # Thread classifier-derived attributes (runtime_library,
-        # base_model_lineage, quant_scheme, peft_type, etc.) onto the
-        # destination flavor so inference workers can dispatch on
-        # `runtime_library` without sniffing files. e2e progress.json #67.
-        # Per-spec keys (dtype/file_layout/file_type) win over classifier
-        # defaults if they collide.
-        for ck, cv in (ingest_result.classifier_attrs or {}).items():
-            attrs.setdefault(str(ck), str(cv))
         commit_checkpoint_flavors.append({
             "flavor": spec.label,
             "flavors": [spec.dtype, spec.file_layout, spec.file_type],
             "display_label": spec.label,
-            "attributes": attrs,
             "artifacts": artifacts,
         })
 
@@ -2508,10 +2183,10 @@ def _finalize_clone(
     if commit_checkpoint_flavors:
         metadata["checkpoint_flavors"] = commit_checkpoint_flavors
 
-    # Issue #73: surface partial-success failures (calibrated quants etc.)
-    # so the e2e CLI / API caller can render per-flavor warnings. Each entry
-    # carries the requested dtype/file_type, the reason, and the suggested
-    # separate-job command. Empty when every requested flavor landed cleanly.
+    # Surface partial-success failures (calibrated quants etc.) so callers can
+    # render per-flavor warnings. Each entry carries the requested
+    # dtype/file_type, the reason, and optional structured follow-up metadata.
+    # Empty when every requested flavor landed cleanly.
     if failed_flavors:
         metadata["failed_flavors"] = failed_flavors
         metadata["failed_flavor_count"] = str(len(failed_flavors))
@@ -2652,9 +2327,6 @@ def _finalize_clone(
         "snapshot_manifest": snapshot_manifest,
         "relationship_kind": "import",
         "auto_create_external_parent": True,
-        # Issue #18: caller toggles public at publish time + chooses whether
-        # to merge new files with any prior checkpoint in the same repo.
-        "release_visibility": "public" if auto_publish_public else "private",
         "merge_with_existing": not overwrite_repo,
     }
     if destination_repo_tags:
@@ -2713,56 +2385,6 @@ def finalize_clone(
         quantize_components=quantize_components,
     )
     return finalized.output
-
-
-def _build_dedupe_hit_output(
-    *,
-    ctx: RequestContext,
-    dedupe_result: dict[str, Any],
-    source_identity: SourceIdentity,
-    destination_repo: str,
-    destination_owner: str,
-    destination_repo_name: str,
-    destination_repo_tags: list[str],
-) -> ConversionOutput:
-    primary_ref = str(dedupe_result.get("primary_artifact_ref") or "").strip()
-    primary_format = str(dedupe_result.get("primary_artifact_format") or "").strip() or None
-    copied_from_repo = str(dedupe_result.get("copied_from_repo") or "").strip()
-    copied_from_version_id = str(dedupe_result.get("copied_from_version_id") or "").strip().lower()
-    copied_version_id = str(
-        dedupe_result.get("copied_version_id") or copied_from_version_id
-    ).strip().lower()
-    warnings = list(dedupe_result.get("warnings") or [])
-
-    out_ref = primary_ref or f"jobs/{ctx.request_id}/outputs/dedupe-copy.bin"
-    metadata = {
-        "result_code": "dedupe_copy_hit",
-        "source_provider": source_identity.provider,
-        "source_ref": source_identity.source_ref,
-        "source_revision": source_identity.source_revision,
-        "source_hash": source_identity.identity_hash,
-        "destination_repo": destination_repo,
-        "destination_owner": destination_owner,
-        "destination_repo_name": destination_repo_name,
-        "destination_repo_tags": ",".join(destination_repo_tags),
-        "copied_from_repo": copied_from_repo,
-        "copied_from_version_id": copied_from_version_id,
-        "copied_version_id": copied_version_id,
-        "claim_written": "1" if bool(dedupe_result.get("claim_written")) else "0",
-        "mirror.mode": "mirror",
-        "mirror.provider": source_identity.provider,
-        "mirror.source_ref": source_identity.source_ref,
-        "mirror.source_revision": source_identity.source_revision,
-        "mirror.source_hash": source_identity.identity_hash,
-    }
-    metadata.update({k: str(v) for k, v in dict(source_identity.source_metadata).items()})
-    if warnings:
-        metadata["dedupe_warning_count"] = str(len(warnings))
-
-    return ConversionOutput(
-        weights=Tensors(ref=out_ref, format=primary_format),
-        metadata=metadata,
-    )
 
 
 def run_clone(
@@ -2928,7 +2550,7 @@ def run_clone(
         source_expected_size_bytes = _parse_positive_int(
             source_identity.source_metadata.get("source_expected_size_bytes")
         )
-        # e2e progress.json #72: thread the requested concrete dtypes
+        # Thread the requested concrete dtypes
         # from `resolved_outputs` so the HF downloader can multi-select
         # when N>1. Single-element / unset falls back to single-checkpoint
         # behavior. Drop entries with empty `dtype` (defaults from the
@@ -2990,113 +2612,9 @@ def run_clone(
             "primary_artifact_format": str(finalized.output.weights.format or "").strip(),
         }
 
-    dedupe_helper = getattr(ctx, "mirror_dedupe_or_run", None)
-    local_reuse = _maybe_reuse_destination_private_version(
-        ctx,
-        source_identity=source_identity,
-        destination_repo=normalized_destination,
-        destination_owner=destination_owner,
-        destination_repo_name=normalized_destination_name,
-        destination_repo_tags=normalized_tags,
-    )
-    if isinstance(local_reuse, ConversionOutput):
-        emit_stage(
-            "clone.dedupe.destination_hit",
-            0.22,
-            {
-                "result_code": "dedupe_copy_hit",
-                "strategy": "destination_version_claim_hit",
-            },
-        )
-        emit_stage("clone.completed", 1.0, {"result_code": "dedupe_copy_hit"})
-        return local_reuse
-
-    if callable(dedupe_helper):
-        emit_stage("clone.dedupe.lookup_started", 0.18)
-        try:
-            dedupe_result = dedupe_helper(
-                source_identity={
-                    "provider": source_identity.provider,
-                    "source_ref": source_identity.source_ref,
-                    "source_revision": source_identity.source_revision,
-                    "identity_hash": source_identity.identity_hash,
-                    "dedupe_supported": source_identity.dedupe_supported,
-                    "civitai_model_version_id": source_identity.civitai_model_version_id,
-                    "civitai_file_id": source_identity.civitai_file_id,
-                },
-                destination_repo=normalized_destination,
-                destination_repo_tags=normalized_tags,
-                on_miss=execute_miss,
-            )
-        except Exception as exc:
-            err_raw = str(exc or "").strip()
-            if not err_raw.startswith("mirror_dedupe_search_failed:"):
-                raise
-            emit_stage("clone.dedupe.skipped",
-                0.18,
-                {
-                    "reason": "helper_error",
-                    "error_code": str(type(exc).__name__ or "dedupe_helper_error"),
-                    "error_message": err_raw,
-                },
-            )
-            return execute_miss()["output"]
-        if not isinstance(dedupe_result, dict):
-            dedupe_result = {"result_code": "dedupe_miss", "miss_result": execute_miss()}
-
-        invalidated = [
-            int(v)
-            for v in list(dedupe_result.get("invalidated_claim_ids") or [])
-            if isinstance(v, int) and int(v) > 0
-        ]
-        if invalidated:
-            emit_stage(
-                "clone.dedupe.claim_invalidated",
-                0.23,
-                {
-                    "count": len(invalidated),
-                    "claim_ids": ",".join(str(v) for v in invalidated),
-                },
-            )
-
-        result_code = str(dedupe_result.get("result_code") or "").strip().lower()
-        if result_code == "dedupe_copy_hit":
-            emit_stage(
-                "clone.dedupe.copy_completed",
-                0.28,
-                {
-                    "copied_from_repo": str(dedupe_result.get("copied_from_repo") or "").strip(),
-                    "copied_from_version_id": str(dedupe_result.get("copied_from_version_id") or "").strip(),
-                    "claim_written": bool(dedupe_result.get("claim_written")),
-                },
-            )
-            out = _build_dedupe_hit_output(
-                ctx=ctx,
-                dedupe_result=dedupe_result,
-                source_identity=source_identity,
-                destination_repo=normalized_destination,
-                destination_owner=destination_owner,
-                destination_repo_name=normalized_destination_name,
-                destination_repo_tags=normalized_tags,
-            )
-            emit_stage("clone.completed", 1.0, {"result_code": "dedupe_copy_hit"})
-            return out
-
-        miss_result = dedupe_result.get("miss_result") if isinstance(dedupe_result.get("miss_result"), dict) else {}
-        out = miss_result.get("output")
-        if isinstance(out, ConversionOutput):
-            metadata = dict(out.metadata)
-            if result_code != "":
-                metadata.setdefault("result_code", result_code)
-            metadata.setdefault("claim_written", "1" if bool(dedupe_result.get("claim_written")) else "0")
-            warnings = list(dedupe_result.get("warnings") or [])
-            if warnings:
-                metadata.setdefault("dedupe_warning_count", str(len(warnings)))
-            return ConversionOutput(weights=tensors_with(out.weights, local_path=None), metadata=metadata)
-
     emit_stage("clone.dedupe.skipped",
         0.18,
-        {"reason": "helper_unavailable"},
+        {"reason": "removed"},
     )
     return execute_miss()["output"]
 

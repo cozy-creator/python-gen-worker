@@ -10,6 +10,9 @@ publish endpoints to Cozy. Three endpoint types are supported:
 The library handles discovery, scheduling, model loading, cancellation, artifact
 uploads, and terminal reporting. Your code owns the function body only.
 
+For ownership boundaries between this worker library, endpoint repos, and the
+control plane, see `docs/system-boundaries.md`.
+
 ---
 
 ## 1. Terminology
@@ -48,7 +51,7 @@ The built image must:
 2. Bake the discovery manifest at build time:
    ```dockerfile
    RUN mkdir -p /app/.tensorhub \
-     && python -m gen_worker.discover > /app/.tensorhub/endpoint.lock
+     && python -m gen_worker.discovery > /app/.tensorhub/endpoint.lock
    ```
 3. Use `gen_worker.entrypoint` as the container entrypoint:
    ```dockerfile
@@ -269,44 +272,65 @@ Any uncaught exception is treated as a fatal run failure.
 
 ## 5. Conversion Endpoints
 
-Conversion endpoints are regular `@worker_function` handlers that declare
-**reserved-name** payload fields. The orchestrator inspects them by name and
-routes/validates the job accordingly; there is no separate decorator.
+Conversion endpoints use `gen_worker.conversion` contract types. The worker
+library owns the generic source/destination/upload/calibration plumbing; the
+endpoint owns the product function names, dependency choices, and actual
+conversion recipe.
 
 ```python
 import msgspec
-from gen_worker import RequestContext, Tensors, worker_function
-from gen_worker.api.types import SourceRepo, DestinationRepo, OutputSpec
+import torch
+from gen_worker.conversion import (
+    ConversionContext,
+    ProducedFlavor,
+    Source,
+    training_function,
+)
 
-class ConvertInput(msgspec.Struct):
-    source: SourceRepo            # reserved name: what to convert
-    destination: DestinationRepo  # reserved name: where to publish
-    outputs: list[OutputSpec]     # one entry per emitted variant
 
-class ConvertOutput(msgspec.Struct):
-    weights: Tensors
+class CastSpec(msgspec.Struct):
+    dtype: str
 
-@worker_function()
-def convert(ctx: RequestContext, payload: ConvertInput) -> ConvertOutput:
-    # ... do the conversion, write local file ...
-    tensors = ctx.save_checkpoint(
-        f"jobs/{ctx.request_id}/outputs/weights.safetensors",
-        "/tmp/converted.safetensors",
-        format="safetensors",
-    )
-    return ConvertOutput(weights=tensors)
+
+@training_function(kind="format-conversion", concurrency="sequential")
+def cast_dtype(
+    ctx: ConversionContext,
+    source: Source,
+    specs: list[CastSpec],
+) -> list[ProducedFlavor]:
+    writer = ctx.open_output_writer()
+    for component, name, tensor in source.iter_tensors():
+        if ctx.cancelled:
+            break
+        writer.write(component, name, tensor.to(torch.bfloat16))
+
+    return [
+        ProducedFlavor(
+            path=writer.finalize(),
+            attributes={
+                "dtype": specs[0].dtype,
+                "file_layout": source.file_layout,
+                "file_type": "safetensors",
+            },
+        )
+    ]
 ```
 
-### Reserved types
+The function signature uses reserved names such as `ctx`, `source`, and
+`datasets`; everything else is decoded from the request payload by name.
 
-- **`SourceRepo`**: `ref` (`owner/repo[:tag][#flavor...][@<checkpoint_id>]`), optional `checkpoint_id`
-  (highest-priority explicit variant selector), optional `attributes` dict
-  (subset-containment match; well-known keys include `dtype`, `file_layout`,
-  `file_type`, `quant_library`, plus family-specific `quant_*` keys — see
-  tensorhub `docs/variant_attributes.md`).
-- **`DestinationRepo`**: `ref` and `tags` list. After your function returns
+### Reserved types and attributes
+
+- **Wire source descriptor**: the request contains `source.ref`
+  (`owner/repo[:tag][#flavor...][@<checkpoint_id>]`), optional
+  `checkpoint_id`, and optional `attributes` for subset-containment matching.
+  The library materializes this into the `Source` object passed to the
+  function. Well-known attributes include `dtype`, `file_layout`, `file_type`,
+  `quant_library`, and family-specific `quant_*` keys.
+- **Destination metadata**: destination `ref` and `tags` are provided by the
+  signed request context. After your function returns
   success, the library applies each tag to the new checkpoint atomically.
-- **`OutputSpec`**: `attributes` dict. Every entry in `payload.outputs`
+- **Output specs**: every requested output spec has an `attributes` dict and
   produces one variant on the destination's new checkpoint. You may augment
   `attributes` at upload time with runtime-discovered provenance
   (e.g. `quant_library_version`); the stored attribute bag is the union. The
@@ -315,18 +339,27 @@ def convert(ctx: RequestContext, payload: ConvertInput) -> ConvertOutput:
 ### Streaming large artifacts
 
 ```python
-with ctx.open_checkpoint_stream(
-    f"jobs/{ctx.request_id}/outputs/weights.safetensors",
-    format="safetensors",
-) as out:
-    for chunk in produce_chunks():
-        out.write(chunk)
-    tensors = out.finalize()
+writer = ctx.open_output_writer()
+for component, name, tensor in source.iter_tensors():
+    writer.write(component, name, transform(tensor))
+produced = ProducedFlavor(path=writer.finalize(), attributes={...})
 ```
 
-`Tensors` fields surfaced to callers: `ref`, `owner`, `local_path`, `format`,
-`size_bytes`, `sha256`, `blake3`, `blob_digest`, `snapshot_digest`. It mirrors
-`Asset` but is the first-class type for weight payloads.
+The library uploads returned `ProducedFlavor` paths and commits them as
+checkpoint variants on the destination repo.
+
+### Quantization ownership
+
+`python-gen-worker` may provide generic primitives that worker functions call,
+including dtype casts, GGUF helpers, weight-only torchao/bitsandbytes helpers,
+and calibration policy helpers. Product conversion functions and calibrated
+quantization workflows belong in endpoint code.
+
+Modelopt is intentionally not a core `gen-worker` dependency. A conversion
+endpoint can install and import modelopt inside its own function body, declare
+`required_libraries = ["modelopt"]` and CUDA requirements in `endpoint.toml`,
+and use `gen_worker.conversion` dataset/calibration helpers to enforce request
+policy.
 
 ---
 
@@ -343,7 +376,7 @@ and terminal reporting.
 Required methods:
 
 ```python
-from gen_worker import StepContext, StepResult
+from gen_worker.trainer import StepContext, StepResult
 
 class MyTrainer:
     def setup(self, ctx: StepContext) -> None: ...
@@ -571,38 +604,6 @@ they must never fail a run.
 ---
 
 ## 8. Local Testing
-
-### Dev HTTP runner (inference)
-
-```bash
-docker run --rm --gpus all -p 8081:8081 \
-  -v "$(pwd)/out:/outputs" \
-  -e TENSORHUB_URL='http://host.docker.internal:7777' \
-  <your-image> \
-  python -m gen_worker.testing.http_runner --listen 0.0.0.0:8081 --outputs /outputs
-```
-
-Invoke:
-
-```bash
-curl -sS -X POST 'http://localhost:8081/v1/request/generate' \
-  -H 'content-type: application/json' \
-  -d '{"payload":{"prompt":"hello"}}'
-```
-
-Outputs land under `/outputs/jobs/<request_id>/outputs/...`, matching Cozy ref
-semantics.
-
-### Mock orchestrator (one-shot request)
-
-Start the worker container pointing at `host.docker.internal:8080`, then:
-
-```bash
-python -m gen_worker.testing.mock_orchestrator \
-  --listen 0.0.0.0:8080 \
-  --run generate \
-  --payload-json '{"prompt":"hello"}'
-```
 
 ### Trainer smoke run
 

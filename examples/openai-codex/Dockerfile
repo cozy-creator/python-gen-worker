@@ -8,16 +8,12 @@
 # Local build:
 #   docker build -t cozy-example-openai-codex:dev -f Dockerfile .
 #
-# Runtime requires:
-# - WORKER_JWT (for worker auth)
-# - CODEX_API_KEY (for Codex `exec` headless auth)
-#
+ARG BASE_IMAGE=ubuntu:24.04
 FROM ghcr.io/astral-sh/uv:latest AS uv_bin
 
-FROM ubuntu:24.04
+FROM ${BASE_IMAGE}
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG PYTHON_VERSION=3.12
 
 # Pin Codex CLI version for reproducibility.
 # See https://github.com/openai/codex/releases

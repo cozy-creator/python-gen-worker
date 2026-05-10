@@ -1,5 +1,5 @@
 """Tests for Worker's handling of EndpointConfig disabled_functions and
-ref_availability_by_function. See e2e/agents/progress.json issue #6.
+ref_availability_by_function.
 
 These tests poke directly at Worker's public predicate methods
 (is_function_runnable, payload_key_status) after seeding the internal

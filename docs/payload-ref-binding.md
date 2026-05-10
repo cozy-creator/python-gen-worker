@@ -1,8 +1,8 @@
 # `Src.PAYLOAD_REF` — caller-supplied checkpoint refs
 
-E2E #46. Lets a caller pass their own checkpoint ref at invoke time
-against an endpoint that was NOT pre-configured for that ref. Opt-in
-per function; default posture is still to pin via `FIXED` / `PAYLOAD`.
+Lets a caller pass their own checkpoint ref at invoke time against an endpoint
+that was NOT pre-configured for that ref. Opt-in per function; default posture
+is still to pin via `FIXED` / `PAYLOAD`.
 
 ## When to use
 
@@ -202,19 +202,18 @@ classifies them as `error_type=ref_compatibility_surprise` so the
 caller's error response distinguishes "incompatible ref" from "infra
 flake." Not prevented — just labeled.
 
-## CLI usage
+## Client Payload
 
-```bash
-e2e run-inference \
-  --endpoint-name cozy/sdxl-inference \
-  --function generate \
-  --input 'prompt="a watercolor cat"' \
-  --model-ref alice/my-sdxl-ft@sha256:abc...
+```json
+{
+  "prompt": "a watercolor cat",
+  "model_ref": "alice/my-sdxl-ft@sha256:abc..."
+}
 ```
 
-`--model-ref` threads through as the payload field the function
-declared (here, `model_ref`). Multi-ref functions: pass repeatedly or
-use `--input` with explicit JSON.
+`model_ref` is the payload field declared by the function. Multi-ref functions
+should declare one payload field per ref, or accept an explicit structured
+payload that contains the refs.
 
 ## Placement implications (pairs with #47)
 

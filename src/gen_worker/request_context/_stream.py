@@ -43,7 +43,7 @@ class _RequestOutputStream:
         format: Optional[str] = None,
         create: bool = False,
         expected_size_bytes: Optional[int] = None,
-        # Lineage metadata (checkpoint uploads only). See e2e issue #8.
+        # Lineage metadata (checkpoint uploads only).
         produced_by_kind: Optional[str] = None,
         step_number: Optional[int] = None,
         epoch_number: Optional[int] = None,
@@ -374,8 +374,7 @@ class _RequestOutputStream:
             self._maybe_emit_progress(stage="stream_upload")
 
         # Repo-CAS uploads carry lineage metadata onto /complete so tensorhub
-        # can populate checkpoint_lineage (see e2e issue #8). Media uploads
-        # have no lineage.
+        # can populate checkpoint_lineage. Media uploads have no lineage.
         complete_extra: Optional[Dict[str, Any]] = None
         if self._repo_job_scope is not None:
             extra: Dict[str, Any] = {}

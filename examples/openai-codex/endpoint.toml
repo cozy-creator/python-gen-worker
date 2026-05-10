@@ -1,6 +1,4 @@
 schema_version = 1
-
-name = "openai-codex"
 main = "openai_codex_worker.main"
 [host.requirements]
 # No GPU requirement for this example.
@@ -8,3 +6,7 @@ main = "openai_codex_worker.main"
 [resources]
 ram_gb = 4
 cpu_cores = 2
+
+[[build.profiles]]
+name = "cpu"
+base_image = "ubuntu:24.04"

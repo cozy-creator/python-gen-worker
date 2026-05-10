@@ -1,13 +1,11 @@
 schema_version = 1
-
-name = "medasr-transcribe"
 main = "medasr_transcribe.main"
 
 [models]
 medasr = { ref = "google/medasr", attributes = { dtype = ["fp16", "bf16"] } }
 
 [host.requirements]
-cuda = "12.8"
+cuda_min = "12.8"
 
 [resources]
 vram_gb = 8
