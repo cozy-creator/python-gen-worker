@@ -11,6 +11,26 @@ class Asset(msgspec.Struct):
 
     The worker runtime should populate `local_path` before invoking tenant code
     so the function can open/read the file efficiently.
+
+    An Asset can carry its payload one of two ways on the way out
+    (see tensorhub/docs/api-conventions.md):
+
+      - URL: ``url`` + ``url_expires_at`` point at a presigned download.
+        The worker uploaded the bytes to tensorhub/MinIO and got back a
+        signed receipt (``receipt_jws``).
+      - Inline ``inline_bytes``: the worker SKIPPED the tensorhub upload
+        and returned the raw bytes directly. Used when the client asked
+        for ``Prefer: bytes=inline`` and the payload fits under the
+        worker's inline threshold. Faster and cheaper for small
+        responses; no S3 round-trip. The bytes flow through worker →
+        orchestrator → client as msgpack ``bin`` when the client
+        accepts msgpack, or base64-encoded when the client accepts
+        JSON.
+
+    Exactly one of ``url`` and ``inline_bytes`` is set on a successful
+    output Asset. The field is named ``inline_bytes`` rather than
+    ``bytes`` to avoid the name collision with Python's builtin
+    ``bytes`` (which breaks msgspec.Struct decoding).
     """
 
     ref: str
@@ -26,6 +46,7 @@ class Asset(msgspec.Struct):
     receipt_jws: Optional[str] = None
     download_token: Optional[str] = None
     stream_mode: Optional[str] = None
+    inline_bytes: Optional[bytes] = None
 
     def __fspath__(self) -> str:
         if self.local_path is None:

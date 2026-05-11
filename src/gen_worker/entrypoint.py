@@ -208,12 +208,12 @@ def _run_main() -> int:
     max_reconnect_attempts = 0  # 0 = infinite
     lb_only_retries = True
 
-    if not settings.orchestrator_public_grpc_addr:
-        logger.error("Settings.orchestrator_public_grpc_addr is empty (set ORCHESTRATOR_PUBLIC_GRPC_ADDR env). Refusing to start worker.")
+    if not settings.orchestrator_public_addr:
+        logger.error("Settings.orchestrator_public_addr is empty (set ORCHESTRATOR_PUBLIC_ADDR env). Refusing to start worker.")
         return 1
 
     logger.info("Starting worker...")
-    logger.info("  Scheduler Address: %s", settings.orchestrator_public_grpc_addr)
+    logger.info("  Orchestrator Public Address: %s", settings.orchestrator_public_addr)
     logger.info("  User Function Modules: %s", user_modules)
     logger.info("  Worker ID: %s", settings.worker_id or "(from JWT)")
     logger.info("  Reconnect Delay (base): %.3fs", reconnect_delay)

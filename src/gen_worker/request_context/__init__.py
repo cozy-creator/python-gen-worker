@@ -559,6 +559,13 @@ class RequestContext:
     def log(self, message: str, level: str = "info") -> None:
         self.emit("request.log", {"message": message, "level": level})
 
+    # Inline-bytes threshold: when the client requested
+    # `Prefer: bytes=inline` AND the payload is at or below this many
+    # bytes, skip the tensorhub upload and return the bytes directly
+    # on the Asset (see Asset.bytes docstring). Default ~1 MiB matches
+    # the orchestrator-side default ORCHESTRATOR_OUTPUT_INLINE_MAX_BYTES.
+    _SAVE_BYTES_INLINE_THRESHOLD = 4 * 1024 * 1024
+
     def save_bytes(self, ref: str, data: bytes) -> Asset:
         if not isinstance(data, (bytes, bytearray)):
             raise TypeError("save_bytes expects bytes")
@@ -580,6 +587,25 @@ class RequestContext:
                 size_bytes=len(data),
                 sha256=sha,
             )
+
+        # Inline path: client signaled `Prefer: bytes=inline` and the
+        # payload fits under the inline threshold. Skip the tensorhub
+        # upload entirely — return raw bytes on the Asset and let the
+        # orchestrator pass them through to the client. msgpack on the
+        # wire keeps the bytes raw (no base64 inflation); JSON clients
+        # get them base64-encoded by Go's encoding/json on the way out.
+        output_format = str(
+            (self._execution_hints or {}).get("output_format", "")
+        ).strip().lower()
+        if output_format == "inline" and len(data) <= self._SAVE_BYTES_INLINE_THRESHOLD:
+            return Asset(
+                ref=ref,
+                owner=self.owner,
+                size_bytes=len(data),
+                sha256=hashlib.sha256(data).hexdigest(),
+                inline_bytes=data,
+            )
+
         stream = self.open_output_stream(ref, create=False, expected_size_bytes=len(data))
         stream.write(data)
         out = stream.finalize()

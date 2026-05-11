@@ -20,7 +20,7 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     All fields default to their zero value so the loader can omit any field
     that isn't explicitly set in any source — msgspec.convert applies struct
     defaults for missing keys. Required-ness is enforced by callers (e.g.
-    `Worker.__init__` raises if `orchestrator_public_grpc_addr` is empty).
+    `Worker.__init__` raises if `orchestrator_public_addr` is empty).
     """
 
     # HuggingFace credentials/cache. Universal across endpoints — read by the
@@ -30,7 +30,10 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
 
     # Service endpoints injected by gen-orchestrator at pod launch.
     tensorhub_public_url: str = ""
-    orchestrator_public_grpc_addr: str = ""
+    # Public address of the orchestrator router (ALPN-multiplexed HTTP + gRPC).
+    # Single shared value across the cluster — the router resolves us to the
+    # per-release lease owner. gen-orchestrator issue #317.
+    orchestrator_public_addr: str = ""
 
     # Per-pod worker identity (orchestrator-injected).
     worker_id: str = ""
@@ -43,3 +46,13 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
 
     # Runtime introspection (set by the RunPod runtime; not configuration).
     runpod_pod_id: str = ""
+
+    # Worker self-exit timeout when the orchestrator is unreachable.
+    # The reconnect loop is otherwise infinite (correct for transient
+    # network blips and single-replica restarts). After this many seconds
+    # of NO successful connection, the worker exits cleanly so its
+    # container is reaped by docker/runpod — handles stack-shutdown
+    # ergonomics (compose down, machine power-off) without a separate
+    # shutdown-coordination protocol. Default 600s = 10 min. gen-orchestrator
+    # issue #317.
+    worker_disconnected_timeout_s: int = 600

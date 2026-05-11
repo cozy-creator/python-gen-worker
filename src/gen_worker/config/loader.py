@@ -31,12 +31,13 @@ _ENV_TO_FIELD: Dict[str, str] = {
     "HF_TOKEN": "hf_token",
     "HF_HOME": "hf_home",
     "TENSORHUB_PUBLIC_URL": "tensorhub_public_url",
-    "ORCHESTRATOR_PUBLIC_GRPC_ADDR": "orchestrator_public_grpc_addr",
+    "ORCHESTRATOR_PUBLIC_ADDR": "orchestrator_public_addr",
     "WORKER_ID": "worker_id",
     "WORKER_MODE": "worker_mode",
     "WORKER_JWT": "worker_jwt",
     "TRAINER_JOB_SPEC_PATH": "trainer_job_spec_path",
     "RUNPOD_POD_ID": "runpod_pod_id",
+    "WORKER_DISCONNECTED_TIMEOUT_S": "worker_disconnected_timeout_s",
 }
 
 _FIELD_NAMES = frozenset(_ENV_TO_FIELD.values())
@@ -168,8 +169,10 @@ def load_settings(**init_kwargs: Any) -> Settings:
 
     Layers from lowest precedence to highest, merging dict-update style so
     later layers overwrite earlier ones. Then hands the merged dict to
-    `msgspec.convert(..., strict=True)` which applies struct defaults for
-    missing fields and rejects invalid values (e.g. `worker_mode=garbage`).
+    `msgspec.convert(..., strict=False)` which performs lossless string→typed
+    coercion (env vars arrive as strings; numeric / bool fields get parsed)
+    while still rejecting non-fitting values (e.g. `WORKER_MODE=garbage` is
+    not a member of the Literal so it still raises).
     """
     merged: Dict[str, Any] = {}
     merged.update(_load_yaml())
@@ -177,4 +180,4 @@ def load_settings(**init_kwargs: Any) -> Settings:
     merged.update(_load_dotenv())
     merged.update(_load_env())
     merged.update(_normalize_init_kwargs(init_kwargs))
-    return msgspec.convert(merged, Settings, strict=True)
+    return msgspec.convert(merged, Settings, strict=False)

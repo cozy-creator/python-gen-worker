@@ -207,7 +207,7 @@ class Worker:
         Args:
             settings: The canonical worker `Settings` loaded once at process
                 start (`gen_worker.config.load_settings`). Provides
-                orchestrator_public_grpc_addr, worker_id, worker_jwt,
+                orchestrator_public_addr, worker_id, worker_jwt,
                 tensorhub_public_url, hf_token, hf_home, runpod_pod_id.
             user_module_names: List of Python module names containing
                 user-defined @inference_function functions.
@@ -219,10 +219,10 @@ class Worker:
                 containing models, resources, etc.
         """
         self._settings = settings
-        scheduler_addr, use_tls = _normalize_grpc_addr(settings.orchestrator_public_grpc_addr)
+        scheduler_addr, use_tls = _normalize_grpc_addr(settings.orchestrator_public_addr)
         if not scheduler_addr:
             raise RuntimeError(
-                "Settings.orchestrator_public_grpc_addr is required to start the worker"
+                "Settings.orchestrator_public_addr is required to start the worker"
             )
         self.scheduler_addr = scheduler_addr
         self.scheduler_addrs = self._normalize_scheduler_addrs(scheduler_addr, None)
@@ -325,7 +325,7 @@ class Worker:
         # not_leader:<addr> and closes the stream. The worker reconnects to the
         # advertised addr. If the redirect chain doesn't terminate within this
         # many hops something is wrong (stale lease addr, network partition,
-        # misconfigured ORCHESTRATOR_PUBLIC_GRPC_ADDR) and we should fail loud
+        # misconfigured ORCHESTRATOR_PUBLIC_ADDR) and we should fail loud
         # rather than spinning forever.
         self._max_redirect_chain = 5
         self._redirect_chain_count = 0
@@ -2477,6 +2477,13 @@ class Worker:
         self._stop_event.clear()
         self._reconnect_count = 0 # Reset reconnect count on new run
         self._draining = False
+        # Self-exit cap (gen-orchestrator #317): track the last time we
+        # were successfully connected. After settings.worker_disconnected_timeout_s
+        # of continuous failure to reconnect, exit cleanly so the container
+        # is reaped. Stack-shutdown ergonomics without a separate
+        # shutdown-coordination protocol.
+        timeout_s = int(self._settings.worker_disconnected_timeout_s or 0)
+        self._last_successful_connect_at = time.monotonic()
         self._start_registration_watchdog()
 
         try:
@@ -2485,6 +2492,7 @@ class Worker:
                 logger.info(f"Connection attempt {self._reconnect_count}...")
                 if self.connect():
                     # Successfully connected, wait for stop signal or disconnection
+                    self._last_successful_connect_at = time.monotonic()
                     logger.info("Connection successful. Worker running.")
                     self._stop_event.wait() # Wait here until stopped or disconnected
                     logger.info("Worker run loop received stop/disconnect signal.")
@@ -2496,6 +2504,21 @@ class Worker:
                         logger.error("Failed to connect after maximum attempts. Stopping worker.")
                         self._running = False # Ensure loop terminates
                         break
+
+                    # Self-exit when disconnected too long. Bounded version
+                    # of the previously-infinite reconnect loop — keeps the
+                    # container from running forever if the orchestrator is
+                    # gone for good (stack shutdown, machine power-off).
+                    if timeout_s > 0:
+                        elapsed = time.monotonic() - self._last_successful_connect_at
+                        if elapsed >= timeout_s:
+                            logger.error(
+                                "Worker disconnected for %.1fs without a successful reconnect "
+                                "(WORKER_DISCONNECTED_TIMEOUT_S=%d). Exiting so container is reaped.",
+                                elapsed, timeout_s,
+                            )
+                            self._running = False
+                            break
 
                     if self._running and not self._stop_event.is_set():
                         delay = self._next_reconnect_delay(self._reconnect_count)
