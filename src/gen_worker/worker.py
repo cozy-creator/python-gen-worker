@@ -303,7 +303,7 @@ class Worker:
         # not_leader:<addr> and closes the stream. The worker reconnects to the
         # advertised addr. If the redirect chain doesn't terminate within this
         # many hops something is wrong (stale lease addr, network partition,
-        # misconfigured PUBLIC_ORCHESTRATOR_GRPC_ADDR) and we should fail loud
+        # misconfigured ORCHESTRATOR_PUBLIC_GRPC_ADDR) and we should fail loud
         # rather than spinning forever.
         self._max_redirect_chain = 5
         self._redirect_chain_count = 0

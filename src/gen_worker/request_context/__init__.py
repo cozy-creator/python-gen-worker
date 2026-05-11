@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Literal, Mapping, Optional
 
@@ -576,6 +577,49 @@ class RequestContext:
         if isinstance(out, Asset):
             return out
         raise RuntimeError("file save failed (invalid_asset_response)")
+
+    def save_image(
+        self,
+        image: Any,
+        ref: Optional[str] = None,
+        *,
+        format: str = "webp",
+        quality: int = 95,
+        lossless: bool = False,
+    ) -> Asset:
+        fmt = str(format or "webp").strip().lower()
+        if fmt in {"jpg", "jpeg"}:
+            pil_format = "JPEG"
+            ext = ".jpg"
+        elif fmt == "png":
+            pil_format = "PNG"
+            ext = ".png"
+        elif fmt == "webp":
+            pil_format = "WEBP"
+            ext = ".webp"
+        else:
+            raise ValueError("unsupported image format")
+
+        if ref is None or str(ref).strip() == "":
+            ref = f"outputs/{self.request_id}/image{ext}"
+        else:
+            ref = _normalize_output_ref(str(ref))
+            if Path(ref).suffix == "":
+                ref += ext
+
+        img = image
+        if pil_format == "JPEG" and getattr(img, "mode", "") in {"RGBA", "LA", "P"}:
+            img = img.convert("RGB")
+
+        buf = BytesIO()
+        save_kwargs: Dict[str, Any] = {}
+        if pil_format in {"JPEG", "WEBP"}:
+            save_kwargs["quality"] = max(1, min(int(quality), 100))
+        if pil_format == "WEBP":
+            save_kwargs["lossless"] = bool(lossless)
+            save_kwargs["method"] = 6
+        img.save(buf, format=pil_format, **save_kwargs)
+        return self.save_bytes(ref, buf.getvalue())
 
     def save_file(self, ref: str, local_path: str) -> Asset:
         ref = _normalize_output_ref(ref)

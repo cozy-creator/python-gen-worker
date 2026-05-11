@@ -20,7 +20,7 @@ from blake3 import blake3
 
 from ..api.errors import AuthError
 from ..api.types import Asset, Tensors
-from ._helpers import _enforce_output_file_size_limit, _infer_tensors_format, _normalize_output_ref
+from ._helpers import _enforce_output_file_size_limit, _infer_mime_type, _infer_tensors_format, _normalize_output_ref
 
 if TYPE_CHECKING:
     from . import RequestContext
@@ -346,6 +346,9 @@ class _RequestOutputStream:
         req_id = str(self._ctx.request_id or "").strip()
         if req_id:
             create_payload["request_id"] = req_id
+        content_type = self._infer_content_type()
+        if content_type and content_type != "application/octet-stream":
+            create_payload["content_type"] = content_type
 
         if self._repo_job_scope is None:
             # Media upload.
@@ -458,6 +461,16 @@ class _RequestOutputStream:
                 stream_mode=self.stream_mode,
             )
         return asset
+
+    def _infer_content_type(self) -> str:
+        assert self._tmp_path is not None
+        head = b""
+        try:
+            with open(self._tmp_path, "rb") as f:
+                head = f.read(512)
+        except Exception:
+            head = b""
+        return _infer_mime_type(self._ref, head)
 
     @staticmethod
     def _classify_error(exc: BaseException) -> str:

@@ -2,7 +2,7 @@
 name = "from-scratch"
 version = "0.1.0"
 dependencies = [
-    "gen-worker[torch]>=0.5.11",
+    "gen-worker[torch]>=0.5.12",
     "safetensors",
 ]
 

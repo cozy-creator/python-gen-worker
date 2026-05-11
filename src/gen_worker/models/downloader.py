@@ -19,7 +19,7 @@ class ModelDownloader(ABC):
         raise NotImplementedError
 
 
-class CozyHubDownloader(ModelDownloader):
+class TensorhubDownloader(ModelDownloader):
     """
     Simple async downloader for Cozy hub model artifacts.
 

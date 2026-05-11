@@ -6,7 +6,7 @@ from .cache_paths import (
     tensorhub_cas_dir,
     worker_local_model_cache_dir_default,
 )
-from .downloader import CozyHubDownloader, ModelDownloader
+from .downloader import TensorhubDownloader, ModelDownloader
 from .interface import ModelManagementInterface, ModelManager
 from .refs import CozyRef, HuggingFaceRef, ParsedModelRef, parse_model_ref
 
@@ -17,7 +17,7 @@ __all__ = [
     "tensorhub_cache_dir",
     "tensorhub_cas_dir",
     "worker_local_model_cache_dir_default",
-    "CozyHubDownloader",
+    "TensorhubDownloader",
     "ModelDownloader",
     "ModelManagementInterface",
     "ModelManager",

@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional
 
 
 @dataclass(frozen=True)
-class CozyHubWorkerCapabilities:
+class TensorhubWorkerCapabilities:
     cuda_version: str
     gpu_sm: int
     torch_version: str
@@ -28,7 +28,7 @@ def _is_importable(module_name: str) -> bool:
         return False
 
 
-def detect_worker_capabilities(*, extra_libs: Optional[List[str]] = None) -> CozyHubWorkerCapabilities:
+def detect_worker_capabilities(*, extra_libs: Optional[List[str]] = None) -> TensorhubWorkerCapabilities:
     """
     Detect worker capabilities for Cozy Hub artifact selection.
 
@@ -65,7 +65,7 @@ def detect_worker_capabilities(*, extra_libs: Optional[List[str]] = None) -> Coz
         pass
 
     installed.sort()
-    return CozyHubWorkerCapabilities(
+    return TensorhubWorkerCapabilities(
         cuda_version=cuda_version,
         gpu_sm=gpu_sm,
         torch_version=torch_version,

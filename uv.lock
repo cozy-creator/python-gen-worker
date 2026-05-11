@@ -736,7 +736,7 @@ wheels = [
 
 [[package]]
 name = "gen-worker"
-version = "0.5.10"
+version = "0.5.12"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
