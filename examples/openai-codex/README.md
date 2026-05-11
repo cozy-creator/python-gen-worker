@@ -1,23 +1,18 @@
-# OpenAI Codex example worker
+# openai-codex
 
-This example runs OpenAI's Codex CLI inside a `gen-worker` function and streams Codex's JSONL events back as incremental deltas.
+Runs the OpenAI `codex` CLI in headless mode and streams its JSONL event output back to the caller as incremental deltas.
 
-## Build
+## What it demonstrates
+- **Streaming output** — the function returns `Iterator[Delta]`; each yielded struct is flushed to the caller as it's produced (no buffering until completion).
+- **CPU-only** endpoint (no GPU declared).
+- **Subprocess + secret env vars** — `CODEX_API_KEY` injected at runtime; the function `raise ValueError(...)` cleanly when it's missing, which the SDK maps to a 4xx for the invoker.
+- **Multi-profile build** — `[[build.profiles]]` shows how to declare alternative base images (CPU variant only here).
 
-This image expects an orchestrator to inject `WORKER_JWT` and a Codex API key at runtime.
+## When to copy it
+- Wrapping a CLI tool as an endpoint (anything you'd shell out to).
+- Streaming response patterns — generic example you can adapt for token-by-token LLM output, frame-by-frame video, etc.
+- Endpoints that need runtime secrets (API keys) injected via environment.
 
-```bash
-docker build -t cozy-example-openai-codex:dev -f Dockerfile .
-```
-
-## Run (local)
-
-Codex `exec` supports `CODEX_API_KEY` in headless mode.
-
-```bash
-docker run --rm \
-  -e WORKER_JWT="..." \
-  -e PUBLIC_ORCHESTRATOR_GRPC_ADDR="host.docker.internal:8080" \
-  -e CODEX_API_KEY="..." \
-  cozy-example-openai-codex:dev
-```
+## Files
+- `src/openai_codex_worker/main.py` — subprocess spawn + JSONL line iteration.
+- `endpoint.toml` — declares CPU-only resources + a multi-profile build matrix.

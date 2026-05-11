@@ -29,7 +29,7 @@ import inspect
 import logging
 import typing
 from pathlib import Path
-from typing import Any, Callable, Optional, TYPE_CHECKING, get_args, get_origin
+from typing import Any, Callable, TYPE_CHECKING, get_args, get_origin
 
 import msgspec
 
@@ -138,7 +138,6 @@ def training_function(
     fn: Callable[..., list[ProducedFlavor]] | None = None,
     *,
     kind: str = DEFAULT_KIND,
-    concurrency: str = "sequential",
     label: str | None = None,
     description: str | None = None,
     calibration: dict[str, CalibrationPolicy] | None = None,
@@ -152,9 +151,6 @@ def training_function(
         kind: Populates ``training_jobs.kind`` at dispatch.
             See ``RECOMMENDED_KINDS`` for the coarse label set; sub-labels
             via ``kind='quantization:gptq-w4'`` permitted.
-        concurrency: ``"sequential"`` (default — training workloads aren't
-            typically reentrant) | ``"batched"`` | ``"concurrent"``. See
-            tensorhub #232 for the scheduler dispatch model.
         label: Optional author-supplied UI / search label. Non-functional.
         description: Optional free-text description. Non-functional.
         calibration: Per-scheme calibration policy, as a
@@ -182,13 +178,13 @@ def training_function(
     if fn is None:
         def _apply(real_fn: Callable[..., list[ProducedFlavor]]) -> Callable[..., list[ProducedFlavor]]:
             return _build_dispatch(
-                real_fn, kind=kind, concurrency=concurrency,
+                real_fn, kind=kind,
                 label=label, description=description,
                 calibration=calibration,
             )
         return _apply  # type: ignore[return-value]
     return _build_dispatch(
-        fn, kind=kind, concurrency=concurrency,
+        fn, kind=kind,
         label=label, description=description,
         calibration=calibration,
     )
@@ -214,7 +210,6 @@ def _build_dispatch(
     fn: Callable[..., list[ProducedFlavor]],
     *,
     kind: str,
-    concurrency: str = "sequential",
     label: str | None = None,
     description: str | None = None,
     calibration: dict[str, CalibrationPolicy] | None = None,
@@ -226,13 +221,6 @@ def _build_dispatch(
     validated_calibration: dict[str, CalibrationPolicy] = (
         validate_policy_map(fn.__name__, calibration) if calibration else {}
     )
-    # Concurrency enum sanity check — matches CONCURRENCY_MODES in the
-    # inference_function decorator. Tensorhub #232.
-    if concurrency not in ("sequential", "batched", "concurrent"):
-        raise ValueError(
-            f"@training_function: concurrency={concurrency!r} must be one of "
-            "('sequential', 'batched', 'concurrent')"
-        )
     # Resolve string-form annotations (from __future__ import annotations) so
     # reserved-type comparisons work against actual class objects, not strings.
     sig = inspect.signature(fn)
@@ -317,10 +305,6 @@ def _build_dispatch(
     dispatch.__doc__ = fn.__doc__
     dispatch._is_training_function = True  # type: ignore[attr-defined]
     dispatch._worker_resources = ResourceRequirements(kind="training")  # type: ignore[attr-defined]
-    # Tensorhub #232: scheduler-facing capability metadata. Discovery emits
-    # these into endpoint.lock; orchestrator reads them onto FunctionMetadata
-    # for per-function routing decisions.
-    dispatch._concurrency_mode = concurrency  # type: ignore[attr-defined]
     dispatch._function_label = (label or "").strip() or None  # type: ignore[attr-defined]
     dispatch._function_description = (description or "").strip() or None  # type: ignore[attr-defined]
     # Per-scheme calibration policy. Discovery / endpoint.lock

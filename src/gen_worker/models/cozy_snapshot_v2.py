@@ -12,8 +12,7 @@ from typing import Any, Coroutine, Dict, List, Optional, Set
 
 from .cozy_cas import _download_one_file as _download_one_file
 from .cozy_cas import _norm_rel_path
-from .hub_policy import default_resolve_preferences
-from .hub_client import CozyHubV2Client, CozyHubResolveArtifactResult, CozyHubSnapshotFile
+from .hub_client import WorkerResolvedRepo, WorkerResolvedRepoFile
 from .refs import CozyRef
 
 _log = logging.getLogger("gen_worker.download")
@@ -97,7 +96,7 @@ def _try_hardlink_or_copy(src: Path, dst: Path) -> None:
 # Coerce orchestrator wire format -> internal type
 # ---------------------------------------------------------------------------
 
-def _coerce_resolved_model(ref: CozyRef, resolved: Any) -> CozyHubResolveArtifactResult:
+def _coerce_resolved_model(ref: CozyRef, resolved: Any) -> WorkerResolvedRepo:
     """Handle both legacy (.files[]) and v2 (.entries[], blake3:-prefixed digests)."""
     snapshot_digest = str(_field(resolved, "snapshot_digest", "snapshotDigest") or "").strip()
     if not snapshot_digest:
@@ -106,7 +105,7 @@ def _coerce_resolved_model(ref: CozyRef, resolved: Any) -> CozyHubResolveArtifac
 
     # v2 uses "entries", legacy uses "files"
     files_raw = list(_field(resolved, "entries", "files") or [])
-    files: List[CozyHubSnapshotFile] = []
+    files: List[WorkerResolvedRepoFile] = []
     for ent in files_raw:
         path = str(_field(ent, "path") or "").strip()
         if not path:
@@ -118,15 +117,13 @@ def _coerce_resolved_model(ref: CozyRef, resolved: Any) -> CozyHubResolveArtifac
         size_bytes = int(_field(ent, "size_bytes") or 0)
         if not blake3_hex or not url:
             raise ValueError(f"resolved model file missing blake3/url: {path}")
-        files.append(CozyHubSnapshotFile(path=path, size_bytes=size_bytes, blake3=blake3_hex, url=url))
+        files.append(WorkerResolvedRepoFile(path=path, size_bytes=size_bytes, blake3=blake3_hex, url=url))
 
     if not files:
         raise ValueError("resolved model has empty files list")
 
-    return CozyHubResolveArtifactResult(
-        repo_revision_seq=0,
+    return WorkerResolvedRepo(
         snapshot_digest=snapshot_digest,
-        artifact=None,
         files=files,
     )
 
@@ -143,25 +140,28 @@ class CozySnapshotV2Downloader:
       snapshots/<snapshot_digest>/...
     """
 
-    def __init__(self, client: Optional[CozyHubV2Client]) -> None:
-        self._client = client
+    def __init__(self) -> None:
+        pass
 
     async def ensure_snapshot(
         self,
         base_dir: Path,
         ref: CozyRef,
         *,
-        resolved: Optional[Any] = None,
+        resolved: Any,
     ) -> Path:
         blobs_root = base_dir / "blobs"
         snaps_root = base_dir / "snapshots"
         blobs_root.mkdir(parents=True, exist_ok=True)
         snaps_root.mkdir(parents=True, exist_ok=True)
 
-        if resolved is not None:
-            res = _coerce_resolved_model(ref, resolved)
-        else:
-            res = await self._resolve(ref)
+        if resolved is None:
+            # Workers don't resolve via HTTP — the orchestrator pre-resolves
+            # every cozy ref a job needs and ships URLs via JobExecutionRequest.
+            raise RuntimeError(
+                "cozy snapshot requires orchestrator-resolved URLs (resolved=None)"
+            )
+        res = _coerce_resolved_model(ref, resolved)
 
         snap_dir = snaps_root / res.snapshot_digest
         if snap_dir.exists():
@@ -223,11 +223,11 @@ class CozySnapshotV2Downloader:
     # Blob download (deduplicated, parallel)
     # ------------------------------------------------------------------
 
-    async def _ensure_blobs(self, blobs_root: Path, files: List[CozyHubSnapshotFile]) -> None:
+    async def _ensure_blobs(self, blobs_root: Path, files: List[WorkerResolvedRepoFile]) -> None:
         # Deduplicate by digest — same blob referenced by multiple paths (e.g.
         # fp16 and normal variants sharing the same part) is downloaded once.
         seen: Set[str] = set()
-        unique: List[CozyHubSnapshotFile] = []
+        unique: List[WorkerResolvedRepoFile] = []
         for f in files:
             digest = (f.blake3 or "").strip().lower()
             if not digest:
@@ -246,7 +246,7 @@ class CozySnapshotV2Downloader:
         max_conc = max(1, int(os.getenv("WORKER_MODEL_DOWNLOAD_CONCURRENCY", "4") or "4"))
         sem = asyncio.Semaphore(max_conc)
 
-        async def _dl(f: CozyHubSnapshotFile) -> None:
+        async def _dl(f: WorkerResolvedRepoFile) -> None:
             digest = f.blake3.strip().lower()
             dst = _blob_path(blobs_root, digest)
             dst.parent.mkdir(parents=True, exist_ok=True)
@@ -274,7 +274,7 @@ class CozySnapshotV2Downloader:
     # ------------------------------------------------------------------
 
     def _reassemble_chunked(
-        self, blobs_root: Path, tmp: Path, files: List[CozyHubSnapshotFile]
+        self, blobs_root: Path, tmp: Path, files: List[WorkerResolvedRepoFile]
     ) -> None:
         """Read .parts.json manifests and concatenate part blobs into original files."""
         for f in files:
@@ -318,7 +318,7 @@ class CozySnapshotV2Downloader:
     # ------------------------------------------------------------------
 
     def _materialize_regular(
-        self, blobs_root: Path, tmp: Path, files: List[CozyHubSnapshotFile]
+        self, blobs_root: Path, tmp: Path, files: List[WorkerResolvedRepoFile]
     ) -> None:
         """Hardlink/copy non-chunked blobs into the snapshot tree."""
         part_paths = {f.path for f in files if _is_part_file(f.path)}
@@ -330,23 +330,6 @@ class CozySnapshotV2Downloader:
             src = _blob_path(blobs_root, f.blake3)
             _try_hardlink_or_copy(src, dst)
 
-    # ------------------------------------------------------------------
-    # Hub resolution
-    # ------------------------------------------------------------------
-
-    async def _resolve(self, ref: CozyRef) -> CozyHubResolveArtifactResult:
-        if self._client is None:
-            raise RuntimeError("cozy hub api resolve is disabled")
-        prefs = default_resolve_preferences()
-        return await self._client.resolve_artifact(
-            owner=ref.owner,
-            repo=ref.repo,
-            tag=ref.tag,
-            digest=ref.digest,
-            flavor=ref.flavor,
-            include_urls=True,
-            preferences=prefs,
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -357,16 +340,9 @@ async def ensure_snapshot_async(
     *,
     base_dir: Path,
     ref: CozyRef,
-    base_url: str,
-    token: Optional[str],
-    resolved: Optional[Any] = None,
+    resolved: Any,
 ) -> Path:
-    client: Optional[CozyHubV2Client] = None
-    if resolved is None:
-        if not (base_url or "").strip():
-            raise RuntimeError("cozy downloads require TENSORHUB_URL")
-        client = CozyHubV2Client(base_url=base_url, token=token)
-    dl = CozySnapshotV2Downloader(client)
+    dl = CozySnapshotV2Downloader()
     return await dl.ensure_snapshot(base_dir, ref, resolved=resolved)
 
 

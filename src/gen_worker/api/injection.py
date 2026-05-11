@@ -71,10 +71,6 @@ class ModelRef:
     require_lineage_descendant_of: str = ""
     require_lineage_verified: bool = False
 
-    # Attribute scoping — subset-containment against the checkpoint's
-    # attributes. {key: [allowed_values]} semantics.
-    required_attributes: tuple = ()  # tuple of (key, allowed_values_tuple)
-
 
 @dataclass(frozen=True)
 class InjectionSpec:

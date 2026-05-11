@@ -298,7 +298,12 @@ class JsonHttpArtifactUploader(ArtifactUploader):
                 "ref": ref,
                 "request_id": str(self._request_id or ""),
             }
-            endpoint_path = "/api/v1/media/uploads"
+            owner = (self._owner or "").strip()
+            if not owner:
+                raise ArtifactUploadError(
+                    "media upload requires owner (set on the orchestrated trainer)"
+                )
+            endpoint_path = f"/api/v1/media/{quote(owner, safe='')}/uploads"
         else:
             # Issue #20: repo-CAS uploads use the session-scoped URL shape.
             # The trainer subsystem owns the session lifecycle here (checkpoint

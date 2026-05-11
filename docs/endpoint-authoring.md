@@ -1,38 +1,20 @@
-# Endpoint Author Manual
+# Endpoint Authoring Guide
 
-This manual covers how to write Python code using the `gen-worker` library to
-publish endpoints to Cozy. Three endpoint types are supported:
+A guide for writing Python endpoints with `gen-worker`. Three endpoint kinds:
 
-- **Inference** — request/response functions, optionally streaming.
-- **Conversion** — functions that produce weight artifacts on a destination repo.
-- **Training** — long-running jobs implemented as a stateful trainer class.
+| Kind | Decorator | Lives in | What it does |
+|---|---|---|---|
+| Inference | `@inference_function` | `gen_worker` | Request/response (optionally streaming) |
+| Conversion | `@training_function(kind="format-conversion")` | `gen_worker.conversion` | Produces new weight artifacts on a destination repo |
+| Training | trainer class | `gen_worker.trainer` | Long-running stateful job, periodic checkpoints |
 
-The library handles discovery, scheduling, model loading, cancellation, artifact
-uploads, and terminal reporting. Your code owns the function body only.
-
-For ownership boundaries between this worker library, endpoint repos, and the
-control plane, see `docs/system-boundaries.md`.
+The SDK handles discovery, scheduling, model loading, cancellation, file I/O, and terminal reporting. You write the function body.
 
 ---
 
-## 1. Terminology
+## 1. Project Layout
 
-- `owner` — publishing namespace (an org slug in URLs; canonical ID is a UUID).
-- `endpoint` — published unit, built from your source. Your `endpoint.toml`
-  `name` becomes the endpoint slug.
-- `function` — an invokable unit inside an endpoint release. Names are derived
-  from `@worker_function` names (normalized to a URL-safe slug, e.g.
-  `medasr_transcribe` → `medasr-transcribe`).
-- `release_id` — immutable identifier for a published endpoint release.
-- Invoke reference — `owner/endpoint/function[:tag]` (default tag `prod`).
-- `invoker` / `invoker_id` — the identity performing an invocation.
-- `request` / `job` — one execution of a function (legacy: "task"/"action").
-
----
-
-## 2. Project Layout
-
-A tenant endpoint is a Dockerfile-first project:
+A tenant endpoint is Dockerfile-first:
 
 ```
 my-endpoint/
@@ -45,64 +27,66 @@ my-endpoint/
         └── main.py
 ```
 
-The built image must:
+The Dockerfile must:
 
-1. Install `gen-worker`.
+1. Install `gen-worker` and your dependencies.
 2. Bake the discovery manifest at build time:
    ```dockerfile
-   RUN mkdir -p /app/.tensorhub \
-     && python -m gen_worker.discovery > /app/.tensorhub/endpoint.lock
+   RUN mkdir -p /app/.tensorhub && \
+       uv run python -m gen_worker.discovery > /app/.tensorhub/endpoint.lock
    ```
-3. Use `gen_worker.entrypoint` as the container entrypoint:
+3. Use `gen_worker.entrypoint` as the entrypoint:
    ```dockerfile
-   ENTRYPOINT ["python", "-m", "gen_worker.entrypoint"]
+   ENTRYPOINT ["uv", "run", "python", "-m", "gen_worker.entrypoint"]
    ```
 
-`endpoint.toml` is a build-time input; it does not need to be shipped inside the
-image. The control plane reads `/app/.tensorhub/endpoint.lock` from the image
-and stores it for routing.
+`endpoint.toml` is a build-time input; it does not need to be in the final image. The control plane reads `/app/.tensorhub/endpoint.lock` and stores it for routing.
 
 ---
 
-## 3. `endpoint.toml` Reference
+## 2. `endpoint.toml` Reference
 
 ```toml
 schema_version = 1
 name = "my-endpoint"
-main = "my_pkg.main"         # Python import path that discovery scans
+main = "my_pkg.main"   # Python import path that discovery scans
 
 [host.requirements]
-cuda = "12.8"                # presence indicates GPU requirement
-compute_capabilities = ["8.0", "8.6"]   # optional
+cuda = "12.8"                            # presence indicates GPU requirement
+compute_capabilities = ["8.0", "8.6"]    # optional, supported SM list
 
 [resources]
 vram_gb = 12
 ram_gb = 32
 cpu_cores = 8
 disk_gb = 80
-max_inflight_requests = 1
 
-# Fixed model keyspace (available to any function)
+# Static model refs: declared up front, pre-resolved at deploy time, available
+# to any function. Selectors live in the ref string itself:
+#   "owner/repo"               → latest tag, default flavor
+#   "owner/repo:prod"          → prod tag, default flavor
+#   "owner/repo:prod#int4"     → prod tag, int4 flavor
+#   "owner/repo@blake3:<hex>"  → pinned checkpoint
 [models]
-sdxl = { ref = "stabilityai/stable-diffusion-xl-base-1.0", attributes = { dtype = ["fp16", "bf16"] } }
+sdxl = "stabilityai/stable-diffusion-xl-base-1.0:prod"
 
-# Per-function keyspace (for payload-driven model selection)
+# Per-function model keyspace — payload chooses one key at invoke time.
 [models.generate]
 dreamshaper = "lykon/dreamshaper-xl-v2-turbo"
 juggernaut  = "rundiffusion/juggernaut-xl-v9"
 ```
 
-The shorthand `key = "owner/repo"` omits attributes — the tensorhub resolver matches any variant and picks the tag/latest.
+The publishing identity must have read access to every declared ref; deployment fails fast otherwise.
 
 ---
 
-## 4. Inference Endpoints
+## 3. Inference Endpoints
 
 ### Minimal handler
 
 ```python
 import msgspec
-from gen_worker import RequestContext, worker_function
+from gen_worker import RequestContext, inference_function
 
 class Input(msgspec.Struct):
     prompt: str
@@ -110,79 +94,42 @@ class Input(msgspec.Struct):
 class Output(msgspec.Struct):
     text: str
 
-@worker_function()
+@inference_function
 def generate(ctx: RequestContext, payload: Input) -> Output:
     return Output(text=f"Hello, {payload.prompt}!")
 ```
 
-Inputs and outputs must be `msgspec.Struct` types. The discovery manifest
-records their schemas.
+Inputs and outputs must be `msgspec.Struct`. The discovery step records their JSON schemas.
 
-### `@worker_function` resources
-
-Optional `ResourceRequirements` hints for the scheduler:
+### Resource hints
 
 ```python
-from gen_worker import worker_function
-from gen_worker.api.decorators import ResourceRequirements
+from gen_worker import inference_function, ResourceRequirements
 
-@worker_function(resources=ResourceRequirements(
-    batch_size_target=4,
-    prefetch_depth=2,
+@inference_function(resources=ResourceRequirements(
+    accelerator="cuda",
     requires_gpu=True,
     min_vram_gb=8.0,
+    cuda_compute_min=8.0,
+    required_libraries=["torch", "diffusers"],
 ))
 def generate(ctx, payload): ...
 ```
 
-Common fields: `batch_size_{min,target,max}`, `prefetch_depth`, `max_wait_ms`,
-`memory_hint_mb`, `kind`, `requires_gpu`, `min_vram_gb`, `vram_multiplier`,
-`compute_capability_min`, `supported_precisions`, `supported_conversion_profiles`.
+Fields: `kind`, `accelerator` (`"none"` | `"cuda"`), `requires_gpu`, `min_vram_gb`, `cuda_compute_min` (SM floor as float, e.g. `8.0`), `required_libraries`.
 
-### `RequestContext`
+### Model injection
 
-What your function receives as its first argument.
+Declare a model dependency with `Annotated[..., ModelRef(...)]`. The worker loads and caches the object; your function receives the live instance.
 
-Identity and environment:
-
-- `request_id`, `job_id`, `parent_request_id`, `child_request_id`
-- `owner`, `invoker_id`, `workspace_scope_id`
-- `device` (torch device), `timeout_ms`, `deadline`, `time_remaining_s()`
-- `resolved_cozy_models_by_id`, `required_models`
-
-Lifecycle:
-
-- `is_canceled() -> bool` — cooperative cancellation check.
-- `done` (a `threading.Event`) and `cancel()`.
-- `progress(progress: float, stage: str | None)` — emit progress events.
-- `log(message, level)` — structured log.
-- `emit(event_type, payload)` — custom event.
-
-Output persistence:
-
-- `save_bytes(ref, data) -> Asset`
-- `save_file(ref, local_path) -> Asset`
-- `save_checkpoint(ref, local_path, format=...) -> Tensors`
-- `save_checkpoint_bytes(ref, data, format=...) -> Tensors`
-- `open_output_stream()` — incremental byte streams.
-- `open_checkpoint_stream(ref, format=...)` — incremental weight artifacts;
-  `finalize()` returns a `Tensors`.
-
-Batching hints: `preferred_batch_size()`, `prefetch_depth()`.
-
-### Model Injection
-
-Declare a model dependency with `Annotated[..., ModelRef(...)]`. The worker
-loads and caches the model; your function receives the live object.
-
-**Fixed** — the model key is baked into the signature:
+**Fixed** — key baked into the signature:
 
 ```python
 from typing import Annotated
 from diffusers import DiffusionPipeline
-from gen_worker.api.injection import ModelRef, ModelRefSource as Src
+from gen_worker import ModelRef, ModelRefSource as Src
 
-@worker_function()
+@inference_function
 def generate(
     ctx: RequestContext,
     pipe: Annotated[DiffusionPipeline, ModelRef(Src.FIXED, "sdxl")],
@@ -190,14 +137,14 @@ def generate(
 ) -> Output: ...
 ```
 
-**Payload-selected** — the caller chooses from the function's keyspace:
+**Payload-selected** — caller chooses from the function's `[models.<fn>]` keyspace:
 
 ```python
 class Input(msgspec.Struct):
     prompt: str
     model: str   # must match a key in [models.generate]
 
-@worker_function()
+@inference_function
 def generate(
     ctx: RequestContext,
     pipe: Annotated[DiffusionPipeline, ModelRef(Src.PAYLOAD, "model")],
@@ -205,13 +152,11 @@ def generate(
 ) -> Output: ...
 ```
 
-Payload selection rejects arbitrary repo refs; only short keys declared in
-`[models.<function>]` are accepted by default.
+Only short keys declared in `[models.<function>]` are accepted; arbitrary repo refs from the payload are rejected.
 
-### Streaming Output
+### Streaming output
 
-Return `Iterator[T]`, `Generator[T, None, None]`, or `AsyncIterator[T]`. Each
-yielded struct is flushed to the caller as a delta.
+Return `Iterator[T]`, `Generator[T, None, None]`, or `AsyncIterator[T]`. Each yielded struct is flushed as a delta.
 
 ```python
 from typing import Iterator
@@ -219,7 +164,7 @@ from typing import Iterator
 class Delta(msgspec.Struct):
     chunk: str
 
-@worker_function()
+@inference_function
 def stream(ctx: RequestContext, payload: Input) -> Iterator[Delta]:
     for word in payload.prompt.split():
         if ctx.is_canceled():
@@ -227,14 +172,12 @@ def stream(ctx: RequestContext, payload: Input) -> Iterator[Delta]:
         yield Delta(chunk=word)
 ```
 
-For Hugging Face `TextIteratorStreamer` integration, see
-`gen_worker.api.streaming.iter_transformers_text_deltas` (forwards a cancel
-check while iterating).
+For Hugging Face `TextIteratorStreamer`, `gen_worker.iter_transformers_text_deltas` forwards a cancel check while iterating.
 
-### Saving Output Files
+### Saving output files
 
 ```python
-@worker_function()
+@inference_function
 def render(ctx: RequestContext, payload: Input) -> Output:
     asset = ctx.save_bytes(
         f"jobs/{ctx.request_id}/outputs/out.png",
@@ -243,7 +186,7 @@ def render(ctx: RequestContext, payload: Input) -> Output:
     return Output(image=asset)
 ```
 
-For large outputs, stream instead of buffering:
+For large outputs, stream:
 
 ```python
 with ctx.open_output_stream(
@@ -254,28 +197,69 @@ with ctx.open_output_stream(
     asset = out.finalize()
 ```
 
-### Error Types
+### Realtime sockets
 
-Raise these from `gen_worker.errors` to shape retry behavior:
-
-- `ValidationError` — bad input; no retry, returned to caller as 4xx.
-- `RetryableError` — transient; scheduler may retry.
-- `ResourceError` — resource exhausted.
-- `CanceledError` — run canceled cooperatively.
-- `AuthError` — permission denied.
-- `FatalError` — unrecoverable.
-- `OutputTooLargeError(size_bytes, max_bytes)` — returned output exceeds limit.
-
-Any uncaught exception is treated as a fatal run failure.
+For bidirectional streaming (audio, frame-by-frame interaction), use `@realtime_function`. The function receives a `RealtimeSocket` instead of a plain payload; documented separately under `gen_worker.api.realtime`.
 
 ---
 
-## 5. Conversion Endpoints
+## 4. `RequestContext`
 
-Conversion endpoints use `gen_worker.conversion` contract types. The worker
-library owns the generic source/destination/upload/calibration plumbing; the
-endpoint owns the product function names, dependency choices, and actual
-conversion recipe.
+What every endpoint function receives as its first argument.
+
+**Identity / environment**
+- `ctx.request_id`, `ctx.job_id`, `ctx.parent_request_id`, `ctx.child_request_id`
+- `ctx.owner`
+- `ctx.device` (torch device), `ctx.timeout_ms`, `ctx.deadline`, `ctx.time_remaining_s()`
+- `ctx.compute` — resolved hardware spec (accelerator, vram_gb, gpu_tier, etc.)
+
+**Lifecycle**
+- `ctx.is_canceled() -> bool` — cooperative cancellation check
+- `ctx.progress(progress: float, stage: str | None = None)` — emit a progress event
+- `ctx.log(message, level)` — structured log
+- `ctx.emit(event_type, payload)` — custom event
+
+**Output persistence**
+- `ctx.save_bytes(ref, data) -> Asset` — small inline payloads
+- `ctx.save_file(ref, local_path) -> Asset` — non-tensor files
+- `ctx.save_checkpoint(ref, local_path, format=..., flavor=...) -> Tensors` — tensor weights (requires repo-job scope; set by conversion/training jobs)
+- `ctx.save_checkpoint_bytes(ref, data, format=...) -> Tensors`
+- `ctx.open_output_stream(ref, ...)` / `ctx.open_checkpoint_stream(ref, ...)` — chunked uploads
+
+For ref strings: `jobs/{ctx.request_id}/outputs/<path>` is the canonical layout for ephemeral per-job output. Other prefixes need explicit scope from the orchestrator.
+
+**Batching hints**
+- `ctx.preferred_batch_size()`, `ctx.prefetch_depth()` — read on warm start to size loops
+
+### How model downloads work
+
+You never call resolve from inside an endpoint. The orchestrator pre-resolves every model ref the job needs (static refs from `endpoint.toml [models]`, plus any runtime refs from the request payload) and ships `{snapshot_digest, files: [{path, blake3, presigned_url}]}` to the worker over gRPC. The `ModelRef` injection paths shown above just consume that pre-resolved manifest — the worker downloads from the presigned URLs and hands you the loaded object.
+
+If the invoker doesn't have read access to a runtime-specified repo, the orchestrator fails the invoke before dispatching — your function never starts.
+
+---
+
+## 5. Error Types
+
+Raise these from `gen_worker` (or let them propagate) to shape retry/terminal behavior:
+
+| Exception | Outcome |
+|---|---|
+| `ValidationError` | 4xx to caller, no retry |
+| `RetryableError` | Transient; scheduler may retry |
+| `ResourceError` | Resource exhausted (e.g. OOM) |
+| `CanceledError` | Cooperative cancellation |
+| `AuthError` | Permission denied |
+| `FatalError` | Unrecoverable |
+| `OutputTooLargeError(size_bytes, max_bytes)` | Output exceeds limit |
+
+Any uncaught exception becomes a fatal run failure.
+
+---
+
+## 6. Conversion Endpoints
+
+Conversion endpoints take a source model + an output spec, produce new weight artifacts on a destination repo. Use `gen_worker.conversion.training_function(kind="format-conversion")`.
 
 ```python
 import msgspec
@@ -287,12 +271,10 @@ from gen_worker.conversion import (
     training_function,
 )
 
-
 class CastSpec(msgspec.Struct):
     dtype: str
 
-
-@training_function(kind="format-conversion", concurrency="sequential")
+@training_function(kind="format-conversion")
 def cast_dtype(
     ctx: ConversionContext,
     source: Source,
@@ -304,76 +286,22 @@ def cast_dtype(
             break
         writer.write(component, name, tensor.to(torch.bfloat16))
 
-    return [
-        ProducedFlavor(
-            path=writer.finalize(),
-            attributes={
-                "dtype": specs[0].dtype,
-                "file_layout": source.file_layout,
-                "file_type": "safetensors",
-            },
-        )
-    ]
+    return [ProducedFlavor(path=writer.finalize(), flavor=specs[0].dtype)]
 ```
 
-The function signature uses reserved names such as `ctx`, `source`, and
-`datasets`; everything else is decoded from the request payload by name.
+Reserved signature names: `ctx`, `source`, `destination`, `specs`, `datasets`. Everything else is decoded from the request payload by name.
 
-### Reserved types and attributes
+- `source` is materialized from the request's `source.ref` (and optional `checkpoint_id`); orchestrator has already verified the invoker can read it.
+- `destination` carries the destination repo + tags. After your function returns, the SDK uploads each `ProducedFlavor` and applies the tags atomically.
+- Each `ProducedFlavor` becomes one checkpoint flavor on the destination repo. `flavor` is the user-facing name (e.g. `int4-awq`, `bf16-singlefile`).
 
-- **Wire source descriptor**: the request contains `source.ref`
-  (`owner/repo[:tag][#flavor...][@<checkpoint_id>]`), optional
-  `checkpoint_id`, and optional `attributes` for subset-containment matching.
-  The library materializes this into the `Source` object passed to the
-  function. Well-known attributes include `dtype`, `file_layout`, `file_type`,
-  `quant_library`, and family-specific `quant_*` keys.
-- **Destination metadata**: destination `ref` and `tags` are provided by the
-  signed request context. After your function returns
-  success, the library applies each tag to the new checkpoint atomically.
-- **Output specs**: every requested output spec has an `attributes` dict and
-  produces one variant on the destination's new checkpoint. You may augment
-  `attributes` at upload time with runtime-discovered provenance
-  (e.g. `quant_library_version`); the stored attribute bag is the union. The
-  attributes must satisfy tensorhub's per-family validation at commit time.
-
-### Streaming large artifacts
-
-```python
-writer = ctx.open_output_writer()
-for component, name, tensor in source.iter_tensors():
-    writer.write(component, name, transform(tensor))
-produced = ProducedFlavor(path=writer.finalize(), attributes={...})
-```
-
-The library uploads returned `ProducedFlavor` paths and commits them as
-checkpoint variants on the destination repo.
-
-### Quantization ownership
-
-`python-gen-worker` may provide generic primitives that worker functions call,
-including dtype casts, GGUF helpers, weight-only torchao/bitsandbytes helpers,
-and calibration policy helpers. Product conversion functions and calibrated
-quantization workflows belong in endpoint code.
-
-Modelopt is intentionally not a core `gen-worker` dependency. A conversion
-endpoint can install and import modelopt inside its own function body, declare
-`required_libraries = ["modelopt"]` and CUDA requirements in `endpoint.toml`,
-and use `gen_worker.conversion` dataset/calibration helpers to enforce request
-policy.
+For calibrated quantization, dataset shaping helpers, etc., see `gen_worker.conversion`'s submodules.
 
 ---
 
-## 6. Training Endpoints
+## 7. Training Endpoints
 
-Training endpoints are published the same way as inference endpoints, but are
-invoked by the worker running with `WORKER_MODE=trainer`. The trainer body is
-a **class** (or class instance) with canonical hooks. The runtime owns the
-outer loop, cadence, checkpoint/sample writes, artifact uploads, cancellation,
-and terminal reporting.
-
-### Trainer class contract
-
-Required methods:
+Training is published like any other endpoint but invoked with `WORKER_MODE=trainer`. Your trainer is a **class** with canonical hooks; the runtime owns the outer loop, cadence, checkpointing, uploads, cancellation.
 
 ```python
 from gen_worker.trainer import StepContext, StepResult
@@ -385,233 +313,68 @@ class MyTrainer:
     def train_step(self, prepared_batch, state, ctx: StepContext) -> StepResult: ...
     def state_dict(self, state) -> dict[str, object]: ...
     def load_state_dict(self, state, payload, ctx: StepContext) -> None: ...
+    # Optional, recommended:
+    def save_checkpoint(self, *, state, step, output_dir, final, ctx) -> dict | None: ...
+    def load_checkpoint(self, *, state, checkpoint_dir, payload, ctx) -> None: ...
 ```
 
-Optional checkpoint hooks (recommended when you produce real weight files):
+Point to the class via the job spec's `"trainer": "my_pkg.train:MyTrainer"` field, or `TRAINER_PLUGIN=my_pkg.train:MyTrainer`.
 
-```python
-def save_checkpoint(self, *, state, step, output_dir, final, ctx) -> dict | None: ...
-def load_checkpoint(self, *, state, checkpoint_dir, payload, ctx) -> None: ...
-```
+**Ownership split**:
 
-Point to your class from the job spec (`"trainer": "my_pkg.train:MyTrainer"`)
-or via `TRAINER_PLUGIN=my_pkg.train:MyTrainer`.
+The runtime handles: lifecycle, cancellation, timeouts, ref resolution, dataset materialization, cadence-driven metric/checkpoint/sample emission, artifact uploads, terminal reporting.
 
-Incompatibility policy is buyer-beware: if the resolved model layout is
-incompatible with your trainer, fail fast inside `configure()` with a clear
-error.
+Your trainer handles: dataset shaping, batch preparation, forward/backward/update math, prompt/mask/curriculum logic, state serialization.
 
-### `StepContext`
-
-Attributes the runtime populates for every hook call:
-
-- `job` — `TrainingJobSpec` (`request_id`, `max_steps`, `trainer_api_version`,
-  `metric_every`, `checkpoint_every`, `sample_every`, `owner`, `release_ref`,
-  `hyperparams`).
-- `model_handles` — dict of resolved model components.
-- `dataset`, `optimizer`, `scheduler`.
-- `device` (e.g. `"cuda:0"`), `dtype` (e.g. `"bf16"`).
-- `is_canceled()` — cancellation check (check it at step boundaries).
-
-### `StepResult`
+**StepResult**:
 
 ```python
 @dataclass
 class StepResult:
-    metrics: Mapping[str, float]
+    metrics: Mapping[str, float]      # {"loss": ..., "lr": ...}
     debug:   Mapping[str, Any] | None = None
     control: StepControlHints | None = None  # skip_cadence_emit, backoff_seconds
 ```
 
-The runtime normalizes metric names: `loss`/`train_loss` → `train/loss`;
-`lr`/`learning_rate`/`train_lr` → `train/lr`. Missing `train/lr` is extracted
-from `debug`, state values, or optimizer param groups if possible.
+The runtime normalizes metric names (`loss` → `train/loss`, `lr` → `train/lr`).
 
-### Ownership split
-
-The runtime owns:
-
-- Lifecycle, cancellation, timeout, retry, terminal state.
-- Ref resolution, input downloads, parquet→Arrow batch feeding.
-- Cadence-driven metric/checkpoint/sample emission.
-- Local artifact writes and uploads.
-
-Your trainer owns:
-
-- Dataset shaping and batch preparation.
-- Forward/backward/update math.
-- Prompt/mask/curriculum logic.
-- Trainer state serialization (`state_dict` / `load_state_dict`).
-
-### Optional helpers (`gen_worker.trainer.helpers`)
-
-Use only if they fit your endpoint:
-
-- `seed_everything(seed)` — seeds `random` and, if available, `torch`.
-- `to_float_scalar(value)` — normalize tensor/scalar loss values.
-- `build_default_adamw_bundle(model_or_params, hyperparams=...)` — AdamW with
-  cosine/warmup scheduler.
-- `save_trainable_module_checkpoint(...)` / `load_trainable_module_checkpoint(...)` —
-  LoRA-style module + optimizer checkpoint serialization.
-
-### Running locally
-
-```bash
-WORKER_MODE=trainer \
-TRAINER_JOB_SPEC_PATH=/path/to/trainer_job.json \
-python -m gen_worker.entrypoint
-```
-
-### Job spec (v1)
-
-```json
-{
-  "trainer_api_version": "v1",
-  "request_id": "run_123",
-  "trainer": "my_pkg.train:MyTrainer",
-  "max_steps": 1000,
-  "metric_every": 10,
-  "checkpoint_every": 200,
-  "sample_every": 200,
-  "owner": "org_id",
-  "release_ref": "org/repo:latest",
-  "hyperparams": {"learning_rate": 1e-4},
-  "dataset": {
-    "parquet_paths": ["/data/train.parquet"],
-    "batch_size": 32,
-    "readahead": 2,
-    "columns": ["image_ref", "caption"]
-  }
-}
-```
-
-`mock_batches` is supported for local smoke runs. `inputs` accepts
-`base_model_ref`/`base_model_url`, `dataset_parquet_refs`/`..._urls`, and
-`resume_checkpoint_ref`/`..._url` — the runtime materializes these before
-`setup()` is called.
-
-### Artifact layout
-
-Everything resolves from `TRAINER_ARTIFACTS_DIR` (default `/tmp/training`):
-
-- `${TRAINER_ARTIFACTS_DIR}/checkpoints/step-%08d.json` — periodic checkpoints.
-- `${TRAINER_ARTIFACTS_DIR}/checkpoints/final.json` — final marker at completion.
-- `${TRAINER_ARTIFACTS_DIR}/samples/step-%08d-%02d.json` — sample artifacts.
-- `${TRAINER_ARTIFACTS_DIR}/metrics/events.jsonl` — JSONL event stream.
-
-Checkpoint JSON payload shape: `{"step": ..., "request_id": ..., "state": {...}}`.
-JSON writes are atomic (`tempfile + fsync + rename`) where possible. Overrides:
-`TRAINER_CHECKPOINTS_DIR`, `TRAINER_SAMPLES_DIR`, `TRAINER_METRICS_DIR`,
-`TRAINER_EVENTS_PATH`.
-
-### Resume
-
-Set `resume_from_latest: true`. The runtime scans `step-*.json` (ignoring
-corrupt files), picks the highest valid step, and applies the serialized state
-via `load_state_dict(state, payload, ctx)`. Step counters continue from the
-resumed step. If `final.json` already exists, the runtime short-circuits as
-completed to avoid duplicate terminal emission. An explicit
-`resume_checkpoint_path` overrides the scan when provided.
-
-### Sample prompts
-
-The job spec `sample_prompts` list accepts:
-
-- plain strings (`t2i` by default), or
-- objects with `mode`, `prompt`, `instruction`, `source_image`, `seed`.
-
-An optional `sample_seed` provides a fixed fallback seed.
-
-### Orchestrated mode
-
-Set `TRAINER_ORCHESTRATED=1` to enable strict startup checks; a capability
-token is then required (via `TRAINER_CAPABILITY_TOKEN` or job spec
-`capability_token`). Cancellation is checked via `TRAINER_CANCELLED` env flag
-or `TRAINER_CANCEL_FILE`. Max runtime via `TRAINER_MAX_RUNTIME_SECONDS`
-(surfaced as cancel reason `timeout`).
-
-Upload endpoints (bearer-auth using the capability token):
-
-- `TRAINER_UPLOAD_METRICS_URL`, `TRAINER_UPLOAD_CHECKPOINT_URL`,
-  `TRAINER_UPLOAD_SAMPLE_URL`, `TRAINER_UPLOAD_TERMINAL_URL`.
-
-Deterministic failure categories surfaced in events: `startup`, `input`,
-`auth`, `model-load`, `train-step`, `upload`.
-
-### Event stream (v1)
-
-`events.jsonl` carries one JSON object per line with stable fields:
-
-- `schema_version: "trainer_event.v1"`
-- `event`: `started | metric | checkpoint | sample | completed | failed`
-- `request_id`, `seq`, `timestamp_ms`
-- event-specific payload (`name`, `value`, `step`, `path`, `error`, ...)
-
----
-
-## 7. Observability (worker-emitted)
-
-You do not need to emit these yourself; they are listed so you know what
-signals exist when debugging a run.
-
-### Inference request lifecycle
-
-Per-request events emitted by the worker:
-
-- `request.received`, `request.started`
-- `request.model_resolve.{started,completed,failed,stuck}`
-- `request.model_load.{started,completed,failed,stuck}`
-- `request.inference.{started,completed,failed,stuck}`
-- `request.completed`, `request.failed`
-
-Stuck warnings are controlled by env:
-
-- `WORKER_WARN_MODEL_RESOLVE_S` (default 30)
-- `WORKER_WARN_MODEL_LOAD_S` (default 60)
-- `WORKER_WARN_INFERENCE_S` (default 60)
-
-### Worker startup
-
-Emitted as `worker.startup.phase` events:
-
-`boot`, `cache_preflight_started`, `cache_preflight_ok|failed`,
-`cache_preflight_fallback_attempt|enabled`, `scheduler_connecting`,
-`registered`, `ready`, `startup_timeout_unregistered`.
-
-Registration timeout: `WORKER_REGISTER_TIMEOUT_S` (default 90s). On top-level
-crash, a `worker.fatal` event is emitted with `phase`, `exception_class`,
-`exception_message`, `traceback`, `exit_code`.
-
-### Per-run performance metrics
-
-Best-effort events, low-cardinality payloads (numbers and small strings only):
-
-- `metrics.compute.started` — `{ "at": "<rfc3339>" }`
-- `metrics.compute.completed` — `{ "at": "<rfc3339>" }`
-- `metrics.fetch` — `{ "ms": <int> }` (0 for warm disk hits)
-- `metrics.gpu_load` — `{ "ms": <int> }`
-- `metrics.inference` — `{ "ms": <int> }`
-- `metrics.tokens` — `{ "output_tokens": <int> }` (when applicable)
-- `metrics.job` — one end-of-run extended payload (schema version 1), including
-  `function_name`, `cache_state`, per-model details, `pipeline_init_ms`,
-  `inference_ms`, optional post/resources keys.
-
-Separately, the worker emits `model.cached` and `models.disk_inventory` with
-`disk_backend`, `disk_fstype`, `disk_volume_key` so the scheduler knows which
-shared volumes hold which models. None of these are required for correctness;
-they must never fail a run.
+**Optional helpers** (`gen_worker.trainer.helpers`):
+- `seed_everything(seed)`
+- `to_float_scalar(value)` — normalize tensor/scalar loss
+- `build_default_adamw_bundle(model_or_params, hyperparams=...)`
+- `save_trainable_module_checkpoint(...)` / `load_trainable_module_checkpoint(...)`
 
 ---
 
 ## 8. Local Testing
+
+### Inference endpoint
+
+```bash
+uv run python -m gen_worker.discovery       # writes endpoint.lock to stdout
+WORKER_MODE=invoke uv run python -m gen_worker.entrypoint
+```
+
+Hit it with a local invoke (`curl` against the dev server, or the in-repo dev runner).
 
 ### Trainer smoke run
 
 ```bash
 WORKER_MODE=trainer \
 TRAINER_JOB_SPEC_PATH=./trainer_job.example.json \
-python -m gen_worker.entrypoint
+uv run python -m gen_worker.entrypoint
 ```
 
-Confirm: metrics appear in `events.jsonl`, checkpoints include a serialized
-`state` payload, and the resume path restores through `load_state_dict`.
+Confirm: metrics appear in `events.jsonl`, checkpoints serialize a `state` payload, and the resume path restores through `load_state_dict`.
+
+---
+
+## 9. Examples
+
+Working endpoints to copy from in `python-gen-worker/examples/`:
+
+- `marco-polo/` — minimal inference endpoint
+- `medasr-transcribe/` — audio transcription with a HF model dependency
+- `openai-codex/` — text generation
+- `training-smoke/` — minimal trainer
+- `from-scratch/` — boilerplate template

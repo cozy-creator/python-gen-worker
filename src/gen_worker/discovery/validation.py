@@ -90,12 +90,6 @@ def validate_endpoint(root: str | Path, *, require_uv_lock: bool = False) -> End
         if tensorhub_cfg.get("schema_version") != 1:
             errors.append("endpoint.toml missing or invalid schema_version (expected schema_version = 1)")
 
-        endpoint_name = tensorhub_cfg.get("name")
-        if not isinstance(endpoint_name, str) or endpoint_name.strip() == "":
-            errors.append("endpoint.toml missing name")
-        elif _normalize_endpoint_name(endpoint_name) == "":
-            errors.append("endpoint.toml invalid name")
-
         main = tensorhub_cfg.get("main")
         if not isinstance(main, str) or main.strip() == "":
             errors.append("endpoint.toml missing main")

@@ -122,7 +122,7 @@ def _infer_mime_type(ref: str, head: bytes) -> str:
 
 
 def _default_output_prefix(request_id: str) -> str:
-    return f"jobs/{request_id}/outputs/"
+    return f"outputs/{request_id}/"
 
 
 def _normalize_output_ref(ref: str) -> str:

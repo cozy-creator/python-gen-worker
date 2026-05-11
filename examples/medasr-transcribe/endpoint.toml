@@ -2,7 +2,7 @@ schema_version = 1
 main = "medasr_transcribe.main"
 
 [models]
-medasr = { ref = "google/medasr", attributes = { dtype = ["fp16", "bf16"] } }
+medasr = "google/medasr"
 
 [host.requirements]
 cuda_min = "12.8"

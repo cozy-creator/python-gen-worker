@@ -137,7 +137,7 @@ class RunMetricsV1:
     request_id: str
     function_name: str
     required_models: List[str] = field(default_factory=list)
-    resolved_cozy_models_by_id: Optional[Mapping[str, Any]] = None
+    resolved_repos_by_id: Optional[Mapping[str, Any]] = None
 
     # Times (ms)
     fetch_ms: Optional[int] = None
@@ -361,7 +361,7 @@ def best_effort_init_model_metrics(
     disk_set = set(str(x) for x in (disk_models or []))
     base = cache_dir or _cache_dir()
 
-    resolved = rm.resolved_cozy_models_by_id or {}
+    resolved = rm.resolved_repos_by_id or {}
     for raw in model_ids:
         mid = str(raw or "").strip()
         if not mid:

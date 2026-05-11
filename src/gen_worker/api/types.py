@@ -19,6 +19,11 @@ class Asset(msgspec.Struct):
     mime_type: Optional[str] = None
     size_bytes: Optional[int] = None
     sha256: Optional[str] = None
+    blake3: Optional[str] = None
+    media_id: Optional[str] = None
+    url: Optional[str] = None
+    url_expires_at: Optional[str] = None
+    receipt_jws: Optional[str] = None
     download_token: Optional[str] = None
     stream_mode: Optional[str] = None
 

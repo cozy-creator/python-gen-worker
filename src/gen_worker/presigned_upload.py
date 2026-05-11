@@ -23,7 +23,7 @@ is used at different route prefixes for repo checkpoints
 (/api/v1/repos/:owner/:repo/jobs/:job_id/uploads), datasets
 (/api/v1/datasets/:dataset_id/uploads), endpoint source
 (/api/v1/endpoints/:owner/:endpoint/releases/uploads), and user media
-(/api/v1/media/uploads).
+(/api/v1/media/:owner/uploads).
 """
 
 from __future__ import annotations
@@ -97,7 +97,7 @@ def presigned_upload_file(
     Args:
         file_path: Local path to the file.
         base_url: TensorHub base URL.
-        endpoint_path: e.g. "/api/v1/media/uploads" or "/api/v1/repos/.../uploads".
+        endpoint_path: e.g. "/api/v1/media/:owner/uploads" or "/api/v1/repos/.../uploads".
         headers: Auth headers (Authorization, X-Cozy-Owner).
         create_payload: Additional fields for the create POST (ref, path, request_id, etc.).
         blake3_hex: Pre-computed BLAKE3 hash of the file.

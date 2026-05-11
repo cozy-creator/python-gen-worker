@@ -50,7 +50,6 @@ class _RequestOutputStream:
         output_kind: Optional[str] = None,
         target_dtype: Optional[str] = None,
         flavor: Optional[str] = None,
-        attributes: Optional[Mapping[str, str]] = None,
     ) -> None:
         from ..presigned_upload import blake3_hash_file, presigned_upload_file
 
@@ -67,16 +66,6 @@ class _RequestOutputStream:
         self._lineage_output_kind = (str(output_kind or "").strip() or None)
         self._lineage_target_dtype = (str(target_dtype or "").strip() or None)
         self._lineage_flavor = (str(flavor or "").strip() or None)
-        # Free-form attribute map. Carried onto /complete alongside structured
-        # lineage so tenants can attach extension metadata (provenance, recipe
-        # hints, etc.) without requiring new wire fields per attribute. Server
-        # may or may not currently consume; field is forward-compatible.
-        if attributes:
-            self._lineage_attributes: Dict[str, str] = {
-                str(k): str(v) for k, v in dict(attributes).items() if str(k).strip()
-            }
-        else:
-            self._lineage_attributes = {}
         if self._expected_size_bytes < 0:
             self._expected_size_bytes = 0
         if self._expected_size_bytes > 0:
@@ -104,7 +93,14 @@ class _RequestOutputStream:
         self._retry_backoff_ms = max(0, int(os.getenv("WORKER_STREAM_UPLOAD_RETRY_BACKOFF_MS", "500") or "500"))
         self._session_id: Optional[str] = None
         self._uploader_meta: Dict[str, Any] = {}
-        self._repo_job_scope = self._ctx._repo_job_upload_scope() if self._kind == "checkpoint" else None
+        # Route all output streams (checkpoint AND asset) through the
+        # repo-CAS upload session when the job carries a destination_repo
+        # scope. Without this, clone/conversion jobs splay their non-tensor
+        # auxiliary files (README, config.json, etc.) onto /api/v1/media/:owner/uploads,
+        # which the worker cap-token does not authorize.
+        # Inference jobs have no destination_repo, so scope stays None and
+        # the media route remains the default for those.
+        self._repo_job_scope = self._ctx._repo_job_upload_scope()
         self._finalized = False
         self._result: Any = None
 
@@ -207,7 +203,6 @@ class _RequestOutputStream:
                         output_kind=self._lineage_output_kind,
                         target_dtype=self._lineage_target_dtype,
                         flavor=self._lineage_flavor,
-                        attributes=self._lineage_attributes or None,
                     )
                 else:
                     if self._create:
@@ -257,6 +252,11 @@ class _RequestOutputStream:
                 mime_type=value.mime_type,
                 size_bytes=value.size_bytes,
                 sha256=value.sha256,
+                blake3=value.blake3,
+                media_id=value.media_id,
+                url=value.url,
+                url_expires_at=value.url_expires_at,
+                receipt_jws=value.receipt_jws,
                 download_token=value.download_token,
                 stream_mode=self.stream_mode,
             )
@@ -353,7 +353,16 @@ class _RequestOutputStream:
             job_id = str(self._ctx.job_id or "").strip()
             if job_id:
                 create_payload["job_id"] = job_id
-            endpoint_path = "/api/v1/media/uploads"
+            # Owner is now an explicit URL segment (mirrors /repos/:owner/...,
+            # /endpoints/:owner/..., /datasets/:owner/...). The capability
+            # token still carries owner binding; tensorhub enforces the URL
+            # owner matches the token-bound owner on each request.
+            if not owner:
+                raise RuntimeError(
+                    "file save failed (missing owner): media uploads require ctx.owner"
+                )
+            owner_seg = urllib.parse.quote(owner, safe="")
+            endpoint_path = f"/api/v1/media/{owner_seg}/uploads"
         else:
             # Repo-CAS upload — issue #20 session-scoped URL shape. The
             # session is opened lazily by the ctx-level manager on first use
@@ -390,8 +399,6 @@ class _RequestOutputStream:
                 extra["target_dtype"] = self._lineage_target_dtype
             if self._lineage_flavor:
                 extra["flavor"] = self._lineage_flavor
-            if self._lineage_attributes:
-                extra["attributes"] = dict(self._lineage_attributes)
             if extra:
                 complete_extra = extra
 
@@ -418,13 +425,19 @@ class _RequestOutputStream:
         meta = dict(result.meta)
         size = int(meta.get("size_bytes") or file_size)
         sha = str(meta.get("sha256") or "").strip() or self._sha.hexdigest()
+        final_ref = str(meta.get("ref") or self._ref).strip() or self._ref
         asset = Asset(
-            ref=self._ref,
+            ref=final_ref,
             owner=self._ctx.owner,
             local_path=None,
             mime_type=str(meta.get("mime_type") or "") or None,
             size_bytes=size,
             sha256=sha,
+            blake3=str(meta.get("blake3") or blake3_hex).strip() or None,
+            media_id=str(meta.get("media_id") or "").strip() or None,
+            url=str(meta.get("url") or "").strip() or None,
+            url_expires_at=str(meta.get("url_expires_at") or "").strip() or None,
+            receipt_jws=str(meta.get("receipt_jws") or "").strip() or None,
             stream_mode=self.stream_mode,
         )
         if self._kind == "checkpoint":

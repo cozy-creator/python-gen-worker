@@ -47,7 +47,6 @@ class EndpointResources:
     memory_gb: int = 0
     cpu_cores: int = 0
     disk_gb: int = 0
-    max_inflight_requests: int = 1
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize non-default fields for the manifest wire shape."""
@@ -66,7 +65,6 @@ class EndpointResources:
             out["cpu_cores"] = self.cpu_cores
         if self.disk_gb:
             out["disk_gb"] = self.disk_gb
-        out["max_inflight_requests"] = self.max_inflight_requests
         return out
 
 
@@ -312,7 +310,7 @@ def _parse_function_resource_hints(v: Any) -> dict[str, Any]:
     if "max_concurrency" in v or "max_inflight_requests" in v:
         raise ValueError(
             "function-level concurrency hints are not supported in endpoint.toml; "
-            "set endpoint concurrency only via [resources].max_inflight_requests"
+            "Tensorhub learns scheduling concurrency from runtime observations"
         )
     out: dict[str, Any] = {}
     for key in (
@@ -514,8 +512,6 @@ def load_endpoint_toml_with_warnings(path: Path) -> tuple[EndpointToml, list[str
 
     name = str(data.get("name") or "").strip()
     main = str(data.get("main") or "").strip()
-    if not name:
-        raise ValueError("endpoint.toml missing name")
     if not main:
         raise ValueError("endpoint.toml missing main")
 
@@ -576,10 +572,9 @@ def load_endpoint_toml_with_warnings(path: Path) -> tuple[EndpointToml, list[str
                 continue
             models[key] = _parse_model_spec(value_raw, warnings=warnings)
 
-    # Reject legacy endpoint.toml blocks that moved onto the decorator or
-    # became platform-controlled. Function-scoped [resources] is accepted for
-    # mixed CPU/GPU endpoints; concurrency inside it remains rejected by
-    # _parse_function_resource_hints.
+    # Reject legacy endpoint.toml blocks that became platform-controlled.
+    # Function-scoped [resources] is accepted for mixed CPU/GPU endpoints;
+    # concurrency inside it remains rejected by _parse_function_resource_hints.
     _REJECTED_ENDPOINT_BLOCKS = {
         "scaling": (
             "autoscaling is platform-controlled; remove the [scaling] block from "
@@ -589,9 +584,7 @@ def load_endpoint_toml_with_warnings(path: Path) -> tuple[EndpointToml, list[str
     _REJECTED_FUNCTION_BLOCKS = {
         "runtime": (
             "per-function [functions.<fn>.runtime] numerics (batch_size_max, prefetch_depth, etc) "
-            "were removed in tensorhub #232. Concurrency lives on the decorator "
-            "(@inference_function(concurrency=\"batched\"|\"concurrent\"|\"sequential\")); "
-            "runtime capacity is reported by the worker at handshake."
+            "were removed. Tensorhub learns scheduling behavior from runtime observations."
         ),
         "compute_envelope": (
             "compute_envelope (min/max/default) was removed in tensorhub #232. "
@@ -599,8 +592,8 @@ def load_endpoint_toml_with_warnings(path: Path) -> tuple[EndpointToml, list[str
             "override size axes at runtime via wire-payload `compute`."
         ),
         "concurrency": (
-            "per-function [functions.<fn>.concurrency] was removed in tensorhub #232. "
-            "Concurrency is now declared on the decorator: @inference_function(concurrency=\"batched\")."
+            "per-function [functions.<fn>.concurrency] was removed. "
+            "Tensorhub learns scheduling concurrency from runtime observations."
         ),
     }
     for block_name, message in _REJECTED_ENDPOINT_BLOCKS.items():
@@ -645,15 +638,11 @@ def load_endpoint_toml_with_warnings(path: Path) -> tuple[EndpointToml, list[str
         # memory_gb isn't explicitly set.
         if "memory_gb" not in res_kwargs and "ram_gb" in raw_resources:
             res_kwargs["memory_gb"] = int(raw_resources["ram_gb"])
-        # max_inflight_requests: hard ceiling on concurrent requests per worker.
         if "max_inflight_requests" in raw_resources:
-            try:
-                iv = int(raw_resources["max_inflight_requests"])
-            except Exception:
-                raise ValueError("resources.max_inflight_requests must be an integer")
-            if iv <= 0:
-                raise ValueError("resources.max_inflight_requests must be > 0")
-            res_kwargs["max_inflight_requests"] = iv
+            raise ValueError(
+                "resources.max_inflight_requests is no longer accepted; "
+                "Tensorhub learns scheduling concurrency from runtime observations"
+            )
     resources = EndpointResources(**res_kwargs)
 
     return (

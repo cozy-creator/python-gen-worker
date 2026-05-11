@@ -17,7 +17,6 @@ import importlib.util
 import inspect
 import json
 import os
-import re
 import sys
 import typing
 from pathlib import Path
@@ -283,10 +282,6 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
                     "required_components": dict(getattr(mr, "required_components", ()) or ()),
                     "require_lineage_descendant_of": str(getattr(mr, "require_lineage_descendant_of", "") or "").strip(),
                     "require_lineage_verified": bool(getattr(mr, "require_lineage_verified", False)),
-                    "required_attributes": {
-                        str(k): [str(v) for v in list(vs or [])]
-                        for k, vs in dict(getattr(mr, "required_attributes", ()) or ()).items()
-                    },
                 }
             injections.append({
                 "param": p.name,
@@ -375,10 +370,6 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
     if not function_name:
         raise ValueError(f"{func.__name__}: function name cannot be normalized")
 
-    # Tensorhub #232: per-function decorator metadata (concurrency mode,
-    # author-supplied label/description). Baked into endpoint.lock so
-    # orchestrator can route per concurrency_mode at dispatch.
-    concurrency_mode = str(getattr(func, "_concurrency_mode", None) or "sequential")
     fn_label = getattr(func, "_function_label", None) or None
     fn_description = getattr(func, "_function_description", None) or None
 
@@ -399,7 +390,6 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
         "required_models": required_models,  # release model keys needed by this function
         "payload_repo_selectors": payload_repo_selectors,
         "decorator": "inference_function",
-        "concurrency_mode": concurrency_mode,
         "label": fn_label,
         "description": fn_description,
     }
@@ -486,10 +476,6 @@ def _extract_conversion_function_metadata(func: Any, module_name: str) -> Dict[s
         # can distinguish @inference_function (inference) from @training_function
         # (conversion/training) when the decorator-based branch matters.
         "decorator": "training_function",
-        # Tensorhub #232: concurrency_mode + label/description ride alongside
-        # the rest of the per-function metadata. Training functions default to
-        # sequential (see @training_function decorator implementation).
-        "concurrency_mode": str(getattr(func, "_concurrency_mode", None) or "sequential"),
         "label": getattr(func, "_function_label", None) or None,
         "description": getattr(func, "_function_description", None) or None,
     }
@@ -711,12 +697,7 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
             )
         seen_fn[fn_name] = py_name
 
-    endpoint_name = slugify_name(tensorhub_manifest.name)
-    if not endpoint_name:
-        raise ValueError("invalid endpoint.toml name")
-
     manifest: Dict[str, Any] = {
-        "endpoint_name": endpoint_name,
         "functions": functions,
     }
 

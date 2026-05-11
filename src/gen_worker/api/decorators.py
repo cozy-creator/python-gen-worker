@@ -1,64 +1,7 @@
-import inspect
-import typing
 from typing import Any, Callable, Dict, Optional, Sequence, TypeVar
 
 F = TypeVar("F", bound=Callable[..., Any])
 
-
-# Concurrency modes for @inference_function / @training_function (tensorhub
-# #232). These are the scheduler-facing capability declarations:
-#   - "sequential": one request at a time per worker (safe default).
-#   - "batched":    worker accepts batched requests grouped by the scheduler.
-#   - "concurrent": worker handles N reentrant requests in parallel.
-# Worker-reported FunctionCapacity at handshake tells the scheduler how many
-# to dispatch within each mode.
-CONCURRENCY_MODES = ("sequential", "batched", "concurrent")
-
-
-def _infer_concurrency_mode(func: Callable[..., Any], *, is_training: bool) -> str:
-    """Signature-based default when the decorator omits ``concurrency=``.
-
-    Training functions always default to ``sequential`` — training workloads
-    are typically long-running, non-reentrant, one-at-a-time per worker.
-
-    Inference functions infer from the signature:
-      - ``list[Input] → list[Output]`` (second positional is list, return is list)
-        → ``batched``
-      - Everything else → ``sequential``. Tenants who have verified their
-        function is reentrant bump explicitly to ``concurrent``.
-    """
-    if is_training:
-        return "sequential"
-    try:
-        hints = typing.get_type_hints(func, include_extras=True)
-    except Exception:
-        hints = {}
-    try:
-        sig = inspect.signature(func)
-    except (TypeError, ValueError):
-        return "sequential"
-    params = [p for p in sig.parameters.values() if p.name not in ("self", "cls")]
-    # Skip the ctx param; consider the first tenant-declared input.
-    if params and params[0].name in ("ctx", "context"):
-        params = params[1:]
-    if not params:
-        return "sequential"
-    first_ann = hints.get(params[0].name)
-    return_ann = hints.get("return")
-    if _is_list_type(first_ann) and _is_list_type(return_ann):
-        return "batched"
-    return "sequential"
-
-
-def _is_list_type(ann: Any) -> bool:
-    if ann is None:
-        return False
-    # Bare ``list`` annotation (no element type) — common enough that we
-    # accept it as batched too.
-    if ann is list:
-        return True
-    origin = typing.get_origin(ann)
-    return origin is list
 
 class ResourceRequirements:
     """
@@ -121,7 +64,6 @@ class ResourceRequirements:
 def inference_function(
     fn: Optional[F] = None,
     *,
-    concurrency: Optional[str] = None,
     label: Optional[str] = None,
     description: Optional[str] = None,
     resources: Optional[ResourceRequirements] = None,
@@ -132,9 +74,6 @@ def inference_function(
     with kwargs.
 
     Args:
-        concurrency: ``"sequential"`` | ``"batched"`` | ``"concurrent"``.
-            Omitted → inferred from signature (``list→list`` → batched;
-            everything else → sequential).
         label: Optional short label surfaced in the endpoint UI / search
             (e.g. ``"text-to-image"``). Non-functional.
         description: Optional free-text description. Non-functional.
@@ -143,17 +82,11 @@ def inference_function(
             optional library requirements are used by the worker to advertise
             only functions runnable on the current host.
     """
-    if concurrency is not None and concurrency not in CONCURRENCY_MODES:
-        raise ValueError(
-            f"@inference_function: concurrency={concurrency!r} not in {CONCURRENCY_MODES}"
-        )
     if resources is None:
         resources = ResourceRequirements()
 
     def apply(func: F) -> F:
-        mode = concurrency or _infer_concurrency_mode(func, is_training=False)
         setattr(func, "_is_inference_function", True)
-        setattr(func, "_concurrency_mode", mode)
         setattr(func, "_function_label", (label or "").strip() or None)
         setattr(func, "_function_description", (description or "").strip() or None)
         setattr(func, "_worker_resources", resources)

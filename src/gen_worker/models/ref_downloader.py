@@ -5,71 +5,24 @@ import contextvars
 from pathlib import Path
 from typing import Any, Coroutine, Mapping, Optional
 
-import random
-import time
-
 from .cozy_snapshot_v2 import ensure_snapshot_async
 from .downloader import ModelDownloader
-from .hub_client import (
-    CozyHubError,
-    CozyHubPublicModelPendingError,
-    CozyHubResolveArtifactResult,
-    CozyHubV2Client,
-)
 from .hf_downloader import HuggingFaceHubDownloader
-from .refs import CozyRef, ParsedModelRef, parse_model_ref
+from .refs import ParsedModelRef, parse_model_ref
 
 # Per-request resolved manifests provided by gen-orchestrator (issue #92).
-# Shape: {canonical_model_id: ResolvedCozyModel-like object}
-_resolved_cozy_models_by_id: contextvars.ContextVar[Optional[Mapping[str, Any]]] = contextvars.ContextVar(
-    "resolved_cozy_models_by_id", default=None
-)
-
-# Per-request best-effort model download preferences.
-#
-# Shape:
-#   {canonical_model_ref: {"dtypes": ["bf16","fp16"], "file_type": "safetensors"}}
-_cozy_model_download_prefs_by_ref: contextvars.ContextVar[Optional[Mapping[str, Any]]] = contextvars.ContextVar(
-    "cozy_model_download_prefs_by_ref", default=None
-)
-
-# Per-request worker capability token. Set by Worker._materialize_source_for_conversion
-# so the ref_downloader can authenticate tensorhub resolve calls as the invoker.
-_cozy_worker_capability_token: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
-    "cozy_worker_capability_token", default=None
+# Shape: {canonical_model_id: ResolvedRepo-like object}
+_resolved_repos_by_id: contextvars.ContextVar[Optional[Mapping[str, Any]]] = contextvars.ContextVar(
+    "resolved_repos_by_id", default=None
 )
 
 
-def set_cozy_worker_capability_token(token: Optional[str]) -> contextvars.Token:
-    return _cozy_worker_capability_token.set(token)
+def set_resolved_repos_by_id(mapping: Optional[Mapping[str, Any]]) -> contextvars.Token:
+    return _resolved_repos_by_id.set(mapping)
 
 
-def reset_cozy_worker_capability_token(token: contextvars.Token) -> None:
-    _cozy_worker_capability_token.reset(token)
-
-
-def set_resolved_cozy_models_by_id(mapping: Optional[Mapping[str, Any]]) -> contextvars.Token:
-    return _resolved_cozy_models_by_id.set(mapping)
-
-
-def reset_resolved_cozy_models_by_id(token: contextvars.Token) -> None:
-    _resolved_cozy_models_by_id.reset(token)
-
-
-def set_cozy_model_download_prefs_by_ref(mapping: Optional[Mapping[str, Any]]) -> contextvars.Token:
-    return _cozy_model_download_prefs_by_ref.set(mapping)
-
-
-def reset_cozy_model_download_prefs_by_ref(token: contextvars.Token) -> None:
-    _cozy_model_download_prefs_by_ref.reset(token)
-
-
-def _get_prefs_for_ref(canonical_ref: str) -> Mapping[str, Any]:
-    m = _cozy_model_download_prefs_by_ref.get()
-    if not isinstance(m, Mapping):
-        return {}
-    v = m.get(canonical_ref)
-    return v if isinstance(v, Mapping) else {}
+def reset_resolved_repos_by_id(token: contextvars.Token) -> None:
+    _resolved_repos_by_id.reset(token)
 
 
 class ModelRefDownloader(ModelDownloader):
@@ -83,186 +36,44 @@ class ModelRefDownloader(ModelDownloader):
     Returns a local directory path for both schemes.
     """
 
-    DEFAULT_PUBLIC_MODEL_REQUEST_WAIT_TIMEOUT_S = 15 * 60
-
     def __init__(
         self,
-        cozy_base_url: Optional[str] = None,
-        cozy_token: Optional[str] = None,
         hf_home: Optional[str] = None,
         hf_token: Optional[str] = None,
     ) -> None:
-        self._cozy_base_url = (cozy_base_url or "").strip() or None
-        self._cozy_token = (cozy_token or "").strip() or None
-
         self._hf = HuggingFaceHubDownloader(hf_home=hf_home, hf_token=hf_token)
-
-        self._cozy_v2: Optional[CozyHubV2Client] = None
-        if self._cozy_base_url:
-            self._cozy_v2 = CozyHubV2Client(base_url=self._cozy_base_url, token=self._cozy_token)
 
     async def _download_async(self, parsed: ParsedModelRef, dest_dir: Path) -> Path:
         if parsed.scheme == "hf" and parsed.hf is not None:
-            # Prefer Cozy Hub public model request when Cozy Hub is configured.
-            # If Cozy Hub cannot serve it (e.g. not mirrored and no auth), fall back to HF directly.
-            if self._cozy_v2 is not None:
-                try:
-                    canonical = parsed.hf.canonical()
-                    prefs = _get_prefs_for_ref(canonical)
-                    resolved_artifact = await self._request_public_model_with_wait(canonical, prefs=prefs)
-                    return await ensure_snapshot_async(
-                        base_dir=dest_dir,
-                        ref=CozyRef(owner="public", repo="public", tag="latest"),
-                        base_url=self._cozy_base_url or "",
-                        token=None,
-                        resolved=resolved_artifact,
-                    )
-                except CozyHubError:
-                    pass
+            # Workers download HuggingFace refs directly from HF. Any
+            # Cozy-Hub mirroring of HF repos is orchestrator-side
+            # (pre-resolved into resolved_repos_by_id as a cozy: ref).
             return self._hf.download(parsed.hf).local_dir
 
         if parsed.scheme == "cozy" and parsed.cozy is not None:
             canonical = parsed.cozy.canonical()
-            resolved_mapping = _resolved_cozy_models_by_id.get()
+            resolved_mapping = _resolved_repos_by_id.get()
             resolved_entry = resolved_mapping.get(canonical) if resolved_mapping is not None else None
 
-            if resolved_entry is not None:
-                return await ensure_snapshot_async(
-                    base_dir=dest_dir,
-                    ref=parsed.cozy,
-                    base_url=self._cozy_base_url or "",
-                    token=None,
-                    resolved=resolved_entry,
+            if resolved_entry is None:
+                # Workers never resolve directly against tensorhub. The
+                # orchestrator pre-resolves every cozy: ref a job needs and
+                # ships the manifest + presigned URLs via
+                # JobExecutionRequest.resolved_repos_by_id. Missing entry
+                # here means the orchestrator didn't pre-resolve this ref
+                # — that's an orchestrator-side bug, not a worker fallback.
+                raise RuntimeError(
+                    f"cozy ref {canonical!r} not in resolved_repos_by_id "
+                    "— orchestrator must pre-resolve before dispatching the job"
                 )
 
-            # Direct-resolve fallback against tensorhub's public /repos resolve route.
-            # Used by conversion/training jobs where the orchestrator doesn't pre-populate
-            # resolved_cozy_models_by_id (reserved-name source.ref path). Calls
-            # CozyHubV2Client.resolve_artifact(...) with dtype/file_layout/file_type
-            # preferences from the download-prefs contextvar (populated by
-            # Worker._materialize_source_for_conversion). The worker's capability
-            # token authenticates the read against tensorhub.
-            if self._cozy_v2 is not None:
-                prefs = _get_prefs_for_ref(canonical)
-                resolve_prefs: dict[str, Any] = {}
-                if prefs:
-                    dtypes = self._dtype_candidates(prefs)
-                    if dtypes:
-                        resolve_prefs["dtypes"] = dtypes
-                    file_types = self._file_type_candidates(prefs)
-                    if file_types:
-                        resolve_prefs["file_types"] = file_types
-                    file_layouts = self._file_layout_candidates(prefs)
-                    if file_layouts:
-                        resolve_prefs["file_layouts"] = file_layouts
-                cap_token = _cozy_worker_capability_token.get()
-                try:
-                    resolved = await self._cozy_v2.resolve_artifact(
-                        owner=parsed.cozy.owner,
-                        repo=parsed.cozy.repo,
-                        tag=parsed.cozy.tag or "latest",
-                        digest=parsed.cozy.digest,
-                        flavor=parsed.cozy.flavor,
-                        include_urls=True,
-                        preferences=resolve_prefs,
-                        capability_token=cap_token,
-                    )
-                except CozyHubError:
-                    raise RuntimeError(
-                        f"cozy model download failed: tensorhub resolve rejected "
-                        f"ref={canonical!r} prefs={resolve_prefs!r}"
-                    )
-                return await ensure_snapshot_async(
-                    base_dir=dest_dir,
-                    ref=parsed.cozy,
-                    base_url=self._cozy_base_url or "",
-                    token=None,
-                    resolved=resolved,
-                )
-
-            raise RuntimeError(
-                "cozy model download requires orchestrator-resolved URLs "
-                "(missing resolved_cozy_models_by_id entry; TENSORHUB_URL not set for direct-resolve fallback)"
+            return await ensure_snapshot_async(
+                base_dir=dest_dir,
+                ref=parsed.cozy,
+                resolved=resolved_entry,
             )
 
         raise ValueError("invalid parsed model ref")
-
-    def _dtype_candidates(self, prefs: Mapping[str, Any]) -> list[str]:
-        raw = prefs.get("dtypes")
-        if isinstance(raw, str):
-            dtypes = [raw]
-        elif isinstance(raw, list):
-            dtypes = [str(x) for x in raw if str(x).strip()]
-        else:
-            dtypes = []
-        dtypes = [d.strip().lower() for d in dtypes if d.strip()]
-
-        # Default preference: bf16, then fp16.
-        if not dtypes:
-            return ["bf16", "fp16"]
-
-        # If fp16 is acceptable, bf16 is also acceptable (and preferred).
-        if "fp16" in dtypes and "bf16" not in dtypes:
-            dtypes = ["bf16"] + dtypes
-
-        # Prefer bf16 first when present.
-        if "bf16" in dtypes:
-            dtypes = ["bf16"] + [d for d in dtypes if d != "bf16"]
-
-        # Dedupe preserving order.
-        out: list[str] = []
-        for d in dtypes:
-            if d not in out:
-                out.append(d)
-        return out
-
-    def _file_type_candidates(self, prefs: Mapping[str, Any]) -> list[str]:
-        ft = str(prefs.get("file_type") or "").strip().lower()
-        if ft in ("flashpack", "safetensors"):
-            return [ft]
-        # Default to safetensors for broad compatibility.
-        return ["safetensors"]
-
-    def _file_layout_candidates(self, prefs: Mapping[str, Any]) -> list[str]:
-        lo = str(prefs.get("file_layout") or "").strip().lower()
-        if lo in ("diffusers",):
-            return [lo]
-        return ["diffusers"]
-
-    async def _request_public_model_with_wait(
-        self,
-        model_ref: str,
-        *,
-        prefs: Mapping[str, Any],
-    ) -> CozyHubResolveArtifactResult:
-        if self._cozy_v2 is None:
-            raise RuntimeError("cozy downloads require TENSORHUB_URL")
-
-        deadline = time.monotonic() + self.DEFAULT_PUBLIC_MODEL_REQUEST_WAIT_TIMEOUT_S
-        delay = 0.5
-        dtypes = self._dtype_candidates(prefs)
-        file_types = self._file_type_candidates(prefs)
-        file_layouts = self._file_layout_candidates(prefs)
-        while True:
-            try:
-                return await self._cozy_v2.request_public_model(
-                    model_ref=model_ref,
-                    dtypes=dtypes,
-                    file_types=file_types,
-                    file_layouts=file_layouts,
-                    include_urls=True,
-                )
-            except CozyHubPublicModelPendingError as e:
-                now = time.monotonic()
-                if now >= deadline:
-                    raise RuntimeError(
-                        f"timed out waiting for public model ingest (ingest_job_id={e.ingest_job_id})"
-                    ) from e
-                # Exponential backoff with a little jitter.
-                sleep_s = min(delay, max(0.1, deadline - now))
-                sleep_s = max(0.1, sleep_s + random.random() * 0.25)
-                await asyncio.sleep(sleep_s)
-                delay = min(10.0, delay * 1.5)
 
     def download(self, model_ref: str, dest_dir: str, filename: Optional[str] = None) -> str:
         parsed = parse_model_ref(model_ref)

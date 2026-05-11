@@ -211,29 +211,11 @@ def _parse_manifest_model_mapping(mapping: Dict[str, Any]) -> tuple[Dict[str, st
         ref = _canonicalize_model_ref_string(str(v.get("ref") or "").strip())
         if not ref:
             continue
-        # endpoint.lock shape (post-refactor): ``{ref, attributes: {dtype: [...]}}``.
-        # Flatten ``attributes.dtype`` into the ``dtypes`` list the downloader
-        # already consumes. Fall back to the legacy ``dtypes`` key for manifests
-        # that pre-date the attributes shape.
-        attrs = v.get("attributes") if isinstance(v.get("attributes"), dict) else {}
-        dtype_candidates = attrs.get("dtype") if attrs else None
-        if not isinstance(dtype_candidates, list) or not dtype_candidates:
-            dtype_candidates = v.get("dtypes") if isinstance(v.get("dtypes"), list) else []
-        file_type = attrs.get("file_type") if attrs else None
-        file_layout = attrs.get("file_layout") if attrs else None
+        # endpoint.lock shape: ``{ref}``. Flavor + pin-by-checkpoint_id are
+        # encoded directly in the ref string (e.g. "owner/repo:tag#flavor"
+        # or "owner/repo@blake3:<digest>"). No separate selector axes.
         ids[key] = ref
-        specs[key] = {
-            "ref": ref,
-            "dtypes": [str(x) for x in (dtype_candidates or []) if str(x).strip()],
-            "file_type": (
-                [str(x) for x in file_type if str(x).strip()] if isinstance(file_type, list)
-                else ([str(file_type)] if isinstance(file_type, str) and file_type.strip() else [])
-            ),
-            "file_layout": (
-                [str(x) for x in file_layout if str(x).strip()] if isinstance(file_layout, list)
-                else ([str(file_layout)] if isinstance(file_layout, str) and file_layout.strip() else [])
-            ),
-        }
+        specs[key] = {"ref": ref}
     return ids, specs
 
 

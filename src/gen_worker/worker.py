@@ -18,8 +18,8 @@ import psutil
 import importlib
 import inspect
 import typing
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from dataclasses import dataclass
 import collections.abc as cabc
 from typing import Any, Callable, Dict, Optional, TypeVar, Iterator, List, Tuple, Iterable, get_args, get_origin
 import hashlib
@@ -244,9 +244,9 @@ class Worker:
         self._training_specs: Dict[str, Callable[..., Any]] = {}
         self._active_requests: Dict[str, RequestContext] = {}
         self._active_requests_lock = threading.Lock()
+        self._request_observations: Dict[str, Dict[str, Any]] = {}
         self._request_batch_context: Dict[str, Tuple[str, str]] = {}  # request_id -> (batch_id, item_id)
         self._request_batch_context_lock = threading.Lock()
-        self.max_concurrency = int(os.getenv("WORKER_MAX_CONCURRENCY", "0"))
         self._drain_timeout_seconds = int(os.getenv("WORKER_DRAIN_TIMEOUT_SECONDS", "0"))
         self._draining = False
         # When set, emit model.ready immediately on connect instead of waiting for a model
@@ -322,6 +322,10 @@ class Worker:
         self._receive_thread: Optional[threading.Thread] = None
         self._heartbeat_thread: Optional[threading.Thread] = None
         self._heartbeat_drain_thread: Optional[threading.Thread] = None
+        self._job_queue: "queue.Queue[Tuple[Callable[..., Any], Tuple[Any, ...], str, float]]" = queue.Queue(maxsize=1024)
+        self._job_executor = ThreadPoolExecutor(thread_name_prefix="gen-worker-job")
+        self._job_dispatch_thread = threading.Thread(target=self._job_dispatch_loop, daemon=True, name="gen-worker-job-dispatch")
+        self._job_dispatch_thread.start()
 
         self._realtime_sessions: Dict[str, _RealtimeSessionState] = {}
         self._realtime_lock = threading.Lock()
@@ -358,12 +362,7 @@ class Worker:
         self._model_manager = resolved_model_manager
         self._downloader = downloader
         if self._downloader is None:
-            base_url = os.getenv("TENSORHUB_URL", "").strip()
-            token = os.getenv("TENSORHUB_TOKEN", "").strip() or None
-            self._downloader = ModelRefDownloader(
-                cozy_base_url=base_url,
-                cozy_token=token,
-            )
+            self._downloader = ModelRefDownloader()
         self._supported_model_ids_from_scheduler: Optional[List[str]] = None  # allowlist from scheduler (repo refs)
         self._required_flavor_refs_from_scheduler: Optional[List[str]] = None  # warm-start pinned flavors
         self._release_allowed_model_ids: Optional[set[str]] = None
@@ -380,7 +379,7 @@ class Worker:
         self._payload_model_spec_by_key_by_function: Dict[str, Dict[str, Dict[str, Any]]] = {}
         # Orchestrator-resolved manifests received in EndpointConfig (startup prefetch baseline).
         # Keys should be canonical model ref strings (e.g. "cozy:owner/repo@sha256:<digest>").
-        self._resolved_cozy_models_by_id_baseline: Dict[str, Any] = {}
+        self._resolved_repos_by_id_baseline: Dict[str, Any] = {}
         self._prefetch_lock = threading.Lock()
         # Orchestrator-reported availability state received with each
         # EndpointConfig. See  for the
@@ -1331,6 +1330,28 @@ class Worker:
         else:
             logger.warning("Attempted to send message while worker is stopping or stopped.")
 
+    def _job_dispatch_loop(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                target, args, request_id, enqueued_at = self._job_queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            self._job_executor.submit(self._run_queued_job, target, args, request_id, enqueued_at)
+
+    def _run_queued_job(
+        self,
+        target: Callable[..., Any],
+        args: Tuple[Any, ...],
+        request_id: str,
+        enqueued_at: float,
+    ) -> None:
+        started_at = time.monotonic()
+        with self._active_requests_lock:
+            obs = self._request_observations.setdefault(request_id, {})
+            obs["local_queue_ms"] = max(0, int((started_at - enqueued_at) * 1000))
+            obs["started_at"] = started_at
+        target(*args)
+
     def _materialize_assets(self, ctx: RequestContext, obj: Any) -> None:
         if isinstance(obj, (Asset, Tensors)):
             self._materialize_asset(ctx, obj)
@@ -1367,7 +1388,7 @@ class Worker:
         def _default_ref(local_path: str) -> str:
             nonlocal upload_idx
             leaf = os.path.basename(local_path) or "artifact.bin"
-            ref = f"jobs/{ctx.request_id}/outputs/auto/{upload_idx:06d}-{leaf}"
+            ref = f"outputs/{ctx.request_id}/auto/{upload_idx:06d}-{leaf}"
             upload_idx += 1
             return _normalize_output_ref(ref)
 
@@ -2261,7 +2282,6 @@ class Worker:
                 gpu_memory_free_bytes=gpu_info["gpu_free_mem"],
                 gpu_name=gpu_info["gpu_name"],
                 gpu_driver=gpu_info["gpu_driver"],
-                max_concurrency=self.max_concurrency,
                 cuda_version=gpu_info["cuda_version"],
                 torch_version=gpu_info["torch_version"],
                 gpu_sm=gpu_info["gpu_sm"],
@@ -2741,7 +2761,7 @@ class Worker:
         # Add handling for other message types if needed (e.g., config updates)
         elif msg_type == 'endpoint_config':
             cfg = message.endpoint_config
-            resolved_by_flavor = dict(getattr(cfg, "resolved_cozy_models_by_flavor_ref", {}) or {})
+            resolved_by_flavor = dict(getattr(cfg, "resolved_repos_by_ref", {}) or {})
             required_ref_list = list(getattr(cfg, "required_flavor_refs", []) or [])
             logger.info(
                 "Received EndpointConfig (supported=%d required=%d resolved=%d)",
@@ -2847,7 +2867,7 @@ class Worker:
                 self._supported_model_ids_from_scheduler = supported_from_sched
 
             # Baseline resolved manifests for Cozy model downloads (issue #66/#238).
-            self._resolved_cozy_models_by_id_baseline = self._canonicalize_resolved_models_map(
+            self._resolved_repos_by_id_baseline = self._canonicalize_resolved_repos_map(
                 resolved_by_flavor
             )
 
@@ -3010,7 +3030,7 @@ class Worker:
         threading.Thread(target=_drain_then_stop, daemon=True, name="worker-drain").start()
 
     @staticmethod
-    def _canonicalize_resolved_models_map(mp: Dict[str, Any]) -> Dict[str, Any]:
+    def _canonicalize_resolved_repos_map(mp: Dict[str, Any]) -> Dict[str, Any]:
         out: Dict[str, Any] = {}
         for k, v in (mp or {}).items():
             raw = str(k or "").strip()
@@ -3149,7 +3169,7 @@ class Worker:
             q.put_nowait(mid)
 
         def worker() -> None:
-            from .models.ref_downloader import reset_resolved_cozy_models_by_id, set_resolved_cozy_models_by_id
+            from .models.ref_downloader import reset_resolved_repos_by_id, set_resolved_repos_by_id
 
             while not self._stop_event.is_set():
                 try:
@@ -3213,24 +3233,11 @@ class Worker:
                     except Exception:
                         pass
 
-                    tok = set_resolved_cozy_models_by_id(self._resolved_cozy_models_by_id_baseline or None)
-                    # Thread dtype/file_type/file_layout preferences from the
-                    # baked endpoint.lock into the download so resolve picks
-                    # the right variant. Without this the downloader falls
-                    # back to :latest, which may point at a private checkpoint.
-                    prefs = self._prefs_for_canonical(canon)
-                    logger.info("startup_prefetch canon=%s prefs=%s fixed_spec_keys=%s", canon, prefs, list(self._fixed_model_spec_by_key.keys()))
-                    prefs_tok = None
-                    if prefs:
-                        from .models.ref_downloader import set_cozy_model_download_prefs_by_ref
-                        prefs_tok = set_cozy_model_download_prefs_by_ref({canon: prefs})
+                    tok = set_resolved_repos_by_id(self._resolved_repos_by_id_baseline or None)
                     try:
                         local_path = self._downloader.download(canon, str(cache_dir)) if self._downloader else ""
                     finally:
-                        reset_resolved_cozy_models_by_id(tok)
-                        if prefs_tok is not None:
-                            from .models.ref_downloader import reset_cozy_model_download_prefs_by_ref
-                            reset_cozy_model_download_prefs_by_ref(prefs_tok)
+                        reset_resolved_repos_by_id(tok)
 
                     lp = Path(local_path) if local_path else None
                     if lp is None or not lp.exists():
@@ -3411,8 +3418,8 @@ class Worker:
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
 
-            from .models.ref_downloader import reset_resolved_cozy_models_by_id, set_resolved_cozy_models_by_id
-            tok = set_resolved_cozy_models_by_id(self._resolved_cozy_models_by_id_baseline or None)
+            from .models.ref_downloader import reset_resolved_repos_by_id, set_resolved_repos_by_id
+            tok = set_resolved_repos_by_id(self._resolved_repos_by_id_baseline or None)
             try:
                 loop.run_until_complete(
                     self._model_manager.process_supported_models_config(
@@ -3421,7 +3428,7 @@ class Worker:
                     )
                 )
             finally:
-                reset_resolved_cozy_models_by_id(tok)
+                reset_resolved_repos_by_id(tok)
             logger.info("Model configuration and downloads (if any) processed.")
         except Exception as e:
             logger.exception(f"Error during model_manager.process_supported_models_config: {e}")
@@ -3462,16 +3469,16 @@ class Worker:
 
                 logger.info(f"Model Memory Manager attempting to load '{model_id}' into VRAM...")
                 # Set resolved cozy models context so downloads can use orchestrator-resolved URLs.
-                from .models.ref_downloader import reset_resolved_cozy_models_by_id, set_resolved_cozy_models_by_id
-                per_cmd = dict(getattr(cmd, "resolved_cozy_models_by_id", {}) or {})
-                baseline = getattr(self, "_resolved_cozy_models_by_id_baseline", None) or {}
+                from .models.ref_downloader import reset_resolved_repos_by_id, set_resolved_repos_by_id
+                per_cmd = dict(getattr(cmd, "resolved_repos_by_id", {}) or {})
+                baseline = getattr(self, "_resolved_repos_by_id_baseline", None) or {}
                 merged = {**baseline, **per_cmd} if per_cmd else dict(baseline)
-                tok = set_resolved_cozy_models_by_id(merged or None)
+                tok = set_resolved_repos_by_id(merged or None)
                 try:
                     # load_model_into_vram is async
                     success = asyncio.run(self._model_manager.load_model_into_vram(model_id))
                 finally:
-                    reset_resolved_cozy_models_by_id(tok)
+                    reset_resolved_repos_by_id(tok)
                 if success: logger.info(f"Model '{model_id}' loaded to VRAM by Model Memory Manager.")
                 else: error_msg = f"MMM.load_model_into_vram failed for '{model_id}'."; logger.error(error_msg)
             except Exception as e:
@@ -3607,7 +3614,7 @@ class Worker:
         invoker_id = str(getattr(request, "invoker_id", "") or "")
         file_base_url = str(getattr(request, "file_base_url", "") or "")
         worker_capability_token = _extract_worker_capability_token(request)
-        resolved_cozy_models_by_id = dict(getattr(request, "resolved_cozy_models_by_id", {}) or {})
+        resolved_repos_by_id = dict(getattr(request, "resolved_repos_by_id", {}) or {})
         # Tensorhub #232: resolved hardware spec populated by the orchestrator.
         # Surfaced to tenant code read-only via ctx.compute.
         compute = _extract_resolved_compute(request)
@@ -3764,7 +3771,7 @@ class Worker:
             worker_capability_token=worker_capability_token or None,
             materialized_input_urls=materialized_input_urls or None,
             local_output_dir=None,
-            resolved_cozy_models_by_id=resolved_cozy_models_by_id or None,
+            resolved_repos_by_id=resolved_repos_by_id or None,
             required_models=required_models or None,
             runtime_batching_config=runtime_cfg or None,
             execution_hints=execution_hints or None,
@@ -3784,31 +3791,40 @@ class Worker:
                   logger.error(error_msg)
                   self._emit_request_event(request_id, "request.rejected", {"reason": "duplicate_request_id"})
                   return # Avoid starting duplicate thread
-             if self.max_concurrency > 0 and len(self._active_requests) >= self.max_concurrency:
-                  error_msg = f"Worker concurrency limit reached ({self.max_concurrency})."
-                  logger.error(error_msg)
-                  self._emit_request_event(request_id, "request.rejected", {"reason": "max_concurrency_reached"})
-                  self._send_request_result(request_id, False, None, "retryable", True, "worker busy", error_msg)
-                  return
+             active_count_at_start = len(self._active_requests)
+             local_queued_count_at_start = self._job_queue.qsize()
              self._active_requests[request_id] = ctx
+             self._request_observations[request_id] = {
+                 "release_id": self.release_id,
+                 "function_name": function_name,
+                 "provider": "runpod" if self.runpod_pod_id else "local",
+                 "worker_id": self.worker_id,
+                 "active_count_at_start": active_count_at_start,
+                 "local_queued_count_at_start": local_queued_count_at_start,
+                 "enqueued_at": time.monotonic(),
+             }
 
-        # Execute function in a separate thread to avoid blocking the receive loop.
+        # Queue execution locally to keep the receive loop responsive and report
+        # local queue delay back to the scheduler.
         # Training-function handlers take a different dispatch path — the
         # dispatch wrapper already owns msgspec-decode of the raw payload dict,
         # tenant-call, and ProducedFlavor upload via RequestContext.save_checkpoint.
         if training_fn is not None:
-            thread = threading.Thread(
-                target=self._execute_training_request,
-                args=(ctx, function_name, training_fn, input_payload),
-                daemon=True,
-            )
+            target = self._execute_training_request
+            args = (ctx, function_name, training_fn, input_payload)
         else:
-            thread = threading.Thread(
-                target=self._execute_request,
-                args=(ctx, spec, input_payload),
-                daemon=True,
-            )
-        thread.start()
+            target = self._execute_request
+            args = (ctx, spec, input_payload)
+        try:
+            self._job_queue.put_nowait((target, args, request_id, time.monotonic()))
+        except queue.Full:
+            error_msg = "Worker local queue is full"
+            logger.warning("%s: request_id=%s", error_msg, request_id)
+            self._emit_request_event(request_id, "request.rejected", {"reason": "local_queue_full"})
+            with self._active_requests_lock:
+                self._active_requests.pop(request_id, None)
+                self._request_observations.pop(request_id, None)
+            self._send_request_result(request_id, False, None, "worker_overloaded", True, "worker busy", error_msg)
 
     def _handle_batch_job_request(self, request: Any) -> None:
         batch_id = str(getattr(request, "batch_id", "") or "")
@@ -3838,7 +3854,7 @@ class Worker:
                 timeout_ms=int(getattr(item, "timeout_ms", 0) or 0),
                 owner=str(getattr(item, "owner", "") or ""),
                 invoker_id=str(getattr(item, "invoker_id", "") or ""),
-                resolved_cozy_models_by_id=dict(getattr(item, "resolved_cozy_models_by_id", {}) or {}),
+                resolved_repos_by_id=dict(getattr(item, "resolved_repos_by_id", {}) or {}),
                 parent_request_id=str(getattr(item, "parent_request_id", "") or ""),
                 child_request_id=str(getattr(item, "child_request_id", "") or ""),
                 item_id=item_id,
@@ -3894,7 +3910,7 @@ class Worker:
             file_api_base_url=file_base_url or None,
             worker_capability_token=worker_capability_token or None,
             materialized_input_urls=materialized_input_urls or None,
-            resolved_cozy_models_by_id=getattr(self, "_resolved_cozy_models_by_id_baseline", None) or None,
+            resolved_repos_by_id=getattr(self, "_resolved_repos_by_id_baseline", None) or None,
             compute=compute,
         )
 
@@ -3914,14 +3930,11 @@ class Worker:
                 # Build kwargs for handler.
                 kwargs: Dict[str, Any] = {spec.ctx_param: ctx, spec.socket_param: sock}
                 from .models.ref_downloader import (
-                    reset_cozy_model_download_prefs_by_ref,
-                    reset_resolved_cozy_models_by_id,
-                    set_cozy_model_download_prefs_by_ref,
-                    set_resolved_cozy_models_by_id,
+                    reset_resolved_repos_by_id,
+                    set_resolved_repos_by_id,
                 )
-                baseline = getattr(self, "_resolved_cozy_models_by_id_baseline", None) or None
-                resolved_tok = set_resolved_cozy_models_by_id(getattr(ctx, "resolved_cozy_models_by_id", None) or baseline)
-                prefs_tok = set_cozy_model_download_prefs_by_ref({})
+                baseline = getattr(self, "_resolved_repos_by_id_baseline", None) or None
+                resolved_tok = set_resolved_repos_by_id(getattr(ctx, "resolved_repos_by_id", None) or baseline)
                 try:
                     required_flavor_refs = list(getattr(cmd, "required_flavor_refs", []) or [])
                     for idx, inj in enumerate(spec.injections):
@@ -3932,8 +3945,7 @@ class Worker:
                         kwargs[inj.param_name] = self._resolve_injected_value(ctx, inj.param_type, model_id, inj)
                     await spec.func(**kwargs)
                 finally:
-                    reset_resolved_cozy_models_by_id(resolved_tok)
-                    reset_cozy_model_download_prefs_by_ref(prefs_tok)
+                    reset_resolved_repos_by_id(resolved_tok)
 
             try:
                 loop.run_until_complete(run_handler())
@@ -4022,12 +4034,12 @@ class Worker:
         success = False
 
         # Metrics (best-effort): never fail a job.
-        resolved_map = getattr(ctx, "resolved_cozy_models_by_id", None) or None
+        resolved_map = getattr(ctx, "resolved_repos_by_id", None) or None
         rm = RunMetricsV1(
             request_id=str(request_id or ""),
             function_name=str(spec.name or ""),
             required_models=list(getattr(ctx, "required_models", []) or []),
-            resolved_cozy_models_by_id=resolved_map,
+            resolved_repos_by_id=resolved_map,
         )
         # Attach to ctx so RequestContext.save_* and injection paths can accumulate.
         try:
@@ -4130,17 +4142,13 @@ class Worker:
         self._gpu_busy_enter()
 
         from .models.ref_downloader import (
-            reset_cozy_model_download_prefs_by_ref,
-            reset_resolved_cozy_models_by_id,
-            set_cozy_model_download_prefs_by_ref,
-            set_resolved_cozy_models_by_id,
+            reset_resolved_repos_by_id,
+            set_resolved_repos_by_id,
         )
 
-        baseline = getattr(self, "_resolved_cozy_models_by_id_baseline", None) or None
-        resolved_map = getattr(ctx, "resolved_cozy_models_by_id", None) or baseline
-        resolved_tok = set_resolved_cozy_models_by_id(resolved_map)
-        prefs_map: Dict[str, Any] = {}
-        prefs_tok = set_cozy_model_download_prefs_by_ref(prefs_map)
+        baseline = getattr(self, "_resolved_repos_by_id_baseline", None) or None
+        resolved_map = getattr(ctx, "resolved_repos_by_id", None) or baseline
+        resolved_tok = set_resolved_repos_by_id(resolved_map)
 
         models_in_use: set[str] = set()
         inference_watchdog: Optional[threading.Timer] = None
@@ -4644,8 +4652,7 @@ class Worker:
         finally:
             if inference_watchdog is not None:
                 inference_watchdog.cancel()
-            reset_resolved_cozy_models_by_id(resolved_tok)
-            reset_cozy_model_download_prefs_by_ref(prefs_tok)
+            reset_resolved_repos_by_id(resolved_tok)
 
             for mid in models_in_use:
                 try:
@@ -4694,6 +4701,10 @@ class Worker:
                 self._emit_worker_event_bytes(request_id, "metrics.job", safe_json_bytes(rm.to_metrics_run_payload()))
             except Exception:
                 pass
+            with self._active_requests_lock:
+                obs = self._request_observations.setdefault(request_id, {})
+                obs["peak_memory_bytes"] = int(getattr(rm, "peak_ram_bytes", 0) or 0)
+                obs["peak_vram_bytes"] = int(getattr(rm, "peak_vram_bytes", 0) or 0)
             if success:
                 self._emit_request_event(
                     request_id,
@@ -4746,7 +4757,7 @@ class Worker:
             request_id=str(request_id or ""),
             function_name=str(function_name or ""),
             required_models=list(getattr(ctx, "required_models", []) or []),
-            resolved_cozy_models_by_id=getattr(ctx, "resolved_cozy_models_by_id", None) or None,
+            resolved_repos_by_id=getattr(ctx, "resolved_repos_by_id", None) or None,
         )
         try:
             setattr(ctx, "_run_metrics", rm)
@@ -4893,6 +4904,10 @@ class Worker:
                 self._emit_worker_event_bytes(request_id, "metrics.job", safe_json_bytes(rm.to_metrics_run_payload()))
             except Exception:
                 pass
+            with self._active_requests_lock:
+                obs = self._request_observations.setdefault(request_id, {})
+                obs["peak_memory_bytes"] = int(getattr(rm, "peak_ram_bytes", 0) or 0)
+                obs["peak_vram_bytes"] = int(getattr(rm, "peak_vram_bytes", 0) or 0)
             if success:
                 self._emit_request_event(
                     request_id,
@@ -4972,12 +4987,9 @@ class Worker:
         """Materialize the source snapshot for a conversion/training job.
 
         Called just before tenant code runs when the job payload has a
-        reserved-name `source` field. Resolves source.ref against tensorhub,
-        downloads the checkpoint flavor matching source.attributes (subset-containment),
+        reserved-name `source` field. Resolves source.ref against tensorhub
         and populates ctx.source_path with the local snapshot directory.
-
-        If source.checkpoint_id is set, it takes priority over the attributes
-        selector.
+        If source.checkpoint_id is set it pins a specific checkpoint.
         """
         ref = str(source.get("ref") or "").strip()
         if not ref:
@@ -4993,61 +5005,18 @@ class Worker:
         if not canonical.startswith(("cozy:", "hf:")):
             canonical = "cozy:" + canonical
 
-        # Thread attribute-based download prefs through the contextvar so
-        # ref_downloader.py can honor dtype/file_type/file_layout selectors
-        # while resolving the variant. Attribute keys not recognized by the
-        # current resolver are ignored (forward-compat for #229).
-        attrs = source.get("attributes") or {}
-        prefs: Dict[str, Any] = {}
-        if isinstance(attrs, dict):
-            if attrs.get("dtype"):
-                prefs["dtypes"] = [str(attrs["dtype"]).strip().lower()]
-            if attrs.get("file_type"):
-                prefs["file_type"] = str(attrs["file_type"]).strip().lower()
-            if attrs.get("file_layout"):
-                prefs["file_layout"] = str(attrs["file_layout"]).strip().lower()
-        logger.info("materialize_source source=%s parsed_attrs=%s prefs=%s", source, attrs, prefs)
+        logger.info("materialize_source source=%s", source)
 
-        from .models.ref_downloader import (
-            set_cozy_model_download_prefs_by_ref,
-            reset_cozy_model_download_prefs_by_ref,
-        )
-
-        # Parse canonical to identify the downloader's per-ref key. The
-        # downloader looks up prefs using ``CozyRef.canonical()``, which is
-        # ``cozy:<owner>/<repo>:<tag>`` (tag defaults to "latest"). Build the
-        # same form here so the contextvar lookup hits — previously we
-        # stripped the prefix + tag which silently dropped every pref.
-        parsed_canonical = canonical
-        if not parsed_canonical.startswith("cozy:"):
-            parsed_canonical = "cozy:" + parsed_canonical
-        if "@" not in parsed_canonical and ":" not in parsed_canonical[len("cozy:"):]:
-            parsed_canonical = parsed_canonical + ":latest"
-
-        from .models.ref_downloader import (
-            reset_cozy_worker_capability_token,
-            set_cozy_worker_capability_token,
-        )
-
-        prefs_tok = set_cozy_model_download_prefs_by_ref({parsed_canonical: prefs} if prefs else None)
-        # Plumb the per-job capability token into the downloader's tensorhub-resolve
-        # fallback so the resolve-artifact call authenticates as the invoker.
-        cap_token_raw = str(getattr(ctx, "_worker_capability_token", "") or "").strip()
-        cap_tok = set_cozy_worker_capability_token(cap_token_raw or None)
-        try:
-            cache_dir = str(tensorhub_cas_dir())
-            local = self._downloader.download(canonical, cache_dir)
-        finally:
-            reset_cozy_model_download_prefs_by_ref(prefs_tok)
-            reset_cozy_worker_capability_token(cap_tok)
+        cache_dir = str(tensorhub_cas_dir())
+        local = self._downloader.download(canonical, cache_dir)
 
         if not local or not Path(local).exists():
             raise RuntimeError(f"source materialization returned missing path: {local!r}")
 
         ctx._set_source_path(local)
         logger.info(
-            "[request_id=%s] conversion source materialized at %s (ref=%s, attrs=%s)",
-            ctx.request_id, local, ref, prefs,
+            "[request_id=%s] conversion source materialized at %s (ref=%s)",
+            ctx.request_id, local, ref,
         )
 
     def _apply_destination_tags(self, ctx: RequestContext, destination: Dict[str, Any], checkpoint_id: str) -> None:
@@ -5252,7 +5221,7 @@ class Worker:
                         # If we have an orchestrator-resolved manifest, estimate missing bytes.
                         resolved_entry = None
                         try:
-                            resolved_entry = (getattr(ctx, "resolved_cozy_models_by_id", None) or {}).get(canon)
+                            resolved_entry = (getattr(ctx, "resolved_repos_by_id", None) or {}).get(canon)
                         except Exception:
                             resolved_entry = None
                         bytes_dl = None
@@ -5823,6 +5792,7 @@ class Worker:
     ) -> None:
         """Send a request execution result back to the scheduler via the queue."""
         try:
+            observation = self._build_job_observation(request_id, success, error_type)
             batch_ctx: Optional[Tuple[str, str]] = None
             with self._request_batch_context_lock:
                 batch_ctx = self._request_batch_context.pop(request_id, None)
@@ -5837,6 +5807,7 @@ class Worker:
                     error_type=error_type if not success else "",
                     retryable=bool(retryable) if not success else False,
                     safe_message=safe_message if not success else "",
+                    observation=observation,
                 )
                 msg = pb.WorkerSchedulerMessage(
                     batch_job_result=pb.BatchExecutionResult(
@@ -5853,6 +5824,7 @@ class Worker:
                     error_type=error_type if not success else "",
                     retryable=bool(retryable) if not success else False,
                     safe_message=safe_message if not success else "",
+                    observation=observation,
                 )
                 msg = pb.WorkerSchedulerMessage(job_result=result)
             self._send_message(msg)
@@ -5860,3 +5832,26 @@ class Worker:
         except Exception as e:
              # This shouldn't generally fail unless message creation has issues
              logger.error(f"Failed to create or queue request result for request_id={request_id}: {e}")
+
+    def _build_job_observation(self, request_id: str, success: bool, error_type: str) -> Any:
+        with self._active_requests_lock:
+            obs = dict(self._request_observations.pop(request_id, {}) or {})
+        started_at = float(obs.get("started_at") or obs.get("enqueued_at") or time.monotonic())
+        runtime_ms = max(0, int((time.monotonic() - started_at) * 1000))
+        return pb.JobExecutionObservation(
+            release_id=str(obs.get("release_id") or self.release_id or ""),
+            function_name=str(obs.get("function_name") or ""),
+            build_profile=str(obs.get("build_profile") or ""),
+            image_digest=str(obs.get("image_digest") or ""),
+            provider=str(obs.get("provider") or ("runpod" if self.runpod_pod_id else "local")),
+            worker_id=str(obs.get("worker_id") or self.worker_id or ""),
+            machine_class=str(obs.get("machine_class") or ""),
+            status="succeeded" if success else "failed",
+            error_type=str(error_type or ""),
+            runtime_ms=runtime_ms,
+            local_queue_ms=int(obs.get("local_queue_ms") or 0),
+            peak_memory_bytes=int(obs.get("peak_memory_bytes") or 0),
+            peak_vram_bytes=int(obs.get("peak_vram_bytes") or 0),
+            active_count_at_start=int(obs.get("active_count_at_start") or 0),
+            local_queued_count_at_start=int(obs.get("local_queued_count_at_start") or 0),
+        )

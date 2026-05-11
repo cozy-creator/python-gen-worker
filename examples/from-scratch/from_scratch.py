@@ -27,7 +27,7 @@ class FromScratchInput(msgspec.Struct, forbid_unknown_fields=True):
     hidden_dim: int = 64
 
 
-@training_function(kind="from-scratch", concurrency="sequential")
+@training_function(kind="from-scratch")
 def generate(
     ctx: ConversionContext,
     payload: FromScratchInput,
@@ -58,15 +58,7 @@ def generate(
         raise RuntimeError("safetensors required for random-init example")
     save_file(weights, str(weights_path))
 
-    return [
-        ProducedFlavor(
-            path=weights_path,
-            flavor="fp32",
-            attributes={
-                "dtype": "fp32",
-                "file_layout": "singlefile",
-                "file_type": "safetensors",
-                "kind": "model",
-            },
-        )
-    ]
+    # Attribute provenance (dtype/file_layout/file_type/kind) is no longer
+    # stamped on produced checkpoints — server-side inference reads the
+    # uploaded bytes for these.
+    return [ProducedFlavor(path=weights_path, flavor="fp32")]

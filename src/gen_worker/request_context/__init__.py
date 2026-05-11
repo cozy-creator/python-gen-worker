@@ -92,7 +92,7 @@ class RequestContext:
         worker_capability_token: Optional[str] = None,
         materialized_input_urls: Optional[Dict[str, str]] = None,
         local_output_dir: Optional[str] = None,
-        resolved_cozy_models_by_id: Optional[Dict[str, Any]] = None,
+        resolved_repos_by_id: Optional[Dict[str, Any]] = None,
         required_models: Optional[List[str]] = None,
         runtime_batching_config: Optional[Dict[str, Any]] = None,
         execution_hints: Optional[Dict[str, Any]] = None,
@@ -114,7 +114,7 @@ class RequestContext:
         self._worker_capability_token = (worker_capability_token or "").strip() or None
         self._materialized_input_urls = dict(materialized_input_urls or {})
         self._local_output_dir = (local_output_dir or "").strip() or None
-        self._resolved_cozy_models_by_id = resolved_cozy_models_by_id
+        self._resolved_repos_by_id = resolved_repos_by_id
         self._required_models = list(required_models or [])
         self._runtime_batching_config = dict(runtime_batching_config or {})
         self._execution_hints = dict(execution_hints or {})
@@ -398,8 +398,8 @@ class RequestContext:
             )
 
     @property
-    def resolved_cozy_models_by_id(self) -> Optional[Dict[str, Any]]:
-        return self._resolved_cozy_models_by_id
+    def resolved_repos_by_id(self) -> Optional[Dict[str, Any]]:
+        return self._resolved_repos_by_id
 
     @property
     def required_models(self) -> List[str]:
@@ -487,7 +487,7 @@ class RequestContext:
             item_key = f"item-{self._item_index:06d}"
         if not item_key:
             item_key = "item-000000"
-        return f"jobs/{self._request_id}/outputs/items/{item_key}/{leaf}"
+        return f"outputs/{self._request_id}/items/{item_key}/{leaf}"
 
     def preferred_batch_size(self, default: int = 1) -> int:
         cfg = self._runtime_batching_config
@@ -627,17 +627,8 @@ class RequestContext:
         output_kind: Optional[str] = None,
         target_dtype: Optional[str] = None,
         flavor: Optional[str] = None,
-        attributes: Optional[Mapping[str, str]] = None,
     ) -> Tensors:
-        """Save checkpoint/model-weight bytes and return a first-class tensor artifact.
-
-        ``attributes`` is a free-form per-blob metadata map carried onto the
-        upload-session /complete payload (alongside structured lineage). The
-        server may persist it on the resulting Tensors record; unknown keys
-        are forward-compatible. Use this instead of inventing new structured
-        kwargs for one-off provenance fields (recipe hashes, calibration
-        dataset refs, library versions, etc.).
-        """
+        """Save checkpoint/model-weight bytes and return a first-class tensor artifact."""
         ref = _normalize_output_ref(ref)
         self._require_repo_job_scope_for_tensors(ref)
         src = str(local_path or "").strip()
@@ -669,7 +660,6 @@ class RequestContext:
                 output_kind=output_kind,
                 target_dtype=target_dtype,
                 flavor=flavor,
-                attributes=attributes,
             )
             with open(src, "rb") as fin:
                 while True:
@@ -796,7 +786,6 @@ class RequestContext:
         output_kind: Optional[str] = None,
         target_dtype: Optional[str] = None,
         flavor: Optional[str] = None,
-        attributes: Optional[Mapping[str, str]] = None,
     ) -> _RequestOutputStream:
         """Open a chunk-writable output stream that finalizes to Tensors."""
         ref = _normalize_output_ref(ref)
@@ -813,7 +802,6 @@ class RequestContext:
             output_kind=output_kind,
             target_dtype=target_dtype,
             flavor=flavor,
-            attributes=attributes,
         )
 
     def save_bytes_create(self, ref: str, data: bytes) -> Asset:
