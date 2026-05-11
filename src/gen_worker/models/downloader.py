@@ -37,7 +37,7 @@ class TensorhubDownloader(ModelDownloader):
         if ref.startswith("http://") or ref.startswith("https://"):
             return ref
         if not self.base_url:
-            raise ValueError("TENSORHUB_URL is required for non-URL model_ref")
+            raise ValueError("TENSORHUB_PUBLIC_URL is required for non-URL model_ref")
         return f"{self.base_url}/{ref.lstrip('/')}"
 
     def _default_filename(self, url: str) -> str:

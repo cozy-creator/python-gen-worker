@@ -183,17 +183,6 @@ def prepare_hf_source_tree_for_gguf(
 
 
 def resolve_gguf_convert_script() -> Path:
-    env_candidates = [
-        str(os.getenv("CONVERSION_GGUF_CONVERT_SCRIPT", "")).strip(),
-        str(os.getenv("LLAMA_CPP_CONVERT_HF_TO_GGUF", "")).strip(),
-    ]
-    for raw in env_candidates:
-        if raw == "":
-            continue
-        candidate = Path(raw)
-        if candidate.exists() and candidate.is_file():
-            return candidate
-
     discovered = shutil.which("convert_hf_to_gguf.py")
     if discovered:
         return Path(discovered)
@@ -202,10 +191,6 @@ def resolve_gguf_convert_script() -> Path:
 
 
 def resolve_llama_cpp_commit(script_path: Path) -> str:
-    from_env = str(os.getenv("LLAMA_CPP_COMMIT", "")).strip()
-    if from_env != "":
-        return from_env
-
     for parent in [script_path.parent, *script_path.parents]:
         git_dir = parent / ".git"
         if not git_dir.exists():
@@ -233,7 +218,7 @@ def run_hf_to_gguf_conversion(
     output_path: Path,
     encoding: str,
 ) -> None:
-    python_bin = str(os.getenv("CONVERSION_GGUF_PYTHON", "")).strip() or sys.executable
+    python_bin = sys.executable
     cmd = [
         python_bin,
         str(script_path),
@@ -249,7 +234,7 @@ def run_hf_to_gguf_conversion(
             check=False,
             text=True,
             capture_output=True,
-            timeout=float(os.getenv("CONVERSION_GGUF_TIMEOUT_SECONDS", "7200")),
+            timeout=7200.0,
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError("gguf_conversion_timeout") from exc

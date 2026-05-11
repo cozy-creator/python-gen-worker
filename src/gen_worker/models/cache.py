@@ -7,12 +7,6 @@ This module provides a model cache that:
 - Reports cache stats for orchestrator heartbeats
 - Supports orchestrator-commanded load/unload operations
 - Supports progressive model availability (accept jobs as models become ready)
-
-Configuration via environment variables:
-- WORKER_MAX_VRAM_GB: Maximum VRAM to use (default: auto-detect - safety margin)
-- WORKER_VRAM_SAFETY_MARGIN_GB: Reserved VRAM for working memory (default: 3.5)
-- TENSORHUB_CACHE_DIR: TensorHub cache root (default: ~/.cache/tensorhub)
-- WORKER_MAX_CONCURRENT_DOWNLOADS: Maximum concurrent model downloads (default: 2)
 """
 
 from __future__ import annotations
@@ -32,7 +26,6 @@ from .cache_paths import tensorhub_cas_dir
 
 logger = logging.getLogger(__name__)
 
-# Constants - can be overridden via environment variables
 DEFAULT_VRAM_SAFETY_MARGIN_GB = 3.5
 DEFAULT_MAX_CONCURRENT_DOWNLOADS = 2
 
@@ -115,10 +108,7 @@ class ModelCache:
             vram_safety_margin_gb: VRAM to reserve for working memory.
             model_cache_dir: Directory for disk-cached models.
         """
-        # Configuration from args or environment
-        self._vram_safety_margin = vram_safety_margin_gb or float(
-            os.getenv("WORKER_VRAM_SAFETY_MARGIN_GB", str(DEFAULT_VRAM_SAFETY_MARGIN_GB))
-        )
+        self._vram_safety_margin = vram_safety_margin_gb or DEFAULT_VRAM_SAFETY_MARGIN_GB
         cache_dir = model_cache_dir or str(tensorhub_cas_dir())
         self._model_cache_dir = Path(os.path.expanduser(cache_dir))
         self._model_cache_dir.mkdir(parents=True, exist_ok=True)
@@ -128,12 +118,8 @@ class ModelCache:
         if max_vram_gb is not None:
             self._max_vram_gb = max_vram_gb
         else:
-            env_max = os.getenv("WORKER_MAX_VRAM_GB", "").strip()
-            if env_max:
-                self._max_vram_gb = float(env_max)
-            else:
-                # Auto: total VRAM minus safety margin
-                self._max_vram_gb = max(0.0, self._total_vram_gb - self._vram_safety_margin)
+            # Auto: total VRAM minus safety margin
+            self._max_vram_gb = max(0.0, self._total_vram_gb - self._vram_safety_margin)
 
         # Model tracking with LRU ordering
         # OrderedDict maintains insertion order; we move items to end on access
@@ -516,7 +502,4 @@ class ModelCache:
 
     def get_max_concurrent_downloads(self) -> int:
         """Get the maximum number of concurrent downloads allowed."""
-        return int(os.getenv(
-            "WORKER_MAX_CONCURRENT_DOWNLOADS",
-            str(DEFAULT_MAX_CONCURRENT_DOWNLOADS)
-        ))
+        return DEFAULT_MAX_CONCURRENT_DOWNLOADS

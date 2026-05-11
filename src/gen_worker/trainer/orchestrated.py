@@ -351,8 +351,8 @@ class RuntimeInputDownloader:
         self._root.mkdir(parents=True, exist_ok=True)
         self._token = (capability_token or "").strip() or None
         self._model_downloader = ModelRefDownloader(
-            cozy_base_url=os.getenv("TENSORHUB_URL"),
-            cozy_token=os.getenv("TENSORHUB_TOKEN"),
+            cozy_base_url=os.getenv("TENSORHUB_PUBLIC_URL"),
+            cozy_token=self._token,
             hf_home=os.getenv("HF_HOME"),
             hf_token=os.getenv("HF_TOKEN"),
         )

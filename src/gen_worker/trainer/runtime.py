@@ -23,7 +23,6 @@ from .orchestrated import (
     RuntimeInputDownloader,
     StartupContractError,
     UploadEndpoints,
-    is_truthy,
 )
 
 logger = logging.getLogger("TrainerRuntime")
@@ -117,8 +116,7 @@ class LocalTrainingReporter:
     def is_canceled(self) -> bool:
         if self._cancel_policy is not None and self._cancel_policy.is_canceled():
             return True
-        cancel_flag = (os.getenv("TRAINER_CANCELLED") or "").strip().lower()
-        return cancel_flag in {"1", "true", "t", "yes", "y"}
+        return False
 
     @property
     def cancel_reason(self) -> str:
@@ -279,52 +277,44 @@ def _runtime_config_from_env() -> TrainerRuntimeConfig:
     job_spec_path = (os.getenv("TRAINER_JOB_SPEC_PATH") or "/app/.cozy/trainer_job.json").strip()
     if not job_spec_path:
         raise StartupContractError("startup.missing_job_spec_path", "TRAINER_JOB_SPEC_PATH is required")
-    trainer_import = (os.getenv("TRAINER_PLUGIN") or "").strip()
-    artifacts_root = (os.getenv("TRAINER_ARTIFACTS_DIR") or "/tmp/training").strip()
-    checkpoints_dir = (os.getenv("TRAINER_CHECKPOINTS_DIR") or f"{artifacts_root}/checkpoints").strip()
-    samples_dir = (os.getenv("TRAINER_SAMPLES_DIR") or f"{artifacts_root}/samples").strip()
-    metrics_dir = (os.getenv("TRAINER_METRICS_DIR") or f"{artifacts_root}/metrics").strip()
-    events_path = (os.getenv("TRAINER_EVENTS_PATH") or f"{metrics_dir}/events.jsonl").strip() or None
-    capability_token = (os.getenv("TRAINER_CAPABILITY_TOKEN") or "").strip() or None
-    orchestrated = is_truthy(os.getenv("TRAINER_ORCHESTRATED"))
-    max_runtime_seconds = int((os.getenv("TRAINER_MAX_RUNTIME_SECONDS") or "0").strip() or "0")
-    cancel_file_path = (os.getenv("TRAINER_CANCEL_FILE") or "").strip() or None
+    artifacts_root = "/tmp/training"
+    checkpoints_dir = f"{artifacts_root}/checkpoints"
+    samples_dir = f"{artifacts_root}/samples"
+    metrics_dir = f"{artifacts_root}/metrics"
+    events_path: str | None = f"{metrics_dir}/events.jsonl"
 
+    # All trainer config now flows through the job spec file. The trainer
+    # subprocess no longer reads TRAINER_PLUGIN / TRAINER_*_DIR /
+    # TRAINER_UPLOAD_* / TRAINER_CAPABILITY_TOKEN / etc. — orchestrator
+    # writes everything needed into TRAINER_JOB_SPEC_PATH.
     upload_endpoints = UploadEndpoints(
-        metrics_url=(os.getenv("TRAINER_UPLOAD_METRICS_URL") or "").strip(),
-        checkpoint_url=(os.getenv("TRAINER_UPLOAD_CHECKPOINT_URL") or "").strip(),
-        sample_url=(os.getenv("TRAINER_UPLOAD_SAMPLE_URL") or "").strip(),
-        terminal_url=(os.getenv("TRAINER_UPLOAD_TERMINAL_URL") or "").strip(),
+        metrics_url="",
+        checkpoint_url="",
+        sample_url="",
+        terminal_url="",
     )
+    payload = _read_job_spec(job_spec_path)
+    trainer_import = str(payload.get("trainer") or "").strip()
+    capability_token = str(payload.get("capability_token") or "").strip() or None
+    orchestrated = bool(payload.get("orchestrated", False))
+    max_runtime_seconds = int(payload.get("max_runtime_seconds") or 0)
+    cancel_file_path = str(payload.get("cancel_file_path") or "").strip() or None
+    up = payload.get("uploads")
+    if isinstance(up, dict):
+        upload_endpoints = UploadEndpoints(
+            metrics_url=str(up.get("metrics_url") or "").strip(),
+            checkpoint_url=str(up.get("checkpoint_url") or "").strip(),
+            sample_url=str(up.get("sample_url") or "").strip(),
+            terminal_url=str(up.get("terminal_url") or "").strip(),
+        )
     if not trainer_import:
-        payload = _read_job_spec(job_spec_path)
-        trainer_import = str(payload.get("trainer") or "").strip()
-        if not capability_token:
-            capability_token = str(payload.get("capability_token") or "").strip() or None
-        if not orchestrated:
-            orchestrated = bool(payload.get("orchestrated", False))
-        if max_runtime_seconds <= 0:
-            max_runtime_seconds = int(payload.get("max_runtime_seconds") or 0)
-        if not cancel_file_path:
-            cancel_file_path = str(payload.get("cancel_file_path") or "").strip() or None
-        up = payload.get("uploads")
-        if isinstance(up, dict):
-            upload_endpoints = UploadEndpoints(
-                metrics_url=str(up.get("metrics_url") or upload_endpoints.metrics_url or "").strip(),
-                checkpoint_url=str(up.get("checkpoint_url") or upload_endpoints.checkpoint_url or "").strip(),
-                sample_url=str(up.get("sample_url") or upload_endpoints.sample_url or "").strip(),
-                terminal_url=str(up.get("terminal_url") or upload_endpoints.terminal_url or "").strip(),
-            )
-    if not trainer_import:
-        raise StartupContractError("startup.missing_trainer_import", "trainer import is required via TRAINER_PLUGIN or job spec field 'trainer'")
-    if not checkpoints_dir or not samples_dir or not metrics_dir:
-        raise StartupContractError("startup.invalid_artifact_paths", "artifact directories must be non-empty")
+        raise StartupContractError("startup.missing_trainer_import", "trainer import is required via job spec field 'trainer'")
     if max_runtime_seconds < 0:
         raise StartupContractError("startup.invalid_timeout", "max runtime seconds must be >= 0")
     if orchestrated and not capability_token:
         raise StartupContractError(
             "startup.missing_capability_token",
-            "TRAINER_CAPABILITY_TOKEN (or job spec `capability_token`) is required in orchestrated mode",
+            "job spec `capability_token` is required in orchestrated mode",
         )
     return TrainerRuntimeConfig(
         trainer_import=trainer_import,
@@ -676,7 +666,7 @@ def run_training_runtime_from_env() -> int:
             request_id=job.request_id,
             token=cfg.capability_token,
             endpoints=cfg.upload_endpoints,
-            tensorhub_url=os.getenv("TENSORHUB_URL"),
+            tensorhub_url=os.getenv("TENSORHUB_PUBLIC_URL"),
             owner=job.owner,
             destination_repo=destination_repo,
             job_id=job_id,

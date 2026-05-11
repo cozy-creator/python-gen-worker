@@ -90,7 +90,7 @@ from .models.refs import parse_model_ref
 from .api.types import Asset, Tensors
 from .models.cache import ModelCache
 from .run_metrics_v1 import RunMetricsV1, best_effort_bytes_downloaded, best_effort_init_model_metrics, safe_json_bytes
-from .models.cache_paths import worker_local_model_cache_dir_default, tensorhub_cas_dir
+from .models.cache_paths import tensorhub_cas_dir
 from .wire_protocol import WIRE_PROTOCOL_MAJOR, WIRE_PROTOCOL_MINOR, wire_protocol_version_string
 from .api.injection import (
     InjectionSpec,
@@ -203,28 +203,26 @@ class Worker:
         self._registered_event = threading.Event()
         self._registration_watchdog_thread: Optional[threading.Thread] = None
         self._startup_timeout_triggered = False
-        self._register_timeout_s = int(os.getenv("WORKER_REGISTER_TIMEOUT_S", "90") or "90")
-        self._warn_model_resolve_s = float(os.getenv("WORKER_WARN_MODEL_RESOLVE_S", "30") or "30")
-        self._warn_model_load_s = float(os.getenv("WORKER_WARN_MODEL_LOAD_S", "60") or "60")
-        self._warn_inference_s = float(os.getenv("WORKER_WARN_INFERENCE_S", "60") or "60")
+        self._register_timeout_s = 90
+        self._warn_model_resolve_s = 30.0
+        self._warn_model_load_s = 60.0
+        self._warn_inference_s = 60.0
         self.user_module_names = user_module_names # Store module names
         self.worker_jwt = (worker_jwt or "").strip()
-        if not self.worker_jwt:
-            raise ValueError("WORKER_JWT is required (worker-connect JWT); refusing to run unauthenticated worker")
-        self._worker_claims = _decode_unverified_jwt_claims(self.worker_jwt)
+        self._worker_claims = _decode_unverified_jwt_claims(self.worker_jwt) if self.worker_jwt else {}
         jwt_worker_id = str(self._worker_claims.get("sub") or "").strip()
         self.worker_id = worker_id or jwt_worker_id or f"py-worker-{os.getpid()}"
         self.use_tls = use_tls
         self.reconnect_delay = reconnect_delay
         self.max_reconnect_attempts = max_reconnect_attempts
-        self.max_input_bytes = int(os.getenv("WORKER_MAX_INPUT_BYTES", "0"))
-        self.max_output_bytes = int(os.getenv("WORKER_MAX_OUTPUT_BYTES", "0"))
+        self.max_input_bytes = 0
+        self.max_output_bytes = 0
 
-        self._jwks_url = os.getenv("SCHEDULER_JWKS_URL", "").strip()
-        self._jwks_ttl_seconds = int(os.getenv("SCHEDULER_JWKS_TTL_SECONDS", "300"))
-        self._jwt_issuer = os.getenv("SCHEDULER_JWT_ISSUER", "").strip()
-        self._jwt_audience = os.getenv("SCHEDULER_JWT_AUDIENCE", "").strip()
-        self._jwks_cache: Optional[_JWKSCache] = _JWKSCache(self._jwks_url, self._jwks_ttl_seconds) if self._jwks_url else None
+        self._jwks_url = ""
+        self._jwks_ttl_seconds = 300
+        self._jwt_issuer = ""
+        self._jwt_audience = ""
+        self._jwks_cache: Optional[_JWKSCache] = None
 
         # Worker containers are treated as untrusted. Do not depend on RELEASE_ID/OWNER env vars.
         # Release + owner identity come from the scheduler-issued JWT and per-job gRPC envelopes.
@@ -247,12 +245,11 @@ class Worker:
         self._request_observations: Dict[str, Dict[str, Any]] = {}
         self._request_batch_context: Dict[str, Tuple[str, str]] = {}  # request_id -> (batch_id, item_id)
         self._request_batch_context_lock = threading.Lock()
-        self._drain_timeout_seconds = int(os.getenv("WORKER_DRAIN_TIMEOUT_SECONDS", "0"))
+        self._drain_timeout_seconds = 0
         self._draining = False
-        # When set, emit model.ready immediately on connect instead of waiting for a model
-        # load event. Use this for conversion workers that have no GPU model to pre-load.
-        _mroc = (os.getenv("WORKER_MODELS_READY_ON_CONNECT") or "").strip().lower()
-        self._models_ready_on_connect: bool = _mroc in ("1", "true", "yes", "t", "on")
+        # Emit model.ready immediately on connect by default; downstream model-load
+        # events still apply for workers that need to gate on GPU model pre-load.
+        self._models_ready_on_connect: bool = False
         self._discovered_resources: Dict[str, ResourceRequirements] = {} # Store resources per function
         self._function_schemas: Dict[str, Tuple[bytes, bytes, Optional[bytes], bytes]] = {}  # func_name -> (input_schema_json, output_schema_json, delta_schema_json, injection_json)
         self._runtime_batching_config_by_function: Dict[str, Dict[str, Any]] = {}
@@ -263,11 +260,8 @@ class Worker:
         self._custom_runtime_locks: Dict[Tuple[str, str], threading.Lock] = {}
 
         # Local (non-NFS) cache for NFS->local snapshot localization.
-        # Empty WORKER_LOCAL_MODEL_CACHE_DIR disables localization entirely.
-        self._local_model_cache_dir = os.getenv(
-            "WORKER_LOCAL_MODEL_CACHE_DIR",
-            str(worker_local_model_cache_dir_default()),
-        ).strip()
+        # Empty string disables localization entirely.
+        self._local_model_cache_dir = ""
         self._local_model_cache: Optional[Any] = None
         self._local_model_cache_lock = threading.Lock()
         self._last_disk_inventory_hash: str = ""
@@ -331,24 +325,11 @@ class Worker:
         self._realtime_lock = threading.Lock()
 
         self._reconnect_delay_base = max(0, reconnect_delay)
-        self._reconnect_delay_max = int(os.getenv("RECONNECT_MAX_DELAY", "60"))
-        self._reconnect_jitter_seconds = float(os.getenv("RECONNECT_JITTER_SECONDS", "1.0"))
+        self._reconnect_delay_max = 60
+        self._reconnect_jitter_seconds = 1.0
         self._lb_only_retries = lb_only_retries
 
         resolved_model_manager = model_manager
-        if resolved_model_manager is None:
-            model_manager_path = os.getenv("MODEL_MANAGER_CLASS", "").strip()
-            if model_manager_path:
-                try:
-                    module_path, _, class_name = model_manager_path.partition(":")
-                    if not module_path or not class_name:
-                        raise ValueError("MODEL_MANAGER_CLASS must be in module:Class format")
-                    module = importlib.import_module(module_path)
-                    manager_cls = getattr(module, class_name)
-                    resolved_model_manager = manager_cls()
-                    logger.info(f"Loaded ModelManager from MODEL_MANAGER_CLASS={model_manager_path}")
-                except Exception as e:
-                    logger.exception(f"Failed to load MODEL_MANAGER_CLASS '{model_manager_path}': {e}")
         # Auto-wire: if no explicit manager and diffusers is available, use the
         # built-in DiffusersModelManager so LoadModelCommand works out of the box.
         if resolved_model_manager is None:
@@ -1465,14 +1446,14 @@ class Worker:
         if not (ref.startswith("http://") or ref.startswith("https://")):
             if mapped := ctx._materialized_input_url_for_ref(ref):
                 ref = mapped
-        base_dir = os.getenv("WORKER_JOB_DIR", "/tmp/tensorhub/job").rstrip("/")
+        base_dir = "/tmp/tensorhub/job"
         scope_id = _workspace_scope_id(ctx.request_id, getattr(ctx, "job_id", None))
         local_inputs_dir = os.path.join(base_dir, scope_id, "inputs")
         os.makedirs(local_inputs_dir, exist_ok=True)
-        cache_dir = os.getenv("WORKER_CACHE_DIR", os.path.join(base_dir, "cache")).rstrip("/")
+        cache_dir = os.path.join(base_dir, "cache")
         os.makedirs(cache_dir, exist_ok=True)
 
-        max_bytes = int(os.getenv("WORKER_MAX_INPUT_FILE_BYTES", str(200 * 1024 * 1024)))
+        max_bytes = 200 * 1024 * 1024
 
         # External URL inputs — check shared cache first, download on miss.
         if ref.startswith("http://") or ref.startswith("https://"):
@@ -1629,7 +1610,7 @@ class Worker:
         asset.sha256 = sha256_hex or None
 
     def _download_url_to_file(self, src: str, dst: str, max_bytes: int, token: Optional[str] = None) -> Tuple[int, str, Optional[str]]:
-        attempts = int(os.getenv("WORKER_DOWNLOAD_RETRIES", "3"))
+        attempts = 3
         attempt = 0
         last_err: Optional[Exception] = None
         while attempt < max(1, attempts):
@@ -2009,8 +1990,8 @@ class Worker:
             "gpu_name": "",
             "gpu_driver": "",
             "gpu_sm": "",
-            "cuda_version": os.getenv("WORKER_CUDA_VERSION", "").strip(),
-            "torch_version": os.getenv("WORKER_TORCH_VERSION", "").strip(),
+            "cuda_version": "",
+            "torch_version": "",
             "installed_libs": [],
         }
 
@@ -2036,28 +2017,11 @@ class Worker:
                 except Exception as gpu_err:
                     logger.warning(f"Could not get GPU properties: {gpu_err}")
 
-        fake_gpu_count = os.getenv("WORKER_FAKE_GPU_COUNT")
-        if fake_gpu_count:
-            try:
-                count = int(fake_gpu_count)
-                if count > 0:
-                    fake_mem = int(os.getenv("WORKER_FAKE_GPU_MEMORY_BYTES", str(24 * 1024 * 1024 * 1024)))
-                    info["gpu_count"] = count
-                    info["gpu_total_mem"] = fake_mem
-                    info["gpu_used_mem"] = 0
-                    info["gpu_free_mem"] = fake_mem
-                    info["gpu_name"] = os.getenv("WORKER_FAKE_GPU_NAME", "FakeGPU")
-                    info["gpu_driver"] = os.getenv("WORKER_FAKE_GPU_DRIVER", "fake")
-            except ValueError:
-                logger.warning("Invalid WORKER_FAKE_GPU_COUNT; ignoring fake GPU override.")
-
         if torch is not None:
             if not info["torch_version"]:
                 info["torch_version"] = getattr(torch, "__version__", "") or ""
             if not info["cuda_version"]:
                 info["cuda_version"] = getattr(torch.version, "cuda", "") or ""
-        if not info["cuda_version"]:
-            info["cuda_version"] = os.getenv("CUDA_VERSION", "").strip() or os.getenv("NVIDIA_CUDA_VERSION", "").strip()
 
         try:
             from .models.hub_policy import detect_worker_capabilities
@@ -3217,9 +3181,12 @@ class Worker:
                             )
                         except Exception:
                             pass
-                        # Push a primary-stream registration update promptly (do not wait for
+                        # Push a primary-stream heartbeat promptly (do not wait for
                         # the 10s heartbeat tick) so schedulers see disk inventory changes.
-                        self._register_worker(is_heartbeat=False)
+                        # Must be is_heartbeat=True: an is_heartbeat=False message makes the
+                        # orchestrator treat this as an initial registration and re-send
+                        # EndpointConfig, which would re-enter this loop indefinitely.
+                        self._register_worker(is_heartbeat=True)
                         continue
 
                     self._model_cache.mark_downloading(canon, progress=0.0)
@@ -3283,9 +3250,10 @@ class Worker:
                         )
                     except Exception:
                         pass
-                    # Push a primary-stream registration update promptly (do not wait for
+                    # Push a primary-stream heartbeat promptly (do not wait for
                     # the 10s heartbeat tick) so schedulers see disk inventory changes.
-                    self._register_worker(is_heartbeat=False)
+                    # Must be is_heartbeat=True: see note at the cached-already branch above.
+                    self._register_worker(is_heartbeat=True)
                 except Exception as e:
                     try:
                         # Clear "downloading" state on failure so we don't report a stuck download forever.
@@ -3914,7 +3882,7 @@ class Worker:
             compute=compute,
         )
 
-        max_frame = int(os.getenv("WORKER_MAX_WS_FRAME_BYTES", "0") or 0)
+        max_frame = 0
 
         def runner() -> None:
             loop = asyncio.new_event_loop()
@@ -3986,7 +3954,7 @@ class Worker:
         if not session_id:
             return
 
-        max_frame = int(os.getenv("WORKER_MAX_WS_FRAME_BYTES", "0") or 0)
+        max_frame = 0
         if max_frame > 0 and len(data) > max_frame:
             self._send_message(
                 pb.WorkerSchedulerMessage(
@@ -4491,8 +4459,8 @@ class Worker:
                             )
             else:
                 # Incremental output: the function returns an iterator of delta structs.
-                max_delta_bytes = int(os.getenv("WORKER_MAX_OUTPUT_DELTA_BYTES", "65536"))
-                max_events = int(os.getenv("WORKER_MAX_OUTPUT_DELTA_EVENTS", "0"))
+                max_delta_bytes = 65536
+                max_events = 0
                 count = 0
                 last_item_id = "item-0"
 
@@ -4951,7 +4919,7 @@ class Worker:
             try:
                 from .pipeline.local_cache import LocalModelCache  # local import to avoid heavy import at worker init
 
-                max_cache_gb = float(os.environ.get("WORKER_LOCAL_CACHE_GB", "100"))
+                max_cache_gb = 100.0
                 self._local_model_cache = LocalModelCache(d, max_cache_gb)
                 logger.info("Local model cache enabled: %s (%.1fGB max)", d, max_cache_gb)
                 return self._local_model_cache
@@ -4997,7 +4965,7 @@ class Worker:
         if self._downloader is None:
             raise RuntimeError(
                 "source materialization requires a model downloader "
-                "(set TENSORHUB_URL so the worker can resolve cozy refs)"
+                "(set TENSORHUB_PUBLIC_URL so the worker can resolve cozy refs)"
             )
         # Canonicalize refs that omit the cozy: prefix so the downloader treats
         # them as cozy snapshots, not HF refs.
@@ -5047,9 +5015,9 @@ class Worker:
             logger.warning("[request_id=%s] tag apply skipped: owner=%r repo=%r checkpoint=%r", ctx.request_id, owner, repo, checkpoint_id)
             return
 
-        base_url = os.getenv("TENSORHUB_URL", "").strip()
+        base_url = os.getenv("TENSORHUB_PUBLIC_URL", "").strip()
         if not base_url:
-            logger.warning("[request_id=%s] TENSORHUB_URL unset; skipping destination tag apply", ctx.request_id)
+            logger.warning("[request_id=%s] TENSORHUB_PUBLIC_URL unset; skipping destination tag apply", ctx.request_id)
             return
         base_url = base_url.rstrip("/")
 
@@ -5493,24 +5461,14 @@ class Worker:
                         f"model injection type mismatch for {inj.param_name}: expected {expected_qn}, got {got_qn} (model_id={model_id})"
                     )
                 # Best-effort move to worker device if supported.
-                # Tenants that know their pipeline won't fit in VRAM can set
-                # WORKER_SKIP_PIPELINE_TO=1 so the pipeline stays on CPU
-                # and the tenant function can call
-                # ``pipeline.enable_sequential_cpu_offload()`` (or equivalent)
-                # to stream submodules to GPU on demand.
-                _skip_pipeline_to_env = (os.getenv("WORKER_SKIP_PIPELINE_TO") or "").strip().lower()
-                _skip_pipeline_to = _skip_pipeline_to_env in {"1", "true", "yes", "y", "t"}
                 try:
-                    if _skip_pipeline_to:
-                        logger.info("WORKER_SKIP_PIPELINE_TO set; leaving pipeline on CPU for tenant offload model=%s", model_id)
-                        return obj
                     if torch is not None and hasattr(obj, "to") and callable(getattr(obj, "to", None)):
                         # For diffusers pipelines, evict older VRAM pipelines before moving a new one
                         # to GPU to avoid transient OOMs during `.to("cuda")`.
                         try:
                             device_is_cuda = str(ctx.device).startswith("cuda") and torch.cuda.is_available()
                             if device_is_cuda and is_diffusers_pipeline_type and self._model_cache is not None and canon:
-                                max_keep = int(os.getenv("WORKER_MAX_DIFFUSERS_VRAM_MODELS", "2") or "2")
+                                max_keep = 2
                                 if max_keep > 0 and not self._model_cache.is_in_vram(canon):
                                     self._model_cache.evict_lru_vram_until_count(max_keep - 1)
                         except Exception:
@@ -5550,12 +5508,6 @@ class Worker:
                             total_vram = _get_total_vram_gb()
                             free_vram = _get_available_vram_gb()
                             safety_margin = 2.0
-                            try:
-                                safety_margin = float(
-                                    os.getenv("COZY_INFERENCE_VRAM_SAFETY_MARGIN_GB", "2.0") or "2.0"
-                                )
-                            except ValueError:
-                                safety_margin = 2.0
                             if model_gb > 0 and model_gb > max(0.0, free_vram - safety_margin):
                                 logger.warning(
                                     "low_vram preflight: model=%s size=%.1fGB free_vram=%.1fGB total_vram=%.1fGB -> enabling offload before .to()",
@@ -5672,7 +5624,7 @@ class Worker:
                                         size_gb = 0.0
                                     if size_gb <= 0.1:
                                         # Fallback heuristic when deltas are noisy.
-                                        size_gb = float(os.getenv("WORKER_DIFFUSERS_VRAM_GB_FALLBACK", "10") or "10")
+                                        size_gb = 10.0
                                 self._model_cache.mark_loaded_to_vram(canon, obj, size_gb)
                                 logger.info(
                                     "pipeline injection resolved: model=%s size_gb=%.1f device=%s",

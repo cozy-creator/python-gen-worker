@@ -150,35 +150,21 @@ def _infer_tensors_format(ref_or_path: str) -> str:
     return "unknown"
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    raw = str(os.getenv(name, "1" if default else "0")).strip().lower()
-    return raw in {"1", "true", "yes", "on"}
-
-
-def _env_int(name: str, default: int) -> int:
-    raw = str(os.getenv(name, str(default))).strip()
-    try:
-        return int(raw)
-    except Exception:
-        return int(default)
-
-
 def _require_file_api_base_url() -> str:
-    base = os.getenv("FILE_API_BASE_URL", "").strip()
+    base = os.getenv("TENSORHUB_PUBLIC_URL", "").strip()
     if not base:
-        base = os.getenv("ORCHESTRATOR_HTTP_URL", "").strip()
-    if not base:
-        base = os.getenv("TENSORHUB_URL", "").strip()
-    if not base:
-        raise RuntimeError("FILE_API_BASE_URL is required for file operations")
+        raise RuntimeError("TENSORHUB_PUBLIC_URL is required for file operations")
     return base.rstrip("/")
 
 
 def _require_worker_capability_token() -> str:
-    token = os.getenv("WORKER_CAPABILITY_TOKEN", "").strip()
-    if not token:
-        raise RuntimeError("WORKER_CAPABILITY_TOKEN is required for file operations")
-    return token
+    # The per-request worker_capability_token is plumbed from
+    # JobExecutionRequest.worker_capability_token via RequestContext.
+    # Callers should prefer RequestContext._get_worker_capability_token(),
+    # which uses the per-request token directly and only falls back here
+    # when none is available. Without a per-request token, file
+    # operations cannot proceed.
+    raise RuntimeError("worker_capability_token is required for file operations")
 
 
 def _parse_owner_repo(value: str) -> tuple[str, str]:

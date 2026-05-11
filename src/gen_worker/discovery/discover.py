@@ -16,7 +16,6 @@ import importlib
 import importlib.util
 import inspect
 import json
-import os
 import sys
 import typing
 from pathlib import Path
@@ -483,10 +482,6 @@ def _extract_conversion_function_metadata(func: Any, module_name: str) -> Dict[s
 
 
 def _find_endpoint_toml_path(root: Path) -> Path | None:
-    env_path = os.getenv("ENDPOINT_TOML_PATH", "").strip()
-    if env_path:
-        p = Path(env_path)
-        return p if p.exists() else None
     p = root / "endpoint.toml"
     return p if p.exists() else None
 
@@ -776,14 +771,6 @@ def _strip_none(obj: Any) -> Any:
 
 def main() -> None:
     """Write the build-time endpoint manifest to stdout."""
-    # Check for legacy COZY_FUNCTION_MODULES env var
-    legacy_modules = os.getenv("COZY_FUNCTION_MODULES", "").strip()
-    if legacy_modules:
-        print(
-            "warning: COZY_FUNCTION_MODULES is deprecated; using auto-discovery instead",
-            file=sys.stderr,
-        )
-
     try:
         manifest = discover_manifest()
     except Exception as e:

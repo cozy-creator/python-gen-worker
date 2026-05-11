@@ -81,16 +81,12 @@ class _RequestOutputStream:
         self._progress_lock = threading.Lock()
         self._stream_mode = "presigned" if self._stream_remote else "local_fallback"
         self._started_mono = time.monotonic()
-        try:
-            interval = float(os.getenv("WORKER_STREAM_PROGRESS_INTERVAL_S", "0.20") or "0.20")
-        except Exception:
-            interval = 0.20
-        self._progress_interval_s = max(0.0, interval)
+        self._progress_interval_s = 0.20
         self._last_progress_emit_mono = self._started_mono
         self._last_progress_mono = self._started_mono
         self._last_progress_uploaded = 0
-        self._retry_attempts = max(1, int(os.getenv("WORKER_STREAM_UPLOAD_RETRY_ATTEMPTS", "5") or "5"))
-        self._retry_backoff_ms = max(0, int(os.getenv("WORKER_STREAM_UPLOAD_RETRY_BACKOFF_MS", "500") or "500"))
+        self._retry_attempts = 5
+        self._retry_backoff_ms = 500
         self._session_id: Optional[str] = None
         self._uploader_meta: Dict[str, Any] = {}
         # Route all output streams (checkpoint AND asset) through the

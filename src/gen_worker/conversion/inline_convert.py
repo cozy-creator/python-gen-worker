@@ -1164,13 +1164,13 @@ def _run_gguf_inline(
             output_path=intermediate,
             encoding="f16",
         )
-        llama_quantize = os.environ.get("LLAMA_QUANTIZE_BIN", "").strip() or "llama-quantize"
+        llama_quantize = "llama-quantize"
         proc = subprocess.run(
             [llama_quantize, str(intermediate), str(final_path), dtype.upper()],
             capture_output=True,
             text=True,
             check=False,
-            timeout=float(os.environ.get("CONVERSION_GGUF_QUANTIZE_TIMEOUT", "7200")),
+            timeout=7200.0,
         )
         if proc.returncode != 0:
             raise RuntimeError(

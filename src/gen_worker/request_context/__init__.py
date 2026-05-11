@@ -56,8 +56,6 @@ from ._helpers import (
     _default_output_prefix,
     _encode_ref_for_url,
     _enforce_output_file_size_limit,
-    _env_bool,
-    _env_int,
     _error_code_from_exception,
     _http_request,
     _infer_mime_type,
@@ -206,10 +204,6 @@ class RequestContext:
         """
         if torch is None:
             raise RuntimeError("torch is not available in this runtime")
-
-        forced = os.getenv("WORKER_TORCH_DEVICE") or os.getenv("WORKER_DEVICE")
-        if forced:
-            return torch.device(forced)
 
         if torch.cuda.is_available():
             return torch.device(f"cuda:{torch.cuda.current_device()}")
@@ -1664,7 +1658,7 @@ class RequestContext:
         # Step 4: write each blob to a stable cache path. Use the sha-based
         # cache layout so identical content across datasets dedupes.
         import tempfile
-        cache_root = Path(os.environ.get("GEN_WORKER_DATASET_CACHE") or (Path(tempfile.gettempdir()) / "gen_worker_datasets"))
+        cache_root = Path(tempfile.gettempdir()) / "gen_worker_datasets"
         target_root = cache_root / owner / name
         target_root.mkdir(parents=True, exist_ok=True)
 

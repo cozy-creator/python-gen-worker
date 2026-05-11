@@ -168,23 +168,6 @@ def flush_memory() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _env_mode() -> Optional[str]:
-    raw = (os.getenv("COZY_INFERENCE_MEMORY_MODE") or "").strip().lower()
-    if raw in _VALID_MODES:
-        return raw
-    return None
-
-
-def _env_float(name: str, default: float) -> float:
-    raw = (os.getenv(name) or "").strip()
-    if not raw:
-        return default
-    try:
-        return float(raw)
-    except ValueError:
-        return default
-
-
 def select_auto_mode(
     *,
     pipeline: Any,
@@ -208,10 +191,10 @@ def select_auto_mode(
         return "off"
 
     model_gb = model_size_gb if model_size_gb is not None else estimate_pipeline_size_gb(pipeline)
-    margin = _env_float("COZY_INFERENCE_VRAM_SAFETY_MARGIN_GB", _DEFAULT_SAFETY_MARGIN_GB)
-    t_group = _env_float("COZY_INFERENCE_GROUP_OFFLOAD_VRAM_GB", _DEFAULT_GROUP_OFFLOAD_THRESHOLD_GB)
-    t_model = _env_float("COZY_INFERENCE_MODEL_OFFLOAD_VRAM_GB", _DEFAULT_MODEL_OFFLOAD_THRESHOLD_GB)
-    t_vae = _env_float("COZY_INFERENCE_VAE_SLICE_VRAM_GB", _DEFAULT_VAE_SLICE_THRESHOLD_GB)
+    margin = _DEFAULT_SAFETY_MARGIN_GB
+    t_group = _DEFAULT_GROUP_OFFLOAD_THRESHOLD_GB
+    t_model = _DEFAULT_MODEL_OFFLOAD_THRESHOLD_GB
+    t_vae = _DEFAULT_VAE_SLICE_THRESHOLD_GB
 
     # Very low VRAM: escalate aggressively.
     if total <= t_group:
@@ -393,11 +376,7 @@ def apply_low_vram_config(
     if mode not in _VALID_MODES:
         raise ValueError(f"invalid low-VRAM mode: {mode!r}; expected one of {_VALID_MODES}")
 
-    # Env override wins over mode="auto" but does not override explicit modes.
     effective_mode = mode
-    env_mode = _env_mode()
-    if env_mode is not None:
-        effective_mode = env_mode
 
     # Idempotency
     prior = getattr(pipeline, _COZY_MODE_ATTR, None)
@@ -504,22 +483,15 @@ def _applied_summary(applied: Dict[str, Any]) -> str:
 
 
 def _should_auto_disk_offload() -> bool:
-    raw = (os.getenv("COZY_INFERENCE_AUTO_DISK_OFFLOAD") or "1").strip().lower()
-    if raw in {"0", "false", "no", "n", "off"}:
-        return False
     ram = get_available_ram_gb()
     if ram <= 0.0:
         return False
-    threshold = _env_float("COZY_INFERENCE_DISK_OFFLOAD_RAM_GB", 16.0)
+    threshold = 16.0
     return ram < threshold
 
 
 def _default_disk_offload_path() -> Optional[str]:
-    raw = (os.getenv("COZY_OFFLOAD_DIR") or "").strip()
-    if raw:
-        return raw
     try:
-        # Prefer /tmp; callers can override via env.
         p = "/tmp/cozy-offload"
         os.makedirs(p, exist_ok=True)
         return p

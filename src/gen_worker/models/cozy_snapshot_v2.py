@@ -243,7 +243,7 @@ class CozySnapshotV2Downloader:
         # Sort largest first for better overlap, then download in parallel.
         unique.sort(key=lambda f: int(f.size_bytes or 0), reverse=True)
 
-        max_conc = max(1, int(os.getenv("WORKER_MODEL_DOWNLOAD_CONCURRENCY", "4") or "4"))
+        max_conc = 4
         sem = asyncio.Semaphore(max_conc)
 
         async def _dl(f: WorkerResolvedRepoFile) -> None:

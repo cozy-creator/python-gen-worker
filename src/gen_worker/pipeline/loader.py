@@ -50,7 +50,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 
-from gen_worker.models.cache_paths import worker_local_model_cache_dir_default, tensorhub_cas_dir
+from gen_worker.models.cache_paths import tensorhub_cas_dir
 
 from .local_cache import LocalModelCache  # re-exported for external callers
 
@@ -601,8 +601,8 @@ class PipelineLoader:
         self.vram_safety_margin_gb = vram_safety_margin_gb
 
         # Cozy Hub configuration
-        self._tensorhub_url = tensorhub_url or os.environ.get("TENSORHUB_URL", "")
-        self._tensorhub_token = tensorhub_token or os.environ.get("TENSORHUB_TOKEN", "")
+        self._tensorhub_url = tensorhub_url or os.environ.get("TENSORHUB_PUBLIC_URL", "")
+        self._tensorhub_token = tensorhub_token or ""
         self._downloader = downloader
 
         # Auto-detect VRAM
@@ -623,14 +623,8 @@ class PipelineLoader:
         # model_id strings passed to load_model_into_vram / load.
         self._quant_attrs_by_model_id: Dict[str, Dict[str, str]] = {}
 
-        # Local NVMe cache for NFS optimization
+        # Local NVMe cache for NFS optimization (disabled unless explicitly passed).
         self._local_cache: Optional[LocalModelCache] = None
-        if local_cache_dir is None:
-            # Standard env for local (non-NFS) cache. Empty disables.
-            local_cache_dir = os.environ.get(
-                "WORKER_LOCAL_MODEL_CACHE_DIR",
-                str(worker_local_model_cache_dir_default()),
-            ).strip() or None
         if local_cache_dir:
             # Validate local cache isn't itself on NFS; otherwise localization is pointless.
             try:
@@ -639,7 +633,7 @@ class PipelineLoader:
                 mb = mount_backend_for_path(local_cache_dir)
                 if mb is not None and mb.is_nfs:
                     logger.warning(
-                        "WORKER_LOCAL_MODEL_CACHE_DIR appears to be on NFS (%s, %s); disabling localization cache",
+                        "local cache appears to be on NFS (%s, %s); disabling localization cache",
                         mb.fstype,
                         mb.mountpoint,
                     )
@@ -648,7 +642,7 @@ class PipelineLoader:
                 # best-effort; if mount detection fails, still allow cache usage
                 pass
         if local_cache_dir:
-            max_cache_gb = float(os.environ.get("WORKER_LOCAL_CACHE_GB", "100"))
+            max_cache_gb = 100.0
             self._local_cache = LocalModelCache(local_cache_dir, max_cache_gb)
             self.local_cache_dir = Path(local_cache_dir)
             logger.info(f"Local cache enabled: {local_cache_dir} ({max_cache_gb}GB max)")

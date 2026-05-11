@@ -156,46 +156,26 @@ def _check_cache_path(label: str, path_str: str) -> tuple[bool, Dict[str, Any]]:
 
 
 def _preflight_cache_dirs() -> Dict[str, str]:
-    """
-    Validate model cache directory writeability before worker startup.
-
-    - Primary: ${TENSORHUB_CACHE_DIR}/cas (default TENSORHUB_CACHE_DIR=~/.cache/tensorhub)
-    - Optional local cache: WORKER_LOCAL_MODEL_CACHE_DIR (if set)
-    """
-    default_primary = str(tensorhub_cas_dir())
-    primary = default_primary
-    local_cache = (os.getenv("WORKER_LOCAL_MODEL_CACHE_DIR", "") or "").strip()
+    """Validate model cache directory writeability before worker startup."""
+    primary = str(tensorhub_cas_dir())
 
     _log_startup_phase(
         "cache_preflight_started",
         status="starting",
         primary_cache_dir=primary,
-        local_cache_dir=local_cache or None,
-        tensorhub_cache_dir=os.getenv("TENSORHUB_CACHE_DIR", "~/.cache/tensorhub"),
     )
 
     ok, details = _check_cache_path("TENSORHUB_CAS_DIR", primary)
-    effective_primary = primary
     if not ok:
         raise RuntimeError(
             "worker cache preflight failed for tensorhub CAS path "
             f"{primary} ({details.get('exception_class')}: {details.get('exception_message')}). "
-            "Fix volume permissions/ownership or set TENSORHUB_CACHE_DIR to a writable tensorhub cache root."
+            "Fix volume permissions/ownership."
         )
 
-    effective_local = local_cache
-    if local_cache:
-        ok_local, local_details = _check_cache_path("WORKER_LOCAL_MODEL_CACHE_DIR", local_cache)
-        if not ok_local:
-            raise RuntimeError(
-                "worker cache preflight failed for WORKER_LOCAL_MODEL_CACHE_DIR="
-                f"{local_cache} ({local_details.get('exception_class')}: {local_details.get('exception_message')}). "
-                "Fix path permissions or unset WORKER_LOCAL_MODEL_CACHE_DIR."
-            )
-
     return {
-        "model_cache_dir": effective_primary,
-        "local_model_cache_dir": effective_local,
+        "model_cache_dir": primary,
+        "local_model_cache_dir": "",
     }
 
 
@@ -244,34 +224,18 @@ def _run_main() -> int:
         return 1
 
     scheduler_addr_raw = _scheduler_public_addr_from_env()
-    scheduler_addrs_raw = os.getenv("SCHEDULER_ADDRS", "")
     worker_id = os.getenv("WORKER_ID", "").strip()
-    worker_jwt = os.getenv("WORKER_JWT", "").strip()
-    use_tls_env = os.getenv("USE_TLS")
-    def _parse_float_env(name: str, default: float) -> float:
-        raw = (os.getenv(name) or "").strip()
-        if not raw:
-            return default
-        try:
-            return float(raw)
-        except Exception:
-            return default
 
-    reconnect_delay = _parse_float_env("RECONNECT_DELAY", 0.1)
-    max_reconnect_attempts = int(os.getenv("MAX_RECONNECT_ATTEMPTS", "0") or "0")
-    lb_only_retries = (os.getenv("LB_ONLY_RETRIES", "true") or "true").strip().lower() in ("1", "true", "t", "yes", "y", "on")
+    reconnect_delay = 0.1
+    max_reconnect_attempts = 0  # 0 = infinite
+    lb_only_retries = True
 
     if not scheduler_addr_raw:
         logger.error("ORCHESTRATOR_PUBLIC_GRPC_ADDR is required (scheduler dial address). Refusing to start worker.")
         return 1
 
-    seed_addrs = [addr.strip() for addr in scheduler_addrs_raw.split(",") if addr.strip()]
-    scheduler_addr, inferred_tls = _normalize_grpc_addr(scheduler_addr_raw)
-    seed_addrs = [_normalize_grpc_addr(a)[0] for a in seed_addrs]
-    if use_tls_env is None:
-        use_tls = inferred_tls
-    else:
-        use_tls = use_tls_env.lower() in ("true", "1", "t")
+    seed_addrs: List[str] = []
+    scheduler_addr, use_tls = _normalize_grpc_addr(scheduler_addr_raw)
 
     logger.info("Starting worker...")
     logger.info("  Scheduler Address: %s", scheduler_addr)
@@ -295,17 +259,13 @@ def _run_main() -> int:
         )
         return 1
 
-    if not worker_jwt:
-        logger.error("WORKER_JWT is required (worker-connect JWT). Refusing to start unauthenticated worker.")
-        return 1
-
     try:
         worker = Worker(
             scheduler_addr=scheduler_addr,
             scheduler_addrs=seed_addrs,
             user_module_names=user_modules,
             worker_id=worker_id or None,
-            worker_jwt=worker_jwt,
+            worker_jwt="",
             use_tls=use_tls,
             reconnect_delay=reconnect_delay,
             max_reconnect_attempts=max_reconnect_attempts,

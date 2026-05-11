@@ -5,7 +5,7 @@ import os
 import struct
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterable, List, Optional, Sequence, Set, cast
+from typing import Any, Callable, Optional, Sequence, cast
 
 import requests
 
@@ -18,55 +18,9 @@ class HuggingFaceDownloadResult:
     local_dir: Path
 
 
-def _csv_env(name: str) -> Optional[List[str]]:
-    raw = (os.getenv(name) or "").strip()
-    if not raw:
-        return None
-    parts = [p.strip() for p in raw.split(",")]
-    return [p for p in parts if p]
-
-
-def _normalize_components(cs: Iterable[str]) -> List[str]:
-    out: List[str] = []
-    for c in cs:
-        c = (c or "").strip().strip("/")
-        if not c:
-            continue
-        out.append(c)
-    # de-dupe but keep stable order
-    seen: Set[str] = set()
-    deduped: List[str] = []
-    for c in out:
-        if c in seen:
-            continue
-        seen.add(c)
-        deduped.append(c)
-    return deduped
-
-
-def _default_weight_precisions() -> List[str]:
+def _default_weight_precisions() -> list[str]:
     # Default: only reduced-precision weights.
     return ["fp16", "bf16"]
-
-
-def _precisions_from_env() -> List[str]:
-    ps = _csv_env("COZY_HF_WEIGHT_PRECISIONS")
-    if not ps:
-        return _default_weight_precisions()
-    return [p.lower().strip() for p in ps if p.strip()]
-
-
-def _token_from_env() -> Optional[str]:
-    # huggingface_hub typically uses HF_TOKEN, but keep compatibility with common envs.
-    for k in ("HF_TOKEN", "HUGGINGFACE_TOKEN", "HUGGINGFACEHUB_API_TOKEN"):
-        v = (os.getenv(k) or "").strip()
-        if v:
-            return v
-    return None
-
-
-def _truthy_env(name: str) -> bool:
-    return (os.getenv(name) or "").strip().lower() in ("1", "true", "yes", "y", "t")
 
 
 class HuggingFaceHubDownloader:
@@ -78,7 +32,7 @@ class HuggingFaceHubDownloader:
 
     def __init__(self, hf_home: Optional[str] = None, hf_token: Optional[str] = None) -> None:
         self.hf_home = (hf_home or os.getenv("HF_HOME") or "").strip() or None
-        self.hf_token = (hf_token or _token_from_env() or "").strip() or None
+        self.hf_token = (hf_token or os.getenv("HF_TOKEN") or "").strip() or None
 
     def download(self, ref: HuggingFaceRef) -> HuggingFaceDownloadResult:
         try:
@@ -111,21 +65,15 @@ class HuggingFaceHubDownloader:
             kwargs["token"] = self.hf_token
 
         # Prefer minimal downloads for diffusers-style repos by default.
-        # This can be overridden by setting COZY_HF_FULL_REPO_DOWNLOAD=1.
-        full_repo = _truthy_env("COZY_HF_FULL_REPO_DOWNLOAD")
-        if not full_repo:
+        if True:
             # Non-configurable safety guard: refuse to download extremely large file sets by default.
-            #
-            # This is intentionally hardcoded. Callers can bypass it by explicitly opting into a full
-            # repo download (COZY_HF_FULL_REPO_DOWNLOAD=1), which is already an escape hatch.
             max_total_bytes = 30_000_000_000  # 30GB
 
-            env_components = _csv_env("COZY_HF_COMPONENTS")
             policy = HFSelectionPolicy(
-                components_override=_normalize_components(env_components) if env_components else None,
-                include_optional_components=_truthy_env("COZY_HF_INCLUDE_OPTIONAL_COMPONENTS"),
-                weight_precisions=_precisions_from_env(),
-                allow_root_json=_truthy_env("COZY_HF_ALLOW_ROOT_JSON"),
+                components_override=None,
+                include_optional_components=False,
+                weight_precisions=_default_weight_precisions(),
+                allow_root_json=False,
             )
 
             # Best-effort local completeness check: if we already have a local snapshot folder that
@@ -273,7 +221,7 @@ class HuggingFaceHubDownloader:
                 if total > max_total_bytes:
                     raise RuntimeError(
                         f"refusing to download an excessively large Hugging Face repo selection: {total} bytes "
-                        f"(limit {max_total_bytes} bytes). Use COZY_HF_FULL_REPO_DOWNLOAD=1 to override."
+                        f"(limit {max_total_bytes} bytes)."
                     )
 
             # Deterministic order helps debugging and keeps behavior stable.

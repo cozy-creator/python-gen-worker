@@ -52,8 +52,10 @@ _FORBIDDEN_SOURCE_HEADER_NAMES = {
     "trailer",
 }
 
-# Force plain HTTP/LFS download path. In some environments the Hugging Face
-# Xet flow can stall after xet token negotiation during large model pulls.
+# Force plain HTTP/LFS download path. huggingface_hub reads HF_HUB_DISABLE_XET
+# from the environment at import / runtime — there is no Python API for this,
+# so we have to set the env. In some environments the Hugging Face Xet flow
+# can stall after xet token negotiation during large model pulls.
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
 _HF_SOURCE_AUTH_HOSTS = {
@@ -105,24 +107,8 @@ _CIVITAI_COMPONENT_EXCLUDED_HINTS = (
     "embedding",
 )
 
-# Canonical runtime vars now use MIRROR_* with explicit INGEST_* aliases kept
-# for backward compatibility while deploy environments migrate.
-_HF_TOKEN_ENV_ALIASES = (
-    "MIRROR_HF_TOKEN",
-    "INGEST_HF_TOKEN",
-    "COZY_MIRROR_HF_TOKEN",
-    "COZY_INGEST_HF_TOKEN",
-    "HF_TOKEN",
-    "HUGGING_FACE_HUB_TOKEN",
-    "HUGGINGFACE_HUB_TOKEN",
-)
-_CIVITAI_TOKEN_ENV_ALIASES = (
-    "MIRROR_CIVITAI_API_KEY",
-    "INGEST_CIVITAI_API_KEY",
-    "COZY_MIRROR_CIVITAI_API_KEY",
-    "COZY_INGEST_CIVITAI_API_KEY",
-    "CIVITAI_API_KEY",
-)
+_HF_TOKEN_ENV_ALIASES = ("HF_TOKEN",)
+_CIVITAI_TOKEN_ENV_ALIASES: tuple[str, ...] = ()
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -370,8 +356,8 @@ def _stream_http_download(
 
     opener = urllib.request.build_opener(_NoRedirectHandler())
     current_url = src
-    retry_attempts = max(1, int(os.getenv("MIRROR_SOURCE_DOWNLOAD_RETRY_ATTEMPTS", "3")))
-    retry_backoff_ms = max(0, int(os.getenv("MIRROR_SOURCE_DOWNLOAD_RETRY_BACKOFF_MS", "250")))
+    retry_attempts = 3
+    retry_backoff_ms = 250
 
     sha = hashlib.sha256()
     downloaded = 0
@@ -1008,11 +994,7 @@ def download_huggingface_repo_files(
     import threading
     import time as _time
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    max_workers_env = os.getenv("GEN_WORKER_HF_DOWNLOAD_PARALLELISM", "4")
-    try:
-        max_workers = max(1, int(max_workers_env))
-    except ValueError:
-        max_workers = 4
+    max_workers = 4
     if files_total < max_workers:
         max_workers = max(1, files_total)
 

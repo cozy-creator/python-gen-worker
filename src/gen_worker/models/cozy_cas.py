@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from pathlib import Path
 from typing import Any, Dict
 
@@ -68,8 +67,8 @@ async def _download_one_file(url: str, dst: Path, expected_size: int, expected_b
 
     timeout = aiohttp.ClientTimeout(
         total=None,
-        sock_connect=float(os.getenv("WORKER_MODEL_DOWNLOAD_SOCK_CONNECT_TIMEOUT_S", "60")),
-        sock_read=float(os.getenv("WORKER_MODEL_DOWNLOAD_SOCK_READ_TIMEOUT_S", "180")),
+        sock_connect=60.0,
+        sock_read=180.0,
     )
     tmp = dst.with_suffix(dst.suffix + ".part")
 
