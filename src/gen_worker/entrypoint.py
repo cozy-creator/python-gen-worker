@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 
 import msgspec
 
+from .config import Settings, load_settings
 from .models.cache_paths import tensorhub_cas_dir
 try:
     from .worker import Worker
@@ -33,28 +34,6 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger("WorkerEntrypoint")
-
-
-def _normalize_grpc_addr(addr: str) -> tuple[str, bool]:
-    """Normalize scheduler address strings for grpc.{insecure,secure}_channel."""
-    a = (addr or "").strip()
-    if not a:
-        return "", False
-    lower = a.lower()
-    if lower.startswith("grpcs://"):
-        return a[len("grpcs://"):].strip(), True
-    if lower.startswith("grpc://"):
-        return a[len("grpc://"):].strip(), False
-    if lower.startswith("https://"):
-        return a[len("https://"):].strip(), True
-    if lower.startswith("http://"):
-        return a[len("http://"):].strip(), False
-    tls = a.endswith(":443")
-    return a, tls
-
-
-def _scheduler_public_addr_from_env() -> str:
-    return (os.getenv("ORCHESTRATOR_PUBLIC_GRPC_ADDR") or "").strip()
 
 
 def _startup_payload(phase: str, status: str = "ok", **extra: Any) -> Dict[str, Any]:
@@ -181,16 +160,18 @@ def _preflight_cache_dirs() -> Dict[str, str]:
 
 def _run_main() -> int:
     _log_startup_phase("boot", status="starting")
-    worker_mode = (os.getenv("WORKER_MODE") or "inference").strip().lower()
-    if worker_mode not in {"inference", "trainer"}:
-        logger.error("Invalid WORKER_MODE=%r (expected 'inference' or 'trainer')", worker_mode)
+    try:
+        settings = load_settings()
+    except Exception as e:
+        logger.exception("Failed to load worker settings: %s", e)
+        _log_worker_fatal("settings_load", e, exit_code=1)
         return 1
-    if worker_mode == "trainer":
-        _log_startup_phase("trainer_mode_selected", status="ok", worker_mode=worker_mode)
+    if settings.worker_mode == "trainer":
+        _log_startup_phase("trainer_mode_selected", status="ok", worker_mode=settings.worker_mode)
         try:
-            from .trainer.runtime import run_training_runtime_from_env
+            from .trainer.runtime import run_training_runtime
 
-            return int(run_training_runtime_from_env())
+            return int(run_training_runtime(settings))
         except Exception as e:
             logger.exception("Trainer runtime failed unexpectedly: %s", e)
             _log_worker_fatal("trainer_runtime", e, exit_code=1)
@@ -223,27 +204,18 @@ def _run_main() -> int:
         logger.error(str(e))
         return 1
 
-    scheduler_addr_raw = _scheduler_public_addr_from_env()
-    worker_id = os.getenv("WORKER_ID", "").strip()
-
     reconnect_delay = 0.1
     max_reconnect_attempts = 0  # 0 = infinite
     lb_only_retries = True
 
-    if not scheduler_addr_raw:
-        logger.error("ORCHESTRATOR_PUBLIC_GRPC_ADDR is required (scheduler dial address). Refusing to start worker.")
+    if not settings.orchestrator_public_grpc_addr:
+        logger.error("Settings.orchestrator_public_grpc_addr is empty (set ORCHESTRATOR_PUBLIC_GRPC_ADDR env). Refusing to start worker.")
         return 1
 
-    seed_addrs: List[str] = []
-    scheduler_addr, use_tls = _normalize_grpc_addr(scheduler_addr_raw)
-
     logger.info("Starting worker...")
-    logger.info("  Scheduler Address: %s", scheduler_addr)
-    if seed_addrs:
-        logger.info("  Scheduler Seeds: %s", seed_addrs)
+    logger.info("  Scheduler Address: %s", settings.orchestrator_public_grpc_addr)
     logger.info("  User Function Modules: %s", user_modules)
-    logger.info("  Worker ID: %s", worker_id or "(from JWT)")
-    logger.info("  Use TLS: %s", use_tls)
+    logger.info("  Worker ID: %s", settings.worker_id or "(from JWT)")
     logger.info("  Reconnect Delay (base): %.3fs", reconnect_delay)
     logger.info("  Max Reconnect Attempts: %s", max_reconnect_attempts or "Infinite")
     logger.info("  LB-only retries: %s", lb_only_retries)
@@ -261,12 +233,8 @@ def _run_main() -> int:
 
     try:
         worker = Worker(
-            scheduler_addr=scheduler_addr,
-            scheduler_addrs=seed_addrs,
+            settings=settings,
             user_module_names=user_modules,
-            worker_id=worker_id or None,
-            worker_jwt="",
-            use_tls=use_tls,
             reconnect_delay=reconnect_delay,
             max_reconnect_attempts=max_reconnect_attempts,
             lb_only_retries=lb_only_retries,

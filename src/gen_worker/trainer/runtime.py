@@ -5,12 +5,13 @@ from dataclasses import dataclass
 import inspect
 import json
 import logging
-import os
 from pathlib import Path
 import re
 import tempfile
 import time
 from typing import Any, Mapping
+
+from ..config import Settings
 
 from .api import load_trainer_plugin
 from .arrow_feed import ArrowFeedConfig, ParquetArrowBatchFeeder
@@ -41,6 +42,9 @@ class TrainerRuntimeConfig:
     trainer_import: str
     job_spec_path: str
     artifacts: RuntimeArtifactLayout
+    tensorhub_public_url: str
+    hf_token: str
+    hf_home: str
     capability_token: str | None = None
     orchestrated: bool = False
     max_runtime_seconds: int = 0
@@ -273,10 +277,10 @@ def _read_job_spec(path: str) -> dict[str, Any]:
     return data
 
 
-def _runtime_config_from_env() -> TrainerRuntimeConfig:
-    job_spec_path = (os.getenv("TRAINER_JOB_SPEC_PATH") or "/app/.cozy/trainer_job.json").strip()
+def _runtime_config_from_settings(settings: Settings) -> TrainerRuntimeConfig:
+    job_spec_path = (settings.trainer_job_spec_path or "/app/.cozy/trainer_job.json").strip()
     if not job_spec_path:
-        raise StartupContractError("startup.missing_job_spec_path", "TRAINER_JOB_SPEC_PATH is required")
+        raise StartupContractError("startup.missing_job_spec_path", "Settings.trainer_job_spec_path is required")
     artifacts_root = "/tmp/training"
     checkpoints_dir = f"{artifacts_root}/checkpoints"
     samples_dir = f"{artifacts_root}/samples"
@@ -325,6 +329,9 @@ def _runtime_config_from_env() -> TrainerRuntimeConfig:
             metrics_dir=metrics_dir,
             events_path=events_path,
         ),
+        tensorhub_public_url=settings.tensorhub_public_url,
+        hf_token=settings.hf_token,
+        hf_home=settings.hf_home,
         capability_token=capability_token,
         orchestrated=orchestrated,
         max_runtime_seconds=max_runtime_seconds,
@@ -390,6 +397,9 @@ def _materialize_input_refs(spec: dict[str, Any], cfg: TrainerRuntimeConfig) -> 
 
     downloader = RuntimeInputDownloader(
         root_dir=str(Path(cfg.artifacts.metrics_dir) / "materialized-inputs"),
+        tensorhub_public_url=cfg.tensorhub_public_url,
+        hf_token=cfg.hf_token,
+        hf_home=cfg.hf_home,
         capability_token=cfg.capability_token,
     )
 
@@ -603,8 +613,8 @@ def _classify_runtime_error(exc: Exception, *, phase: str) -> tuple[str, str, st
     return (phase, msg, repr(exc))
 
 
-def run_training_runtime_from_env() -> int:
-    cfg = _runtime_config_from_env()
+def run_training_runtime(settings: Settings) -> int:
+    cfg = _runtime_config_from_settings(settings)
     spec = _read_job_spec(cfg.job_spec_path)
 
     cancel_policy = RuntimeCancelPolicy(
@@ -666,7 +676,7 @@ def run_training_runtime_from_env() -> int:
             request_id=job.request_id,
             token=cfg.capability_token,
             endpoints=cfg.upload_endpoints,
-            tensorhub_url=os.getenv("TENSORHUB_PUBLIC_URL"),
+            tensorhub_url=cfg.tensorhub_public_url or None,
             owner=job.owner,
             destination_repo=destination_repo,
             job_id=job_id,
@@ -730,4 +740,4 @@ def run_training_runtime_from_env() -> int:
     return 0
 
 
-__all__ = ["run_training_runtime_from_env"]
+__all__ = ["run_training_runtime"]

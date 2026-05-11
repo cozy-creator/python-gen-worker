@@ -820,6 +820,7 @@ def _resolve_source_identity(
     provider: str,
     source_ref: str,
     source_revision: str | None,
+    hf_token: str = "",
     civitai_model_version_id: int | None = None,
     civitai_file_id: int | None = None,
     source_metadata_overrides: dict[str, str] | None = None,
@@ -886,6 +887,7 @@ def _resolve_source_identity(
         repo_id, resolved_revision = resolve_huggingface_source_identity(
             source_ref_norm,
             source_revision=source_revision_norm or None,
+            hf_token=hf_token,
         )
         source_ref_norm = str(repo_id).strip()
         source_revision_norm = str(resolved_revision).strip()
@@ -2436,6 +2438,7 @@ def run_clone(
         provider=provider,
         source_ref=normalized_source,
         source_revision=source_revision,
+        hf_token=ctx.hf_token,
         civitai_model_version_id=civitai_model_version_id,
         civitai_file_id=civitai_file_id,
         source_metadata_overrides=source_metadata_overrides,

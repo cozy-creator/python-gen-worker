@@ -12,7 +12,6 @@ import hashlib
 import ipaddress
 import json
 import logging
-import os
 import re
 import socket
 import time
@@ -148,13 +147,6 @@ def _infer_tensors_format(ref_or_path: str) -> str:
     if leaf.endswith(".ckpt"):
         return "ckpt"
     return "unknown"
-
-
-def _require_file_api_base_url() -> str:
-    base = os.getenv("TENSORHUB_PUBLIC_URL", "").strip()
-    if not base:
-        raise RuntimeError("TENSORHUB_PUBLIC_URL is required for file operations")
-    return base.rstrip("/")
 
 
 def _require_worker_capability_token() -> str:

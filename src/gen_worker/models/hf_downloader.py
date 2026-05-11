@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import struct
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,8 +30,10 @@ class HuggingFaceHubDownloader:
     """
 
     def __init__(self, hf_home: Optional[str] = None, hf_token: Optional[str] = None) -> None:
-        self.hf_home = (hf_home or os.getenv("HF_HOME") or "").strip() or None
-        self.hf_token = (hf_token or os.getenv("HF_TOKEN") or "").strip() or None
+        # Caller passes hf_home/hf_token from gen_worker.config.Settings.
+        # No env fallback — Settings is the single source of truth (issue #253).
+        self.hf_home = (hf_home or "").strip() or None
+        self.hf_token = (hf_token or "").strip() or None
 
     def download(self, ref: HuggingFaceRef) -> HuggingFaceDownloadResult:
         try:

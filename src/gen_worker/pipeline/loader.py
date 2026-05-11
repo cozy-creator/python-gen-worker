@@ -41,7 +41,6 @@ import importlib
 import inspect
 import json
 import logging
-import os
 import random
 import shutil
 import threading
@@ -600,8 +599,9 @@ class PipelineLoader:
         self.local_cache_dir: Optional[Path] = None
         self.vram_safety_margin_gb = vram_safety_margin_gb
 
-        # Cozy Hub configuration
-        self._tensorhub_url = tensorhub_url or os.environ.get("TENSORHUB_PUBLIC_URL", "")
+        # Tensorhub configuration. Caller passes the URL from Settings — no env
+        # fallback (Settings is the single source of truth, see issue #253).
+        self._tensorhub_url = tensorhub_url or ""
         self._tensorhub_token = tensorhub_token or ""
         self._downloader = downloader
 

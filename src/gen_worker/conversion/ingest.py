@@ -107,10 +107,6 @@ _CIVITAI_COMPONENT_EXCLUDED_HINTS = (
     "embedding",
 )
 
-_HF_TOKEN_ENV_ALIASES = ("HF_TOKEN",)
-_CIVITAI_TOKEN_ENV_ALIASES: tuple[str, ...] = ()
-
-
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
         _ = req, fp, code, msg, headers, newurl
@@ -156,14 +152,6 @@ class CivitaiFrontendURLInfo:
     model_version_id: int | None
 
 
-def _env_first_nonempty(names: tuple[str, ...]) -> str:
-    for name in names:
-        value = str(os.getenv(name, "") or "").strip()
-        if value != "":
-            return value
-    return ""
-
-
 def _http_host_allowed(host: str, allowed_hosts: set[str]) -> bool:
     host_norm = str(host or "").strip().lower()
     if host_norm == "":
@@ -188,23 +176,6 @@ def _normalize_sha256(raw: object) -> str:
     return ""
 
 
-def _source_auth_fallback(host: str, *, provider: str | None = None) -> tuple[str, set[str]]:
-    provider_norm = str(provider or "").strip().lower()
-    host_lc = str(host or "").strip().lower()
-
-    hf_token = _env_first_nonempty(_HF_TOKEN_ENV_ALIASES)
-    civitai_token = _env_first_nonempty(_CIVITAI_TOKEN_ENV_ALIASES)
-
-    if provider_norm == "huggingface" and hf_token != "":
-        return hf_token, set(_HF_SOURCE_AUTH_HOSTS)
-    if provider_norm == "civitai" and civitai_token != "":
-        return civitai_token, set(_CIVITAI_SOURCE_AUTH_HOSTS)
-
-    if host_lc != "" and hf_token != "" and _http_host_allowed(host_lc, _HF_SOURCE_AUTH_HOSTS):
-        return hf_token, set(_HF_SOURCE_AUTH_HOSTS)
-    if host_lc != "" and civitai_token != "" and _http_host_allowed(host_lc, _CIVITAI_SOURCE_AUTH_HOSTS):
-        return civitai_token, set(_CIVITAI_SOURCE_AUTH_HOSTS)
-    return "", set()
 
 
 def _normalize_source_auth_hosts(raw_hosts: object) -> set[str]:
@@ -340,17 +311,17 @@ def _stream_http_download(
     if parsed0.scheme not in {"http", "https"} or str(parsed0.hostname or "").strip() == "":
         raise ValueError("invalid_source_url")
 
-    token, allowed_hosts = _source_auth_fallback(str(parsed0.hostname or ""), provider=provider)
-    explicit_token = str(source_auth_token or "").strip()
+    # Auth: caller must pass `source_auth_token` explicitly with the matching
+    # `source_auth_hosts`. This function does not read env / fall back to a
+    # bag of provider-default credentials — Settings is the single source of
+    # truth and provider-specific tokens flow in via the caller chain.
+    _ = provider  # accepted for callsite compatibility but unused
+    token = str(source_auth_token or "").strip()
     explicit_hosts = _normalize_source_auth_hosts(source_auth_hosts)
-    if explicit_token != "":
-        token = explicit_token
-        if explicit_hosts:
-            allowed_hosts = set(explicit_hosts)
-        else:
-            base_host = str(parsed0.hostname or "").strip().lower()
-            allowed_hosts = ({base_host} if base_host != "" else set())
-    elif explicit_hosts:
+    if token != "" and not explicit_hosts:
+        base_host = str(parsed0.hostname or "").strip().lower()
+        allowed_hosts: set[str] = ({base_host} if base_host != "" else set())
+    else:
         allowed_hosts = set(explicit_hosts)
     header_overrides = _normalize_source_headers(source_headers)
 
@@ -557,7 +528,12 @@ def _sha256_file(path: Path) -> str:
     return hasher.hexdigest().lower()
 
 
-def resolve_huggingface_source_identity(source_repo: str, *, source_revision: str | None = None) -> tuple[str, str]:
+def resolve_huggingface_source_identity(
+    source_repo: str,
+    *,
+    source_revision: str | None = None,
+    hf_token: str = "",
+) -> tuple[str, str]:
     try:
         from huggingface_hub import HfApi
     except Exception as exc:
@@ -565,7 +541,7 @@ def resolve_huggingface_source_identity(source_repo: str, *, source_revision: st
 
     repo_id, embedded_revision = _split_hf_repo_ref(source_repo)
     revision = str(source_revision or "").strip() or embedded_revision or "main"
-    token = _env_first_nonempty(_HF_TOKEN_ENV_ALIASES) or None
+    token = (hf_token or "").strip() or None
     api = HfApi(token=token)
     info = api.model_info(repo_id=repo_id, revision=revision)
     resolved_revision = str(getattr(info, "sha", "") or "").strip() or revision
@@ -603,14 +579,17 @@ def list_huggingface_repo_files(
     source_repo: str,
     *,
     source_revision: str | None = None,
+    hf_token: str = "",
 ) -> dict[str, object]:
     try:
         from huggingface_hub import HfApi
     except Exception as exc:
         raise RuntimeError("huggingface_hub is required for clone_huggingface source_repo ingestion") from exc
 
-    repo_id, revision = resolve_huggingface_source_identity(source_repo, source_revision=source_revision)
-    token = _env_first_nonempty(_HF_TOKEN_ENV_ALIASES) or None
+    repo_id, revision = resolve_huggingface_source_identity(
+        source_repo, source_revision=source_revision, hf_token=hf_token,
+    )
+    token = (hf_token or "").strip() or None
     api = HfApi(token=token)
     tree = api.list_repo_tree(
         repo_id=repo_id,
@@ -824,6 +803,7 @@ def download_huggingface_repo_files(
     # N checkpoints under the same destination tag with distinct attributes.
     # Empty / None falls back to the single-dtype path (back-compat).
     dtype_outputs: list[str] | None = None,
+    hf_token: str = "",
 ) -> dict[str, object]:
     """Classify the HF repo, select the minimal file set, and download it.
 
@@ -839,13 +819,15 @@ def download_huggingface_repo_files(
         str(p or "").strip().lower() for p in (source_dtype_preference or []) if str(p or "").strip()
     ) or ("bf16", "fp16", "fp32")
 
-    listing = list_huggingface_repo_files(source_repo, source_revision=source_revision)
+    listing = list_huggingface_repo_files(
+        source_repo, source_revision=source_revision, hf_token=hf_token,
+    )
     repo_id = str(listing.get("source_repo") or "")
     revision = str(listing.get("source_revision") or "")
     all_files_list = [dict(item) for item in list(listing.get("files") or []) if isinstance(item, dict)]
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    token = _env_first_nonempty(_HF_TOKEN_ENV_ALIASES) or None
+    token = (hf_token or "").strip() or None
 
     # Classification (no weight downloads).
     classification_inputs = _fetch_classification_inputs(

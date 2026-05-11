@@ -165,6 +165,7 @@ def ingest_from_source(
             gguf_quant=gguf_quant,
             progress_callback=progress_callback,
             dtype_outputs=list(dtype_outputs or []),
+            hf_token=ctx.hf_token,
         )
 
         files = [dict(item) for item in list(info.get("files") or []) if isinstance(item, dict)]

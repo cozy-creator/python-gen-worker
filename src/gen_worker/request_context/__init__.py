@@ -66,7 +66,6 @@ from ._helpers import (
     _normalize_repo_name,
     _parse_owner_repo,
     _parse_owner_repo_with_optional_tag,
-    _require_file_api_base_url,
     _require_worker_capability_token,
     _resolve_hint_first_string,
     _sha256_file,
@@ -103,6 +102,7 @@ class RequestContext:
         source_info: Optional[Dict[str, Any]] = None,
         destination_info: Optional[Dict[str, Any]] = None,
         compute: Optional["Compute"] = None,
+        hf_token: str = "",
     ) -> None:
         self._request_id = str(request_id or "").strip()
         self._job_id = str(job_id or "").strip() or None
@@ -111,6 +111,7 @@ class RequestContext:
         self._timeout_ms = timeout_ms
         self._file_api_base_url = (file_api_base_url or "").strip() or None
         self._worker_capability_token = (worker_capability_token or "").strip() or None
+        self._hf_token = (hf_token or "").strip()
         self._materialized_input_urls = dict(materialized_input_urls or {})
         self._local_output_dir = (local_output_dir or "").strip() or None
         self._resolved_repos_by_id = resolved_repos_by_id
@@ -210,10 +211,24 @@ class RequestContext:
 
         return torch.device("cpu")
 
+    @property
+    def hf_token(self) -> str:
+        """HuggingFace API token, sourced from gen_worker.config.Settings.
+
+        Tenant code calling into `gen_worker.clone` / `gen_worker.conversion`
+        helpers passes `hf_token=ctx.hf_token` so the library never reads env
+        on the tenant's behalf. Empty string when no token is configured —
+        helpers fall back to unauthenticated calls (works for public HF repos).
+        """
+        return self._hf_token
+
     def _get_file_api_base_url(self) -> str:
-        if self._file_api_base_url:
-            return self._file_api_base_url.rstrip("/")
-        return _require_file_api_base_url()
+        if not self._file_api_base_url:
+            raise RuntimeError(
+                "file API base URL is not configured for this request — "
+                "Worker did not propagate Settings.tensorhub_public_url"
+            )
+        return self._file_api_base_url.rstrip("/")
 
     def _upload_session_manager(self):
         """Lazy-instantiate the upload session manager for this request.

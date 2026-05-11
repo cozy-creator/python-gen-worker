@@ -32,6 +32,29 @@ import asyncio
 
 import jwt
 from ._worker_auth import _JWKSCache
+from .config import Settings
+
+
+def _normalize_grpc_addr(addr: str) -> tuple[str, bool]:
+    """Normalize a scheduler address into (host:port, use_tls).
+
+    Accepts bare `host:port`, or any of `grpc://`, `grpcs://`, `http://`,
+    `https://` prefixes. Trailing `:443` implies TLS even without scheme.
+    """
+    a = (addr or "").strip()
+    if not a:
+        return "", False
+    lower = a.lower()
+    if lower.startswith("grpcs://"):
+        return a[len("grpcs://"):].strip(), True
+    if lower.startswith("grpc://"):
+        return a[len("grpc://"):].strip(), False
+    if lower.startswith("https://"):
+        return a[len("https://"):].strip(), True
+    if lower.startswith("http://"):
+        return a[len("http://"):].strip(), False
+    tls = a.endswith(":443")
+    return a, tls
 from ._worker_support import (
     RealtimeSocket,
     _AuthInterceptor,
@@ -169,36 +192,40 @@ class Worker:
 
     def __init__(
         self,
-        scheduler_addr: str = "localhost:8080",
-        scheduler_addrs: Optional[List[str]] = None,
-        user_module_names: List[str] = ["functions"], # Add new parameter for user modules
-        worker_id: Optional[str] = None,
-        worker_jwt: str = "",
-        use_tls: bool = False,
+        *,
+        settings: Settings,
+        user_module_names: List[str] = ["functions"],
         reconnect_delay: float = 5,
         max_reconnect_attempts: int = 0,  # 0 means infinite retries
         lb_only_retries: bool = False,
-        model_manager: Optional[ModelManagementInterface] = None, # Optional model manager
-        downloader: Optional[ModelDownloader] = None,  # Optional model downloader
-        manifest: Optional[Dict[str, Any]] = None,  # Optional manifest from build
+        model_manager: Optional[ModelManagementInterface] = None,
+        downloader: Optional[ModelDownloader] = None,
+        manifest: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Initialize a new worker.
 
         Args:
-            scheduler_addr: Address of the scheduler service.
-            scheduler_addrs: Optional list of seed scheduler addresses.
-            user_module_names: List of Python module names containing user-defined @inference_function functions.
-            worker_id: Unique ID for this worker (generated if not provided).
-            worker_jwt: Worker-connect JWT (required).
-            use_tls: Whether to use TLS for the connection.
+            settings: The canonical worker `Settings` loaded once at process
+                start (`gen_worker.config.load_settings`). Provides
+                orchestrator_public_grpc_addr, worker_id, worker_jwt,
+                tensorhub_public_url, hf_token, hf_home, runpod_pod_id.
+            user_module_names: List of Python module names containing
+                user-defined @inference_function functions.
             reconnect_delay: Seconds to wait between reconnection attempts.
             max_reconnect_attempts: Max reconnect attempts (0 = infinite).
             model_manager: Optional model manager.
             downloader: Optional model downloader.
-            manifest: Optional manifest dict (baked in at build time) containing models, resources, etc.
+            manifest: Optional manifest dict (baked in at build time)
+                containing models, resources, etc.
         """
+        self._settings = settings
+        scheduler_addr, use_tls = _normalize_grpc_addr(settings.orchestrator_public_grpc_addr)
+        if not scheduler_addr:
+            raise RuntimeError(
+                "Settings.orchestrator_public_grpc_addr is required to start the worker"
+            )
         self.scheduler_addr = scheduler_addr
-        self.scheduler_addrs = self._normalize_scheduler_addrs(scheduler_addr, scheduler_addrs)
+        self.scheduler_addrs = self._normalize_scheduler_addrs(scheduler_addr, None)
         self._process_started_monotonic = time.monotonic()
         self._registered_event = threading.Event()
         self._registration_watchdog_thread: Optional[threading.Thread] = None
@@ -207,11 +234,11 @@ class Worker:
         self._warn_model_resolve_s = 30.0
         self._warn_model_load_s = 60.0
         self._warn_inference_s = 60.0
-        self.user_module_names = user_module_names # Store module names
-        self.worker_jwt = (worker_jwt or "").strip()
+        self.user_module_names = user_module_names
+        self.worker_jwt = settings.worker_jwt.strip()
         self._worker_claims = _decode_unverified_jwt_claims(self.worker_jwt) if self.worker_jwt else {}
         jwt_worker_id = str(self._worker_claims.get("sub") or "").strip()
-        self.worker_id = worker_id or jwt_worker_id or f"py-worker-{os.getpid()}"
+        self.worker_id = settings.worker_id or jwt_worker_id or f"py-worker-{os.getpid()}"
         self.use_tls = use_tls
         self.reconnect_delay = reconnect_delay
         self.max_reconnect_attempts = max_reconnect_attempts
@@ -224,13 +251,14 @@ class Worker:
         self._jwt_audience = ""
         self._jwks_cache: Optional[_JWKSCache] = None
 
-        # Worker containers are treated as untrusted. Do not depend on RELEASE_ID/OWNER env vars.
-        # Release + owner identity come from the scheduler-issued JWT and per-job gRPC envelopes.
+        # Worker containers are treated as untrusted. Do not depend on
+        # RELEASE_ID/OWNER env vars. Release + owner identity come from the
+        # scheduler-issued JWT and per-job gRPC envelopes.
         self.release_id = str(self._worker_claims.get("release_id") or "").strip()
         self.owner = ""
-        self.runpod_pod_id = os.getenv("RUNPOD_POD_ID", "") # Read injected pod ID
+        self.runpod_pod_id = settings.runpod_pod_id
         if not self.runpod_pod_id:
-            logger.warning("RUNPOD_POD_ID environment variable not set for this worker!")
+            logger.warning("Settings.runpod_pod_id is empty for this worker!")
 
         logger.info(f"RUNPOD_POD_ID: {self.runpod_pod_id}")
 
@@ -3735,7 +3763,7 @@ class Worker:
             owner=owner or None,
             invoker_id=invoker_id or None,
             timeout_ms=timeout_ms if timeout_ms > 0 else None,
-            file_api_base_url=file_base_url or None,
+            file_api_base_url=(file_base_url or self._settings.tensorhub_public_url or None),
             worker_capability_token=worker_capability_token or None,
             materialized_input_urls=materialized_input_urls or None,
             local_output_dir=None,
@@ -3750,6 +3778,7 @@ class Worker:
             source_info=source_info_raw,
             destination_info=destination_info_raw,
             compute=compute,
+            hf_token=self._settings.hf_token,
         )
         # Add to active requests *before* starting thread
         with self._active_requests_lock:
@@ -3875,11 +3904,12 @@ class Worker:
             owner=owner or None,
             invoker_id=invoker_id or None,
             timeout_ms=timeout_ms,
-            file_api_base_url=file_base_url or None,
+            file_api_base_url=(file_base_url or self._settings.tensorhub_public_url or None),
             worker_capability_token=worker_capability_token or None,
             materialized_input_urls=materialized_input_urls or None,
             resolved_repos_by_id=getattr(self, "_resolved_repos_by_id_baseline", None) or None,
             compute=compute,
+            hf_token=self._settings.hf_token,
         )
 
         max_frame = 0
@@ -4965,7 +4995,7 @@ class Worker:
         if self._downloader is None:
             raise RuntimeError(
                 "source materialization requires a model downloader "
-                "(set TENSORHUB_PUBLIC_URL so the worker can resolve cozy refs)"
+                "(Settings.tensorhub_public_url must be set so the worker can resolve cozy refs)"
             )
         # Canonicalize refs that omit the cozy: prefix so the downloader treats
         # them as cozy snapshots, not HF refs.
@@ -5015,9 +5045,9 @@ class Worker:
             logger.warning("[request_id=%s] tag apply skipped: owner=%r repo=%r checkpoint=%r", ctx.request_id, owner, repo, checkpoint_id)
             return
 
-        base_url = os.getenv("TENSORHUB_PUBLIC_URL", "").strip()
+        base_url = (self._settings.tensorhub_public_url or "").strip()
         if not base_url:
-            logger.warning("[request_id=%s] TENSORHUB_PUBLIC_URL unset; skipping destination tag apply", ctx.request_id)
+            logger.warning("[request_id=%s] Settings.tensorhub_public_url unset; skipping destination tag apply", ctx.request_id)
             return
         base_url = base_url.rstrip("/")
 

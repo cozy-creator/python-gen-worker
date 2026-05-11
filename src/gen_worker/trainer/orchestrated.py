@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
-import os
 from pathlib import Path
 import time
 from typing import Any, Mapping
@@ -346,15 +345,23 @@ class JsonHttpArtifactUploader(ArtifactUploader):
 
 
 class RuntimeInputDownloader:
-    def __init__(self, *, root_dir: str, capability_token: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        root_dir: str,
+        tensorhub_public_url: str,
+        hf_token: str,
+        hf_home: str,
+        capability_token: str | None = None,
+    ) -> None:
         self._root = Path(root_dir)
         self._root.mkdir(parents=True, exist_ok=True)
         self._token = (capability_token or "").strip() or None
         self._model_downloader = ModelRefDownloader(
-            cozy_base_url=os.getenv("TENSORHUB_PUBLIC_URL"),
+            cozy_base_url=tensorhub_public_url or None,
             cozy_token=self._token,
-            hf_home=os.getenv("HF_HOME"),
-            hf_token=os.getenv("HF_TOKEN"),
+            hf_home=hf_home or None,
+            hf_token=hf_token or None,
         )
 
     def _hash_name(self, ref: str) -> str:

@@ -15,7 +15,7 @@ from .contracts import (
 )
 from .helpers import OptimizerBundle, build_default_adamw_bundle, seed_everything, to_float_scalar
 from .loop import TrainingCanceled, run_training_loop
-from .runtime import run_training_runtime_from_env
+from .runtime import run_training_runtime
 from .subprocess_contract import (
     TrainerSubprocessContractV1,
     read_subprocess_contract,
@@ -42,7 +42,7 @@ __all__ = [
     "load_trainer_plugin",
     "load_trainable_module_checkpoint",
     "read_subprocess_contract",
-    "run_training_runtime_from_env",
+    "run_training_runtime",
     "save_trainable_module_checkpoint",
     "seed_everything",
     "to_float_scalar",
