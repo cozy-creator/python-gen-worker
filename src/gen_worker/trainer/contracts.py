@@ -73,49 +73,6 @@ RawBatchT = TypeVar("RawBatchT")
 PreparedBatchT = TypeVar("PreparedBatchT")
 
 
-class TrainerEndpointContract(Protocol[StateT, RawBatchT, PreparedBatchT]):
-    """Canonical class-only trainer contract for endpoint implementations."""
-
-    def setup(self, ctx: StepContext) -> None:
-        ...
-
-    def configure(self, ctx: StepContext) -> StateT:
-        ...
-
-    def prepare_batch(self, raw_batch: RawBatchT, state: StateT, ctx: StepContext) -> PreparedBatchT:
-        ...
-
-    def train_step(self, batch: PreparedBatchT, state: StateT, ctx: StepContext) -> StepResult:
-        ...
-
-    def state_dict(self, state: StateT) -> dict[str, object]:
-        ...
-
-    def load_state_dict(self, state: StateT, payload: dict[str, object], ctx: StepContext) -> None:
-        ...
-
-    def save_checkpoint(
-        self,
-        *,
-        state: StateT,
-        step: int,
-        output_dir: str,
-        final: bool,
-        ctx: StepContext,
-    ) -> Mapping[str, object] | None:
-        ...
-
-    def load_checkpoint(
-        self,
-        *,
-        state: StateT,
-        checkpoint_dir: str,
-        payload: Mapping[str, object],
-        ctx: StepContext,
-    ) -> None:
-        ...
-
-
 class TrainingReporter(Protocol):
     """Runtime reporter contract.
 
@@ -166,50 +123,13 @@ class TrainerPlugin(Protocol):
         ...
 
 
-class CheckpointingTrainerPlugin(Protocol):
-    """Optional checkpoint IO hooks for real model artifacts.
-
-    If present, the runtime will call these hooks in addition to JSON state_dict
-    snapshots so plugins can persist model-weight artifacts (for example LoRA files).
-    """
-
-    def save_checkpoint(
-        self,
-        *,
-        state: Any,
-        step: int,
-        output_dir: str,
-        final: bool,
-        ctx: StepContext,
-    ) -> Mapping[str, Any] | None:
-        ...
-
-    def load_checkpoint(
-        self,
-        *,
-        state: Any,
-        checkpoint_dir: str,
-        payload: Mapping[str, Any],
-        ctx: StepContext,
-    ) -> None:
-        ...
-
-
-class BatchProvider(Protocol):
-    def iter_batches(self) -> Any:
-        ...
-
-
 __all__ = [
-    "BatchProvider",
-    "CheckpointingTrainerPlugin",
     "PreparedBatchT",
     "RawBatchT",
     "StateT",
     "StepControlHints",
     "StepContext",
     "StepResult",
-    "TrainerEndpointContract",
     "TrainerPlugin",
     "TrainingJobSpec",
     "TrainingReporter",

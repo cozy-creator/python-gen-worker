@@ -77,7 +77,6 @@ def test_resolve_artifact_no_compatible() -> None:
                     digest=None,
                     include_urls=False,
                     preferences={},
-                    capabilities={},
                 )
             )
         assert "no compatible artifact" in str(e.value).lower()

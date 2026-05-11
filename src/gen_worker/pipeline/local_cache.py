@@ -254,19 +254,6 @@ class LocalModelCache:
         except RuntimeError:
             logger.debug("start_prefetch called outside event loop, skipping for %s", model_id)
 
-    async def wait_for_prefetch(self, model_id: str, timeout: float = 60.0) -> bool:
-        """Wait for a prefetch to complete."""
-        prefetch_future = self._prefetch_tasks.get(model_id)
-        if prefetch_future is None:
-            return self.is_cached(model_id)
-
-        try:
-            await asyncio.wait_for(prefetch_future, timeout=timeout)
-            return True
-        except asyncio.TimeoutError:
-            logger.warning(f"Prefetch timeout for {model_id}")
-            return False
-
     def get_stats(self) -> Dict[str, Any]:
         """Get cache statistics."""
         cached_models = []

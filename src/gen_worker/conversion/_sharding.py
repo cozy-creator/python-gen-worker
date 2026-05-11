@@ -16,7 +16,6 @@ they'd get from a native HF save.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import ceil
 from typing import Mapping
 
 

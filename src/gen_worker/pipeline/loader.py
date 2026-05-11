@@ -94,7 +94,6 @@ class ModelDownloadError(PipelineLoaderError):
 
 # Constants
 VRAM_SAFETY_MARGIN_GB = 3.5
-DEFAULT_MAX_VRAM_BUFFER_GB = 2.0
 
 # FlashPack constants
 FLASHPACK_SUFFIX = ".flashpack"
@@ -654,10 +653,6 @@ class PipelineLoader:
             self.local_cache_dir = Path(local_cache_dir)
             logger.info(f"Local cache enabled: {local_cache_dir} ({max_cache_gb}GB max)")
 
-        # Download semaphore for concurrent downloads
-        max_concurrent = int(os.environ.get("WORKER_MAX_CONCURRENT_DOWNLOADS", "2"))
-        self._download_semaphore = asyncio.Semaphore(max_concurrent)
-
     def _find_flashpack_path(self, model_path: Path) -> Optional[Path]:
         """Find FlashPack version of a model if it exists."""
         if not self._flashpack_available:
@@ -780,106 +775,6 @@ class PipelineLoader:
         # Unreachable: we always either have a downloader or fail above.
         raise ModelNotFoundError(model_id, self.models_dir / model_id if self.models_dir else None)
 
-    async def _download_from_tensorhub(
-        self,
-        model_id: str,
-        progress_callback: Optional[Callable[[str, float], None]] = None,
-    ) -> Path:
-        """
-        Download a model from Cozy Hub.
-
-        Cozy Hub provides a model manifest API that lists all files in a model.
-        We download each file and reconstruct the directory structure.
-        """
-        import aiohttp
-        import backoff
-
-        if not self.models_dir:
-            raise ModelDownloadError(model_id, "No models_dir configured")
-
-        dest_dir = self.models_dir / model_id
-        temp_dir = dest_dir.with_suffix(".downloading")
-
-        if temp_dir.exists():
-            shutil.rmtree(temp_dir)
-        temp_dir.mkdir(parents=True)
-
-        try:
-            headers = {}
-            if self._tensorhub_token:
-                headers["Authorization"] = f"Bearer {self._tensorhub_token}"
-
-            # Get model manifest from Cozy Hub
-            manifest_url = f"{self._tensorhub_url}/models/{model_id}/manifest"
-            timeout = aiohttp.ClientTimeout(total=30)
-
-            async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
-                # Fetch manifest
-                async with session.get(manifest_url) as resp:
-                    if resp.status == 404:
-                        raise ModelDownloadError(
-                            model_id, "Model not found in Cozy Hub", retryable=False
-                        )
-                    resp.raise_for_status()
-                    manifest = await resp.json()
-
-                files = manifest.get("files", [])
-                if not files:
-                    raise ModelDownloadError(model_id, "Empty model manifest")
-
-                total_size = sum(f.get("size", 0) for f in files)
-                downloaded = 0
-
-                logger.info(
-                    f"Downloading {model_id}: {len(files)} files, "
-                    f"{total_size / (1024**3):.1f}GB"
-                )
-
-                # Download each file
-                for file_info in files:
-                    file_path = file_info["path"]
-                    file_url = file_info.get("url") or f"{self._tensorhub_url}/models/{model_id}/files/{file_path}"
-                    file_size = file_info.get("size", 0)
-
-                    dest_path = temp_dir / file_path
-                    dest_path.parent.mkdir(parents=True, exist_ok=True)
-
-                    # Download with retries
-                    @backoff.on_exception(
-                        backoff.expo,
-                        (aiohttp.ClientError, asyncio.TimeoutError),
-                        max_tries=3,
-                    )
-                    async def download_file() -> None:
-                        download_timeout = aiohttp.ClientTimeout(total=600)
-                        async with aiohttp.ClientSession(
-                            timeout=download_timeout, headers=headers
-                        ) as dl_session:
-                            async with dl_session.get(file_url) as dl_resp:
-                                dl_resp.raise_for_status()
-                                with open(dest_path, "wb") as f:
-                                    async for chunk in dl_resp.content.iter_chunked(_DOWNLOAD_CHUNK_BYTES):
-                                        f.write(chunk)
-
-                    await download_file()
-                    downloaded += file_size
-
-                    if progress_callback and total_size > 0:
-                        progress_callback("downloading", downloaded / total_size * 100)
-
-            # Atomic rename
-            temp_dir.rename(dest_dir)
-            logger.info(f"Downloaded {model_id} to {dest_dir}")
-
-            return dest_dir
-
-        except aiohttp.ClientError as e:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            raise ModelDownloadError(model_id, str(e), retryable=True)
-        except Exception as e:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            raise ModelDownloadError(model_id, str(e), retryable=False)
-
     async def download_models(
         self,
         model_ids: List[str],
@@ -923,59 +818,6 @@ class PipelineLoader:
                     raise
 
         return results
-
-    # =========================================================================
-    # Startup Initialization
-    # =========================================================================
-
-    async def initialize_startup_models(
-        self,
-        model_ids: List[str],
-        preload_first: Optional[str] = None,
-        progress_callback: Optional[Callable[[str, str, float], None]] = None,
-    ) -> None:
-        """
-        Initialize models at worker startup.
-
-        Downloads models with randomized order (to distribute load),
-        then optionally preloads one model into VRAM.
-
-        Args:
-            model_ids: List of models to initialize
-            preload_first: Optional model to preload into VRAM first
-            progress_callback: Optional callback(model_id, stage, progress_pct)
-        """
-        if not model_ids:
-            return
-
-        logger.info(f"Initializing {len(model_ids)} models at startup")
-        start_time = time.monotonic()
-
-        # Download all models (randomized order)
-        paths = await self.download_models(
-            model_ids,
-            progress_callback=progress_callback,
-            randomize_order=True,
-        )
-
-        download_time = time.monotonic() - start_time
-        logger.info(f"Downloaded {len(paths)} models in {download_time:.1f}s")
-
-        # If local cache is enabled, prefetch to NVMe
-        if self._local_cache:
-            for model_id, path in paths.items():
-                self._local_cache.start_prefetch(model_id, path)
-
-        # Optionally preload first model into VRAM
-        if preload_first and preload_first in paths:
-            logger.info(f"Preloading {preload_first} into VRAM")
-            try:
-                await self.load(preload_first, str(paths[preload_first]))
-            except Exception as e:
-                logger.warning(f"Failed to preload {preload_first}: {e}")
-
-        total_time = time.monotonic() - start_time
-        logger.info(f"Startup initialization complete in {total_time:.1f}s")
 
     # =========================================================================
     # Pipeline Loading
@@ -1484,30 +1326,6 @@ class PipelineLoader:
         loaded = self._loaded_pipelines.get(model_id)
         return loaded.pipeline if loaded else None
 
-    def register_quant_attributes(self, model_id: str, attrs: Optional[Dict[str, str]]) -> None:
-        """stash the resolved checkpoint's attributes (from
-        tensorhub) so the next ``load()`` call for this model_id can
-        auto-apply a ``quantization_config`` kwarg or pre-import a quant
-        library. Called by the worker's model-resolution path once per
-        incoming checkpoint. Passing ``None`` / empty dict clears the entry.
-        """
-        if not attrs:
-            self._quant_attrs_by_model_id.pop(model_id, None)
-            return
-        # Only store the quant_* subset — other attrs are irrelevant to the
-        # loader and can change per-invocation. Keeping a narrow subset
-        # makes the stored state predictable for operators reading logs.
-        filtered: Dict[str, str] = {}
-        for k, v in attrs.items():
-            if not isinstance(k, str) or not isinstance(v, (str, int, float)):
-                continue
-            k_lower = k.lower()
-            if k_lower.startswith("quant_") or k_lower == "file_layout" or k_lower == "file_type" or k_lower == "dtype":
-                filtered[k] = str(v)
-        if filtered:
-            self._quant_attrs_by_model_id[model_id] = filtered
-            logger.info("registered quant attrs for %s: %s", model_id, filtered)
-
     def get_for_inference(self, model_id: str) -> Optional[Any]:
         """
         Get a thread-safe pipeline copy for concurrent inference.
@@ -1571,10 +1389,6 @@ class PipelineLoader:
             logger.error(f"Failed to create thread-safe pipeline for {model_id}: {e}")
             # Fall back to base pipeline - concurrent access may cause issues
             return base_pipeline
-
-    def get_loaded_models(self) -> List[str]:
-        """Get list of loaded model IDs."""
-        return list(self._loaded_pipelines.keys())
 
     def get_stats(self) -> Dict[str, Any]:
         """Get loader statistics."""

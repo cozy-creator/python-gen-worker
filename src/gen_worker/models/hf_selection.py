@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Callable, Iterable, Mapping, Optional, Sequence, Set
 
@@ -434,8 +433,3 @@ def finalize_diffusers_download(
     return selected
 
 
-_SHARD_RE = re.compile(r"-\\d{5}-of-\\d{5}\\.safetensors$", re.IGNORECASE)
-
-
-def is_probably_shard_file(path: str) -> bool:
-    return bool(_SHARD_RE.search(path))

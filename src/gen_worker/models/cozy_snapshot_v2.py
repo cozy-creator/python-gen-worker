@@ -12,7 +12,7 @@ from typing import Any, Coroutine, Dict, List, Optional, Set
 
 from .cozy_cas import _download_one_file as _download_one_file
 from .cozy_cas import _norm_rel_path
-from .hub_policy import default_resolve_preferences, detect_worker_capabilities
+from .hub_policy import default_resolve_preferences
 from .hub_client import CozyHubV2Client, CozyHubResolveArtifactResult, CozyHubSnapshotFile
 from .refs import CozyRef
 
@@ -338,7 +338,6 @@ class CozySnapshotV2Downloader:
         if self._client is None:
             raise RuntimeError("cozy hub api resolve is disabled")
         prefs = default_resolve_preferences()
-        caps = detect_worker_capabilities()
         return await self._client.resolve_artifact(
             owner=ref.owner,
             repo=ref.repo,
@@ -347,7 +346,6 @@ class CozySnapshotV2Downloader:
             flavor=ref.flavor,
             include_urls=True,
             preferences=prefs,
-            capabilities=caps.to_dict(),
         )
 
 
@@ -370,34 +368,6 @@ async def ensure_snapshot_async(
         client = CozyHubV2Client(base_url=base_url, token=token)
     dl = CozySnapshotV2Downloader(client)
     return await dl.ensure_snapshot(base_dir, ref, resolved=resolved)
-
-
-def ensure_snapshot_sync(
-    *,
-    base_dir: Path,
-    ref: CozyRef,
-    base_url: str,
-    token: Optional[str],
-    resolved: Optional[Any] = None,
-) -> Path:
-    client: Optional[CozyHubV2Client] = None
-    if resolved is None:
-        if not (base_url or "").strip():
-            raise RuntimeError("cozy downloads require TENSORHUB_URL")
-        client = CozyHubV2Client(base_url=base_url, token=token)
-
-    dl = CozySnapshotV2Downloader(client)
-
-    async def _run() -> Path:
-        return await dl.ensure_snapshot(base_dir, ref, resolved=resolved)
-
-    try:
-        loop = asyncio.get_running_loop()
-        if loop.is_running():
-            return Path(_run_in_thread(_run()))
-    except RuntimeError:
-        pass
-    return asyncio.run(_run())
 
 
 def _run_in_thread(coro: Coroutine[Any, Any, Path]) -> str:

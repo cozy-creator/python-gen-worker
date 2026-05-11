@@ -2,7 +2,6 @@ import asyncio
 import hashlib
 import os
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from typing import Coroutine, Optional
 from urllib.parse import urlparse
 
@@ -18,13 +17,6 @@ class ModelDownloader(ABC):
     def download(self, model_ref: str, dest_dir: str, filename: Optional[str] = None) -> str:
         """Download a model artifact and return the local file path."""
         raise NotImplementedError
-
-
-@dataclass
-class DownloadResult:
-    path: str
-    sha256: Optional[str] = None
-    bytes_written: int = 0
 
 
 class CozyHubDownloader(ModelDownloader):

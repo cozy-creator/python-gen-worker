@@ -170,33 +170,6 @@ class CivitaiFrontendURLInfo:
     model_version_id: int | None
 
 
-def _copy_with_hash_and_progress(
-    src_path: Path,
-    output_path: Path,
-    *,
-    progress_callback: Callable[[int, int | None], None] | None = None,
-) -> dict[str, str | int]:
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    hasher = hashlib.sha256()
-    total_bytes = int(src_path.stat().st_size)
-    written = 0
-    with src_path.open("rb") as src, output_path.open("wb") as dst:
-        while True:
-            chunk = src.read(_CHUNK_BYTES)
-            if not chunk:
-                break
-            hasher.update(chunk)
-            dst.write(chunk)
-            written += len(chunk)
-            if progress_callback is not None:
-                progress_callback(written, total_bytes)
-    return {
-        "output_path": str(output_path),
-        "sha256": hasher.hexdigest(),
-        "size_bytes": int(written),
-    }
-
-
 def _env_first_nonempty(names: tuple[str, ...]) -> str:
     for name in names:
         value = str(os.getenv(name, "") or "").strip()

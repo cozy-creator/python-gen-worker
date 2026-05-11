@@ -87,7 +87,6 @@ class CozyHubV2Client:
         flavor: Optional[str] = None,
         include_urls: bool,
         preferences: Mapping[str, Any],
-        capabilities: Mapping[str, Any],
         capability_token: Optional[str] = None,
     ) -> CozyHubResolveArtifactResult:
         if not owner or not repo:
@@ -170,24 +169,6 @@ class CozyHubV2Client:
 
         return _parse_resolve_artifact_response(data, include_urls=include_urls)
 
-    async def get_snapshot_manifest(self, *, owner: str, repo: str, digest: str) -> List[CozyHubSnapshotFile]:
-        """
-        Fetch a snapshot manifest by digest (already pinned) via resolve.
-        """
-        if not owner or not repo or not digest:
-            raise ValueError("owner/repo/digest required")
-        res = await self.resolve_artifact(
-            owner=owner,
-            repo=repo,
-            tag="latest",
-            digest=digest,
-            flavor=None,
-            include_urls=True,
-            preferences={},
-            capabilities={},
-        )
-        return res.files
-
     async def request_public_model(
         self,
         *,
@@ -234,7 +215,6 @@ class CozyHubV2Client:
                 flavor=parsed.cozy.flavor,
                 include_urls=include_urls,
                 preferences=preferences,
-                capabilities={},
             )
 
         url = f"{self.base_url}/api/v1/public/models/request"

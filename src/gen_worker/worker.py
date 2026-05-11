@@ -109,9 +109,6 @@ logger = logging.getLogger(__name__) # Use __name__ for logger
 I = TypeVar('I')  # Input type
 O = TypeVar('O')  # Output type
 
-# Generic type for discovered request handlers
-RequestHandlerFunc = Callable[[Any, I], O]
-
 HEARTBEAT_INTERVAL = 10  # seconds
 
 _DOWNLOAD_CHUNK_BYTES = 4 * 1024 * 1024
@@ -280,7 +277,6 @@ class Worker:
         # Use a refcount (not a boolean) so overlapping inference + model ops
         # cannot flip BUSY -> NOT BUSY prematurely.
         self._gpu_busy_refcount = 0
-        self._is_gpu_busy = False  # legacy; derived from refcount in _get_gpu_busy_status()
         # Detect GPU availability once at startup
         self._has_gpu = False
         try:
@@ -413,8 +409,7 @@ class Worker:
         # LRU model cache for tracking VRAM and disk-cached models
         self._model_cache = ModelCache()
 
-        # Store manifest and initialize model config from it
-        self._manifest = manifest
+        # Initialize model config from the manifest
         if manifest and isinstance(manifest, dict):
             global_models = manifest.get("models")
             if isinstance(global_models, dict):
@@ -1000,27 +995,12 @@ class Worker:
         return timer
 
 
-    def _set_gpu_busy_status(self, busy: bool, func_name_for_log: str = "") -> None:
-        # Legacy setter kept for older call sites (none in-tree). Translate to refcount.
-        if busy:
-            self._gpu_busy_enter()
-        else:
-            self._gpu_busy_exit()
-
-
     def _get_gpu_busy_status(self) -> bool:
         lock = getattr(self, "_gpu_busy_lock", None)
         if lock is None:
-            return bool(getattr(self, "_is_gpu_busy", False))
+            return False
         with lock:
-            ref = int(getattr(self, "_gpu_busy_refcount", 0) or 0)
-            busy = ref > 0
-            # Keep legacy boolean in sync for any external introspection.
-            try:
-                self._is_gpu_busy = busy
-            except Exception:
-                pass
-            return busy
+            return int(getattr(self, "_gpu_busy_refcount", 0) or 0) > 0
 
     def _gpu_busy_enter(self) -> None:
         if not bool(getattr(self, "_has_gpu", False)):
@@ -1031,7 +1011,6 @@ class Worker:
         with lock:
             cur = int(getattr(self, "_gpu_busy_refcount", 0) or 0)
             self._gpu_busy_refcount = cur + 1
-            self._is_gpu_busy = self._gpu_busy_refcount > 0
 
     def _gpu_busy_exit(self) -> None:
         if not bool(getattr(self, "_has_gpu", False)):
@@ -1045,7 +1024,6 @@ class Worker:
                 self._gpu_busy_refcount = 0
             else:
                 self._gpu_busy_refcount = cur - 1
-            self._is_gpu_busy = self._gpu_busy_refcount > 0
 
     def _model_use_enter(self, canonical_model_id: str) -> None:
         mid = str(canonical_model_id or "").strip()
@@ -1342,67 +1320,6 @@ class Worker:
             socket_param=socket_name,
             injections=tuple(injections),
         )
-
-    def _infer_payload_type(
-        self,
-        func: Callable[..., Any],
-        expects_pipeline: bool,
-    ) -> Optional[type[msgspec.Struct]]:
-        signature = inspect.signature(func)
-        params = list(signature.parameters.values())
-        expected_params = 3 if expects_pipeline else 2
-        if len(params) != expected_params:
-            logger.error(
-                "Function '%s' has %d parameters but expected %d.",
-                func.__name__,
-                len(params),
-                expected_params,
-            )
-            return None
-
-        payload_param = params[-1]
-        try:
-            type_hints = typing.get_type_hints(func, globalns=func.__globals__)
-        except Exception as exc:
-            logger.error("Failed to resolve type hints for '%s': %s", func.__name__, exc)
-            return None
-
-        payload_type = type_hints.get(payload_param.name)
-        if payload_type is None:
-            logger.error("Function '%s' is missing a payload type annotation.", func.__name__)
-            return None
-
-        if not isinstance(payload_type, type) or not issubclass(payload_type, msgspec.Struct):
-            logger.error(
-                "Function '%s' payload type must be a msgspec.Struct, got %r.",
-                func.__name__,
-                payload_type,
-            )
-            return None
-
-        return payload_type
-
-    def _infer_return_type(self, func: Callable[..., Any]) -> Optional[type[msgspec.Struct]]:
-        try:
-            type_hints = typing.get_type_hints(func, globalns=func.__globals__)
-        except Exception as exc:
-            logger.error("Failed to resolve return type hints for '%s': %s", func.__name__, exc)
-            return None
-
-        return_type = type_hints.get("return")
-        if return_type is None:
-            logger.error("Function '%s' is missing a return type annotation.", func.__name__)
-            return None
-
-        if not isinstance(return_type, type) or not issubclass(return_type, msgspec.Struct):
-            logger.error(
-                "Function '%s' return type must be a msgspec.Struct, got %r.",
-                func.__name__,
-                return_type,
-            )
-            return None
-
-        return return_type
 
     def _send_message(self, message: WorkerSchedulerMessage) -> None:
         """Add a message to the outgoing queue."""
@@ -2174,7 +2091,7 @@ class Worker:
         if accelerator == "cpu":
             accelerator = "none"
         requires_gpu = bool(cfg.get("requires_gpu") is True or accelerator == "cuda")
-        if cfg.get("compute_capability") or cfg.get("compute_capability_min") or cfg.get("cuda_compute_min"):
+        if cfg.get("cuda_compute_min"):
             requires_gpu = True
         if cfg.get("min_vram_gb") is not None:
             requires_gpu = True
@@ -2192,11 +2109,7 @@ class Worker:
                 "axes": axes,
             }
 
-        min_cc = (
-            self._parse_compute_capability_value(cfg.get("compute_capability"))
-            or self._parse_compute_capability_value(cfg.get("compute_capability_min"))
-            or self._parse_compute_capability_value(cfg.get("cuda_compute_min"))
-        )
+        min_cc = self._parse_compute_capability_value(cfg.get("cuda_compute_min"))
         if min_cc is not None:
             detected_cc = self._parse_compute_capability_value(gpu_info.get("gpu_sm"))
             axes["required_compute_capability"] = f"{min_cc:.1f}"
@@ -3800,11 +3713,6 @@ class Worker:
         kind = str(req_cfg.get("kind", "") or "").strip()
         if kind:
             execution_hints["kind"] = kind
-        if "memory_hint_mb" in req_cfg:
-            try:
-                execution_hints["memory_hint_mb"] = int(req_cfg.get("memory_hint_mb") or 0)
-            except Exception:
-                pass
         # For training tasks, extract the reserved-name fields
         # (`source` and `destination`) from the input payload so RequestContext
         # can expose them to tenant code via ctx.source, ctx.source_path,

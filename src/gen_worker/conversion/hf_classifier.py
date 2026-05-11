@@ -1017,29 +1017,6 @@ def _select_native_lora(inputs: ClassificationInputs) -> SelectionResult:
     return _finalize(selected, inputs, attrs)
 
 
-_TAG_TO_BASE = {
-    "stable-diffusion-xl": "stabilityai/stable-diffusion-xl-base-1.0",
-    "stable-diffusion-v1-5": "runwayml/stable-diffusion-v1-5",
-    "stable-diffusion": "runwayml/stable-diffusion-v1-5",
-    "flux": "black-forest-labs/FLUX.1-dev",
-    "flux-1": "black-forest-labs/FLUX.1-dev",
-    "flux-dev": "black-forest-labs/FLUX.1-dev",
-    "flux-2": "black-forest-labs/FLUX.2-klein-4B",
-    "wan2-1": "Wan-AI/Wan2.1-T2V-A14B",
-    "wan2-2": "Wan-AI/Wan2.2-T2V-A14B",
-}
-
-
-def _infer_base_from_tags(tags: object) -> Optional[str]:
-    if not isinstance(tags, list):
-        return None
-    for t in tags:
-        ts = str(t or "").strip().lower()
-        if ts in _TAG_TO_BASE:
-            return _TAG_TO_BASE[ts]
-    return None
-
-
 # --- Sentence-Transformers ---
 
 def _select_sentence_transformers(

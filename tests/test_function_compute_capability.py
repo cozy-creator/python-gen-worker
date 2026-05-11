@@ -15,31 +15,29 @@ def _cleanup_modules(prefix: str) -> None:
 
 
 class TestFunctionComputeCapability(unittest.TestCase):
-    def test_resource_requirements_canonicalizes_compute_capability_min(self) -> None:
-        req = ResourceRequirements(compute_capability_min=10)
+    def test_resource_requirements_canonicalizes_cuda_compute_min(self) -> None:
+        req = ResourceRequirements(cuda_compute_min=10)
         self.assertEqual(
             req.to_dict(),
-            {"compute_capability": {"min": "10.0"}},
+            {"cuda_compute_min": "10.0", "compute_capability": {"min": "10.0"}},
         )
 
     def test_resource_requirements_emits_function_hardware_axes(self) -> None:
         req = ResourceRequirements(
             accelerator="cuda",
-            accelerator_preference="required",
             cuda_compute_min=9,
             min_vram_gb=24,
             required_libraries=["modelopt"],
         )
         self.assertEqual(req.to_dict()["accelerator"], "cuda")
-        self.assertEqual(req.to_dict()["accelerator_preference"], "required")
         self.assertEqual(req.to_dict()["cuda_compute_min"], "9.0")
         self.assertEqual(req.to_dict()["compute_capability"], {"min": "9.0"})
         self.assertEqual(req.to_dict()["min_vram_gb"], 24.0)
         self.assertEqual(req.to_dict()["required_libraries"], ["modelopt"])
 
-    def test_resource_requirements_rejects_invalid_compute_capability_min(self) -> None:
+    def test_resource_requirements_rejects_invalid_cuda_compute_min(self) -> None:
         with self.assertRaises(ValueError):
-            ResourceRequirements(compute_capability_min=0)
+            ResourceRequirements(cuda_compute_min=0)
 
     def test_discovery_emits_function_compute_capability_requirement(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -80,7 +78,7 @@ class Input(msgspec.Struct):
 class Output(msgspec.Struct):
     y: int
 
-@inference_function(resources=ResourceRequirements(compute_capability_min=10))
+@inference_function(resources=ResourceRequirements(cuda_compute_min=10))
 def generate_nvfp4(ctx: RequestContext, payload: Input) -> Output:
     return Output(y=payload.x)
 """.lstrip(),

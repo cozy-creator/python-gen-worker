@@ -126,9 +126,7 @@ def presigned_upload_file(
     try:
         resp = requests.post(url, headers=create_headers, data=json.dumps(payload), timeout=_CREATE_TIMEOUT_S)
     except requests.RequestException as e:
-        err = RuntimeError(f"file save failed (network_error): {e}")
-        err.__cause__ = e
-        raise err
+        raise RuntimeError(f"file save failed (network_error): {e}") from e
     code = resp.status_code
     if code in (401, 403):
         raise AuthError(f"file save unauthorized ({code})")
@@ -208,7 +206,6 @@ def presigned_upload_file(
             )
         except requests.RequestException as e:
             last_exc = RuntimeError(f"file save failed (network_error): {e}")
-            last_exc.__cause__ = e
         else:
             code = resp.status_code
             if code in (401, 403):
@@ -274,7 +271,6 @@ def _upload_parts_to_s3(
                     return (part_number, etag)
             except requests.RequestException as e:
                 last_exc = RuntimeError(f"S3 part upload network error: {e}")
-                last_exc.__cause__ = e
             if attempt < retry_attempts and retry_backoff_ms > 0:
                 time.sleep(retry_backoff_ms / 1000.0)
 

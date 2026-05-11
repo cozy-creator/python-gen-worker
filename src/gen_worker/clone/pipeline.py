@@ -2069,48 +2069,7 @@ def _finalize_clone(
         art["domain"] = domain
         return art
 
-    def _snapshot_digest(t: Any) -> str:
-        """Get snapshot_digest from a Tensors object in algo:hex format."""
-        sd = str(getattr(t, "snapshot_digest", "") or getattr(t, "blob_digest", "") or getattr(t, "blake3", "") or "").strip()
-        if sd and ":" not in sd:
-            sd = f"blake3:{sd}"
-        return sd
-
-    def _file_type_from_tensors(t: Any) -> str:
-        fmt = str(getattr(t, "format", "") or "").strip().lower()
-        if fmt in {"safetensors", "bin", "pt", "pth", "ckpt", "gguf"}:
-            return fmt
-        ref = str(getattr(t, "ref", "") or "").strip().lower()
-        if ref.endswith(".safetensors"):
-            return "safetensors"
-        if ref.endswith(".bin") or ref.endswith(".pt") or ref.endswith(".pth"):
-            return "bin"
-        if ref.endswith(".gguf"):
-            return "gguf"
-        return "safetensors"
-
     commit_checkpoint_flavors: list[dict[str, Any]] = []
-
-    def _flavor_quantization(save_format: str) -> str:
-        """Normalize a save_format string into the canonical quantization label
-        stored in flavor attributes."""
-        s = str(save_format or "").strip().lower()
-        if s == "":
-            return "none"
-        # fp8:e4m3 → fp8-e4m3; gguf:f16 → gguf-f16; nvfp4 → nvfp4; bf16 → bf16.
-        return s.replace(":", "-")
-
-    def _flavor_file_layout(save_format: str, tensors: Any, default_layout: str) -> str:
-        """Derive file_layout for a save_format output: single-file containers
-        (flashpack, gguf) emit as 'singlefile'; everything else inherits the
-        clone's selected layout (usually 'diffusers')."""
-        s = str(save_format or "").strip().lower()
-        if s.startswith("gguf") or s == "flashpack":
-            return "singlefile"
-        ref = str(getattr(tensors, "ref", "") or "").strip().lower()
-        if ref.endswith(".flashpack") or ref.endswith(".gguf"):
-            return "singlefile"
-        return default_layout or "diffusers"
 
     # Non-weight files (configs/tokenizers/scheduler/model_index.json/README/
     # LICENSE) always belong to every emitted flavor so inference can load

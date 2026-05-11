@@ -165,7 +165,6 @@ class ModelRefDownloader(ModelDownloader):
                         flavor=parsed.cozy.flavor,
                         include_urls=True,
                         preferences=resolve_prefs,
-                        capabilities={},
                         capability_token=cap_token,
                     )
                 except CozyHubError:

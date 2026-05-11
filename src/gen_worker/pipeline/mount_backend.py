@@ -104,11 +104,6 @@ def mount_backend_for_path(path: str | Path, *, mountinfo_text: Optional[str] = 
     return best
 
 
-def is_nfs_path(path: str | Path, *, mountinfo_text: Optional[str] = None) -> bool:
-    mb = mount_backend_for_path(path, mountinfo_text=mountinfo_text)
-    return bool(mb and mb.is_nfs)
-
-
 def volume_key_for_path(path: str | Path, *, mountinfo_text: Optional[str] = None) -> Optional[str]:
     """
     Return a stable, non-sensitive identifier for the mount containing `path`.

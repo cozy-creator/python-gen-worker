@@ -121,29 +121,6 @@ class ConversionContext:
         self._open_writers.append(w)
         return w
 
-    # ----- secondary-model load ---------------------------------------
-
-    def load_reference_model(self, ref: str) -> Any:
-        """Dynamically load a secondary model by tensorhub ref.
-
-        Prefer the declarative ``Annotated[Source, ModelRef(Src.PAYLOAD,
-        "field_name")]`` pattern when the ref is known at dispatch time —
-        that scopes the capability token correctly at token-mint time. This
-        method is the escape hatch when the ref isn't statically known.
-
-        Raises if the capability token doesn't already cover the ref.
-        """
-        # Deferred — requires gen-worker's existing ref-downloader path with
-        # capability-token auth. The MVP implementation wires this up after
-        # the per-function ref-registry is plumbed through orchestrator +
-        # endpoint.lock. For now, raise a clear not-implemented error rather
-        # than silently downloading without authorization checks.
-        raise NotImplementedError(
-            "ctx.load_reference_model is not yet implemented — use the "
-            "declarative Annotated[Source, ModelRef(Src.PAYLOAD, ...)] "
-            "pattern instead (orchestrator pre-scopes the capability token)."
-        )
-
     # ----- layout passthrough escape hatch ----------------------------
 
     def copy_unconverted_components(

@@ -34,8 +34,6 @@ logger = logging.getLogger(__name__)
 
 # Constants - can be overridden via environment variables
 DEFAULT_VRAM_SAFETY_MARGIN_GB = 3.5
-DEFAULT_WORKING_MEMORY_GB = 2.0
-DEFAULT_RAM_SAFETY_MARGIN_GB = 10.0
 DEFAULT_MAX_CONCURRENT_DOWNLOADS = 2
 
 
@@ -243,40 +241,6 @@ class ModelCache:
     # Model Operations
     # -------------------------------------------------------------------------
 
-    def register_model(
-        self,
-        model_id: str,
-        location: ModelLocation,
-        size_gb: float = 0.0,
-        pipeline: Any = None,
-        disk_path: Optional[Path] = None,
-    ) -> None:
-        """
-        Register a model in the cache.
-
-        Args:
-            model_id: Unique model identifier.
-            location: Where the model is stored.
-            size_gb: Size of the model in GB.
-            pipeline: The pipeline object (if in VRAM).
-            disk_path: Path on disk (if cached).
-        """
-        with self._lock:
-            model = CachedModel(
-                model_id=model_id,
-                location=location,
-                size_gb=size_gb,
-                pipeline=pipeline,
-                disk_path=disk_path,
-            )
-            self._models[model_id] = model
-            self._models.move_to_end(model_id)  # Mark as most recently used
-
-            if location == ModelLocation.VRAM:
-                self._vram_used_gb += size_gb
-
-            logger.info(f"Registered model {model_id} in {location.value} ({size_gb:.1f}GB)")
-
     def get_pipeline(self, model_id: str) -> Optional[Any]:
         """
         Get a pipeline for inference, loading from disk if needed.
@@ -300,22 +264,11 @@ class ModelCache:
             # Model is on disk or downloading - caller needs to load it
             return None
 
-    def has_model(self, model_id: str) -> bool:
-        """Check if a model is in the cache (any location)."""
-        with self._lock:
-            return model_id in self._models
-
     def is_in_vram(self, model_id: str) -> bool:
         """Check if a model is loaded in VRAM."""
         with self._lock:
             model = self._models.get(model_id)
             return model is not None and model.location == ModelLocation.VRAM
-
-    def is_on_disk(self, model_id: str) -> bool:
-        """Check if a model is cached on disk."""
-        with self._lock:
-            model = self._models.get(model_id)
-            return model is not None and model.location == ModelLocation.DISK
 
     def mark_loaded_to_vram(
         self,
@@ -420,13 +373,6 @@ class ModelCache:
                 )
                 self._models[model_id] = model
 
-    def update_download_progress(self, model_id: str, progress: float) -> None:
-        """Update download progress for a model."""
-        with self._lock:
-            model = self._models.get(model_id)
-            if model and model.location == ModelLocation.DOWNLOADING:
-                model.download_progress = progress
-
     def _unload_from_vram(self, model_id: str, keep_on_disk: bool = True) -> float:
         """
         Unload a model from VRAM.
@@ -487,16 +433,6 @@ class ModelCache:
             logger.info(f"Completely unloaded model {model_id}")
             return True
 
-    def unload_from_vram(self, model_id: str, keep_on_disk: bool = True) -> float:
-        """
-        Unload a model from VRAM while optionally keeping its disk cache entry.
-
-        This is a public wrapper around the internal VRAM unload logic so the
-        worker runtime can enforce simple count-based eviction policies without
-        reaching into private methods.
-        """
-        return self._unload_from_vram(model_id, keep_on_disk=keep_on_disk)
-
     def evict_lru_vram_until_count(self, max_vram_models: int) -> int:
         """
         Evict least-recently-used VRAM models until we have <= max_vram_models.
@@ -525,20 +461,6 @@ class ModelCache:
             evicted += 1
 
         return evicted
-
-    def can_fit_in_vram(self, size_gb: float) -> bool:
-        """Check if a model of given size can fit in VRAM (with potential eviction)."""
-        with self._lock:
-            available = self._max_vram_gb - self._vram_used_gb
-            if available >= size_gb:
-                return True
-
-            # Check if eviction could free enough space
-            evictable = sum(
-                m.size_gb for m in self._models.values()
-                if m.location == ModelLocation.VRAM
-            )
-            return available + evictable >= size_gb
 
     # -------------------------------------------------------------------------
     # Stats for Heartbeat
@@ -591,70 +513,6 @@ class ModelCache:
                 m.model_id for m in self._models.values()
                 if m.location == ModelLocation.DISK
             ]
-
-    def get_all_models(self) -> List[str]:
-        """Get list of all tracked models."""
-        with self._lock:
-            return list(self._models.keys())
-
-    def are_models_available(self, model_ids: List[str]) -> bool:
-        """
-        Check if all specified models are available (VRAM or disk).
-
-        This is used for progressive model availability - a worker can
-        accept jobs as soon as the required models are downloaded,
-        even if other models are still downloading.
-
-        Args:
-            model_ids: List of model IDs to check.
-
-        Returns:
-            True if all models are in VRAM or on disk (not downloading).
-        """
-        with self._lock:
-            for model_id in model_ids:
-                model = self._models.get(model_id)
-                if model is None:
-                    return False  # Model not tracked at all
-                if model.location == ModelLocation.DOWNLOADING:
-                    return False  # Still downloading
-            return True
-
-    def get_available_models(self) -> List[str]:
-        """
-        Get list of models that are available for inference.
-
-        Returns models in VRAM or on disk (not downloading).
-        """
-        with self._lock:
-            return [
-                m.model_id for m in self._models.values()
-                if m.location in (ModelLocation.VRAM, ModelLocation.DISK)
-            ]
-
-    def get_downloading_models(self) -> List[str]:
-        """Get list of models currently being downloaded."""
-        with self._lock:
-            return [
-                m.model_id for m in self._models.values()
-                if m.location == ModelLocation.DOWNLOADING
-            ]
-
-    def get_download_progress(self, model_id: str) -> Optional[float]:
-        """
-        Get download progress for a model.
-
-        Args:
-            model_id: Model to check.
-
-        Returns:
-            Progress (0.0-1.0) if downloading, None otherwise.
-        """
-        with self._lock:
-            model = self._models.get(model_id)
-            if model and model.location == ModelLocation.DOWNLOADING:
-                return model.download_progress
-            return None
 
     def get_max_concurrent_downloads(self) -> int:
         """Get the maximum number of concurrent downloads allowed."""
