@@ -4806,6 +4806,22 @@ class Worker:
             {"function_name": function_name, "phase": "training"},
         )
 
+        # Populate the resolved_repos_by_id contextvar from this request's
+        # ctx so the downloader (used by `_materialize_source_for_training`
+        # and tenant code that calls Source.* helpers) can look up the
+        # orchestrator-pre-resolved snapshot URLs. Without this, training
+        # jobs fail at materialize-source time with "cozy ref ... not in
+        # resolved_repos_by_id" even when the orchestrator did pre-resolve.
+        # Mirrors the inference path's set at line ~4172 below.
+        from .models.ref_downloader import (
+            reset_resolved_repos_by_id,
+            set_resolved_repos_by_id,
+        )
+
+        baseline = getattr(self, "_resolved_repos_by_id_baseline", None) or None
+        resolved_map = getattr(ctx, "resolved_repos_by_id", None) or baseline
+        resolved_tok = set_resolved_repos_by_id(resolved_map)
+
         try:
             if ctx.is_canceled():
                 raise CanceledError("canceled")
@@ -4909,6 +4925,10 @@ class Worker:
             success = False
 
         finally:
+            try:
+                reset_resolved_repos_by_id(resolved_tok)
+            except Exception:
+                pass
             self._gpu_busy_exit()
             rm.mark_compute_completed()
             if rm.compute_completed_at:

@@ -250,9 +250,6 @@ class _RequestOutputStream:
                 sha256=value.sha256,
                 blake3=value.blake3,
                 media_id=value.media_id,
-                url=value.url,
-                url_expires_at=value.url_expires_at,
-                receipt_jws=value.receipt_jws,
                 download_token=value.download_token,
                 stream_mode=self.stream_mode,
             )
@@ -434,9 +431,6 @@ class _RequestOutputStream:
             sha256=sha,
             blake3=str(meta.get("blake3") or blake3_hex).strip() or None,
             media_id=str(meta.get("media_id") or "").strip() or None,
-            url=str(meta.get("url") or "").strip() or None,
-            url_expires_at=str(meta.get("url_expires_at") or "").strip() or None,
-            receipt_jws=str(meta.get("receipt_jws") or "").strip() or None,
             stream_mode=self.stream_mode,
         )
         if self._kind == "checkpoint":

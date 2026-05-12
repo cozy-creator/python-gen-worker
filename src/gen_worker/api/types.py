@@ -15,9 +15,13 @@ class Asset(msgspec.Struct):
     An Asset can carry its payload one of two ways on the way out
     (see tensorhub/docs/api-conventions.md):
 
-      - URL: ``url`` + ``url_expires_at`` point at a presigned download.
-        The worker uploaded the bytes to tensorhub/MinIO and got back a
-        signed receipt (``receipt_jws``).
+      - Stored: the worker uploaded the bytes to tensorhub/MinIO and
+        returns just ``ref`` + the immutable bytes-attestation fields
+        (``sha256``, ``blake3``, ``size_bytes``, ``mime_type``,
+        ``media_id``). gen-orchestrator re-presigns the download URL on
+        every client read via tensorhub's ``POST /api/v1/media/urls``.
+        gen-orchestrator issue #318 deleted the upload-time URL caching
+        and the asset-receipt JWT.
       - Inline ``inline_bytes``: the worker SKIPPED the tensorhub upload
         and returned the raw bytes directly. Used when the client asked
         for ``Prefer: bytes=inline`` and the payload fits under the
@@ -27,7 +31,7 @@ class Asset(msgspec.Struct):
         accepts msgpack, or base64-encoded when the client accepts
         JSON.
 
-    Exactly one of ``url`` and ``inline_bytes`` is set on a successful
+    Exactly one of ``ref`` and ``inline_bytes`` is set on a successful
     output Asset. The field is named ``inline_bytes`` rather than
     ``bytes`` to avoid the name collision with Python's builtin
     ``bytes`` (which breaks msgspec.Struct decoding).
@@ -41,9 +45,6 @@ class Asset(msgspec.Struct):
     sha256: Optional[str] = None
     blake3: Optional[str] = None
     media_id: Optional[str] = None
-    url: Optional[str] = None
-    url_expires_at: Optional[str] = None
-    receipt_jws: Optional[str] = None
     download_token: Optional[str] = None
     stream_mode: Optional[str] = None
     inline_bytes: Optional[bytes] = None
