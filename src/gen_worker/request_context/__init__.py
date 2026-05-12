@@ -287,10 +287,15 @@ class RequestContext:
             if str(v or "").strip()
         }
 
-    def _checkpoint_session_id(self, repo_owner: str, repo_name: str) -> str:
-        """Return the session_id for a checkpoint upload session on this
+    def _checkpoint_revision_id(self, repo_owner: str, repo_name: str) -> str:
+        """Return the revision_id for a checkpoint upload session on this
         destination repo, opening it lazily on first call. Cached per ctx —
-        subsequent uploads to the same repo reuse the session."""
+        subsequent uploads to the same repo reuse the session.
+
+        Tensorhub still calls the open-session token `session_id` over the
+        wire; we surface it locally as `revision_id` because the resource
+        it materializes is one repo revision. The two names refer to the
+        same opaque value."""
         mgr = self._upload_session_manager()
         return mgr.session_id_for(
             "checkpoint",
@@ -1131,7 +1136,7 @@ class RequestContext:
         """Issue #20: preferred name for the catalog-commit operation.
 
         Forwards to ``publish_repo_revision`` (which now routes to
-        ``POST /upload-sessions/:session_id/finalize`` internally via the
+        ``POST /revisions/:revision_id/finalize`` internally via the
         session manager). Kept as an alias so tenant code can adopt the
         new terminology at their pace; ``publish_repo_revision`` remains
         functional for back-compat within this module.
@@ -1154,7 +1159,6 @@ class RequestContext:
         # plus per-checkpoint lineage and a tags map.
         relationship_kind: str = "import",
         auto_create_external_parent: bool = True,
-        merge_with_existing: bool = True,
     ) -> Dict[str, Any]:
         """Publish checkpoints + lineage to Tensorhub via the worker-cap /publish endpoint.
 
@@ -1384,13 +1388,29 @@ class RequestContext:
                 per_flavor_entries = [e for e in v_manifest if isinstance(e, dict)]
             else:
                 per_flavor_entries = manifest_entries
-            publish_checkpoints.append({
+            # Explicit deletions list — paths from the prior :latest checkpoint
+            # that the caller wants removed from this revision. The server
+            # always merges with :latest, so this is the only way to express
+            # overwrite semantics (e.g. clone's overwrite_repo path enumerates
+            # the prior manifest and lists every path here).
+            v_deletions_raw = v.get("deletions")
+            per_flavor_deletions: List[str] = []
+            if isinstance(v_deletions_raw, list):
+                for d in v_deletions_raw:
+                    if isinstance(d, str):
+                        s = d.strip()
+                        if s:
+                            per_flavor_deletions.append(s)
+            ck_entry: Dict[str, Any] = {
                 "snapshot_manifest": per_flavor_entries,
                 "display_label":     label,
                 "flavor":            flavor,
                 "flavors":           flavors,
                 "lineage":           lineage,
-            })
+            }
+            if per_flavor_deletions:
+                ck_entry["deletions"] = per_flavor_deletions
+            publish_checkpoints.append(ck_entry)
 
         primary_default_flavor = ""
         if publish_checkpoints:
@@ -1399,15 +1419,19 @@ class RequestContext:
                 raw_primary_flavors = publish_checkpoints[0].get("flavors")
                 if isinstance(raw_primary_flavors, list) and raw_primary_flavors:
                     primary_default_flavor = str(raw_primary_flavors[0] or "").strip()
-        tag_groups: List[Dict[str, Any]] = []
+        # Top-level tags list (renamed from tag_groups). Each entry points
+        # at a flavor; the server selects which checkpoint that flavor
+        # resolves to. `default_checkpoint_id` is no longer sent —
+        # `default_flavor` carries the same information.
+        tags: List[Dict[str, Any]] = []
         for tag in normalized_tags:
             clean_tag = str(tag or "").strip()
             if not clean_tag or clean_tag.lower() == "latest":
                 continue
-            group: Dict[str, Any] = {"tag": clean_tag}
+            entry: Dict[str, Any] = {"tag": clean_tag}
             if primary_default_flavor:
-                group["default_flavor"] = primary_default_flavor
-            tag_groups.append(group)
+                entry["default_flavor"] = primary_default_flavor
+            tags.append(entry)
 
         if not publish_checkpoints:
             logger.warning(
@@ -1415,21 +1439,24 @@ class RequestContext:
                 self.request_id, self.job_id or "", owner, repo,
             )
         else:
+            # `merge_with_existing` is no longer sent: the server always
+            # merges with :latest. Overwrite semantics are expressed by
+            # the caller populating per-checkpoint `deletions` lists; this
+            # method passes them through unchanged.
             publish_req_body = {
-                "tag_groups":                  tag_groups,
+                "tags":                        tags,
                 "checkpoint_flavors":          publish_checkpoints,
                 "auto_create_external_parent": bool(auto_create_external_parent),
-                "merge_with_existing":         bool(merge_with_existing),
             }
             # Issue #20: finalize hits the session-scoped URL. The session
             # was opened lazily on the first save_* call to this repo and
             # cached in the ctx-level manager.
             finalize_resp: Dict[str, Any] = {}
             try:
-                session_id = self._checkpoint_session_id(owner, repo)
+                revision_id = self._checkpoint_revision_id(owner, repo)
                 finalize_resp = _request_json(
                     "POST",
-                    f"/api/v1/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}/upload-sessions/{urllib.parse.quote(session_id, safe='')}/finalize",
+                    f"/api/v1/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}/revisions/{urllib.parse.quote(revision_id, safe='')}/finalize",
                     publish_req_body,
                 ) or {}
                 # Finalize succeeded — drop the session from the manager's

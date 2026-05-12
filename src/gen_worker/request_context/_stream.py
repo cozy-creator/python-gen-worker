@@ -368,11 +368,11 @@ class _RequestOutputStream:
             # and cached so subsequent uploads to the same repo reuse it.
             repo_owner, repo, _job_id = self._repo_job_scope
             create_payload["path"] = self._ref
-            session_id = self._ctx._checkpoint_session_id(repo_owner, repo)
+            revision_id = self._ctx._checkpoint_revision_id(repo_owner, repo)
             endpoint_path = (
                 f"/api/v1/repos/{urllib.parse.quote(repo_owner, safe='')}/"
-                f"{urllib.parse.quote(repo, safe='')}/upload-sessions/"
-                f"{urllib.parse.quote(session_id, safe='')}/uploads"
+                f"{urllib.parse.quote(repo, safe='')}/revisions/"
+                f"{urllib.parse.quote(revision_id, safe='')}/uploads"
             )
 
         def _progress_cb(parts_done: int, total_parts: int, bytes_up: int) -> None:

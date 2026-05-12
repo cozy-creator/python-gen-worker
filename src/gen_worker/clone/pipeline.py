@@ -103,6 +103,67 @@ def normalize_save_formats(values: Iterable[str]) -> list[str]:
     return out
 
 
+def _enumerate_prior_latest_paths(ctx: RequestContext, destination_repo: str) -> list[str]:
+    """List every path in the destination repo's prior :latest checkpoint.
+
+    Used by the `overwrite_repo` clone path: tensorhub's publish handler
+    always merges new manifests with :latest, so to express "overwrite,
+    don't merge" we enumerate every path the prior revision contained and
+    pass it through the per-checkpoint `deletions` list. The server then
+    removes those paths from the merged manifest before writing the new
+    revision, leaving only what this job uploaded.
+
+    Returns an empty list when the repo has no prior :latest (brand-new
+    repo, or :latest missing), or when the lookup fails — in either case
+    the caller treats overwrite as a no-op against an empty prior set,
+    which is the correct behavior for a first revision.
+    """
+    import requests
+
+    owner, _, repo_part = destination_repo.partition("/")
+    owner = owner.strip()
+    repo_part = repo_part.strip()
+    if not owner or not repo_part:
+        return []
+    try:
+        base = ctx._get_file_api_base_url()  # type: ignore[attr-defined]
+    except Exception:
+        return []
+    token = (getattr(ctx, "_worker_capability_token", "") or "").strip()
+    headers: dict[str, str] = {"X-Cozy-Owner": owner}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    import urllib.parse as _up
+    url = (
+        f"{base}/api/v1/repos/{_up.quote(owner, safe='')}/"
+        f"{_up.quote(repo_part, safe='')}/tree?tag=latest"
+    )
+    try:
+        resp = requests.get(url, headers=headers, timeout=30)
+    except Exception:
+        return []
+    if resp.status_code == 404 or resp.status_code < 200 or resp.status_code >= 300:
+        return []
+    try:
+        parsed = resp.json() if resp.text else {}
+    except Exception:
+        return []
+    entries = parsed.get("entries") if isinstance(parsed, dict) else None
+    if not isinstance(entries, list):
+        return []
+    out: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        # Tree handler emits manifest entries directly; each has `path`. Skip
+        # directory rollup rows (no path / type=='dir' / size_bytes missing).
+        path = str(entry.get("path") or "").strip()
+        if not path:
+            continue
+        out.append(path)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # OutputSpec: the canonical per-variant request.
 # ---------------------------------------------------------------------------
@@ -766,6 +827,18 @@ def _finalize_publish_as_is(
         parent_repo = src_ref
         parent_checkpoint_id = str(source_version_id or "").strip()
 
+    # Overwrite semantics: tensorhub always merges new manifests with
+    # :latest, so we enumerate the prior revision's paths and pass them
+    # as per-flavor `deletions` lists. Each commit_checkpoint_flavor gets
+    # the same enumeration — the server applies it after merge to wipe
+    # everything the prior checkpoint contained.
+    overwrite_deletions: list[str] = []
+    if overwrite_repo:
+        overwrite_deletions = _enumerate_prior_latest_paths(ctx, destination_repo)
+        if overwrite_deletions:
+            for cf in commit_checkpoint_flavors:
+                cf["deletions"] = list(overwrite_deletions)
+
     metadata: dict[str, Any] = {}
     metadata.update(ingested.metadata or {})
     metadata["destination_repo"] = destination_repo
@@ -792,7 +865,6 @@ def _finalize_publish_as_is(
         "snapshot_manifest": snapshot_manifest,
         "relationship_kind": "import",
         "auto_create_external_parent": True,
-        "merge_with_existing": not overwrite_repo,
     }
     if destination_repo_tags:
         publish_kwargs["destination_repo_tags"] = destination_repo_tags
@@ -2278,6 +2350,18 @@ def _finalize_clone(
         parent_repo = source_ref
         parent_checkpoint_id = str(source_version_id or "").strip()
 
+    # Overwrite semantics: tensorhub always merges new manifests with
+    # :latest, so we enumerate the prior revision's paths and attach them
+    # as per-flavor `deletions`. The server applies these after merge to
+    # wipe everything the prior checkpoint contained, leaving only what
+    # this job just uploaded.
+    if overwrite_repo and commit_checkpoint_flavors:
+        overwrite_deletions = _enumerate_prior_latest_paths(ctx, destination_repo)
+        if overwrite_deletions:
+            for cf in commit_checkpoint_flavors:
+                cf["deletions"] = list(overwrite_deletions)
+            metadata["checkpoint_flavors"] = commit_checkpoint_flavors
+
     publish_kwargs: dict[str, Any] = {
         "destination_repo": destination_repo,
         "artifact_refs": dedup_refs,
@@ -2288,7 +2372,6 @@ def _finalize_clone(
         "snapshot_manifest": snapshot_manifest,
         "relationship_kind": "import",
         "auto_create_external_parent": True,
-        "merge_with_existing": not overwrite_repo,
     }
     if destination_repo_tags:
         publish_kwargs["destination_repo_tags"] = destination_repo_tags

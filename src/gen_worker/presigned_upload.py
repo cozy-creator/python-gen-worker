@@ -20,10 +20,10 @@ tensorhub, and tensorhub's presigned URLs let bytes go straight to S3.
 
 This is the standard tensorhub multipart-upload client. The same shape
 is used at different route prefixes for repo checkpoints
-(/api/v1/repos/:owner/:repo/jobs/:job_id/uploads), datasets
-(/api/v1/datasets/:dataset_id/uploads), endpoint source
-(/api/v1/endpoints/:owner/:endpoint/releases/uploads), and user media
-(/api/v1/media/:owner/uploads).
+(/api/v1/repos/:owner/:repo/revisions/:revision_id/uploads), datasets
+(/api/v1/datasets/:dataset_id/upload-sessions/:session_id/uploads),
+endpoint source (/api/v1/endpoints/:owner/:endpoint/releases/uploads),
+and user media (/api/v1/media/:owner/uploads).
 """
 
 from __future__ import annotations

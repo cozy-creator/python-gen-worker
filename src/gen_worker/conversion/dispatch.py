@@ -615,7 +615,6 @@ def _finalize_produced_variants(
                 relationship_kind=rel_kind,
                 auto_create_external_parent=False,
                 destination_repo_tags=destination_tags,
-                merge_with_existing=True,
             )
         except Exception as exc:  # noqa: BLE001 — surface via event, don't fail the job
             emit = getattr(request_context, "emit", None)

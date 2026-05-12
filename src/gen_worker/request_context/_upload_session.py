@@ -10,7 +10,7 @@ Library-internal. `_`-prefixed module name. Don't import from tenant code.
 # Session lifecycle
 
     ctx._upload_sessions.open(kind='checkpoint', scope={'repo_id': ...})
-        → opens a session on tensorhub via POST {prefix}/upload-sessions
+        → opens a session on tensorhub via POST {prefix}/{segment}
         → caches session_id keyed by (kind, scope)
         → returns session_id
 
@@ -18,11 +18,11 @@ Library-internal. `_`-prefixed module name. Don't import from tenant code.
         → returns cached session_id; opens if not cached
 
     ctx._upload_sessions.finalize(session_id, finalize_body)
-        → POST {prefix}/upload-sessions/:session_id/finalize
+        → POST {prefix}/{segment}/:session_id/finalize
         → returns response body
 
     ctx._upload_sessions.abort(session_id)
-        → DELETE {prefix}/upload-sessions/:session_id
+        → DELETE {prefix}/{segment}/:session_id
         → no-op if already finalized
 
     ctx._upload_sessions.close_all(abort_open=True)
@@ -30,14 +30,19 @@ Library-internal. `_`-prefixed module name. Don't import from tenant code.
 
 # URL routing
 
-Each session kind maps to a URL prefix:
-  - checkpoint        → /api/v1/repos/{owner}/{repo}/upload-sessions[/...]
+Each session kind maps to a URL prefix and a collection segment:
+  - checkpoint        → /api/v1/repos/{owner}/{repo}/revisions[/...]
+                        (callers refer to the id as `revision_id`)
   - dataset           → /api/v1/datasets/{dataset_id}/upload-sessions[/...]
   - endpoint_release  → /api/v1/endpoints/{owner}/{endpoint_name}/upload-sessions[/...]
   - media             → /api/v1/media/upload-sessions[/...]
 
 Only `checkpoint` is implemented end-to-end today (issue #20 scope); the
-other three are scaffolding for future work.
+other three are scaffolding for future work. The checkpoint segment is
+named `revisions` because each session materializes a new repo revision
+(a content-addressed checkpoint with associated tag updates) on finalize;
+the other kinds still use the older `upload-sessions` collection name
+since they haven't been migrated yet.
 """
 
 from __future__ import annotations
@@ -82,8 +87,28 @@ def _session_url_prefix(kind: SessionKind, scope: Dict[str, Any]) -> str:
     raise ValueError(f"unsupported session kind: {kind!r}")
 
 
+def _session_collection_segment(kind: SessionKind) -> str:
+    """The URL segment that names the collection of sessions for this kind.
+
+    The checkpoint subsystem renamed `upload-sessions` → `revisions` to
+    match the user-facing terminology (each session becomes one repo
+    revision on finalize). The other kinds still use the legacy segment
+    until they are migrated.
+    """
+    if kind == "checkpoint":
+        return "revisions"
+    return "upload-sessions"
+
+
 class _UploadSession:
-    """A single open upload session. Caches session_id + URL prefix."""
+    """A single open upload session. Caches session_id + URL prefix.
+
+    The `session_id` attribute is the unguessable token the server issues
+    on open; for the checkpoint kind, callers expose this externally as
+    `revision_id` (it identifies the in-flight repo revision). Internally
+    we keep the generic name because other kinds (dataset/media/endpoint
+    release) still use `session_id` terminology.
+    """
 
     __slots__ = ("kind", "scope", "scope_key", "session_id", "url_prefix", "expires_at")
 
@@ -103,17 +128,20 @@ class _UploadSession:
         self.url_prefix = url_prefix
         self.expires_at = expires_at
 
+    def _collection_segment(self) -> str:
+        return _session_collection_segment(self.kind)
+
     def upload_url(self) -> str:
         """URL for presigning a new file upload within this session."""
-        return f"{self.url_prefix}/upload-sessions/{self.session_id}/uploads"
+        return f"{self.url_prefix}/{self._collection_segment()}/{self.session_id}/uploads"
 
     def finalize_url(self) -> str:
         """URL for finalizing this session → creates catalog record."""
-        return f"{self.url_prefix}/upload-sessions/{self.session_id}/finalize"
+        return f"{self.url_prefix}/{self._collection_segment()}/{self.session_id}/finalize"
 
     def abort_url(self) -> str:
         """URL for aborting this session."""
-        return f"{self.url_prefix}/upload-sessions/{self.session_id}"
+        return f"{self.url_prefix}/{self._collection_segment()}/{self.session_id}"
 
 
 class _UploadSessionManager:
@@ -176,7 +204,8 @@ class _UploadSessionManager:
         self, kind: SessionKind, scope: Dict[str, Any], key: Tuple
     ) -> _UploadSession:
         prefix = _session_url_prefix(kind, scope)
-        url = f"{self._base_url}{prefix}/upload-sessions"
+        segment = _session_collection_segment(kind)
+        url = f"{self._base_url}{prefix}/{segment}"
         body: Dict[str, Any] = {}
         if self._job_id:
             body["job_id"] = self._job_id
