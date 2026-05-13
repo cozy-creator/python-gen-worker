@@ -293,8 +293,7 @@ class Worker:
         self._active_requests: Dict[str, RequestContext] = {}
         self._active_requests_lock = threading.Lock()
         self._request_observations: Dict[str, Dict[str, Any]] = {}
-        self._request_batch_context: Dict[str, Tuple[str, str]] = {}  # request_id -> (batch_id, item_id)
-        self._request_batch_context_lock = threading.Lock()
+        # #321: batch context state removed alongside BatchExecutionRequest.
         self._drain_timeout_seconds = 0
         self._draining = False
         # Emit model.ready immediately on connect by default; downstream model-load
@@ -2673,8 +2672,7 @@ class Worker:
 
         if msg_type == 'job_request':
             self._handle_job_request(message.job_request)
-        elif msg_type == 'batch_job_request':
-            self._handle_batch_job_request(message.batch_job_request)
+        # #321: batch_job_request removed.
         elif msg_type == 'load_model_cmd':
             self._handle_load_model_cmd(message.load_model_cmd)
         elif msg_type == 'unload_model_cmd':
@@ -3714,41 +3712,10 @@ class Worker:
                 self._request_observations.pop(request_id, None)
             self._send_request_result(request_id, False, None, "worker_overloaded", True, "worker busy", error_msg)
 
-    def _handle_batch_job_request(self, request: Any) -> None:
-        batch_id = str(getattr(request, "batch_id", "") or "")
-        batch_function_name = str(getattr(request, "function_name", "") or "")
-        items = list(getattr(request, "items", []) or [])
-        logger.info(
-            "Received batch request: batch_id=%s function=%s items=%d",
-            batch_id or "(none)",
-            batch_function_name or "(per-item)",
-            len(items),
-        )
-        for item in items:
-            if item is None:
-                continue
-            function_name = str(getattr(item, "function_name", "") or "") or batch_function_name
-            request_id = str(getattr(item, "request_id", "") or "")
-            item_id = str(getattr(item, "item_id", "") or "") or "item-000001"
-            if not request_id or not function_name:
-                continue
-            with self._request_batch_context_lock:
-                self._request_batch_context[request_id] = (batch_id, item_id)
-            req = pb.JobExecutionRequest(
-                request_id=request_id,
-                function_name=function_name,
-                input_payload=bytes(getattr(item, "input_payload", b"") or b""),
-                required_flavor_refs=list(getattr(item, "required_flavor_refs", []) or []),
-                timeout_ms=int(getattr(item, "timeout_ms", 0) or 0),
-                owner=str(getattr(item, "owner", "") or ""),
-                invoker_id=str(getattr(item, "invoker_id", "") or ""),
-                resolved_repos_by_id=dict(getattr(item, "resolved_repos_by_id", {}) or {}),
-                parent_request_id=str(getattr(item, "parent_request_id", "") or ""),
-                child_request_id=str(getattr(item, "child_request_id", "") or ""),
-                item_id=item_id,
-                item_index=int(getattr(item, "item_index", 0) or 0),
-            )
-            self._handle_job_request(req)
+    # #321: _handle_batch_job_request removed. BatchExecutionRequest was a
+    # wire-level envelope that the worker unpacked and ran serially — no real
+    # GPU batching. Real LLM batching needs continuous batching with shared
+    # KV-cache; reintroduce with the right primitives then.
 
     def _handle_interrupt_request(self, request_id: str, *, item_ids: Optional[List[str]] = None, cancel_queued_only: bool = False) -> None:
         """Handle a request to interrupt/cancel an active request."""
@@ -5538,42 +5505,20 @@ class Worker:
         """Send a request execution result back to the scheduler via the queue."""
         try:
             observation = self._build_job_observation(request_id, success, error_type)
-            batch_ctx: Optional[Tuple[str, str]] = None
-            with self._request_batch_context_lock:
-                batch_ctx = self._request_batch_context.pop(request_id, None)
-            # #321: error_message field removed from JobExecutionResult and
-            # BatchExecutionItemResult — safe_message is the canonical client
-            # error string, error_type is the canonical classification.
-            if batch_ctx is not None:
-                batch_id, item_id = batch_ctx
-                item_result = pb.BatchExecutionItemResult(
-                    request_id=request_id,
-                    item_id=item_id or "item-000001",
-                    success=success,
-                    output_payload=(output_payload or b'') if success else b'',
-                    error_type=error_type if not success else "",
-                    retryable=bool(retryable) if not success else False,
-                    safe_message=safe_message if not success else "",
-                    observation=observation,
-                )
-                msg = pb.WorkerSchedulerMessage(
-                    batch_job_result=pb.BatchExecutionResult(
-                        batch_id=batch_id or "",
-                        items=[item_result],
-                    )
-                )
-            else:
-                result = pb.JobExecutionResult(
-                    request_id=request_id,
-                    success=success,
-                    output_payload=(output_payload or b'') if success else b'', # Default to b'' if None
-                    error_type=error_type if not success else "",
-                    retryable=bool(retryable) if not success else False,
-                    safe_message=safe_message if not success else "",
-                    observation=observation,
-                )
-                msg = pb.WorkerSchedulerMessage(job_result=result)
-            self._send_message(msg)
+            # #321: BatchExecutionItemResult branch removed alongside the
+            # batch envelope; every request result is a typed JobExecutionResult.
+            # error_message field removed too — safe_message is the canonical
+            # client error string; error_type is the classification.
+            result = pb.JobExecutionResult(
+                request_id=request_id,
+                success=success,
+                output_payload=(output_payload or b'') if success else b'',
+                error_type=error_type if not success else "",
+                retryable=bool(retryable) if not success else False,
+                safe_message=safe_message if not success else "",
+                observation=observation,
+            )
+            self._send_message(pb.WorkerSchedulerMessage(job_result=result))
             logger.debug(f"Queued request result for request_id={request_id}, success={success}")
         except Exception as e:
              # This shouldn't generally fail unless message creation has issues
