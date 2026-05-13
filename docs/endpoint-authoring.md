@@ -1,78 +1,47 @@
 # Endpoint Authoring Guide
 
-A guide for writing Python endpoints with `gen-worker`. Three endpoint kinds:
+Write a Python function, ship it as a serverless endpoint. The SDK handles
+discovery, scheduling, model loading, cancellation, streaming, file I/O, and
+terminal reporting. You write the function body.
 
-| Kind | Decorator | Lives in | What it does |
-|---|---|---|---|
-| Inference | `@inference_function` | `gen_worker` | Request/response (optionally streaming) |
-| Conversion | `@training_function(kind="format-conversion")` | `gen_worker.conversion` | Produces new weight artifacts on a destination repo |
-| Training | trainer class | `gen_worker.trainer` | Long-running stateful job, periodic checkpoints |
+Three endpoint kinds:
 
-The SDK handles discovery, scheduling, model loading, cancellation, file I/O, and terminal reporting. You write the function body.
-
----
-
-## 1. Project Layout
-
-A tenant endpoint is Dockerfile-first:
-
-```
-my-endpoint/
-├── endpoint.toml
-├── Dockerfile
-├── pyproject.toml
-├── uv.lock
-└── src/
-    └── my_pkg/
-        └── main.py
-```
-
-The Dockerfile must:
-
-1. Install `gen-worker` and your dependencies.
-2. Bake the discovery manifest at build time:
-   ```dockerfile
-   RUN mkdir -p /app/.tensorhub && \
-       uv run python -m gen_worker.discovery > /app/.tensorhub/endpoint.lock
-   ```
-3. Use `gen_worker.entrypoint` as the entrypoint:
-   ```dockerfile
-   ENTRYPOINT ["uv", "run", "python", "-m", "gen_worker.entrypoint"]
-   ```
-
-`endpoint.toml` is a build-time input; it does not need to be in the final image. The control plane reads `/app/.tensorhub/endpoint.lock` and stores it for routing.
+| Kind       | Decorator                                          | Module                  | What it does                              |
+|------------|----------------------------------------------------|-------------------------|-------------------------------------------|
+| Inference  | `@inference_function`                              | `gen_worker`            | Request/response, optionally streaming    |
+| Conversion | `@training_function(kind="format-conversion")` (and other conversion kinds) | `gen_worker.conversion` | Produces new weight artifacts on a repo  |
+| Training   | trainer class                                      | `gen_worker.trainer`    | Long-running, periodic checkpoints        |
 
 ---
 
-## 2. `endpoint.toml` Reference
+## Quick start — the minimum viable endpoint
+
+Three files. Arbitrary base image. No model injection.
+
+**`endpoint.toml`**
 
 ```toml
 schema_version = 1
-name = "my-endpoint"
-main = "my_pkg.main"   # Python import path that discovery scans
+main = "myendpoint.main"
 
-[host.requirements]
-cuda = "12.8"                            # presence indicates GPU requirement
-compute_capabilities = ["8.0", "8.6"]    # optional, supported SM list
-
-[resources]
-vram_gb = 12
-ram_gb = 32
-cpu_cores = 8
-disk_gb = 80
-
-# Model bindings live in Python on @inference_function(models={...}) — see
-# the "Model bindings" section below. The `[models]` / `[models.<fn>]` toml
-# tables were removed in gen-worker 0.7.0.
+[[build.profiles]]
+name = "default"
+accelerator = "none"
 ```
 
-The publishing identity must have read access to every binding's ref; deployment fails fast otherwise.
+**`Dockerfile`**
 
----
+```dockerfile
+FROM python:3.12-slim
+WORKDIR /app
+COPY . /app
+RUN pip install -e .
+RUN mkdir -p /app/.tensorhub \
+    && python -m gen_worker.discovery > /app/.tensorhub/endpoint.lock
+ENTRYPOINT ["python", "-m", "gen_worker.entrypoint"]
+```
 
-## 3. Inference Endpoints
-
-### Minimal handler
+**`main.py`**
 
 ```python
 import msgspec
@@ -85,163 +54,437 @@ class Output(msgspec.Struct):
     text: str
 
 @inference_function
-def generate(ctx: RequestContext, payload: Input) -> Output:
-    return Output(text=f"Hello, {payload.prompt}!")
+def run(ctx: RequestContext, payload: Input) -> Output:
+    return Output(text=f"got: {payload.prompt}")
 ```
 
-Inputs and outputs must be `msgspec.Struct`. The discovery step records their JSON schemas.
+That's everything. Discovery runs at image-build time and bakes
+`/app/.tensorhub/endpoint.lock`; the entrypoint loads it on container start and
+serves invocations.
 
-### Resources — per-function envelope + cost shape
+---
 
-`Resources` collapses the old `ResourceRequirements` + `ScalingHints` into a
-single per-function struct. Declare it **per function** so the worker can
-self-advertise an accurate availability map at boot and the orchestrator can
-route on accurate per-function hardware needs.
+## The three layers
+
+Each layer is independent and can be minimal or maximal:
+
+| File                 | Declares                                                                  |
+|----------------------|---------------------------------------------------------------------------|
+| `endpoint.toml`      | The entry module + where to run the image (orchestrator placement)        |
+| `Dockerfile`         | How to build the image (your choice; three contract points only)          |
+| `main.py` (decorators) | What the functions do + each function's runtime envelope and model bindings |
+
+- `endpoint.toml` reference: [endpoint-toml.md](endpoint-toml.md)
+- Dockerfile contract: [dockerfile.md](dockerfile.md)
+- The rest of this doc covers the Python side.
+
+---
+
+## `Resources` — per-function envelope + cost shape
+
+`Resources` is declared **per function** so the worker can self-advertise an
+accurate availability map at boot (skip functions whose hardware envelope this
+host can't satisfy) and the orchestrator can route on accurate per-function
+needs.
 
 ```python
-from gen_worker import Resources, inference_function
+from gen_worker import Resources
 
-@inference_function(resources=Resources(
-    accelerator="cuda",
+_flux_dispatch = Resources(
+    # Static placement envelope (hard gates)
     requires_gpu=True,
-    min_vram_gb=22.0,
+    min_vram_gb=14.0,
     cuda_compute_min=8.0,
     required_libraries=("torch", "diffusers"),
+
+    # Dynamic cost shape (admission + scheduling)
     vram_must_fit="full_model",
-    vram_size_multiplier=1.0,
-    vram_base=2 * 1024**3,
-    vram_scales_with=("width", "height"),
-    runtime_scales_with=("num_inference_steps",),
-))
-def generate(ctx, payload): ...
+    vram_base=500 * 1024 * 1024,
+    vram_size_multiplier=1.10,
+    vram_scales_with=("width", "height", "num_images_per_prompt"),
+    runtime_scales_with=("num_inference_steps", "num_images_per_prompt"),
+)
 ```
 
-**Static placement envelope (hard gates):** `accelerator`, `requires_gpu`,
-`min_vram_gb`, `cuda_compute_min`, `required_libraries`.
+| Field                    | Purpose                                                                                                         |
+|--------------------------|-----------------------------------------------------------------------------------------------------------------|
+| `accelerator`            | `"cuda"` or `"none"`. Normalized from `"gpu"`/`"cpu"` shorthand.                                                |
+| `requires_gpu`           | Implies `accelerator="cuda"` for placement.                                                                     |
+| `min_vram_gb`            | Hard VRAM floor in GiB. Function unavailable on hosts below this.                                              |
+| `cuda_compute_min`       | Minimum SM compute capability (e.g. `8.0`). Function unavailable on hosts below this.                          |
+| `required_libraries`     | Python package names the function needs (`"flash_attn"`, `"bitsandbytes"`, …). Worker checks import at boot.   |
+| `vram_must_fit`          | `"full_model"` or `"largest_component"`. Picks which `size_facts` entry the orchestrator uses for admission.   |
+| `vram_base`              | Constant VRAM overhead in bytes.                                                                                |
+| `vram_size_multiplier`   | Multiplier on `size_facts[vram_must_fit]` when computing admission VRAM.                                       |
+| `vram_scales_with`       | Payload field names that grow VRAM. Coefficients learned per `(function, gpu_class, field)`.                   |
+| `runtime_scales_with`    | Payload field names that grow runtime. Coefficients learned per `(function, gpu_class, field)`.                |
 
-**Dynamic cost shape (admission + scheduling):** `vram_must_fit`,
-`vram_base`, `vram_size_multiplier`, `vram_scales_with`, `runtime_scales_with`.
+`vram_scales_with` and `runtime_scales_with` must reference real fields on the
+payload struct. Drift fails discovery with `unknown_payload_field`.
 
-Field names in `vram_scales_with` / `runtime_scales_with` must reference real
-fields on the payload struct — `inference_function` validates this at decoration
-time (failure: `unknown_payload_field`).
+See [scaling-hints.md](scaling-hints.md) for the cost-shape fields in depth.
 
-### Model bindings — `models={...}` kwarg
+---
 
-Declare model dependencies via the decorator's `models=` kwarg. The worker
-loads and caches each binding; your function receives the live instance.
+## `Repo` + chainable methods
 
-**Fixed pick:**
+A binding is constructed module-level. `Repo` is both the repo handle and a
+usable binding with defaults (`tag="prod"`, no flavor, no override).
 
 ```python
-from diffusers import StableDiffusionXLPipeline
-from gen_worker import Repo, RequestContext, Resources, inference_function
+from gen_worker import Repo
 
-sdxl = Repo("stabilityai/stable-diffusion-xl-base-1.0")
+flux = Repo("black-forest-labs/flux.2-klein-4b-turbo")
 
-@inference_function(
-    resources=Resources(requires_gpu=True, min_vram_gb=12.0),
-    models={"pipe": sdxl.flavor("bf16")},
-)
-def generate(ctx: RequestContext, pipe: StableDiffusionXLPipeline, payload: Input) -> Output: ...
+flux                                          # bare repo, defaults: tag="prod", no flavor
+flux.flavor("nf4")                            # pin a flavor
+flux.tag("canary")                            # pin a non-prod tag
+flux.tag("canary").flavor("nf4")              # both (order doesn't matter)
+flux.flavor("nf4").allow_override(Flux2KleinPipeline)
 ```
 
-**Fixed pick with caller-override allowlist:**
+All modifier methods return new immutable instances; chain order is commutative.
+
+| Method                       | Returns | Effect                                                                                                                       |
+|------------------------------|---------|------------------------------------------------------------------------------------------------------------------------------|
+| `Repo.flavor(name)`          | `Repo`  | New Repo with the flavor set                                                                                                |
+| `Repo.tag(name)`             | `Repo`  | New Repo with the tag set                                                                                                   |
+| `Repo.allow_override(*cls)`  | `Repo`  | New Repo allowing caller substitution within the supplied class allowlist. Zero-arg call raises `ValueError` at decoration. |
+
+---
+
+## Fixed pick
+
+Function pins one specific `(repo, flavor?, tag?)`:
 
 ```python
+from diffusers import Flux2KleinPipeline
+from gen_worker import Repo, Resources, inference_function
+
+flux = Repo("black-forest-labs/flux.2-klein-4b-turbo")
+_flux_bf16 = Resources(requires_gpu=True, min_vram_gb=22.0)
+
 @inference_function(
-    resources=Resources(requires_gpu=True, min_vram_gb=12.0),
-    models={"pipe": sdxl.flavor("bf16").allow_override(StableDiffusionXLPipeline)},
+    resources=_flux_bf16,
+    models={"pipeline": flux.flavor("bf16")},
 )
-def generate(ctx, pipe, payload): ...
+def generate_bf16(ctx, pipeline: Flux2KleinPipeline, payload: GenerateInput) -> GenerateOutput:
+    return _generate(ctx, pipeline, payload)
 ```
 
-When `.allow_override(*classes)` is declared, the caller may send
-`_models.pipe = "acme/my-sdxl-finetune:prod#bf16"` to substitute the binding
-default — subject to the supplied ref's `pipeline_class` matching one of the
-allowlisted classes.
+The pick resolves to a concrete checkpoint at deploy time; the worker downloads
+and caches it before serving traffic.
 
-**Dispatch pick** — payload-driven dispatch on a `Literal[...]`-typed field:
+---
+
+## Dispatch pick — payload-driven selection
+
+Function pins a set of picks keyed by a `Literal[...]`-typed discriminator
+field on the payload. At invoke time the discriminator selects which pick to
+use.
 
 ```python
 from typing import Literal
 import msgspec
-from gen_worker import Repo, dispatch, inference_function
+from gen_worker import Repo, Resources, dispatch, inference_function
 
 class BnbInput(msgspec.Struct):
     variant: Literal["nf4", "int8"]
     prompt: str
+    num_inference_steps: int = 4
+    width: int = 1024
+    height: int = 1024
+    num_images_per_prompt: int = 1
 
-flux = Repo("acme/flux")
+flux = Repo("black-forest-labs/flux.2-klein-4b-turbo")
+
+_flux_dispatch = Resources(
+    requires_gpu=True,
+    min_vram_gb=14.0,                # largest pick the table can resolve to
+    vram_must_fit="full_model",
+    vram_base=500 * 1024 * 1024,
+    vram_size_multiplier=1.10,
+    vram_scales_with=("width", "height", "num_images_per_prompt"),
+    runtime_scales_with=("num_inference_steps", "num_images_per_prompt"),
+)
 
 @inference_function(
-    resources=Resources(requires_gpu=True, min_vram_gb=14.0),
-    models={"pipe": dispatch(
-        field="variant",
-        table={
-            "nf4":  flux.flavor("nf4"),
-            "int8": flux.flavor("int8"),
-        },
-    )},
+    resources=_flux_dispatch,
+    models={
+        "pipeline": dispatch(
+            field="variant",
+            table={
+                "nf4":  flux.flavor("nf4"),
+                "int8": flux.flavor("int8"),
+            },
+        ),
+    },
 )
-def generate_bnb(ctx, pipe, payload: BnbInput) -> Output: ...
+def generate_bnb(ctx, pipeline: Flux2KleinPipeline, payload: BnbInput) -> GenerateOutput: ...
 ```
 
-Dispatch tables may also carry `.allow_override(*classes)`. The caller can
-either pick a table key via the discriminator field, OR send `_models.<param>`
-to bypass the dispatch table entirely (subject to the pipeline-class allowlist).
+Decoration-time validation:
 
-**`_models` invocation envelope:**
+- The `field` name must exist on the payload struct.
+- The field must be `Literal[...]`-typed (or `Optional[Literal[...]]`).
+- Every `table` key must be a member of the Literal.
 
-```jsonc
-// Structured form (preferred for typed clients):
-{
-  "prompt": "...",
-  "_models": {
-    "pipe": {"ref": "acme/sdxl-finetune", "tag": "prod", "flavor": "bf16"}
-  }
-}
+---
 
-// String shorthand:
-{
-  "prompt": "...",
-  "_models": {"pipe": "acme/sdxl-finetune:prod#bf16"}
-}
-```
+## `allow_override(*classes)` — caller substitution
 
-Both forms normalize to `(ref, tag, flavor)`. The reserved field name
-`_models` is rejected at decoration time if a payload struct uses it.
-
-**Override error codes** (returned by the orchestrator):
-
-- `unknown_override_param` — `_models[<x>]` names a param that doesn't exist.
-- `model_override_not_allowed` — the binding has no `.allow_override(...)`.
-- `override_ref_not_found` — the supplied ref doesn't resolve.
-- `override_tag_not_found` — the ref exists but the tag isn't published.
-- `override_flavor_not_found` — the ref+tag exist but the flavor isn't in the
-  checkpoint group.
-- `incompatible_pipeline_class` — the supplied ref's pipeline class is not in
-  the binding's `pipeline_classes` allowlist.
-
-Override substitution is **atomic** — if any `_models` entry fails validation,
-the whole request is rejected before dispatch. No partial substitution.
-
-**Multi-param injection** — each binding's override policy is independent:
+`.allow_override(...)` lets the invoker substitute the binding default with an
+arbitrary ref of their choice. The tenant supplies an explicit pipeline-class
+allowlist; the orchestrator rejects overrides whose `pipeline_class` is not in
+that list.
 
 ```python
+from diffusers import StableDiffusionXLPipeline
+
 @inference_function(
-    resources=Resources(requires_gpu=True, min_vram_gb=24.0),
+    resources=Resources(requires_gpu=True, min_vram_gb=12.0),
+    models={
+        "pipe": sdxl.flavor("bf16").allow_override(StableDiffusionXLPipeline),
+    },
+)
+def generate(ctx, pipe: StableDiffusionXLPipeline, payload: Input) -> Output: ...
+```
+
+Multiple acceptable classes:
+
+```python
+.allow_override(Flux2KleinPipeline, Flux2KleinKontextPipeline)
+```
+
+Classes may be passed as class objects (preferred — autocomplete + import-time
+check) or string FQNs (escape hatch). **Bare zero-arg `.allow_override()` is a
+decoration-time error** — the framework does not auto-derive the constraint
+from the function's parameter annotation.
+
+### The six override error codes
+
+If the invoker supplies `_models.<param>`, the orchestrator validates the
+override before dispatch and rejects with one of:
+
+| Error code                       | Meaning                                                                |
+|----------------------------------|------------------------------------------------------------------------|
+| `unknown_override_param`         | `_models[<x>]` names a param that doesn't exist on the function       |
+| `model_override_not_allowed`     | The binding has no `.allow_override(...)` declared                     |
+| `override_ref_not_found`         | Tensorhub returns 404 for the supplied ref                             |
+| `override_tag_not_found`         | The ref exists but the requested tag isn't published                   |
+| `override_flavor_not_found`      | The ref+tag exist but the flavor isn't in the checkpoint group         |
+| `incompatible_pipeline_class`    | Supplied `pipeline_class` is not in the binding's allowlist            |
+
+All return HTTP 400 with a typed error code in the body.
+
+---
+
+## Multi-param injection — each binding is independent
+
+A function can declare multiple injected params in `models={...}`. Each entry
+is its own binding with its own `(repo, flavor, tag)` pick and its own
+optional `.allow_override(...)` modifier. The invoker's `_models` dict is
+keyed by the same param names, so each is overridden independently.
+
+```python
+flux       = Repo("black-forest-labs/flux.2-klein-4b-turbo")
+flux_lora  = Repo("black-forest-labs/flux-lora-collection")
+
+@inference_function(
+    resources=_flux,
+    models={
+        "pipeline":   flux.flavor("nf4"),                                 # fixed, NOT overridable
+        "adapter":    flux_lora.flavor("realism").allow_override(LoRA),   # fixed default + overridable
+        "controlnet": dispatch(
+            field="controlnet_kind",
+            table={
+                "depth": Repo("...flux-controlnet-depth").flavor("bf16"),
+                "canny": Repo("...flux-controlnet-canny").flavor("bf16"),
+            },
+        ).allow_override(FluxControlNetModel),                            # dispatch + overridable
+    },
+)
+def generate_with_adapter(
+    ctx,
+    pipeline: Flux2KleinPipeline,
+    adapter: LoRA,
+    controlnet: FluxControlNetModel,
+    payload: AdapterInput,
+) -> GenerateOutput: ...
+```
+
+Three bindings, three independent override policies:
+
+- `pipeline` — fixed, no override. Invoker cannot substitute it.
+- `adapter` — fixed default + overridable within the `LoRA` allowlist.
+- `controlnet` — dispatch default + overridable within the
+  `FluxControlNetModel` allowlist. Invoker may pick a table key via the
+  discriminator OR send `_models.controlnet` to bypass the table entirely.
+
+An invocation overriding two of three:
+
+```json
+{
+  "prompt": "A red bicycle",
+  "controlnet_kind": "depth",
+  "_models": {
+    "adapter":    "acme/my-custom-lora:prod#realism",
+    "controlnet": {"ref": "acme/my-controlnet", "flavor": "bf16"}
+  }
+}
+```
+
+### Multi-model two-stage example — SDXL base + refiner
+
+Two pipelines injected into one function; both optionally overridable.
+
+```python
+sdxl_base    = Repo("stabilityai/stable-diffusion-xl-base-1.0")
+sdxl_refiner = Repo("stabilityai/stable-diffusion-xl-refiner-1.0")
+
+_sdxl_two_stage = Resources(
+    requires_gpu=True,
+    min_vram_gb=24.0,                       # BOTH models resident
+    vram_must_fit="full_model",
+    vram_scales_with=("width", "height", "num_images_per_prompt"),
+    runtime_scales_with=("base_steps", "refiner_steps", "num_images_per_prompt"),
+)
+
+class SDXLTwoStageInput(msgspec.Struct):
+    prompt: str
+    negative_prompt: str = ""
+    base_steps: int = 30
+    refiner_steps: int = 10
+    high_noise_frac: float = 0.8
+    width: int = 1024
+    height: int = 1024
+    num_images_per_prompt: int = 1
+    seed: int | None = None
+
+@inference_function(
+    resources=_sdxl_two_stage,
     models={
         "base":    sdxl_base.flavor("bf16").allow_override(StableDiffusionXLPipeline),
         "refiner": sdxl_refiner.flavor("bf16").allow_override(StableDiffusionXLImg2ImgPipeline),
     },
 )
-def generate_with_refiner(ctx, base, refiner, payload) -> Output: ...
+def generate_with_refiner(
+    ctx: RequestContext,
+    base: StableDiffusionXLPipeline,
+    refiner: StableDiffusionXLImg2ImgPipeline,
+    payload: SDXLTwoStageInput,
+) -> GenerateOutput:
+    latent = base(
+        prompt=payload.prompt, negative_prompt=payload.negative_prompt,
+        num_inference_steps=payload.base_steps,
+        width=payload.width, height=payload.height,
+        num_images_per_prompt=payload.num_images_per_prompt,
+        denoising_end=payload.high_noise_frac,
+        output_type="latent",
+    ).images
+    images = refiner(
+        prompt=payload.prompt, negative_prompt=payload.negative_prompt,
+        num_inference_steps=payload.refiner_steps,
+        denoising_start=payload.high_noise_frac,
+        image=latent,
+    ).images
+    return GenerateOutput(image=gw_io.write_image(ctx, "out", images[0]))
 ```
 
-### Streaming output
+Four invocation scenarios:
 
-Return `Iterator[T]`, `Generator[T, None, None]`, or `AsyncIterator[T]`. Each yielded struct is flushed as a delta.
+```jsonc
+// (a) defaults — both checkpoints from the bindings
+{ "prompt": "A red bicycle", "base_steps": 30, "refiner_steps": 10 }
+
+// (b) override just `base` — refiner stays default
+{
+  "prompt": "A red bicycle",
+  "_models": { "base": "acme/sdxl-architecture-finetune:prod#bf16" }
+}
+
+// (c) override both
+{
+  "prompt": "A red bicycle",
+  "_models": {
+    "base":    "acme/sdxl-architecture-finetune:prod#bf16",
+    "refiner": { "ref": "acme/sdxl-refiner-tuned", "flavor": "bf16" }
+  }
+}
+
+// (d) class mismatch on `base` — rejected with incompatible_pipeline_class
+{
+  "prompt": "A red bicycle",
+  "_models": { "base": "runwayml/stable-diffusion-v1-5" }
+}
+```
+
+---
+
+## The reserved `_models` invocation field
+
+The orchestrator strips `_models` from the payload before dispatch and uses it
+to compute the resolved binding for each param. Two accepted shapes:
+
+**Structured** (preferred for typed clients):
+
+```json
+{
+  "prompt": "A red bicycle",
+  "_models": {
+    "pipeline": {"ref": "acme/my-flux-finetune", "tag": "prod", "flavor": "bf16"}
+  }
+}
+```
+
+**String shorthand**:
+
+```json
+{
+  "prompt": "A red bicycle",
+  "_models": {"pipeline": "acme/my-flux-finetune:prod#bf16"}
+}
+```
+
+Both forms normalize to `(ref, tag, flavor)`. Grammar:
+`<owner>/<repo>[:<tag>][#<flavor>]`. Tag defaults to `"prod"`; flavor is
+optional.
+
+Payload structs cannot use the reserved field name `_models` — decoration
+fails at discovery time if you try.
+
+### Atomic substitution
+
+If the invoker supplies overrides for multiple params and **any one** fails
+validation, the whole request is rejected before dispatch. No partial
+substitution. The error response names which `_models[<param>]` failed.
+
+Atomic is the safe default: tenants' function bodies assume the whole binding
+set is valid, and half-substituting could deliver a mismatched pair the tenant
+didn't authorize.
+
+### Cross-param compatibility is tenant-side
+
+The framework only enforces per-param class allowlist and ref-resolves-cleanly
+checks. It does NOT verify that an override for `base` is compatible with the
+override or default for `refiner` (shared VAE, latent space, training-data
+alignment, etc.).
+
+Tenants who need strict cross-param coupling have three options:
+
+1. **Don't enable `.allow_override(...)`** — lock both params to known-good defaults.
+2. **Narrow the allowlist to a single class** — overrides must at least share architecture.
+3. **Add a runtime cross-check** inside the function body and raise a typed
+   error if the pair is incompatible at invoke time.
+
+The framework gives the building blocks; tenants compose the policy.
+
+---
+
+## Streaming output
+
+Return an `Iterator[T]`, `Generator[T, None, None]`, or `AsyncIterator[T]`.
+Each yielded struct is flushed as a delta.
 
 ```python
 from typing import Iterator
@@ -256,13 +499,17 @@ def stream(ctx: RequestContext, payload: Input) -> Iterator[Delta]:
         yield Delta(chunk=word)
 ```
 
-For Hugging Face `TextIteratorStreamer`, `gen_worker.iter_transformers_text_deltas` forwards a cancel check while iterating.
+For Hugging Face `TextIteratorStreamer`,
+`gen_worker.iter_transformers_text_deltas` forwards a cancel check while
+iterating.
 
-### Loading inputs and saving outputs
+---
 
-`Asset` is a small typed pointer to a file — codecs are free functions in
-`gen_worker.io`, not methods on the struct. This keeps `Asset` cheap to
-import (no PIL/numpy pull) and gives every endpoint the same one-liner.
+## Loading inputs and saving outputs
+
+`Asset` is a typed pointer to a file. Codecs live as free functions in
+`gen_worker.io` — keeps `Asset` cheap to import (no PIL/numpy pull) and gives
+every endpoint the same one-liner.
 
 ```python
 from gen_worker import io as gw_io
@@ -280,22 +527,16 @@ with gw_io.open(payload.file, "rb") as f:
 if gw_io.exists(payload.optional_file):
     ...
 
-# Encode and save an image output (replaces the older ctx.save_image()):
+# Encode and save an image output:
 out = gw_io.write_image(ctx, "out", img, format="webp", quality=90)
 return Output(image=out)
 ```
 
 If `Asset.local_path` is not set (the platform didn't materialize the file),
-these functions raise `ValidationError` with the asset ref in the message —
-no need for per-endpoint `local_path is None` checks.
+these functions raise `ValidationError` with the asset ref in the message — no
+need for per-endpoint `local_path is None` checks.
 
-Install the codec extras you need:
-
-```bash
-pip install gen-worker[images,audio]
-```
-
-### Saving output files
+For arbitrary outputs:
 
 ```python
 @inference_function
@@ -307,12 +548,10 @@ def render(ctx: RequestContext, payload: Input) -> Output:
     return Output(image=asset)
 ```
 
-For large outputs, stream:
+Streaming large outputs:
 
 ```python
-with ctx.open_output_stream(
-    f"jobs/{ctx.request_id}/outputs/out.bin"
-) as out:
+with ctx.open_output_stream(f"jobs/{ctx.request_id}/outputs/out.bin") as out:
     for chunk in produce():
         out.write(chunk)
     asset = out.finalize()
@@ -320,40 +559,55 @@ with ctx.open_output_stream(
 
 ---
 
-## 4. `RequestContext`
+## `RequestContext`
 
-What every endpoint function receives as its first argument.
+Every endpoint function receives the matching context subclass as its first
+argument.
 
 **Identity / environment**
+
 - `ctx.request_id`, `ctx.job_id`, `ctx.parent_request_id`, `ctx.child_request_id`
 - `ctx.owner`
 - `ctx.device` (torch device), `ctx.timeout_ms`, `ctx.deadline`, `ctx.time_remaining_s()`
-- `ctx.compute` — resolved hardware spec (accelerator, vram_gb, gpu_tier, etc.)
+- `ctx.compute` — resolved hardware spec (`accelerator`, `vram_gb`, `gpu_tier`, …)
 
 **Lifecycle**
+
 - `ctx.is_canceled() -> bool` — cooperative cancellation check
-- `ctx.raise_if_canceled(message: str = "request canceled") -> None` — raise `CanceledError(message)` if canceled; the canonical one-liner inside long-running loops
+- `ctx.raise_if_canceled(message="request canceled")` — the canonical one-liner inside long-running loops; raises `CanceledError`
 - `ctx.progress(progress: float, stage: str | None = None)` — emit a progress event
 - `ctx.log(message, level)` — structured log
 - `ctx.emit(event_type, payload)` — custom event
 
 **Output persistence**
+
 - `ctx.save_bytes(ref, data) -> Asset` — small inline payloads
 - `ctx.save_file(ref, local_path) -> Asset` — non-tensor files
-- `ctx.save_checkpoint(ref, local_path, format=..., flavor=...) -> Tensors` — tensor weights (requires repo-job scope; set by conversion/training jobs)
+- `ctx.save_checkpoint(ref, local_path, format=..., flavor=...) -> Tensors` — tensor weights
 - `ctx.save_checkpoint_bytes(ref, data, format=...) -> Tensors`
 - `ctx.open_output_stream(ref, ...)` / `ctx.open_checkpoint_stream(ref, ...)` — chunked uploads
 
-For ref strings: `jobs/{ctx.request_id}/outputs/<path>` is the canonical layout for ephemeral per-job output. Other prefixes need explicit scope from the orchestrator.
+The canonical layout for ephemeral per-job output is
+`jobs/{ctx.request_id}/outputs/<path>`. Other prefixes need explicit scope from
+the orchestrator.
 
 ### Kind-specific context subclasses
 
-The SDK ships three `RequestContext` subclasses for non-inference endpoint kinds. The worker constructs the matching subclass before dispatch based on your function's declared kind; you type the matching subclass as your `ctx:` parameter and get autocomplete for the methods you can call.
+The SDK ships three `RequestContext` subclasses for non-inference kinds. The
+worker constructs the matching subclass before dispatch; you type the
+matching subclass on your handler and get autocomplete for the methods you
+can call.
 
-- **Inference handlers** — receive `RequestContext`. Just the base surface above.
-- **Conversion handlers** (`@training_function(kind="format-conversion")`, `kind="quantization"`, `kind="fine-tuning"`, etc.) — receive `ConversionContext`. Adds `publish_repo_revision`, `read_repo_metadata`, `write_repo_metadata`, `materialize_blob`, plus the conversion-helper API (`mktemp`, `checkpoint_dir`, `open_output_writer`, `copy_unconverted_components`, `cancelled`).
-- **Dataset handlers** (`@training_function(kind="dataset-generation")`) — receive `DatasetContext`. Adds `publish_dataset_revision`, `resolve_dataset`, `materialize_blob`.
-- **Trainer-class endpoints** — receive `TrainingContext`. Adds `read_repo_metadata`, `write_repo_metadata`. `save_checkpoint` is on the base, so trainer code can use it from any context.
+- **Inference handlers** — `RequestContext`. Just the base surface above.
+- **Conversion handlers** — `ConversionContext`. Adds `publish_repo_revision`,
+  `read_repo_metadata`, `write_repo_metadata`, `materialize_blob`, plus the
+  conversion helpers (`mktemp`, `checkpoint_dir`, `open_output_writer`,
+  `copy_unconverted_components`, `cancelled`).
+- **Dataset handlers** (`@training_function(kind="dataset-generation")`) —
+  `DatasetContext`. Adds `publish_dataset_revision`, `resolve_dataset`,
+  `materialize_blob`.
+- **Trainer-class endpoints** — `TrainingContext`. Adds `read_repo_metadata`,
+  `write_repo_metadata`. `save_checkpoint` is on the base.
 
 ```python
 from gen_worker import (
@@ -372,38 +626,45 @@ def convert(ctx: ConversionContext, source: Source, specs: list[Spec]) -> list[P
 def gen_corpus(ctx: DatasetContext, payload: GenerateInput) -> list[ProducedFlavor]: ...
 ```
 
-Admin-plane visibility toggles (`publish_endpoint`, `publish_media`, `publish_checkpoint`, etc.) are no longer on `RequestContext`. Endpoint authors should never need them — they belong in `cozyctl` or the tensorhub UI.
-
 ### How model downloads work
 
-You never call resolve from inside an endpoint. The orchestrator pre-resolves every model ref the job needs (default picks from `@inference_function(models={...})` bindings, plus any caller-supplied overrides from the request's `_models` field) and ships `{snapshot_digest, files: [{path, blake3, presigned_url}]}` to the worker over gRPC. The binding-injection paths shown above just consume that pre-resolved manifest — the worker downloads from the presigned URLs and hands you the loaded object.
+You never call resolve from inside an endpoint. The orchestrator pre-resolves
+every model ref the job needs (default picks from `models={...}` plus any
+caller-supplied overrides from the request's `_models` field) and ships
+`{snapshot_digest, files: [{path, blake3, presigned_url}]}` to the worker
+over gRPC. The binding-injection paths shown above just consume that
+pre-resolved manifest — the worker downloads from the presigned URLs and
+hands you the loaded object.
 
-If the invoker doesn't have read access to a runtime-specified repo, the orchestrator fails the invoke before dispatching — your function never starts.
+If the invoker doesn't have read access to a runtime-specified repo, the
+orchestrator fails the invoke before dispatching — your function never starts.
 
 ---
 
-## 5. Error Types
+## Error types
 
-Raise these from `gen_worker` (or let them propagate) to shape retry/terminal behavior:
+Raise these from `gen_worker` (or let them propagate) to shape retry/terminal
+behavior:
 
-| Exception | Outcome |
-|---|---|
-| `ValidationError` | 4xx to caller, no retry |
-| `RetryableError` | Transient; scheduler may retry |
-| `ResourceError` | Resource exhausted (e.g. OOM) |
-| `CanceledError` | Cooperative cancellation — what `ctx.raise_if_canceled()` raises; `except CanceledError` in cleanup code |
-| `AuthError` | Permission denied |
-| `FatalError` | Unrecoverable |
-| `OutputTooLargeError(size_bytes, max_bytes)` | Output exceeds limit |
-| `InputTooLargeError(size_bytes, max_bytes, source)` | Input exceeds limit |
+| Exception                              | Outcome                                                                       |
+|----------------------------------------|-------------------------------------------------------------------------------|
+| `ValidationError`                      | 4xx to caller, no retry                                                       |
+| `RetryableError`                       | Transient; scheduler may retry                                                |
+| `ResourceError`                        | Resource exhausted (e.g. OOM)                                                 |
+| `CanceledError`                        | Cooperative cancellation — what `ctx.raise_if_canceled()` raises              |
+| `AuthError`                            | Permission denied                                                             |
+| `FatalError`                           | Unrecoverable                                                                 |
+| `OutputTooLargeError(size, max)`       | Output exceeds limit                                                          |
+| `InputTooLargeError(size, max, source)`| Input exceeds limit                                                           |
 
 Any uncaught exception becomes a fatal run failure.
 
 ---
 
-## 6. Conversion Endpoints
+## Conversion endpoints
 
-Conversion endpoints take a source model + an output spec, produce new weight artifacts on a destination repo. Use `gen_worker.conversion.training_function(kind="format-conversion")`.
+Conversion endpoints take a source model + an output spec and produce new
+weight artifacts on a destination repo.
 
 ```python
 import msgspec
@@ -433,19 +694,28 @@ def cast_dtype(
     return [ProducedFlavor(path=writer.finalize(), flavor=specs[0].dtype)]
 ```
 
-Reserved signature names: `ctx`, `source`, `destination`, `specs`, `datasets`. Everything else is decoded from the request payload by name.
+Reserved signature names: `ctx`, `source`, `destination`, `specs`, `datasets`.
+Everything else is decoded from the request payload by name.
 
-- `source` is materialized from the request's `source.ref` (and optional `checkpoint_id`); orchestrator has already verified the invoker can read it.
-- `destination` carries the destination repo + tags. After your function returns, the SDK uploads each `ProducedFlavor` and applies the tags atomically.
-- Each `ProducedFlavor` becomes one checkpoint flavor on the destination repo. `flavor` is the user-facing name (e.g. `int4-awq`, `bf16-singlefile`).
+- `source` is materialized from the request's `source.ref` (and optional
+  `checkpoint_id`); the orchestrator has already verified the invoker can
+  read it.
+- `destination` carries the destination repo + tags. After your function
+  returns, the SDK uploads each `ProducedFlavor` and applies the tags
+  atomically.
+- Each `ProducedFlavor` becomes one checkpoint flavor on the destination
+  repo. `flavor` is the user-facing name (e.g. `int4-awq`, `bf16-singlefile`).
 
-For calibrated quantization, dataset shaping helpers, etc., see `gen_worker.conversion`'s submodules.
+For calibrated quantization, dataset-shaping helpers, etc., see
+`gen_worker.conversion`'s submodules.
 
 ---
 
-## 7. Training Endpoints
+## Training endpoints
 
-Training is published like any other endpoint but invoked with `WORKER_MODE=trainer`. Your trainer is a **class** with canonical hooks; the runtime owns the outer loop, cadence, checkpointing, uploads, cancellation.
+Training is published like any other endpoint but invoked with
+`WORKER_MODE=trainer`. Your trainer is a **class** with canonical hooks; the
+runtime owns the outer loop, cadence, checkpointing, uploads, cancellation.
 
 ```python
 from gen_worker.trainer import StepContext, StepResult
@@ -462,15 +732,19 @@ class MyTrainer:
     def load_checkpoint(self, *, state, checkpoint_dir, payload, ctx) -> None: ...
 ```
 
-Point to the class via the job spec's `"trainer": "my_pkg.train:MyTrainer"` field, or `TRAINER_PLUGIN=my_pkg.train:MyTrainer`.
+Point to the class via the job spec's `"trainer": "my_pkg.train:MyTrainer"`
+field, or `TRAINER_PLUGIN=my_pkg.train:MyTrainer`.
 
-**Ownership split**:
+**Ownership split:**
 
-The runtime handles: lifecycle, cancellation, timeouts, ref resolution, dataset materialization, cadence-driven metric/checkpoint/sample emission, artifact uploads, terminal reporting.
+The runtime handles: lifecycle, cancellation, timeouts, ref resolution,
+dataset materialization, cadence-driven metric/checkpoint/sample emission,
+artifact uploads, terminal reporting.
 
-Your trainer handles: dataset shaping, batch preparation, forward/backward/update math, prompt/mask/curriculum logic, state serialization.
+Your trainer handles: dataset shaping, batch preparation, forward/backward/
+update math, prompt/mask/curriculum logic, state serialization.
 
-**StepResult**:
+**StepResult:**
 
 ```python
 @dataclass
@@ -483,6 +757,7 @@ class StepResult:
 The runtime normalizes metric names (`loss` → `train/loss`, `lr` → `train/lr`).
 
 **Optional helpers** (`gen_worker.trainer.helpers`):
+
 - `seed_everything(seed)`
 - `to_float_scalar(value)` — normalize tensor/scalar loss
 - `build_default_adamw_bundle(model_or_params, hyperparams=...)`
@@ -490,7 +765,7 @@ The runtime normalizes metric names (`loss` → `train/loss`, `lr` → `train/lr
 
 ---
 
-## 8. Local Testing
+## Local testing
 
 ### Inference endpoint
 
@@ -499,7 +774,8 @@ uv run python -m gen_worker.discovery       # writes endpoint.lock to stdout
 WORKER_MODE=invoke uv run python -m gen_worker.entrypoint
 ```
 
-Hit it with a local invoke (`curl` against the dev server, or the in-repo dev runner).
+Hit it with a local invoke (`curl` against the dev server, or the in-repo
+dev runner).
 
 ### Trainer smoke run
 
@@ -509,16 +785,17 @@ TRAINER_JOB_SPEC_PATH=./trainer_job.example.json \
 uv run python -m gen_worker.entrypoint
 ```
 
-Confirm: metrics appear in `events.jsonl`, checkpoints serialize a `state` payload, and the resume path restores through `load_state_dict`.
+Confirm: metrics appear in `events.jsonl`, checkpoints serialize a `state`
+payload, the resume path restores through `load_state_dict`.
 
 ---
 
-## 9. Examples
+## Examples
 
-Working endpoints to copy from in `python-gen-worker/examples/`:
+Working endpoints to copy from in `examples/`:
 
 - `marco-polo/` — minimal inference endpoint
-- `medasr-transcribe/` — audio transcription with a HF model dependency
+- `medasr-transcribe/` — audio transcription with a Hugging Face model
 - `openai-codex/` — text generation
 - `training-smoke/` — minimal trainer
 - `from-scratch/` — boilerplate template
