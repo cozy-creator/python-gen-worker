@@ -1,40 +1,51 @@
-"""Hardware capability gates — worker self-disables a function on unmet hardware.
+"""Hardware capability error types for the worker's self-disable signaling.
 
-When a tenant function needs a hardware resource that varies worker-to-worker
-(compute capability / SM level, VRAM, disk, CUDA libraries, ...), the first
-attempt on an unsuitable worker raises a ``HardwareUnmetError`` subclass.
-``gen_worker.worker`` classifies that as a function-level self-disable
-terminal — the job fails fast (no retry on the same worker), the worker
-emits a ``WorkerFunctionUnavailableSignal`` upstream, and the orchestrator
-narrows subsequent dispatches for that function to workers where the gate
-has not triggered.
+The public ``require_vram`` / ``require_compute_capability`` / ``require_cuda_library``
+helpers were removed in gen-worker 0.7.0 (decorator-table-model-bindings) —
+the per-function :class:`gen_worker.Resources` envelope is now the single
+declarative source of truth, checked by the worker at boot.
 
-Example consumers:
-- Quantization functions with hardware-specific kernels can call
-  ``require_compute_capability((10, 0))`` for Blackwell-only recipes or
-  ``(9, 0)`` for Hopper+ recipes.
-- Large-model inference functions can call ``require_vram(N * 1024**3)``
-  at function entry so a function declaring ``required_vram_gb=28`` refuses to
-  run on a 24 GB GPU while sibling 20 GB functions on the same endpoint stay
-  dispatchable.
+The error types below remain because :mod:`gen_worker.worker` still raises
+them internally when its boot-time self-advertise gate runs (and during
+runtime fallbacks for resources that can't be known statically). They flow
+upstream as ``WorkerFunctionUnavailableSignal`` payloads so the orchestrator
+narrows subsequent dispatches to suitable workers.
 
-Error → signal → orchestrator flow is driven by ``gen_worker.worker``; tenants
-just call the ``require_*`` helpers at the top of their function body.
+Migration::
+
+    # Before (0.6.x):
+    from gen_worker.capability import require_vram, require_compute_capability
+
+    @inference_function(resources=ResourceRequirements(...))
+    def generate_bf16(ctx, payload):
+        require_vram(22 * 1024**3)
+        require_compute_capability((8, 0))
+        ...
+
+    # After (0.7.0):
+    from gen_worker import Resources, inference_function
+
+    _flux_bf16 = Resources(requires_gpu=True, min_vram_gb=22.0, cuda_compute_min=8.0)
+
+    @inference_function(resources=_flux_bf16)
+    def generate_bf16(ctx, payload):
+        # Worker boot-time self-advertise checks _flux_bf16 against host
+        # hardware and marks this function unavailable on hosts that can't
+        # satisfy it. No runtime check needed.
+        ...
 """
 
 from __future__ import annotations
-
-from pathlib import Path
-from typing import Any
 
 
 class HardwareUnmetError(RuntimeError):
     """Base class for hardware-axis gates the worker cannot satisfy.
 
-    Recognised by ``gen_worker.worker`` as a terminal 'disable this function
-    on this worker' signal. Subclasses carry axis-specific fields; the
-    ``axes()`` method returns the key/value map the ``WorkerFunctionUnavailableSignal``
-    proto embeds as free-form hardware specifics.
+    Recognised by :mod:`gen_worker.worker` as a terminal 'disable this
+    function on this worker' signal. Subclasses carry axis-specific fields;
+    :meth:`axes` returns the key/value map the
+    ``WorkerFunctionUnavailableSignal`` proto embeds as free-form hardware
+    specifics.
     """
 
     #: One of: compute_capability_unmet, insufficient_vram, missing_cuda_library,
@@ -101,8 +112,8 @@ class MissingCudaLibraryError(HardwareUnmetError):
     """A required CUDA library / kernel module is not available on this host.
 
     Typical reasons: ``flash_attn`` wheel not built for this GPU family, or a
-    CUDA minor version mismatch. Not resolvable at runtime — the only fix is a
-    hardware / image swap.
+    CUDA minor version mismatch. Not resolvable at runtime — the only fix is
+    a hardware / image swap.
     """
 
     reason = "missing_cuda_library"
@@ -155,129 +166,32 @@ class InsufficientDiskError(HardwareUnmetError):
         return out
 
 
-# ---------------------------------------------------------------------------
-# require_* helpers — call at the top of a @training_function / @inference_function
-# body. On unmet they raise the matching error; the worker classifies it as a
-# self-disable terminal and emits the upstream signal.
+_REMOVED_HELPERS = {
+    "require_vram": (
+        "gen_worker.capability.require_vram was removed in gen-worker 0.7.0. "
+        "Declare min_vram_gb on the per-function Resources struct instead: "
+        "Resources(requires_gpu=True, min_vram_gb=22.0). The worker checks "
+        "host VRAM against the declared envelope at boot and self-disables "
+        "functions whose hosts can't satisfy them."
+    ),
+    "require_compute_capability": (
+        "gen_worker.capability.require_compute_capability was removed in "
+        "gen-worker 0.7.0. Declare cuda_compute_min on the per-function "
+        "Resources struct instead: Resources(requires_gpu=True, "
+        "cuda_compute_min=10.0). The worker checks host SM at boot."
+    ),
+    "require_cuda_library": (
+        "gen_worker.capability.require_cuda_library was removed in "
+        "gen-worker 0.7.0. Declare required_libraries on the per-function "
+        "Resources struct instead: Resources(required_libraries=(\"flash_attn\",))."
+    ),
+}
 
 
-def require_compute_capability(minimum: tuple[int, int]) -> None:
-    """Raise ``ComputeCapabilityUnmetError`` if host GPU SM < ``minimum``.
-
-    ``minimum`` is ``(major, minor)``, e.g. ``(10, 0)`` for Blackwell SM 10.0,
-    ``(9, 0)`` for Hopper SM 9.0, ``(8, 9)`` for Ada SM 8.9. No-op if the
-    minimum is satisfied.
-    """
-    try:
-        import torch
-    except ImportError as exc:  # pragma: no cover - torch is a hard dep in practice
-        raise MissingCudaLibraryError(
-            "torch is not importable; cannot check compute capability",
-            library="torch",
-        ) from exc
-
-    if not torch.cuda.is_available():
-        raise ComputeCapabilityUnmetError(
-            f"cuda_unavailable (function requires SM {minimum[0]}.{minimum[1]}+)",
-            detected_sm="none",
-            required_sm=f"{minimum[0]}.{minimum[1]}",
-        )
-
-    cap = torch.cuda.get_device_capability(0)
-    if cap < minimum:
-        raise ComputeCapabilityUnmetError(
-            f"host SM {cap[0]}.{cap[1]} < required SM {minimum[0]}.{minimum[1]}",
-            detected_sm=f"{cap[0]}.{cap[1]}",
-            required_sm=f"{minimum[0]}.{minimum[1]}",
-        )
-
-
-def require_vram(required_bytes: int) -> None:
-    """Raise ``InsufficientVRAMError`` if GPU 0's total VRAM is less than ``required_bytes``.
-
-    ``required_bytes`` is the function's declared footprint at load time —
-    e.g. 22 GB for flux.2-klein-4b-turbo bf16. Worker uses the primary device's
-    total memory (``torch.cuda.get_device_properties(0).total_memory``); this
-    ignores other running processes and accelerate-style sharding, which is
-    intentional: the check is about the function's hardware gate, not
-    moment-to-moment memory pressure.
-    """
-    try:
-        import torch
-    except ImportError as exc:  # pragma: no cover
-        raise MissingCudaLibraryError(
-            "torch is not importable; cannot check vram",
-            library="torch",
-        ) from exc
-
-    if not torch.cuda.is_available():
-        raise InsufficientVRAMError(
-            f"cuda_unavailable (function requires {required_bytes} bytes VRAM)",
-            available_bytes=0,
-            required_bytes=int(required_bytes),
-        )
-
-    available = int(torch.cuda.get_device_properties(0).total_memory)
-    if available < int(required_bytes):
-        raise InsufficientVRAMError(
-            f"host VRAM {available} < required {required_bytes}",
-            available_bytes=available,
-            required_bytes=int(required_bytes),
-        )
-
-
-def require_cuda_library(name: str, *, min_version: str = "") -> None:
-    """Raise ``MissingCudaLibraryError`` if the named Python package is not importable.
-
-    Narrow check: attempts ``importlib.import_module(name)``. Version comparison
-    is a best-effort string compare against ``module.__version__`` if
-    ``min_version`` is given — callers needing strict semver comparison should
-    layer their own check on top.
-    """
-    import importlib
-
-    try:
-        mod: Any = importlib.import_module(name)
-    except ImportError as exc:
-        raise MissingCudaLibraryError(
-            f"cuda library {name!r} is not importable on this host",
-            library=name,
-            min_version=min_version,
-        ) from exc
-
-    if not min_version:
-        return
-    got = str(getattr(mod, "__version__", "") or "")
-    if got and got < min_version:
-        raise MissingCudaLibraryError(
-            f"cuda library {name!r} version {got!r} < required {min_version!r}",
-            library=name,
-            min_version=min_version,
-        )
-
-
-def require_disk(required_bytes: int, *, path: str | Path = "/") -> None:
-    """Raise ``InsufficientDiskError`` if free disk bytes at ``path`` < ``required_bytes``."""
-    import shutil
-
-    p = str(path)
-    try:
-        usage = shutil.disk_usage(p)
-    except OSError as exc:
-        raise InsufficientDiskError(
-            f"cannot stat disk at {p!r}: {exc}",
-            available_bytes=0,
-            required_bytes=int(required_bytes),
-            path=p,
-        ) from exc
-
-    if usage.free < int(required_bytes):
-        raise InsufficientDiskError(
-            f"disk free {usage.free} < required {required_bytes} at {p!r}",
-            available_bytes=int(usage.free),
-            required_bytes=int(required_bytes),
-            path=p,
-        )
+def __getattr__(name: str):
+    if name in _REMOVED_HELPERS:
+        raise ImportError(_REMOVED_HELPERS[name])
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 __all__ = [
@@ -286,8 +200,4 @@ __all__ = [
     "InsufficientVRAMError",
     "MissingCudaLibraryError",
     "InsufficientDiskError",
-    "require_compute_capability",
-    "require_vram",
-    "require_cuda_library",
-    "require_disk",
 ]

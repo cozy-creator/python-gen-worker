@@ -17,15 +17,22 @@ Context types (issue #1: slim-request-context):
 
 All three subclass ``RequestContext``; the kind-specific subclass is
 constructed by the worker before dispatch based on the endpoint kind.
+
+Bindings (issue #9: decorator-table-model-bindings):
+  - ``Repo(ref)`` — module-level repo handle and fixed-pick binding.
+  - ``dispatch(field, table)`` — payload-driven dispatch binding.
+  - ``Resources(...)`` — per-function hardware envelope + cost shape.
+  - Both ``Repo`` and ``Dispatch`` support ``.allow_override(*classes)``
+    to permit caller-supplied substitutions inside an explicit pipeline
+    class allowlist.
 """
 
 from . import io
+from .api.binding import Binding, Dispatch, Repo, dispatch
 from .api.decorators import (
-    ResourceRequirements,
-    ScalingHints,
+    Resources,
     inference_function,
 )
-from .api.injection import ModelRef, ModelRefSource
 from .request_context import (
     ConversionContext,
     DatasetContext,
@@ -51,24 +58,61 @@ from .utils.lora import load_loras
 from .inference_memory import apply_low_vram_config, with_oom_retry
 
 
+_REMOVED_PUBLIC_SYMBOLS = {
+    "ModelRef": (
+        "gen_worker.ModelRef was removed in gen-worker 0.7.0. Use Repo / dispatch / "
+        "the models={...} kwarg on @inference_function instead. See `progress.json` "
+        "issue #9 (decorator-table-model-bindings)."
+    ),
+    "ModelRefSource": (
+        "gen_worker.ModelRefSource was removed in gen-worker 0.7.0. The ModelRef "
+        "concept was replaced by Repo / Dispatch bindings on the decorator's "
+        "models={...} kwarg. See `progress.json` issue #9."
+    ),
+    "Src": (
+        "gen_worker.Src was removed in gen-worker 0.7.0. The Src.FIXED / Src.PAYLOAD / "
+        "Src.PAYLOAD_REF discriminators are gone — fixed bindings use Repo(...), "
+        "payload-driven dispatch uses dispatch(field, table), and caller overrides "
+        "use .allow_override(*classes)."
+    ),
+    "ResourceRequirements": (
+        "gen_worker.ResourceRequirements was renamed to gen_worker.Resources in "
+        "gen-worker 0.7.0. The five ScalingHints fields (vram_must_fit, vram_base, "
+        "vram_size_multiplier, vram_scales_with, runtime_scales_with) are now part "
+        "of the same struct. The `kind` field was dropped."
+    ),
+    "ScalingHints": (
+        "gen_worker.ScalingHints was merged into gen_worker.Resources in gen-worker "
+        "0.7.0. Pass vram_must_fit / vram_base / vram_size_multiplier / "
+        "vram_scales_with / runtime_scales_with directly on Resources(...)."
+    ),
+}
+
+
 def __getattr__(name: str):
     if name == "clone":
         import importlib
 
         return importlib.import_module(".clone", __name__)
+    if name in _REMOVED_PUBLIC_SYMBOLS:
+        raise ImportError(_REMOVED_PUBLIC_SYMBOLS[name])
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 __all__ = [
+    # Decorators + binding model.
     "inference_function",
-    "ResourceRequirements",
-    "ScalingHints",
-    "ModelRef",
-    "ModelRefSource",
+    "Resources",
+    "Repo",
+    "Dispatch",
+    "Binding",
+    "dispatch",
+    # Context types.
     "RequestContext",
     "ConversionContext",
     "DatasetContext",
     "TrainingContext",
+    # Errors.
     "AuthError",
     "CanceledError",
     "RetryableError",
@@ -79,6 +123,7 @@ __all__ = [
     "OutputTooLargeError",
     "RefCompatibilitySurprise",
     "WorkerError",
+    # Payload + media helpers.
     "Asset",
     "Compute",
     "Tensors",
