@@ -50,30 +50,15 @@ class Asset(msgspec.Struct):
     inline_bytes: Optional[bytes] = None
 
     def __fspath__(self) -> str:
+        # Kept so `open(asset)`, `Path(asset)`, and the wider os.PathLike
+        # protocol still work. All other I/O is now free functions in
+        # ``gen_worker.io`` — see `gen_worker.io.read_bytes`,
+        # `gen_worker.io.open`, `gen_worker.io.exists`,
+        # `gen_worker.io.read_image`, `gen_worker.io.read_audio`,
+        # `gen_worker.io.write_image`.
         if self.local_path is None:
             raise ValueError("Asset.local_path is not set (file not materialized)")
         return self.local_path
-
-    def open(self, mode: str = "rb") -> IO[bytes]:
-        if "b" not in mode:
-            raise ValueError("Asset.open only supports binary modes")
-        if self.local_path is None:
-            raise ValueError("Asset.local_path is not set (file not materialized)")
-        return open(self.local_path, mode)
-
-    def exists(self) -> bool:
-        if self.local_path is None:
-            return False
-        return os.path.exists(self.local_path)
-
-    def read_bytes(self, max_bytes: Optional[int] = None) -> bytes:
-        if self.local_path is None:
-            raise ValueError("Asset.local_path is not set (file not materialized)")
-        with open(self.local_path, "rb") as f:
-            data = f.read() if max_bytes is None else f.read(max_bytes + 1)
-        if max_bytes is not None and len(data) > max_bytes:
-            raise ValueError("asset too large to read into memory")
-        return data
 
 
 class Tensors(msgspec.Struct):

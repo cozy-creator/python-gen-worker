@@ -1,17 +1,20 @@
-from typing import Any, Callable, Dict, List, Optional, Sequence, TypeVar
+from typing import Any, Callable, Literal, Optional, Sequence, TypeVar, overload
+
+import msgspec
 
 F = TypeVar("F", bound=Callable[..., Any])
 
 
-_VRAM_MUST_FIT_VALUES = frozenset({"full_model", "largest_component"})
+def _force_setattr(obj: Any, name: str, value: Any) -> None:
+    msgspec.structs.force_setattr(obj, name, value)
 
 
-class ScalingHints:
-    """Per-function scaling hints used by the orchestrator's VRAM-aware
+class ScalingHints(msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True):
+    """Per-endpoint scaling hints used by the orchestrator's VRAM-aware
     placement + cost/latency-aware scheduling (gen-orchestrator #320).
 
-    The tenant tells the platform WHICH dimensions matter — not by how much.
-    The orchestrator learns the coefficients from observed runs.
+    The tenant declares WHICH payload dimensions drive VRAM and runtime; the
+    orchestrator learns the coefficients from observed runs.
 
     VRAM at submit is gated as::
 
@@ -29,54 +32,42 @@ class ScalingHints:
     run. The tenant only declares the *dimensions* that influence cost; the
     orchestrator fits the magnitudes.
 
-    Args:
-        vram_must_fit: Anchor for the size-scaled VRAM term. Allowed:
-            ``"full_model"`` (whole bf16 must fit) or
-            ``"largest_component"`` (only the largest single component must
-            fit — for streaming-load paths). Tensorhub records both numbers
-            on each checkpoint at ingest.
-        vram_base: Constant VRAM overhead (bytes) — CUDA kernels, working
-            memory, etc. Default 0.
+    Attributes:
+        vram_must_fit: Anchor for the size-scaled VRAM term. ``"full_model"``
+            (whole bf16 must fit) or ``"largest_component"`` (only the largest
+            single component must fit — for streaming-load paths). Tensorhub
+            records both numbers on each checkpoint at ingest. Selects which
+            entry in ``source.size_facts`` the orchestrator multiplies by
+            ``vram_size_multiplier``.
+        vram_base: Constant VRAM overhead in bytes (CUDA kernels, working
+            memory, etc.). Default 0.
         vram_size_multiplier: Multiplier on ``source.size_facts[vram_must_fit]``.
-            Use 1.0 for "model must fit exactly", >1 for headroom. Default 0.
-        vram_scales_with: Payload field names that grow VRAM (e.g.
-            ``["batch_size", "width", "height"]``). Coefficients learned.
-        runtime_scales_with: Payload field names that grow runtime (e.g.
-            ``["num_inference_steps", "batch_size"]``). Coefficients learned
-            per gpu_class.
+            Use 1.0 for "model must fit exactly", >1 for headroom. Default 0.0.
+        vram_scales_with: Tuple of payload field paths that grow VRAM
+            (e.g. ``("batch_size", "width", "height")``). Coefficients learned.
+        runtime_scales_with: Tuple of payload field paths that grow runtime
+            (e.g. ``("num_inference_steps", "batch_size")``). Coefficients
+            learned per gpu_class.
     """
 
-    def __init__(
-        self,
-        *,
-        vram_must_fit: Optional[str] = None,
-        vram_base: int = 0,
-        vram_size_multiplier: float = 0.0,
-        vram_scales_with: Optional[Sequence[str]] = None,
-        runtime_scales_with: Optional[Sequence[str]] = None,
-    ) -> None:
-        if vram_must_fit is not None:
-            v = str(vram_must_fit).strip()
-            if v and v not in _VRAM_MUST_FIT_VALUES:
-                raise ValueError(
-                    f"vram_must_fit must be one of {sorted(_VRAM_MUST_FIT_VALUES)} "
-                    f"(or None); got {vram_must_fit!r}"
-                )
-            self.vram_must_fit: Optional[str] = v or None
-        else:
-            self.vram_must_fit = None
-        if int(vram_base) < 0:
-            raise ValueError(f"vram_base must be >= 0, got {vram_base}")
-        self.vram_base: int = int(vram_base)
-        if float(vram_size_multiplier) < 0:
-            raise ValueError(f"vram_size_multiplier must be >= 0, got {vram_size_multiplier}")
-        self.vram_size_multiplier: float = float(vram_size_multiplier)
-        self.vram_scales_with: List[str] = [
-            str(x).strip() for x in (vram_scales_with or []) if str(x).strip()
-        ]
-        self.runtime_scales_with: List[str] = [
-            str(x).strip() for x in (runtime_scales_with or []) if str(x).strip()
-        ]
+    vram_must_fit: Literal["full_model", "largest_component"] | None = None
+    vram_base: int = 0
+    vram_size_multiplier: float = 0.0
+    vram_scales_with: tuple[str, ...] = ()
+    runtime_scales_with: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.vram_must_fit not in (None, "full_model", "largest_component"):
+            raise ValueError(
+                f"vram_must_fit must be 'full_model', 'largest_component', or None; "
+                f"got {self.vram_must_fit!r}"
+            )
+        if self.vram_base < 0:
+            raise ValueError(f"vram_base must be >= 0, got {self.vram_base}")
+        if self.vram_size_multiplier < 0:
+            raise ValueError(
+                f"vram_size_multiplier must be >= 0, got {self.vram_size_multiplier}"
+            )
 
     def is_empty(self) -> bool:
         return (
@@ -87,120 +78,98 @@ class ScalingHints:
             and not self.runtime_scales_with
         )
 
-    def to_dict(self) -> Dict[str, Any]:
-        out: Dict[str, Any] = {}
-        if self.vram_must_fit is not None:
-            out["vram_must_fit"] = self.vram_must_fit
-        if self.vram_base:
-            out["vram_base"] = self.vram_base
-        if self.vram_size_multiplier:
-            out["vram_size_multiplier"] = self.vram_size_multiplier
-        if self.vram_scales_with:
-            out["vram_scales_with"] = list(self.vram_scales_with)
-        if self.runtime_scales_with:
-            out["runtime_scales_with"] = list(self.runtime_scales_with)
-        return out
 
-    def __repr__(self) -> str:
-        return f"ScalingHints({self.to_dict()})"
+class ResourceRequirements(msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True):
+    """Resource requirements for an endpoint pod.
 
+    Passed to :func:`inference_function` / :func:`training_function` to declare
+    the hardware shape the function needs. Frozen + kw_only — matches Go struct
+    semantics (immutable, fields by name).
 
-def _build_scaling_hints(
-    *,
-    scaling_hints: Optional["ScalingHints"],
-    vram_must_fit: Optional[str],
-    vram_base: Optional[int],
-    vram_size_multiplier: Optional[float],
-    vram_scales_with: Optional[Sequence[str]],
-    runtime_scales_with: Optional[Sequence[str]],
-) -> "ScalingHints":
-    """Resolve `scaling_hints=` vs flat kwargs into one ScalingHints object.
+    Wire shape (consumed by tensorhub builder + gen-orchestrator scheduler):
 
-    Tenants may pass a `scaling_hints=ScalingHints(...)` object OR flat
-    kwargs (`vram_must_fit=...`, etc.). Passing both is an error.
+    - ``kind``: optional free-form label.
+    - ``accelerator``: ``"cuda"`` | ``"none"``. ``"gpu"`` and ``"cpu"`` are
+      normalized to ``"cuda"`` / ``"none"`` on construction.
+    - ``cuda_compute_min``: minimum CUDA compute capability (e.g. ``8.0``).
+      Emitted on the wire as a formatted ``"8.0"`` string plus
+      ``compute_capability: {"min": "8.0"}`` for the Go scheduler.
+    - ``requires_gpu``: bool. Auto-set to ``True`` when ``accelerator="cuda"``
+      and not otherwise specified.
+    - ``min_vram_gb``: minimum VRAM in GiB.
+    - ``required_libraries``: tuple of library names the function imports
+      (``("bitsandbytes", "torchao")`` etc.) — used by the worker to advertise
+      only functions runnable on the current host.
     """
-    flat_given = (
-        vram_must_fit is not None
-        or vram_base is not None
-        or vram_size_multiplier is not None
-        or vram_scales_with is not None
-        or runtime_scales_with is not None
-    )
-    if scaling_hints is not None and flat_given:
-        raise ValueError(
-            "pass either scaling_hints=ScalingHints(...) OR flat kwargs "
-            "(vram_must_fit, vram_base, vram_size_multiplier, vram_scales_with, "
-            "runtime_scales_with), not both"
-        )
-    if scaling_hints is not None:
-        return scaling_hints
-    return ScalingHints(
-        vram_must_fit=vram_must_fit,
-        vram_base=int(vram_base) if vram_base is not None else 0,
-        vram_size_multiplier=float(vram_size_multiplier) if vram_size_multiplier is not None else 0.0,
-        vram_scales_with=vram_scales_with,
-        runtime_scales_with=runtime_scales_with,
-    )
 
+    kind: str | None = None
+    accelerator: Literal["cuda", "none"] | None = None
+    cuda_compute_min: float | None = None
+    # Derived wire-shape field — set in __post_init__ when cuda_compute_min is
+    # provided. Kept on the struct so msgspec.to_builtins emits it. Consumers
+    # (tensorhub function_requirements.go, gen-orchestrator resolver) read
+    # both this and cuda_compute_min.
+    compute_capability: dict[str, str] | None = None
+    requires_gpu: bool | None = None
+    min_vram_gb: float | None = None
+    required_libraries: tuple[str, ...] = ()
 
-class ResourceRequirements:
-    """
-    Specifies the resource requirements for a worker function.
+    def __post_init__(self) -> None:
+        # Normalize kind: empty string → None (so omit_defaults drops it).
+        if self.kind is not None:
+            k = str(self.kind).strip()
+            _force_setattr(self, "kind", k or None)
 
-    Worker resources may include per-function hints used by schedulers
-    (for example, requires_gpu or low-precision profile support).
-    """
-    def __init__(
-        self,
-        kind: Optional[str] = None,
-        accelerator: Optional[str] = None,
-        cuda_compute_min: Optional[float] = None,
-        requires_gpu: Optional[bool] = None,
-        min_vram_gb: Optional[float] = None,
-        required_libraries: Optional[Sequence[str]] = None,
-    ) -> None:
-        self.kind = str(kind or "").strip()
-        self._requirements: Dict[str, Any] = {}
-        if self.kind:
-            self._requirements["kind"] = self.kind
-        if accelerator is not None:
-            accel = str(accelerator or "").strip().lower()
+        # Normalize accelerator: "gpu" → "cuda", "cpu" → "none", "" → None.
+        if self.accelerator is not None:
+            accel = str(self.accelerator).strip().lower()
             if accel == "gpu":
                 accel = "cuda"
             elif accel == "cpu":
                 accel = "none"
-            if accel not in ("", "none", "cuda"):
-                raise ValueError(f"accelerator must be 'none' or 'cuda', got {accelerator!r}")
-            if accel:
-                self._requirements["accelerator"] = accel
-                if accel == "cuda" and requires_gpu is None:
-                    requires_gpu = True
-        if cuda_compute_min is not None:
-            val = float(cuda_compute_min)
+            if accel == "":
+                _force_setattr(self, "accelerator", None)
+            elif accel in ("none", "cuda"):
+                _force_setattr(self, "accelerator", accel)
+                # accelerator="cuda" implies requires_gpu=True unless caller said otherwise.
+                if accel == "cuda" and self.requires_gpu is None:
+                    _force_setattr(self, "requires_gpu", True)
+            else:
+                raise ValueError(
+                    f"accelerator must be 'none' or 'cuda', got {self.accelerator!r}"
+                )
+
+        # Validate + derive compute_capability from cuda_compute_min.
+        if self.cuda_compute_min is not None:
+            val = float(self.cuda_compute_min)
             if val <= 0:
                 raise ValueError(f"cuda_compute_min must be positive, got {val}")
-            self._requirements["cuda_compute_min"] = f"{val:.1f}"
-            self._requirements["compute_capability"] = {"min": f"{val:.1f}"}
-        if requires_gpu is not None:
-            self._requirements["requires_gpu"] = bool(requires_gpu)
-        if min_vram_gb is not None:
-            vram = float(min_vram_gb)
+            _force_setattr(self, "cuda_compute_min", val)
+            _force_setattr(self, "compute_capability", {"min": f"{val:.1f}"})
+
+        if self.min_vram_gb is not None:
+            vram = float(self.min_vram_gb)
             if vram <= 0:
                 raise ValueError(f"min_vram_gb must be positive, got {vram}")
-            self._requirements["min_vram_gb"] = vram
-        if required_libraries is not None:
-            libs = [str(x).strip() for x in required_libraries if str(x).strip()]
-            if libs:
-                self._requirements["required_libraries"] = libs
+            _force_setattr(self, "min_vram_gb", vram)
 
-    def to_dict(self) -> Dict[str, Any]:
-        """Returns a dictionary representation of the defined requirements."""
-        return self._requirements
-
-    def __repr__(self) -> str:
-        return f"ResourceRequirements({self._requirements})"
+        # Strip empty entries from required_libraries.
+        if self.required_libraries:
+            libs = tuple(str(x).strip() for x in self.required_libraries if str(x).strip())
+            _force_setattr(self, "required_libraries", libs)
 
 
+@overload
+def inference_function(fn: F) -> F: ...
+@overload
+def inference_function(
+    fn: None = None,
+    *,
+    label: Optional[str] = None,
+    description: Optional[str] = None,
+    resources: Optional[ResourceRequirements] = None,
+    scaling_hints: Optional[ScalingHints] = None,
+) -> Callable[[F], F]: ...
 def inference_function(
     fn: Optional[F] = None,
     *,
@@ -208,13 +177,6 @@ def inference_function(
     description: Optional[str] = None,
     resources: Optional[ResourceRequirements] = None,
     scaling_hints: Optional[ScalingHints] = None,
-    # Flat-kwarg variants of ScalingHints, for ergonomic decorator use.
-    # Passing these AND scaling_hints= is an error.
-    vram_must_fit: Optional[str] = None,
-    vram_base: Optional[int] = None,
-    vram_size_multiplier: Optional[float] = None,
-    vram_scales_with: Optional[Sequence[str]] = None,
-    runtime_scales_with: Optional[Sequence[str]] = None,
 ) -> Any:
     """Mark a function as an inference endpoint (tensorhub #232).
 
@@ -229,30 +191,19 @@ def inference_function(
             such as ``accelerator="cuda"``, compute capability, VRAM, and
             optional library requirements are used by the worker to advertise
             only functions runnable on the current host.
-        scaling_hints: Per-function ScalingHints — declares which dimensions
-            drive VRAM and runtime so the orchestrator can predict and learn.
-            See :class:`ScalingHints`. Alternatively, pass the flat kwargs
-            ``vram_must_fit``, ``vram_base``, ``vram_size_multiplier``,
-            ``vram_scales_with``, ``runtime_scales_with`` directly on the
-            decorator.
+        scaling_hints: Per-function :class:`ScalingHints` — declares which
+            dimensions drive VRAM and runtime so the orchestrator can
+            predict and learn.
     """
     if resources is None:
         resources = ResourceRequirements()
-    hints = _build_scaling_hints(
-        scaling_hints=scaling_hints,
-        vram_must_fit=vram_must_fit,
-        vram_base=vram_base,
-        vram_size_multiplier=vram_size_multiplier,
-        vram_scales_with=vram_scales_with,
-        runtime_scales_with=runtime_scales_with,
-    )
 
     def apply(func: F) -> F:
         setattr(func, "_is_inference_function", True)
         setattr(func, "_function_label", (label or "").strip() or None)
         setattr(func, "_function_description", (description or "").strip() or None)
         setattr(func, "_worker_resources", resources)
-        setattr(func, "_scaling_hints", hints)
+        setattr(func, "_scaling_hints", scaling_hints)
         return func
 
     if fn is not None:
@@ -265,49 +216,3 @@ def inference_function(
 # (ctx / source / datasets) and signature-introspected dispatch. Keeping it out
 # of the top-level package avoids presenting conversion internals to inference
 # endpoint authors.
-
-
-# Realtime/WebSocket endpoints retain their own decorator. Tenants handling
-# realtime sessions declare ``@realtime_function`` (renamed from
-# ``@worker_websocket``) for the same reason inference + training got their
-# own decorator names — the kind is part of the tenant's function metadata.
-def realtime_function(
-    fn: Optional[F] = None,
-    *,
-    label: Optional[str] = None,
-    description: Optional[str] = None,
-    resources: Optional[ResourceRequirements] = None,
-    scaling_hints: Optional[ScalingHints] = None,
-    vram_must_fit: Optional[str] = None,
-    vram_base: Optional[int] = None,
-    vram_size_multiplier: Optional[float] = None,
-    vram_scales_with: Optional[Sequence[str]] = None,
-    runtime_scales_with: Optional[Sequence[str]] = None,
-) -> Any:
-    """Mark an async function as a WebSocket realtime handler.
-
-    Scaling hints work the same way as on @inference_function — see
-    :class:`ScalingHints`.
-    """
-    if resources is None:
-        resources = ResourceRequirements()
-    hints = _build_scaling_hints(
-        scaling_hints=scaling_hints,
-        vram_must_fit=vram_must_fit,
-        vram_base=vram_base,
-        vram_size_multiplier=vram_size_multiplier,
-        vram_scales_with=vram_scales_with,
-        runtime_scales_with=runtime_scales_with,
-    )
-
-    def apply(func: F) -> F:
-        setattr(func, "_is_worker_websocket", True)
-        setattr(func, "_function_label", (label or "").strip() or None)
-        setattr(func, "_function_description", (description or "").strip() or None)
-        setattr(func, "_worker_resources", resources)
-        setattr(func, "_scaling_hints", hints)
-        return func
-
-    if fn is not None:
-        return apply(fn)
-    return apply

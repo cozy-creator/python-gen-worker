@@ -1,6 +1,6 @@
 [project]
 name = "gen-worker"
-version = "0.5.34"
+version = "0.6.3"
 description = "A library used to build custom functions in Cozy Creator's serverless function platform."
 readme = "README.md"
 license = "MIT"
@@ -52,6 +52,13 @@ torch = [
 ]
 trainer = [
     "pyarrow>=17.0.0",
+]
+images = [
+    "Pillow>=10.0",
+]
+audio = [
+    "soundfile>=0.12",
+    "numpy>=1.24",
 ]
 dev = [
     "grpcio-tools>=1.71.0",

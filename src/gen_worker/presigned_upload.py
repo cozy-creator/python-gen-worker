@@ -41,7 +41,7 @@ from urllib.parse import quote
 import requests
 from blake3 import blake3
 
-from .api.errors import AuthError
+from .api.errors import AuthError, CanceledError
 
 logger = logging.getLogger(__name__)
 
@@ -266,7 +266,7 @@ def presigned_upload_file(
     last_exc: Optional[BaseException] = None
     for attempt in range(1, retry_attempts + 1):
         if cancel_check and cancel_check():
-            raise InterruptedError("canceled")
+            raise CanceledError("canceled")
         try:
             resp = requests.post(
                 complete_url,
@@ -320,7 +320,7 @@ def _upload_parts_to_s3(
         last_exc: Optional[BaseException] = None
         for attempt in range(1, retry_attempts + 1):
             if cancel_check and cancel_check():
-                raise InterruptedError("canceled")
+                raise CanceledError("canceled")
             # Re-open the bounded reader on every attempt so a retry
             # after a partial-PUT failure starts from the part's true
             # offset rather than wherever the prior generator left off.

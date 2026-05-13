@@ -2,8 +2,31 @@ from __future__ import annotations
 
 # Worker<->scheduler gRPC wire protocol version.
 # MAJOR: breaking changes, MINOR: additive/backward-compatible changes.
+#
+# 1.3 (#321): protocol cleanup — removed Realtime{Open,Frame,Close}Cmd,
+# RepoURLRefreshRequest/Response, RuntimeBatchingConfigCommand/Result,
+# WorkerFunctionAvailabilityClearedSignal; stripped unused fields from
+# WorkerResources / JobExecutionRequest / JobExecutionResult / WorkerEvent /
+# IncrementalToken* / BatchExecutionItemResult / WorkerDrainResult. The
+# old fields are `reserved` in the proto so wire bytes from older workers
+# (1.2 and below) will still parse with the removed fields dropped — but
+# emitting any of them from a worker is an error at construction time.
+#
+# 1.4 (#321): typed worker lifecycle signals — added WorkerStartupPhaseSignal
+# (worker_startup_phase = 30), WorkerModelReadySignal (worker_model_ready =
+# 32), WorkerFunctionCapabilitiesSignal (worker_function_capabilities = 33).
+# Replaces the prior string-switched worker_event dispatch on event_type
+# values "startup_phase"/"worker.startup.phase"/"function_capabilities"/
+# "model.ready"/"model.cached"/"model.download.completed". Fixed a silent bug:
+# worker emitted "worker.function_capabilities" while the orchestrator matched
+# "function_capabilities" without the prefix, so capabilities had been silently
+# dropped. Also unified the proactive `available: false` per-function flag with
+# WorkerFunctionUnavailableSignal so the placement filter actually respects
+# function capabilities. Additive; older workers continue to use the
+# worker_event path (orchestrator no longer routes those, so capabilities and
+# startup phase only flow via typed messages now — coordinate the release).
 WIRE_PROTOCOL_MAJOR = 1
-WIRE_PROTOCOL_MINOR = 2
+WIRE_PROTOCOL_MINOR = 4
 
 
 def wire_protocol_version_string() -> str:

@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated
 
 import msgspec
-import numpy as np
-import soundfile as sf
-import soxr
 import torch
 from transformers import AutoModelForCTC, AutoProcessor
 
-from gen_worker import RequestContext, Asset, ResourceRequirements, inference_function
+from gen_worker import Asset, RequestContext, ResourceRequirements, inference_function
+from gen_worker import io as gw_io
 from gen_worker.api.injection import ModelRef, ModelRefSource as Src
 
 _MODEL_KEY = "medasr"
@@ -30,20 +28,10 @@ def medasr_transcribe(
     processor: Annotated[AutoProcessor, ModelRef(Src.FIXED, _MODEL_KEY)],
     payload: MedASRInput,
 ) -> MedASROutput:
-    if payload.audio.local_path is None:
-        raise RuntimeError("audio.local_path missing")
-
-    if ctx.is_canceled():
-        raise InterruptedError("canceled")
+    ctx.raise_if_canceled()
 
     device = next(model.parameters()).device
-    speech, sample_rate = sf.read(payload.audio.local_path, always_2d=False, dtype="float32")
-    if speech.ndim > 1:
-        # Mix down multi-channel audio to mono.
-        speech = np.mean(speech, axis=1)
-    if sample_rate != 16000:
-        speech = soxr.resample(speech, sample_rate, 16000)
-        sample_rate = 16000
+    speech, sample_rate = gw_io.read_audio(payload.audio, target_sample_rate=16000)
     inputs = processor(speech, sampling_rate=sample_rate, return_tensors="pt", padding=True)
     inputs = inputs.to(device)
 
@@ -54,8 +42,7 @@ def medasr_transcribe(
             logits = model(**inputs).logits
             token_ids = torch.argmax(logits, dim=-1)
 
-    if ctx.is_canceled():
-        raise InterruptedError("canceled")
+    ctx.raise_if_canceled()
 
     try:
         text = processor.batch_decode(token_ids, skip_special_tokens=True)[0]

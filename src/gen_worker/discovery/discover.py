@@ -59,6 +59,28 @@ def _is_msgspec_struct(t: Any) -> bool:
         return False
 
 
+def _synthesize_model_key(ref: str, flavor: str) -> str:
+    """Generate a deterministic local key from a direct (ref, flavor) pair.
+
+    Used when a function declares `ModelRef(Src.FIXED, ref="owner/repo",
+    flavor="nf4")` directly — discovery synthesizes a key so the wire
+    format (list of string keys) doesn't change. The synthesized key is
+    additive: tenants are encouraged NOT to write it themselves.
+
+    Shape: `<owner>__<repo>__<flavor>` with "/", ".", and ":" replaced by
+    safe separators. Deterministic — the same (ref, flavor) pair always
+    produces the same key.
+    """
+    ref = (ref or "").strip()
+    flavor = (flavor or "").strip()
+    if not ref:
+        return ""
+    slug = ref.replace("/", "__").replace(".", "-").replace(":", "-")
+    if flavor:
+        return f"{slug}__{flavor}"
+    return slug
+
+
 def _parse_annotated_model_ref(ann: Any) -> Optional[Tuple[type, ModelRef]]:
     """Extract ModelRef from Annotated type if present."""
     origin = typing.get_origin(ann)
@@ -133,7 +155,7 @@ def _file_uses_worker_decorator(filepath: Path) -> bool:
     except (SyntaxError, UnicodeDecodeError):
         return False
 
-    target_names = {"inference_function", "training_function", "realtime_function"}
+    target_names = {"inference_function", "training_function"}
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef):
             for decorator in node.decorator_list:
@@ -181,9 +203,9 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
     """Extract metadata from a worker function."""
     resources = getattr(func, "_worker_resources", None)
     res_dict: Dict[str, Any] = {}
-    if resources is not None and hasattr(resources, "to_dict"):
+    if resources is not None:
         try:
-            raw = resources.to_dict()
+            raw = msgspec.to_builtins(resources)
             if isinstance(raw, dict):
                 res_dict.update(raw)
         except Exception:
@@ -240,7 +262,16 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
                 ref = str(getattr(mr, "ref", "") or "").strip()
             except Exception:
                 ref = ""
-            mr_entry: Dict[str, Any] = {"source": src, "key": mr.key, "ref": ref, "dtypes": dtypes}
+            tag = str(getattr(mr, "tag", "") or "").strip() or "prod"
+            flavor = str(getattr(mr, "flavor", "") or "").strip()
+            mr_entry: Dict[str, Any] = {
+                "source": src,
+                "key": mr.key,
+                "ref": ref,
+                "tag": tag,
+                "flavor": flavor,
+                "dtypes": dtypes,
+            }
             # PAYLOAD_REF binding ships a compat_spec object that
             # carries the scoping the orchestrator enforces at invoke time.
             # The derived pipeline class comes straight from the parameter's
@@ -344,12 +375,27 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
         delta_schema, delta_sha = _schema_and_hash(delta_type)
 
     # Extract required_models: fixed-source model keys that must be available.
-    # These are keys used by ModelRef(FIXED, "<key>") injections.
-    required_models = [
-        inj["model_ref"]["key"]
-        for inj in injections
-        if inj.get("model_ref", {}).get("source") == "fixed"
-    ]
+    # Two forms:
+    #   (a) Legacy: ModelRef(Src.FIXED, "local-key") — key references
+    #       endpoint.toml [models] entry; use the key as-is.
+    #   (b) Direct: ModelRef(Src.FIXED, ref="owner/repo", flavor="nf4") —
+    #       SDK synthesizes a deterministic key from (ref, flavor) so the
+    #       wire format stays a list of strings. Discovery also writes the
+    #       synthesized key back onto the injection so downstream code
+    #       (build_manifest's [models] synthesis, worker injection) sees it.
+    required_models = []
+    for inj in injections:
+        mr = inj.get("model_ref") or {}
+        if mr.get("source") != "fixed":
+            continue
+        key = str(mr.get("key") or "").strip()
+        ref = str(mr.get("ref") or "").strip()
+        if not key and ref:
+            flavor = str(mr.get("flavor") or "").strip()
+            key = _synthesize_model_key(ref, flavor)
+            mr["key"] = key
+        if key:
+            required_models.append(key)
 
     # Extract payload-based repo selectors so schedulers can compute required repos
     # at submit-time for cache-aware routing.
@@ -395,11 +441,13 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
 
     # Per-function scaling hints (gen-orchestrator #320) — emit only when the
     # tenant declared at least one field so we don't pollute endpoint.lock
-    # for the majority of existing functions.
+    # for the majority of existing functions. ScalingHints is a msgspec.Struct
+    # with omit_defaults=True, so to_builtins drops fields the tenant left
+    # at their defaults — preserving the original sparse wire shape.
     hints = getattr(func, "_scaling_hints", None)
-    if hints is not None and hasattr(hints, "to_dict"):
+    if hints is not None:
         try:
-            hints_dict = hints.to_dict()
+            hints_dict = msgspec.to_builtins(hints)
             if isinstance(hints_dict, dict) and hints_dict:
                 fn["scaling_hints"] = hints_dict
         except Exception:
@@ -430,9 +478,9 @@ def _extract_conversion_function_metadata(func: Any, module_name: str) -> Dict[s
 
     resources = getattr(func, "_worker_resources", None)
     res_dict: Dict[str, Any] = {}
-    if resources is not None and hasattr(resources, "to_dict"):
+    if resources is not None:
         try:
-            raw = resources.to_dict()
+            raw = msgspec.to_builtins(resources)
             if isinstance(raw, dict):
                 res_dict.update(raw)
         except Exception:
@@ -490,11 +538,13 @@ def _extract_conversion_function_metadata(func: Any, module_name: str) -> Dict[s
         "label": getattr(func, "_function_label", None) or None,
         "description": getattr(func, "_function_description", None) or None,
     }
-    # Per-function scaling hints (gen-orchestrator #320).
+    # Per-function scaling hints (gen-orchestrator #320). ScalingHints is a
+    # msgspec.Struct with omit_defaults=True, so to_builtins drops fields the
+    # tenant left at their defaults — preserving the original sparse wire shape.
     hints = getattr(func, "_scaling_hints", None)
-    if hints is not None and hasattr(hints, "to_dict"):
+    if hints is not None:
         try:
-            hints_dict = hints.to_dict()
+            hints_dict = msgspec.to_builtins(hints)
             if isinstance(hints_dict, dict) and hints_dict:
                 fn["scaling_hints"] = hints_dict
         except Exception:
@@ -748,24 +798,29 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
         # check against top-level `[models]`), because FIXED refs must
         # bind at publish time.
 
-        # Fixed refs must be declared in top-level [models].
+        # Fixed refs must be declared either via inline (ref, tag, flavor)
+        # OR via top-level [models]. Synthesize a [models] entry for any
+        # FIXED injection that carries a direct ref — keeps the wire shape
+        # uniform (everything resolves through manifest["models"][key]).
         required_keys = set(fn.get("required_models", []) or [])
         inj_list = list(fn.get("injection_json", []) or [])
         for inj in inj_list:
-            mr = dict(inj.get("model_ref", {}) or {})
+            mr = inj.get("model_ref") or {}
             key = str(mr.get("key") or "").strip()
-            if not key:
-                continue
             ref = str(mr.get("ref") or "").strip()
             src = str(mr.get("source") or "").strip()
-            if src in ("fixed", "payload"):
-                if ref:
-                    raise ValueError(
-                        f"function '{fn_name}' uses ModelRef({src.upper()}, {key!r}) with inline ref; "
-                        "declare model refs in endpoint.toml [models] / [models.<function_name>]"
-                    )
+
+            if src == "fixed" and ref and key and key not in fixed_models:
+                # Direct-form FIXED injection — synthesize the [models] entry.
+                # Note: the wire-side TensorhubModelSpec doesn't carry tag
+                # today; "prod" is the implicit default the orchestrator uses.
+                # We keep the tag on the ModelRef for forward compatibility
+                # but store only ref+flavor in the synthesized spec.
+                flavor = str(mr.get("flavor") or "").strip()
+                fixed_models[key] = TensorhubModelSpec(ref=ref, flavor=flavor)
+
             if src == "payload":
-                if key not in required_payload_fields:
+                if key and key not in required_payload_fields:
                     # Defensive: keep selector metadata aligned with model refs.
                     required_payload_fields.append(key)
 
@@ -775,7 +830,8 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
                 missing.append(k)
         if missing:
             raise ValueError(
-                f"function '{fn_name}' has FIXED model keys missing from endpoint.toml [models]: {missing}"
+                f"function '{fn_name}' has FIXED model keys missing from endpoint.toml [models] "
+                f"or inline ModelRef(ref=..., flavor=...): {missing}"
             )
 
         if payload_keyspace:

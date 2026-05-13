@@ -3,21 +3,40 @@
 Keep this surface intentionally small. Endpoint code that needs advanced
 subsystems should import their explicit modules, for example
 ``gen_worker.trainer`` or ``gen_worker.conversion``.
+
+Context types (issue #1: slim-request-context):
+  - ``RequestContext`` — inference handlers (the base type).
+  - ``ConversionContext`` — ``@training_function`` handlers that produce a
+    new repo revision (format-conversion, quantization, fine-tuning, …).
+    Adds ``publish_repo_revision`` / ``materialize_blob`` /
+    ``read_repo_metadata`` / ``write_repo_metadata`` plus the conversion
+    helper API (``mktemp``, ``open_output_writer``, …).
+  - ``DatasetContext`` — ``@training_function(kind="dataset-generation")``
+    handlers. Adds ``publish_dataset_revision`` / ``resolve_dataset``.
+  - ``TrainingContext`` — trainer-class endpoints. Adds repo-metadata RPCs.
+
+All three subclass ``RequestContext``; the kind-specific subclass is
+constructed by the worker before dispatch based on the endpoint kind.
 """
 
+from . import io
 from .api.decorators import (
     ResourceRequirements,
     ScalingHints,
     inference_function,
-    realtime_function,
 )
 from .api.injection import ModelRef, ModelRefSource
-from .request_context import RequestContext
-from .worker import RealtimeSocket
+from .request_context import (
+    ConversionContext,
+    DatasetContext,
+    RequestContext,
+    TrainingContext,
+)
 from .api.errors import (
     AuthError,
     CanceledError,
     FatalError,
+    InputTooLargeError,
     OutputTooLargeError,
     RefCompatibilitySurprise,
     ResourceError,
@@ -42,19 +61,21 @@ def __getattr__(name: str):
 
 __all__ = [
     "inference_function",
-    "realtime_function",
     "ResourceRequirements",
     "ScalingHints",
     "ModelRef",
     "ModelRefSource",
     "RequestContext",
-    "RealtimeSocket",
+    "ConversionContext",
+    "DatasetContext",
+    "TrainingContext",
     "AuthError",
     "CanceledError",
     "RetryableError",
     "ResourceError",
     "ValidationError",
     "FatalError",
+    "InputTooLargeError",
     "OutputTooLargeError",
     "RefCompatibilitySurprise",
     "WorkerError",
@@ -68,4 +89,5 @@ __all__ = [
     "apply_low_vram_config",
     "with_oom_retry",
     "clone",
+    "io",
 ]

@@ -15,8 +15,10 @@ class CheckpointRef:
     """Reference to a finalized checkpoint in tensorhub.
 
     Returned from `clone.from_huggingface` / `clone.from_civitai`. Opaque
-    to tenant code — carry it through to `ctx.publish_checkpoint(...)`
-    if flipping visibility.
+    to tenant code — carry it through to whatever downstream call needs
+    the destination_repo + checkpoint_id pair (e.g. an explicit
+    ``publish_repo_revision`` retag, or simply reporting back to the
+    caller).
     """
 
     destination_repo: str  # "owner/repo"

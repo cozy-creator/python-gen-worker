@@ -21,7 +21,7 @@ import typing
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import collections.abc as cabc
-from typing import Any, Callable, Dict, Optional, TypeVar, Iterator, List, Tuple, Iterable, get_args, get_origin
+from typing import Any, Callable, Dict, Optional, Type, TypeVar, Iterator, List, Tuple, Iterable, get_args, get_origin
 import hashlib
 import msgspec
 try:
@@ -56,15 +56,11 @@ def _normalize_grpc_addr(addr: str) -> tuple[str, bool]:
     tls = a.endswith(":443")
     return a, tls
 from ._worker_support import (
-    RealtimeSocket,
     _AuthInterceptor,
-    _RealtimeSessionState,
     _RequestSpec,
-    _WebsocketSpec,
     _extract_checkpoint_id_from_result,
     _extract_resolved_compute,
     _extract_worker_capability_token,
-    _normalize_materialized_input_urls,
     _parse_manifest_model_mapping,
     _workspace_scope_id,
 )
@@ -99,6 +95,8 @@ from .api.errors import (
     AuthError,
     CanceledError,
     FatalError,
+    InputTooLargeError,
+    OutputTooLargeError,
     RefCompatibilitySurprise,
     ResourceError,
     RetryableError,
@@ -137,58 +135,8 @@ HEARTBEAT_INTERVAL = 10  # seconds
 _DOWNLOAD_CHUNK_BYTES = 4 * 1024 * 1024
 
 
-class _RealtimeSocketAdapter(RealtimeSocket):
-    def __init__(self, worker: "Worker", session_id: str, loop: asyncio.AbstractEventLoop, in_q: "asyncio.Queue[Optional[bytes]]") -> None:
-        self._worker = worker
-        self._session_id = session_id
-        self._loop = loop
-        self._in_q = in_q
-        self._closed = False
-
-    async def send_bytes(self, data: bytes) -> None:
-        if self._closed:
-            return
-        self._worker._send_message(
-            pb.WorkerSchedulerMessage(
-                realtime_frame=pb.RealtimeFrame(session_id=self._session_id, data=data, is_text=False)
-            )
-        )
-
-    async def send_json(self, obj: Any) -> None:
-        if self._closed:
-            return
-        data = json.dumps(obj, separators=(",", ":"), sort_keys=True).encode("utf-8")
-        self._worker._send_message(
-            pb.WorkerSchedulerMessage(
-                realtime_frame=pb.RealtimeFrame(session_id=self._session_id, data=data, is_text=True)
-            )
-        )
-
-    async def iter_bytes(self) -> typing.AsyncIterator[bytes]:
-        while True:
-            item = await self._in_q.get()
-            if item is None:
-                break
-            yield item
-
-    async def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        try:
-            self._worker._send_message(
-                pb.WorkerSchedulerMessage(
-                    realtime_close_cmd=pb.RealtimeCloseCommand(session_id=self._session_id, reason="closed")
-                )
-            )
-        except Exception:
-            pass
-
-
 class Worker:
     """Worker implementation that connects to the scheduler via gRPC."""
-
-    _JWT_ROTATE_EVENT_TYPES = ("worker.jwt.rotate", "worker_jwt.rotate")
 
     def __init__(
         self,
@@ -263,7 +211,6 @@ class Worker:
         logger.info(f"RUNPOD_POD_ID: {self.runpod_pod_id}")
 
         self._request_specs: Dict[str, _RequestSpec] = {}
-        self._ws_specs: Dict[str, _WebsocketSpec] = {}
         # Transform-kind (@training_function) handlers, keyed by function
         # name. Dispatch shape is (request_context, payload_dict) → list[ProducedFlavor];
         # see gen_worker/conversion/dispatch.py for the contract.
@@ -280,8 +227,7 @@ class Worker:
         self._models_ready_on_connect: bool = False
         self._discovered_resources: Dict[str, ResourceRequirements] = {} # Store resources per function
         self._function_schemas: Dict[str, Tuple[bytes, bytes, Optional[bytes], bytes]] = {}  # func_name -> (input_schema_json, output_schema_json, delta_schema_json, injection_json)
-        self._runtime_batching_config_by_function: Dict[str, Dict[str, Any]] = {}
-        self._runtime_batching_config_lock = threading.Lock()
+        # #321: runtime batching state removed alongside RuntimeBatchingConfigCommand.
         self._last_function_capabilities_hash = ""
 
         self._custom_runtime_cache: Dict[Tuple[str, str], Any] = {}  # (model_id, injected_type_qualname) -> runtime handle
@@ -348,9 +294,6 @@ class Worker:
         self._job_executor = ThreadPoolExecutor(thread_name_prefix="gen-worker-job")
         self._job_dispatch_thread = threading.Thread(target=self._job_dispatch_loop, daemon=True, name="gen-worker-job-dispatch")
         self._job_dispatch_thread.start()
-
-        self._realtime_sessions: Dict[str, _RealtimeSessionState] = {}
-        self._realtime_lock = threading.Lock()
 
         self._reconnect_delay_base = max(0, reconnect_delay)
         self._reconnect_delay_max = 60
@@ -676,7 +619,7 @@ class Worker:
 
     def _map_exception(self, exc: BaseException) -> tuple[str, bool, str, str]:
         internal = f"{type(exc).__name__}: {str(exc)}".strip()
-        if isinstance(exc, CanceledError) or isinstance(exc, InterruptedError):
+        if isinstance(exc, CanceledError):
             return "canceled", False, "canceled", internal
         if isinstance(exc, HardwareUnmetError):
             # Terminal: function self-disables on this worker. Not
@@ -892,6 +835,44 @@ class Worker:
             error_message=str(error_message or ""),
         )
 
+    # #321: typed startup-phase enum on the wire (replaces stringly-typed
+    # event_type dispatch). Map our internal phase strings (which still flow
+    # into logs and ctx surfaces) to the proto enum so the orchestrator's
+    # state machine receives a typed value.
+    _STARTUP_PHASE_PROTO = {
+        "booting":             1,  # WORKER_STARTUP_PHASE_BOOTING
+        "models_downloading":  2,  # WORKER_STARTUP_PHASE_MODELS_DOWNLOADING
+        "pipeline_loading":    3,  # WORKER_STARTUP_PHASE_PIPELINE_LOADING
+        "ready":               4,  # WORKER_STARTUP_PHASE_READY
+        "error":               5,  # WORKER_STARTUP_PHASE_ERROR
+    }
+
+    # ModelAvailabilityKind proto enum values (#321):
+    _MODEL_AVAILABILITY_READY              = 1
+    _MODEL_AVAILABILITY_DOWNLOAD_COMPLETED = 2
+    _MODEL_AVAILABILITY_CACHED             = 3
+
+    def _emit_model_ready(self, model_id: str, kind: int) -> None:
+        """Emit a typed WorkerModelReadySignal (#321).
+
+        Replaces the three event_type strings (model.ready, model.cached,
+        model.download.completed) the worker used to send via worker_event.
+        Orchestrator routes on the typed variant and uses the kind enum for
+        the same downstream behavior (mark worker available; READY also
+        appends to VRAM model list).
+        """
+        try:
+            self._send_message(
+                pb.WorkerSchedulerMessage(
+                    worker_model_ready=pb.WorkerModelReadySignal(
+                        model_id=str(model_id or ""),
+                        kind=kind,
+                    )
+                )
+            )
+        except Exception:
+            pass
+
     def _emit_startup_phase(
         self,
         phase: str,
@@ -902,10 +883,13 @@ class Worker:
         **extra: Any,
     ) -> None:
         """
-        Emit a structured startup phase marker to logs and (best-effort) scheduler WorkerEvent.
+        Emit a structured startup phase marker to logs and (best-effort) the
+        scheduler via the typed WorkerStartupPhaseSignal (#321).
         """
-        payload: Dict[str, Any] = {
-            "phase": str(phase or "").strip(),
+        phase_str = str(phase or "").strip()
+        elapsed_ms = int(max(0.0, (time.monotonic() - float(getattr(self, "_process_started_monotonic", time.monotonic()))) * 1000.0))
+        log_payload: Dict[str, Any] = {
+            "phase": phase_str,
             "status": str(status or "ok"),
             "worker_id": str(getattr(self, "worker_id", "") or ""),
             "scheduler_addr": str(getattr(self, "scheduler_addr", "") or ""),
@@ -913,16 +897,33 @@ class Worker:
             "uid": int(os.getuid()) if hasattr(os, "getuid") else None,
             "gid": int(os.getgid()) if hasattr(os, "getgid") else None,
             "cwd": str(os.getcwd()),
-            "elapsed_ms": int(max(0.0, (time.monotonic() - float(getattr(self, "_process_started_monotonic", time.monotonic()))) * 1000.0)),
+            "elapsed_ms": elapsed_ms,
         }
-        payload.update({k: v for k, v in extra.items() if v is not None})
+        log_payload.update({k: v for k, v in extra.items() if v is not None})
         try:
-            logger.log(level, "worker.startup.phase %s", json.dumps(payload, separators=(",", ":"), sort_keys=True))
+            logger.log(level, "worker.startup.phase %s", json.dumps(log_payload, separators=(",", ":"), sort_keys=True))
         except Exception:
-            logger.log(level, "worker.startup.phase phase=%s status=%s", payload.get("phase"), payload.get("status"))
+            logger.log(level, "worker.startup.phase phase=%s status=%s", phase_str, status)
         if emit_worker_event:
+            phase_enum = self._STARTUP_PHASE_PROTO.get(phase_str, 0)  # 0 = UNSPECIFIED; orchestrator ignores
+            detail_parts = []
+            for k, v in extra.items():
+                if v is None:
+                    continue
+                detail_parts.append(f"{k}={v}")
+            detail = " ".join(detail_parts)
             try:
-                self._emit_worker_event_bytes("", "worker.startup.phase", safe_json_bytes(payload))
+                self._send_message(
+                    pb.WorkerSchedulerMessage(
+                        worker_startup_phase=pb.WorkerStartupPhaseSignal(
+                            phase=phase_enum,
+                            status=str(status or "ok"),
+                            scheduler_addr=str(getattr(self, "scheduler_addr", "") or ""),
+                            elapsed_ms=elapsed_ms,
+                            detail=detail,
+                        )
+                    )
+                )
             except Exception:
                 pass
 
@@ -1079,7 +1080,7 @@ class Worker:
 
 
     def _discover_and_register_functions(self) -> None:
-        """Discover and register functions marked with @inference_function / @realtime_function."""
+        """Discover and register functions marked with @inference_function."""
         logger.info("Discovering worker handlers in modules: %s...", self.user_module_names)
         discovered = 0
 
@@ -1128,7 +1129,7 @@ class Worker:
                     except Exception as exc:
                         logger.error("Skipping function '%s': %s", getattr(obj, "__name__", "<unknown>"), exc)
                         continue
-                    if spec.name in self._request_specs or spec.name in self._ws_specs:
+                    if spec.name in self._request_specs:
                         logger.warning("Handler name conflict for '%s'; skipping", spec.name)
                         continue
                     self._request_specs[spec.name] = spec
@@ -1142,20 +1143,6 @@ class Worker:
                     discovered += 1
                     logger.info("Registered function: '%s' (%s)", spec.name, spec.output_mode)
                     continue
-
-                if getattr(obj, "_is_worker_websocket", False) is True:
-                    try:
-                        ws_spec = self._inspect_websocket_spec(obj)
-                    except Exception as exc:
-                        logger.error("Skipping websocket '%s': %s", getattr(obj, "__name__", "<unknown>"), exc)
-                        continue
-                    if ws_spec.name in self._request_specs or ws_spec.name in self._ws_specs:
-                        logger.warning("Handler name conflict for '%s'; skipping", ws_spec.name)
-                        continue
-                    self._ws_specs[ws_spec.name] = ws_spec
-                    self._discovered_resources[ws_spec.name] = ws_spec.resources
-                    discovered += 1
-                    logger.info("Registered websocket: '%s'", ws_spec.name)
 
         if discovered == 0:
             logger.warning("No worker handlers found in modules: %s", self.user_module_names)
@@ -1279,54 +1266,6 @@ class Worker:
             output_schema_json=output_schema_json,
             delta_schema_json=delta_schema_json,
             injection_json=injection_json,
-        )
-
-    def _inspect_websocket_spec(self, func: Callable[..., Any]) -> _WebsocketSpec:
-        python_name = func.__name__
-        func_name = slugify_name(python_name)
-        if not func_name:
-            raise ValueError(f"{python_name}: function name cannot be normalized")
-        resources: ResourceRequirements = getattr(func, "_worker_resources", ResourceRequirements())
-        if not inspect.iscoroutinefunction(func):
-            raise ValueError("websocket handler must be async def")
-
-        try:
-            hints = typing.get_type_hints(func, globalns=func.__globals__, include_extras=True)
-        except Exception as exc:
-            raise ValueError(f"failed to resolve type hints: {exc}")
-
-        sig = inspect.signature(func)
-        params = list(sig.parameters.values())
-        if len(params) < 2:
-            raise ValueError("websocket handler must accept (ctx: RequestContext, sock: RealtimeSocket, ...)")
-
-        ctx_name = params[0].name
-        if hints.get(ctx_name) is not RequestContext:
-            raise ValueError("first argument must be ctx: RequestContext")
-
-        # We do not enforce a concrete socket type here; it is worker-owned and may
-        # be provided by the runtime. We only validate that the param exists.
-        socket_name = params[1].name
-        injections: list[InjectionSpec] = []
-        for p in params[2:]:
-            ann = hints.get(p.name)
-            if ann is None:
-                raise ValueError(f"missing type annotation for param: {p.name}")
-            inj = parse_injection(ann)
-            if inj is None:
-                raise ValueError("websocket extra params must be Annotated injections")
-            base_t, model_ref = inj
-            if model_ref.source == ModelRefSource.PAYLOAD:
-                raise ValueError("websocket handlers cannot use ModelRef(PAYLOAD, ...) (no payload for selection)")
-            injections.append(InjectionSpec(param_name=p.name, param_type=base_t, model_ref=model_ref))
-
-        return _WebsocketSpec(
-            name=func_name,
-            func=func,
-            resources=resources,
-            ctx_param=ctx_name,
-            socket_param=socket_name,
-            injections=tuple(injections),
         )
 
     def _send_message(self, message: WorkerSchedulerMessage) -> None:
@@ -1578,7 +1517,7 @@ class Worker:
             raise RuntimeError(f"failed to stat asset ({code or 'unknown'})") from e
         size = int(size_hdr) if size_hdr.isdigit() else 0
         if max_bytes > 0 and size > max_bytes:
-            raise RuntimeError("input file too large")
+            raise InputTooLargeError(size_bytes=size, max_bytes=max_bytes, source="input file")
 
         ext = os.path.splitext(ref)[1]
         if not ext and mime:
@@ -1695,7 +1634,7 @@ class Worker:
                         break
                     total += len(chunk)
                     if total > max_bytes:
-                        raise RuntimeError("input file too large")
+                        raise InputTooLargeError(size_bytes=total, max_bytes=max_bytes, source="input file")
                     h.update(chunk)
                     out.write(chunk)
             os.replace(tmp, dst)
@@ -2097,7 +2036,7 @@ class Worker:
         req: Optional[ResourceRequirements],
         gpu_info: Dict[str, Any],
     ) -> tuple[bool, Dict[str, Any]]:
-        cfg = dict(req.to_dict() if req else {})
+        cfg: Dict[str, Any] = dict(msgspec.to_builtins(req)) if req is not None else {}
         accelerator = str(cfg.get("accelerator", "") or "").strip().lower()
         if accelerator == "gpu":
             accelerator = "cuda"
@@ -2218,32 +2157,11 @@ class Worker:
 
         return vram_models, disk_models, downloading_models, supports_model_loading_flag
 
-    def _build_function_schemas(self) -> List[Any]:
-        """Serialize the registered `_function_schemas` dict into FunctionSchema
-        proto messages. Skips any entry whose spec lookup raises so one bad
-        function can't block registration of the others."""
-        function_schemas: List[Any] = []
-        for fname, (in_schema, out_schema, _delta_schema, inj_json) in self._function_schemas.items():
-            if not self.is_function_runnable(fname):
-                continue
-            try:
-                spec = self._request_specs.get(fname)
-                incremental = bool(spec and spec.output_mode == "incremental")
-                function_schemas.append(
-                    pb.FunctionSchema(
-                        name=fname,
-                        input_schema_json=in_schema,
-                        output_schema_json=out_schema,
-                        injection_json=inj_json,
-                        incremental_output=incremental,
-                    )
-                )
-            except Exception:
-                continue
-        return function_schemas
+    # #321: _build_function_schemas removed — WorkerResources.function_schemas
+    # was never read by the orchestrator. Schemas are served by tensorhub HTTP.
 
     def _available_function_names(self) -> List[str]:
-        names = list(self._request_specs.keys()) + list(self._ws_specs.keys()) + list(self._training_specs.keys())
+        names = list(self._request_specs.keys()) + list(self._training_specs.keys())
         return [name for name in dict.fromkeys(names) if self.is_function_runnable(name)]
 
     def _register_worker(self, is_heartbeat: bool = False) -> None:
@@ -2255,34 +2173,28 @@ class Worker:
                 self._collect_model_inventory()
             )
             _ = downloading_models  # not currently sent on WorkerResources
-            function_schemas = self._build_function_schemas()
-
+            # #321: function_schemas, cpu_cores, memory_bytes,
+            # gpu_memory_used_bytes, gpu_driver, cuda_version, torch_version,
+            # supports_model_loading, tensorrt_version, onnxruntime_version,
+            # build_timestamp were removed — orchestrator never read them.
             resources = pb.WorkerResources(
                 # Worker identity is carried in the worker-connect JWT claims when auth is enabled.
                 # When auth is disabled (dev mode), send worker_id directly so the orchestrator
                 # can identify this worker without JWT claims.
                 worker_id=self.worker_id,
                 release_id=self.release_id,
-                # owner is provided per-request via JobExecutionRequest/RealtimeOpenCommand.
+                # owner is provided per-request via JobExecutionRequest.
                 runpod_pod_id=self.runpod_pod_id,
                 gpu_is_busy=self._get_gpu_busy_status(),
-                cpu_cores=gpu_info["cpu_cores"],
-                memory_bytes=gpu_info["memory_bytes"],
                 gpu_count=gpu_info["gpu_count"],
                 gpu_memory_bytes=gpu_info["gpu_total_mem"],
-                gpu_memory_used_bytes=gpu_info["gpu_used_mem"],
                 gpu_memory_free_bytes=gpu_info["gpu_free_mem"],
                 gpu_name=gpu_info["gpu_name"],
-                gpu_driver=gpu_info["gpu_driver"],
-                cuda_version=gpu_info["cuda_version"],
-                torch_version=gpu_info["torch_version"],
                 gpu_sm=gpu_info["gpu_sm"],
                 installed_libs=gpu_info["installed_libs"],
                 available_functions=self._available_function_names(),
                 vram_models=vram_models,   # Models in VRAM (hot)
                 disk_models=disk_models,   # Models on disk (warm)
-                supports_model_loading=supports_model_loading_flag,
-                function_schemas=function_schemas,
             )
             registration = pb.WorkerRegistration(
                 resources=resources,
@@ -2342,100 +2254,23 @@ class Worker:
         except Exception as e:
             logger.error(f"Failed to create or send registration/heartbeat: {e}")
 
-    def _runtime_batching_cfg_for_function(self, function_name: str) -> Dict[str, Any]:
-        fn = str(function_name or "").strip()
-        if not fn:
-            return {}
-        with self._runtime_batching_config_lock:
-            cfg = self._runtime_batching_config_by_function.get(fn)
-            if not cfg:
-                return {}
-            return dict(cfg)
-
-    def _handle_runtime_batching_config_cmd(self, cmd: Any) -> None:
-        cfg = getattr(cmd, "config", None)
-        function_name = str(getattr(cfg, "function_name", "") or "").strip()
-        version = int(getattr(cfg, "version", 0) or 0)
-        success = False
-        error_message = ""
-        if not function_name:
-            error_message = "missing_function_name"
-        elif function_name not in self._request_specs:
-            error_message = f"unknown_function:{function_name}"
-        else:
-            normalized: Dict[str, Any] = {
-                "function_name": function_name,
-                "batch_size_target": max(1, int(getattr(cfg, "batch_size_target", 1) or 1)),
-                "batch_size_min": max(1, int(getattr(cfg, "batch_size_min", 1) or 1)),
-                "batch_size_max": max(1, int(getattr(cfg, "batch_size_max", 1) or 1)),
-                "prefetch_depth": max(1, int(getattr(cfg, "prefetch_depth", 1) or 1)),
-                "max_wait_ms": max(1, int(getattr(cfg, "max_wait_ms", 1) or 1)),
-                "version": max(1, version),
-            }
-            if normalized["batch_size_max"] < normalized["batch_size_min"]:
-                normalized["batch_size_max"] = normalized["batch_size_min"]
-            if normalized["batch_size_target"] < normalized["batch_size_min"]:
-                normalized["batch_size_target"] = normalized["batch_size_min"]
-            if normalized["batch_size_target"] > normalized["batch_size_max"]:
-                normalized["batch_size_target"] = normalized["batch_size_max"]
-
-            with self._runtime_batching_config_lock:
-                prev = self._runtime_batching_config_by_function.get(function_name)
-                prev_version = int((prev or {}).get("version", 0) or 0)
-                if version > 0 and version < prev_version:
-                    normalized = dict(prev or {})
-                else:
-                    self._runtime_batching_config_by_function[function_name] = normalized
-            success = True
-
-            try:
-                self._send_message(
-                    pb.WorkerSchedulerMessage(
-                        worker_event=pb.WorkerEvent(
-                            request_id="",
-                            event_type="worker.runtime_batching.updated",
-                            payload_json=json.dumps(
-                                {
-                                    "function_name": function_name,
-                                    "version": int(normalized.get("version", 0) or 0),
-                                    "batch_size_target": int(normalized.get("batch_size_target", 1) or 1),
-                                    "batch_size_min": int(normalized.get("batch_size_min", 1) or 1),
-                                    "batch_size_max": int(normalized.get("batch_size_max", 1) or 1),
-                                    "prefetch_depth": int(normalized.get("prefetch_depth", 1) or 1),
-                                    "max_wait_ms": int(normalized.get("max_wait_ms", 1) or 1),
-                                },
-                                separators=(",", ":"),
-                                sort_keys=True,
-                            ).encode("utf-8"),
-                        )
-                    )
-                )
-            except Exception:
-                pass
-
-        ack_version = max(1, version)
-        self._send_message(
-            pb.WorkerSchedulerMessage(
-                runtime_batching_config_result=pb.RuntimeBatchingConfigResult(
-                    function_name=function_name,
-                    version=ack_version,
-                    success=success,
-                    error_message=error_message,
-                )
-            )
-        )
+    # #321: _runtime_batching_cfg_for_function + _handle_runtime_batching_config_cmd
+    # removed. Proto messages (RuntimeBatchingConfigCommand/Result) were deleted
+    # because the orchestrator-side producer never landed; the helper, state,
+    # and the RequestContext.runtime_batching_config / preferred_batch_size /
+    # prefetch_depth API went with them. Reintroduce when an SLA planner ships
+    # a real producer.
 
     def _emit_function_capabilities_event(self) -> None:
         functions: List[Dict[str, Any]] = []
         all_names = dict.fromkeys(
             list(self._discovered_resources.keys())
             + list(self._request_specs.keys())
-            + list(self._ws_specs.keys())
             + list(self._training_specs.keys())
         )
         for fn_name in all_names:
             req = self._discovered_resources.get(fn_name)
-            caps = dict(req.to_dict() if req else {})
+            caps: Dict[str, Any] = dict(msgspec.to_builtins(req)) if req is not None else {}
             spec = self._request_specs.get(fn_name)
             if spec is not None:
                 caps["output_mode"] = spec.output_mode
@@ -2455,12 +2290,15 @@ class Worker:
         if sig == self._last_function_capabilities_hash:
             return
         self._last_function_capabilities_hash = sig
+        # #321: typed signal. Previously emitted via worker_event with
+        # event_type="worker.function_capabilities" — the orchestrator matched
+        # "function_capabilities" (no prefix), so capabilities were silently
+        # dropped. Typed dispatch eliminates the string-mismatch class of bug.
         self._send_message(
             pb.WorkerSchedulerMessage(
-                worker_event=pb.WorkerEvent(
-                    request_id="",
-                    event_type="worker.function_capabilities",
-                    payload_json=raw,
+                worker_function_capabilities=pb.WorkerFunctionCapabilitiesSignal(
+                    capabilities_json=raw,
+                    signature=sig,
                 )
             )
         )
@@ -2761,19 +2599,11 @@ class Worker:
             item_ids = [str(x).strip() for x in list(getattr(cmd, "item_ids", []) or []) if str(x).strip()]
             cancel_queued_only = bool(getattr(cmd, "cancel_queued_only", False))
             self._handle_interrupt_request(request_id, item_ids=item_ids, cancel_queued_only=cancel_queued_only)
-        elif msg_type == "runtime_batching_config_cmd":
-            self._handle_runtime_batching_config_cmd(message.runtime_batching_config_cmd)
         elif msg_type == "worker_drain_cmd":
             self._handle_worker_drain_cmd(message.worker_drain_cmd)
-        elif msg_type == "realtime_open_cmd":
-            self._handle_realtime_open_cmd(message.realtime_open_cmd)
-        elif msg_type == "realtime_frame":
-            self._handle_realtime_frame(message.realtime_frame)
-        elif msg_type == "realtime_close_cmd":
-            self._handle_realtime_close_cmd(message.realtime_close_cmd)
-        elif msg_type == "worker_event":
-            self._handle_worker_event_from_scheduler(message.worker_event)
-        # Add handling for other message types if needed (e.g., config updates)
+        # #321: runtime_batching_config_cmd removed — producer never landed.
+        # #321: inbound worker_event (JWT-rotation channel) removed — speculative;
+        # rotation is done by force-disconnecting the worker so it reconnects with a new token.
         elif msg_type == 'endpoint_config':
             cfg = message.endpoint_config
             resolved_by_flavor = dict(getattr(cfg, "resolved_repos_by_ref", {}) or {})
@@ -3199,39 +3029,12 @@ class Worker:
                     existing = self._try_find_existing_cozy_snapshot_dir(canon, cache_dir)
                     if existing is not None:
                         self._model_cache.mark_cached_to_disk(canon, existing)
-                        # Best-effort telemetry + convergence signals.
-                        try:
-                            payload = json.dumps(
-                                {"model_id": canon, "cached": True, "duration_ms": 0},
-                                separators=(",", ":"),
-                                sort_keys=True,
-                            ).encode("utf-8")
-                            self._send_message(
-                                pb.WorkerSchedulerMessage(
-                                    worker_event=pb.WorkerEvent(request_id="", event_type="model.download.completed", payload_json=payload)
-                                )
-                            )
-                            self._send_message(
-                                pb.WorkerSchedulerMessage(
-                                    worker_event=pb.WorkerEvent(request_id="", event_type="model.ready", payload_json=json.dumps({"model_id": canon}, separators=(",", ":"), sort_keys=True).encode("utf-8"))
-                                )
-                            )
-                        except Exception:
-                            pass
-                        # Volume inventory signal (gen-orchestrator issue #236).
-                        try:
-                            payload = json.dumps(
-                                {"model_variant_id": canon, **self._shared_disk_volume_info(existing)},
-                                separators=(",", ":"),
-                                sort_keys=True,
-                            ).encode("utf-8")
-                            self._send_message(
-                                pb.WorkerSchedulerMessage(
-                                    worker_event=pb.WorkerEvent(request_id="", event_type="model.cached", payload_json=payload)
-                                )
-                            )
-                        except Exception:
-                            pass
+                        # #321: typed model-ready signals. The orchestrator
+                        # collapses all three kinds into "mark available";
+                        # we preserve the kind for triage visibility.
+                        self._emit_model_ready(canon, self._MODEL_AVAILABILITY_DOWNLOAD_COMPLETED)
+                        self._emit_model_ready(canon, self._MODEL_AVAILABILITY_READY)
+                        self._emit_model_ready(canon, self._MODEL_AVAILABILITY_CACHED)
                         # Push a primary-stream heartbeat promptly (do not wait for
                         # the 10s heartbeat tick) so schedulers see disk inventory changes.
                         # Must be is_heartbeat=True: an is_heartbeat=False message makes the
@@ -3262,45 +3065,10 @@ class Worker:
                         raise RuntimeError(f"model download returned missing path: {local_path!r}")
 
                     self._model_cache.mark_cached_to_disk(canon, lp)
-                    # Optional fast convergence signal.
-                    try:
-                        payload = json.dumps({"model_id": canon}, separators=(",", ":"), sort_keys=True).encode("utf-8")
-                        self._send_message(
-                            pb.WorkerSchedulerMessage(
-                                worker_event=pb.WorkerEvent(request_id="", event_type="model.ready", payload_json=payload)
-                            )
-                        )
-                    except Exception:
-                        pass
-                    # Volume inventory signal (gen-orchestrator issue #236).
-                    # model id should match what the scheduler uses in required_flavor_refs.
-                    try:
-                        payload = json.dumps(
-                            {"model_variant_id": canon, **self._shared_disk_volume_info(lp)},
-                            separators=(",", ":"),
-                            sort_keys=True,
-                        ).encode("utf-8")
-                        self._send_message(
-                            pb.WorkerSchedulerMessage(
-                                worker_event=pb.WorkerEvent(request_id="", event_type="model.cached", payload_json=payload)
-                            )
-                        )
-                    except Exception:
-                        pass
-                    try:
-                        dur_ms = int((time.monotonic() - started_at) * 1000)
-                        payload = json.dumps(
-                            {"model_id": canon, "cached": False, "duration_ms": dur_ms},
-                            separators=(",", ":"),
-                            sort_keys=True,
-                        ).encode("utf-8")
-                        self._send_message(
-                            pb.WorkerSchedulerMessage(
-                                worker_event=pb.WorkerEvent(request_id="", event_type="model.download.completed", payload_json=payload)
-                            )
-                        )
-                    except Exception:
-                        pass
+                    # #321: typed signals (replaces 3 worker_event emits).
+                    self._emit_model_ready(canon, self._MODEL_AVAILABILITY_READY)
+                    self._emit_model_ready(canon, self._MODEL_AVAILABILITY_CACHED)
+                    self._emit_model_ready(canon, self._MODEL_AVAILABILITY_DOWNLOAD_COMPLETED)
                     # Push a primary-stream heartbeat promptly (do not wait for
                     # the 10s heartbeat tick) so schedulers see disk inventory changes.
                     # Must be is_heartbeat=True: see note at the cached-already branch above.
@@ -3394,34 +3162,10 @@ class Worker:
             return snap_dir
         return None
 
-    def _handle_worker_event_from_scheduler(self, ev: WorkerEvent) -> None:
-        # Direction is not enforced by the proto; we reserve WorkerEvent for low-frequency
-        # scheduler->worker control signals too (e.g. WORKER_JWT rotation).
-        try:
-            event_type = str(getattr(ev, "event_type", "") or "").strip()
-            if not event_type:
-                return
-            if event_type not in self._JWT_ROTATE_EVENT_TYPES:
-                logger.info("Ignoring scheduler worker_event type=%r", event_type)
-                return
-
-            payload_raw = getattr(ev, "payload_json", b"") or b""
-            payload: Dict[str, Any] = {}
-            try:
-                payload = json.loads(payload_raw.decode("utf-8")) if payload_raw else {}
-            except Exception:
-                payload = {}
-
-            new_token = str(payload.get("worker_jwt") or payload.get("token") or "").strip()
-            if not new_token:
-                logger.warning("Received worker JWT rotation event without a token; ignoring")
-                return
-
-            # Only affects future reconnects. The current stream uses the interceptor created at connect time.
-            self.worker_jwt = new_token
-            logger.info("Stored rotated WORKER_JWT for next reconnect (len=%d).", len(new_token))
-        except Exception as e:
-            logger.warning("Failed to handle scheduler worker_event: %s", e)
+    # #321: _handle_worker_event_from_scheduler removed — no orchestrator ever
+    # sent a worker_event toward a worker. JWT rotation is done by minting a
+    # new token, force-disconnecting the worker, and letting it reconnect with
+    # the new JWT (drop+reconnect = same outcome with zero new protocol).
 
     def _process_release_config_async_wrapper(self) -> None:
         if not self._model_manager or self._supported_model_ids_from_scheduler is None:
@@ -3647,7 +3391,8 @@ class Worker:
                 item_index = int(raw_item_index)
             except Exception:
                 item_index = None
-        materialized_input_urls = _normalize_materialized_input_urls(request)
+        # #321: input URLs flow inside input_payload msgpack; no separate field.
+        materialized_input_urls: Optional[Dict[str, str]] = None
 
         required_models_raw = list(getattr(request, "required_flavor_refs", []) or [])
         if required_models_raw:
@@ -3732,9 +3477,8 @@ class Worker:
                 continue
             required_models.append(_canonicalize_model_ref_string(s))
 
-        runtime_cfg = self._runtime_batching_cfg_for_function(function_name)
         resource_req = self._discovered_resources.get(function_name)
-        req_cfg = dict(resource_req.to_dict() if resource_req else {})
+        req_cfg: Dict[str, Any] = dict(msgspec.to_builtins(resource_req)) if resource_req is not None else {}
         execution_hints: Dict[str, Any] = {}
         kind = str(req_cfg.get("kind", "") or "").strip()
         if kind:
@@ -3779,7 +3523,25 @@ class Worker:
             if job_id and "job_id" not in execution_hints:
                 execution_hints["job_id"] = job_id
 
-        ctx = RequestContext(
+        # Issue #1 (slim-request-context): pick the kind-specific subclass.
+        # Inference functions get the bare RequestContext (no producer-contract
+        # methods); @training_function handlers get ConversionContext (default)
+        # or DatasetContext (kind=='dataset-generation*'). Trainer-class
+        # endpoints route through a separate runtime (entrypoint.py) and don't
+        # touch this code path. The handler's typed annotation
+        # (`ctx: ConversionContext`) is the source of truth — we match it here.
+        ctx_cls: Type[RequestContext] = RequestContext
+        if training_fn is not None:
+            training_spec = getattr(training_fn, "__training_spec__", None)
+            spec_kind = str(getattr(training_spec, "kind", "") or "").strip()
+            if spec_kind.startswith("dataset-generation"):
+                from .request_context import DatasetContext
+                ctx_cls = DatasetContext
+            else:
+                from .request_context import ConversionContext
+                ctx_cls = ConversionContext
+
+        ctx = ctx_cls(
             request_id,
             job_id=job_id,
             emitter=self._emit_progress_event,
@@ -3792,7 +3554,6 @@ class Worker:
             local_output_dir=None,
             resolved_repos_by_id=resolved_repos_by_id or None,
             required_models=required_models or None,
-            runtime_batching_config=runtime_cfg or None,
             execution_hints=execution_hints or None,
             parent_request_id=parent_request_id,
             child_request_id=child_request_id,
@@ -3810,6 +3571,27 @@ class Worker:
                   error_msg = f"Task with request_id {request_id} is already active (race condition?)."
                   logger.error(error_msg)
                   self._emit_request_event(request_id, "request.rejected", {"reason": "duplicate_request_id"})
+                  # #321: emit a terminal JobExecutionResult so the orchestrator
+                  # sees this as a failure NOW instead of timing out the
+                  # request. error_type=duplicate_request_id makes the failure
+                  # mode searchable in request_events.
+                  try:
+                       self._send_message(
+                            pb.WorkerSchedulerMessage(
+                                 job_result=pb.JobExecutionResult(
+                                      request_id=request_id,
+                                      success=False,
+                                      error_type="duplicate_request_id",
+                                      retryable=False,
+                                      safe_message="orchestrator dispatched a request_id that is already active on this worker",
+                                 )
+                            )
+                       )
+                  except Exception as send_err:
+                       logger.error(
+                            "failed to send duplicate_request_id result rid=%s: %s",
+                            request_id, send_err,
+                       )
                   return # Avoid starting duplicate thread
              active_count_at_start = len(self._active_requests)
              local_queued_count_at_start = self._job_queue.qsize()
@@ -3896,148 +3678,6 @@ class Worker:
                 ctx.cancel() # Set internal flag and event
             else:
                 logger.warning(f"Could not interrupt request request_id={request_id}: Not found in active requests.")
-
-    def _handle_realtime_open_cmd(self, cmd: Any) -> None:
-        session_id = str(getattr(cmd, "session_id", "") or "")
-        function_name = str(getattr(cmd, "function_name", "") or "")
-        if not session_id or not function_name:
-            return
-        spec = self._ws_specs.get(function_name)
-        if spec is None:
-            self._send_message(
-                pb.WorkerSchedulerMessage(
-                    realtime_close_cmd=pb.RealtimeCloseCommand(session_id=session_id, reason="unknown_function")
-                )
-            )
-            return
-
-        owner = str(getattr(cmd, "owner", "") or "") or (self.owner or "")
-        invoker_id = str(getattr(cmd, "invoker_id", "") or "")
-        timeout_ms = int(getattr(cmd, "timeout_ms", 0) or 0) or None
-        file_base_url = str(getattr(cmd, "file_base_url", "") or "")
-        worker_capability_token = _extract_worker_capability_token(cmd)
-        materialized_input_urls = _normalize_materialized_input_urls(cmd)
-        # Tensorhub #232: resolved hardware also populated for realtime sessions
-        # (RealtimeOpenCommand carries the same resolved_compute protobuf field
-        # as JobExecutionRequest). Tenants read via ctx.compute.
-        compute = _extract_resolved_compute(cmd)
-        ctx = RequestContext(
-            session_id,
-            emitter=self._emit_progress_event,
-            owner=owner or None,
-            invoker_id=invoker_id or None,
-            timeout_ms=timeout_ms,
-            file_api_base_url=(file_base_url or self._settings.tensorhub_public_url or None),
-            worker_capability_token=worker_capability_token or None,
-            materialized_input_urls=materialized_input_urls or None,
-            resolved_repos_by_id=getattr(self, "_resolved_repos_by_id_baseline", None) or None,
-            compute=compute,
-            hf_token=self._settings.hf_token,
-        )
-
-        max_frame = 0
-
-        def runner() -> None:
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            in_q: asyncio.Queue[Optional[bytes]] = asyncio.Queue(maxsize=16)
-            sock = _RealtimeSocketAdapter(self, session_id, loop, in_q)
-            closed = threading.Event()
-            st = _RealtimeSessionState(session_id=session_id, spec=spec, ctx=ctx, loop=loop, in_q=in_q, closed=closed)
-            with self._realtime_lock:
-                self._realtime_sessions[session_id] = st
-
-            async def run_handler() -> None:
-                # Build kwargs for handler.
-                kwargs: Dict[str, Any] = {spec.ctx_param: ctx, spec.socket_param: sock}
-                from .models.ref_downloader import (
-                    reset_resolved_repos_by_id,
-                    set_resolved_repos_by_id,
-                )
-                baseline = getattr(self, "_resolved_repos_by_id_baseline", None) or None
-                resolved_tok = set_resolved_repos_by_id(getattr(ctx, "resolved_repos_by_id", None) or baseline)
-                try:
-                    required_flavor_refs = list(getattr(cmd, "required_flavor_refs", []) or [])
-                    for idx, inj in enumerate(spec.injections):
-                        if idx >= len(required_flavor_refs) or not str(required_flavor_refs[idx]).strip():
-                            raise ValueError(f"missing required_flavor_refs for injection param: {inj.param_name}")
-                        model_id = _canonicalize_model_ref_string(str(required_flavor_refs[idx]).strip())
-                        self._enforce_model_allowlist(model_id, inj)
-                        kwargs[inj.param_name] = self._resolve_injected_value(ctx, inj.param_type, model_id, inj)
-                    await spec.func(**kwargs)
-                finally:
-                    reset_resolved_repos_by_id(resolved_tok)
-
-            try:
-                loop.run_until_complete(run_handler())
-                self._send_message(
-                    pb.WorkerSchedulerMessage(
-                        realtime_close_cmd=pb.RealtimeCloseCommand(session_id=session_id, reason="completed")
-                    )
-                )
-            except Exception as exc:
-                self._send_message(
-                    pb.WorkerSchedulerMessage(
-                        realtime_close_cmd=pb.RealtimeCloseCommand(session_id=session_id, reason=f"error:{type(exc).__name__}")
-                    )
-                )
-            finally:
-                closed.set()
-                try:
-                    loop.call_soon_threadsafe(in_q.put_nowait, None)
-                except Exception:
-                    pass
-                with self._realtime_lock:
-                    self._realtime_sessions.pop(session_id, None)
-                try:
-                    loop.stop()
-                except Exception:
-                    pass
-                try:
-                    loop.close()
-                except Exception:
-                    pass
-
-        t = threading.Thread(target=runner, daemon=True)
-        t.start()
-
-    def _handle_realtime_frame(self, frame: Any) -> None:
-        session_id = str(getattr(frame, "session_id", "") or "")
-        data = bytes(getattr(frame, "data", b"") or b"")
-        if not session_id:
-            return
-
-        max_frame = 0
-        if max_frame > 0 and len(data) > max_frame:
-            self._send_message(
-                pb.WorkerSchedulerMessage(
-                    realtime_close_cmd=pb.RealtimeCloseCommand(session_id=session_id, reason="frame_too_large")
-                )
-            )
-            return
-
-        with self._realtime_lock:
-            st = self._realtime_sessions.get(session_id)
-        if st is None:
-            return
-        try:
-            st.loop.call_soon_threadsafe(st.in_q.put_nowait, data)
-        except Exception:
-            pass
-
-    def _handle_realtime_close_cmd(self, cmd: Any) -> None:
-        session_id = str(getattr(cmd, "session_id", "") or "")
-        if not session_id:
-            return
-        with self._realtime_lock:
-            st = self._realtime_sessions.get(session_id)
-        if st is None:
-            return
-        st.ctx.cancel()
-        try:
-            st.loop.call_soon_threadsafe(st.in_q.put_nowait, None)
-        except Exception:
-            pass
 
     def _execute_request(
         self,
@@ -4132,7 +3772,6 @@ class Worker:
             {
                 "function_name": str(spec.name or ""),
                 "required_flavor_refs": list(getattr(ctx, "required_models", []) or []),
-                "runtime_batching_config": getattr(ctx, "runtime_batching_config", {}),
                 "execution_hints": getattr(ctx, "execution_hints", {}),
             },
         )
@@ -4488,7 +4127,7 @@ class Worker:
                 result = self._auto_upload_output_assets(ctx, result)
                 output_payload = msgspec.msgpack.encode(msgspec.to_builtins(result))
                 if self.max_output_bytes > 0 and len(output_payload) > self.max_output_bytes:
-                    raise ValueError(f"Output payload too large: {len(output_payload)} bytes (max {self.max_output_bytes})")
+                    raise OutputTooLargeError(size_bytes=len(output_payload), max_bytes=self.max_output_bytes)
                 success = True
 
                 # Training: apply destination.tags to the produced
@@ -4535,7 +4174,14 @@ class Worker:
                                 delta_text = val.strip()
                                 break
                     ts_ms = int(time.time() * 1000)
-                    emitted = self._emit_incremental_delta_typed(
+                    # #321: dual streaming path removed. The typed
+                    # IncrementalToken* messages are the contract; a False
+                    # return now means the proto class is missing on the wire
+                    # (deployment skew with the scheduler) — drop the delta
+                    # and log rather than silently routing through
+                    # worker_event, which the orchestrator wouldn't typed-
+                    # branch on anyway.
+                    if not self._emit_incremental_delta_typed(
                         request_id=request_id,
                         function_name=spec.name,
                         item_id=item_id,
@@ -4543,12 +4189,10 @@ class Worker:
                         timestamp_unix_ms=ts_ms,
                         delta_text=delta_text,
                         payload_json=raw,
-                    )
-                    if not emitted:
-                        self._send_message(
-                            pb.WorkerSchedulerMessage(
-                                worker_event=pb.WorkerEvent(request_id=request_id, event_type="output.delta", payload_json=raw)
-                            )
+                    ):
+                        logger.warning(
+                            "IncrementalTokenDelta proto class unavailable; dropping delta rid=%s seq=%d",
+                            request_id, count + 1,
                         )
                     last_item_id = item_id
                     count += 1
@@ -4581,20 +4225,18 @@ class Worker:
                         if max_events > 0 and count >= max_events:
                             break
 
-                # Optionally emit completion marker.
+                # Emit completion marker (#321: typed-only, no worker_event fallback).
                 done_ts_ms = int(time.time() * 1000)
-                emitted_done = self._emit_incremental_done_typed(
+                if not self._emit_incremental_done_typed(
                     request_id=request_id,
                     function_name=spec.name,
                     item_id=last_item_id,
                     sequence=count + 1,
                     timestamp_unix_ms=done_ts_ms,
-                )
-                if not emitted_done:
-                    self._send_message(
-                        pb.WorkerSchedulerMessage(
-                            worker_event=pb.WorkerEvent(request_id=request_id, event_type="output.completed", payload_json=b"{}")
-                        )
+                ):
+                    logger.warning(
+                        "IncrementalTokenStreamDone proto class unavailable; cannot signal stream end rid=%s",
+                        request_id,
                     )
                 output_payload = b""
                 success = True
@@ -4652,20 +4294,18 @@ class Worker:
                 )
             if spec.output_mode == "incremental":
                 try:
-                    payload = json.dumps({"error_type": error_type, "message": safe_message}, separators=(",", ":")).encode("utf-8")
-                    emitted_err = self._emit_incremental_error_typed(
+                    # #321: typed-only, no worker_event fallback.
+                    if not self._emit_incremental_error_typed(
                         request_id=request_id,
                         function_name=spec.name,
                         item_id="item-0",
                         sequence=0,
                         timestamp_unix_ms=int(time.time() * 1000),
                         error_message=safe_message,
-                    )
-                    if not emitted_err:
-                        self._send_message(
-                            pb.WorkerSchedulerMessage(
-                                worker_event=pb.WorkerEvent(request_id=request_id, event_type="output.error", payload_json=payload)
-                            )
+                    ):
+                        logger.warning(
+                            "IncrementalTokenStreamError proto class unavailable; cannot signal stream error rid=%s",
+                            request_id,
                         )
                 except Exception:
                     pass
@@ -5285,20 +4925,8 @@ class Worker:
                                 except Exception:
                                     pass
                                 if not warm:
-                                    # Volume inventory signal (gen-orchestrator issue #236).
-                                    try:
-                                        payload = json.dumps(
-                                            {"model_variant_id": canon, **self._shared_disk_volume_info(lp)},
-                                            separators=(",", ":"),
-                                            sort_keys=True,
-                                        ).encode("utf-8")
-                                        self._send_message(
-                                            pb.WorkerSchedulerMessage(
-                                                worker_event=pb.WorkerEvent(request_id="", event_type="model.cached", payload_json=payload)
-                                            )
-                                        )
-                                    except Exception:
-                                        pass
+                                    # #321: typed signal.
+                                    self._emit_model_ready(canon, self._MODEL_AVAILABILITY_CACHED)
                         except Exception:
                             pass
                     else:
@@ -5821,6 +5449,9 @@ class Worker:
             batch_ctx: Optional[Tuple[str, str]] = None
             with self._request_batch_context_lock:
                 batch_ctx = self._request_batch_context.pop(request_id, None)
+            # #321: error_message field removed from JobExecutionResult and
+            # BatchExecutionItemResult — safe_message is the canonical client
+            # error string, error_type is the canonical classification.
             if batch_ctx is not None:
                 batch_id, item_id = batch_ctx
                 item_result = pb.BatchExecutionItemResult(
@@ -5828,7 +5459,6 @@ class Worker:
                     item_id=item_id or "item-000001",
                     success=success,
                     output_payload=(output_payload or b'') if success else b'',
-                    error_message=error_message if not success else "",
                     error_type=error_type if not success else "",
                     retryable=bool(retryable) if not success else False,
                     safe_message=safe_message if not success else "",
@@ -5845,7 +5475,6 @@ class Worker:
                     request_id=request_id,
                     success=success,
                     output_payload=(output_payload or b'') if success else b'', # Default to b'' if None
-                    error_message=error_message if not success else "",
                     error_type=error_type if not success else "",
                     retryable=bool(retryable) if not success else False,
                     safe_message=safe_message if not success else "",

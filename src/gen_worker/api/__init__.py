@@ -4,7 +4,6 @@ from .decorators import (
     ResourceRequirements,
     ScalingHints,
     inference_function,
-    realtime_function,
 )
 from .errors import (
     AuthError,
@@ -26,7 +25,6 @@ __all__ = [
     "ResourceRequirements",
     "ScalingHints",
     "inference_function",
-    "realtime_function",
     "AuthError",
     "CanceledError",
     "FatalError",

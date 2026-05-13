@@ -18,7 +18,7 @@ from pathlib import Path
 
 import msgspec
 
-from gen_worker.conversion import ConversionContext, ProducedFlavor, training_function
+from gen_worker.conversion import ConversionContext, ProducedFlavor, Source, training_function
 
 
 class FromScratchInput(msgspec.Struct, forbid_unknown_fields=True):
@@ -30,6 +30,7 @@ class FromScratchInput(msgspec.Struct, forbid_unknown_fields=True):
 @training_function(kind="from-scratch")
 def generate(
     ctx: ConversionContext,
+    source: Source,
     payload: FromScratchInput,
 ) -> list[ProducedFlavor]:
     """Generate random weights and emit as an orphan checkpoint.
@@ -38,7 +39,13 @@ def generate(
     declaration tells the library this produces checkpoints that
     genuinely have no upstream; the lineage array will be empty; the
     finalize handler accepts empty lineage as the root case.
+
+    Source is required by the @training_function signature (post-0.6.0)
+    but ignored — the e2e CLI still has to pass a --source-ref, so any
+    tiny repo works. The orphan-checkpoint semantics still hold because
+    we don't write source into the produced lineage.
     """
+    _ = source
     try:
         import torch  # noqa: WPS433
     except ImportError:

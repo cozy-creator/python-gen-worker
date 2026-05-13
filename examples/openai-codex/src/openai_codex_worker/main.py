@@ -67,7 +67,7 @@ def codex_exec(ctx: RequestContext, payload: CodexExecInput) -> Iterator[CodexEv
         for line in proc.stdout:
             if ctx.is_canceled():
                 proc.kill()
-                raise InterruptedError("Task cancelled")
+                ctx.raise_if_canceled()
             s = line.rstrip("\n")
             if not s:
                 continue

@@ -4,7 +4,7 @@ The hello-world inference endpoint. Send `{"text": "marco"}`, get back `{"respon
 
 ## What it demonstrates
 - Minimal `@inference_function` shape — msgspec.Struct in, msgspec.Struct out.
-- Cooperative cancellation via `ctx.is_canceled()`.
+- Cooperative cancellation via `ctx.raise_if_canceled()`.
 - No GPU, no models, no dependencies.
 
 ## When to copy it

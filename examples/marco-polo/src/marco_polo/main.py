@@ -14,8 +14,7 @@ class MarcoPoloOutput(msgspec.Struct):
 def marco_polo(ctx: RequestContext, data: MarcoPoloInput) -> MarcoPoloOutput:
     """Returns 'polo' when input is 'marco'; otherwise a fallback response."""
     # Deterministic minimal handler used for latency tests.
-    if ctx.is_canceled():
-        raise InterruptedError("Request cancelled")
+    ctx.raise_if_canceled()
 
     if str(data.text or "").strip().lower() == "marco":
         return MarcoPoloOutput(response="polo")

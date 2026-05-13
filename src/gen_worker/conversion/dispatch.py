@@ -35,10 +35,10 @@ import msgspec
 
 _log = logging.getLogger(__name__)
 
-from ..api.decorators import ResourceRequirements
+from ..api.decorators import ResourceRequirements, ScalingHints
 from ..api.injection import ModelRef, ModelRefSource, parse_injection
 from .calibration import CalibrationPolicy, lookup_policy, validate_policy_map
-from .context import ConversionContext
+from ..request_context import ConversionContext
 from .dataset import Dataset
 from .produced import ProducedFlavor
 from .source import Source
@@ -58,6 +58,24 @@ _CANONICAL_QUANT_SCHEME_LIBRARY: dict[str, str] = {
     "fp8":      "modelopt",
     "int8":     "modelopt",
 }
+
+_CHECKPOINT_METADATA_DROP_KEYS = {
+    "flavor",
+    "flavors",
+    "produced_by_kind",
+    "produced_by_job_id",
+}
+
+
+def _checkpoint_metadata_from_attrs(attrs: dict[str, Any]) -> dict[str, Any]:
+    """Keep only non-identity, non-provenance checkpoint metadata."""
+    out: dict[str, Any] = {}
+    for key, value in attrs.items():
+        clean = str(key or "").strip()
+        if not clean or clean in _CHECKPOINT_METADATA_DROP_KEYS:
+            continue
+        out[clean] = value
+    return out
 
 
 def _resolve_quant_method(flavor: str, v_attrs: dict[str, Any], merged_attrs: dict[str, Any]) -> str:
@@ -192,13 +210,12 @@ def training_function(
     label: str | None = None,
     description: str | None = None,
     calibration: dict[str, CalibrationPolicy] | None = None,
-    scaling_hints: Any = None,
-    # Flat-kwarg variants of ScalingHints, see ScalingHints docstring.
+    scaling_hints: ScalingHints | None = None,
     vram_must_fit: str | None = None,
-    vram_base: int | None = None,
-    vram_size_multiplier: float | None = None,
-    vram_scales_with: list[str] | None = None,
-    runtime_scales_with: list[str] | None = None,
+    vram_base: int = 0,
+    vram_size_multiplier: float = 0.0,
+    vram_scales_with: list[str] | tuple[str, ...] | None = None,
+    runtime_scales_with: list[str] | tuple[str, ...] | None = None,
 ) -> Callable[..., list[ProducedFlavor]]:
     """Mark a tenant function as a training endpoint (tensorhub #232).
 
@@ -221,6 +238,10 @@ def training_function(
             front "supply a dataset." At runtime the tenant calls
             ``gen_worker.conversion.calibration.resolve_calibration_action``
             to enforce policy per spec.
+        scaling_hints: Optional prebuilt :class:`ScalingHints` value. Tenants
+            may also pass the direct VRAM/runtime keyword fields below.
+        vram_must_fit, vram_base, vram_size_multiplier, vram_scales_with,
+            runtime_scales_with: Convenience form for ``ScalingHints``.
 
     At decorator time: validates the signature and attaches a
     ``TrainingFunctionSpec`` to the function as ``__training_spec__``.
@@ -232,10 +253,7 @@ def training_function(
     (ctx / source / datasets) are library-injected; the rest of the
     signature decodes from the wire payload.
     """
-    # Resolve scaling_hints (object OR flat kwargs) once at call time so the
-    # error surface is clear when both are provided.
-    from ..api.decorators import _build_scaling_hints
-    hints = _build_scaling_hints(
+    effective_scaling_hints = _coerce_training_scaling_hints(
         scaling_hints=scaling_hints,
         vram_must_fit=vram_must_fit,
         vram_base=vram_base,
@@ -243,7 +261,6 @@ def training_function(
         vram_scales_with=vram_scales_with,
         runtime_scales_with=runtime_scales_with,
     )
-
     # Support both @training_function and @training_function(kind=...).
     if fn is None:
         def _apply(real_fn: Callable[..., list[ProducedFlavor]]) -> Callable[..., list[ProducedFlavor]]:
@@ -251,14 +268,48 @@ def training_function(
                 real_fn, kind=kind,
                 label=label, description=description,
                 calibration=calibration,
-                scaling_hints=hints,
+                scaling_hints=effective_scaling_hints,
             )
         return _apply  # type: ignore[return-value]
     return _build_dispatch(
         fn, kind=kind,
         label=label, description=description,
         calibration=calibration,
-        scaling_hints=hints,
+        scaling_hints=effective_scaling_hints,
+    )
+
+
+def _coerce_training_scaling_hints(
+    *,
+    scaling_hints: ScalingHints | None,
+    vram_must_fit: str | None,
+    vram_base: int,
+    vram_size_multiplier: float,
+    vram_scales_with: list[str] | tuple[str, ...] | None,
+    runtime_scales_with: list[str] | tuple[str, ...] | None,
+) -> ScalingHints | None:
+    direct_fields_present = (
+        vram_must_fit is not None
+        or bool(vram_base)
+        or bool(vram_size_multiplier)
+        or bool(vram_scales_with)
+        or bool(runtime_scales_with)
+    )
+    if scaling_hints is not None:
+        if direct_fields_present:
+            raise TypeError(
+                "@training_function received both scaling_hints= and direct "
+                "vram/runtime scaling fields; use one form"
+            )
+        return scaling_hints
+    if not direct_fields_present:
+        return None
+    return ScalingHints(
+        vram_must_fit=vram_must_fit,  # type: ignore[arg-type]
+        vram_base=int(vram_base or 0),
+        vram_size_multiplier=float(vram_size_multiplier or 0.0),
+        vram_scales_with=tuple(vram_scales_with or ()),
+        runtime_scales_with=tuple(runtime_scales_with or ()),
     )
 
 
@@ -310,9 +361,20 @@ def _build_dispatch(
     ref_registry: dict[str, str] = {}
     other_params: dict[str, inspect.Parameter] = {}
 
+    # Issue #1 (slim-request-context): `ctx`'s expected type depends on the
+    # endpoint kind. Dataset-generation tenants type `ctx: DatasetContext`;
+    # all other transform-kind tenants type `ctx: ConversionContext`.
+    is_dataset_gen = kind.startswith("dataset-generation")
+    if is_dataset_gen:
+        from ..request_context import DatasetContext as _CtxType
+    else:
+        from ..request_context import ConversionContext as _CtxType
+    reserved_for_kind: dict[str, Any] = dict(RESERVED_TYPES)
+    reserved_for_kind["ctx"] = _CtxType
+
     for name, p in sig.parameters.items():
-        if name in RESERVED_TYPES:
-            expected = RESERVED_TYPES[name]
+        if name in reserved_for_kind:
+            expected = reserved_for_kind[name]
             if p.annotation is inspect.Parameter.empty:
                 raise TypeError(
                     f"{fn.__name__}: reserved param '{name}' must be typed as "
@@ -410,7 +472,14 @@ def _run(
     source: Source | None = None
     if "source" in spec.signature.parameters:
         source = _build_source(request_context, payload)
-    ctx = ConversionContext(request_context=request_context, source=source)
+    # Issue #1 (slim-request-context): the kind-specific subclass is now
+    # constructed in worker.py before dispatch (ConversionContext for
+    # transform-kind jobs, DatasetContext for dataset-generation). Reuse
+    # that incoming context and just attach the resolved Source so the
+    # tenant-helper API (mktemp / open_output_writer) can reach it.
+    ctx = request_context
+    if source is not None and hasattr(ctx, "_source"):
+        ctx._source = source  # type: ignore[attr-defined]
     datasets = _build_datasets(request_context, payload)
 
     # Auto-enforce calibration policy. When a scheme's policy is
@@ -515,7 +584,7 @@ def _finalize_produced_variants(
       3. Computes ``snapshot_digest = sha256(canonical_json(entries))`` —
          content-addresses the whole variant snapshot.
       4. Calls the appropriate publish method with the snapshot_manifest
-         + attributes payload.
+         + metadata payload.
 
     ``destination.tags`` (e.g. ``:prod``) are forwarded to
     ``publish_repo_revision`` in the checkpoint path so the tag + checkpoint
@@ -529,12 +598,6 @@ def _finalize_produced_variants(
     if is_dataset_gen:
         _finalize_dataset_variants(request_context, variants, kind=kind)
         return
-
-    job_id = str(getattr(request_context, "job_id", "") or "") \
-        or str(getattr(request_context, "request_id", "") or "")
-    library_provenance: dict[str, str] = {"produced_by_job_id": job_id}
-    if kind:
-        library_provenance["produced_by_kind"] = kind
 
     # ctx.destination / ctx.source are dicts ({ref, tags, ...} / {ref, attributes, ...}).
     destination = getattr(request_context, "destination", None) or {}
@@ -579,11 +642,11 @@ def _finalize_produced_variants(
     aggregate_manifest_entries: list[dict[str, Any]] = []
 
     for variant in variants:
-        merged_attrs = {**library_provenance, **dict(variant.attributes or {})}
+        v_attrs = dict(variant.attributes or {})
+        checkpoint_metadata = _checkpoint_metadata_from_attrs(v_attrs)
         flavor = str(
             getattr(variant, "flavor", "")
-            or merged_attrs.get("flavor")
-            or merged_attrs.get("flavor")
+            or v_attrs.get("flavor")
             or ""
         ).strip()
         flavors: list[str] = []
@@ -595,10 +658,6 @@ def _finalize_produced_variants(
                     flavors.append(item)
         if flavor and flavor not in flavors:
             flavors.insert(0, flavor)
-        if flavor:
-            merged_attrs["flavor"] = flavor
-        if flavors:
-            merged_attrs["flavors"] = ",".join(flavors)
         path = variant.path
         _log.info("finalize flavor: path=%s flavor=%s is_file=%s is_dir=%s dest=%s", path, flavor, path.is_file() if path else False, path.is_dir() if path else False, dest_ref)
 
@@ -609,13 +668,13 @@ def _finalize_produced_variants(
         uploaded: list[tuple[str, Any]] = []
         if path.is_file():
             t = _upload_single_file_flavor(
-                request_context, path, attributes=merged_attrs,
+                request_context, path, attributes=checkpoint_metadata,
             )
             if t is not None:
                 uploaded.append((path.name, t))
         elif path.is_dir():
             uploaded.extend(_upload_directory_flavor(
-                request_context, path, attributes=merged_attrs,
+                request_context, path, attributes=checkpoint_metadata,
             ))
         else:
             raise FileNotFoundError(f"ProducedFlavor.path does not exist: {path}")
@@ -643,7 +702,6 @@ def _finalize_produced_variants(
         # one place server-side.
         _log.info("finalize: manifest_entries=%d publish_callable=%s dest_ref=%s", len(manifest_entries), callable(publish_fn), dest_ref)
         if callable(publish_fn) and dest_ref and manifest_entries:
-            v_attrs = dict(variant.attributes or {})
             # Issue #22: server-authoritative metadata. The body
             # carries the manifest + flavor labels + size only; server
             # infers kind / library / dtype / file_layout / file_type
@@ -671,21 +729,23 @@ def _finalize_produced_variants(
                 "snapshot_manifest": manifest_entries,
                 "display_label":      label,
             }
+            if checkpoint_metadata:
+                publish_checkpoint_flavor["metadata"] = dict(checkpoint_metadata)
             # Issue #258 task 3: for quantization edges, attach the
             # canonical method + library to the publish payload so
             # tensorhub's lineage edge metadata carries the quant
             # identity (validated server-side by
             # ValidateQuantizationLineageMetadata).
             if rel_kind == "quantization":
-                quant_method = _resolve_quant_method(flavor, v_attrs, merged_attrs)
-                quant_library = _resolve_quant_library(quant_method, v_attrs, merged_attrs)
+                quant_method = _resolve_quant_method(flavor, v_attrs, checkpoint_metadata)
+                quant_library = _resolve_quant_library(quant_method, v_attrs, checkpoint_metadata)
                 if quant_method or quant_library:
                     quant_meta: dict[str, Any] = {}
                     if quant_method:
                         quant_meta["quantization_method"] = quant_method
                     if quant_library:
                         quant_meta["quantization_library"] = quant_library
-                    quant_params = v_attrs.get("quantization_params") or merged_attrs.get("quantization_params")
+                    quant_params = v_attrs.get("quantization_params") or checkpoint_metadata.get("quantization_params")
                     if isinstance(quant_params, dict):
                         quant_meta["quantization_params"] = quant_params
                     publish_checkpoint_flavor["lineage_metadata"] = quant_meta

@@ -22,7 +22,7 @@ from blake3 import blake3
 
 logger = logging.getLogger(__name__)
 
-from ..api.errors import AuthError
+from ..api.errors import AuthError, CanceledError
 from ..api.types import Asset, Tensors
 from ._helpers import _enforce_output_file_size_limit, _infer_mime_type, _infer_tensors_format, _normalize_output_ref
 
@@ -64,7 +64,10 @@ class _RequestOutputStream:
         self._format = str(format or "").strip() or None
         self._create = bool(create)
         self._expected_size_bytes = int(expected_size_bytes or 0)
-        # Lineage: carried onto the /complete payload for repo-cas uploads.
+        # Lineage/attributes are retained for local fallback compatibility.
+        # Repo-CAS `/complete` is deliberately parts-only; checkpoint-level
+        # metadata is sent once in publish_repo_revision's final
+        # checkpoint_flavors[] payload.
         self._lineage_produced_by_kind = (str(produced_by_kind or "").strip() or None)
         self._lineage_step_number = step_number if isinstance(step_number, int) else None
         self._lineage_epoch_number = epoch_number if isinstance(epoch_number, int) else None
@@ -73,7 +76,6 @@ class _RequestOutputStream:
         self._lineage_flavor = (str(flavor or "").strip() or None)
         # Free-form attributes from the dispatch wrapper (quantization
         # library + scheme + group_size + calibration dataset id, etc).
-        # Plumbed onto the /complete payload when streaming to repo-CAS.
         self._lineage_attributes = dict(attributes) if isinstance(attributes, dict) and attributes else None
         if self._expected_size_bytes < 0:
             self._expected_size_bytes = 0
@@ -150,7 +152,7 @@ class _RequestOutputStream:
             raise RuntimeError("output stream already finalized")
         if self._ctx.is_canceled():
             self.close()
-            raise InterruptedError("canceled")
+            raise CanceledError("canceled")
         if isinstance(data, memoryview):
             data = data.tobytes()
         if not isinstance(data, (bytes, bytearray)):
@@ -180,7 +182,7 @@ class _RequestOutputStream:
             return self._result
         if self._ctx.is_canceled():
             self.close()
-            raise InterruptedError("canceled")
+            raise CanceledError("canceled")
 
         assert self._fh is not None
         assert self._tmp_path is not None
@@ -391,41 +393,6 @@ class _RequestOutputStream:
                 self._chunks_uploaded = parts_done
             self._maybe_emit_progress(stage="stream_upload")
 
-        # Repo-CAS uploads carry lineage metadata onto /complete so tensorhub
-        # can populate checkpoint_lineage. Media uploads have no lineage.
-        complete_extra: Optional[Dict[str, Any]] = None
-        if self._repo_job_scope is not None:
-            extra: Dict[str, Any] = {}
-            if self._lineage_produced_by_kind:
-                extra["produced_by_kind"] = self._lineage_produced_by_kind
-            if self._lineage_step_number is not None:
-                extra["step_number"] = int(self._lineage_step_number)
-            if self._lineage_epoch_number is not None:
-                extra["epoch_number"] = int(self._lineage_epoch_number)
-            if self._lineage_output_kind:
-                extra["output_kind"] = self._lineage_output_kind
-            if self._lineage_target_dtype:
-                extra["target_dtype"] = self._lineage_target_dtype
-            if self._lineage_flavor:
-                extra["flavor"] = self._lineage_flavor
-            if self._lineage_attributes:
-                # Free-form provenance from the dispatch wrapper (quant
-                # library/scheme/group_size, calibration dataset id, etc).
-                # `flavor` from the attributes map mirrors `_lineage_flavor`
-                # when both are set; prefer the explicit lineage field.
-                attr_clean = {
-                    k: v for k, v in self._lineage_attributes.items()
-                    if k != "flavor" or "flavor" not in extra
-                }
-                if attr_clean:
-                    extra["attributes"] = attr_clean
-                # Also surface the flavor from attributes when no explicit
-                # lineage flavor was supplied.
-                if "flavor" not in extra and self._lineage_attributes.get("flavor"):
-                    extra["flavor"] = str(self._lineage_attributes["flavor"])
-            if extra:
-                complete_extra = extra
-
         result = presigned_upload_file(
             file_path=self._tmp_path,
             base_url=base,
@@ -438,7 +405,7 @@ class _RequestOutputStream:
             retry_backoff_ms=self._retry_backoff_ms,
             on_progress=_progress_cb,
             cancel_check=self._ctx.is_canceled,
-            complete_extra=complete_extra,
+            complete_extra=None,
         )
 
         # Issue #269: sample peak RSS to verify the streaming refactor is

@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 
 import gen_worker.request_context as request_context_module
-from gen_worker.request_context import RequestContext
+from gen_worker.request_context import ConversionContext, RequestContext
 
 
 class _Response:
@@ -25,12 +25,14 @@ class _NoopUploadSessionManager:
         return None
 
 
-def _context(monkeypatch: pytest.MonkeyPatch) -> RequestContext:
+def _context(monkeypatch: pytest.MonkeyPatch) -> ConversionContext:
     monkeypatch.setattr(request_context_module, "_assert_token_repo_scope_matches_destination", lambda *a, **k: None)
     monkeypatch.setattr(request_context_module.time, "sleep", lambda *_a, **_k: None)
     monkeypatch.setattr(request_context_module.random, "uniform", lambda *_a, **_k: 0.0)
 
-    ctx = RequestContext(
+    # Issue #1: publish_repo_revision moved off RequestContext and onto
+    # ConversionContext. Tests construct the subclass directly.
+    ctx = ConversionContext(
         request_id="req-1",
         job_id="00000000-0000-0000-0000-000000000001",
         file_api_base_url="http://tensorhub",
@@ -42,7 +44,7 @@ def _context(monkeypatch: pytest.MonkeyPatch) -> RequestContext:
     return ctx
 
 
-def _publish(ctx: RequestContext) -> dict[str, Any]:
+def _publish(ctx: ConversionContext) -> dict[str, Any]:
     return ctx.publish_repo_revision(
         destination_repo="owner/repo",
         metadata={
@@ -100,6 +102,42 @@ def test_publish_repo_revision_polls_after_accepted_finalize(monkeypatch: pytest
         "http://tensorhub/api/v1/repos/owner/repo/revisions/11111111-1111-1111-1111-111111111111"
     ]
     assert result["checkpoint_ids"] == ["blake3:final"]
+
+
+def test_publish_repo_revision_forwards_checkpoint_artifact_axes(monkeypatch: pytest.MonkeyPatch) -> None:
+    posted_body: dict[str, Any] = {}
+
+    def fake_post(_url: str, **kwargs: Any) -> _Response:
+        posted_body.update(json.loads(kwargs.get("data") or "{}"))
+        return _Response(200, {"ok": True, "checkpoints": [{"checkpoint_id": "blake3:final"}]})
+
+    monkeypatch.setattr(request_context_module.requests, "post", fake_post)
+
+    ctx = _context(monkeypatch)
+    result = ctx.publish_repo_revision(
+        destination_repo="owner/repo",
+        metadata={
+            "checkpoint_flavors": [
+                {
+                    "flavor": "bf16",
+                    "snapshot_manifest": [
+                        {"path": "model.safetensors", "blake3": "abc", "size_bytes": 1},
+                    ],
+                    "dtype": "bf16",
+                    "file_layout": "diffusers",
+                    "file_type": "safetensors",
+                }
+            ]
+        },
+        destination_repo_tags=["prod"],
+    )
+
+    checkpoint = posted_body["checkpoint_flavors"][0]
+    assert result["checkpoint_ids"] == ["blake3:final"]
+    assert checkpoint["dtype"] == "bf16"
+    assert checkpoint["file_layout"] == "diffusers"
+    assert checkpoint["file_type"] == "safetensors"
+    assert "display_label" not in checkpoint
 
 
 def test_publish_repo_revision_retries_finalize_post_after_timeout(monkeypatch: pytest.MonkeyPatch) -> None:

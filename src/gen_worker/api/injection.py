@@ -25,19 +25,48 @@ class ModelRef:
     """
     Metadata marker for signature-driven model selection/injection.
 
-    This is intended to be used inside `typing.Annotated[..., ModelRef(...)]`.
+    Used inside `typing.Annotated[..., ModelRef(...)]`.
 
-    For PAYLOAD_REF, the common case requires zero scoping
-    declarations — discovery auto-derives the expected pipeline class /
-    architectures from the parameter's type annotation. Optional overrides
-    below cover edge cases and stricter-than-default scoping.
+    Two forms for `Src.FIXED`:
+
+    - Preferred (direct):
+      ``ModelRef(Src.FIXED, ref="owner/repo", flavor="nf4")`` — function
+      declares the exact repo and flavor it needs. No `endpoint.toml [models]`
+      entry required; discovery synthesizes the entry into the manifest.
+    - Legacy (local key):
+      ``ModelRef(Src.FIXED, "local-key")`` — function references a key from
+      `endpoint.toml [models]` which maps to a (ref, flavor). Still supported
+      but adds an extra naming layer for no upside.
+
+    For `Src.PAYLOAD`: ``ModelRef(Src.PAYLOAD, "field_name")`` where
+    `field_name` is the payload field the caller fills with a key from
+    `[models.<function_name>]`.
+
+    For `Src.PAYLOAD_REF`: ``ModelRef(Src.PAYLOAD_REF, "field_name")`` where
+    the caller supplies an arbitrary canonical ref at invoke time;
+    orchestrator runs the compat validation chain before dispatch.
     """
 
     source: ModelRefSource
-    key: str
-    # Optional explicit model ref string for FIXED source.
-    # If set, discovery includes this in the baked manifest fixed keyspace.
+    # For PAYLOAD / PAYLOAD_REF: the payload field name (required).
+    # For FIXED: the local endpoint.toml [models] key (legacy form). Empty
+    # when the function uses the direct (ref, tag, flavor) form below.
+    key: str = ""
+
+    # Direct (ref, tag, flavor) — preferred for FIXED.
+    # `ref` is the canonical repo ref (e.g. "owner/repo"). Setting `ref`
+    # makes this a direct declaration; no endpoint.toml [models] entry is
+    # required and discovery synthesizes one into the manifest.
     ref: Optional[str] = None
+    # Repo tag to resolve against. Defaults to "prod" — the convention for
+    # every endpoint we ship today. Override only when a function specifically
+    # wants a non-prod tag (e.g. "canary" for a staged rollout).
+    tag: str = "prod"
+    # Flavor selector inside the repo's checkpoint group. e.g. "bf16", "nf4",
+    # "fp8", "int8". The repo's flavors are tensorhub-side metadata; the
+    # function picks one. Empty = default flavor for the repo.
+    flavor: str = ""
+
     dtypes: tuple[str, ...] = ()
 
     # PAYLOAD_REF scoping. All fields are optional; ignored for FIXED /
@@ -70,6 +99,36 @@ class ModelRef:
     # only edges).
     require_lineage_descendant_of: str = ""
     require_lineage_verified: bool = False
+
+    def __post_init__(self) -> None:
+        # FIXED: either direct (ref, ...) form OR legacy local key, not both, not neither.
+        if self.source == ModelRefSource.FIXED:
+            if self.ref and self.key:
+                raise ValueError(
+                    "ModelRef(Src.FIXED, ...): pass EITHER `key=` (legacy local-key form) "
+                    "OR `ref=` (direct form), not both."
+                )
+            if not self.ref and not self.key:
+                raise ValueError(
+                    "ModelRef(Src.FIXED, ...) requires either `ref=` (direct: "
+                    'ModelRef(Src.FIXED, ref="owner/repo", flavor="nf4")) '
+                    "or `key=` (legacy: ModelRef(Src.FIXED, \"local-key\"))."
+                )
+            if not self.ref and self.flavor:
+                raise ValueError(
+                    "ModelRef(Src.FIXED, ...) with `flavor=` requires `ref=` to be set. "
+                    "Flavor without a ref is meaningless."
+                )
+        elif self.source in (ModelRefSource.PAYLOAD, ModelRefSource.PAYLOAD_REF):
+            if not self.key:
+                raise ValueError(
+                    f"ModelRef({self.source.name}, ...) requires `key=<payload_field_name>`."
+                )
+            if self.ref:
+                raise ValueError(
+                    f"ModelRef({self.source.name}, ...): `ref=` is only valid for "
+                    "Src.FIXED. PAYLOAD sources resolve refs at invoke time from the caller's payload."
+                )
 
 
 @dataclass(frozen=True)

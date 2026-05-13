@@ -3,7 +3,7 @@
 A tenant's ``@training_function`` returns ``list[ProducedFlavor]`` — one
 entry per flavor the job produces into the destination checkpoint. The
 library uploads each flavor's ``path`` (file OR directory) and attaches
-the declared ``attributes`` to the upload-commit.
+the declared ``attributes`` to the final checkpoint flavor publish payload.
 
 Attribute-bag ownership (issue #22 — server-authoritative metadata):
   - Tenant declares ONLY tenant-specific attributes (technique config,

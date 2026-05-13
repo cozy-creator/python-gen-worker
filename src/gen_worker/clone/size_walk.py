@@ -2,7 +2,7 @@
 
 Computes ``full_model_bytes`` and ``largest_component_bytes`` by stat-ing the
 weight files on disk. No model instantiation, no torch import, no GPU. The
-output is intended to be attached to a checkpoint as ``attributes.size_facts``
+output is intended to be attached to a checkpoint as ``metadata.size_facts``
 at ingest time so the orchestrator can gate VRAM placement at submit
 (gen-orchestrator #320):
 

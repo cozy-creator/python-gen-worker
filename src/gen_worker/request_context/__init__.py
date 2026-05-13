@@ -98,7 +98,6 @@ class RequestContext:
         local_output_dir: Optional[str] = None,
         resolved_repos_by_id: Optional[Dict[str, Any]] = None,
         required_models: Optional[List[str]] = None,
-        runtime_batching_config: Optional[Dict[str, Any]] = None,
         execution_hints: Optional[Dict[str, Any]] = None,
         parent_request_id: Optional[str] = None,
         child_request_id: Optional[str] = None,
@@ -122,7 +121,6 @@ class RequestContext:
         self._local_output_dir = (local_output_dir or "").strip() or None
         self._resolved_repos_by_id = resolved_repos_by_id
         self._required_models = list(required_models or [])
-        self._runtime_batching_config = dict(runtime_batching_config or {})
         self._execution_hints = dict(execution_hints or {})
         self._parent_request_id = str(parent_request_id or "").strip() or None
         self._child_request_id = str(child_request_id or "").strip() or None
@@ -431,19 +429,15 @@ class RequestContext:
             )
 
     @property
-    def resolved_repos_by_id(self) -> Optional[Dict[str, Any]]:
+    def resolved_repos_by_id(self) -> Optional[dict[str, Any]]:
         return self._resolved_repos_by_id
 
     @property
-    def required_models(self) -> List[str]:
+    def required_models(self) -> list[str]:
         return list(self._required_models)
 
     @property
-    def runtime_batching_config(self) -> Dict[str, Any]:
-        return dict(self._runtime_batching_config)
-
-    @property
-    def execution_hints(self) -> Dict[str, Any]:
+    def execution_hints(self) -> dict[str, Any]:
         return dict(self._execution_hints)
 
     # Reserved-name conversion/training contract. `source` and `destination`
@@ -452,7 +446,7 @@ class RequestContext:
     # by the library after it materializes the source snapshot to local disk.
     # Tenant code reads these; writes happen only inside the library.
     @property
-    def source(self) -> Dict[str, Any]:
+    def source(self) -> dict[str, Any]:
         """Echoed source descriptor: {ref, checkpoint_id?, attributes}. Empty dict
         if this isn't a conversion/training job or the payload didn't supply
         the reserved `source` field."""
@@ -466,7 +460,7 @@ class RequestContext:
         return self._source_path
 
     @property
-    def destination(self) -> Dict[str, Any]:
+    def destination(self) -> dict[str, Any]:
         """Echoed destination descriptor: {ref, tags}. Empty dict if this isn't
         a conversion/training job or the payload didn't supply the reserved
         `destination` field."""
@@ -494,10 +488,10 @@ class RequestContext:
         return self._item_index
 
     @property
-    def item_span(self) -> Dict[str, int]:
+    def item_span(self) -> dict[str, int]:
         return dict(self._item_span)
 
-    def partition_context(self) -> Dict[str, Any]:
+    def partition_context(self) -> dict[str, Any]:
         out: Dict[str, Any] = {
             "request_id": self._request_id,
             "job_id": self._job_id,
@@ -522,23 +516,9 @@ class RequestContext:
             item_key = "item-000000"
         return f"outputs/{self._request_id}/items/{item_key}/{leaf}"
 
-    def preferred_batch_size(self, default: int = 1) -> int:
-        cfg = self._runtime_batching_config
-        target = int(cfg.get("batch_size_target", default) or default)
-        mn = int(cfg.get("batch_size_min", 1) or 1)
-        mx = int(cfg.get("batch_size_max", max(mn, target)) or max(mn, target))
-        if mx < mn:
-            mx = mn
-        if target < mn:
-            target = mn
-        if target > mx:
-            target = mx
-        return max(1, target)
-
-    def prefetch_depth(self, default: int = 1) -> int:
-        cfg = self._runtime_batching_config
-        v = int(cfg.get("prefetch_depth", default) or default)
-        return max(1, v)
+    # #321: preferred_batch_size() / prefetch_depth() removed alongside
+    # RuntimeBatchingConfigCommand — they only ever read state set by the
+    # orchestrator's runtime override, and that producer never landed.
 
     def time_remaining_s(self) -> Optional[float]:
         if self._deadline is None:
@@ -548,6 +528,15 @@ class RequestContext:
     def is_canceled(self) -> bool:
         """Check if the request was canceled."""
         return self._canceled
+
+    def raise_if_canceled(self, message: str = "request canceled") -> None:
+        """Raise ``CanceledError(message)`` if this request has been canceled. No-op otherwise.
+
+        Canonical cancellation idiom — call inside long-running loops.
+        """
+        if self.is_canceled():
+            from ..api.errors import CanceledError
+            raise CanceledError(message)
 
     def cancel(self) -> None:
         """Mark the request as canceled."""
@@ -679,9 +668,9 @@ class RequestContext:
         img.save(buf, format=pil_format, **save_kwargs)
         return self.save_bytes(ref, buf.getvalue())
 
-    def save_file(self, ref: str, local_path: str) -> Asset:
+    def save_file(self, ref: str, local_path: str | os.PathLike[str]) -> Asset:
         ref = _normalize_output_ref(ref)
-        src = str(local_path or "").strip()
+        src = str(os.fspath(local_path) if local_path else "").strip()
         if not src:
             raise ValueError("local_path is required")
         if not os.path.exists(src):
@@ -720,7 +709,7 @@ class RequestContext:
     def save_checkpoint(
         self,
         ref: str,
-        local_path: str,
+        local_path: str | os.PathLike[str],
         format: Optional[str] = None,
         *,
         produced_by_kind: Optional[str] = None,
@@ -734,14 +723,13 @@ class RequestContext:
         """Save checkpoint/model-weight bytes and return a first-class tensor artifact.
 
         ``attributes`` is a free-form provenance map (e.g. quantization
-        library + scheme + group_size + calibration dataset id). Stamped
-        onto the output flavor for downstream lineage queries. Threaded
-        to the upload session's ``/complete`` payload when streaming via
-        repo-CAS; ignored for the legacy media-route fallback path.
+        library + scheme + group_size + calibration dataset id). Conversion
+        dispatchers attach it to the final ``checkpoint_flavors[]`` publish
+        payload; per-file repo-CAS ``/complete`` remains parts-only.
         """
         ref = _normalize_output_ref(ref)
         self._require_repo_job_scope_for_tensors(ref)
-        src = str(local_path or "").strip()
+        src = str(os.fspath(local_path) if local_path else "").strip()
         if not src:
             raise ValueError("local_path is required")
         if not os.path.exists(src):
@@ -948,9 +936,9 @@ class RequestContext:
             return out
         raise RuntimeError("file save failed (invalid_asset_response)")
 
-    def save_file_create(self, ref: str, local_path: str) -> Asset:
+    def save_file_create(self, ref: str, local_path: str | os.PathLike[str]) -> Asset:
         ref = _normalize_output_ref(ref)
-        src = str(local_path or "").strip()
+        src = str(os.fspath(local_path) if local_path else "").strip()
         if not src:
             raise ValueError("local_path is required")
         if not os.path.exists(src):
@@ -988,180 +976,98 @@ class RequestContext:
             return out
         raise RuntimeError("file save failed (invalid_asset_response)")
 
-    # ------------------------------------------------------------------
-    # Visibility controls (issue #20). `publish` means "make publicly
-    # available" — the new semantics after the terminology cleanup.
-    # ------------------------------------------------------------------
+    # Issue #1 (slim-request-context): admin-plane visibility toggles
+    # (publish_checkpoint / publish_dataset / publish_endpoint /
+    # publish_endpoint_release / publish_media + their unpublish_ counterparts)
+    # were deleted as a hard cut. They were not used by any worker-author
+    # endpoint; visibility flips belong in cozyctl / the tensorhub UI, not on
+    # a per-request object.
 
-    def publish_checkpoint(self, destination_repo: str, checkpoint_id: str) -> Dict[str, Any]:
-        """Flip a finalized checkpoint's visibility to 'public'. Idempotent.
 
-        `destination_repo` is 'owner/repo'; `checkpoint_id` is the content-addressed
-        digest returned by finalize. Hits POST /api/v1/repos/:owner/:repo/checkpoints/:id/publish.
+
+# ---------------------------------------------------------------------------
+# Issue #1 (slim-request-context): kind-specific subclasses.
+#
+# RequestContext is the per-inference base. Conversion, dataset-producing,
+# and trainer endpoints get richer subclasses that carry the
+# producer-contract RPCs (publish_repo_revision, publish_dataset_revision,
+# resolve_dataset, read/write_repo_metadata, materialize_blob).
+#
+# ConversionContext + DatasetContext share a `_PublisherMixin` that holds
+# the `_download_blob_by_digest` helper used by both
+# `ConversionContext.materialize_blob` and
+# `DatasetContext.resolve_dataset`. (Python's equivalent of Go's embedding.)
+# ---------------------------------------------------------------------------
+
+
+class _PublisherMixin:
+    """Producer-contract helpers shared by ConversionContext + DatasetContext.
+
+    Holds the common `_download_blob_by_digest` implementation that both
+    ``ConversionContext.materialize_blob`` and ``DatasetContext.resolve_dataset``
+    use to pull blob bytes by content-addressed digest. Always combined with
+    ``RequestContext`` via multiple inheritance (so ``self`` has
+    ``_file_api_base_url`` / ``_owner`` / ``_get_worker_capability_token``).
+
+    Not a public surface: tenants should never import this directly.
+    """
+
+    def _download_blob_by_digest(self, digest: str, dest: Path) -> None:
+        """Fetch a blob by ``<algo>:<hex>`` digest to ``dest``.
+
+        Uses the repo-CAS by-digest read endpoint — works for any blob
+        uploaded via ``save_checkpoint`` regardless of whether it's a
+        checkpoint file or a dataset file. The server indexes all CAS
+        content by blake3 digest; callers that know the digest can fetch
+        without needing to know which subsystem the blob belongs to.
         """
-        owner, repo = _parse_owner_repo(destination_repo)
-        cid = str(checkpoint_id or "").strip()
-        if not cid:
-            raise ValueError("checkpoint_id is required")
-        base = self._get_file_api_base_url()
+        base = (self._file_api_base_url or "").strip().rstrip("/")
         token = self._get_worker_capability_token()
-        url = (
-            f"{base}/api/v1/repos/{urllib.parse.quote(owner, safe='')}/"
-            f"{urllib.parse.quote(repo, safe='')}/checkpoints/{urllib.parse.quote(cid, safe='')}/publish"
-        )
-        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-        if self._owner:
-            headers["X-Cozy-Owner"] = self._owner
-        resp = requests.post(url, headers=headers, data=b"{}", timeout=30)
-        if resp.status_code in (401, 403):
-            raise AuthError(f"publish_checkpoint unauthorized ({resp.status_code})")
-        if resp.status_code < 200 or resp.status_code >= 300:
-            raise RuntimeError(f"publish_checkpoint failed ({resp.status_code}): {resp.text[:256]}")
-        return resp.json() if resp.text else {"ok": True}
+        # Normalize digest format for URL.
+        digest_norm = digest if ":" in digest else f"blake3:{digest}"
+        url = f"{base}/api/v1/blobs/{urllib.parse.quote(digest_norm, safe=':')}/content"
+        headers = {"Authorization": f"Bearer {token}"}
+        with requests.get(url, headers=headers, stream=True, timeout=300) as resp:
+            if resp.status_code in (401, 403):
+                raise AuthError(f"blob fetch unauthorized ({resp.status_code}) digest={digest}")
+            if resp.status_code == 404:
+                raise RuntimeError(f"blob fetch 404 for digest={digest}")
+            if resp.status_code < 200 or resp.status_code >= 300:
+                raise RuntimeError(f"blob fetch failed ({resp.status_code}) digest={digest}: {resp.text[:256]}")
+            with open(dest, "wb") as f:
+                for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
 
-    def unpublish_checkpoint(self, destination_repo: str, checkpoint_id: str) -> Dict[str, Any]:
-        """Flip a public checkpoint back to 'private'. Idempotent."""
-        owner, repo = _parse_owner_repo(destination_repo)
-        cid = str(checkpoint_id or "").strip()
-        if not cid:
-            raise ValueError("checkpoint_id is required")
-        base = self._get_file_api_base_url()
-        token = self._get_worker_capability_token()
-        url = (
-            f"{base}/api/v1/repos/{urllib.parse.quote(owner, safe='')}/"
-            f"{urllib.parse.quote(repo, safe='')}/checkpoints/{urllib.parse.quote(cid, safe='')}/unpublish"
-        )
-        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-        if self._owner:
-            headers["X-Cozy-Owner"] = self._owner
-        resp = requests.post(url, headers=headers, data=b"{}", timeout=30)
-        if resp.status_code in (401, 403):
-            raise AuthError(f"unpublish_checkpoint unauthorized ({resp.status_code})")
-        if resp.status_code < 200 or resp.status_code >= 300:
-            raise RuntimeError(f"unpublish_checkpoint failed ({resp.status_code}): {resp.text[:256]}")
-        return resp.json() if resp.text else {"ok": True}
 
-    # Issue #21: per-primitive publish/unpublish for datasets, endpoints,
-    # endpoint source-code releases, and media. All route to matching
-    # tensorhub endpoints with uniform semantics (empty body; idempotent;
-    # returns ok + new visibility).
+class ConversionContext(_PublisherMixin, RequestContext):
+    """RequestContext for ``@training_function(kind="format-conversion")``
+    and similar conversion endpoints.
 
-    def _visibility_flip(self, op: str, url: str) -> Dict[str, Any]:
-        token = self._get_worker_capability_token()
-        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-        if self._owner:
-            headers["X-Cozy-Owner"] = self._owner
-        resp = requests.post(url, headers=headers, data=b"{}", timeout=30)
-        if resp.status_code in (401, 403):
-            raise AuthError(f"{op} unauthorized ({resp.status_code})")
-        if resp.status_code < 200 or resp.status_code >= 300:
-            raise RuntimeError(f"{op} failed ({resp.status_code}): {resp.text[:256]}")
-        return resp.json() if resp.text else {"ok": True}
+    Carries the producer-contract RPCs needed to publish new repo revisions
+    and read/write repo metadata, plus the conversion-helper surface
+    (``mktemp``, ``checkpoint_dir``, ``open_output_writer``,
+    ``copy_unconverted_components``, ``cancelled``).
 
-    def publish_dataset(self, dataset_id: str) -> Dict[str, Any]:
-        """Flip a dataset's visibility to 'public'. Idempotent."""
-        did = str(dataset_id or "").strip()
-        if not did:
-            raise ValueError("dataset_id is required")
-        base = self._get_file_api_base_url()
-        url = f"{base}/api/v1/datasets/{urllib.parse.quote(did, safe='')}/publish"
-        return self._visibility_flip("publish_dataset", url)
+    Inference handlers receive ``RequestContext`` instead — they never need
+    these methods.
+    """
 
-    def unpublish_dataset(self, dataset_id: str) -> Dict[str, Any]:
-        """Flip a dataset's visibility back to 'private'. Idempotent."""
-        did = str(dataset_id or "").strip()
-        if not did:
-            raise ValueError("dataset_id is required")
-        base = self._get_file_api_base_url()
-        url = f"{base}/api/v1/datasets/{urllib.parse.quote(did, safe='')}/unpublish"
-        return self._visibility_flip("unpublish_dataset", url)
+    def __init__(self, *args: Any, source: Any = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        # Conversion-wrapper state. ``source`` is the resolved input model
+        # (``gen_worker.conversion.source.Source``) for tenants that operate
+        # on a checkpoint; dataset-generation tenants pass ``source=None``.
+        self._source = source
+        self._mktemp_root: Optional[Path] = None
+        self._open_writers: list[Any] = []
 
-    def publish_endpoint(self, owner: str, endpoint_name: str) -> Dict[str, Any]:
-        """Flip an endpoint's endpoint-level visibility to 'public' (anyone can call/list). Idempotent."""
-        own = str(owner or "").strip()
-        name = str(endpoint_name or "").strip()
-        if not own or not name:
-            raise ValueError("owner and endpoint_name are required")
-        base = self._get_file_api_base_url()
-        url = (
-            f"{base}/api/v1/endpoints/{urllib.parse.quote(own, safe='')}/"
-            f"{urllib.parse.quote(name, safe='')}/publish"
-        )
-        return self._visibility_flip("publish_endpoint", url)
-
-    def unpublish_endpoint(self, owner: str, endpoint_name: str) -> Dict[str, Any]:
-        """Flip an endpoint's endpoint-level visibility back to 'private'. Idempotent."""
-        own = str(owner or "").strip()
-        name = str(endpoint_name or "").strip()
-        if not own or not name:
-            raise ValueError("owner and endpoint_name are required")
-        base = self._get_file_api_base_url()
-        url = (
-            f"{base}/api/v1/endpoints/{urllib.parse.quote(own, safe='')}/"
-            f"{urllib.parse.quote(name, safe='')}/unpublish"
-        )
-        return self._visibility_flip("unpublish_endpoint", url)
-
-    def publish_endpoint_release(
-        self, owner: str, endpoint_name: str, release_id: str
-    ) -> Dict[str, Any]:
-        """Flip an endpoint release's source-code visibility to 'public' (bundle publicly readable). Idempotent.
-
-        Orthogonal to publish_endpoint — an endpoint can be publicly callable
-        while individual release sources stay private, or vice versa.
-        """
-        own = str(owner or "").strip()
-        name = str(endpoint_name or "").strip()
-        rid = str(release_id or "").strip()
-        if not own or not name or not rid:
-            raise ValueError("owner, endpoint_name, and release_id are required")
-        base = self._get_file_api_base_url()
-        url = (
-            f"{base}/api/v1/endpoints/{urllib.parse.quote(own, safe='')}/"
-            f"{urllib.parse.quote(name, safe='')}/releases/"
-            f"{urllib.parse.quote(rid, safe='')}/publish"
-        )
-        return self._visibility_flip("publish_endpoint_release", url)
-
-    def unpublish_endpoint_release(
-        self, owner: str, endpoint_name: str, release_id: str
-    ) -> Dict[str, Any]:
-        """Flip an endpoint release's source-code visibility back to 'private'. Idempotent."""
-        own = str(owner or "").strip()
-        name = str(endpoint_name or "").strip()
-        rid = str(release_id or "").strip()
-        if not own or not name or not rid:
-            raise ValueError("owner, endpoint_name, and release_id are required")
-        base = self._get_file_api_base_url()
-        url = (
-            f"{base}/api/v1/endpoints/{urllib.parse.quote(own, safe='')}/"
-            f"{urllib.parse.quote(name, safe='')}/releases/"
-            f"{urllib.parse.quote(rid, safe='')}/unpublish"
-        )
-        return self._visibility_flip("unpublish_endpoint_release", url)
-
-    def publish_media(self, media_id: str) -> Dict[str, Any]:
-        """Flip a media asset's visibility to 'public'. Idempotent."""
-        mid = str(media_id or "").strip()
-        if not mid:
-            raise ValueError("media_id is required")
-        base = self._get_file_api_base_url()
-        url = f"{base}/api/v1/media/{urllib.parse.quote(mid, safe='')}/publish"
-        return self._visibility_flip("publish_media", url)
-
-    def unpublish_media(self, media_id: str) -> Dict[str, Any]:
-        """Flip a media asset's visibility back to 'private'. Idempotent."""
-        mid = str(media_id or "").strip()
-        if not mid:
-            raise ValueError("media_id is required")
-        base = self._get_file_api_base_url()
-        url = f"{base}/api/v1/media/{urllib.parse.quote(mid, safe='')}/unpublish"
-        return self._visibility_flip("unpublish_media", url)
+    # ----- producer-contract RPCs -------------------------------------
 
     def finalize_checkpoints(
         self,
         **kwargs: Any,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Issue #20: preferred name for the catalog-commit operation.
 
         Forwards to ``publish_repo_revision`` (which now routes to
@@ -1188,7 +1094,7 @@ class RequestContext:
         # plus per-checkpoint lineage and a tags map.
         relationship_kind: str = "import",
         auto_create_external_parent: bool = True,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Publish checkpoints + lineage to Tensorhub via the worker-cap /publish endpoint.
 
         Every entry in metadata['checkpoint_flavors'] becomes one concrete
@@ -1534,7 +1440,7 @@ class RequestContext:
                         flavors.append(item)
             if flavor and flavor not in flavors:
                 flavors.insert(0, flavor)
-            label = str(v.get("display_label") or flavor).strip()
+            label = str(v.get("display_label") or "").strip()
             lineage: List[Dict[str, Any]] = []
             if parent_repo_ref and parent_checkpoint_id:
                 edge: Dict[str, Any] = {
@@ -1576,21 +1482,24 @@ class RequestContext:
                             per_flavor_deletions.append(s)
             ck_entry: Dict[str, Any] = {
                 "snapshot_manifest": per_flavor_entries,
-                "display_label":     label,
                 "flavor":            flavor,
                 "flavors":           flavors,
                 "lineage":           lineage,
             }
+            if label:
+                ck_entry["display_label"] = label
+            for axis_key in ("dtype", "file_layout", "file_type"):
+                axis_value = str(v.get(axis_key) or "").strip()
+                if axis_value:
+                    ck_entry[axis_key] = axis_value
             if per_flavor_deletions:
                 ck_entry["deletions"] = per_flavor_deletions
-            # Per-checkpoint attributes — tensorhub stores these as
-            # `repo_checkpoints.attributes` jsonb. Carries intrinsic facts
-            # like `size_facts` used by the orchestrator's VRAM-aware
-            # placement (gen-orchestrator #320). Tensorhub side must accept
-            # the field in the publish payload to persist it.
-            raw_attrs = v.get("attributes")
-            if isinstance(raw_attrs, dict) and raw_attrs:
-                ck_entry["attributes"] = dict(raw_attrs)
+            # Per-checkpoint metadata — tensorhub stores this as
+            # `checkpoints.metadata` jsonb. Carries intrinsic facts like
+            # `size_facts` used by the orchestrator's VRAM-aware placement.
+            raw_metadata = v.get("metadata")
+            if isinstance(raw_metadata, dict) and raw_metadata:
+                ck_entry["metadata"] = dict(raw_metadata)
             publish_checkpoints.append(ck_entry)
 
         primary_default_flavor = ""
@@ -1684,6 +1593,186 @@ class RequestContext:
             out["destination_repo_tags"] = normalized_tags
         return out
 
+    def read_repo_metadata(self, *, destination_repo: str) -> dict[str, Any]:
+        """Read repo-level metadata from Tensorhub public HTTP API."""
+        owner, repo = _parse_owner_repo(destination_repo)
+        base = (self._file_api_base_url or "").strip().rstrip("/")
+        token = (self._worker_capability_token or "").strip()
+        if token:
+            _assert_token_repo_scope_matches_destination(token, owner, repo, required_permissions=["tensor-repo:read"])
+        if not base or not token:
+            return {"ok": False, "skipped": True, "reason": "missing_worker_capability_channel", "exists": False, "metadata": {}}
+
+        url = f"{base}/api/v1/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}/metadata"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "X-Cozy-Owner": owner,
+        }
+        resp = requests.get(url, headers=headers, timeout=30)
+        code = int(resp.status_code)
+        if code in (401, 403):
+            raise AuthError(f"repo metadata read unauthorized ({code}): check worker_capability_token validity")
+        if code == 404:
+            return {"ok": True, "exists": False, "metadata": {}}
+        if code < 200 or code >= 300:
+            raise RuntimeError(f"repo metadata read failed ({code}): {resp.text[:256]}")
+
+        try:
+            parsed = resp.json()
+        except Exception:
+            parsed = {}
+        if not isinstance(parsed, dict):
+            parsed = {}
+        metadata = parsed.get("metadata")
+        if not isinstance(metadata, dict):
+            metadata = {}
+        exists = bool(parsed.get("exists", True))
+        return {"ok": True, "exists": exists, "metadata": metadata}
+
+    def write_repo_metadata(self, *, destination_repo: str, metadata: dict[str, Any]) -> dict[str, Any]:
+        """Write repo-level metadata via Tensorhub public HTTP API."""
+        owner, repo = _parse_owner_repo(destination_repo)
+        if not isinstance(metadata, dict):
+            raise ValueError("metadata must be an object")
+        base = (self._file_api_base_url or "").strip().rstrip("/")
+        token = (self._worker_capability_token or "").strip()
+        if token:
+            _assert_token_repo_scope_matches_destination(token, owner, repo, required_permissions=["repo-version:create"])
+        if not base or not token:
+            return {"ok": False, "skipped": True, "reason": "missing_worker_capability_channel", "owner": owner, "name": repo}
+
+        url = f"{base}/api/v1/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}/metadata"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "X-Cozy-Owner": owner,
+        }
+        resp = requests.put(url, headers=headers, data=json.dumps({"metadata": metadata}), timeout=30)
+        code = int(resp.status_code)
+        if code in (401, 403):
+            raise AuthError(f"repo metadata write unauthorized ({code}): check worker_capability_token validity")
+        if code < 200 or code >= 300:
+            raise RuntimeError(f"repo metadata write failed ({code}): {resp.text[:256]}")
+
+        try:
+            parsed = resp.json()
+        except Exception:
+            parsed = {}
+        if not isinstance(parsed, dict):
+            parsed = {}
+        returned = parsed.get("metadata")
+        if not isinstance(returned, dict):
+            returned = metadata
+        return {"ok": True, "owner": owner, "name": repo, "metadata": returned}
+
+
+    def materialize_blob(self, digest: str, dest: "str | os.PathLike[str]") -> Path:
+        """Fetch a blob by ``<algo>:<hex>`` content-addressed digest.
+
+        Returns the ``Path`` the blob was written to. Replacement for the
+        private ``_download_blob_by_digest`` — exposed publicly so tenants
+        that handle a digest directly (e.g. consuming a snapshot manifest
+        emitted by an earlier conversion) can pull the bytes themselves.
+        """
+        dest_path = Path(os.fspath(dest))
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        self._download_blob_by_digest(digest, dest_path)
+        return dest_path
+
+    # ----- conversion-helper wrapper API ------------------------------
+    #
+    # Previously lived in ``gen_worker.conversion.context.ConversionContext``
+    # as a wrapper around RequestContext. Subclassed in (since both classes
+    # share the same name and the wrapper has no per-method state that
+    # RequestContext doesn't already track).
+
+    @property
+    def cancelled(self) -> bool:
+        """Return True if the scheduler has signaled cancellation.
+
+        Same semantics as ``is_canceled()`` — kept under the British
+        spelling for back-compat with conversion-endpoint code that read
+        ``ctx.cancelled`` before the slim-context refactor.
+        """
+        return self.is_canceled()
+
+    def mktemp(self) -> Path:
+        """Return a job-scoped scratch directory. Contents are NOT persisted.
+
+        Auto-cleaned at job end. Each call returns a fresh subdir so tenants
+        can use it as ``out_dir`` for ``model.save_pretrained(ctx.mktemp())``
+        without collision.
+        """
+        if self._mktemp_root is None:
+            self._mktemp_root = Path(
+                tempfile.mkdtemp(
+                    prefix=f"txform-{self.request_id or 'x'}-",
+                    dir=tempfile.gettempdir(),
+                )
+            )
+        return Path(tempfile.mkdtemp(dir=str(self._mktemp_root)))
+
+    def checkpoint_dir(self, *, key: str) -> Path:
+        """Return a PERSISTENT scratch dir keyed by (job_id, key).
+
+        Survives worker restart — intended for transformers.Trainer.output_dir
+        so ``resume_from_checkpoint=True`` can pick up where a preempted job
+        left off.
+        """
+        job_id = self.job_id or self.request_id or "x"
+        base = Path(tempfile.gettempdir()) / "txform-persistent" / str(job_id)
+        safe_key = "".join(c if c.isalnum() or c in "-_" else "_" for c in key)
+        dir_path = base / safe_key
+        dir_path.mkdir(parents=True, exist_ok=True)
+        return dir_path
+
+    def open_output_writer(self) -> Any:
+        """Return a fresh ``StreamingWriter`` for one output variant.
+
+        Call once per entry in the tenant's specs list. The returned writer
+        is scoped to a unique subdirectory under ``mktemp()``; tenants don't
+        pick paths themselves.
+        """
+        from ..conversion.writer import StreamingWriter
+
+        out_dir = self.mktemp()
+        w = StreamingWriter(source=self._source, out_dir=out_dir)
+        self._open_writers.append(w)
+        return w
+
+    def copy_unconverted_components(
+        self,
+        source: Any,
+        out_dir: "str | os.PathLike[str]",
+        *,
+        skip: Any = (),
+    ) -> None:
+        """Copy components from ``source`` -> ``out_dir`` that the tenant didn't produce.
+
+        For tenants that use ``source.as_hf_model() + model.save_pretrained()``
+        and want source-layout passthrough for non-touched components. The
+        ``skip`` iterable names components the tenant HAS produced (and thus
+        should not be overwritten).
+        """
+        skip_set = set(skip)
+        out_dir = Path(os.fspath(out_dir))
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for comp_name, comp in source.components.items():
+            if comp_name in skip_set:
+                continue
+            dst = out_dir / comp_name
+            if dst.exists():
+                continue
+            shutil.copytree(str(comp.path), str(dst))
+
+
+class DatasetContext(_PublisherMixin, RequestContext):
+    """RequestContext for dataset-producing endpoints
+    (``@training_function(kind="dataset-generation")``).
+
+    Adds ``publish_dataset_revision`` + ``resolve_dataset``.
+    """
+
     def publish_dataset_revision(
         self,
         *,
@@ -1694,7 +1783,7 @@ class RequestContext:
         visibility: str = "private",
         kind: str = "",
         dataset_info: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Publish a dataset revision into ``tensorhub.datasets``.
 
         Parallel to ``publish_repo_revision`` but writes to the datasets
@@ -1927,34 +2016,34 @@ class RequestContext:
 
         return str(target_root)
 
-    def _download_blob_by_digest(self, digest: str, dest: Path) -> None:
-        """Fetch a blob by ``<algo>:<hex>`` digest to ``dest``.
 
-        Uses the repo-CAS by-digest read endpoint — works for any blob
-        uploaded via ``save_checkpoint`` regardless of whether it's a
-        checkpoint file or a dataset file. The server indexes all CAS
-        content by blake3 digest; callers that know the digest can fetch
-        without needing to know which subsystem the blob belongs to.
+
+    def materialize_blob(self, digest: str, dest: "str | os.PathLike[str]") -> Path:
+        """Fetch a blob by ``<algo>:<hex>`` content-addressed digest.
+
+        Same semantics as ``ConversionContext.materialize_blob``: returns
+        the ``Path`` written. Dataset tenants that build their own manifest
+        flow (rather than going through ``publish_dataset_revision``) can
+        call this to pull blob bytes directly.
         """
-        base = (self._file_api_base_url or "").strip().rstrip("/")
-        token = self._get_worker_capability_token()
-        # Normalize digest format for URL.
-        digest_norm = digest if ":" in digest else f"blake3:{digest}"
-        url = f"{base}/api/v1/blobs/{urllib.parse.quote(digest_norm, safe=':')}/content"
-        headers = {"Authorization": f"Bearer {token}"}
-        with requests.get(url, headers=headers, stream=True, timeout=300) as resp:
-            if resp.status_code in (401, 403):
-                raise AuthError(f"blob fetch unauthorized ({resp.status_code}) digest={digest}")
-            if resp.status_code == 404:
-                raise RuntimeError(f"blob fetch 404 for digest={digest}")
-            if resp.status_code < 200 or resp.status_code >= 300:
-                raise RuntimeError(f"blob fetch failed ({resp.status_code}) digest={digest}: {resp.text[:256]}")
-            with open(dest, "wb") as f:
-                for chunk in resp.iter_content(chunk_size=1024 * 1024):
-                    if chunk:
-                        f.write(chunk)
+        dest_path = Path(os.fspath(dest))
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        self._download_blob_by_digest(digest, dest_path)
+        return dest_path
 
-    def read_repo_metadata(self, *, destination_repo: str) -> Dict[str, Any]:
+
+class TrainingContext(RequestContext):
+    """RequestContext for trainer-class endpoints (transformers.Trainer +
+    friends).
+
+    Adds ``read_repo_metadata`` / ``write_repo_metadata``.
+    ``save_checkpoint`` lives on the base ``RequestContext`` (gated by
+    ``_require_repo_job_scope_for_tensors``) because the internal upload
+    paths in ``conversion/dispatch.py`` and ``worker.py`` call it via
+    ``getattr`` regardless of which subclass the request used.
+    """
+
+    def read_repo_metadata(self, *, destination_repo: str) -> dict[str, Any]:
         """Read repo-level metadata from Tensorhub public HTTP API."""
         owner, repo = _parse_owner_repo(destination_repo)
         base = (self._file_api_base_url or "").strip().rstrip("/")
@@ -1990,7 +2079,7 @@ class RequestContext:
         exists = bool(parsed.get("exists", True))
         return {"ok": True, "exists": exists, "metadata": metadata}
 
-    def write_repo_metadata(self, *, destination_repo: str, metadata: Dict[str, Any]) -> Dict[str, Any]:
+    def write_repo_metadata(self, *, destination_repo: str, metadata: dict[str, Any]) -> dict[str, Any]:
         """Write repo-level metadata via Tensorhub public HTTP API."""
         owner, repo = _parse_owner_repo(destination_repo)
         if not isinstance(metadata, dict):

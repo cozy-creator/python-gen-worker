@@ -608,32 +608,16 @@ def _finalize_publish_as_is(
     # Single flavor entry covering everything we ingested.
     primary_dtype = str(classifier_attrs.get("dtype") or ingested.metadata.get("dtype") or "bf16").strip().lower()
     primary_filetype = str(classifier_attrs.get("file_type") or "safetensors").strip().lower()
-    # `file_layout` is the tensorhub-validated axis.
-    # Only diffusers uses non-empty values (`multi-file` / `single-file`).
-    # transformers / peft / sentence-transformers / gguf / native_lora — empty.
-    # The classifier may have stamped a strategy-name into `file_layout` for
-    # tagging purposes; that label rides under a different attr key
-    # (`layout_kind`) so it doesn't collide with the validator's enum.
     classifier_layout = str(classifier_attrs.get("file_layout") or "").strip().lower()
-    primary_layout = ""  # empty for non-diffusers; validator requires this
-    primary_label_layout = classifier_layout or runtime_library or "transformers"
-    flavor_label_parts = [primary_dtype, primary_label_layout, primary_filetype]
-    flavor_label = "-".join([p for p in flavor_label_parts if p])
 
-    # `flavor` is the tensorhub-validated canonical token (must be in the
-    # CanonicalQuantSchemes ∪ BaselineDtypes set, see
-    # tensorhub/internal/validation/canonical_quant.go). The composite
-    # `<dtype>-<layout>-<filetype>` string is purely a UI label and rides
-    # on `display_label`. Sending the composite as `flavor` — or stuffing
-    # file_layout / file_type into the `flavors[]` list — is what
-    # produces `invalid_flavor` 400s at /finalize. The `flavors[]` field
-    # holds canonical quant tokens ONLY (currently just the dtype for
-    # passthrough). file_layout + file_type are server-inferred from the
-    # snapshot manifest, not flavor-list contents.
+    # `flavor` remains the user-facing variant token. Artifact axes are
+    # first-class checkpoint fields, not synthetic display labels.
     commit_checkpoint_flavors: list[dict[str, Any]] = [{
         "flavor": primary_dtype,
         "flavors": [primary_dtype],
-        "display_label": flavor_label,
+        "dtype": primary_dtype,
+        "file_layout": classifier_layout,
+        "file_type": primary_filetype,
         "artifacts": promoted_artifacts,
         # The publish_repo_revision wrapper looks at v.get("snapshot_manifest")
         # per-flavor before falling back to the top-level manifest entries.
@@ -656,12 +640,13 @@ def _finalize_publish_as_is(
         if not ck_dtype or ck_dtype == primary_dtype:
             continue
         ck_filetype = str(ck_attrs.get("file_type") or primary_filetype).strip().lower()
-        ck_label_layout = str(ck_attrs.get("layout_kind") or runtime_library or "transformers").strip().lower()
-        ck_label = "-".join([p for p in (ck_dtype, ck_label_layout, ck_filetype) if p])
+        ck_filelayout = str(ck_attrs.get("file_layout") or classifier_layout).strip().lower()
         commit_checkpoint_flavors.append({
             "flavor": ck_dtype,
             "flavors": [ck_dtype],
-            "display_label": ck_label,
+            "dtype": ck_dtype,
+            "file_layout": ck_filelayout,
+            "file_type": ck_filetype,
             "artifacts": promoted_artifacts,
             "snapshot_manifest": snapshot_manifest,
         })
@@ -690,7 +675,9 @@ def _finalize_publish_as_is(
                 break
         if primary_matched_spec is not None:
             commit_checkpoint_flavors[0]["flavor"] = primary_matched_spec.dtype
-            commit_checkpoint_flavors[0]["display_label"] = primary_matched_spec.label
+            commit_checkpoint_flavors[0]["dtype"] = primary_matched_spec.dtype
+            commit_checkpoint_flavors[0]["file_layout"] = primary_matched_spec.file_layout
+            commit_checkpoint_flavors[0]["file_type"] = primary_matched_spec.file_type
 
         for spec in requested_specs:
             if spec is primary_matched_spec:
@@ -847,7 +834,9 @@ def _finalize_publish_as_is(
             commit_checkpoint_flavors.append({
                 "flavor": spec_dtype,
                 "flavors": [spec_dtype],
-                "display_label": spec.label,
+                "dtype": spec_dtype,
+                "file_layout": spec.file_layout,
+                "file_type": spec.file_type,
                 "artifacts": spec_artifacts,
                 "snapshot_manifest": spec_manifest,
             })
@@ -867,11 +856,11 @@ def _finalize_publish_as_is(
         snapshot_size_facts = {}
     if snapshot_size_facts and snapshot_size_facts.get("full_model_bytes", 0) > 0:
         for cf in commit_checkpoint_flavors:
-            attrs = cf.get("attributes")
-            if not isinstance(attrs, dict):
-                attrs = {}
-            attrs.setdefault("size_facts", snapshot_size_facts)
-            cf["attributes"] = attrs
+            metadata = cf.get("metadata")
+            if not isinstance(metadata, dict):
+                metadata = {}
+            metadata.setdefault("size_facts", snapshot_size_facts)
+            cf["metadata"] = metadata
 
     # Lineage: pin the upstream as parent if known.
     parent_repo = ""
@@ -2270,7 +2259,9 @@ def _finalize_clone(
         commit_checkpoint_flavors.append({
             "flavor": spec.dtype,
             "flavors": [spec.dtype],
-            "display_label": spec.label,
+            "dtype": spec.dtype,
+            "file_layout": spec.file_layout,
+            "file_type": spec.file_type,
             "artifacts": artifacts,
         })
 

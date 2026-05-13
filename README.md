@@ -71,9 +71,9 @@ contracts, error types, and local testing.
 
 The top-level `gen_worker` module exports only what endpoint authors need:
 
-- Decorators: `inference_function`, `realtime_function`, `ResourceRequirements`
+- Decorators: `inference_function`, `ResourceRequirements`, `ScalingHints`
 - Injection: `ModelRef`, `ModelRefSource`
-- Context: `RequestContext`, `RealtimeSocket`
+- Context: `RequestContext` (inference; the base), `ConversionContext` (transform / conversion endpoints), `DatasetContext` (dataset-generation), `TrainingContext` (trainer-class)
 - Types: `Asset`, `Tensors`, `Compute`, `LoraSpec`
 - Errors: `ValidationError`, `RetryableError`, `FatalError`, `ResourceError`,
   `AuthError`, `CanceledError`, `OutputTooLargeError`, `WorkerError`
