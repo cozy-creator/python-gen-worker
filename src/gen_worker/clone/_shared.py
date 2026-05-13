@@ -239,13 +239,31 @@ def ingest_from_source(
         # variant needs these (model_index.json, tokenizer configs, etc.) to
         # reconstruct a working diffusers pipeline regardless of which dtype
         # was requested.
-        for row in non_weight_items:
+        #
+        # Issue #269: fan out across MAX_CONCURRENT_UPLOADS file uploads
+        # so the worker pipelines disk read + hash + multipart PUT across
+        # files instead of waiting for each to drain.
+        from gen_worker.request_context._concurrent_upload import parallel_map_uploads
+
+        def _upload_non_weight(row: dict[str, object]) -> tuple[dict[str, object], object]:
+            rel_path_local = str(row["rel_path"])
+            local_path_local = str(row["local_path"])
+            ref_local = f"jobs/{ctx.request_id}/outputs/source-repo/{rel_path_local}"
+            saved_local = ctx.save_checkpoint(
+                ref_local,
+                local_path_local,
+                format=Path(rel_path_local).suffix.lstrip(".") or "bin",
+            )
+            if str(saved_local.local_path or "").strip() == "":
+                saved_local = tensors_with(saved_local, local_path=local_path_local)
+            return row, saved_local
+
+        for row, saved in parallel_map_uploads(
+            non_weight_items, _upload_non_weight, label="clone-nonweight"
+        ):
             rel_path = str(row["rel_path"])
             local_path = str(row["local_path"])
             ref = f"jobs/{ctx.request_id}/outputs/source-repo/{rel_path}"
-            saved = ctx.save_checkpoint(ref, local_path, format=Path(rel_path).suffix.lstrip(".") or "bin")
-            if str(saved.local_path or "").strip() == "":
-                saved = tensors_with(saved, local_path=local_path)
             refs.append(str(saved.ref or ref))
             all_file_tensors.append((saved, rel_path, int(saved.size_bytes or 0)))
 
@@ -426,6 +444,9 @@ def ingest_from_source(
         primary_weight_exts = (".safetensors", ".ckpt", ".pt", ".bin")
         selected_manifest: list[dict[str, object]] = []
 
+        # Filter once so the upload fan-out + the manifest pass see the
+        # same list (and parallel_map_uploads preserves index alignment).
+        usable_items: list[dict[str, object]] = []
         for item in files:
             rel_path = str(item.get("path") or "").strip().replace("\\", "/").lstrip("/")
             local_path = str(item.get("local_path") or "").strip()
@@ -433,10 +454,34 @@ def ingest_from_source(
                 continue
             if ".." in rel_path.split("/"):
                 continue
+            item = dict(item)
+            item["_rel_path"] = rel_path
+            item["_local_path"] = local_path
+            usable_items.append(item)
+
+        # Issue #269: parallelize per-file upload across
+        # MAX_CONCURRENT_UPLOADS. Each future owns one file
+        # hash→PUT→complete cycle; results returned in input order.
+        from gen_worker.request_context._concurrent_upload import parallel_map_uploads
+
+        def _upload_civitai(item: dict[str, object]) -> "Tensors":
+            rel_path_local = str(item["_rel_path"])
+            local_path_local = str(item["_local_path"])
+            ref_local = f"jobs/{ctx.request_id}/outputs/source-repo/{rel_path_local}"
+            saved_local = ctx.save_checkpoint(
+                ref_local,
+                local_path_local,
+                format=Path(rel_path_local).suffix.lstrip(".") or "bin",
+            )
+            if str(saved_local.local_path or "").strip() == "":
+                saved_local = tensors_with(saved_local, local_path=local_path_local)
+            return saved_local
+
+        uploaded = parallel_map_uploads(usable_items, _upload_civitai, label="civitai")
+
+        for item, saved in zip(usable_items, uploaded):
+            rel_path = str(item["_rel_path"])
             ref = f"jobs/{ctx.request_id}/outputs/source-repo/{rel_path}"
-            saved = ctx.save_checkpoint(ref, local_path, format=Path(rel_path).suffix.lstrip(".") or "bin")
-            if str(saved.local_path or "").strip() == "":
-                saved = tensors_with(saved, local_path=local_path)
             refs.append(str(saved.ref or ref))
 
             if primary_saved is None:

@@ -214,7 +214,14 @@ class _UploadSessionManager:
                 repo_spec = dict(self._repo_spec_provider() or {})
             except Exception:
                 repo_spec = {}
-            for key in ("kind", "library_name", "model_family", "class_name", "adapter_for"):
+            for key in (
+                "kind",
+                "library_name",
+                "model_family",
+                "class_name",
+                "adapter_for_checkpoint_group",
+                "adapter_for_family",
+            ):
                 val = str(repo_spec.get(key) or "").strip()
                 if val:
                     body[key] = val

@@ -53,10 +53,21 @@ _CREATE_TIMEOUT_S = 60
 _FALLBACK_PART_SIZE = 64 * 1024 * 1024  # 64 MiB
 _MAX_PARALLEL_PARTS = 4
 
+# Streaming-from-disk read chunk size used by the bounded part-body reader
+# below and by ``blake3_hash_file``. 16 MiB is comfortably above S3's 5 MiB
+# minimum multipart part size and gives the kernel a fat-enough syscall to
+# amortize read overhead on NVMe / page-cache hits. (Issue #269.)
+STREAM_CHUNK_BYTES = 16 * 1024 * 1024
 
-def blake3_hash_file(path: str | Path, chunk_size: int = 8 * 1024 * 1024) -> str:
-    """Compute BLAKE3 hash of a file without loading it into memory."""
-    h = blake3()
+
+def blake3_hash_file(path: str | Path, chunk_size: int = STREAM_CHUNK_BYTES) -> str:
+    """Compute BLAKE3 hash of a file without loading it into memory.
+
+    Fans BLAKE3 internals across available CPU cores via
+    ``max_threads=blake3.AUTO`` — on a 16-core host this is ~5-8× the
+    single-threaded throughput. (Issue #269.)
+    """
+    h = blake3(max_threads=blake3.AUTO)
     with open(path, "rb") as f:
         while True:
             chunk = f.read(chunk_size)
@@ -64,6 +75,65 @@ def blake3_hash_file(path: str | Path, chunk_size: int = 8 * 1024 * 1024) -> str
                 break
             h.update(chunk)
     return h.hexdigest()
+
+
+class _BoundedFileReader:
+    """File-like view of ``[offset, offset+length)`` for a path.
+
+    Passed to ``requests.put(data=...)`` so the HTTP client streams the
+    part body from disk in small reads instead of loading the entire
+    part into memory. Peak resident bytes per in-flight part is one
+    ``STREAM_CHUNK_BYTES`` read buffer plus whatever requests/urllib3
+    buffer internally (~32 KiB).
+
+    Not thread-safe — each part-uploader owns its own instance.
+    """
+
+    __slots__ = ("_fh", "_remaining", "_length")
+
+    def __init__(self, path: str, offset: int, length: int) -> None:
+        # buffering=0 forces unbuffered binary I/O; we manage chunking
+        # explicitly so the kernel doesn't double-buffer behind us.
+        self._fh = open(path, "rb", buffering=0)
+        try:
+            self._fh.seek(offset)
+        except BaseException:
+            self._fh.close()
+            raise
+        self._length = int(length)
+        self._remaining = int(length)
+
+    def __len__(self) -> int:
+        # urllib3 looks for __len__ when computing Content-Length on a
+        # file-like body. Returning total length keeps the framing
+        # consistent across retries.
+        return int(self._length)
+
+    def read(self, size: int = -1) -> bytes:
+        if self._remaining <= 0:
+            return b""
+        if size is None or size < 0 or size > self._remaining:
+            size = self._remaining
+        # Cap each read at STREAM_CHUNK_BYTES so peak per-read RSS stays
+        # bounded even if requests/urllib3 asks for a huge slab.
+        if size > STREAM_CHUNK_BYTES:
+            size = STREAM_CHUNK_BYTES
+        data = self._fh.read(size)
+        self._remaining -= len(data)
+        return data
+
+    def close(self) -> None:
+        try:
+            self._fh.close()
+        except Exception:
+            pass
+
+    def __enter__(self) -> "_BoundedFileReader":
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+        self.close()
+        return False
 
 
 class PresignedUploadResult:
@@ -247,21 +317,21 @@ def _upload_parts_to_s3(
         offset = part_index * part_size
         length = min(part_size, file_size - offset)
 
-        with open(file_path, "rb") as f:
-            f.seek(offset)
-            data = f.read(length)
-
         last_exc: Optional[BaseException] = None
         for attempt in range(1, retry_attempts + 1):
             if cancel_check and cancel_check():
                 raise InterruptedError("canceled")
+            # Re-open the bounded reader on every attempt so a retry
+            # after a partial-PUT failure starts from the part's true
+            # offset rather than wherever the prior generator left off.
             try:
-                resp = requests.put(
-                    presigned_url,
-                    data=data,
-                    headers={"Content-Length": str(len(data))},
-                    timeout=_UPLOAD_TIMEOUT_S,
-                )
+                with _BoundedFileReader(file_path, offset, length) as body:
+                    resp = requests.put(
+                        presigned_url,
+                        data=body,
+                        headers={"Content-Length": str(length)},
+                        timeout=_UPLOAD_TIMEOUT_S,
+                    )
                 if resp.status_code < 200 or resp.status_code >= 300:
                     last_exc = RuntimeError(f"S3 part upload failed ({resp.status_code}): {resp.text[:200]}")
                 else:

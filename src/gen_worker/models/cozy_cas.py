@@ -166,7 +166,9 @@ async def _download_one_file(url: str, dst: Path, expected_size: int, expected_b
 
 
 def _blake3_file(path: Path, chunk_size: int = _DOWNLOAD_CHUNK_BYTES) -> str:
-    h = blake3()
+    # Fan BLAKE3 across cores via AUTO threading (issue #269). Used on
+    # download-verify path; same throughput win as the upload-side hash.
+    h = blake3(max_threads=blake3.AUTO)
     with open(path, "rb") as f:
         while True:
             b = f.read(chunk_size)

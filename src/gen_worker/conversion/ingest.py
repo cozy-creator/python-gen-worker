@@ -37,6 +37,22 @@ _MAX_REDIRECTS = 6
 _CHUNK_BYTES = 1024 * 1024
 _MAX_JSON_BYTES = 16 * 1024 * 1024
 _RETRYABLE_HTTP_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
+
+# Stable per-(repo, revision) HF mirror directory used as
+# `hf_hub_download(local_dir=...)`. Persistent across requests within
+# the worker container's lifetime so a retry of the same ingest
+# etag-checks against the existing files and skips re-download.
+# Passing the per-request output_dir as `local_dir` (older behavior)
+# meant the cache was per-request and every retry pulled bytes again.
+_HF_MIRROR_ROOT = Path(
+    os.getenv("CONVERSION_HF_MIRROR_DIR", "/var/cache/conversion/hf-mirror")
+)
+
+
+def _hf_mirror_dir_for(repo: str, rev: object) -> Path:
+    safe_repo = str(repo or "").replace("/", "--").replace("..", "_")
+    safe_rev = str(rev or "main").replace("/", "--").replace("..", "_")
+    return _HF_MIRROR_ROOT / safe_repo / safe_rev
 _FORBIDDEN_SOURCE_HEADER_NAMES = {
     "host",
     "authorization",
@@ -983,6 +999,7 @@ def download_huggingface_repo_files(
     state_lock = threading.Lock()
     state = {
         "bytes_completed": 0,
+        "bytes_in_flight": 0,
         "files_completed": 0,
         "files_in_flight": 0,
         "start_ts": _time.monotonic(),
@@ -998,13 +1015,18 @@ def download_huggingface_repo_files(
                 return
             state["last_emit_ts"] = now
             elapsed = max(now - state["start_ts"], 1e-3)
+            # `hf_hub_download` doesn't expose chunk-level progress, so the
+            # poller below scans on-disk bytes between completions. The
+            # display value is the larger of (a) completed-file bytes and
+            # (b) live on-disk sample — monotonic across both.
+            display_bytes = max(state["bytes_completed"], state["bytes_in_flight"])
             payload = {
-                "bytes_written": state["bytes_completed"],
+                "bytes_written": display_bytes,
                 "bytes_total": total_bytes_hint,
                 "files_completed": state["files_completed"],
                 "files_total": files_total,
                 "files_in_flight": state["files_in_flight"],
-                "bytes_per_sec_avg": float(state["bytes_completed"]) / elapsed,
+                "bytes_per_sec_avg": float(display_bytes) / elapsed,
             }
         # Best-effort — older callers expect (bytes_written, total_bytes) only;
         # newer callers can introspect a richer dict by checking the type.
@@ -1013,22 +1035,92 @@ def download_huggingface_repo_files(
         except Exception:
             pass
 
+    # In-flight progress poller. `hf_hub_download` only signals completion,
+    # so without this the user sees nothing for the multi-minute duration
+    # of a single multi-GB file. We scan `output_dir` on a 5s cadence and
+    # update `bytes_in_flight` so `_emit_progress` can report live bytes.
+    _poll_stop = threading.Event()
+
+    def _scan_on_disk_bytes() -> int:
+        # Scan both the per-request output_dir AND the stable mirror_dir
+        # the HF downloader writes into. Bytes accumulate in the mirror
+        # during transfer; we hardlink into output_dir only on completion,
+        # so without the mirror scan the poller would see nothing during
+        # a multi-GB single-file download.
+        total = 0
+        seen: set[int] = set()
+        for scan_root in (str(output_dir), str(mirror_dir)):
+            try:
+                for root, _dirs, files in os.walk(scan_root):
+                    for f in files:
+                        try:
+                            st = os.stat(os.path.join(root, f))
+                        except OSError:
+                            continue
+                        # Hardlinks share an inode — count once.
+                        key = (st.st_dev, st.st_ino)
+                        # Pack into a single int for the set.
+                        ikey = hash(key)
+                        if ikey in seen:
+                            continue
+                        seen.add(ikey)
+                        total += int(st.st_size)
+            except OSError:
+                pass
+        return total
+
+    def _in_flight_poll_loop() -> None:
+        while not _poll_stop.wait(5.0):
+            on_disk = _scan_on_disk_bytes()
+            with state_lock:
+                # Monotonic — protects against transient filesystem
+                # inconsistencies (e.g. rename-into-place atomicity).
+                if on_disk > state["bytes_in_flight"]:
+                    state["bytes_in_flight"] = on_disk
+                # Force-bypass the 1.5s rate-limit on the next emit; this
+                # is our only mid-flight signal.
+                state["last_emit_ts"] = 0.0
+            _emit_progress()
+
+    # Stable mirror dir for this (repo, revision). Reused across requests so
+    # huggingface_hub etag-checks against existing files and skips re-download
+    # on retries.
+    mirror_dir = _hf_mirror_dir_for(repo_id, revision)
+    mirror_dir.mkdir(parents=True, exist_ok=True)
+
     def _download_one(item: dict) -> dict:
         rel_path = str(item.get("path") or "").strip().replace("\\", "/").lstrip("/")
         size_bytes = item.get("size_bytes")
         with state_lock:
             state["files_in_flight"] += 1
         try:
-            local_path = hf_hub_download(
+            cached_path = hf_hub_download(
                 repo_id=repo_id,
                 filename=rel_path,
                 revision=revision,
-                local_dir=str(output_dir),
-                local_dir_use_symlinks=False,
+                local_dir=str(mirror_dir),
                 token=token,
             )
         finally:
             pass
+        # Hardlink the cached file into the per-request output_dir so
+        # downstream layout/walk code sees the expected tree layout. Hardlink
+        # is zero-cost on the same filesystem and keeps the central mirror
+        # populated when this request's tmp dir is later cleaned up. Falls
+        # back to copy on cross-device or filesystems without hardlink
+        # support.
+        target = Path(output_dir) / rel_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if target.exists() or target.is_symlink():
+            try:
+                target.unlink()
+            except OSError:
+                pass
+        try:
+            os.link(cached_path, target)
+        except OSError:
+            shutil.copy2(cached_path, target)
+        local_path = str(target)
         local_size = int(os.path.getsize(local_path))
         if local_size > _MAX_SOURCE_FILE_BYTES:
             raise ValueError(
@@ -1055,22 +1147,28 @@ def download_huggingface_repo_files(
             row["expected_sha256"] = expected_sha256
         return row
 
+    poller = threading.Thread(target=_in_flight_poll_loop, name="hf-ingest-poller", daemon=True)
+    poller.start()
     materialized: list[dict[str, object]] = []
-    if max_workers <= 1 or files_total <= 1:
-        # Single-thread path (legacy behavior; same code path)
-        for item in files_to_download:
-            materialized.append(_download_one(item))
-    else:
-        with ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures = [pool.submit(_download_one, item) for item in files_to_download]
-            try:
-                for fut in as_completed(futures):
-                    materialized.append(fut.result())
-            except Exception:
-                # Cancel remaining work; let the ThreadPoolExecutor wind down.
-                for fut in futures:
-                    fut.cancel()
-                raise
+    try:
+        if max_workers <= 1 or files_total <= 1:
+            # Single-thread path (legacy behavior; same code path)
+            for item in files_to_download:
+                materialized.append(_download_one(item))
+        else:
+            with ThreadPoolExecutor(max_workers=max_workers) as pool:
+                futures = [pool.submit(_download_one, item) for item in files_to_download]
+                try:
+                    for fut in as_completed(futures):
+                        materialized.append(fut.result())
+                except Exception:
+                    # Cancel remaining work; let the ThreadPoolExecutor wind down.
+                    for fut in futures:
+                        fut.cancel()
+                    raise
+    finally:
+        _poll_stop.set()
+        poller.join(timeout=2.0)
 
     total_bytes = sum(int(v.get("size_bytes") or 0) for v in materialized)
     # Final progress flush (overrides the 1.5s rate limit) so callers see the

@@ -31,6 +31,7 @@ from gen_worker.conversion.repackage import (
     diffusers_to_singlefile,
     singlefile_to_diffusers,
 )
+from gen_worker.request_context._concurrent_upload import parallel_map_uploads
 from ._shared import ConversionOutput, IngestResult, default_output_ref, ingest_from_source, tensors_with
 
 
@@ -540,25 +541,36 @@ def _finalize_publish_as_is(
     snapshot_manifest: list[dict[str, Any]] = []
     seen_keys: set[tuple[str, str]] = set()  # (path, digest) dedup
 
-    for t, rel_path, _size in list(ingest_result.all_file_tensors or []):
-        rel_path = str(rel_path or "").strip().replace("\\", "/").lstrip("/")
-        if not rel_path:
+    # Issue #269: collect work items, then fan out the uploads.
+    # Already-uploaded tensors (blob_digest present from the ingest's
+    # non-weight pass) pass through unchanged; new uploads go through
+    # the bounded ThreadPoolExecutor.
+    work_items: list[tuple[Any, str]] = []  # (tensor_or_None, rel_path) for non-uploaded; (saved_tensor, rel_path) for already-uploaded.
+    for t, rel_path_raw, _size in list(ingest_result.all_file_tensors or []):
+        rel_path_norm = str(rel_path_raw or "").strip().replace("\\", "/").lstrip("/")
+        if not rel_path_norm:
             continue
-        # If the tensor already has a blob_digest, it was uploaded during
-        # the ingest's non-weight-file pass. Reuse the digest.
-        if t.blob_digest:
-            saved = t
-        else:
-            local_path = str(t.local_path or "").strip()
-            if not local_path:
-                continue
-            ref = f"jobs/{ctx.request_id}/outputs/source-repo/{rel_path}"
-            ext = Path(rel_path).suffix.lstrip(".") or "bin"
-            try:
-                saved = ctx.save_checkpoint(ref, local_path, format=ext)
-            except Exception as exc:
-                raise RuntimeError(f"finalize_publish_as_is: failed to upload {rel_path}: {exc}") from exc
+        work_items.append((t, rel_path_norm))
 
+    def _maybe_upload(item: tuple[Any, str]) -> tuple[Any, str]:
+        t_local, rel_path_local = item
+        if t_local.blob_digest:
+            return t_local, rel_path_local
+        local_path_local = str(t_local.local_path or "").strip()
+        if not local_path_local:
+            return None, rel_path_local
+        ref_local = f"jobs/{ctx.request_id}/outputs/source-repo/{rel_path_local}"
+        ext_local = Path(rel_path_local).suffix.lstrip(".") or "bin"
+        try:
+            return ctx.save_checkpoint(ref_local, local_path_local, format=ext_local), rel_path_local
+        except Exception as exc:
+            raise RuntimeError(f"finalize_publish_as_is: failed to upload {rel_path_local}: {exc}") from exc
+
+    uploaded_pairs = parallel_map_uploads(work_items, _maybe_upload, label="finalize-publish")
+
+    for saved, rel_path in uploaded_pairs:
+        if saved is None:
+            continue
         art = _tensors_artifact_module(saved)
         digest = str(art.get("digest") or "").strip()
         if not digest:
@@ -608,9 +620,19 @@ def _finalize_publish_as_is(
     flavor_label_parts = [primary_dtype, primary_label_layout, primary_filetype]
     flavor_label = "-".join([p for p in flavor_label_parts if p])
 
+    # `flavor` is the tensorhub-validated canonical token (must be in the
+    # CanonicalQuantSchemes ∪ BaselineDtypes set, see
+    # tensorhub/internal/validation/canonical_quant.go). The composite
+    # `<dtype>-<layout>-<filetype>` string is purely a UI label and rides
+    # on `display_label`. Sending the composite as `flavor` — or stuffing
+    # file_layout / file_type into the `flavors[]` list — is what
+    # produces `invalid_flavor` 400s at /finalize. The `flavors[]` field
+    # holds canonical quant tokens ONLY (currently just the dtype for
+    # passthrough). file_layout + file_type are server-inferred from the
+    # snapshot manifest, not flavor-list contents.
     commit_checkpoint_flavors: list[dict[str, Any]] = [{
-        "flavor": flavor_label,
-        "flavors": [primary_dtype, primary_layout, primary_filetype],
+        "flavor": primary_dtype,
+        "flavors": [primary_dtype],
         "display_label": flavor_label,
         "artifacts": promoted_artifacts,
         # The publish_repo_revision wrapper looks at v.get("snapshot_manifest")
@@ -637,8 +659,8 @@ def _finalize_publish_as_is(
         ck_label_layout = str(ck_attrs.get("layout_kind") or runtime_library or "transformers").strip().lower()
         ck_label = "-".join([p for p in (ck_dtype, ck_label_layout, ck_filetype) if p])
         commit_checkpoint_flavors.append({
-            "flavor": ck_label,
-            "flavors": [ck_dtype, "", ck_filetype],
+            "flavor": ck_dtype,
+            "flavors": [ck_dtype],
             "display_label": ck_label,
             "artifacts": promoted_artifacts,
             "snapshot_manifest": snapshot_manifest,
@@ -667,7 +689,7 @@ def _finalize_publish_as_is(
                 primary_matched_spec = spec
                 break
         if primary_matched_spec is not None:
-            commit_checkpoint_flavors[0]["flavor"] = primary_matched_spec.label
+            commit_checkpoint_flavors[0]["flavor"] = primary_matched_spec.dtype
             commit_checkpoint_flavors[0]["display_label"] = primary_matched_spec.label
 
         for spec in requested_specs:
@@ -747,24 +769,35 @@ def _finalize_publish_as_is(
             # Promote the converted output files to CAS and build a per-spec
             # flavor entry. Each output file lives at
             # `<repo>/<filename>` for the destination snapshot.
+            #
+            # Issue #269: fan the uploads out across
+            # MAX_CONCURRENT_UPLOADS so a multi-shard inline conversion
+            # output ships shards in parallel.
             spec_artifacts: list[dict[str, Any]] = []
             spec_manifest: list[dict[str, Any]] = []
-            for out_path in inline_result.output_paths:
+            inline_outputs = list(inline_result.output_paths)
+
+            def _upload_inline(out_path: Path) -> tuple[Path, Any]:
+                rel_local = out_path.name
+                ref_key_local = f"jobs/{ctx.request_id}/outputs/inline-{spec.label}/{rel_local}"
+                ext_local = Path(rel_local).suffix.lstrip(".") or "bin"
+                return out_path, ctx.save_checkpoint(ref_key_local, str(out_path), format=ext_local)
+
+            try:
+                uploaded_inline = parallel_map_uploads(
+                    inline_outputs, _upload_inline, label=f"inline-{spec.label}"
+                )
+            except Exception as exc:
+                failed_flavors.append({
+                    "spec_label": spec.label,
+                    "dtype": spec.dtype,
+                    "file_type": spec.file_type,
+                    "reason": f"inline conversion produced output but upload failed: {exc}",
+                })
+                uploaded_inline = []
+
+            for out_path, saved in uploaded_inline:
                 rel = out_path.name
-                ref_key = f"jobs/{ctx.request_id}/outputs/inline-{spec.label}/{rel}"
-                ext = Path(rel).suffix.lstrip(".") or "bin"
-                try:
-                    saved = ctx.save_checkpoint(ref_key, str(out_path), format=ext)
-                except Exception as exc:
-                    failed_flavors.append({
-                        "spec_label": spec.label,
-                        "dtype": spec.dtype,
-                        "file_type": spec.file_type,
-                        "reason": f"inline conversion produced output but upload failed: {exc}",
-                    })
-                    spec_artifacts = []
-                    spec_manifest = []
-                    break
                 art = _tensors_artifact_module(saved)
                 digest = str(art.get("digest") or "").strip()
                 if not digest:
@@ -812,8 +845,8 @@ def _finalize_publish_as_is(
                 continue
 
             commit_checkpoint_flavors.append({
-                "flavor": spec.label,
-                "flavors": [spec_dtype, primary_layout, str(spec.file_type or "safetensors").strip().lower()],
+                "flavor": spec_dtype,
+                "flavors": [spec_dtype],
                 "display_label": spec.label,
                 "artifacts": spec_artifacts,
                 "snapshot_manifest": spec_manifest,
@@ -1659,16 +1692,22 @@ def _run_layout_repackage(
             out_dir = td / "diffusers"
             singlefile_to_diffusers(primary, out_dir, model_family=model_family)
             # Upload every file in the diffusers tree under a common prefix.
+            # Issue #269: fan uploads out across MAX_CONCURRENT_UPLOADS;
+            # results in input order so the "first safetensors becomes
+            # primary" rule is preserved deterministically.
             ref_root = f"jobs/{ctx.request_id}/outputs/weights-diffusers"
             primary_saved: Tensors | None = None
             additional: list[Any] = []
-            for f in sorted(out_dir.rglob("*")):
-                if not f.is_file():
-                    continue
-                rel = f.relative_to(out_dir).as_posix()
-                saved = ctx.save_checkpoint(
-                    f"{ref_root}/{rel}", str(f), format=f.suffix.lstrip(".") or "bin",
+            tree_files = [f for f in sorted(out_dir.rglob("*")) if f.is_file()]
+
+            def _upload_tree(f_local: Path) -> tuple[Path, Any]:
+                rel_local = f_local.relative_to(out_dir).as_posix()
+                return f_local, ctx.save_checkpoint(
+                    f"{ref_root}/{rel_local}", str(f_local), format=f_local.suffix.lstrip(".") or "bin",
                 )
+
+            for f, saved in parallel_map_uploads(tree_files, _upload_tree, label="singlefile-tree"):
+                rel = f.relative_to(out_dir).as_posix()
                 if primary_saved is None and rel.endswith(".safetensors"):
                     primary_saved = saved
                 else:
@@ -1863,6 +1902,13 @@ def _finalize_clone(
             # under the source's parent directory (preserving the component
             # path: `transformer/diffusion_pytorch_model.safetensors` →
             # `transformer/diffusion_pytorch_model-00001-of-00002.safetensors`).
+            #
+            # Issue #269: precompute the full upload job list (including
+            # sharding oversize files) up front, then fan all uploads out
+            # across MAX_CONCURRENT_UPLOADS. The 5 GB FLUX shards each
+            # used to take 30-50s of serial overhead; with 4-way fan-out
+            # they pipeline disk read + BLAKE3 + multipart PUT.
+            upload_jobs: list[tuple[str, str, str, str]] = []  # (ref, local_path, format, rel_for_uploaded_list)
             for saved_tensors, rel_path, file_size in ingest_result.all_weight_files:
                 local_path = str(getattr(saved_tensors, "local_path", "") or "").strip()
                 if local_path == "":
@@ -1876,54 +1922,51 @@ def _finalize_clone(
                     and int(file_size or 0) > int(MAX_SAFETENSORS_SHARD_BYTES)
                 )
                 if not needs_shard:
-                    up = ctx.save_checkpoint(up_ref, local_path, format=fmt)
-                    if str(up.local_path or "").strip() == "":
-                        up = tensors_with(up, local_path=local_path)
-                    uploaded_for_spec.append((up, rel_path))
-                    if str(up.ref or "").strip():
-                        publish_artifact_refs.append(str(up.ref).strip())
+                    upload_jobs.append((up_ref, local_path, fmt, rel_path))
                     continue
 
-                # Oversize safetensors: shard by byte offset, upload each
-                # shard + the index.json. No decode; no combined intermediate.
+                # Oversize safetensors: shard by byte offset (still serial
+                # — sharding writes to local disk and is bounded by NVMe
+                # bandwidth, not network; running multiple shard ops in
+                # parallel would just thrash the page cache).
                 rel_path_obj = Path(rel_path)
                 base_name = rel_path_obj.stem  # e.g. "diffusion_pytorch_model"
                 shard_stage = Path(local_path).parent / f".__shard_stage__{base_name}"
                 shard_stage.mkdir(parents=True, exist_ok=True)
-                try:
-                    shard_paths, index_path, _shard_sizes = shard_safetensors_by_offset(
-                        Path(local_path),
-                        shard_stage,
-                        max_shard_bytes=MAX_SAFETENSORS_SHARD_BYTES,
-                        shard_prefix=base_name,
-                    )
-                    rel_dir = rel_path_obj.parent
-                    for shard_path in shard_paths:
-                        shard_rel = str((rel_dir / shard_path.name).as_posix())
-                        shard_ref = f"jobs/{ctx.request_id}/outputs/source-repo/{shard_rel}"
-                        up = ctx.save_checkpoint(shard_ref, str(shard_path), format="safetensors")
-                        if str(up.local_path or "").strip() == "":
-                            up = tensors_with(up, local_path=str(shard_path))
-                        uploaded_for_spec.append((up, shard_rel))
-                        if str(up.ref or "").strip():
-                            publish_artifact_refs.append(str(up.ref).strip())
-                    # Only upload the index when we actually sharded into
-                    # multiple files (planner may return a single-shard plan
-                    # if the file happens to fit).
-                    if len(shard_paths) > 1:
-                        index_rel = str((rel_dir / index_path.name).as_posix())
-                        index_ref = f"jobs/{ctx.request_id}/outputs/source-repo/{index_rel}"
-                        idx_up = ctx.save_checkpoint(index_ref, str(index_path), format="json")
-                        if str(idx_up.local_path or "").strip() == "":
-                            idx_up = tensors_with(idx_up, local_path=str(index_path))
-                        uploaded_for_spec.append((idx_up, index_rel))
-                        if str(idx_up.ref or "").strip():
-                            publish_artifact_refs.append(str(idx_up.ref).strip())
-                finally:
-                    # Leave shard files on disk so the stream upload's retry
-                    # path can re-read; caller (worker-level temp dir cleanup)
-                    # wipes the whole request tmp at end of request.
-                    pass
+                shard_paths, index_path, _shard_sizes = shard_safetensors_by_offset(
+                    Path(local_path),
+                    shard_stage,
+                    max_shard_bytes=MAX_SAFETENSORS_SHARD_BYTES,
+                    shard_prefix=base_name,
+                )
+                rel_dir = rel_path_obj.parent
+                for shard_path in shard_paths:
+                    shard_rel = str((rel_dir / shard_path.name).as_posix())
+                    shard_ref = f"jobs/{ctx.request_id}/outputs/source-repo/{shard_rel}"
+                    upload_jobs.append((shard_ref, str(shard_path), "safetensors", shard_rel))
+                # Only upload the index when we actually sharded into
+                # multiple files (planner may return a single-shard plan
+                # if the file happens to fit).
+                if len(shard_paths) > 1:
+                    index_rel = str((rel_dir / index_path.name).as_posix())
+                    index_ref = f"jobs/{ctx.request_id}/outputs/source-repo/{index_rel}"
+                    upload_jobs.append((index_ref, str(index_path), "json", index_rel))
+
+            def _upload_passthrough(job: tuple[str, str, str, str]) -> tuple[Any, str]:
+                up_ref_local, local_path_local, fmt_local, rel_for_list_local = job
+                up_local = ctx.save_checkpoint(up_ref_local, local_path_local, format=fmt_local)
+                if str(up_local.local_path or "").strip() == "":
+                    up_local = tensors_with(up_local, local_path=local_path_local)
+                return up_local, rel_for_list_local
+
+            uploaded_results = parallel_map_uploads(
+                upload_jobs, _upload_passthrough, label="passthrough"
+            )
+            for up, rel_for_list in uploaded_results:
+                uploaded_for_spec.append((up, rel_for_list))
+                if str(up.ref or "").strip():
+                    publish_artifact_refs.append(str(up.ref).strip())
+
             passthrough_uploads[spec.label] = uploaded_for_spec
             conversion_idx += max(1, len(conversion_jobs))
             emit_stage("clone.save_format.completed",
@@ -2225,8 +2268,8 @@ def _finalize_clone(
             continue
 
         commit_checkpoint_flavors.append({
-            "flavor": spec.label,
-            "flavors": [spec.dtype, spec.file_layout, spec.file_type],
+            "flavor": spec.dtype,
+            "flavors": [spec.dtype],
             "display_label": spec.label,
             "artifacts": artifacts,
         })

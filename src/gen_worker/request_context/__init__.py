@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import base64
+import random
 import re
 import shutil
 import tempfile
@@ -35,6 +36,11 @@ def _default_compute() -> Compute:
     return Compute()
 
 logger = logging.getLogger(__name__)
+
+_REPO_REVISION_FINALIZE_REQUEST_TIMEOUT_S = 30
+_REPO_REVISION_FINALIZE_POLL_MAX_S = 30 * 60
+_REPO_REVISION_FINALIZE_POLL_INITIAL_S = 1.0
+_REPO_REVISION_FINALIZE_POLL_MAX_DELAY_S = 10.0
 
 # Helpers, constants, and JWT/SSRF utilities live in _helpers.py. They are
 # re-exported here so existing `from gen_worker.request_context import _foo`
@@ -149,6 +155,11 @@ class RequestContext:
         # Tenant-invisible; library-internal machinery for the session
         # lifecycle (open → per-file uploads → finalize).
         self._upload_sessions = None  # type: Optional["_UploadSessionManager"]
+        # Guards lazy-init of `_upload_sessions`. Per-file upload threads
+        # (issue #269: MAX_CONCURRENT_UPLOADS=4) can race on the first
+        # save_* call when the manager hasn't been instantiated yet.
+        # The manager itself is already thread-safe internally.
+        self._upload_sessions_lock = threading.Lock()
 
         # Repo fields declared by the ingest pipeline before the first upload
         # session opens. Empty values are omitted and tensorhub keeps/inherits
@@ -237,26 +248,31 @@ class RequestContext:
         ctx.save_file / save_checkpoint / save_output_stream / save_checkpoint_release
         which route through the manager implicitly.
         """
+        # Double-checked locking so concurrent save_* threads (issue
+        # #269) don't each materialize a manager and lose session
+        # caching to each other.
         if self._upload_sessions is None:
-            from ._upload_session import _UploadSessionManager
-            base = self._get_file_api_base_url()
+            with self._upload_sessions_lock:
+                if self._upload_sessions is None:
+                    from ._upload_session import _UploadSessionManager
+                    base = self._get_file_api_base_url()
 
-            def _hdrs() -> Dict[str, str]:
-                token = self._get_worker_capability_token()
-                h: Dict[str, str] = {"Authorization": f"Bearer {token}"}
-                if self._owner:
-                    h["X-Cozy-Owner"] = self._owner
-                return h
+                    def _hdrs() -> Dict[str, str]:
+                        token = self._get_worker_capability_token()
+                        h: Dict[str, str] = {"Authorization": f"Bearer {token}"}
+                        if self._owner:
+                            h["X-Cozy-Owner"] = self._owner
+                        return h
 
-            def _repo_spec_provider() -> Dict[str, str]:
-                return dict(self._repo_spec)
+                    def _repo_spec_provider() -> Dict[str, str]:
+                        return dict(self._repo_spec)
 
-            self._upload_sessions = _UploadSessionManager(
-                base_url=base,
-                headers_provider=_hdrs,
-                job_id=self._job_id,
-                repo_spec_provider=_repo_spec_provider,
-            )
+                    self._upload_sessions = _UploadSessionManager(
+                        base_url=base,
+                        headers_provider=_hdrs,
+                        job_id=self._job_id,
+                        repo_spec_provider=_repo_spec_provider,
+                    )
         return self._upload_sessions
 
     def set_repo_spec(
@@ -266,7 +282,8 @@ class RequestContext:
         library_name: str = "",
         model_family: str = "",
         class_name: str = "",
-        adapter_for: str = "",
+        adapter_for_checkpoint_group: str = "",
+        adapter_for_family: str = "",
     ) -> None:
         """Set destination repo fields for upload sessions opened from this ctx.
 
@@ -279,7 +296,8 @@ class RequestContext:
             "library_name": library_name,
             "model_family": model_family,
             "class_name": class_name,
-            "adapter_for": adapter_for,
+            "adapter_for_checkpoint_group": adapter_for_checkpoint_group,
+            "adapter_for_family": adapter_for_family,
         }
         self._repo_spec = {
             k: str(v or "").strip()
@@ -1268,7 +1286,7 @@ class RequestContext:
         )
         if not base or not token:
             # Local/dev mode: no remote publish channel configured.
-            return {"ok": False, "skipped": True, "reason": "missing_worker_capability_channel", "owner": owner, "repo": repo}
+            return {"ok": False, "skipped": True, "reason": "missing_worker_capability_channel", "owner": owner, "name": repo}
 
         headers = {
             "Authorization": f"Bearer {token}",
@@ -1276,14 +1294,29 @@ class RequestContext:
             "X-Cozy-Owner": owner,
         }
 
-        def _request_json(method: str, path: str, payload: Dict[str, Any], *, allow_404: bool = False) -> Dict[str, Any]:
-            url = f"{base}{path}"
-            resp = requests.request(method=method, url=url, headers=headers, data=json.dumps(payload), timeout=30)
-            code = int(resp.status_code)
+        def _parse_retry_after(raw: Any) -> Optional[float]:
+            try:
+                value = float(str(raw or "").strip())
+            except Exception:
+                return None
+            if value <= 0:
+                return None
+            return min(value, _REPO_REVISION_FINALIZE_POLL_MAX_DELAY_S)
+
+        def _response_json(resp: requests.Response) -> Dict[str, Any]:
+            try:
+                parsed = resp.json()
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                pass
+            return {"ok": True} if not resp.text else {"ok": False, "raw": resp.text}
+
+        def _raise_publish_http_error(code: int, path: str, text: str) -> None:
             if code in (401, 403):
                 detail = ""
                 try:
-                    detail = str((resp.text or "").strip())
+                    detail = str((text or "").strip())
                 except Exception:
                     detail = ""
                 if detail != "":
@@ -1291,20 +1324,138 @@ class RequestContext:
                         f"repo publish unauthorized ({code}): check worker_capability_token validity; response={detail[:256]}"
                     )
                 raise AuthError(f"repo publish unauthorized ({code}): check worker_capability_token validity")
+            raise RuntimeError(f"repo publish request failed ({code}) {path}: {text[:512]}")
+
+        def _poll_repo_revision_finalize(status_path: str, initial_delay_s: Optional[float] = None) -> Dict[str, Any]:
+            delay_s = initial_delay_s or _REPO_REVISION_FINALIZE_POLL_INITIAL_S
+            deadline = time.monotonic() + _REPO_REVISION_FINALIZE_POLL_MAX_S
+            while True:
+                if self._cancel_event.is_set():
+                    raise RuntimeError("repo finalize canceled while polling")
+                sleep_s = max(0.0, min(delay_s, _REPO_REVISION_FINALIZE_POLL_MAX_DELAY_S))
+                if sleep_s > 0:
+                    time.sleep(sleep_s + random.uniform(0, min(0.25, sleep_s * 0.1)))
+                url = f"{base}{status_path}"
+                resp = requests.get(url, headers=headers, timeout=_REPO_REVISION_FINALIZE_REQUEST_TIMEOUT_S)
+                code = int(resp.status_code)
+                if code in (401, 403):
+                    _raise_publish_http_error(code, status_path, resp.text or "")
+                if code < 200 or code >= 300:
+                    raise RuntimeError(f"repo finalize status poll failed ({code}) {status_path}: {resp.text[:512]}")
+                parsed = _response_json(resp)
+                state = str(parsed.get("state") or "").strip().lower()
+                finalize_status = str(parsed.get("finalize_status") or "").strip().lower()
+                if state == "finalized" or finalize_status == "succeeded":
+                    result = parsed.get("finalize_result")
+                    if isinstance(result, dict):
+                        return result
+                    return parsed
+                if state == "failed" or finalize_status == "failed":
+                    err = parsed.get("finalize_error")
+                    if isinstance(err, dict):
+                        err_msg = json.dumps(err, sort_keys=True)
+                    else:
+                        err_msg = str(err or parsed)
+                    raise RuntimeError(f"repo finalize failed: {err_msg[:512]}")
+                retry_after = _parse_retry_after(parsed.get("retry_after_seconds"))
+                if retry_after is not None:
+                    delay_s = retry_after
+                else:
+                    delay_s = min(delay_s * 1.6, _REPO_REVISION_FINALIZE_POLL_MAX_DELAY_S)
+                if time.monotonic() >= deadline:
+                    raise RuntimeError(
+                        f"repo finalize timed out after {_REPO_REVISION_FINALIZE_POLL_MAX_S}s polling {status_path}"
+                    )
+
+        def _status_path_from_location(path: str, location: str) -> str:
+            loc = str(location or "").strip()
+            if not loc:
+                return path[:-len("/finalize")] if path.endswith("/finalize") else path
+            parsed = urllib.parse.urlparse(loc)
+            if parsed.scheme or parsed.netloc:
+                status_path = parsed.path or "/"
+                if parsed.query:
+                    status_path = f"{status_path}?{parsed.query}"
+                return status_path
+            return loc
+
+        def _request_repo_revision_finalize(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+            deadline = time.monotonic() + _REPO_REVISION_FINALIZE_POLL_MAX_S
+            body = json.dumps(payload)
+            delay_s = _REPO_REVISION_FINALIZE_POLL_INITIAL_S
+            while True:
+                url = f"{base}{path}"
+                try:
+                    resp = requests.post(
+                        url,
+                        headers=headers,
+                        data=body,
+                        timeout=_REPO_REVISION_FINALIZE_REQUEST_TIMEOUT_S,
+                    )
+                except requests.RequestException as exc:
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError(f"repo finalize failed (network): {exc}") from exc
+                    logger.warning(
+                        "worker_finalize_post_retry request_id=%s job_id=%s path=%s error=%r",
+                        self.request_id,
+                        self.job_id or "",
+                        path,
+                        exc,
+                    )
+                    time.sleep(delay_s + random.uniform(0, min(0.25, delay_s * 0.1)))
+                    delay_s = min(delay_s * 1.6, _REPO_REVISION_FINALIZE_POLL_MAX_DELAY_S)
+                    continue
+
+                code = int(resp.status_code)
+                if code == 202:
+                    status_path = _status_path_from_location(path, resp.headers.get("Location", ""))
+                    retry_after = _parse_retry_after(resp.headers.get("Retry-After"))
+                    if retry_after is None:
+                        try:
+                            retry_after = _parse_retry_after(_response_json(resp).get("retry_after_seconds"))
+                        except Exception:
+                            retry_after = None
+                    return _poll_repo_revision_finalize(status_path, retry_after)
+                if code in (401, 403):
+                    _raise_publish_http_error(code, path, resp.text or "")
+                if code >= 500 and time.monotonic() < deadline:
+                    logger.warning(
+                        "worker_finalize_post_retry request_id=%s job_id=%s path=%s status=%s response=%s",
+                        self.request_id,
+                        self.job_id or "",
+                        path,
+                        code,
+                        (resp.text or "")[:256],
+                    )
+                    time.sleep(delay_s + random.uniform(0, min(0.25, delay_s * 0.1)))
+                    delay_s = min(delay_s * 1.6, _REPO_REVISION_FINALIZE_POLL_MAX_DELAY_S)
+                    continue
+                if code < 200 or code >= 300:
+                    _raise_publish_http_error(code, path, resp.text or "")
+                return _response_json(resp)
+
+        def _request_json(method: str, path: str, payload: Dict[str, Any], *, allow_404: bool = False) -> Dict[str, Any]:
+            if method.upper() == "POST" and path.endswith("/finalize"):
+                return _request_repo_revision_finalize(path, payload)
+            url = f"{base}{path}"
+            resp = requests.request(
+                method=method,
+                url=url,
+                headers=headers,
+                data=json.dumps(payload),
+                timeout=30,
+            )
+            code = int(resp.status_code)
+            if code in (401, 403):
+                _raise_publish_http_error(code, path, resp.text or "")
             if allow_404 and code == 404:
                 return {"ok": False, "not_found": True}
             if code < 200 or code >= 300:
                 # Create may be idempotent and already exists.
                 if path == "/api/v1/repos" and code in (400, 409):
                     return {"ok": True, "already_exists": True}
-                raise RuntimeError(f"repo publish request failed ({code}) {path}: {resp.text[:256]}")
-            try:
-                parsed = resp.json()
-                if isinstance(parsed, dict):
-                    return parsed
-            except Exception:
-                pass
-            return {"ok": True}
+                _raise_publish_http_error(code, path, resp.text or "")
+            return _response_json(resp)
 
         # TensorHub auto-creates the repo and lineage record on the upload path,
         # so no explicit repo creation or conversion-jobs/start call is needed.
@@ -1524,7 +1675,7 @@ class RequestContext:
         out: Dict[str, Any] = {
             "ok":                 True,
             "owner":              owner,
-            "repo":               repo,
+            "name":               repo,
             "job_id":             job_id,
             "checkpoint_ids":     published_ids,
             "output_versions":    published_ids,
@@ -1849,7 +2000,7 @@ class RequestContext:
         if token:
             _assert_token_repo_scope_matches_destination(token, owner, repo, required_permissions=["repo-version:create"])
         if not base or not token:
-            return {"ok": False, "skipped": True, "reason": "missing_worker_capability_channel", "owner": owner, "repo": repo}
+            return {"ok": False, "skipped": True, "reason": "missing_worker_capability_channel", "owner": owner, "name": repo}
 
         url = f"{base}/api/v1/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}/metadata"
         headers = {
@@ -1873,4 +2024,4 @@ class RequestContext:
         returned = parsed.get("metadata")
         if not isinstance(returned, dict):
             returned = metadata
-        return {"ok": True, "owner": owner, "repo": repo, "metadata": returned}
+        return {"ok": True, "owner": owner, "name": repo, "metadata": returned}

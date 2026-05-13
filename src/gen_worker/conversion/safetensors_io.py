@@ -157,14 +157,24 @@ def persist_safetensors_output(
             "source_artifact_refs": str(saved.ref or out_ref),
         }
 
+    # Issue #269: parallelize shard uploads across MAX_CONCURRENT_UPLOADS.
+    # Each shard is up to MAX_SAFETENSORS_SHARD_BYTES of independent bytes;
+    # fanning out lets the multipart PUT pipelines stack across files.
+    from ..request_context._concurrent_upload import parallel_map_uploads
+
+    def _upload_shard(shard_path_local: Path) -> tuple[Path, str, Tensors]:
+        shard_name_local = shard_path_local.name
+        shard_ref_local = f"{base_dir}/{shard_name_local}" if base_dir else shard_name_local
+        saved_local = ctx.save_checkpoint(shard_ref_local, str(shard_path_local), format="safetensors")
+        return shard_path_local, shard_ref_local, saved_local
+
     shard_refs: list[str] = []
     shard_artifacts: list[ConversionArtifact] = []
-    for shard_path in shard_paths:
-        shard_name = shard_path.name
-        shard_ref = f"{base_dir}/{shard_name}" if base_dir else shard_name
-        saved = ctx.save_checkpoint(shard_ref, str(shard_path), format="safetensors")
+    for shard_path, shard_ref, saved in parallel_map_uploads(
+        list(shard_paths), _upload_shard, label="shard-upload"
+    ):
         shard_refs.append(str(saved.ref or shard_ref))
-        shard_artifacts.append(ConversionArtifact(rel_name=shard_name, tensors=saved))
+        shard_artifacts.append(ConversionArtifact(rel_name=shard_path.name, tensors=saved))
 
     if index_path is None:
         # Multi-shard without an index — shouldn't happen for a well-formed

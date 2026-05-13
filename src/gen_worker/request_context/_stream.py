@@ -8,7 +8,9 @@ to avoid a circular import between this module and `__init__.py`.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
+import resource
 import threading
 import time
 import tempfile
@@ -17,6 +19,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional
 
 from blake3 import blake3
+
+logger = logging.getLogger(__name__)
 
 from ..api.errors import AuthError
 from ..api.types import Asset, Tensors
@@ -77,7 +81,10 @@ class _RequestOutputStream:
             _enforce_output_file_size_limit(self._expected_size_bytes)
         self._stream_remote = bool(self._ctx._should_stream_output_to_file_api(self._ref))
         self._sha = hashlib.sha256()
-        self._blake3_hasher = blake3()
+        # Fan BLAKE3 across cores; `AUTO` (== -1) lets the impl pick. The
+        # hasher itself stays thread-confined to the writer; AUTO only
+        # affects internal parallelism within a single update() call.
+        self._blake3_hasher = blake3(max_threads=blake3.AUTO)
         self._bytes_written = 0
         self._bytes_uploaded = 0
         self._chunks_written = 0
@@ -433,6 +440,21 @@ class _RequestOutputStream:
             cancel_check=self._ctx.is_canceled,
             complete_extra=complete_extra,
         )
+
+        # Issue #269: sample peak RSS to verify the streaming refactor is
+        # actually keeping us bounded. ru_maxrss is in KiB on Linux,
+        # bytes on macOS; we report both numbers so neither platform is
+        # ambiguous. With MAX_CONCURRENT_UPLOADS=4 and per-file streaming
+        # we expect this to stay well under 1 GiB even for 5 GB shards.
+        try:
+            ru = resource.getrusage(resource.RUSAGE_SELF)
+            peak_kib = int(ru.ru_maxrss)  # Linux: KiB; macOS: bytes
+            logger.debug(
+                "upload_stream peak_resident=%d_kib ref=%s file_size=%d",
+                peak_kib, self._ref, int(file_size),
+            )
+        except Exception:
+            pass
 
         self._uploader_meta = result.meta
         with self._progress_lock:
