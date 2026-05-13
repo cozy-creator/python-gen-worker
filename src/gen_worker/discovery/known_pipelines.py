@@ -1,22 +1,17 @@
-"""Non-restricting pipeline / model base classes.
+"""Non-restricting pipeline / model base classes (legacy compat table).
 
-When a ``@inference_function`` uses ``Src.PAYLOAD_REF`` on a parameter whose
-type annotation is one of these deliberately-broad base classes, discovery
-emits NO derived pipeline-class gate — callers can pass any subclass-family
-ref and the orchestrator's compat validator falls through to the other
-axes (file_layout / lineage / attributes) for that gate. Concrete leaf
-classes (``StableDiffusionXLPipeline``, ``Flux2KleinPipeline``, ...) DO
-produce a restricting gate.
+These deliberately-broad base classes (``DiffusionPipeline``,
+``AutoModelForCausalLM``, etc.) are pipeline auto-dispatchers — declaring
+one of them on an injected parameter means "any subclass of this family".
+
+In 0.7.0 the SDK no longer auto-derives `pipeline_classes` from the
+parameter annotation (the explicit tenant-declared
+``.allow_override(*classes)`` allowlist is the only authoritative source).
+The orchestrator still references this list when normalizing caller-supplied
+override classes; the helpers below stay as a reference for that side.
 
 Kept in lockstep with the parallel Go list in
-``gen-orchestrator/internal/release/compat_classes.go``. A drift between
-these two lists is a correctness bug: signatures judged non-restricting on
-the publish side but restricting on the orchestrator side (or vice versa)
-would silently change gate behavior.
-
-When adding a new class: add the entry in BOTH files + bump the shared
-``KNOWN_PIPELINES_REVISION`` string on both sides. A lint / CI check asserts
-revisions match before a build succeeds.
+``gen-orchestrator/internal/release/compat_classes.go``.
 """
 
 from __future__ import annotations

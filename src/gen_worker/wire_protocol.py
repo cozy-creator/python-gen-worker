@@ -25,8 +25,17 @@ from __future__ import annotations
 # function capabilities. Additive; older workers continue to use the
 # worker_event path (orchestrator no longer routes those, so capabilities and
 # startup phase only flow via typed messages now — coordinate the release).
+#
+# 1.5 (#321): BATCH wire family removed — BatchExecutionRequest /
+# BatchExecutionItem / BatchExecutionItemResult / BatchExecutionResult proto
+# messages deleted plus oneof tags 21/22 reserved. The "batching" was
+# wire-level grouping that the worker unpacked and ran serially — no real
+# GPU batching, no orchestrator producer. Real LLM batching needs continuous
+# batching with shared KV-cache and a different wire shape. UNLOAD: orchestrator
+# now produces UnloadModelCommand on OOM-LRU eviction; worker side was already
+# complete.
 WIRE_PROTOCOL_MAJOR = 1
-WIRE_PROTOCOL_MINOR = 4
+WIRE_PROTOCOL_MINOR = 5
 
 
 def wire_protocol_version_string() -> str:

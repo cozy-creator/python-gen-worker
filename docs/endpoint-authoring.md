@@ -61,22 +61,12 @@ ram_gb = 32
 cpu_cores = 8
 disk_gb = 80
 
-# Static model refs: declared up front, pre-resolved at deploy time, available
-# to any function. Selectors live in the ref string itself:
-#   "owner/repo"               → latest tag, default flavor
-#   "owner/repo:prod"          → prod tag, default flavor
-#   "owner/repo:prod#int4"     → prod tag, int4 flavor
-#   "owner/repo@blake3:<hex>"  → pinned checkpoint
-[models]
-sdxl = "stabilityai/stable-diffusion-xl-base-1.0:prod"
-
-# Per-function model keyspace — payload chooses one key at invoke time.
-[models.generate]
-dreamshaper = "lykon/dreamshaper-xl-v2-turbo"
-juggernaut  = "rundiffusion/juggernaut-xl-v9"
+# Model bindings live in Python on @inference_function(models={...}) — see
+# the "Model bindings" section below. The `[models]` / `[models.<fn>]` toml
+# tables were removed in gen-worker 0.7.0.
 ```
 
-The publishing identity must have read access to every declared ref; deployment fails fast otherwise.
+The publishing identity must have read access to every binding's ref; deployment fails fast otherwise.
 
 ---
 
@@ -101,97 +91,153 @@ def generate(ctx: RequestContext, payload: Input) -> Output:
 
 Inputs and outputs must be `msgspec.Struct`. The discovery step records their JSON schemas.
 
-### Resource hints
+### Resources — per-function envelope + cost shape
+
+`Resources` collapses the old `ResourceRequirements` + `ScalingHints` into a
+single per-function struct. Declare it **per function** so the worker can
+self-advertise an accurate availability map at boot and the orchestrator can
+route on accurate per-function hardware needs.
 
 ```python
-from gen_worker import inference_function, ResourceRequirements
+from gen_worker import Resources, inference_function
 
-@inference_function(resources=ResourceRequirements(
+@inference_function(resources=Resources(
     accelerator="cuda",
     requires_gpu=True,
-    min_vram_gb=8.0,
+    min_vram_gb=22.0,
     cuda_compute_min=8.0,
-    required_libraries=["torch", "diffusers"],
+    required_libraries=("torch", "diffusers"),
+    vram_must_fit="full_model",
+    vram_size_multiplier=1.0,
+    vram_base=2 * 1024**3,
+    vram_scales_with=("width", "height"),
+    runtime_scales_with=("num_inference_steps",),
 ))
 def generate(ctx, payload): ...
 ```
 
-Fields: `kind`, `accelerator` (`"none"` | `"cuda"`), `requires_gpu`, `min_vram_gb`, `cuda_compute_min` (SM floor as float, e.g. `8.0`), `required_libraries`.
+**Static placement envelope (hard gates):** `accelerator`, `requires_gpu`,
+`min_vram_gb`, `cuda_compute_min`, `required_libraries`.
 
-### Scaling hints
+**Dynamic cost shape (admission + scheduling):** `vram_must_fit`,
+`vram_base`, `vram_size_multiplier`, `vram_scales_with`, `runtime_scales_with`.
 
-Tell the orchestrator how your endpoint's resource use depends on the payload. The runtime uses these to pre-empt OOMs and to size pods more efficiently. You declare *which* dimensions matter; the orchestrator learns the coefficients from observed runs.
+Field names in `vram_scales_with` / `runtime_scales_with` must reference real
+fields on the payload struct — `inference_function` validates this at decoration
+time (failure: `unknown_payload_field`).
 
-`ScalingHints` is a frozen `msgspec.Struct` — pass it via `scaling_hints=`:
+### Model bindings — `models={...}` kwarg
 
-**VRAM scales with payload (image generation):**
+Declare model dependencies via the decorator's `models=` kwarg. The worker
+loads and caches each binding; your function receives the live instance.
+
+**Fixed pick:**
 
 ```python
-from gen_worker import inference_function, ScalingHints
+from diffusers import StableDiffusionXLPipeline
+from gen_worker import Repo, RequestContext, Resources, inference_function
 
-@inference_function(scaling_hints=ScalingHints(
-    vram_must_fit="full_model",                          # anchor: whole bf16 must fit
-    vram_size_multiplier=1.0,                            # × source.size_facts["full_model"]
-    vram_base=2 * 1024**3,                               # + 2 GB working memory
-    vram_scales_with=("payload.width", "payload.height"),
-))
-def generate_image(ctx, payload): ...
+sdxl = Repo("stabilityai/stable-diffusion-xl-base-1.0")
+
+@inference_function(
+    resources=Resources(requires_gpu=True, min_vram_gb=12.0),
+    models={"pipe": sdxl.flavor("bf16")},
+)
+def generate(ctx: RequestContext, pipe: StableDiffusionXLPipeline, payload: Input) -> Output: ...
 ```
 
-**Runtime scales with payload (LLM):**
+**Fixed pick with caller-override allowlist:**
 
 ```python
-@inference_function(scaling_hints=ScalingHints(
-    vram_must_fit="largest_component",                   # streaming-load: only need largest single shard
-    vram_size_multiplier=1.0,
-    runtime_scales_with=("payload.max_tokens",),
-))
-def chat(ctx, payload): ...
+@inference_function(
+    resources=Resources(requires_gpu=True, min_vram_gb=12.0),
+    models={"pipe": sdxl.flavor("bf16").allow_override(StableDiffusionXLPipeline)},
+)
+def generate(ctx, pipe, payload): ...
 ```
 
-Fields:
-- `vram_must_fit`: anchor — `"full_model"` (whole model must fit) or `"largest_component"` (only largest single component must fit, for streaming-load paths). Tensorhub records both numbers on each checkpoint at ingest; this picks which one the orchestrator multiplies.
-- `vram_base` (int bytes): constant overhead (CUDA kernels, working memory).
-- `vram_size_multiplier` (float): multiplier on `source.size_facts[vram_must_fit]`.
-- `vram_scales_with` / `runtime_scales_with` (tuples of payload field paths): the orchestrator learns coefficients from observation.
+When `.allow_override(*classes)` is declared, the caller may send
+`_models.pipe = "acme/my-sdxl-finetune:prod#bf16"` to substitute the binding
+default — subject to the supplied ref's `pipeline_class` matching one of the
+allowlisted classes.
 
-All optional — declare only the dimensions your endpoint actually depends on.
-
-### Model injection
-
-Declare a model dependency with `Annotated[..., ModelRef(...)]`. The worker loads and caches the object; your function receives the live instance.
-
-**Fixed** — key baked into the signature:
+**Dispatch pick** — payload-driven dispatch on a `Literal[...]`-typed field:
 
 ```python
-from typing import Annotated
-from diffusers import DiffusionPipeline
-from gen_worker import ModelRef, ModelRefSource as Src
+from typing import Literal
+import msgspec
+from gen_worker import Repo, dispatch, inference_function
 
-@inference_function
-def generate(
-    ctx: RequestContext,
-    pipe: Annotated[DiffusionPipeline, ModelRef(Src.FIXED, "sdxl")],
-    payload: Input,
-) -> Output: ...
-```
-
-**Payload-selected** — caller chooses from the function's `[models.<fn>]` keyspace:
-
-```python
-class Input(msgspec.Struct):
+class BnbInput(msgspec.Struct):
+    variant: Literal["nf4", "int8"]
     prompt: str
-    model: str   # must match a key in [models.generate]
 
-@inference_function
-def generate(
-    ctx: RequestContext,
-    pipe: Annotated[DiffusionPipeline, ModelRef(Src.PAYLOAD, "model")],
-    payload: Input,
-) -> Output: ...
+flux = Repo("acme/flux")
+
+@inference_function(
+    resources=Resources(requires_gpu=True, min_vram_gb=14.0),
+    models={"pipe": dispatch(
+        field="variant",
+        table={
+            "nf4":  flux.flavor("nf4"),
+            "int8": flux.flavor("int8"),
+        },
+    )},
+)
+def generate_bnb(ctx, pipe, payload: BnbInput) -> Output: ...
 ```
 
-Only short keys declared in `[models.<function>]` are accepted; arbitrary repo refs from the payload are rejected.
+Dispatch tables may also carry `.allow_override(*classes)`. The caller can
+either pick a table key via the discriminator field, OR send `_models.<param>`
+to bypass the dispatch table entirely (subject to the pipeline-class allowlist).
+
+**`_models` invocation envelope:**
+
+```jsonc
+// Structured form (preferred for typed clients):
+{
+  "prompt": "...",
+  "_models": {
+    "pipe": {"ref": "acme/sdxl-finetune", "tag": "prod", "flavor": "bf16"}
+  }
+}
+
+// String shorthand:
+{
+  "prompt": "...",
+  "_models": {"pipe": "acme/sdxl-finetune:prod#bf16"}
+}
+```
+
+Both forms normalize to `(ref, tag, flavor)`. The reserved field name
+`_models` is rejected at decoration time if a payload struct uses it.
+
+**Override error codes** (returned by the orchestrator):
+
+- `unknown_override_param` — `_models[<x>]` names a param that doesn't exist.
+- `model_override_not_allowed` — the binding has no `.allow_override(...)`.
+- `override_ref_not_found` — the supplied ref doesn't resolve.
+- `override_tag_not_found` — the ref exists but the tag isn't published.
+- `override_flavor_not_found` — the ref+tag exist but the flavor isn't in the
+  checkpoint group.
+- `incompatible_pipeline_class` — the supplied ref's pipeline class is not in
+  the binding's `pipeline_classes` allowlist.
+
+Override substitution is **atomic** — if any `_models` entry fails validation,
+the whole request is rejected before dispatch. No partial substitution.
+
+**Multi-param injection** — each binding's override policy is independent:
+
+```python
+@inference_function(
+    resources=Resources(requires_gpu=True, min_vram_gb=24.0),
+    models={
+        "base":    sdxl_base.flavor("bf16").allow_override(StableDiffusionXLPipeline),
+        "refiner": sdxl_refiner.flavor("bf16").allow_override(StableDiffusionXLImg2ImgPipeline),
+    },
+)
+def generate_with_refiner(ctx, base, refiner, payload) -> Output: ...
+```
 
 ### Streaming output
 
@@ -330,7 +376,7 @@ Admin-plane visibility toggles (`publish_endpoint`, `publish_media`, `publish_ch
 
 ### How model downloads work
 
-You never call resolve from inside an endpoint. The orchestrator pre-resolves every model ref the job needs (static refs from `endpoint.toml [models]`, plus any runtime refs from the request payload) and ships `{snapshot_digest, files: [{path, blake3, presigned_url}]}` to the worker over gRPC. The `ModelRef` injection paths shown above just consume that pre-resolved manifest — the worker downloads from the presigned URLs and hands you the loaded object.
+You never call resolve from inside an endpoint. The orchestrator pre-resolves every model ref the job needs (default picks from `@inference_function(models={...})` bindings, plus any caller-supplied overrides from the request's `_models` field) and ships `{snapshot_digest, files: [{path, blake3, presigned_url}]}` to the worker over gRPC. The binding-injection paths shown above just consume that pre-resolved manifest — the worker downloads from the presigned URLs and hands you the loaded object.
 
 If the invoker doesn't have read access to a runtime-specified repo, the orchestrator fails the invoke before dispatching — your function never starts.
 

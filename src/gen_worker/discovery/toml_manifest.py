@@ -16,11 +16,11 @@ _RE_MODEL_SEGMENT = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 
 @dataclass(frozen=True)
 class TensorhubModelSpec:
-    """Endpoint.toml [models] entry.
-
-    `flavor` selects a named checkpoint inside the resolved checkpoint group.
-    `flavors` is an ordered fallback list. The concrete selector fields are
-    kept explicit; there is no free-form attributes bag in endpoint.toml.
+    """Legacy holder, kept for type-stub compatibility on the EndpointToml
+    dataclass. The endpoint.toml [models] / [models.<fn>] tables that this
+    used to parse were removed in gen-worker 0.7.0 — model bindings now live
+    in Python via @inference_function(models={...}). load_endpoint_toml
+    raises on [models] presence.
     """
 
     ref: str

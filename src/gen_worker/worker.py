@@ -422,11 +422,12 @@ class Worker:
         self._worker_local_unavailable_functions_by_name: Dict[str, Dict[str, Any]] = {}
         self._payload_ref_availability_by_function: Dict[str, Dict[str, Dict[str, Any]]] = {}
         # Per-request tracking of which caller-supplied refs the active
-        # invocation bound via Src.PAYLOAD_REF. Set by the dispatch path before
-        # the tenant body runs; read by `_map_exception` to classify
-        # post-download failures as `ref_compatibility_surprise`.
-        # rather than generic `validation` / `internal`. Empty dict = no
-        # caller refs on this request; the classifier returns False.
+        # invocation bound via the orchestrator-stamped `resolved_models` map
+        # (the 0.7.0 override channel — replaces the old Src.PAYLOAD_REF
+        # signature pattern). Set by the dispatch path before the tenant
+        # body runs; read by `_map_exception` to classify post-download
+        # failures as `ref_compatibility_surprise`. Empty dict = no caller
+        # refs on this request; the classifier returns False.
         self._current_payload_ref_keys: Dict[str, str] = {}
         self._prefetch_thread: Optional[threading.Thread] = None
         self._model_init_done_event = threading.Event() # To signal model init is complete
@@ -616,12 +617,12 @@ class Worker:
         caller-supplied ref.
 
         Runs only when ``_current_payload_ref_keys`` is populated (meaning
-        the function's signature had a ``Src.PAYLOAD_REF`` binding and the
-        dispatch path recorded which keys the caller supplied). Without
-        that flag we don't want to false-positive on requests that never
-        involved a caller ref — an internal fine-tune or a FIXED-only
-        endpoint's state_dict mismatch is NOT a compatibility surprise,
-        it's a real bug.
+        the orchestrator stamped a `resolved_models` override on this
+        request and the dispatch path recorded which params the caller
+        substituted). Without that flag we don't want to false-positive on
+        requests that never involved a caller-supplied ref — an internal
+        fine-tune or a fixed-binding endpoint's state_dict mismatch is NOT
+        a compatibility surprise, it's a real bug.
 
         Detection patterns (sufficient, not exhaustive):
 

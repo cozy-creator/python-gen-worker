@@ -1,16 +1,14 @@
 from __future__ import annotations
 
-from typing import Annotated
-
 import msgspec
 import torch
 from transformers import AutoModelForCTC, AutoProcessor
 
-from gen_worker import Asset, RequestContext, ResourceRequirements, inference_function
+from gen_worker import Asset, Repo, RequestContext, Resources, inference_function
 from gen_worker import io as gw_io
-from gen_worker.api.injection import ModelRef, ModelRefSource as Src
 
-_MODEL_KEY = "medasr"
+# Module-level Repo handle — reused for every binding that needs this repo.
+medasr = Repo("medasr/transcribe")
 
 
 class MedASRInput(msgspec.Struct):
@@ -21,11 +19,17 @@ class MedASROutput(msgspec.Struct):
     text: str
 
 
-@inference_function(resources=ResourceRequirements())
+@inference_function(
+    resources=Resources(requires_gpu=True, min_vram_gb=4.0),
+    models={
+        "model": medasr,
+        "processor": medasr,
+    },
+)
 def medasr_transcribe(
     ctx: RequestContext,
-    model: Annotated[AutoModelForCTC, ModelRef(Src.FIXED, _MODEL_KEY)],
-    processor: Annotated[AutoProcessor, ModelRef(Src.FIXED, _MODEL_KEY)],
+    model: AutoModelForCTC,
+    processor: AutoProcessor,
     payload: MedASRInput,
 ) -> MedASROutput:
     ctx.raise_if_canceled()

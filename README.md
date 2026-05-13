@@ -71,8 +71,8 @@ contracts, error types, and local testing.
 
 The top-level `gen_worker` module exports only what endpoint authors need:
 
-- Decorators: `inference_function`, `ResourceRequirements`, `ScalingHints`
-- Injection: `ModelRef`, `ModelRefSource`
+- Decorators: `inference_function`, `Resources`
+- Bindings: `Repo`, `Dispatch`, `dispatch`
 - Context: `RequestContext` (inference; the base), `ConversionContext` (transform / conversion endpoints), `DatasetContext` (dataset-generation), `TrainingContext` (trainer-class)
 - Types: `Asset`, `Tensors`, `Compute`, `LoraSpec`
 - Errors: `ValidationError`, `RetryableError`, `FatalError`, `ResourceError`,
@@ -82,3 +82,51 @@ The top-level `gen_worker` module exports only what endpoint authors need:
 
 Training and conversion live in their own submodules: `gen_worker.trainer`,
 `gen_worker.conversion`, `gen_worker.clone`.
+
+## Migrating 0.6.x → 0.7.0
+
+The 0.7.0 cut replaces the `Annotated[T, ModelRef(...)]` injection pattern and
+the `endpoint.toml [models]` table with a single `models={...}` kwarg on
+`@inference_function`. `ResourceRequirements` and `ScalingHints` merged into
+one `Resources` struct (declared **per function**). The `require_vram` /
+`require_compute_capability` / `require_cuda_library` runtime helpers are
+gone — the worker now boot-checks each function's `Resources` envelope
+against host hardware and self-advertises only runnable functions.
+
+```python
+# 0.6.x:
+from gen_worker import ModelRef, ResourceRequirements, ScalingHints, inference_function
+from gen_worker.capability import require_vram
+
+@inference_function(
+    resources=ResourceRequirements(min_vram_gb=4.0),
+    scaling_hints=ScalingHints(vram_scales_with=("width", "height")),
+)
+def generate(
+    ctx,
+    pipe: Annotated[FluxPipeline, ModelRef(Src.FIXED, ref="acme/flux", flavor="bf16")],
+    payload: Input,
+) -> Output:
+    require_vram(22 * 1024**3)
+    ...
+
+# 0.7.0:
+from gen_worker import Repo, Resources, inference_function
+
+flux = Repo("acme/flux")
+
+@inference_function(
+    resources=Resources(
+        requires_gpu=True,
+        min_vram_gb=22.0,
+        vram_scales_with=("width", "height"),
+    ),
+    models={"pipe": flux.flavor("bf16")},
+)
+def generate(ctx, pipe: FluxPipeline, payload: Input) -> Output:
+    ...
+```
+
+Bare imports of the removed symbols (`ModelRef`, `ModelRefSource`, `Src`,
+`ResourceRequirements`, `ScalingHints`, `require_vram`, etc.) raise
+`ImportError` with a one-line migration pointer.

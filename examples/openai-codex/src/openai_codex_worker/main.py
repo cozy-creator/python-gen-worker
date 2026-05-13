@@ -5,7 +5,7 @@ from typing import Iterator, Optional
 
 import msgspec
 
-from gen_worker import RequestContext, ResourceRequirements, inference_function
+from gen_worker import RequestContext, Resources, inference_function
 
 
 class CodexExecInput(msgspec.Struct):
@@ -19,7 +19,7 @@ class CodexEventDelta(msgspec.Struct):
     jsonl: str
 
 
-@inference_function(resources=ResourceRequirements())
+@inference_function(resources=Resources())
 def codex_exec(ctx: RequestContext, payload: CodexExecInput) -> Iterator[CodexEventDelta]:
     """
     Run Codex in headless mode and stream JSONL events as incremental deltas.

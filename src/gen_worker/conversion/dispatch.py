@@ -2,21 +2,21 @@
 
 Signature-introspected dispatch: reserved parameter names bound to library-
 injected types (ctx, source, datasets), everything else decoded by msgspec
-from the wire payload by name. Supports ``Annotated[Source, ModelRef(
-Src.PAYLOAD, '<wire_field>')]`` to declare secondary models the library
-materializes alongside the primary source.
+from the wire payload by name. Extra ``Source``-typed params can be tagged
+with the private ``_PayloadRef("wire_field")`` Annotated marker to declare
+secondary models the library materializes alongside the primary source.
 
 At decorator time:
   - Reject reserved-name + non-reserved-type combos (TypeError).
   - Require ``ctx`` + ``source``.
   - Build a per-function ``ref_registry`` for orchestrator token scoping:
-    maps wire_field → parameter_name for every Annotated[Source, ModelRef(
-    Src.PAYLOAD, ...)] param.
+    maps wire_field → parameter_name for every Annotated[Source,
+    _PayloadRef(...)] param.
 
 At dispatch time:
   - Build reserved-name injected values (ctx, source, datasets).
   - For each non-reserved param: decode from payload[name] using msgspec,
-    or materialize via ModelRef-PAYLOAD if annotated.
+    or materialize via _PayloadRef if annotated.
   - Call fn(**kwargs) with only the names the tenant declared.
   - Upload each returned ProducedFlavor; apply destination.tags on success.
 
@@ -150,7 +150,7 @@ class TrainingFunctionSpec:
     """Per-function metadata built at decorator time.
 
     ``ref_registry`` maps wire-field-name -> parameter-name for every
-    ``Annotated[Source, ModelRef(Src.PAYLOAD, key)]`` parameter. Orchestrator
+    ``Annotated[Source, _PayloadRef(key)]`` parameter. Orchestrator
     reads this at publish to know which wire fields to include in the
     capability-token reads set.
 
@@ -189,7 +189,7 @@ class TrainingFunctionSpec:
         # from payload by msgspec)
         self.other_params = other_params
         # Full wire-payload JSON schema (dict). Includes source, destination,
-        # datasets (if declared), every ModelRef-PAYLOAD field, and every
+        # datasets (if declared), every _PayloadRef field, and every
         # tenant-named param. Enum types come through via msgspec Literal
         # → JSON schema `enum` mapping.
         self.input_schema = input_schema
@@ -238,10 +238,10 @@ def training_function(
             front "supply a dataset." At runtime the tenant calls
             ``gen_worker.conversion.calibration.resolve_calibration_action``
             to enforce policy per spec.
-        scaling_hints: Optional prebuilt :class:`ScalingHints` value. Tenants
+        scaling_hints: Optional prebuilt :class:`Resources` value. Tenants
             may also pass the direct VRAM/runtime keyword fields below.
         vram_must_fit, vram_base, vram_size_multiplier, vram_scales_with,
-            runtime_scales_with: Convenience form for ``ScalingHints``.
+            runtime_scales_with: Convenience form for ``Resources``.
 
     At decorator time: validates the signature and attaches a
     ``TrainingFunctionSpec`` to the function as ``__training_spec__``.
@@ -281,7 +281,7 @@ def training_function(
 
 def _coerce_training_scaling_hints(
     *,
-    scaling_hints: ScalingHints | None,
+    scaling_hints:  Resources | None,
     vram_must_fit: str | None,
     vram_base: int,
     vram_size_multiplier: float,
@@ -1064,7 +1064,7 @@ def _materialize_secondary_source(
     default_is_optional: bool,
     default: Any,
 ) -> Any:
-    """Materialize a secondary Source declared via Annotated[Source, ModelRef(Src.PAYLOAD, key)]."""
+    """Materialize a secondary Source declared via Annotated[Source, _PayloadRef(key)]."""
     if wire_field not in raw_fields:
         if default_is_optional:
             return default
@@ -1095,7 +1095,7 @@ def _materialize_secondary_source(
             f"worker must have resolved+downloaded the snapshot before dispatching."
         )
     # For now all secondary models materialize as a Source (the base type in
-    # Annotated[Source, ModelRef(...)]). Future richer types (Pipeline,
+    # Annotated[Source, _PayloadRef(...)]). Future richer types (Pipeline,
     # PreTrainedModel) can be dispatched on base_type here.
     return Source(Path(local_path), attributes=attributes, ref=ref_str)
 
@@ -1145,13 +1145,13 @@ def _build_wire_payload_schema(
         DestinationRepo (msgspec structs).
       - datasets: present iff the tenant declared `datasets: list[Dataset]`.
         Schema = array of DatasetRef.
-      - Every Annotated[Source, ModelRef(Src.PAYLOAD, 'field')] param maps
+      - Every Annotated[Source, _PayloadRef('field')] param maps
         to a wire field named `field`. Schema = SourceRepo.
       - Every tenant-named param (entries in other_params) maps to a wire
         field of that name. Schema = msgspec.json.schema(param.annotation).
 
     Required-fields: source, destination; each tenant-named param without a
-    default; each ModelRef-PAYLOAD param without a default.
+    default; each _PayloadRef param without a default.
     """
     from ..api.types import DatasetRef, DestinationRepo, SourceRepo
 
@@ -1181,7 +1181,7 @@ def _build_wire_payload_schema(
         if p.default is inspect.Parameter.empty:
             required.append(name)
 
-    # ModelRef(Src.PAYLOAD, ...) params — wire field is SourceRepo-shaped
+    # _PayloadRef(...) params — wire field is SourceRepo-shaped
     for wire_field, param_name in ref_registry.items():
         p = signature.parameters[param_name]
         if p.default is inspect.Parameter.empty:
@@ -1219,7 +1219,7 @@ def _build_wire_payload_schema(
             continue
         properties[name] = type_to_schema.get(id(p.annotation), {"type": "object"})
     for wire_field, param_name in ref_registry.items():
-        # ModelRef-PAYLOAD wire fields are SourceRepo-shaped dicts
+        # _PayloadRef wire fields are SourceRepo-shaped dicts
         properties[wire_field] = type_to_schema[id(SourceRepo)]
 
     schema: dict = {

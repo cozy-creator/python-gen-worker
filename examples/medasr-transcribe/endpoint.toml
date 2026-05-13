@@ -1,14 +1,10 @@
 schema_version = 1
 main = "medasr_transcribe.main"
 
-[models]
-medasr = "google/medasr"
+# Model bindings live in @inference_function(models={...}) in main.py. The
+# per-function Resources struct on the decorator declares hardware needs.
 
-[host.requirements]
-cuda_min = "12.8"
-
-[resources]
-vram_gb = 8
-ram_gb = 16
-cpu_cores = 4
-disk_gb = 30
+[[build.profiles]]
+name = "default"
+accelerator = "cuda"
+cuda = "12.8"
