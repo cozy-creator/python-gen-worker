@@ -8,9 +8,23 @@ Usage:
     python -m gen_worker.entrypoint
 """
 
+import os
+
+# Reduce CUDA allocator fragmentation for tight-VRAM single-process workers.
+# Set BEFORE any module imports torch (PyTorch reads this env var only at
+# first cudaMalloc; setting it later is a no-op). gen-worker entrypoint is
+# the first module loaded in every worker process, so putting it here gives
+# library-wide coverage across conversion / inference / training workers.
+#
+# `setdefault` so an operator-set value (Dockerfile ENV or docker-compose env)
+# overrides. The flag uses CUDA's virtual-memory APIs to grow allocator
+# segments on demand, recovering hundreds of MiB of "reserved-but-unallocated"
+# headroom that the default fixed-segment allocator wastes. See:
+# https://docs.pytorch.org/docs/stable/notes/cuda.html#optimizing-memory-usage-with-pytorch-cuda-alloc-conf
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import json
 import logging
-import os
 import sys
 import traceback
 from pathlib import Path

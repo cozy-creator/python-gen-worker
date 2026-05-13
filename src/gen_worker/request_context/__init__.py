@@ -711,8 +711,16 @@ class RequestContext:
         output_kind: Optional[str] = None,
         target_dtype: Optional[str] = None,
         flavor: Optional[str] = None,
+        attributes: Optional[dict] = None,
     ) -> Tensors:
-        """Save checkpoint/model-weight bytes and return a first-class tensor artifact."""
+        """Save checkpoint/model-weight bytes and return a first-class tensor artifact.
+
+        ``attributes`` is a free-form provenance map (e.g. quantization
+        library + scheme + group_size + calibration dataset id). Stamped
+        onto the output flavor for downstream lineage queries. Threaded
+        to the upload session's ``/complete`` payload when streaming via
+        repo-CAS; ignored for the legacy media-route fallback path.
+        """
         ref = _normalize_output_ref(ref)
         self._require_repo_job_scope_for_tensors(ref)
         src = str(local_path or "").strip()
@@ -744,6 +752,7 @@ class RequestContext:
                 output_kind=output_kind,
                 target_dtype=target_dtype,
                 flavor=flavor,
+                attributes=attributes,
             )
             with open(src, "rb") as fin:
                 while True:
@@ -870,6 +879,7 @@ class RequestContext:
         output_kind: Optional[str] = None,
         target_dtype: Optional[str] = None,
         flavor: Optional[str] = None,
+        attributes: Optional[dict] = None,
     ) -> _RequestOutputStream:
         """Open a chunk-writable output stream that finalizes to Tensors."""
         ref = _normalize_output_ref(ref)
@@ -886,6 +896,7 @@ class RequestContext:
             output_kind=output_kind,
             target_dtype=target_dtype,
             flavor=flavor,
+            attributes=attributes,
         )
 
     def save_bytes_create(self, ref: str, data: bytes) -> Asset:
@@ -1375,11 +1386,22 @@ class RequestContext:
             label = str(v.get("display_label") or flavor).strip()
             lineage: List[Dict[str, Any]] = []
             if parent_repo_ref and parent_checkpoint_id:
-                lineage.append({
+                edge: Dict[str, Any] = {
                     "parent_repo":          parent_repo_ref,
                     "parent_checkpoint_id": parent_checkpoint_id,
                     "relationship_kind":    relationship_kind or "import",
-                })
+                }
+                # Issue #258 task 3: forward per-edge metadata when the
+                # caller attached it (e.g. quantization_method +
+                # quantization_library for quantization edges). The
+                # publish handler in tensorhub validates the shape via
+                # ValidateQuantizationLineageMetadata for relationship_kind
+                # == "quantization" and rejects with 400 if required
+                # fields are missing.
+                raw_meta = v.get("lineage_metadata")
+                if isinstance(raw_meta, dict) and raw_meta:
+                    edge["metadata"] = raw_meta
+                lineage.append(edge)
             # Per-flavor snapshot_manifest is taken from the caller's
             # v["snapshot_manifest"] when present; otherwise falls back to
             # the shared top-level manifest_entries (clone path).
@@ -1410,6 +1432,14 @@ class RequestContext:
             }
             if per_flavor_deletions:
                 ck_entry["deletions"] = per_flavor_deletions
+            # Per-checkpoint attributes — tensorhub stores these as
+            # `repo_checkpoints.attributes` jsonb. Carries intrinsic facts
+            # like `size_facts` used by the orchestrator's VRAM-aware
+            # placement (gen-orchestrator #320). Tensorhub side must accept
+            # the field in the publish payload to persist it.
+            raw_attrs = v.get("attributes")
+            if isinstance(raw_attrs, dict) and raw_attrs:
+                ck_entry["attributes"] = dict(raw_attrs)
             publish_checkpoints.append(ck_entry)
 
         primary_default_flavor = ""

@@ -2,6 +2,7 @@
 
 from .decorators import (
     ResourceRequirements,
+    ScalingHints,
     inference_function,
     realtime_function,
 )
@@ -23,6 +24,7 @@ from .types import Asset, Compute, LoraSpec, Tensors
 
 __all__ = [
     "ResourceRequirements",
+    "ScalingHints",
     "inference_function",
     "realtime_function",
     "AuthError",

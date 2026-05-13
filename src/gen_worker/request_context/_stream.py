@@ -50,6 +50,7 @@ class _RequestOutputStream:
         output_kind: Optional[str] = None,
         target_dtype: Optional[str] = None,
         flavor: Optional[str] = None,
+        attributes: Optional[dict] = None,
     ) -> None:
         from ..presigned_upload import blake3_hash_file, presigned_upload_file
 
@@ -66,6 +67,10 @@ class _RequestOutputStream:
         self._lineage_output_kind = (str(output_kind or "").strip() or None)
         self._lineage_target_dtype = (str(target_dtype or "").strip() or None)
         self._lineage_flavor = (str(flavor or "").strip() or None)
+        # Free-form attributes from the dispatch wrapper (quantization
+        # library + scheme + group_size + calibration dataset id, etc).
+        # Plumbed onto the /complete payload when streaming to repo-CAS.
+        self._lineage_attributes = dict(attributes) if isinstance(attributes, dict) and attributes else None
         if self._expected_size_bytes < 0:
             self._expected_size_bytes = 0
         if self._expected_size_bytes > 0:
@@ -199,6 +204,7 @@ class _RequestOutputStream:
                         output_kind=self._lineage_output_kind,
                         target_dtype=self._lineage_target_dtype,
                         flavor=self._lineage_flavor,
+                        attributes=self._lineage_attributes,
                     )
                 else:
                     if self._create:
@@ -395,6 +401,21 @@ class _RequestOutputStream:
                 extra["target_dtype"] = self._lineage_target_dtype
             if self._lineage_flavor:
                 extra["flavor"] = self._lineage_flavor
+            if self._lineage_attributes:
+                # Free-form provenance from the dispatch wrapper (quant
+                # library/scheme/group_size, calibration dataset id, etc).
+                # `flavor` from the attributes map mirrors `_lineage_flavor`
+                # when both are set; prefer the explicit lineage field.
+                attr_clean = {
+                    k: v for k, v in self._lineage_attributes.items()
+                    if k != "flavor" or "flavor" not in extra
+                }
+                if attr_clean:
+                    extra["attributes"] = attr_clean
+                # Also surface the flavor from attributes when no explicit
+                # lineage flavor was supplied.
+                if "flavor" not in extra and self._lineage_attributes.get("flavor"):
+                    extra["flavor"] = str(self._lineage_attributes["flavor"])
             if extra:
                 complete_extra = extra
 

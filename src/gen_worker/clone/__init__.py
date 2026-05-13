@@ -25,8 +25,7 @@
 - Intermediate APIs: stable, narrower use-cases — changes flagged in
   release notes; minor bump additive, major bump breaking.
 - Everything else inside `gen_worker.clone` (including `pipeline.py`,
-  `_shared.py`, `_flashpack.py`): LIBRARY-INTERNAL. No stability promise;
-  refactor freely.
+  `_shared.py`): LIBRARY-INTERNAL. No stability promise; refactor freely.
 
 ## Architectural principle
 
@@ -42,6 +41,7 @@ from __future__ import annotations
 from typing import Any
 
 from .pipeline import run_clone as _run_clone
+from .size_walk import compute_size_facts
 from .types import CheckpointRef, CivitaiMeta, HFMeta
 
 
@@ -169,6 +169,7 @@ __all__ = [
     "fetch_civitai_file",
     "parse_huggingface_metadata",
     "parse_civitai_metadata",
+    "compute_size_facts",
     "CheckpointRef",
     "HFMeta",
     "CivitaiMeta",

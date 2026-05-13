@@ -196,7 +196,7 @@ def require_vram(required_bytes: int) -> None:
     """Raise ``InsufficientVRAMError`` if GPU 0's total VRAM is less than ``required_bytes``.
 
     ``required_bytes`` is the function's declared footprint at load time —
-    e.g. 22 GB for flux.2-klein-4b bf16. Worker uses the primary device's
+    e.g. 22 GB for flux.2-klein-4b-turbo bf16. Worker uses the primary device's
     total memory (``torch.cuda.get_device_properties(0).total_memory``); this
     ignores other running processes and accelerate-style sharding, which is
     intentional: the check is about the function's hardware gate, not

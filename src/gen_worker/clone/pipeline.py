@@ -819,6 +819,27 @@ def _finalize_publish_as_is(
                 "snapshot_manifest": spec_manifest,
             })
 
+    # Intrinsic size facts for the materialized snapshot — used by the
+    # orchestrator's VRAM-aware placement (gen-orchestrator #320). Computed
+    # once per source repo dir; attached to every flavor below since all
+    # flavors share the same materialized snapshot files at this point.
+    snapshot_size_facts: dict[str, Any] = {}
+    try:
+        from .size_walk import compute_size_facts
+        source_repo_dir = str(ingest_result.source_repo_dir or "").strip()
+        if source_repo_dir:
+            snapshot_size_facts = compute_size_facts(source_repo_dir)
+    except Exception:
+        # Size walk is purely advisory — never block publish on it.
+        snapshot_size_facts = {}
+    if snapshot_size_facts and snapshot_size_facts.get("full_model_bytes", 0) > 0:
+        for cf in commit_checkpoint_flavors:
+            attrs = cf.get("attributes")
+            if not isinstance(attrs, dict):
+                attrs = {}
+            attrs.setdefault("size_facts", snapshot_size_facts)
+            cf["attributes"] = attrs
+
     # Lineage: pin the upstream as parent if known.
     parent_repo = ""
     parent_checkpoint_id = ""
@@ -1424,7 +1445,7 @@ def _apply_save_format(
         materialize_safetensors_input,
         persist_safetensors_output,
     )
-    from ._flashpack import convert_safetensors_to_flashpack
+    from gen_worker.conversion.flashpack import convert_safetensors_to_flashpack
     from gen_worker.conversion.streaming_primitives import (
         streaming_dtype_cast,
         streaming_nvfp4_quantize,

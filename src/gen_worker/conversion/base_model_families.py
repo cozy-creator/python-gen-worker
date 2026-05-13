@@ -1,7 +1,7 @@
 """Base-model family enum + cross-format mapping tables.
 
 Records the destination LoRA / PEFT checkpoint's lineage on two axes:
-  - `base_model_family`: a finite canonical enum (`sdxl`, `flux2-klein-4b`,
+  - `base_model_family`: a finite canonical enum (`sdxl`, `flux2-klein-4b-turbo`,
     `llama-3-8b`, ...) — useful for compatibility checks ("base+LoRA must
     share family") and discovery filters
   - `base_model_repo`: the specific upstream repo id (`stabilityai/...`)
@@ -34,7 +34,7 @@ CANONICAL_FAMILIES: frozenset[str] = frozenset({
     "sdxl", "sdxl-turbo", "sdxl-pony", "sdxl-illustrious",
     "sdxl-distilled", "sdxl-lightning", "sdxl-hyper",
     "flux1-dev", "flux1-schnell", "flux1-kontext", "flux1-krea",
-    "flux2-dev", "flux2-klein-4b", "flux2-klein-9b", "flux2-pro",
+    "flux2-dev", "flux2-klein-4b-turbo", "flux2-klein-9b", "flux2-pro",
     "stable-cascade", "playground-v2", "pixart-alpha", "pixart-sigma",
     "lumina", "kolors", "hunyuan-1", "auraflow",
     "qwen-image", "z-image",
@@ -95,9 +95,9 @@ _KOHYA_TO_FAMILY: Mapping[str, str] = {
     "flux.1": "flux1-dev",
     "flux1-dev": "flux1-dev",
     "flux1-schnell": "flux1-schnell",
-    "flux2": "flux2-klein-4b",
-    "flux2-klein": "flux2-klein-4b",
-    "flux2-klein-4b": "flux2-klein-4b",
+    "flux2": "flux2-klein-4b-turbo",
+    "flux2-klein": "flux2-klein-4b-turbo",
+    "flux2-klein-4b": "flux2-klein-4b-turbo",
     "flux2-klein-9b": "flux2-klein-9b",
     # SD 3.x
     "sd3": "sd3-medium",
@@ -141,7 +141,7 @@ _CIVITAI_TO_FAMILY: Mapping[str, str] = {
     "AuraFlow": "auraflow",
     "Flux.1 D": "flux1-dev",
     "Flux.1 S": "flux1-schnell",
-    "Flux.2": "flux2-klein-4b",
+    "Flux.2": "flux2-klein-4b-turbo",
     "SD 3": "sd3-medium",
     "SD 3.5": "sd35-medium",
     "SD 3.5 Medium": "sd35-medium",
@@ -177,7 +177,7 @@ _REPO_TO_FAMILY: Mapping[str, str] = {
     "black-forest-labs/FLUX.1-Kontext-dev": "flux1-kontext",
     "black-forest-labs/FLUX.1-Krea-dev": "flux1-krea",
     "black-forest-labs/FLUX.2-dev": "flux2-dev",
-    "black-forest-labs/FLUX.2-klein-4B": "flux2-klein-4b",
+    "black-forest-labs/FLUX.2-klein-4B": "flux2-klein-4b-turbo",
     "black-forest-labs/FLUX.2-klein-9B": "flux2-klein-9b",
     # Video
     "stabilityai/stable-video-diffusion-img2vid": "svd",
@@ -225,7 +225,7 @@ _TAG_TO_FAMILY: Mapping[str, str] = {
     "flux-1": "flux1-dev",
     "flux-dev": "flux1-dev",
     "flux-schnell": "flux1-schnell",
-    "flux-2": "flux2-klein-4b",
+    "flux-2": "flux2-klein-4b-turbo",
     "wan2-1": "wan21",
     "wan2-2": "wan22",
     "ltx-video": "ltx-video",
@@ -246,7 +246,7 @@ def kohya_to_family(value: str) -> Optional[str]:
     if "flux1" in s or "flux.1" in s:
         return "flux1-dev"
     if "flux2" in s or "flux.2" in s:
-        return "flux2-klein-4b"
+        return "flux2-klein-4b-turbo"
     if "sd_v1" in s or "sd-v1" in s or "sd1" in s:
         return "sd15"
     if "sd_v2" in s or "sd-v2" in s or "sd2" in s:

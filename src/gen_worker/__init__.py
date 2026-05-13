@@ -7,6 +7,7 @@ subsystems should import their explicit modules, for example
 
 from .api.decorators import (
     ResourceRequirements,
+    ScalingHints,
     inference_function,
     realtime_function,
 )
@@ -43,6 +44,7 @@ __all__ = [
     "inference_function",
     "realtime_function",
     "ResourceRequirements",
+    "ScalingHints",
     "ModelRef",
     "ModelRefSource",
     "RequestContext",

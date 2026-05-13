@@ -393,6 +393,18 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
         "description": fn_description,
     }
 
+    # Per-function scaling hints (gen-orchestrator #320) — emit only when the
+    # tenant declared at least one field so we don't pollute endpoint.lock
+    # for the majority of existing functions.
+    hints = getattr(func, "_scaling_hints", None)
+    if hints is not None and hasattr(hints, "to_dict"):
+        try:
+            hints_dict = hints.to_dict()
+            if isinstance(hints_dict, dict) and hints_dict:
+                fn["scaling_hints"] = hints_dict
+        except Exception:
+            pass
+
     if delta_type is not None:
         fn["delta_type"] = _type_id(delta_type)
         fn["delta_schema_sha256"] = delta_sha
@@ -478,6 +490,15 @@ def _extract_conversion_function_metadata(func: Any, module_name: str) -> Dict[s
         "label": getattr(func, "_function_label", None) or None,
         "description": getattr(func, "_function_description", None) or None,
     }
+    # Per-function scaling hints (gen-orchestrator #320).
+    hints = getattr(func, "_scaling_hints", None)
+    if hints is not None and hasattr(hints, "to_dict"):
+        try:
+            hints_dict = hints.to_dict()
+            if isinstance(hints_dict, dict) and hints_dict:
+                fn["scaling_hints"] = hints_dict
+        except Exception:
+            pass
     return fn
 
 
@@ -713,11 +734,19 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
             for sel in payload_selectors
             if isinstance(sel, dict) and str(sel.get("field") or "").strip()
         ]
-        if required_payload_fields and not payload_keyspace:
-            raise ValueError(
-                f"function '{fn_name}' declares ModelRef(PAYLOAD, ...) but "
-                f"endpoint.toml is missing [models.{fn_name}] keyspace"
-            )
+        # Issue #32 (training-endpoints/agents/progress.json): a missing
+        # `[models.<fn>]` block is fine for functions whose ONLY ModelRef
+        # params are payload-sourced. The valid payload-key set already
+        # comes from the Python decorators (via `required_payload_fields`
+        # above); the toml block was only useful when it mapped each key
+        # to a FIXED default ref. For caller-supplied refs there is no
+        # meaningful "default" to declare — and the previous strictness
+        # forced endpoint authors to invent sentinel refs (the
+        # `root/placeholder` anti-pattern).
+        #
+        # FIXED-ref keyspace is still enforced below (the `required_keys`
+        # check against top-level `[models]`), because FIXED refs must
+        # bind at publish time.
 
         # Fixed refs must be declared in top-level [models].
         required_keys = set(fn.get("required_models", []) or [])

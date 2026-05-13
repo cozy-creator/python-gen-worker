@@ -43,6 +43,57 @@ from .dataset import Dataset
 from .produced import ProducedFlavor
 from .source import Source
 
+# Mirror of training-endpoints canonical_quant.SCHEME_LIBRARY for the
+# canonical (scheme → default library) mapping. Kept inline here so
+# python-gen-worker doesn't take a hard dependency on training-endpoints
+# at import time. Issue #258 task 3.
+_CANONICAL_QUANT_SCHEME_LIBRARY: dict[str, str] = {
+    "nf4":      "bitsandbytes",
+    "int4_awq": "modelopt",
+    "w4a8_awq": "modelopt",
+    "int4_wo":  "torchao",
+    "svdquant": "nunchaku",
+    "hqq":      "hqq",
+    "nvfp4":    "modelopt",
+    "fp8":      "modelopt",
+    "int8":     "modelopt",
+}
+
+
+def _resolve_quant_method(flavor: str, v_attrs: dict[str, Any], merged_attrs: dict[str, Any]) -> str:
+    """Pick the canonical quantization method for a quantization-edge publish.
+
+    Resolution order:
+      1. Explicit `quantization_method` / `quant_method` / `quant_scheme`
+         on the variant's attributes.
+      2. The variant flavor itself, if it's a canonical scheme name
+         (post-normalization the worker emits canonical names directly).
+      3. Empty string — caller decides whether to skip lineage metadata.
+    """
+    for key in ("quantization_method", "quant_method", "quant_scheme"):
+        v = str(v_attrs.get(key) or merged_attrs.get(key) or "").strip()
+        if v:
+            return v
+    fl = str(flavor or "").strip()
+    if fl in _CANONICAL_QUANT_SCHEME_LIBRARY:
+        return fl
+    return ""
+
+
+def _resolve_quant_library(method: str, v_attrs: dict[str, Any], merged_attrs: dict[str, Any]) -> str:
+    """Pick the canonical library that produced the bytes.
+
+    Resolution order:
+      1. Explicit `quantization_library` / `quant_library` on attrs.
+      2. Canonical default for `method` from _CANONICAL_QUANT_SCHEME_LIBRARY.
+      3. Empty string.
+    """
+    for key in ("quantization_library", "quant_library"):
+        v = str(v_attrs.get(key) or merged_attrs.get(key) or "").strip()
+        if v:
+            return v
+    return _CANONICAL_QUANT_SCHEME_LIBRARY.get(str(method).strip(), "")
+
 if TYPE_CHECKING:
     from ..request_context import RequestContext
 
@@ -141,6 +192,13 @@ def training_function(
     label: str | None = None,
     description: str | None = None,
     calibration: dict[str, CalibrationPolicy] | None = None,
+    scaling_hints: Any = None,
+    # Flat-kwarg variants of ScalingHints, see ScalingHints docstring.
+    vram_must_fit: str | None = None,
+    vram_base: int | None = None,
+    vram_size_multiplier: float | None = None,
+    vram_scales_with: list[str] | None = None,
+    runtime_scales_with: list[str] | None = None,
 ) -> Callable[..., list[ProducedFlavor]]:
     """Mark a tenant function as a training endpoint (tensorhub #232).
 
@@ -174,6 +232,18 @@ def training_function(
     (ctx / source / datasets) are library-injected; the rest of the
     signature decodes from the wire payload.
     """
+    # Resolve scaling_hints (object OR flat kwargs) once at call time so the
+    # error surface is clear when both are provided.
+    from ..api.decorators import _build_scaling_hints
+    hints = _build_scaling_hints(
+        scaling_hints=scaling_hints,
+        vram_must_fit=vram_must_fit,
+        vram_base=vram_base,
+        vram_size_multiplier=vram_size_multiplier,
+        vram_scales_with=vram_scales_with,
+        runtime_scales_with=runtime_scales_with,
+    )
+
     # Support both @training_function and @training_function(kind=...).
     if fn is None:
         def _apply(real_fn: Callable[..., list[ProducedFlavor]]) -> Callable[..., list[ProducedFlavor]]:
@@ -181,12 +251,14 @@ def training_function(
                 real_fn, kind=kind,
                 label=label, description=description,
                 calibration=calibration,
+                scaling_hints=hints,
             )
         return _apply  # type: ignore[return-value]
     return _build_dispatch(
         fn, kind=kind,
         label=label, description=description,
         calibration=calibration,
+        scaling_hints=hints,
     )
 
 
@@ -213,6 +285,7 @@ def _build_dispatch(
     label: str | None = None,
     description: str | None = None,
     calibration: dict[str, CalibrationPolicy] | None = None,
+    scaling_hints: Any = None,
 ) -> Callable[..., list[ProducedFlavor]]:
     """Inner: build the dispatch wrapper. Split from ``training_function`` so
     the same body serves both ``@training_function`` and
@@ -312,6 +385,12 @@ def _build_dispatch(
     # without a dataset BEFORE dispatch (faster than waiting for the worker
     # to reject). Empty dict for functions that don't quantize.
     dispatch._calibration_policy = dict(validated_calibration)  # type: ignore[attr-defined]
+    # Per-function scaling hints (gen-orchestrator #320) — declares which
+    # dimensions drive VRAM and runtime. Discovery serializes into endpoint.lock
+    # under functions[].scaling_hints; orchestrator uses for placement + learns
+    # coefficients from observation.
+    if scaling_hints is not None:
+        dispatch._scaling_hints = scaling_hints  # type: ignore[attr-defined]
     return dispatch
 
 
@@ -592,6 +671,24 @@ def _finalize_produced_variants(
                 "snapshot_manifest": manifest_entries,
                 "display_label":      label,
             }
+            # Issue #258 task 3: for quantization edges, attach the
+            # canonical method + library to the publish payload so
+            # tensorhub's lineage edge metadata carries the quant
+            # identity (validated server-side by
+            # ValidateQuantizationLineageMetadata).
+            if rel_kind == "quantization":
+                quant_method = _resolve_quant_method(flavor, v_attrs, merged_attrs)
+                quant_library = _resolve_quant_library(quant_method, v_attrs, merged_attrs)
+                if quant_method or quant_library:
+                    quant_meta: dict[str, Any] = {}
+                    if quant_method:
+                        quant_meta["quantization_method"] = quant_method
+                    if quant_library:
+                        quant_meta["quantization_library"] = quant_library
+                    quant_params = v_attrs.get("quantization_params") or merged_attrs.get("quantization_params")
+                    if isinstance(quant_params, dict):
+                        quant_meta["quantization_params"] = quant_params
+                    publish_checkpoint_flavor["lineage_metadata"] = quant_meta
             publish_checkpoint_flavors.append(publish_checkpoint_flavor)
             aggregate_manifest_entries.extend(manifest_entries)
 
