@@ -24,10 +24,9 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import msgspec
 
 from gen_worker import RequestContext
-from gen_worker.api.injection import ModelRef
+from gen_worker.api.binding import Binding, Dispatch, Repo
 
 from gen_worker.discovery.toml_manifest import (
-    TensorhubModelSpec,
     EndpointToml,
     load_endpoint_toml,
 )
@@ -59,41 +58,75 @@ def _is_msgspec_struct(t: Any) -> bool:
         return False
 
 
-def _synthesize_model_key(ref: str, flavor: str) -> str:
-    """Generate a deterministic local key from a direct (ref, flavor) pair.
+def _binding_to_manifest(binding: Binding, param_annotation: Any) -> Dict[str, Any]:
+    """Emit a `functions.bindings.<param>` block for the manifest.
 
-    Used when a function declares `ModelRef(Src.FIXED, ref="owner/repo",
-    flavor="nf4")` directly — discovery synthesizes a key so the wire
-    format (list of string keys) doesn't change. The synthesized key is
-    additive: tenants are encouraged NOT to write it themselves.
+    Wire shape (from `progress.json` issue #9):
 
-    Shape: `<owner>__<repo>__<flavor>` with "/", ".", and ":" replaced by
-    safe separators. Deterministic — the same (ref, flavor) pair always
-    produces the same key.
+    Fixed::
+
+        [functions.bindings.pipeline]
+        kind = "fixed"
+        ref = "owner/repo"
+        flavor = "bf16"
+        tag = "prod"
+        allow_override = false
+        pipeline_classes = ["pkg.mod.PipelineClass"]
+
+    Dispatch::
+
+        [functions.bindings.pipeline]
+        kind = "dispatch"
+        field = "variant"
+        allow_override = false
+        pipeline_classes = ["pkg.mod.PipelineClass"]
+
+        [functions.bindings.pipeline.table.nf4]
+        ref = "owner/repo"
+        flavor = "nf4"
+        tag = "prod"
     """
-    ref = (ref or "").strip()
-    flavor = (flavor or "").strip()
-    if not ref:
-        return ""
-    slug = ref.replace("/", "__").replace(".", "-").replace(":", "-")
-    if flavor:
-        return f"{slug}__{flavor}"
-    return slug
+    # `pipeline_classes` comes from `.allow_override(*classes)` (the explicit
+    # tenant-declared allowlist). When the binding has no override declared,
+    # we still emit the param-annotated class FQN as metadata so the
+    # orchestrator / UI can surface it without parsing the Python signature.
+    declared_classes: List[str] = list(getattr(binding, "_pipeline_classes", ()) or ())
+    if not declared_classes:
+        annotation_class = _annotation_to_fqn(param_annotation)
+        if annotation_class:
+            declared_classes = [annotation_class]
+
+    if isinstance(binding, Repo):
+        return {
+            "kind": "fixed",
+            "ref": binding.ref,
+            "flavor": binding._flavor,
+            "tag": binding._tag,
+            "allow_override": bool(binding._allow_override),
+            "pipeline_classes": declared_classes,
+        }
+    if isinstance(binding, Dispatch):
+        table: Dict[str, Dict[str, str]] = {}
+        for k, repo in binding.table.items():
+            entry: Dict[str, str] = {"ref": repo.ref, "tag": repo._tag}
+            if repo._flavor:
+                entry["flavor"] = repo._flavor
+            table[k] = entry
+        return {
+            "kind": "dispatch",
+            "field": binding.field,
+            "table": table,
+            "allow_override": bool(binding._allow_override),
+            "pipeline_classes": declared_classes,
+        }
+    raise TypeError(f"unknown binding type: {type(binding).__name__}")
 
 
-def _parse_annotated_model_ref(ann: Any) -> Optional[Tuple[type, ModelRef]]:
-    """Extract ModelRef from Annotated type if present."""
-    origin = typing.get_origin(ann)
-    if origin is not typing.Annotated:
-        return None
-    args = typing.get_args(ann)
-    if not args:
-        return None
-    base = args[0]
-    for meta in args[1:]:
-        if isinstance(meta, ModelRef):
-            return base, meta
-    return None
+def _annotation_to_fqn(ann: Any) -> str:
+    """Return a plain `module.qualname` for a parameter annotation, or ''."""
+    if isinstance(ann, type):
+        return f"{ann.__module__}.{ann.__qualname__}"
+    return ""
 
 
 def _schema_and_hash(t: type) -> Tuple[Dict[str, Any], str]:
@@ -236,88 +269,19 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
                 "instead of declaring it on the function signature."
             )
 
+    bindings_map: Dict[str, Binding] = dict(getattr(func, "__gen_worker_bindings__", None) or {})
+
     payload_type = None
     payload_param = None
-    injections: List[Dict[str, Any]] = []
+    bindings_block: Dict[str, Dict[str, Any]] = {}
 
     for p in params[1:]:
         ann = hints.get(p.name)
         if ann is None:
             raise ValueError(f"{func.__name__}: missing type annotation for param {p.name}")
 
-        parsed_injection = _parse_annotated_model_ref(ann)
-        if parsed_injection is not None:
-            base_t, mr = parsed_injection
-            src = mr.source.value
-            # Canonicalize older "release" terminology into "fixed" for manifests.
-            if src == "release":
-                src = "fixed"
-            dtypes = []
-            try:
-                dtypes = [str(x).strip() for x in list(getattr(mr, "dtypes", ()) or ()) if str(x).strip()]
-            except Exception:
-                dtypes = []
-            ref = ""
-            try:
-                ref = str(getattr(mr, "ref", "") or "").strip()
-            except Exception:
-                ref = ""
-            tag = str(getattr(mr, "tag", "") or "").strip() or "prod"
-            flavor = str(getattr(mr, "flavor", "") or "").strip()
-            mr_entry: Dict[str, Any] = {
-                "source": src,
-                "key": mr.key,
-                "ref": ref,
-                "tag": tag,
-                "flavor": flavor,
-                "dtypes": dtypes,
-            }
-            # PAYLOAD_REF binding ships a compat_spec object that
-            # carries the scoping the orchestrator enforces at invoke time.
-            # The derived pipeline class comes straight from the parameter's
-            # annotated type; non-restricting base classes (DiffusionPipeline,
-            # AutoModelForCausalLM, ...) produce NO derived gate.
-            if src == "payload_ref":
-                from .known_pipelines import (
-                    KNOWN_PIPELINES_REVISION,
-                    is_non_restricting,
-                )
-                base_class_name = getattr(base_t, "__name__", "") or ""
-                derived_pipeline_class = ""
-                derived_architectures: list[str] = []
-                if base_class_name and not is_non_restricting(base_class_name):
-                    # For diffusers pipelines we emit pipeline_class; for
-                    # transformers models we emit architectures. Discovery
-                    # doesn't know which family the class belongs to without
-                    # importing the libraries, so it emits BOTH — the
-                    # orchestrator picks whichever axis matches the ref's
-                    # checkpoint attributes.
-                    derived_pipeline_class = base_class_name
-                    derived_architectures = [base_class_name]
-                mr_entry["compat_spec"] = {
-                    "_revision": KNOWN_PIPELINES_REVISION,
-                    "derived_pipeline_class": derived_pipeline_class,
-                    "derived_architectures": derived_architectures,
-                    "allow_pipeline_classes": [
-                        str(x).strip()
-                        for x in list(getattr(mr, "allow_pipeline_classes", ()) or ())
-                        if str(x).strip()
-                    ],
-                    "allow_architectures": [
-                        str(x).strip()
-                        for x in list(getattr(mr, "allow_architectures", ()) or ())
-                        if str(x).strip()
-                    ],
-                    "required_file_layout": str(getattr(mr, "required_file_layout", "") or "").strip(),
-                    "required_components": dict(getattr(mr, "required_components", ()) or ()),
-                    "require_lineage_descendant_of": str(getattr(mr, "require_lineage_descendant_of", "") or "").strip(),
-                    "require_lineage_verified": bool(getattr(mr, "require_lineage_verified", False)),
-                }
-            injections.append({
-                "param": p.name,
-                "type": _type_qualname(base_t),
-                "model_ref": mr_entry,
-            })
+        if p.name in bindings_map:
+            bindings_block[p.name] = _binding_to_manifest(bindings_map[p.name], ann)
             continue
 
         if _is_msgspec_struct(ann):
@@ -329,7 +293,10 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
             payload_param = p.name
             continue
 
-        raise ValueError(f"{func.__name__}: unsupported param type for {p.name}: {ann!r}")
+        raise ValueError(
+            f"{func.__name__}: unsupported param type for {p.name}: {ann!r} "
+            "(inject models via @inference_function(models={...}); payload must be msgspec.Struct)"
+        )
 
     if payload_type is None or payload_param is None:
         raise ValueError(f"{func.__name__}: missing msgspec.Struct payload param")
@@ -374,43 +341,6 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
     if delta_type is not None:
         delta_schema, delta_sha = _schema_and_hash(delta_type)
 
-    # Extract required_models: fixed-source model keys that must be available.
-    # Two forms:
-    #   (a) Legacy: ModelRef(Src.FIXED, "local-key") — key references
-    #       endpoint.toml [models] entry; use the key as-is.
-    #   (b) Direct: ModelRef(Src.FIXED, ref="owner/repo", flavor="nf4") —
-    #       SDK synthesizes a deterministic key from (ref, flavor) so the
-    #       wire format stays a list of strings. Discovery also writes the
-    #       synthesized key back onto the injection so downstream code
-    #       (build_manifest's [models] synthesis, worker injection) sees it.
-    required_models = []
-    for inj in injections:
-        mr = inj.get("model_ref") or {}
-        if mr.get("source") != "fixed":
-            continue
-        key = str(mr.get("key") or "").strip()
-        ref = str(mr.get("ref") or "").strip()
-        if not key and ref:
-            flavor = str(mr.get("flavor") or "").strip()
-            key = _synthesize_model_key(ref, flavor)
-            mr["key"] = key
-        if key:
-            required_models.append(key)
-
-    # Extract payload-based repo selectors so schedulers can compute required repos
-    # at submit-time for cache-aware routing.
-    payload_repo_selectors = []
-    seen_fields = set()
-    for inj_entry in injections:
-        mr_json = inj_entry.get("model_ref", {}) or {}
-        if mr_json.get("source") != "payload":
-            continue
-        field = str(mr_json.get("key") or "").strip()
-        if not field or field in seen_fields:
-            continue
-        seen_fields.add(field)
-        payload_repo_selectors.append({"field": field, "kind": "short_key"})
-
     function_name = slugify_name(func.__name__)
     if not function_name:
         raise ValueError(f"{func.__name__}: function name cannot be normalized")
@@ -423,6 +353,7 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
         "python_name": func.__name__,
         "module": module_name,
         "resources": res_dict,
+        "bindings": bindings_block,
         "payload_type": _type_id(payload_type),
         "payload_schema_sha256": input_sha,
         "input_schema": input_schema,
@@ -431,27 +362,10 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
         "output_schema_sha256": output_sha,
         "output_schema": output_schema,
         "incremental_output": incremental,
-        "injection_json": injections,
-        "required_models": required_models,  # release model keys needed by this function
-        "payload_repo_selectors": payload_repo_selectors,
         "decorator": "inference_function",
         "label": fn_label,
         "description": fn_description,
     }
-
-    # Per-function scaling hints (gen-orchestrator #320) — emit only when the
-    # tenant declared at least one field so we don't pollute endpoint.lock
-    # for the majority of existing functions. ScalingHints is a msgspec.Struct
-    # with omit_defaults=True, so to_builtins drops fields the tenant left
-    # at their defaults — preserving the original sparse wire shape.
-    hints = getattr(func, "_scaling_hints", None)
-    if hints is not None:
-        try:
-            hints_dict = msgspec.to_builtins(hints)
-            if isinstance(hints_dict, dict) and hints_dict:
-                fn["scaling_hints"] = hints_dict
-        except Exception:
-            pass
 
     if delta_type is not None:
         fn["delta_type"] = _type_id(delta_type)
@@ -494,18 +408,13 @@ def _extract_conversion_function_metadata(func: Any, module_name: str) -> Dict[s
     input_schema_bytes = json.dumps(input_schema, separators=(",", ":"), sort_keys=True).encode("utf-8")
     input_sha = hashlib.sha256(input_schema_bytes).hexdigest()
 
-    # Synthesize injection_json from ref_registry — each PAYLOAD-bound
-    # secondary Source param becomes a `payload`-source injection entry so
-    # orchestrator can extend the capability-token reads set.
-    injections: List[Dict[str, Any]] = []
-    payload_repo_selectors: List[Dict[str, Any]] = []
+    # Training functions: emit a `payload_refs` block listing the wire-field
+    # → param mapping for each secondary Source materialization. Inference's
+    # `bindings` block doesn't apply; training stays on the legacy wire-field
+    # pattern for now.
+    payload_refs: Dict[str, Dict[str, str]] = {}
     for wire_field, param_name in sorted(spec.ref_registry.items()):
-        injections.append({
-            "param": param_name,
-            "type": "gen_worker.conversion.Source",
-            "model_ref": {"source": "payload", "key": wire_field, "ref": "", "dtypes": []},
-        })
-        payload_repo_selectors.append({"field": wire_field, "kind": "short_key"})
+        payload_refs[wire_field] = {"param": param_name, "kind": "source"}
 
     fn: Dict[str, Any] = {
         "name": function_name,
@@ -514,9 +423,7 @@ def _extract_conversion_function_metadata(func: Any, module_name: str) -> Dict[s
         "resources": res_dict,
         # Conversion functions have a single structured return (list[ProducedFlavor])
         # that the library uploads. Tenant input schema captures the full wire
-        # payload (source, destination, datasets, specs, PAYLOAD-model refs,
-        # tenant-named params); issue #5 bakes it into endpoint.lock so
-        # orchestrator validates submit-time.
+        # payload.
         "payload_type": {"module": "", "qualname": "gen_worker.conversion.WirePayload"},
         "payload_schema_sha256": input_sha,
         "input_schema": input_schema,
@@ -525,30 +432,12 @@ def _extract_conversion_function_metadata(func: Any, module_name: str) -> Dict[s
         "output_schema_sha256": "",
         "output_schema": {},
         "incremental_output": False,
-        "injection_json": injections,
-        "required_models": [],
-        "payload_repo_selectors": payload_repo_selectors,
-        # Issue #10: tenant-declared job-kind label — orchestrator reads this
-        # at dispatch to populate training_jobs.kind.
+        "payload_refs": payload_refs,
         "kind": spec.kind,
-        # Mark which decorator produced this entry so downstream consumers
-        # can distinguish @inference_function (inference) from @training_function
-        # (conversion/training) when the decorator-based branch matters.
         "decorator": "training_function",
         "label": getattr(func, "_function_label", None) or None,
         "description": getattr(func, "_function_description", None) or None,
     }
-    # Per-function scaling hints (gen-orchestrator #320). ScalingHints is a
-    # msgspec.Struct with omit_defaults=True, so to_builtins drops fields the
-    # tenant left at their defaults — preserving the original sparse wire shape.
-    hints = getattr(func, "_scaling_hints", None)
-    if hints is not None:
-        try:
-            hints_dict = msgspec.to_builtins(hints)
-            if isinstance(hints_dict, dict) and hints_dict:
-                fn["scaling_hints"] = hints_dict
-        except Exception:
-            pass
     return fn
 
 
@@ -562,33 +451,6 @@ def _load_endpoint_manifest_toml(root: Path) -> EndpointToml:
     if p is None:
         raise ValueError("missing endpoint.toml (required for discovery)")
     return load_endpoint_toml(p)
-
-
-def _model_spec_to_json(spec: TensorhubModelSpec) -> Dict[str, Any]:
-    """Emit a [models] entry for endpoint.lock.
-
-    The lock keeps checkpoint-group selection explicit: flavor/flavors for
-    named variants, plus concrete selector axes when a flavor is not enough.
-    """
-    out: Dict[str, Any] = {"ref": spec.ref}
-    if spec.flavor:
-        out["flavor"] = spec.flavor
-    if spec.flavors:
-        out["flavors"] = list(spec.flavors)
-    if spec.dtype:
-        out["dtype"] = spec.dtype
-    if spec.file_layout:
-        out["file_layout"] = spec.file_layout
-    if spec.file_type:
-        out["file_type"] = spec.file_type
-    return out
-
-
-def _models_by_key_to_json(models: Dict[str, TensorhubModelSpec]) -> Dict[str, Any]:
-    out: Dict[str, Any] = {}
-    for k, spec in models.items():
-        out[str(k)] = _model_spec_to_json(spec)
-    return out
 
 
 def discover_functions(root: Optional[Path] = None, *, main_module: str | None = None) -> List[Dict[str, Any]]:
@@ -737,15 +599,6 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
         fn_name = str(fn.get("name") or "").strip()
         if not fn_name:
             continue
-        hints = tensorhub_manifest.function_resources.get(fn_name) or {}
-        if hints:
-            base = fn.get("resources")
-            merged: Dict[str, Any] = {}
-            if isinstance(base, dict):
-                merged.update(base)
-            merged.update(hints)
-            fn["resources"] = merged
-
         batch_path = (tensorhub_manifest.function_batch_dimensions.get(fn_name) or "").strip()
         if batch_path:
             fn["batch_dimension"] = batch_path
@@ -766,82 +619,6 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
     manifest: Dict[str, Any] = {
         "functions": functions,
     }
-
-    manifest["resources"] = tensorhub_manifest.resources.to_dict()
-
-    # Build model keyspaces.
-    fixed_models = dict(tensorhub_manifest.models or {})
-    models_by_function: Dict[str, Any] = {}
-    for fn in functions:
-        fn_name = str(fn.get("name") or "").strip()
-        if not fn_name:
-            continue
-
-        payload_keyspace = dict(tensorhub_manifest.function_models.get(fn_name) or {})
-        payload_selectors = list(fn.get("payload_repo_selectors") or [])
-        required_payload_fields = [
-            str(sel.get("field") or "").strip()
-            for sel in payload_selectors
-            if isinstance(sel, dict) and str(sel.get("field") or "").strip()
-        ]
-        # Issue #32 (training-endpoints/agents/progress.json): a missing
-        # `[models.<fn>]` block is fine for functions whose ONLY ModelRef
-        # params are payload-sourced. The valid payload-key set already
-        # comes from the Python decorators (via `required_payload_fields`
-        # above); the toml block was only useful when it mapped each key
-        # to a FIXED default ref. For caller-supplied refs there is no
-        # meaningful "default" to declare — and the previous strictness
-        # forced endpoint authors to invent sentinel refs (the
-        # `root/placeholder` anti-pattern).
-        #
-        # FIXED-ref keyspace is still enforced below (the `required_keys`
-        # check against top-level `[models]`), because FIXED refs must
-        # bind at publish time.
-
-        # Fixed refs must be declared either via inline (ref, tag, flavor)
-        # OR via top-level [models]. Synthesize a [models] entry for any
-        # FIXED injection that carries a direct ref — keeps the wire shape
-        # uniform (everything resolves through manifest["models"][key]).
-        required_keys = set(fn.get("required_models", []) or [])
-        inj_list = list(fn.get("injection_json", []) or [])
-        for inj in inj_list:
-            mr = inj.get("model_ref") or {}
-            key = str(mr.get("key") or "").strip()
-            ref = str(mr.get("ref") or "").strip()
-            src = str(mr.get("source") or "").strip()
-
-            if src == "fixed" and ref and key and key not in fixed_models:
-                # Direct-form FIXED injection — synthesize the [models] entry.
-                # Note: the wire-side TensorhubModelSpec doesn't carry tag
-                # today; "prod" is the implicit default the orchestrator uses.
-                # We keep the tag on the ModelRef for forward compatibility
-                # but store only ref+flavor in the synthesized spec.
-                flavor = str(mr.get("flavor") or "").strip()
-                fixed_models[key] = TensorhubModelSpec(ref=ref, flavor=flavor)
-
-            if src == "payload":
-                if key and key not in required_payload_fields:
-                    # Defensive: keep selector metadata aligned with model refs.
-                    required_payload_fields.append(key)
-
-        missing = []
-        for k in sorted(required_keys):
-            if k not in fixed_models:
-                missing.append(k)
-        if missing:
-            raise ValueError(
-                f"function '{fn_name}' has FIXED model keys missing from endpoint.toml [models] "
-                f"or inline ModelRef(ref=..., flavor=...): {missing}"
-            )
-
-        if payload_keyspace:
-            models_by_function[fn_name] = _models_by_key_to_json(payload_keyspace)
-
-    if fixed_models:
-        manifest["models"] = _models_by_key_to_json(fixed_models)
-    if models_by_function:
-        manifest["models_by_function"] = models_by_function
-
     return manifest
 
 

@@ -1,7 +1,8 @@
 """Source — library-constructed handle to the materialized source snapshot.
 
-Tenants receive a ``Source`` as the reserved ``source`` parameter (and as
-additional ``Annotated[Source, ModelRef(Src.PAYLOAD, ...)]`` parameters).
+Tenants receive a ``Source`` as the reserved ``source`` parameter (and on
+additional ``Source``-typed parameters tagged with the training-private
+``_PayloadRef`` Annotated marker).
 Source abstracts over singlefile vs diffusers layouts, handles pickle →
 safetensors conversion, resolves sharded-safetensors via .index.json, and
 provides convenience methods for loading into HF / diffusers / tokenizer APIs.
@@ -259,7 +260,7 @@ class Source:
         sources, and sums the file sizes of any ``.safetensors``,
         ``.bin``, ``.pt``, ``.pth``, ``.ckpt`` files found.
 
-        Used by quant tenants to compute per-scheme `require_vram(...)` gates
+        Used by quant tenants to compute per-scheme `the per-function Resources(min_vram_gb=...) declaration` gates
         without depending on the snapshot manifest plumbing — the loader
         only needs a number of bytes to reason about. For bf16 sources
         this number ≈ ``num_params * 2``, which is the right multiplicand
@@ -300,7 +301,7 @@ class Source:
         components.
 
         Quant tenants should use this method (not ``weights_size_bytes()``)
-        as the multiplicand for their ``require_vram(...)`` heuristic.
+        as the multiplicand for their ``the per-function Resources(min_vram_gb=...) declaration`` heuristic.
         Using the sum over-gates by ~2x on multi-component diffusion
         pipelines (FLUX-class: transformer ≈ text_encoder ≈ 7.5 GB each,
         sum = 15 GB; largest = 7.5 GB; the gate difference rules
@@ -529,7 +530,7 @@ def _iter_diffusers_components(
             # device_map shape — when the caller passed an offload_folder the
             # intent is "spill to CPU/disk if needed", so use accelerate's
             # auto-placement. When no offload_folder is set, the caller has
-            # already gated VRAM availability (typically via require_vram on
+            # already gated VRAM availability (typically via the function-level Resources declaration on
             # the tenant) and asks for hard GPU-only placement: failing loud
             # on OOM is cleaner than silent spillage that bnb can't honor for
             # nf4/fp4 unless `llm_int8_enable_fp32_cpu_offload=True`.

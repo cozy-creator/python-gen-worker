@@ -13,7 +13,8 @@ Tenant authors write functions like:
 Contract summary:
   - Reserved names (ctx, source, datasets) bound to library-injected types.
   - Everything else decoded from wire payload by name via msgspec.
-  - Secondary-model loads via Annotated[Source, ModelRef(Src.PAYLOAD, '...')].
+  - Secondary-model loads via the training-side `_PayloadRef` annotation
+    (private; declared on extra Source-typed parameters).
   - Return list[ProducedFlavor]; library handles upload + destination.tags.
 
 Boundary summary:

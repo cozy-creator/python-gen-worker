@@ -537,40 +537,16 @@ def load_endpoint_toml_with_warnings(path: Path) -> tuple[EndpointToml, list[str
 
     models: dict[str, TensorhubModelSpec] = {}
     function_models: dict[str, dict[str, TensorhubModelSpec]] = {}
-    raw_models = data.get("models")
-    if raw_models is not None:
-        if not isinstance(raw_models, Mapping):
-            raise ValueError("models must be a table")
-        for key_raw, value_raw in raw_models.items():
-            key = str(key_raw).strip()
-            if not key:
-                continue
-            # [models.<function_name>] subtable support: maps without any
-            # model-spec keys are treated as function keyspaces.
-            if (
-                isinstance(value_raw, Mapping)
-                and "ref" not in value_raw
-                and "dtypes" not in value_raw
-                and "attributes" not in value_raw
-                and "flavor" not in value_raw
-                and "flavors" not in value_raw
-                and "dtype" not in value_raw
-                and "file_layout" not in value_raw
-                and "file_type" not in value_raw
-            ):
-                fn = slugify_name(key)
-                if not fn:
-                    raise ValueError(f"invalid function keyspace name under [models]: {key!r}")
-                keyspace: dict[str, TensorhubModelSpec] = {}
-                for model_key_raw, model_spec_raw in value_raw.items():
-                    model_key = str(model_key_raw).strip()
-                    if not model_key:
-                        continue
-                    keyspace[model_key] = _parse_model_spec(model_spec_raw, warnings=warnings)
-                if keyspace:
-                    function_models[fn] = keyspace
-                continue
-            models[key] = _parse_model_spec(value_raw, warnings=warnings)
+    if "models" in data:
+        # 0.7.0 hard cut: [models] and [models.<fn>] toml tables were replaced
+        # by the Python-side @inference_function(models={...}) binding kwarg.
+        # Fail loud — tenants must migrate.
+        raise ValueError(
+            "endpoint.toml: [models] / [models.<fn>] tables were removed in "
+            "gen-worker 0.7.0. Declare model bindings in Python via "
+            "@inference_function(models={...}) with Repo / Dispatch. See "
+            "`progress.json` issue #9 (decorator-table-model-bindings)."
+        )
 
     # Reject legacy endpoint.toml blocks that became platform-controlled.
     # Function-scoped [resources] is accepted for mixed CPU/GPU endpoints;

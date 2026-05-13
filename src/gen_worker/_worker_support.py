@@ -14,8 +14,7 @@ from typing import Any, Callable, Dict, Optional, Tuple, TYPE_CHECKING
 import grpc
 import msgspec
 
-from .api.decorators import ResourceRequirements
-from .api.injection import InjectionSpec
+from .api.decorators import Resources
 from .api.types import Compute
 from .request_context import _canonicalize_model_ref_string
 
@@ -108,14 +107,17 @@ def _extract_checkpoint_id_from_result(result: Any) -> str:
 class _RequestSpec:
     name: str
     func: Callable[..., Any]
-    resources: ResourceRequirements
+    resources: Resources
     ctx_param: str
     payload_param: str
     payload_type: type[msgspec.Struct]
     output_mode: str  # "single" | "incremental"
     output_type: Optional[type[msgspec.Struct]] = None
     delta_type: Optional[type[msgspec.Struct]] = None
-    injections: Tuple[InjectionSpec, ...] = ()
+    # `injections` carries the per-parameter binding specs; type is left as
+    # ``tuple[Any, ...]`` here to avoid a circular import on the worker-side
+    # ``InjectionSpec`` (it's defined alongside the Worker class).
+    injections: Tuple[Any, ...] = ()
     input_schema_json: bytes = b""
     output_schema_json: bytes = b""
     delta_schema_json: Optional[bytes] = None

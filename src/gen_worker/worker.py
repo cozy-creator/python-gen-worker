@@ -90,7 +90,8 @@ LoadModelResult = Any
 UnloadModelResult = Any
 JobExecutionRequest = Any
 JobExecutionResult = Any
-from .api.decorators import ResourceRequirements
+from .api.binding import Binding, Dispatch, Repo
+from .api.decorators import Resources
 from .api.errors import (
     AuthError,
     CanceledError,
@@ -113,13 +114,87 @@ from .models.cache import ModelCache
 from .run_metrics_v1 import RunMetricsV1, best_effort_bytes_downloaded, best_effort_init_model_metrics, safe_json_bytes
 from .models.cache_paths import tensorhub_cas_dir
 from .wire_protocol import WIRE_PROTOCOL_MAJOR, WIRE_PROTOCOL_MINOR, wire_protocol_version_string
-from .api.injection import (
-    InjectionSpec,
-    ModelRef,
-    ModelRefSource,
-    parse_injection,
-    type_qualname,
-)
+from dataclasses import dataclass as _injection_dataclass
+
+
+def _type_qualname(t: Any) -> str:
+    """Return a class's fully-qualified ``module.qualname`` string."""
+    mod = getattr(t, "__module__", "") or ""
+    qn = getattr(t, "__qualname__", None) or getattr(t, "__name__", "") or ""
+    if mod and qn:
+        return f"{mod}.{qn}"
+    return repr(t)
+
+
+@_injection_dataclass(frozen=True)
+class InjectionSpec:
+    """Per-parameter binding spec attached to a discovered function.
+
+    Replaces the 0.6.x ``InjectionSpec(param_name, param_type, model_ref)``
+    shape — ``binding`` is now a :class:`Repo` or :class:`Dispatch` value
+    from ``@inference_function(models={...})``.
+    """
+
+    param_name: str
+    param_type: Any
+    binding: Binding
+
+
+def _binding_to_wire(param_name: str, param_type: Any, binding: Binding) -> Dict[str, Any]:
+    """Serialize an InjectionSpec to the wire shape consumed by the
+    orchestrator's release resolver.
+    """
+    if isinstance(binding, Repo):
+        return {
+            "param": param_name,
+            "type": _type_qualname(param_type),
+            "binding": {
+                "kind": "fixed",
+                "ref": binding.ref,
+                "flavor": binding._flavor,
+                "tag": binding._tag,
+                "allow_override": binding._allow_override,
+                "pipeline_classes": list(binding._pipeline_classes),
+            },
+        }
+    if isinstance(binding, Dispatch):
+        table: Dict[str, Dict[str, str]] = {}
+        for k, repo in binding.table.items():
+            table[k] = {
+                "ref": repo.ref,
+                "flavor": repo._flavor,
+                "tag": repo._tag,
+            }
+        return {
+            "param": param_name,
+            "type": _type_qualname(param_type),
+            "binding": {
+                "kind": "dispatch",
+                "field": binding.field,
+                "table": table,
+                "allow_override": binding._allow_override,
+                "pipeline_classes": list(binding._pipeline_classes),
+            },
+        }
+    raise TypeError(f"unknown binding type: {type(binding).__name__}")
+
+
+def _resolved_repo_id(ref: str, flavor: str = "", tag: str = "prod") -> str:
+    """Construct a deterministic canonical ref string for ``(ref, tag, flavor)``.
+
+    Used as the local cache key for orchestrator-stamped resolved checkpoints.
+    """
+    base = (ref or "").strip()
+    if not base:
+        return ""
+    out = base
+    if tag and tag != "prod":
+        out = f"{out}:{tag}"
+    if flavor:
+        out = f"{out}#{flavor}"
+    return out
+
+
 from .discovery.names import slugify_name
 
 # Configure logging
@@ -225,7 +300,7 @@ class Worker:
         # Emit model.ready immediately on connect by default; downstream model-load
         # events still apply for workers that need to gate on GPU model pre-load.
         self._models_ready_on_connect: bool = False
-        self._discovered_resources: Dict[str, ResourceRequirements] = {} # Store resources per function
+        self._discovered_resources: Dict[str, Resources] = {} # Store resources per function
         self._function_schemas: Dict[str, Tuple[bytes, bytes, Optional[bytes], bytes]] = {}  # func_name -> (input_schema_json, output_schema_json, delta_schema_json, injection_json)
         # #321: runtime batching state removed alongside RuntimeBatchingConfigCommand.
         self._last_function_capabilities_hash = ""
@@ -1154,7 +1229,7 @@ class Worker:
         func_name = slugify_name(python_name)
         if not func_name:
             raise ValueError(f"{python_name}: function name cannot be normalized")
-        resources: ResourceRequirements = getattr(func, "_worker_resources", ResourceRequirements())
+        resources: Resources = getattr(func, "_worker_resources", Resources())
 
         try:
             hints = typing.get_type_hints(func, globalns=func.__globals__, include_extras=True)
@@ -1171,6 +1246,14 @@ class Worker:
         if ctx_type is not RequestContext:
             raise ValueError("first argument must be ctx: RequestContext")
 
+        # New 0.7.0 binding model: @inference_function(models={...}) attaches
+        # __gen_worker_bindings__ keyed by parameter name. Treat any parameter
+        # listed there as an injected binding; any msgspec.Struct parameter as
+        # the payload. Everything else is a signature error.
+        bindings_map: Dict[str, Binding] = dict(
+            getattr(func, "__gen_worker_bindings__", None) or {}
+        )
+
         injections: list[InjectionSpec] = []
         payload_type: Optional[type[msgspec.Struct]] = None
         payload_param: Optional[str] = None
@@ -1178,10 +1261,14 @@ class Worker:
             ann = hints.get(p.name)
             if ann is None:
                 raise ValueError(f"missing type annotation for param: {p.name}")
-            inj = parse_injection(ann)
-            if inj is not None:
-                base_t, model_ref = inj
-                injections.append(InjectionSpec(param_name=p.name, param_type=base_t, model_ref=model_ref))
+            if p.name in bindings_map:
+                injections.append(
+                    InjectionSpec(
+                        param_name=p.name,
+                        param_type=ann,
+                        binding=bindings_map[p.name],
+                    )
+                )
                 continue
             if isinstance(ann, type) and issubclass(ann, msgspec.Struct):
                 if payload_type is not None:
@@ -1189,7 +1276,10 @@ class Worker:
                 payload_type = ann
                 payload_param = p.name
                 continue
-            raise ValueError(f"unsupported param type (must be payload msgspec.Struct or Annotated injection): {p.name}={ann!r}")
+            raise ValueError(
+                f"unsupported param type for {p.name!r}: {ann!r}. "
+                "Inject models via @inference_function(models={...}); payload must be msgspec.Struct."
+            )
 
         if payload_type is None or payload_param is None:
             raise ValueError("must accept exactly one msgspec.Struct payload arg")
@@ -1242,11 +1332,7 @@ class Worker:
             delta_schema_json = json.dumps(delta_schema, separators=(",", ":"), sort_keys=True).encode("utf-8")
 
         injection_payload = [
-            {
-                "param": inj.param_name,
-                "type": type_qualname(inj.param_type),
-                "model_ref": {"source": inj.model_ref.source.value, "key": inj.model_ref.key},
-            }
+            _binding_to_wire(inj.param_name, inj.param_type, inj.binding)
             for inj in injections
         ]
         injection_json = json.dumps(injection_payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -2033,7 +2119,7 @@ class Worker:
     def _function_host_availability(
         self,
         function_name: str,
-        req: Optional[ResourceRequirements],
+        req: Optional[Resources],
         gpu_info: Dict[str, Any],
     ) -> tuple[bool, Dict[str, Any]]:
         cfg: Dict[str, Any] = dict(msgspec.to_builtins(req)) if req is not None else {}
@@ -3859,26 +3945,18 @@ class Worker:
             call_kwargs[spec.ctx_param] = ctx
             call_kwargs[spec.payload_param] = input_obj
 
-            # Record which caller-supplied refs (Src.PAYLOAD_REF) are bound on
-            # this request so _map_exception can classify post-download load
-            # failures as `ref_compatibility_surprise`. Cleared in the outer
-            # `except` / `finally` via `_current_payload_ref_keys = {}`.
+            # 0.7.0 binding model: caller-supplied overrides arrive on the wire
+            # as orchestrator-stamped `resolved_models[param_name]` (typed by
+            # orchestrator after validating the caller's `_models` block).
+            # Record them here so _map_exception can classify post-download
+            # load failures as `ref_compatibility_surprise`.
+            resolved_models = self._resolved_models_for_request(request)
             payload_ref_keys_this_request: Dict[str, str] = {}
             for inj in spec.injections:
-                try:
-                    if inj.model_ref.source == ModelRefSource.PAYLOAD_REF:
-                        key = str(inj.model_ref.key or "").strip()
-                        if key:
-                            try:
-                                ref_val = getattr(input_obj, key, "") or ""
-                            except Exception:
-                                ref_val = ""
-                            if isinstance(ref_val, dict):
-                                ref_val = str(ref_val.get("ref") or "")
-                            payload_ref_keys_this_request[key] = str(ref_val or "")
-                except Exception:
-                    # Older InjectionSpec builds without PAYLOAD_REF just skip.
-                    pass
+                if inj.binding._allow_override and inj.param_name in resolved_models:
+                    payload_ref_keys_this_request[inj.param_name] = str(
+                        (resolved_models.get(inj.param_name) or {}).get("ref") or ""
+                    )
             self._current_payload_ref_keys = payload_ref_keys_this_request
 
             for inj in spec.injections:
@@ -3898,7 +3976,9 @@ class Worker:
                 model_key: Optional[str] = None
                 canon_model_id = ""
                 try:
-                    model_id, model_key = self._resolve_model_id_for_injection(spec.name, inj, payload=input_obj)
+                    model_id, model_key = self._resolve_model_id_for_injection(
+                        spec.name, inj, payload=input_obj, resolved_models=resolved_models,
+                    )
                     canon_model_id = _canonicalize_model_ref_string(str(model_id or "").strip()) if model_id else ""
                     self._emit_request_event(
                         request_id,
@@ -3926,21 +4006,9 @@ class Worker:
                 finally:
                     if resolve_watchdog is not None:
                         resolve_watchdog.cancel()
-                # Best-effort: attach dtype preferences from endpoint.toml-derived manifest mapping.
-                if model_key:
-                    try:
-                        s = None
-                        if inj.model_ref.source == ModelRefSource.FIXED:
-                            s = self._fixed_model_spec_by_key.get(model_key)
-                        elif inj.model_ref.source == ModelRefSource.PAYLOAD:
-                            by_fn = self._payload_model_spec_by_key_by_function.get(spec.name) or {}
-                            s = by_fn.get(model_key) if isinstance(by_fn, dict) else None
-                        if isinstance(s, dict):
-                            dts = s.get("dtypes")
-                            if isinstance(dts, list) and canon_model_id:
-                                prefs_map[canon_model_id] = {"dtypes": [str(x) for x in dts if str(x).strip()]}
-                    except Exception:
-                        pass
+                # NOTE: 0.7.0 dropped the per-`[models]` dtype preference path
+                # (the [models] toml table was deleted). Dtype preferences flow
+                # in via the orchestrator-resolved checkpoint metadata if needed.
                 if canon_model_id and canon_model_id not in models_in_use:
                     self._model_use_enter(canon_model_id)
                     models_in_use.add(canon_model_id)
@@ -4773,7 +4841,7 @@ class Worker:
                 )
 
     def _resolve_injected_value(self, ctx: RequestContext, requested_type: Any, model_id: str, inj: InjectionSpec) -> Any:
-        qn = type_qualname(requested_type)
+        qn = _type_qualname(requested_type)
         rm: Optional[RunMetricsV1] = getattr(ctx, "_run_metrics", None)
 
         # diffusers pipeline injection via existing model manager (torch-only).
@@ -4802,8 +4870,8 @@ class Worker:
                     except Exception:
                         pass
                 if isinstance(requested_type, type) and not isinstance(pipe, requested_type):
-                    expected_qn = type_qualname(requested_type)
-                    got_qn = type_qualname(type(pipe))
+                    expected_qn = _type_qualname(requested_type)
+                    got_qn = _type_qualname(type(pipe))
                     raise ValueError(
                         f"model injection type mismatch for {inj.param_name}: expected {expected_qn}, got {got_qn} (model_id={model_id})"
                     )
@@ -4813,7 +4881,7 @@ class Worker:
         # libraries with a `from_pretrained` factory.
         # We treat these as worker-owned cached handles: load once, reuse across invocations.
         if hasattr(requested_type, "from_pretrained") and callable(getattr(requested_type, "from_pretrained", None)):
-            qn = type_qualname(requested_type)
+            qn = _type_qualname(requested_type)
             key = (model_id, qn)
             lock = self._custom_runtime_locks.setdefault(key, threading.Lock())
             with lock:
@@ -4868,8 +4936,8 @@ class Worker:
                                     except Exception:
                                         pass
                                 if isinstance(requested_type, type) and not isinstance(cached, requested_type):
-                                    expected_qn = type_qualname(requested_type)
-                                    got_qn = type_qualname(type(cached))
+                                    expected_qn = _type_qualname(requested_type)
+                                    got_qn = _type_qualname(type(cached))
                                     raise ValueError(
                                         f"model injection type mismatch for {inj.param_name}: expected {expected_qn}, got {got_qn} (model_id={model_id})"
                                     )
@@ -5146,7 +5214,7 @@ class Worker:
 
                     logger.info(
                         "Loading from_pretrained: source=%s type=%s kwargs=%s",
-                        model_source, type_qualname(requested_type), list(preload_kwargs.keys()),
+                        model_source, _type_qualname(requested_type), list(preload_kwargs.keys()),
                     )
                     obj = from_pretrained(model_source, **preload_kwargs)
                     logger.info(
@@ -5156,8 +5224,8 @@ class Worker:
                     if rm is not None:
                         rm.add_pipeline_init_time(int((time.monotonic() - t_pi0) * 1000))
                 if isinstance(requested_type, type) and not isinstance(obj, requested_type):
-                    expected_qn = type_qualname(requested_type)
-                    got_qn = type_qualname(type(obj))
+                    expected_qn = _type_qualname(requested_type)
+                    got_qn = _type_qualname(type(obj))
                     raise ValueError(
                         f"model injection type mismatch for {inj.param_name}: expected {expected_qn}, got {got_qn} (model_id={model_id})"
                     )
@@ -5342,87 +5410,111 @@ class Worker:
 
         raise ValueError(f"no injection provider for type {qn} (model_id={model_id})")
 
-    def _resolve_model_id_for_injection(self, fn_name: str, inj: InjectionSpec, payload: msgspec.Struct) -> tuple[str, Optional[str]]:
-        fixed_map = dict(getattr(self, "_fixed_model_id_by_key", {}) or {})
-        payload_map = dict((getattr(self, "_payload_model_id_by_key_by_function", {}) or {}).get(fn_name) or {})
-        allowed_ids: Optional[set[str]] = None
-        local_allowed: set[str] = set()
-        local_allowed.update(fixed_map.values())
-        local_allowed.update(payload_map.values())
-        if local_allowed:
-            allowed_ids = local_allowed
+    def _resolved_models_for_request(self, request: Any) -> Dict[str, Dict[str, Any]]:
+        """Extract the orchestrator-stamped ``resolved_models`` map from a
+        JobExecutionRequest envelope.
 
-        if inj.model_ref.source == ModelRefSource.FIXED:
-            raw = inj.model_ref.key.strip()
-            if not raw:
-                raise ValueError(f"empty fixed ModelRef for injection param: {inj.param_name}")
-            explicit_ref = _canonicalize_model_ref_string(str(inj.model_ref.ref or "").strip())
-            if explicit_ref:
-                raise ValueError(
-                    f"function {fn_name!r} uses ModelRef(FIXED, {raw!r}) with inline ref; "
-                    "declare fixed key mappings in endpoint.toml [models]"
-                )
-            if not fixed_map:
-                raise ValueError(
-                    "fixed model selection is not configured; expected top-level models in /app/.tensorhub/endpoint.lock"
-                )
-            if raw not in fixed_map:
-                allowed = sorted(fixed_map.keys())
-                head = allowed[:20]
-                suffix = ""
-                if len(allowed) > len(head):
-                    suffix = f" (+{len(allowed) - len(head)} more)"
-                raise ValueError(
-                    f"unknown fixed model key {raw!r}; allowed keys: {head}{suffix}"
-                )
-            model_id = fixed_map[raw]
-            logger.info(
-                "Resolved fixed model key function=%s param=%s key=%s model_id=%s scheduler_required_refs=%s fixed_refs=%s",
-                fn_name,
-                inj.param_name,
-                raw,
-                model_id,
-                list(getattr(self, "_required_flavor_refs_from_scheduler", []) or []),
-                sorted(fixed_map.values()),
-            )
-            self._enforce_model_allowlist(model_id, inj, allowed_ids=allowed_ids)
-            return model_id, raw
+        The orchestrator validates caller-supplied ``_models`` overrides
+        against each function's per-param binding (allow_override + pipeline
+        class allowlist), drops the field from the payload, and stamps the
+        resolved (ref, tag, flavor) triple onto the envelope. The worker
+        consumes the map here.
 
-        if inj.model_ref.source == ModelRefSource.PAYLOAD:
-            field = inj.model_ref.key.strip()
-            if not field:
-                raise ValueError(f"empty payload ModelRef for injection param: {inj.param_name}")
+        Returns ``{}`` when no overrides were stamped.
+        """
+        try:
+            raw = getattr(request, "resolved_models", None)
+        except Exception:
+            return {}
+        if not raw:
+            return {}
+        out: Dict[str, Dict[str, Any]] = {}
+        # Two accepted shapes: protobuf map<string, ResolvedModel> or
+        # plain Python dict (test fixtures). Both flow through msgspec.to_builtins
+        # cleanly for the common case.
+        try:
+            iter_items = list(raw.items())
+        except AttributeError:
+            return {}
+        for param_name, entry in iter_items:
+            ref = ""
+            tag = "prod"
+            flavor = ""
+            if isinstance(entry, dict):
+                ref = str(entry.get("ref") or "").strip()
+                tag = str(entry.get("tag") or "prod").strip() or "prod"
+                flavor = str(entry.get("flavor") or "").strip()
+            else:
+                ref = str(getattr(entry, "ref", "") or "").strip()
+                tag = str(getattr(entry, "tag", "") or "prod").strip() or "prod"
+                flavor = str(getattr(entry, "flavor", "") or "").strip()
+            if ref:
+                out[str(param_name)] = {"ref": ref, "tag": tag, "flavor": flavor}
+        return out
+
+    def _resolve_model_id_for_injection(
+        self,
+        fn_name: str,
+        inj: InjectionSpec,
+        payload: msgspec.Struct,
+        *,
+        resolved_models: Optional[Dict[str, Dict[str, Any]]] = None,
+    ) -> tuple[str, Optional[str]]:
+        """Resolve the model id for a binding.
+
+        Order:
+          1. Orchestrator-stamped ``resolved_models[param_name]`` (caller
+             override that has already passed the orchestrator's allowlist).
+          2. Binding default — fixed ``(ref, flavor, tag)`` or dispatch table
+             lookup on the discriminator field.
+        """
+        resolved_models = resolved_models or {}
+
+        # 1. Caller override (already validated by the orchestrator).
+        override = resolved_models.get(inj.param_name)
+        if override:
+            if not inj.binding._allow_override:
+                # Defense-in-depth — orchestrator should already have rejected.
+                raise ValueError(
+                    f"function {fn_name!r} param {inj.param_name!r}: binding has no "
+                    "allow_override declared, but resolved_models was stamped — orchestrator drift?"
+                )
+            ref = override.get("ref", "")
+            flavor = override.get("flavor", "")
+            tag = override.get("tag", "prod")
+            model_id = _resolved_repo_id(ref, flavor=flavor, tag=tag)
+            return model_id, None
+
+        # 2. Binding default.
+        binding = inj.binding
+        if isinstance(binding, Repo):
+            model_id = _resolved_repo_id(binding.ref, flavor=binding._flavor, tag=binding._tag)
+            return model_id, None
+
+        if isinstance(binding, Dispatch):
+            # Discriminator field → table key → repo pick.
             try:
-                chosen = getattr(payload, field)
+                chosen = getattr(payload, binding.field)
             except Exception:
-                raise ValueError(f"missing payload field for model selection: {field!r}") from None
-            if chosen is None:
-                raise ValueError(f"payload field {field!r} is null; expected a model key")
+                raise ValueError(
+                    f"function {fn_name!r}: dispatch field {binding.field!r} missing on payload"
+                ) from None
             if not isinstance(chosen, str):
-                raise ValueError(f"payload field {field!r} must be a string (model key), got {type(chosen)!r}")
+                raise ValueError(
+                    f"function {fn_name!r}: dispatch field {binding.field!r} must be a string, "
+                    f"got {type(chosen).__name__}"
+                )
             key = chosen.strip()
-            if not key:
-                raise ValueError(f"payload field {field!r} is empty; expected a model key")
-            if not payload_map:
+            pick = binding.table.get(key)
+            if pick is None:
+                allowed = sorted(binding.table.keys())
                 raise ValueError(
-                    f"payload model selection is not configured for function {fn_name!r}; "
-                    f"expected models_by_function.{fn_name} in /app/.tensorhub/endpoint.lock"
+                    f"function {fn_name!r}: dispatch key {key!r} not in table {allowed!r}"
                 )
-            if key not in payload_map:
-                allowed = sorted(payload_map.keys())
-                head = allowed[:20]
-                suffix = ""
-                if len(allowed) > len(head):
-                    suffix = f" (+{len(allowed) - len(head)} more)"
-                raise ValueError(
-                    f"unknown model key {key!r} for function {fn_name!r} payload field {field!r}; "
-                    f"allowed keys: {head}{suffix}"
-                )
-            model_id = payload_map[key]
-            self._enforce_model_allowlist(model_id, inj, allowed_ids=allowed_ids)
+            model_id = _resolved_repo_id(pick.ref, flavor=pick._flavor, tag=pick._tag)
             return model_id, key
 
-        raise ValueError(f"unknown ModelRef source: {inj.model_ref.source!r}")
+        raise TypeError(f"unknown binding type: {type(binding).__name__}")
 
     def _enforce_model_allowlist(self, model_id: str, inj: InjectionSpec, *, allowed_ids: Optional[set[str]] = None) -> None:
         # Enforce BOTH:

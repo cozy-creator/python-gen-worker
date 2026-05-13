@@ -35,8 +35,8 @@ import msgspec
 
 _log = logging.getLogger(__name__)
 
-from ..api.decorators import ResourceRequirements, ScalingHints
-from ..api.injection import ModelRef, ModelRefSource, parse_injection
+from ..api.decorators import Resources
+from ._training_injection import _PayloadRef, _parse_payload_ref
 from .calibration import CalibrationPolicy, lookup_policy, validate_policy_map
 from ..request_context import ConversionContext
 from .dataset import Dataset
@@ -210,7 +210,7 @@ def training_function(
     label: str | None = None,
     description: str | None = None,
     calibration: dict[str, CalibrationPolicy] | None = None,
-    scaling_hints: ScalingHints | None = None,
+    scaling_hints: Resources | None = None,
     vram_must_fit: str | None = None,
     vram_base: int = 0,
     vram_size_multiplier: float = 0.0,
@@ -287,7 +287,7 @@ def _coerce_training_scaling_hints(
     vram_size_multiplier: float,
     vram_scales_with: list[str] | tuple[str, ...] | None,
     runtime_scales_with: list[str] | tuple[str, ...] | None,
-) -> ScalingHints | None:
+) -> Resources | None:
     direct_fields_present = (
         vram_must_fit is not None
         or bool(vram_base)
@@ -304,7 +304,7 @@ def _coerce_training_scaling_hints(
         return scaling_hints
     if not direct_fields_present:
         return None
-    return ScalingHints(
+    return Resources(
         vram_must_fit=vram_must_fit,  # type: ignore[arg-type]
         vram_base=int(vram_base or 0),
         vram_size_multiplier=float(vram_size_multiplier or 0.0),
@@ -386,13 +386,12 @@ def _build_dispatch(
                     f"{_type_repr(expected)}; got {_type_repr(p.annotation)}"
                 )
             continue
-        # Non-reserved: is it an Annotated[..., ModelRef(Src.PAYLOAD, ...)] ?
-        parsed = parse_injection(p.annotation)
+        # Non-reserved: is it an Annotated[..., _PayloadRef("wire_field")] ?
+        parsed = _parse_payload_ref(p.annotation)
         if parsed is not None:
             _base, ref = parsed
-            if ref.source == ModelRefSource.PAYLOAD:
-                ref_registry[ref.key] = name
-                continue
+            ref_registry[ref.key] = name
+            continue
         # Plain tenant-named param — library decodes from payload at dispatch
         other_params[name] = p
 
@@ -439,7 +438,7 @@ def _build_dispatch(
     dispatch.__name__ = fn.__name__
     dispatch.__doc__ = fn.__doc__
     dispatch._is_training_function = True  # type: ignore[attr-defined]
-    dispatch._worker_resources = ResourceRequirements(kind="training")  # type: ignore[attr-defined]
+    dispatch._worker_resources = Resources()  # type: ignore[attr-defined]
     dispatch._function_label = (label or "").strip() or None  # type: ignore[attr-defined]
     dispatch._function_description = (description or "").strip() or None  # type: ignore[attr-defined]
     # Per-scheme calibration policy. Discovery / endpoint.lock
@@ -522,17 +521,16 @@ def _run(
         if name in injected:
             kwargs[name] = injected[name]
             continue
-        # ModelRef-PAYLOAD secondary-model load
-        parsed = parse_injection(p.annotation)
+        # _PayloadRef secondary-model load
+        parsed = _parse_payload_ref(p.annotation)
         if parsed is not None:
             base, ref = parsed
-            if ref.source == ModelRefSource.PAYLOAD:
-                kwargs[name] = _materialize_secondary_source(
-                    request_context, raw_fields, ref.key, base,
-                    default_is_optional=(p.default is not inspect.Parameter.empty),
-                    default=p.default,
-                )
-                continue
+            kwargs[name] = _materialize_secondary_source(
+                request_context, raw_fields, ref.key, base,
+                default_is_optional=(p.default is not inspect.Parameter.empty),
+                default=p.default,
+            )
+            continue
         # Tenant-named param — decode from payload
         if name in raw_fields:
             kwargs[name] = msgspec.convert(raw_fields[name], type=p.annotation)
