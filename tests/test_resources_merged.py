@@ -17,13 +17,13 @@ def test_static_envelope_fields() -> None:
         accelerator="cuda",
         requires_gpu=True,
         min_vram_gb=22.0,
-        cuda_compute_min=8.0,
+        min_compute_capability=8.0,
         required_libraries=("flash_attn", "torchao"),
     )
     assert r.accelerator == "cuda"
     assert r.requires_gpu is True
     assert r.min_vram_gb == 22.0
-    assert r.cuda_compute_min == 8.0
+    assert r.min_compute_capability == 8.0
     assert r.required_libraries == ("flash_attn", "torchao")
     assert r.compute_capability == {"min": "8.0"}
 

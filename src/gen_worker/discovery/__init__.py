@@ -2,7 +2,12 @@
 
 from .names import slugify_name
 from .toml_manifest import TensorhubModelSpec, EndpointResources, EndpointToml, load_endpoint_toml
-from .validation import EndpointValidationResult, validate_endpoint
+from .validation import (
+    EndpointLockValidationResult,
+    EndpointValidationResult,
+    validate_endpoint,
+    validate_endpoint_lock,
+)
 
 __all__ = [
     "slugify_name",
@@ -11,5 +16,7 @@ __all__ = [
     "EndpointToml",
     "load_endpoint_toml",
     "EndpointValidationResult",
+    "EndpointLockValidationResult",
     "validate_endpoint",
+    "validate_endpoint_lock",
 ]

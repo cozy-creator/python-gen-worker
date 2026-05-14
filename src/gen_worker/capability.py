@@ -16,7 +16,7 @@ Migration::
     # Before (0.6.x):
     from gen_worker.capability import require_vram, require_compute_capability
 
-    @inference_function(resources=ResourceRequirements(...))
+    @inference(resources=ResourceRequirements(...))
     def generate_bf16(ctx, payload):
         require_vram(22 * 1024**3)
         require_compute_capability((8, 0))
@@ -25,9 +25,9 @@ Migration::
     # After (0.7.0):
     from gen_worker import Resources, inference_function
 
-    _flux_bf16 = Resources(requires_gpu=True, min_vram_gb=22.0, cuda_compute_min=8.0)
+    _flux_bf16 = Resources(requires_gpu=True, min_vram_gb=22.0, min_compute_capability=8.0)
 
-    @inference_function(resources=_flux_bf16)
+    @inference(resources=_flux_bf16)
     def generate_bf16(ctx, payload):
         # Worker boot-time self-advertise checks _flux_bf16 against host
         # hardware and marks this function unavailable on hosts that can't
@@ -176,9 +176,9 @@ _REMOVED_HELPERS = {
     ),
     "require_compute_capability": (
         "gen_worker.capability.require_compute_capability was removed in "
-        "gen-worker 0.7.0. Declare cuda_compute_min on the per-function "
+        "gen-worker 0.7.0. Declare min_compute_capability on the per-function "
         "Resources struct instead: Resources(requires_gpu=True, "
-        "cuda_compute_min=10.0). The worker checks host SM at boot."
+        "min_compute_capability=10.0). The worker checks host SM at boot."
     ),
     "require_cuda_library": (
         "gen_worker.capability.require_cuda_library was removed in "

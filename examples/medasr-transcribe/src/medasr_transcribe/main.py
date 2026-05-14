@@ -4,7 +4,7 @@ import msgspec
 import torch
 from transformers import AutoModelForCTC, AutoProcessor
 
-from gen_worker import Asset, Repo, RequestContext, Resources, inference_function
+from gen_worker import Asset, Repo, RequestContext, Resources, inference
 from gen_worker import io as gw_io
 
 # Module-level Repo handle — reused for every binding that needs this repo.
@@ -19,39 +19,54 @@ class MedASROutput(msgspec.Struct):
     text: str
 
 
-@inference_function(
+@inference(
     resources=Resources(requires_gpu=True, min_vram_gb=4.0),
     models={
         "model": medasr,
         "processor": medasr,
     },
 )
-def medasr_transcribe(
-    ctx: RequestContext,
-    model: AutoModelForCTC,
-    processor: AutoProcessor,
-    payload: MedASRInput,
-) -> MedASROutput:
-    ctx.raise_if_canceled()
+class MedasrTranscribe:
+    def setup(
+        self,
+        model: AutoModelForCTC,
+        processor: AutoProcessor,
+    ) -> None:
+        self.model = model
+        self.processor = processor
 
-    device = next(model.parameters()).device
-    speech, sample_rate = gw_io.read_audio(payload.audio, target_sample_rate=16000)
-    inputs = processor(speech, sampling_rate=sample_rate, return_tensors="pt", padding=True)
-    inputs = inputs.to(device)
+    @inference.function(name="medasr_transcribe")
+    def medasr_transcribe(
+        self,
+        ctx: RequestContext,
+        payload: MedASRInput,
+    ) -> MedASROutput:
+        ctx.raise_if_canceled()
 
-    with torch.inference_mode():
+        model = self.model
+        processor = self.processor
+
+        device = next(model.parameters()).device
+        speech, sample_rate = gw_io.read_audio(payload.audio, target_sample_rate=16000)
+        inputs = processor(speech, sampling_rate=sample_rate, return_tensors="pt", padding=True)
+        inputs = inputs.to(device)
+
+        with torch.inference_mode():
+            try:
+                token_ids = model.generate(**inputs)
+            except Exception:
+                logits = model(**inputs).logits
+                token_ids = torch.argmax(logits, dim=-1)
+
+        ctx.raise_if_canceled()
+
         try:
-            token_ids = model.generate(**inputs)
+            text = processor.batch_decode(token_ids, skip_special_tokens=True)[0]
         except Exception:
-            logits = model(**inputs).logits
-            token_ids = torch.argmax(logits, dim=-1)
+            tokenizer = getattr(processor, "tokenizer", processor)
+            text = tokenizer.batch_decode(token_ids, skip_special_tokens=True)[0]
 
-    ctx.raise_if_canceled()
+        return MedASROutput(text=text)
 
-    try:
-        text = processor.batch_decode(token_ids, skip_special_tokens=True)[0]
-    except Exception:
-        tokenizer = getattr(processor, "tokenizer", processor)
-        text = tokenizer.batch_decode(token_ids, skip_special_tokens=True)[0]
-
-    return MedASROutput(text=text)
+    def shutdown(self) -> None:
+        pass

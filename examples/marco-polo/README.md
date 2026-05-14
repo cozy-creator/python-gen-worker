@@ -3,7 +3,7 @@
 The hello-world inference endpoint. Send `{"text": "marco"}`, get back `{"response": "polo"}`. Anything else gets a snarky fallback.
 
 ## What it demonstrates
-- Minimal `@inference_function` shape — msgspec.Struct in, msgspec.Struct out.
+- Minimal `@inference` shape — msgspec.Struct in, msgspec.Struct out.
 - Cooperative cancellation via `ctx.raise_if_canceled()`.
 - No GPU, no models, no dependencies.
 

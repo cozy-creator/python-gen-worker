@@ -94,7 +94,7 @@ _flux_dispatch = Resources(
     # Static placement envelope (hard gates)
     requires_gpu=True,
     min_vram_gb=14.0,
-    cuda_compute_min=8.0,
+    min_compute_capability=8.0,
     required_libraries=("torch", "diffusers"),
 
     # Dynamic cost shape (admission + scheduling)
@@ -111,7 +111,7 @@ _flux_dispatch = Resources(
 | `accelerator`            | `"cuda"` or `"none"`. Normalized from `"gpu"`/`"cpu"` shorthand.                                                |
 | `requires_gpu`           | Implies `accelerator="cuda"` for placement.                                                                     |
 | `min_vram_gb`            | Hard VRAM floor in GiB. Function unavailable on hosts below this.                                              |
-| `cuda_compute_min`       | Minimum SM compute capability (e.g. `8.0`). Function unavailable on hosts below this.                          |
+| `min_compute_capability`       | Minimum SM compute capability (e.g. `8.0`). Function unavailable on hosts below this.                          |
 | `required_libraries`     | Python package names the function needs (`"flash_attn"`, `"bitsandbytes"`, …). Worker checks import at boot.   |
 | `vram_must_fit`          | `"full_model"` or `"largest_component"`. Picks which `size_facts` entry the orchestrator uses for admission.   |
 | `vram_base`              | Constant VRAM overhead in bytes.                                                                                |
@@ -789,6 +789,24 @@ Confirm: metrics appear in `events.jsonl`, checkpoints serialize a `state`
 payload, the resume path restores through `load_state_dict`.
 
 ---
+
+## Per-modality cookbooks
+
+For shipping production endpoints by modality, see the cookbooks. Each
+is a one-page recipe covering the class shape, acceleration stack,
+per-model recommended config, and a complete working example:
+
+- [cookbook-image-diffusion.md](cookbook-image-diffusion.md) — Flux, SDXL,
+  SD3, Qwen-Image, Sana-Sprint. torch.compile + FBCache/DeepCache + NVFP4.
+- [cookbook-video-diffusion.md](cookbook-video-diffusion.md) — LTX-Video,
+  HunyuanVideo, Wan2.2, Mochi. TeaCache + FP8/NVFP4 + xDiT sequence
+  parallelism.
+- [cookbook-audio.md](cookbook-audio.md) — F5-TTS, Kokoro, Stable Audio
+  Open (SerialWorker) and Chatterbox, GPT-SoVITS, Bark, MusicGen
+  (BatchedWorker via vLLM).
+- [cookbook-stages.md](cookbook-stages.md) — `@inference.stage`
+  annotations for multi-stage pipelines (3D, large DiTs with batch-
+  friendly encoders).
 
 ## Examples
 

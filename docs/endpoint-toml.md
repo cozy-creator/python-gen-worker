@@ -67,7 +67,7 @@ accelerator = "cuda"
 cuda_min = "12.8"
 compute_capabilities = [">=8.0"]
 python = "3.12"
-torch = "2.11.x"
+torch = "2.12.x"
 cuda = "12.8"
 ```
 
@@ -190,7 +190,7 @@ accelerator = "cuda"
 cuda_min = "12.8"
 compute_capabilities = [">=8.0"]
 python = "3.12"
-torch = "2.11.x"
+torch = "2.12.x"
 cuda = "12.8"
 
 # CPU fallback

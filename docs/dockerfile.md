@@ -8,7 +8,7 @@ You satisfy three contract points; everything else is up to you.
 ## The three contract points
 
 1. **`gen_worker` is importable in the runtime environment.** Whatever
-   dependency manager you use, the resulting image must have `gen-worker[torch]`
+   dependency manager you use, the resulting image must have `gen-worker`
    (or just `gen-worker` for non-PyTorch endpoints) installed.
 
 2. **Discovery is baked into the image at `/app/.tensorhub/endpoint.lock`.**
@@ -46,7 +46,7 @@ ENTRYPOINT ["python", "-m", "gen_worker.entrypoint"]
 ```
 
 No `ARG BASE_IMAGE`, no version pass-throughs. The endpoint's `pyproject.toml`
-pins `gen-worker[torch]>=0.7.0` and the Dockerfile installs it.
+pins `gen-worker>=0.7.5` and the Dockerfile installs it.
 
 ---
 
@@ -58,7 +58,7 @@ Use `ARG BASE_IMAGE` when your `endpoint.toml` profile uses **managed mode**
 a build arg.
 
 ```dockerfile
-ARG BASE_IMAGE=python:3.12-slim
+ARG BASE_IMAGE=pytorch/pytorch:2.11.0-cuda12.8-cudnn9-runtime
 FROM ${BASE_IMAGE}
 WORKDIR /app
 COPY . /app
@@ -68,9 +68,9 @@ RUN mkdir -p /app/.tensorhub \
 ENTRYPOINT ["python", "-m", "gen_worker.entrypoint"]
 ```
 
-The `ARG BASE_IMAGE=python:3.12-slim` line provides a default so the
-Dockerfile is buildable locally without tensorhub. In production, tensorhub
-overrides it with the resolved / explicit ref.
+Use a common upstream default matching the profile so local builds behave like
+Tensorhub builds. In production, tensorhub overrides it with the resolved /
+explicit ref.
 
 Omit `ARG BASE_IMAGE` entirely when your profile is **fully custom**
 (no `python` / `torch` / `cuda` / `base_image` declared). Tensorhub does not
@@ -154,7 +154,7 @@ RUN echo "build-nonce=${BUILD_NONCE}" \
 ## Full real-world example (managed mode + uv)
 
 ```dockerfile
-ARG BASE_IMAGE=python:3.12-slim
+ARG BASE_IMAGE=pytorch/pytorch:2.11.0-cuda12.8-cudnn9-runtime
 FROM ${BASE_IMAGE}
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
@@ -183,5 +183,5 @@ RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
 ENTRYPOINT ["python", "-m", "gen_worker.entrypoint"]
 ```
 
-This is what `examples/marco-polo/Dockerfile` looks like — copy from it for
-real endpoints.
+Use this shape for GPU endpoints. For CPU-only endpoints, `python:3.12-slim`
+is still a good common default.

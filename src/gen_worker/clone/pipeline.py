@@ -15,7 +15,7 @@ from gen_worker import RequestContext, Tensors
 
 # clone_pipeline calls the library streaming primitives directly (see
 # _apply_save_format) instead of going through the transform-endpoint tenant
-# functions — those use a different dispatch shape (@training_function) that
+# functions — those use a different dispatch shape (@conversion) that
 # expects ctx.source_path to point at a materialized tensorhub snapshot, but
 # clone_pipeline works from a local Tensors object that's already been
 # ingested from an external URL.
@@ -1458,7 +1458,7 @@ def _apply_save_format(
     """Apply one conversion (bf16 / flashpack / fp8 / nvfp4 / gguf) to local weights.
 
     Calls gen_worker.conversion streaming primitives directly rather than
-    dispatching through the @training_function tenant path (those expect
+    dispatching through the @conversion tenant path (those expect
     a materialized tensorhub snapshot; clone_pipeline works from a local
     Tensors that's already been ingested from an external URL).
     """

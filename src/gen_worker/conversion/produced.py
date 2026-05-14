@@ -1,6 +1,6 @@
 """ProducedFlavor — what a tenant transform returns per output.
 
-A tenant's ``@training_function`` returns ``list[ProducedFlavor]`` — one
+A tenant's ``@conversion`` returns ``list[ProducedFlavor]`` — one
 entry per flavor the job produces into the destination checkpoint. The
 library uploads each flavor's ``path`` (file OR directory) and attaches
 the declared ``attributes`` to the final checkpoint flavor publish payload.
@@ -22,8 +22,19 @@ Attribute-bag ownership (issue #22 — server-authoritative metadata):
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Annotated
 
 import msgspec
+
+
+# JSON-schema bridge for pathlib.Path: discovery emits a per-class JSON schema
+# for every msgspec.Struct in the function signature, and msgspec's schema
+# generator rejects custom types unless they're annotated with extra_json_schema
+# or a schema_hook. ProducedFlavor's `path` / `extra_files` are filesystem
+# pointers used by the library to know what to upload — on the wire they're
+# absolute paths represented as strings. The annotation keeps the field typed
+# as Path for tenant ergonomics while making it discoverable.
+_PathField = Annotated[Path, msgspec.Meta(extra_json_schema={"type": "string"})]
 
 
 class ProducedFlavor(msgspec.Struct):
@@ -44,9 +55,9 @@ class ProducedFlavor(msgspec.Struct):
         compatibility label and is included automatically when present.
     """
 
-    path: Path
+    path: _PathField
     attributes: dict = msgspec.field(default_factory=dict)
-    extra_files: list[Path] = msgspec.field(default_factory=list)
+    extra_files: list[_PathField] = msgspec.field(default_factory=list)
     flavor: str = ""
     flavors: list[str] = msgspec.field(default_factory=list)
 

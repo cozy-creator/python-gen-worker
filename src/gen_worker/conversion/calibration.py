@@ -20,7 +20,7 @@ Training functions that quantize weights fall into three buckets:
   fail loudly rather than silently discard.
 
 Tenants declare policy as a ``{scheme: CalibrationPolicy}`` dict passed
-to ``@training_function(calibration=...)``. At runtime, the tenant calls
+to ``@conversion(calibration=...)``. At runtime, the tenant calls
 ``resolve_calibration_action(policy, ...)`` once per spec entry to decide
 whether to calibrate, skip, or run dummy (or raise on invalid combos).
 
@@ -65,24 +65,24 @@ def validate_policy_map(fn_name: str, policy_map) -> dict[str, CalibrationPolicy
     if isinstance(policy_map, str):
         if policy_map not in VALID_POLICIES:
             raise TypeError(
-                f"{fn_name}: @training_function calibration={policy_map!r} "
+                f"{fn_name}: @conversion calibration={policy_map!r} "
                 f"is not valid. Use one of {sorted(VALID_POLICIES)}."
             )
         return {"*": policy_map}  # type: ignore[return-value]
     if not isinstance(policy_map, dict):
         raise TypeError(
-            f"{fn_name}: @training_function calibration= must be a string or "
+            f"{fn_name}: @conversion calibration= must be a string or "
             f"dict[scheme_name, policy]; got {type(policy_map).__name__}"
         )
     for scheme, policy in policy_map.items():
         if not isinstance(scheme, str) or not scheme:
             raise TypeError(
-                f"{fn_name}: @training_function calibration= keys must be "
+                f"{fn_name}: @conversion calibration= keys must be "
                 f"non-empty strings; got {scheme!r}"
             )
         if policy not in VALID_POLICIES:
             raise TypeError(
-                f"{fn_name}: @training_function calibration[{scheme!r}]="
+                f"{fn_name}: @conversion calibration[{scheme!r}]="
                 f"{policy!r} is not valid. Use one of {sorted(VALID_POLICIES)}."
             )
     return dict(policy_map)  # type: ignore[return-value]

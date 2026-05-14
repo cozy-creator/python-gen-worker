@@ -1,47 +1,51 @@
-"""@training_function — unified decorator for transform-kind endpoints.
+"""Finalize helpers for the class-shape conversion / training / dataset
+endpoints (#332).
 
-Signature-introspected dispatch: reserved parameter names bound to library-
-injected types (ctx, source, datasets), everything else decoded by msgspec
-from the wire payload by name. Extra ``Source``-typed params can be tagged
-with the private ``_PayloadRef("wire_field")`` Annotated marker to declare
-secondary models the library materializes alongside the primary source.
+After the #332 hard-cut, all transform-kind tenants are class-shape
+(``@conversion`` / ``@training`` / ``@dataset``). The worker's
+``_execute_conversion_class_request`` invokes the tenant's
+``generate()`` method, collects the returned ``list[ProducedFlavor]``,
+and hands it to ``_finalize_produced_variants`` here for upload +
+publish.
 
-At decorator time:
-  - Reject reserved-name + non-reserved-type combos (TypeError).
-  - Require ``ctx`` + ``source``.
-  - Build a per-function ``ref_registry`` for orchestrator token scoping:
-    maps wire_field → parameter_name for every Annotated[Source,
-    _PayloadRef(...)] param.
+This module owns the upload + publish contract: given a list of
+ProducedFlavors and the ``RequestContext`` carrying ``destination`` /
+``source`` info, it walks each variant's output dir (or single file),
+uploads every file via ``ctx.save_checkpoint`` (which routes to
+tensorhub's CAS), builds the snapshot_manifest list of
+``(path, digest, size_bytes)`` entries, and calls the appropriate
+publish RPC:
 
-At dispatch time:
-  - Build reserved-name injected values (ctx, source, datasets).
-  - For each non-reserved param: decode from payload[name] using msgspec,
-    or materialize via _PayloadRef if annotated.
-  - Call fn(**kwargs) with only the names the tenant declared.
-  - Upload each returned ProducedFlavor; apply destination.tags on success.
+  - ``publish_repo_revision`` for model checkpoints (conversion /
+    training kinds — the ``sub_kind`` field on the endpoint class
+    distinguishes ``format-conversion`` / ``quantization`` / etc.).
+  - ``publish_dataset_revision`` for dataset artifacts (dataset kind,
+    or any sub_kind starting with ``dataset-generation``).
 
-This module owns the transform/training dispatch contract used by endpoint code.
+The function-shape ``@conversion`` decorator was removed in
+#332. Tenants now declare:
+
+    @conversion(sub_kind="format-conversion", models={...})
+    class MyConversion:
+        def setup(self): ...
+        @conversion.function
+        def generate(self, ctx, payload) -> Iterator[ProducedFlavor]: ...
+        def shutdown(self): ...
 """
 
 from __future__ import annotations
 
-import inspect
 import logging
-import typing
 from pathlib import Path
-from typing import Any, Callable, TYPE_CHECKING, get_args, get_origin
+from typing import Any, TYPE_CHECKING
 
-import msgspec
+from .produced import ProducedFlavor
+
+if TYPE_CHECKING:
+    from ..request_context import RequestContext
 
 _log = logging.getLogger(__name__)
 
-from ..api.decorators import Resources
-from ._training_injection import _PayloadRef, _parse_payload_ref
-from .calibration import CalibrationPolicy, lookup_policy, validate_policy_map
-from ..request_context import ConversionContext
-from .dataset import Dataset
-from .produced import ProducedFlavor
-from .source import Source
 
 # Mirror of training-endpoints canonical_quant.SCHEME_LIBRARY for the
 # canonical (scheme → default library) mapping. Kept inline here so
@@ -112,448 +116,6 @@ def _resolve_quant_library(method: str, v_attrs: dict[str, Any], merged_attrs: d
             return v
     return _CANONICAL_QUANT_SCHEME_LIBRARY.get(str(method).strip(), "")
 
-if TYPE_CHECKING:
-    from ..request_context import RequestContext
-
-
-# Reserved parameter names and the exact types they must bind to.
-# Reserved NAME with wrong TYPE → TypeError at decorator time.
-RESERVED_TYPES: dict[str, Any] = {
-    "ctx": ConversionContext,
-    "source": Source,
-    "datasets": list[Dataset],
-}
-
-
-# Recommended coarse labels for the training_jobs.kind column (issue #10).
-# Free-form: tenants MAY use other values, and MAY use ``colon:sub-label`` to
-# pick a sub-bucket. Recommended set is validated for typos with a warning.
-RECOMMENDED_KINDS = frozenset({
-    "quantization",
-    "pruning",
-    "distillation",
-    "fine-tuning",
-    "fusion",
-    "format-conversion",
-    # Dataset-generation endpoints emit a dataset artifact, not a model
-    # checkpoint, but share the @training_function dispatch path.
-    "dataset-generation",
-})
-
-# Default when @training_function is used without kind=. Fine-tuning is
-# the most common case for new tenants; quantization / format-conversion /
-# fusion endpoints must declare explicitly.
-DEFAULT_KIND = "fine-tuning"
-
-
-class TrainingFunctionSpec:
-    """Per-function metadata built at decorator time.
-
-    ``ref_registry`` maps wire-field-name -> parameter-name for every
-    ``Annotated[Source, _PayloadRef(key)]`` parameter. Orchestrator
-    reads this at publish to know which wire fields to include in the
-    capability-token reads set.
-
-    ``input_schema`` is the JSON schema for the full wire payload — library
-    bakes it into endpoint.lock at publish; orchestrator validates incoming
-    SubmitRequest payloads against it BEFORE minting capability tokens /
-    dispatching to a worker. Catches ``specs[0].dtype='fp15'``-type enum
-    violations at HTTP boundary instead of mid-job on the worker.
-
-    ``kind`` is the tenant-declared job-kind label that populates
-    ``orchestrator.training_jobs.kind`` on dispatch (issue #10). Free-form
-    string; see ``RECOMMENDED_KINDS`` for the coarse label set.
-    """
-
-    __slots__ = (
-        "fn", "signature", "ref_registry", "other_params", "input_schema",
-        "kind", "calibration",
-    )
-
-    def __init__(
-        self,
-        *,
-        fn: Callable[..., list[ProducedFlavor]],
-        signature: inspect.Signature,
-        ref_registry: dict[str, str],
-        other_params: dict[str, inspect.Parameter],
-        input_schema: dict,
-        kind: str,
-        calibration: dict[str, CalibrationPolicy] | None = None,
-    ) -> None:
-        self.fn = fn
-        self.signature = signature
-        # wire_field -> param_name
-        self.ref_registry = ref_registry
-        # param_name -> Parameter (for non-reserved, non-ref params — decoded
-        # from payload by msgspec)
-        self.other_params = other_params
-        # Full wire-payload JSON schema (dict). Includes source, destination,
-        # datasets (if declared), every _PayloadRef field, and every
-        # tenant-named param. Enum types come through via msgspec Literal
-        # → JSON schema `enum` mapping.
-        self.input_schema = input_schema
-        self.kind = kind
-        # Per-scheme calibration policy. See
-        # gen_worker.conversion.calibration for the three policies
-        # (required / beneficial / unsupported) and the resolver helper.
-        # Empty dict for non-quantization functions; discovery emits this
-        # into endpoint.lock so orchestrator / UI can surface "needs a
-        # dataset" to callers up-front.
-        self.calibration: dict[str, CalibrationPolicy] = dict(calibration or {})
-
-
-def training_function(
-    fn: Callable[..., list[ProducedFlavor]] | None = None,
-    *,
-    kind: str = DEFAULT_KIND,
-    label: str | None = None,
-    description: str | None = None,
-    calibration: dict[str, CalibrationPolicy] | None = None,
-    scaling_hints: Resources | None = None,
-    vram_must_fit: str | None = None,
-    vram_base: int = 0,
-    vram_size_multiplier: float = 0.0,
-    vram_scales_with: list[str] | tuple[str, ...] | None = None,
-    runtime_scales_with: list[str] | tuple[str, ...] | None = None,
-) -> Callable[..., list[ProducedFlavor]]:
-    """Mark a tenant function as a training endpoint (tensorhub #232).
-
-    Usable as a plain decorator (``@training_function``) or with kwargs
-    (``@training_function(kind='quantization')``).
-
-    Args:
-        kind: Populates ``training_jobs.kind`` at dispatch.
-            See ``RECOMMENDED_KINDS`` for the coarse label set; sub-labels
-            via ``kind='quantization:gptq-w4'`` permitted.
-        label: Optional author-supplied UI / search label. Non-functional.
-        description: Optional free-text description. Non-functional.
-        calibration: Per-scheme calibration policy, as a
-            ``{scheme_name: "required"|"beneficial"|"unsupported"}`` dict.
-            Tenants that quantize use this to declare, for each scheme
-            their function supports, whether a calibration dataset is
-            required (e.g. int4_awq), beneficial (e.g. modelopt fp8), or
-            unsupported (torchao int4_wo). Discovery bakes this into
-            endpoint.lock so the orchestrator / UI can tell callers up-
-            front "supply a dataset." At runtime the tenant calls
-            ``gen_worker.conversion.calibration.resolve_calibration_action``
-            to enforce policy per spec.
-        scaling_hints: Optional prebuilt :class:`Resources` value. Tenants
-            may also pass the direct VRAM/runtime keyword fields below.
-        vram_must_fit, vram_base, vram_size_multiplier, vram_scales_with,
-            runtime_scales_with: Convenience form for ``Resources``.
-
-    At decorator time: validates the signature and attaches a
-    ``TrainingFunctionSpec`` to the function as ``__training_spec__``.
-    Raises TypeError for reserved-name/wrong-type violations or missing
-    required params.
-
-    The returned callable is a dispatch wrapper the library invokes with
-    ``(request_context, payload)`` at runtime. Reserved-name parameters
-    (ctx / source / datasets) are library-injected; the rest of the
-    signature decodes from the wire payload.
-    """
-    effective_scaling_hints = _coerce_training_scaling_hints(
-        scaling_hints=scaling_hints,
-        vram_must_fit=vram_must_fit,
-        vram_base=vram_base,
-        vram_size_multiplier=vram_size_multiplier,
-        vram_scales_with=vram_scales_with,
-        runtime_scales_with=runtime_scales_with,
-    )
-    # Support both @training_function and @training_function(kind=...).
-    if fn is None:
-        def _apply(real_fn: Callable[..., list[ProducedFlavor]]) -> Callable[..., list[ProducedFlavor]]:
-            return _build_dispatch(
-                real_fn, kind=kind,
-                label=label, description=description,
-                calibration=calibration,
-                scaling_hints=effective_scaling_hints,
-            )
-        return _apply  # type: ignore[return-value]
-    return _build_dispatch(
-        fn, kind=kind,
-        label=label, description=description,
-        calibration=calibration,
-        scaling_hints=effective_scaling_hints,
-    )
-
-
-def _coerce_training_scaling_hints(
-    *,
-    scaling_hints:  Resources | None,
-    vram_must_fit: str | None,
-    vram_base: int,
-    vram_size_multiplier: float,
-    vram_scales_with: list[str] | tuple[str, ...] | None,
-    runtime_scales_with: list[str] | tuple[str, ...] | None,
-) -> Resources | None:
-    direct_fields_present = (
-        vram_must_fit is not None
-        or bool(vram_base)
-        or bool(vram_size_multiplier)
-        or bool(vram_scales_with)
-        or bool(runtime_scales_with)
-    )
-    if scaling_hints is not None:
-        if direct_fields_present:
-            raise TypeError(
-                "@training_function received both scaling_hints= and direct "
-                "vram/runtime scaling fields; use one form"
-            )
-        return scaling_hints
-    if not direct_fields_present:
-        return None
-    return Resources(
-        vram_must_fit=vram_must_fit,  # type: ignore[arg-type]
-        vram_base=int(vram_base or 0),
-        vram_size_multiplier=float(vram_size_multiplier or 0.0),
-        vram_scales_with=tuple(vram_scales_with or ()),
-        runtime_scales_with=tuple(runtime_scales_with or ()),
-    )
-
-
-def _validate_kind(fn_name: str, kind: str) -> None:
-    """Warn on typos against RECOMMENDED_KINDS. Free-form labels are allowed."""
-    import warnings
-    if not isinstance(kind, str) or not kind.strip():
-        raise TypeError(f"{fn_name}: @training_function kind= must be a non-empty string")
-    # Split off sub-label if present (e.g. 'quantization:gptq-w4').
-    coarse = kind.split(":", 1)[0]
-    if coarse not in RECOMMENDED_KINDS:
-        warnings.warn(
-            f"{fn_name}: @training_function kind={kind!r} is not in the "
-            f"recommended set {sorted(RECOMMENDED_KINDS)}. "
-            f"Free-form is allowed, but check for typos (did you mean 'fine-tuning'?).",
-            stacklevel=3,
-        )
-
-
-def _build_dispatch(
-    fn: Callable[..., list[ProducedFlavor]],
-    *,
-    kind: str,
-    label: str | None = None,
-    description: str | None = None,
-    calibration: dict[str, CalibrationPolicy] | None = None,
-    scaling_hints: Any = None,
-) -> Callable[..., list[ProducedFlavor]]:
-    """Inner: build the dispatch wrapper. Split from ``training_function`` so
-    the same body serves both ``@training_function`` and
-    ``@training_function(kind=...)`` entry paths."""
-    _validate_kind(fn.__name__, kind)
-    validated_calibration: dict[str, CalibrationPolicy] = (
-        validate_policy_map(fn.__name__, calibration) if calibration else {}
-    )
-    # Resolve string-form annotations (from __future__ import annotations) so
-    # reserved-type comparisons work against actual class objects, not strings.
-    sig = inspect.signature(fn)
-    try:
-        type_hints = typing.get_type_hints(fn, include_extras=True)
-    except Exception:
-        type_hints = {}
-    new_params = []
-    for name, p in sig.parameters.items():
-        if name in type_hints:
-            p = p.replace(annotation=type_hints[name])
-        new_params.append(p)
-    sig = sig.replace(parameters=new_params)
-    ref_registry: dict[str, str] = {}
-    other_params: dict[str, inspect.Parameter] = {}
-
-    # Issue #1 (slim-request-context): `ctx`'s expected type depends on the
-    # endpoint kind. Dataset-generation tenants type `ctx: DatasetContext`;
-    # all other transform-kind tenants type `ctx: ConversionContext`.
-    is_dataset_gen = kind.startswith("dataset-generation")
-    if is_dataset_gen:
-        from ..request_context import DatasetContext as _CtxType
-    else:
-        from ..request_context import ConversionContext as _CtxType
-    reserved_for_kind: dict[str, Any] = dict(RESERVED_TYPES)
-    reserved_for_kind["ctx"] = _CtxType
-
-    for name, p in sig.parameters.items():
-        if name in reserved_for_kind:
-            expected = reserved_for_kind[name]
-            if p.annotation is inspect.Parameter.empty:
-                raise TypeError(
-                    f"{fn.__name__}: reserved param '{name}' must be typed as "
-                    f"{_type_repr(expected)} (got no annotation)"
-                )
-            if not _annotation_matches(p.annotation, expected):
-                raise TypeError(
-                    f"{fn.__name__}: reserved param '{name}' must be typed as "
-                    f"{_type_repr(expected)}; got {_type_repr(p.annotation)}"
-                )
-            continue
-        # Non-reserved: is it an Annotated[..., _PayloadRef("wire_field")] ?
-        parsed = _parse_payload_ref(p.annotation)
-        if parsed is not None:
-            _base, ref = parsed
-            ref_registry[ref.key] = name
-            continue
-        # Plain tenant-named param — library decodes from payload at dispatch
-        other_params[name] = p
-
-    # ``ctx`` is always required. ``source`` is required for tenant
-    # functions that operate on a model checkpoint (dtype conversion,
-    # quantization, fine-tuning, ...). Dataset-generation tenants don't need
-    # a source — prompt corpora are model-agnostic — so source is optional
-    # when kind starts with "dataset-generation".
-    if "ctx" not in sig.parameters:
-        raise TypeError(f"{fn.__name__}: must declare required parameter 'ctx'")
-    if "source" not in sig.parameters and not kind.startswith("dataset-generation"):
-        raise TypeError(
-            f"{fn.__name__}: must declare required parameter 'source' "
-            f"(only kind='dataset-generation' tenants may omit it)"
-        )
-
-    input_schema = _build_wire_payload_schema(
-        signature=sig,
-        other_params=other_params,
-        ref_registry=ref_registry,
-    )
-
-    spec = TrainingFunctionSpec(
-        fn=fn,
-        signature=sig,
-        ref_registry=ref_registry,
-        other_params=other_params,
-        input_schema=input_schema,
-        kind=kind,
-        calibration=validated_calibration,
-    )
-
-    def dispatch(request_context: "RequestContext", payload: Any) -> list[ProducedFlavor]:
-        return _run(spec, request_context, payload)
-
-    # Attach metadata so discovery / publish-time validation can read it.
-    # Setting _is_training_function + _worker_resources makes the existing
-    # gen-worker discovery pick this up as a registered handler. Discovery
-    # treats _is_training_function specially — it doesn't try to parse the
-    # dispatch wrapper's (request_context, payload) signature as a regular
-    # worker function; instead it reads TrainingFunctionSpec directly.
-    dispatch.__training_spec__ = spec  # type: ignore[attr-defined]
-    dispatch.__wrapped__ = fn  # type: ignore[attr-defined]
-    dispatch.__name__ = fn.__name__
-    dispatch.__doc__ = fn.__doc__
-    dispatch._is_training_function = True  # type: ignore[attr-defined]
-    dispatch._worker_resources = Resources()  # type: ignore[attr-defined]
-    dispatch._function_label = (label or "").strip() or None  # type: ignore[attr-defined]
-    dispatch._function_description = (description or "").strip() or None  # type: ignore[attr-defined]
-    # Per-scheme calibration policy. Discovery / endpoint.lock
-    # propagates this up so orchestrator + UI can flag calibrated schemes
-    # without a dataset BEFORE dispatch (faster than waiting for the worker
-    # to reject). Empty dict for functions that don't quantize.
-    dispatch._calibration_policy = dict(validated_calibration)  # type: ignore[attr-defined]
-    # Per-function scaling hints (gen-orchestrator #320) — declares which
-    # dimensions drive VRAM and runtime. Discovery serializes into endpoint.lock
-    # under functions[].scaling_hints; orchestrator uses for placement + learns
-    # coefficients from observation.
-    if scaling_hints is not None:
-        dispatch._scaling_hints = scaling_hints  # type: ignore[attr-defined]
-    return dispatch
-
-
-# ---------------------------------------------------------------------------
-# dispatch-time runtime helpers
-# ---------------------------------------------------------------------------
-
-
-def _run(
-    spec: TrainingFunctionSpec,
-    request_context: "RequestContext",
-    payload: Any,
-) -> list[ProducedFlavor]:
-    """Build kwargs from payload + inject library helpers; call the tenant."""
-    # Only build the Source if the tenant declared it. Dataset-generation
-    # tenants skip source to keep corpus generation model-agnostic.
-    source: Source | None = None
-    if "source" in spec.signature.parameters:
-        source = _build_source(request_context, payload)
-    # Issue #1 (slim-request-context): the kind-specific subclass is now
-    # constructed in worker.py before dispatch (ConversionContext for
-    # transform-kind jobs, DatasetContext for dataset-generation). Reuse
-    # that incoming context and just attach the resolved Source so the
-    # tenant-helper API (mktemp / open_output_writer) can reach it.
-    ctx = request_context
-    if source is not None and hasattr(ctx, "_source"):
-        ctx._source = source  # type: ignore[attr-defined]
-    datasets = _build_datasets(request_context, payload)
-
-    # Auto-enforce calibration policy. When a scheme's policy is
-    # ``unsupported``, reject any submitted datasets here so tenants don't
-    # need to repeat ``resolve_calibration_action`` calls in their bodies.
-    if datasets and spec.calibration:
-        raw_fields = _payload_as_dict(payload)
-        specs_field = raw_fields.get("specs") or []
-        if not isinstance(specs_field, list):
-            specs_field = []
-        for s in specs_field:
-            scheme = ""
-            if isinstance(s, dict):
-                scheme = str(s.get("scheme") or "")
-            if not scheme:
-                continue
-            policy = lookup_policy(spec.calibration, scheme)
-            if policy == "unsupported":
-                raise ValueError(
-                    f"{spec.fn.__name__}: scheme={scheme!r} does not accept a "
-                    f"calibration dataset (calibration='unsupported'); remove "
-                    f"the dataset or choose a calibrated quantization recipe."
-                )
-
-    injected: dict[str, Any] = {
-        "ctx": ctx,
-    }
-    # Only inject ``datasets`` when the tenant declares the parameter.
-    # Tenants that don't accept calibration data (e.g. weight-only quant)
-    # can omit the parameter entirely.
-    if "datasets" in spec.signature.parameters:
-        injected["datasets"] = datasets
-    if source is not None:
-        injected["source"] = source
-
-    raw_fields = _payload_as_dict(payload)
-    kwargs: dict[str, Any] = {}
-    sig = spec.signature
-    for name, p in sig.parameters.items():
-        if name in injected:
-            kwargs[name] = injected[name]
-            continue
-        # _PayloadRef secondary-model load
-        parsed = _parse_payload_ref(p.annotation)
-        if parsed is not None:
-            base, ref = parsed
-            kwargs[name] = _materialize_secondary_source(
-                request_context, raw_fields, ref.key, base,
-                default_is_optional=(p.default is not inspect.Parameter.empty),
-                default=p.default,
-            )
-            continue
-        # Tenant-named param — decode from payload
-        if name in raw_fields:
-            kwargs[name] = msgspec.convert(raw_fields[name], type=p.annotation)
-        elif p.default is not inspect.Parameter.empty:
-            kwargs[name] = p.default
-        else:
-            raise ValueError(
-                f"{spec.fn.__name__}: missing required wire field '{name}' in payload"
-            )
-
-    result = spec.fn(**kwargs)
-    if not isinstance(result, list):
-        raise TypeError(
-            f"{spec.fn.__name__}: must return list[ProducedFlavor]; got "
-            f"{type(result).__name__}"
-        )
-    # Upload each ProducedFlavor to the destination + apply tags on success.
-    # Library appends exactly one provenance key (`produced_by_job_id`).
-    # Every other input-to-the-job lives in the orchestrator job record;
-    # duplicating it onto the variant drifts.
-    _finalize_produced_variants(request_context, result, kind=spec.kind)
-    return result
-
 
 def _finalize_produced_variants(
     request_context: "RequestContext",
@@ -561,22 +123,24 @@ def _finalize_produced_variants(
     *,
     kind: str,
 ) -> None:
-    """Upload each ProducedFlavor's files, build its manifest + snapshot_digest,
-    and publish to the correct tensorhub subsystem based on ``kind``.
+    """Upload each ProducedFlavor's files, build its manifest +
+    snapshot_digest, and publish to the correct tensorhub subsystem
+    based on ``kind``.
 
     Routes by kind:
 
     - ``kind.startswith("dataset-generation")`` → publish into
-      ``tensorhub.datasets`` via ``publish_dataset_revision``. File bytes land
-      in CAS same as checkpoints; the difference is the publish target:
-      dataset artifacts shouldn't pollute the model-checkpoint search space.
+      ``tensorhub.datasets`` via ``publish_dataset_revision``. File bytes
+      land in CAS same as checkpoints; the difference is the publish
+      target: dataset artifacts shouldn't pollute the model-checkpoint
+      search space.
     - everything else → publish into ``tensorhub.repo_checkpoints`` via
       ``publish_repo_revision`` (the original path — model weights).
 
     Upload flow in both branches:
-      1. Walks the variant's output dir (or single file) and uploads each file
-         via ``ctx.save_checkpoint``, capturing the blake3-keyed Tensors handle
-         the upload returns.
+      1. Walks the variant's output dir (or single file) and uploads
+         each file via ``ctx.save_checkpoint``, capturing the
+         blake3-keyed Tensors handle the upload returns.
       2. Builds a snapshot_manifest entry list from those handles:
          ``[{path, digest, size_bytes}]``.
       3. Computes ``snapshot_digest = sha256(canonical_json(entries))`` —
@@ -585,8 +149,8 @@ def _finalize_produced_variants(
          + metadata payload.
 
     ``destination.tags`` (e.g. ``:prod``) are forwarded to
-    ``publish_repo_revision`` in the checkpoint path so the tag + checkpoint
-    land atomically. Datasets use naming-based versioning,
+    ``publish_repo_revision`` in the checkpoint path so the tag +
+    checkpoint land atomically. Datasets use naming-based versioning,
     not tags — the publish_dataset_revision path ignores destination.tags.
     """
     if not variants:
@@ -704,13 +268,7 @@ def _finalize_produced_variants(
             # carries the manifest + flavor labels + size only; server
             # infers kind / library / dtype / file_layout / file_type
             # from the uploaded file contents and writes the canonical
-            # values. file_type / file_layout / quantization / kind are
-            # deliberately omitted — any caller-side value would be
-            # ignored by the server anyway.
-            # Derive a meaningful display label from the recipe attrs the
-            # tenant supplied. Falls back to the output-dir basename only
-            # when no recipe info is available — that fallback used to leak
-            # `tmpXXXXXX` Python tempdir names into the catalog.
+            # values.
             label = str(flavor or "").strip()
             if not label:
                 recipe = str(v_attrs.get("quant_recipe") or "").strip()
@@ -731,9 +289,8 @@ def _finalize_produced_variants(
                 publish_checkpoint_flavor["metadata"] = dict(checkpoint_metadata)
             # Issue #258 task 3: for quantization edges, attach the
             # canonical method + library to the publish payload so
-            # tensorhub's lineage edge metadata carries the quant
-            # identity (validated server-side by
-            # ValidateQuantizationLineageMetadata).
+            # tensorhub's lineage edge metadata carries the quant identity
+            # (validated server-side by ValidateQuantizationLineageMetadata).
             if rel_kind == "quantization":
                 quant_method = _resolve_quant_method(flavor, v_attrs, checkpoint_metadata)
                 quant_library = _resolve_quant_library(quant_method, v_attrs, checkpoint_metadata)
@@ -797,10 +354,8 @@ def _finalize_dataset_variants(
       2. Read ``dataset_info.json`` at the variant root — it's the
          authoritative source of truth for features_json / kind / num_rows.
       3. Call ``publish_dataset_revision`` to create (or update) the
-         ``tensorhub.datasets`` row. The
-         dataset table is mutable; versioning is by naming convention
-         (``partiprompts-256-v1`` vs ``partiprompts-256-v2`` are separate
-         dataset rows).
+         ``tensorhub.datasets`` row. The dataset table is mutable;
+         versioning is by naming convention.
 
     Failures in publish are surfaced as ``dataset.publish_failed`` events
     rather than re-raised — the blob uploads already landed, so the
@@ -857,9 +412,7 @@ def _finalize_dataset_variants(
             })
 
         # Parse dataset_info.json for features_json + kind. Falls back to
-        # a minimal schema if the file is missing (shouldn't happen — the
-        # tenants write it — but don't let a malformed snapshot nuke
-        # publish).
+        # a minimal schema if the file is missing.
         info_path = path / "dataset_info.json" if path.is_dir() else None
         features_json: dict[str, Any] = {}
         dataset_kind: str = ""
@@ -892,7 +445,7 @@ def _finalize_dataset_variants(
                 kind=dataset_kind,
                 dataset_info=dataset_info,
             )
-            _log.info("dataset finalize: published %s → %s", dest_ref, result)
+            _log.info("dataset finalize: published %s -> %s", dest_ref, result)
         except Exception as exc:  # noqa: BLE001
             emit = getattr(request_context, "emit", None)
             if emit is not None:
@@ -905,10 +458,10 @@ def _finalize_dataset_variants(
 
 def _tensors_blake3_digest(t: Any) -> str:
     """Return the ``blake3:<hex>`` digest the upload flow bound for this
-    Tensors handle. Tensorhub's CAS indexes blobs by blake3; the commit step
-    verifies the uploaded bytes hashed to this digest, so we trust it here.
-    Returns ``""`` when the upload path didn't populate a digest (e.g. test
-    stubs), in which case the manifest entry is dropped.
+    Tensors handle. Tensorhub's CAS indexes blobs by blake3; the commit
+    step verifies the uploaded bytes hashed to this digest, so we trust
+    it here. Returns ``""`` when the upload path didn't populate a digest
+    (e.g. test stubs), in which case the manifest entry is dropped.
     """
     bd = str(getattr(t, "blob_digest", "") or "").strip()
     if bd:
@@ -968,272 +521,7 @@ def _default_flavor_ref(request_context: "RequestContext", path: Path) -> str:
     return f"jobs/{job_id}/outputs/{path.name}"
 
 
-def _build_source(request_context: "RequestContext", payload: Any) -> Source:
-    """Construct a Source from the materialized snapshot + resolved attributes."""
-    source_path = getattr(request_context, "source_path", None)
-    if source_path is None:
-        raise RuntimeError(
-            "@training_function requires request_context.source_path to be set "
-            "(endpoint_kind must be 'training' and the gen-worker reserved-name "
-            "dispatch must have materialized the source)"
-        )
-    ctx_source = getattr(request_context, "source", None)
-    attrs: dict = {}
-    ref = ""
-    if ctx_source is not None:
-        attrs = dict(getattr(ctx_source, "attributes", {}) or {})
-        ref = str(getattr(ctx_source, "ref", "") or "")
-    return Source(Path(source_path), attributes=attrs, ref=ref)
-
-
-def _build_datasets(request_context: "RequestContext", payload: Any) -> list[Dataset]:
-    """Materialize each DatasetRef in payload.datasets into a Dataset.
-
-    Resolution order:
-
-    1. ``request_context.dataset_paths[ref]`` — when the orchestrator
-       pre-materialized the dataset, the local path is already in-hand.
-       This is the fast path used in tests + when the orchestrator's
-       dataset-resolver has wired the download before dispatch.
-    2. ``request_context.resolve_dataset(ref)`` — when the
-       gen-worker / orchestrator side has the resolver-helper method
-       wired. Downloads the dataset's
-       parquet + dataset_info.json into the worker's local cache and
-       returns the path.
-    3. Error out — the caller needs to wire one of the above.
-    """
-    raw = _payload_as_dict(payload).get("datasets") or []
-    out: list[Dataset] = []
-    for entry in raw:
-        if isinstance(entry, dict):
-            ref = str(entry.get("ref", ""))
-            split = str(entry.get("split", "train") or "train")
-            attributes = dict(entry.get("attributes") or {})
-        else:
-            ref = str(getattr(entry, "ref", ""))
-            split = str(getattr(entry, "split", "train"))
-            attributes = dict(getattr(entry, "attributes", {}) or {})
-
-        local_path: str | None = None
-        # Path 1: orchestrator-injected cache.
-        dataset_paths = getattr(request_context, "dataset_paths", {}) or {}
-        if ref in dataset_paths:
-            local_path = dataset_paths[ref]
-
-        # Path 2: gen-worker's own resolver. When the
-        # worker runtime has ``resolve_dataset`` wired, call it and cache
-        # the returned path on the request_context so subsequent calls
-        # don't re-download.
-        if local_path is None:
-            resolver = getattr(request_context, "resolve_dataset", None)
-            if callable(resolver):
-                try:
-                    local_path = str(resolver(ref))
-                    # Cache for future lookups in the same request.
-                    dataset_paths = dict(dataset_paths)
-                    dataset_paths[ref] = local_path
-                    try:
-                        request_context.dataset_paths = dataset_paths  # type: ignore[attr-defined]
-                    except Exception:
-                        pass  # read-only RC; first lookup path is sole cache.
-                except Exception as exc:  # noqa: BLE001
-                    raise RuntimeError(
-                        f"dataset {ref!r}: resolver failed ({exc})"
-                    ) from exc
-
-        if local_path is None:
-            raise RuntimeError(
-                f"dataset {ref!r} not materialized: neither "
-                f"request_context.dataset_paths[{ref!r}] nor "
-                f"request_context.resolve_dataset({ref!r}) is wired. "
-                f"Orchestrator must materialize datasets before dispatch, "
-                f"OR the worker runtime must expose a resolver helper."
-            )
-        out.append(Dataset(
-            ref=ref, split=split, path=Path(local_path), attributes=attributes,
-        ))
-    return out
-
-
-def _materialize_secondary_source(
-    request_context: "RequestContext",
-    raw_fields: dict,
-    wire_field: str,
-    base_type: Any,
-    *,
-    default_is_optional: bool,
-    default: Any,
-) -> Any:
-    """Materialize a secondary Source declared via Annotated[Source, _PayloadRef(key)]."""
-    if wire_field not in raw_fields:
-        if default_is_optional:
-            return default
-        raise ValueError(
-            f"secondary-model wire field '{wire_field}' missing from payload"
-        )
-    ref_value = raw_fields[wire_field]
-    # Accept a bare string or a SourceRepo-shaped dict.
-    if isinstance(ref_value, str):
-        ref_str = ref_value
-        attributes: dict = {}
-    elif isinstance(ref_value, dict):
-        ref_str = str(ref_value.get("ref", ""))
-        attributes = dict(ref_value.get("attributes") or {})
-    else:
-        ref_str = str(getattr(ref_value, "ref", ""))
-        attributes = dict(getattr(ref_value, "attributes", {}) or {})
-    # TODO(secondary-model-materialization): delegate to the host's
-    # capability-token-aware ref downloader. For MVP, the host framework
-    # injects a dict on the request_context mapping ref -> local snapshot path.
-    secondary_paths = getattr(request_context, "secondary_source_paths", {}) or {}
-    local_path = secondary_paths.get(ref_str)
-    if local_path is None:
-        raise RuntimeError(
-            f"secondary-model ref {ref_str!r} not materialized: "
-            f"request_context.secondary_source_paths missing this ref. "
-            f"Orchestrator must have pre-scoped the capability token and the "
-            f"worker must have resolved+downloaded the snapshot before dispatching."
-        )
-    # For now all secondary models materialize as a Source (the base type in
-    # Annotated[Source, _PayloadRef(...)]). Future richer types (Pipeline,
-    # PreTrainedModel) can be dispatched on base_type here.
-    return Source(Path(local_path), attributes=attributes, ref=ref_str)
-
-
-def _payload_as_dict(payload: Any) -> dict:
-    """Extract a dict view of the payload for by-name field access."""
-    if isinstance(payload, dict):
-        return payload
-    if isinstance(payload, msgspec.Struct):
-        # msgspec structs expose attributes directly; build a dict by field name
-        return {f: getattr(payload, f) for f in payload.__struct_fields__}
-    # Fallback: any object with __dict__
-    if hasattr(payload, "__dict__"):
-        return dict(payload.__dict__)
-    raise TypeError(f"unsupported payload type: {type(payload).__name__}")
-
-
-def _annotation_matches(annotation: Any, expected: Any) -> bool:
-    """Compare two type annotations, treating list[X] specially for Python 3.9+ compat."""
-    if annotation is expected:
-        return True
-    origin_a = get_origin(annotation)
-    origin_e = get_origin(expected)
-    if origin_a is not None and origin_a is origin_e:
-        return get_args(annotation) == get_args(expected)
-    return False
-
-
-def _type_repr(t: Any) -> str:
-    mod = getattr(t, "__module__", None)
-    name = getattr(t, "__qualname__", None) or getattr(t, "__name__", None)
-    if mod and name and mod not in ("builtins", "typing"):
-        return f"{mod}.{name}"
-    return repr(t)
-
-
-def _build_wire_payload_schema(
-    *,
-    signature: inspect.Signature,
-    other_params: dict[str, inspect.Parameter],
-    ref_registry: dict[str, str],
-) -> dict:
-    """Build the full wire-payload JSON schema for this function.
-
-    Properties:
-      - source / destination: always present; schemas come from SourceRepo /
-        DestinationRepo (msgspec structs).
-      - datasets: present iff the tenant declared `datasets: list[Dataset]`.
-        Schema = array of DatasetRef.
-      - Every Annotated[Source, _PayloadRef('field')] param maps
-        to a wire field named `field`. Schema = SourceRepo.
-      - Every tenant-named param (entries in other_params) maps to a wire
-        field of that name. Schema = msgspec.json.schema(param.annotation).
-
-    Required-fields: source, destination; each tenant-named param without a
-    default; each _PayloadRef param without a default.
-    """
-    from ..api.types import DatasetRef, DestinationRepo, SourceRepo
-
-    # Collect all types we need schemas for so msgspec.json.schema_components
-    # can emit one consolidated $defs block.
-    types_to_schema: list[Any] = [SourceRepo, DestinationRepo]
-    properties: dict[str, dict] = {}
-    # `source` is required only when the tenant signature declares a `source`
-    # parameter. Dataset-generation tenants deliberately omit it —
-    # forcing `source` into required there would reject every valid request
-    # at the orchestrator schema gate.
-    has_source_param = "source" in signature.parameters
-    required: list[str] = []
-    if has_source_param:
-        required.append("source")
-    required.append("destination")
-
-    # datasets
-    has_datasets_param = "datasets" in signature.parameters
-    if has_datasets_param:
-        types_to_schema.append(DatasetRef)
-
-    # Tenant-named params (specs, prompts, reward_model_ref, ...)
-    for name, p in other_params.items():
-        if p.annotation is not inspect.Parameter.empty:
-            types_to_schema.append(p.annotation)
-        if p.default is inspect.Parameter.empty:
-            required.append(name)
-
-    # _PayloadRef(...) params — wire field is SourceRepo-shaped
-    for wire_field, param_name in ref_registry.items():
-        p = signature.parameters[param_name]
-        if p.default is inspect.Parameter.empty:
-            required.append(wire_field)
-
-    # Build consolidated schemas
-    try:
-        schemas_list, components = msgspec.json.schema_components(
-            types_to_schema, ref_template="#/$defs/{name}",
-        )
-    except Exception:
-        # Fall back to per-type schemas if schema_components fails for any reason
-        schemas_list = [msgspec.json.schema(t) for t in types_to_schema]
-        components = {}
-
-    type_to_schema: dict[int, dict] = {}
-    for t, s in zip(types_to_schema, schemas_list):
-        type_to_schema[id(t)] = s
-
-    # Top-level properties. Mirror `has_source_param` from above — emit the
-    # `source` slot only when the tenant signature declares it. Dataset-
-    # generation tenants get a schema without `source`, so the
-    # orchestrator gate accepts wire payloads that omit the field.
-    if has_source_param:
-        properties["source"] = type_to_schema[id(SourceRepo)]
-    properties["destination"] = type_to_schema[id(DestinationRepo)]
-    if has_datasets_param:
-        properties["datasets"] = {
-            "type": "array",
-            "items": type_to_schema[id(DatasetRef)],
-            "default": [],
-        }
-    for name, p in other_params.items():
-        if p.annotation is inspect.Parameter.empty:
-            continue
-        properties[name] = type_to_schema.get(id(p.annotation), {"type": "object"})
-    for wire_field, param_name in ref_registry.items():
-        # _PayloadRef wire fields are SourceRepo-shaped dicts
-        properties[wire_field] = type_to_schema[id(SourceRepo)]
-
-    schema: dict = {
-        "type": "object",
-        "properties": properties,
-        "required": required,
-    }
-    if components:
-        schema["$defs"] = components
-    return schema
-
-
 __all__ = [
-    "TrainingFunctionSpec",
-    "RESERVED_TYPES",
-    "training_function",
+    "_finalize_produced_variants",
+    "_finalize_dataset_variants",
 ]

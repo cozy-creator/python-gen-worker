@@ -9,7 +9,7 @@ Migration::
     # Before (0.6.x):
     from gen_worker import ModelRef, ModelRefSource as Src
 
-    @inference_function(resources=...)
+    @inference(resources=...)
     def generate(
         ctx,
         pipeline: Annotated[FluxPipeline, ModelRef(Src.FIXED, ref="owner/repo", flavor="nf4")],
@@ -21,7 +21,7 @@ Migration::
 
     flux = Repo("owner/repo")
 
-    @inference_function(resources=..., models={"pipeline": flux.flavor("nf4")})
+    @inference(resources=..., models={"pipeline": flux.flavor("nf4")})
     def generate(ctx, pipeline: FluxPipeline, payload: GenerateInput) -> GenerateOutput: ...
 
 See ``progress.json`` issue #9 (decorator-table-model-bindings) for the full
@@ -33,7 +33,7 @@ from __future__ import annotations
 _MIGRATION_MESSAGE = (
     "gen_worker.api.injection (ModelRef / ModelRefSource / Src / parse_injection / "
     "InjectionSpec) was removed in gen-worker 0.7.0. Use the models={...} kwarg on "
-    "@inference_function with Repo / Dispatch bindings instead. See `progress.json` "
+    "@inference with Repo / Dispatch bindings instead. See `progress.json` "
     "issue #9 (decorator-table-model-bindings)."
 )
 

@@ -5,7 +5,7 @@
 # - Installs required system libs (libsndfile1) for soundfile.
 # - Bakes discovered functions into /app/.tensorhub/endpoint.lock at build time.
 #
-ARG BASE_IMAGE=python:3.12-slim
+ARG BASE_IMAGE=pytorch/pytorch:2.11.0-cuda12.8-cudnn9-runtime
 FROM ${BASE_IMAGE} AS cozy_base
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
@@ -48,7 +48,7 @@ RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
     uv pip install --system --break-system-packages --no-deps --no-sources /app
 
 RUN mkdir -p /app/.tensorhub \
-    && python -m gen_worker.discovery > /app/.tensorhub/endpoint.lock
+    && python3 -m gen_worker.discovery > /app/.tensorhub/endpoint.lock
 
 
 ENV HOME=/root
@@ -56,4 +56,4 @@ ENV XDG_CACHE_HOME=/root/.cache
 ENV HF_HOME=/root/.cache/huggingface
 
 
-ENTRYPOINT ["python", "-m", "gen_worker.entrypoint"]
+ENTRYPOINT ["python3", "-m", "gen_worker.entrypoint"]

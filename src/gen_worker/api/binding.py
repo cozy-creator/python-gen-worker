@@ -1,4 +1,4 @@
-"""Binding model for `@inference_function(models=...)` — `Repo` + `Dispatch`.
+"""Binding model for `@inference(models=...)` — `Repo` + `Dispatch`.
 
 Replaces the old `Annotated[T, ModelRef(...)]` injection pattern. See
 `progress.json` issue #9 (decorator-table-model-bindings) for the spec.
@@ -27,8 +27,8 @@ the function's param annotation.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
-from typing import Any, Mapping, Union
+from dataclasses import dataclass, replace
+from typing import Any, ClassVar, Mapping, Union
 
 
 def _qualname(t: Any) -> str:
@@ -78,9 +78,16 @@ def _normalize_classes(classes: tuple[Any, ...]) -> tuple[str, ...]:
 class Repo:
     """Repository handle — also usable as a binding with defaults.
 
+    A bare ``Repo("owner/repo")`` is a **tensorhub** reference. For
+    huggingface or civitai use the explicit subclasses :class:`HFRepo` /
+    :class:`CivitaiRepo` — the provider is encoded in the class chosen, not
+    in a string prefix. See issue #10 (typed-provider-repo-classes).
+
     Module-level convention::
 
-        flux = Repo("black-forest-labs/flux.2-klein-4b-turbo")
+        flux = Repo("black-forest-labs/flux.2-klein-4b-turbo")  # tensorhub
+        qwen = HFRepo("Qwen/Qwen2.5-1.5B-Instruct")             # huggingface
+        sdxl = CivitaiRepo("123456")                            # civitai
 
     A bare ``Repo("owner/repo")`` already serves as a valid fixed binding
     (tag defaults to ``"prod"``, no flavor, no override). Refine with the
@@ -94,6 +101,11 @@ class Repo:
     commutative.
     """
 
+    # Class-level provider constant — ClassVar so dataclass does NOT
+    # treat it as a field. Subclasses override with their own value.
+    # "cozy" = tensorhub, "hf" = huggingface, "civitai" = civitai.
+    PROVIDER: ClassVar[str] = "cozy"
+
     ref: str
     _flavor: str = ""
     _tag: str = "prod"
@@ -102,10 +114,13 @@ class Repo:
 
     def __post_init__(self) -> None:
         if not isinstance(self.ref, str) or not self.ref.strip():
-            raise ValueError(f"Repo(ref=) must be a non-empty string, got {self.ref!r}")
-        # Normalize ref (lowercase + trim). Keep validation light here; the
-        # heavier ref grammar check lives in the manifest validator.
+            raise ValueError(f"{type(self).__name__}(ref=) must be a non-empty string, got {self.ref!r}")
         object.__setattr__(self, "ref", self.ref.strip())
+
+    @property
+    def provider(self) -> str:
+        """Resolver provider: ``"cozy"`` (tensorhub), ``"hf"``, or ``"civitai"``."""
+        return type(self).PROVIDER
 
     def flavor(self, name: str) -> "Repo":
         """Return a new Repo bound to the given flavor."""
@@ -134,6 +149,57 @@ class Repo:
         """
         fqns = _normalize_classes(classes)
         return replace(self, _allow_override=True, _pipeline_classes=fqns)
+
+
+@dataclass(frozen=True)
+class HFRepo(Repo):
+    """HuggingFace-backed binding.
+
+    The ref is the canonical HuggingFace repo id (``"owner/repo"``). Pin to
+    a specific git revision with :meth:`revision`::
+
+        qwen = HFRepo("Qwen/Qwen2.5-1.5B-Instruct")
+        qwen_pinned = qwen.revision("a1b2c3d")  # branch, tag, or commit sha
+    """
+
+    PROVIDER: ClassVar[str] = "hf"
+    _revision: str = ""
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if "/" not in self.ref:
+            raise ValueError(
+                f"HFRepo(ref=) must be 'owner/repo', got {self.ref!r}"
+            )
+
+    def revision(self, rev: str) -> "HFRepo":
+        """Return a new HFRepo pinned to a specific git revision."""
+        rev = str(rev or "").strip()
+        if not rev:
+            raise ValueError("HFRepo.revision() requires a non-empty revision")
+        return replace(self, _revision=rev)
+
+
+@dataclass(frozen=True)
+class CivitaiRepo(Repo):
+    """Civitai-backed binding.
+
+    The ref is the Civitai model id (as a string). Pin to a specific
+    version with :meth:`version`::
+
+        lora = CivitaiRepo("123456")
+        lora_v2 = lora.version("789012")
+    """
+
+    PROVIDER: ClassVar[str] = "civitai"
+    _version_id: str = ""
+
+    def version(self, version_id: str) -> "CivitaiRepo":
+        """Return a new CivitaiRepo pinned to a specific version id."""
+        version_id = str(version_id or "").strip()
+        if not version_id:
+            raise ValueError("CivitaiRepo.version() requires a non-empty version id")
+        return replace(self, _version_id=version_id)
 
 
 @dataclass(frozen=True)
@@ -207,7 +273,9 @@ Binding = Union[Repo, Dispatch]
 
 __all__ = [
     "Binding",
+    "CivitaiRepo",
     "Dispatch",
+    "HFRepo",
     "Repo",
     "dispatch",
 ]

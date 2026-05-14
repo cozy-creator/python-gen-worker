@@ -6,7 +6,7 @@ VRAM and runtime grow with payload inputs. They're used for **admission**
 (prefer faster GPU classes for jobs that will benefit).
 
 `Resources` also carries the static placement envelope (`min_vram_gb`,
-`cuda_compute_min`, …). The placement floor is a hard gate; the cost-shape
+`min_compute_capability`, …). The placement floor is a hard gate; the cost-shape
 fields are predictions, with coefficients learned from observed runs.
 
 ## The fields

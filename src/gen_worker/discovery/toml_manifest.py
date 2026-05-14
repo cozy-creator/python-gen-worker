@@ -19,7 +19,7 @@ class TensorhubModelSpec:
     """Legacy holder, kept for type-stub compatibility on the EndpointToml
     dataclass. The endpoint.toml [models] / [models.<fn>] tables that this
     used to parse were removed in gen-worker 0.7.0 — model bindings now live
-    in Python via @inference_function(models={...}). load_endpoint_toml
+    in Python via @inference(models={...}). load_endpoint_toml
     raises on [models] presence.
     """
 
@@ -37,11 +37,11 @@ class EndpointResources:
 
     Single source of truth for hardware. Size axes (vram_gb, gpu_count,
     memory_gb, cpu_cores, disk_gb) are invoker-overridable for training
-    invocations; architecture axes (accelerator, cuda_compute_min) are
+    invocations; architecture axes (accelerator, min_compute_capability) are
     always pinned at the endpoint level.
     """
     accelerator: str = ""                    # "cuda" | "none" | ""
-    cuda_compute_min: str = ""               # e.g. "8.0"
+    min_compute_capability: str = ""         # e.g. "8.0"
     vram_gb: int = 0
     gpu_count: int = 0
     memory_gb: int = 0
@@ -53,8 +53,8 @@ class EndpointResources:
         out: dict[str, Any] = {}
         if self.accelerator:
             out["accelerator"] = self.accelerator
-        if self.cuda_compute_min:
-            out["cuda_compute_min"] = self.cuda_compute_min
+        if self.min_compute_capability:
+            out["min_compute_capability"] = self.min_compute_capability
         if self.vram_gb:
             out["vram_gb"] = self.vram_gb
         if self.gpu_count:
@@ -371,7 +371,7 @@ def _parse_function_resource_hints(v: Any) -> dict[str, Any]:
 
     compute_min_raw = v.get("compute_capability_min")
     if compute_min_raw is None:
-        compute_min_raw = v.get("cuda_compute_min")
+        compute_min_raw = v.get("min_compute_capability")
     if compute_min_raw is not None:
         raw = str(compute_min_raw or "").strip()
         if raw:
@@ -382,8 +382,8 @@ def _parse_function_resource_hints(v: Any) -> dict[str, Any]:
             if parsed <= 0:
                 raise ValueError("function resource hint compute_capability_min must be > 0")
             out["compute_capability_min"] = f"{parsed:.1f}"
-            if "cuda_compute_min" in v:
-                out["cuda_compute_min"] = f"{parsed:.1f}"
+            if "min_compute_capability" in v:
+                out["min_compute_capability"] = f"{parsed:.1f}"
 
     if "min_vram_gb" in v:
         raw = v.get("min_vram_gb")
@@ -539,12 +539,12 @@ def load_endpoint_toml_with_warnings(path: Path) -> tuple[EndpointToml, list[str
     function_models: dict[str, dict[str, TensorhubModelSpec]] = {}
     if "models" in data:
         # 0.7.0 hard cut: [models] and [models.<fn>] toml tables were replaced
-        # by the Python-side @inference_function(models={...}) binding kwarg.
+        # by the Python-side @inference(models={...}) binding kwarg.
         # Fail loud — tenants must migrate.
         raise ValueError(
             "endpoint.toml: [models] / [models.<fn>] tables were removed in "
             "gen-worker 0.7.0. Declare model bindings in Python via "
-            "@inference_function(models={...}) with Repo / Dispatch. See "
+            "@inference(models={...}) with Repo / Dispatch. See "
             "`progress.json` issue #9 (decorator-table-model-bindings)."
         )
 
@@ -604,7 +604,7 @@ def load_endpoint_toml_with_warnings(path: Path) -> tuple[EndpointToml, list[str
     raw_resources = data.get("resources")
     res_kwargs: dict[str, Any] = {}
     if isinstance(raw_resources, dict):
-        for k in ("accelerator", "cuda_compute_min"):
+        for k in ("accelerator", "min_compute_capability"):
             if k in raw_resources:
                 res_kwargs[k] = str(raw_resources[k])
         for k in ("vram_gb", "gpu_count", "memory_gb", "cpu_cores", "disk_gb"):

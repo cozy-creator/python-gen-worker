@@ -58,7 +58,7 @@ def _extract_resolved_compute(envelope: Any) -> Optional[Compute]:
     tier = str(getattr(rc, "gpu_tier", "") or "") or None
     return Compute(
         accelerator=str(getattr(rc, "accelerator", "") or ""),
-        cuda_compute_min=str(getattr(rc, "cuda_compute_min", "") or ""),
+        min_compute_capability=str(getattr(rc, "min_compute_capability", "") or ""),
         vram_gb=int(getattr(rc, "vram_gb", 0) or 0),
         gpu_count=int(getattr(rc, "gpu_count", 0) or 0),
         gpu_tier=tier,
@@ -122,6 +122,140 @@ class _RequestSpec:
     output_schema_json: bytes = b""
     delta_schema_json: Optional[bytes] = None
     injection_json: bytes = b""
+
+
+@dataclass(frozen=True)
+class _BatchedWorkerSpec:
+    """Dispatch entry for one ``@inference.function`` method on a
+    ``BatchedWorker`` (continuous-batching) class (#273).
+
+    Each entry binds the externally-addressable function name to:
+      - ``instance`` — the singleton BatchedWorker class instance (one per
+        worker process; created during startup).
+      - ``method`` — the bound async / async-generator method on
+        ``instance`` (``@inference.function``-decorated).
+      - ``payload_type`` — msgspec.Struct type used to decode the wire
+        ``input_payload`` bytes.
+      - ``delta_type`` — msgspec.Struct type the method yields. Worker
+        encodes each yielded item as JSON for the IncrementalTokenDelta
+        wire envelope.
+      - ``ctx_param`` / ``payload_param`` — keyword names the method
+        expects (matches @inference.function signature
+        ``async def fn(self, ctx, payload)``).
+
+    Unlike ``_RequestSpec`` we do NOT carry ``injections`` — model
+    download is owned by the SDK lifecycle (``setup(engine=...)``), not
+    per-request injection. The engine instance + class instance both
+    live on the Worker object alongside this spec.
+    """
+
+    name: str
+    instance: Any
+    method: Callable[..., Any]
+    resources: Resources
+    ctx_param: str
+    payload_param: str
+    payload_type: type[msgspec.Struct]
+    delta_type: type[msgspec.Struct]
+    runtime: str  # "sglang" | "vllm"
+    input_schema_json: bytes = b""
+    delta_schema_json: bytes = b""
+    timeout_ms: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class _SerialWorkerSpec:
+    """Dispatch entry for one ``@inference.function`` method on a
+    ``SerialWorker`` (sync) class (#322/#328).
+
+    Mirrors ``_BatchedWorkerSpec`` but for the synchronous archetype:
+    setup/warmup/shutdown + invocable methods are all plain sync callables.
+    One request fully owns the GPU until done — no continuous-batching
+    engine, no asyncio loop.
+
+    Each entry binds the externally-addressable function name to:
+      - ``instance`` — the singleton SerialWorker class instance (one per
+        worker process; created during discovery, ``setup(self, **models)``
+        runs lazily on first dispatch with model_path-resolved bindings).
+      - ``method`` — the bound sync method on ``instance`` (or a sync
+        generator yielding deltas when ``output_mode == "incremental"``).
+      - ``payload_type`` — msgspec.Struct type used to decode the wire
+        ``input_payload`` bytes.
+      - ``output_type`` / ``delta_type`` — msgspec.Struct return / yield
+        type. ``output_type`` is set when ``output_mode == "single"``;
+        ``delta_type`` is set when ``output_mode == "incremental"``.
+      - ``ctx_param`` / ``payload_param`` — keyword names the method
+        expects (matches @inference.function signature
+        ``def fn(self, ctx, payload)``).
+
+    Unlike ``_RequestSpec`` we don't carry ``injections`` — models are
+    loaded once via ``setup(**models)``, then re-used across requests.
+    The class instance lives on the Worker object alongside this spec
+    (one record per class in ``_serial_class_instances``).
+    """
+
+    name: str
+    instance: Any
+    method: Callable[..., Any]
+    resources: Resources
+    ctx_param: str
+    payload_param: str
+    payload_type: type[msgspec.Struct]
+    output_mode: str  # "single" | "incremental"
+    output_type: Optional[type[msgspec.Struct]] = None
+    delta_type: Optional[type[msgspec.Struct]] = None
+    input_schema_json: bytes = b""
+    output_schema_json: bytes = b""
+    delta_schema_json: Optional[bytes] = None
+    timeout_ms: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class _ConversionWorkerSpec:
+    """Dispatch entry for one ``@conversion.function`` / ``@training.function``
+    / ``@dataset.function`` method on a sync class endpoint (#332).
+
+    Conversion-kind class endpoints are structurally SerialWorker
+    (sync setup → generate → shutdown) but the result emission path
+    differs: instead of an msgspec.Struct return decoded back to the
+    caller, the method returns ``Iterator[ProducedFlavor]`` or
+    ``list[ProducedFlavor]`` and the library uploads each flavor +
+    publishes a revision via ``_finalize_produced_variants``.
+
+    Fields mirror ``_SerialWorkerSpec`` (instance, method, payload_type,
+    ctx/payload param names) plus conversion-specific metadata:
+
+      - ``endpoint_kind`` — top-level decorator kind: ``"conversion"`` /
+        ``"training"`` / ``"dataset"``. Picks the result-emission lane.
+      - ``sub_kind`` — granular label declared on the class decorator
+        (e.g. ``"format-conversion"`` / ``"quantization"`` /
+        ``"dataset-generation"``). Forwarded to
+        ``_finalize_produced_variants`` so the relationship_map +
+        dataset-publish branch keep working.
+      - ``ctx_class`` — the kind-specific RequestContext subclass to
+        instantiate for this request (ConversionContext / DatasetContext).
+      - ``calibration`` — per-scheme calibration policy carried over
+        from the function-shape ``@conversion(calibration=...)``
+        contract; enforced at dispatch time for unsupported schemes.
+
+    Returns are always single-mode (one upload+publish per request);
+    incremental streaming on conversion isn't supported.
+    """
+
+    name: str
+    instance: Any
+    method: Callable[..., Any]
+    resources: Resources
+    ctx_param: str
+    payload_param: str
+    payload_type: type[msgspec.Struct]
+    endpoint_kind: str  # "conversion" | "training" | "dataset"
+    sub_kind: str = ""
+    ctx_class: Any = None  # type[RequestContext] subclass (resolved at register-time)
+    calibration: Dict[str, str] = None  # type: ignore[assignment]
+    input_schema_json: bytes = b""
+    output_schema_json: bytes = b""
+    timeout_ms: Optional[int] = None
 
 
 def _parse_manifest_model_mapping(mapping: Dict[str, Any]) -> tuple[Dict[str, str], Dict[str, Dict[str, Any]]]:

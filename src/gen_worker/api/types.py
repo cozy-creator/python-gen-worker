@@ -210,14 +210,14 @@ class Compute(msgspec.Struct, frozen=True):
         invoker's ``compute`` overrides from the wire payload.
 
     Surfaced to tenant code read-only via ``RequestContext.compute``.
-    Architecture axes (accelerator, cuda_compute_min) are always pinned by
+    Architecture axes (accelerator, min_compute_capability) are always pinned by
     the endpoint image; invoker overrides on those are rejected at submit.
 
     See tensorhub issue #232 for the full contract.
     """
 
     accelerator: str = ""
-    cuda_compute_min: str = ""
+    min_compute_capability: str = ""
     vram_gb: int = 0
     gpu_count: int = 0
     gpu_tier: Optional[str] = None

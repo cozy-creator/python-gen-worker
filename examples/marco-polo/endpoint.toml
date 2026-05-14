@@ -1,5 +1,7 @@
 schema_version = 1
 main = "marco_polo.main"
 
-[resources]
-max_inflight_requests = 10
+[[build.profiles]]
+name = "cpu"
+accelerator = "none"
+python = "3.12"

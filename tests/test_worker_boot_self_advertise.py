@@ -40,7 +40,7 @@ def test_resources_requiring_more_vram_than_host_has_is_unavailable() -> None:
 
 def test_resources_with_compute_capability_below_host_is_unavailable() -> None:
     w = _bare_worker()
-    res = Resources(requires_gpu=True, min_vram_gb=4.0, cuda_compute_min=10.0)
+    res = Resources(requires_gpu=True, min_vram_gb=4.0, min_compute_capability=10.0)
     gpu_info = {"gpu_count": 1, "gpu_sm": "8.0", "gpu_total_mem": int(80 * 1024**3)}
     ok, status = w._function_host_availability("blackwell-only", res, gpu_info)
     assert ok is False
@@ -49,7 +49,7 @@ def test_resources_with_compute_capability_below_host_is_unavailable() -> None:
 
 def test_resources_satisfied_by_host_marks_available() -> None:
     w = _bare_worker()
-    res = Resources(requires_gpu=True, min_vram_gb=8.0, cuda_compute_min=8.0)
+    res = Resources(requires_gpu=True, min_vram_gb=8.0, min_compute_capability=8.0)
     gpu_info = {"gpu_count": 1, "gpu_sm": "8.6", "gpu_total_mem": int(24 * 1024**3)}
     ok, status = w._function_host_availability("generate-fp8", res, gpu_info)
     assert ok is True

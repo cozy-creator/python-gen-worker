@@ -6,32 +6,44 @@ subsystems should import their explicit modules, for example
 
 Context types (issue #1: slim-request-context):
   - ``RequestContext`` — inference handlers (the base type).
-  - ``ConversionContext`` — ``@training_function`` handlers that produce a
+  - ``ConversionContext`` — ``@conversion`` handlers that produce a
     new repo revision (format-conversion, quantization, fine-tuning, …).
     Adds ``publish_repo_revision`` / ``materialize_blob`` /
     ``read_repo_metadata`` / ``write_repo_metadata`` plus the conversion
     helper API (``mktemp``, ``open_output_writer``, …).
-  - ``DatasetContext`` — ``@training_function(kind="dataset-generation")``
+  - ``DatasetContext`` — ``@dataset``
     handlers. Adds ``publish_dataset_revision`` / ``resolve_dataset``.
   - ``TrainingContext`` — trainer-class endpoints. Adds repo-metadata RPCs.
 
 All three subclass ``RequestContext``; the kind-specific subclass is
 constructed by the worker before dispatch based on the endpoint kind.
 
-Bindings (issue #9: decorator-table-model-bindings):
-  - ``Repo(ref)`` — module-level repo handle and fixed-pick binding.
+Bindings (issue #9: decorator-table-model-bindings, #10: typed-provider-repo):
+  - ``Repo(ref)`` — module-level handle for a **tensorhub** ref (default).
+  - ``HFRepo(ref)`` — explicit huggingface ref. Use this instead of relying
+    on a string prefix.
+  - ``CivitaiRepo(ref)`` — explicit civitai ref by model id.
   - ``dispatch(field, table)`` — payload-driven dispatch binding.
   - ``Resources(...)`` — per-function hardware envelope + cost shape.
-  - Both ``Repo`` and ``Dispatch`` support ``.allow_override(*classes)``
-    to permit caller-supplied substitutions inside an explicit pipeline
-    class allowlist.
+  - All bindings support ``.allow_override(*classes)`` to permit
+    caller-supplied substitutions inside an explicit pipeline class allowlist.
 """
 
 from . import io
-from .api.binding import Binding, Dispatch, Repo, dispatch
+from . import cache  # noqa: F401 — exposed as gen_worker.cache
+from . import compile_helpers as compile  # noqa: F401 — exposed as gen_worker.compile
+from . import parallelism  # noqa: F401 — exposed as gen_worker.parallelism
+from . import quant  # noqa: F401 — exposed as gen_worker.quant
+from .api.binding import Binding, CivitaiRepo, Dispatch, HFRepo, Repo, dispatch
 from .api.decorators import (
     Resources,
-    inference_function,
+    conversion,
+    dataset,
+    inference,
+    inference_function,  # hard-cut migration stub (raises ImportError if called)
+    realtime_function,   # hard-cut migration stub
+    training,
+    training_function,   # hard-cut migration stub
 )
 from .request_context import (
     ConversionContext,
@@ -61,7 +73,7 @@ from .inference_memory import apply_low_vram_config, with_oom_retry
 _REMOVED_PUBLIC_SYMBOLS = {
     "ModelRef": (
         "gen_worker.ModelRef was removed in gen-worker 0.7.0. Use Repo / dispatch / "
-        "the models={...} kwarg on @inference_function instead. See `progress.json` "
+        "the models={...} kwarg on @inference instead. See `progress.json` "
         "issue #9 (decorator-table-model-bindings)."
     ),
     "ModelRefSource": (
@@ -100,13 +112,26 @@ def __getattr__(name: str):
 
 
 __all__ = [
-    # Decorators + binding model.
-    "inference_function",
+    # Decorators + binding model (#322 class-only).
+    "inference",
+    "training",
+    "dataset",
+    "conversion",
     "Resources",
     "Repo",
+    "HFRepo",
+    "CivitaiRepo",
     "Dispatch",
     "Binding",
     "dispatch",
+    # Hard-cut migration stubs (raise ImportError if used).
+    "inference_function",
+    "training_function",
+    "realtime_function",
+    # Acceleration helpers (#324):
+    "cache",
+    "compile",
+    "quant",
     # Context types.
     "RequestContext",
     "ConversionContext",

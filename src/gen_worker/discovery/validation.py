@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List
 import re
 
 try:
@@ -10,12 +10,156 @@ try:
 except Exception:  # pragma: no cover
     tomllib = None  # type: ignore[assignment]
 
+from .names import slugify_name
+
 
 @dataclass(frozen=True)
 class EndpointValidationResult:
     ok: bool
     errors: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class EndpointLockValidationResult:
+    """Result of validating a discovered endpoint-lock ``functions`` list (#328).
+
+    Constructed by ``validate_endpoint_lock``. ``ok`` is True iff
+    ``errors`` is empty. Warnings are advisory (legacy `runtime` mismatch
+    on a SerialWorker class, etc.).
+    """
+
+    ok: bool
+    errors: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
+
+
+# #328: archetype-shape requirements. Every class-shape entry must have these
+# keys populated; the migration sweep guarantees this — old function-shape
+# entries (pre-#322) lack class_name, so they're the trip-wire.
+_REQUIRED_CLASS_SHAPE_FIELDS = ("class_name", "archetype", "kind")
+_KNOWN_ARCHETYPES = frozenset(("SerialWorker", "BatchedWorker"))
+_KNOWN_KINDS = frozenset(("inference", "training", "dataset", "conversion"))
+
+
+def validate_endpoint_lock(lock_dict: Dict[str, Any]) -> EndpointLockValidationResult:
+    """Validate a discovered endpoint.lock dict at bake time (#322/#328).
+
+    Confirms every entry in ``lock_dict["functions"]`` is a class-shape
+    (post-#322) declaration:
+
+      1. ``class_name`` is present and non-empty — proves the entry came
+         from a ``@inference`` / ``@training`` / ``@dataset`` / ``@conversion``
+         decorated class, not a bare ``@inference``.
+      2. ``archetype`` is ``"SerialWorker"`` or ``"BatchedWorker"``.
+      3. ``kind`` is one of the four supported kinds.
+      4. No two ``@inference.function`` methods on the SAME class slugify
+         to the same wire route — that would silently shadow one of them
+         at dispatch time.
+
+    Returns an ``EndpointLockValidationResult`` whose ``errors`` lists every
+    violation found, so a build can surface them all at once instead of one
+    at a time. ``ok`` is True iff no errors.
+
+    The intended caller is ``python -m gen_worker.discovery`` (bake time) and
+    any CI lint that wants to gate-keep a pull request that drops a class
+    declaration. Bake fails loudly when an endpoint still ships an old
+    function-shape entry.
+    """
+    errors: List[str] = []
+    warnings: List[str] = []
+
+    functions = lock_dict.get("functions") if isinstance(lock_dict, dict) else None
+    if not isinstance(functions, list):
+        return EndpointLockValidationResult(
+            ok=False,
+            errors=("endpoint lock missing 'functions' list",),
+        )
+    if len(functions) == 0:
+        warnings.append("no functions discovered (endpoint will advertise nothing)")
+
+    # Per-class accumulator for the "two methods slugify to the same route"
+    # check. Keyed by class_name → {function_slug: python_name}. A second
+    # python_name on an existing slug under the same class is the violation.
+    per_class_slugs: Dict[str, Dict[str, str]] = {}
+
+    for idx, fn in enumerate(functions):
+        if not isinstance(fn, dict):
+            errors.append(f"functions[{idx}]: expected dict, got {type(fn).__name__}")
+            continue
+        fn_label = str(fn.get("name") or fn.get("python_name") or f"functions[{idx}]")
+
+        # Old-shape entries (pre-#322 @inference) lack class_name.
+        # That's the migration trip-wire — fail loud with a pointer to #328.
+        missing = [f for f in _REQUIRED_CLASS_SHAPE_FIELDS if not fn.get(f)]
+        if missing:
+            errors.append(
+                f"functions[{idx}] ({fn_label!r}): missing required class-shape "
+                f"field(s) {missing}. This is an old function-shape entry from "
+                "before the #322 SDK refactor. Migration steps in progress.json "
+                "#328 — rewrite the endpoint as a class with @inference / "
+                "@training / @dataset / @conversion decorator. Bake-time hard "
+                "fail to prevent shipping a stale endpoint that the worker "
+                "can't dispatch."
+            )
+            continue
+
+        # Type / value checks for the three required fields.
+        cls_name = str(fn.get("class_name") or "").strip()
+        archetype = str(fn.get("archetype") or "").strip()
+        kind = str(fn.get("kind") or "").strip()
+        if not cls_name:
+            errors.append(f"functions[{idx}] ({fn_label!r}): class_name empty")
+            continue
+        if archetype not in _KNOWN_ARCHETYPES:
+            errors.append(
+                f"functions[{idx}] ({fn_label!r}): archetype must be one of "
+                f"{sorted(_KNOWN_ARCHETYPES)}, got {archetype!r}"
+            )
+        if kind not in _KNOWN_KINDS:
+            errors.append(
+                f"functions[{idx}] ({fn_label!r}): kind must be one of "
+                f"{sorted(_KNOWN_KINDS)}, got {kind!r}"
+            )
+
+        # Cross-method slug uniqueness within a class. The orchestrator
+        # routes by ``slugify_name(function_name)``; two methods producing
+        # the same slug means one silently shadows the other at dispatch.
+        # (Discovery's outer check catches GLOBAL collisions across all
+        # classes; this catches the more-likely SAME-class collision.)
+        fn_name = str(fn.get("name") or "").strip()
+        slug = slugify_name(fn_name)
+        if not slug:
+            errors.append(
+                f"functions[{idx}] ({fn_label!r}): function name "
+                f"{fn_name!r} produces empty slug"
+            )
+            continue
+        py_name = str(fn.get("python_name") or "").strip()
+        slugs = per_class_slugs.setdefault(cls_name, {})
+        prior_py = slugs.get(slug)
+        if prior_py is not None and prior_py != py_name:
+            errors.append(
+                f"class {cls_name!r}: two @inference.function methods slugify "
+                f"to the same wire route {slug!r}: {prior_py!r} and {py_name!r}. "
+                "Rename one of the methods (or set @inference.function(name=...))."
+            )
+        slugs[slug] = py_name
+
+        # Cross-cutting hook sanity (#322): runtime= only valid on BatchedWorker.
+        runtime = fn.get("runtime")
+        if runtime is not None and archetype != "BatchedWorker":
+            warnings.append(
+                f"functions[{idx}] ({fn_label!r}): runtime={runtime!r} declared "
+                f"on archetype={archetype} — runtime= is only valid on "
+                "BatchedWorker (async class). Field will be ignored at dispatch."
+            )
+
+    return EndpointLockValidationResult(
+        ok=not errors,
+        errors=tuple(errors),
+        warnings=tuple(warnings),
+    )
 
 
 _NON_SLUG_CHARS = re.compile(r"[^a-z0-9.]+")

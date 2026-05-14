@@ -1,7 +1,7 @@
 """
 Function discovery module for Cozy workers.
 
-This module auto-discovers all @inference_function decorated functions in the project
+This module auto-discovers all @inference decorated functions in the project
 by scanning .py files and extracting metadata. Run as:
 
     python -m gen_worker.discovery
@@ -181,7 +181,7 @@ def _find_python_files(root: Path, skip_patterns: Optional[Set[str]] = None) -> 
 
 
 def _file_uses_worker_decorator(filepath: Path) -> bool:
-    """Quick AST check if file uses @inference_function or @training_function."""
+    """Quick AST check if file uses @inference or @conversion."""
     try:
         source = filepath.read_text(encoding="utf-8")
         tree = ast.parse(source, filename=str(filepath))
@@ -192,10 +192,10 @@ def _file_uses_worker_decorator(filepath: Path) -> bool:
     for node in ast.walk(tree):
         if isinstance(node, ast.FunctionDef):
             for decorator in node.decorator_list:
-                # @inference_function, @training_function (bare)
+                # @inference, @conversion (bare)
                 if isinstance(decorator, ast.Name) and decorator.id in target_names:
                     return True
-                # @inference_function(...), @training_function(kind=...)
+                # @inference(...), @conversion(kind=...)
                 if isinstance(decorator, ast.Call):
                     if isinstance(decorator.func, ast.Name) and decorator.func.id in target_names:
                         return True
@@ -295,7 +295,7 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
 
         raise ValueError(
             f"{func.__name__}: unsupported param type for {p.name}: {ann!r} "
-            "(inject models via @inference_function(models={...}); payload must be msgspec.Struct)"
+            "(inject models via @inference(models={...}); payload must be msgspec.Struct)"
         )
 
     if payload_type is None or payload_param is None:
@@ -376,19 +376,19 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
 
 
 def _extract_conversion_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
-    """Extract endpoint.lock metadata from a @training_function-decorated tenant.
+    """Extract endpoint.lock metadata from a @conversion-decorated tenant.
 
     Reads ``__training_spec__`` attached by the decorator — fetches the
     tenant-declared ``kind`` (issue #10), the full wire-payload JSON schema
     (issue #5), and the ref_registry for capability-token scoping. Returns a
     dict compatible with the endpoint.lock ``functions`` entry shape used by
-    @inference_function discovery, so downstream consumers (orchestrator
+    @inference discovery, so downstream consumers (orchestrator
     ``FunctionMetadata``, tensorhub publish-time validator) can read one
     unified format.
     """
     spec = getattr(func, "__training_spec__", None)
     if spec is None:
-        raise ValueError(f"{func.__name__}: missing __training_spec__ (expected @training_function decoration)")
+        raise ValueError(f"{func.__name__}: missing __training_spec__ (expected @conversion decoration)")
 
     resources = getattr(func, "_worker_resources", None)
     res_dict: Dict[str, Any] = {}
@@ -455,7 +455,7 @@ def _load_endpoint_manifest_toml(root: Path) -> EndpointToml:
 
 def discover_functions(root: Optional[Path] = None, *, main_module: str | None = None) -> List[Dict[str, Any]]:
     """
-    Discover all @inference_function decorated functions in the project.
+    Discover all @inference decorated functions in the project.
 
     Args:
         root: Project root directory. Defaults to current working directory.
@@ -520,6 +520,23 @@ def discover_functions(root: Optional[Path] = None, *, main_module: str | None =
                 continue
             if not _module_is_in_project(mod):
                 continue
+            # #322: scan for class-shape endpoints first.
+            for class_fn in _scan_module_for_class_endpoints(mod, module_name):
+                # Dedup by the class's declaring module + class_name (not the
+                # walking module). When a class is re-exported via __init__.py
+                # star-imports + endpoint.toml main pointing at a module that
+                # re-imports it, the same class would otherwise be discovered
+                # multiple times — once per walking module — producing
+                # "duplicate function name" at bake validation.
+                key = (
+                    class_fn.get("declared_module", class_fn.get("module", "")),
+                    class_fn.get("class_name", ""),
+                    class_fn.get("python_name", ""),
+                )
+                if key in seen_functions:
+                    continue
+                seen_functions.add(key)
+                functions.append(class_fn)
             # Iterate module dict to avoid triggering module-level __getattr__.
             for obj in mod.__dict__.values():
                 if not inspect.isfunction(obj):
@@ -553,7 +570,19 @@ def discover_functions(root: Optional[Path] = None, *, main_module: str | None =
             print(f"warning: failed to import {computed_module_name}: {e}", file=sys.stderr)
             continue
 
-        # Find decorated functions (both @inference_function and @training_function).
+        # #322: scan for class-shape endpoints first.
+        for class_fn in _scan_module_for_class_endpoints(mod, computed_module_name):
+            key = (
+                class_fn.get("module", ""),
+                class_fn.get("class_name", ""),
+                class_fn.get("python_name", ""),
+            )
+            if key in seen_functions:
+                continue
+            seen_functions.add(key)
+            functions.append(class_fn)
+
+        # Find decorated functions (both @inference and @conversion).
         # Iterate module dict to avoid triggering module-level __getattr__.
         for name, obj in mod.__dict__.items():
             if not inspect.isfunction(obj):
@@ -577,6 +606,222 @@ def discover_functions(root: Optional[Path] = None, *, main_module: str | None =
                 raise
 
     return functions
+
+
+def _extract_class_function_methods(
+    cls: type, module_name: str
+) -> List[Dict[str, Any]]:
+    """Extract per-function manifest entries from a class-shape endpoint (#322).
+
+    A class decorated with ``@inference`` / ``@training`` / ``@dataset`` /
+    ``@conversion`` carries one or more ``@inference.function``-decorated
+    methods. Each method becomes a separate entry in the manifest's
+    ``functions`` list, sharing the class-level resources/bindings.
+    """
+    spec = getattr(cls, "__gen_worker_endpoint_spec__", None)
+    if spec is None:
+        return []
+
+    function_methods = getattr(cls, "__gen_worker_function_methods__", None) or []
+    if not function_methods:
+        return []
+
+    # Class-level resources serialize once; shared across all functions.
+    res_dict: Dict[str, Any] = {}
+    if spec.resources is not None:
+        try:
+            raw = msgspec.to_builtins(spec.resources)
+            if isinstance(raw, dict):
+                res_dict.update(raw)
+        except Exception:
+            pass
+
+    # Class-level bindings — same shape as old function-decorator bindings,
+    # keyed by setup() kwarg name. For each method, the bindings block is
+    # the same (every method shares the loaded models).
+    bindings_map: Dict[str, Binding] = dict(spec.models or {})
+    bindings_block: Dict[str, Dict[str, Any]] = {}
+    for key, binding in bindings_map.items():
+        bindings_block[key] = _binding_to_manifest(binding, None)
+
+    out: List[Dict[str, Any]] = []
+    for attr_name, method, fn_spec in function_methods:
+        # Method signature: (self, ctx, payload) — skip self.
+        hints = typing.get_type_hints(method, include_extras=False)
+        sig = inspect.signature(method)
+        params = [p for p in sig.parameters.values() if p.name != "self"]
+
+        if len(params) < 2:
+            raise ValueError(
+                f"{cls.__name__}.{attr_name}: must accept (self, ctx, payload). "
+                f"Got params: {[p.name for p in params]}"
+            )
+
+        # First non-self param is ctx; second is payload struct.
+        ctx_name = params[0].name
+        payload_param = params[1]
+        payload_ann = hints.get(payload_param.name)
+        if payload_ann is None or not _is_msgspec_struct(payload_ann):
+            raise ValueError(
+                f"{cls.__name__}.{attr_name}: payload param {payload_param.name!r} "
+                f"must be a msgspec.Struct (got {payload_ann!r})"
+            )
+
+        payload_type = payload_ann
+
+        ret = hints.get("return")
+        if ret is None:
+            raise ValueError(
+                f"{cls.__name__}.{attr_name}: missing return type annotation"
+            )
+
+        output_mode = "single"
+        incremental = False
+        output_type: Optional[type] = None
+        delta_type: Optional[type] = None
+
+        # BatchedWorker async generator returning AsyncIterator[X] OR
+        # SerialWorker sync function returning Iterator[X] → incremental.
+        origin = typing.get_origin(ret)
+        if _is_msgspec_struct(ret):
+            output_type = ret
+        elif origin in (
+            typing.Iterator,
+            typing.Iterable,
+            typing.AsyncIterator,
+            typing.AsyncIterable,
+            collections.abc.Iterator,
+            collections.abc.Iterable,
+            collections.abc.AsyncIterator,
+            collections.abc.AsyncIterable,
+        ):
+            args = typing.get_args(ret)
+            if len(args) != 1 or not _is_msgspec_struct(args[0]):
+                raise ValueError(
+                    f"{cls.__name__}.{attr_name}: incremental return must be "
+                    f"Iterator[msgspec.Struct] or AsyncIterator[msgspec.Struct]"
+                )
+            incremental = True
+            output_mode = "incremental"
+            delta_type = args[0]
+            output_type = args[0]
+        else:
+            raise ValueError(
+                f"{cls.__name__}.{attr_name}: return type must be msgspec.Struct "
+                f"or (Async)Iterator[msgspec.Struct], got {ret!r}"
+            )
+
+        input_schema, input_sha = _schema_and_hash(payload_type)
+        output_schema, output_sha = _schema_and_hash(output_type)
+        delta_schema = None
+        delta_sha = ""
+        if delta_type is not None:
+            delta_schema, delta_sha = _schema_and_hash(delta_type)
+
+        function_name = slugify_name(fn_spec.name)
+        if not function_name:
+            raise ValueError(
+                f"{cls.__name__}.{attr_name}: function name cannot be normalized "
+                f"from {fn_spec.name!r}"
+            )
+
+        fn: Dict[str, Any] = {
+            "name": function_name,
+            "python_name": attr_name,
+            "module": module_name,
+            # Class's declaration module (vs the module being walked) — used
+            # by discover_manifest to dedup re-exported classes.
+            "declared_module": getattr(cls, "__module__", "") or module_name,
+            "class_name": cls.__name__,
+            "archetype": getattr(cls, "__gen_worker_archetype__", "SerialWorker"),
+            "kind": spec.kind,
+            "sub_kind": spec.sub_kind,
+            "runtime": spec.runtime,
+            "resources": res_dict,
+            "bindings": bindings_block,
+            "payload_type": _type_id(payload_type),
+            "payload_schema_sha256": input_sha,
+            "input_schema": input_schema,
+            "output_mode": output_mode,
+            "output_type": _type_id(output_type) if output_type else None,
+            "output_schema_sha256": output_sha,
+            "output_schema": output_schema,
+            "incremental_output": incremental,
+            "decorator": f"@{spec.kind}.function",
+            "label": fn_spec.label,
+            "description": fn_spec.description,
+            "timeout_ms": fn_spec.timeout_ms,
+            "allowed_shapes": [list(s) for s in fn_spec.allowed_shapes]
+                              or [list(s) for s in spec.allowed_shapes],
+            "max_concurrent_per_worker": fn_spec.max_concurrent_per_worker,
+            # #324: SerialWorker cross-request micro-batching declaration.
+            # Surfaced so the orchestrator can scorecard / route around this
+            # at scheduling time. Both must be set for the worker to actually
+            # enable batching; either-None means "no batching".
+            "batch_window_ms": getattr(spec, "batch_window_ms", None),
+            "max_batch": getattr(spec, "max_batch", None),
+            # #324: Distilled-checkpoint awareness. When True the orchestrator
+            # may auto-substitute a Lightning/Turbo/Schnell/Sprint variant of
+            # the declared model Repo(...) at resolve time. SLA-aware
+            # automatic selection is a follow-up depending on #320.
+            "prefer_distilled": bool(getattr(spec, "prefer_distilled", False)),
+        }
+
+        if delta_type is not None:
+            fn["delta_type"] = _type_id(delta_type)
+            fn["delta_schema_sha256"] = delta_sha
+            fn["delta_output_schema"] = delta_schema
+
+        # Stage methods on the class — emit once per class as a flat list
+        # under the first function entry (same for every function on the class,
+        # but downstream consumers index by function so this is the natural place).
+        stage_methods = getattr(cls, "__gen_worker_stage_methods__", None) or []
+        if stage_methods:
+            fn["stages"] = [
+                {
+                    "python_name": stage_attr,
+                    "name": stage_spec.name,
+                    "gpu_class": stage_spec.gpu_class,
+                }
+                for stage_attr, _stage_method, stage_spec in stage_methods
+            ]
+
+        out.append(fn)
+
+    return out
+
+
+def _scan_module_for_class_endpoints(
+    mod: Any, module_name: str
+) -> List[Dict[str, Any]]:
+    """Walk a module looking for class-shape endpoints (#322)."""
+    out: List[Dict[str, Any]] = []
+    for name, obj in mod.__dict__.items():
+        if not inspect.isclass(obj):
+            continue
+        if not hasattr(obj, "__gen_worker_endpoint_spec__"):
+            continue
+        # Avoid double-counting classes imported from other modules — only
+        # collect classes that were defined in this module.
+        if getattr(obj, "__module__", "") != module_name:
+            # Allow re-export from the endpoint's __init__ — accept the class
+            # if its declaring module is still part of the same package.
+            declared_module = getattr(obj, "__module__", "")
+            if not (
+                declared_module == module_name
+                or module_name.startswith(declared_module + ".")
+                or declared_module.startswith(module_name.split(".", 1)[0] + ".")
+            ):
+                continue
+        try:
+            out.extend(_extract_class_function_methods(obj, module_name))
+        except Exception as e:
+            print(
+                f"warning: failed to extract class endpoint {name}: {e}",
+                file=sys.stderr,
+            )
+            raise
+    return out
 
 
 def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
@@ -632,15 +877,37 @@ def _strip_none(obj: Any) -> Any:
 
 
 def main() -> None:
-    """Write the build-time endpoint manifest to stdout."""
+    """Write the build-time endpoint manifest to stdout.
+
+    #328: bake-time validation gate. After ``discover_manifest`` produces
+    the ``functions`` list, ``validate_endpoint_lock`` confirms every entry
+    is a class-shape declaration (post-#322). An old function-shape entry
+    that slipped past the discovery refactor hard-fails the build with a
+    pointer to the migration guide.
+    """
     try:
         manifest = discover_manifest()
     except Exception as e:
         print(f"error: {e}", file=sys.stderr)
         sys.exit(1)
 
+    # #328 bake-time validation gate. Old function-shape entries trip the
+    # missing-class_name check; same-class slug collisions trip the route
+    # uniqueness check; non-class shapes (an entry without archetype/kind)
+    # are caught by the required-field check. All errors flow out at once
+    # so the build surfaces every problem rather than one-at-a-time.
+    from .validation import validate_endpoint_lock
+
+    val = validate_endpoint_lock(manifest)
+    for w in val.warnings:
+        print(f"warning: {w}", file=sys.stderr)
+    if not val.ok:
+        for err in val.errors:
+            print(f"error: {err}", file=sys.stderr)
+        sys.exit(1)
+
     if not manifest.get("functions"):
-        print("warning: no @inference_function decorated functions found", file=sys.stderr)
+        print("warning: no @inference decorated functions found", file=sys.stderr)
 
     sys.stdout.write(msgspec.toml.encode(_strip_none(manifest)).decode("utf-8"))
     if not sys.stdout.isatty():

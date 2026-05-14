@@ -9,4 +9,5 @@ cpu_cores = 2
 
 [[build.profiles]]
 name = "cpu"
+accelerator = "none"
 base_image = "ubuntu:24.04"

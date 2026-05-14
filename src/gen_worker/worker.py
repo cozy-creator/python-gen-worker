@@ -57,7 +57,10 @@ def _normalize_grpc_addr(addr: str) -> tuple[str, bool]:
     return a, tls
 from ._worker_support import (
     _AuthInterceptor,
+    _BatchedWorkerSpec,
+    _ConversionWorkerSpec,
     _RequestSpec,
+    _SerialWorkerSpec,
     _extract_checkpoint_id_from_result,
     _extract_resolved_compute,
     _extract_worker_capability_token,
@@ -117,6 +120,17 @@ from .wire_protocol import WIRE_PROTOCOL_MAJOR, WIRE_PROTOCOL_MINOR, wire_protoc
 from dataclasses import dataclass as _injection_dataclass
 
 
+async def _single_item_async_iter(value: Any):
+    """Wrap a single value as a one-shot async iterator.
+
+    Used by the BatchedWorker dispatch path when the tenant method
+    returns a single awaitable (an `async def` that returns one delta
+    instead of yielding many). Lets us share the same async-for emission
+    loop for both shapes.
+    """
+    yield value
+
+
 def _type_qualname(t: Any) -> str:
     """Return a class's fully-qualified ``module.qualname`` string."""
     mod = getattr(t, "__module__", "") or ""
@@ -132,12 +146,25 @@ class InjectionSpec:
 
     Replaces the 0.6.x ``InjectionSpec(param_name, param_type, model_ref)``
     shape — ``binding`` is now a :class:`Repo` or :class:`Dispatch` value
-    from ``@inference_function(models={...})``.
+    from ``@inference(models={...})``.
     """
 
     param_name: str
     param_type: Any
     binding: Binding
+
+
+def _wire_ref(repo: Repo) -> str:
+    """Canonical wire ref for a Repo binding.
+
+    Tensorhub refs (provider=cozy) are emitted bare; HF / civitai get a
+    prefix so legacy resolvers (orch + worker) that only know the prefix
+    scheme continue to route correctly. New consumers should prefer the
+    explicit ``provider`` field on the binding shape.
+    """
+    if repo.provider == "cozy":
+        return repo.ref
+    return f"{repo.provider}:{repo.ref}"
 
 
 def _binding_to_wire(param_name: str, param_type: Any, binding: Binding) -> Dict[str, Any]:
@@ -150,7 +177,8 @@ def _binding_to_wire(param_name: str, param_type: Any, binding: Binding) -> Dict
             "type": _type_qualname(param_type),
             "binding": {
                 "kind": "fixed",
-                "ref": binding.ref,
+                "ref": _wire_ref(binding),
+                "provider": binding.provider,
                 "flavor": binding._flavor,
                 "tag": binding._tag,
                 "allow_override": binding._allow_override,
@@ -161,7 +189,8 @@ def _binding_to_wire(param_name: str, param_type: Any, binding: Binding) -> Dict
         table: Dict[str, Dict[str, str]] = {}
         for k, repo in binding.table.items():
             table[k] = {
-                "ref": repo.ref,
+                "ref": _wire_ref(repo),
+                "provider": repo.provider,
                 "flavor": repo._flavor,
                 "tag": repo._tag,
             }
@@ -233,7 +262,7 @@ class Worker:
                 orchestrator_public_addr, worker_id, worker_jwt,
                 tensorhub_public_url, hf_token, hf_home, runpod_pod_id.
             user_module_names: List of Python module names containing
-                user-defined @inference_function functions.
+                user-defined @inference functions.
             reconnect_delay: Seconds to wait between reconnection attempts.
             max_reconnect_attempts: Max reconnect attempts (0 = infinite).
             model_manager: Optional model manager.
@@ -286,10 +315,61 @@ class Worker:
         logger.info(f"RUNPOD_POD_ID: {self.runpod_pod_id}")
 
         self._request_specs: Dict[str, _RequestSpec] = {}
-        # Transform-kind (@training_function) handlers, keyed by function
+        # Transform-kind (@conversion) handlers, keyed by function
         # name. Dispatch shape is (request_context, payload_dict) → list[ProducedFlavor];
         # see gen_worker/conversion/dispatch.py for the contract.
         self._training_specs: Dict[str, Callable[..., Any]] = {}
+        # #273: BatchedWorker (`@inference(runtime="sglang"|"vllm")`) handlers,
+        # keyed by externally-addressable function name. Each spec carries the
+        # singleton class instance + bound async method + payload/delta types.
+        # The class instance lives once per worker process; setup(**models[, engine=...])
+        # runs lazily on first dispatch via _start_one_batched_instance.
+        self._batched_specs: Dict[str, _BatchedWorkerSpec] = {}
+        # Map class-instance id -> (instance, engine, runtime) so drain can call
+        # shutdown() exactly once per class even when multiple @inference.function
+        # methods route through the same instance.
+        self._batched_instances: List[Dict[str, Any]] = []
+        # Per-request engine submission tracking. function_name -> request_id ->
+        # asyncio task. Used by _handle_interrupt_request to call engine.abort().
+        self._batched_inflight_lock = threading.Lock()
+        self._batched_inflight: Dict[str, Dict[str, Any]] = {}
+        # Single asyncio event loop hosting all BatchedWorker dispatch +
+        # engine I/O. Started lazily in _ensure_batched_loop; runs on a
+        # dedicated thread so the synchronous receive loop / job dispatch
+        # thread can submit coroutines via run_coroutine_threadsafe.
+        self._batched_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._batched_loop_thread: Optional[threading.Thread] = None
+        # #322/#328: SerialWorker (`@inference` sync class) dispatch table.
+        # Mirrors `_batched_specs` but for the synchronous archetype — one
+        # request fully owns the GPU end-to-end, no engine, no asyncio loop.
+        # The class instance is constructed once at discovery; `setup(**models)`
+        # runs lazily on first dispatch (under a per-class lock) so we pay
+        # the cold-load cost on the first job rather than at process boot.
+        self._serial_class_specs: Dict[str, _SerialWorkerSpec] = {}
+        # Per-class record: {cls_name, instance, endpoint_spec, started, started_lock}.
+        # Mirrors `_batched_instances`; the drain path calls `instance.shutdown()`
+        # exactly once per record.
+        self._serial_class_instances: List[Dict[str, Any]] = []
+        # #332: sync class endpoints for the conversion / training / dataset
+        # kinds. Structurally identical to SerialWorker (sync setup → generate
+        # → shutdown) but the result emission path uploads ProducedFlavors and
+        # publishes a revision via `_finalize_produced_variants` rather than
+        # returning an msgspec.Struct back to the caller.
+        self._conversion_class_specs: Dict[str, _ConversionWorkerSpec] = {}
+        # Per-class record for the conversion-kind classes; mirrors
+        # `_serial_class_instances`. Reuses `_ensure_serial_class_started` /
+        # `_find_serial_record` by appending to the same list, since the
+        # lazy-setup contract is identical.
+        # #324: per-function cross-request micro-batching aggregator. Populated
+        # in `_register_endpoint_class_serial` when both `batch_window_ms` and
+        # `max_batch` are declared on the @inference class. Auto-disabled at
+        # setup-time when any attached cache wrapper has
+        # `breaks_cross_request_batching=True` (e.g. TeaCache, nunchaku #597).
+        # The serial dispatch wrapper inspects this map to route through the
+        # aggregator vs invoke the bound method directly. Value is a
+        # ``gen_worker.api.micro_batch.MicroBatchAggregator``; typed Any to
+        # avoid pulling the lazy asyncio init into module load order.
+        self._micro_batch_aggregators: Dict[str, Any] = {}
         self._active_requests: Dict[str, RequestContext] = {}
         self._active_requests_lock = threading.Lock()
         self._request_observations: Dict[str, Dict[str, Any]] = {}
@@ -857,7 +937,14 @@ class Worker:
         timestamp_unix_ms: int,
         delta_text: str,
         payload_json: bytes,
+        audio_chunk: bytes = b"",
+        audio_codec: str = "",
     ) -> bool:
+        # #327: audio-token streaming. When the tenant yields a delta struct
+        # with `audio_chunk: bytes` + `audio_codec: str` fields populated, the
+        # bytes are routed to the typed proto slots instead of being
+        # base64-encoded inside payload_json (saves ~33% wire size + the JSON
+        # CPU tax). Text-shaped deltas leave audio_chunk empty.
         return self._emit_typed_worker_event(
             pb_type="IncrementalTokenDelta",
             msg_field="incremental_token_delta",
@@ -868,6 +955,8 @@ class Worker:
             timestamp_unix_ms=int(timestamp_unix_ms),
             delta_text=str(delta_text or ""),
             payload_json=bytes(payload_json or b"{}"),
+            audio_chunk=bytes(audio_chunk or b""),
+            audio_codec=str(audio_codec or ""),
         )
 
     def _emit_incremental_done_typed(
@@ -910,6 +999,39 @@ class Worker:
             error_message=str(error_message or ""),
         )
 
+    @staticmethod
+    def _extract_audio_from_delta(delta_obj: Any) -> tuple[bytes, str]:
+        """#327: AR-TTS audio-token streaming. If the tenant's yielded delta
+        struct declares fields named `audio_chunk: bytes` and (optionally)
+        `audio_codec: str`, peel them off so they can travel on the typed
+        proto slots instead of being base64-encoded inside payload_json.
+        Returns (audio_chunk_bytes, audio_codec_string); both empty when the
+        delta is text-shaped.
+
+        msgspec.Struct introspection is duck-typed: any object exposing the
+        named attributes works (msgspec, dataclass, plain instance). bytes
+        are passed through verbatim; str (in case the tenant hands base64
+        through this path) is rejected — the contract is raw bytes only.
+        """
+        chunk_attr = getattr(delta_obj, "audio_chunk", None)
+        codec_attr = getattr(delta_obj, "audio_codec", None)
+        # msgspec.UNSET handling — tenants commonly default optional fields
+        # to UNSET so they don't get serialized.
+        try:
+            if chunk_attr is msgspec.UNSET:
+                chunk_attr = None
+            if codec_attr is msgspec.UNSET:
+                codec_attr = None
+        except Exception:
+            pass
+        audio_bytes = b""
+        if isinstance(chunk_attr, (bytes, bytearray, memoryview)):
+            audio_bytes = bytes(chunk_attr)
+        audio_codec = ""
+        if isinstance(codec_attr, str):
+            audio_codec = codec_attr
+        return audio_bytes, audio_codec
+
     # #321: typed startup-phase enum on the wire (replaces stringly-typed
     # event_type dispatch). Map our internal phase strings (which still flow
     # into logs and ctx surfaces) to the proto enum so the orchestrator's
@@ -920,6 +1042,8 @@ class Worker:
         "pipeline_loading":    3,  # WORKER_STARTUP_PHASE_PIPELINE_LOADING
         "ready":               4,  # WORKER_STARTUP_PHASE_READY
         "error":               5,  # WORKER_STARTUP_PHASE_ERROR
+        # #322: warming = torch.compile graph capture / warmup() running.
+        "warming":             6,  # WORKER_STARTUP_PHASE_WARMING
     }
 
     # ModelAvailabilityKind proto enum values (#321):
@@ -1155,7 +1279,19 @@ class Worker:
 
 
     def _discover_and_register_functions(self) -> None:
-        """Discover and register functions marked with @inference_function."""
+        """Discover and register handlers in user modules.
+
+        Three handler shapes are recognized:
+          1. Bare ``@inference`` (legacy function-shape; the hard-cut
+             stub will raise ImportError on first import, but we still scan
+             so legacy modules error loud rather than silently disappear).
+          2. Bare ``@conversion`` (likewise legacy).
+          3. ``@inference`` / ``@training`` / ``@dataset`` / ``@conversion``
+             on a class (#322 / #273). The class carries
+             ``__gen_worker_endpoint_spec__`` and (for BatchedWorker) declares
+             ``runtime="sglang"|"vllm"`` to route to the continuous-batching
+             engine path.
+        """
         logger.info("Discovering worker handlers in modules: %s...", self.user_module_names)
         discovered = 0
 
@@ -1166,25 +1302,48 @@ class Worker:
                 logger.error("Could not import user module: %s", module_name)
                 continue
 
+            # First pass: pick up @inference / @training class endpoints.
+            for _, obj in inspect.getmembers(module):
+                if not inspect.isclass(obj):
+                    continue
+                if getattr(obj, "__module__", "") != module.__name__:
+                    # Re-exported symbols (e.g. `from gen_worker import inference`)
+                    # are not endpoint classes — only own-module definitions count.
+                    continue
+                ep_spec = getattr(obj, "__gen_worker_endpoint_spec__", None)
+                if ep_spec is None:
+                    continue
+                try:
+                    n = self._register_endpoint_class(obj, ep_spec)
+                except Exception as exc:
+                    logger.exception(
+                        "Skipping endpoint class '%s' in %s: %s",
+                        getattr(obj, "__name__", "<unknown>"),
+                        module_name,
+                        exc,
+                    )
+                    continue
+                discovered += n
+
             for _, obj in inspect.getmembers(module):
                 if not inspect.isfunction(obj):
                     continue
 
-                # Transform-kind endpoints: @training_function decorated.
+                # Transform-kind endpoints: @conversion decorated.
                 # The wrapper's (request_context, payload) signature isn't a
-                # regular @inference_function shape; register via TrainingFunctionSpec
+                # regular @inference shape; register via TrainingFunctionSpec
                 # without running _inspect_request_spec.
                 if getattr(obj, "_is_training_function", False) is True:
                     python_name = getattr(obj, "__name__", None)
                     if not python_name:
-                        logger.error("Skipping unnamed @training_function in %s", module_name)
+                        logger.error("Skipping unnamed @conversion in %s", module_name)
                         continue
                     # Slugify the Python name to match what orchestrator dispatches
                     # (matches the inference-function registration convention so
                     # function_name lookups agree at RPC time).
                     name = slugify_name(python_name)
                     if not name:
-                        logger.error("@training_function '%s' in %s: function name cannot be normalized",
+                        logger.error("@conversion '%s' in %s: function name cannot be normalized",
                                      python_name, module_name)
                         continue
                     if name in self._training_specs:
@@ -1224,6 +1383,765 @@ class Worker:
         else:
             logger.info("Discovery complete. Found %d handlers.", discovered)
 
+    def _register_endpoint_class(self, cls: type, ep_spec: Any) -> int:
+        """Register one ``@inference`` (or sibling) class endpoint.
+
+        Returns the number of externally-addressable functions registered.
+
+        Two archetypes (#322):
+          - ``BatchedWorker`` — async class with ``runtime="sglang"|"vllm"``.
+            Routes through the continuous-batching engine path.
+          - ``SerialWorker`` — sync class. One request fully owns the GPU.
+            Routes through the synchronous job-queue path (#328).
+        """
+        kind = str(getattr(ep_spec, "kind", "") or "")
+        runtime = getattr(ep_spec, "runtime", None)
+        archetype = str(getattr(cls, "__gen_worker_archetype__", "") or "")
+        function_methods = list(getattr(cls, "__gen_worker_function_methods__", []) or [])
+        if not function_methods:
+            logger.warning(
+                "@%s class %r declares no @%s.function methods; skipping",
+                kind, cls.__name__, kind,
+            )
+            return 0
+
+        # SerialWorker path (#322/#328): sync `@inference` class without
+        # `runtime=`. Dispatch through `_serial_class_specs`.
+        if archetype == "SerialWorker" and kind == "inference" and runtime is None:
+            return self._register_endpoint_class_serial(cls, ep_spec)
+
+        # #332: non-inference sync class endpoints (conversion / training /
+        # dataset). Structurally SerialWorker (sync setup → generate →
+        # shutdown) but the result emission path uploads ProducedFlavors and
+        # publishes a revision instead of returning a struct. Dispatch
+        # through `_conversion_class_specs`.
+        if (
+            archetype == "SerialWorker"
+            and kind in ("conversion", "training", "dataset")
+            and runtime is None
+        ):
+            return self._register_endpoint_class_conversion(cls, ep_spec)
+
+        if runtime is None or kind != "inference":
+            # Async (BatchedWorker) classes with non-inference kinds aren't
+            # supported — the continuous-batching engine path is keyed on
+            # inference. Surface the rejection so operators don't think a
+            # mis-declared class silently disappears.
+            logger.warning(
+                "Recognized %s class endpoint %r (archetype=%s runtime=%s) — "
+                "unsupported combination; conversion / training / dataset "
+                "endpoints must be sync (SerialWorker shape)",
+                kind, cls.__name__, archetype, runtime,
+            )
+            return 0
+
+        # Construct the singleton instance. Real ``setup(**models[, engine=…])``
+        # is deferred to ``_start_one_batched_instance`` (lazy on first dispatch).
+        try:
+            instance = cls()
+        except TypeError as exc:
+            raise ValueError(
+                f"@inference class {cls.__name__!r}: __init__ must take no "
+                f"arguments (got TypeError {exc}). Move model loading into "
+                "setup()."
+            ) from exc
+
+        registered = 0
+        resources: Resources = getattr(ep_spec, "resources", None) or Resources()
+
+        for method_name, _unbound, fn_spec in function_methods:
+            method = getattr(instance, method_name, None)
+            if method is None or not callable(method):
+                logger.warning(
+                    "@inference class %r: method %r missing on instance after "
+                    "construction; skipping",
+                    cls.__name__, method_name,
+                )
+                continue
+            name = str(getattr(fn_spec, "name", method_name) or method_name)
+            slug = slugify_name(name)
+            if not slug:
+                logger.error(
+                    "@inference class %r: method %r yields empty slug; skipping",
+                    cls.__name__, method_name,
+                )
+                continue
+            if slug in self._request_specs or slug in self._training_specs or slug in self._batched_specs:
+                logger.warning("Handler name conflict for '%s'; skipping", slug)
+                continue
+
+            try:
+                payload_type, delta_type, ctx_param, payload_param = self._inspect_batched_method(
+                    cls, getattr(cls, method_name)
+                )
+            except Exception as exc:
+                logger.error(
+                    "@inference class %r method %r: signature invalid: %s",
+                    cls.__name__, method_name, exc,
+                )
+                continue
+
+            input_schema = msgspec.json.schema(payload_type)
+            delta_schema = msgspec.json.schema(delta_type)
+            input_schema_json = json.dumps(
+                input_schema, separators=(",", ":"), sort_keys=True
+            ).encode("utf-8")
+            delta_schema_json = json.dumps(
+                delta_schema, separators=(",", ":"), sort_keys=True
+            ).encode("utf-8")
+
+            bspec = _BatchedWorkerSpec(
+                name=slug,
+                instance=instance,
+                method=method,
+                resources=resources,
+                ctx_param=ctx_param,
+                payload_param=payload_param,
+                payload_type=payload_type,
+                delta_type=delta_type,
+                runtime=str(runtime),
+                input_schema_json=input_schema_json,
+                delta_schema_json=delta_schema_json,
+                timeout_ms=getattr(fn_spec, "timeout_ms", None),
+            )
+            self._batched_specs[slug] = bspec
+            self._discovered_resources[slug] = resources
+            # Mirror schemas into _function_schemas so the existing
+            # function-capability advertisement path picks them up. The
+            # 4-tuple shape is (input, output, delta, injection); for
+            # BatchedWorker we surface delta in both the output and
+            # delta slots (no separate "single" output shape exists) and
+            # carry an empty injection blob (no per-request injections).
+            self._function_schemas[slug] = (
+                input_schema_json,
+                delta_schema_json,
+                delta_schema_json,
+                b"[]",
+            )
+            registered += 1
+            logger.info(
+                "Registered BatchedWorker function: '%s' (class=%s, runtime=%s)",
+                slug, cls.__name__, runtime,
+            )
+
+        if registered > 0:
+            self._batched_instances.append(
+                {
+                    "cls_name": cls.__name__,
+                    "instance": instance,
+                    "endpoint_spec": ep_spec,
+                    "runtime": str(runtime),
+                    "engine": None,  # populated lazily in _start_one_batched_instance (only when tenant declares engine=)
+                    "started": False,
+                }
+            )
+        return registered
+
+    def _inspect_batched_method(
+        self,
+        cls: type,
+        method: Callable[..., Any],
+    ) -> Tuple[type, type, str, str]:
+        """Validate a BatchedWorker method signature.
+
+        Must look like::
+
+            async def fn(self, ctx: RequestContext, payload: MyInput) -> AsyncIterator[MyOutput]:
+                ...
+
+        Returns ``(payload_type, delta_type, ctx_param_name, payload_param_name)``.
+        Raises ValueError on shape errors.
+        """
+        if not (inspect.iscoroutinefunction(method) or inspect.isasyncgenfunction(method)):
+            raise ValueError(
+                "BatchedWorker @inference.function method must be async (`async def`); "
+                "use SerialWorker (sync class) for one-request-at-a-time endpoints."
+            )
+
+        try:
+            hints = typing.get_type_hints(
+                method, globalns=getattr(method, "__globals__", None), include_extras=True
+            )
+        except Exception as exc:
+            raise ValueError(f"failed to resolve type hints: {exc}") from exc
+
+        sig = inspect.signature(method)
+        params = list(sig.parameters.values())
+        if len(params) < 3:
+            raise ValueError(
+                "BatchedWorker method must take (self, ctx: RequestContext, payload: <Struct>)"
+            )
+        # params[0] is self.
+        ctx_p = params[1]
+        payload_p = params[2]
+        ctx_type = hints.get(ctx_p.name)
+        if ctx_type is not RequestContext:
+            raise ValueError(
+                f"second arg must be `ctx: RequestContext` (got annotation {ctx_type!r})"
+            )
+        payload_type = hints.get(payload_p.name)
+        if not (isinstance(payload_type, type) and issubclass(payload_type, msgspec.Struct)):
+            raise ValueError(
+                f"third arg must be a msgspec.Struct payload (got {payload_type!r})"
+            )
+
+        ret = hints.get("return")
+        if ret is None:
+            raise ValueError("missing return type annotation")
+        origin = get_origin(ret)
+        # AsyncIterator[X] / AsyncGenerator[X, None] / cabc.AsyncIterator[X].
+        if origin in (cabc.AsyncIterator, cabc.AsyncGenerator):
+            args = get_args(ret)
+            if not args:
+                raise ValueError("AsyncIterator return type must declare a yield type")
+            dt = args[0]
+        else:
+            # Allow bare msgspec.Struct return + the body using `yield` —
+            # async-generator functions report a return annotation of the
+            # yield type sometimes (depends on how the tenant wrote it).
+            dt = ret
+        if not (isinstance(dt, type) and issubclass(dt, msgspec.Struct)):
+            raise ValueError(
+                f"BatchedWorker method must yield a msgspec.Struct (got {dt!r})"
+            )
+        return payload_type, dt, ctx_p.name, payload_p.name
+
+    def _register_endpoint_class_serial(self, cls: type, ep_spec: Any) -> int:
+        """Register one synchronous ``@inference`` class as a SerialWorker (#322/#328).
+
+        Mirrors ``_register_endpoint_class``'s BatchedWorker leg. Constructs the
+        singleton class instance, inspects each ``@inference.function`` method
+        for signature validity, and writes a ``_SerialWorkerSpec`` per method
+        keyed by ``slugify_name(method_name)``. The actual ``setup(self, **models)``
+        + optional ``warmup(self)`` calls are deferred to first dispatch so the
+        worker can boot quickly and only pay the cold-load cost on the first
+        request — see ``_start_one_serial_instance``.
+
+        Sets ``TORCHINDUCTOR_CACHE_DIR`` env var BEFORE any tenant code runs
+        (here at registration time) so that future ``torch.compile`` calls
+        inside ``setup()`` see the persistent inductor cache.
+
+        Returns the number of externally-addressable functions registered.
+        """
+        function_methods = list(getattr(cls, "__gen_worker_function_methods__", []) or [])
+        kind = str(getattr(ep_spec, "kind", "") or "inference")
+
+        # #322 cross-cutting hook: persistent torch.compile cache. The env var
+        # must be set before any setup() (and certainly before torch.compile)
+        # runs. Setting it here at discovery time also covers the case where
+        # the tenant imports torch in their `setup()` body.
+        self._configure_torchinductor_cache_dir()
+
+        # Construct the singleton instance. setup() / warmup() are deferred to
+        # first dispatch; here we just verify __init__ is no-arg.
+        try:
+            instance = cls()
+        except TypeError as exc:
+            raise ValueError(
+                f"@{kind} class {cls.__name__!r}: __init__ must take no "
+                f"arguments (got TypeError {exc}). Move model loading into "
+                "setup()."
+            ) from exc
+
+        resources: Resources = getattr(ep_spec, "resources", None) or Resources()
+        # #324: cross-request micro-batching declaration. Both kwargs must be
+        # set for the aggregator to activate; either-None means "no batching".
+        batch_window_ms = getattr(ep_spec, "batch_window_ms", None)
+        max_batch = getattr(ep_spec, "max_batch", None)
+        batching_declared = batch_window_ms is not None and max_batch is not None
+
+        registered = 0
+
+        for method_name, _unbound, fn_spec in function_methods:
+            method = getattr(instance, method_name, None)
+            if method is None or not callable(method):
+                logger.warning(
+                    "@inference class %r: method %r missing on instance after "
+                    "construction; skipping",
+                    cls.__name__, method_name,
+                )
+                continue
+            name = str(getattr(fn_spec, "name", method_name) or method_name)
+            slug = slugify_name(name)
+            if not slug:
+                logger.error(
+                    "@inference class %r: method %r yields empty slug; skipping",
+                    cls.__name__, method_name,
+                )
+                continue
+            if (slug in self._request_specs
+                    or slug in self._training_specs
+                    or slug in self._batched_specs
+                    or slug in self._serial_class_specs):
+                logger.warning("Handler name conflict for '%s'; skipping", slug)
+                continue
+
+            try:
+                (
+                    payload_type,
+                    output_type,
+                    delta_type,
+                    output_mode,
+                    ctx_param,
+                    payload_param,
+                ) = self._inspect_serial_method(cls, getattr(cls, method_name))
+            except Exception as exc:
+                logger.error(
+                    "@inference class %r method %r: signature invalid: %s",
+                    cls.__name__, method_name, exc,
+                )
+                continue
+
+            input_schema = msgspec.json.schema(payload_type)
+            input_schema_json = json.dumps(
+                input_schema, separators=(",", ":"), sort_keys=True
+            ).encode("utf-8")
+            output_schema_json = b""
+            delta_schema_json: Optional[bytes] = None
+            if output_type is not None:
+                output_schema = msgspec.json.schema(output_type)
+                output_schema_json = json.dumps(
+                    output_schema, separators=(",", ":"), sort_keys=True
+                ).encode("utf-8")
+            if delta_type is not None:
+                delta_schema = msgspec.json.schema(delta_type)
+                delta_schema_json = json.dumps(
+                    delta_schema, separators=(",", ":"), sort_keys=True
+                ).encode("utf-8")
+
+            sspec = _SerialWorkerSpec(
+                name=slug,
+                instance=instance,
+                method=method,
+                resources=resources,
+                ctx_param=ctx_param,
+                payload_param=payload_param,
+                payload_type=payload_type,
+                output_mode=output_mode,
+                output_type=output_type,
+                delta_type=delta_type,
+                input_schema_json=input_schema_json,
+                output_schema_json=output_schema_json,
+                delta_schema_json=delta_schema_json,
+                timeout_ms=getattr(fn_spec, "timeout_ms", None),
+            )
+            self._serial_class_specs[slug] = sspec
+            self._discovered_resources[slug] = resources
+            # Mirror schemas into _function_schemas so the function-capability
+            # advertisement path picks them up. Shape:
+            # (input, output, delta, injection).
+            self._function_schemas[slug] = (
+                input_schema_json,
+                output_schema_json or (delta_schema_json or b""),
+                delta_schema_json,
+                b"[]",
+            )
+            registered += 1
+            logger.info(
+                "Registered SerialWorker function: '%s' (class=%s, output_mode=%s)",
+                slug, cls.__name__, output_mode,
+            )
+
+            # #324: optionally attach a cross-request micro-batching aggregator.
+            # Creation is conditional on (a) both kwargs declared, AND (b) no
+            # batch-breaking cache wrapper detected on the tenant instance at
+            # registration time. setup() hasn't been called yet so caches added
+            # there (the common case — TeaCache.apply() inside setup()) are
+            # caught by a second scan in `_ensure_serial_class_started`.
+            if batching_declared:
+                from .api.micro_batch import (
+                    MicroBatchAggregator,
+                    should_disable_batching,
+                )
+
+                disable_reason = should_disable_batching(instance)
+                if disable_reason:
+                    logger.warning(
+                        "MicroBatch aggregator NOT created for '%s' (class=%s): "
+                        "%s. batch_window_ms=%s max_batch=%s will be ignored.",
+                        slug, cls.__name__, disable_reason,
+                        batch_window_ms, max_batch,
+                    )
+                else:
+                    agg = MicroBatchAggregator(
+                        function_name=slug,
+                        batch_window_ms=int(batch_window_ms),
+                        max_batch=int(max_batch),
+                        call_fn=self._make_aggregator_call_fn(slug, sspec),
+                    )
+                    self._micro_batch_aggregators[slug] = agg
+                    logger.info(
+                        "MicroBatch aggregator created for '%s': window_ms=%d "
+                        "max_batch=%d (drain coroutine starts on first request)",
+                        slug, int(batch_window_ms), int(max_batch),
+                    )
+
+        if registered > 0:
+            self._serial_class_instances.append(
+                {
+                    "cls_name": cls.__name__,
+                    "instance": instance,
+                    "endpoint_spec": ep_spec,
+                    "archetype": "SerialWorker",
+                    "started": False,
+                    "started_lock": threading.Lock(),
+                    "shutdown_done": False,
+                }
+            )
+        return registered
+
+    def _register_endpoint_class_conversion(self, cls: type, ep_spec: Any) -> int:
+        """Register a sync class endpoint of kind conversion/training/dataset
+        (#332).
+
+        Structurally a SerialWorker — sync ``setup`` / ``shutdown`` plus one
+        or more ``@conversion.function`` / ``@training.function`` /
+        ``@dataset.function`` methods of shape::
+
+            def generate(self, ctx: ConversionContext, payload: <Struct>)
+                -> Iterator[ProducedFlavor]  # or list[ProducedFlavor]
+
+        Differences from `_register_endpoint_class_serial`:
+
+          * ``ctx`` is typed as ``ConversionContext`` (kind=conversion /
+            training) or ``DatasetContext`` (kind=dataset) — both
+            ``RequestContext`` subclasses; we capture the concrete class
+            on the spec so dispatch instantiates the right one.
+          * The return type is ``Iterator[ProducedFlavor]`` /
+            ``list[ProducedFlavor]`` — NOT a single msgspec.Struct.
+            ProducedFlavor itself IS a msgspec.Struct, so the same yield-
+            type check used by the discovery validator works here.
+          * Output emission goes through
+            ``gen_worker.conversion.dispatch._finalize_produced_variants``
+            (upload + publish_repo_revision / publish_dataset_revision),
+            not through a wire-payload response.
+
+        Lazy ``setup`` / ``shutdown`` reuses the same record list +
+        helpers (`_serial_class_instances`, `_ensure_serial_class_started`,
+        `_find_serial_record`) — the lifecycle contract is identical.
+        """
+        function_methods = list(getattr(cls, "__gen_worker_function_methods__", []) or [])
+        kind = str(getattr(ep_spec, "kind", "") or "").strip()
+        sub_kind = str(getattr(ep_spec, "sub_kind", "") or "").strip()
+
+        # Pick the kind-specific RequestContext subclass once, at register
+        # time. Done here so dispatch doesn't re-resolve per request.
+        if kind == "dataset":
+            from .request_context import DatasetContext
+            ctx_class: Any = DatasetContext
+        else:
+            # conversion + training both get the ConversionContext mixin
+            # (producer-contract publish + mktemp + open_output_writer).
+            from .request_context import ConversionContext
+            ctx_class = ConversionContext
+
+        # Construct the singleton instance; setup runs lazily on first
+        # dispatch via `_ensure_serial_class_started`.
+        try:
+            instance = cls()
+        except TypeError as exc:
+            raise ValueError(
+                f"@{kind} class {cls.__name__!r}: __init__ must take no "
+                f"arguments (got TypeError {exc}). Move model loading into "
+                "setup()."
+            ) from exc
+
+        resources: Resources = getattr(ep_spec, "resources", None) or Resources()
+        # `calibration` is part of the conversion contract for quantization
+        # endpoints; it lives on the @conversion() decorator
+        # historically. The class-shape decorator doesn't yet accept it,
+        # but if it's attached (e.g. by a future decorator update or by
+        # the tenant directly setting `__gen_worker_calibration__`) we
+        # honor it.
+        calibration_attr = getattr(cls, "__gen_worker_calibration__", None) or {}
+        calibration_map: Dict[str, str] = {
+            str(k): str(v) for k, v in (calibration_attr or {}).items()
+        }
+
+        registered = 0
+
+        for method_name, _unbound, fn_spec in function_methods:
+            method = getattr(instance, method_name, None)
+            if method is None or not callable(method):
+                logger.warning(
+                    "@%s class %r: method %r missing on instance after "
+                    "construction; skipping",
+                    kind, cls.__name__, method_name,
+                )
+                continue
+            name = str(getattr(fn_spec, "name", method_name) or method_name)
+            slug = slugify_name(name)
+            if not slug:
+                logger.error(
+                    "@%s class %r: method %r yields empty slug; skipping",
+                    kind, cls.__name__, method_name,
+                )
+                continue
+            if (
+                slug in self._request_specs
+                or slug in self._training_specs
+                or slug in self._batched_specs
+                or slug in self._serial_class_specs
+                or slug in self._conversion_class_specs
+            ):
+                logger.warning("Handler name conflict for '%s'; skipping", slug)
+                continue
+
+            try:
+                payload_type, ctx_param, payload_param = self._inspect_conversion_method(
+                    cls, getattr(cls, method_name), ctx_class,
+                )
+            except Exception as exc:
+                logger.error(
+                    "@%s class %r method %r: signature invalid: %s",
+                    kind, cls.__name__, method_name, exc,
+                )
+                continue
+
+            input_schema = msgspec.json.schema(payload_type)
+            input_schema_json = json.dumps(
+                input_schema, separators=(",", ":"), sort_keys=True
+            ).encode("utf-8")
+
+            cspec = _ConversionWorkerSpec(
+                name=slug,
+                instance=instance,
+                method=method,
+                resources=resources,
+                ctx_param=ctx_param,
+                payload_param=payload_param,
+                payload_type=payload_type,
+                endpoint_kind=kind,
+                sub_kind=sub_kind,
+                ctx_class=ctx_class,
+                calibration=calibration_map,
+                input_schema_json=input_schema_json,
+                timeout_ms=getattr(fn_spec, "timeout_ms", None),
+            )
+            self._conversion_class_specs[slug] = cspec
+            self._discovered_resources[slug] = resources
+            self._function_schemas[slug] = (
+                input_schema_json,
+                b"",  # no structured output: ProducedFlavors are uploaded
+                None,
+                b"[]",
+            )
+            registered += 1
+            logger.info(
+                "Registered %s class function: '%s' (class=%s, sub_kind=%s)",
+                kind, slug, cls.__name__, sub_kind or "<unset>",
+            )
+
+        if registered > 0:
+            self._serial_class_instances.append(
+                {
+                    "cls_name": cls.__name__,
+                    "instance": instance,
+                    "endpoint_spec": ep_spec,
+                    "archetype": "SerialWorker",
+                    "started": False,
+                    "started_lock": threading.Lock(),
+                    "shutdown_done": False,
+                }
+            )
+        return registered
+
+    def _inspect_conversion_method(
+        self,
+        cls: type,
+        method: Callable[..., Any],
+        ctx_class: Any,
+    ) -> Tuple[type, str, str]:
+        """Validate a conversion / training / dataset class method signature
+        (#332).
+
+        Must look like::
+
+            def fn(self, ctx: <ConversionContext|DatasetContext>,
+                   payload: <msgspec.Struct>)
+                -> Iterator[ProducedFlavor]  # or list[ProducedFlavor]
+
+        Returns ``(payload_type, ctx_param_name, payload_param_name)``.
+
+        Output type is fixed (``list[ProducedFlavor]`` / ``Iterator[…]``);
+        we don't validate it strictly here — the dispatcher accepts any
+        iterable yielding objects that quack like ``ProducedFlavor``.
+
+        Async methods on a class otherwise classified as a conversion-kind
+        SerialWorker are a validation error.
+        """
+        if inspect.iscoroutinefunction(method) or inspect.isasyncgenfunction(method):
+            raise ValueError(
+                "conversion / training / dataset class methods must be sync "
+                "(`def`); BatchedWorker (continuous batching) doesn't apply "
+                "to these kinds."
+            )
+
+        try:
+            hints = typing.get_type_hints(
+                method, globalns=getattr(method, "__globals__", None), include_extras=True
+            )
+        except Exception as exc:
+            raise ValueError(f"failed to resolve type hints: {exc}") from exc
+
+        sig = inspect.signature(method)
+        params = list(sig.parameters.values())
+        if len(params) < 3:
+            raise ValueError(
+                "conversion-kind class method must take "
+                "(self, ctx: ConversionContext, payload: <Struct>)"
+            )
+        ctx_p = params[1]
+        payload_p = params[2]
+        ctx_type = hints.get(ctx_p.name)
+        # Accept the class itself or any subclass; ConversionContext and
+        # DatasetContext both inherit from RequestContext but are the
+        # tenant-facing types.
+        if not (
+            isinstance(ctx_type, type)
+            and (issubclass(ctx_type, ctx_class) or issubclass(ctx_class, ctx_type))
+        ):
+            raise ValueError(
+                f"second arg must be `ctx: {ctx_class.__name__}` (or a base "
+                f"thereof); got {ctx_type!r}"
+            )
+        payload_type = hints.get(payload_p.name)
+        if not (isinstance(payload_type, type) and issubclass(payload_type, msgspec.Struct)):
+            raise ValueError(
+                f"third arg must be a msgspec.Struct payload (got {payload_type!r})"
+            )
+        return payload_type, ctx_p.name, payload_p.name
+
+    def _configure_torchinductor_cache_dir(self) -> None:
+        """Ensure TORCHINDUCTOR_CACHE_DIR is set before any tenant setup()
+        runs (#322 cross-cutting hooks).
+
+        torch.compile caches the lowered fx graph + kernel code per-key under
+        TORCHINDUCTOR_CACHE_DIR. Without persistence the worker re-compiles
+        on every pod start — minutes per shape on cold cache. With persistence
+        and a baked image layer, restarts are 5-15s per shape.
+
+        Honors any env override (operator can point at a Runpod volume mount);
+        only sets the default when unset.
+
+        Idempotent: subsequent calls are no-ops once the directory exists.
+        """
+        existing = os.environ.get("TORCHINDUCTOR_CACHE_DIR", "").strip()
+        if existing:
+            return
+        default_dir = "/var/cache/gen-worker/inductor"
+        os.environ["TORCHINDUCTOR_CACHE_DIR"] = default_dir
+        try:
+            Path(default_dir).mkdir(parents=True, exist_ok=True)
+        except (OSError, PermissionError) as exc:
+            # Falling back to a process-local tmpdir if /var/cache isn't
+            # writable (e.g. dev mode running as unprivileged user). Inductor
+            # will still cache; the cache just won't survive process restart.
+            import tempfile
+            fallback = tempfile.gettempdir() + "/gen-worker-inductor"
+            os.environ["TORCHINDUCTOR_CACHE_DIR"] = fallback
+            try:
+                Path(fallback).mkdir(parents=True, exist_ok=True)
+            except Exception:
+                pass
+            logger.warning(
+                "TORCHINDUCTOR_CACHE_DIR fallback to %r (default %r not "
+                "writable: %s). Compile cache will not persist across "
+                "process restart.",
+                fallback, default_dir, exc,
+            )
+        else:
+            logger.info(
+                "TORCHINDUCTOR_CACHE_DIR set to %s for torch.compile persistence",
+                default_dir,
+            )
+
+    def _inspect_serial_method(
+        self,
+        cls: type,
+        method: Callable[..., Any],
+    ) -> Tuple[type, Optional[type], Optional[type], str, str, str]:
+        """Validate a SerialWorker method signature.
+
+        Must look like one of::
+
+            def fn(self, ctx: RequestContext, payload: MyInput) -> MyOutput: ...
+            def fn(self, ctx: RequestContext, payload: MyInput) -> Iterator[MyDelta]: ...
+
+        Returns
+        -------
+        (payload_type, output_type, delta_type, output_mode, ctx_param_name, payload_param_name)
+
+        - ``output_mode`` is ``"single"`` when the return type is a
+          ``msgspec.Struct`` subclass, or ``"incremental"`` when it's an
+          ``Iterator[Struct]`` / ``Iterable[Struct]``.
+        - ``output_type`` is set in both modes (incremental mode uses the
+          yielded delta type for both ``output_type`` and ``delta_type``).
+        - ``delta_type`` is only set in incremental mode.
+
+        Async methods on a class otherwise classified as SerialWorker are a
+        validation error — they belong on the BatchedWorker leg.
+        """
+        if inspect.iscoroutinefunction(method) or inspect.isasyncgenfunction(method):
+            raise ValueError(
+                "SerialWorker @inference.function method must be sync (`def`); "
+                "use BatchedWorker (async class + runtime='sglang'|'vllm') for "
+                "continuous-batching endpoints."
+            )
+
+        try:
+            hints = typing.get_type_hints(
+                method, globalns=getattr(method, "__globals__", None), include_extras=True
+            )
+        except Exception as exc:
+            raise ValueError(f"failed to resolve type hints: {exc}") from exc
+
+        sig = inspect.signature(method)
+        params = list(sig.parameters.values())
+        if len(params) < 3:
+            raise ValueError(
+                "SerialWorker method must take (self, ctx: RequestContext, payload: <Struct>)"
+            )
+        # params[0] is self.
+        ctx_p = params[1]
+        payload_p = params[2]
+        ctx_type = hints.get(ctx_p.name)
+        if ctx_type is not RequestContext:
+            raise ValueError(
+                f"second arg must be `ctx: RequestContext` (got annotation {ctx_type!r})"
+            )
+        payload_type = hints.get(payload_p.name)
+        if not (isinstance(payload_type, type) and issubclass(payload_type, msgspec.Struct)):
+            raise ValueError(
+                f"third arg must be a msgspec.Struct payload (got {payload_type!r})"
+            )
+
+        ret = hints.get("return")
+        if ret is None:
+            raise ValueError("missing return type annotation")
+
+        # Single-output: bare msgspec.Struct return.
+        if isinstance(ret, type) and issubclass(ret, msgspec.Struct):
+            return payload_type, ret, None, "single", ctx_p.name, payload_p.name
+
+        # Incremental: Iterator[X] / Iterable[X].
+        origin = get_origin(ret)
+        if origin in (Iterator, Iterable, cabc.Iterator, cabc.Iterable):
+            args = get_args(ret)
+            if not args:
+                raise ValueError("Iterator return type must declare a yield type")
+            dt = args[0]
+            if not (isinstance(dt, type) and issubclass(dt, msgspec.Struct)):
+                raise ValueError(
+                    f"SerialWorker method must yield a msgspec.Struct (got {dt!r})"
+                )
+            return payload_type, dt, dt, "incremental", ctx_p.name, payload_p.name
+
+        raise ValueError(
+            "SerialWorker method return type must be msgspec.Struct or "
+            f"Iterator[msgspec.Struct] (got {ret!r})"
+        )
+
     def _inspect_request_spec(self, func: Callable[..., Any]) -> _RequestSpec:
         python_name = func.__name__
         func_name = slugify_name(python_name)
@@ -1246,7 +2164,7 @@ class Worker:
         if ctx_type is not RequestContext:
             raise ValueError("first argument must be ctx: RequestContext")
 
-        # New 0.7.0 binding model: @inference_function(models={...}) attaches
+        # New 0.7.0 binding model: @inference(models={...}) attaches
         # __gen_worker_bindings__ keyed by parameter name. Treat any parameter
         # listed there as an injected binding; any msgspec.Struct parameter as
         # the payload. Everything else is a signature error.
@@ -1278,7 +2196,7 @@ class Worker:
                 continue
             raise ValueError(
                 f"unsupported param type for {p.name!r}: {ann!r}. "
-                "Inject models via @inference_function(models={...}); payload must be msgspec.Struct."
+                "Inject models via @inference(models={...}); payload must be msgspec.Struct."
             )
 
         if payload_type is None or payload_param is None:
@@ -2129,7 +3047,7 @@ class Worker:
         if accelerator == "cpu":
             accelerator = "none"
         requires_gpu = bool(cfg.get("requires_gpu") is True or accelerator == "cuda")
-        if cfg.get("cuda_compute_min"):
+        if cfg.get("min_compute_capability"):
             requires_gpu = True
         if cfg.get("min_vram_gb") is not None:
             requires_gpu = True
@@ -2147,7 +3065,7 @@ class Worker:
                 "axes": axes,
             }
 
-        min_cc = self._parse_compute_capability_value(cfg.get("cuda_compute_min"))
+        min_cc = self._parse_compute_capability_value(cfg.get("min_compute_capability"))
         if min_cc is not None:
             detected_cc = self._parse_compute_capability_value(gpu_info.get("gpu_sm"))
             axes["required_compute_capability"] = f"{min_cc:.1f}"
@@ -2482,6 +3400,20 @@ class Worker:
         self._draining = True
         self._running = False # Signal loops to stop
         self._stop_event.set() # Wake up any waiting threads
+
+        # #273: gracefully shut down BatchedWorker engines + instances
+        # before tearing down the connection. shutdown_done flag guards
+        # double-calls if _handle_worker_drain_cmd already invoked this.
+        try:
+            self._shutdown_batched_workers()
+        except Exception:
+            logger.exception("BatchedWorker shutdown during stop() raised; continuing")
+
+        # #322/#328: same idempotent shutdown for SerialWorker classes.
+        try:
+            self._shutdown_serial_workers()
+        except Exception:
+            logger.exception("SerialWorker shutdown during stop() raised; continuing")
 
         # Cancel any active requests
         active_request_ids = []
@@ -2952,12 +3884,79 @@ class Worker:
                     break
                 time.sleep(0.2)
             final_status = "drained" if self._active_request_count() == 0 else "deadline_exceeded"
+            # #273: shut down each BatchedWorker instance + engine exactly once.
+            # Engines hold open subprocesses + GPU memory; not calling
+            # shutdown leaks both. shutdown() runs on the BatchedWorker loop.
+            self._shutdown_batched_workers()
+            # #322/#328: idempotent SerialWorker shutdown so tenants can
+            # release CUDA graphs / model handles cleanly on drain.
+            try:
+                self._shutdown_serial_workers()
+            except Exception:
+                logger.exception(
+                    "SerialWorker shutdown during drain raised; continuing"
+                )
             self._emit_worker_drain_result(reason, final_status)
             time.sleep(0.2)
             if terminate_after_deadline or final_status == "drained":
                 self.stop()
 
         threading.Thread(target=_drain_then_stop, daemon=True, name="worker-drain").start()
+
+    def _shutdown_batched_workers(self) -> None:
+        """Call instance.shutdown() + engine.shutdown() on every registered
+        BatchedWorker class. Safe to call multiple times; each rec is
+        flagged after shutdown to avoid duplicate calls.
+        """
+        loop = self._batched_loop
+        if loop is None or not loop.is_running():
+            return
+        for rec in self._batched_instances:
+            if rec.get("shutdown_done"):
+                continue
+            instance = rec.get("instance")
+            engine = rec.get("engine")
+
+            async def _shutdown_one(_inst: Any, _eng: Any) -> None:
+                if _inst is not None:
+                    sd = getattr(_inst, "shutdown", None)
+                    if callable(sd):
+                        try:
+                            res = sd()
+                            if inspect.iscoroutine(res):
+                                await res
+                        except Exception:
+                            logger.exception(
+                                "BatchedWorker instance.shutdown raised (class=%s); continuing",
+                                rec.get("cls_name"),
+                            )
+                if _eng is not None:
+                    try:
+                        await _eng.shutdown()
+                    except Exception:
+                        logger.exception(
+                            "BatchedWorker engine.shutdown raised (class=%s); continuing",
+                            rec.get("cls_name"),
+                        )
+
+            try:
+                fut = asyncio.run_coroutine_threadsafe(
+                    _shutdown_one(instance, engine), loop
+                )
+                fut.result(timeout=30.0)
+            except Exception:
+                logger.exception(
+                    "BatchedWorker shutdown failed for class=%s; continuing",
+                    rec.get("cls_name"),
+                )
+            finally:
+                rec["shutdown_done"] = True
+        # Stop the loop after all shutdowns. The loop thread is daemon;
+        # call_soon_threadsafe + stop is the canonical clean way.
+        try:
+            loop.call_soon_threadsafe(loop.stop)
+        except Exception:
+            pass
 
     @staticmethod
     def _canonicalize_resolved_repos_map(mp: Dict[str, Any]) -> Dict[str, Any]:
@@ -3497,7 +4496,32 @@ class Worker:
 
         spec = self._request_specs.get(function_name)
         training_fn = self._training_specs.get(function_name) if spec is None else None
-        if spec is None and training_fn is None:
+        # #273: BatchedWorker (`@inference(runtime="sglang"|"vllm")`) lookup.
+        batched_spec = (
+            self._batched_specs.get(function_name)
+            if spec is None and training_fn is None
+            else None
+        )
+        # #322/#328: SerialWorker (sync `@inference` class) lookup.
+        serial_spec = (
+            self._serial_class_specs.get(function_name)
+            if spec is None and training_fn is None and batched_spec is None
+            else None
+        )
+        # #332: conversion / training / dataset sync class lookup.
+        conversion_spec = (
+            self._conversion_class_specs.get(function_name)
+            if spec is None and training_fn is None
+            and batched_spec is None and serial_spec is None
+            else None
+        )
+        if (
+            spec is None
+            and training_fn is None
+            and batched_spec is None
+            and serial_spec is None
+            and conversion_spec is None
+        ):
             error_msg = f"Unknown function requested: {function_name}"
             logger.error(error_msg)
             self._emit_request_event(
@@ -3576,7 +4600,7 @@ class Worker:
         source_info_raw: Optional[Dict[str, Any]] = None
         destination_info_raw: Optional[Dict[str, Any]] = None
         # Widened past the original kind=="training" gate: clone_huggingface /
-        # clone_civitai are @inference_function but still need destination_repo
+        # clone_civitai are @inference but still need destination_repo
         # + job_id in execution_hints so publish_repo_revision can open a repo
         # job scope at finalize time. Actual file uploads continue to route
         # through media (see save_checkpoint — we intentionally don't lift to
@@ -3610,7 +4634,7 @@ class Worker:
 
         # Issue #1 (slim-request-context): pick the kind-specific subclass.
         # Inference functions get the bare RequestContext (no producer-contract
-        # methods); @training_function handlers get ConversionContext (default)
+        # methods); @conversion handlers get ConversionContext (default)
         # or DatasetContext (kind=='dataset-generation*'). Trainer-class
         # endpoints route through a separate runtime (entrypoint.py) and don't
         # touch this code path. The handler's typed annotation
@@ -3625,6 +4649,11 @@ class Worker:
             else:
                 from .request_context import ConversionContext
                 ctx_cls = ConversionContext
+        elif conversion_spec is not None:
+            # #332: class-shape conversion / training / dataset endpoints.
+            # The register-time inspector resolved the ctx subclass already
+            # and stored it on the spec — honor it.
+            ctx_cls = conversion_spec.ctx_class or RequestContext
 
         ctx = ctx_cls(
             request_id,
@@ -3680,6 +4709,21 @@ class Worker:
                   return # Avoid starting duplicate thread
              active_count_at_start = len(self._active_requests)
              local_queued_count_at_start = self._job_queue.qsize()
+             # #322/#273: surface which dispatch archetype handled this request
+             # so the per-request TTFT/ITL fields downstream (in
+             # `_request_observations`) can attribute timing to the correct
+             # leg. legacy = `@inference` shape; batched = BatchedWorker;
+             # serial = SerialWorker; training = `@conversion`.
+             if batched_spec is not None:
+                 archetype = "BatchedWorker"
+             elif serial_spec is not None:
+                 archetype = "SerialWorker"
+             elif conversion_spec is not None:
+                 archetype = "ConversionWorker"
+             elif training_fn is not None:
+                 archetype = "training_function"
+             else:
+                 archetype = "legacy_inference_function"
              self._active_requests[request_id] = ctx
              self._request_observations[request_id] = {
                  "release_id": self.release_id,
@@ -3689,6 +4733,7 @@ class Worker:
                  "active_count_at_start": active_count_at_start,
                  "local_queued_count_at_start": local_queued_count_at_start,
                  "enqueued_at": time.monotonic(),
+                 "archetype": archetype,
              }
 
         # Queue execution locally to keep the receive loop responsive and report
@@ -3699,9 +4744,29 @@ class Worker:
         if training_fn is not None:
             target = self._execute_training_request
             args = (ctx, function_name, training_fn, input_payload)
+        elif batched_spec is not None:
+            # #273: BatchedWorker path. Schedule the async invocation on the
+            # dedicated asyncio loop and return immediately; the loop drives
+            # the engine + emits IncrementalTokenDelta typed wire events. The
+            # job_queue task is the lightweight "submit" call — the heavy
+            # work runs on the loop thread.
+            target = self._submit_batched_request
+            args = (ctx, batched_spec, input_payload)
+        elif serial_spec is not None:
+            # #322/#328: SerialWorker path. Sync `@inference` class — runs
+            # on the job_executor thread pool (same pool as the legacy
+            # function-shape `_execute_request` path).
+            target = self._execute_serial_class_request
+            args = (ctx, serial_spec, input_payload)
+        elif conversion_spec is not None:
+            # #332: conversion / training / dataset class-shape path.
+            # Sync class that returns ProducedFlavors; library uploads +
+            # publishes a revision via `_finalize_produced_variants`.
+            target = self._execute_conversion_class_request
+            args = (ctx, conversion_spec, input_payload)
         else:
             target = self._execute_request
-            args = (ctx, spec, input_payload)
+            args = (ctx, spec, input_payload, request)
         try:
             self._job_queue.put_nowait((target, args, request_id, time.monotonic()))
         except queue.Full:
@@ -3733,11 +4798,1351 @@ class Worker:
             else:
                 logger.warning(f"Could not interrupt request request_id={request_id}: Not found in active requests.")
 
+        # #273: BatchedWorker — propagate cancel into engine.abort(request_id)
+        # so the continuous-batching scheduler evicts the request and frees
+        # KV blocks at the next iteration boundary. Idempotent — if the
+        # request never reached the engine (e.g. cancel arrived before
+        # _submit_batched_request scheduled the coroutine) this is a no-op.
+        with self._batched_inflight_lock:
+            inflight = self._batched_inflight.pop(request_id, None)
+        if inflight is not None:
+            engine = inflight.get("engine")
+            loop = self._batched_loop
+            if engine is not None and loop is not None and loop.is_running():
+                try:
+                    asyncio.run_coroutine_threadsafe(engine.abort(request_id), loop)
+                except Exception:
+                    logger.exception(
+                        "Failed to schedule engine.abort for rid=%s", request_id
+                    )
+
+    # ========================================================================
+    # #273 BatchedWorker dispatch path.
+    # ========================================================================
+    #
+    # The BatchedWorker shape (decorator `@inference(runtime="sglang"|"vllm")`)
+    # hosts a long-lived continuous-batching engine inside the worker
+    # process. The engine drives many concurrent requests on a single
+    # forward pass; new requests join the batch at iteration boundaries.
+    # This worker code is the wire-level glue:
+    #
+    #   1. `_ensure_batched_loop` lazily spins up a dedicated asyncio loop
+    #      on its own thread. All engine + tenant async code runs there.
+    #
+    #   2. `_start_one_batched_instance` is the per-class one-shot setup:
+    #      construct the engine, await `engine.start(model_path)`, then
+    #      `await instance.setup(engine=engine)` + `await instance.warmup()`.
+    #      Memoized on the instance record; second call is a no-op.
+    #
+    #   3. `_submit_batched_request` runs on the job_queue worker thread.
+    #      It schedules `_execute_batched_request_async` onto the loop,
+    #      records the inflight tuple, and returns. The loop drives the
+    #      tenant's async iterator, encodes each yielded delta to
+    #      IncrementalTokenDelta, and emits Done/Error at termination.
+    #
+    #   4. `_handle_interrupt_request` cancels the asyncio task AND calls
+    #      `engine.abort(rid)` so the engine evicts the request and the
+    #      KV blocks free at the next batch iteration.
+    #
+    #   5. `_handle_worker_drain_cmd` awaits inflight engine work then
+    #      calls `instance.shutdown()` exactly once per registered class.
+
+    def _ensure_batched_loop(self) -> asyncio.AbstractEventLoop:
+        """Lazy-init the BatchedWorker asyncio loop + its dedicated thread.
+
+        Threadsafe; idempotent. Returns the loop instance once it's running.
+        """
+        if self._batched_loop is not None and self._batched_loop.is_running():
+            return self._batched_loop
+
+        loop_ready = threading.Event()
+        loop_box: Dict[str, asyncio.AbstractEventLoop] = {}
+
+        def _run_loop() -> None:
+            loop = asyncio.new_event_loop()
+            loop_box["loop"] = loop
+            asyncio.set_event_loop(loop)
+            loop_ready.set()
+            try:
+                loop.run_forever()
+            finally:
+                # Close the loop once stopped. Pending tasks should be
+                # cancelled before we get here.
+                try:
+                    pending = asyncio.all_tasks(loop)
+                    for t in pending:
+                        t.cancel()
+                except Exception:
+                    pass
+                try:
+                    loop.close()
+                except Exception:
+                    pass
+
+        thread = threading.Thread(
+            target=_run_loop,
+            name="gen-worker-batched-loop",
+            daemon=True,
+        )
+        thread.start()
+        loop_ready.wait(timeout=5.0)
+        loop = loop_box.get("loop")
+        if loop is None:
+            raise RuntimeError("BatchedWorker asyncio loop failed to start")
+        self._batched_loop = loop
+        self._batched_loop_thread = thread
+        logger.info("BatchedWorker asyncio loop started on dedicated thread")
+        return loop
+
+    def _resolve_batched_model_path(self, ep_spec: Any) -> str:
+        """Resolve the on-disk model_path the engine should load.
+
+        Reads the @inference(models={"engine": <Repo>}) declaration on
+        the class. v1 path: read the canonical ref, look up the tensorhub
+        CAS snapshot dir if one already exists, otherwise pass the raw
+        ref through (SGLang/vLLM both accept HuggingFace org/repo refs
+        and will pull through their own HF caching).
+
+        Future: tighten this to always materialize through the worker's
+        downloader so the model_path is a local directory the engine can
+        mmap. For #273 v1 we accept either local-dir or remote-ref since
+        SGLang and vLLM both handle both shapes.
+        """
+        models = dict(getattr(ep_spec, "models", {}) or {})
+        if not models:
+            raise ValueError(
+                "BatchedWorker class declared no models={} mapping — "
+                "@inference(models={'engine': Repo('owner/repo')}) is required "
+                "so the SDK can resolve a model_path for engine.start()."
+            )
+        # Prefer the "engine" key by convention; fall back to first entry.
+        binding = models.get("engine") or next(iter(models.values()))
+        ref = getattr(binding, "ref", None)
+        if not isinstance(ref, str) or not ref.strip():
+            raise ValueError(
+                "BatchedWorker class models[...] binding has no .ref attribute"
+            )
+        ref = ref.strip()
+        # If it's a tensorhub-style ref (`cozy:owner/repo[:tag][@digest]`),
+        # try to resolve via the worker's existing snapshot machinery.
+        try:
+            canon = _canonicalize_model_ref_string(ref)
+            cache_dir = tensorhub_cas_dir()
+            local = self._try_find_existing_cozy_snapshot_dir(canon, cache_dir)
+            if local is not None:
+                return str(local)
+        except Exception:
+            # Best-effort — fall through to raw ref.
+            pass
+        # Strip "hf:" / "cozy:" prefix if present so SGLang/vLLM get the
+        # bare HF org/repo string they expect for HuggingFace pulls.
+        for prefix in ("hf:", "huggingface:"):
+            if ref.lower().startswith(prefix):
+                ref = ref[len(prefix) :]
+                break
+        return ref
+
+    async def _start_one_batched_instance(self, rec: Dict[str, Any]) -> None:
+        """One-shot per-class setup: SDK engine.start (when adopted) →
+        instance.setup(**resolved_models[, engine=…]) → warmup.
+
+        Setup contract for the BatchedWorker shape:
+          1. Resolve every Repo-style binding declared on @inference(models={...})
+             to a local snapshot dir (or ref string) via the same path SerialWorker
+             uses (_resolve_serial_model_paths), so tenants get materialized model
+             paths as kwargs matching their setup() signature.
+          2. Match resolved kwargs against the tenant's setup() signature. If the
+             tenant declared `engine` as a kwarg (or accepts **kwargs), construct
+             the SDK engine wrapper and pass it. Otherwise the tenant owns engine
+             construction inside setup() — skip make_engine entirely.
+          3. Call `await setup(**filtered_kwargs)` then optional `warmup()`.
+        """
+        if rec.get("started"):
+            return
+        ep_spec = rec["endpoint_spec"]
+        runtime = str(rec["runtime"])
+
+        instance = rec["instance"]
+        setup_fn = getattr(instance, "setup", None)
+        if setup_fn is None:
+            raise ValueError(
+                f"BatchedWorker class {rec.get('cls_name')!r} missing setup() method"
+            )
+
+        # Inspect the tenant's setup signature so we only pass kwargs it declares.
+        try:
+            sig = inspect.signature(setup_fn)
+        except (TypeError, ValueError):
+            sig = None
+        declared_kw: set[str] = set()
+        accepts_var_kw = False
+        if sig is not None:
+            for pname, p in sig.parameters.items():
+                if p.kind == inspect.Parameter.VAR_KEYWORD:
+                    accepts_var_kw = True
+                elif p.kind in (
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    inspect.Parameter.KEYWORD_ONLY,
+                ):
+                    declared_kw.add(pname)
+
+        # Resolve declared model bindings to local paths / refs. Reuses the
+        # SerialWorker resolver — same mechanism (canonicalize → CAS lookup →
+        # fall back to bare ref). Skips Dispatch bindings that resolve at
+        # request time.
+        resolved_models = self._resolve_serial_model_paths(ep_spec)
+
+        # Build setup kwargs: each resolved binding goes in if the tenant
+        # declared a kwarg by that name (or accepts **kwargs). Bindings the
+        # tenant didn't ask for are silently dropped — they may have been
+        # declared for a different lifecycle hook.
+        setup_kwargs: Dict[str, Any] = {}
+        for key, value in resolved_models.items():
+            if accepts_var_kw or key in declared_kw:
+                setup_kwargs[key] = value
+
+        # SDK-managed engine: only construct + start it if the tenant opted in
+        # by declaring `engine` as a setup kwarg (or accepts **kwargs). Tenants
+        # like chatterbox-tts manage their own AsyncLLMEngine inside setup and
+        # don't take `engine=` — for those, skip make_engine entirely.
+        wants_sdk_engine = accepts_var_kw or ("engine" in declared_kw)
+        engine: Any = None
+        if wants_sdk_engine:
+            from .engines import make_engine
+
+            model_path = self._resolve_batched_model_path(ep_spec)
+            engine = make_engine(runtime)
+            rec["engine"] = engine
+            logger.info(
+                "BatchedWorker SDK engine starting: class=%s runtime=%s model_path=%s",
+                rec.get("cls_name"), runtime, model_path,
+            )
+            await engine.start(model_path)
+            setup_kwargs["engine"] = engine
+
+        logger.info(
+            "BatchedWorker setup starting: class=%s runtime=%s sdk_engine=%s setup_kwargs=%s",
+            rec.get("cls_name"), runtime, wants_sdk_engine, sorted(setup_kwargs.keys()),
+        )
+        # Emit `warming` phase before setup() — model load / engine init is
+        # the longest part of startup and the orchestrator surfaces this to
+        # callers (#322 cross-cutting hooks).
+        self._emit_startup_phase("warming", status="ok", scheduler_addr=self.scheduler_addr)
+
+        await setup_fn(**setup_kwargs)
+
+        # Optional warmup() — async or sync.
+        warmup_fn = getattr(instance, "warmup", None)
+        if callable(warmup_fn):
+            res = warmup_fn()
+            if inspect.iscoroutine(res):
+                await res
+        rec["started"] = True
+        logger.info(
+            "BatchedWorker setup complete: class=%s runtime=%s",
+            rec.get("cls_name"), runtime,
+        )
+
+    def _submit_batched_request(
+        self,
+        ctx: RequestContext,
+        spec: _BatchedWorkerSpec,
+        input_payload: bytes,
+    ) -> None:
+        """Job-queue target: schedule a BatchedWorker job on the asyncio loop.
+
+        Runs on the synchronous job-dispatch thread. We don't block here —
+        coroutine work runs on the BatchedWorker loop. The active_requests
+        bookkeeping for cleanup happens in the async wrapper.
+        """
+        request_id = ctx.request_id
+        try:
+            loop = self._ensure_batched_loop()
+        except Exception as exc:
+            logger.exception("Failed to start BatchedWorker loop: %s", exc)
+            self._send_request_result(
+                request_id, False, None, "internal", True,
+                "batched_worker_loop_unavailable", str(exc),
+            )
+            return
+
+        # Find the instance record for this spec so the async wrapper can
+        # call setup() lazily on first dispatch.
+        rec = None
+        for r in self._batched_instances:
+            if r.get("instance") is spec.instance:
+                rec = r
+                break
+        if rec is None:
+            err = f"BatchedWorker instance record missing for function={spec.name}"
+            logger.error(err)
+            self._send_request_result(
+                request_id, False, None, "internal", False,
+                "internal_error", err,
+            )
+            return
+
+        coro = self._execute_batched_request_async(ctx, spec, rec, input_payload)
+        future = asyncio.run_coroutine_threadsafe(coro, loop)
+
+        # Track inflight so InterruptJobCommand can call engine.abort.
+        with self._batched_inflight_lock:
+            self._batched_inflight[request_id] = {
+                "engine": rec.get("engine"),
+                "future": future,
+                "function_name": spec.name,
+            }
+
+    async def _execute_batched_request_async(
+        self,
+        ctx: RequestContext,
+        spec: _BatchedWorkerSpec,
+        rec: Dict[str, Any],
+        input_payload: bytes,
+    ) -> None:
+        """Drive one BatchedWorker request to completion.
+
+        Lifecycle on the loop thread:
+          1. Lazy-start the engine + instance.setup the first time we see
+             a request for this class.
+          2. msgspec-decode the payload.
+          3. Call the tenant's `async def fn(ctx, payload) -> AsyncIterator[Delta]`.
+          4. async-iterate the generator; encode each yielded item to
+             IncrementalTokenDelta and emit it on the wire.
+          5. Emit IncrementalTokenStreamDone on clean termination or
+             IncrementalTokenStreamError on exception.
+          6. Send the terminal JobExecutionResult.
+        """
+        request_id = ctx.request_id
+        success = False
+        error_type = ""
+        retryable = False
+        safe_message = ""
+        error_message = ""
+        seq = 0
+        last_item_id = "item-0"
+
+        # Lazy-start the engine + instance on first dispatch. We hold the
+        # _started flag on the instance record so concurrent first-dispatches
+        # don't double-init. Use the loop's lock semantics (the loop is
+        # single-threaded so a simple flag-check is safe; but if multiple
+        # in-flight starts race, the second await on the started flag
+        # serializes naturally).
+        if not rec.get("started"):
+            try:
+                await self._start_one_batched_instance(rec)
+            except Exception as exc:
+                logger.exception(
+                    "BatchedWorker startup failed (rid=%s class=%s): %s",
+                    request_id, rec.get("cls_name"), exc,
+                )
+                self._send_request_result(
+                    request_id, False, None, "internal", True,
+                    self._sanitize_safe_message(str(exc) or "engine startup failed"),
+                    repr(exc),
+                )
+                with self._batched_inflight_lock:
+                    self._batched_inflight.pop(request_id, None)
+                with self._active_requests_lock:
+                    self._active_requests.pop(request_id, None)
+                return
+
+        # Ensure the inflight engine reference matches (in case start filled it).
+        with self._batched_inflight_lock:
+            inflight = self._batched_inflight.get(request_id)
+            if inflight is not None:
+                inflight["engine"] = rec.get("engine")
+
+        self._emit_request_event(
+            request_id,
+            "request.started",
+            {
+                "function_name": spec.name,
+                "runtime": spec.runtime,
+                "input_bytes": len(input_payload or b""),
+            },
+        )
+
+        try:
+            if ctx.is_canceled():
+                raise CanceledError("canceled")
+
+            input_obj = msgspec.msgpack.decode(input_payload, type=spec.payload_type)
+
+            # Build call kwargs honoring the method's declared param names.
+            call_kwargs: Dict[str, Any] = {
+                spec.ctx_param: ctx,
+                spec.payload_param: input_obj,
+            }
+            t_infer0 = time.monotonic()
+            iterator_obj = spec.method(**call_kwargs)
+
+            if not hasattr(iterator_obj, "__aiter__"):
+                # tenant returned an awaitable (single-shot async). Resolve
+                # and treat the value as the sole yielded delta.
+                if inspect.isawaitable(iterator_obj):
+                    one = await iterator_obj
+                    iterator_obj = _single_item_async_iter(one)
+                else:
+                    raise TypeError(
+                        "BatchedWorker method must return an AsyncIterator; "
+                        f"got {type(iterator_obj).__name__}"
+                    )
+
+            async for item in iterator_obj:
+                if ctx.is_canceled():
+                    raise CanceledError("canceled")
+                if spec.delta_type is not None and not isinstance(item, spec.delta_type):
+                    raise TypeError(
+                        f"delta item type {type(item)!r} != {spec.delta_type!r}"
+                    )
+                # #327: peel off audio_chunk + audio_codec from the struct
+                # so they travel on the typed proto slots, not base64-encoded
+                # inside payload_json.
+                audio_chunk, audio_codec = self._extract_audio_from_delta(item)
+                payload_dict = msgspec.to_builtins(item)
+                if isinstance(payload_dict, dict) and audio_chunk:
+                    payload_dict.pop("audio_chunk", None)
+                    payload_dict.pop("audio_codec", None)
+                raw = json.dumps(
+                    payload_dict, separators=(",", ":"), sort_keys=True
+                ).encode("utf-8")
+                item_id = "item-0"
+                delta_text = ""
+                if isinstance(payload_dict, dict):
+                    iid = payload_dict.get("item_id")
+                    if isinstance(iid, str) and iid.strip():
+                        item_id = iid.strip()
+                    for key in (
+                        "delta_text",
+                        "delta",
+                        "token",
+                        "text",
+                        "content",
+                        "caption_delta",
+                    ):
+                        val = payload_dict.get(key)
+                        if isinstance(val, str) and val.strip():
+                            delta_text = val.strip()
+                            break
+                seq += 1
+                last_item_id = item_id
+                ts_ms = int(time.time() * 1000)
+                if not self._emit_incremental_delta_typed(
+                    request_id=request_id,
+                    function_name=spec.name,
+                    item_id=item_id,
+                    sequence=seq,
+                    timestamp_unix_ms=ts_ms,
+                    delta_text=delta_text,
+                    payload_json=raw,
+                    audio_chunk=audio_chunk,
+                    audio_codec=audio_codec,
+                ):
+                    logger.warning(
+                        "IncrementalTokenDelta proto class unavailable; dropping "
+                        "delta rid=%s seq=%d",
+                        request_id, seq,
+                    )
+
+            if ctx.is_canceled():
+                raise CanceledError("canceled")
+
+            # Stream-end marker (typed).
+            done_ts_ms = int(time.time() * 1000)
+            if not self._emit_incremental_done_typed(
+                request_id=request_id,
+                function_name=spec.name,
+                item_id=last_item_id,
+                sequence=seq + 1,
+                timestamp_unix_ms=done_ts_ms,
+            ):
+                logger.warning(
+                    "IncrementalTokenStreamDone proto class unavailable; cannot "
+                    "signal stream end rid=%s",
+                    request_id,
+                )
+
+            self._emit_request_event(
+                request_id,
+                "request.inference.completed",
+                {
+                    "function_name": spec.name,
+                    "duration_ms": int((time.monotonic() - t_infer0) * 1000),
+                    "deltas": seq,
+                },
+            )
+            success = True
+
+        except Exception as e:
+            logger.exception("BatchedWorker request %s failed: %s", request_id, e)
+            error_type, retryable, safe_message, error_message = self._map_exception(e)
+            self._emit_request_event(
+                request_id,
+                "request.failed",
+                {
+                    "function_name": spec.name,
+                    "error_type": error_type,
+                    "retryable": bool(retryable),
+                    "safe_message": safe_message,
+                },
+            )
+            try:
+                if not self._emit_incremental_error_typed(
+                    request_id=request_id,
+                    function_name=spec.name,
+                    item_id=last_item_id,
+                    sequence=seq + 1,
+                    timestamp_unix_ms=int(time.time() * 1000),
+                    error_message=safe_message,
+                ):
+                    logger.warning(
+                        "IncrementalTokenStreamError proto class unavailable; "
+                        "cannot signal stream error rid=%s",
+                        request_id,
+                    )
+            except Exception:
+                pass
+            # Best-effort engine.abort on any failure path so the engine
+            # doesn't keep a half-finished generation alive.
+            engine = rec.get("engine")
+            if engine is not None:
+                try:
+                    await engine.abort(request_id)
+                except Exception:
+                    pass
+
+        finally:
+            with self._batched_inflight_lock:
+                self._batched_inflight.pop(request_id, None)
+            with self._active_requests_lock:
+                self._active_requests.pop(request_id, None)
+            self._send_request_result(
+                request_id,
+                success,
+                b"" if success else None,
+                error_type,
+                bool(retryable),
+                safe_message,
+                error_message,
+            )
+
+    # ========================================================================
+    # SerialWorker class-shape dispatch path (#322/#324/#328).
+    # ========================================================================
+    #
+    # SerialWorker = sync `@inference` class. Each request fully owns the GPU
+    # end-to-end. Compared to the legacy function-shape (`_execute_request`)
+    # this path is lighter because models are bound at class-level
+    # (loaded once via `setup(**models)`) rather than per-request injection.
+    #
+    # #324: when the class declares both `batch_window_ms` and `max_batch`,
+    # concurrent requests are routed through a `MicroBatchAggregator` that
+    # collects them in a time window and fires ONE batched forward call.
+    # Auto-disabled if any attached cache wrapper has
+    # `breaks_cross_request_batching=True` (TeaCache, nunchaku #597).
+
+    def _make_aggregator_call_fn(
+        self,
+        slug: str,
+        sspec: "_SerialWorkerSpec",
+    ) -> Callable[[List[Any]], Any]:
+        """Return a closure the MicroBatchAggregator invokes with a payload list.
+
+        The closure calls the tenant's bound `@inference.function` method with
+        the LIST of decoded payloads as the payload argument. The tenant is
+        responsible for batching shape handling — see
+        ``gen_worker.api.micro_batch`` for the contract.
+
+        ``ctx`` is passed as ``None`` when batched: per-caller RequestContexts
+        can't all flow through one call, and per-caller bookkeeping
+        (cancellation, events) is handled outside the aggregator's call_fn.
+        Tenants whose batched body needs ctx should either avoid the
+        aggregator or test for ``ctx is None``.
+        """
+        method = sspec.method
+
+        def _call(payloads: List[Any]) -> Any:
+            return method(None, payloads)
+
+        _call.__name__ = f"micro_batch_call_{slug}"
+        return _call
+
+    def _ensure_serial_class_started(self, rec: Dict[str, Any]) -> None:
+        """Lazy-call ``instance.setup(**models)`` once per SerialWorker class (#322/#328).
+
+        Runs under the per-record lock so concurrent first-requests serialize
+        the cold-start. After setup, re-scans for batch-breaking cache wrappers
+        and drops any aggregator that became invalid (the tenant's setup()
+        body is where TeaCache typically attaches).
+
+        Idempotent — second call is a no-op.
+
+        Lifecycle:
+          1. Confirm ``TORCHINDUCTOR_CACHE_DIR`` is set (defensive re-check —
+             discovery time should have set it, but env scrubbing in between
+             would otherwise silently disable persistent torch.compile cache).
+          2. Resolve every ``ep_spec.models[key]`` binding to a local path
+             (snapshot dir if cached, otherwise canonical ref string).
+          3. Call ``instance.setup(**models)`` so tenants declaring
+             ``def setup(self, **models)`` get the model_path-resolved kwargs.
+          4. Emit the typed ``warming`` startup phase signal so operators
+             can tell "30s into a 2min compile" apart from "just slow."
+          5. Call ``instance.warmup()`` if defined; transition implicit to
+             ``ready`` (orchestrator advertises ready once warmup returns).
+          6. Re-scan for batch-breaking cache wrappers (tenants typically
+             attach TeaCache inside setup()).
+        """
+        if rec.get("started"):
+            return
+        with rec["started_lock"]:
+            if rec.get("started"):
+                return
+            instance = rec["instance"]
+            ep_spec = rec.get("endpoint_spec")
+            cls_name = rec.get("cls_name") or type(instance).__name__
+            setup_fn = getattr(instance, "setup", None)
+            if setup_fn is None:
+                raise ValueError(
+                    f"@inference SerialWorker class {cls_name!r}: missing "
+                    "setup() method"
+                )
+
+            # #322 cross-cutting hook: persistent torch.compile cache. The env
+            # var must be set BEFORE setup() runs. Idempotent — already set at
+            # discovery time, but a defensive re-check covers env scrubbing
+            # between discovery and first dispatch.
+            self._configure_torchinductor_cache_dir()
+
+            # #328 model binding → setup() kwargs. Resolve every binding in
+            # ep_spec.models to a local path the loader can pick up. Tenants
+            # whose setup signature is ``def setup(self, **models)`` load with
+            # the resolved kwargs; classes whose setup is bare ``def setup(self)``
+            # still work because models_kwargs is empty when ep_spec.models
+            # is empty.
+            models_kwargs = self._resolve_serial_model_paths(ep_spec)
+
+            logger.info(
+                "SerialWorker setup starting: class=%s models=%s",
+                cls_name, sorted(models_kwargs.keys()),
+            )
+            try:
+                setup_fn(**models_kwargs)
+            except TypeError as exc:
+                # Setup signature doesn't accept the resolved kwargs. Fall
+                # back to bare setup() so classes that intentionally bind
+                # models elsewhere still load. The next request may fail
+                # if setup() actually needed those kwargs.
+                logger.warning(
+                    "@inference SerialWorker class %r: setup(**%s) raised "
+                    "TypeError %r; retrying with bare setup()",
+                    cls_name, sorted(models_kwargs.keys()), exc,
+                )
+                try:
+                    setup_fn()
+                except Exception as exc2:  # noqa: BLE001
+                    logger.exception(
+                        "@inference SerialWorker class %r: bare setup() also "
+                        "raised; continuing — the next request may fail. err=%r",
+                        cls_name, exc2,
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.exception(
+                    "@inference SerialWorker class %r: setup() raised; "
+                    "continuing — the next request may fail. err=%r",
+                    cls_name, exc,
+                )
+
+            warmup_fn = getattr(instance, "warmup", None)
+            if callable(warmup_fn):
+                # Emit the typed ``warming`` startup phase (#322 — added to
+                # WorkerStartupPhase enum, ordered between pipeline_loading
+                # and ready). Operators see "warming" instead of "just slow"
+                # while torch.compile flushes graphs.
+                self._emit_startup_phase(
+                    "warming",
+                    status="ok",
+                    scheduler_addr=getattr(self, "scheduler_addr", ""),
+                    class_name=cls_name,
+                )
+                try:
+                    warmup_fn()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "@inference SerialWorker class %r: warmup() raised "
+                        "%r; continuing", cls_name, exc,
+                    )
+
+            # #324: re-scan for batch-breaking cache wrappers now that setup()
+            # has attached them. Drop any aggregator that became invalid.
+            from .api.micro_batch import should_disable_batching
+
+            disable_reason = should_disable_batching(instance)
+            if disable_reason:
+                dropped: List[str] = []
+                for slug, sspec in list(self._serial_class_specs.items()):
+                    if sspec.instance is instance and slug in self._micro_batch_aggregators:
+                        agg = self._micro_batch_aggregators.pop(slug, None)
+                        if agg is not None:
+                            try:
+                                agg.shutdown()
+                            except Exception:
+                                pass
+                        dropped.append(slug)
+                if dropped:
+                    logger.warning(
+                        "MicroBatch aggregator(s) auto-disabled after setup() "
+                        "on class=%s: %s. Reason: %s",
+                        cls_name, ", ".join(dropped), disable_reason,
+                    )
+
+            rec["started"] = True
+            logger.info(
+                "SerialWorker setup complete: class=%s functions=%d "
+                "aggregators=%d",
+                cls_name,
+                sum(1 for s in self._serial_class_specs.values()
+                    if s.instance is instance),
+                sum(1 for slug, _ in self._micro_batch_aggregators.items()
+                    if any(
+                        self._serial_class_specs[slug].instance is instance
+                        for slug in self._micro_batch_aggregators
+                        if slug in self._serial_class_specs
+                    )),
+            )
+
+    def _find_serial_record(self, instance: Any) -> Optional[Dict[str, Any]]:
+        for rec in self._serial_class_instances:
+            if rec.get("instance") is instance:
+                return rec
+        return None
+
+    def _resolve_serial_model_paths(self, ep_spec: Any) -> Dict[str, Any]:
+        """Resolve every binding in ``ep_spec.models`` to a local path
+        suitable for ``instance.setup(**models)`` (#322/#328).
+
+        Returns ``{kwarg_name: model_path}``. Each value is the local
+        snapshot directory if the model is already in the tensorhub CAS
+        cache, otherwise the canonicalized ref string (which most loaders
+        — diffusers / transformers — accept directly).
+
+        Bindings without a ``.ref`` attribute (Dispatch bindings — per-
+        request lookup) are skipped here; tenants who use Dispatch
+        bindings on SerialWorker resolve at request time via
+        ``ctx.resolved_repos_by_id``.
+        """
+        out: Dict[str, Any] = {}
+        if ep_spec is None:
+            return out
+        models = dict(getattr(ep_spec, "models", {}) or {})
+        for key, binding in models.items():
+            ref = getattr(binding, "ref", None)
+            if not isinstance(ref, str) or not ref.strip():
+                # Dispatch bindings (or anything without a static .ref)
+                # are resolved at request time, not setup() time.
+                continue
+            bare_ref = ref.strip()
+            try:
+                canon = _canonicalize_model_ref_string(bare_ref)
+                cache_dir = tensorhub_cas_dir()
+                local = self._try_find_existing_cozy_snapshot_dir(canon, cache_dir)
+                if local is not None:
+                    out[key] = str(local)
+                    continue
+            except Exception:
+                # Fall through to ref-as-string (loader resolves via own cache).
+                pass
+            # Strip "hf:" / "huggingface:" prefix so the underlying loader
+            # sees the bare org/repo string.
+            for prefix in ("hf:", "huggingface:"):
+                if bare_ref.lower().startswith(prefix):
+                    bare_ref = bare_ref[len(prefix):]
+                    break
+            out[key] = bare_ref
+        return out
+
+    def _shutdown_serial_workers(self) -> None:
+        """Call ``instance.shutdown()`` on every registered SerialWorker class.
+
+        Symmetric to ``_shutdown_batched_workers`` but synchronous — no
+        asyncio loop to drive, just direct method calls on the singleton
+        instance. Idempotent: each rec's shutdown_done flag guards against
+        double-call (drain + stop both invoke this; we want shutdown()
+        to run exactly once per class).
+        """
+        for rec in self._serial_class_instances:
+            if rec.get("shutdown_done"):
+                continue
+            instance = rec.get("instance")
+            sd = getattr(instance, "shutdown", None)
+            if callable(sd):
+                try:
+                    res = sd()
+                    # Tenants might write shutdown() as async by mistake on a
+                    # sync class. We can't await here (we're sync). Log + close
+                    # the coroutine to avoid the un-awaited-coroutine warning.
+                    if inspect.iscoroutine(res):
+                        logger.warning(
+                            "SerialWorker class=%s shutdown() returned a "
+                            "coroutine — sync shutdown expected on the "
+                            "SerialWorker archetype. If your endpoint needs "
+                            "async shutdown, use BatchedWorker (async class "
+                            "+ runtime=) instead.",
+                            rec.get("cls_name"),
+                        )
+                        try:
+                            res.close()
+                        except Exception:
+                            pass
+                except Exception:
+                    logger.exception(
+                        "SerialWorker instance.shutdown raised (class=%s); continuing",
+                        rec.get("cls_name"),
+                    )
+            rec["shutdown_done"] = True
+
+    def _execute_serial_class_request(
+        self,
+        ctx: RequestContext,
+        sspec: "_SerialWorkerSpec",
+        input_payload: bytes,
+    ) -> None:
+        """Run a SerialWorker class-shape request on the job-executor thread.
+
+        Mirrors ``_execute_request`` but for the class-shape SerialWorker.
+        Skipping the injection pipeline (models bind once at setup time);
+        routing optionally through the cross-request micro-batching
+        aggregator when one is registered for this function.
+        """
+        request_id = ctx.request_id
+        output_payload: Optional[bytes] = None
+        error_type: str = ""
+        safe_message: str = ""
+        error_message: str = ""
+        retryable = False
+        success = False
+
+        rm = RunMetricsV1(
+            request_id=str(request_id or ""),
+            function_name=str(sspec.name or ""),
+            required_models=list(getattr(ctx, "required_models", []) or []),
+            resolved_repos_by_id=getattr(ctx, "resolved_repos_by_id", None) or None,
+        )
+        try:
+            setattr(ctx, "_run_metrics", rm)
+        except Exception:
+            pass
+        rm.mark_compute_started()
+
+        self._emit_request_event(
+            request_id,
+            "request.started",
+            {
+                "function_name": str(sspec.name or ""),
+                "required_flavor_refs": list(getattr(ctx, "required_models", []) or []),
+                "execution_hints": getattr(ctx, "execution_hints", {}),
+                "archetype": "SerialWorker",
+            },
+        )
+
+        self._gpu_busy_enter()
+        t_infer0 = time.monotonic()
+        try:
+            if ctx.is_canceled():
+                raise CanceledError("canceled")
+
+            # Lazy setup on first dispatch.
+            rec = self._find_serial_record(sspec.instance)
+            if rec is None:
+                raise RuntimeError(
+                    f"SerialWorker instance for {sspec.name!r} not registered"
+                )
+            self._ensure_serial_class_started(rec)
+
+            if ctx.is_canceled():
+                raise CanceledError("canceled")
+
+            input_obj = msgspec.msgpack.decode(input_payload, type=sspec.payload_type)
+
+            # #324: if a micro-batch aggregator is registered for this slug,
+            # route through it. Otherwise call the bound method directly.
+            aggregator = self._micro_batch_aggregators.get(sspec.name)
+            if aggregator is not None and sspec.output_mode == "single":
+                # Aggregator drains on the BatchedWorker asyncio loop —
+                # reusing it means one shared loop hosts every aggregator
+                # in the worker process (no per-function thread overhead).
+                loop = self._ensure_batched_loop()
+                if aggregator._loop is None:
+                    aggregator.start(loop)
+                # `submit` returns a concurrent.futures.Future. Block this
+                # job-executor thread on it (this is one of pool of threads
+                # — blocking is fine).
+                cfut = aggregator.submit(request_id, input_obj)
+                result = cfut.result()
+            else:
+                result = sspec.method(ctx, input_obj)
+
+            if ctx.is_canceled():
+                raise CanceledError("canceled")
+
+            if sspec.output_mode == "single":
+                if sspec.output_type is not None and not isinstance(result, sspec.output_type):
+                    raise TypeError(
+                        f"Function {sspec.name} returned {type(result)!r}, "
+                        f"expected {sspec.output_type!r}"
+                    )
+                output_payload = msgspec.msgpack.encode(msgspec.to_builtins(result))
+                if self.max_output_bytes > 0 and len(output_payload) > self.max_output_bytes:
+                    raise OutputTooLargeError(
+                        size_bytes=len(output_payload),
+                        max_bytes=self.max_output_bytes,
+                    )
+                success = True
+            else:
+                # Incremental: iterate the sync generator and emit deltas.
+                max_delta_bytes = 65536
+                count = 0
+                last_item_id = "item-0"
+                if not isinstance(result, cabc.Iterable):
+                    raise TypeError(
+                        "incremental output functions must return an iterator/iterable"
+                    )
+                for item in result:
+                    if ctx.is_canceled():
+                        raise CanceledError("canceled")
+                    if sspec.delta_type is not None and not isinstance(item, sspec.delta_type):
+                        raise TypeError(
+                            f"delta item type {type(item)!r} != {sspec.delta_type!r}"
+                        )
+                    # #327: peel off audio_chunk + audio_codec before JSON
+                    # serialization so audio bytes ride the typed proto slots.
+                    audio_chunk, audio_codec = self._extract_audio_from_delta(item)
+                    payload = msgspec.to_builtins(item)
+                    if isinstance(payload, dict) and audio_chunk:
+                        payload.pop("audio_chunk", None)
+                        payload.pop("audio_codec", None)
+                    raw = json.dumps(
+                        payload, separators=(",", ":"), sort_keys=True
+                    ).encode("utf-8")
+                    if max_delta_bytes > 0 and len(raw) > max_delta_bytes:
+                        raw = json.dumps(
+                            {"truncated": True},
+                            separators=(",", ":"), sort_keys=True,
+                        ).encode("utf-8")
+                    item_id = "item-0"
+                    delta_text = ""
+                    if isinstance(payload, dict):
+                        iid = payload.get("item_id")
+                        if isinstance(iid, str) and iid.strip():
+                            item_id = iid.strip()
+                        for key in (
+                            "delta_text", "delta", "token", "text", "content",
+                            "caption_delta",
+                        ):
+                            val = payload.get(key)
+                            if isinstance(val, str) and val.strip():
+                                delta_text = val.strip()
+                                break
+                    self._emit_incremental_delta_typed(
+                        request_id=request_id,
+                        function_name=sspec.name,
+                        item_id=item_id,
+                        sequence=count + 1,
+                        timestamp_unix_ms=int(time.time() * 1000),
+                        delta_text=delta_text,
+                        payload_json=raw,
+                        audio_chunk=audio_chunk,
+                        audio_codec=audio_codec,
+                    )
+                    last_item_id = item_id
+                    count += 1
+                self._emit_incremental_done_typed(
+                    request_id=request_id,
+                    function_name=sspec.name,
+                    item_id=last_item_id,
+                    sequence=count + 1,
+                    timestamp_unix_ms=int(time.time() * 1000),
+                )
+                output_payload = b""
+                success = True
+
+            try:
+                rm.inference_ms = int((time.monotonic() - t_infer0) * 1000)
+            except Exception:
+                pass
+            self._emit_request_event(
+                request_id,
+                "request.inference.completed",
+                {
+                    "function_name": sspec.name,
+                    "output_mode": sspec.output_mode,
+                    "duration_ms": int((time.monotonic() - t_infer0) * 1000),
+                    "archetype": "SerialWorker",
+                },
+            )
+        except Exception as e:
+            logger.exception("SerialWorker task %s failed: %s", request_id, e)
+            error_type, retryable, safe_message, error_message = self._map_exception(e)
+        finally:
+            self._gpu_busy_exit()
+            with self._active_requests_lock:
+                self._active_requests.pop(request_id, None)
+            self._send_request_result(
+                request_id,
+                success,
+                output_payload if success else None,
+                error_type,
+                bool(retryable),
+                safe_message,
+                error_message,
+            )
+
+    def _execute_conversion_class_request(
+        self,
+        ctx: "RequestContext",
+        cspec: "_ConversionWorkerSpec",
+        input_payload: bytes,
+    ) -> None:
+        """Run a class-shape conversion / training / dataset request (#332).
+
+        Mirrors ``_execute_training_request`` but for the class-shape
+        endpoint contract:
+
+          1. Lazy setup on first dispatch (reuses
+             ``_ensure_serial_class_started`` — same lifecycle as the
+             SerialWorker leg).
+          2. Materialize the source snapshot when the payload carries a
+             ``source.ref`` (reserved-name materialization done by
+             ``_materialize_source_for_training``).
+          3. Decode the wire payload into the method's payload type and
+             call ``method(ctx, payload)``.
+          4. Collect the returned/yielded ``ProducedFlavor`` items into a
+             list (the class-shape supports either ``Iterator`` or
+             ``list`` returns).
+          5. Hand the variants to ``_finalize_produced_variants`` —
+             upload each flavor's files, publish a revision via
+             ``publish_repo_revision`` (or ``publish_dataset_revision``
+             for the dataset kind).
+          6. Apply ``destination.tags`` against the produced checkpoint
+             (best-effort; non-fatal on failure).
+          7. Send a structured success response (empty msgpack map — the
+             durable outputs are the uploaded files + the job record).
+        """
+        request_id = ctx.request_id
+        output_payload: Optional[bytes] = None
+        error_type: str = ""
+        safe_message: str = ""
+        error_message: str = ""
+        retryable = False
+        success = False
+
+        function_name = str(cspec.name or "")
+
+        rm = RunMetricsV1(
+            request_id=str(request_id or ""),
+            function_name=function_name,
+            required_models=list(getattr(ctx, "required_models", []) or []),
+            resolved_repos_by_id=getattr(ctx, "resolved_repos_by_id", None) or None,
+        )
+        try:
+            setattr(ctx, "_run_metrics", rm)
+        except Exception:
+            pass
+        rm.mark_compute_started()
+        if rm.compute_started_at:
+            self._emit_worker_event_bytes(
+                request_id,
+                "metrics.compute.started",
+                safe_json_bytes({"at": rm.compute_started_at}),
+            )
+
+        self._emit_request_event(
+            request_id,
+            "request.started",
+            {
+                "function_name": function_name,
+                "required_flavor_refs": list(getattr(ctx, "required_models", []) or []),
+                "execution_hints": getattr(ctx, "execution_hints", {}),
+                "archetype": "ConversionWorker",
+                "endpoint_kind": cspec.endpoint_kind,
+                "sub_kind": cspec.sub_kind,
+            },
+        )
+
+        from .models.ref_downloader import (
+            reset_resolved_repos_by_id,
+            set_resolved_repos_by_id,
+        )
+
+        baseline = getattr(self, "_resolved_repos_by_id_baseline", None) or None
+        resolved_map = getattr(ctx, "resolved_repos_by_id", None) or baseline
+        resolved_tok = set_resolved_repos_by_id(resolved_map)
+
+        self._gpu_busy_enter()
+        t_infer0 = time.monotonic()
+        self._emit_request_event(
+            request_id,
+            "request.training.started",
+            {"function_name": function_name, "phase": cspec.endpoint_kind},
+        )
+
+        try:
+            if ctx.is_canceled():
+                raise CanceledError("canceled")
+
+            # Lazy setup on first dispatch — reuses the SerialWorker
+            # bootstrap helper (same lifecycle).
+            rec = self._find_serial_record(cspec.instance)
+            if rec is None:
+                raise RuntimeError(
+                    f"ConversionWorker instance for {cspec.name!r} not registered"
+                )
+            self._ensure_serial_class_started(rec)
+
+            if ctx.is_canceled():
+                raise CanceledError("canceled")
+
+            # Reserved-name source materialization. Populates
+            # ctx.source_path with the local snapshot dir so the tenant's
+            # generate() body can construct a Source handle on it.
+            src_info = getattr(ctx, "source", None) or {}
+            if isinstance(src_info, dict) and str(src_info.get("ref") or "").strip():
+                self._materialize_source_for_training(ctx, src_info)
+
+            # Decode the payload into the tenant's msgspec.Struct type.
+            input_obj = msgspec.msgpack.decode(
+                input_payload, type=cspec.payload_type,
+            )
+
+            # Auto-enforce calibration policy for quantization endpoints —
+            # mirrors the function-shape contract's check in
+            # `gen_worker.conversion.dispatch._run`. When the tenant
+            # declared `calibration={scheme: 'unsupported'}` and the
+            # caller supplied a dataset for that scheme, reject before
+            # the method runs.
+            if cspec.calibration:
+                try:
+                    self._enforce_class_calibration_policy(
+                        function_name, cspec.calibration, input_payload,
+                    )
+                except ValueError as exc:
+                    raise exc
+
+            logger.info(
+                "[request_id=%s] calling %s class method %s",
+                request_id, cspec.endpoint_kind, function_name,
+            )
+            result = cspec.method(ctx, input_obj)
+
+            # Class-shape returns either a list[ProducedFlavor] or yields
+            # them as an Iterator[ProducedFlavor]. Normalize to a list so
+            # the finalizer can operate on a concrete collection.
+            if result is None:
+                variants: list = []
+            elif isinstance(result, list):
+                variants = result
+            elif isinstance(result, cabc.Iterable):
+                variants = list(result)
+            else:
+                raise TypeError(
+                    f"{function_name}: must return list[ProducedFlavor] or "
+                    f"Iterator[ProducedFlavor]; got {type(result).__name__}"
+                )
+
+            if ctx.is_canceled():
+                raise CanceledError("canceled")
+
+            logger.info(
+                "[request_id=%s] %s class method %s returned (%d variants)",
+                request_id, cspec.endpoint_kind, function_name, len(variants),
+            )
+
+            # Upload + publish. The finalizer routes between
+            # publish_repo_revision (checkpoints) and
+            # publish_dataset_revision (datasets) based on the granular
+            # kind label — pass sub_kind so the existing logic keeps
+            # working unchanged.
+            from .conversion.dispatch import _finalize_produced_variants
+
+            finalize_kind = cspec.sub_kind or (
+                "dataset-generation" if cspec.endpoint_kind == "dataset" else ""
+            )
+            _finalize_produced_variants(ctx, variants, kind=finalize_kind)
+
+            # Apply destination.tags to the produced checkpoint. Same
+            # best-effort dance as `_execute_training_request`.
+            destination_info = getattr(ctx, "destination", None) or {}
+            if isinstance(destination_info, dict) and destination_info.get("tags"):
+                checkpoint_id = _extract_checkpoint_id_from_result(variants)
+                if checkpoint_id:
+                    try:
+                        self._apply_destination_tags(ctx, destination_info, checkpoint_id)
+                    except Exception as exc:
+                        logger.warning(
+                            "[request_id=%s] tag apply raised (non-fatal): %s",
+                            request_id, exc,
+                        )
+
+            output_payload = msgspec.msgpack.encode({})
+            success = True
+
+            try:
+                rm.inference_ms = int((time.monotonic() - t_infer0) * 1000)
+            except Exception:
+                pass
+            self._emit_request_event(
+                request_id,
+                "request.inference.completed",
+                {
+                    "function_name": function_name,
+                    "duration_ms": int((time.monotonic() - t_infer0) * 1000),
+                    "archetype": "ConversionWorker",
+                    "endpoint_kind": cspec.endpoint_kind,
+                },
+            )
+        except CanceledError:
+            error_type = "cancelled"
+            retryable = False
+            safe_message = "cancelled"
+            error_message = "cancelled"
+            self._emit_request_event(
+                request_id,
+                "request.cancelled",
+                {"function_name": function_name},
+            )
+            success = False
+        except Exception as exc:
+            if isinstance(exc, HardwareUnmetError):
+                error_type = "hardware_unmet"
+                retryable = False
+                safe_message = self._sanitize_safe_message(str(exc) or "hardware unmet")
+                error_message = f"{type(exc).__name__}: {exc}"
+                self._emit_function_unavailable_signal(
+                    function_name=function_name, exc=exc,
+                )
+                logger.warning(
+                    "[request_id=%s] %s class method %s self-disabled: %s",
+                    request_id, cspec.endpoint_kind, function_name, exc,
+                )
+            else:
+                logger.exception(
+                    "[request_id=%s] %s class method %s failed: %s",
+                    request_id, cspec.endpoint_kind, function_name, exc,
+                )
+                error_type, retryable, safe_message, error_message = self._map_exception(exc)
+            self._emit_request_event(
+                request_id,
+                "request.training.failed",
+                {
+                    "function_name": function_name,
+                    "phase": cspec.endpoint_kind,
+                    "error_type": error_type,
+                    "duration_ms": int((time.monotonic() - t_infer0) * 1000),
+                },
+            )
+            success = False
+        finally:
+            try:
+                reset_resolved_repos_by_id(resolved_tok)
+            except Exception:
+                pass
+            self._gpu_busy_exit()
+            rm.mark_compute_completed()
+            if rm.compute_completed_at:
+                self._emit_worker_event_bytes(
+                    request_id,
+                    "metrics.compute.completed",
+                    safe_json_bytes({"at": rm.compute_completed_at}),
+                )
+            try:
+                rm.finalize()
+                for ev_type, event_payload in rm.canonical_events():
+                    if ev_type in ("metrics.compute.started", "metrics.compute.completed"):
+                        continue
+                    self._emit_worker_event_bytes(
+                        request_id, ev_type, safe_json_bytes(event_payload),
+                    )
+            except Exception:
+                pass
+            try:
+                self._emit_worker_event_bytes(
+                    request_id,
+                    "metrics.job",
+                    safe_json_bytes(rm.to_metrics_run_payload()),
+                )
+            except Exception:
+                pass
+            with self._active_requests_lock:
+                obs = self._request_observations.setdefault(request_id, {})
+                obs["peak_memory_bytes"] = int(getattr(rm, "peak_ram_bytes", 0) or 0)
+                obs["peak_vram_bytes"] = int(getattr(rm, "peak_vram_bytes", 0) or 0)
+            if success:
+                self._emit_request_event(
+                    request_id,
+                    "request.completed",
+                    {
+                        "function_name": function_name,
+                        "duration_ms": int((time.monotonic() - t_infer0) * 1000),
+                    },
+                )
+            self._send_request_result(
+                request_id, success, output_payload, error_type,
+                bool(retryable), safe_message, error_message,
+            )
+            with self._active_requests_lock:
+                self._active_requests.pop(request_id, None)
+
+    def _enforce_class_calibration_policy(
+        self,
+        function_name: str,
+        calibration: Dict[str, str],
+        input_payload: bytes,
+    ) -> None:
+        """Reject the request when a `calibration='unsupported'` scheme
+        was paired with a dataset.
+
+        Mirrors the function-shape check in
+        ``gen_worker.conversion.dispatch._run``. Best-effort: we look at
+        the raw payload dict (datasets + specs[].scheme), and raise
+        ``ValueError`` when an unsupported pairing is detected. Any
+        parse failure (malformed payload, missing fields) is treated as
+        a no-op — the tenant's method will surface the validation error
+        instead.
+        """
+        try:
+            raw = msgspec.msgpack.decode(input_payload) if input_payload else {}
+        except Exception:
+            return
+        if not isinstance(raw, dict):
+            return
+        datasets = raw.get("datasets") or []
+        if not datasets:
+            return
+        specs = raw.get("specs") or []
+        if not isinstance(specs, list):
+            return
+        from .conversion.calibration import lookup_policy
+
+        for s in specs:
+            scheme = ""
+            if isinstance(s, dict):
+                scheme = str(s.get("scheme") or "").strip()
+            if not scheme:
+                continue
+            policy = lookup_policy(calibration, scheme)
+            if policy == "unsupported":
+                raise ValueError(
+                    f"{function_name}: scheme={scheme!r} does not accept a "
+                    f"calibration dataset (calibration='unsupported'); "
+                    f"remove the dataset or choose a calibrated scheme."
+                )
+
     def _execute_request(
         self,
         ctx: RequestContext,
         spec: _RequestSpec,
         input_payload: bytes,
+        request: Any = None,
     ) -> None:
         """Execute a discovered request handler and send result/events back."""
         request_id = ctx.request_id
@@ -4194,7 +6599,14 @@ class Worker:
 
                 def emit_delta(delta_obj: msgspec.Struct) -> None:
                     nonlocal count, last_item_id
+                    # #327: route audio_chunk / audio_codec to the typed
+                    # IncrementalTokenDelta proto slots instead of base64-
+                    # in-payload_json.
+                    audio_chunk, audio_codec = self._extract_audio_from_delta(delta_obj)
                     payload = msgspec.to_builtins(delta_obj)
+                    if isinstance(payload, dict) and audio_chunk:
+                        payload.pop("audio_chunk", None)
+                        payload.pop("audio_codec", None)
                     raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
                     if max_delta_bytes > 0 and len(raw) > max_delta_bytes:
                         raw = json.dumps({"truncated": True}, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -4225,6 +6637,8 @@ class Worker:
                         timestamp_unix_ms=ts_ms,
                         delta_text=delta_text,
                         payload_json=raw,
+                        audio_chunk=audio_chunk,
+                        audio_codec=audio_codec,
                     ):
                         logger.warning(
                             "IncrementalTokenDelta proto class unavailable; dropping delta rid=%s seq=%d",
@@ -4433,7 +6847,7 @@ class Worker:
         training_fn: Callable[..., Any],
         input_payload: bytes,
     ) -> None:
-        """Dispatch a @training_function handler.
+        """Dispatch a @conversion handler.
 
         The dispatch wrapper (conversion/dispatch.py) owns tenant-call plumbing:
         msgspec-decoding each tenant parameter, building Source/Dataset helpers,
@@ -5456,7 +7870,9 @@ class Worker:
         # 2. Binding default.
         binding = inj.binding
         if isinstance(binding, Repo):
-            model_id = _resolved_repo_id(binding.ref, flavor=binding._flavor, tag=binding._tag)
+            # _wire_ref prepends the provider prefix for non-cozy bindings
+            # so the local model_id matches the manifest's canonical wire ref.
+            model_id = _resolved_repo_id(_wire_ref(binding), flavor=binding._flavor, tag=binding._tag)
             return model_id, None
 
         if isinstance(binding, Dispatch):
@@ -5479,7 +7895,7 @@ class Worker:
                 raise ValueError(
                     f"function {fn_name!r}: dispatch key {key!r} not in table {allowed!r}"
                 )
-            model_id = _resolved_repo_id(pick.ref, flavor=pick._flavor, tag=pick._tag)
+            model_id = _resolved_repo_id(_wire_ref(pick), flavor=pick._flavor, tag=pick._tag)
             return model_id, key
 
         raise TypeError(f"unknown binding type: {type(binding).__name__}")

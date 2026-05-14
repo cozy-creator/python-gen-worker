@@ -1,6 +1,6 @@
 """Core types shared by transform tenants, clone_pipeline, and library internals.
 
-Tenants using the new @training_function contract typically don't touch
+Tenants using the new @conversion contract typically don't touch
 these directly — they return ``list[ProducedFlavor]`` which the library
 adapts. But legacy clone_pipeline + any tenant that needs richer output
 metadata (multi-artifact outputs with sharded indices) can import these.
@@ -32,7 +32,7 @@ class ConversionArtifact(msgspec.Struct):
 class ConversionOutput(msgspec.Struct):
     """The legacy transform/clone function return type.
 
-    For new @training_function tenants, prefer returning
+    For new @conversion tenants, prefer returning
     ``list[ProducedFlavor]`` and let the library handle upload +
     attributes. ``ConversionOutput`` remains for clone_pipeline + any code
     path that needs a single primary artifact with a typed metadata dict.

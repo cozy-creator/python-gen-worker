@@ -34,8 +34,24 @@ from __future__ import annotations
 # batching with shared KV-cache and a different wire shape. UNLOAD: orchestrator
 # now produces UnloadModelCommand on OOM-LRU eviction; worker side was already
 # complete.
+# 1.6 (#322): SDK foundation hard-cut. The wire protocol itself is unchanged
+# — the SDK refactor is internal to gen-worker — but workers running with
+# the new class-shape decorator advertise 1.6 so an old orchestrator can tell
+# new-shape workers apart. Adds 'warming' startup phase (between
+# pipeline_loading and ready) so workers in torch.compile warmup report
+# honestly. SerialWorker / BatchedWorker archetype detection is driven by
+# the discovered class shape; no proto change.
+#
+# 1.7 (#327): IncrementalTokenDelta gains `bytes audio_chunk = 12` and
+# `string audio_codec = 13` so AR-TTS endpoints (Chatterbox, GPT-SoVITS,
+# Bark, MusicGen) can stream raw audio bytes on the same wire as text
+# token deltas instead of base64-encoding them inside payload_json. Saves
+# ~33% wire size and the JSON CPU tax. Mutually exclusive at the semantic
+# level: text deltas set delta_text/payload_json, audio deltas set
+# audio_chunk/audio_codec. Additive — text-streaming workers keep working
+# unchanged; only the chatterbox-tts endpoint switches over in this cut.
 WIRE_PROTOCOL_MAJOR = 1
-WIRE_PROTOCOL_MINOR = 5
+WIRE_PROTOCOL_MINOR = 7
 
 
 def wire_protocol_version_string() -> str:

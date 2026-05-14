@@ -29,7 +29,7 @@
 
 ## Architectural principle
 
-Tenant endpoint code — both `@inference_function` and `@training_function`
+Tenant endpoint code — both `@inference` and `@conversion`
 — should never touch tensorhub's upload contract (sessions, presigns,
 finalize, publish). This module owns all that machinery for clone flows.
 Tenant endpoints call `clone.from_huggingface(ctx, payload)` and nothing

@@ -388,7 +388,7 @@ class RequestContext:
 
         # Scope resolves whenever destination_repo + job_id are present.
         # Previously gated on kind=="training", which broke publish for
-        # @inference_function clone jobs that still emit checkpoints.
+        # @inference clone jobs that still emit checkpoints.
         hints = dict(self._execution_hints or {})
         destination_repo = _resolve_hint_first_string(hints, keys=_HINT_KEYS_DESTINATION_REPO)
         if destination_repo == "":
@@ -1041,7 +1041,7 @@ class _PublisherMixin:
 
 
 class ConversionContext(_PublisherMixin, RequestContext):
-    """RequestContext for ``@training_function(kind="format-conversion")``
+    """RequestContext for ``@conversion(sub_kind="format-conversion")``
     and similar conversion endpoints.
 
     Carries the producer-contract RPCs needed to publish new repo revisions
@@ -1766,9 +1766,26 @@ class ConversionContext(_PublisherMixin, RequestContext):
             shutil.copytree(str(comp.path), str(dst))
 
 
+# Producer-style @inference handlers (clone_huggingface,
+# clone_civitai) call `ctx.publish_repo_revision` directly. The slim-context
+# refactor (#1) moved publish_repo_revision onto ConversionContext only,
+# which silently broke those handlers (publish skipped, upload session
+# aborted, no checkpoint row, downstream quantize fails with
+# flavor_not_found). Bind publish_repo_revision + finalize_checkpoints onto
+# the base RequestContext so any handler that genuinely needs to publish
+# can do so regardless of decorator kind. The richer producer-contract
+# methods (publish_dataset_revision, materialize_blob, mktemp, …) stay
+# subclass-only.
+for _name in ("publish_repo_revision", "finalize_checkpoints"):
+    _attr = ConversionContext.__dict__.get(_name)
+    if _attr is not None and not hasattr(RequestContext, _name):
+        setattr(RequestContext, _name, _attr)
+del _name
+
+
 class DatasetContext(_PublisherMixin, RequestContext):
     """RequestContext for dataset-producing endpoints
-    (``@training_function(kind="dataset-generation")``).
+    (``@dataset``).
 
     Adds ``publish_dataset_revision`` + ``resolve_dataset``.
     """
