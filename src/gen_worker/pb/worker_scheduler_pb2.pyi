@@ -109,7 +109,7 @@ class WorkerRegistration(_message.Message):
     def __init__(self, resources: _Optional[_Union[WorkerResources, _Mapping]] = ..., is_heartbeat: bool = ..., protocol_major: _Optional[int] = ..., protocol_minor: _Optional[int] = ..., active_assignments: _Optional[_Iterable[_Union[ActiveAssignmentResume, _Mapping]]] = ...) -> None: ...
 
 class ResolvedCompute(_message.Message):
-    __slots__ = ("accelerator", "min_compute_capability", "vram_gb", "gpu_count", "gpu_tier", "memory_gb", "cpu_cores", "disk_gb")
+    __slots__ = ("accelerator", "min_compute_capability", "vram_gb", "gpu_count", "gpu_tier", "memory_gb", "cpu_cores", "disk_gb", "gpu_index")
     ACCELERATOR_FIELD_NUMBER: _ClassVar[int]
     MIN_COMPUTE_CAPABILITY_FIELD_NUMBER: _ClassVar[int]
     VRAM_GB_FIELD_NUMBER: _ClassVar[int]
@@ -118,6 +118,7 @@ class ResolvedCompute(_message.Message):
     MEMORY_GB_FIELD_NUMBER: _ClassVar[int]
     CPU_CORES_FIELD_NUMBER: _ClassVar[int]
     DISK_GB_FIELD_NUMBER: _ClassVar[int]
+    GPU_INDEX_FIELD_NUMBER: _ClassVar[int]
     accelerator: str
     min_compute_capability: str
     vram_gb: int
@@ -126,7 +127,8 @@ class ResolvedCompute(_message.Message):
     memory_gb: int
     cpu_cores: int
     disk_gb: int
-    def __init__(self, accelerator: _Optional[str] = ..., min_compute_capability: _Optional[str] = ..., vram_gb: _Optional[int] = ..., gpu_count: _Optional[int] = ..., gpu_tier: _Optional[str] = ..., memory_gb: _Optional[int] = ..., cpu_cores: _Optional[int] = ..., disk_gb: _Optional[int] = ...) -> None: ...
+    gpu_index: int
+    def __init__(self, accelerator: _Optional[str] = ..., min_compute_capability: _Optional[str] = ..., vram_gb: _Optional[int] = ..., gpu_count: _Optional[int] = ..., gpu_tier: _Optional[str] = ..., memory_gb: _Optional[int] = ..., cpu_cores: _Optional[int] = ..., disk_gb: _Optional[int] = ..., gpu_index: _Optional[int] = ...) -> None: ...
 
 class LoadModelCommand(_message.Message):
     __slots__ = ("model_id",)
