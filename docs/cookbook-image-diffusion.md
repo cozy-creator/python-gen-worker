@@ -26,7 +26,7 @@ anymore.
 ```python
 from gen_worker import RequestContext, Repo, Resources, inference
 
-flux = Repo("black-forest-labs/flux.2-klein-4b-turbo")
+flux = Repo("black-forest-labs/flux.2-klein-4b-base")
 
 @inference(
     resources=Resources(
@@ -283,7 +283,7 @@ from gen_worker import (
 )
 
 
-flux = Repo("black-forest-labs/flux.2-klein-4b-turbo")
+flux = Repo("black-forest-labs/flux.2-klein-4b-base")
 
 
 class GenerateInput(msgspec.Struct):

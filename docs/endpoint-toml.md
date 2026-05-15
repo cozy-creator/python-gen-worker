@@ -45,16 +45,36 @@ What this declares:
 
 ---
 
-## The three build modes
+## The four build modes
 
 Every profile is a **routing declaration** (`accelerator` + optional CUDA
 hints for placement). The image-source dimension is independent:
 
-| Mode               | Profile fields                                | Image comes from                                    | `BASE_IMAGE` injected? |
-|--------------------|-----------------------------------------------|-----------------------------------------------------|------------------------|
-| **Managed**        | `accelerator` + `python` / `torch` / `cuda`   | Tensorhub resolves via lookup table                 | Yes (resolved)         |
-| **Explicit**       | `accelerator` + `base_image`                  | Tenant names the image ref directly                 | Yes (literal)          |
-| **Fully custom**   | `accelerator` only (no build hints)           | Whatever's in the tenant's `FROM` line              | No                     |
+| Mode                     | Profile fields                                | Image comes from                                    | Dockerfile required? |
+|--------------------------|-----------------------------------------------|-----------------------------------------------------|----------------------|
+| **Generated Dockerfile** | no Dockerfile + `python` / `torch` / `cuda` or `base_image` | Tensorhub generates a standard Dockerfile           | No                   |
+| **Managed**              | Dockerfile + `python` / `torch` / `cuda`      | Tensorhub resolves via lookup table                 | Yes                  |
+| **Explicit**             | Dockerfile + `base_image`                     | Tenant names the image ref directly                 | Yes                  |
+| **Fully custom**         | Dockerfile + `accelerator` only (no build hints) | Whatever's in the tenant's `FROM` line              | Yes                  |
+
+### Generated Dockerfile
+
+Tensorhub generates the Dockerfile from the profile and project files when the
+tarball has no root `Dockerfile` and the profile has build hints. Use this for
+the common case where the endpoint can be installed with pip or `pyproject.toml`
+metadata:
+
+```toml
+[[build.profiles]]
+name = "cpu"
+accelerator = "none"
+python = "3.12"
+dependencies = ["gen-worker>=0.7.5", "msgspec"]
+```
+
+There is no `kind` selector in `endpoint.toml`; add a Dockerfile only when you
+need to own the base image, build stages, package manager setup, or shell
+commands.
 
 ### Managed mode
 
@@ -135,6 +155,8 @@ them when picking a managed base image; they're irrelevant to placement.
 | `cuda`        | Which CUDA version the managed base image is built against (separate from `cuda_min`)     |
 | `image_kind`  | `"runtime"` vs `"devel"` flavor of the managed image                                      |
 | `base_image`  | Explicit override; bypasses the managed lookup entirely                                   |
+| `dependencies` | Extra pip requirements for generated Dockerfiles                                        |
+| `system_dependencies` | Debian packages installed by generated Dockerfiles                                |
 
 `cuda` (build) and `cuda_min` (placement) typically match but can differ — for
 example, you might build against CUDA 12.4 yet require host driver >= 12.8.

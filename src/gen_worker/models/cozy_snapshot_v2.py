@@ -13,7 +13,7 @@ from typing import Any, Coroutine, Dict, List, Optional, Set
 from .cozy_cas import _download_one_file as _download_one_file
 from .cozy_cas import _norm_rel_path
 from .hub_client import WorkerResolvedRepo, WorkerResolvedRepoFile
-from .refs import CozyRef
+from .refs import TensorhubRef
 
 _log = logging.getLogger("gen_worker.download")
 
@@ -96,7 +96,7 @@ def _try_hardlink_or_copy(src: Path, dst: Path) -> None:
 # Coerce orchestrator wire format -> internal type
 # ---------------------------------------------------------------------------
 
-def _coerce_resolved_model(ref: CozyRef, resolved: Any) -> WorkerResolvedRepo:
+def _coerce_resolved_model(ref: TensorhubRef, resolved: Any) -> WorkerResolvedRepo:
     """Handle both legacy (.files[]) and v2 (.entries[], blake3:-prefixed digests)."""
     snapshot_digest = str(_field(resolved, "snapshot_digest", "snapshotDigest") or "").strip()
     if not snapshot_digest:
@@ -146,7 +146,7 @@ class CozySnapshotV2Downloader:
     async def ensure_snapshot(
         self,
         base_dir: Path,
-        ref: CozyRef,
+        ref: TensorhubRef,
         *,
         resolved: Any,
     ) -> Path:
@@ -339,7 +339,7 @@ class CozySnapshotV2Downloader:
 async def ensure_snapshot_async(
     *,
     base_dir: Path,
-    ref: CozyRef,
+    ref: TensorhubRef,
     resolved: Any,
 ) -> Path:
     dl = CozySnapshotV2Downloader()

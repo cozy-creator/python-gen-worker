@@ -371,8 +371,8 @@ def best_effort_init_model_metrics(
         cache_state: Optional[str] = None
         try:
             parsed = parse_model_ref(mid)
-            if parsed.scheme == "cozy" and parsed.cozy is not None:
-                canon = parsed.cozy.canonical()
+            if parsed.provider == "tensorhub" and parsed.tensorhub is not None:
+                canon = parsed.tensorhub.canonical()
         except Exception:
             pass
 

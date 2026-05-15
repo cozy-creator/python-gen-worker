@@ -1,9 +1,9 @@
 # Cookbook: Audio Endpoints
 
 One page covering both audio archetypes: **flow-matching / diffusion**
-audio models (F5-TTS, Kokoro, Stable Audio Open) shipped as
+audio models such as Stable Audio Open shipped as
 SerialWorker, and **autoregressive** audio models (Chatterbox,
-GPT-SoVITS, Bark, MusicGen) shipped as BatchedWorker with vLLM
+other AR audio decoders) shipped as BatchedWorker with vLLM
 continuous batching.
 
 Audience: you know Python + PyTorch and want to publish a TTS or
@@ -35,10 +35,10 @@ diffusion models fill the GPU with one request's worth of work.
 
 | Family                              | Examples                               | Archetype       | Engine        |
 |-------------------------------------|----------------------------------------|-----------------|---------------|
-| Flow-matching DiT                   | F5-TTS, MaskGCT                        | SerialWorker    | direct PyTorch |
-| Small flow-matching (CPU-capable)   | Kokoro-82M                             | SerialWorker    | direct PyTorch |
+| Flow-matching DiT                   | flow-matching TTS                       | SerialWorker    | direct PyTorch |
+| Small flow-matching (CPU-capable)   | small TTS models                        | SerialWorker    | direct PyTorch |
 | Latent diffusion (audio)            | Stable Audio Open, MusicLDM            | SerialWorker    | direct PyTorch |
-| AR Llama-class decoder              | Chatterbox, GPT-SoVITS, Bark, MusicGen | BatchedWorker   | vLLM          |
+| AR Llama-class decoder              | Chatterbox, other AR audio decoders     | BatchedWorker   | vLLM          |
 
 When in doubt, ask: "does the forward pass emit one token at a time?"
 If yes, you're looking at AR. If no, SerialWorker.
@@ -68,7 +68,7 @@ def setup(self, dit, vocoder):
 ```
 
 Optional: compile the vocoder too. Most vocoders (BigVGAN, HiFi-GAN,
-the F5-TTS native vocoder) compile cleanly and the win is ~10-20%.
+the model-native vocoder) compile cleanly and the win is ~10-20%.
 
 ### RTF — the metric that matters
 
@@ -77,8 +77,8 @@ RTF < 1.0 means the model can synthesize faster than real-time.
 
 | Model                  | Reference RTF (H100)        | Notes                                             |
 |------------------------|------------------------------|---------------------------------------------------|
-| F5-TTS                 | 0.15 (≈10s speech in 1.5s)   | Per F5-TTS-ONNX measurements (arXiv 2410.06885)   |
-| Kokoro-82M             | ~0.5 on CPU, <0.1 on GPU     | Small enough to deploy on CPU workers              |
+| Flow-matching TTS      | measure per model             | Direct PyTorch DiT-style synthesis                 |
+| small TTS models             | ~0.5 on CPU, <0.1 on GPU     | Small enough to deploy on CPU workers              |
 | Stable Audio Open 1.0  | ~47s for stereo audio        | 20 steps/s on H100 — measure as `samples/second`   |
 
 How to measure inside your endpoint, for telemetry:
@@ -108,194 +108,9 @@ gains and to spot regressions across worker hardware.
 
 The 300ms rule from image diffusion still applies: cross-request
 micro-batching pays off only when the forward is short enough that
-the SDK's admission window (~50ms) doesn't dominate. For F5-TTS at
-~1.5s per call, this is solidly past the threshold. For Kokoro-82M
+the SDK's admission window (~50ms) doesn't dominate. For flow-matching TTS at
+~1.5s per call, this is solidly past the threshold. For small TTS models
 short utterances, it can be in the window — measure before opting in.
-
-### Kokoro special case: CPU deployment
-
-Kokoro-82M is small enough that CPU-only deployment beats waiting in
-a GPU queue for typical traffic. Declare it with `accelerator="none"`:
-
-```python
-@inference(
-    resources=Resources(
-        accelerator="none",        # or use "cpu" — both normalize
-        requires_gpu=False,
-    ),
-    models={"model": kokoro_repo},
-)
-class KokoroSynth:
-    ...
-```
-
-Now the orchestrator will place this endpoint on cheap CPU-only
-workers. You can still ship a `cu128` build profile in
-`endpoint.toml` and the orchestrator will pick whichever worker
-becomes free first.
-
-### Complete working example: F5-TTS SerialWorker
-
-```python
-"""F5-TTS — non-autoregressive flow-matching DiT for zero-shot speech."""
-
-from __future__ import annotations
-
-import time
-
-import msgspec
-
-from gen_worker import (
-    Asset,
-    Repo,
-    RequestContext,
-    Resources,
-    compile as gw_compile,
-    inference,
-    io as gw_io,
-)
-
-
-f5_tts = Repo("SWivid/F5-TTS")
-
-
-class F5TTSInput(msgspec.Struct):
-    gen_text: str
-    ref_audio: Asset
-    ref_text: str = ""
-    nfe_step: int = 32           # flow-matching ODE steps; quality plateaus around 32
-    cfg_strength: float = 2.0
-    speed: float = 1.0
-    target_sample_rate: int = 24000
-    seed: int = -1
-
-
-class F5TTSOutput(msgspec.Struct):
-    audio: Asset
-    sample_rate: int
-    duration_s: float
-    rtf: float                   # compute_s / audio_s
-
-
-@inference(
-    label="F5-TTS",
-    description="Non-AR flow-matching DiT for zero-shot voice cloning TTS.",
-    resources=Resources(
-        accelerator="cuda",
-        requires_gpu=True,
-        min_vram_gb=12.0,
-        min_compute_capability=8.0,
-        required_libraries=("torch", "torchaudio"),
-        vram_must_fit="full_model",
-        peak_vram_per_request_gb=14.0,
-        vram_base=512 * 1024 * 1024,
-        vram_size_multiplier=1.15,
-        runtime_scales_with=("nfe_step", "gen_text"),
-    ),
-    models={
-        "dit": f5_tts.flavor("bf16"),
-        "vocoder": f5_tts.flavor("vocoder"),
-    },
-)
-class F5TTSSynth:
-    def setup(self, dit, vocoder) -> None:
-        self.dit = dit
-        self.vocoder = vocoder
-        # Compile the heavy DiT. max-autotune trades startup time
-        # for steady-state RTF — right call for audio.
-        try:
-            self.dit = gw_compile.torch_compile(self.dit, mode="max-autotune")
-        except gw_compile.CompileUnavailableError:
-            # Best-effort: fall back to eager if compile not viable.
-            pass
-
-    def warmup(self) -> None:
-        # Synthesize a 1-second fixed reference at the nominal step
-        # count so the compile cache and CUDA workspace are warm.
-        pass    # replace with your actual short-form forward
-
-    @inference.function(
-        timeout_ms=120_000,
-        description="Synthesize speech from text + a 3-30s reference clip.",
-    )
-    def synthesize(
-        self,
-        ctx: RequestContext,
-        payload: F5TTSInput,
-    ) -> F5TTSOutput:
-        import torch
-
-        ctx.raise_if_canceled()
-
-        gen_text = payload.gen_text.strip()
-        if not gen_text:
-            raise ValueError("gen_text must be non-empty")
-
-        nfe_step = max(1, min(64, int(payload.nfe_step)))
-        speed = max(0.25, min(4.0, float(payload.speed)))
-        sample_rate = max(1, int(payload.target_sample_rate))
-
-        if payload.seed >= 0:
-            torch.manual_seed(int(payload.seed))
-
-        # Load the reference clip.
-        ref_audio, ref_sr = gw_io.read_audio(
-            payload.ref_audio, target_sample_rate=sample_rate
-        )
-
-        t0 = time.time()
-        ctx.progress(0.05, stage="prepare")
-
-        # Run the flow-matching ODE for nfe_step iterations, then
-        # decode mel via the vocoder. Replace with your real impl.
-        for step in range(nfe_step):
-            ctx.raise_if_canceled()
-            # ... one ODE step ...
-            ctx.progress(0.05 + 0.85 * (step + 1) / nfe_step, stage="flow_matching")
-
-        ctx.progress(0.92, stage="vocoder")
-        # ... vocoder forward, returning a 1D float32 numpy array ...
-        audio_array = ...    # shape: (N,)
-
-        compute_s = time.time() - t0
-        duration_s = len(audio_array) / sample_rate
-        rtf = compute_s / duration_s if duration_s > 0 else float("inf")
-
-        # Save the waveform. Use ctx.save_bytes for the in-memory shape
-        # or stream via ctx.open_output_stream for very long outputs.
-        audio_ref = f"jobs/{ctx.request_id}/outputs/synth.wav"
-        # ... encode to WAV bytes via soundfile.write to a BytesIO ...
-        audio_asset = ctx.save_bytes(audio_ref, wav_bytes)
-
-        # Telemetry: emit RTF for the metrics pipeline.
-        ctx.emit("synthesis_metrics", {
-            "compute_seconds": compute_s,
-            "audio_seconds": duration_s,
-            "rtf": rtf,
-        })
-
-        ctx.progress(1.0, stage="done")
-        return F5TTSOutput(
-            audio=audio_asset,
-            sample_rate=sample_rate,
-            duration_s=duration_s,
-            rtf=rtf,
-        )
-
-    def shutdown(self) -> None:
-        import gc
-        self.dit = None
-        self.vocoder = None
-        gc.collect()
-        try:
-            import torch
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except Exception:
-            pass
-```
-
----
 
 ## Part 2: Autoregressive audio (BatchedWorker)
 
@@ -356,7 +171,7 @@ spec = lookup("Chatterbox")          # case-insensitive
 # spec.supports_streaming     -> True
 ```
 
-Built-in entries: `Chatterbox`, `GPT-SoVITS-v2`, `Bark`, `MusicGen`.
+Built-in production entry: `Chatterbox`. Other AR audio classes can be added to the registry when a maintained engine port exists.
 The registry holds engine/codec metadata only — no engine imports
 happen at lookup time, so discovery on a CPU-only laptop succeeds.
 
@@ -671,11 +486,11 @@ What this gives you on H100:
 
 | Scenario                                            | Archetype       | Why                                                |
 |-----------------------------------------------------|-----------------|----------------------------------------------------|
-| F5-TTS, MaskGCT (flow-matching)                     | SerialWorker    | One request fills the GPU; no token batching.      |
-| Kokoro on CPU                                       | SerialWorker    | Small enough to ship CPU-only; no GPU coordination. |
+| flow-matching TTS (flow-matching)                     | SerialWorker    | One request fills the GPU; no token batching.      |
+| Small TTS on CPU                                    | SerialWorker    | Small enough to ship CPU-only; no GPU coordination. |
 | Stable Audio Open (latent diffusion)                | SerialWorker    | Diffusion forward; no AR sharing.                  |
-| Chatterbox, GPT-SoVITS (Llama-class decoder + codec)| BatchedWorker   | AR decoder fits vLLM continuous batching directly. |
-| Bark, MusicGen                                      | BatchedWorker   | Three-stage AR decoders; each stage benefits from batching. |
+| Chatterbox-style Llama decoder + codec              | BatchedWorker   | AR decoder fits vLLM continuous batching directly. |
+| Multi-stage AR audio                                | BatchedWorker   | Each AR stage benefits from batching.               |
 | Whisper (ASR transcription)                         | SerialWorker    | Encoder-decoder; not the AR-token pattern.         |
 
 If your model emits one audio token at a time from a Llama-class
@@ -723,5 +538,4 @@ occupying engine slots until they hit their token budget.
   import time via `gen_worker.runtimes.ar_tts.register(...)` and use
   the same BatchedWorker shape.
 - **Whisper / ASR**? SerialWorker, no special engine. Standard
-  encoder-decoder; see the `medasr-transcribe` example in
-  `examples/`.
+  encoder-decoder.

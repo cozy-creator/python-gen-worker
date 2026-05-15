@@ -8,7 +8,7 @@ from .cache_paths import (
 )
 from .downloader import TensorhubDownloader, ModelDownloader
 from .interface import ModelManagementInterface, ModelManager
-from .refs import CozyRef, HuggingFaceRef, ParsedModelRef, parse_model_ref
+from .refs import TensorhubRef, HuggingFaceRef, ParsedModelRef, parse_model_ref
 
 __all__ = [
     "ModelCache",
@@ -21,7 +21,7 @@ __all__ = [
     "ModelDownloader",
     "ModelManagementInterface",
     "ModelManager",
-    "CozyRef",
+    "TensorhubRef",
     "HuggingFaceRef",
     "ParsedModelRef",
     "parse_model_ref",

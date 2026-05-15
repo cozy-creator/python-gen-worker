@@ -1,3 +1,4 @@
+# source-hash bust: 2026-05-15T01:25Z (force-fresh enqueue after API split)
 import msgspec
 from gen_worker import RequestContext, inference
 
@@ -28,3 +29,4 @@ class MarcoPolo:
 
     def shutdown(self) -> None:
         pass
+# bust 1778809586

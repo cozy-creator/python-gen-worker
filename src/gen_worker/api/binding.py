@@ -85,7 +85,7 @@ class Repo:
 
     Module-level convention::
 
-        flux = Repo("black-forest-labs/flux.2-klein-4b-turbo")  # tensorhub
+        flux = Repo("black-forest-labs/flux.2-klein-4b-base")  # tensorhub
         qwen = HFRepo("Qwen/Qwen2.5-1.5B-Instruct")             # huggingface
         sdxl = CivitaiRepo("123456")                            # civitai
 
@@ -103,8 +103,8 @@ class Repo:
 
     # Class-level provider constant — ClassVar so dataclass does NOT
     # treat it as a field. Subclasses override with their own value.
-    # "cozy" = tensorhub, "hf" = huggingface, "civitai" = civitai.
-    PROVIDER: ClassVar[str] = "cozy"
+    # "tensorhub" = cozy hub (default), "hf" = huggingface, "civitai" = civitai.
+    PROVIDER: ClassVar[str] = "tensorhub"
 
     ref: str
     _flavor: str = ""
@@ -119,7 +119,7 @@ class Repo:
 
     @property
     def provider(self) -> str:
-        """Resolver provider: ``"cozy"`` (tensorhub), ``"hf"``, or ``"civitai"``."""
+        """Resolver provider: ``"tensorhub"`` (default), ``"hf"``, or ``"civitai"``."""
         return type(self).PROVIDER
 
     def flavor(self, name: str) -> "Repo":

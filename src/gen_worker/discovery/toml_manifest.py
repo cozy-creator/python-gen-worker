@@ -274,10 +274,11 @@ def _validate_endpoint_model_ref(ref: str, *, field: str) -> None:
         raise ValueError(f"{field} cannot be empty")
     if raw.lower() != raw:
         raise ValueError(f"{field} must be lowercase: {raw!r}")
-    if raw.startswith("cozy:") or raw.startswith("hf:"):
-        raise ValueError(
-            f"{field} must not include a scheme prefix; use plain owner/repo form (got {raw!r})"
-        )
+    for p in ("hf:", "civitai:", "tensorhub:", "huggingface:"):
+        if raw.startswith(p):
+            raise ValueError(
+                f"{field} must not include a provider prefix; use bare owner/repo form (got {raw!r})"
+            )
 
     base = raw
     if "@" in base:
@@ -423,21 +424,6 @@ def _parse_function_resource_hints(v: Any) -> dict[str, Any]:
     return out
 
 
-def _parse_batch_dimension_path(raw: Any, *, field: str) -> str | None:
-    if raw is None:
-        return None
-    if not isinstance(raw, str):
-        raise ValueError(f"{field} must be a string")
-    s = raw.strip()
-    if not s:
-        return None
-    if s.startswith("input."):
-        raise ValueError(
-            f"{field} must be payload-root relative (for example, 'items' instead of 'input.items')"
-        )
-    return s
-
-
 def _parse_compute_capabilities(raw: Any, *, field: str) -> tuple[str, ...]:
     if raw is None:
         return ()
@@ -467,28 +453,6 @@ def _parse_compute_capabilities(raw: Any, *, field: str) -> tuple[str, ...]:
             )
         out.append(token)
     return tuple(out)
-
-
-def _parse_function_batch_dimension(v: Any, *, field_prefix: str) -> str | None:
-    if not isinstance(v, Mapping):
-        return None
-
-    for unsupported in (
-        "models",
-        "request_contract",
-        "batch_dimension_path",
-        "request_mode",
-        "max_items_per_request",
-        "dynamic_batching",
-        "partitioning",
-    ):
-        if unsupported in v:
-            raise ValueError(
-                f"{field_prefix}.{unsupported} is not supported; "
-                "only batch_dimension may be configured by endpoints"
-            )
-
-    return _parse_batch_dimension_path(v.get("batch_dimension"), field=f"{field_prefix}.batch_dimension")
 
 
 def load_endpoint_toml(path: Path) -> EndpointToml:
@@ -557,47 +521,18 @@ def load_endpoint_toml_with_warnings(path: Path) -> tuple[EndpointToml, list[str
             "endpoint.toml. If you need policy knobs, request them via platform config."
         ),
     }
-    _REJECTED_FUNCTION_BLOCKS = {
-        "runtime": (
-            "per-function [functions.<fn>.runtime] numerics (batch_size_max, prefetch_depth, etc) "
-            "were removed. Tensorhub learns scheduling behavior from runtime observations."
-        ),
-        "compute_envelope": (
-            "compute_envelope (min/max/default) was removed in tensorhub #232. "
-            "Declare a single hardware default at endpoint-level [resources]; invokers "
-            "override size axes at runtime via wire-payload `compute`."
-        ),
-        "concurrency": (
-            "per-function [functions.<fn>.concurrency] was removed. "
-            "Tensorhub learns scheduling concurrency from runtime observations."
-        ),
-    }
     for block_name, message in _REJECTED_ENDPOINT_BLOCKS.items():
         if block_name in data:
             raise ValueError(f"endpoint.toml: [{block_name}] is no longer accepted — {message}")
 
+    if "functions" in data:
+        raise ValueError(
+            "endpoint.toml: function metadata sections are no longer accepted; "
+            "declare function metadata in Python decorators"
+        )
+
     function_resources: dict[str, dict[str, Any]] = {}
     function_batch_dimensions: dict[str, str] = {}
-    raw_functions = data.get("functions")
-    if isinstance(raw_functions, dict):
-        for fn_name, fn_cfg in raw_functions.items():
-            fn = slugify_name(str(fn_name).strip())
-            if not fn or not isinstance(fn_cfg, dict):
-                continue
-
-            for rejected_key, reject_msg in _REJECTED_FUNCTION_BLOCKS.items():
-                if rejected_key in fn_cfg:
-                    raise ValueError(
-                        f"endpoint.toml: [functions.{fn}.{rejected_key}] is no longer accepted — {reject_msg}"
-                    )
-
-            batch_path = _parse_function_batch_dimension(fn_cfg, field_prefix=f"functions.{fn}")
-            if batch_path:
-                function_batch_dimensions[fn] = batch_path
-            if "resources" in fn_cfg:
-                parsed = _parse_function_resource_hints(fn_cfg.get("resources"))
-                if parsed:
-                    function_resources[fn] = parsed
 
     # Endpoint-level [resources] is the default. Function-level [resources]
     # may narrow/override hardware for mixed CPU/GPU endpoints.

@@ -93,7 +93,7 @@ LoadModelResult = Any
 UnloadModelResult = Any
 JobExecutionRequest = Any
 JobExecutionResult = Any
-from .api.binding import Binding, Dispatch, Repo
+from .api.binding import Binding, CivitaiRepo, Dispatch, HFRepo, Repo
 from .api.decorators import Resources
 from .api.errors import (
     AuthError,
@@ -157,43 +157,48 @@ class InjectionSpec:
 def _wire_ref(repo: Repo) -> str:
     """Canonical wire ref for a Repo binding.
 
-    Tensorhub refs (provider=cozy) are emitted bare; HF / civitai get a
-    prefix so legacy resolvers (orch + worker) that only know the prefix
-    scheme continue to route correctly. New consumers should prefer the
-    explicit ``provider`` field on the binding shape.
+    The wire format is bare ref + explicit ``provider`` field — never
+    prefixed. Caller emits ``provider`` alongside ``ref`` (see
+    :func:`_binding_to_wire`). The implicit default on the consumer
+    side is ``"tensorhub"`` when the provider field is absent on a payload.
     """
-    if repo.provider == "cozy":
-        return repo.ref
-    return f"{repo.provider}:{repo.ref}"
+    return repo.ref
 
 
 def _binding_to_wire(param_name: str, param_type: Any, binding: Binding) -> Dict[str, Any]:
     """Serialize an InjectionSpec to the wire shape consumed by the
     orchestrator's release resolver.
     """
-    if isinstance(binding, Repo):
-        return {
-            "param": param_name,
-            "type": _type_qualname(param_type),
-            "binding": {
-                "kind": "fixed",
-                "ref": _wire_ref(binding),
-                "provider": binding.provider,
-                "flavor": binding._flavor,
-                "tag": binding._tag,
-                "allow_override": binding._allow_override,
-                "pipeline_classes": list(binding._pipeline_classes),
-            },
+    # Provider-aware match: Repo (cozy/tensorhub), HFRepo (huggingface),
+    # CivitaiRepo (civitai). HFRepo/CivitaiRepo are Repo subclasses today,
+    # so plain Repo would already match — the tuple form makes the typed
+    # provider surface explicit at the call site (issue #10).
+    if isinstance(binding, (Repo, HFRepo, CivitaiRepo)):
+        out: Dict[str, Any] = {
+            "kind": "fixed",
+            "ref": _wire_ref(binding),
+            "flavor": binding._flavor,
+            "tag": binding._tag,
+            "allow_override": binding._allow_override,
+            "pipeline_classes": list(binding._pipeline_classes),
         }
+        # Tensorhub is the implicit default — omit `provider` when it
+        # would be tensorhub so the wire stays clean. Non-tensorhub
+        # providers MUST emit the field explicitly.
+        if binding.provider != "tensorhub":
+            out["provider"] = binding.provider
+        return {"param": param_name, "type": _type_qualname(param_type), "binding": out}
     if isinstance(binding, Dispatch):
-        table: Dict[str, Dict[str, str]] = {}
+        table: Dict[str, Dict[str, Any]] = {}
         for k, repo in binding.table.items():
-            table[k] = {
+            entry: Dict[str, Any] = {
                 "ref": _wire_ref(repo),
-                "provider": repo.provider,
                 "flavor": repo._flavor,
                 "tag": repo._tag,
             }
+            if repo.provider != "tensorhub":
+                entry["provider"] = repo.provider
+            table[k] = entry
         return {
             "param": param_name,
             "type": _type_qualname(param_type),
@@ -208,10 +213,15 @@ def _binding_to_wire(param_name: str, param_type: Any, binding: Binding) -> Dict
     raise TypeError(f"unknown binding type: {type(binding).__name__}")
 
 
-def _resolved_repo_id(ref: str, flavor: str = "", tag: str = "prod") -> str:
-    """Construct a deterministic canonical ref string for ``(ref, tag, flavor)``.
+def _resolved_repo_id(ref: str, flavor: str = "", tag: str = "prod", provider: str = "tensorhub") -> str:
+    """Construct a deterministic canonical identity for ``(provider, ref, tag, flavor)``.
 
     Used as the local cache key for orchestrator-stamped resolved checkpoints.
+    The wire format carries ``provider`` as a typed field; for in-process
+    cache-key purposes we serialize it with a ``provider::`` prefix (double
+    colon, intentionally distinct from the legacy ``provider:`` single-colon
+    wire prefix that no longer exists). ``cozy`` is the implicit default and
+    is elided so existing cozy keys round-trip unchanged.
     """
     base = (ref or "").strip()
     if not base:
@@ -221,6 +231,8 @@ def _resolved_repo_id(ref: str, flavor: str = "", tag: str = "prod") -> str:
         out = f"{out}:{tag}"
     if flavor:
         out = f"{out}#{flavor}"
+    if provider and provider != "tensorhub":
+        out = f"{provider}::{out}"
     return out
 
 
@@ -484,7 +496,7 @@ class Worker:
         self._fixed_model_spec_by_key: Dict[str, Dict[str, Any]] = {}
         self._payload_model_spec_by_key_by_function: Dict[str, Dict[str, Dict[str, Any]]] = {}
         # Orchestrator-resolved manifests received in EndpointConfig (startup prefetch baseline).
-        # Keys should be canonical model ref strings (e.g. "cozy:owner/repo@sha256:<digest>").
+        # Keys are canonical bare tensorhub refs (e.g. "owner/repo@sha256:<digest>").
         self._resolved_repos_by_id_baseline: Dict[str, Any] = {}
         self._prefetch_lock = threading.Lock()
         # Orchestrator-reported availability state received with each
@@ -3970,15 +3982,17 @@ class Worker:
             # Also keep the raw key if different, to be tolerant of non-canonical senders.
             if raw != canon:
                 out[raw] = v
-            # For digest-based refs (e.g. "cozy:owner/repo@blake3:<hex>"), also add
-            # a tag-based alias (e.g. "cozy:owner/repo:latest") so that lookups by
-            # tag in model_ref_downloader will find the resolved entry.
+            # For digest-based tensorhub refs (e.g. "owner/repo@blake3:<hex>"),
+            # also add a tag-based alias (e.g. "owner/repo:latest") so that
+            # lookups by tag in model_ref_downloader will find the resolved
+            # entry. Tensorhub is the default provider — the alias keys are
+            # bare (no prefix).
             try:
                 parsed = parse_model_ref(canon)
-                if parsed.scheme == "cozy" and parsed.cozy is not None and parsed.cozy.digest:
-                    tag_canon = f"cozy:{parsed.cozy.owner}/{parsed.cozy.repo}:{parsed.cozy.tag}"
-                    if parsed.cozy.flavor:
-                        tag_canon = f"{tag_canon}#{parsed.cozy.flavor}"
+                if parsed.provider == "tensorhub" and parsed.tensorhub is not None and parsed.tensorhub.digest:
+                    tag_canon = f"{parsed.tensorhub.owner}/{parsed.tensorhub.repo}:{parsed.tensorhub.tag}"
+                    if parsed.tensorhub.flavor:
+                        tag_canon = f"{tag_canon}#{parsed.tensorhub.flavor}"
                     if tag_canon not in out:
                         out[tag_canon] = v
             except Exception:
@@ -4235,9 +4249,9 @@ class Worker:
             parsed = parse_model_ref(canonical_model_id)
         except Exception:
             return None
-        if parsed.scheme != "cozy" or parsed.cozy is None:
+        if parsed.provider != "tensorhub" or parsed.tensorhub is None:
             return None
-        digest = (parsed.cozy.digest or "").strip()
+        digest = (parsed.tensorhub.digest or "").strip()
         if not digest:
             # Tag refs are mutable; rely on downloads.
             return None
@@ -4934,12 +4948,8 @@ class Worker:
         except Exception:
             # Best-effort — fall through to raw ref.
             pass
-        # Strip "hf:" / "cozy:" prefix if present so SGLang/vLLM get the
-        # bare HF org/repo string they expect for HuggingFace pulls.
-        for prefix in ("hf:", "huggingface:"):
-            if ref.lower().startswith(prefix):
-                ref = ref[len(prefix) :]
-                break
+        # Wire-format refs are bare (issue wire-format-bare-refs-typed-provider);
+        # no prefix-strip needed.
         return ref
 
     async def _start_one_batched_instance(self, rec: Dict[str, Any]) -> None:
@@ -5552,12 +5562,8 @@ class Worker:
             except Exception:
                 # Fall through to ref-as-string (loader resolves via own cache).
                 pass
-            # Strip "hf:" / "huggingface:" prefix so the underlying loader
-            # sees the bare org/repo string.
-            for prefix in ("hf:", "huggingface:"):
-                if bare_ref.lower().startswith(prefix):
-                    bare_ref = bare_ref[len(prefix):]
-                    break
+            # Wire-format refs are bare — provider is tracked separately,
+            # no prefix-strip needed.
             out[key] = bare_ref
         return out
 
@@ -6900,7 +6906,7 @@ class Worker:
         # ctx so the downloader (used by `_materialize_source_for_training`
         # and tenant code that calls Source.* helpers) can look up the
         # orchestrator-pre-resolved snapshot URLs. Without this, training
-        # jobs fail at materialize-source time with "cozy ref ... not in
+        # jobs fail at materialize-source time with "tensorhub ref ... not in
         # resolved_repos_by_id" even when the orchestrator did pre-resolve.
         # Mirrors the inference path's set at line ~4172 below.
         from .models.ref_downloader import (
@@ -7130,11 +7136,9 @@ class Worker:
                 "source materialization requires a model downloader "
                 "(Settings.tensorhub_public_url must be set so the worker can resolve cozy refs)"
             )
-        # Canonicalize refs that omit the cozy: prefix so the downloader treats
-        # them as cozy snapshots, not HF refs.
+        # Wire-format refs are bare tensorhub refs; the downloader treats
+        # bare refs as tensorhub snapshots by default.
         canonical = _canonicalize_model_ref_string(ref)
-        if not canonical.startswith(("cozy:", "hf:")):
-            canonical = "cozy:" + canonical
 
         logger.info("materialize_source source=%s", source)
 
@@ -7242,7 +7246,7 @@ class Worker:
                 if rm is not None and model_id:
                     try:
                         parsed = parse_model_ref(str(model_id))
-                        canon = parsed.cozy.canonical() if parsed.scheme == "cozy" and parsed.cozy is not None else str(model_id)
+                        canon = parsed.tensorhub.canonical() if parsed.provider == "tensorhub" and parsed.tensorhub is not None else str(model_id)
                         model_metrics = rm.models.get(canon)
                         rm.set_initial_model_state(
                             canon,
@@ -7271,12 +7275,12 @@ class Worker:
                 if cached is not None:
                     return cached
 
-                # Diffusers pipelines: prefer downloading via the worker's model downloader and
-                # loading from a local directory, instead of letting diffusers/huggingface_hub
-                # interpret model refs like "hf:owner/repo".
+                # Diffusers pipelines: prefer downloading via the worker's model downloader
+                # and loading from a local directory, instead of letting diffusers /
+                # huggingface_hub fetch the bare ref directly.
                 #
-                # This keeps tenant code inference-only while still supporting the platform's
-                # model-ref schemes and caching behavior.
+                # This keeps tenant code inference-only while letting the platform handle
+                # provider-aware caching + presigned-manifest resolution.
                 obj = None
                 is_diffusers_pipeline_type = False
                 canon = ""
@@ -7296,7 +7300,7 @@ class Worker:
                     canon = str(model_id)
                     try:
                         parsed = parse_model_ref(str(model_id))
-                        canon = parsed.cozy.canonical() if parsed.scheme == "cozy" and parsed.cozy is not None else str(model_id)
+                        canon = parsed.tensorhub.canonical() if parsed.provider == "tensorhub" and parsed.tensorhub is not None else str(model_id)
                     except Exception:
                         canon = str(model_id)
 
@@ -7583,9 +7587,9 @@ class Worker:
                             model_source = p.as_posix()
                         else:
                             parsed = parse_model_ref(model_source)
-                            if self._downloader is not None and parsed.scheme in ("cozy", "hf"):
+                            if self._downloader is not None and parsed.provider in ("tensorhub", "hf"):
                                 model_source = self._downloader.download(model_source, str(tensorhub_cas_dir()))
-                            elif parsed.scheme == "hf" and parsed.hf is not None:
+                            elif parsed.provider == "hf" and parsed.hf is not None:
                                 # Fallback path when downloader is unavailable.
                                 model_source = parsed.hf.repo_id
                                 if parsed.hf.revision:
@@ -7869,10 +7873,13 @@ class Worker:
 
         # 2. Binding default.
         binding = inj.binding
-        if isinstance(binding, Repo):
-            # _wire_ref prepends the provider prefix for non-cozy bindings
-            # so the local model_id matches the manifest's canonical wire ref.
-            model_id = _resolved_repo_id(_wire_ref(binding), flavor=binding._flavor, tag=binding._tag)
+        # The wire format is bare ref + explicit provider field. Internal
+        # canonical model_id keys discriminate by provider so the same
+        # `owner/repo` on cozy vs. hf stays disjoint in the cache.
+        if isinstance(binding, (Repo, HFRepo, CivitaiRepo)):
+            model_id = _resolved_repo_id(
+                binding.ref, flavor=binding._flavor, tag=binding._tag, provider=binding.provider
+            )
             return model_id, None
 
         if isinstance(binding, Dispatch):
@@ -7895,7 +7902,9 @@ class Worker:
                 raise ValueError(
                     f"function {fn_name!r}: dispatch key {key!r} not in table {allowed!r}"
                 )
-            model_id = _resolved_repo_id(_wire_ref(pick), flavor=pick._flavor, tag=pick._tag)
+            model_id = _resolved_repo_id(
+                pick.ref, flavor=pick._flavor, tag=pick._tag, provider=pick.provider
+            )
             return model_id, key
 
         raise TypeError(f"unknown binding type: {type(binding).__name__}")

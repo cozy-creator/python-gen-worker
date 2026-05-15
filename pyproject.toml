@@ -1,6 +1,6 @@
 [project]
 name = "gen-worker"
-version = "0.7.6"
+version = "0.7.7"
 description = "A library used to build custom functions in Cozy Creator's serverless function platform."
 readme = "README.md"
 license = "MIT"
@@ -41,6 +41,9 @@ dependencies = [
 Homepage = "https://github.com/cozy-creator/python-gen-worker"
 Repository = "https://github.com/cozy-creator/python-gen-worker"
 Issues = "https://github.com/cozy-creator/python-gen-worker/issues"
+
+[project.scripts]
+gen-worker = "gen_worker.cli:main"
 
 [project.optional-dependencies]
 torch = [

@@ -1,6 +1,39 @@
 # Changelog
 
-## 0.8.0
+## 0.7.7
+
+### Breaking — wire-format hard cut (issue wire-format-bare-refs-typed-provider)
+
+- **No more prefix strings on the wire.** `_wire_ref(binding)` now returns
+  `binding.ref` BARE for every provider. The `_binding_to_wire` payload
+  carries the typed `provider` field (`"tensorhub"` | `"hf"` | `"civitai"`)
+  alongside `ref`; absence of `provider` on a consumer payload defaults
+  to `"cozy"` (tensorhub).
+- **`parse_model_ref` is no longer LEGACY framing** — the `scheme` alias
+  field on `ParsedModelRef` is gone; `provider` is the only field. Every
+  internal caller now reads `parsed.provider`.
+- **Internal cache key shape changed.** `_resolved_repo_id(ref, ...,
+  provider=...)` takes provider explicitly and prefixes non-cozy refs
+  with `<provider>::` (double-colon) as an in-process identity tag.
+  `cozy` is the implicit default and is elided so existing cozy keys
+  round-trip unchanged. This is NOT a wire format — it's an internal
+  Python identity string.
+- Endpoints rebuilt against 0.7.7 produce manifests that tensorhub
+  >= migration 006 accepts. Pre-0.7.7 manifests are rejected with a
+  typed migration error pointing at SDK upgrade + endpoint rebuild.
+
+### Cross-repo coordination
+
+- tensorhub migration `006_drop_ref_prefixes.up.sql` strips prefixes
+  from existing `function_param_bindings.ref` and `dispatch_table_json`
+  entries, populates `provider` from the stripped prefix, marks the
+  column NOT NULL, and adds a CHECK constraint forbidding future
+  prefixes.
+- gen-orchestrator removes prefix-sniff fallback in `BindingProvider`
+  and stops `"cozy:" + ref` prepending when sending to workers.
+- All 13 inference + 4 training endpoints rebuild against this SDK.
+
+## 0.7.6
 
 ### Breaking
 
@@ -24,7 +57,7 @@
   prefix-sniffing path on the orchestrator + worker remains as fallback
   for already-published manifests, but the explicit field is the
   canonical signal going forward. Endpoints must be rebuilt against
-  0.8.0 to emit the new field.
+  0.7.6 to emit the new field.
 
 ### New
 

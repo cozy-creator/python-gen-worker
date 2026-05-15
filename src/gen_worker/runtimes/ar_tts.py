@@ -1,6 +1,6 @@
 """Autoregressive-TTS model-class registry (progress.json #327).
 
-Autoregressive TTS models (Chatterbox, GPT-SoVITS, Bark, MusicGen, …) are
+Autoregressive TTS models (Chatterbox, Bark, MusicGen, …) are
 architecturally Llama-class decoders that emit *audio* tokens instead of text
 tokens. The decoder side fits cleanly onto a continuous-batching engine
 (vLLM / SGLang); the post-decoder side runs a learned audio codec (S3 token
@@ -42,7 +42,6 @@ References:
   - chatterbox-vllm port: https://github.com/randombk/chatterbox-vllm
   - Resemble AI Chatterbox: https://github.com/resemble-ai/chatterbox
   - vLLM AR-TTS tracking: https://github.com/vllm-project/vllm/issues/21989
-  - GPT-SoVITS RTF on 4090: https://github.com/RVC-Boss/GPT-SoVITS/issues/2579
 """
 
 from __future__ import annotations
@@ -56,7 +55,7 @@ class ARTTSModelSpec(msgspec.Struct, frozen=True, kw_only=True):
     """Engine + codec wiring for one AR-TTS model class.
 
     Attributes:
-      model_class: Human name (`"Chatterbox"`, `"GPT-SoVITS-v2"`, etc.).
+      model_class: Human name (`"Chatterbox"`, `"MusicGen"`, etc.).
       vllm_arch: vLLM model class name (registered via
         ``ModelRegistry.register_model``). ``None`` if the model has no
         vLLM port yet.
@@ -109,24 +108,6 @@ _REGISTRY: dict[str, ARTTSModelSpec] = {
             "Llama-class decoder emitting S3 audio tokens. "
             "chatterbox-vllm registers `LlamaChatterboxModel` with vLLM "
             "via `ModelRegistry.register_model` at import time."
-        ),
-    ),
-    # GPT-SoVITS v2. AR side is a GPT-style decoder (`AR.models.t2s_model`).
-    # Native batch_size knob in the upstream repo (PR #2579) gets RTF=0.014
-    # on a 4090 at batch=8. No vLLM port shipped yet — placeholder so
-    # callers can detect the model class is known but unported.
-    "gpt-sovits-v2": ARTTSModelSpec(
-        model_class="GPT-SoVITS-v2",
-        vllm_arch=None,
-        sglang_runner=None,
-        audio_codec_decoder="GPT_SoVITS.module.models.SynthesizerTrn",
-        sample_rate_hz=32000,
-        audio_token_vocab_size=1025,
-        supports_streaming=False,
-        notes=(
-            "GPT-style AR decoder + VITS-style flow matching decoder. "
-            "No vLLM port published yet; entry exists so the registry "
-            "can advertise the model class while wiring is in flight."
         ),
     ),
     # Bark (Suno). Three-stage cascade (text→semantic, semantic→coarse,

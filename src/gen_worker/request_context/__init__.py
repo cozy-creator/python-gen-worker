@@ -1107,7 +1107,10 @@ class ConversionContext(_PublisherMixin, RequestContext):
 
         For imports (clone_huggingface), pass source_repo as
         'external-sources/upstream' and source_version_id as the external
-        reference like 'hf:black-forest-labs/FLUX.2-klein-4B'; set
+        reference. The external-source identifier is an internal tensorhub
+        schema encoding (separate from the model-ref wire format) that
+        prefixes the upstream provider, e.g. 'hf:black-forest-labs/FLUX.2-klein-4B'
+        for huggingface or 'civitai:<id>' for civitai. Set
         `relationship_kind='import'` + `auto_create_external_parent=True`.
         """
         owner, repo = _parse_owner_repo(destination_repo)

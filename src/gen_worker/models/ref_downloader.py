@@ -26,14 +26,14 @@ def reset_resolved_repos_by_id(token: contextvars.Token) -> None:
 
 
 class ModelRefDownloader(ModelDownloader):
-    """Composite downloader for phase-1 model refs.
+    """Composite downloader for typed model refs.
 
-    Supported schemes:
-      - Cozy Hub snapshots: owner/repo[:tag] or owner/repo@sha256:<digest>,
-        optionally prefixed with "cozy:". Requires orchestrator-provided presigned URLs.
-      - Hugging Face: hf:owner/repo[@revision]
+    Supported providers (provider tracked separately from the bare ref):
+      - Tensorhub (default): bare owner/repo[:tag] or owner/repo@sha256:<digest>.
+        Requires orchestrator-provided presigned URLs.
+      - Hugging Face: bare owner/repo[@revision].
 
-    Returns a local directory path for both schemes.
+    Returns a local directory path for both providers.
     """
 
     def __init__(
@@ -44,14 +44,14 @@ class ModelRefDownloader(ModelDownloader):
         self._hf = HuggingFaceHubDownloader(hf_home=hf_home, hf_token=hf_token)
 
     async def _download_async(self, parsed: ParsedModelRef, dest_dir: Path) -> Path:
-        if parsed.scheme == "hf" and parsed.hf is not None:
+        if parsed.provider == "hf" and parsed.hf is not None:
             # Workers download HuggingFace refs directly from HF. Any
             # Cozy-Hub mirroring of HF repos is orchestrator-side
             # (pre-resolved into resolved_repos_by_id as a cozy: ref).
             return self._hf.download(parsed.hf).local_dir
 
-        if parsed.scheme == "cozy" and parsed.cozy is not None:
-            canonical = parsed.cozy.canonical()
+        if parsed.provider == "tensorhub" and parsed.tensorhub is not None:
+            canonical = parsed.tensorhub.canonical()
             resolved_mapping = _resolved_repos_by_id.get()
             resolved_entry = resolved_mapping.get(canonical) if resolved_mapping is not None else None
 
@@ -63,13 +63,13 @@ class ModelRefDownloader(ModelDownloader):
                 # here means the orchestrator didn't pre-resolve this ref
                 # — that's an orchestrator-side bug, not a worker fallback.
                 raise RuntimeError(
-                    f"cozy ref {canonical!r} not in resolved_repos_by_id "
+                    f"tensorhub ref {canonical!r} not in resolved_repos_by_id "
                     "— orchestrator must pre-resolve before dispatching the job"
                 )
 
             return await ensure_snapshot_async(
                 base_dir=dest_dir,
-                ref=parsed.cozy,
+                ref=parsed.tensorhub,
                 resolved=resolved_entry,
             )
 

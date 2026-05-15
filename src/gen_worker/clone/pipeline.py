@@ -63,9 +63,16 @@ def normalize_destination_ref(value: str) -> str:
     destination_ref = str(value or "").strip().lower()
     if destination_ref == "":
         raise ValueError("destination_repo is required")
-    # Strip the optional "cozy:" scheme prefix (e.g. "cozy:owner/repo" -> "owner/repo")
-    if destination_ref.startswith("cozy:"):
-        destination_ref = destination_ref[len("cozy:"):]
+    # Hard-reject any legacy provider prefix on the destination ref. The
+    # wire contract is bare ref + provider field (issue
+    # wire-format-bare-refs-typed-provider); destination_repo is always
+    # tensorhub-internal, so no prefix is expected.
+    for p in ("tensorhub:", "hf:", "civitai:", "huggingface:"):
+        if destination_ref.startswith(p):
+            raise ValueError(
+                f"destination_repo must not carry a provider prefix; "
+                f"use bare owner/repo (got {value!r})"
+            )
     parts = destination_ref.split("/", 1)
     if len(parts) != 2:
         raise ValueError("destination_repo must be in '<owner>/<repo>' format")
@@ -2395,6 +2402,13 @@ def _finalize_clone(
     # placeholder parent when auto_create_external_parent=True.
     provider = (source_identity.provider or "").strip().lower()
     source_ref = (source_identity.source_ref or "").strip()
+    # parent_checkpoint_id is a tensorhub-internal identifier (FK target
+    # in the lineage table). For external sources, we encode provider +
+    # external ref into the string so downstream consumers can tell the
+    # upstream apart. This is NOT the model-ref wire format — it's a
+    # tensorhub schema field. A future migration may split this into
+    # (parent_provider, parent_external_ref) columns; until then the
+    # encoding stays.
     if provider in ("huggingface", "hf"):
         parent_repo = "external-sources/upstream"
         parent_checkpoint_id = f"hf:{source_ref}"

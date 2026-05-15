@@ -32,7 +32,7 @@ from gen_worker.worker import _binding_to_wire, _wire_ref
 
 
 def test_repo_provider_is_cozy() -> None:
-    assert Repo("acme/myrepo").provider == "cozy"
+    assert Repo("acme/myrepo").provider == "tensorhub"
 
 
 def test_hfrepo_provider_is_hf() -> None:
@@ -196,28 +196,30 @@ def test_civitairepo_modifiers_preserve_subclass() -> None:
 
 
 def test_wire_ref_cozy_is_bare() -> None:
-    """Tensorhub refs go on the wire without a prefix."""
+    """Tensorhub refs go on the wire as the bare ref."""
     assert _wire_ref(Repo("acme/myrepo")) == "acme/myrepo"
 
 
-def test_wire_ref_hf_has_prefix() -> None:
-    """HF refs get an `hf:` prefix for legacy resolver compatibility."""
-    assert _wire_ref(HFRepo("Qwen/Qwen2.5-1.5B-Instruct")) == "hf:Qwen/Qwen2.5-1.5B-Instruct"
+def test_wire_ref_hf_is_bare() -> None:
+    """HF refs go on the wire as the bare ref. Provider rides in the
+    `provider` field on the binding payload, not as a string prefix."""
+    assert _wire_ref(HFRepo("Qwen/Qwen2.5-1.5B-Instruct")) == "Qwen/Qwen2.5-1.5B-Instruct"
 
 
-def test_wire_ref_civitai_has_prefix() -> None:
-    """Civitai refs get a `civitai:` prefix for legacy resolver compatibility."""
-    assert _wire_ref(CivitaiRepo("123456")) == "civitai:123456"
+def test_wire_ref_civitai_is_bare() -> None:
+    """Civitai refs go on the wire as the bare ref."""
+    assert _wire_ref(CivitaiRepo("123456")) == "123456"
 
 
-def test_binding_to_wire_cozy_fixed() -> None:
-    """Fixed tensorhub binding round-trips: bare ref + provider=cozy."""
+def test_binding_to_wire_tensorhub_fixed() -> None:
+    """Fixed tensorhub binding round-trips: bare ref, no provider field
+    on the wire (tensorhub is the implicit default — absence == tensorhub)."""
     out = _binding_to_wire("pipeline", str, Repo("acme/myrepo").flavor("nf4"))
     assert out["param"] == "pipeline"
     binding = out["binding"]
     assert binding["kind"] == "fixed"
     assert binding["ref"] == "acme/myrepo"
-    assert binding["provider"] == "cozy"
+    assert "provider" not in binding
     assert binding["flavor"] == "nf4"
     assert binding["tag"] == "prod"
     assert binding["allow_override"] is False
@@ -225,31 +227,31 @@ def test_binding_to_wire_cozy_fixed() -> None:
 
 
 def test_binding_to_wire_hf_fixed() -> None:
-    """Fixed HF binding round-trips: prefixed ref + provider=hf."""
+    """Fixed HF binding round-trips: bare ref + provider=hf."""
     out = _binding_to_wire("pipeline", str, HFRepo("Qwen/Qwen2.5-1.5B-Instruct"))
     binding = out["binding"]
     assert binding["kind"] == "fixed"
-    assert binding["ref"] == "hf:Qwen/Qwen2.5-1.5B-Instruct"
+    assert binding["ref"] == "Qwen/Qwen2.5-1.5B-Instruct"
     assert binding["provider"] == "hf"
 
 
 def test_binding_to_wire_civitai_fixed() -> None:
-    """Fixed civitai binding round-trips: prefixed ref + provider=civitai."""
+    """Fixed civitai binding round-trips: bare ref + provider=civitai."""
     out = _binding_to_wire("pipeline", str, CivitaiRepo("123456"))
     binding = out["binding"]
     assert binding["kind"] == "fixed"
-    assert binding["ref"] == "civitai:123456"
+    assert binding["ref"] == "123456"
     assert binding["provider"] == "civitai"
 
 
 def test_binding_to_wire_dispatch_mixed_providers() -> None:
-    """Dispatch table with mixed providers: each entry stamps its own provider."""
+    """Dispatch table with mixed providers: each entry stamps its own provider; refs stay bare."""
     from gen_worker import dispatch
 
     d = dispatch(
         field="variant",
         table={
-            "cozy": Repo("acme/r").flavor("nf4"),
+            "tensorhub": Repo("acme/r").flavor("nf4"),
             "hf": HFRepo("Qwen/Q").flavor("bf16"),
             "civitai": CivitaiRepo("123").flavor("fp16"),
         },
@@ -259,9 +261,9 @@ def test_binding_to_wire_dispatch_mixed_providers() -> None:
     assert binding["kind"] == "dispatch"
     assert binding["field"] == "variant"
     table = binding["table"]
-    assert table["cozy"]["ref"] == "acme/r"
-    assert table["cozy"]["provider"] == "cozy"
-    assert table["hf"]["ref"] == "hf:Qwen/Q"
+    assert table["tensorhub"]["ref"] == "acme/r"
+    assert "provider" not in table["tensorhub"]  # tensorhub default elided
+    assert table["hf"]["ref"] == "Qwen/Q"
     assert table["hf"]["provider"] == "hf"
-    assert table["civitai"]["ref"] == "civitai:123"
+    assert table["civitai"]["ref"] == "123"
     assert table["civitai"]["provider"] == "civitai"

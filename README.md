@@ -22,9 +22,11 @@ Optional extras: `[images]` for `gw.io.read_image / write_image`,
 
 ## Minimum viable endpoint
 
-Three files. Any base image. No model injection, no fancy decorators.
+Two files when deploying through Tensorhub's generated-Dockerfile path.
+Tensorhub generates the Dockerfile when `endpoint.toml` has build hints,
+installs your dependencies, runs discovery, and wires the runtime entrypoint.
 
-**`endpoint.toml`** (5 lines for CUDA, 4 for CPU):
+**`endpoint.toml`**:
 
 ```toml
 schema_version = 1
@@ -33,18 +35,8 @@ main = "myendpoint.main"
 [[build.profiles]]
 name = "default"
 accelerator = "none"
-```
-
-**`Dockerfile`** (your choice of base, your build steps):
-
-```dockerfile
-FROM python:3.12-slim
-WORKDIR /app
-COPY . /app
-RUN pip install -e .
-RUN mkdir -p /app/.tensorhub \
-    && python -m gen_worker.discovery > /app/.tensorhub/endpoint.lock
-ENTRYPOINT ["python", "-m", "gen_worker.entrypoint"]
+python = "3.12"
+dependencies = ["gen-worker>=0.7.5", "msgspec"]
 ```
 
 **`main.py`**:
@@ -65,6 +57,8 @@ def run(ctx: RequestContext, payload: Input) -> Output:
 ```
 
 That's it. `cozyctl endpoint deploy` (or the platform UI) takes it from here.
+For custom base images, multi-stage builds, or non-pip setup, add a Dockerfile;
+Tensorhub will use it instead of generating one.
 
 ## Adding a model
 
@@ -149,15 +143,34 @@ Top-level `gen_worker` exports only what endpoint authors need:
 Training and conversion live in their own submodules: `gen_worker.trainer`,
 `gen_worker.conversion`, `gen_worker.clone`.
 
+## Local development
+
+`gen-worker run` executes one endpoint method in the local Python
+interpreter against a JSON payload — no docker-compose, no orchestrator.
+
+```bash
+pip install -e .
+gen-worker run --payload '{"prompt": "hello"}'
+```
+
+stdout for results, stderr for events; exit 0 / 1 / 2 / 3 / 130 for
+success / user-exception / usage / model-resolution / SIGINT. Full
+two-input model, `--offline` story, SIGINT semantics, and worked
+examples in [docs/local-dev.md](docs/local-dev.md).
+
 ## Documentation
 
 - [docs/endpoint-authoring.md](docs/endpoint-authoring.md) — full reference: the
   three layers, `Resources`, bindings, `dispatch`, `allow_override`,
   multi-param injection, the `_models` envelope, atomic substitution.
+- [docs/local-dev.md](docs/local-dev.md) — `gen-worker run` CLI: two-input
+  invocation model, `--offline` story, SIGINT semantics, exit codes,
+  worked examples.
 - [docs/endpoint-toml.md](docs/endpoint-toml.md) — `endpoint.toml` reference:
   build modes, placement fields, build hints, `BASE_IMAGE` injection.
-- [docs/dockerfile.md](docs/dockerfile.md) — the three Dockerfile contract
-  points, when `ARG BASE_IMAGE` matters, multi-profile builds.
+- [docs/dockerfile.md](docs/dockerfile.md) — when to provide your own
+  Dockerfile, the three Dockerfile contract points, when `ARG BASE_IMAGE`
+  matters, multi-profile builds.
 - [docs/scaling-hints.md](docs/scaling-hints.md) — `Resources` cost-shape
   fields used by the orchestrator for admission and scheduling.
 - [docs/endpoint-envs.md](docs/endpoint-envs.md) — tenant-defined envs/secrets
@@ -168,7 +181,5 @@ Training and conversion live in their own submodules: `gen_worker.trainer`,
 Working endpoints to copy from in `examples/`:
 
 - `marco-polo/` — minimal inference endpoint
-- `medasr-transcribe/` — audio transcription with a Hugging Face model
-- `openai-codex/` — text generation
 - `training-smoke/` — minimal trainer
 - `from-scratch/` — boilerplate template

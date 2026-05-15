@@ -51,11 +51,9 @@ class HuggingFaceHubDownloader:
         except Exception:
             pass
 
-        # Be defensive: the HF APIs want a bare "owner/repo" repo_id. If a caller accidentally
-        # passes "hf:owner/repo" through as the repo_id, strip the scheme.
+        # The wire format is bare ref + typed provider — HF refs reach
+        # this loader without any prefix. No defensive strip needed.
         repo_id = (ref.repo_id or "").strip()
-        if repo_id.lower().startswith("hf:"):
-            repo_id = repo_id.split(":", 1)[1].strip()
         if not repo_id:
             raise ValueError("empty hf repo_id")
 
@@ -136,7 +134,7 @@ class HuggingFaceHubDownloader:
 
             if model_index is None:
                 raise RuntimeError(
-                    f"hf:{ref.repo_id} is missing model_index.json and no diffusers-like components could be inferred."
+                    f"huggingface ref {ref.repo_id!r} is missing model_index.json and no diffusers-like components could be inferred."
                 )
 
             # Prefetch all sharded-weight index JSONs (small) so we can choose the best weight set per component.

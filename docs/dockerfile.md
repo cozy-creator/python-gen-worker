@@ -1,7 +1,13 @@
 # Dockerfile contract
 
-The Dockerfile is fully yours — base image, build steps, dependency manager,
-caching strategy, multi-stage layouts. Tensorhub does not own this layer.
+You only need a Dockerfile when you want to own the base image, build steps,
+dependency manager, caching strategy, or multi-stage layout. For simple
+Tensorhub endpoints, omit the Dockerfile and set build hints in
+`endpoint.toml`; Tensorhub generates the Dockerfile and satisfies the contract
+below.
+
+When you do provide a Dockerfile, it is fully yours. Tensorhub does not own this
+layer.
 
 You satisfy three contract points; everything else is up to you.
 
@@ -47,6 +53,17 @@ ENTRYPOINT ["python", "-m", "gen_worker.entrypoint"]
 
 No `ARG BASE_IMAGE`, no version pass-throughs. The endpoint's `pyproject.toml`
 pins `gen-worker>=0.7.5` and the Dockerfile installs it.
+
+If the Dockerfile only looks like this, prefer Tensorhub's
+generated-Dockerfile path:
+
+```toml
+[[build.profiles]]
+name = "default"
+accelerator = "none"
+python = "3.12"
+dependencies = ["gen-worker>=0.7.5"]
+```
 
 ---
 

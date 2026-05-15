@@ -368,9 +368,9 @@ def _canonicalize_model_ref_string(raw: str) -> str:
         return s
     try:
         parsed = parse_model_ref(s)
-        if parsed.scheme == "cozy" and parsed.cozy is not None:
-            return parsed.cozy.canonical()
-        if parsed.scheme == "hf" and parsed.hf is not None:
+        if parsed.provider == "tensorhub" and parsed.tensorhub is not None:
+            return parsed.tensorhub.canonical()
+        if parsed.provider == "hf" and parsed.hf is not None:
             return parsed.hf.canonical()
         return s
     except Exception:

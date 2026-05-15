@@ -16,7 +16,9 @@ Three endpoint kinds:
 
 ## Quick start — the minimum viable endpoint
 
-Three files. Arbitrary base image. No model injection.
+Two files when deploying through Tensorhub's generated-Dockerfile path.
+Tensorhub generates the Dockerfile when `endpoint.toml` has build hints,
+installs your dependencies, runs discovery, and wires the runtime entrypoint.
 
 **`endpoint.toml`**
 
@@ -27,18 +29,8 @@ main = "myendpoint.main"
 [[build.profiles]]
 name = "default"
 accelerator = "none"
-```
-
-**`Dockerfile`**
-
-```dockerfile
-FROM python:3.12-slim
-WORKDIR /app
-COPY . /app
-RUN pip install -e .
-RUN mkdir -p /app/.tensorhub \
-    && python -m gen_worker.discovery > /app/.tensorhub/endpoint.lock
-ENTRYPOINT ["python", "-m", "gen_worker.entrypoint"]
+python = "3.12"
+dependencies = ["gen-worker>=0.7.5", "msgspec"]
 ```
 
 **`main.py`**
@@ -58,9 +50,9 @@ def run(ctx: RequestContext, payload: Input) -> Output:
     return Output(text=f"got: {payload.prompt}")
 ```
 
-That's everything. Discovery runs at image-build time and bakes
-`/app/.tensorhub/endpoint.lock`; the entrypoint loads it on container start and
-serves invocations.
+That's everything. Discovery still runs at image-build time and bakes
+`/app/.tensorhub/endpoint.lock`; in generated-Dockerfile builds Tensorhub writes the Dockerfile
+that performs those contract steps.
 
 ---
 
@@ -70,8 +62,8 @@ Each layer is independent and can be minimal or maximal:
 
 | File                 | Declares                                                                  |
 |----------------------|---------------------------------------------------------------------------|
-| `endpoint.toml`      | The entry module + where to run the image (orchestrator placement)        |
-| `Dockerfile`         | How to build the image (your choice; three contract points only)          |
+| `endpoint.toml`      | The entry module + where to run the image, plus optional build hints      |
+| `Dockerfile`         | Optional when generated Dockerfile builds are enough; required for custom build steps |
 | `main.py` (decorators) | What the functions do + each function's runtime envelope and model bindings |
 
 - `endpoint.toml` reference: [endpoint-toml.md](endpoint-toml.md)
@@ -134,7 +126,7 @@ usable binding with defaults (`tag="prod"`, no flavor, no override).
 ```python
 from gen_worker import Repo
 
-flux = Repo("black-forest-labs/flux.2-klein-4b-turbo")
+flux = Repo("black-forest-labs/flux.2-klein-4b-base")
 
 flux                                          # bare repo, defaults: tag="prod", no flavor
 flux.flavor("nf4")                            # pin a flavor
@@ -161,7 +153,7 @@ Function pins one specific `(repo, flavor?, tag?)`:
 from diffusers import Flux2KleinPipeline
 from gen_worker import Repo, Resources, inference_function
 
-flux = Repo("black-forest-labs/flux.2-klein-4b-turbo")
+flux = Repo("black-forest-labs/flux.2-klein-4b-base")
 _flux_bf16 = Resources(requires_gpu=True, min_vram_gb=22.0)
 
 @inference_function(
@@ -196,7 +188,7 @@ class BnbInput(msgspec.Struct):
     height: int = 1024
     num_images_per_prompt: int = 1
 
-flux = Repo("black-forest-labs/flux.2-klein-4b-turbo")
+flux = Repo("black-forest-labs/flux.2-klein-4b-base")
 
 _flux_dispatch = Resources(
     requires_gpu=True,
@@ -287,7 +279,7 @@ optional `.allow_override(...)` modifier. The invoker's `_models` dict is
 keyed by the same param names, so each is overridden independently.
 
 ```python
-flux       = Repo("black-forest-labs/flux.2-klein-4b-turbo")
+flux       = Repo("black-forest-labs/flux.2-klein-4b-base")
 flux_lora  = Repo("black-forest-labs/flux-lora-collection")
 
 @inference_function(
@@ -769,13 +761,38 @@ The runtime normalizes metric names (`loss` → `train/loss`, `lr` → `train/lr
 
 ### Inference endpoint
 
+The canonical local-test recipe is `gen-worker run`:
+
+```bash
+# Single-class, single-method endpoint — both inferred from your code.
+gen-worker run --payload '{"prompt": "hello"}'
+
+# Pick a specific class + method.
+gen-worker run --class MyEndpoint --method generate --payload '{"prompt":"hello"}'
+
+# Read payload from a file.
+gen-worker run --method generate --payload-file ./fixtures/sample.json
+
+# Override the model via payload._models (same shape as production).
+gen-worker run --payload '{"prompt":"x","_models":{"pipe":"other/repo:tag#flavor"}}'
+
+# Air-gapped — fail rather than fetch from the registry on cache miss.
+gen-worker run --offline --payload '{"prompt":"x"}'
+```
+
+Result goes to stdout (one JSON object per line, msgspec-encoded); events
+from `ctx.emit / progress / log` go to stderr as JSON lines so the result
+on stdout stays pipeable (`gen-worker run ... | jq .value`). Exit codes:
+`0` success, `1` user exception, `2` usage / validation error, `3` model
+resolution failure, `130` SIGINT. See [local-dev.md](local-dev.md) for
+the full design, the SIGINT story, and the `--offline` story.
+
+Fallback (when you want to wire your own HTTP harness):
+
 ```bash
 uv run python -m gen_worker.discovery       # writes endpoint.lock to stdout
 WORKER_MODE=invoke uv run python -m gen_worker.entrypoint
 ```
-
-Hit it with a local invoke (`curl` against the dev server, or the in-repo
-dev runner).
 
 ### Trainer smoke run
 
@@ -801,9 +818,8 @@ per-model recommended config, and a complete working example:
 - [cookbook-video-diffusion.md](cookbook-video-diffusion.md) — LTX-Video,
   HunyuanVideo, Wan2.2, Mochi. TeaCache + FP8/NVFP4 + xDiT sequence
   parallelism.
-- [cookbook-audio.md](cookbook-audio.md) — F5-TTS, Kokoro, Stable Audio
-  Open (SerialWorker) and Chatterbox, GPT-SoVITS, Bark, MusicGen
-  (BatchedWorker via vLLM).
+- [cookbook-audio.md](cookbook-audio.md) — Stable Audio style SerialWorkers
+  and Chatterbox-style BatchedWorkers via vLLM.
 - [cookbook-stages.md](cookbook-stages.md) — `@inference.stage`
   annotations for multi-stage pipelines (3D, large DiTs with batch-
   friendly encoders).
@@ -813,7 +829,5 @@ per-model recommended config, and a complete working example:
 Working endpoints to copy from in `examples/`:
 
 - `marco-polo/` — minimal inference endpoint
-- `medasr-transcribe/` — audio transcription with a Hugging Face model
-- `openai-codex/` — text generation
 - `training-smoke/` — minimal trainer
 - `from-scratch/` — boilerplate template
