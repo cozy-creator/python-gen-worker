@@ -170,7 +170,6 @@ class _FunctionSpec(msgspec.Struct, frozen=True, kw_only=True):
     name: str
     timeout_ms: int | None = None
     allowed_shapes: tuple[tuple[int, ...], ...] = ()
-    max_concurrent_per_worker: int | None = None
     rate_limit_per_invoker: int | None = None
     label: str | None = None
     description: str | None = None
@@ -240,7 +239,6 @@ def _function_inner(
     name: Optional[str] = None,
     timeout_ms: Optional[int] = None,
     allowed_shapes: Optional[tuple[tuple[int, ...], ...]] = None,
-    max_concurrent_per_worker: Optional[int] = None,
     rate_limit_per_invoker: Optional[int] = None,
     label: Optional[str] = None,
     description: Optional[str] = None,
@@ -255,7 +253,6 @@ def _function_inner(
             name=name or method.__name__,
             timeout_ms=timeout_ms,
             allowed_shapes=tuple(tuple(s) for s in (allowed_shapes or ())),
-            max_concurrent_per_worker=max_concurrent_per_worker,
             rate_limit_per_invoker=rate_limit_per_invoker,
             label=(label or "").strip() or None,
             description=(description or "").strip() or None,
@@ -598,7 +595,6 @@ class _InferenceDecorator:
         name: Optional[str] = None,
         timeout_ms: Optional[int] = None,
         allowed_shapes: Optional[tuple[tuple[int, ...], ...]] = None,
-        max_concurrent_per_worker: Optional[int] = None,
         rate_limit_per_invoker: Optional[int] = None,
         label: Optional[str] = None,
         description: Optional[str] = None,
@@ -608,7 +604,6 @@ class _InferenceDecorator:
             name=name,
             timeout_ms=timeout_ms,
             allowed_shapes=allowed_shapes,
-            max_concurrent_per_worker=max_concurrent_per_worker,
             rate_limit_per_invoker=rate_limit_per_invoker,
             label=label,
             description=description,

@@ -417,13 +417,34 @@ class Worker:
         # Use a refcount (not a boolean) so overlapping inference + model ops
         # cannot flip BUSY -> NOT BUSY prematurely.
         self._gpu_busy_refcount = 0
-        # Detect GPU availability once at startup
+        # Detect GPU availability + count once at startup. We need both flags:
+        # `_has_gpu` gates the status-reporting refcount; `_gpu_count` sizes
+        # the BoundedSemaphore that actually serializes handler dispatch.
         self._has_gpu = False
+        self._gpu_count = 0
         try:
             import torch
-            self._has_gpu = torch.cuda.is_available() and torch.cuda.device_count() > 0
+            if torch.cuda.is_available():
+                self._gpu_count = int(torch.cuda.device_count() or 0)
+                self._has_gpu = self._gpu_count > 0
         except ImportError:
             pass
+
+        # GPU exclusivity primitive — one slot per physical GPU. SerialWorker /
+        # Conversion / Training handlers acquire before running their handler
+        # method; prefetched jobs block here until the current handler releases.
+        # Result: sub-millisecond hot-handoff between sequential jobs on the
+        # same GPU.
+        # CRITICAL: only acquired by handlers whose function declares
+        # accelerator=cuda*. For accelerator=none endpoints (marco-polo style),
+        # the acquire is skipped entirely so trivial CPU endpoints scale to
+        # regular-Python-webserver throughput (~5-10K req/sec per worker).
+        # Sized to max(1, _gpu_count) so even worker-no-gpu boots get a real
+        # primitive (handlers on a no-gpu worker that nevertheless declare
+        # accelerator=cuda would block as if on a 1-GPU host — not a real
+        # production scenario but a safe fallback).
+        _sema_slots = max(1, int(self._gpu_count or 0) or 1)
+        self._gpu_semaphore = threading.BoundedSemaphore(_sema_slots)
 
         # Track models currently in use by in-flight runs, so we can refuse
         # UnloadModelCommand that would thrash/kill active inference.
@@ -1252,6 +1273,75 @@ class Worker:
                 self._gpu_busy_refcount = 0
             else:
                 self._gpu_busy_refcount = cur - 1
+
+    @staticmethod
+    def _function_needs_gpu(spec: Any) -> bool:
+        """True iff the function/class declares ``accelerator=cuda*``.
+
+        Inspects the spec's resources block (function-level metadata, NOT
+        the build profile). Returns False when the field is unset/unknown —
+        we don't artificially serialize handlers whose declaration we
+        cannot read.
+
+        Used by ``_execute_serial_class_request`` / conversion / training
+        dispatch paths to decide whether to acquire ``_gpu_semaphore``.
+        ``accelerator=none`` endpoints (marco-polo class) skip the
+        semaphore entirely and scale to ThreadPoolExecutor capacity.
+        """
+        if spec is None:
+            return False
+        resources = getattr(spec, "resources", None)
+        if resources is None:
+            return False
+        accel = getattr(resources, "accelerator", None)
+        if accel is None:
+            return False
+        try:
+            return str(accel).strip().lower().startswith("cuda")
+        except Exception:
+            return False
+
+    def _bind_gpu_for_request(self, ctx: Any) -> int:
+        """Set ``CUDA_VISIBLE_DEVICES`` for this handler's GPU index.
+
+        Returns the gpu_index this handler should bind to, or -1 if no
+        GPU binding is needed (no compute attached, accelerator!=cuda).
+
+        The orchestrator stamps ``ResolvedCompute.gpu_index`` (proto field
+        9; added by the parallel gen-orchestrator concurrency rewrite) on
+        each dispatch when a multi-GPU worker has 2 GPU jobs in flight.
+        We use ``getattr`` with default 0 so this worker keeps booting
+        cleanly against an older pb that lacks the field.
+
+        Caveat: ``os.environ["CUDA_VISIBLE_DEVICES"]`` is process-wide.
+        Once a handler has loaded a CUDA context, changing the env var
+        later doesn't move it. For multi-GPU workers, handlers MUST
+        either (a) call ``torch.cuda.set_device(ctx.compute.gpu_index)``
+        explicitly, OR (b) trust ``CUDA_VISIBLE_DEVICES`` BEFORE any
+        torch/cuda import or call inside the handler. We emit a debug
+        log when the gpu_index changes between handlers so multi-GPU
+        misconfigurations surface in operator logs.
+
+        Call this AFTER the semaphore acquires (so two handlers can't
+        race on CUDA_VISIBLE_DEVICES) and BEFORE the handler runs.
+        """
+        compute = getattr(ctx, "compute", None)
+        if compute is None:
+            return -1
+        accelerator = str(getattr(compute, "accelerator", "") or "").lower()
+        if not accelerator.startswith("cuda"):
+            return -1
+        gpu_index = int(getattr(compute, "gpu_index", 0) or 0)
+        prev = os.environ.get("CUDA_VISIBLE_DEVICES")
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_index)
+        if prev is not None and prev != str(gpu_index):
+            logger.debug(
+                "gpu_index_changed_between_handlers from=%s to=%s — "
+                "multi-GPU handlers should use torch.cuda.set_device() "
+                "rather than relying on this env var",
+                prev, gpu_index,
+            )
+        return gpu_index
 
     def _model_use_enter(self, canonical_model_id: str) -> None:
         mid = str(canonical_model_id or "").strip()
@@ -5728,158 +5818,192 @@ class Worker:
             },
         )
 
-        self._gpu_busy_enter()
-        t_infer0 = time.monotonic()
+        # Stage 5 semaphore: only acquire when the function declares
+        # accelerator=cuda*. accelerator=none endpoints (marco-polo) skip
+        # entirely so they scale to ThreadPoolExecutor capacity.
+        needs_gpu = self._function_needs_gpu(sspec)
+        # [concurrency-debug] persistent diagnostic; emit entry/exit so we can
+        # see ``active`` and the semaphore value during burst tests.
         try:
-            if ctx.is_canceled():
-                raise CanceledError("canceled")
+            logger.info(
+                "[concurrency-debug] enter rid=%s active=%d sema_value=%s needs_gpu=%s",
+                request_id,
+                len(self._active_requests),
+                getattr(self._gpu_semaphore, "_value", None),
+                needs_gpu,
+            )
+        except Exception:
+            pass
+        if needs_gpu:
+            self._gpu_semaphore.acquire()
+        try:
+            # Bind GPU AFTER the semaphore acquire so two handlers can't race
+            # on CUDA_VISIBLE_DEVICES, and BEFORE the handler runs so a fresh
+            # torch context starts on the right device.
+            if needs_gpu:
+                self._bind_gpu_for_request(ctx)
+            self._gpu_busy_enter()
+            t_infer0 = time.monotonic()
+            try:
+                if ctx.is_canceled():
+                    raise CanceledError("canceled")
 
-            # Lazy setup on first dispatch.
-            rec = self._find_serial_record(sspec.instance)
-            if rec is None:
-                raise RuntimeError(
-                    f"SerialWorker instance for {sspec.name!r} not registered"
-                )
-            self._ensure_serial_class_started(rec)
-
-            if ctx.is_canceled():
-                raise CanceledError("canceled")
-
-            input_obj = msgspec.msgpack.decode(input_payload, type=sspec.payload_type)
-
-            # #324: if a micro-batch aggregator is registered for this slug,
-            # route through it. Otherwise call the bound method directly.
-            aggregator = self._micro_batch_aggregators.get(sspec.name)
-            if aggregator is not None and sspec.output_mode == "single":
-                # Aggregator drains on the BatchedWorker asyncio loop —
-                # reusing it means one shared loop hosts every aggregator
-                # in the worker process (no per-function thread overhead).
-                loop = self._ensure_batched_loop()
-                if aggregator._loop is None:
-                    aggregator.start(loop)
-                # `submit` returns a concurrent.futures.Future. Block this
-                # job-executor thread on it (this is one of pool of threads
-                # — blocking is fine).
-                cfut = aggregator.submit(request_id, input_obj)
-                result = cfut.result()
-            else:
-                result = sspec.method(ctx, input_obj)
-
-            if ctx.is_canceled():
-                raise CanceledError("canceled")
-
-            if sspec.output_mode == "single":
-                if sspec.output_type is not None and not isinstance(result, sspec.output_type):
-                    raise TypeError(
-                        f"Function {sspec.name} returned {type(result)!r}, "
-                        f"expected {sspec.output_type!r}"
+                # Lazy setup on first dispatch.
+                rec = self._find_serial_record(sspec.instance)
+                if rec is None:
+                    raise RuntimeError(
+                        f"SerialWorker instance for {sspec.name!r} not registered"
                     )
-                output_payload = msgspec.msgpack.encode(msgspec.to_builtins(result))
-                if self.max_output_bytes > 0 and len(output_payload) > self.max_output_bytes:
-                    raise OutputTooLargeError(
-                        size_bytes=len(output_payload),
-                        max_bytes=self.max_output_bytes,
-                    )
-                success = True
-            else:
-                # Incremental: iterate the sync generator and emit deltas.
-                max_delta_bytes = 65536
-                count = 0
-                last_item_id = "item-0"
-                if not isinstance(result, cabc.Iterable):
-                    raise TypeError(
-                        "incremental output functions must return an iterator/iterable"
-                    )
-                for item in result:
-                    if ctx.is_canceled():
-                        raise CanceledError("canceled")
-                    if sspec.delta_type is not None and not isinstance(item, sspec.delta_type):
+                self._ensure_serial_class_started(rec)
+
+                if ctx.is_canceled():
+                    raise CanceledError("canceled")
+
+                input_obj = msgspec.msgpack.decode(input_payload, type=sspec.payload_type)
+
+                # #324: if a micro-batch aggregator is registered for this slug,
+                # route through it. Otherwise call the bound method directly.
+                aggregator = self._micro_batch_aggregators.get(sspec.name)
+                if aggregator is not None and sspec.output_mode == "single":
+                    # Aggregator drains on the BatchedWorker asyncio loop —
+                    # reusing it means one shared loop hosts every aggregator
+                    # in the worker process (no per-function thread overhead).
+                    loop = self._ensure_batched_loop()
+                    if aggregator._loop is None:
+                        aggregator.start(loop)
+                    # `submit` returns a concurrent.futures.Future. Block this
+                    # job-executor thread on it (this is one of pool of threads
+                    # — blocking is fine).
+                    cfut = aggregator.submit(request_id, input_obj)
+                    result = cfut.result()
+                else:
+                    result = sspec.method(ctx, input_obj)
+
+                if ctx.is_canceled():
+                    raise CanceledError("canceled")
+
+                if sspec.output_mode == "single":
+                    if sspec.output_type is not None and not isinstance(result, sspec.output_type):
                         raise TypeError(
-                            f"delta item type {type(item)!r} != {sspec.delta_type!r}"
+                            f"Function {sspec.name} returned {type(result)!r}, "
+                            f"expected {sspec.output_type!r}"
                         )
-                    # #327: peel off audio_chunk + audio_codec before JSON
-                    # serialization so audio bytes ride the typed proto slots.
-                    audio_chunk, audio_codec = self._extract_audio_from_delta(item)
-                    payload = msgspec.to_builtins(item)
-                    if isinstance(payload, dict) and audio_chunk:
-                        payload.pop("audio_chunk", None)
-                        payload.pop("audio_codec", None)
-                    raw = json.dumps(
-                        payload, separators=(",", ":"), sort_keys=True
-                    ).encode("utf-8")
-                    if max_delta_bytes > 0 and len(raw) > max_delta_bytes:
+                    output_payload = msgspec.msgpack.encode(msgspec.to_builtins(result))
+                    if self.max_output_bytes > 0 and len(output_payload) > self.max_output_bytes:
+                        raise OutputTooLargeError(
+                            size_bytes=len(output_payload),
+                            max_bytes=self.max_output_bytes,
+                        )
+                    success = True
+                else:
+                    # Incremental: iterate the sync generator and emit deltas.
+                    max_delta_bytes = 65536
+                    count = 0
+                    last_item_id = "item-0"
+                    if not isinstance(result, cabc.Iterable):
+                        raise TypeError(
+                            "incremental output functions must return an iterator/iterable"
+                        )
+                    for item in result:
+                        if ctx.is_canceled():
+                            raise CanceledError("canceled")
+                        if sspec.delta_type is not None and not isinstance(item, sspec.delta_type):
+                            raise TypeError(
+                                f"delta item type {type(item)!r} != {sspec.delta_type!r}"
+                            )
+                        # #327: peel off audio_chunk + audio_codec before JSON
+                        # serialization so audio bytes ride the typed proto slots.
+                        audio_chunk, audio_codec = self._extract_audio_from_delta(item)
+                        payload = msgspec.to_builtins(item)
+                        if isinstance(payload, dict) and audio_chunk:
+                            payload.pop("audio_chunk", None)
+                            payload.pop("audio_codec", None)
                         raw = json.dumps(
-                            {"truncated": True},
-                            separators=(",", ":"), sort_keys=True,
+                            payload, separators=(",", ":"), sort_keys=True
                         ).encode("utf-8")
-                    item_id = "item-0"
-                    delta_text = ""
-                    if isinstance(payload, dict):
-                        iid = payload.get("item_id")
-                        if isinstance(iid, str) and iid.strip():
-                            item_id = iid.strip()
-                        for key in (
-                            "delta_text", "delta", "token", "text", "content",
-                            "caption_delta",
-                        ):
-                            val = payload.get(key)
-                            if isinstance(val, str) and val.strip():
-                                delta_text = val.strip()
-                                break
-                    self._emit_incremental_delta_typed(
+                        if max_delta_bytes > 0 and len(raw) > max_delta_bytes:
+                            raw = json.dumps(
+                                {"truncated": True},
+                                separators=(",", ":"), sort_keys=True,
+                            ).encode("utf-8")
+                        item_id = "item-0"
+                        delta_text = ""
+                        if isinstance(payload, dict):
+                            iid = payload.get("item_id")
+                            if isinstance(iid, str) and iid.strip():
+                                item_id = iid.strip()
+                            for key in (
+                                "delta_text", "delta", "token", "text", "content",
+                                "caption_delta",
+                            ):
+                                val = payload.get(key)
+                                if isinstance(val, str) and val.strip():
+                                    delta_text = val.strip()
+                                    break
+                        self._emit_incremental_delta_typed(
+                            request_id=request_id,
+                            function_name=sspec.name,
+                            item_id=item_id,
+                            sequence=count + 1,
+                            timestamp_unix_ms=int(time.time() * 1000),
+                            delta_text=delta_text,
+                            payload_json=raw,
+                            audio_chunk=audio_chunk,
+                            audio_codec=audio_codec,
+                        )
+                        last_item_id = item_id
+                        count += 1
+                    self._emit_incremental_done_typed(
                         request_id=request_id,
                         function_name=sspec.name,
-                        item_id=item_id,
+                        item_id=last_item_id,
                         sequence=count + 1,
                         timestamp_unix_ms=int(time.time() * 1000),
-                        delta_text=delta_text,
-                        payload_json=raw,
-                        audio_chunk=audio_chunk,
-                        audio_codec=audio_codec,
                     )
-                    last_item_id = item_id
-                    count += 1
-                self._emit_incremental_done_typed(
-                    request_id=request_id,
-                    function_name=sspec.name,
-                    item_id=last_item_id,
-                    sequence=count + 1,
-                    timestamp_unix_ms=int(time.time() * 1000),
-                )
-                output_payload = b""
-                success = True
+                    output_payload = b""
+                    success = True
 
-            try:
-                rm.inference_ms = int((time.monotonic() - t_infer0) * 1000)
-            except Exception:
-                pass
-            self._emit_request_event(
-                request_id,
-                "request.inference.completed",
-                {
-                    "function_name": sspec.name,
-                    "output_mode": sspec.output_mode,
-                    "duration_ms": int((time.monotonic() - t_infer0) * 1000),
-                    "archetype": "SerialWorker",
-                },
-            )
-        except Exception as e:
-            logger.exception("SerialWorker task %s failed: %s", request_id, e)
-            error_type, retryable, safe_message, error_message = self._map_exception(e)
+                try:
+                    rm.inference_ms = int((time.monotonic() - t_infer0) * 1000)
+                except Exception:
+                    pass
+                self._emit_request_event(
+                    request_id,
+                    "request.inference.completed",
+                    {
+                        "function_name": sspec.name,
+                        "output_mode": sspec.output_mode,
+                        "duration_ms": int((time.monotonic() - t_infer0) * 1000),
+                        "archetype": "SerialWorker",
+                    },
+                )
+            except Exception as e:
+                logger.exception("SerialWorker task %s failed: %s", request_id, e)
+                error_type, retryable, safe_message, error_message = self._map_exception(e)
+            finally:
+                self._gpu_busy_exit()
+                with self._active_requests_lock:
+                    self._active_requests.pop(request_id, None)
+                try:
+                    logger.info(
+                        "[concurrency-debug] exit rid=%s active=%d",
+                        request_id, len(self._active_requests),
+                    )
+                except Exception:
+                    pass
+                self._request_handler_done_times[request_id] = time.monotonic()
+                self._send_request_result(
+                    request_id,
+                    success,
+                    output_payload if success else None,
+                    error_type,
+                    bool(retryable),
+                    safe_message,
+                    error_message,
+                )
         finally:
-            self._gpu_busy_exit()
-            with self._active_requests_lock:
-                self._active_requests.pop(request_id, None)
-            self._request_handler_done_times[request_id] = time.monotonic()
-            self._send_request_result(
-                request_id,
-                success,
-                output_payload if success else None,
-                error_type,
-                bool(retryable),
-                safe_message,
-                error_message,
-            )
+            if needs_gpu:
+                self._gpu_semaphore.release()
 
     def _execute_conversion_class_request(
         self,
@@ -5961,6 +6085,13 @@ class Worker:
         baseline = getattr(self, "_resolved_repos_by_id_baseline", None) or None
         resolved_map = getattr(ctx, "resolved_repos_by_id", None) or baseline
         resolved_tok = set_resolved_repos_by_id(resolved_map)
+
+        # Stage 5 semaphore: same gating as SerialWorker dispatch.
+        # ConversionWorker/Training spec wraps the tenant call below.
+        needs_gpu = self._function_needs_gpu(cspec)
+        if needs_gpu:
+            self._gpu_semaphore.acquire()
+            self._bind_gpu_for_request(ctx)
 
         self._gpu_busy_enter()
         t_infer0 = time.monotonic()
@@ -6131,6 +6262,15 @@ class Worker:
             except Exception:
                 pass
             self._gpu_busy_exit()
+            # Stage 5: release the GPU semaphore mirroring the acquire above.
+            if needs_gpu:
+                try:
+                    self._gpu_semaphore.release()
+                except ValueError:
+                    # BoundedSemaphore raises if released too many times —
+                    # defensive: log and swallow so we don't crash the
+                    # job-executor thread on a future refactor mistake.
+                    logger.exception("gpu_semaphore over-release on conversion path")
             rm.mark_compute_completed()
             if rm.compute_completed_at:
                 self._emit_worker_event_bytes(
@@ -6341,6 +6481,12 @@ class Worker:
             except Exception:
                 pass
 
+        # Stage 5 semaphore: gate on the function's declared accelerator.
+        # Only serialize handlers whose function declares accelerator=cuda*.
+        needs_gpu = self._function_needs_gpu(spec)
+        if needs_gpu:
+            self._gpu_semaphore.acquire()
+            self._bind_gpu_for_request(ctx)
         # Refcounted BUSY so overlapping jobs/model ops can't flip BUSY -> NOT BUSY early.
         self._gpu_busy_enter()
 
@@ -6855,6 +7001,12 @@ class Worker:
                 except Exception:
                     pass
             self._gpu_busy_exit()
+            # Stage 5: release the GPU semaphore mirroring the acquire above.
+            if needs_gpu:
+                try:
+                    self._gpu_semaphore.release()
+                except ValueError:
+                    logger.exception("gpu_semaphore over-release on inference path")
             # Clear per-request PAYLOAD_REF tracking so the classifier doesn't
             # mis-fire on the next request that didn't involve caller refs.
             self._current_payload_ref_keys = {}
@@ -6972,6 +7124,18 @@ class Worker:
             },
         )
 
+        # Stage 5 semaphore: training functions carry their Resources on
+        # the `_worker_resources` attribute (no _SerialWorkerSpec object
+        # exists for the legacy function-shape path). Build a minimal
+        # accessor so `_function_needs_gpu` can inspect the same way.
+        class _TrainingSpecShim:
+            def __init__(self, res: Any) -> None:
+                self.resources = res
+        _tr_res = getattr(training_fn, "_worker_resources", None)
+        needs_gpu = self._function_needs_gpu(_TrainingSpecShim(_tr_res))
+        if needs_gpu:
+            self._gpu_semaphore.acquire()
+            self._bind_gpu_for_request(ctx)
         self._gpu_busy_enter()
         t_infer0 = time.monotonic()
         self._emit_request_event(
@@ -7104,6 +7268,12 @@ class Worker:
             except Exception:
                 pass
             self._gpu_busy_exit()
+            # Stage 5: release the GPU semaphore mirroring the acquire above.
+            if needs_gpu:
+                try:
+                    self._gpu_semaphore.release()
+                except ValueError:
+                    logger.exception("gpu_semaphore over-release on training path")
             rm.mark_compute_completed()
             if rm.compute_completed_at:
                 self._emit_worker_event_bytes(request_id, "metrics.compute.completed", safe_json_bytes({"at": rm.compute_completed_at}))
