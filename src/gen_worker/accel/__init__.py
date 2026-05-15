@@ -1,5 +1,13 @@
 """SerialWorker diffusion acceleration helpers (#324).
 
+``gen_worker.accel`` is the canonical five-call surface for SerialWorker
+acceleration. For richer parameter spaces (multiple cache backends,
+multi-precision quant fallbacks, sequence parallelism) the lower-level
+modules — :mod:`gen_worker.cache`, :mod:`gen_worker.compile_helpers`,
+:mod:`gen_worker.quant`, :mod:`gen_worker.parallelism` — remain available
+but the recommended entry points for new endpoints are the five
+``accel.*`` calls below.
+
 A small, well-documented surface around the canonical Apache-2.0
 acceleration stack. The entry points are designed to be called from a
 :func:`@inference.setup` so that the per-request fast path stays clean.

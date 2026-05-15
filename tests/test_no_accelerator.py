@@ -282,3 +282,115 @@ def test_resources_empty_string_accelerator_normalizes_to_none() -> None:
     """An empty string is treated as 'unset' (normalizes to None)."""
     r = Resources(accelerator="")  # type: ignore[arg-type]
     assert r.accelerator is None
+
+
+# ============================================================================
+# (6) Self-contradiction gate: accelerator='none' + GPU resource axes
+#     must raise at decoration time (#326 polish for 0.7.8). CPU-only
+#     endpoints stay legal — the gate only fires when the tenant declares
+#     both no-accelerator AND GPU resources in the same Resources call.
+# ============================================================================
+
+
+def test_accelerator_none_with_requires_gpu_raises() -> None:
+    """accelerator='none' + requires_gpu=True is self-contradictory."""
+    with pytest.raises(ValueError) as exc:
+        Resources(accelerator="none", requires_gpu=True)
+    msg = str(exc.value)
+    assert "Resources(accelerator='none')" in msg
+    assert "requires_gpu=" in msg
+    # Error must point at both remediations.
+    assert "'cuda'" in msg
+    assert "drop the GPU resource axes" in msg
+
+
+def test_accelerator_none_with_min_vram_gb_raises() -> None:
+    """accelerator='none' + min_vram_gb=4 is self-contradictory."""
+    with pytest.raises(ValueError) as exc:
+        Resources(accelerator="none", min_vram_gb=4.0)
+    msg = str(exc.value)
+    assert "Resources(accelerator='none')" in msg
+    assert "min_vram_gb=" in msg
+
+
+def test_accelerator_none_with_min_compute_capability_raises() -> None:
+    """accelerator='none' + min_compute_capability=8.0 is self-contradictory."""
+    with pytest.raises(ValueError) as exc:
+        Resources(accelerator="none", min_compute_capability=8.0)
+    msg = str(exc.value)
+    assert "Resources(accelerator='none')" in msg
+    assert "min_compute_capability=" in msg
+
+
+def test_accelerator_none_with_multiple_gpu_axes_lists_all() -> None:
+    """When several GPU axes leak into a 'none' Resources, the error
+    should enumerate every offender (so the tenant can fix the whole
+    block in one pass instead of one-at-a-time)."""
+    with pytest.raises(ValueError) as exc:
+        Resources(
+            accelerator="none",
+            requires_gpu=True,
+            min_vram_gb=8.0,
+            min_compute_capability=8.0,
+        )
+    msg = str(exc.value)
+    assert "requires_gpu=" in msg
+    assert "min_vram_gb=" in msg
+    assert "min_compute_capability=" in msg
+
+
+def test_accelerator_none_alone_passes() -> None:
+    """Regression guard: CPU-only endpoints (the whole point of #326)
+    must continue to construct without raising. The gate must not block
+    valid configurations."""
+    r = Resources(accelerator="none")
+    assert r.accelerator == "none"
+    assert r.requires_gpu is None
+    assert r.min_vram_gb is None
+    assert r.min_compute_capability is None
+
+
+def test_accelerator_cuda_with_gpu_count_via_requires_gpu_passes() -> None:
+    """accelerator='cuda' + requires_gpu=True is the canonical GPU
+    declaration. (Resources doesn't have a literal ``gpu_count`` field —
+    the GPU-count axis is expressed via requires_gpu + min_vram_gb.)"""
+    r = Resources(accelerator="cuda", requires_gpu=True)
+    assert r.accelerator == "cuda"
+    assert r.requires_gpu is True
+
+
+def test_accelerator_cuda_with_vram_only_passes() -> None:
+    """accelerator='cuda' + min_vram_gb=24 (no explicit requires_gpu) is
+    fine — the accelerator='cuda' path auto-sets requires_gpu=True."""
+    r = Resources(accelerator="cuda", min_vram_gb=24.0)
+    assert r.accelerator == "cuda"
+    # The 'cuda' path auto-flips requires_gpu when it wasn't supplied.
+    assert r.requires_gpu is True
+    assert r.min_vram_gb == 24.0
+
+
+def test_accelerator_none_with_requires_gpu_false_passes() -> None:
+    """``requires_gpu=False`` is an explicit 'no GPU' declaration and is
+    consistent with accelerator='none' — the gate only fires on the
+    True path."""
+    r = Resources(accelerator="none", requires_gpu=False)
+    assert r.accelerator == "none"
+    assert r.requires_gpu is False
+
+
+def test_decorator_propagates_none_with_gpu_axes_rejection() -> None:
+    """The self-contradiction gate must fire under the @inference
+    decorator path too — tenants see the error during import."""
+    with pytest.raises(ValueError, match="Resources\\(accelerator='none'\\)"):
+
+        @inference(resources=Resources(accelerator="none", min_vram_gb=8.0))
+        class BadMixed:
+            def setup(self) -> None:
+                pass
+
+            @inference.function
+            def f(self, ctx: RequestContext, payload: _TTSInput) -> _TTSOutput:
+                return _TTSOutput(audio_bytes=b"")
+
+            def shutdown(self) -> None:
+                pass

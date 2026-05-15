@@ -1,5 +1,12 @@
 """Quantization helpers for diffusion / DiT models (#324).
 
+.. note::
+   For the common case, prefer :func:`gen_worker.accel.apply_nvfp4` —
+   the canonical five-call surface in :mod:`gen_worker.accel` covers most
+   SerialWorker endpoints. This module remains available for advanced
+   cases (FP8 / INT8 fallbacks, custom calibration, multi-precision
+   quant pipelines).
+
 Wraps NVIDIA Model-Optimizer (Apache 2.0, open source) for NVFP4 / FP8
 weight quantization, and bitsandbytes for the INT8 fallback. Calibration
 artifacts are content-addressed-cached via a sibling of #322's compile

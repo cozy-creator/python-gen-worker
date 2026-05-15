@@ -133,6 +133,31 @@ class Resources(msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True):
                     f"accelerator must be 'none' or 'cuda', got {self.accelerator!r}"
                 )
 
+        # ----- accelerator='none' + GPU resource axes is self-contradictory.
+        # CPU-only endpoints (accelerator='none') legitimately exist — small
+        # flow-matching audio, CPU classifiers — but they MUST NOT also
+        # declare GPU resource axes. The combination is a copy/paste typo
+        # (most often: a CPU port of a GPU endpoint where the resources
+        # block wasn't pruned) and silently misroutes endpoints. Fail fast
+        # at decoration time.
+        if self.accelerator == "none":
+            offenders: list[str] = []
+            if self.requires_gpu is True:
+                offenders.append(f"requires_gpu={self.requires_gpu!r}")
+            if self.min_vram_gb is not None:
+                offenders.append(f"min_vram_gb={self.min_vram_gb!r}")
+            if self.min_compute_capability is not None:
+                offenders.append(
+                    f"min_compute_capability={self.min_compute_capability!r}"
+                )
+            if offenders:
+                raise ValueError(
+                    f"Resources(accelerator='none') cannot also declare "
+                    f"{'/'.join(offenders)}. Use accelerator='cuda' for "
+                    "GPU endpoints, or drop the GPU resource axes for "
+                    "accelerator='none'."
+                )
+
         if self.min_compute_capability is not None:
             val = float(self.min_compute_capability)
             if val <= 0:

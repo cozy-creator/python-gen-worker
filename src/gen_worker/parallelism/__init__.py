@@ -1,5 +1,12 @@
 """Multi-GPU parallelism helpers for SerialWorker endpoints (#324).
 
+.. note::
+   For the common case, prefer :func:`gen_worker.accel.apply_para_attn` —
+   the canonical five-call surface in :mod:`gen_worker.accel` covers most
+   SerialWorker endpoints. This module remains available for advanced
+   cases (xDiT Unified Sequence Parallel, tensor parallelism with
+   non-default placement strategies).
+
 Wraps xDiT's Unified Sequence Parallel (USP) for single-request multi-GPU
 inference on large video/image DiTs. The xDiT paper measured 3.54x on Mochi
 across 6xL40 — wins are per-request; throughput still scales horizontally
