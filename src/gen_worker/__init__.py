@@ -30,6 +30,7 @@ Bindings (issue #9: decorator-table-model-bindings, #10: typed-provider-repo):
 """
 
 from . import io
+from . import accel  # noqa: F401 — exposed as gen_worker.accel (#324)
 from . import cache  # noqa: F401 — exposed as gen_worker.cache
 from . import compile_helpers as compile  # noqa: F401 — exposed as gen_worker.compile
 from . import parallelism  # noqa: F401 — exposed as gen_worker.parallelism
@@ -129,6 +130,7 @@ __all__ = [
     "training_function",
     "realtime_function",
     # Acceleration helpers (#324):
+    "accel",
     "cache",
     "compile",
     "quant",
