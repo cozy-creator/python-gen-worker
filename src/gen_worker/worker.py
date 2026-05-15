@@ -385,6 +385,12 @@ class Worker:
         self._active_requests: Dict[str, RequestContext] = {}
         self._active_requests_lock = threading.Lock()
         self._request_observations: Dict[str, Dict[str, Any]] = {}
+        # request_id -> monotonic time when _handle_job_request first logged it.
+        # Used by _outgoing_message_iterator to emit a [worker-timing] line
+        # showing recv→handler_done→yielded deltas for latency profiling.
+        # Popped on yield.
+        self._request_recv_times: Dict[str, float] = {}
+        self._request_handler_done_times: Dict[str, float] = {}
         # #321: batch context state removed alongside BatchExecutionRequest.
         self._drain_timeout_seconds = 0
         self._draining = False
@@ -458,8 +464,10 @@ class Worker:
         self._heartbeat_drain_thread: Optional[threading.Thread] = None
         self._job_queue: "queue.Queue[Tuple[Callable[..., Any], Tuple[Any, ...], str, float]]" = queue.Queue(maxsize=1024)
         self._job_executor = ThreadPoolExecutor(thread_name_prefix="gen-worker-job")
-        self._job_dispatch_thread = threading.Thread(target=self._job_dispatch_loop, daemon=True, name="gen-worker-job-dispatch")
-        self._job_dispatch_thread.start()
+        # Started lazily from run() (and re-checked on every reconnect via
+        # _ensure_job_dispatch_thread). Don't start here — self._running is
+        # False during __init__, so the loop would exit immediately.
+        self._job_dispatch_thread: Optional[threading.Thread] = None
 
         self._reconnect_delay_base = max(0, reconnect_delay)
         self._reconnect_delay_max = 60
@@ -2294,8 +2302,33 @@ class Worker:
         else:
             logger.warning("Attempted to send message while worker is stopping or stopped.")
 
+    def _ensure_job_dispatch_thread(self) -> None:
+        """Start the job-dispatch thread if it isn't running.
+
+        Called from run() at boot and from _connect_once() on every reconnect
+        so a thread that died for any reason gets resurrected before new
+        requests can land on a dead _job_queue.
+        """
+        t = self._job_dispatch_thread
+        if t is not None and t.is_alive():
+            return
+        self._job_dispatch_thread = threading.Thread(
+            target=self._job_dispatch_loop,
+            daemon=True,
+            name="gen-worker-job-dispatch",
+        )
+        self._job_dispatch_thread.start()
+
     def _job_dispatch_loop(self) -> None:
-        while not self._stop_event.is_set():
+        # Gate on self._running, NOT self._stop_event. _stop_event is set on
+        # every reconnect by _handle_connection_error to wake the run-loop
+        # and the recv-thread iterators — if this loop also exited on
+        # _stop_event, the daemon thread would die on the first disconnect
+        # and never come back, leaving subsequent reconnects with a live
+        # receive thread enqueuing into _job_queue but nothing draining it.
+        # _ensure_job_dispatch_thread() (called from _connect_once) restarts
+        # this thread if it died for any reason.
+        while self._running:
             try:
                 target, args, request_id, enqueued_at = self._job_queue.get(timeout=0.1)
             except queue.Empty:
@@ -2768,6 +2801,12 @@ class Worker:
 
             self._stub = pb_grpc.SchedulerWorkerServiceStub(self._channel)
             self._reset_outgoing_queues()
+            # Defense in depth: the job-dispatch thread is started in run() at
+            # boot, but if it died mid-flight (e.g. an unhandled exception, or
+            # a future code path setting _stop_event in a way that surprised
+            # this loop's gate) the receive thread would silently enqueue into
+            # a dead _job_queue. Resurrect here on every reconnect.
+            self._ensure_job_dispatch_thread()
 
             # Start the bidirectional stream
             request_iterator = self._outgoing_message_iterator(self._outgoing_queue)
@@ -2887,6 +2926,33 @@ class Worker:
             try:
                 # Block for a short time to allow stopping gracefully
                 message = outbound_queue.get(timeout=0.1)
+                # [worker-timing] for marco-polo latency profiling: when a
+                # job_result hits the wire, log recv→handler_done→yielded
+                # deltas so we can compare against the orch's [invoke-timing]
+                # wait phase and localize the 248ms gap.
+                try:
+                    if message.WhichOneof("msg") == "job_result":
+                        rid = message.job_result.request_id
+                        t_recv = self._request_recv_times.pop(rid, None)
+                        t_handler = self._request_handler_done_times.pop(rid, None)
+                        if t_recv is not None:
+                            t_yield = time.monotonic()
+                            handler_ms = (
+                                int((t_handler - t_recv) * 1000)
+                                if t_handler is not None else -1
+                            )
+                            yield_ms = int((t_yield - t_recv) * 1000)
+                            queue_ms = (
+                                int((t_yield - t_handler) * 1000)
+                                if t_handler is not None else -1
+                            )
+                            logger.info(
+                                "[worker-timing] rid=%s recv_to_handler_done=%dms "
+                                "handler_done_to_yield=%dms recv_to_yield=%dms",
+                                rid, handler_ms, queue_ms, yield_ms,
+                            )
+                except Exception:
+                    pass
                 yield message
                 # self._outgoing_queue.task_done() # Not needed if not joining queue
             except queue.Empty:
@@ -3177,7 +3243,12 @@ class Worker:
     # was never read by the orchestrator. Schemas are served by tensorhub HTTP.
 
     def _available_function_names(self) -> List[str]:
-        names = list(self._request_specs.keys()) + list(self._training_specs.keys())
+        names = (
+            list(self._request_specs.keys())
+            + list(self._training_specs.keys())
+            + list(self._batched_specs.keys())
+            + list(self._serial_class_specs.keys())
+        )
         return [name for name in dict.fromkeys(names) if self.is_function_runnable(name)]
 
     def _register_worker(self, is_heartbeat: bool = False) -> None:
@@ -3330,6 +3401,7 @@ class Worker:
         self._registered_event.clear()
         self._stop_event.clear()
         self._reconnect_count = 0 # Reset reconnect count on new run
+        self._ensure_job_dispatch_thread()
         self._draining = False
         # Self-exit cap (gen-orchestrator #317): track the last time we
         # were successfully connected. After settings.worker_disconnected_timeout_s
@@ -4496,6 +4568,11 @@ class Worker:
         if required_models_raw:
             required_model_id_for_exec = str(required_models_raw[0] or "").strip()
 
+        t_recv_monotonic = time.monotonic()
+        # Stash on the active-requests observation so _outgoing_message_iterator
+        # can compute a recv→yield delta when the result message ships.
+        # Keyed by request_id; popped by _build_job_observation.
+        self._request_recv_times[request_id] = t_recv_monotonic
         logger.info(f"Received Request: request_id={request_id}, function={function_name}, model='{required_model_id_for_exec or 'None'}'")
         self._emit_request_event(
             request_id,
@@ -5793,6 +5870,7 @@ class Worker:
             self._gpu_busy_exit()
             with self._active_requests_lock:
                 self._active_requests.pop(request_id, None)
+            self._request_handler_done_times[request_id] = time.monotonic()
             self._send_request_result(
                 request_id,
                 success,
