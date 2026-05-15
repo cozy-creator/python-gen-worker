@@ -753,7 +753,6 @@ def _extract_class_function_methods(
             "timeout_ms": fn_spec.timeout_ms,
             "allowed_shapes": [list(s) for s in fn_spec.allowed_shapes]
                               or [list(s) for s in spec.allowed_shapes],
-            "max_concurrent_per_worker": fn_spec.max_concurrent_per_worker,
             # #324: SerialWorker cross-request micro-batching declaration.
             # Surfaced so the orchestrator can scorecard / route around this
             # at scheduling time. Both must be set for the worker to actually
