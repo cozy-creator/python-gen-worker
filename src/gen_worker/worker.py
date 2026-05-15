@@ -3332,14 +3332,93 @@ class Worker:
     # #321: _build_function_schemas removed — WorkerResources.function_schemas
     # was never read by the orchestrator. Schemas are served by tensorhub HTTP.
 
-    def _available_function_names(self) -> List[str]:
-        names = (
-            list(self._request_specs.keys())
-            + list(self._training_specs.keys())
-            + list(self._batched_specs.keys())
-            + list(self._serial_class_specs.keys())
+    def _all_declared_function_names(self) -> List[str]:
+        """Every function name the worker has discovered, irrespective of
+        runnability. Source of truth for "which functions can possibly be
+        loading?" — the loading set is a subset of this list.
+        """
+        return list(
+            dict.fromkeys(
+                list(self._request_specs.keys())
+                + list(self._training_specs.keys())
+                + list(self._batched_specs.keys())
+                + list(self._serial_class_specs.keys())
+            )
         )
-        return [name for name in dict.fromkeys(names) if self.is_function_runnable(name)]
+
+    def _bound_model_refs_for_function(self, function_name: str) -> List[str]:
+        """Canonicalized model refs bound to a single function via the
+        baked manifest. A function's bound set = fixed (global) refs +
+        per-function payload refs. The values are canonicalized to match
+        the keying used by ``ModelCache``.
+        """
+        name = (function_name or "").strip()
+        if not name:
+            return []
+        refs: set[str] = set()
+        for v in (self._fixed_model_id_by_key or {}).values():
+            s = str(v or "").strip()
+            if not s:
+                continue
+            try:
+                refs.add(_canonicalize_model_ref_string(s))
+            except Exception:
+                refs.add(s)
+        per_fn = (self._payload_model_id_by_key_by_function or {}).get(name) or {}
+        for v in per_fn.values():
+            s = str(v or "").strip()
+            if not s:
+                continue
+            try:
+                refs.add(_canonicalize_model_ref_string(s))
+            except Exception:
+                refs.add(s)
+        return sorted(refs)
+
+    def _loading_function_names(self) -> List[str]:
+        """Return the sorted list of function names whose bound model refs
+        are still being downloaded (i.e. at least one bound ref is in the
+        model cache's ``downloading_models`` set).
+
+        Functions whose bound refs are all on disk (or that have no bound
+        refs at all — e.g. marco-polo) are NOT loading. Functions that are
+        also disabled or host-unavailable are excluded — those land in
+        ``_function_unavailable_entry`` via the existing channels.
+        """
+        # Fast path: no model cache, no concept of "downloading".
+        cache = getattr(self, "_model_cache", None)
+        if cache is None:
+            return []
+        try:
+            stats = cache.get_stats()
+        except Exception:
+            return []
+        downloading = set(stats.downloading_models or [])
+        if not downloading:
+            return []
+        out: List[str] = []
+        for fn_name in self._all_declared_function_names():
+            # Skip functions that are already gated out for a non-loading
+            # reason (host-unavailable / scheduler-disabled). They aren't
+            # "loading" — they're permanently or transiently unavailable.
+            if (
+                getattr(self, "_disabled_functions_by_name", {}).get(fn_name)
+                or getattr(self, "_worker_local_unavailable_functions_by_name", {}).get(fn_name)
+            ):
+                continue
+            bound = self._bound_model_refs_for_function(fn_name)
+            if not bound:
+                # Functions with no bound models (string-compare style) are
+                # never "loading" — they're ready as soon as setup() returns.
+                continue
+            if any(ref in downloading for ref in bound):
+                out.append(fn_name)
+        out.sort()
+        return out
+
+    def _available_function_names(self) -> List[str]:
+        names = self._all_declared_function_names()
+        return [name for name in names if self.is_function_runnable(name)]
 
     def _register_worker(self, is_heartbeat: bool = False) -> None:
         """Create and send a registration/heartbeat message."""
@@ -3349,7 +3428,16 @@ class Worker:
             vram_models, disk_models, downloading_models, supports_model_loading_flag = (
                 self._collect_model_inventory()
             )
-            _ = downloading_models  # not currently sent on WorkerResources
+            _ = downloading_models  # surfaced via `loading_functions` below;
+            # the raw list is still consumed for logging in _collect_model_inventory.
+            # Compute loading_functions BEFORE building available_functions so
+            # the two sets are derived from the same model-cache snapshot
+            # within one heartbeat tick (gen-orchestrator #341). Routing rule
+            # on the scheduler side:
+            #   eligible iff (fn in available_functions) AND (fn not in loading_functions)
+            # available_functions already excludes loading functions because
+            # _function_unavailable_entry consults the same loading set.
+            loading_functions = self._loading_function_names()
             # #321: function_schemas, cpu_cores, memory_bytes,
             # gpu_memory_used_bytes, gpu_driver, cuda_version, torch_version,
             # supports_model_loading, tensorrt_version, onnxruntime_version,
@@ -3370,6 +3458,7 @@ class Worker:
                 gpu_sm=gpu_info["gpu_sm"],
                 installed_libs=gpu_info["installed_libs"],
                 available_functions=self._available_function_names(),
+                loading_functions=loading_functions,
                 vram_models=vram_models,   # Models in VRAM (hot)
                 disk_models=disk_models,   # Models on disk (warm)
             )
@@ -4222,7 +4311,37 @@ class Worker:
         entry = getattr(self, "_worker_local_unavailable_functions_by_name", {}).get(name)
         if entry:
             return entry
+        # gen-orchestrator #341: incremental function readiness. A function
+        # whose bound model refs are still downloading is reported as
+        # unavailable so:
+        #   - is_function_runnable(fn) returns False (no local dispatch),
+        #   - _available_function_names() omits it from
+        #     WorkerResources.available_functions on the wire.
+        # The parallel WorkerResources.loading_functions advertisement tells
+        # the orchestrator to queue jobs for it rather than reject them.
+        # Computed on-the-fly so heartbeat snapshots and dispatch-time gates
+        # always agree with the current model-cache state.
+        loading = self._currently_loading_function_set()
+        if name in loading:
+            return {
+                "reason": "models_loading",
+                "detail": "one or more bound model refs are still downloading",
+                "function_name": name,
+            }
         return None
+
+    def _currently_loading_function_set(self) -> set[str]:
+        """Return the set of function names currently loading (any bound
+        model ref is in the ModelCache.downloading set). Wrapper around
+        ``_loading_function_names`` for the dispatch-time set-membership
+        check. Computed on every call so callers see the live state — the
+        model cache transition (downloading → on-disk) happens on the
+        prefetch worker thread without notifying this layer.
+        """
+        try:
+            return set(self._loading_function_names())
+        except Exception:
+            return set()
 
     def payload_key_status(self, function_name: str, model_key: str) -> Optional[str]:
         """Return the status string for a PAYLOAD-bound short_key on a
