@@ -3209,11 +3209,11 @@ class Worker:
         gpu_info: Dict[str, Any],
     ) -> tuple[bool, Dict[str, Any]]:
         cfg: Dict[str, Any] = dict(msgspec.to_builtins(req)) if req is not None else {}
+        # Resources.__post_init__ already rejected 'cpu'/'gpu' aliases (#326);
+        # by the time we see ``req`` here it's strictly 'cuda', 'none', '', or
+        # absent. Lowercase + strip is still defensive against case-only typos
+        # surviving msgspec serialization round-trips.
         accelerator = str(cfg.get("accelerator", "") or "").strip().lower()
-        if accelerator == "gpu":
-            accelerator = "cuda"
-        if accelerator == "cpu":
-            accelerator = "none"
         requires_gpu = bool(cfg.get("requires_gpu") is True or accelerator == "cuda")
         if cfg.get("min_compute_capability"):
             requires_gpu = True
