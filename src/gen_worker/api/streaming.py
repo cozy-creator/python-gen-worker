@@ -3,7 +3,74 @@ from __future__ import annotations
 import queue
 import threading
 from collections.abc import Callable, Iterator, Mapping
-from typing import Any
+from typing import Any, Union
+
+import msgspec
+
+
+# ============================================================================
+# Typed token-streaming signals (#321 wire-side, #273 SDK-side surface).
+#
+# These are the Python-level signal types tenant code yields from a
+# ``@batched_inference.function`` async generator. They're thin msgspec
+# Structs that the BatchedWorker dispatcher maps onto the existing
+# IncrementalTokenDelta / IncrementalTokenStreamDone / IncrementalTokenStreamError
+# proto messages on the wire (see worker.py ``_emit_incremental_*_typed``).
+#
+# The wire format already exists — these classes only give tenants a stable
+# import:
+#
+#     from gen_worker import IncrementalTokenDelta, Done, Error
+#
+# instead of having to define their own msgspec.Struct shapes per endpoint.
+# Endpoints that need richer payloads (image bytes, structured tool calls,
+# etc.) can still declare their own struct types — the dispatcher checks
+# ``isinstance(item, _SIGNAL_TYPES)`` first and falls through to the legacy
+# duck-typed path otherwise.
+# ============================================================================
+
+
+class IncrementalTokenDelta(msgspec.Struct, frozen=True, kw_only=True):
+    """One incremental token (or token group) emitted by a streaming endpoint.
+
+    Tenants yield instances of this from an
+    ``async def fn(...) -> AsyncIterator[Signal]`` method on a
+    ``@batched_inference`` class. The worker dispatcher routes ``text``
+    into the wire ``delta_text`` slot and emits an ``IncrementalTokenDelta``
+    proto message back to the orchestrator. ``item_id`` lets a single
+    request multiplex deltas across distinct logical outputs (rarely used
+    for chat / captioning; reserved for batched multi-output flows).
+    """
+
+    text: str = ""
+    item_id: str | None = None
+
+
+class Done(msgspec.Struct, frozen=True, kw_only=True):
+    """End-of-stream marker. Yield exactly one Done() to terminate cleanly.
+
+    The dispatcher converts this into an ``IncrementalTokenStreamDone``
+    proto message and the terminal ``JobExecutionResult(success=True)``.
+    """
+
+
+class Error(msgspec.Struct, frozen=True, kw_only=True):
+    """Terminal error signal. Yield Error(message=...) to fail the stream.
+
+    Equivalent to raising — the dispatcher emits an
+    ``IncrementalTokenStreamError`` proto message and the terminal
+    ``JobExecutionResult(success=False)``. Prefer raising a typed
+    ``gen_worker`` exception (``ValidationError`` / ``ResourceError`` /
+    etc.) when you have one; Error() is the fallback for engine-internal
+    errors the tenant catches and reports inline.
+    """
+
+    message: str = ""
+
+
+# Tuple form for runtime ``isinstance`` checks in the dispatcher.
+_SIGNAL_TYPES: tuple[type, ...] = (IncrementalTokenDelta, Done, Error)
+TokenStreamSignal = Union[IncrementalTokenDelta, Done, Error]
 
 
 def iter_transformers_text_deltas(

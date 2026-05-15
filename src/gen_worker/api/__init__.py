@@ -18,7 +18,13 @@ from .errors import (
     WorkerError,
 )
 from .payload_constraints import Clamp
-from .streaming import iter_transformers_text_deltas
+from .streaming import (
+    Done,
+    Error,
+    IncrementalTokenDelta,
+    TokenStreamSignal,
+    iter_transformers_text_deltas,
+)
 from .types import Asset, Compute, LoraSpec, Tensors
 
 __all__ = [
@@ -41,6 +47,10 @@ __all__ = [
     "ValidationError",
     "WorkerError",
     "Clamp",
+    "Done",
+    "Error",
+    "IncrementalTokenDelta",
+    "TokenStreamSignal",
     "iter_transformers_text_deltas",
     "Asset",
     "Compute",
