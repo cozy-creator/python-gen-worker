@@ -45,7 +45,7 @@ KV_PREFIX_CACHE_EVENT_ADDED: KVPrefixCacheEvent
 KV_PREFIX_CACHE_EVENT_REMOVED: KVPrefixCacheEvent
 
 class WorkerResources(_message.Message):
-    __slots__ = ("worker_id", "gpu_count", "gpu_memory_bytes", "available_functions", "vram_models", "release_id", "runpod_pod_id", "gpu_is_busy", "gpu_name", "gpu_memory_free_bytes", "gpu_sm", "disk_models", "installed_libs", "image_digest", "git_commit")
+    __slots__ = ("worker_id", "gpu_count", "gpu_memory_bytes", "available_functions", "vram_models", "release_id", "runpod_pod_id", "gpu_is_busy", "gpu_name", "gpu_memory_free_bytes", "gpu_sm", "disk_models", "installed_libs", "image_digest", "git_commit", "loading_functions")
     WORKER_ID_FIELD_NUMBER: _ClassVar[int]
     GPU_COUNT_FIELD_NUMBER: _ClassVar[int]
     GPU_MEMORY_BYTES_FIELD_NUMBER: _ClassVar[int]
@@ -61,6 +61,7 @@ class WorkerResources(_message.Message):
     INSTALLED_LIBS_FIELD_NUMBER: _ClassVar[int]
     IMAGE_DIGEST_FIELD_NUMBER: _ClassVar[int]
     GIT_COMMIT_FIELD_NUMBER: _ClassVar[int]
+    LOADING_FUNCTIONS_FIELD_NUMBER: _ClassVar[int]
     worker_id: str
     gpu_count: int
     gpu_memory_bytes: int
@@ -76,7 +77,8 @@ class WorkerResources(_message.Message):
     installed_libs: _containers.RepeatedScalarFieldContainer[str]
     image_digest: str
     git_commit: str
-    def __init__(self, worker_id: _Optional[str] = ..., gpu_count: _Optional[int] = ..., gpu_memory_bytes: _Optional[int] = ..., available_functions: _Optional[_Iterable[str]] = ..., vram_models: _Optional[_Iterable[str]] = ..., release_id: _Optional[str] = ..., runpod_pod_id: _Optional[str] = ..., gpu_is_busy: bool = ..., gpu_name: _Optional[str] = ..., gpu_memory_free_bytes: _Optional[int] = ..., gpu_sm: _Optional[str] = ..., disk_models: _Optional[_Iterable[str]] = ..., installed_libs: _Optional[_Iterable[str]] = ..., image_digest: _Optional[str] = ..., git_commit: _Optional[str] = ...) -> None: ...
+    loading_functions: _containers.RepeatedScalarFieldContainer[str]
+    def __init__(self, worker_id: _Optional[str] = ..., gpu_count: _Optional[int] = ..., gpu_memory_bytes: _Optional[int] = ..., available_functions: _Optional[_Iterable[str]] = ..., vram_models: _Optional[_Iterable[str]] = ..., release_id: _Optional[str] = ..., runpod_pod_id: _Optional[str] = ..., gpu_is_busy: bool = ..., gpu_name: _Optional[str] = ..., gpu_memory_free_bytes: _Optional[int] = ..., gpu_sm: _Optional[str] = ..., disk_models: _Optional[_Iterable[str]] = ..., installed_libs: _Optional[_Iterable[str]] = ..., image_digest: _Optional[str] = ..., git_commit: _Optional[str] = ..., loading_functions: _Optional[_Iterable[str]] = ...) -> None: ...
 
 class ActiveAssignmentResume(_message.Message):
     __slots__ = ("request_id", "item_id", "assignment_attempt_epoch", "last_job_result_seq", "last_worker_event_seq", "last_incremental_seq")
@@ -135,6 +137,16 @@ class LoadModelCommand(_message.Message):
     MODEL_ID_FIELD_NUMBER: _ClassVar[int]
     model_id: str
     def __init__(self, model_id: _Optional[str] = ...) -> None: ...
+
+class DownloadModelCommand(_message.Message):
+    __slots__ = ("model_id", "ref", "priority")
+    MODEL_ID_FIELD_NUMBER: _ClassVar[int]
+    REF_FIELD_NUMBER: _ClassVar[int]
+    PRIORITY_FIELD_NUMBER: _ClassVar[int]
+    model_id: str
+    ref: str
+    priority: int
+    def __init__(self, model_id: _Optional[str] = ..., ref: _Optional[str] = ..., priority: _Optional[int] = ...) -> None: ...
 
 class UnloadModelCommand(_message.Message):
     __slots__ = ("model_id",)
@@ -235,7 +247,14 @@ class JobExecutionResult(_message.Message):
     def __init__(self, request_id: _Optional[str] = ..., success: bool = ..., output_payload: _Optional[bytes] = ..., error_type: _Optional[str] = ..., retryable: bool = ..., safe_message: _Optional[str] = ..., observation: _Optional[_Union[JobExecutionObservation, _Mapping]] = ...) -> None: ...
 
 class JobExecutionObservation(_message.Message):
-    __slots__ = ("release_id", "function_name", "build_profile", "image_digest", "provider", "worker_id", "machine_class", "status", "error_type", "runtime_ms", "local_queue_ms", "peak_memory_bytes", "peak_vram_bytes", "active_count_at_start", "local_queued_count_at_start", "ttft_ms", "itl_p50_ms", "prefix_hit_rate_pct", "kv_blocks_used", "kv_blocks_total")
+    __slots__ = ("release_id", "function_name", "build_profile", "image_digest", "provider", "worker_id", "machine_class", "status", "error_type", "runtime_ms", "local_queue_ms", "peak_memory_bytes", "peak_vram_bytes", "active_count_at_start", "local_queued_count_at_start", "ttft_ms", "itl_p50_ms", "prefix_hit_rate_pct", "kv_blocks_used", "kv_blocks_total", "scaling_factors")
+    class ScalingFactorsEntry(_message.Message):
+        __slots__ = ("key", "value")
+        KEY_FIELD_NUMBER: _ClassVar[int]
+        VALUE_FIELD_NUMBER: _ClassVar[int]
+        key: str
+        value: float
+        def __init__(self, key: _Optional[str] = ..., value: _Optional[float] = ...) -> None: ...
     RELEASE_ID_FIELD_NUMBER: _ClassVar[int]
     FUNCTION_NAME_FIELD_NUMBER: _ClassVar[int]
     BUILD_PROFILE_FIELD_NUMBER: _ClassVar[int]
@@ -256,6 +275,7 @@ class JobExecutionObservation(_message.Message):
     PREFIX_HIT_RATE_PCT_FIELD_NUMBER: _ClassVar[int]
     KV_BLOCKS_USED_FIELD_NUMBER: _ClassVar[int]
     KV_BLOCKS_TOTAL_FIELD_NUMBER: _ClassVar[int]
+    SCALING_FACTORS_FIELD_NUMBER: _ClassVar[int]
     release_id: str
     function_name: str
     build_profile: str
@@ -276,7 +296,8 @@ class JobExecutionObservation(_message.Message):
     prefix_hit_rate_pct: int
     kv_blocks_used: int
     kv_blocks_total: int
-    def __init__(self, release_id: _Optional[str] = ..., function_name: _Optional[str] = ..., build_profile: _Optional[str] = ..., image_digest: _Optional[str] = ..., provider: _Optional[str] = ..., worker_id: _Optional[str] = ..., machine_class: _Optional[str] = ..., status: _Optional[str] = ..., error_type: _Optional[str] = ..., runtime_ms: _Optional[int] = ..., local_queue_ms: _Optional[int] = ..., peak_memory_bytes: _Optional[int] = ..., peak_vram_bytes: _Optional[int] = ..., active_count_at_start: _Optional[int] = ..., local_queued_count_at_start: _Optional[int] = ..., ttft_ms: _Optional[int] = ..., itl_p50_ms: _Optional[int] = ..., prefix_hit_rate_pct: _Optional[int] = ..., kv_blocks_used: _Optional[int] = ..., kv_blocks_total: _Optional[int] = ...) -> None: ...
+    scaling_factors: _containers.ScalarMap[str, float]
+    def __init__(self, release_id: _Optional[str] = ..., function_name: _Optional[str] = ..., build_profile: _Optional[str] = ..., image_digest: _Optional[str] = ..., provider: _Optional[str] = ..., worker_id: _Optional[str] = ..., machine_class: _Optional[str] = ..., status: _Optional[str] = ..., error_type: _Optional[str] = ..., runtime_ms: _Optional[int] = ..., local_queue_ms: _Optional[int] = ..., peak_memory_bytes: _Optional[int] = ..., peak_vram_bytes: _Optional[int] = ..., active_count_at_start: _Optional[int] = ..., local_queued_count_at_start: _Optional[int] = ..., ttft_ms: _Optional[int] = ..., itl_p50_ms: _Optional[int] = ..., prefix_hit_rate_pct: _Optional[int] = ..., kv_blocks_used: _Optional[int] = ..., kv_blocks_total: _Optional[int] = ..., scaling_factors: _Optional[_Mapping[str, float]] = ...) -> None: ...
 
 class WorkerEvent(_message.Message):
     __slots__ = ("request_id", "event_type", "payload_json")
@@ -558,7 +579,7 @@ class EndpointConfig(_message.Message):
     def __init__(self, supported_repo_refs: _Optional[_Iterable[str]] = ..., repo_ref_by_key: _Optional[_Mapping[str, str]] = ..., resolved_repos_by_ref: _Optional[_Mapping[str, ResolvedRepo]] = ..., required_flavor_refs: _Optional[_Iterable[str]] = ..., models_by_function: _Optional[_Mapping[str, ModelsByKey]] = ..., disabled_functions: _Optional[_Iterable[_Union[DisabledFunction, _Mapping]]] = ..., ref_availability_by_function: _Optional[_Mapping[str, FunctionRefAvailability]] = ...) -> None: ...
 
 class WorkerSchedulerMessage(_message.Message):
-    __slots__ = ("worker_registration", "job_result", "load_model_result", "unload_model_result", "worker_event", "incremental_token_delta", "incremental_token_stream_done", "incremental_token_stream_error", "worker_function_unavailable", "worker_drain_result", "worker_startup_phase", "worker_model_ready", "worker_function_capabilities", "worker_kv_prefix_cache", "job_request", "load_model_cmd", "unload_model_cmd", "interrupt_job_cmd", "endpoint_config", "worker_drain_cmd")
+    __slots__ = ("worker_registration", "job_result", "load_model_result", "unload_model_result", "worker_event", "incremental_token_delta", "incremental_token_stream_done", "incremental_token_stream_error", "worker_function_unavailable", "worker_drain_result", "worker_startup_phase", "worker_model_ready", "worker_function_capabilities", "worker_kv_prefix_cache", "job_request", "load_model_cmd", "unload_model_cmd", "interrupt_job_cmd", "endpoint_config", "worker_drain_cmd", "download_model_cmd")
     WORKER_REGISTRATION_FIELD_NUMBER: _ClassVar[int]
     JOB_RESULT_FIELD_NUMBER: _ClassVar[int]
     LOAD_MODEL_RESULT_FIELD_NUMBER: _ClassVar[int]
@@ -579,6 +600,7 @@ class WorkerSchedulerMessage(_message.Message):
     INTERRUPT_JOB_CMD_FIELD_NUMBER: _ClassVar[int]
     ENDPOINT_CONFIG_FIELD_NUMBER: _ClassVar[int]
     WORKER_DRAIN_CMD_FIELD_NUMBER: _ClassVar[int]
+    DOWNLOAD_MODEL_CMD_FIELD_NUMBER: _ClassVar[int]
     worker_registration: WorkerRegistration
     job_result: JobExecutionResult
     load_model_result: LoadModelResult
@@ -599,4 +621,5 @@ class WorkerSchedulerMessage(_message.Message):
     interrupt_job_cmd: InterruptJobCommand
     endpoint_config: EndpointConfig
     worker_drain_cmd: WorkerDrainCommand
-    def __init__(self, worker_registration: _Optional[_Union[WorkerRegistration, _Mapping]] = ..., job_result: _Optional[_Union[JobExecutionResult, _Mapping]] = ..., load_model_result: _Optional[_Union[LoadModelResult, _Mapping]] = ..., unload_model_result: _Optional[_Union[UnloadModelResult, _Mapping]] = ..., worker_event: _Optional[_Union[WorkerEvent, _Mapping]] = ..., incremental_token_delta: _Optional[_Union[IncrementalTokenDelta, _Mapping]] = ..., incremental_token_stream_done: _Optional[_Union[IncrementalTokenStreamDone, _Mapping]] = ..., incremental_token_stream_error: _Optional[_Union[IncrementalTokenStreamError, _Mapping]] = ..., worker_function_unavailable: _Optional[_Union[WorkerFunctionUnavailableSignal, _Mapping]] = ..., worker_drain_result: _Optional[_Union[WorkerDrainResult, _Mapping]] = ..., worker_startup_phase: _Optional[_Union[WorkerStartupPhaseSignal, _Mapping]] = ..., worker_model_ready: _Optional[_Union[WorkerModelReadySignal, _Mapping]] = ..., worker_function_capabilities: _Optional[_Union[WorkerFunctionCapabilitiesSignal, _Mapping]] = ..., worker_kv_prefix_cache: _Optional[_Union[WorkerKVPrefixCache, _Mapping]] = ..., job_request: _Optional[_Union[JobExecutionRequest, _Mapping]] = ..., load_model_cmd: _Optional[_Union[LoadModelCommand, _Mapping]] = ..., unload_model_cmd: _Optional[_Union[UnloadModelCommand, _Mapping]] = ..., interrupt_job_cmd: _Optional[_Union[InterruptJobCommand, _Mapping]] = ..., endpoint_config: _Optional[_Union[EndpointConfig, _Mapping]] = ..., worker_drain_cmd: _Optional[_Union[WorkerDrainCommand, _Mapping]] = ...) -> None: ...
+    download_model_cmd: DownloadModelCommand
+    def __init__(self, worker_registration: _Optional[_Union[WorkerRegistration, _Mapping]] = ..., job_result: _Optional[_Union[JobExecutionResult, _Mapping]] = ..., load_model_result: _Optional[_Union[LoadModelResult, _Mapping]] = ..., unload_model_result: _Optional[_Union[UnloadModelResult, _Mapping]] = ..., worker_event: _Optional[_Union[WorkerEvent, _Mapping]] = ..., incremental_token_delta: _Optional[_Union[IncrementalTokenDelta, _Mapping]] = ..., incremental_token_stream_done: _Optional[_Union[IncrementalTokenStreamDone, _Mapping]] = ..., incremental_token_stream_error: _Optional[_Union[IncrementalTokenStreamError, _Mapping]] = ..., worker_function_unavailable: _Optional[_Union[WorkerFunctionUnavailableSignal, _Mapping]] = ..., worker_drain_result: _Optional[_Union[WorkerDrainResult, _Mapping]] = ..., worker_startup_phase: _Optional[_Union[WorkerStartupPhaseSignal, _Mapping]] = ..., worker_model_ready: _Optional[_Union[WorkerModelReadySignal, _Mapping]] = ..., worker_function_capabilities: _Optional[_Union[WorkerFunctionCapabilitiesSignal, _Mapping]] = ..., worker_kv_prefix_cache: _Optional[_Union[WorkerKVPrefixCache, _Mapping]] = ..., job_request: _Optional[_Union[JobExecutionRequest, _Mapping]] = ..., load_model_cmd: _Optional[_Union[LoadModelCommand, _Mapping]] = ..., unload_model_cmd: _Optional[_Union[UnloadModelCommand, _Mapping]] = ..., interrupt_job_cmd: _Optional[_Union[InterruptJobCommand, _Mapping]] = ..., endpoint_config: _Optional[_Union[EndpointConfig, _Mapping]] = ..., worker_drain_cmd: _Optional[_Union[WorkerDrainCommand, _Mapping]] = ..., download_model_cmd: _Optional[_Union[DownloadModelCommand, _Mapping]] = ...) -> None: ...

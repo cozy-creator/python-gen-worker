@@ -3782,6 +3782,11 @@ class Worker:
         # #321: batch_job_request removed.
         elif msg_type == 'load_model_cmd':
             self._handle_load_model_cmd(message.load_model_cmd)
+        elif msg_type == 'download_model_cmd':
+            # #339: orchestrator-driven cold-fetch for per-request model
+            # affinity. Distinct from load_model_cmd (disk -> VRAM); this
+            # is upstream -> disk.
+            self._handle_download_model_cmd(message.download_model_cmd)
         elif msg_type == 'unload_model_cmd':
             self._handle_unload_model_cmd(message.unload_model_cmd)
         elif msg_type == 'interrupt_job_cmd':
@@ -4531,6 +4536,194 @@ class Worker:
             ev_type = "model.load.completed" if success else "model.load.failed"
             payload = json.dumps(
                 {"model_id": model_id, "duration_ms": dur_ms, "error_type": "" if success else "load_failed"},
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            self._send_message(
+                pb.WorkerSchedulerMessage(
+                    worker_event=pb.WorkerEvent(request_id="", event_type=ev_type, payload_json=payload)
+                )
+            )
+        except Exception:
+            pass
+
+    def _handle_download_model_cmd(self, cmd: Any) -> None:
+        """Handle orchestrator command to fetch a model ref onto local disk
+        (gen-orchestrator #339 — per-request cold-fetch model affinity).
+
+        Distinct from LoadModelCommand:
+          - LoadModelCommand  = promote a model already on disk into VRAM.
+          - DownloadModelCommand = fetch the bytes from upstream onto disk
+            so the next dispatch can pick this worker via cache locality.
+
+        The orchestrator clears its pending-download tracker when it sees
+        WorkerModelReadySignal{kind=MODEL_AVAILABILITY_DOWNLOAD_COMPLETED}
+        and/or the next heartbeat's `disk_models` includes the ref
+        (handleWorkerModelReady in connect_worker.go). We emit both signals
+        and force an immediate heartbeat so the scheduler converges within
+        a few seconds rather than waiting for the next 10s tick.
+
+        The download itself runs in a background thread because cold
+        fetches can take minutes; blocking the message-receive thread that
+        long would stall every other command (interrupts, load, drain).
+        """
+        raw_ref = str(getattr(cmd, "ref", "") or "").strip()
+        raw_model_id = str(getattr(cmd, "model_id", "") or "").strip()
+        # Per the proto: when `ref` is empty the worker MAY treat `model_id`
+        # as the ref (legacy paths). We always canonicalize.
+        ref_for_download = raw_ref or raw_model_id
+        canonical = _canonicalize_model_ref_string(ref_for_download)
+        # The orchestrator keys its pending-download tracker by the
+        # `model_id` field on the LoadModelResult / WorkerModelReadySignal,
+        # so the response must echo the model_id the orchestrator sent
+        # (not the resolved ref) so its index lookup hits.
+        echo_model_id = _canonicalize_model_ref_string(raw_model_id) or canonical
+        logger.info(
+            "Received DownloadModelCommand model_id=%s ref=%s (canonical=%s)",
+            echo_model_id,
+            raw_ref,
+            canonical,
+        )
+
+        if not canonical:
+            error_msg = "DownloadModelCommand: empty model_id/ref"
+            logger.error(error_msg)
+            try:
+                result = pb.LoadModelResult(
+                    model_id=echo_model_id,
+                    success=False,
+                    error_message=error_msg,
+                )
+                self._send_message(pb.WorkerSchedulerMessage(load_model_result=result))
+            except Exception:
+                pass
+            return
+
+        # Run the actual download off the message-receive thread so a
+        # multi-minute cold fetch doesn't block subsequent orchestrator
+        # commands. Tests may invoke the runner inline by calling
+        # `_run_download_model_cmd` directly.
+        threading.Thread(
+            target=self._run_download_model_cmd,
+            args=(echo_model_id, canonical),
+            daemon=True,
+            name=f"download-model-{canonical[:48]}",
+        ).start()
+
+    def _run_download_model_cmd(self, echo_model_id: str, canonical_ref: str) -> None:
+        """Body of DownloadModelCommand handler. Split out so tests can
+        call it inline without spawning a thread.
+        """
+        from .models.ref_downloader import reset_resolved_repos_by_id, set_resolved_repos_by_id
+
+        cache_dir = tensorhub_cas_dir()
+        try:
+            cache_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+
+        success = False
+        error_msg = ""
+        started_at = time.monotonic()
+
+        # Announce start (best-effort, audit channel).
+        try:
+            payload = json.dumps({"model_id": canonical_ref}, separators=(",", ":"), sort_keys=True).encode("utf-8")
+            self._send_message(
+                pb.WorkerSchedulerMessage(
+                    worker_event=pb.WorkerEvent(
+                        request_id="", event_type="model.download.started", payload_json=payload
+                    )
+                )
+            )
+        except Exception:
+            pass
+
+        try:
+            # Short-circuit: if the snapshot is already on disk just refresh
+            # the cache + emit the typed ready signal — no need to re-fetch.
+            existing = None
+            try:
+                existing = self._try_find_existing_cozy_snapshot_dir(canonical_ref, cache_dir)
+            except Exception:
+                existing = None
+
+            if existing is not None and self._model_cache:
+                self._model_cache.mark_cached_to_disk(canonical_ref, existing)
+                success = True
+            elif self._downloader is None:
+                error_msg = "DownloadModelCommand: no downloader configured on worker"
+                logger.error(error_msg)
+            else:
+                if self._model_cache:
+                    try:
+                        self._model_cache.mark_downloading(canonical_ref, progress=0.0)
+                    except Exception:
+                        pass
+                tok = set_resolved_repos_by_id(getattr(self, "_resolved_repos_by_id_baseline", None) or None)
+                try:
+                    local_path = self._downloader.download(canonical_ref, str(cache_dir))
+                finally:
+                    reset_resolved_repos_by_id(tok)
+                lp = Path(local_path) if local_path else None
+                if lp is None or not lp.exists():
+                    error_msg = f"download returned missing path: {local_path!r}"
+                    logger.error("DownloadModelCommand %s: %s", canonical_ref, error_msg)
+                    if self._model_cache:
+                        try:
+                            self._model_cache.unload_model(canonical_ref)
+                        except Exception:
+                            pass
+                else:
+                    if self._model_cache:
+                        self._model_cache.mark_cached_to_disk(canonical_ref, lp)
+                    success = True
+        except Exception as e:
+            error_msg = f"Exception in DownloadModelCommand for {canonical_ref!r}: {e}"
+            logger.exception(error_msg)
+            if self._model_cache:
+                try:
+                    self._model_cache.unload_model(canonical_ref)
+                except Exception:
+                    pass
+
+        # Always send LoadModelResult so the orchestrator can clear its
+        # pending tracker on both success and failure paths.
+        try:
+            result = pb.LoadModelResult(
+                model_id=echo_model_id,
+                success=success,
+                error_message=error_msg,
+            )
+            self._send_message(pb.WorkerSchedulerMessage(load_model_result=result))
+        except Exception:
+            logger.exception("DownloadModelCommand: failed to send LoadModelResult")
+
+        if success:
+            # #339: typed model-ready signal. handleWorkerModelReady reads
+            # MODEL_AVAILABILITY_DOWNLOAD_COMPLETED to append to disk_models
+            # immediately and clear pendingDownloadsByModel.
+            self._emit_model_ready(echo_model_id, self._MODEL_AVAILABILITY_DOWNLOAD_COMPLETED)
+            self._emit_model_ready(echo_model_id, self._MODEL_AVAILABILITY_CACHED)
+            # Force an out-of-band heartbeat so disk_models on the next
+            # wire-level tick reflects the new ref. is_heartbeat=True is
+            # load-bearing — is_heartbeat=False would be treated as a
+            # fresh registration and trigger an EndpointConfig re-send.
+            try:
+                self._register_worker(is_heartbeat=True)
+            except Exception:
+                logger.exception("DownloadModelCommand: force-heartbeat failed")
+
+        # Audit-channel completion event for observability.
+        try:
+            dur_ms = int((time.monotonic() - started_at) * 1000)
+            ev_type = "model.download.completed" if success else "model.download.failed"
+            payload = json.dumps(
+                {
+                    "model_id": canonical_ref,
+                    "duration_ms": dur_ms,
+                    "error_type": "" if success else "download_failed",
+                },
                 separators=(",", ":"),
                 sort_keys=True,
             ).encode("utf-8")
