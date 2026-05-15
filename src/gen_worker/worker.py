@@ -1508,6 +1508,19 @@ class Worker:
         runtime = getattr(ep_spec, "runtime", None)
         archetype = str(getattr(cls, "__gen_worker_archetype__", "") or "")
         function_methods = list(getattr(cls, "__gen_worker_function_methods__", []) or [])
+        # #273: @batched_inference decorator path. The new SDK shape sets a
+        # PARALLEL marker (``__gen_worker_batched_inference_function_methods__``)
+        # so the dispatcher can route LLM-serving classes without overloading
+        # the @inference function-methods slot. Tenant owns the engine; SDK
+        # only invokes the async-generator method and forwards yielded signals
+        # over the existing IncrementalToken* wire primitives.
+        batched_inference_methods = list(
+            getattr(cls, "__gen_worker_batched_inference_function_methods__", []) or []
+        )
+        if batched_inference_methods:
+            return self._register_endpoint_class_batched_inference(
+                cls, ep_spec, batched_inference_methods
+            )
         if not function_methods:
             logger.warning(
                 "@%s class %r declares no @%s.function methods; skipping",
@@ -1715,6 +1728,235 @@ class Worker:
                 f"BatchedWorker method must yield a msgspec.Struct (got {dt!r})"
             )
         return payload_type, dt, ctx_p.name, payload_p.name
+
+    def _inspect_batched_inference_method(
+        self,
+        cls: type,
+        method: Callable[..., Any],
+    ) -> Tuple[type, str, str]:
+        """Validate a @batched_inference.function method signature (#273).
+
+        Method shape contract::
+
+            async def fn(self, ctx, payload: MyInput) -> AsyncIterator[Signal]:
+                yield IncrementalTokenDelta(...)
+                yield Done()
+
+        Where Signal is ``IncrementalTokenDelta | Done | Error`` (the typed
+        signal union exported from ``gen_worker.api.streaming``). The
+        return type annotation is OPTIONAL — the dispatcher does
+        ``isinstance(item, _SIGNAL_TYPES)`` at runtime, so tenants can omit
+        it. The annotation, when present, is allowed to be either a single
+        Signal struct or a ``Union[IncrementalTokenDelta, Done, Error]`` /
+        ``IncrementalTokenDelta | Done | Error``.
+
+        Returns ``(payload_type, ctx_param_name, payload_param_name)``.
+        Raises ``ValueError`` on shape violations.
+        """
+        if not inspect.isasyncgenfunction(method):
+            # Should have been caught at decoration time, but guard here
+            # in case the tenant rebound the method after decoration.
+            raise ValueError(
+                "@batched_inference.function method must be an async generator "
+                "(``async def`` with ``yield``)."
+            )
+
+        try:
+            hints = typing.get_type_hints(
+                method,
+                globalns=getattr(method, "__globals__", None),
+                include_extras=True,
+            )
+        except Exception as exc:
+            raise ValueError(f"failed to resolve type hints: {exc}") from exc
+
+        sig = inspect.signature(method)
+        params = list(sig.parameters.values())
+        if len(params) < 3:
+            raise ValueError(
+                "@batched_inference.function method must take "
+                "(self, ctx, payload: <Struct>)"
+            )
+        # params[0] is self.
+        ctx_p = params[1]
+        payload_p = params[2]
+        ctx_type = hints.get(ctx_p.name)
+        # ctx may or may not be annotated; if it is, the only legal type
+        # is RequestContext (which the worker passes in at dispatch time).
+        if ctx_type is not None and ctx_type is not RequestContext:
+            raise ValueError(
+                f"second arg must be `ctx` (RequestContext or unannotated); "
+                f"got annotation {ctx_type!r}"
+            )
+        payload_type = hints.get(payload_p.name)
+        if not (
+            isinstance(payload_type, type) and issubclass(payload_type, msgspec.Struct)
+        ):
+            raise ValueError(
+                f"third arg must be a msgspec.Struct payload (got {payload_type!r})"
+            )
+
+        # Return-type annotation is optional; if present, sanity-check it
+        # admits typed token-stream signals. We don't enforce the exact
+        # Union shape — runtime ``isinstance`` against _SIGNAL_TYPES is the
+        # source of truth.
+        return payload_type, ctx_p.name, payload_p.name
+
+    def _register_endpoint_class_batched_inference(
+        self,
+        cls: type,
+        ep_spec: Any,
+        batched_inference_methods: list[tuple[str, Callable[..., Any], Any]],
+    ) -> int:
+        """Register one ``@batched_inference`` class endpoint (#273).
+
+        Parallel to the existing BatchedWorker (``runtime="sglang"|"vllm"``)
+        leg in ``_register_endpoint_class``, but for the new SDK shape where
+        the tenant owns engine construction inside ``setup()``. The SDK only:
+          * Invokes the tenant's async-generator method with (ctx, payload).
+          * Forwards each yielded ``IncrementalTokenDelta`` / ``Done`` /
+            ``Error`` signal over the existing IncrementalToken* wire
+            envelopes.
+          * Sets ``ctx.cancelled()`` on stream EOF / cancellation so the
+            tenant's loop can break out cleanly.
+
+        Engine integration (vLLM / SGLang / transformers) is OUT OF SCOPE
+        for this slice; the tenant builds + drives the engine inside their
+        setup() body for now.
+        """
+        from .api.streaming import _SIGNAL_TYPES  # local import to avoid cycle
+
+        if not batched_inference_methods:
+            logger.warning(
+                "@batched_inference class %r declares no .function methods; "
+                "skipping",
+                cls.__name__,
+            )
+            return 0
+
+        # Construct the singleton instance. Real ``setup(**models)`` is
+        # deferred to ``_start_one_batched_instance`` (lazy on first
+        # dispatch), same lifecycle as the existing BatchedWorker leg.
+        try:
+            instance = cls()
+        except TypeError as exc:
+            raise ValueError(
+                f"@batched_inference class {cls.__name__!r}: __init__ must "
+                f"take no arguments (got TypeError {exc}). Move engine "
+                "construction into setup()."
+            ) from exc
+
+        registered = 0
+        resources: Resources = getattr(ep_spec, "resources", None) or Resources()
+
+        for method_name, _unbound, fn_spec in batched_inference_methods:
+            method = getattr(instance, method_name, None)
+            if method is None or not callable(method):
+                logger.warning(
+                    "@batched_inference class %r: method %r missing on "
+                    "instance after construction; skipping",
+                    cls.__name__, method_name,
+                )
+                continue
+            name = str(getattr(fn_spec, "name", method_name) or method_name)
+            slug = slugify_name(name)
+            if not slug:
+                logger.error(
+                    "@batched_inference class %r: method %r yields empty "
+                    "slug; skipping",
+                    cls.__name__, method_name,
+                )
+                continue
+            if (
+                slug in self._request_specs
+                or slug in self._training_specs
+                or slug in self._batched_specs
+                or slug in self._serial_class_specs
+            ):
+                logger.warning("Handler name conflict for '%s'; skipping", slug)
+                continue
+
+            try:
+                payload_type, ctx_param, payload_param = (
+                    self._inspect_batched_inference_method(
+                        cls, getattr(cls, method_name)
+                    )
+                )
+            except Exception as exc:
+                logger.error(
+                    "@batched_inference class %r method %r: signature "
+                    "invalid: %s",
+                    cls.__name__, method_name, exc,
+                )
+                continue
+
+            # Use IncrementalTokenDelta as the canonical delta_type for
+            # wire-schema advertisement. The dispatcher routes Done / Error
+            # through their own emit paths (incremental_done_typed /
+            # incremental_error_typed), not as deltas — so the schema only
+            # describes what tenants send through the delta channel.
+            from .api.streaming import IncrementalTokenDelta as _ITDStruct
+
+            input_schema = msgspec.json.schema(payload_type)
+            delta_schema = msgspec.json.schema(_ITDStruct)
+            input_schema_json = json.dumps(
+                input_schema, separators=(",", ":"), sort_keys=True
+            ).encode("utf-8")
+            delta_schema_json = json.dumps(
+                delta_schema, separators=(",", ":"), sort_keys=True
+            ).encode("utf-8")
+
+            bspec = _BatchedWorkerSpec(
+                name=slug,
+                instance=instance,
+                method=method,
+                resources=resources,
+                ctx_param=ctx_param,
+                payload_param=payload_param,
+                payload_type=payload_type,
+                # delta_type=None semantic isn't representable in the
+                # current dataclass (it requires a Struct type), so we
+                # plug in the canonical IncrementalTokenDelta type here.
+                # Runtime ``isinstance(item, spec.delta_type)`` is bypassed
+                # in ``_execute_batched_request_async`` for tenants who
+                # yield Done / Error too — we'll patch the dispatcher
+                # below to recognize the signal-union shape.
+                delta_type=_ITDStruct,
+                runtime="tenant",  # marker: tenant owns the engine
+                input_schema_json=input_schema_json,
+                delta_schema_json=delta_schema_json,
+                timeout_ms=getattr(fn_spec, "timeout_ms", None),
+            )
+            self._batched_specs[slug] = bspec
+            self._discovered_resources[slug] = resources
+            self._function_schemas[slug] = (
+                input_schema_json,
+                delta_schema_json,
+                delta_schema_json,
+                b"[]",
+            )
+            registered += 1
+            logger.info(
+                "Registered @batched_inference function: '%s' (class=%s, "
+                "tenant-owned engine)",
+                slug, cls.__name__,
+            )
+
+        if registered > 0:
+            self._batched_instances.append(
+                {
+                    "cls_name": cls.__name__,
+                    "instance": instance,
+                    "endpoint_spec": ep_spec,
+                    "runtime": "tenant",
+                    "engine": None,  # tenant owns engine inside setup()
+                    "started": False,
+                    # Marker so dispatch helpers can short-circuit any
+                    # SDK-engine probes (the tenant's setup() does it all).
+                    "tenant_owned_engine": True,
+                }
+            )
+        return registered
 
     def _register_endpoint_class_serial(self, cls: type, ep_spec: Any) -> int:
         """Register one synchronous ``@inference`` class as a SerialWorker (#322/#328).
@@ -5678,13 +5920,45 @@ class Worker:
                         f"got {type(iterator_obj).__name__}"
                     )
 
+            # #273: typed signal recognition for @batched_inference. The
+            # tenant's async generator may yield IncrementalTokenDelta /
+            # Done / Error from gen_worker.api.streaming directly; we
+            # short-circuit Done → emit IncrementalTokenStreamDone and
+            # Error → emit IncrementalTokenStreamError, then break.
+            from .api.streaming import (
+                Done as _SignalDone,
+                Error as _SignalError,
+                IncrementalTokenDelta as _SignalDelta,
+            )
+
+            tenant_signaled_done = False
+            tenant_signaled_error: Optional[str] = None
+
             async for item in iterator_obj:
                 if ctx.is_canceled():
                     raise CanceledError("canceled")
-                if spec.delta_type is not None and not isinstance(item, spec.delta_type):
+
+                # ---- typed signal short-circuit (#273) ----
+                if isinstance(item, _SignalDone):
+                    tenant_signaled_done = True
+                    break
+                if isinstance(item, _SignalError):
+                    tenant_signaled_error = str(getattr(item, "message", "") or "")
+                    break
+
+                # IncrementalTokenDelta from gen_worker.api.streaming is
+                # the canonical typed delta — keep going through the
+                # legacy duck-typed serializer below (text → delta_text
+                # slot). Other msgspec.Structs continue to work as before.
+                if (
+                    spec.delta_type is not None
+                    and not isinstance(item, _SignalDelta)
+                    and not isinstance(item, spec.delta_type)
+                ):
                     raise TypeError(
                         f"delta item type {type(item)!r} != {spec.delta_type!r}"
                     )
+
                 # #327: peel off audio_chunk + audio_codec from the struct
                 # so they travel on the typed proto slots, not base64-encoded
                 # inside payload_json.
@@ -5737,7 +6011,13 @@ class Worker:
             if ctx.is_canceled():
                 raise CanceledError("canceled")
 
-            # Stream-end marker (typed).
+            # #273: tenant yielded Error(...) — emit error + terminate.
+            if tenant_signaled_error is not None:
+                raise FatalError(tenant_signaled_error or "tenant signaled error")
+
+            # Stream-end marker (typed). Emitted whether or not the tenant
+            # yielded an explicit Done() — Done() is sugar for "I'm done"
+            # but the dispatcher emits the terminal proto either way.
             done_ts_ms = int(time.time() * 1000)
             if not self._emit_incremental_done_typed(
                 request_id=request_id,
@@ -5751,6 +6031,7 @@ class Worker:
                     "signal stream end rid=%s",
                     request_id,
                 )
+            _ = tenant_signaled_done  # suppress unused-warning; kept for log/debug parity
 
             self._emit_request_event(
                 request_id,

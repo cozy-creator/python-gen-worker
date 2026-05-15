@@ -37,6 +37,7 @@ from . import quant  # noqa: F401 — exposed as gen_worker.quant
 from .api.binding import Binding, CivitaiRepo, Dispatch, HFRepo, Repo, dispatch
 from .api.decorators import (
     Resources,
+    batched_inference,
     conversion,
     dataset,
     inference,
@@ -65,7 +66,13 @@ from .api.errors import (
 )
 from .api.types import Asset, Compute, LoraSpec, Tensors
 from .api.payload_constraints import Clamp
-from .api.streaming import iter_transformers_text_deltas
+from .api.streaming import (
+    Done,
+    Error,
+    IncrementalTokenDelta,
+    TokenStreamSignal,
+    iter_transformers_text_deltas,
+)
 from .utils.lora import load_loras
 from .inference_memory import apply_low_vram_config, with_oom_retry
 
@@ -114,6 +121,7 @@ def __getattr__(name: str):
 __all__ = [
     # Decorators + binding model (#322 class-only).
     "inference",
+    "batched_inference",
     "training",
     "dataset",
     "conversion",
@@ -154,6 +162,10 @@ __all__ = [
     "Tensors",
     "LoraSpec",
     "Clamp",
+    "Done",
+    "Error",
+    "IncrementalTokenDelta",
+    "TokenStreamSignal",
     "iter_transformers_text_deltas",
     "load_loras",
     "apply_low_vram_config",

@@ -175,6 +175,23 @@ class _FunctionSpec(msgspec.Struct, frozen=True, kw_only=True):
     description: str | None = None
 
 
+class _BatchedInferenceFunctionSpec(msgspec.Struct, frozen=True, kw_only=True):
+    """Metadata attached to a method by @batched_inference.function (#273).
+
+    Parallels ``_FunctionSpec`` but for the LLM-serving BatchedWorker shape:
+    the method MUST be an async generator yielding
+    ``IncrementalTokenDelta | Done | Error`` signals. No ``allowed_shapes``
+    field — batch-shape sweeping is meaningless for autoregressive engines
+    (vLLM / SGLang manage their own continuous batching).
+    """
+
+    name: str
+    timeout_ms: int | None = None
+    rate_limit_per_invoker: int | None = None
+    label: str | None = None
+    description: str | None = None
+
+
 class _StageSpec(msgspec.Struct, frozen=True, kw_only=True):
     """Metadata attached to a method by @inference.stage.
 
@@ -672,6 +689,309 @@ class _InferenceDecorator:
         return _stage_inner(fn, name=name, gpu_class=gpu_class)
 
 
+# ============================================================================
+# @batched_inference — LLM-serving BatchedWorker shape (#273).
+# Parallel to @inference but:
+#   * async-generator methods required (inspect.isasyncgenfunction).
+#   * No stages — BatchedWorker hosts a single long-lived engine.
+#   * Yields typed signals: IncrementalTokenDelta | Done | Error.
+#   * Tenant constructs the engine in setup(); SDK does not pick the engine.
+# ============================================================================
+
+
+def _batched_function_inner(
+    fn: Optional[F] = None,
+    *,
+    name: Optional[str] = None,
+    timeout_ms: Optional[int] = None,
+    rate_limit_per_invoker: Optional[int] = None,
+    label: Optional[str] = None,
+    description: Optional[str] = None,
+) -> Any:
+    """Inner decorator for @batched_inference.function (#273).
+
+    Marks an async-generator method as the externally-invocable entry
+    point of a BatchedWorker LLM-serving class. The method MUST satisfy
+    ``inspect.isasyncgenfunction(method)`` — i.e. ``async def`` with at
+    least one ``yield``. Plain coroutines and sync methods are rejected
+    at decoration time with a clear error.
+
+    Usage::
+
+        @batched_inference.function
+        async def caption(self, ctx, payload):
+            async for token in self.engine.generate(...):
+                yield IncrementalTokenDelta(text=token)
+            yield Done()
+    """
+
+    def apply(method: F) -> F:
+        if not inspect.isasyncgenfunction(method):
+            qname = getattr(
+                method, "__qualname__", getattr(method, "__name__", "<method>")
+            )
+            if inspect.iscoroutinefunction(method):
+                hint = (
+                    "method is a plain coroutine (``async def`` without "
+                    "``yield``). BatchedWorker methods must be async "
+                    "GENERATORS — add a ``yield`` statement (yield Done() at "
+                    "minimum)."
+                )
+            elif inspect.isfunction(method) or inspect.ismethod(method):
+                hint = (
+                    "method is sync. Use ``@inference`` for sync (SerialWorker) "
+                    "endpoints, or rewrite this method as ``async def`` with at "
+                    "least one ``yield``."
+                )
+            else:
+                hint = (
+                    f"got {type(method).__name__!r}; expected an async-generator "
+                    "method (``async def`` with ``yield``)."
+                )
+            raise TypeError(
+                f"@batched_inference.function rejected {qname!r}: {hint} "
+                "See progress.json #273 for the BatchedWorker shape."
+            )
+        spec = _BatchedInferenceFunctionSpec(
+            name=name or method.__name__,
+            timeout_ms=timeout_ms,
+            rate_limit_per_invoker=rate_limit_per_invoker,
+            label=(label or "").strip() or None,
+            description=(description or "").strip() or None,
+        )
+        setattr(method, "__gen_worker_batched_inference_function_spec__", spec)
+        return method
+
+    if fn is not None:
+        return apply(fn)
+    return apply
+
+
+def _validate_batched_setup_signature(cls: type) -> dict[str, inspect.Parameter]:
+    """Return the model kwargs of ``setup``. setup must take (self, **models).
+
+    Same contract as ``_validate_setup_signature`` but reports under
+    ``@batched_inference`` framing for clearer errors.
+    """
+    setup = getattr(cls, "setup", None)
+    if setup is None:
+        raise ValueError(
+            f"@batched_inference class {cls.__name__!r}: missing required "
+            "`setup` method. Add `def setup(self, **models): ...` and "
+            "construct your engine (vLLM / SGLang / etc.) inside it."
+        )
+    sig = inspect.signature(setup)
+    params = list(sig.parameters.values())[1:]
+    return {p.name: p for p in params}
+
+
+def _validate_batched_invocable_methods(
+    cls: type,
+) -> list[tuple[str, Callable[..., Any], _BatchedInferenceFunctionSpec]]:
+    """Find @batched_inference.function-decorated methods on the class."""
+    out: list[tuple[str, Callable[..., Any], _BatchedInferenceFunctionSpec]] = []
+    for attr_name in dir(cls):
+        if attr_name.startswith("_"):
+            continue
+        member = getattr(cls, attr_name, None)
+        if member is None or not callable(member):
+            continue
+        spec = getattr(
+            member, "__gen_worker_batched_inference_function_spec__", None
+        )
+        if spec is not None:
+            # Re-validate the async-generator constraint at class-decoration
+            # time too — guards against a tenant decorating the method
+            # correctly but then re-assigning a sync replacement before
+            # class construction lands.
+            if not inspect.isasyncgenfunction(member):
+                raise TypeError(
+                    f"@batched_inference class {cls.__name__!r}: method "
+                    f"{attr_name!r} carries @batched_inference.function but "
+                    "is not an async generator. Add a ``yield`` to make it one."
+                )
+            out.append((attr_name, member, spec))
+    if not out:
+        raise ValueError(
+            f"@batched_inference class {cls.__name__!r}: no "
+            "@batched_inference.function-decorated methods found. At least "
+            "one async-generator method is required."
+        )
+    return out
+
+
+def _make_batched_inference_decorator():
+    """Build the @batched_inference class-level decorator (#273)."""
+
+    @overload
+    def decorator(cls: C) -> C: ...
+    @overload
+    def decorator(
+        cls: None = None,
+        *,
+        label: Optional[str] = None,
+        description: Optional[str] = None,
+        resources: Optional[Resources] = None,
+        models: Optional[Mapping[str, Binding]] = None,
+    ) -> Callable[[C], C]: ...
+    def decorator(
+        cls: Optional[C] = None,
+        *,
+        label: Optional[str] = None,
+        description: Optional[str] = None,
+        resources: Optional[Resources] = None,
+        models: Optional[Mapping[str, Binding]] = None,
+    ) -> Any:
+        resources_value: Resources = (
+            resources if resources is not None else Resources()
+        )
+
+        def apply(target: C) -> C:
+            if not inspect.isclass(target):
+                raise TypeError(
+                    f"@batched_inference requires a class. Got "
+                    f"{type(target).__name__}. BatchedWorker is a long-lived "
+                    "engine host — express it as a class with setup / "
+                    "warmup / shutdown lifecycle methods."
+                )
+
+            cls_name = target.__name__
+            setup_kwargs = _validate_batched_setup_signature(target)
+            function_methods = _validate_batched_invocable_methods(target)
+
+            # Reuse the same models-vs-setup validator — the contract is
+            # identical: each models={} key must correspond to a setup()
+            # kwarg.
+            validated_models = _validate_models_against_setup(
+                cls_name, models or {}, setup_kwargs
+            )
+
+            # @batched_inference does NOT support @inference.stage —
+            # pipelines (sync stages) are a SerialWorker concept. Reject
+            # any stray @inference.stage methods loud rather than letting
+            # them silently no-op.
+            stage_method_names: list[str] = []
+            for attr_name in dir(target):
+                if attr_name.startswith("_"):
+                    continue
+                member = getattr(target, attr_name, None)
+                if member is None or not callable(member):
+                    continue
+                if (
+                    getattr(member, "__gen_worker_stage_spec__", None)
+                    is not None
+                ):
+                    stage_method_names.append(attr_name)
+            if stage_method_names:
+                raise ValueError(
+                    f"@batched_inference class {cls_name!r}: @inference.stage "
+                    f"is not supported (found {', '.join(stage_method_names)}). "
+                    "Stages are a SerialWorker feature; BatchedWorker hosts a "
+                    "single long-lived engine."
+                )
+
+            spec = _EndpointClassSpec(
+                kind="inference",
+                sub_kind=None,
+                label=(label or "").strip() or None,
+                description=(description or "").strip() or None,
+                resources=resources_value,
+                models=validated_models,
+                allowed_shapes=(),
+                # `runtime` stays None — engine choice is the tenant's job
+                # (they construct vLLM / SGLang / transformers inside
+                # setup()). The SDK only routes the request to the class
+                # instance; the engine is opaque to it.
+                runtime=None,
+                batch_window_ms=None,
+                max_batch=None,
+                prefer_distilled=False,
+            )
+
+            setattr(target, "__gen_worker_endpoint_spec__", spec)
+            setattr(target, "__gen_worker_archetype__", "BatchedWorker")
+            # Parallel-to-@inference marker so the worker dispatcher can
+            # route requests through the @batched_inference codepath
+            # without overloading the @inference function-methods slot.
+            setattr(
+                target,
+                "__gen_worker_batched_inference_function_methods__",
+                function_methods,
+            )
+            return target
+
+        if cls is not None:
+            return apply(cls)
+        return apply
+
+    return decorator
+
+
+class _BatchedInferenceDecorator:
+    """Callable + namespace for `@batched_inference` and `.function` (#273).
+
+    Parallel to ``@inference``, but enforces the LLM-serving BatchedWorker
+    shape:
+      * setup() constructs the tenant's engine (vLLM / SGLang / transformers).
+        SDK does NOT pick or own the engine.
+      * @batched_inference.function methods MUST be async generators yielding
+        ``IncrementalTokenDelta | Done | Error`` signals.
+      * No ``@inference.stage`` — BatchedWorker hosts a single long-lived
+        engine, not a pipeline of stages.
+
+    Usage::
+
+        from gen_worker import (
+            batched_inference, Resources,
+            IncrementalTokenDelta, Done, Error,
+        )
+
+        @batched_inference(
+            models={'llm': Repo("org/llama-3b")},
+            resources=Resources(accelerator='cuda', min_vram_gb=24),
+        )
+        class JoyCaptionGenerate:
+            def setup(self, llm):
+                self.engine = build_engine(llm)
+
+            @batched_inference.function
+            async def caption(self, ctx, payload):
+                async for tok in self.engine.generate(payload):
+                    if ctx.cancelled():
+                        break
+                    yield IncrementalTokenDelta(text=tok)
+                yield Done()
+
+            def shutdown(self):
+                self.engine.shutdown()
+    """
+
+    def __init__(self) -> None:
+        self._outer = _make_batched_inference_decorator()
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        return self._outer(*args, **kwargs)
+
+    @staticmethod
+    def function(
+        fn: Optional[F] = None,
+        *,
+        name: Optional[str] = None,
+        timeout_ms: Optional[int] = None,
+        rate_limit_per_invoker: Optional[int] = None,
+        label: Optional[str] = None,
+        description: Optional[str] = None,
+    ) -> Any:
+        return _batched_function_inner(
+            fn,
+            name=name,
+            timeout_ms=timeout_ms,
+            rate_limit_per_invoker=rate_limit_per_invoker,
+            label=label,
+            description=description,
+        )
+
+
 class _TrainingDecorator:
     """Callable + namespace for `@training`, mirrors `@inference`."""
 
@@ -728,6 +1048,7 @@ class _ConversionDecorator:
 
 # Singletons exported as the public API.
 inference = _InferenceDecorator()
+batched_inference = _BatchedInferenceDecorator()
 training = _TrainingDecorator()
 dataset = _DatasetDecorator()
 conversion = _ConversionDecorator()
@@ -771,6 +1092,7 @@ realtime_function = _migration_error("realtime_function", "inference")
 __all__ = [
     "Resources",
     "inference",
+    "batched_inference",
     "training",
     "dataset",
     "conversion",
@@ -781,5 +1103,6 @@ __all__ = [
     # Internal specs (for discovery):
     "_EndpointClassSpec",
     "_FunctionSpec",
+    "_BatchedInferenceFunctionSpec",
     "_StageSpec",
 ]
