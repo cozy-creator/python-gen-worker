@@ -212,6 +212,27 @@ captures the practical disaggregation boundary (cheap vs expensive
 hardware) without committing the SDK to a finer-grained policy that
 might not match real fleet shapes.
 
+### Validation rules (`@inference.stage`)
+
+The decorator fails fast at class-decoration time — the tenant sees
+errors during `import`, not at bake or first dispatch:
+
+| Rule                                                | Failure mode                                   |
+|-----------------------------------------------------|------------------------------------------------|
+| `gpu_class` must be `"small"` or `"large"`          | `ValueError("gpu_class must be one of [...]")` |
+| `name` must produce a non-empty slug                | `ValueError("name '...' produces empty slug")` |
+| Two stages on the same class can't share a name     | `ValueError("duplicate stage name '...'")`     |
+
+The `name` is normalized using the same slug rules as
+`@inference.function` (lowercased, `_` → `-`, non-`[a-z0-9.]` → `-`).
+So `@inference.stage(name="Make Structure")` ships as `make-structure`
+in the manifest. The original Python method name is preserved on
+`stages[i].python_name` for debugging.
+
+Stage names are scoped to a class: `class A` and `class B` can both
+have a stage named `encode` without clashing — only same-class
+collisions are an error.
+
 ---
 
 ## Complete working example: TRELLIS.2 with 4 stages annotated
