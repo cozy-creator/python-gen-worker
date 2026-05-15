@@ -43,15 +43,31 @@ def test_dynamic_cost_shape_fields_present() -> None:
     assert r.runtime_scales_with == ("num_inference_steps",)
 
 
-def test_accelerator_gpu_normalizes_to_cuda() -> None:
-    r = Resources(accelerator="gpu")
+def test_accelerator_gpu_rejected() -> None:
+    """#326: 'gpu' alias removed. Tenants must spell it 'cuda'."""
+    with pytest.raises(ValueError, match="accelerator='gpu' is invalid"):
+        Resources(accelerator="gpu")  # type: ignore[arg-type]
+
+
+def test_accelerator_cpu_rejected() -> None:
+    """#326: 'cpu' alias removed — CPU is the *absence* of an accelerator,
+    not an accelerator itself. Tenants must spell it 'none'.
+    """
+    with pytest.raises(ValueError, match="accelerator='cpu' is invalid"):
+        Resources(accelerator="cpu")  # type: ignore[arg-type]
+
+
+def test_accelerator_none_string_keeps_none() -> None:
+    """'none' is the canonical CPU-endpoint value (#326)."""
+    r = Resources(accelerator="none")
+    assert r.accelerator == "none"
+
+
+def test_accelerator_cuda_canonical() -> None:
+    """'cuda' is the canonical GPU-endpoint value (#326)."""
+    r = Resources(accelerator="cuda")
     assert r.accelerator == "cuda"
     assert r.requires_gpu is True
-
-
-def test_accelerator_cpu_normalizes_to_none() -> None:
-    r = Resources(accelerator="cpu")
-    assert r.accelerator == "none"
 
 
 def test_resources_no_kind_field() -> None:
