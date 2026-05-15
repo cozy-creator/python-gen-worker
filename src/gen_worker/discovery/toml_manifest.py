@@ -47,6 +47,10 @@ class EndpointResources:
     memory_gb: int = 0
     cpu_cores: int = 0
     disk_gb: int = 0
+    # gen-orchestrator #350: GPU class preference + per-request override
+    # policy. Both ride the same [resources] block as the size axes.
+    gpu_tier: str = ""                       # e.g. "RTX 4090", "A100-80", "H100"
+    invoker_compute_override: str = ""       # "" (default = size-only), "allowed", "size-only", "none"
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize non-default fields for the manifest wire shape."""
@@ -65,6 +69,10 @@ class EndpointResources:
             out["cpu_cores"] = self.cpu_cores
         if self.disk_gb:
             out["disk_gb"] = self.disk_gb
+        if self.gpu_tier:
+            out["gpu_tier"] = self.gpu_tier
+        if self.invoker_compute_override:
+            out["invoker_compute_override"] = self.invoker_compute_override
         return out
 
 
@@ -539,9 +547,20 @@ def load_endpoint_toml_with_warnings(path: Path) -> tuple[EndpointToml, list[str
     raw_resources = data.get("resources")
     res_kwargs: dict[str, Any] = {}
     if isinstance(raw_resources, dict):
-        for k in ("accelerator", "min_compute_capability"):
+        # gen-orchestrator #350: gpu_tier + invoker_compute_override are
+        # string fields alongside accelerator/min_compute_capability.
+        for k in ("accelerator", "min_compute_capability", "gpu_tier", "invoker_compute_override"):
             if k in raw_resources:
                 res_kwargs[k] = str(raw_resources[k])
+        # Validate invoker_compute_override values per the orch's
+        # ResourceRequirements.InvokerComputeOverride contract:
+        # "" (default = size-only), "allowed", "size-only", "none".
+        if res_kwargs.get("invoker_compute_override") not in (None, "", "allowed", "size-only", "none"):
+            raise ValueError(
+                f"resources.invoker_compute_override must be one of "
+                f"'allowed', 'size-only', 'none' (or omitted); "
+                f"got {res_kwargs['invoker_compute_override']!r}"
+            )
         for k in ("vram_gb", "gpu_count", "memory_gb", "cpu_cores", "disk_gb"):
             if k in raw_resources:
                 res_kwargs[k] = int(raw_resources[k])
