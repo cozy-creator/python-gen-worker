@@ -102,19 +102,32 @@ class Resources(msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True):
     compute_capability: dict[str, str] | None = None
 
     def __post_init__(self) -> None:
-        # Normalize accelerator: "gpu" → "cuda", "cpu" → "none", "" → None.
+        # Accelerator vocabulary: 'cuda' (GPU endpoints), 'none' (CPU-only
+        # endpoints — CPU is the *absence* of an accelerator, not one), or
+        # None (unset; treated as 'none' at scheduling time). Empty string
+        # normalizes to None for convenience. The 'cpu' / 'gpu' shorthands
+        # were dropped (#326) — they're oxymoronic ('cpu' as an accelerator
+        # is a contradiction) and they masked typos.
         if self.accelerator is not None:
             accel = str(self.accelerator).strip().lower()
-            if accel == "gpu":
-                accel = "cuda"
-            elif accel == "cpu":
-                accel = "none"
             if accel == "":
                 _force_setattr(self, "accelerator", None)
             elif accel in ("none", "cuda"):
                 _force_setattr(self, "accelerator", accel)
                 if accel == "cuda" and self.requires_gpu is None:
                     _force_setattr(self, "requires_gpu", True)
+            elif accel == "cpu":
+                raise ValueError(
+                    f"accelerator={self.accelerator!r} is invalid — "
+                    "CPU endpoints use accelerator='none'. "
+                    "Valid values: 'cuda', 'none', or None."
+                )
+            elif accel == "gpu":
+                raise ValueError(
+                    f"accelerator={self.accelerator!r} is invalid — "
+                    "GPU endpoints use accelerator='cuda'. "
+                    "Valid values: 'cuda', 'none', or None."
+                )
             else:
                 raise ValueError(
                     f"accelerator must be 'none' or 'cuda', got {self.accelerator!r}"
