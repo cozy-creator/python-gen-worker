@@ -265,6 +265,9 @@ def _function_inner(
     return apply
 
 
+_VALID_GPU_CLASSES = ("small", "large")
+
+
 def _stage_inner(
     fn: Optional[F] = None,
     *,
@@ -278,11 +281,45 @@ def _stage_inner(
     to local method calls, so tenant code is portable.
 
     Usable as ``@inference.stage(name='encode', gpu_class='small')``.
+
+    Validation (raised at decoration time so tenants see the error during
+    ``import``, not at bake / dispatch):
+
+      - ``gpu_class`` must be ``'small'`` or ``'large'`` — the orchestrator's
+        future remote-dispatch path uses this as a placement hint.
+      - ``name`` (or the method name if not supplied) must produce a
+        non-empty slug under ``slugify_name`` — same slug rules as
+        ``@inference.function`` wire routes.
     """
+    # gpu_class is typed ``Literal``, but msgspec.Struct does NOT enforce
+    # Literal members at construction time. Validate explicitly so a typo
+    # ('medium', 'big') fails fast at decoration time.
+    if gpu_class not in _VALID_GPU_CLASSES:
+        raise ValueError(
+            f"@inference.stage: gpu_class must be one of "
+            f"{list(_VALID_GPU_CLASSES)}, got {gpu_class!r}"
+        )
+
+    # Lazy import to avoid a circular dep between api.decorators and discovery.
+    from gen_worker.discovery.names import slugify_name
 
     def apply(method: F) -> F:
+        raw_name = name if name is not None else method.__name__
+        if not isinstance(raw_name, str):
+            raise TypeError(
+                f"@inference.stage on {method.__name__!r}: name must be a str, "
+                f"got {type(raw_name).__name__}"
+            )
+        slug = slugify_name(raw_name)
+        if not slug:
+            raise ValueError(
+                f"@inference.stage on {method.__name__!r}: name {raw_name!r} "
+                "produces an empty slug. Use a name with at least one "
+                "alphanumeric character (slug rules: lowercased, _ -> -, "
+                "non-[a-z0-9.] -> -)."
+            )
         spec = _StageSpec(
-            name=name or method.__name__,
+            name=slug,
             gpu_class=gpu_class,
         )
         setattr(method, "__gen_worker_stage_spec__", spec)
@@ -370,8 +407,14 @@ def _validate_invocable_methods(cls: type) -> list[tuple[str, Callable[..., Any]
 
 
 def _validate_stage_methods(cls: type) -> list[tuple[str, Callable[..., Any], _StageSpec]]:
-    """Find @inference.stage-decorated methods. Optional — empty is fine."""
+    """Find @inference.stage-decorated methods. Optional — empty is fine.
+
+    Rejects duplicate stage names within a class: two stages sharing a name
+    would clash in the manifest's ``stages`` list and silently shadow each
+    other in any future remote-dispatch routing table.
+    """
     out: list[tuple[str, Callable[..., Any], _StageSpec]] = []
+    seen_names: dict[str, str] = {}  # stage_name -> method attr_name
     for attr_name in dir(cls):
         if attr_name.startswith("_"):
             continue
@@ -379,8 +422,18 @@ def _validate_stage_methods(cls: type) -> list[tuple[str, Callable[..., Any], _S
         if member is None or not callable(member):
             continue
         spec = getattr(member, "__gen_worker_stage_spec__", None)
-        if spec is not None:
-            out.append((attr_name, member, spec))
+        if spec is None:
+            continue
+        prior = seen_names.get(spec.name)
+        if prior is not None and prior != attr_name:
+            raise ValueError(
+                f"@inference class {cls.__name__!r}: duplicate stage name "
+                f"{spec.name!r} on methods {prior!r} and {attr_name!r}. "
+                "Stage names must be unique within a class (each name maps "
+                "to one routable pipeline stage)."
+            )
+        seen_names[spec.name] = attr_name
+        out.append((attr_name, member, spec))
     return out
 
 
