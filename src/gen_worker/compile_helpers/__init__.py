@@ -1,5 +1,12 @@
 """Compilation backends for diffusion / DiT modules (#324).
 
+.. note::
+   For the common case, prefer :func:`gen_worker.accel.compile_diffusion` —
+   the canonical five-call surface in :mod:`gen_worker.accel` covers most
+   SerialWorker endpoints. This module remains available for advanced
+   cases (Nexfort / OneDiff, TensorRT, fine-grained ``torch.compile``
+   options).
+
 Wrappers around torch.compile, OneDiff-Nexfort, and TensorRT to compile
 the heavy module of a Diffusers pipeline (usually `pipe.transformer`).
 

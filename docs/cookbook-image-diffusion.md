@@ -11,6 +11,8 @@ gen-worker conventions.
 Cross-links:
 - [endpoint-authoring.md](endpoint-authoring.md) — base SDK reference
   (bindings, Resources, payload structs, RequestContext).
+- [cookbook-acceleration.md](cookbook-acceleration.md) — the
+  `gen_worker.accel` five-call surface in isolation.
 - [cookbook-video-diffusion.md](cookbook-video-diffusion.md) — video DiTs.
 - [cookbook-stages.md](cookbook-stages.md) — `@inference.stage` for
   multi-stage pipelines (mostly 3D and very large DiTs).

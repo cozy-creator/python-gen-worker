@@ -1,5 +1,12 @@
 """Per-request feature caches for diffusion models (#324).
 
+.. note::
+   For the common case, prefer :func:`gen_worker.accel.apply_fbcache` —
+   the canonical five-call surface in :mod:`gen_worker.accel` covers most
+   SerialWorker endpoints. This module remains available for advanced
+   cases that need additional cache backends (DeepCache, TeaCache) or
+   finer-grained control.
+
 These wrap a HuggingFace Diffusers pipeline to skip redundant computation
 across timesteps. They are per-request acceleration — multiple concurrent
 requests each get their own cache state (the cache wrapper holds no

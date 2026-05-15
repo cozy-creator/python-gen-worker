@@ -1,5 +1,101 @@
 # Changelog
 
+## 0.7.8
+
+### New
+
+- **`gen_worker.accel` — canonical five-call diffusion acceleration**
+  (issue #324). New top-level module exposing the recommended entry
+  points for SerialWorker acceleration: `gpu_capability()` (cached
+  hardware probe), `compile_diffusion(module)` (torch.compile wrapper
+  for the heavy DiT), `apply_fbcache(pipe)` (ParaAttention First-Block
+  Cache), `apply_para_attn(pipe)` (ParaAttention sequence-parallel
+  adapter), `apply_nvfp4(model)` (NVFP4 weight quantization for
+  Blackwell). The lower-level modules (`gen_worker.cache`,
+  `gen_worker.compile_helpers`, `gen_worker.quant`,
+  `gen_worker.parallelism`) remain available for advanced cases
+  (multiple cache backends, multi-precision quant fallbacks, sequence
+  parallelism with custom placement); each carries a docstring
+  pointing at the corresponding `accel.*` entry point for the common
+  case. See [docs/cookbook-acceleration.md](docs/cookbook-acceleration.md).
+- **`@batched_inference` class shape** (issue #273). Parallel-to-
+  `@inference` decorator for LLM-class workloads (chat / instruct
+  models, multimodal captioners, autoregressive TTS). The decorated
+  class hosts a single long-lived inference engine; the
+  externally-invocable method is an async generator yielding typed
+  streaming signals — `IncrementalTokenDelta(text=...)` per delta,
+  `Done()` at clean end, `Error(message=...)` for inline failures.
+  Worker dispatch leg routes requests through the
+  `@batched_inference` codepath without overloading the `@inference`
+  function-methods slot. Cooperative cancellation is wired via
+  `ctx.cancelled()` — client disconnect (stream-EOF) flips the flag,
+  and the tenant's loop calls `engine.abort(request_id)` to release
+  the engine slot immediately. **No engine integration yet** — tenants
+  construct `AsyncLLMEngine.from_engine_args(...)` (vLLM) or
+  `sgl.Engine(...)` (SGLang) in their `setup()`; engine choice,
+  precision, and tuning knobs are tenant-owned. See
+  [docs/cookbook-batched-llm.md](docs/cookbook-batched-llm.md).
+- **`@inference.stage` decorator hardened** (issue #325). Validation
+  now fails fast at class-decoration time so tenants see errors
+  during `import` rather than at bake / first dispatch:
+  - `gpu_class` must be `"small"` or `"large"` — `Literal` typing
+    isn't enforced by msgspec at construction, so a typo (`"medium"`,
+    `"big"`) now raises `ValueError` with the valid list.
+  - `name` (or the method name if not supplied) must produce a non-
+    empty slug under the same rules as `@inference.function` wire
+    routes; an empty-slug name (`"!!!"`, `""`) raises with the
+    slug rules in the error message.
+  - Two stages on the same class can't share a name — duplicates
+    would silently shadow each other in the manifest's `stages` list
+    and in any future remote-dispatch routing table. Cross-class
+    duplicates remain legal (stage names are scoped per class).
+  - The validated stage spec is plumbed through the manifest as
+    `(name, gpu_class, python_name)` so future SDK releases can route
+    each stage to a separate worker without endpoint-code changes.
+
+### Breaking
+
+- **`accelerator='cpu'` / `accelerator='gpu'` aliases removed**
+  (issue #326). The canonical vocabulary is `'cuda'` (GPU endpoints)
+  and `'none'` (CPU-only endpoints — CPU is the *absence* of an
+  accelerator, not one). The oxymoronic shorthands were masking typos
+  and conflicting with the wire-side meaning of `accelerator`. Both
+  legacy spellings now raise at `Resources(...)` construction time
+  with a pointer to the canonical value. The check is case-
+  insensitive (`'CPU'` / `'GPU'` raise the same way).
+- **Discovery-time gate on self-contradictory Resources** (issue
+  #326). `Resources(accelerator='none')` paired with any GPU resource
+  axis (`requires_gpu=True`, `min_vram_gb`, `min_compute_capability`)
+  now raises `ValueError` at decoration time. The combination is
+  almost always a copy/paste typo (a CPU port of a GPU endpoint
+  where the resources block wasn't pruned) and would otherwise
+  silently misroute endpoints. CPU-only endpoints declared cleanly
+  (`Resources(accelerator='none')` alone, no GPU axes) continue to
+  pass.
+
+### Migration
+
+- **`accelerator='cpu'` → `accelerator='none'`.** CPU-only endpoints
+  (small flow-matching audio, CPU-only classifiers) use the
+  no-accelerator form. Drop any `requires_gpu=` / `min_vram_gb=` /
+  `min_compute_capability=` kwargs from the same `Resources(...)`
+  call — they would otherwise trip the new discovery-time gate.
+  ```python
+  # Before:
+  Resources(accelerator='cpu', min_vram_gb=4.0)
+  # After:
+  Resources(accelerator='none')
+  ```
+- **`accelerator='gpu'` → `accelerator='cuda'`.** GPU endpoints use
+  the explicit CUDA spelling. The `requires_gpu=True` auto-flip on
+  the `'cuda'` path is unchanged.
+  ```python
+  # Before:
+  Resources(accelerator='gpu', min_vram_gb=24.0)
+  # After:
+  Resources(accelerator='cuda', min_vram_gb=24.0)
+  ```
+
 ## 0.7.7
 
 ### Breaking — wire-format hard cut (issue wire-format-bare-refs-typed-provider)
