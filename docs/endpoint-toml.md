@@ -135,7 +135,7 @@ them to decide which workers can host this profile.
 | `accelerator`          | always                     | `"cuda"` or `"none"`                                                                     |
 | `cuda_min`             | if `accelerator="cuda"`    | Minimum host CUDA driver version (e.g. `"12.8"`)                                         |
 | `compute_capabilities` | if `accelerator="cuda"`    | Minimum GPU SM version constraint(s) (e.g. `[">=8.0"]`)                                  |
-| `cpu_arch`             | optional, default `"amd64"` | `"amd64"` or `"arm64"`                                                                  |
+| `cpu_arch`             | optional, default `"x86"`  | `"x86"` or `"arm64"`                                                                    |
 | `os`                   | optional, default `"linux"` | OS family the image expects (`"linux"` / `"windows"` / `"macos"`)                       |
 
 Per-function `Resources.min_vram_gb` drives VRAM placement decisions — that's
