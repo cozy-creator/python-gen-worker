@@ -1,3 +1,11 @@
 {
-  "issues": []
+  "issues": [
+    {
+      "id": 11,
+      "name": "Adaptive sizing for MAX_CONCURRENT_UPLOADS (drop the hardcoded constant)",
+      "status": "planned",
+      "description": "Today `MAX_CONCURRENT_UPLOADS = 4` in `_concurrent_upload.py` is a hardcoded empirical default — chosen because 4 concurrent files saturated a 10 GbE / NVMe / 8-core test host without thrashing the BLAKE3 worker threads. On slower disks or hosts with more cores the right number is different. User feedback (#269 closeout, 2026-05-16): hardcoding any one number is wrong; the pool should saturate the available bandwidth/CPU without the operator having to tune anything.\n\n## Design (sketch)\n\nReplace the constant with an adaptive sizer:\n\n1. Start at N=1 (or 2). Each file completes; record elapsed time + bytes uploaded.\n2. Compute aggregate throughput over a sliding window (last 4-8 files).\n3. After each file finishes, decide:\n   - If recent throughput is still trending up vs the previous window, increase N by 1 (cap at some sanity ceiling like 16).\n   - If throughput plateaued or fell, hold N steady.\n   - If error rate ticked up (5xx, timeouts), decrease N by 1.\n4. Combined with the existing `BudgetGate` (which back-pressures on capability budget), the sizer never\n   over-commits in-flight bytes either.\n\n## Constraints\n\n- **Not env-configurable.** User explicitly does not want a knob.\n- **No global state**. Each clone job's pool sizes itself independently from a clean baseline (different   workloads have different sweet spots).\n- **Bounded**: sanity ceiling so a runaway sizer can't try 100 concurrent uploads on a degenerate workload.\n\n## Why this isn't urgent\n\nThe hardcoded N=4 is good enough today: clones complete in reasonable wall-time on the live e2e stack, the back-pressure gate prevents catastrophic over-commit, and most clone workloads are 2-10 file batches where N=4 saturates anyway. The adaptive sizer is a refinement for the long tail where hosts vary significantly.\n\n## Related\n\n- tensorhub #269 (closed) — original upload throughput work, capability-budget back-pressure, blake3 swap.\n- The `BudgetGate` design in `_concurrent_upload.py` is the right back-pressure primitive for the adaptive\n  sizer to compose with: byte budgets enforce a hard ceiling, concurrency tuning runs within that ceiling.",
+      "tasks": []
+    }
+  ]
 }
