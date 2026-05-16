@@ -159,6 +159,14 @@ class RequestContext:
         # The manager itself is already thread-safe internally.
         self._upload_sessions_lock = threading.Lock()
 
+        # Capability-budget gate (issue #269 back-pressure). Lazy-built from
+        # the worker_capability_token's max_total_bytes + max_bytes_per_file
+        # claims on first upload. The pool's per-file fan-out can over-commit
+        # if multiple 30+ GiB shards run in parallel; the gate blocks new
+        # reservations until in-flight bytes fit the aggregate budget.
+        self._upload_budget_gate = None  # type: Optional["BudgetGate"]
+        self._upload_budget_gate_lock = threading.Lock()
+
         # Repo fields declared by the ingest pipeline before the first upload
         # session opens. Empty values are omitted and tensorhub keeps/inherits
         # existing repo values.
@@ -238,6 +246,20 @@ class RequestContext:
                 "Worker did not propagate Settings.tensorhub_public_url"
             )
         return self._file_api_base_url.rstrip("/")
+
+    def _get_upload_budget_gate(self):
+        """Lazy-construct the capability-budget gate from the JWT claims.
+
+        Pure pass-through when the token has no budget claims (dev/test
+        paths). See ``_concurrent_upload.BudgetGate`` for semantics.
+        """
+        if self._upload_budget_gate is None:
+            with self._upload_budget_gate_lock:
+                if self._upload_budget_gate is None:
+                    from ._concurrent_upload import budget_gate_from_capability_jwt
+                    token = self._get_worker_capability_token() or ""
+                    self._upload_budget_gate = budget_gate_from_capability_jwt(token)
+        return self._upload_budget_gate
 
     def _upload_session_manager(self):
         """Lazy-instantiate the upload session manager for this request.
@@ -694,17 +716,22 @@ class RequestContext:
                 size_bytes=size,
                 sha256=sha,
             )
-        stream = self.open_output_stream(ref, create=False, expected_size_bytes=size)
-        with open(src, "rb") as fin:
-            while True:
-                chunk = fin.read(8 * 1024 * 1024)
-                if not chunk:
-                    break
-                stream.write(chunk)
-        out = stream.finalize()
-        if isinstance(out, Asset):
-            return out
-        raise RuntimeError("file save failed (invalid_asset_response)")
+        # Reserve aggregate-bytes budget (issue #269 back-pressure) — held
+        # until the upload completes. Reentrant: nested save_file from
+        # inside save_checkpoint's non-streaming branch is a no-op for
+        # the same thread.
+        with self._get_upload_budget_gate().reserve(size):
+            stream = self.open_output_stream(ref, create=False, expected_size_bytes=size)
+            with open(src, "rb") as fin:
+                while True:
+                    chunk = fin.read(8 * 1024 * 1024)
+                    if not chunk:
+                        break
+                    stream.write(chunk)
+            out = stream.finalize()
+            if isinstance(out, Asset):
+                return out
+            raise RuntimeError("file save failed (invalid_asset_response)")
 
     def save_checkpoint(
         self,
@@ -747,31 +774,35 @@ class RequestContext:
         # broke `_build_snapshot_manifest` because save_file returns an Asset
         # without blake3 and the clone pipeline's manifest builder requires a
         # blake3 digest per entry.)
-        if self._repo_job_upload_scope() is not None and self._should_stream_output_to_file_api(ref):
-            stream = self.open_checkpoint_stream(
-                ref,
-                format=fmt,
-                expected_size_bytes=size,
-                produced_by_kind=produced_by_kind,
-                step_number=step_number,
-                epoch_number=epoch_number,
-                output_kind=output_kind,
-                target_dtype=target_dtype,
-                flavor=flavor,
-                attributes=attributes,
-            )
-            with open(src, "rb") as fin:
-                while True:
-                    chunk = fin.read(8 * 1024 * 1024)
-                    if not chunk:
-                        break
-                    stream.write(chunk)
-            out = stream.finalize()
-            if isinstance(out, Tensors):
-                return out
-            raise RuntimeError("file save failed (invalid_tensors_response)")
+        # Reserve aggregate-bytes budget (issue #269 back-pressure). Held
+        # across either branch (streaming or save_file fallthrough). Save_file
+        # is reentrancy-aware so its inner reserve() is a no-op.
+        with self._get_upload_budget_gate().reserve(size):
+            if self._repo_job_upload_scope() is not None and self._should_stream_output_to_file_api(ref):
+                stream = self.open_checkpoint_stream(
+                    ref,
+                    format=fmt,
+                    expected_size_bytes=size,
+                    produced_by_kind=produced_by_kind,
+                    step_number=step_number,
+                    epoch_number=epoch_number,
+                    output_kind=output_kind,
+                    target_dtype=target_dtype,
+                    flavor=flavor,
+                    attributes=attributes,
+                )
+                with open(src, "rb") as fin:
+                    while True:
+                        chunk = fin.read(8 * 1024 * 1024)
+                        if not chunk:
+                            break
+                        stream.write(chunk)
+                out = stream.finalize()
+                if isinstance(out, Tensors):
+                    return out
+                raise RuntimeError("file save failed (invalid_tensors_response)")
 
-        asset = self.save_file(ref, src)
+            asset = self.save_file(ref, src)
         return Tensors(
             ref=asset.ref,
             owner=asset.owner,
@@ -964,17 +995,19 @@ class RequestContext:
                 size_bytes=size,
                 sha256=sha,
             )
-        stream = self.open_output_stream(ref, create=True, expected_size_bytes=size)
-        with open(src, "rb") as fin:
-            while True:
-                chunk = fin.read(8 * 1024 * 1024)
-                if not chunk:
-                    break
-                stream.write(chunk)
-        out = stream.finalize()
-        if isinstance(out, Asset):
-            return out
-        raise RuntimeError("file save failed (invalid_asset_response)")
+        # Reserve aggregate-bytes budget (issue #269 back-pressure).
+        with self._get_upload_budget_gate().reserve(size):
+            stream = self.open_output_stream(ref, create=True, expected_size_bytes=size)
+            with open(src, "rb") as fin:
+                while True:
+                    chunk = fin.read(8 * 1024 * 1024)
+                    if not chunk:
+                        break
+                    stream.write(chunk)
+            out = stream.finalize()
+            if isinstance(out, Asset):
+                return out
+            raise RuntimeError("file save failed (invalid_asset_response)")
 
     # Issue #1 (slim-request-context): admin-plane visibility toggles
     # (publish_checkpoint / publish_dataset / publish_endpoint /
