@@ -31,6 +31,7 @@ from gen_worker.discovery.toml_manifest import (
     load_endpoint_toml,
 )
 from gen_worker.discovery.names import slugify_name
+from gen_worker.discovery.walk import FoundEndpointClass, find_endpoint_classes
 
 
 def _type_id(t: type) -> Dict[str, str]:
@@ -459,6 +460,11 @@ def discover_functions(root: Optional[Path] = None, *, main_module: str | None =
 
     Args:
         root: Project root directory. Defaults to current working directory.
+        main_module: ``endpoint.toml``'s ``main`` pointer (e.g. ``"conversion.main"``).
+            When provided, the top-level package (``"conversion"``) is walked
+            via :func:`gen_worker.discovery.walk.find_endpoint_classes` to find
+            class-shape endpoints. When omitted, the fallback filesystem scan
+            still picks up function-shape decorators.
 
     Returns:
         List of function metadata dictionaries.
@@ -477,7 +483,7 @@ def discover_functions(root: Optional[Path] = None, *, main_module: str | None =
 
     functions: List[Dict[str, Any]] = []
     imported_modules: Set[str] = set()
-    seen_functions: Set[Tuple[str, str]] = set()  # (module, name)
+    seen_functions: Set[Tuple[str, str, str]] = set()  # (declared_module, class_name, python_name)
 
     def _module_is_in_project(mod: Any) -> bool:
         """
@@ -500,16 +506,62 @@ def discover_functions(root: Optional[Path] = None, *, main_module: str | None =
             return False
 
     if main_module:
+        # Build-time class-shape discovery now flows through the unified
+        # walker shared with Worker._discover_and_register_functions. The
+        # walker takes top-level package names; we derive the top-level
+        # from main_module (``"conversion.main"`` -> ``"conversion"``) so
+        # the walker's ``walk_packages`` finds every submodule whether or
+        # not __init__.py re-exports it.
+        top_level = main_module.split(".", 1)[0]
+        try:
+            found_classes = find_endpoint_classes([top_level])
+        except Exception as e:
+            raise ValueError(
+                f"failed to walk endpoint package {top_level!r} (derived from "
+                f"endpoint.toml main={main_module!r}): {e}"
+            ) from e
+
+        for found in found_classes:
+            # Per-class entries are attributed to the walked top-level
+            # package name to keep the lockfile ``module`` field stable
+            # across submodule re-exports (matches pre-refactor behavior).
+            module_name = found.walked_module
+            try:
+                class_entries = _extract_class_function_methods(
+                    found.cls, module_name
+                )
+            except Exception as e:
+                print(
+                    f"warning: failed to extract class endpoint {found.qualname}: {e}",
+                    file=sys.stderr,
+                )
+                raise
+            for class_fn in class_entries:
+                key = (
+                    class_fn.get("declared_module", class_fn.get("module", "")),
+                    class_fn.get("class_name", ""),
+                    class_fn.get("python_name", ""),
+                )
+                if key in seen_functions:
+                    continue
+                seen_functions.add(key)
+                functions.append(class_fn)
+
+        # Function-shape (@inference / @conversion at module level) still
+        # ships through the per-module dict scan — only the class-discovery
+        # path was duplicated between build-time and runtime, so that's
+        # the path we unified. Function-shape decorators are legacy stubs
+        # post-#322 but still scanned so a tenant who slipped one in gets
+        # a loud build-time error rather than a silent miss.
         before = set(sys.modules.keys())
         try:
             importlib.import_module(main_module)
         except Exception as e:
-            raise ValueError(f"failed to import endpoint.toml main module {main_module!r}: {e}") from e
-
+            raise ValueError(
+                f"failed to import endpoint.toml main module {main_module!r}: {e}"
+            ) from e
         after = set(sys.modules.keys())
-        newly_loaded = sorted(after - before)
-        # Also include the main module itself (it was present in before in some cases).
-        candidates = set(newly_loaded)
+        candidates = set(sorted(after - before))
         candidates.add(main_module)
         for module_name in sorted(candidates):
             if module_name in imported_modules:
@@ -520,24 +572,6 @@ def discover_functions(root: Optional[Path] = None, *, main_module: str | None =
                 continue
             if not _module_is_in_project(mod):
                 continue
-            # #322: scan for class-shape endpoints first.
-            for class_fn in _scan_module_for_class_endpoints(mod, module_name):
-                # Dedup by the class's declaring module + class_name (not the
-                # walking module). When a class is re-exported via __init__.py
-                # star-imports + endpoint.toml main pointing at a module that
-                # re-imports it, the same class would otherwise be discovered
-                # multiple times — once per walking module — producing
-                # "duplicate function name" at bake validation.
-                key = (
-                    class_fn.get("declared_module", class_fn.get("module", "")),
-                    class_fn.get("class_name", ""),
-                    class_fn.get("python_name", ""),
-                )
-                if key in seen_functions:
-                    continue
-                seen_functions.add(key)
-                functions.append(class_fn)
-            # Iterate module dict to avoid triggering module-level __getattr__.
             for obj in mod.__dict__.values():
                 if not inspect.isfunction(obj):
                     continue
@@ -545,7 +579,11 @@ def discover_functions(root: Optional[Path] = None, *, main_module: str | None =
                 is_conversion = getattr(obj, "_is_training_function", False)
                 if not (is_worker or is_conversion):
                     continue
-                key = (getattr(obj, "__module__", ""), getattr(obj, "__name__", ""))
+                key = (
+                    getattr(obj, "__module__", ""),
+                    "",
+                    getattr(obj, "__name__", ""),
+                )
                 if key in seen_functions:
                     continue
                 seen_functions.add(key)
@@ -556,9 +594,51 @@ def discover_functions(root: Optional[Path] = None, *, main_module: str | None =
                 functions.append(fn_meta)
         return functions
 
-    # Fallback: scan the filesystem for decorated functions.
+    # Fallback: no main_module declared. Scan the filesystem for decorated
+    # functions (legacy function-shape) AND walk every top-level package
+    # under the project root for class-shape endpoints. The fallback is
+    # rarely hit in practice — every published endpoint declares ``main``
+    # in endpoint.toml — but exists so ad-hoc invocations of
+    # ``discover_functions()`` against a project still work.
     py_files = _find_python_files(root)
     candidate_files = [f for f in py_files if _file_uses_worker_decorator(f)]
+
+    # Class-shape: walk every top-level package the filesystem suggests.
+    top_level_pkgs: Set[str] = set()
+    for filepath in candidate_files:
+        computed_module_name = _compute_module_name(filepath, root)
+        if computed_module_name:
+            top_level_pkgs.add(computed_module_name.split(".", 1)[0])
+    if top_level_pkgs:
+        try:
+            found_classes = find_endpoint_classes(sorted(top_level_pkgs))
+        except Exception as e:
+            print(f"warning: walker failed: {e}", file=sys.stderr)
+            found_classes = []
+        for found in found_classes:
+            module_name = found.walked_module
+            try:
+                class_entries = _extract_class_function_methods(
+                    found.cls, module_name
+                )
+            except Exception as e:
+                print(
+                    f"warning: failed to extract class endpoint {found.qualname}: {e}",
+                    file=sys.stderr,
+                )
+                raise
+            for class_fn in class_entries:
+                key = (
+                    class_fn.get("declared_module", class_fn.get("module", "")),
+                    class_fn.get("class_name", ""),
+                    class_fn.get("python_name", ""),
+                )
+                if key in seen_functions:
+                    continue
+                seen_functions.add(key)
+                functions.append(class_fn)
+
+    # Function-shape: per-file import then module-dict scan.
     for filepath in candidate_files:
         computed_module_name = _compute_module_name(filepath, root)
         if computed_module_name is None or computed_module_name in imported_modules:
@@ -570,20 +650,6 @@ def discover_functions(root: Optional[Path] = None, *, main_module: str | None =
             print(f"warning: failed to import {computed_module_name}: {e}", file=sys.stderr)
             continue
 
-        # #322: scan for class-shape endpoints first.
-        for class_fn in _scan_module_for_class_endpoints(mod, computed_module_name):
-            key = (
-                class_fn.get("module", ""),
-                class_fn.get("class_name", ""),
-                class_fn.get("python_name", ""),
-            )
-            if key in seen_functions:
-                continue
-            seen_functions.add(key)
-            functions.append(class_fn)
-
-        # Find decorated functions (both @inference and @conversion).
-        # Iterate module dict to avoid triggering module-level __getattr__.
         for name, obj in mod.__dict__.items():
             if not inspect.isfunction(obj):
                 continue
@@ -591,7 +657,11 @@ def discover_functions(root: Optional[Path] = None, *, main_module: str | None =
             is_conversion = getattr(obj, "_is_training_function", False)
             if not (is_worker or is_conversion):
                 continue
-            key = (getattr(obj, "__module__", ""), getattr(obj, "__name__", ""))
+            key = (
+                getattr(obj, "__module__", ""),
+                "",
+                getattr(obj, "__name__", ""),
+            )
             if key in seen_functions:
                 continue
             seen_functions.add(key)
@@ -787,39 +857,6 @@ def _extract_class_function_methods(
 
         out.append(fn)
 
-    return out
-
-
-def _scan_module_for_class_endpoints(
-    mod: Any, module_name: str
-) -> List[Dict[str, Any]]:
-    """Walk a module looking for class-shape endpoints (#322)."""
-    out: List[Dict[str, Any]] = []
-    for name, obj in mod.__dict__.items():
-        if not inspect.isclass(obj):
-            continue
-        if not hasattr(obj, "__gen_worker_endpoint_spec__"):
-            continue
-        # Avoid double-counting classes imported from other modules — only
-        # collect classes that were defined in this module.
-        if getattr(obj, "__module__", "") != module_name:
-            # Allow re-export from the endpoint's __init__ — accept the class
-            # if its declaring module is still part of the same package.
-            declared_module = getattr(obj, "__module__", "")
-            if not (
-                declared_module == module_name
-                or module_name.startswith(declared_module + ".")
-                or declared_module.startswith(module_name.split(".", 1)[0] + ".")
-            ):
-                continue
-        try:
-            out.extend(_extract_class_function_methods(obj, module_name))
-        except Exception as e:
-            print(
-                f"warning: failed to extract class endpoint {name}: {e}",
-                file=sys.stderr,
-            )
-            raise
     return out
 
 

@@ -237,6 +237,7 @@ def _resolved_repo_id(ref: str, flavor: str = "", tag: str = "prod", provider: s
 
 
 from .discovery.names import slugify_name
+from .discovery.walk import find_endpoint_classes
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -1391,61 +1392,48 @@ class Worker:
     def _discover_and_register_functions(self) -> None:
         """Discover and register handlers in user modules.
 
-        Three handler shapes are recognized:
-          1. Bare ``@inference`` (legacy function-shape; the hard-cut
-             stub will raise ImportError on first import, but we still scan
-             so legacy modules error loud rather than silently disappear).
-          2. Bare ``@conversion`` (likewise legacy).
-          3. ``@inference`` / ``@training`` / ``@dataset`` / ``@conversion``
-             on a class (#322 / #273). The class carries
-             ``__gen_worker_endpoint_spec__`` and (for BatchedWorker) declares
-             ``runtime="sglang"|"vllm"`` to route to the continuous-batching
-             engine path.
+        Class-shape discovery (``@inference`` / ``@training`` / ``@dataset`` /
+        ``@conversion`` on a class) flows through
+        :func:`gen_worker.discovery.walk.find_endpoint_classes` — the same
+        walker the build-time discovery uses. Keeping the two paths unified
+        is the whole point of issue #12: when they drift, the worker boots
+        fine but the orchestrator's dispatch fails with `Unknown function
+        requested` (the conversion-endpoint outage of 2026-05-16).
+
+        Legacy function-shape ``@inference`` / ``@conversion`` decorators are
+        still scanned per-module so a stray decorator surfaces as a registered
+        handler (or a loud error) instead of vanishing silently. Post-#322 the
+        canonical shape is class-based.
         """
-        logger.info("Discovering worker handlers in modules: %s...", self.user_module_names)
+        logger.info(
+            "Discovering worker handlers in modules: %s...",
+            self.user_module_names,
+        )
         discovered = 0
 
-        for module_name in self.user_module_names:
+        # Class-shape: single walker call shared with build-time discovery.
+        # The walker handles import failures, submodule walks, re-export
+        # dedup, and third-party rejection — all the band-aids the
+        # previous runtime path grew separately.
+        found_classes = find_endpoint_classes(list(self.user_module_names))
+        for found in found_classes:
             try:
-                module = importlib.import_module(module_name)
-            except ImportError:
-                logger.error("Could not import user module: %s", module_name)
+                n = self._register_endpoint_class(found.cls, found.endpoint_spec)
+            except Exception as exc:
+                logger.exception(
+                    "Skipping endpoint class '%s' from module '%s': %s",
+                    found.qualname, found.module, exc,
+                )
                 continue
+            discovered += n
 
-            # First pass: pick up @inference / @training class endpoints.
-            for _, obj in inspect.getmembers(module):
-                if not inspect.isclass(obj):
-                    continue
-                obj_module = getattr(obj, "__module__", "") or ""
-                # Skip third-party re-exports (e.g. `from gen_worker import inference`)
-                # but accept classes defined in any submodule of the user's package
-                # — the conversion endpoint, for instance, declares `@inference()`
-                # classes in `conversion/clone_huggingface.py` and re-exports them
-                # via `conversion/__init__.py`'s `from .main import *`. The class's
-                # `__module__` is `conversion.clone_huggingface`, but the package
-                # being walked is `conversion`. Without the prefix check, every
-                # submodule-defined endpoint class gets silently dropped and the
-                # worker registers zero handlers. Dedup at the per-function level
-                # below (via `_request_specs[spec.name]`) protects against the
-                # same class being seen twice through different re-export paths.
-                package_prefix = module.__name__ + "."
-                if obj_module != module.__name__ and not obj_module.startswith(package_prefix):
-                    continue
-                ep_spec = getattr(obj, "__gen_worker_endpoint_spec__", None)
-                if ep_spec is None:
-                    continue
-                try:
-                    n = self._register_endpoint_class(obj, ep_spec)
-                except Exception as exc:
-                    logger.exception(
-                        "Skipping endpoint class '%s' in %s: %s",
-                        getattr(obj, "__name__", "<unknown>"),
-                        module_name,
-                        exc,
-                    )
-                    continue
-                discovered += n
-
+        # Function-shape: per-module dict scan. Walks the same modules the
+        # walker imported (they're now in sys.modules) so we don't re-import.
+        for module_name in self.user_module_names:
+            module = sys.modules.get(module_name)
+            if module is None:
+                # The walker logs the import failure already; nothing to scan.
+                continue
             for _, obj in inspect.getmembers(module):
                 if not inspect.isfunction(obj):
                     continue
@@ -1500,7 +1488,16 @@ class Worker:
                     continue
 
         if discovered == 0:
-            logger.warning("No worker handlers found in modules: %s", self.user_module_names)
+            logger.error(
+                "No worker handlers found in modules: %s. The worker will register "
+                "with the orchestrator but reject every dispatched request with "
+                "'Unknown function requested'. Common causes: (1) a module "
+                "import failed (look for 'Could not import user module' above); "
+                "(2) the @inference decorator was not applied to any class in "
+                "the listed modules; (3) the @inference classes are defined in "
+                "third-party packages (look for 'Skipping endpoint class' logs).",
+                self.user_module_names,
+            )
         else:
             logger.info("Discovery complete. Found %d handlers.", discovered)
 
