@@ -100,6 +100,13 @@ def _binding_to_manifest(binding: Binding, param_annotation: Any) -> Dict[str, A
     if isinstance(binding, Repo):
         return {
             "kind": "fixed",
+            # `provider` distinguishes HFRepo / CivitaiRepo / Repo (tensorhub).
+            # Without it the downstream catalog defaults to "tensorhub" and
+            # silently rewrites the ref through tensorhub's slug normalizer,
+            # so HFRepo("black-forest-labs/FLUX.2-klein-4B") landed as
+            # tensorhub-provider `black-forest-labs/flux.2-klein-4b-base` in
+            # the catalog. Always emit the actual provider.
+            "provider": binding.provider,
             "ref": binding.ref,
             "flavor": binding._flavor,
             "tag": binding._tag,
@@ -109,7 +116,13 @@ def _binding_to_manifest(binding: Binding, param_annotation: Any) -> Dict[str, A
     if isinstance(binding, Dispatch):
         table: Dict[str, Dict[str, str]] = {}
         for k, repo in binding.table.items():
-            entry: Dict[str, str] = {"ref": repo.ref, "tag": repo._tag}
+            entry: Dict[str, str] = {
+                "ref": repo.ref,
+                "tag": repo._tag,
+                # Per-entry provider — a Dispatch table can mix providers
+                # across variants (e.g. fp8 from tensorhub, nf4 from HF).
+                "provider": repo.provider,
+            }
             if repo._flavor:
                 entry["flavor"] = repo._flavor
             table[k] = entry
