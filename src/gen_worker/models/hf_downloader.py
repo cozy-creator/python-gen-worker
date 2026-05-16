@@ -85,17 +85,29 @@ class HuggingFaceHubDownloader:
                 token=self.hf_token,
             )
             if local_snapshot is not None:
-                local_files = _walk_relative_files(local_snapshot)
-                model_index = _try_load_local_model_index(local_snapshot)
-                if model_index is not None:
-                    plan = plan_diffusers_download(model_index=model_index, repo_files=sorted(local_files), policy=policy)
-                    needed = finalize_diffusers_download(
-                        plan=plan,
-                        repo_files=sorted(local_files),
-                        weight_index_json_by_file=_load_local_weight_indexes(local_snapshot, plan.required_weight_index_files),
-                    )
-                    if needed.issubset(local_files) and not _has_incomplete_markers(local_snapshot):
-                        return HuggingFaceDownloadResult(local_dir=local_snapshot)
+                # `snapshot_download(local_files_only=True)` only checks for the
+                # `refs/<branch>` file — a partial cache (some LFS blobs still
+                # unmaterialized) still returns the snapshot path. Walking it
+                # then feeds an incomplete file list into the planner, which
+                # raises (e.g. "weight shard referenced by ... not found in
+                # repo: ...") because the index JSON references shards that
+                # aren't on disk yet. The fast-path is only valid for *fully
+                # complete* caches; on ANY failure fall through to the API
+                # path below — never let the partial-cache RuntimeError bubble.
+                try:
+                    local_files = _walk_relative_files(local_snapshot)
+                    model_index = _try_load_local_model_index(local_snapshot)
+                    if model_index is not None:
+                        plan = plan_diffusers_download(model_index=model_index, repo_files=sorted(local_files), policy=policy)
+                        needed = finalize_diffusers_download(
+                            plan=plan,
+                            repo_files=sorted(local_files),
+                            weight_index_json_by_file=_load_local_weight_indexes(local_snapshot, plan.required_weight_index_files),
+                        )
+                        if needed.issubset(local_files) and not _has_incomplete_markers(local_snapshot):
+                            return HuggingFaceDownloadResult(local_dir=local_snapshot)
+                except Exception:
+                    pass  # partial cache or planner mismatch — fall through to API path
 
             api = HfApi(token=self.hf_token)
             repo_files: Sequence[str] = api.list_repo_files(repo_id=repo_id, repo_type="model", revision=ref.revision)
