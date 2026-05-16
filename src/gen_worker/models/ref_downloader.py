@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 import contextvars
 from pathlib import Path
-from typing import Any, Coroutine, Mapping, Optional
+from typing import Any, Coroutine, Iterable, Mapping, Optional
 
 from .cozy_snapshot_v2 import ensure_snapshot_async
 from .downloader import ModelDownloader
 from .hf_downloader import HuggingFaceHubDownloader
 from .refs import ParsedModelRef, parse_model_ref
+from .unsafe_format import UnsafeFileFormat, assert_safe_weight_format
 
 # Per-request resolved manifests provided by gen-orchestrator (issue #92).
 # Shape: {canonical_model_id: ResolvedRepo-like object}
@@ -43,6 +44,27 @@ def set_provider_by_ref(mapping: Optional[Mapping[str, str]]) -> contextvars.Tok
 
 def reset_provider_by_ref(token: contextvars.Token) -> None:
     _provider_by_ref.reset(token)
+
+
+# Issue #18: per-request set of override ref keys. When the worker
+# dispatches a JobExecutionRequest whose `resolved_models` map carries
+# invoker-supplied overrides, it records the corresponding canonical model
+# id strings here so the downloader can run the safetensors-only gate on
+# the resulting snapshot. Binding-default refs are NOT in this set —
+# they already passed the build-time validator.
+_override_ref_keys: contextvars.ContextVar[Optional[frozenset[str]]] = contextvars.ContextVar(
+    "override_ref_keys", default=None
+)
+
+
+def set_override_ref_keys(keys: Optional[Iterable[str]]) -> contextvars.Token:
+    if keys is None:
+        return _override_ref_keys.set(None)
+    return _override_ref_keys.set(frozenset(k for k in keys if k))
+
+
+def reset_override_ref_keys(token: contextvars.Token) -> None:
+    _override_ref_keys.reset(token)
 
 
 def lookup_provider_for_ref(ref: str, *, default: str = "tensorhub") -> str:
@@ -126,14 +148,26 @@ class ModelRefDownloader(ModelDownloader):
         parsed = parse_model_ref(model_ref, provider=provider)
         base = Path(dest_dir)
         # We ignore filename; snapshots/refs already define structure.
+        local: Optional[str] = None
         try:
             loop = asyncio.get_running_loop()
             if loop.is_running():
                 # Nested loop scenario; run in a new loop in a thread.
-                return _run_in_thread(self._download_async(parsed, base))
+                local = _run_in_thread(self._download_async(parsed, base))
         except RuntimeError:
             pass
-        return asyncio.run(self._download_async(parsed, base)).as_posix()
+        if local is None:
+            local = asyncio.run(self._download_async(parsed, base)).as_posix()
+
+        # Issue #18: belt-and-braces safetensors-only gate for override
+        # downloads. Binding-default refs already passed the build-time
+        # validator; the orchestrator runs the same check pre-dispatch in
+        # gen-orchestrator #358. This is the worker-side last line of
+        # defense if either of those slipped.
+        override_keys = _override_ref_keys.get()
+        if override_keys and model_ref in override_keys:
+            assert_safe_weight_format(Path(local), ref=model_ref)
+        return local
 
 
 def _run_in_thread(coro: Coroutine[Any, Any, Path]) -> str:

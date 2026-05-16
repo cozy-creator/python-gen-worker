@@ -172,6 +172,9 @@ def test_dispatch_binding_rejects_unknown_key() -> None:
 def test_resolved_models_for_request_dict_shape() -> None:
     """Worker._resolved_models_for_request accepts both protobuf-map and
     plain-dict shapes (the latter is what test fixtures send).
+
+    Issue #18: the extracted dict now carries `provider` as well; defaults
+    to "tensorhub" when the entry omits it (pre-#358 wire-format compat).
     """
     w = _bare_worker()
     fake_request = MagicMock()
@@ -179,7 +182,9 @@ def test_resolved_models_for_request_dict_shape() -> None:
         "pipeline": {"ref": "acme/r", "tag": "prod", "flavor": "bf16"},
     }
     out = w._resolved_models_for_request(fake_request)
-    assert out == {"pipeline": {"ref": "acme/r", "tag": "prod", "flavor": "bf16"}}
+    assert out == {
+        "pipeline": {"ref": "acme/r", "tag": "prod", "flavor": "bf16", "provider": "tensorhub"},
+    }
 
 
 def test_resolved_models_for_request_empty() -> None:

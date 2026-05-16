@@ -115,7 +115,9 @@ from .models.downloader import ModelDownloader
 from .models.ref_downloader import (
     ModelRefDownloader,
     lookup_provider_for_ref,
+    reset_override_ref_keys,
     reset_provider_by_ref,
+    set_override_ref_keys,
     set_provider_by_ref,
 )
 from .models.refs import parse_model_ref
@@ -7190,6 +7192,10 @@ class Worker:
 
         models_in_use: set[str] = set()
         inference_watchdog: Optional[threading.Timer] = None
+        # Issue #18: declared here so the `finally` cleanup can reference it
+        # even if the try body raises before resolved_models extraction.
+        _request_provider_tok: Optional[Any] = None
+        _request_override_keys_tok: Optional[Any] = None
         try:
             if ctx.is_canceled():
                 raise CanceledError("canceled")
@@ -7250,6 +7256,54 @@ class Worker:
                         (resolved_models.get(inj.param_name) or {}).get("ref") or ""
                     )
             self._current_payload_ref_keys = payload_ref_keys_this_request
+
+            # Issue #18: layer per-request override providers on top of the
+            # build-time `_provider_by_ref` index so the downloader resolves
+            # invoker-supplied refs (which aren't in endpoint.lock) through
+            # the right branch. Keys must match the bare-ref form that
+            # `ModelRefDownloader.download()` receives — the same form
+            # `_resolved_repo_id()` produces (provider-prefixed for non-
+            # tensorhub, plus tag/flavor decorations).
+            request_provider_overrides: Dict[str, str] = {}
+            for _param, _override in resolved_models.items():
+                _ref = str(_override.get("ref") or "").strip()
+                _prov = str(_override.get("provider") or "tensorhub").strip() or "tensorhub"
+                if not _ref:
+                    continue
+                _tag = str(_override.get("tag") or "prod").strip() or "prod"
+                _flavor = str(_override.get("flavor") or "").strip()
+                _key = _resolved_repo_id(_ref, flavor=_flavor, tag=_tag, provider=_prov)
+                if _key:
+                    request_provider_overrides[_key] = _prov
+                # Also index the bare ref + flavor (no tag, no provider prefix)
+                # because `ModelRefDownloader.download` receives whatever the
+                # caller passed and `lookup_provider_for_ref` does a literal
+                # lookup. The HF parser strips `#flavor` itself.
+                _bare = _ref
+                if _flavor and "#" not in _bare:
+                    _bare = f"{_bare}#{_flavor}"
+                request_provider_overrides.setdefault(_bare, _prov)
+                request_provider_overrides.setdefault(_ref, _prov)
+            if request_provider_overrides:
+                _base_index = getattr(self, "_provider_by_ref_index", None) or {}
+                # Build-time index wins for refs the manifest declared; per-
+                # request overrides only add new entries. (Tenant bindings
+                # in the manifest should never collide with caller overrides
+                # because override refs are different from binding refs by
+                # construction.)
+                _merged = {**request_provider_overrides, **_base_index}
+                _request_provider_tok = set_provider_by_ref(_merged)
+            else:
+                _request_provider_tok = None
+
+            # Issue #18: mark every override-derived ref key so the
+            # downloader runs the safetensors-only gate on its snapshot.
+            # The key set must match whatever string ends up at
+            # `ModelRefDownloader.download(model_ref)` — that's the
+            # `_resolved_repo_id` output for these overrides.
+            _request_override_keys_tok = set_override_ref_keys(
+                request_provider_overrides.keys() if request_provider_overrides else None
+            )
 
             for inj in spec.injections:
                 resolve_t0 = time.monotonic()
@@ -7682,6 +7736,19 @@ class Worker:
         finally:
             if inference_watchdog is not None:
                 inference_watchdog.cancel()
+            # Issue #18: tear down in reverse order — request-level overrides
+            # first, then the build-time index — so the contextvar lands back
+            # at its pre-request state regardless of which layers fired.
+            if _request_override_keys_tok is not None:
+                try:
+                    reset_override_ref_keys(_request_override_keys_tok)
+                except Exception:
+                    pass
+            if _request_provider_tok is not None:
+                try:
+                    reset_provider_by_ref(_request_provider_tok)
+                except Exception:
+                    pass
             try:
                 reset_provider_by_ref(provider_tok)
             except Exception:
@@ -8786,16 +8853,28 @@ class Worker:
             ref = ""
             tag = "prod"
             flavor = ""
+            # Issue #18: extract `provider` from the stamped entry. Older
+            # orchestrators (pre #358) didn't ship the provider field; those
+            # entries are tensorhub-only by definition of the previous wire
+            # contract, so default to "tensorhub" for back-compat.
+            provider = "tensorhub"
             if isinstance(entry, dict):
                 ref = str(entry.get("ref") or "").strip()
                 tag = str(entry.get("tag") or "prod").strip() or "prod"
                 flavor = str(entry.get("flavor") or "").strip()
+                provider = str(entry.get("provider") or "").strip() or "tensorhub"
             else:
                 ref = str(getattr(entry, "ref", "") or "").strip()
                 tag = str(getattr(entry, "tag", "") or "prod").strip() or "prod"
                 flavor = str(getattr(entry, "flavor", "") or "").strip()
+                provider = str(getattr(entry, "provider", "") or "").strip() or "tensorhub"
             if ref:
-                out[str(param_name)] = {"ref": ref, "tag": tag, "flavor": flavor}
+                out[str(param_name)] = {
+                    "ref": ref,
+                    "tag": tag,
+                    "flavor": flavor,
+                    "provider": provider,
+                }
         return out
 
     def _resolve_model_id_for_injection(
@@ -8828,7 +8907,15 @@ class Worker:
             ref = override.get("ref", "")
             flavor = override.get("flavor", "")
             tag = override.get("tag", "prod")
-            model_id = _resolved_repo_id(ref, flavor=flavor, tag=tag)
+            # Issue #18: route the override through the right provider so
+            # an HFRepo binding overridden with `{provider: "hf", ref: ...}`
+            # resolves through the HF downloader, not tensorhub's
+            # resolved_repos_by_id map. Older orchestrators that haven't
+            # shipped the provider field land on "tensorhub" via the
+            # default in `_resolved_models_for_request` — same as the
+            # pre-#358 behavior.
+            provider = override.get("provider", "tensorhub") or "tensorhub"
+            model_id = _resolved_repo_id(ref, flavor=flavor, tag=tag, provider=provider)
             return model_id, None
 
         # 2. Binding default.
