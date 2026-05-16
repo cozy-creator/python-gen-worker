@@ -326,22 +326,13 @@ def upload_part_to_presigned_url(
 
 
 def optimal_part_concurrency(total_parts: int) -> int:
-    """Adaptive part-level concurrency for one file's multipart upload.
+    """Fixed part-level concurrency for one file's multipart upload.
 
-    Replaces the former fixed part fan-out. Rationale: a single file
-    with N parts can saturate the wire with a handful of in-flight PUTs;
-    pushing higher just adds TLS-pool churn (the same pool churn that
-    triggered the R2 SSLV3_ALERT_BAD_RECORD_MAC in the first place). The
-    right bound depends on:
-
-      - total_parts itself (don't spin up 16 workers for a 4-part file)
-      - the file-level fan-out above (handled by the caller — file-level
-        × part-level should not exceed ~16 in-flight PUTs total).
-
-    Sized at ``min(total_parts, 8)``. Above 8 is empirically diminishing
-    returns on a single NIC, and the per-part PoolManager allocation
-    becomes the bottleneck.
+    A single file can saturate R2 with a small number of in-flight PUTs.
+    Keep this fixed so it cannot multiply with file-level fan-out into an
+    uncontrolled retry storm. The current Tensorhub presigned path also
+    has a process-wide PUT budget in ``presigned_upload.py``.
     """
     if total_parts <= 1:
         return 1
-    return min(int(total_parts), 8)
+    return min(int(total_parts), 4)

@@ -394,15 +394,6 @@ def _compute_identity_hash(*, provider: str, source_ref: str, source_revision: s
     )
 
 
-def _normalize_sha256(raw: str | None) -> str:
-    value = str(raw or "").strip().lower()
-    if value.startswith("sha256:"):
-        value = value.split(":", 1)[1].strip().lower()
-    if len(value) == 64 and all(ch in "0123456789abcdef" for ch in value):
-        return value
-    return ""
-
-
 def _parse_positive_int(raw: object) -> int | None:
     try:
         parsed = int(str(raw or "").strip())
@@ -764,9 +755,9 @@ def _finalize_publish_as_is(
             # flavor entry. Each output file lives at
             # `<repo>/<filename>` for the destination snapshot.
             #
-            # Issue #269/#13: fan the uploads out across the adaptive
-            # file pool so a multi-shard inline conversion output ships
-            # shards in parallel.
+            # Issue #269/#13/#19: fan uploads out across the fixed file
+            # pool so a multi-shard inline conversion output ships shards
+            # in parallel without unbounded R2 PUT fan-out.
             spec_artifacts: list[dict[str, Any]] = []
             spec_manifest: list[dict[str, Any]] = []
             inline_outputs = list(inline_result.output_paths)
@@ -955,8 +946,9 @@ def _resolve_source_identity(
     civitai_file_norm = int(civitai_file_id or 0)
     source_metadata: dict[str, str] = {}
     resolved_civitai_identity: CivitaiResolvedIdentity | None = None
-    override_expected_sha = ""
-    override_expected_size: int | None = None
+
+    if _is_http_source(source_ref_norm):
+        raise ValueError("arbitrary URL model sources are not supported")
 
     if provider_norm == "civitai" and civitai_model_version_norm > 0:
         resolved_civitai_identity = resolve_civitai_source_identity(
@@ -1005,7 +997,7 @@ def _resolve_source_identity(
         source_metadata["civitai_model_family_variant_hint"] = str(resolved_civitai_identity.model_family_variant)
 
     # Tenant-owned source identity normalization stays in endpoint code.
-    if provider_norm == "huggingface" and not _is_http_source(source_ref_norm):
+    if provider_norm == "huggingface":
         repo_id, resolved_revision = resolve_huggingface_source_identity(
             source_ref_norm,
             source_revision=source_revision_norm or None,
@@ -1016,8 +1008,6 @@ def _resolve_source_identity(
         dedupe_supported = source_revision_norm != ""
 
     if source_metadata_overrides:
-        override_expected_sha = _normalize_sha256(source_metadata_overrides.get("source_expected_sha256"))
-        override_expected_size = _parse_positive_int(source_metadata_overrides.get("source_expected_size_bytes"))
         for key, value in source_metadata_overrides.items():
             k = str(key or "").strip()
             if k == "":
@@ -1025,13 +1015,6 @@ def _resolve_source_identity(
             if k in {"source_expected_sha256", "source_expected_size_bytes"}:
                 continue
             source_metadata[k] = str(value or "")
-
-    if _is_http_source(source_ref_norm) and override_expected_sha != "":
-        source_revision_norm = f"sha256:{override_expected_sha}"
-        dedupe_supported = True
-        source_metadata["source_expected_sha256"] = override_expected_sha
-        if isinstance(override_expected_size, int) and override_expected_size > 0:
-            source_metadata["source_expected_size_bytes"] = str(override_expected_size)
 
     return SourceIdentity(
         provider=provider_norm,
@@ -1688,7 +1671,7 @@ def _run_layout_repackage(
             out_dir = td / "diffusers"
             singlefile_to_diffusers(primary, out_dir, model_family=model_family)
             # Upload every file in the diffusers tree under a common prefix.
-            # Issue #269/#13: fan uploads out across the adaptive file
+            # Issue #269/#13/#19: fan uploads out across the fixed file
             # pool; results in input order so the "first safetensors
             # becomes primary" rule is preserved deterministically.
             ref_root = f"jobs/{ctx.request_id}/outputs/weights-diffusers"
@@ -1899,11 +1882,11 @@ def _finalize_clone(
             # path: `transformer/diffusion_pytorch_model.safetensors` →
             # `transformer/diffusion_pytorch_model-00001-of-00002.safetensors`).
             #
-            # Issue #269/#13: precompute the full upload job list (including
-            # sharding oversize files) up front, then fan all uploads out
-            # across the adaptive file pool. The 5 GB FLUX shards each
-            # used to take 30-50s of serial overhead; with parallel
-            # file fan-out they pipeline disk read + BLAKE3 + multipart PUT.
+            # Issue #269/#13/#19: precompute the full upload job list
+            # (including sharding oversize files) up front, then fan all
+            # uploads out across the fixed file pool. The global presigned
+            # PUT budget keeps R2 concurrency bounded while preserving
+            # parallel disk read + BLAKE3 + multipart PUT.
             upload_jobs: list[tuple[str, str, str, str]] = []  # (ref, local_path, format, rel_for_uploaded_list)
             for saved_tensors, rel_path, file_size in ingest_result.all_weight_files:
                 local_path = str(getattr(saved_tensors, "local_path", "") or "").strip()

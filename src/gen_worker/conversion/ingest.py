@@ -6,12 +6,12 @@ import logging
 import os
 import shutil
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+
+import requests
 
 from .hf_classifier import (
     ClassificationInputs,
@@ -124,12 +124,6 @@ _CIVITAI_COMPONENT_EXCLUDED_HINTS = (
     "textual-inversion",
     "embedding",
 )
-
-class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
-        _ = req, fp, code, msg, headers, newurl
-        return None
-
 
 @dataclass(frozen=True)
 class CivitaiImportCandidate:
@@ -343,7 +337,7 @@ def _stream_http_download(
         allowed_hosts = set(explicit_hosts)
     header_overrides = _normalize_source_headers(source_headers)
 
-    opener = urllib.request.build_opener(_NoRedirectHandler())
+    session = requests.Session()
     current_url = src
 
     sha = hashlib.sha256()
@@ -367,32 +361,18 @@ def _stream_http_download(
             if token != "" and _http_host_allowed(host, allowed_hosts):
                 headers["Authorization"] = f"Bearer {token}"
 
-            req = urllib.request.Request(current_url, method="GET", headers=headers)
-
             redirected = False
             resp = None
             for attempt in range(_HTTP_DOWNLOAD_RETRIES):
                 try:
-                    resp = opener.open(req, timeout=120)
-                    break
-                except urllib.error.HTTPError as exc:
-                    status = int(getattr(exc, "code", 0) or 0)
-                    if status in {301, 302, 303, 307, 308}:
-                        loc = str(exc.headers.get("Location") or "").strip()
-                        exc.close()
-                        if loc == "":
-                            raise ValueError("source_download_redirect_missing_location")
-                        current_url = urllib.parse.urljoin(current_url, loc)
-                        redirected = True
-                        break
-                    exc.close()
-                    if status in _RETRYABLE_HTTP_STATUS_CODES and (attempt + 1) < _HTTP_DOWNLOAD_RETRIES:
-                        time.sleep(_HTTP_DOWNLOAD_BACKOFF_S * float(attempt + 1))
-                        continue
-                    if str(provider or "").strip().lower() == "civitai":
-                        raise _civitai_error_from_status(status, stage=str(civitai_stage or "fetch")) from None
-                    raise ValueError(f"source_download_http_status:{status}") from None
-                except urllib.error.URLError:
+                    resp = session.get(
+                        current_url,
+                        headers=headers,
+                        timeout=120,
+                        stream=True,
+                        allow_redirects=False,
+                    )
+                except requests.RequestException:
                     if (attempt + 1) < _HTTP_DOWNLOAD_RETRIES:
                         time.sleep(_HTTP_DOWNLOAD_BACKOFF_S * float(attempt + 1))
                         continue
@@ -402,6 +382,26 @@ def _stream_http_download(
                             stage = "download"
                         raise ValueError(f"civitai_{stage}_failed") from None
                     raise ValueError("source_download_failed") from None
+
+                status = int(resp.status_code)
+                if status >= 400 or status in {301, 302, 303, 307, 308}:
+                    if status in {301, 302, 303, 307, 308}:
+                        loc = str(resp.headers.get("Location") or "").strip()
+                        resp.close()
+                        if loc == "":
+                            raise ValueError("source_download_redirect_missing_location")
+                        current_url = urllib.parse.urljoin(current_url, loc)
+                        redirected = True
+                        break
+                    if status in _RETRYABLE_HTTP_STATUS_CODES and (attempt + 1) < _HTTP_DOWNLOAD_RETRIES:
+                        resp.close()
+                        time.sleep(_HTTP_DOWNLOAD_BACKOFF_S * float(attempt + 1))
+                        continue
+                    resp.close()
+                    if str(provider or "").strip().lower() == "civitai":
+                        raise _civitai_error_from_status(status, stage=str(civitai_stage or "fetch")) from None
+                    raise ValueError(f"source_download_http_status:{status}") from None
+                break
 
             if redirected:
                 continue
@@ -428,10 +428,9 @@ def _stream_http_download(
                         f"source_download_size_mismatch: expected={expected_size_bytes} got={content_length_hint}"
                     )
 
-                while True:
-                    chunk = resp.read(_CHUNK_BYTES)
+                for chunk in resp.iter_content(chunk_size=_CHUNK_BYTES):
                     if not chunk:
-                        break
+                        continue
                     downloaded += len(chunk)
                     if downloaded > _MAX_SOURCE_FILE_BYTES:
                         raise ValueError(f"source_download_size_limit_exceeded:{_MAX_SOURCE_FILE_BYTES}")

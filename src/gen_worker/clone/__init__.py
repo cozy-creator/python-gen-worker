@@ -76,26 +76,25 @@ def from_huggingface(ctx: Any, payload: Any) -> Any:
 def from_civitai(ctx: Any, payload: Any) -> Any:
     """Clone a Civitai model end-to-end: download, convert, upload.
 
-    Supports both URL-based (`source_url`) and ID-based (`civitai_model_version_id` +
-    optional `civitai_file_id`) inputs — the pipeline auto-routes.
+    Accepts a `civitai_model_version_id` plus optional `civitai_file_id`.
+    Arbitrary model-weight URLs are not a supported provider surface.
     """
-    # Civitai supports two input modes; keep both pass-throughs. The tenant
-    # wrapper used to handle the URL-vs-ID disambiguation; moved here per
-    # the architectural principle.
     source_url = str(getattr(payload, "source_url", "") or "").strip()
+    if source_url:
+        raise ValueError("civitai source_url is not supported; use civitai_model_version_id")
     version_id = int(getattr(payload, "civitai_model_version_id", 0) or 0)
+    if version_id <= 0:
+        raise ValueError("civitai_model_version_id is required")
     file_id = int(getattr(payload, "civitai_file_id", 0) or 0)
 
     source_metadata_overrides: dict[str, str] = {}
     if file_id:
         source_metadata_overrides["civitai_file_id"] = str(file_id)
 
-    source_ref = source_url if source_url else str(version_id)
-
     return _run_clone(
         ctx,
         provider="civitai",
-        source_ref=source_ref,
+        source_ref=str(version_id),
         source_version_id=str(version_id) if version_id else None,
         source_revision=None,
         source_metadata_overrides=source_metadata_overrides or None,

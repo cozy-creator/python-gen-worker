@@ -5,8 +5,8 @@ import logging
 from pathlib import Path
 from typing import Any, Dict
 
-import aiohttp
 import backoff
+import requests
 from blake3 import blake3
 
 _log = logging.getLogger(__name__)
@@ -26,20 +26,27 @@ def _norm_rel_path(p: str) -> str:
 
 @backoff.on_exception(
     backoff.expo,
-    (aiohttp.ClientError, asyncio.TimeoutError, ValueError, OSError),
+    (requests.RequestException, ValueError, OSError),
     max_tries=30,
     max_time=3600,
     factor=1,
     max_value=30,  # cap backoff at 30s between retries
 )
 async def _download_one_file(url: str, dst: Path, expected_size: int, expected_blake3: str) -> None:
+    await asyncio.get_running_loop().run_in_executor(
+        None,
+        lambda: _download_one_file_sync(url, dst, expected_size, expected_blake3),
+    )
+
+
+def _download_one_file_sync(url: str, dst: Path, expected_size: int, expected_blake3: str) -> None:
     """Download a single file with HTTP Range resume, size + blake3 validation.
 
-    Fully async — no blocking calls that would stall the event loop.
-    Caller is responsible for ensuring only one coroutine downloads a given
-    dst at a time (dedup by digest in _ensure_blobs).
+    Caller runs this in a worker thread; the transfer itself uses the same
+    requests stack as the Tensorhub control plane fallback path.
     """
     import logging
+
     log = logging.getLogger("gen_worker.download")
 
     def _human_size(n: int) -> str:
@@ -65,11 +72,6 @@ async def _download_one_file(url: str, dst: Path, expected_size: int, expected_b
         except Exception:
             pass  # re-download
 
-    timeout = aiohttp.ClientTimeout(
-        total=None,
-        sock_connect=60.0,
-        sock_read=180.0,
-    )
     tmp = dst.with_suffix(dst.suffix + ".part")
 
     # Resume from partial download if available.
@@ -108,12 +110,12 @@ async def _download_one_file(url: str, dst: Path, expected_size: int, expected_b
                  dst.name, _human_size(expected_size) if expected_size else "unknown",
                  (expected_blake3 or "n/a")[:16])
 
-    async def _stream(resp: aiohttp.ClientResponse, *, write_mode: str, start: int) -> None:
+    def _stream(resp: requests.Response, *, write_mode: str, start: int) -> None:
         downloaded = start
         last_log = start
         log_every = max(expected_size // 10, 50 << 20) if expected_size else (100 << 20)
         with open(tmp, write_mode) as f:
-            async for chunk in resp.content.iter_chunked(_DOWNLOAD_CHUNK_BYTES):
+            for chunk in resp.iter_content(chunk_size=_DOWNLOAD_CHUNK_BYTES):
                 if not chunk:
                     continue
                 f.write(chunk)
@@ -126,24 +128,24 @@ async def _download_one_file(url: str, dst: Path, expected_size: int, expected_b
                              dst.name, _human_size(downloaded), pct)
                     last_log = downloaded
 
-    async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(url, headers=headers) as resp:
+    with requests.Session() as session:
+        with session.get(url, headers=headers, stream=True, timeout=(60, 180)) as resp:
             content_range = str(resp.headers.get("Content-Range") or "").strip()
 
             # Server ignored Range or returned unexpected range start?
             # Restart from byte 0 to avoid corrupted appends.
             if offset and (
-                resp.status == 200
-                or (resp.status == 206 and not content_range.startswith(f"bytes {offset}-"))
+                resp.status_code == 200
+                or (resp.status_code == 206 and not content_range.startswith(f"bytes {offset}-"))
             ):
-                log.info("download_range_ignored path=%s status=%s (restarting from 0)", dst.name, resp.status)
-                resp.release()
-                async with session.get(url) as resp2:
+                log.info("download_range_ignored path=%s status=%s (restarting from 0)", dst.name, resp.status_code)
+                resp.close()
+                with session.get(url, stream=True, timeout=(60, 180)) as resp2:
                     resp2.raise_for_status()
-                    await _stream(resp2, write_mode="wb", start=0)
+                    _stream(resp2, write_mode="wb", start=0)
             else:
                 resp.raise_for_status()
-                await _stream(resp, write_mode=mode, start=offset)
+                _stream(resp, write_mode=mode, start=offset)
 
     # Validate.
     actual_size = tmp.stat().st_size

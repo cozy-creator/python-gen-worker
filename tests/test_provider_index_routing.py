@@ -33,6 +33,7 @@ from gen_worker.models.ref_downloader import (
     lookup_provider_for_ref,
     reset_provider_by_ref,
     set_provider_by_ref,
+    set_provider_by_ref_global,
 )
 
 
@@ -198,6 +199,63 @@ def test_lookup_provider_after_reset_falls_back_to_default() -> None:
     tok = set_provider_by_ref({"foo/bar": "hf"})
     reset_provider_by_ref(tok)
     assert lookup_provider_for_ref("foo/bar") == "tensorhub"
+
+
+def test_lookup_provider_strips_tag_when_index_has_bare_form() -> None:
+    """Regression for the live 2026-05-16 failure: the canonicalizer on a
+    thread without the contextvar set stamps ``:latest`` onto an HF ref,
+    producing ``owner/repo:latest#bf16``. The index only carries the bare
+    HF form ``owner/repo#bf16``. The lookup must strip the tag segment to
+    match — tag is meaningless for HF/civitai providers.
+    """
+    index = {"black-forest-labs/FLUX.2-klein-base-4B#bf16": "hf"}
+    tok = set_provider_by_ref(index)
+    try:
+        # Tag-stamped form must still resolve to "hf".
+        assert (
+            lookup_provider_for_ref(
+                "black-forest-labs/FLUX.2-klein-base-4B:latest#bf16"
+            )
+            == "hf"
+        )
+        # Non-default tags must also be tag-stripped.
+        assert (
+            lookup_provider_for_ref(
+                "black-forest-labs/FLUX.2-klein-base-4B:prod#bf16"
+            )
+            == "hf"
+        )
+        # The bare form still works (no regression).
+        assert (
+            lookup_provider_for_ref(
+                "black-forest-labs/FLUX.2-klein-base-4B#bf16"
+            )
+            == "hf"
+        )
+    finally:
+        reset_provider_by_ref(tok)
+
+
+def test_lookup_provider_falls_back_to_global_index() -> None:
+    """When the contextvar isn't set (e.g. gRPC stream thread that didn't
+    inherit context), the lookup must fall back to the process-global
+    index that the worker installs at boot.
+    """
+    # Sanity: contextvar empty, global empty, ref not found.
+    assert lookup_provider_for_ref("black-forest-labs/x#bf16") == "tensorhub"
+
+    set_provider_by_ref_global({"black-forest-labs/x#bf16": "hf"})
+    try:
+        # No contextvar set — should still resolve via the global fallback.
+        assert (
+            lookup_provider_for_ref("black-forest-labs/x#bf16") == "hf"
+        )
+        # Tag-stamped form must work against the global too.
+        assert (
+            lookup_provider_for_ref("black-forest-labs/x:latest#bf16") == "hf"
+        )
+    finally:
+        set_provider_by_ref_global({})
 
 
 # -----------------------------------------------------------------------------

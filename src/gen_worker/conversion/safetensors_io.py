@@ -157,9 +157,9 @@ def persist_safetensors_output(
             "source_artifact_refs": str(saved.ref or out_ref),
         }
 
-    # Issue #269/#13: parallelize shard uploads across the adaptive file
+    # Issue #269/#13/#19: parallelize shard uploads across the fixed file
     # pool. Each shard is up to MAX_SAFETENSORS_SHARD_BYTES of independent
-    # bytes; fanning out lets the multipart PUT pipelines stack across files.
+    # bytes; the global presigned PUT budget keeps R2 concurrency bounded.
     from ..request_context._concurrent_upload import parallel_map_uploads
 
     def _upload_shard(shard_path_local: Path) -> tuple[Path, str, Tensors]:

@@ -67,25 +67,74 @@ def reset_override_ref_keys(token: contextvars.Token) -> None:
     _override_ref_keys.reset(token)
 
 
-def lookup_provider_for_ref(ref: str, *, default: str = "tensorhub") -> str:
-    """Return the provider tag for ``ref`` from the active context, or
-    ``default`` when no index is set or ``ref`` isn't in it.
+# Process-global fallback index: the worker sets this once at boot from the
+# baked endpoint.lock manifest. Used by ``lookup_provider_for_ref`` when the
+# contextvar (per-request scope) is unset — contextvars don't reliably
+# propagate across threads spawned by gRPC stream handlers etc., so a global
+# fallback is needed for the binding-default code paths.
+_provider_by_ref_global: Mapping[str, str] = {}
 
-    The index uses the bare ref string (whatever the manifest serialized)
-    as the key. We try the raw value first, then with surrounding
-    whitespace stripped — endpoint.lock entries are emitted bare but
-    runtime payloads may carry trailing whitespace.
+
+def set_provider_by_ref_global(mapping: Optional[Mapping[str, str]]) -> None:
+    """Install the process-global fallback provider index. Worker calls this
+    once at boot from the loaded endpoint.lock manifest. Per-request override
+    indexes still go through the contextvar (``set_provider_by_ref``).
     """
-    mapping = _provider_by_ref.get()
-    if not mapping:
-        return default
+    global _provider_by_ref_global
+    _provider_by_ref_global = mapping or {}
+
+
+def lookup_provider_for_ref(ref: str, *, default: str = "tensorhub") -> str:
+    """Return the provider tag for ``ref`` from the active context, falling
+    back to the process-global index, then to ``default``.
+
+    Key variants tried (in order) on each mapping layer:
+      1. raw ``ref``
+      2. ``ref.strip()`` (in case of stray whitespace)
+      3. ``ref`` with the tag segment removed (``owner/repo:tag#flavor`` ->
+         ``owner/repo#flavor``) — runtime payloads may stamp ``:latest`` on
+         HF refs because the canonicalizer's contextvar wasn't set in the
+         thread that built them; the index keys are bare so we strip to
+         match. Tag is meaningless for HF/civitai providers.
+    """
     if not ref:
         return default
-    if ref in mapping:
-        return mapping[ref]
-    stripped = ref.strip()
-    if stripped != ref and stripped in mapping:
-        return mapping[stripped]
+
+    def _try(mapping: Mapping[str, str]) -> Optional[str]:
+        if not mapping:
+            return None
+        if ref in mapping:
+            return mapping[ref]
+        stripped = ref.strip()
+        if stripped and stripped != ref and stripped in mapping:
+            return mapping[stripped]
+        # Strip ``:tag`` between the repo path and any ``#flavor`` suffix.
+        # Only the first ``:`` after the last ``/`` is the tag separator;
+        # everything before that is the repo identity.
+        base = stripped or ref
+        if "/" in base:
+            slash = base.rfind("/")
+            head = base[:slash]
+            tail = base[slash:]
+            colon = tail.find(":")
+            if colon >= 0:
+                hash_idx = tail.find("#")
+                if hash_idx < 0:
+                    no_tag = head + tail[:colon]
+                else:
+                    no_tag = head + tail[:colon] + tail[hash_idx:]
+                if no_tag != base and no_tag in mapping:
+                    return mapping[no_tag]
+        return None
+
+    ctx_mapping = _provider_by_ref.get()
+    if ctx_mapping:
+        hit = _try(ctx_mapping)
+        if hit is not None:
+            return hit
+    hit = _try(_provider_by_ref_global)
+    if hit is not None:
+        return hit
     return default
 
 

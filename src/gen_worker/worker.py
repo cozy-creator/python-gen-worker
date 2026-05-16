@@ -98,6 +98,7 @@ JobExecutionResult = Any
 from .api.binding import Binding, CivitaiRepo, Dispatch, HFRepo, Repo
 from .api.decorators import Resources
 from .api.errors import (
+    ArtifactTransferError,
     AuthError,
     CanceledError,
     FatalError,
@@ -117,6 +118,7 @@ from .models.ref_downloader import (
     lookup_provider_for_ref,
     reset_override_ref_keys,
     reset_provider_by_ref,
+    set_provider_by_ref_global,
     set_override_ref_keys,
     set_provider_by_ref,
 )
@@ -589,12 +591,17 @@ class Worker:
                         len(self._provider_by_ref_index),
                         sorted(set(self._provider_by_ref_index.values())),
                     )
+                # Install as process-global fallback so canonicalization in
+                # threads that didn't inherit the contextvar (gRPC stream
+                # handler, etc.) still routes HF/civitai refs correctly.
+                set_provider_by_ref_global(self._provider_by_ref_index)
             except Exception as e:
                 # Defensive — a malformed manifest entry must not block boot.
                 # Missing entries fall through to the default tensorhub
                 # provider so existing tensorhub builds keep working.
                 logger.warning("Failed to build provider index from manifest: %s", e)
                 self._provider_by_ref_index = {}
+                set_provider_by_ref_global({})
 
             global_models = manifest.get("models")
             if isinstance(global_models, dict):
@@ -901,6 +908,13 @@ class Worker:
             return "fatal", False, self._sanitize_safe_message(str(exc) or "fatal error"), internal
         if isinstance(exc, AuthError):
             return "auth", False, self._sanitize_safe_message(str(exc) or "authentication failed"), internal
+        if isinstance(exc, ArtifactTransferError):
+            return (
+                "artifact_transfer",
+                bool(getattr(exc, "retryable", False)),
+                self._sanitize_safe_message(str(exc) or "artifact transfer failed"),
+                internal,
+            )
         # Torch OOM detection without importing torch at import time.
         if type(exc).__name__ in {"OutOfMemoryError", "CUDAOutOfMemoryError"}:
             return "resource", False, "out of memory", internal

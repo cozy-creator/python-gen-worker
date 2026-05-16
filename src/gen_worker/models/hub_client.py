@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Any, List, Optional
 
 
 # In-memory shape of an orchestrator-resolved cozy: ref. These used to be
@@ -17,6 +17,7 @@ class WorkerResolvedRepoFile:
     size_bytes: int
     blake3: str
     url: Optional[str]
+    transfer_grant: Optional[dict[str, Any]] = None
 
 
 @dataclass(frozen=True)

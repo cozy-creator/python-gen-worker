@@ -26,6 +26,40 @@ class AuthError(WorkerError):
     """Authentication/authorization failure; do not retry (token expired or invalid)."""
 
 
+class ArtifactTransferError(WorkerError):
+    """Model/artifact upload or download failed in a provider transfer path."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str = "",
+        phase: str = "",
+        retryable: bool = False,
+        status_code: int | None = None,
+        cause_type: str = "",
+    ) -> None:
+        self.provider = str(provider or "")
+        self.phase = str(phase or "")
+        self.retryable = bool(retryable)
+        self.status_code = status_code
+        self.cause_type = str(cause_type or "")
+
+        detail = str(message or "").strip() or "artifact transfer failed"
+        context: list[str] = []
+        if self.provider:
+            context.append(f"provider={self.provider}")
+        if self.phase:
+            context.append(f"phase={self.phase}")
+        if self.status_code is not None:
+            context.append(f"status={int(self.status_code)}")
+        if self.cause_type:
+            context.append(f"cause={self.cause_type}")
+        if context:
+            detail = f"{detail} ({', '.join(context)})"
+        super().__init__(detail)
+
+
 class OutputTooLargeError(ValidationError):
     """Output artifact exceeds the configured worker-side size limit."""
 

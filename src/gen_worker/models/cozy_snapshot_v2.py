@@ -14,6 +14,7 @@ from .cozy_cas import _download_one_file as _download_one_file
 from .cozy_cas import _norm_rel_path
 from .hub_client import WorkerResolvedRepo, WorkerResolvedRepoFile
 from .refs import TensorhubRef
+from ..s3_transfer import S3TransferGrant, download_file_with_grant
 
 _log = logging.getLogger("gen_worker.download")
 
@@ -114,10 +115,21 @@ def _coerce_resolved_model(ref: TensorhubRef, resolved: Any) -> WorkerResolvedRe
         if not blake3_hex:
             blake3_hex = _strip_blake3_prefix(str(_field(ent, "digest") or ""))
         url = str(_field(ent, "url") or "").strip() or None
+        transfer_grant = _field(ent, "transfer_grant", "s3_transfer_grant")
+        if not isinstance(transfer_grant, dict):
+            transfer_grant = None
         size_bytes = int(_field(ent, "size_bytes") or 0)
-        if not blake3_hex or not url:
-            raise ValueError(f"resolved model file missing blake3/url: {path}")
-        files.append(WorkerResolvedRepoFile(path=path, size_bytes=size_bytes, blake3=blake3_hex, url=url))
+        if not blake3_hex or (not url and transfer_grant is None):
+            raise ValueError(f"resolved model file missing blake3/transfer: {path}")
+        files.append(
+            WorkerResolvedRepoFile(
+                path=path,
+                size_bytes=size_bytes,
+                blake3=blake3_hex,
+                url=url,
+                transfer_grant=transfer_grant,
+            )
+        )
 
     if not files:
         raise ValueError("resolved model has empty files list")
@@ -232,8 +244,8 @@ class CozySnapshotV2Downloader:
             digest = (f.blake3 or "").strip().lower()
             if not digest:
                 raise ValueError(f"missing blake3 for {f.path}")
-            if not f.url:
-                raise ValueError(f"missing url for {f.path}")
+            if not f.url and not f.transfer_grant:
+                raise ValueError(f"missing transfer for {f.path}")
             if digest not in seen:
                 seen.add(digest)
                 unique.append(f)
@@ -258,13 +270,25 @@ class CozySnapshotV2Downloader:
                     return
                 _log.info("blob_download_start path=%s size=%s digest=%s",
                           f.path, f.size_bytes, digest[:16])
-                assert f.url is not None  # validated above in _ensure_blobs loop
-                await _download_one_file(
-                    f.url,
-                    dst,
-                    expected_size=int(f.size_bytes or 0),
-                    expected_blake3=digest,
-                )
+                if f.transfer_grant:
+                    grant = S3TransferGrant.from_mapping(f.transfer_grant)
+                    await asyncio.get_running_loop().run_in_executor(
+                        None,
+                        lambda: download_file_with_grant(
+                            grant=grant,
+                            dest_path=dst,
+                            expected_size_bytes=int(f.size_bytes or 0) or None,
+                            expected_blake3=digest,
+                        ),
+                    )
+                else:
+                    assert f.url is not None  # validated above in _ensure_blobs loop
+                    await _download_one_file(
+                        f.url,
+                        dst,
+                        expected_size=int(f.size_bytes or 0),
+                        expected_blake3=digest,
+                    )
                 _log.info("blob_download_done path=%s digest=%s", f.path, digest[:16])
 
         await asyncio.gather(*(_dl(f) for f in unique))

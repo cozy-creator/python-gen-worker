@@ -2,7 +2,7 @@
 
 Transform endpoints use gen_worker.conversion on the library side. This file is
 the narrower slice used only by clone_huggingface / clone_civitai /
-clone_pipeline for the external-URL ingest path.
+clone_pipeline for provider-specific ingest paths.
 
 Legacy progress-tracking machinery (_emit_upload_progress + 300 LOC of
 stream-mode detection, retry env defaults, chunked-upload orchestration)
@@ -18,7 +18,6 @@ import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlparse
 
 from gen_worker import RequestContext, Tensors
 from gen_worker.conversion.core_types import (
@@ -31,11 +30,9 @@ from gen_worker.conversion.ingest import (
     CivitaiResolvedIdentity,
     download_civitai_model_version_files,
     download_huggingface_repo_files,
-    source_url_to_cas,
 )
 from gen_worker.conversion.layout import (
     detect_huggingface_source_layout,
-    infer_model_family_from_hint,
 )
 
 
@@ -54,48 +51,6 @@ def default_output_ref(ctx: RequestContext, stem: str, ext: str = ".safetensors"
     """Job-scoped output ref: ``jobs/<request_id>/outputs/<stem><ext>``."""
     suffix = ext if ext.startswith(".") else f".{ext}"
     return f"jobs/{ctx.request_id}/outputs/{stem}{suffix}"
-
-
-def _infer_source_ext_from_url(source_url: str) -> str:
-    try:
-        parsed = urlparse(str(source_url or "").strip())
-        ext = Path(parsed.path).suffix.lower()
-    except Exception:
-        ext = ""
-    if ext in {".safetensors", ".ckpt", ".pt", ".bin", ".flashpack"}:
-        return ext
-    return ".bin"
-
-
-def ingest_from_url(
-    ctx: RequestContext,
-    *,
-    source_url: str,
-    output_ref: Optional[str],
-    progress_callback: Callable[[int, int | None], None] | None = None,
-) -> ConversionOutput:
-    src = str(source_url or "").strip()
-    if not (src.startswith("http://") or src.startswith("https://")):
-        raise ValueError("ingest source must be an http(s) URL")
-
-    td = tempfile.mkdtemp(prefix=f"conv-{ctx.request_id}-ingest-")
-    ext = _infer_source_ext_from_url(src)
-    raw = Path(td) / f"ingested{ext}"
-    info = source_url_to_cas(src, raw, progress_callback=progress_callback)
-    ref = str(output_ref or "").strip() or default_output_ref(ctx, "ingested-source", ext=ext)
-    saved = ctx.save_checkpoint(ref, str(raw), format=ext.lstrip(".") or "bin")
-    if str(saved.local_path or "").strip() == "":
-        saved = tensors_with(saved, local_path=str(raw))
-    return ConversionOutput(
-        weights=saved,
-        metadata={
-            "source_url": src,
-            "source_layout": "singlefile",
-            "model_family": "unknown",
-            "sha256": str(info.get("sha256") or ""),
-            "size_bytes": str(info.get("size_bytes") or ""),
-        },
-    )
 
 
 def ingest_from_source(
@@ -129,31 +84,8 @@ def ingest_from_source(
         raise ValueError("source_ref is required")
 
     td = tempfile.mkdtemp(prefix=f"conv-{ctx.request_id}-ingest-")
-    raw = Path(td) / "ingested.bin"
     if src.startswith("http://") or src.startswith("https://"):
-        source_ext = _infer_source_ext_from_url(src)
-        raw = Path(td) / f"ingested{source_ext}"
-        info = source_url_to_cas(
-            src,
-            raw,
-            progress_callback=progress_callback,
-            source_provider=provider_norm,
-            expected_size_bytes=source_expected_size_bytes,
-            expected_sha256=str(source_expected_sha256 or ""),
-        )
-        guessed_family = infer_model_family_from_hint(src)
-        source_meta: dict[str, str] = {
-            "source_url": src,
-            "source_layout": "singlefile",
-            "model_family": guessed_family,
-        }
-        ref = str(output_ref or "").strip() or default_output_ref(ctx, "ingested-source", ext=source_ext)
-        saved = ctx.save_checkpoint(ref, str(raw), format=source_ext.lstrip(".") or "bin")
-        if str(saved.local_path or "").strip() == "":
-            saved = tensors_with(saved, local_path=str(raw))
-        source_meta["sha256"] = str(info.get("sha256") or "")
-        source_meta["size_bytes"] = str(info.get("size_bytes") or "")
-        return ConversionOutput(weights=saved, metadata=source_meta), IngestResult()
+        raise ValueError("arbitrary URL model sources are not supported")
     elif provider_norm == "huggingface":
         repo_dir = Path(td) / "source-repo"
         info = download_huggingface_repo_files(
@@ -240,9 +172,9 @@ def ingest_from_source(
         # reconstruct a working diffusers pipeline regardless of which dtype
         # was requested.
         #
-        # Issue #269/#13: fan out across the adaptive file-level upload
+        # Issue #269/#13/#19: fan out across the fixed file-level upload
         # pool so the worker pipelines disk read + hash + multipart PUT
-        # across files instead of waiting for each to drain.
+        # across files without unbounded R2 PUT fan-out.
         from gen_worker.request_context._concurrent_upload import parallel_map_uploads
 
         def _upload_non_weight(row: dict[str, object]) -> tuple[dict[str, object], object]:
@@ -459,9 +391,9 @@ def ingest_from_source(
             item["_local_path"] = local_path
             usable_items.append(item)
 
-        # Issue #269/#13: parallelize per-file upload across the
-        # adaptive file pool. Each future owns one file
-        # hash→PUT→complete cycle; results returned in input order.
+        # Issue #269/#13/#19: parallelize per-file upload across the
+        # fixed file pool. Each future owns one file hash→PUT→complete
+        # cycle; results returned in input order.
         from gen_worker.request_context._concurrent_upload import parallel_map_uploads
 
         def _upload_civitai(item: dict[str, object]) -> "Tensors":
@@ -632,7 +564,7 @@ def ingest_from_source(
             ),
         )
     else:
-        raise ValueError("ingest source must be an http(s) URL")
+        raise ValueError(f"unsupported ingest provider: {provider_norm}")
 
 
 __all__ = [
@@ -644,6 +576,5 @@ __all__ = [
     # Clone-pipeline-local helpers
     "require_local_weights",
     "default_output_ref",
-    "ingest_from_url",
     "ingest_from_source",
 ]

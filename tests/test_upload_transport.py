@@ -137,12 +137,12 @@ def test_optimal_part_concurrency_single_part_is_one() -> None:
     assert optimal_part_concurrency(0) == 1
 
 
-def test_optimal_part_concurrency_caps_at_eight() -> None:
+def test_optimal_part_concurrency_caps_at_four() -> None:
     assert optimal_part_concurrency(2) == 2
     assert optimal_part_concurrency(4) == 4
-    assert optimal_part_concurrency(8) == 8
-    assert optimal_part_concurrency(16) == 8
-    assert optimal_part_concurrency(128) == 8
+    assert optimal_part_concurrency(8) == 4
+    assert optimal_part_concurrency(16) == 4
+    assert optimal_part_concurrency(128) == 4
 
 
 # --- upload_part_to_presigned_url integration with mocked urllib3 ---
