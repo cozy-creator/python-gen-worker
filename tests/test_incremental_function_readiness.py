@@ -60,6 +60,7 @@ def _bare_worker_with_two_model_bound_functions(
     w._request_specs = {}
     w._training_specs = {}
     w._batched_specs = {}
+    w._conversion_class_specs = {}
     w._serial_class_specs = {
         fn: MagicMock() for fn in payload_refs_by_fn.keys()
     }
@@ -198,6 +199,19 @@ def test_function_with_no_bound_models_is_never_loading() -> None:
     assert w._loading_function_names() == []
     assert w.is_function_runnable("marco-polo") is True
     assert w._available_function_names() == ["marco-polo"]
+
+
+def test_conversion_class_function_with_no_bound_models_is_available() -> None:
+    """Conversion endpoints register under _conversion_class_specs, not
+    _serial_class_specs, and still need to advertise readiness.
+    """
+    w = _bare_worker_with_two_model_bound_functions(fixed_refs={}, payload_refs_by_fn={})
+    w._serial_class_specs = {}
+    w._conversion_class_specs = {"torchao-quantization": MagicMock()}
+
+    assert w._loading_function_names() == []
+    assert w.is_function_runnable("torchao-quantization") is True
+    assert w._available_function_names() == ["torchao-quantization"]
 
 
 def test_fixed_keyspace_ref_blocks_every_function_that_depends_on_it() -> None:

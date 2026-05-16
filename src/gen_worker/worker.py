@@ -59,6 +59,8 @@ def _normalize_grpc_addr(addr: str) -> tuple[str, bool]:
 from ._worker_support import (
     _AuthInterceptor,
     _BatchedWorkerSpec,
+    _binding_canonical_ref,
+    _collect_binding_entries,
     _ConversionWorkerSpec,
     _RequestSpec,
     _SerialWorkerSpec,
@@ -536,6 +538,18 @@ class Worker:
         # DType specs tracked in the same shape as model id maps.
         self._fixed_model_spec_by_key: Dict[str, Dict[str, Any]] = {}
         self._payload_model_spec_by_key_by_function: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        # gen-worker 0.7.21: per-function bound refs derived from the
+        # `[functions.bindings]` block in endpoint.lock. Binding-shape
+        # manifests (every gen-worker 0.7.x endpoint) don't populate the
+        # legacy `_fixed_model_id_by_key` / `_payload_model_id_by_key_by_function`
+        # maps because those only mirror the old top-level `models` /
+        # `models_by_function` blocks; without this map `_loading_function_names`
+        # finds no bound refs for any function and falsely reports every
+        # function as ready while downloads are still in flight.
+        # function_name -> set(canonical_ref). Populated in __init__ by
+        # walking manifest["functions"][i]["bindings"]; consulted by
+        # `_bound_model_refs_for_function`.
+        self._required_refs_by_function: Dict[str, set[str]] = {}
         # Orchestrator-resolved manifests received in EndpointConfig (startup prefetch baseline).
         # Keys are canonical bare tensorhub refs (e.g. "owner/repo@sha256:<digest>").
         self._resolved_repos_by_id_baseline: Dict[str, Any] = {}
@@ -625,21 +639,101 @@ class Worker:
                     if keyspace_spec:
                         self._payload_model_spec_by_key_by_function[fn] = keyspace_spec
 
-            # Compute union allowlist for prefetch/guardrails.
+            # gen-worker 0.7.21: extract required refs from the typed
+            # `[functions.bindings]` block in endpoint.lock. The legacy
+            # `models` / `models_by_function` top-level blocks aren't
+            # populated by binding-shape manifests (every gen-worker 0.7.x
+            # endpoint), so without this walk `_release_allowed_model_ids`
+            # is None and the pre-mark-downloading + readiness-gate paths
+            # both skip — leaving the worker emitting `startup_phase=ready`
+            # before any model bytes land on disk.
+            #
+            # The walk also seeds `_required_refs_by_function` so
+            # `_loading_function_names` can compute per-function loading
+            # state from the same source (one map → one source of truth).
+            #
+            # Canonicalization here uses the entry's `provider` field
+            # directly rather than going through the contextvar / global
+            # provider index. That avoids an init-ordering coupling: this
+            # walk runs concurrently with the global-index install above
+            # in the same try block, but a future refactor that moves
+            # things around shouldn't silently regress to falling back to
+            # `tensorhub` (which would stamp `:latest` onto every HF ref
+            # and break the orchestrator-side RequiredRepoRefs match).
+            try:
+                functions_block = manifest.get("functions")
+                if isinstance(functions_block, list):
+                    binding_refs: set[str] = set()
+                    for fn_entry in functions_block:
+                        if not isinstance(fn_entry, dict):
+                            continue
+                        fn_name = str(fn_entry.get("name") or "").strip()
+                        if not fn_name:
+                            continue
+                        per_fn: set[str] = set()
+                        for entry in _collect_binding_entries(fn_entry.get("bindings")):
+                            ref_key = _binding_canonical_ref(entry)
+                            if not ref_key:
+                                continue
+                            provider = (
+                                str(entry.get("provider") or "").strip() or "tensorhub"
+                            )
+                            try:
+                                parsed = parse_model_ref(ref_key, provider=provider)
+                                if parsed.provider == "tensorhub" and parsed.tensorhub:
+                                    canon = parsed.tensorhub.canonical()
+                                elif parsed.provider == "hf" and parsed.hf:
+                                    canon = parsed.hf.canonical()
+                                else:
+                                    canon = ref_key
+                            except Exception:
+                                canon = ref_key
+                            per_fn.add(canon)
+                            binding_refs.add(canon)
+                        if per_fn:
+                            self._required_refs_by_function[fn_name] = per_fn
+                    if binding_refs:
+                        # Union with whatever the legacy path produced so
+                        # mixed manifests (some legacy, some binding) both
+                        # contribute. Don't overwrite — both forms are
+                        # authoritative for their own functions.
+                        prior = self._manifest_allowed_model_ids or set()
+                        self._manifest_allowed_model_ids = prior | binding_refs
+                        self._release_allowed_model_ids = self._manifest_allowed_model_ids
+                        logger.info(
+                            "Extracted %d required refs from %d function bindings",
+                            len(binding_refs),
+                            len(self._required_refs_by_function),
+                        )
+            except Exception:
+                # Defensive: a malformed bindings block must not block boot.
+                # The orchestrator-sent EndpointConfig.required_flavor_refs
+                # still drives the prefetch loop in that case.
+                logger.exception("Failed to extract required refs from manifest bindings")
+
+            # Compute union allowlist for prefetch/guardrails (legacy path).
+            # When the bindings walk above already populated
+            # _manifest_allowed_model_ids, this only adds entries — it
+            # never shrinks the set.
             allowed: set[str] = set()
             allowed.update(self._fixed_model_id_by_key.values())
             for m in self._payload_model_id_by_key_by_function.values():
                 allowed.update(m.values())
-            self._manifest_allowed_model_ids = allowed or None
-            # Default enforcement scope to what the tenant declared (baked manifest),
-            # until the scheduler narrows it further.
-            self._release_allowed_model_ids = self._manifest_allowed_model_ids
+            if allowed:
+                prior = self._manifest_allowed_model_ids or set()
+                self._manifest_allowed_model_ids = prior | allowed
+                self._release_allowed_model_ids = self._manifest_allowed_model_ids
 
-            if self._fixed_model_id_by_key or self._payload_model_id_by_key_by_function:
+            if (
+                self._fixed_model_id_by_key
+                or self._payload_model_id_by_key_by_function
+                or self._required_refs_by_function
+            ):
                 logger.info(
-                    "Loaded model mappings from manifest (fixed=%d, functions=%d)",
+                    "Loaded model mappings from manifest (fixed=%d, functions=%d, binding_functions=%d)",
                     len(self._fixed_model_id_by_key),
                     len(self._payload_model_id_by_key_by_function),
+                    len(self._required_refs_by_function),
                 )
 
         # Pre-mark every required ref as "downloading" BEFORE the registration
@@ -3707,14 +3801,23 @@ class Worker:
                 + list(self._training_specs.keys())
                 + list(self._batched_specs.keys())
                 + list(self._serial_class_specs.keys())
+                + list(self._conversion_class_specs.keys())
             )
         )
 
     def _bound_model_refs_for_function(self, function_name: str) -> List[str]:
         """Canonicalized model refs bound to a single function via the
         baked manifest. A function's bound set = fixed (global) refs +
-        per-function payload refs. The values are canonicalized to match
-        the keying used by ``ModelCache``.
+        per-function payload refs + per-function binding refs. The values
+        are canonicalized to match the keying used by ``ModelCache``.
+
+        gen-worker 0.7.21: also consults ``_required_refs_by_function`` so
+        binding-shape manifests (every gen-worker 0.7.x endpoint, where
+        the legacy ``models_by_function`` block is absent) contribute the
+        refs extracted from ``[functions.bindings]`` at boot. Without this
+        union the loading-set computation reports an empty bound set for
+        every binding-shape function, hiding model-loading in-flight from
+        the orchestrator's dispatch gate.
         """
         name = (function_name or "").strip()
         if not name:
@@ -3737,6 +3840,10 @@ class Worker:
                 refs.add(_canonicalize_model_ref_string(s))
             except Exception:
                 refs.add(s)
+        # Binding-shape contribution. Already canonicalized at
+        # extraction time, so just union in.
+        per_fn_binding = (getattr(self, "_required_refs_by_function", None) or {}).get(name) or set()
+        refs.update(per_fn_binding)
         return sorted(refs)
 
     def _loading_function_names(self) -> List[str]:
@@ -3819,9 +3926,16 @@ class Worker:
     def _handle_manager_model_download_failed(self, ref: str, exc: BaseException) -> None:
         """Callback fired by the manager when a prefetch download fails.
         Clear the "downloading" marker so the heartbeat doesn't advertise
-        a permanently-stuck download. The startup phase intentionally does
-        NOT flip to ``ready`` — the missing ref will keep the function
-        gated until the operator intervenes (re-deploy, fix manifest).
+        a permanently-stuck download.
+
+        gen-worker 0.7.21: A terminally-failed required ref (e.g. an
+        HF flavor that doesn't exist on the upstream repo, or a permanent
+        404 / 401 / 403) must NOT keep the worker pinned in
+        ``models_downloading`` forever. Mark the ref as terminally failed
+        so ``_emit_ready_if_all_cached`` counts it as resolved for the
+        readiness gate; the orchestrator side will independently see the
+        function as unhealthy via the per-function disabled-functions
+        channel if the ref was required by a fixed binding.
         """
         try:
             canon = _canonicalize_model_ref_string(str(ref or "").strip())
@@ -3836,6 +3950,46 @@ class Worker:
                 cache.unload_model(canon)
             except Exception:
                 pass
+        self._mark_ref_terminally_failed(canon, str(exc))
+        # The failure might have been the last outstanding required ref —
+        # release the readiness gate so the worker doesn't sit in
+        # `models_downloading` forever when one flavor doesn't exist on HF.
+        self._emit_ready_if_all_cached()
+
+    def _mark_ref_terminally_failed(self, canonical_ref: str, detail: str) -> None:
+        """Record a terminally-failed required ref so
+        ``_emit_ready_if_all_cached`` doesn't block on it.
+
+        Also marks every function whose ONLY refs failed terminally as
+        worker-locally unavailable so the dispatch gate rejects the
+        function with a clear reason instead of accepting a request the
+        worker can't run.
+        """
+        if not canonical_ref:
+            return
+        if not hasattr(self, "_terminally_failed_refs"):
+            self._terminally_failed_refs = set()
+        self._terminally_failed_refs.add(canonical_ref)
+
+        # Disable any function whose entire required-ref set is now in
+        # `_terminally_failed_refs`. Functions sharing the failed ref with
+        # at least one still-healthy ref keep serving.
+        by_fn = getattr(self, "_required_refs_by_function", None) or {}
+        for fn_name, refs in by_fn.items():
+            if not refs:
+                continue
+            if refs.issubset(self._terminally_failed_refs):
+                if fn_name not in self._worker_local_unavailable_functions_by_name:
+                    self._worker_local_unavailable_functions_by_name[fn_name] = {
+                        "function_name": fn_name,
+                        "reason": "binding_ref_unavailable",
+                        "detail": detail or f"required ref {canonical_ref} failed to download",
+                        "ref": canonical_ref,
+                    }
+                    logger.warning(
+                        "function %s marked locally unavailable: ref %s terminally failed (%s)",
+                        fn_name, canonical_ref, detail or "unspecified",
+                    )
 
     def _emit_ready_if_all_cached(self) -> None:
         """Emit the typed ``ready`` startup-phase signal exactly once, when
@@ -3867,7 +4021,18 @@ class Worker:
                     on_disk = set(cache.get_disk_models() or [])
                 except Exception:
                     return
-                if not required.issubset(on_disk):
+                # gen-worker 0.7.21: count terminally-failed refs as
+                # resolved for the readiness gate. Otherwise a missing
+                # HF flavor (e.g. nf4 that doesn't exist on
+                # FLUX.2-klein-base-4B) would keep the worker pinned in
+                # `models_downloading` forever even though every
+                # achievable ref has landed. The orchestrator separately
+                # tracks per-function availability via the disabled
+                # functions channel and routes traffic only to functions
+                # whose refs DID land.
+                terminally_failed = getattr(self, "_terminally_failed_refs", None) or set()
+                outstanding = required - on_disk - terminally_failed
+                if outstanding:
                     return
             self._ready_phase_emitted = True
         # Emit outside the lock so signal-send latency doesn't serialize callers.
@@ -4963,6 +5128,13 @@ class Worker:
                     except Exception:
                         pass
                     logger.warning("Startup prefetch failed for %s: %s", canon, e)
+                    # gen-worker 0.7.21: record the terminal failure so
+                    # `_emit_ready_if_all_cached` doesn't block on a ref
+                    # that will never land (e.g. HF flavor that doesn't
+                    # exist), and so the dispatch gate locally rejects
+                    # functions whose required refs ALL failed.
+                    self._mark_ref_terminally_failed(canon, msg)
+                    self._emit_ready_if_all_cached()
 
         threads = [threading.Thread(target=worker, daemon=True, name=f"PrefetchWorker-{i}") for i in range(max_conc)]
         for t in threads:

@@ -99,6 +99,7 @@ def _bare_worker_for_readiness(
     w._training_specs = {}
     w._batched_specs = {}
     w._serial_class_specs = {}
+    w._conversion_class_specs = {}
     w._disabled_functions_by_name = {}
     w._worker_local_unavailable_functions_by_name = {}
 

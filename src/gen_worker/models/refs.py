@@ -28,12 +28,26 @@ class TensorhubRef:
 class HuggingFaceRef:
     repo_id: str
     revision: Optional[str] = None
+    flavor: Optional[str] = None
 
     def canonical(self) -> str:
-        """Canonical bare-ref form. Provider is tracked separately."""
+        """Canonical bare-ref form. Provider is tracked separately.
+
+        Flavor is a binding-metadata side channel that the worker uses to
+        pick a weight-precision subset out of an HF repo. The orchestrator
+        carries the flavor folded into the ref as ``owner/repo#flavor`` in
+        its routing maps (RequiredRepoRefs, etc.). Keep the same form in
+        canonical() so disk_models / vram_models advertisements use the
+        same identity the orchestrator's cache-locality scorer expects.
+        Two flavors of the same repo therefore get two distinct cache
+        entries — matching how the orchestrator routes per-flavor refs.
+        """
+        base = self.repo_id
         if self.revision:
-            return f"{self.repo_id}@{self.revision}"
-        return self.repo_id
+            base = f"{base}@{self.revision}"
+        if self.flavor:
+            return f"{base}#{self.flavor}"
+        return base
 
 
 @dataclass(frozen=True)
@@ -80,8 +94,12 @@ def parse_model_ref(raw: str, *, provider: str = "tensorhub") -> ParsedModelRef:
         # binding the orchestrator is referring to. The HF Hub itself has
         # no notion of flavor — strip the `#flavor` tail before parsing
         # so `huggingface_hub.snapshot_download` sees a valid repo_id.
+        flavor: Optional[str] = None
         if "#" in repo:
-            repo = repo.split("#", 1)[0].strip()
+            repo, flavor_part = repo.split("#", 1)
+            repo = repo.strip()
+            flavor_part = flavor_part.strip()
+            flavor = flavor_part or None
         revision = None
         if "@" in repo:
             repo, revision = repo.split("@", 1)
@@ -89,7 +107,10 @@ def parse_model_ref(raw: str, *, provider: str = "tensorhub") -> ParsedModelRef:
             revision = revision.strip() or None
         if "/" not in repo:
             raise ValueError("hf ref must be 'owner/repo'")
-        return ParsedModelRef(provider="hf", hf=HuggingFaceRef(repo_id=repo, revision=revision))
+        return ParsedModelRef(
+            provider="hf",
+            hf=HuggingFaceRef(repo_id=repo, revision=revision, flavor=flavor),
+        )
 
     if provider == "civitai":
         return ParsedModelRef(provider="civitai", civitai=CivitaiRef(model_id=s))

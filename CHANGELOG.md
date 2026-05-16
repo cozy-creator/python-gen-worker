@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.7.21
+
+### Fixed
+
+- **Binding-shape manifests now correctly populate startup readiness
+  state.** Pre-fix, gen-worker 0.7.x endpoints (every endpoint built
+  with the typed bindings shape from `gen-worker#9`) had no top-level
+  `models` / `models_by_function` blocks in their manifest. The 0.7.19
+  startup-readiness gate only walked those legacy blocks, so
+  `_release_allowed_model_ids` was always `None` for binding-shape
+  manifests — the worker emitted `startup_phase=ready` immediately on
+  gRPC connect, before any model bytes hit disk. The orchestrator
+  flipped `AvailableForRequests=true` and dispatched requests to
+  empty-disk workers.
+  Fix walks `manifest["functions"][i]["bindings"]` in
+  `Worker.__init__`, unions extracted canonical refs into
+  `_release_allowed_model_ids`, and builds a per-function
+  `_required_refs_by_function` map so `_loading_function_names()`
+  computes accurate per-function loading state for binding-shape
+  endpoints.
+- **HuggingFace ref canonical form now preserves `#flavor`.** Pre-fix,
+  `HuggingFaceRef.canonical()` stripped the flavor segment, so
+  `disk_models` advertised the bare repo (`owner/repo`) while the
+  orchestrator's `RequiredRepoRefs` carried the with-flavor form
+  (`owner/repo#bf16`). The cache-locality scorer compared the two with
+  exact-string match, always landed on `localityCold`, and parked
+  every request waiting for a cold fetch that never satisfied the
+  match. FLUX inference requests were observed queued for 249s while
+  the worker quietly held the bytes on disk.
+  Fix: `HuggingFaceRef` now carries the `flavor` field;
+  `parse_model_ref(..., provider="hf")` extracts and preserves it;
+  `canonical()` emits `owner/repo[@revision][#flavor]`. The
+  orchestrator-side `RequiredRepoRefs` and the worker-side
+  `disk_models` now share an identity and route correctly.
+- **Terminally-failed required refs no longer block startup readiness.**
+  Required refs that fail terminally (HF flavor doesn't exist on the
+  repo, 404 / 401 / 403) are now counted as resolved for the
+  `_emit_ready_if_all_cached` gate so the worker doesn't sit in
+  `models_downloading` forever. Functions whose entire required-ref
+  set failed terminally are marked locally unavailable so the dispatch
+  gate rejects them with a clear reason.
+
 ## 0.7.8
 
 ### New
