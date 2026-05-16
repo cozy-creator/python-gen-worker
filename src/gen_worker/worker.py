@@ -642,6 +642,59 @@ class Worker:
                     len(self._payload_model_id_by_key_by_function),
                 )
 
+        # Pre-mark every required ref as "downloading" BEFORE the registration
+        # message goes out. Without this `_loading_function_names()` returns
+        # `[]` because the model cache hasn't seen any of them yet, so the
+        # initial WorkerRegistration advertises every function as ready —
+        # the orchestrator then dispatches jobs to a cold worker. The cache
+        # entries are flipped to `cached_to_disk` by the prefetch + manager
+        # paths as each download completes.
+        self._startup_required_refs_canonical: set[str] = set()
+        if getattr(self, "_release_allowed_model_ids", None):
+            cache = getattr(self, "_model_cache", None)
+            for raw in self._release_allowed_model_ids:
+                s = str(raw or "").strip()
+                if not s:
+                    continue
+                try:
+                    canon = _canonicalize_model_ref_string(s)
+                except Exception:
+                    canon = s
+                self._startup_required_refs_canonical.add(canon)
+                if cache is not None:
+                    try:
+                        cache.mark_downloading(canon, progress=0.0)
+                    except Exception:
+                        # mark_downloading is best-effort bookkeeping; do not
+                        # crash boot if the cache rejects a ref shape.
+                        pass
+
+        # Latch so we only fire the typed `ready` startup-phase signal once
+        # all required refs are cached to disk (Fix 2c). Without this gate
+        # the orchestrator flips AvailableForRequests=true on register-ACK
+        # and dispatches a request to a cold worker before models exist on
+        # disk. See gen-orchestrator handleWorkerStartupPhase.
+        self._ready_phase_emitted = False
+        self._ready_phase_lock = threading.Lock()
+
+        # Wire download-completion callbacks on the auto-wired manager so
+        # its prefetch loop can update the worker's model cache + emit the
+        # typed ready signal + force a heartbeat as each ref lands. We
+        # attribute-inject rather than extend the abstract interface so
+        # third-party managers that don't expose these hooks keep their
+        # current contract.
+        manager = self._model_manager
+        if manager is not None:
+            try:
+                if hasattr(manager, "_on_model_downloaded"):
+                    manager._on_model_downloaded = self._handle_manager_model_downloaded
+                if hasattr(manager, "_on_model_download_failed"):
+                    manager._on_model_download_failed = (
+                        self._handle_manager_model_download_failed
+                    )
+            except Exception:
+                logger.exception("failed to wire manager download callbacks")
+
         if self._model_manager:
             logger.info(f"ModelManager of type '{type(self._model_manager).__name__}' provided.")
             # If we have models from manifest, start pre-download in background
@@ -3239,7 +3292,17 @@ class Worker:
             self._heartbeat_thread.start()
 
             logger.info(f"Successfully connected to scheduler at {self.scheduler_addr}")
-            self._emit_startup_phase("ready", status="ok", scheduler_addr=self.scheduler_addr)
+            # Fix 2c: do NOT emit `ready` from the register-ACK timing.
+            # The register-ACK only means the gRPC stream is alive — model
+            # bytes still haven't landed on disk. Emit `models_downloading`
+            # instead and let the download-completion callbacks emit `ready`
+            # once every required ref is cached. The helper short-circuits
+            # to `ready` immediately when the required set is empty (idle
+            # workers, marco-polo, etc.) so back-compat is preserved.
+            self._emit_startup_phase(
+                "models_downloading", status="ok", scheduler_addr=self.scheduler_addr
+            )
+            self._emit_ready_if_all_cached()
             # Reset redirect chain on a successful registration so a future
             # owner change (legitimate failover) starts with a fresh budget.
             self._redirect_chain_count = 0
@@ -3720,6 +3783,99 @@ class Worker:
     def _available_function_names(self) -> List[str]:
         names = self._all_declared_function_names()
         return [name for name in names if self.is_function_runnable(name)]
+
+    def _handle_manager_model_downloaded(self, ref: str, local_path: Path) -> None:
+        """Callback fired by ``DiffusersModelManager.process_supported_models_config``
+        after a model has been pulled to disk. Mirrors the bookkeeping
+        ``_startup_prefetch_loop`` already does on the worker-driven path:
+        flip the cache entry to ``cached_to_disk`` (which drops the function
+        from ``loading_functions``), emit the typed model-ready signals,
+        force an out-of-band heartbeat so the orchestrator's
+        ``disk_models`` view converges promptly, and flip the startup phase
+        to ``ready`` if this was the last required ref.
+        """
+        try:
+            canon = _canonicalize_model_ref_string(str(ref or "").strip())
+        except Exception:
+            canon = str(ref or "").strip()
+        if not canon:
+            return
+        cache = getattr(self, "_model_cache", None)
+        if cache is not None:
+            try:
+                cache.mark_cached_to_disk(canon, local_path)
+            except Exception:
+                logger.exception("manager-completion: mark_cached_to_disk failed for %s", canon)
+        # #321: typed model-ready signals (mirrors the prefetch-loop emits).
+        self._emit_model_ready(canon, self._MODEL_AVAILABILITY_DOWNLOAD_COMPLETED)
+        self._emit_model_ready(canon, self._MODEL_AVAILABILITY_CACHED)
+        self._emit_model_ready(canon, self._MODEL_AVAILABILITY_READY)
+        try:
+            self._register_worker(is_heartbeat=True)
+        except Exception:
+            logger.exception("manager-completion: force-heartbeat failed for %s", canon)
+        self._emit_ready_if_all_cached()
+
+    def _handle_manager_model_download_failed(self, ref: str, exc: BaseException) -> None:
+        """Callback fired by the manager when a prefetch download fails.
+        Clear the "downloading" marker so the heartbeat doesn't advertise
+        a permanently-stuck download. The startup phase intentionally does
+        NOT flip to ``ready`` — the missing ref will keep the function
+        gated until the operator intervenes (re-deploy, fix manifest).
+        """
+        try:
+            canon = _canonicalize_model_ref_string(str(ref or "").strip())
+        except Exception:
+            canon = str(ref or "").strip()
+        if not canon:
+            return
+        logger.warning("manager-completion: download failed for %s: %s", canon, exc)
+        cache = getattr(self, "_model_cache", None)
+        if cache is not None:
+            try:
+                cache.unload_model(canon)
+            except Exception:
+                pass
+
+    def _emit_ready_if_all_cached(self) -> None:
+        """Emit the typed ``ready`` startup-phase signal exactly once, when
+        every required ref has been cached to disk (Fix 2c).
+
+        Without this gate the worker would emit ``ready`` from the gRPC
+        connect callback — pure register-ACK timing — and the orchestrator
+        would flip ``AvailableForRequests=true`` before any model bytes
+        landed, dispatching requests to a cold worker.
+
+        Safe to call from any thread. Uses a lock + latch so concurrent
+        download-completion paths can race to call this without emitting
+        duplicate signals. Tolerates missing ``__init__`` state (some
+        unit-test code paths build a bare ``Worker`` via ``__new__`` and
+        invoke handler methods directly) by no-op-ing in that case.
+        """
+        lock = getattr(self, "_ready_phase_lock", None)
+        if lock is None:
+            return  # bare-Worker test path — readiness gate is opt-in
+        with lock:
+            if getattr(self, "_ready_phase_emitted", False):
+                return
+            required = getattr(self, "_startup_required_refs_canonical", None) or set()
+            if required:
+                cache = getattr(self, "_model_cache", None)
+                if cache is None:
+                    return
+                try:
+                    on_disk = set(cache.get_disk_models() or [])
+                except Exception:
+                    return
+                if not required.issubset(on_disk):
+                    return
+            self._ready_phase_emitted = True
+        # Emit outside the lock so signal-send latency doesn't serialize callers.
+        self._emit_startup_phase(
+            "ready",
+            status="ok",
+            scheduler_addr=getattr(self, "scheduler_addr", ""),
+        )
 
     def _register_worker(self, is_heartbeat: bool = False) -> None:
         """Create and send a registration/heartbeat message."""
@@ -4731,6 +4887,10 @@ class Worker:
                         # orchestrator treat this as an initial registration and re-send
                         # EndpointConfig, which would re-enter this loop indefinitely.
                         self._register_worker(is_heartbeat=True)
+                        # Fix 2c: a snapshot-already-cached ref still counts toward
+                        # the startup readiness gate. Emit `ready` if every
+                        # required ref is now on disk.
+                        self._emit_ready_if_all_cached()
                         continue
 
                     self._model_cache.mark_downloading(canon, progress=0.0)
@@ -4765,6 +4925,10 @@ class Worker:
                     # the 10s heartbeat tick) so schedulers see disk inventory changes.
                     # Must be is_heartbeat=True: see note at the cached-already branch above.
                     self._register_worker(is_heartbeat=True)
+                    # Fix 2c: every completed download is a chance to flip
+                    # the startup phase to `ready` if this was the last
+                    # required ref.
+                    self._emit_ready_if_all_cached()
                 except Exception as e:
                     try:
                         # Clear "downloading" state on failure so we don't report a stuck download forever.
@@ -5174,6 +5338,9 @@ class Worker:
                 self._register_worker(is_heartbeat=True)
             except Exception:
                 logger.exception("DownloadModelCommand: force-heartbeat failed")
+            # Fix 2c: scheduler-driven download can complete a missing
+            # required ref. Flip the startup phase to `ready` if so.
+            self._emit_ready_if_all_cached()
 
         # Audit-channel completion event for observability.
         try:
