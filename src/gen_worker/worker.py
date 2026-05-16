@@ -1416,9 +1416,20 @@ class Worker:
             for _, obj in inspect.getmembers(module):
                 if not inspect.isclass(obj):
                     continue
-                if getattr(obj, "__module__", "") != module.__name__:
-                    # Re-exported symbols (e.g. `from gen_worker import inference`)
-                    # are not endpoint classes — only own-module definitions count.
+                obj_module = getattr(obj, "__module__", "") or ""
+                # Skip third-party re-exports (e.g. `from gen_worker import inference`)
+                # but accept classes defined in any submodule of the user's package
+                # — the conversion endpoint, for instance, declares `@inference()`
+                # classes in `conversion/clone_huggingface.py` and re-exports them
+                # via `conversion/__init__.py`'s `from .main import *`. The class's
+                # `__module__` is `conversion.clone_huggingface`, but the package
+                # being walked is `conversion`. Without the prefix check, every
+                # submodule-defined endpoint class gets silently dropped and the
+                # worker registers zero handlers. Dedup at the per-function level
+                # below (via `_request_specs[spec.name]`) protects against the
+                # same class being seen twice through different re-export paths.
+                package_prefix = module.__name__ + "."
+                if obj_module != module.__name__ and not obj_module.startswith(package_prefix):
                     continue
                 ep_spec = getattr(obj, "__gen_worker_endpoint_spec__", None)
                 if ep_spec is None:
