@@ -37,6 +37,8 @@ _MAX_REDIRECTS = 6
 _CHUNK_BYTES = 1024 * 1024
 _MAX_JSON_BYTES = 16 * 1024 * 1024
 _RETRYABLE_HTTP_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
+_HTTP_DOWNLOAD_RETRIES = 3
+_HTTP_DOWNLOAD_BACKOFF_S = 0.25
 
 # Stable per-(repo, revision) HF mirror directory used as
 # `hf_hub_download(local_dir=...)`. Persistent across requests within
@@ -343,8 +345,6 @@ def _stream_http_download(
 
     opener = urllib.request.build_opener(_NoRedirectHandler())
     current_url = src
-    retry_attempts = 3
-    retry_backoff_ms = 250
 
     sha = hashlib.sha256()
     downloaded = 0
@@ -371,7 +371,7 @@ def _stream_http_download(
 
             redirected = False
             resp = None
-            for attempt in range(retry_attempts):
+            for attempt in range(_HTTP_DOWNLOAD_RETRIES):
                 try:
                     resp = opener.open(req, timeout=120)
                     break
@@ -386,17 +386,15 @@ def _stream_http_download(
                         redirected = True
                         break
                     exc.close()
-                    if status in _RETRYABLE_HTTP_STATUS_CODES and (attempt + 1) < retry_attempts:
-                        if retry_backoff_ms > 0:
-                            time.sleep((retry_backoff_ms / 1000.0) * float(attempt + 1))
+                    if status in _RETRYABLE_HTTP_STATUS_CODES and (attempt + 1) < _HTTP_DOWNLOAD_RETRIES:
+                        time.sleep(_HTTP_DOWNLOAD_BACKOFF_S * float(attempt + 1))
                         continue
                     if str(provider or "").strip().lower() == "civitai":
                         raise _civitai_error_from_status(status, stage=str(civitai_stage or "fetch")) from None
                     raise ValueError(f"source_download_http_status:{status}") from None
                 except urllib.error.URLError:
-                    if (attempt + 1) < retry_attempts:
-                        if retry_backoff_ms > 0:
-                            time.sleep((retry_backoff_ms / 1000.0) * float(attempt + 1))
+                    if (attempt + 1) < _HTTP_DOWNLOAD_RETRIES:
+                        time.sleep(_HTTP_DOWNLOAD_BACKOFF_S * float(attempt + 1))
                         continue
                     if str(provider or "").strip().lower() == "civitai":
                         stage = str(civitai_stage or "fetch").strip().lower()

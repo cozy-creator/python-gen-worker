@@ -31,7 +31,7 @@ from gen_worker.discovery.toml_manifest import (
     load_endpoint_toml,
 )
 from gen_worker.discovery.names import slugify_name
-from gen_worker.discovery.walk import FoundEndpointClass, find_endpoint_classes
+from gen_worker.discovery.walk import find_endpoint_classes
 
 
 def _type_id(t: type) -> Dict[str, str]:

@@ -99,8 +99,6 @@ class _RequestOutputStream:
         self._last_progress_emit_mono = self._started_mono
         self._last_progress_mono = self._started_mono
         self._last_progress_uploaded = 0
-        self._retry_attempts = 5
-        self._retry_backoff_ms = 500
         self._session_id: Optional[str] = None
         self._uploader_meta: Dict[str, Any] = {}
         # Route all output streams (checkpoint AND asset) through the
@@ -401,8 +399,6 @@ class _RequestOutputStream:
             create_payload=create_payload,
             blake3_hex=blake3_hex,
             size_bytes=file_size,
-            retry_attempts=self._retry_attempts,
-            retry_backoff_ms=self._retry_backoff_ms,
             on_progress=_progress_cb,
             cancel_check=self._ctx.is_canceled,
             complete_extra=None,
@@ -411,8 +407,7 @@ class _RequestOutputStream:
         # Issue #269: sample peak RSS to verify the streaming refactor is
         # actually keeping us bounded. ru_maxrss is in KiB on Linux,
         # bytes on macOS; we report both numbers so neither platform is
-        # ambiguous. With the adaptive file-level fan-out (issue #13) capped
-        # at 4 and per-file streaming we expect this to stay well under
+        # ambiguous. With per-file streaming, this should stay well under
         # 1 GiB even for 5 GB shards.
         try:
             ru = resource.getrusage(resource.RUSAGE_SELF)

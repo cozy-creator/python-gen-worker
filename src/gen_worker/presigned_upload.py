@@ -62,6 +62,8 @@ logger = logging.getLogger(__name__)
 
 _FINALIZE_TIMEOUT_S = 600
 _CREATE_TIMEOUT_S = 60
+_FINALIZE_RETRY_ATTEMPTS = 5
+_FINALIZE_RETRY_BACKOFF_S = 0.5
 
 # Default part size sent by server, but we read it from the response.
 _FALLBACK_PART_SIZE = 64 * 1024 * 1024  # 64 MiB
@@ -110,9 +112,6 @@ def presigned_upload_file(
     create_payload: Dict[str, Any],
     blake3_hex: str,
     size_bytes: int,
-    retry_attempts: int = 5,
-    retry_backoff_ms: int = 500,
-    max_parallel: Optional[int] = None,
     on_progress: Optional[Any] = None,
     cancel_check: Optional[Any] = None,
     complete_extra: Optional[Dict[str, Any]] = None,
@@ -127,15 +126,6 @@ def presigned_upload_file(
         create_payload: Additional fields for the create POST (ref, path, request_id, etc.).
         blake3_hex: Pre-computed BLAKE3 hash of the file.
         size_bytes: File size in bytes.
-        retry_attempts: Number of retries for the per-part PUT and the
-            finalize POST. Transport-level errors and 5xx/429 retry with
-            exponential backoff + jitter inside ``_upload_transport``.
-        retry_backoff_ms: Backoff between finalize-POST retries (ms).
-            Per-part backoff is decorrelated-jitter and ignores this knob.
-        max_parallel: Optional override for per-file part-level
-            concurrency. Defaults to ``optimal_part_concurrency(total_parts)``
-            — bounded adaptive sizing (issue #13). Set to 1 to serialize
-            parts for debugging.
         on_progress: Optional callback(parts_done, total_parts, bytes_uploaded).
         cancel_check: Optional callable that returns True if canceled.
         complete_extra: Optional extra fields merged into the /complete POST
@@ -187,24 +177,12 @@ def presigned_upload_file(
     session_id = upload_id
     abort_url = f"{url}/{session_id}"
 
-    # Adaptive per-file part concurrency. Caller can override (max_parallel
-    # kwarg) but the default is sized off total_parts so a 4-part file
-    # doesn't spin up 8 workers and a 64-part file doesn't run 64 in
-    # parallel and saturate the per-host TCP connection budget.
-    effective_max_parallel = (
-        int(max_parallel)
-        if max_parallel is not None and max_parallel > 0
-        else optimal_part_concurrency(total_parts)
-    )
-
     try:
         etags = _upload_parts_to_s3(
             file_path=str(file_path),
             part_urls=part_urls,
             part_size=part_size,
             total_parts=total_parts,
-            retry_attempts=retry_attempts,
-            max_parallel=effective_max_parallel,
             on_progress=on_progress,
             cancel_check=cancel_check,
         )
@@ -234,7 +212,7 @@ def presigned_upload_file(
     complete_headers["Content-Type"] = "application/json"
 
     last_exc: Optional[BaseException] = None
-    for attempt in range(1, retry_attempts + 1):
+    for attempt in range(1, _FINALIZE_RETRY_ATTEMPTS + 1):
         if cancel_check and cancel_check():
             raise CanceledError("canceled")
         try:
@@ -257,8 +235,8 @@ def presigned_upload_file(
             else:
                 result_meta = resp.json() if resp.text else {}
                 return PresignedUploadResult(meta=result_meta, dedup=False)
-        if attempt < retry_attempts and retry_backoff_ms > 0:
-            time.sleep(retry_backoff_ms / 1000.0)
+        if attempt < _FINALIZE_RETRY_ATTEMPTS:
+            time.sleep(_FINALIZE_RETRY_BACKOFF_S)
 
     if last_exc:
         raise last_exc
@@ -271,8 +249,6 @@ def _upload_parts_to_s3(
     part_urls: List[str],
     part_size: int,
     total_parts: int,
-    retry_attempts: int,
-    max_parallel: int,
     on_progress: Optional[Any],
     cancel_check: Optional[Any],
 ) -> List[Tuple[int, str]]:
@@ -297,7 +273,6 @@ def _upload_parts_to_s3(
                 file_path=file_path,
                 offset=offset,
                 length=length,
-                max_attempts=max(1, int(retry_attempts)),
                 cancel_check=cancel_check,
             )
         except InterruptedError as ie:
@@ -309,7 +284,7 @@ def _upload_parts_to_s3(
         return (part_number, etag)
 
     # Upload parts in parallel.
-    workers = min(max_parallel, total_parts)
+    workers = min(optimal_part_concurrency(total_parts), total_parts)
     parts_done = 0
     if workers <= 1:
         for i in range(total_parts):

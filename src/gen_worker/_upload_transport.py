@@ -10,8 +10,9 @@ the receiver side — fatal, unrecoverable on the same connection — and
 ``requests`` cannot tell that error apart from a fresh-handshake
 failure, so its retry just replays the broken socket.
 
-This module fixes that with three mechanical changes that boto3's
-``s3transfer`` already does by default:
+This module fixes that with three mechanical changes while preserving the
+Tensorhub upload contract: Tensorhub creates a multipart session and returns
+presigned part URLs; the worker PUTs bytes directly to those URLs.
 
   1. **Per-part pool isolation.** Each multipart PUT gets its own
      ``urllib3.PoolManager(maxsize=1, block=False)``; the pool is
@@ -36,10 +37,6 @@ Public API: ``upload_part_to_presigned_url(url, file_path, offset,
 length)`` -> ``etag``. Caller owns the part-level fan-out
 (``presigned_upload.py``) and the file-level fan-out
 (``_concurrent_upload.py``). This module is a pure transport leaf.
-
-Phase 1 of issue #13. Phase 2 (boto3 with directly-minted R2
-credentials) requires tensorhub-side STS credential issuance and is
-tracked separately.
 """
 
 from __future__ import annotations
@@ -331,11 +328,11 @@ def upload_part_to_presigned_url(
 def optimal_part_concurrency(total_parts: int) -> int:
     """Adaptive part-level concurrency for one file's multipart upload.
 
-    Replaces the old hardcoded ``_MAX_PARALLEL_PARTS = 4``. Rationale:
-    a single file with N parts can saturate the wire with a handful of
-    in-flight PUTs; pushing higher just adds TLS-pool churn (the same
-    pool churn that triggered the R2 SSLV3_ALERT_BAD_RECORD_MAC in the
-    first place). The right bound depends on:
+    Replaces the former fixed part fan-out. Rationale: a single file
+    with N parts can saturate the wire with a handful of in-flight PUTs;
+    pushing higher just adds TLS-pool churn (the same pool churn that
+    triggered the R2 SSLV3_ALERT_BAD_RECORD_MAC in the first place). The
+    right bound depends on:
 
       - total_parts itself (don't spin up 16 workers for a 4-part file)
       - the file-level fan-out above (handled by the caller — file-level

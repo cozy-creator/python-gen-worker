@@ -9,48 +9,137 @@ serializing them.
 Library-internal. ``_``-prefixed module name. Don't import from tenant
 code.
 
-# Adaptive concurrency (issue #13)
+# Adaptive concurrency (issue #11/#13)
 
-The hardcoded ``MAX_CONCURRENT_UPLOADS = 4`` constant is gone. The
-per-call default is now ``optimal_file_concurrency(item_count)``, which:
+The former fixed file fan-out constant is gone. ``parallel_map_uploads``
+now owns a per-call adaptive scheduler:
 
-  - sizes to 1 for single-item lists (no thread-pool overhead)
-  - sizes to ``min(item_count, 4)`` for typical multi-shard checkpoint
-    uploads (matches the prior steady-state behavior on a 10 GbE / NVMe
-    host without baking in the magic number)
-  - caps at 4 — above that the per-part TLS-pool churn inside
-    ``_upload_transport`` dominates, and BLAKE3's intra-call AUTO
-    thread fan-out competes for the same cores. The 4-wide ceiling
-    matches what boto3's TransferConfig settles on in practice for
-    large-shard checkpoint workloads.
+  - start with a small number of in-flight files
+  - record elapsed time + best-effort item size as each file finishes
+  - ramp while recent throughput is improving
+  - hold when it plateaus
+  - back off immediately on upload errors
 
-Callers can still pass an explicit ``max_workers`` to override.
 ``BudgetGate`` (below) is the authoritative byte-budget back-pressure
-and composes with whatever concurrency the caller picks; nothing in
-the adaptive sizer trusts file sizes since the pool doesn't see them.
+and composes with the internal concurrency policy; nothing in the
+adaptive scheduler overrides the byte budget.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import threading
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Callable, Iterable, List, Optional, Sequence, Tuple, TypeVar
+import time
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from dataclasses import dataclass
+from typing import Any, Callable, Iterable, List, Sequence, Tuple, TypeVar
 
 logger = logging.getLogger(__name__)
 
+_ADAPTIVE_START_WORKERS = 2
+_ADAPTIVE_MAX_WORKERS = 16
+_ADAPTIVE_WINDOW = 4
+_ADAPTIVE_IMPROVEMENT_RATIO = 1.05
+_ADAPTIVE_DROP_RATIO = 0.90
+
+
+@dataclass(frozen=True)
+class _UploadSample:
+    size_bytes: int
+    elapsed_s: float
+
+    @property
+    def throughput(self) -> float:
+        # Unknown sizes use a synthetic one-byte unit so the controller can
+        # still compare relative task completion rates.
+        size = max(1, int(self.size_bytes))
+        elapsed = max(float(self.elapsed_s), 1e-6)
+        return float(size) / elapsed
+
+
+class _AdaptiveUploadController:
+    """Per-call file fan-out controller.
+
+    This is deliberately local to one ``parallel_map_uploads`` call. No
+    global state leaks between jobs, and there is no operator-facing knob.
+    """
+
+    def __init__(self, item_count: int) -> None:
+        count = max(1, int(item_count))
+        self._ceiling = min(count, _ADAPTIVE_MAX_WORKERS)
+        self._target = min(_ADAPTIVE_START_WORKERS, self._ceiling)
+        self._samples: list[_UploadSample] = []
+
+    @property
+    def target(self) -> int:
+        return max(1, min(self._target, self._ceiling))
+
+    @property
+    def ceiling(self) -> int:
+        return self._ceiling
+
+    def observe_success(self, *, size_bytes: int, elapsed_s: float) -> None:
+        self._samples.append(_UploadSample(size_bytes=size_bytes, elapsed_s=elapsed_s))
+        if self._target >= self._ceiling:
+            return
+
+        # Warm-up: ramp quickly from the conservative start until we have a
+        # meaningful window to compare.
+        if len(self._samples) < (_ADAPTIVE_WINDOW * 2):
+            self._target += 1
+            return
+
+        recent = self._avg_throughput(self._samples[-_ADAPTIVE_WINDOW:])
+        previous = self._avg_throughput(self._samples[-(_ADAPTIVE_WINDOW * 2):-_ADAPTIVE_WINDOW])
+        if previous <= 0:
+            self._target += 1
+            return
+        ratio = recent / previous
+        if ratio >= _ADAPTIVE_IMPROVEMENT_RATIO:
+            self._target += 1
+        elif ratio < _ADAPTIVE_DROP_RATIO and self._target > 1:
+            self._target -= 1
+
+    def observe_failure(self) -> None:
+        if self._target > 1:
+            self._target -= 1
+
+    @staticmethod
+    def _avg_throughput(samples: Sequence[_UploadSample]) -> float:
+        if not samples:
+            return 0.0
+        return sum(s.throughput for s in samples) / float(len(samples))
+
 
 def optimal_file_concurrency(item_count: int) -> int:
-    """File-level fan-out for one parallel_map_uploads call.
-
-    Caps at 4 — above that the per-part TLS-pool churn inside the
-    transport dominates, BLAKE3's intra-call thread fan-out competes,
-    and the marginal MB/s gain is small. Same shape boto3's
-    TransferConfig converges to in practice for multi-GiB shards.
-    """
+    """Return the internal upper bound for one file-level upload batch."""
     if item_count <= 1:
         return 1
-    return min(int(item_count), 4)
+    return min(int(item_count), _ADAPTIVE_MAX_WORKERS)
+
+
+def _estimate_item_size_bytes(item: Any) -> int:
+    """Best-effort size estimator used only for adaptive scheduling.
+
+    Common upload callers pass paths, ``Path`` objects, or tuples/lists
+    containing a path. Unknown shapes return 0 and still participate in the
+    controller using completion-rate units.
+    """
+    if isinstance(item, (str, bytes, os.PathLike)):
+        try:
+            return int(os.path.getsize(os.fspath(item)))
+        except OSError:
+            return 0
+    if isinstance(item, (tuple, list)):
+        for value in item:
+            size = _estimate_item_size_bytes(value)
+            if size > 0:
+                return size
+    path = getattr(item, "path", None) or getattr(item, "local_path", None)
+    if path is not None:
+        return _estimate_item_size_bytes(path)
+    return 0
 
 
 class BudgetExceededError(RuntimeError):
@@ -67,12 +156,12 @@ class BudgetExceededError(RuntimeError):
 class BudgetGate:
     """Capability-budget back-pressure for the concurrent upload pool (issue #269).
 
-    The pool runs up to ``optimal_file_concurrency(item_count)`` files in
-    parallel (capped at 4). Tensorhub's worker_capability_token caps
-    aggregate in-flight bytes per session via ``max_total_bytes`` and
-    per-file via ``max_bytes_per_file``. Without back-pressure, four
-    30 GiB shards would exceed a typical 50 GiB total budget; the server
-    would reject them mid-upload, leaving partial parts.
+    The adaptive scheduler may run several files in parallel. Tensorhub's
+    worker_capability_token caps aggregate in-flight bytes per session via
+    ``max_total_bytes`` and per-file via ``max_bytes_per_file``. Without
+    back-pressure, multiple 30 GiB shards could exceed a typical 50 GiB
+    total budget; the server would reject them mid-upload, leaving partial
+    parts.
 
     The gate sits between the pool and the upload entry points
     (``save_file``, ``save_checkpoint``, ``save_file_create``). Each entry
@@ -205,20 +294,18 @@ def parallel_map_uploads(
     items: Sequence[T],
     upload_fn: Callable[[T], R],
     *,
-    max_workers: Optional[int] = None,
     label: str = "upload",
 ) -> List[R]:
     """Run ``upload_fn`` over ``items`` with bounded concurrency, preserving order.
 
     Each callable owns one file end-to-end (hash → presigned create →
-    multipart PUT → /complete). The pool is sized at ``max_workers``
-    (default: adaptive via ``optimal_file_concurrency(len(items))``) —
-    if ``items`` is shorter than the cap, only that many workers spin up.
+    multipart PUT → /complete). The pool starts conservatively and adjusts
+    internal fan-out as files complete.
 
     Results are returned in the SAME order as ``items``. If any worker
     raises, the first exception is re-raised after the remaining
-    in-flight uploads finish (best-effort drain, no aggressive cancel —
-    we don't want a half-cancelled multipart leaking partial parts).
+    in-flight uploads finish. No new uploads are scheduled after the first
+    failure.
 
     The S3 multipart PUTs inside each upload already run their own
     inner part-level thread pool; this fan-out is at the FILE level on
@@ -227,30 +314,48 @@ def parallel_map_uploads(
     n = len(items)
     if n == 0:
         return []
-    effective_workers = (
-        int(max_workers) if max_workers is not None and max_workers > 0
-        else optimal_file_concurrency(n)
-    )
-    # Serial fast path keeps debug behavior 1:1 with the pre-#269 code.
-    if effective_workers <= 1 or n == 1:
+    if n == 1:
         return [upload_fn(it) for it in items]
 
-    workers = min(effective_workers, n)
+    controller = _AdaptiveUploadController(n)
+    max_workers = controller.ceiling
     results: List[Any] = [None] * n
     first_exc: BaseException | None = None
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix=f"gw-{label}") as pool:
-        futures = {pool.submit(upload_fn, item): idx for idx, item in enumerate(items)}
-        for fut in as_completed(futures):
-            idx = futures[fut]
-            try:
-                results[idx] = fut.result()
-            except BaseException as exc:  # noqa: BLE001
-                if first_exc is None:
-                    first_exc = exc
-                logger.warning(
-                    "%s_concurrent_item_failed idx=%d err=%r",
-                    label, idx, exc,
-                )
+    next_idx = 0
+    futures: dict[Future[R], tuple[int, float, int]] = {}
+
+    def _schedule_available(pool: ThreadPoolExecutor) -> None:
+        nonlocal next_idx
+        while first_exc is None and next_idx < n and len(futures) < controller.target:
+            item = items[next_idx]
+            fut = pool.submit(upload_fn, item)
+            futures[fut] = (next_idx, time.monotonic(), _estimate_item_size_bytes(item))
+            next_idx += 1
+
+    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix=f"gw-{label}") as pool:
+        _schedule_available(pool)
+        while futures:
+            done, _pending = wait(set(futures.keys()), return_when=FIRST_COMPLETED)
+            for fut in done:
+                idx, started, size_bytes = futures.pop(fut)
+                elapsed_s = time.monotonic() - started
+                try:
+                    results[idx] = fut.result()
+                except BaseException as exc:  # noqa: BLE001
+                    controller.observe_failure()
+                    if first_exc is None:
+                        first_exc = exc
+                    logger.warning(
+                        "%s_concurrent_item_failed idx=%d target_workers=%d err=%r",
+                        label, idx, controller.target, exc,
+                    )
+                else:
+                    controller.observe_success(size_bytes=size_bytes, elapsed_s=elapsed_s)
+                    logger.debug(
+                        "%s_concurrent_item_done idx=%d size_bytes=%d elapsed_s=%.3f target_workers=%d",
+                        label, idx, size_bytes, elapsed_s, controller.target,
+                    )
+            _schedule_available(pool)
     if first_exc is not None:
         raise first_exc
     return results
