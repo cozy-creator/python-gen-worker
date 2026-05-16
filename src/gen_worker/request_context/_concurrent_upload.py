@@ -1,33 +1,33 @@
-"""Concurrent multi-file upload coordinator (issue #269).
+"""Concurrent multi-file upload coordinator (issue #269, refactored #13).
 
-Single source of truth for the worker-side upload fan-out constant and
-the small ThreadPoolExecutor helper that wraps it. Loops that previously
-did ``for f in files: ctx.save_checkpoint(f)`` should swap in
-``parallel_save_checkpoints(ctx, files, upload_fn)`` to get up to
-``MAX_CONCURRENT_UPLOADS`` files running their hash-read-PUT-complete
-cycle concurrently.
+Single source of truth for the worker-side file-level upload fan-out.
+Loops that previously did ``for f in files: ctx.save_checkpoint(f)``
+should swap in ``parallel_map_uploads(items, upload_fn)`` to pipeline
+disk read + BLAKE3 hash + multipart PUT across files instead of
+serializing them.
 
 Library-internal. ``_``-prefixed module name. Don't import from tenant
 code.
 
-# Why a constant, not a knob
+# Adaptive concurrency (issue #13)
 
-Workers are tenant-written code; we don't expose tuning surface to
-tenants. The trade-off is fixed:
+The hardcoded ``MAX_CONCURRENT_UPLOADS = 4`` constant is gone. The
+per-call default is now ``optimal_file_concurrency(item_count)``, which:
 
-  - 1  → serial, easy to reason about, ~113 MB/s on a 10 GbE host
-         saturating BLAKE3 single-threaded.
-  - 4  → 4× disk readers + 4× HTTP clients in flight; saturates the
-         BLAKE3 fan-out (each instance also fans out internally via
-         ``max_threads=blake3.AUTO``) without thrashing the read-ahead
-         page cache. Empirically lands near wire saturation on a
-         single-NIC host with NVMe storage.
-  - 8+ → diminishing returns; competes for BLAKE3 worker threads,
-         starts to thrash the page cache, and the marginal MB/s gain
-         is small relative to the CPU contention cost.
+  - sizes to 1 for single-item lists (no thread-pool overhead)
+  - sizes to ``min(item_count, 4)`` for typical multi-shard checkpoint
+    uploads (matches the prior steady-state behavior on a 10 GbE / NVMe
+    host without baking in the magic number)
+  - caps at 4 — above that the per-part TLS-pool churn inside
+    ``_upload_transport`` dominates, and BLAKE3's intra-call AUTO
+    thread fan-out competes for the same cores. The 4-wide ceiling
+    matches what boto3's TransferConfig settles on in practice for
+    large-shard checkpoint workloads.
 
-Flip to ``1`` in source to reproduce the prior serial behavior for
-debugging.
+Callers can still pass an explicit ``max_workers`` to override.
+``BudgetGate`` (below) is the authoritative byte-budget back-pressure
+and composes with whatever concurrency the caller picks; nothing in
+the adaptive sizer trusts file sizes since the pool doesn't see them.
 """
 
 from __future__ import annotations
@@ -35,13 +35,22 @@ from __future__ import annotations
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Any, Callable, Iterable, List, Sequence, Tuple, TypeVar
+from typing import Any, Callable, Iterable, List, Optional, Sequence, Tuple, TypeVar
 
 logger = logging.getLogger(__name__)
 
-# Hardcoded; do NOT plumb to an env var or config knob. See module
-# docstring for the trade-off rationale.
-MAX_CONCURRENT_UPLOADS = 4
+
+def optimal_file_concurrency(item_count: int) -> int:
+    """File-level fan-out for one parallel_map_uploads call.
+
+    Caps at 4 — above that the per-part TLS-pool churn inside the
+    transport dominates, BLAKE3's intra-call thread fan-out competes,
+    and the marginal MB/s gain is small. Same shape boto3's
+    TransferConfig converges to in practice for multi-GiB shards.
+    """
+    if item_count <= 1:
+        return 1
+    return min(int(item_count), 4)
 
 
 class BudgetExceededError(RuntimeError):
@@ -58,11 +67,12 @@ class BudgetExceededError(RuntimeError):
 class BudgetGate:
     """Capability-budget back-pressure for the concurrent upload pool (issue #269).
 
-    The pool runs ``MAX_CONCURRENT_UPLOADS=4`` files in parallel. Tensorhub's
-    worker_capability_token caps aggregate in-flight bytes per session via
-    ``max_total_bytes`` and per-file via ``max_bytes_per_file``. Without
-    back-pressure, four 30 GiB shards would exceed a typical 50 GiB total
-    budget; the server would reject them mid-upload, leaving partial parts.
+    The pool runs up to ``optimal_file_concurrency(item_count)`` files in
+    parallel (capped at 4). Tensorhub's worker_capability_token caps
+    aggregate in-flight bytes per session via ``max_total_bytes`` and
+    per-file via ``max_bytes_per_file``. Without back-pressure, four
+    30 GiB shards would exceed a typical 50 GiB total budget; the server
+    would reject them mid-upload, leaving partial parts.
 
     The gate sits between the pool and the upload entry points
     (``save_file``, ``save_checkpoint``, ``save_file_create``). Each entry
@@ -195,15 +205,15 @@ def parallel_map_uploads(
     items: Sequence[T],
     upload_fn: Callable[[T], R],
     *,
-    max_workers: int = MAX_CONCURRENT_UPLOADS,
+    max_workers: Optional[int] = None,
     label: str = "upload",
 ) -> List[R]:
     """Run ``upload_fn`` over ``items`` with bounded concurrency, preserving order.
 
     Each callable owns one file end-to-end (hash → presigned create →
     multipart PUT → /complete). The pool is sized at ``max_workers``
-    (default ``MAX_CONCURRENT_UPLOADS``) — if ``items`` is shorter, only
-    that many workers spin up.
+    (default: adaptive via ``optimal_file_concurrency(len(items))``) —
+    if ``items`` is shorter than the cap, only that many workers spin up.
 
     Results are returned in the SAME order as ``items``. If any worker
     raises, the first exception is re-raised after the remaining
@@ -217,11 +227,15 @@ def parallel_map_uploads(
     n = len(items)
     if n == 0:
         return []
+    effective_workers = (
+        int(max_workers) if max_workers is not None and max_workers > 0
+        else optimal_file_concurrency(n)
+    )
     # Serial fast path keeps debug behavior 1:1 with the pre-#269 code.
-    if max_workers <= 1 or n == 1:
+    if effective_workers <= 1 or n == 1:
         return [upload_fn(it) for it in items]
 
-    workers = min(max_workers, n)
+    workers = min(effective_workers, n)
     results: List[Any] = [None] * n
     first_exc: BaseException | None = None
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix=f"gw-{label}") as pool:

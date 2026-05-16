@@ -411,8 +411,9 @@ class _RequestOutputStream:
         # Issue #269: sample peak RSS to verify the streaming refactor is
         # actually keeping us bounded. ru_maxrss is in KiB on Linux,
         # bytes on macOS; we report both numbers so neither platform is
-        # ambiguous. With MAX_CONCURRENT_UPLOADS=4 and per-file streaming
-        # we expect this to stay well under 1 GiB even for 5 GB shards.
+        # ambiguous. With the adaptive file-level fan-out (issue #13) capped
+        # at 4 and per-file streaming we expect this to stay well under
+        # 1 GiB even for 5 GB shards.
         try:
             ru = resource.getrusage(resource.RUSAGE_SELF)
             peak_kib = int(ru.ru_maxrss)  # Linux: KiB; macOS: bytes

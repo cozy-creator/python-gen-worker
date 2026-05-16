@@ -764,9 +764,9 @@ def _finalize_publish_as_is(
             # flavor entry. Each output file lives at
             # `<repo>/<filename>` for the destination snapshot.
             #
-            # Issue #269: fan the uploads out across
-            # MAX_CONCURRENT_UPLOADS so a multi-shard inline conversion
-            # output ships shards in parallel.
+            # Issue #269/#13: fan the uploads out across the adaptive
+            # file pool so a multi-shard inline conversion output ships
+            # shards in parallel.
             spec_artifacts: list[dict[str, Any]] = []
             spec_manifest: list[dict[str, Any]] = []
             inline_outputs = list(inline_result.output_paths)
@@ -1688,9 +1688,9 @@ def _run_layout_repackage(
             out_dir = td / "diffusers"
             singlefile_to_diffusers(primary, out_dir, model_family=model_family)
             # Upload every file in the diffusers tree under a common prefix.
-            # Issue #269: fan uploads out across MAX_CONCURRENT_UPLOADS;
-            # results in input order so the "first safetensors becomes
-            # primary" rule is preserved deterministically.
+            # Issue #269/#13: fan uploads out across the adaptive file
+            # pool; results in input order so the "first safetensors
+            # becomes primary" rule is preserved deterministically.
             ref_root = f"jobs/{ctx.request_id}/outputs/weights-diffusers"
             primary_saved: Tensors | None = None
             additional: list[Any] = []
@@ -1899,11 +1899,11 @@ def _finalize_clone(
             # path: `transformer/diffusion_pytorch_model.safetensors` →
             # `transformer/diffusion_pytorch_model-00001-of-00002.safetensors`).
             #
-            # Issue #269: precompute the full upload job list (including
+            # Issue #269/#13: precompute the full upload job list (including
             # sharding oversize files) up front, then fan all uploads out
-            # across MAX_CONCURRENT_UPLOADS. The 5 GB FLUX shards each
-            # used to take 30-50s of serial overhead; with 4-way fan-out
-            # they pipeline disk read + BLAKE3 + multipart PUT.
+            # across the adaptive file pool. The 5 GB FLUX shards each
+            # used to take 30-50s of serial overhead; with parallel
+            # file fan-out they pipeline disk read + BLAKE3 + multipart PUT.
             upload_jobs: list[tuple[str, str, str, str]] = []  # (ref, local_path, format, rel_for_uploaded_list)
             for saved_tensors, rel_path, file_size in ingest_result.all_weight_files:
                 local_path = str(getattr(saved_tensors, "local_path", "") or "").strip()

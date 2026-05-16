@@ -154,8 +154,8 @@ class RequestContext:
         # lifecycle (open → per-file uploads → finalize).
         self._upload_sessions = None  # type: Optional["_UploadSessionManager"]
         # Guards lazy-init of `_upload_sessions`. Per-file upload threads
-        # (issue #269: MAX_CONCURRENT_UPLOADS=4) can race on the first
-        # save_* call when the manager hasn't been instantiated yet.
+        # (issue #269 / #13: adaptive fan-out, capped at 4) can race on
+        # the first save_* call when the manager hasn't been instantiated yet.
         # The manager itself is already thread-safe internally.
         self._upload_sessions_lock = threading.Lock()
 

@@ -240,9 +240,9 @@ def ingest_from_source(
         # reconstruct a working diffusers pipeline regardless of which dtype
         # was requested.
         #
-        # Issue #269: fan out across MAX_CONCURRENT_UPLOADS file uploads
-        # so the worker pipelines disk read + hash + multipart PUT across
-        # files instead of waiting for each to drain.
+        # Issue #269/#13: fan out across the adaptive file-level upload
+        # pool so the worker pipelines disk read + hash + multipart PUT
+        # across files instead of waiting for each to drain.
         from gen_worker.request_context._concurrent_upload import parallel_map_uploads
 
         def _upload_non_weight(row: dict[str, object]) -> tuple[dict[str, object], object]:
@@ -459,8 +459,8 @@ def ingest_from_source(
             item["_local_path"] = local_path
             usable_items.append(item)
 
-        # Issue #269: parallelize per-file upload across
-        # MAX_CONCURRENT_UPLOADS. Each future owns one file
+        # Issue #269/#13: parallelize per-file upload across the
+        # adaptive file pool. Each future owns one file
         # hash→PUT→complete cycle; results returned in input order.
         from gen_worker.request_context._concurrent_upload import parallel_map_uploads
 
