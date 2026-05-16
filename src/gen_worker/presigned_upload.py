@@ -324,14 +324,33 @@ def _upload_parts_to_s3(
             # Re-open the bounded reader on every attempt so a retry
             # after a partial-PUT failure starts from the part's true
             # offset rather than wherever the prior generator left off.
+            #
+            # Use a fresh `requests.Session()` per attempt and immediately
+            # close it. The module-global session that `requests.put()`
+            # uses by default keeps a TLS connection pool alive; under
+            # concurrent multipart uploads to R2 (16 parallel parts × 4
+            # parallel files = 64 in-flight streams) that pool will hand
+            # out a connection R2 has already half-closed, and the next
+            # send aborts with `SSLV3_ALERT_BAD_RECORD_MAC` — a TLS-state-
+            # corruption symptom that no number of retries can recover
+            # from while the same pooled connection is in play. A scoped
+            # Session forces a fresh TCP+TLS handshake on each attempt,
+            # so a retry actually re-tries instead of replaying the same
+            # broken socket. Also disable urllib3's internal retry adapter
+            # (max_retries=0) so the outer retry_attempts loop is the
+            # only retry surface.
             try:
                 with _BoundedFileReader(file_path, offset, length) as body:
-                    resp = requests.put(
-                        presigned_url,
-                        data=body,
-                        headers={"Content-Length": str(length)},
-                        timeout=_UPLOAD_TIMEOUT_S,
-                    )
+                    with requests.Session() as session:
+                        adapter = requests.adapters.HTTPAdapter(max_retries=0)
+                        session.mount("https://", adapter)
+                        session.mount("http://", adapter)
+                        resp = session.put(
+                            presigned_url,
+                            data=body,
+                            headers={"Content-Length": str(length), "Connection": "close"},
+                            timeout=_UPLOAD_TIMEOUT_S,
+                        )
                 if resp.status_code < 200 or resp.status_code >= 300:
                     last_exc = RuntimeError(f"S3 part upload failed ({resp.status_code}): {resp.text[:200]}")
                 else:
