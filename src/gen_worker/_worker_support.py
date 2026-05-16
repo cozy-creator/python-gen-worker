@@ -276,6 +276,114 @@ def _parse_manifest_model_mapping(mapping: Dict[str, Any]) -> tuple[Dict[str, st
     return ids, specs
 
 
+def _binding_canonical_ref(entry: Dict[str, Any]) -> str:
+    """Build the canonical bare ref string for a binding entry from
+    endpoint.lock (post-issue #9 manifest shape).
+
+    Tensorhub refs render bare; HF / civitai refs also render bare since the
+    runtime wire format keys by the bare ref string. Provider is the side
+    channel — see ``build_provider_index_from_manifest``.
+
+    Entries are ``{provider, ref, flavor?, tag?, ...}``. Missing/empty
+    tag → "latest" (tensorhub default); HF refs ignore tag entirely.
+    """
+    ref = str(entry.get("ref") or "").strip()
+    if not ref:
+        return ""
+    provider = str(entry.get("provider") or "").strip() or "tensorhub"
+    flavor = str(entry.get("flavor") or "").strip()
+    tag = str(entry.get("tag") or "").strip()
+
+    if provider == "tensorhub":
+        # Match TensorhubRef.canonical() shape: owner/repo:tag[#flavor].
+        if "@" in ref or ":" in ref:
+            # Ref already encodes tag/digest — don't double-stamp.
+            out = ref
+        else:
+            out = f"{ref}:{tag or 'latest'}"
+        if flavor and "#" not in out:
+            out = f"{out}#{flavor}"
+        return out
+
+    # HF / civitai keep the bare ref (optionally with flavor).
+    out = ref
+    if flavor and "#" not in out:
+        out = f"{out}#{flavor}"
+    return out
+
+
+def _collect_binding_entries(bindings: Any) -> list[Dict[str, Any]]:
+    """Flatten a function's ``bindings`` block into a list of leaf entries
+    that each carry ``{provider, ref, ...}``.
+
+    ``bindings`` is shaped ``{param_name: <entry>}`` where each entry is
+    either ``kind: fixed`` (one ref) or ``kind: dispatch`` (a ``table`` of
+    variant → entry). Other shapes are ignored defensively.
+    """
+    out: list[Dict[str, Any]] = []
+    if not isinstance(bindings, dict):
+        return out
+    for _param_name, entry in bindings.items():
+        if not isinstance(entry, dict):
+            continue
+        kind = str(entry.get("kind") or "").strip()
+        if kind == "dispatch":
+            table = entry.get("table")
+            if isinstance(table, dict):
+                for _variant, sub in table.items():
+                    if isinstance(sub, dict):
+                        out.append(sub)
+            continue
+        # kind == "fixed" or older shape that puts ref/provider at top level.
+        if entry.get("ref"):
+            out.append(entry)
+    return out
+
+
+def build_provider_index_from_manifest(manifest: Optional[Dict[str, Any]]) -> Dict[str, str]:
+    """Walk the loaded endpoint.lock manifest and return a
+    ``{bare_ref_string: provider}`` index.
+
+    Issue #17: the runtime wire format passes refs as bare strings without
+    a side-channel provider field. The downloader and other parse-time
+    sites consult this index (set as a contextvar by the worker before
+    invoking the model manager) to recover the provider for a bare ref.
+
+    Refs not in the manifest (e.g. invoker-supplied overrides) default to
+    ``"tensorhub"`` at the consuming site — match the wire-format contract.
+    """
+    index: Dict[str, str] = {}
+    if not isinstance(manifest, dict):
+        return index
+    functions = manifest.get("functions")
+    if not isinstance(functions, list):
+        return index
+    for fn in functions:
+        if not isinstance(fn, dict):
+            continue
+        bindings = fn.get("bindings")
+        for entry in _collect_binding_entries(bindings):
+            ref_key = _binding_canonical_ref(entry)
+            if not ref_key:
+                continue
+            provider = str(entry.get("provider") or "").strip() or "tensorhub"
+            # First-write-wins: tenant-declared providers shouldn't conflict
+            # across functions for the same ref, but if they do the first
+            # entry (deterministic by function discovery order) takes priority.
+            index.setdefault(ref_key, provider)
+            # Also index the bare ref without tag — runtime payloads may
+            # canonicalize "owner/repo:latest#bf16" or strip tags. The
+            # provider is the same regardless of tag-form variations.
+            ref_bare = str(entry.get("ref") or "").strip()
+            flavor = str(entry.get("flavor") or "").strip()
+            if ref_bare:
+                if flavor:
+                    alt = f"{ref_bare}#{flavor}"
+                    index.setdefault(alt, provider)
+                index.setdefault(ref_bare, provider)
+    return index
+
+
 class _AuthInterceptor(grpc.StreamStreamClientInterceptor):
     def __init__(self, token: str) -> None:
         self._token = token

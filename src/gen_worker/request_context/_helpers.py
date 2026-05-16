@@ -20,6 +20,7 @@ import urllib.request
 from typing import Any, Dict, List, Optional
 
 from ..api.errors import OutputTooLargeError
+from ..models.ref_downloader import lookup_provider_for_ref
 from ..models.refs import parse_model_ref
 
 logger = logging.getLogger(__name__)
@@ -362,12 +363,18 @@ def _canonicalize_model_ref_string(raw: str) -> str:
     Best-effort normalization of Cozy/HF model ref strings for allowlisting and caching identity.
 
     If the string doesn't parse as a phase-1 model ref, return it unchanged.
+
+    Issue #17: consult the per-worker provider index (set as a contextvar
+    by the worker before invoking the model manager) so HF / civitai refs
+    are decoded with the correct provider. Refs not in the index default
+    to ``"tensorhub"`` — matching the wire-format contract.
     """
     s = (raw or "").strip()
     if not s:
         return s
     try:
-        parsed = parse_model_ref(s)
+        provider = lookup_provider_for_ref(s)
+        parsed = parse_model_ref(s, provider=provider)
         if parsed.provider == "tensorhub" and parsed.tensorhub is not None:
             return parsed.tensorhub.canonical()
         if parsed.provider == "hf" and parsed.hf is not None:

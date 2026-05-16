@@ -75,6 +75,13 @@ def parse_model_ref(raw: str, *, provider: str = "tensorhub") -> ParsedModelRef:
 
     if provider == "hf":
         repo = s
+        # Issue #17: runtime wire format carries flavor in the ref string
+        # (e.g. "owner/repo#bf16") to identify which variant of an HF
+        # binding the orchestrator is referring to. The HF Hub itself has
+        # no notion of flavor — strip the `#flavor` tail before parsing
+        # so `huggingface_hub.snapshot_download` sees a valid repo_id.
+        if "#" in repo:
+            repo = repo.split("#", 1)[0].strip()
         revision = None
         if "@" in repo:
             repo, revision = repo.split("@", 1)

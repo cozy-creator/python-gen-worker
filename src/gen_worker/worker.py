@@ -67,6 +67,7 @@ from ._worker_support import (
     _extract_worker_capability_token,
     _parse_manifest_model_mapping,
     _workspace_scope_id,
+    build_provider_index_from_manifest,
 )
 from .request_context import (
     RequestContext,
@@ -111,7 +112,12 @@ from .capability import HardwareUnmetError
 
 from .models.interface import ModelManagementInterface
 from .models.downloader import ModelDownloader
-from .models.ref_downloader import ModelRefDownloader
+from .models.ref_downloader import (
+    ModelRefDownloader,
+    lookup_provider_for_ref,
+    reset_provider_by_ref,
+    set_provider_by_ref,
+)
 from .models.refs import parse_model_ref
 from .api.types import Asset, Tensors
 from .models.cache import ModelCache
@@ -529,6 +535,14 @@ class Worker:
         # Orchestrator-resolved manifests received in EndpointConfig (startup prefetch baseline).
         # Keys are canonical bare tensorhub refs (e.g. "owner/repo@sha256:<digest>").
         self._resolved_repos_by_id_baseline: Dict[str, Any] = {}
+        # Issue #17: provider index built from endpoint.lock at boot. Keys are
+        # bare ref strings (matching what the orchestrator's wire format
+        # sends), values are provider tags ("tensorhub" | "hf" | "civitai").
+        # Consulted by ModelRefDownloader.download and the other
+        # parse_model_ref call sites to recover provider for refs whose
+        # wire-format string is a bare owner/repo with no provider prefix.
+        # Refs absent from the index default to provider="tensorhub".
+        self._provider_by_ref_index: Dict[str, str] = {}
         self._prefetch_lock = threading.Lock()
         # Orchestrator-reported availability state received with each
         # EndpointConfig. See  for the
@@ -560,6 +574,26 @@ class Worker:
 
         # Initialize model config from the manifest
         if manifest and isinstance(manifest, dict):
+            # Issue #17: build the {bare_ref -> provider} index from the
+            # baked endpoint.lock manifest. The downloader and other
+            # parse_model_ref call sites consult this to route HF / civitai
+            # bindings through the right code path; refs absent from the
+            # index default to "tensorhub" at the consuming site.
+            try:
+                self._provider_by_ref_index = build_provider_index_from_manifest(manifest)
+                if self._provider_by_ref_index:
+                    logger.info(
+                        "Built provider index from manifest entries=%d providers=%s",
+                        len(self._provider_by_ref_index),
+                        sorted(set(self._provider_by_ref_index.values())),
+                    )
+            except Exception as e:
+                # Defensive — a malformed manifest entry must not block boot.
+                # Missing entries fall through to the default tensorhub
+                # provider so existing tensorhub builds keep working.
+                logger.warning("Failed to build provider index from manifest: %s", e)
+                self._provider_by_ref_index = {}
+
             global_models = manifest.get("models")
             if isinstance(global_models, dict):
                 out_fixed, out_fixed_spec = _parse_manifest_model_mapping(global_models)
@@ -4495,7 +4529,12 @@ class Worker:
             # entry. Tensorhub is the default provider — the alias keys are
             # bare (no prefix).
             try:
-                parsed = parse_model_ref(canon)
+                # Issue #17: lookup the provider for this ref from the
+                # endpoint.lock index. Refs absent from the index default to
+                # "tensorhub" (matching the wire-format contract). HF /
+                # civitai refs short-circuit the tag-alias logic below.
+                prov = lookup_provider_for_ref(canon)
+                parsed = parse_model_ref(canon, provider=prov)
                 if parsed.provider == "tensorhub" and parsed.tensorhub is not None and parsed.tensorhub.digest:
                     tag_canon = f"{parsed.tensorhub.owner}/{parsed.tensorhub.repo}:{parsed.tensorhub.tag}"
                     if parsed.tensorhub.flavor:
@@ -4690,9 +4729,11 @@ class Worker:
                         pass
 
                     tok = set_resolved_repos_by_id(self._resolved_repos_by_id_baseline or None)
+                    prov_tok = set_provider_by_ref(self._provider_by_ref_index or None)
                     try:
                         local_path = self._downloader.download(canon, str(cache_dir)) if self._downloader else ""
                     finally:
+                        reset_provider_by_ref(prov_tok)
                         reset_resolved_repos_by_id(tok)
 
                     lp = Path(local_path) if local_path else None
@@ -4780,10 +4821,38 @@ class Worker:
                     return prefs
         return prefs
 
+    def _provider_for_ref(self, ref: str, *, default: str = "tensorhub") -> str:
+        """Issue #17: look up the provider for a bare ref from the
+        endpoint.lock-derived provider index. Refs not in the index default
+        to ``"tensorhub"`` — matching the wire-format contract (tensorhub
+        is the implicit provider when none is specified on the wire).
+
+        Safe to call from any thread, with or without the
+        ``_provider_by_ref`` contextvar set: reads the instance dict
+        directly so it works both during startup prefetch (contextvar not
+        yet set) and during dispatch (contextvar set on the worker thread).
+        """
+        if not ref:
+            return default
+        index = getattr(self, "_provider_by_ref_index", None) or {}
+        if not isinstance(index, dict) or not index:
+            return default
+        if ref in index:
+            return index[ref]
+        stripped = ref.strip()
+        if stripped != ref and stripped in index:
+            return index[stripped]
+        return default
+
     def _try_find_existing_cozy_snapshot_dir(self, canonical_model_id: str, cache_dir: Path) -> Optional[Path]:
         # Only applies to cozy:@sha256 refs where the snapshot digest is known.
+        # Issue #17: consult the provider index so HF refs short-circuit to
+        # None instead of being mis-parsed as tensorhub. Reads the instance
+        # index directly — this method may be called from threads where the
+        # contextvar isn't set, so we can't rely on lookup_provider_for_ref.
+        prov = self._provider_for_ref(canonical_model_id)
         try:
-            parsed = parse_model_ref(canonical_model_id)
+            parsed = parse_model_ref(canonical_model_id, provider=prov)
         except Exception:
             return None
         if parsed.provider != "tensorhub" or parsed.tensorhub is None:
@@ -4818,6 +4887,7 @@ class Worker:
 
             from .models.ref_downloader import reset_resolved_repos_by_id, set_resolved_repos_by_id
             tok = set_resolved_repos_by_id(self._resolved_repos_by_id_baseline or None)
+            prov_tok = set_provider_by_ref(self._provider_by_ref_index or None)
             try:
                 loop.run_until_complete(
                     self._model_manager.process_supported_models_config(
@@ -4826,6 +4896,7 @@ class Worker:
                     )
                 )
             finally:
+                reset_provider_by_ref(prov_tok)
                 reset_resolved_repos_by_id(tok)
             logger.info("Model configuration and downloads (if any) processed.")
         except Exception as e:
@@ -4872,10 +4943,12 @@ class Worker:
                 baseline = getattr(self, "_resolved_repos_by_id_baseline", None) or {}
                 merged = {**baseline, **per_cmd} if per_cmd else dict(baseline)
                 tok = set_resolved_repos_by_id(merged or None)
+                prov_tok = set_provider_by_ref(self._provider_by_ref_index or None)
                 try:
                     # load_model_into_vram is async
                     success = asyncio.run(self._model_manager.load_model_into_vram(model_id))
                 finally:
+                    reset_provider_by_ref(prov_tok)
                     reset_resolved_repos_by_id(tok)
                 if success: logger.info(f"Model '{model_id}' loaded to VRAM by Model Memory Manager.")
                 else: error_msg = f"MMM.load_model_into_vram failed for '{model_id}'."; logger.error(error_msg)
@@ -5031,9 +5104,11 @@ class Worker:
                     except Exception:
                         pass
                 tok = set_resolved_repos_by_id(getattr(self, "_resolved_repos_by_id_baseline", None) or None)
+                prov_tok = set_provider_by_ref(getattr(self, "_provider_by_ref_index", None) or None)
                 try:
                     local_path = self._downloader.download(canonical_ref, str(cache_dir))
                 finally:
+                    reset_provider_by_ref(prov_tok)
                     reset_resolved_repos_by_id(tok)
                 lp = Path(local_path) if local_path else None
                 if lp is None or not lp.exists():
@@ -6687,6 +6762,10 @@ class Worker:
         baseline = getattr(self, "_resolved_repos_by_id_baseline", None) or None
         resolved_map = getattr(ctx, "resolved_repos_by_id", None) or baseline
         resolved_tok = set_resolved_repos_by_id(resolved_map)
+        # Issue #17: provide the provider index alongside the resolved-repos
+        # map so any downloader.download() that fires during the tenant body
+        # routes HF/civitai refs through the right branch.
+        provider_tok = set_provider_by_ref(getattr(self, "_provider_by_ref_index", None) or None)
 
         # Stage 5 semaphore: same gating as SerialWorker dispatch.
         # ConversionWorker/Training spec wraps the tenant call below.
@@ -6859,6 +6938,10 @@ class Worker:
             )
             success = False
         finally:
+            try:
+                reset_provider_by_ref(provider_tok)
+            except Exception:
+                pass
             try:
                 reset_resolved_repos_by_id(resolved_tok)
             except Exception:
@@ -7100,6 +7183,10 @@ class Worker:
         baseline = getattr(self, "_resolved_repos_by_id_baseline", None) or None
         resolved_map = getattr(ctx, "resolved_repos_by_id", None) or baseline
         resolved_tok = set_resolved_repos_by_id(resolved_map)
+        # Issue #17: pair the provider index with the resolved-repos map so
+        # ModelRefDownloader.download routes HF/civitai bindings correctly
+        # when the tenant body triggers a model fetch.
+        provider_tok = set_provider_by_ref(getattr(self, "_provider_by_ref_index", None) or None)
 
         models_in_use: set[str] = set()
         inference_watchdog: Optional[threading.Timer] = None
@@ -7595,6 +7682,10 @@ class Worker:
         finally:
             if inference_watchdog is not None:
                 inference_watchdog.cancel()
+            try:
+                reset_provider_by_ref(provider_tok)
+            except Exception:
+                pass
             reset_resolved_repos_by_id(resolved_tok)
 
             for mid in models_in_use:
@@ -7761,6 +7852,10 @@ class Worker:
         baseline = getattr(self, "_resolved_repos_by_id_baseline", None) or None
         resolved_map = getattr(ctx, "resolved_repos_by_id", None) or baseline
         resolved_tok = set_resolved_repos_by_id(resolved_map)
+        # Issue #17: pair the provider index alongside the resolved-repos
+        # set so model downloads inside the tenant body route to the
+        # correct provider branch (HF / civitai / tensorhub).
+        provider_tok = set_provider_by_ref(getattr(self, "_provider_by_ref_index", None) or None)
 
         try:
             if ctx.is_canceled():
@@ -7865,6 +7960,10 @@ class Worker:
             success = False
 
         finally:
+            try:
+                reset_provider_by_ref(provider_tok)
+            except Exception:
+                pass
             try:
                 reset_resolved_repos_by_id(resolved_tok)
             except Exception:
@@ -8095,7 +8194,10 @@ class Worker:
             if pipe is not None:
                 if rm is not None and model_id:
                     try:
-                        parsed = parse_model_ref(str(model_id))
+                        # Issue #17: route through the provider index so HF refs
+                        # don't get mis-parsed as tensorhub here.
+                        prov = self._provider_for_ref(str(model_id))
+                        parsed = parse_model_ref(str(model_id), provider=prov)
                         canon = parsed.tensorhub.canonical() if parsed.provider == "tensorhub" and parsed.tensorhub is not None else str(model_id)
                         model_metrics = rm.models.get(canon)
                         rm.set_initial_model_state(
@@ -8149,7 +8251,12 @@ class Worker:
                     local = None
                     canon = str(model_id)
                     try:
-                        parsed = parse_model_ref(str(model_id))
+                        # Issue #17: provider-aware decoding so HF refs reach
+                        # the hf-branch caching path with the right canonical
+                        # key (the bare repo_id rather than a tensorhub
+                        # tag-derived alias).
+                        prov = self._provider_for_ref(str(model_id))
+                        parsed = parse_model_ref(str(model_id), provider=prov)
                         canon = parsed.tensorhub.canonical() if parsed.provider == "tensorhub" and parsed.tensorhub is not None else str(model_id)
                     except Exception:
                         canon = str(model_id)
@@ -8436,7 +8543,10 @@ class Worker:
                         if p.exists():
                             model_source = p.as_posix()
                         else:
-                            parsed = parse_model_ref(model_source)
+                            # Issue #17: provider-aware parse so the right
+                            # branch fires for HF / civitai bindings.
+                            prov = self._provider_for_ref(model_source)
+                            parsed = parse_model_ref(model_source, provider=prov)
                             if self._downloader is not None and parsed.provider in ("tensorhub", "hf"):
                                 model_source = self._downloader.download(model_source, str(tensorhub_cas_dir()))
                             elif parsed.provider == "hf" and parsed.hf is not None:

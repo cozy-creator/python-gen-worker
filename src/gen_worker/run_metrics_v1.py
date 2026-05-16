@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
 
 from .models.cache_paths import tensorhub_cas_dir
+from .models.ref_downloader import lookup_provider_for_ref
 from .models.refs import parse_model_ref
 
 
@@ -370,7 +371,12 @@ def best_effort_init_model_metrics(
         snap: Optional[str] = None
         cache_state: Optional[str] = None
         try:
-            parsed = parse_model_ref(mid)
+            # Issue #17: consult the provider index so HF refs don't get
+            # mis-parsed as tensorhub (which would still succeed for bare
+            # owner/repo strings but produce a tensorhub canonical that
+            # never matches anything resolved-side).
+            prov = lookup_provider_for_ref(mid)
+            parsed = parse_model_ref(mid, provider=prov)
             if parsed.provider == "tensorhub" and parsed.tensorhub is not None:
                 canon = parsed.tensorhub.canonical()
         except Exception:

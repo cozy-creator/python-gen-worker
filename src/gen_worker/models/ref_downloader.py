@@ -25,6 +25,48 @@ def reset_resolved_repos_by_id(token: contextvars.Token) -> None:
     _resolved_repos_by_id.reset(token)
 
 
+# Per-worker provider index, built from endpoint.lock at boot (issue #17).
+# Shape: {bare_ref_string: provider} where provider is "tensorhub" | "hf" | "civitai".
+# The downloader and other parse-time sites consult this to recover the
+# provider for a bare ref, since the runtime wire format (EndpointConfig,
+# JobExecutionRequest, etc.) currently carries refs as bare strings without
+# a side-channel provider field. Refs not in the index default to
+# ``provider="tensorhub"`` — same as the wire-format contract.
+_provider_by_ref: contextvars.ContextVar[Optional[Mapping[str, str]]] = contextvars.ContextVar(
+    "provider_by_ref", default=None
+)
+
+
+def set_provider_by_ref(mapping: Optional[Mapping[str, str]]) -> contextvars.Token:
+    return _provider_by_ref.set(mapping)
+
+
+def reset_provider_by_ref(token: contextvars.Token) -> None:
+    _provider_by_ref.reset(token)
+
+
+def lookup_provider_for_ref(ref: str, *, default: str = "tensorhub") -> str:
+    """Return the provider tag for ``ref`` from the active context, or
+    ``default`` when no index is set or ``ref`` isn't in it.
+
+    The index uses the bare ref string (whatever the manifest serialized)
+    as the key. We try the raw value first, then with surrounding
+    whitespace stripped — endpoint.lock entries are emitted bare but
+    runtime payloads may carry trailing whitespace.
+    """
+    mapping = _provider_by_ref.get()
+    if not mapping:
+        return default
+    if not ref:
+        return default
+    if ref in mapping:
+        return mapping[ref]
+    stripped = ref.strip()
+    if stripped != ref and stripped in mapping:
+        return mapping[stripped]
+    return default
+
+
 class ModelRefDownloader(ModelDownloader):
     """Composite downloader for typed model refs.
 
@@ -76,7 +118,12 @@ class ModelRefDownloader(ModelDownloader):
         raise ValueError("invalid parsed model ref")
 
     def download(self, model_ref: str, dest_dir: str, filename: Optional[str] = None) -> str:
-        parsed = parse_model_ref(model_ref)
+        # Issue #17: bare ref strings on the wire don't carry their provider,
+        # so consult the per-worker provider index built from endpoint.lock.
+        # Missing entries (e.g. invoker-supplied overrides not in the build-
+        # time manifest) default to "tensorhub", matching the wire contract.
+        provider = lookup_provider_for_ref(model_ref)
+        parsed = parse_model_ref(model_ref, provider=provider)
         base = Path(dest_dir)
         # We ignore filename; snapshots/refs already define structure.
         try:
