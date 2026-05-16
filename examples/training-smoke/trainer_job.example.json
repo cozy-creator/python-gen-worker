@@ -1,15 +1,78 @@
 {
   "trainer_api_version": "v1",
-  "request_id": "training-smoke-001",
-  "trainer": "main:TrainingSmokeTrainer",
+  "request_id": "text-finetune-smoke-001",
+  "trainer": "main:TextClassificationFineTuner",
   "owner": "demo-org",
-  "release_ref": "demo-org/demo-repo:latest",
-  "max_steps": 5,
+  "release_ref": "demo-org/text-classifier:latest",
+  "max_steps": 6,
   "metric_every": 1,
-  "checkpoint_every": 2,
-  "sample_every": 2,
+  "checkpoint_every": 3,
+  "sample_every": 3,
+  "sample_seed": 1234,
+  "sample_prompts": [
+    {
+      "name": "positive-example",
+      "prompt": "shipping was fast and the product works well"
+    },
+    {
+      "name": "negative-example",
+      "prompt": "the app crashed and support did not respond"
+    }
+  ],
   "hyperparams": {
-    "learning_rate": 0.0001
+    "model_name_or_path": "hf-internal-testing/tiny-random-BertForSequenceClassification",
+    "num_labels": 2,
+    "max_length": 64,
+    "learning_rate": 0.001,
+    "weight_decay": 0.01,
+    "warmup_steps": 1,
+    "max_grad_norm": 1.0,
+    "seed": 42,
+    "device": "auto",
+    "dtype": "fp32"
   },
-  "mock_batches": [1, 2, 3, 4, 5]
+  "mock_batches": [
+    {
+      "text": [
+        "the generated image is sharp and matches the prompt",
+        "the output is noisy and unusable"
+      ],
+      "label": [1, 0]
+    },
+    {
+      "text": [
+        "the model followed the instruction accurately",
+        "the response ignored the request"
+      ],
+      "label": [1, 0]
+    },
+    {
+      "text": [
+        "training improved the classifier",
+        "the checkpoint failed to load"
+      ],
+      "label": [1, 0]
+    },
+    {
+      "text": [
+        "the sample looks clean",
+        "the result has severe artifacts"
+      ],
+      "label": [1, 0]
+    },
+    {
+      "text": [
+        "latency stayed within budget",
+        "quality regressed after the change"
+      ],
+      "label": [1, 0]
+    },
+    {
+      "text": [
+        "the endpoint is ready to publish",
+        "the endpoint failed validation"
+      ],
+      "label": [1, 0]
+    }
+  ]
 }

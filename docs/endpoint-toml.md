@@ -233,6 +233,94 @@ that satisfies the per-profile placement fields.
 
 ---
 
+## Recommended Dockerfile pattern (multi-stage)
+
+Tensorhub does not require a specific Dockerfile shape — the four build modes
+above cover everything from no-Dockerfile to fully-managed bring-your-own. But
+for endpoints that DO ship their own Dockerfile, the following multi-stage
+pattern produces the smallest, most cache-friendly runtime image. As of
+2026-05-16 (tensorhub#356), every cozy-creator endpoint in
+`inference-endpoints/` follows this shape.
+
+```dockerfile
+# syntax=docker/dockerfile:1
+ARG BASE_IMAGE=vllm/vllm-openai:v0.21.0-x86_64-cu129-ubuntu2404
+
+# ---- Stage 1: cozy_build — has uv + git for installing Python deps ----
+FROM ${BASE_IMAGE} AS cozy_build
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+WORKDIR /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends git libsndfile1 \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Copy lock metadata before source code so dep layers stay separate from app edits.
+COPY pyproject.toml uv.lock /app/
+
+# Inline UV_* envs so they don't persist in the runtime image.
+RUN UV_NO_CACHE=1 UV_LINK_MODE=copy uv export \
+        --no-dev --no-hashes --no-sources --no-emit-project --no-emit-local \
+        --no-emit-package torch --no-emit-package torchvision \
+        --no-emit-package torchaudio --no-emit-package vllm \
+        -o /tmp/requirements.all.txt \
+    && grep -Ev '^(torch==|torchvision==|torchaudio==|vllm==|triton==|nvidia-|cuda-)' \
+        /tmp/requirements.all.txt > /tmp/requirements.txt \
+    && UV_NO_CACHE=1 UV_LINK_MODE=copy uv pip install \
+        --system --break-system-packages --no-deps -r /tmp/requirements.txt
+
+# Copy app code late; install + bake discovery in one RUN to save a layer.
+COPY . /app
+RUN UV_NO_CACHE=1 UV_LINK_MODE=copy uv pip install \
+        --system --break-system-packages --no-deps --no-sources /app \
+    && mkdir -p /app/.tensorhub \
+    && python3 -m gen_worker.discovery > /app/.tensorhub/endpoint.lock
+
+# ---- Stage 2: cozy_final — runtime image, no uv / no git / no apt cache ----
+FROM ${BASE_IMAGE} AS cozy_final
+WORKDIR /app
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libsndfile1 \
+    && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+COPY --from=cozy_build /usr/local/lib/python3.12/dist-packages \
+                       /usr/local/lib/python3.12/dist-packages
+COPY --from=cozy_build /app /app
+
+# Single multi-key ENV instead of N separate ENV lines (each ENV emits one layer).
+ENV HOME=/root \
+    XDG_CACHE_HOME=/root/.cache \
+    HF_HOME=/root/.cache/huggingface \
+    WORKER_MODEL_DOWNLOAD_MAX_RETRIES=120 \
+    WORKER_MODEL_DOWNLOAD_RETRY_MAX_TIME_S=7200 \
+    WORKER_MODEL_DOWNLOAD_CONCURRENCY=4
+
+ENTRYPOINT ["python3", "-m", "gen_worker.entrypoint"]
+```
+
+Key wins over a single-stage build:
+
+- **`uv` binary (~25 MB) and `git` (~30 MB)** stay in stage 1 only; the runtime
+  image has neither, saving ~50 MB per endpoint.
+- **`apt-get` lists removed** in every apt block (`rm -rf /var/lib/apt/lists/*`)
+  saves another ~30-40 MB of apt cache from the runtime layer.
+- **Single consolidated `ENV`** instead of 8-12 separate lines saves the same
+  number of zero-byte manifest entries (cosmetic, but real for layer audits).
+- **Inline build-time-only envs** (`UV_NO_CACHE=1 UV_LINK_MODE=copy` on the
+  `RUN`) keeps them out of the runtime image's environment.
+
+Per-endpoint variations:
+
+- **Runtime apt deps in stage 2**: only what's `dlopen`'d or `exec`'d at run
+  time (`libsndfile1` for `soundfile`, `ffmpeg` for video). Anything you need
+  only at install time (`git`, `build-essential`) stays in stage 1.
+- **Dep filter on `--no-emit-package`**: include whatever the base image
+  already ships so you don't re-install it on top.
+- **`uv pip install --system`** writes to `/usr/local/lib/python3.12/dist-packages`
+  on Debian/Ubuntu Python 3.12 bases. Verify the actual path on your base
+  before adjusting the `COPY --from=cozy_build` source path.
+
+---
+
 ## What lives where
 
 Model state, per-function hardware envelopes, and cost-shape declarations live

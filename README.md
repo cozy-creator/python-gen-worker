@@ -13,7 +13,8 @@ Three endpoint kinds:
 ## Install
 
 ```bash
-pip install gen-worker[torch]   # for inference with PyTorch
+pip install gen-worker[torch]   # for PyTorch inference/training
+pip install gen-worker[vision]  # add torchvision for image/video models
 pip install gen-worker          # plain Python (e.g. API-proxy endpoints)
 ```
 

@@ -48,9 +48,11 @@ gen-worker = "gen_worker.cli:main"
 [project.optional-dependencies]
 torch = [
     "torch>=2.11.0",
-    "torchvision>=0.26.0",
     "safetensors>=0.7.0",
     "flashpack>=0.2.1",
+]
+vision = [
+    "torchvision>=0.26.0",
 ]
 trainer = [
     "pyarrow>=17.0.0",

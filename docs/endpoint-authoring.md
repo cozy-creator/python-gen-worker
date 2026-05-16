@@ -725,7 +725,7 @@ class MyTrainer:
 ```
 
 Point to the class via the job spec's `"trainer": "my_pkg.train:MyTrainer"`
-field, or `TRAINER_PLUGIN=my_pkg.train:MyTrainer`.
+field.
 
 **Ownership split:**
 
@@ -735,6 +735,18 @@ artifact uploads, terminal reporting.
 
 Your trainer handles: dataset shaping, batch preparation, forward/backward/
 update math, prompt/mask/curriculum logic, state serialization.
+
+Use this hook contract when your endpoint owns the native PyTorch loop. That
+should feel like normal PyTorch or Hugging Face code: tokenize/collate a batch,
+call `model(**batch)`, backpropagate `loss`, then step the optimizer and
+scheduler.
+
+For external engines such as Hugging Face `Trainer`, Accelerate scripts, or
+Ostris AI Toolkit, keep the endpoint as a thin adapter around that engine:
+materialize TensorHub inputs, write the engine config or dataset layout, run the
+engine, and expose the produced checkpoints/samples to the runtime. Do not
+duplicate the engine's inner loop inside `train_step` unless TensorHub needs
+per-step control.
 
 **StepResult:**
 
