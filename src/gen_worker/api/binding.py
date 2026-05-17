@@ -27,6 +27,7 @@ the function's param annotation.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, replace
 from typing import Any, ClassVar, Mapping, Union
 
@@ -156,14 +157,27 @@ class HFRepo(Repo):
     """HuggingFace-backed binding.
 
     The ref is the canonical HuggingFace repo id (``"owner/repo"``). Pin to
-    a specific git revision with :meth:`revision`::
+    a specific git revision with :meth:`revision`. Select load-time torch
+    precision with :meth:`dtype`::
 
         qwen = HFRepo("Qwen/Qwen2.5-1.5B-Instruct")
-        qwen_pinned = qwen.revision("a1b2c3d")  # branch, tag, or commit sha
+        qwen_pinned = qwen.revision("a1b2c3d")            # branch / tag / sha
+        qwen_bf16 = qwen.dtype("bf16")                    # torch_dtype at load
+
+    HuggingFace does NOT have a "flavor" ref selector — flavor is a
+    tensorhub-side concept (the ``#flavor`` suffix in
+    ``Repo("owner/repo:tag#flavor")``). Calling :meth:`flavor` on an HFRepo
+    emits a :class:`DeprecationWarning` and maps the value to
+    :meth:`dtype` for one release; the shim drops in 0.8.x.
     """
 
     PROVIDER: ClassVar[str] = "hf"
     _revision: str = ""
+    # torch dtype for `from_pretrained(torch_dtype=...)`. Empty string means
+    # "let the loader pick a default" (today: `torch.bfloat16`). The wire
+    # format carries this alongside `allow_override` / `pipeline_classes`
+    # on the binding row; it is NOT encoded into the ref string.
+    _dtype: str = ""
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -178,6 +192,38 @@ class HFRepo(Repo):
         if not rev:
             raise ValueError("HFRepo.revision() requires a non-empty revision")
         return replace(self, _revision=rev)
+
+    def dtype(self, name: str) -> "HFRepo":
+        """Return a new HFRepo whose weights load at the given torch dtype.
+
+        Accepts diffusers / transformers-friendly names: ``"bf16"`` /
+        ``"bfloat16"``, ``"fp16"`` / ``"float16"``, ``"fp32"`` /
+        ``"float32"``. The value flows through
+        :class:`~gen_worker.pipeline.loader.PipelineConfig.dtype` into
+        ``from_pretrained(torch_dtype=...)``.
+        """
+        name = str(name or "").strip()
+        if not name:
+            raise ValueError("HFRepo.dtype() requires a non-empty dtype name")
+        return replace(self, _dtype=name)
+
+    def flavor(self, name: str) -> "HFRepo":
+        """**Deprecated.** Maps to :meth:`dtype` for one release.
+
+        ``flavor`` is a tensorhub-side concept (the ``#flavor`` suffix in
+        ``Repo("owner/repo:tag#flavor")``). HuggingFace has no analogous
+        ref selector — what you actually want on an HFRepo is the
+        load-time torch precision, which is :meth:`dtype`.
+
+        Drops in 0.8.x.
+        """
+        warnings.warn(
+            "HFRepo.flavor() is deprecated; use .dtype(...) instead — flavor "
+            "is tensorhub-only. Drops in 0.8.x.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.dtype(name)
 
 
 @dataclass(frozen=True)

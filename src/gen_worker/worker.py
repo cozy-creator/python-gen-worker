@@ -200,6 +200,11 @@ def _binding_to_wire(param_name: str, param_type: Any, binding: Binding) -> Dict
         # providers MUST emit the field explicitly.
         if binding.provider != "tensorhub":
             out["provider"] = binding.provider
+        # Issue #20 fix 2: HF bindings carry a `dtype` field for load-time
+        # torch_dtype selection (replaces the old #flavor-suffix hack).
+        # Only emitted for HFRepo and only when non-empty.
+        if isinstance(binding, HFRepo) and getattr(binding, "_dtype", ""):
+            out["dtype"] = binding._dtype
         return {"param": param_name, "type": _type_qualname(param_type), "binding": out}
     if isinstance(binding, Dispatch):
         table: Dict[str, Dict[str, Any]] = {}
@@ -211,6 +216,10 @@ def _binding_to_wire(param_name: str, param_type: Any, binding: Binding) -> Dict
             }
             if repo.provider != "tensorhub":
                 entry["provider"] = repo.provider
+            # Issue #20 fix 2: dispatch tables can mix providers and the
+            # HF entries may carry a dtype.
+            if isinstance(repo, HFRepo) and getattr(repo, "_dtype", ""):
+                entry["dtype"] = repo._dtype
             table[k] = entry
         return {
             "param": param_name,
@@ -235,6 +244,12 @@ def _resolved_repo_id(ref: str, flavor: str = "", tag: str = "prod", provider: s
     colon, intentionally distinct from the legacy ``provider:`` single-colon
     wire prefix that no longer exists). ``cozy`` is the implicit default and
     is elided so existing cozy keys round-trip unchanged.
+
+    Issue #20 fix 2: ``flavor`` is a tensorhub-side concept (the ``#flavor``
+    suffix in ``Repo("owner/repo:tag#flavor")``). HuggingFace and Civitai
+    refs ignore it — their canonical model_id is the bare provider-prefixed
+    ref. The dtype (formerly leaked through ``HFRepo.flavor("bf16")``) now
+    rides separately on the binding row.
     """
     base = (ref or "").strip()
     if not base:
@@ -242,7 +257,8 @@ def _resolved_repo_id(ref: str, flavor: str = "", tag: str = "prod", provider: s
     out = base
     if tag and tag != "prod":
         out = f"{out}:{tag}"
-    if flavor:
+    # Flavor is tensorhub-only — HF / civitai canonical ids drop it.
+    if flavor and (not provider or provider == "tensorhub"):
         out = f"{out}#{flavor}"
     if provider and provider != "tensorhub":
         out = f"{provider}::{out}"
@@ -690,6 +706,31 @@ class Worker:
                                 canon = ref_key
                             per_fn.add(canon)
                             binding_refs.add(canon)
+                            # Issue #20 fix 2: register HF binding dtype with
+                            # the loader so from_pretrained(torch_dtype=...)
+                            # picks it up. The loader-internal model_id is
+                            # what `_resolved_repo_id` produces — `hf::ref`
+                            # for HF bindings (no #flavor). Compute the same
+                            # shape here so the key matches.
+                            entry_dtype = str(entry.get("dtype") or "").strip()
+                            if entry_dtype and provider == "hf":
+                                entry_tag = str(entry.get("tag") or "prod").strip() or "prod"
+                                load_key = _resolved_repo_id(
+                                    str(entry.get("ref") or "").strip(),
+                                    flavor="",
+                                    tag=entry_tag,
+                                    provider="hf",
+                                )
+                                try:
+                                    _loader = getattr(self._model_manager, "_loader", None)
+                                    if _loader is not None and load_key:
+                                        _loader._dtype_by_model_id[load_key] = entry_dtype
+                                except Exception:
+                                    logger.exception(
+                                        "Failed to register dtype %r for HF binding %s",
+                                        entry_dtype,
+                                        load_key,
+                                    )
                         if per_fn:
                             self._required_refs_by_function[fn_name] = per_fn
                     if binding_refs:

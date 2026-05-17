@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import msgspec
 
 from gen_worker import RequestContext
-from gen_worker.api.binding import Binding, Dispatch, Repo
+from gen_worker.api.binding import Binding, Dispatch, HFRepo, Repo
 
 from gen_worker.discovery.toml_manifest import (
     EndpointToml,
@@ -98,7 +98,7 @@ def _binding_to_manifest(binding: Binding, param_annotation: Any) -> Dict[str, A
             declared_classes = [annotation_class]
 
     if isinstance(binding, Repo):
-        return {
+        out: Dict[str, Any] = {
             "kind": "fixed",
             # `provider` distinguishes HFRepo / CivitaiRepo / Repo (tensorhub).
             # Without it the downstream catalog defaults to "tensorhub" and
@@ -113,6 +113,12 @@ def _binding_to_manifest(binding: Binding, param_annotation: Any) -> Dict[str, A
             "allow_override": bool(binding._allow_override),
             "pipeline_classes": declared_classes,
         }
+        # Issue #20 fix 2: HF bindings carry a `dtype` field (replaces the
+        # old #flavor-suffix that leaked into model_id and got dropped by
+        # the loader). Only emitted for HFRepo and only when non-empty.
+        if isinstance(binding, HFRepo) and getattr(binding, "_dtype", ""):
+            out["dtype"] = binding._dtype
+        return out
     if isinstance(binding, Dispatch):
         table: Dict[str, Dict[str, str]] = {}
         for k, repo in binding.table.items():
@@ -125,6 +131,9 @@ def _binding_to_manifest(binding: Binding, param_annotation: Any) -> Dict[str, A
             }
             if repo._flavor:
                 entry["flavor"] = repo._flavor
+            # Issue #20 fix 2: HF entries can carry dtype.
+            if isinstance(repo, HFRepo) and getattr(repo, "_dtype", ""):
+                entry["dtype"] = repo._dtype
             table[k] = entry
         return {
             "kind": "dispatch",

@@ -118,12 +118,27 @@ def test_constructor_rejects_unknown_kwargs() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_hfrepo_flavor_is_immutable() -> None:
+def test_hfrepo_flavor_is_immutable_and_deprecated() -> None:
+    """Issue #20 fix 2: ``HFRepo.flavor()`` is a deprecation shim that maps
+    to ``.dtype()`` for one release. Flavor is tensorhub-only; HF uses
+    dtype for load-time torch_dtype selection. Drops in 0.8.x.
+    """
+    import warnings
+
     r1 = HFRepo("Qwen/Q")
-    r2 = r1.flavor("nf4")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        r2 = r1.flavor("nf4")
+    assert any(
+        issubclass(w.category, DeprecationWarning) and "HFRepo.flavor()" in str(w.message)
+        for w in caught
+    ), f"expected DeprecationWarning, got {[(w.category, str(w.message)) for w in caught]}"
     assert r1 is not r2
+    # The shim sets _dtype, NOT _flavor — flavor is tensorhub-only.
+    assert r1._dtype == ""
+    assert r2._dtype == "nf4"
     assert r1._flavor == ""
-    assert r2._flavor == "nf4"
+    assert r2._flavor == ""
     # Provider survives the modifier.
     assert r2.provider == "hf"
     assert isinstance(r2, HFRepo)
@@ -252,7 +267,9 @@ def test_binding_to_wire_dispatch_mixed_providers() -> None:
         field="variant",
         table={
             "tensorhub": Repo("acme/r").flavor("nf4"),
-            "hf": HFRepo("Qwen/Q").flavor("bf16"),
+            # HFRepo no longer uses .flavor() (fix 2). Default HFRepo has no
+            # flavor; the dtype goes on the binding row separately via .dtype().
+            "hf": HFRepo("Qwen/Q").dtype("bf16"),
             "civitai": CivitaiRepo("123").flavor("fp16"),
         },
     )

@@ -622,6 +622,11 @@ class PipelineLoader:
         # (worker model-resolution path) before load(). Keys are the same
         # model_id strings passed to load_model_into_vram / load.
         self._quant_attrs_by_model_id: Dict[str, Dict[str, str]] = {}
+        # per-model_id torch dtype hint registered by HFRepo bindings
+        # (issue #20 fix 2). Replaces the old behavior where #flavor on
+        # the model_id was the only signal — which the loader stripped.
+        # Keys are model_id strings (same as load_model_into_vram).
+        self._dtype_by_model_id: Dict[str, str] = {}
 
         # Local NVMe cache for NFS optimization (disabled unless explicitly passed).
         self._local_cache: Optional[LocalModelCache] = None
@@ -1120,6 +1125,24 @@ class PipelineLoader:
         # and have every subsequent load() pick them up automatically.
         if config.quant_attributes is None and model_id in self._quant_attrs_by_model_id:
             config.quant_attributes = self._quant_attrs_by_model_id.get(model_id)
+
+        # Issue #20 fix 2: HF refs travel as `hf::owner/repo` (no #flavor)
+        # so any straggling `#flavor` from older callers / wire formats is
+        # noise — strip it defensively. Also fold the upstream-registered
+        # HF dtype (set by the worker during binding-walk) into config.dtype
+        # if the caller didn't supply one. This is the path that replaces
+        # the old leaky `HFRepo.flavor("bf16")` → `model_id#bf16` indirection.
+        if model_id.startswith("hf::"):
+            if "#" in model_id:
+                stripped = model_id.split("#", 1)[0]
+                logger.warning(
+                    "stripped stray #flavor from HF model_id %r → %r; HF uses dtype, not flavor",
+                    model_id,
+                    stripped,
+                )
+                model_id = stripped
+        if config.dtype is None and model_id in self._dtype_by_model_id:
+            config.dtype = self._dtype_by_model_id.get(model_id)
 
         # Determine dtype
         torch_dtype = get_torch_dtype(config.dtype, model_id)
