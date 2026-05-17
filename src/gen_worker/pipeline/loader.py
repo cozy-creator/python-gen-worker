@@ -1153,17 +1153,43 @@ class PipelineLoader:
         model_size_gb = estimate_model_size_gb(path)
         available_vram = get_available_vram_gb()
 
+        # Issue #20 fix 3: account for from_pretrained peak-vs-resident
+        # overhead. A 15GB-on-disk model needs ~21GB peak during the
+        # CPU→GPU copy (framework buffers + transient allocations) — on a
+        # 24GB GPU with ~4GB safety margin (max_vram=20GB) the old
+        # `disk_size > max_vram` check returns False and offload stays
+        # off, then the load OOMs. The peak-aware trigger lifts the
+        # decision into the "definitely will OOM" zone before
+        # from_pretrained runs.
         if (
             config.device == "cuda"
-            and model_size_gb > available_vram
             and not config.enable_model_cpu_offload
             and not config.enable_sequential_cpu_offload
         ):
-            # Check if we'll definitely OOM (no offload enabled)
-            if model_size_gb > self._max_vram_gb:
+            peak_estimate_gb = model_size_gb * 1.4
+            # Aggressive: sequential offload when the model crowds the
+            # GPU (>=70% of usable VRAM). Better to start aggressive
+            # than to OOM and lose the worker.
+            if model_size_gb >= self._max_vram_gb * 0.7:
                 logger.warning(
-                    f"Model {model_id} ({model_size_gb:.1f}GB) exceeds max VRAM "
-                    f"({self._max_vram_gb:.1f}GB), enabling CPU offload"
+                    "auto-enabling sequential CPU offload for %s: "
+                    "disk_size=%.1fGB, peak_estimate=%.1fGB, "
+                    "max_vram=%.1fGB (>= 70%% threshold)",
+                    model_id,
+                    model_size_gb,
+                    peak_estimate_gb,
+                    self._max_vram_gb,
+                )
+                config.enable_sequential_cpu_offload = True
+            elif peak_estimate_gb > self._max_vram_gb:
+                logger.warning(
+                    "auto-enabling model CPU offload for %s: "
+                    "disk_size=%.1fGB, peak_estimate=%.1fGB, "
+                    "max_vram=%.1fGB",
+                    model_id,
+                    model_size_gb,
+                    peak_estimate_gb,
+                    self._max_vram_gb,
                 )
                 config.enable_model_cpu_offload = True
 
@@ -1201,9 +1227,36 @@ class PipelineLoader:
             except Exception as e:
                 raise PipelineLoaderError(f"Failed to load {model_id}: {e}") from e
 
-            # Move to device with OOM handling
+            # Issue #20 fix 3: apply CPU offload IMMEDIATELY after
+            # from_pretrained returns, BEFORE `.to("cuda")`. Diffusers'
+            # enable_*_cpu_offload() manages device placement itself and
+            # rejects pipelines that have already been moved to CUDA. The
+            # legacy order (move to CUDA, then maybe offload) ran offload
+            # too late — by then the move had either succeeded (so the
+            # offload was redundant) or OOM'd (so the offload never
+            # happened). The auto-trigger above decides offload mode based
+            # on peak-vs-resident accounting; we honor those flags here
+            # before any device move.
+            offload_active = bool(
+                config.enable_model_cpu_offload
+                or config.enable_sequential_cpu_offload
+            )
+            if offload_active:
+                self._apply_memory_optimizations(
+                    pipeline,
+                    model_size_gb,
+                    config.enable_model_cpu_offload,
+                    config.enable_sequential_cpu_offload,
+                )
+
+            # Move to device with OOM handling — skipped when offload is
+            # active because the offload hook owns device placement.
             try:
-                if config.device == "cuda" and torch.cuda.is_available():
+                if (
+                    config.device == "cuda"
+                    and torch.cuda.is_available()
+                    and not offload_active
+                ):
                     logger.info(
                         "Moving pipeline to CUDA for %s (%.1f GB) ...",
                         model_id,
@@ -1211,6 +1264,11 @@ class PipelineLoader:
                     )
                     pipeline = pipeline.to("cuda")
                     logger.info("Pipeline moved to CUDA successfully for %s", model_id)
+                elif offload_active:
+                    logger.info(
+                        "Skipping .to('cuda') for %s — CPU offload owns device placement",
+                        model_id,
+                    )
                 else:
                     logger.warning(
                         "CUDA not available (device=%s, cuda.is_available=%s), "
@@ -1245,13 +1303,19 @@ class PipelineLoader:
 
             logger.info(f"  Estimated model size: {model_size_gb:.1f} GB")
 
-            # Apply memory optimizations (conditional)
-            self._apply_memory_optimizations(
-                pipeline,
-                model_size_gb,
-                config.enable_model_cpu_offload,
-                config.enable_sequential_cpu_offload,
-            )
+            # Apply memory optimizations (conditional) — only when we
+            # didn't already apply them pre-`.to("cuda")` above. This
+            # path still handles the case where the caller (or a
+            # downstream `_apply_memory_optimizations` trigger inside
+            # `_max_vram_gb` exceedance) wants to layer additional
+            # offload after the pipeline is on GPU.
+            if not offload_active:
+                self._apply_memory_optimizations(
+                    pipeline,
+                    model_size_gb,
+                    config.enable_model_cpu_offload,
+                    config.enable_sequential_cpu_offload,
+                )
 
             # Configure scheduler
             if config.scheduler_class:
