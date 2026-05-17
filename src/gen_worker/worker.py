@@ -5303,7 +5303,25 @@ class Worker:
                     reset_provider_by_ref(prov_tok)
                     reset_resolved_repos_by_id(tok)
                 if success: logger.info(f"Model '{model_id}' loaded to VRAM by Model Memory Manager.")
-                else: error_msg = f"MMM.load_model_into_vram failed for '{model_id}'."; logger.error(error_msg)
+                else:
+                    # Surface the underlying exception type + message + condensed
+                    # traceback that the manager stashed on _last_load_{error,traceback}
+                    # (issue #20 fix 1). Use getattr() so third-party
+                    # ModelManagementInterface implementations that don't populate
+                    # these fields keep working — they just produce the legacy
+                    # opaque message instead.
+                    last_err = getattr(self._model_manager, "_last_load_error", None)
+                    last_tb = getattr(self._model_manager, "_last_load_traceback", None)
+                    if last_err:
+                        parts = [f"MMM.load_model_into_vram failed for '{model_id}': {last_err}"]
+                        if last_tb:
+                            # Truncate to keep the gRPC error_message reasonable.
+                            tb_trunc = last_tb if len(last_tb) <= 2000 else last_tb[-2000:]
+                            parts.append(f"traceback:\n{tb_trunc}")
+                        error_msg = "\n".join(parts)
+                    else:
+                        error_msg = f"MMM.load_model_into_vram failed for '{model_id}'."
+                    logger.error(error_msg)
             except Exception as e:
                 msg = str(e)
                 if "out of memory" in msg.lower():

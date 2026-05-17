@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import traceback
 from pathlib import Path
 from typing import Any, Callable, List, Optional
 
@@ -39,6 +40,13 @@ class DiffusersModelManager(ModelManagementInterface):
         # log line in that case, preserving the pre-fix no-op semantics.
         self._on_model_downloaded: Optional[OnModelDownloaded] = None
         self._on_model_download_failed: Optional[OnModelDownloadFailed] = None
+        # Last load error details captured for worker.py to surface in
+        # LoadModelResult.error_message (issue #20 fix 1). Reset at the top
+        # of every load_model_into_vram() attempt. Worker uses getattr() so
+        # third-party ModelManagementInterface impls that don't populate
+        # these stay compatible.
+        self._last_load_error: Optional[str] = None
+        self._last_load_traceback: Optional[str] = None
 
     async def process_supported_models_config(
         self,
@@ -121,6 +129,11 @@ class DiffusersModelManager(ModelManagementInterface):
                         )
 
     async def load_model_into_vram(self, model_id: str) -> bool:
+        # Reset error state at the top of every attempt so a subsequent
+        # success doesn't read stale fields, and a fresh failure doesn't
+        # leak the previous attempt's detail (issue #20 fix 1).
+        self._last_load_error = None
+        self._last_load_traceback = None
         try:
             if self._loader.get(model_id) is not None:
                 return True
@@ -144,7 +157,13 @@ class DiffusersModelManager(ModelManagementInterface):
                 loaded.size_gb,
             )
             return True
-        except Exception:
+        except Exception as e:
+            # Capture exception type + message + traceback so the worker
+            # can include them in the outbound LoadModelResult. Without
+            # this, every load failure surfaces to the orchestrator as
+            # the opaque "MMM.load_model_into_vram failed for X" string.
+            self._last_load_error = f"{type(e).__name__}: {e}"
+            self._last_load_traceback = traceback.format_exc()
             logger.exception("DiffusersModelManager: load_model_into_vram failed for %s", model_id)
             return False
 
