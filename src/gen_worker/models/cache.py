@@ -503,3 +503,33 @@ class ModelCache:
     def get_max_concurrent_downloads(self) -> int:
         """Get the maximum number of concurrent downloads allowed."""
         return DEFAULT_MAX_CONCURRENT_DOWNLOADS
+
+    @property
+    def max_vram_gb(self) -> float:
+        """Maximum VRAM (in GB) the cache is willing to occupy.
+
+        Public accessor for the auto-detected (or operator-configured) VRAM
+        budget after subtracting the safety margin. Used by the prefetch
+        path to decide whether the next ref fits eagerly into VRAM
+        (gen-worker #21).
+        """
+        with self._lock:
+            return float(self._max_vram_gb)
+
+    @property
+    def vram_used_gb(self) -> float:
+        """Sum of declared sizes for models currently in VRAM (GB)."""
+        with self._lock:
+            return float(self._vram_used_gb)
+
+    @property
+    def vram_free_gb(self) -> float:
+        """Remaining VRAM (in GB) inside the safety-margin budget.
+
+        Computed as ``max_vram_gb - vram_used_gb``. Used by the prefetch
+        eager-load gate (gen-worker #21): callers compare this to the
+        estimated VRAM footprint of the next ref and only call
+        ``load_model_into_vram`` if there's headroom.
+        """
+        with self._lock:
+            return max(0.0, float(self._max_vram_gb) - float(self._vram_used_gb))

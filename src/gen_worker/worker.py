@@ -827,6 +827,16 @@ class Worker:
                     manager._on_model_download_failed = (
                         self._handle_manager_model_download_failed
                     )
+                # gen-worker #21: eager-load the top-priority ref(s) into
+                # VRAM during prefetch so the first inference request after
+                # cold-boot doesn't pay the disk -> VRAM hit. Hook is only
+                # wired when the auto-wired DiffusersModelManager exposes
+                # the attribute — third-party managers without it keep
+                # download-only semantics.
+                if hasattr(manager, "_on_model_downloaded_try_eager_load"):
+                    manager._on_model_downloaded_try_eager_load = (
+                        self._handle_manager_model_try_eager_load
+                    )
             except Exception:
                 logger.exception("failed to wire manager download callbacks")
 
@@ -3997,6 +4007,165 @@ class Worker:
         # `models_downloading` forever when one flavor doesn't exist on HF.
         self._emit_ready_if_all_cached()
 
+    def _handle_manager_model_try_eager_load(self, ref: str, local_path: Path) -> bool:
+        """gen-worker #21: try to eagerly load a just-downloaded ref into
+        VRAM during cold-boot prefetch.
+
+        Returns ``True`` if the prefetch loop should keep attempting
+        eager-loads on subsequent refs (i.e. this load succeeded and VRAM
+        still has room), ``False`` if the loop should stop (VRAM full,
+        OOM, no manager, etc.). A ``False`` return doesn't abort the
+        prefetch — remaining refs still download to disk and get
+        promoted to VRAM on demand via the normal LoadModelCommand path.
+
+        Also fires the SerialWorker ``setup()`` for the just-loaded
+        ref's bound class (when discoverable) so the first inference
+        request after cold-boot doesn't pay the endpoint-class
+        instantiation cost (which we measured at ~14s in the
+        2026-05-17 trace).
+        """
+        manager = getattr(self, "_model_manager", None)
+        cache = getattr(self, "_model_cache", None)
+        if manager is None or cache is None:
+            return False
+        try:
+            canon = _canonicalize_model_ref_string(str(ref or "").strip())
+        except Exception:
+            canon = str(ref or "").strip()
+        if not canon:
+            return False
+
+        # VRAM headroom check. We don't know the bytes-on-disk -> VRAM
+        # ratio for arbitrary refs, so use a coarse heuristic: if the
+        # cache reports any free VRAM at all, try the load. The first
+        # ref that OOMs flips us off; the remaining refs stay disk-
+        # resident. The first-load-OOMs case is fine — that just means
+        # the VRAM budget is too small to host even one model eagerly.
+        try:
+            free_gb = cache.vram_free_gb
+            max_gb = cache.max_vram_gb
+        except Exception:
+            # Cache without the public accessors (older tests) — skip
+            # eager-load entirely rather than guessing.
+            return False
+        if max_gb <= 0.0 or free_gb <= 0.0:
+            logger.info(
+                "eager-load: skipping %s; vram budget exhausted (free=%.2fGB, max=%.2fGB)",
+                canon, free_gb, max_gb,
+            )
+            return False
+
+        logger.info(
+            "eager-load: attempting %s; vram budget free=%.2fGB max=%.2fGB",
+            canon, free_gb, max_gb,
+        )
+
+        # Drive the manager's async load on its own loop. We're already
+        # inside an asyncio.to_thread-driven download loop running on a
+        # background thread (see `_process_release_config_async_wrapper`),
+        # so a fresh `asyncio.run` here is safe — there's no surrounding
+        # event loop on this thread.
+        try:
+            loaded = asyncio.run(manager.load_model_into_vram(canon))
+        except Exception as exc:
+            # OOM or any other exception: stop eager-loading subsequent
+            # refs. The ref is already on disk so LoadModelCommand can
+            # still promote it later when there's headroom.
+            logger.warning(
+                "eager-load: load_model_into_vram(%s) raised %r; "
+                "disabling further eager-load attempts",
+                canon, exc,
+            )
+            return False
+        if not loaded:
+            logger.warning(
+                "eager-load: load_model_into_vram(%s) returned False; "
+                "disabling further eager-load attempts",
+                canon,
+            )
+            return False
+
+        # Mirror the bookkeeping `_handle_load_model_cmd` does after a
+        # successful load so the heartbeat advertises the ref in
+        # `vram_models`.
+        try:
+            estimated_size_gb = 0.0
+            if hasattr(manager, "model_sizes"):
+                estimated_size_gb = float(
+                    getattr(manager, "model_sizes", {}).get(canon, 0.0) or 0.0
+                )
+            cache.mark_loaded_to_vram(canon, None, estimated_size_gb)
+        except Exception:
+            logger.exception("eager-load: post-load cache bookkeeping raised for %s", canon)
+
+        # Fire the SerialWorker setup() for the class bound to this ref,
+        # if any. The setup() body is the bulk of the endpoint-class
+        # instantiation cost (model.to(device), torch.compile graph
+        # capture, TeaCache attach, etc.), so paying it during cold-boot
+        # means the first dispatch is hot. Skip silently if the ref
+        # doesn't map to a SerialWorker class — that's the normal case
+        # for refs bound only via dispatch-time payload refs.
+        try:
+            self._trigger_serial_setup_for_ref(canon)
+        except Exception:
+            logger.exception(
+                "eager-load: trigger_serial_setup_for_ref(%s) raised", canon,
+            )
+
+        # Force a heartbeat so the orchestrator's vram_models view
+        # converges promptly.
+        try:
+            self._register_worker(is_heartbeat=True)
+        except Exception:
+            logger.exception("eager-load: force-heartbeat failed for %s", canon)
+
+        return True
+
+    def _trigger_serial_setup_for_ref(self, canonical_ref: str) -> None:
+        """gen-worker #21: invoke SerialWorker ``setup()`` for any class
+        whose ``ep_spec.models[*].ref`` matches the given canonical ref.
+
+        Idempotent — `_ensure_serial_class_started` no-ops if the rec is
+        already started. Silent no-op when the worker has no
+        SerialWorker classes (BatchedWorker / engine-shape endpoints
+        don't have a precondition setup the way SerialWorker classes do).
+        """
+        recs = list(getattr(self, "_serial_class_instances", []) or [])
+        if not recs:
+            return
+        if not canonical_ref:
+            return
+        for rec in recs:
+            if rec.get("started"):
+                continue
+            ep_spec = rec.get("endpoint_spec")
+            if ep_spec is None:
+                continue
+            models = dict(getattr(ep_spec, "models", {}) or {})
+            for binding in models.values():
+                ref = getattr(binding, "ref", None)
+                if not isinstance(ref, str) or not ref.strip():
+                    continue
+                try:
+                    bcanon = _canonicalize_model_ref_string(ref.strip())
+                except Exception:
+                    bcanon = ref.strip()
+                if bcanon == canonical_ref:
+                    cls_name = rec.get("cls_name") or "?"
+                    logger.info(
+                        "eager-load: triggering SerialWorker setup() for class=%s "
+                        "(bound to %s)",
+                        cls_name, canonical_ref,
+                    )
+                    try:
+                        self._ensure_serial_class_started(rec)
+                    except Exception:
+                        logger.exception(
+                            "eager-load: SerialWorker setup() raised for class=%s",
+                            cls_name,
+                        )
+                    break
+
     def _mark_ref_terminally_failed(self, canonical_ref: str, detail: str) -> None:
         """Record a terminally-failed required ref so
         ``_emit_ready_if_all_cached`` doesn't block on it.
@@ -4649,12 +4818,25 @@ class Worker:
             # never widen beyond tenant-declared scope (baked manifest), unless it supplies an
             # explicit runtime model keyspace update.
             if self._manifest_allowed_model_ids is not None and not has_keyspace_update:
-                supported_set = {s for s in supported_from_sched if s and s != "*"}
-                if supported_set:
-                    supported_set &= self._manifest_allowed_model_ids
-                    self._supported_model_ids_from_scheduler = sorted(supported_set)
+                # gen-worker #21: preserve orchestrator-supplied order. The
+                # orchestrator sorts `supported_repo_refs` by per-model demand
+                # before sending; the prefetch loop below walks this list head
+                # first, so a `sorted()` here would defeat incremental cold-
+                # boot by re-ordering refs alphabetically.
+                seen: set[str] = set()
+                ordered: List[str] = []
+                for s in supported_from_sched:
+                    if not s or s == "*":
+                        continue
+                    if s in self._manifest_allowed_model_ids and s not in seen:
+                        seen.add(s)
+                        ordered.append(s)
+                if ordered:
+                    self._supported_model_ids_from_scheduler = ordered
                 else:
                     # Empty/"*" means "no extra restriction"; keep manifest scope.
+                    # Manifest scope has no inherent order, so a stable sort
+                    # keeps determinism for tests/diagnostics.
                     self._supported_model_ids_from_scheduler = sorted(self._manifest_allowed_model_ids)
             else:
                 self._supported_model_ids_from_scheduler = supported_from_sched

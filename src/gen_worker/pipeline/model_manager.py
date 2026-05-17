@@ -40,6 +40,18 @@ class DiffusersModelManager(ModelManagementInterface):
         # log line in that case, preserving the pre-fix no-op semantics.
         self._on_model_downloaded: Optional[OnModelDownloaded] = None
         self._on_model_download_failed: Optional[OnModelDownloadFailed] = None
+        # gen-worker #21: optional eager-load hook injected by Worker. Called
+        # after each successful download to (a) decide whether the just-
+        # downloaded ref fits in remaining VRAM, and if so (b) load weights
+        # into VRAM and fire the SerialWorker setup() so the first inference
+        # request doesn't pay the disk -> VRAM hit + endpoint-class warmup
+        # cost. Returns True if eager-load happened and the loop should
+        # keep trying subsequent refs; False if VRAM is full / OOM / no-op
+        # (in which case the prefetch loop stops eager-loading, but
+        # remaining refs still download to disk).
+        self._on_model_downloaded_try_eager_load: Optional[
+            Callable[[str, "Path"], bool]
+        ] = None
         # Last load error details captured for worker.py to surface in
         # LoadModelResult.error_message (issue #20 fix 1). Reset at the top
         # of every load_model_into_vram() attempt. Worker uses getattr() so
@@ -97,6 +109,16 @@ class DiffusersModelManager(ModelManagementInterface):
         # nothing at all so any positive throughput is a win; per-ref
         # parallelism can be reintroduced if needed but adds little when
         # most HF / civitai endpoints throttle the source side anyway.
+        #
+        # gen-worker #21: walk refs in the order the orchestrator handed us
+        # (sorted by per-model demand). The first ref(s) that fit in VRAM
+        # are also eagerly loaded into VRAM + SerialWorker setup() is
+        # invoked, so the first inference request after cold-boot doesn't
+        # pay the disk -> VRAM hit + endpoint-class warmup cost. Once VRAM
+        # is full (or an eager-load OOMs), we stop eager-loading but
+        # continue downloading the remaining refs to disk so the next
+        # LoadModelCommand for one of those refs is fast.
+        keep_eager_loading = True
         for ref in refs:
             try:
                 local_path_str: str = await asyncio.to_thread(
@@ -116,6 +138,22 @@ class DiffusersModelManager(ModelManagementInterface):
                             "DiffusersModelManager: on_model_downloaded callback raised for %s",
                             ref,
                         )
+                if keep_eager_loading:
+                    eager = self._on_model_downloaded_try_eager_load
+                    if eager is not None:
+                        try:
+                            keep_eager_loading = bool(eager(ref, local_path))
+                        except Exception:
+                            # An eager-load failure is non-fatal — the ref
+                            # is on disk; subsequent LoadModelCommand will
+                            # retry. Stop trying to eagerly load further
+                            # refs since we don't know what state VRAM is in.
+                            logger.exception(
+                                "DiffusersModelManager: eager-load callback raised for %s; "
+                                "disabling further eager-load attempts",
+                                ref,
+                            )
+                            keep_eager_loading = False
             except BaseException as e:
                 logger.exception("DiffusersModelManager: download failed for %s", ref)
                 fail_cb = self._on_model_download_failed
