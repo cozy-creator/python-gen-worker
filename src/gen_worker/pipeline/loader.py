@@ -885,6 +885,15 @@ class PipelineLoader:
 
         kwargs: Dict[str, Any] = {
             "torch_dtype": torch_dtype,
+            # Force safetensors. With `use_safetensors=None` (auto), diffusers'
+            # CUDA-aware `from_pretrained` code path (via accelerate) falls back
+            # to looking for `.bin` (pickle) files for individual components
+            # even when `.safetensors` are present on disk, then errors with
+            # "no file named diffusion_pytorch_model.bin found". Forcing True
+            # commits to the safetensors loader path. We never download `.bin`
+            # weights (see Worker model-transfer issue #19), so this is also a
+            # belt-and-braces "no pickle in the load path" guard.
+            "use_safetensors": True,
         }
 
         kwargs.update(missing_component_overrides_for_from_pretrained(pipeline_class, model_path))
