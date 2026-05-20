@@ -12,7 +12,7 @@ tasks:
     desc: Publish to PyPI (uses UV_PUBLISH_TOKEN from .env)
     deps: [build]
     cmds:
-      - uv publish
+      - sh -c 'unset UV_PUBLISH_USERNAME; uv publish'
 
   lint:
     desc: Type checking

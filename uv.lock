@@ -526,7 +526,7 @@ wheels = [
 
 [[package]]
 name = "gen-worker"
-version = "0.7.21"
+version = "0.7.28"
 source = { editable = "." }
 dependencies = [
     { name = "backoff" },

@@ -247,6 +247,95 @@ def test_transfer_grant_requires_scoped_credentials() -> None:
         S3TransferGrant.from_mapping({"bucket": "repo-cas", "key": "objects/a"})
 
 
+def test_sdk_transfer_config_uses_bounded_threaded_multipart() -> None:
+    config = s3_transfer_module._transfer_config()
+    retry_config = s3_transfer_module._transfer_config(max_concurrency=1)
+
+    assert config.max_concurrency == 10
+    assert retry_config.max_concurrency == 1
+    assert config.use_threads is True
+
+
+def test_sdk_upload_uses_boto_transfer_with_isolated_clients(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    src = tmp_path / "weights.safetensors"
+    src.write_bytes(b"abcdefghijkl")
+    state: dict[str, Any] = {"uploads": [], "closed": 0}
+
+    class _FakeClient:
+        def upload_file(self, filename: str, bucket: str, key: str, Config: Any, Callback: Any) -> None:
+            state["uploads"].append((filename, bucket, key, Config.max_concurrency))
+            Callback(5)
+            Callback(7)
+
+        def close(self) -> None:
+            state["closed"] += 1
+
+    monkeypatch.setattr(s3_transfer_module, "_s3_client", lambda _grant: _FakeClient())
+    progress: list[int] = []
+
+    result = s3_transfer_module.upload_file_with_grant(
+        file_path=src,
+        grant=S3TransferGrant(
+            endpoint_url="https://account.r2.cloudflarestorage.com",
+            bucket="repo-cas",
+            key="objects/a",
+            access_key_id="access",
+            secret_access_key="secret",
+            session_token="session",
+        ),
+        blake3_hex="abc",
+        size_bytes=12,
+        on_progress=lambda _done, _total, current: progress.append(current),
+    )
+
+    assert state["uploads"] == [(str(src), "repo-cas", "objects/a", 10)]
+    assert state["closed"] == 1
+    assert progress[-1] == 12
+
+
+def test_sdk_upload_retries_with_lower_multipart_concurrency(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    src = tmp_path / "weights.safetensors"
+    src.write_bytes(b"abcdefghijkl")
+    state: dict[str, Any] = {"configs": [], "clients": 0, "sleeps": []}
+
+    class _FakeClient:
+        def upload_file(self, filename: str, bucket: str, key: str, Config: Any, Callback: Any) -> None:
+            state["configs"].append(Config.max_concurrency)
+            if len(state["configs"]) < 3:
+                raise RuntimeError("tls alert bad record mac")
+            Callback(12)
+
+        def close(self) -> None:
+            state["clients"] += 1
+
+    monkeypatch.setattr(s3_transfer_module, "_s3_client", lambda _grant: _FakeClient())
+    monkeypatch.setattr(s3_transfer_module.time, "sleep", lambda seconds: state["sleeps"].append(seconds))
+
+    result = s3_transfer_module.upload_file_with_grant(
+        file_path=src,
+        grant=S3TransferGrant(
+            endpoint_url="https://account.r2.cloudflarestorage.com",
+            bucket="repo-cas",
+            key="objects/a",
+            access_key_id="access",
+            secret_access_key="secret",
+            session_token="session",
+        ),
+        blake3_hex="abc",
+        size_bytes=12,
+        on_progress=lambda *_args: None,
+    )
+
+    assert result.size_bytes == 12
+    assert state["configs"] == [10, 5, 1]
+    assert state["clients"] == 3
+    assert state["sleeps"] == [1, 2]
+
+
 def test_sdk_download_rejects_blake3_mismatch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     class _FakeClient:
         def download_file(self, bucket: str, key: str, filename: str, Config: Any) -> None:

@@ -497,20 +497,21 @@ def _upload_directory_flavor(
     attributes: dict[str, str],
 ) -> list[tuple[str, Any]]:
     """Upload every file under a directory flavor; return ``[(rel_path, Tensors)]``."""
+    from ..request_context._concurrent_upload import parallel_map_uploads
+
     save_fn = getattr(request_context, "save_checkpoint", None)
     if save_fn is None:
         return []
     base_ref = _default_flavor_ref(request_context, dir_path)
-    uploaded: list[tuple[str, Any]] = []
-    for f in sorted(dir_path.rglob("*")):
-        if not f.is_file():
-            continue
+    files = [f for f in sorted(dir_path.rglob("*")) if f.is_file()]
+
+    def _upload_one(f: Path) -> tuple[str, Any]:
         rel = f.relative_to(dir_path).as_posix()
         ref = f"{base_ref}/{rel}"
         format_hint = f.suffix.lstrip(".") or "bin"
-        t = save_fn(ref, str(f), format=format_hint, attributes=attributes)
-        uploaded.append((rel, t))
-    return uploaded
+        return rel, save_fn(ref, str(f), format=format_hint, attributes=attributes)
+
+    return parallel_map_uploads(files, _upload_one, label="finalize-flavor")
 
 
 def _default_flavor_ref(request_context: "RequestContext", path: Path) -> str:

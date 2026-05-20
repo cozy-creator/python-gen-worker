@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -12,7 +13,10 @@ from .api.errors import ArtifactTransferError
 from .presigned_upload import blake3_hash_file
 
 _MULTIPART_CHUNK_BYTES = 64 * 1024 * 1024
-_MAX_CONCURRENCY = 8
+_MULTIPART_MAX_WORKERS = 10
+_SDK_TRANSFER_ATTEMPTS = 4
+_SDK_UPLOAD_FILE_BUDGET = 2
+_sdk_upload_slots = threading.BoundedSemaphore(_SDK_UPLOAD_FILE_BUDGET)
 
 
 @dataclass(frozen=True)
@@ -93,42 +97,39 @@ def upload_file_with_grant(
             retryable=False,
         )
 
-    client = _s3_client(grant)
-    seen = 0
-    lock = threading.Lock()
-
-    def _progress(delta: int) -> None:
-        nonlocal seen
-        if not on_progress:
-            return
-        with lock:
-            seen += int(delta)
-            current = min(seen, actual_size)
-        on_progress(1 if current >= actual_size else 0, 1, current)
-
-    try:
-        client.upload_file(
-            str(path),
-            grant.bucket,
-            grant.key,
-            Config=_transfer_config(),
-            Callback=_progress if on_progress else None,
-        )
+    last_exc: Exception | None = None
+    for attempt in range(1, _SDK_TRANSFER_ATTEMPTS + 1):
+        client = _s3_client(grant)
         try:
-            head = client.head_object(Bucket=grant.bucket, Key=grant.key)
-            etag = str(head.get("ETag") or "").strip()
-        except Exception:
-            etag = ""
-    except Exception as exc:
+            with _sdk_upload_slot():
+                client.upload_file(
+                    str(path),
+                    grant.bucket,
+                    grant.key,
+                    Config=_transfer_config(max_concurrency=_sdk_workers_for_attempt(attempt)),
+                    Callback=_BotoTransferProgress(actual_size, on_progress) if on_progress else None,
+                )
+            last_exc = None
+            break
+        except Exception as exc:
+            last_exc = exc
+            if attempt >= _SDK_TRANSFER_ATTEMPTS:
+                break
+            time.sleep(min(2 ** (attempt - 1), 4))
+        finally:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
+    if last_exc is not None:
         raise ArtifactTransferError(
-            f"tensorhub SDK upload failed: {exc}",
+            f"tensorhub SDK upload failed: {last_exc}",
             provider="tensorhub",
             phase="sdk_upload",
             retryable=True,
-            cause_type=type(exc).__name__,
-        ) from exc
+            cause_type=type(last_exc).__name__,
+        ) from last_exc
 
-    return S3TransferResult(bucket=grant.bucket, key=grant.key, size_bytes=actual_size, blake3=blake3_hex, etag=etag)
+    return S3TransferResult(bucket=grant.bucket, key=grant.key, size_bytes=actual_size, blake3=blake3_hex)
 
 
 def download_file_with_grant(
@@ -175,6 +176,29 @@ def download_file_with_grant(
     return S3TransferResult(bucket=grant.bucket, key=grant.key, size_bytes=size, blake3=digest)
 
 
+class _sdk_upload_slot:
+    def __enter__(self) -> None:
+        _sdk_upload_slots.acquire()
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+        _sdk_upload_slots.release()
+        return False
+
+
+class _BotoTransferProgress:
+    def __init__(self, total_bytes: int, on_progress: Any) -> None:
+        self._total = max(int(total_bytes), 0)
+        self._on_progress = on_progress
+        self._seen = 0
+        self._lock = threading.Lock()
+
+    def __call__(self, delta: int) -> None:
+        with self._lock:
+            self._seen = min(self._seen + int(delta), self._total)
+            seen = self._seen
+        self._on_progress(1 if seen >= self._total else 0, 1, seen)
+
+
 def _s3_client(grant: S3TransferGrant) -> Any:
     import boto3
     from botocore.config import Config
@@ -188,19 +212,28 @@ def _s3_client(grant: S3TransferGrant) -> Any:
         aws_session_token=grant.session_token or None,
         config=Config(
             signature_version="s3v4",
-            retries={"mode": "standard", "max_attempts": 5},
+            retries={"mode": "standard", "max_attempts": 10},
             request_checksum_calculation="when_required",
             response_checksum_validation="when_required",
+            tcp_keepalive=True,
         ),
     )
 
 
-def _transfer_config() -> Any:
+def _sdk_workers_for_attempt(attempt: int) -> int:
+    if attempt <= 1:
+        return _MULTIPART_MAX_WORKERS
+    if attempt == 2:
+        return max(1, _MULTIPART_MAX_WORKERS // 2)
+    return 1
+
+
+def _transfer_config(*, max_concurrency: int = _MULTIPART_MAX_WORKERS) -> Any:
     from boto3.s3.transfer import TransferConfig
 
     return TransferConfig(
         multipart_threshold=_MULTIPART_CHUNK_BYTES,
         multipart_chunksize=_MULTIPART_CHUNK_BYTES,
-        max_concurrency=_MAX_CONCURRENCY,
+        max_concurrency=max(1, int(max_concurrency)),
         use_threads=True,
     )

@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 import gen_worker.presigned_upload as presigned_upload_module
-from gen_worker.conversion.dispatch import _finalize_produced_variants
+from gen_worker.conversion.dispatch import _finalize_produced_variants, _upload_directory_flavor
 from gen_worker.conversion.produced import ProducedFlavor
 from gen_worker.request_context import ConversionContext
 
@@ -101,3 +101,47 @@ def test_conversion_dispatch_filters_checkpoint_metadata_and_writes_lineage_meta
     assert "produced_by_kind" not in flavor["metadata"]
     assert flavor["lineage_metadata"]["quantization_method"] == "nf4"
     assert flavor["lineage_metadata"]["quantization_library"] == "bitsandbytes"
+
+
+def test_directory_flavor_upload_uses_file_level_parallel_coordinator(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    out_dir = tmp_path / "repo"
+    (out_dir / "nested").mkdir(parents=True)
+    (out_dir / "model-00001.safetensors").write_bytes(b"one")
+    (out_dir / "nested" / "model-00002.safetensors").write_bytes(b"two")
+
+    calls: dict[str, Any] = {}
+
+    def fake_parallel_map_uploads(items: Any, upload_fn: Any, *, label: str) -> list[Any]:
+        materialized = list(items)
+        calls["label"] = label
+        calls["items"] = [p.relative_to(out_dir).as_posix() for p in materialized]
+        return [upload_fn(p) for p in materialized]
+
+    monkeypatch.setattr(
+        "gen_worker.request_context._concurrent_upload.parallel_map_uploads",
+        fake_parallel_map_uploads,
+    )
+
+    class FakeContext:
+        request_id = "req-1"
+        job_id = "job-1"
+
+        def save_checkpoint(self, ref: str, local_path: str, **kwargs: Any) -> Any:
+            return SimpleNamespace(ref=ref, local_path=local_path, kwargs=kwargs)
+
+    uploaded = _upload_directory_flavor(
+        FakeContext(),  # type: ignore[arg-type]
+        out_dir,
+        attributes={"flavor": "base"},
+    )
+
+    assert calls == {
+        "label": "finalize-flavor",
+        "items": ["model-00001.safetensors", "nested/model-00002.safetensors"],
+    }
+    assert [rel for rel, _ in uploaded] == ["model-00001.safetensors", "nested/model-00002.safetensors"]
+    assert uploaded[1][1].ref.endswith("/nested/model-00002.safetensors")
+    assert uploaded[1][1].kwargs["attributes"] == {"flavor": "base"}

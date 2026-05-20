@@ -70,12 +70,6 @@ _FORBIDDEN_SOURCE_HEADER_NAMES = {
     "trailer",
 }
 
-# Force plain HTTP/LFS download path. huggingface_hub reads HF_HUB_DISABLE_XET
-# from the environment at import / runtime — there is no Python API for this,
-# so we have to set the env. In some environments the Hugging Face Xet flow
-# can stall after xet token negotiation during large model pulls.
-os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
-
 _HF_SOURCE_AUTH_HOSTS = {
     "huggingface.co",
     "www.huggingface.co",
@@ -823,7 +817,7 @@ def download_huggingface_repo_files(
     See gen_worker.conversion.hf_classifier for the strategy table.
     """
     try:
-        from huggingface_hub import hf_hub_download
+        from huggingface_hub import snapshot_download
     except Exception as exc:
         raise RuntimeError("huggingface_hub is required for clone_huggingface source_repo ingestion") from exc
 
@@ -983,15 +977,12 @@ def download_huggingface_repo_files(
     files_to_download = cleaned
     files_total = len(files_to_download)
 
-    # Parallel download with aggregate progress.
-    # Default parallelism=4; HF hub rate-limits aggressively above ~8.
-    # Per-file hash + size verification is preserved.
+    # Library-managed parallel download with aggregate progress.
+    # `snapshot_download` owns the file scheduler, resume/cache semantics, and
+    # hf-xet integration. We keep only selection, progress polling, and
+    # post-download integrity checks here.
     import threading
     import time as _time
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    max_workers = 4
-    if files_total < max_workers:
-        max_workers = max(1, files_total)
 
     state_lock = threading.Lock()
     state = {
@@ -1085,19 +1076,16 @@ def download_huggingface_repo_files(
     mirror_dir = _hf_mirror_dir_for(repo_id, revision)
     mirror_dir.mkdir(parents=True, exist_ok=True)
 
-    def _download_one(item: dict) -> dict:
+    def _materialize_one(item: dict) -> dict:
         rel_path = str(item.get("path") or "").strip().replace("\\", "/").lstrip("/")
         size_bytes = item.get("size_bytes")
         with state_lock:
             state["files_in_flight"] += 1
         try:
-            cached_path = hf_hub_download(
-                repo_id=repo_id,
-                filename=rel_path,
-                revision=revision,
-                local_dir=str(mirror_dir),
-                token=token,
-            )
+            cached_path = mirror_dir / rel_path
+            if not cached_path.exists():
+                raise FileNotFoundError(f"huggingface snapshot missing selected file: {rel_path}")
+            cached_path_str = str(cached_path)
         finally:
             pass
         # Hardlink the cached file into the per-request output_dir so
@@ -1114,9 +1102,9 @@ def download_huggingface_repo_files(
             except OSError:
                 pass
         try:
-            os.link(cached_path, target)
+            os.link(cached_path_str, target)
         except OSError:
-            shutil.copy2(cached_path, target)
+            shutil.copy2(cached_path_str, target)
         local_path = str(target)
         local_size = int(os.path.getsize(local_path))
         if local_size > _MAX_SOURCE_FILE_BYTES:
@@ -1148,21 +1136,15 @@ def download_huggingface_repo_files(
     poller.start()
     materialized: list[dict[str, object]] = []
     try:
-        if max_workers <= 1 or files_total <= 1:
-            # Single-thread path (legacy behavior; same code path)
-            for item in files_to_download:
-                materialized.append(_download_one(item))
-        else:
-            with ThreadPoolExecutor(max_workers=max_workers) as pool:
-                futures = [pool.submit(_download_one, item) for item in files_to_download]
-                try:
-                    for fut in as_completed(futures):
-                        materialized.append(fut.result())
-                except Exception:
-                    # Cancel remaining work; let the ThreadPoolExecutor wind down.
-                    for fut in futures:
-                        fut.cancel()
-                    raise
+        snapshot_download(
+            repo_id=repo_id,
+            revision=revision,
+            local_dir=str(mirror_dir),
+            token=token,
+            allow_patterns=sorted(selected_set),
+        )
+        for item in files_to_download:
+            materialized.append(_materialize_one(item))
     finally:
         _poll_stop.set()
         poller.join(timeout=2.0)
