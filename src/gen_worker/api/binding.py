@@ -27,6 +27,7 @@ the function's param annotation.
 
 from __future__ import annotations
 
+import re
 import warnings
 from dataclasses import dataclass, replace
 from typing import Any, ClassVar, Mapping, Union
@@ -75,7 +76,22 @@ def _normalize_classes(classes: tuple[Any, ...]) -> tuple[str, ...]:
     return tuple(out)
 
 
-@dataclass(frozen=True)
+_SLOT_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _normalize_slot_name(name: str) -> str:
+    out = str(name or "").strip()
+    if not out:
+        return ""
+    if not _SLOT_NAME_RE.match(out):
+        raise ValueError(
+            "model slot name must be a Python/env-style identifier "
+            "(letters, numbers, underscores; cannot start with a number)"
+        )
+    return out
+
+
+@dataclass(frozen=True, init=False)
 class Repo:
     """Repository handle — also usable as a binding with defaults.
 
@@ -108,20 +124,61 @@ class Repo:
     PROVIDER: ClassVar[str] = "tensorhub"
 
     ref: str
+    _slot_name: str = ""
     _flavor: str = ""
     _tag: str = "prod"
     _allow_override: bool = False
     _pipeline_classes: tuple[str, ...] = ()
+    _allow_lora: bool = False
+
+    def __init__(
+        self,
+        ref_or_name: str | None = None,
+        default_ref: str | None = None,
+        *,
+        name: str = "",
+        ref: str = "",
+        _slot_name: str = "",
+        _flavor: str = "",
+        _tag: str = "prod",
+        _allow_override: bool = False,
+        _pipeline_classes: tuple[str, ...] = (),
+        _allow_lora: bool = False,
+    ) -> None:
+        slot_name = _normalize_slot_name(name or _slot_name)
+        if default_ref is not None:
+            if not slot_name:
+                slot_name = _normalize_slot_name(str(ref_or_name or ""))
+            ref_value = default_ref
+        else:
+            ref_value = ref or str(ref_or_name or "")
+            if name:
+                slot_name = _normalize_slot_name(name)
+
+        object.__setattr__(self, "ref", ref_value)
+        object.__setattr__(self, "_slot_name", slot_name)
+        object.__setattr__(self, "_flavor", str(_flavor or "").strip())
+        object.__setattr__(self, "_tag", str(_tag or "prod").strip() or "prod")
+        object.__setattr__(self, "_allow_override", bool(_allow_override))
+        object.__setattr__(self, "_pipeline_classes", tuple(_pipeline_classes or ()))
+        object.__setattr__(self, "_allow_lora", bool(_allow_lora))
+        self.__post_init__()
 
     def __post_init__(self) -> None:
         if not isinstance(self.ref, str) or not self.ref.strip():
             raise ValueError(f"{type(self).__name__}(ref=) must be a non-empty string, got {self.ref!r}")
         object.__setattr__(self, "ref", self.ref.strip())
+        object.__setattr__(self, "_slot_name", _normalize_slot_name(self._slot_name))
 
     @property
     def provider(self) -> str:
         """Resolver provider: ``"tensorhub"`` (default), ``"hf"``, or ``"civitai"``."""
         return type(self).PROVIDER
+
+    @property
+    def slot_name(self) -> str:
+        """Stable mutable-config key for this model binding, if explicitly declared."""
+        return self._slot_name
 
     def flavor(self, name: str) -> "Repo":
         """Return a new Repo bound to the given flavor."""
@@ -151,8 +208,12 @@ class Repo:
         fqns = _normalize_classes(classes)
         return replace(self, _allow_override=True, _pipeline_classes=fqns)
 
+    def allow_lora(self) -> "Repo":
+        """Return a new Repo whose injected runtime may receive LoRA overlays."""
+        return replace(self, _allow_lora=True)
 
-@dataclass(frozen=True)
+
+@dataclass(frozen=True, init=False)
 class HFRepo(Repo):
     """HuggingFace-backed binding.
 
@@ -178,6 +239,38 @@ class HFRepo(Repo):
     # format carries this alongside `allow_override` / `pipeline_classes`
     # on the binding row; it is NOT encoded into the ref string.
     _dtype: str = ""
+
+    def __init__(
+        self,
+        ref_or_name: str | None = None,
+        default_ref: str | None = None,
+        *,
+        name: str = "",
+        ref: str = "",
+        _slot_name: str = "",
+        _flavor: str = "",
+        _tag: str = "prod",
+        _allow_override: bool = False,
+        _pipeline_classes: tuple[str, ...] = (),
+        _allow_lora: bool = False,
+        _revision: str = "",
+        _dtype: str = "",
+    ) -> None:
+        super().__init__(
+            ref_or_name,
+            default_ref,
+            name=name,
+            ref=ref,
+            _slot_name=_slot_name,
+            _flavor=_flavor,
+            _tag=_tag,
+            _allow_override=_allow_override,
+            _pipeline_classes=_pipeline_classes,
+            _allow_lora=_allow_lora,
+        )
+        object.__setattr__(self, "_revision", str(_revision or "").strip())
+        object.__setattr__(self, "_dtype", str(_dtype or "").strip())
+        self.__post_init__()
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -226,7 +319,7 @@ class HFRepo(Repo):
         return self.dtype(name)
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class CivitaiRepo(Repo):
     """Civitai-backed binding.
 
@@ -239,6 +332,35 @@ class CivitaiRepo(Repo):
 
     PROVIDER: ClassVar[str] = "civitai"
     _version_id: str = ""
+
+    def __init__(
+        self,
+        ref_or_name: str | None = None,
+        default_ref: str | None = None,
+        *,
+        name: str = "",
+        ref: str = "",
+        _slot_name: str = "",
+        _flavor: str = "",
+        _tag: str = "prod",
+        _allow_override: bool = False,
+        _pipeline_classes: tuple[str, ...] = (),
+        _allow_lora: bool = False,
+        _version_id: str = "",
+    ) -> None:
+        super().__init__(
+            ref_or_name,
+            default_ref,
+            name=name,
+            ref=ref,
+            _slot_name=_slot_name,
+            _flavor=_flavor,
+            _tag=_tag,
+            _allow_override=_allow_override,
+            _pipeline_classes=_pipeline_classes,
+            _allow_lora=_allow_lora,
+        )
+        object.__setattr__(self, "_version_id", str(_version_id or "").strip())
 
     def version(self, version_id: str) -> "CivitaiRepo":
         """Return a new CivitaiRepo pinned to a specific version id."""
@@ -269,6 +391,7 @@ class Dispatch:
     table: Mapping[str, "Repo"]
     _allow_override: bool = False
     _pipeline_classes: tuple[str, ...] = ()
+    _allow_lora: bool = False
 
     def __post_init__(self) -> None:
         f = str(self.field or "").strip()
@@ -299,6 +422,10 @@ class Dispatch:
         """
         fqns = _normalize_classes(classes)
         return replace(self, _allow_override=True, _pipeline_classes=fqns)
+
+    def allow_lora(self) -> "Dispatch":
+        """Return a new Dispatch whose injected runtime may receive LoRA overlays."""
+        return replace(self, _allow_lora=True)
 
 
 def dispatch(field: str, table: Mapping[str, Repo]) -> Dispatch:

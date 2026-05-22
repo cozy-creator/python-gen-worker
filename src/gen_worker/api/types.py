@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import os
-from typing import IO, Optional
+from dataclasses import dataclass
+from typing import IO, Annotated, Literal, Optional
 
 import msgspec
 
@@ -48,6 +49,12 @@ class Asset(msgspec.Struct):
     download_token: Optional[str] = None
     stream_mode: Optional[str] = None
     inline_bytes: Optional[bytes] = None
+    url_max_bytes: Optional[int] = None
+    url_allowed_mime_types: tuple[str, ...] = ()
+    url_max_width: Optional[int] = None
+    url_max_height: Optional[int] = None
+    url_max_pixels: Optional[int] = None
+    url_validation_context: Optional[str] = None
 
     def __fspath__(self) -> str:
         # Kept so `open(asset)`, `Path(asset)`, and the wider os.PathLike
@@ -59,6 +66,64 @@ class Asset(msgspec.Struct):
         if self.local_path is None:
             raise ValueError("Asset.local_path is not set (file not materialized)")
         return self.local_path
+
+
+class MediaAsset(Asset):
+    """Reference to user-supplied media bytes."""
+
+
+class ImageAsset(MediaAsset):
+    """Reference to image media bytes."""
+
+
+class VideoAsset(MediaAsset):
+    """Reference to video media bytes."""
+
+
+class AudioAsset(MediaAsset):
+    """Reference to audio media bytes."""
+
+
+@dataclass(frozen=True)
+class ExpectedOutput:
+    """Planning metadata for an output media field.
+
+    Use with ``typing.Annotated`` on an output struct field:
+
+        images: Annotated[
+            list[ImageAsset],
+            ExpectedOutput(
+                count="input.num_images",
+                width="input.width",
+                height="input.height",
+                mime_type="image/png",
+            ),
+        ]
+
+    Values are deliberately small: literals or ``input.<field>`` refs.
+    Discovery validates refs and emits plain JSON for Tensorhub /
+    gen-orchestrator to evaluate at request submit time.
+    """
+
+    count: int | str = 1
+    width: int | str | None = None
+    height: int | str | None = None
+    aspect_ratio: str | None = None
+    mime_type: str | None = None
+    media_type: Literal["image", "video", "audio", "file", "other"] | None = None
+
+
+@dataclass(frozen=True)
+class PromptRole:
+    role: Literal["positive", "negative"]
+
+    def __post_init__(self) -> None:
+        if self.role not in ("positive", "negative"):
+            raise ValueError("PromptRole.role must be 'positive' or 'negative'")
+
+
+PositivePrompt = Annotated[str, PromptRole("positive")]
+NegativePrompt = Annotated[str, PromptRole("negative")]
 
 
 class Tensors(msgspec.Struct):
@@ -107,21 +172,6 @@ class Tensors(msgspec.Struct):
         if max_bytes is not None and len(data) > max_bytes:
             raise ValueError("tensors file too large to read into memory")
         return data
-
-
-class LoraSpec(msgspec.Struct):
-    """A LoRA adapter to load for a single inference request.
-
-    ``file`` is materialized by the worker before the function runs, so
-    ``file.local_path`` is guaranteed to be set when your function executes.
-    ``weight`` controls the adapter scale (fuse strength).
-    ``adapter_name`` is optional; if omitted the worker assigns ``lora_0``,
-    ``lora_1``, ... based on list position.
-    """
-
-    file: Asset
-    weight: float = 1.0
-    adapter_name: Optional[str] = None
 
 
 class SourceRepo(msgspec.Struct):

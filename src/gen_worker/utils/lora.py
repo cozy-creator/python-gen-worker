@@ -2,11 +2,9 @@ from __future__ import annotations
 
 import logging
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Generator, Protocol, runtime_checkable
+from typing import Any, Generator, Protocol, runtime_checkable
 
-if TYPE_CHECKING:
-    import torch
-    from ..api.types import LoraSpec
+from ..api.types import Tensors
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +19,7 @@ class LoraCapablePipeline(Protocol):
 @contextmanager
 def load_loras(
     pipeline: LoraCapablePipeline,
-    loras: list["LoraSpec"],
+    loras: list[Any],
     request_id: str = "",
 ) -> Generator[None, None, None]:
     """Context manager that loads LoRA adapters onto *pipeline* for the duration
@@ -43,10 +41,15 @@ def load_loras(
     loaded_adapters: list[str] = []
     try:
         for i, spec in enumerate(loras):
-            if spec.file.local_path is None:
+            tensors = getattr(spec, "tensors", None)
+            if not isinstance(tensors, Tensors):
+                raise RuntimeError(
+                    f"LoRA {i} must expose a tensors: Tensors field"
+                )
+            if tensors.local_path is None:
                 raise RuntimeError(f"LoRA {i} not materialized (local_path is None)")
             name = spec.adapter_name or f"lora_{i}"
-            state_dict = load_safetensors(spec.file.local_path)
+            state_dict = load_safetensors(tensors.local_path)
             for key in list(state_dict.keys()):
                 if "lora_down.weight" in key:
                     alpha_key = key.replace("lora_down.weight", "alpha")
@@ -65,7 +68,7 @@ def load_loras(
         if loaded_adapters:
             pipeline.set_adapters(
                 loaded_adapters,
-                adapter_weights=[s.weight for s in loras],
+                adapter_weights=[float(getattr(s, "weight", 1.0)) for s in loras],
             )
 
         yield

@@ -97,18 +97,22 @@ class ActiveAssignmentResume(_message.Message):
     def __init__(self, request_id: _Optional[str] = ..., item_id: _Optional[str] = ..., assignment_attempt_epoch: _Optional[int] = ..., last_job_result_seq: _Optional[int] = ..., last_worker_event_seq: _Optional[int] = ..., last_incremental_seq: _Optional[int] = ...) -> None: ...
 
 class WorkerRegistration(_message.Message):
-    __slots__ = ("resources", "is_heartbeat", "protocol_major", "protocol_minor", "active_assignments")
+    __slots__ = ("resources", "is_heartbeat", "protocol_major", "protocol_minor", "active_assignments", "in_flight_request_ids", "stream_started_unix_ms")
     RESOURCES_FIELD_NUMBER: _ClassVar[int]
     IS_HEARTBEAT_FIELD_NUMBER: _ClassVar[int]
     PROTOCOL_MAJOR_FIELD_NUMBER: _ClassVar[int]
     PROTOCOL_MINOR_FIELD_NUMBER: _ClassVar[int]
     ACTIVE_ASSIGNMENTS_FIELD_NUMBER: _ClassVar[int]
+    IN_FLIGHT_REQUEST_IDS_FIELD_NUMBER: _ClassVar[int]
+    STREAM_STARTED_UNIX_MS_FIELD_NUMBER: _ClassVar[int]
     resources: WorkerResources
     is_heartbeat: bool
     protocol_major: int
     protocol_minor: int
     active_assignments: _containers.RepeatedCompositeFieldContainer[ActiveAssignmentResume]
-    def __init__(self, resources: _Optional[_Union[WorkerResources, _Mapping]] = ..., is_heartbeat: bool = ..., protocol_major: _Optional[int] = ..., protocol_minor: _Optional[int] = ..., active_assignments: _Optional[_Iterable[_Union[ActiveAssignmentResume, _Mapping]]] = ...) -> None: ...
+    in_flight_request_ids: _containers.RepeatedScalarFieldContainer[str]
+    stream_started_unix_ms: int
+    def __init__(self, resources: _Optional[_Union[WorkerResources, _Mapping]] = ..., is_heartbeat: bool = ..., protocol_major: _Optional[int] = ..., protocol_minor: _Optional[int] = ..., active_assignments: _Optional[_Iterable[_Union[ActiveAssignmentResume, _Mapping]]] = ..., in_flight_request_ids: _Optional[_Iterable[str]] = ..., stream_started_unix_ms: _Optional[int] = ...) -> None: ...
 
 class ResolvedCompute(_message.Message):
     __slots__ = ("accelerator", "min_compute_capability", "vram_gb", "gpu_count", "gpu_tier", "memory_gb", "cpu_cores", "disk_gb", "gpu_index")

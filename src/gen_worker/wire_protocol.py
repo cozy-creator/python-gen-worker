@@ -50,8 +50,18 @@ from __future__ import annotations
 # level: text deltas set delta_text/payload_json, audio deltas set
 # audio_chunk/audio_codec. Additive — text-streaming workers keep working
 # unchanged; only the chatterbox-tts endpoint switches over in this cut.
+#
+# 1.8 (#346): orchestrator-restart recovery. WorkerRegistration gains
+# `in_flight_request_ids` (field 30) and `stream_started_unix_ms` (field 31).
+# On RE-registration (not heartbeat) the worker reports the request_ids it is
+# still processing (snapshot of _active_requests) plus any request_ids whose
+# JobExecutionResult is still buffered in the outgoing queue, so an
+# orchestrator that lost its in-memory assignment map across a restart can
+# reconcile (requeue what the worker dropped, keep what it still holds)
+# instead of guessing. Additive — older orchestrators ignore the new fields,
+# older workers send them empty.
 WIRE_PROTOCOL_MAJOR = 1
-WIRE_PROTOCOL_MINOR = 7
+WIRE_PROTOCOL_MINOR = 8
 
 
 def wire_protocol_version_string() -> str:

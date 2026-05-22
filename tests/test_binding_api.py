@@ -29,6 +29,7 @@ class _OtherPipe:
 def test_repo_bare_is_binding_with_defaults() -> None:
     r = Repo("acme/myrepo")
     assert r.ref == "acme/myrepo"
+    assert r.slot_name == ""
     assert r._flavor == ""
     assert r._tag == "prod"
     assert r._allow_override is False
@@ -40,6 +41,31 @@ def test_repo_rejects_empty_ref() -> None:
         Repo("")
     with pytest.raises(ValueError, match="non-empty"):
         Repo("   ")
+
+
+def test_repo_named_slot_two_positional_args() -> None:
+    r = Repo("base_model", "acme/myrepo")
+    assert r.slot_name == "base_model"
+    assert r.ref == "acme/myrepo"
+
+
+def test_repo_named_slot_keyword_args() -> None:
+    r = Repo(name="base_model", default_ref="acme/myrepo")
+    assert r.slot_name == "base_model"
+    assert r.ref == "acme/myrepo"
+
+
+def test_repo_named_slot_with_legacy_ref_arg() -> None:
+    r = Repo("acme/myrepo", name="base_model")
+    assert r.slot_name == "base_model"
+    assert r.ref == "acme/myrepo"
+
+
+def test_repo_slot_name_rejects_non_identifier() -> None:
+    with pytest.raises(ValueError, match="model slot name"):
+        Repo("base-model", "acme/myrepo")
+    with pytest.raises(ValueError, match="model slot name"):
+        Repo("1base", "acme/myrepo")
 
 
 def test_repo_flavor_returns_new_instance() -> None:
@@ -61,10 +87,11 @@ def test_repo_tag_returns_new_instance() -> None:
 
 
 def test_repo_chain_order_is_commutative() -> None:
-    a = Repo("acme/r").flavor("nf4").tag("canary").allow_override(_Pipe)
-    b = Repo("acme/r").tag("canary").allow_override(_Pipe).flavor("nf4")
-    c = Repo("acme/r").allow_override(_Pipe).flavor("nf4").tag("canary")
+    a = Repo("base_model", "acme/r").flavor("nf4").tag("canary").allow_override(_Pipe).allow_lora()
+    b = Repo("base_model", "acme/r").tag("canary").allow_override(_Pipe).allow_lora().flavor("nf4")
+    c = Repo("base_model", "acme/r").allow_lora().allow_override(_Pipe).flavor("nf4").tag("canary")
     assert a == b == c
+    assert a.slot_name == "base_model"
 
 
 def test_allow_override_accepts_class_object() -> None:
@@ -107,6 +134,14 @@ def test_allow_override_rejects_empty_string() -> None:
         Repo("acme/r").allow_override("")
 
 
+def test_repo_allow_lora_returns_new_instance() -> None:
+    r1 = Repo("acme/r")
+    r2 = r1.allow_lora()
+    assert r1 is not r2
+    assert r1._allow_lora is False
+    assert r2._allow_lora is True
+
+
 def test_dispatch_basic_shape() -> None:
     d = dispatch(
         field="variant",
@@ -137,6 +172,14 @@ def test_dispatch_allow_override_returns_new_instance() -> None:
     assert d1._allow_override is False
     assert d2._allow_override is True
     assert d2._pipeline_classes == ("test_binding_api._Pipe",)
+
+
+def test_dispatch_allow_lora_returns_new_instance() -> None:
+    d1 = dispatch(field="v", table={"a": Repo("x/y")})
+    d2 = d1.allow_lora()
+    assert d1 is not d2
+    assert d1._allow_lora is False
+    assert d2._allow_lora is True
 
 
 def test_dispatch_allow_override_zero_arg_raises() -> None:

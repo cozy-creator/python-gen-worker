@@ -68,6 +68,7 @@ def test_civitairepo_is_repo_subclass() -> None:
 def test_hfrepo_happy_path() -> None:
     r = HFRepo("Qwen/Qwen2.5-1.5B-Instruct")
     assert r.ref == "Qwen/Qwen2.5-1.5B-Instruct"
+    assert r.slot_name == ""
     assert r._flavor == ""
     assert r._tag == "prod"
     assert r._revision == ""
@@ -95,7 +96,26 @@ def test_hfrepo_rejects_whitespace_only_ref() -> None:
 def test_civitairepo_happy_path() -> None:
     r = CivitaiRepo("123456")
     assert r.ref == "123456"
+    assert r.slot_name == ""
     assert r._version_id == ""
+
+
+def test_hfrepo_named_slot_two_positional_args() -> None:
+    r = HFRepo("base_model", "Qwen/Qwen2.5-1.5B-Instruct")
+    assert r.slot_name == "base_model"
+    assert r.ref == "Qwen/Qwen2.5-1.5B-Instruct"
+
+
+def test_hfrepo_named_slot_keyword_args() -> None:
+    r = HFRepo(name="base_model", default_ref="Qwen/Qwen2.5-1.5B-Instruct")
+    assert r.slot_name == "base_model"
+    assert r.ref == "Qwen/Qwen2.5-1.5B-Instruct"
+
+
+def test_civitairepo_named_slot_two_positional_args() -> None:
+    r = CivitaiRepo("lora_model", "123456")
+    assert r.slot_name == "lora_model"
+    assert r.ref == "123456"
 
 
 def test_civitairepo_rejects_empty_ref() -> None:
@@ -168,9 +188,10 @@ def test_hfrepo_allow_override_is_immutable() -> None:
 
 
 def test_hfrepo_revision_is_immutable() -> None:
-    r1 = HFRepo("Qwen/Q")
+    r1 = HFRepo("base_model", "Qwen/Q")
     r2 = r1.revision("a1b2c3d")
     assert r1 is not r2
+    assert r2.slot_name == "base_model"
     assert r1._revision == ""
     assert r2._revision == "a1b2c3d"
     assert isinstance(r2, HFRepo)
@@ -182,9 +203,10 @@ def test_hfrepo_revision_rejects_empty() -> None:
 
 
 def test_civitairepo_version_is_immutable() -> None:
-    r1 = CivitaiRepo("123456")
+    r1 = CivitaiRepo("lora_model", "123456")
     r2 = r1.version("789012")
     assert r1 is not r2
+    assert r2.slot_name == "lora_model"
     assert r1._version_id == ""
     assert r2._version_id == "789012"
     assert isinstance(r2, CivitaiRepo)
@@ -233,6 +255,7 @@ def test_binding_to_wire_tensorhub_fixed() -> None:
     assert out["param"] == "pipeline"
     binding = out["binding"]
     assert binding["kind"] == "fixed"
+    assert binding["slot_name"] == "pipeline"
     assert binding["ref"] == "acme/myrepo"
     assert "provider" not in binding
     assert binding["flavor"] == "nf4"
@@ -243,9 +266,10 @@ def test_binding_to_wire_tensorhub_fixed() -> None:
 
 def test_binding_to_wire_hf_fixed() -> None:
     """Fixed HF binding round-trips: bare ref + provider=hf."""
-    out = _binding_to_wire("pipeline", str, HFRepo("Qwen/Qwen2.5-1.5B-Instruct"))
+    out = _binding_to_wire("pipeline", str, HFRepo("base_model", "Qwen/Qwen2.5-1.5B-Instruct"))
     binding = out["binding"]
     assert binding["kind"] == "fixed"
+    assert binding["slot_name"] == "base_model"
     assert binding["ref"] == "Qwen/Qwen2.5-1.5B-Instruct"
     assert binding["provider"] == "hf"
 
@@ -255,6 +279,7 @@ def test_binding_to_wire_civitai_fixed() -> None:
     out = _binding_to_wire("pipeline", str, CivitaiRepo("123456"))
     binding = out["binding"]
     assert binding["kind"] == "fixed"
+    assert binding["slot_name"] == "pipeline"
     assert binding["ref"] == "123456"
     assert binding["provider"] == "civitai"
 
@@ -277,7 +302,9 @@ def test_binding_to_wire_dispatch_mixed_providers() -> None:
     binding = out["binding"]
     assert binding["kind"] == "dispatch"
     assert binding["field"] == "variant"
+    assert binding["slot_name"] == "pipeline"
     table = binding["table"]
+    assert table["tensorhub"]["slot_name"] == "pipeline"
     assert table["tensorhub"]["ref"] == "acme/r"
     assert "provider" not in table["tensorhub"]  # tensorhub default elided
     assert table["hf"]["ref"] == "Qwen/Q"

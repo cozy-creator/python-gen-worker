@@ -19,10 +19,11 @@ All three subclass ``RequestContext``; the kind-specific subclass is
 constructed by the worker before dispatch based on the endpoint kind.
 
 Bindings (issue #9: decorator-table-model-bindings, #10: typed-provider-repo):
-  - ``Repo(ref)`` — module-level handle for a **tensorhub** ref (default).
-  - ``HFRepo(ref)`` — explicit huggingface ref. Use this instead of relying
-    on a string prefix.
-  - ``CivitaiRepo(ref)`` — explicit civitai ref by model id.
+  - ``Repo(name, default_ref)`` — named tensorhub model slot with an initial ref.
+  - ``HFRepo(name, default_ref)`` — named Hugging Face model slot.
+  - ``CivitaiRepo(name, default_ref)`` — named Civitai model slot.
+  - Legacy ``Repo(ref)`` / ``HFRepo(ref)`` / ``CivitaiRepo(ref)`` still works;
+    discovery falls back to the model parameter name as the slot key.
   - ``dispatch(field, table)`` — payload-driven dispatch binding.
   - ``Resources(...)`` — per-function hardware envelope + cost shape.
   - All bindings support ``.allow_override(*classes)`` to permit
@@ -65,7 +66,19 @@ from .api.errors import (
     ValidationError,
     WorkerError,
 )
-from .api.types import Asset, Compute, LoraSpec, Tensors
+from .api.types import (
+    Asset,
+    AudioAsset,
+    Compute,
+    ExpectedOutput,
+    ImageAsset,
+    MediaAsset,
+    NegativePrompt,
+    PositivePrompt,
+    PromptRole,
+    Tensors,
+    VideoAsset,
+)
 from .api.payload_constraints import Clamp
 from .api.streaming import (
     Done,
@@ -105,6 +118,11 @@ _REMOVED_PUBLIC_SYMBOLS = {
         "gen_worker.ScalingHints was merged into gen_worker.Resources in gen-worker "
         "0.7.0. Pass vram_must_fit / vram_base / vram_size_multiplier / "
         "vram_scales_with / runtime_scales_with directly on Resources(...)."
+    ),
+    "LoraSpec": (
+        "gen_worker.LoraSpec was removed. LoRA bytes are tensor artifacts; define "
+        "endpoint-owned structs with a `tensors: Tensors` field, or use "
+        "model-binding LoRA overlays for platform-managed adapters."
     ),
 }
 
@@ -160,9 +178,16 @@ __all__ = [
     "WorkerError",
     # Payload + media helpers.
     "Asset",
+    "AudioAsset",
     "Compute",
+    "ExpectedOutput",
+    "ImageAsset",
+    "MediaAsset",
+    "NegativePrompt",
+    "PositivePrompt",
+    "PromptRole",
     "Tensors",
-    "LoraSpec",
+    "VideoAsset",
     "Clamp",
     "Done",
     "Error",

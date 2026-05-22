@@ -97,6 +97,32 @@ def test_fixed_binding_override_rejected_when_allow_override_false() -> None:
         )
 
 
+def test_fixed_binding_accepts_orchestrator_default_without_allow_override() -> None:
+    w = _bare_worker()
+    inj = InjectionSpec(
+        param_name="pipeline",
+        param_type=_Pipe,
+        binding=Repo("base_model", "acme/flux").flavor("bf16"),
+    )
+    payload = _BasicPayload()
+    model_id, _ = w._resolve_model_id_for_injection(
+        "fn",
+        inj,
+        payload=payload,
+        resolved_models={
+            "pipeline": {
+                "ref": "acme/runtime-default",
+                "tag": "prod",
+                "flavor": "nf4",
+                "source": "default",
+                "slot_name": "base_model",
+            },
+        },
+    )
+    assert "acme/runtime-default" in model_id
+    assert "nf4" in model_id
+
+
 def test_dispatch_binding_resolves_via_discriminator() -> None:
     w = _bare_worker()
     inj = InjectionSpec(
@@ -179,11 +205,18 @@ def test_resolved_models_for_request_dict_shape() -> None:
     w = _bare_worker()
     fake_request = MagicMock()
     fake_request.resolved_models = {
-        "pipeline": {"ref": "acme/r", "tag": "prod", "flavor": "bf16"},
+        "pipeline": {"ref": "acme/r", "tag": "prod", "flavor": "bf16", "source": "default", "slot_name": "base_model"},
     }
     out = w._resolved_models_for_request(fake_request)
     assert out == {
-        "pipeline": {"ref": "acme/r", "tag": "prod", "flavor": "bf16", "provider": "tensorhub"},
+        "pipeline": {
+            "ref": "acme/r",
+            "tag": "prod",
+            "flavor": "bf16",
+            "provider": "tensorhub",
+            "source": "default",
+            "slot_name": "base_model",
+        },
     }
 
 

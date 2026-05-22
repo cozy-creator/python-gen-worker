@@ -25,6 +25,7 @@ import collections.abc as cabc
 from typing import Any, Callable, Dict, Optional, Type, TypeVar, Iterator, List, Tuple, Iterable, get_args, get_origin
 import hashlib
 import msgspec
+from contextlib import ExitStack, contextmanager
 try:
     import torch
 except Exception:  # pragma: no cover - optional dependency
@@ -125,9 +126,16 @@ from .models.ref_downloader import (
     set_provider_by_ref,
 )
 from .models.refs import parse_model_ref
-from .api.types import Asset, Tensors
+from .api.types import Asset, AudioAsset, ImageAsset, Tensors, VideoAsset
 from .models.cache import ModelCache
-from .run_metrics_v1 import RunMetricsV1, best_effort_bytes_downloaded, best_effort_init_model_metrics, safe_json_bytes
+from .run_metrics_v1 import (
+    RunMetricsV1,
+    best_effort_bytes_downloaded,
+    best_effort_bytes_on_disk,
+    best_effort_init_model_metrics,
+    resolved_entry_total_bytes,
+    safe_json_bytes,
+)
 from .models.cache_paths import tensorhub_cas_dir
 from .wire_protocol import WIRE_PROTOCOL_MAJOR, WIRE_PROTOCOL_MINOR, wire_protocol_version_string
 from dataclasses import dataclass as _injection_dataclass
@@ -167,6 +175,13 @@ class InjectionSpec:
     binding: Binding
 
 
+@_injection_dataclass(frozen=True)
+class _RuntimeLoraSpec:
+    tensors: Tensors
+    weight: float
+    adapter_name: str
+
+
 def _wire_ref(repo: Repo) -> str:
     """Canonical wire ref for a Repo binding.
 
@@ -189,10 +204,12 @@ def _binding_to_wire(param_name: str, param_type: Any, binding: Binding) -> Dict
     if isinstance(binding, (Repo, HFRepo, CivitaiRepo)):
         out: Dict[str, Any] = {
             "kind": "fixed",
+            "slot_name": str(getattr(binding, "slot_name", "") or param_name),
             "ref": _wire_ref(binding),
             "flavor": binding._flavor,
             "tag": binding._tag,
             "allow_override": binding._allow_override,
+            "allow_lora": bool(getattr(binding, "_allow_lora", False)),
             "pipeline_classes": list(binding._pipeline_classes),
         }
         # Tensorhub is the implicit default — omit `provider` when it
@@ -208,8 +225,12 @@ def _binding_to_wire(param_name: str, param_type: Any, binding: Binding) -> Dict
         return {"param": param_name, "type": _type_qualname(param_type), "binding": out}
     if isinstance(binding, Dispatch):
         table: Dict[str, Dict[str, Any]] = {}
+        dispatch_slot_name = ""
         for k, repo in binding.table.items():
+            if not dispatch_slot_name:
+                dispatch_slot_name = str(getattr(repo, "slot_name", "") or param_name)
             entry: Dict[str, Any] = {
+                "slot_name": str(getattr(repo, "slot_name", "") or param_name),
                 "ref": _wire_ref(repo),
                 "flavor": repo._flavor,
                 "tag": repo._tag,
@@ -227,8 +248,10 @@ def _binding_to_wire(param_name: str, param_type: Any, binding: Binding) -> Dict
             "binding": {
                 "kind": "dispatch",
                 "field": binding.field,
+                "slot_name": dispatch_slot_name or param_name,
                 "table": table,
                 "allow_override": binding._allow_override,
+                "allow_lora": bool(getattr(binding, "_allow_lora", False)),
                 "pipeline_classes": list(binding._pipeline_classes),
             },
         }
@@ -279,6 +302,15 @@ O = TypeVar('O')  # Output type
 HEARTBEAT_INTERVAL = 10  # seconds
 
 _DOWNLOAD_CHUNK_BYTES = 4 * 1024 * 1024
+
+# gen-orchestrator #346 (Option 2): the outgoing data queue persists across
+# reconnects (so a JobExecutionResult buffered just before a disconnect is
+# re-shipped on the new stream rather than lost), so it MUST be bounded to
+# avoid unbounded growth if the orchestrator never comes back. On overflow
+# _send_message drops the oldest entry. Sized generously: even a worker
+# running deep prefetch with chunked streaming outputs rarely buffers more
+# than a few dozen messages before the stream drains.
+OUTGOING_QUEUE_MAXSIZE = 1024
 
 
 class Worker:
@@ -434,6 +466,8 @@ class Worker:
 
         self._custom_runtime_cache: Dict[Tuple[str, str], Any] = {}  # (model_id, injected_type_qualname) -> runtime handle
         self._custom_runtime_locks: Dict[Tuple[str, str], threading.Lock] = {}
+        self._lora_overlay_locks: Dict[int, threading.Lock] = {}
+        self._lora_overlay_locks_lock = threading.Lock()
 
         # Local (non-NFS) cache for NFS->local snapshot localization.
         # Empty string disables localization entirely.
@@ -487,7 +521,8 @@ class Worker:
         self._running = False
         self._stop_event = threading.Event()
         self._reconnect_count = 0
-        self._outgoing_queue: queue.Queue[Any] = queue.Queue()
+        # Bounded + persistent across reconnects (gen-orchestrator #346).
+        self._outgoing_queue: queue.Queue[Any] = queue.Queue(maxsize=OUTGOING_QUEUE_MAXSIZE)
         self._leader_hint: Optional[str] = None
         # Cap redirect bounces. When a worker connects to the wrong
         # gen-orchestrator replica the orch responds with FAILED_PRECONDITION
@@ -1449,6 +1484,180 @@ class Worker:
             self._emit_worker_event_bytes(request_id, event_type, safe_json_bytes(payload or {}))
         except Exception:
             pass
+
+    def _run_download_with_request_progress(
+        self,
+        *,
+        request_id: str,
+        model_id: str,
+        cache_dir: str,
+        resolved_entry: Any,
+        download_fn: Callable[[], str],
+    ) -> str:
+        """gen-orchestrator #348: run a blocking model fetch that was triggered
+        by a specific request while emitting per-request model.download.*
+        lifecycle events (started -> progress* -> completed/failed) tagged with
+        ``request_id``. These ride the existing WorkerEvent fabric and surface
+        on the request's SSE stream (GET /v1/requests/:id/events).
+
+        The underlying downloader has no byte-level callback, so progress is
+        sampled by polling on-disk bytes for the resolved manifest entry. When
+        the manifest carries no per-file sizes (bootstrap fallback) we emit
+        ``estimated_total_bytes: 0`` / ``estimated_eta_seconds: -1`` and skip
+        byte-progress events; started/completed/failed still fire.
+
+        Rate limiting (per the issue): min 1s between progress events, force a
+        sample at most every 5s, also emit on >=10% byte deltas, hard cap of 25
+        progress events. ETA is computed locally from an EWMA of throughput
+        over the recent samples.
+        """
+        rid = str(request_id or "").strip()
+        if not rid:
+            # Requestless fetch — not this issue's scope. Just run it.
+            return download_fn()
+
+        cache_path = Path(cache_dir)
+        total_bytes = resolved_entry_total_bytes(resolved_entry)
+        baseline_on_disk = 0
+        try:
+            base = best_effort_bytes_on_disk(cache_path, resolved_entry)
+            if base is not None:
+                baseline_on_disk = int(base)
+        except Exception:
+            baseline_on_disk = 0
+
+        started_at = time.monotonic()
+        self._emit_request_event(
+            rid,
+            "model.download.started",
+            {
+                "request_id": rid,
+                "model_id": model_id,
+                "estimated_total_bytes": int(total_bytes) if total_bytes else 0,
+                "estimated_eta_seconds": -1,
+                "source": "tensorhub_cas",
+            },
+        )
+
+        stop = threading.Event()
+        sampler: Optional[threading.Thread] = None
+
+        if total_bytes and total_bytes > 0:
+            # EWMA throughput estimate (~10s window via alpha) + rate gates.
+            state: Dict[str, Any] = {
+                "last_emit_t": 0.0,
+                "last_emit_pct": -100.0,
+                "emitted": 0,
+                "last_bytes": baseline_on_disk,
+                "last_sample_t": started_at,
+                "throughput_ewma": 0.0,
+            }
+            min_interval = 1.0
+            max_interval = 5.0
+            pct_step = 10.0
+            hard_cap = 25
+            alpha = 0.3  # ~last few seconds dominate the EWMA
+
+            def _sample_and_maybe_emit(force: bool = False) -> None:
+                if state["emitted"] >= hard_cap and not force:
+                    return
+                try:
+                    on_disk = best_effort_bytes_on_disk(cache_path, resolved_entry)
+                except Exception:
+                    on_disk = None
+                if on_disk is None:
+                    return
+                now = time.monotonic()
+                dt = now - float(state["last_sample_t"])
+                dbytes = int(on_disk) - int(state["last_bytes"])
+                if dt > 0 and dbytes >= 0:
+                    inst = float(dbytes) / dt
+                    if state["throughput_ewma"] <= 0:
+                        state["throughput_ewma"] = inst
+                    else:
+                        state["throughput_ewma"] = alpha * inst + (1.0 - alpha) * float(state["throughput_ewma"])
+                state["last_sample_t"] = now
+                state["last_bytes"] = int(on_disk)
+
+                pct = (float(on_disk) / float(total_bytes)) * 100.0 if total_bytes else 0.0
+                since_emit = now - float(state["last_emit_t"])
+                pct_delta = pct - float(state["last_emit_pct"])
+                should = force or (
+                    since_emit >= min_interval and (pct_delta >= pct_step or since_emit >= max_interval)
+                )
+                if not should:
+                    return
+                if state["emitted"] >= hard_cap and not force:
+                    return
+
+                tput = float(state["throughput_ewma"])
+                remaining = max(int(total_bytes) - int(on_disk), 0)
+                eta = int(remaining / tput) if tput > 0 else -1
+                self._emit_request_event(
+                    rid,
+                    "model.download.progress",
+                    {
+                        "request_id": rid,
+                        "model_id": model_id,
+                        "bytes_downloaded": int(on_disk),
+                        "bytes_total": int(total_bytes),
+                        "percent_complete": round(pct, 1),
+                        "eta_remaining_seconds": eta,
+                        "throughput_bytes_per_sec": int(tput),
+                    },
+                )
+                state["last_emit_t"] = now
+                state["last_emit_pct"] = pct
+                state["emitted"] = int(state["emitted"]) + 1
+
+            def _sampler_loop() -> None:
+                # Poll at min_interval; the rate gate decides what actually
+                # emits, so a fast download sends few events, a slow one samples
+                # at >=1s/event up to the hard cap.
+                while not stop.wait(min_interval):
+                    try:
+                        _sample_and_maybe_emit(force=False)
+                    except Exception:
+                        pass
+
+            sampler = threading.Thread(target=_sampler_loop, daemon=True, name=f"dl-progress-{rid[:24]}")
+            sampler.start()
+
+        try:
+            local_path = download_fn()
+        except Exception as e:
+            stop.set()
+            if sampler is not None:
+                sampler.join(timeout=2.0)
+            dur_ms = int((time.monotonic() - started_at) * 1000)
+            self._emit_request_event(
+                rid,
+                "model.download.failed",
+                {
+                    "request_id": rid,
+                    "model_id": model_id,
+                    "error_type": type(e).__name__,
+                    "duration_ms": dur_ms,
+                },
+            )
+            raise
+        else:
+            stop.set()
+            if sampler is not None:
+                sampler.join(timeout=2.0)
+            dur_ms = int((time.monotonic() - started_at) * 1000)
+            final_bytes = int(total_bytes) if total_bytes else 0
+            self._emit_request_event(
+                rid,
+                "model.download.completed",
+                {
+                    "request_id": rid,
+                    "model_id": model_id,
+                    "bytes_total": final_bytes,
+                    "duration_ms": dur_ms,
+                },
+            )
+            return local_path
 
     def _start_task_phase_watchdog(
         self,
@@ -2887,9 +3096,59 @@ class Worker:
             try:
                 self._outgoing_queue.put_nowait(message)
             except queue.Full:
-                 logger.error("Outgoing message queue is full. Message dropped!")
+                # gen-orchestrator #346 (Option 2): the outgoing queue persists
+                # across reconnects and is bounded; on overflow drop the OLDEST
+                # entry to make room for the newest, mirroring the orchestrator's
+                # bounded-buffer policy. Dropping oldest keeps the freshest
+                # results/events most likely to still matter.
+                try:
+                    dropped = self._outgoing_queue.get_nowait()
+                    logger.warning(
+                        "[outgoing-queue-drop] outgoing queue full (cap=%s); dropped oldest msg type=%s",
+                        OUTGOING_QUEUE_MAXSIZE,
+                        dropped.WhichOneof("msg") if hasattr(dropped, "WhichOneof") else "unknown",
+                    )
+                    self._outgoing_queue.put_nowait(message)
+                except queue.Empty:
+                    logger.error("Outgoing message queue is full. Message dropped!")
+                except queue.Full:
+                    logger.error("Outgoing message queue is full. Message dropped!")
         else:
             logger.warning("Attempted to send message while worker is stopping or stopped.")
+
+    def _buffered_result_request_ids(self) -> List[str]:
+        """Return request_ids of JobExecutionResult messages still buffered in
+        the outgoing queue (gen-orchestrator #346).
+
+        A handler can finish microseconds before the gRPC stream breaks; its
+        JobExecutionResult lands in _outgoing_queue but never ships. The
+        orchestrator would otherwise see the request as un-acknowledged and
+        either requeue it (duplicate execution) or leave it stuck. By reporting
+        these on re-registration the orchestrator keeps the request assigned to
+        this worker, which then re-ships the buffered result over the new
+        stream (Option 2 keeps the queue across reconnects so the result is
+        still there).
+
+        Best-effort and non-destructive: iterates a shallow copy of the queue's
+        backing deque under its mutex so it never consumes or reorders pending
+        messages.
+        """
+        ids: List[str] = []
+        try:
+            q = self._outgoing_queue
+            with q.mutex:
+                snapshot = list(q.queue)
+            for message in snapshot:
+                try:
+                    if message.WhichOneof("msg") == "job_result":
+                        rid = message.job_result.request_id
+                        if rid:
+                            ids.append(rid)
+                except Exception:
+                    continue
+        except Exception:
+            return ids
+        return ids
 
     def _ensure_job_dispatch_thread(self) -> None:
         """Start the job-dispatch thread if it isn't running.
@@ -3058,7 +3317,10 @@ class Worker:
         cache_dir = os.path.join(base_dir, "cache")
         os.makedirs(cache_dir, exist_ok=True)
 
-        max_bytes = 200 * 1024 * 1024
+        default_max_bytes = 200 * 1024 * 1024
+        max_bytes = int(getattr(asset, "url_max_bytes", None) or default_max_bytes)
+        if max_bytes <= 0:
+            max_bytes = default_max_bytes
 
         # External URL inputs — check shared cache first, download on miss.
         if ref.startswith("http://") or ref.startswith("https://"):
@@ -3082,6 +3344,9 @@ class Worker:
             if download_token:
                 token_hash = hashlib.sha256(download_token.encode("utf-8")).hexdigest()
                 cache_key_material = f"{ref}\n{token_hash}"
+            validation_context = str(getattr(asset, "url_validation_context", "") or "").strip()
+            if validation_context:
+                cache_key_material = f"{cache_key_material}\n{validation_context}"
             name_hash = hashlib.sha256(cache_key_material.encode("utf-8")).hexdigest()[:32]
             cache_path = os.path.join(cache_dir, f"{name_hash}{ext}")
             sidecar_path = cache_path + ".sha256"
@@ -3122,6 +3387,8 @@ class Worker:
                         shutil.copyfile(cache_path, local_path)
                     except Exception:
                         local_path = cache_path
+            if isinstance(asset, Asset):
+                self._validate_url_asset(asset, local_path, mime)
             asset.local_path = local_path
             if not asset.owner:
                 asset.owner = self.owner
@@ -3223,6 +3490,8 @@ class Worker:
             try:
                 class _StripAuthOnRedirect(urllib.request.HTTPRedirectHandler):
                     def redirect_request(self, req: urllib.request.Request, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> Optional[urllib.request.Request]:
+                        if _url_is_blocked(newurl):
+                            raise ValidationError("input url redirect target blocked")
                         new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
                         if new_req is not None:
                             new_req.headers.pop("Authorization", None)
@@ -3247,18 +3516,76 @@ class Worker:
                     req.add_header("Authorization", f"Bearer {token}")
                     logger.info("_download_url_to_file: using token (last 4: ...%s) for %s", token[-4:], src)
                 with client.open(req, timeout=30) as resp:
+                    response_mime = (resp.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
                     size, sha = self._stream_to_file(resp, dst, max_bytes)
                 with open(dst, "rb") as f:
                     head = f.read(512)
-                mime = _infer_mime_type(src, head)
+                sniffed_mime = (_infer_mime_type(src, head) or "application/octet-stream").lower()
+                if (
+                    response_mime
+                    and sniffed_mime != "application/octet-stream"
+                    and response_mime.split("/", 1)[0] != sniffed_mime.split("/", 1)[0]
+                ):
+                    raise ValidationError(
+                        f"input url content-type mismatch: response={response_mime} sniffed={sniffed_mime}"
+                    )
+                mime = sniffed_mime if sniffed_mime != "application/octet-stream" else (response_mime or sniffed_mime)
                 return size, sha, mime
             except Exception as e:
                 last_err = e
+                if isinstance(e, (ValidationError, InputTooLargeError)):
+                    raise
                 if attempt >= max(1, attempts):
                     break
                 sleep_s = min(10.0, 0.5 * (2 ** (attempt - 1))) + random.random() * 0.2
                 time.sleep(sleep_s)
         raise RuntimeError(f"failed to download url: {last_err}")
+
+    def _validate_url_asset(self, asset: Asset, local_path: str, mime: Optional[str]) -> None:
+        normalized_mime = (mime or "application/octet-stream").split(";", 1)[0].strip().lower()
+        allowed = tuple(
+            str(x or "").strip().lower()
+            for x in getattr(asset, "url_allowed_mime_types", ()) or ()
+            if str(x or "").strip()
+        )
+        if allowed and normalized_mime not in allowed:
+            raise ValidationError(
+                f"input url MIME type {normalized_mime!r} not in allowed set"
+            )
+
+        expected_prefix = ""
+        if isinstance(asset, ImageAsset):
+            expected_prefix = "image/"
+        elif isinstance(asset, VideoAsset):
+            expected_prefix = "video/"
+        elif isinstance(asset, AudioAsset):
+            expected_prefix = "audio/"
+        if expected_prefix and not normalized_mime.startswith(expected_prefix):
+            raise ValidationError(
+                f"input url MIME type {normalized_mime!r} is not valid for {type(asset).__name__}"
+            )
+
+        if isinstance(asset, ImageAsset):
+            max_width = getattr(asset, "url_max_width", None)
+            max_height = getattr(asset, "url_max_height", None)
+            max_pixels = getattr(asset, "url_max_pixels", None)
+            if max_width is None and max_height is None and max_pixels is None:
+                return
+            try:
+                from PIL import Image
+
+                with Image.open(local_path) as image:
+                    width, height = image.size
+                    image.verify()
+            except Exception as exc:
+                raise ValidationError("input url image could not be decoded") from exc
+            if max_width is not None and width > int(max_width):
+                raise InputTooLargeError(size_bytes=width, max_bytes=int(max_width), source="input image width")
+            if max_height is not None and height > int(max_height):
+                raise InputTooLargeError(size_bytes=height, max_bytes=int(max_height), source="input image height")
+            pixels = width * height
+            if max_pixels is not None and pixels > int(max_pixels):
+                raise InputTooLargeError(size_bytes=pixels, max_bytes=int(max_pixels), source="input image pixels")
 
     def _stream_to_file(self, src: Any, dst: str, max_bytes: int) -> Tuple[int, str]:
         tmp = f"{dst}.tmp-{os.getpid()}-{threading.get_ident()}-{random.randint(0, 1_000_000)}"
@@ -3510,13 +3837,27 @@ class Worker:
             return False
 
     def _reset_outgoing_queues(self) -> None:
-        """Give a new gRPC stream fresh queues before re-registering.
+        """Prepare the outgoing queues for a new gRPC stream before re-registering.
 
-        The previous stream iterator may still be unwinding after a reconnect
-        signal. Reusing the same queue lets that stale iterator consume the new
-        registration, leaving the replacement stream to send only later events.
+        gen-orchestrator #346 (Option 2): the DATA queue (_outgoing_queue) now
+        PERSISTS across reconnects. Previously it was replaced with a fresh
+        empty Queue, which silently dropped any buffered events or
+        JobExecutionResult for handlers that completed in the seconds before the
+        disconnect — the handler was done but its result never shipped (stuck
+        request, failure mode C). Keeping the same bounded queue lets the new
+        stream's iterator pick up exactly where the old one left off and re-ship
+        the buffered result.
+
+        The old stream's iterator exits cleanly once the previous stream cancels
+        (it loops on _stop_event / queue.get(timeout=0.1)), so there is no
+        long-lived double-drain; at most one message could be consumed by the
+        unwinding iterator in the reconnect window, which the orchestrator's
+        request_id correlation tolerates.
+
+        The HEARTBEAT queue is still reset: heartbeats are ephemeral, periodic,
+        and idempotent (the next tick re-sends current state within 10s), so
+        there is nothing worth preserving and a stale heartbeat is pure noise.
         """
-        self._outgoing_queue = queue.Queue()
         self._heartbeat_outgoing_queue = queue.Queue()
 
     def _outgoing_message_iterator(self, outbound_queue: queue.Queue[Any]) -> Iterator[WorkerSchedulerMessage]:
@@ -4294,11 +4635,33 @@ class Worker:
                 vram_models=vram_models,   # Models in VRAM (hot)
                 disk_models=disk_models,   # Models on disk (warm)
             )
+            # gen-orchestrator #346: on RE-registration (a non-heartbeat
+            # registration, which only happens on the first connect and after a
+            # reconnect) report the request_ids we are still running so the
+            # orchestrator can reconcile its in-memory assignment map after a
+            # restart instead of guessing. Snapshot _active_requests under its
+            # lock to avoid racing handlers that are completing, and union in
+            # any request_ids whose JobExecutionResult is still buffered in the
+            # outgoing queue (handler finished microseconds before the
+            # disconnect; the result hasn't shipped yet). Heartbeats keep this
+            # empty — they are not a reconciliation point.
+            in_flight_request_ids: List[str] = []
+            if not is_heartbeat:
+                with self._active_requests_lock:
+                    in_flight_request_ids = list(self._active_requests.keys())
+                seen = set(in_flight_request_ids)
+                for rid in self._buffered_result_request_ids():
+                    if rid not in seen:
+                        seen.add(rid)
+                        in_flight_request_ids.append(rid)
+
             registration = pb.WorkerRegistration(
                 resources=resources,
                 is_heartbeat=is_heartbeat,
                 protocol_major=WIRE_PROTOCOL_MAJOR,
                 protocol_minor=WIRE_PROTOCOL_MINOR,
+                in_flight_request_ids=in_flight_request_ids,
+                stream_started_unix_ms=int(time.time() * 1000),
             )
             message = pb.WorkerSchedulerMessage(worker_registration=registration)
             # logger.info(f"DEBUG: Preparing to send registration. Resource object: {resources}")
@@ -4480,9 +4843,35 @@ class Worker:
             raise RuntimeError("startup_timeout_unregistered")
 
     def _handle_interrupt(self, sig: int, frame: Optional[Any]) -> None:
-        """Handle interrupt signal (Ctrl+C)."""
+        """Handle interrupt signal (Ctrl+C / SIGTERM)."""
         logger.info(f"Received signal {sig}, shutting down gracefully.")
+        # gen-orchestrator #346 (bonus): announce that this worker is going
+        # away, carrying the request_ids it is still running, BEFORE stop()
+        # tears the connection down. The orchestrator can then requeue this
+        # worker's in-flight work immediately instead of waiting for the
+        # heartbeat-timeout watchdog. Best-effort: a missed event just falls
+        # back to the existing timeout path.
+        try:
+            self._emit_worker_draining_event()
+        except Exception:
+            pass
         self.stop()
+
+    def _emit_worker_draining_event(self) -> None:
+        """Emit a `worker.draining` WorkerEvent with the current in-flight
+        request_ids so the orchestrator can requeue them eagerly on shutdown
+        (gen-orchestrator #346)."""
+        with self._active_requests_lock:
+            in_flight = list(self._active_requests.keys())
+        for rid in self._buffered_result_request_ids():
+            if rid not in in_flight:
+                in_flight.append(rid)
+        payload = {
+            "worker_id": self.worker_id,
+            "in_flight_request_ids": in_flight,
+            "reason": "sigterm",
+        }
+        self._emit_request_event("", "worker.draining", payload)
 
     def stop(self) -> None:
         """Stop the worker and clean up resources."""
@@ -8081,49 +8470,50 @@ class Worker:
             )
             _max_oom_retries = 2
             _oom_attempt = 0
-            while True:
-                try:
-                    if inspect.iscoroutinefunction(spec.func):
-                        result = asyncio.run(spec.func(**call_kwargs))
-                    elif inspect.isasyncgenfunction(spec.func):
-                        result = spec.func(**call_kwargs)
-                    else:
-                        result = spec.func(**call_kwargs)
-                    break
-                except _oom_types as _oom_exc:  # type: ignore[misc]
-                    _oom_attempt += 1
-                    if _flush_memory is not None:
-                        _flush_memory()
-                    if not _can_retry_oom or _oom_attempt > _max_oom_retries:
-                        logger.error(
-                            "[request_id=%s] inference OOM (attempt %d); giving up",
+            with self._lora_overlay_context(ctx, spec.injections, call_kwargs, resolved_models):
+                while True:
+                    try:
+                        if inspect.iscoroutinefunction(spec.func):
+                            result = asyncio.run(spec.func(**call_kwargs))
+                        elif inspect.isasyncgenfunction(spec.func):
+                            result = spec.func(**call_kwargs)
+                        else:
+                            result = spec.func(**call_kwargs)
+                        break
+                    except _oom_types as _oom_exc:  # type: ignore[misc]
+                        _oom_attempt += 1
+                        if _flush_memory is not None:
+                            _flush_memory()
+                        if not _can_retry_oom or _oom_attempt > _max_oom_retries:
+                            logger.error(
+                                "[request_id=%s] inference OOM (attempt %d); giving up",
+                                request_id, _oom_attempt,
+                            )
+                            raise
+                        escalated = False
+                        for _pipe in _injected_pipes:
+                            try:
+                                if _escalate_pipeline_mode(_pipe, logger=logger, escalation=("vae_only", "model_offload", "group_offload", "sequential")):
+                                    escalated = True
+                            except Exception:
+                                pass
+                        if not escalated:
+                            logger.warning(
+                                "[request_id=%s] inference OOM (attempt %d); no further escalation possible, re-raising",
+                                request_id, _oom_attempt,
+                            )
+                            raise
+                        logger.warning(
+                            "[request_id=%s] inference OOM (attempt %d); retrying with escalated offload",
                             request_id, _oom_attempt,
                         )
-                        raise
-                    escalated = False
-                    for _pipe in _injected_pipes:
                         try:
-                            if _escalate_pipeline_mode(_pipe, logger=logger, escalation=("vae_only", "model_offload", "group_offload", "sequential")):
-                                escalated = True
+                            self._emit_worker_event_bytes(request_id, "inference.oom_retry", safe_json_bytes({
+                                "function_name": spec.name,
+                                "attempt": _oom_attempt,
+                            }))
                         except Exception:
                             pass
-                    if not escalated:
-                        logger.warning(
-                            "[request_id=%s] inference OOM (attempt %d); no further escalation possible, re-raising",
-                            request_id, _oom_attempt,
-                        )
-                        raise
-                    logger.warning(
-                        "[request_id=%s] inference OOM (attempt %d); retrying with escalated offload",
-                        request_id, _oom_attempt,
-                    )
-                    try:
-                        self._emit_worker_event_bytes(request_id, "inference.oom_retry", safe_json_bytes({
-                            "function_name": spec.name,
-                            "attempt": _oom_attempt,
-                        }))
-                    except Exception:
-                        pass
             logger.info("[request_id=%s] %s returned, output_mode=%s", request_id, spec.name, spec.output_mode)
 
             if ctx.is_canceled():
@@ -8960,9 +9350,29 @@ class Worker:
                         if self._downloader is None:
                             raise ValueError("diffusers pipeline injection requires a model downloader")
                         cache_dir = str(tensorhub_cas_dir())
+                        # gen-orchestrator #348: this download was triggered by
+                        # THIS request (the model wasn't on disk when the
+                        # request needed it). Resolve the manifest entry up
+                        # front so the per-request progress wrapper can report
+                        # total bytes + ETA on the request's SSE stream.
+                        resolved_entry = None
+                        try:
+                            resolved_entry = (getattr(ctx, "resolved_repos_by_id", None) or {}).get(canon)
+                        except Exception:
+                            resolved_entry = None
+                        request_id_for_dl = str(getattr(ctx, "request_id", "") or "").strip()
                         # Best-effort download timing.
                         t_dl0 = time.monotonic()
-                        local = self._downloader.download(model_id, cache_dir)
+                        if request_id_for_dl:
+                            local = self._run_download_with_request_progress(
+                                request_id=request_id_for_dl,
+                                model_id=canon or str(model_id),
+                                cache_dir=cache_dir,
+                                resolved_entry=resolved_entry,
+                                download_fn=lambda: self._downloader.download(model_id, cache_dir),
+                            )
+                        else:
+                            local = self._downloader.download(model_id, cache_dir)
                         t_dl_ms = int((time.monotonic() - t_dl0) * 1000)
 
                         warm = False
@@ -8970,13 +9380,6 @@ class Worker:
                             warm = canon in set(self._model_cache.get_disk_models())
                         except Exception:
                             warm = False
-
-                        # If we have an orchestrator-resolved manifest, estimate missing bytes.
-                        resolved_entry = None
-                        try:
-                            resolved_entry = (getattr(ctx, "resolved_repos_by_id", None) or {}).get(canon)
-                        except Exception:
-                            resolved_entry = None
                         bytes_dl = None
                         if resolved_entry is not None:
                             bytes_dl = best_effort_bytes_downloaded(Path(cache_dir), resolved_entry)
@@ -9417,6 +9820,237 @@ class Worker:
 
         raise ValueError(f"no injection provider for type {qn} (model_id={model_id})")
 
+    def _normalize_lora_overlays(
+        self,
+        inj: InjectionSpec,
+        resolved_models: Dict[str, Dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        entry = resolved_models.get(inj.param_name) or {}
+        raw = entry.get("loras") or []
+        if not raw:
+            return []
+        if not getattr(inj.binding, "_allow_lora", False):
+            raise ValueError(
+                f"function binding {inj.param_name!r} received LoRA overlays but did not declare allow_lora()"
+            )
+        if not isinstance(raw, list):
+            raise ValueError(f"function binding {inj.param_name!r}: loras must be a list")
+        out: list[dict[str, Any]] = []
+        for idx, item in enumerate(raw):
+            if not isinstance(item, dict):
+                item = msgspec.to_builtins(item)
+            if not isinstance(item, dict):
+                raise ValueError(f"function binding {inj.param_name!r}: lora {idx} must be an object")
+            ref = str(item.get("ref") or "").strip()
+            if not ref:
+                raise ValueError(f"function binding {inj.param_name!r}: lora {idx} missing ref")
+            provider = str(item.get("provider") or "tensorhub").strip() or "tensorhub"
+            tag = str(item.get("tag") or "prod").strip() or "prod"
+            flavor = str(item.get("flavor") or "").strip()
+            try:
+                weight = float(item.get("weight", 1.0))
+            except Exception as exc:
+                raise ValueError(
+                    f"function binding {inj.param_name!r}: lora {idx} weight must be numeric"
+                ) from exc
+            out.append(
+                {
+                    "ref": ref,
+                    "provider": provider,
+                    "tag": tag,
+                    "flavor": flavor,
+                    "weight": weight,
+                }
+            )
+        return out
+
+    def _pipeline_lora_lock(self, pipeline: Any) -> threading.Lock:
+        locks = getattr(self, "_lora_overlay_locks", None)
+        locks_lock = getattr(self, "_lora_overlay_locks_lock", None)
+        if locks is None:
+            self._lora_overlay_locks = {}
+            locks = self._lora_overlay_locks
+        if locks_lock is None:
+            self._lora_overlay_locks_lock = threading.Lock()
+            locks_lock = self._lora_overlay_locks_lock
+        key = id(pipeline)
+        with locks_lock:
+            lock = locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                locks[key] = lock
+            return lock
+
+    def _materialize_lora_overlay(
+        self,
+        overlay: dict[str, Any],
+        *,
+        adapter_name: str,
+    ) -> _RuntimeLoraSpec:
+        ref = str(overlay["ref"])
+        provider = str(overlay.get("provider") or "tensorhub")
+        tag = str(overlay.get("tag") or "prod")
+        flavor = str(overlay.get("flavor") or "")
+        weight = float(overlay.get("weight", 1.0))
+        model_id = _resolved_repo_id(ref, flavor=flavor, tag=tag, provider=provider)
+
+        local: str | None = None
+        try:
+            p = Path(ref)
+            if p.exists():
+                local = p.as_posix()
+        except Exception:
+            local = None
+        if local is None:
+            if self._downloader is None:
+                raise ValueError("LoRA overlay materialization requires a model downloader")
+            local = self._downloader.download(model_id, str(tensorhub_cas_dir()))
+
+        path = Path(local)
+        if path.is_dir():
+            preferred = (
+                path / "adapter_model.safetensors",
+                path / "pytorch_lora_weights.safetensors",
+            )
+            selected = next((p for p in preferred if p.exists()), None)
+            if selected is None:
+                matches = sorted(path.rglob("*.safetensors"))
+                selected = matches[0] if matches else None
+            if selected is None:
+                raise ValueError(f"LoRA overlay {ref!r} did not materialize a safetensors file")
+            path = selected
+        if not path.exists():
+            raise ValueError(f"LoRA overlay {ref!r} materialized to missing path {path}")
+        return _RuntimeLoraSpec(
+            tensors=Tensors(ref=ref, local_path=path.as_posix()),
+            weight=weight,
+            adapter_name=adapter_name,
+        )
+
+    def _read_safetensors_keys(self, path: Path) -> list[str]:
+        try:
+            from safetensors import safe_open
+        except Exception:
+            return []
+        try:
+            with safe_open(path.as_posix(), framework="pt", device="cpu") as handle:
+                return list(handle.keys())
+        except Exception:
+            return []
+
+    def _pipeline_weight_keys(self, pipeline: Any) -> set[str]:
+        out: set[str] = set()
+        state_dict = getattr(pipeline, "state_dict", None)
+        if callable(state_dict):
+            try:
+                raw = state_dict()
+                if isinstance(raw, dict):
+                    out.update(str(k) for k in raw.keys())
+            except Exception:
+                pass
+        components = getattr(pipeline, "components", None)
+        if isinstance(components, dict):
+            for name, component in components.items():
+                component_state_dict = getattr(component, "state_dict", None)
+                if not callable(component_state_dict):
+                    continue
+                try:
+                    raw = component_state_dict()
+                except Exception:
+                    continue
+                if isinstance(raw, dict):
+                    prefix = str(name)
+                    out.update(f"{prefix}.{k}" for k in raw.keys())
+        return out
+
+    def _lora_target_from_key(self, key: str) -> str:
+        suffixes = (
+            ".lora_down.weight",
+            ".lora_up.weight",
+            ".lora_A.weight",
+            ".lora_B.weight",
+            ".alpha",
+        )
+        for suffix in suffixes:
+            if key.endswith(suffix):
+                return key[: -len(suffix)]
+        return ""
+
+    def _validate_lora_specs_compatible(
+        self,
+        pipeline: Any,
+        specs: list[_RuntimeLoraSpec],
+    ) -> None:
+        for spec in specs:
+            keys = self._read_safetensors_keys(Path(spec.tensors.local_path or ""))
+            if not keys:
+                continue
+            target_prefixes = {
+                target
+                for key in keys
+                if (target := self._lora_target_from_key(str(key)))
+            }
+            if not target_prefixes:
+                raise ValidationError(
+                    f"LoRA artifact {spec.tensors.ref!r} does not contain recognized LoRA adapter weights"
+                )
+            pipeline_keys = self._pipeline_weight_keys(pipeline)
+            if not pipeline_keys:
+                continue
+            unmatched = [
+                target
+                for target in sorted(target_prefixes)
+                if not any(
+                    base == f"{target}.weight"
+                    or base == target
+                    or base.startswith(f"{target}.")
+                    for base in pipeline_keys
+                )
+            ]
+            if unmatched:
+                raise ValidationError(
+                    f"LoRA artifact {spec.tensors.ref!r} targets modules not present on "
+                    f"{type(pipeline).__name__}: {', '.join(unmatched[:5])}"
+                )
+
+    @contextmanager
+    def _lora_overlay_context(
+        self,
+        ctx: RequestContext,
+        injections: list[InjectionSpec],
+        call_kwargs: Dict[str, Any],
+        resolved_models: Dict[str, Dict[str, Any]],
+    ) -> Iterator[None]:
+        with ExitStack() as stack:
+            for inj in injections:
+                overlays = self._normalize_lora_overlays(inj, resolved_models)
+                if not overlays:
+                    continue
+                pipeline = call_kwargs.get(inj.param_name)
+                if pipeline is None:
+                    raise ValueError(f"LoRA overlays require injected pipeline {inj.param_name!r}")
+                required_methods = ("load_lora_weights", "set_adapters", "unload_lora_weights")
+                missing = [name for name in required_methods if not callable(getattr(pipeline, name, None))]
+                if missing:
+                    raise ValueError(
+                        f"binding {inj.param_name!r} declared allow_lora(), but injected runtime "
+                        f"{type(pipeline).__name__} lacks {', '.join(missing)}"
+                    )
+                lock = self._pipeline_lora_lock(pipeline)
+                stack.enter_context(lock)
+                specs = [
+                    self._materialize_lora_overlay(
+                        overlay,
+                        adapter_name=f"cozy_lora_{ctx.request_id}_{inj.param_name}_{idx}",
+                    )
+                    for idx, overlay in enumerate(overlays)
+                ]
+                self._validate_lora_specs_compatible(pipeline, specs)
+                from .utils.lora import load_loras
+
+                stack.enter_context(load_loras(pipeline, specs, ctx.request_id))
+            yield
+
     def _resolved_models_for_request(self, request: Any) -> Dict[str, Dict[str, Any]]:
         """Extract the orchestrator-stamped ``resolved_models`` map from a
         JobExecutionRequest envelope.
@@ -9447,6 +10081,8 @@ class Worker:
             ref = ""
             tag = "prod"
             flavor = ""
+            source = ""
+            slot_name = ""
             # Issue #18: extract `provider` from the stamped entry. Older
             # orchestrators (pre #358) didn't ship the provider field; those
             # entries are tensorhub-only by definition of the previous wire
@@ -9457,11 +10093,17 @@ class Worker:
                 tag = str(entry.get("tag") or "prod").strip() or "prod"
                 flavor = str(entry.get("flavor") or "").strip()
                 provider = str(entry.get("provider") or "").strip() or "tensorhub"
+                source = str(entry.get("source") or "").strip()
+                slot_name = str(entry.get("slot_name") or "").strip()
+                raw_loras = entry.get("loras") or []
             else:
                 ref = str(getattr(entry, "ref", "") or "").strip()
                 tag = str(getattr(entry, "tag", "") or "prod").strip() or "prod"
                 flavor = str(getattr(entry, "flavor", "") or "").strip()
                 provider = str(getattr(entry, "provider", "") or "").strip() or "tensorhub"
+                source = str(getattr(entry, "source", "") or "").strip()
+                slot_name = str(getattr(entry, "slot_name", "") or "").strip()
+                raw_loras = getattr(entry, "loras", None) or []
             if ref:
                 out[str(param_name)] = {
                     "ref": ref,
@@ -9469,6 +10111,12 @@ class Worker:
                     "flavor": flavor,
                     "provider": provider,
                 }
+                if source:
+                    out[str(param_name)]["source"] = source
+                if slot_name:
+                    out[str(param_name)]["slot_name"] = slot_name
+                if raw_loras:
+                    out[str(param_name)]["loras"] = msgspec.to_builtins(raw_loras)
         return out
 
     def _resolve_model_id_for_injection(
@@ -9489,10 +10137,13 @@ class Worker:
         """
         resolved_models = resolved_models or {}
 
-        # 1. Caller override (already validated by the orchestrator).
+        # 1. Orchestrator-resolved ref. source=default is the endpoint
+        # owner's current model-slot default; any other source is a caller
+        # override that has already passed orchestrator policy.
         override = resolved_models.get(inj.param_name)
         if override:
-            if not inj.binding._allow_override:
+            is_caller_override = str(override.get("source") or "").strip() != "default"
+            if is_caller_override and not inj.binding._allow_override:
                 # Defense-in-depth — orchestrator should already have rejected.
                 raise ValueError(
                     f"function {fn_name!r} param {inj.param_name!r}: binding has no "

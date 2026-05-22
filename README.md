@@ -70,7 +70,7 @@ loads and caches each binding; your function receives the live instance.
 from diffusers import StableDiffusionXLPipeline
 from gen_worker import Repo, Resources, inference_function
 
-sdxl = Repo("stabilityai/stable-diffusion-xl-base-1.0")
+sdxl = Repo("base_model", "stabilityai/stable-diffusion-xl-base-1.0")
 
 @inference_function(
     resources=Resources(requires_gpu=True, min_vram_gb=12.0),
@@ -82,16 +82,18 @@ def generate(ctx, pipe: StableDiffusionXLPipeline, payload: Input) -> Output:
 ```
 
 `Resources` is the per-function hardware envelope plus dynamic cost shape (used
-by the orchestrator for placement and admission). `Repo(ref).flavor(name)` is
-the binding — see [docs/endpoint-authoring.md](docs/endpoint-authoring.md) for
-the full grammar.
+by the orchestrator for placement and admission). `Repo(name, default_ref)` is
+the binding. The `name` is the stable model-slot config key Tensorhub can update
+after publish; `default_ref` is only the initial/default repo ref. The old
+`Repo(ref)` / `HFRepo(ref)` / `CivitaiRepo(ref)` shape still works for existing
+endpoints and uses the model parameter name as the slot key when discovered.
 
 ## Three binding shapes
 
 **Fixed pick** — function pins one specific `(repo, flavor?, tag?)`:
 
 ```python
-models={"pipe": Repo("acme/flux").flavor("bf16")}
+models={"pipe": Repo("base_model", "acme/flux").flavor("bf16")}
 ```
 
 **Dispatch pick** — payload-driven, keyed by a `Literal[...]`-typed field:
@@ -132,7 +134,7 @@ Top-level `gen_worker` exports only what endpoint authors need:
 
 - Decorators + bindings: `inference_function`, `Resources`, `Repo`, `Dispatch`, `dispatch`
 - Context types: `RequestContext`, `ConversionContext`, `DatasetContext`, `TrainingContext`
-- Value types: `Asset`, `Tensors`, `Compute`, `LoraSpec`
+- Value types: `Asset`, `ImageAsset`, `VideoAsset`, `AudioAsset`, `MediaAsset`, `Tensors`, `Compute`
 - Errors: `ValidationError`, `RetryableError`, `FatalError`, `ResourceError`,
   `AuthError`, `CanceledError`, `OutputTooLargeError`, `InputTooLargeError`,
   `WorkerError`

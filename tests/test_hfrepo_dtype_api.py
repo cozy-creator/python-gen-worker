@@ -108,6 +108,7 @@ def test_wire_format_hf_binding_carries_dtype() -> None:
     # Flavor field is still emitted (empty) for back-compat with the
     # consumer side, but it must NOT carry the dtype.
     assert binding["flavor"] == ""
+    assert binding["allow_lora"] is False
 
 
 def test_wire_format_hf_binding_no_dtype_field_when_unset() -> None:
@@ -127,3 +128,10 @@ def test_wire_format_tensorhub_binding_has_no_dtype_field() -> None:
     binding = out["binding"]
     assert "dtype" not in binding
     assert binding["flavor"] == "nf4"
+
+
+def test_wire_format_binding_carries_allow_lora() -> None:
+    from gen_worker.worker import _binding_to_wire
+
+    out = _binding_to_wire("pipeline", str, HFRepo("acme/x").allow_lora())
+    assert out["binding"]["allow_lora"] is True

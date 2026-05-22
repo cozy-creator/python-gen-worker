@@ -25,7 +25,19 @@ from .streaming import (
     TokenStreamSignal,
     iter_transformers_text_deltas,
 )
-from .types import Asset, Compute, LoraSpec, Tensors
+from .types import (
+    Asset,
+    AudioAsset,
+    Compute,
+    ExpectedOutput,
+    ImageAsset,
+    MediaAsset,
+    NegativePrompt,
+    PositivePrompt,
+    PromptRole,
+    Tensors,
+    VideoAsset,
+)
 
 __all__ = [
     "Binding",
@@ -53,7 +65,14 @@ __all__ = [
     "TokenStreamSignal",
     "iter_transformers_text_deltas",
     "Asset",
+    "AudioAsset",
     "Compute",
-    "LoraSpec",
+    "ExpectedOutput",
+    "ImageAsset",
+    "MediaAsset",
+    "NegativePrompt",
+    "PositivePrompt",
+    "PromptRole",
     "Tensors",
+    "VideoAsset",
 ]

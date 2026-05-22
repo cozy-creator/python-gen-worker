@@ -407,6 +407,43 @@ def best_effort_bytes_downloaded(base_dir: Path, resolved_entry: Any) -> Optiona
     return _missing_bytes_for_resolved_model(base_dir, resolved_entry)
 
 
+def resolved_entry_total_bytes(resolved_entry: Any) -> Optional[int]:
+    """Sum of per-file sizes declared in an orchestrator-resolved manifest
+    entry — i.e. the total bytes to fetch for the model. Used by the
+    per-request model-download lifecycle events (#348) to populate
+    ``estimated_total_bytes`` at fetch start. Returns ``None`` when the
+    manifest carries no per-file sizes (bootstrap fallback)."""
+    try:
+        files = _extract_resolved_files(resolved_entry)
+        if not files:
+            return None
+        total = 0
+        for ent in files:
+            total += _extract_file_size(ent)
+        return int(total) if total > 0 else None
+    except Exception:
+        return None
+
+
+def best_effort_bytes_on_disk(base_dir: Path, resolved_entry: Any) -> Optional[int]:
+    """Bytes already present on disk for a resolved manifest entry
+    (total declared minus still-missing). Used to sample download
+    progress without a downloader-level byte callback. Returns ``None``
+    when the manifest carries no usable size info."""
+    total = resolved_entry_total_bytes(resolved_entry)
+    if total is None:
+        return None
+    missing = _missing_bytes_for_resolved_model(base_dir, resolved_entry)
+    if missing is None:
+        return None
+    on_disk = total - int(missing)
+    if on_disk < 0:
+        on_disk = 0
+    if on_disk > total:
+        on_disk = total
+    return int(on_disk)
+
+
 def safe_json_bytes(payload: Dict[str, Any]) -> bytes:
     return json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
 

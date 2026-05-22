@@ -18,6 +18,7 @@ import inspect
 import json
 import sys
 import typing
+import types as py_types
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -25,6 +26,16 @@ import msgspec
 
 from gen_worker import RequestContext
 from gen_worker.api.binding import Binding, Dispatch, HFRepo, Repo
+from gen_worker.api.types import (
+    Asset,
+    AudioAsset,
+    ExpectedOutput,
+    ImageAsset,
+    MediaAsset,
+    PromptRole,
+    Tensors,
+    VideoAsset,
+)
 
 from gen_worker.discovery.toml_manifest import (
     EndpointToml,
@@ -59,7 +70,229 @@ def _is_msgspec_struct(t: Any) -> bool:
         return False
 
 
-def _binding_to_manifest(binding: Binding, param_annotation: Any) -> Dict[str, Any]:
+_MEDIA_ASSET_TYPES = (MediaAsset, ImageAsset, VideoAsset, AudioAsset)
+
+
+def _media_kind(t: type) -> str:
+    if issubclass(t, ImageAsset):
+        return "image"
+    if issubclass(t, VideoAsset):
+        return "video"
+    if issubclass(t, AudioAsset):
+        return "audio"
+    return "media"
+
+
+def _collect_payload_moderation_metadata(payload_type: type) -> Dict[str, Any]:
+    out: Dict[str, list[Dict[str, str]]] = {"prompts": [], "media": []}
+    seen_structs: set[type] = set()
+
+    def walk(ann: Any, path: str) -> None:
+        origin = typing.get_origin(ann)
+
+        if origin is typing.Annotated:
+            args = typing.get_args(ann)
+            if not args:
+                return
+            base = args[0]
+            roles = [m for m in args[1:] if isinstance(m, PromptRole)]
+            if roles:
+                if base is not str:
+                    raise ValueError(
+                        f"{path}: PromptRole markers must annotate str fields"
+                    )
+                out["prompts"].append({"field": path, "role": roles[-1].role})
+                return
+            walk(base, path)
+            return
+
+        if origin in (typing.Union, py_types.UnionType):
+            for arg in typing.get_args(ann):
+                if arg is not type(None):
+                    walk(arg, path)
+            return
+
+        if origin in (list, tuple, set, frozenset):
+            args = typing.get_args(ann)
+            if args:
+                walk(args[0], f"{path}[]")
+            return
+
+        if origin is dict:
+            args = typing.get_args(ann)
+            if len(args) == 2:
+                walk(args[1], f"{path}.*")
+            return
+
+        if isinstance(ann, type):
+            if issubclass(ann, _MEDIA_ASSET_TYPES):
+                out["media"].append({"field": path, "kind": _media_kind(ann)})
+                return
+            if issubclass(ann, (Asset, Tensors)):
+                return
+            if _is_msgspec_struct(ann):
+                if ann in seen_structs:
+                    return
+                seen_structs.add(ann)
+                try:
+                    hints = typing.get_type_hints(ann, include_extras=True)
+                except Exception:
+                    hints = getattr(ann, "__annotations__", {})
+                for field in getattr(ann, "__struct_fields__", ()) or ():
+                    if field in hints:
+                        walk(hints[field], f"{path}.{field}" if path else field)
+                seen_structs.discard(ann)
+
+    walk(payload_type, "")
+    return {k: v for k, v in out.items() if v}
+
+
+def _unwrap_optional(ann: Any) -> Any:
+    origin = typing.get_origin(ann)
+    if origin in (typing.Union, py_types.UnionType):
+        args = [arg for arg in typing.get_args(ann) if arg is not type(None)]
+        if len(args) == 1:
+            return args[0]
+    return ann
+
+
+def _media_kind_for_annotation(ann: Any) -> str:
+    ann = _unwrap_optional(ann)
+    origin = typing.get_origin(ann)
+    if origin in (list, tuple, set, frozenset):
+        args = typing.get_args(ann)
+        ann = _unwrap_optional(args[0]) if args else Any
+    if isinstance(ann, type) and issubclass(ann, ImageAsset):
+        return "image"
+    if isinstance(ann, type) and issubclass(ann, VideoAsset):
+        return "video"
+    if isinstance(ann, type) and issubclass(ann, AudioAsset):
+        return "audio"
+    if isinstance(ann, type) and issubclass(ann, MediaAsset):
+        return "file"
+    return "other"
+
+
+def _payload_has_field_path(payload_type: type, ref: str) -> bool:
+    if not ref.startswith("input."):
+        return True
+    path = ref.removeprefix("input.")
+    if not path:
+        return False
+
+    current: Any = payload_type
+    for raw_part in path.replace("[]", "").split("."):
+        part = raw_part.strip()
+        if not part:
+            return False
+        current = _unwrap_optional(current)
+        origin = typing.get_origin(current)
+        if origin in (list, tuple, set, frozenset):
+            args = typing.get_args(current)
+            current = _unwrap_optional(args[0]) if args else Any
+        if not _is_msgspec_struct(current):
+            return False
+        try:
+            hints = typing.get_type_hints(current, include_extras=True)
+        except Exception:
+            hints = getattr(current, "__annotations__", {}) or {}
+        if part not in hints:
+            return False
+        current = hints[part]
+    return True
+
+
+def _expected_output_expr(value: Any, *, payload_type: type, field: str, key: str) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        if value <= 0:
+            raise ValueError(f"{field}: ExpectedOutput.{key} must be positive")
+        return value
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return None
+        if raw.startswith("input.") and not _payload_has_field_path(payload_type, raw):
+            raise ValueError(f"{field}: ExpectedOutput.{key} references unknown payload field {raw!r}")
+        return raw
+    raise TypeError(f"{field}: ExpectedOutput.{key} must be int, str, or None")
+
+
+def _collect_expected_output_metadata(payload_type: type, output_type: type) -> list[Dict[str, Any]]:
+    out: list[Dict[str, Any]] = []
+    seen_structs: set[type] = set()
+
+    def walk(ann: Any, path: str) -> None:
+        origin = typing.get_origin(ann)
+
+        if origin is typing.Annotated:
+            args = typing.get_args(ann)
+            if not args:
+                return
+            base = args[0]
+            markers = [m for m in args[1:] if isinstance(m, ExpectedOutput)]
+            if markers:
+                marker = markers[-1]
+                media_type = marker.media_type or _media_kind_for_annotation(base)
+                item: Dict[str, Any] = {
+                    "field": path,
+                    "type": media_type,
+                }
+                count = _expected_output_expr(marker.count, payload_type=payload_type, field=path, key="count")
+                if count is not None:
+                    item["count"] = count
+                width = _expected_output_expr(marker.width, payload_type=payload_type, field=path, key="width")
+                if width is not None:
+                    item["width"] = width
+                height = _expected_output_expr(marker.height, payload_type=payload_type, field=path, key="height")
+                if height is not None:
+                    item["height"] = height
+                aspect = _expected_output_expr(marker.aspect_ratio, payload_type=payload_type, field=path, key="aspect_ratio")
+                if aspect is not None:
+                    item["aspect_ratio"] = aspect
+                mime = (marker.mime_type or "").strip()
+                if mime:
+                    item["mime_type"] = mime
+                out.append(item)
+                return
+            walk(base, path)
+            return
+
+        if origin in (typing.Union, py_types.UnionType):
+            for arg in typing.get_args(ann):
+                if arg is not type(None):
+                    walk(arg, path)
+            return
+
+        if origin in (list, tuple, set, frozenset):
+            args = typing.get_args(ann)
+            if args:
+                walk(args[0], f"{path}[]")
+            return
+
+        if isinstance(ann, type) and _is_msgspec_struct(ann):
+            if ann in seen_structs:
+                return
+            seen_structs.add(ann)
+            try:
+                hints = typing.get_type_hints(ann, include_extras=True)
+            except Exception:
+                hints = getattr(ann, "__annotations__", {})
+            for field in getattr(ann, "__struct_fields__", ()) or ():
+                if field in hints:
+                    walk(hints[field], f"{path}.{field}" if path else field)
+            seen_structs.discard(ann)
+
+    walk(output_type, "")
+    return out
+
+
+def _binding_slot_name(repo: Repo, fallback: str) -> str:
+    return str(getattr(repo, "slot_name", "") or fallback).strip()
+
+
+def _binding_to_manifest(binding: Binding, param_annotation: Any, param_name: str = "") -> Dict[str, Any]:
     """Emit a `functions.bindings.<param>` block for the manifest.
 
     Wire shape (from `progress.json` issue #9):
@@ -107,10 +340,12 @@ def _binding_to_manifest(binding: Binding, param_annotation: Any) -> Dict[str, A
             # tensorhub-provider `black-forest-labs/flux.2-klein-4b-base` in
             # the catalog. Always emit the actual provider.
             "provider": binding.provider,
+            "slot_name": _binding_slot_name(binding, param_name),
             "ref": binding.ref,
             "flavor": binding._flavor,
             "tag": binding._tag,
             "allow_override": bool(binding._allow_override),
+            "allow_lora": bool(getattr(binding, "_allow_lora", False)),
             "pipeline_classes": declared_classes,
         }
         # Issue #20 fix 2: HF bindings carry a `dtype` field (replaces the
@@ -121,13 +356,17 @@ def _binding_to_manifest(binding: Binding, param_annotation: Any) -> Dict[str, A
         return out
     if isinstance(binding, Dispatch):
         table: Dict[str, Dict[str, str]] = {}
+        dispatch_slot_name = ""
         for k, repo in binding.table.items():
+            if not dispatch_slot_name:
+                dispatch_slot_name = _binding_slot_name(repo, param_name)
             entry: Dict[str, str] = {
                 "ref": repo.ref,
                 "tag": repo._tag,
                 # Per-entry provider — a Dispatch table can mix providers
                 # across variants (e.g. fp8 from tensorhub, nf4 from HF).
                 "provider": repo.provider,
+                "slot_name": _binding_slot_name(repo, param_name),
             }
             if repo._flavor:
                 entry["flavor"] = repo._flavor
@@ -138,8 +377,10 @@ def _binding_to_manifest(binding: Binding, param_annotation: Any) -> Dict[str, A
         return {
             "kind": "dispatch",
             "field": binding.field,
+            "slot_name": dispatch_slot_name or param_name,
             "table": table,
             "allow_override": bool(binding._allow_override),
+            "allow_lora": bool(getattr(binding, "_allow_lora", False)),
             "pipeline_classes": declared_classes,
         }
     raise TypeError(f"unknown binding type: {type(binding).__name__}")
@@ -304,7 +545,7 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
             raise ValueError(f"{func.__name__}: missing type annotation for param {p.name}")
 
         if p.name in bindings_map:
-            bindings_block[p.name] = _binding_to_manifest(bindings_map[p.name], ann)
+            bindings_block[p.name] = _binding_to_manifest(bindings_map[p.name], ann, p.name)
             continue
 
         if _is_msgspec_struct(ann):
@@ -358,7 +599,9 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
             )
 
     input_schema, input_sha = _schema_and_hash(payload_type)
+    moderation = _collect_payload_moderation_metadata(payload_type)
     output_schema, output_sha = _schema_and_hash(output_type)
+    expected_outputs = _collect_expected_output_metadata(payload_type, output_type)
     delta_schema = None
     delta_sha = ""
     if delta_type is not None:
@@ -380,6 +623,8 @@ def _extract_function_metadata(func: Any, module_name: str) -> Dict[str, Any]:
         "payload_type": _type_id(payload_type),
         "payload_schema_sha256": input_sha,
         "input_schema": input_schema,
+        "moderation": moderation,
+        "expected_outputs": expected_outputs,
         "output_mode": output_mode,
         "output_type": _type_id(output_type),
         "output_schema_sha256": output_sha,
@@ -734,12 +979,12 @@ def _extract_class_function_methods(
     bindings_map: Dict[str, Binding] = dict(spec.models or {})
     bindings_block: Dict[str, Dict[str, Any]] = {}
     for key, binding in bindings_map.items():
-        bindings_block[key] = _binding_to_manifest(binding, None)
+        bindings_block[key] = _binding_to_manifest(binding, None, key)
 
     out: List[Dict[str, Any]] = []
     for attr_name, method, fn_spec in function_methods:
         # Method signature: (self, ctx, payload) — skip self.
-        hints = typing.get_type_hints(method, include_extras=False)
+        hints = typing.get_type_hints(method, include_extras=True)
         sig = inspect.signature(method)
         params = [p for p in sig.parameters.values() if p.name != "self"]
 
@@ -804,7 +1049,9 @@ def _extract_class_function_methods(
             )
 
         input_schema, input_sha = _schema_and_hash(payload_type)
+        moderation = _collect_payload_moderation_metadata(payload_type)
         output_schema, output_sha = _schema_and_hash(output_type)
+        expected_outputs = _collect_expected_output_metadata(payload_type, output_type)
         delta_schema = None
         delta_sha = ""
         if delta_type is not None:
@@ -834,6 +1081,8 @@ def _extract_class_function_methods(
             "payload_type": _type_id(payload_type),
             "payload_schema_sha256": input_sha,
             "input_schema": input_schema,
+            "moderation": moderation,
+            "expected_outputs": expected_outputs,
             "output_mode": output_mode,
             "output_type": _type_id(output_type) if output_type else None,
             "output_schema_sha256": output_sha,
