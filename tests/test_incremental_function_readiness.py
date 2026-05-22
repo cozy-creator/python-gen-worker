@@ -27,6 +27,7 @@ across CI shapes (no TLS / scheduler dependency).
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Any, List
 from unittest.mock import MagicMock
@@ -67,6 +68,11 @@ def _bare_worker_with_two_model_bound_functions(
     # Real ModelCache against a tmp dir avoids the VRAM auto-detect
     # branching on a CI host with/without CUDA.
     w._model_cache = ModelCache(max_vram_gb=0.0, model_cache_dir="/tmp/test-mc")
+    # gen-orchestrator #346: _register_worker snapshots _active_requests under
+    # its lock to populate in_flight_request_ids, so the bare fixture must
+    # provide both even though no handler is running in these readiness tests.
+    w._active_requests = {}
+    w._active_requests_lock = threading.Lock()
     return w
 
 

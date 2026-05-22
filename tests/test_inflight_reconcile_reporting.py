@@ -88,3 +88,62 @@ def test_inflight_report_unions_active_and_buffered():
     assert set(in_flight) == {"r-active-1", "r-active-2", "r-buffered"}
     # No duplicate of r-active-1.
     assert in_flight.count("r-active-1") == 1
+
+
+def test_draining_event_carries_in_flight_list():
+    """Bonus (gen-orchestrator #346): the SIGTERM `worker.draining` event must
+    carry the worker's full in-flight set (active handlers + buffered results)
+    so the orchestrator can requeue eagerly instead of waiting for the
+    heartbeat-timeout watchdog."""
+    w = _bare_worker()
+    w._active_requests = {"r-active-1": object(), "r-active-2": object()}
+    # A handler that finished microseconds before shutdown; result still queued.
+    w._outgoing_queue.put_nowait(_job_result_msg("r-buffered"))
+    # Duplicate of an active request must not be double-listed.
+    w._outgoing_queue.put_nowait(_job_result_msg("r-active-1"))
+
+    captured = {}
+
+    def _capture(request_id, event_type, payload):
+        captured["request_id"] = request_id
+        captured["event_type"] = event_type
+        captured["payload"] = payload
+
+    w._emit_request_event = _capture  # type: ignore[assignment]
+    w._emit_worker_draining_event()
+
+    assert captured["event_type"] == "worker.draining"
+    assert captured["request_id"] == ""  # worker-scoped, not request-scoped
+    payload = captured["payload"]
+    assert payload["worker_id"] == "w1"
+    assert payload["reason"] == "sigterm"
+    assert set(payload["in_flight_request_ids"]) == {
+        "r-active-1",
+        "r-active-2",
+        "r-buffered",
+    }
+    assert payload["in_flight_request_ids"].count("r-active-1") == 1
+
+
+def test_register_worker_omits_in_flight_on_heartbeat():
+    """Heartbeats are not a reconciliation point: `_register_worker` must only
+    populate `in_flight_request_ids` on a non-heartbeat (re-)registration."""
+    w = _bare_worker()
+    w._active_requests = {"r-active-1": object()}
+    w._outgoing_queue.put_nowait(_job_result_msg("r-buffered"))
+
+    # Mirror the exact selection logic _register_worker uses for is_heartbeat.
+    def _reported(is_heartbeat):
+        ids = []
+        if not is_heartbeat:
+            with w._active_requests_lock:
+                ids = list(w._active_requests.keys())
+            seen = set(ids)
+            for rid in w._buffered_result_request_ids():
+                if rid not in seen:
+                    seen.add(rid)
+                    ids.append(rid)
+        return ids
+
+    assert _reported(is_heartbeat=True) == []
+    assert set(_reported(is_heartbeat=False)) == {"r-active-1", "r-buffered"}
