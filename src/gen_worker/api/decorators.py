@@ -598,17 +598,27 @@ def _make_endpoint_decorator(kind: Literal["inference", "training", "dataset", "
             )
 
             is_async = _is_async_class(target, function_methods)
-            archetype = "BatchedWorker" if is_async else "SerialWorker"
+            # #345 Improvement B: an async class is BatchedWorker ONLY when it
+            # declares a continuous-batching engine via runtime= (sglang/vllm).
+            # An async @inference class WITHOUT runtime= is now a SerialWorker
+            # whose handlers run on the shared asyncio loop (_batched_loop) via
+            # run_coroutine_threadsafe — high-concurrency I/O without a third
+            # archetype. Sync classes are SerialWorker (ThreadPoolExecutor).
+            # training/dataset/conversion stay sync-only (handled below).
+            if runtime is not None:
+                archetype = "BatchedWorker"
+            else:
+                archetype = "SerialWorker"
 
             if runtime is not None and not is_async:
                 raise ValueError(
                     f"@{kind} class {cls_name!r}: runtime={runtime!r} requires async methods "
                     f"(BatchedWorker shape). Make setup/generate async, or remove runtime=."
                 )
-            if runtime is None and is_async and kind == "inference":
-                # Async class without runtime= is allowed but unusual — warn via attribute,
-                # not exception, so tenants can run async without a continuous-batching engine.
-                pass
+            # #345 Improvement B: async @inference without runtime= is a
+            # first-class SerialWorker async endpoint (no warning needed). For
+            # non-inference kinds (training/dataset/conversion) async remains
+            # unsupported and is rejected at registration in the worker.
 
             # ----- Cross-request micro-batching (#324) ------------------
             # Validate batch_window_ms + max_batch — both must be declared

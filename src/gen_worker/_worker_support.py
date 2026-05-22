@@ -208,6 +208,12 @@ class _SerialWorkerSpec:
     output_schema_json: bytes = b""
     delta_schema_json: Optional[bytes] = None
     timeout_ms: Optional[int] = None
+    # #345 Improvement B: True when the bound method is an `async def` handler
+    # (coroutine or async generator), derived from inspect at registration —
+    # never tenant-declared. Async handlers run on the worker's shared asyncio
+    # loop (`_batched_loop`) so I/O-bound endpoints scale to thousands of
+    # concurrent coroutines instead of being bounded by the ThreadPoolExecutor.
+    is_async: bool = False
 
 
 @dataclass(frozen=True)

@@ -22,7 +22,7 @@ import typing
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import collections.abc as cabc
-from typing import Any, Callable, Dict, Optional, Type, TypeVar, Iterator, List, Tuple, Iterable, get_args, get_origin
+from typing import Any, AsyncIterable, AsyncIterator, Callable, Dict, Optional, Type, TypeVar, Iterator, List, Tuple, Iterable, get_args, get_origin
 import hashlib
 import msgspec
 from contextlib import ExitStack, contextmanager
@@ -313,6 +313,22 @@ _DOWNLOAD_CHUNK_BYTES = 4 * 1024 * 1024
 OUTGOING_QUEUE_MAXSIZE = 1024
 
 
+def _env_flag(name: str, *, default: bool) -> bool:
+    """Parse a boolean env var. Accepts 1/true/yes/on (case-insensitive) as
+    True and 0/false/no/off as False; falls back to ``default`` when unset or
+    unrecognized.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    val = raw.strip().lower()
+    if val in ("1", "true", "yes", "on"):
+        return True
+    if val in ("0", "false", "no", "off"):
+        return False
+    return default
+
+
 class Worker:
     """Worker implementation that connects to the scheduler via gRPC."""
 
@@ -544,6 +560,32 @@ class Worker:
         self._heartbeat_stub: Optional[Any] = None
         self._heartbeat_stream: Optional[Any] = None
         self._heartbeat_outgoing_queue: queue.Queue[Any] = queue.Queue()
+
+        # gen-orchestrator #345 Improvement A: split outgoing streams. In
+        # addition to the control (ConnectWorker) + heartbeat streams above, the
+        # worker opens dedicated RESULTS and EVENTS streams at boot and routes
+        # JobExecutionResult onto results, lifecycle/incremental events onto
+        # events — so the result-send path isn't serialized behind event traffic
+        # on a single wire (the single-worker throughput ceiling #345 targets).
+        # Each is bounded + persistent across reconnects (same policy as the
+        # primary data queue). Gated by WORKER_SPLIT_STREAMS (default on); set
+        # to "0"/"false" to fall back to single-stream behavior (everything on
+        # _outgoing_queue), which is exactly what a legacy worker does.
+        self._split_streams_enabled: bool = _env_flag("WORKER_SPLIT_STREAMS", default=True)
+        self._results_channel: Optional[Any] = None
+        self._results_stub: Optional[Any] = None
+        self._results_stream: Optional[Any] = None
+        self._results_outgoing_queue: queue.Queue[Any] = queue.Queue(maxsize=OUTGOING_QUEUE_MAXSIZE)
+        self._events_channel: Optional[Any] = None
+        self._events_stub: Optional[Any] = None
+        self._events_stream: Optional[Any] = None
+        self._events_outgoing_queue: queue.Queue[Any] = queue.Queue(maxsize=OUTGOING_QUEUE_MAXSIZE)
+        # True once both aux streams are open for the current connection; gates
+        # routing in _send_message so messages don't pile into a queue with no
+        # draining stream during the (re)connect window.
+        self._aux_streams_active: bool = False
+        self._results_drain_thread: Optional[threading.Thread] = None
+        self._events_drain_thread: Optional[threading.Thread] = None
 
         self._receive_thread: Optional[threading.Thread] = None
         self._heartbeat_thread: Optional[threading.Thread] = None
@@ -2502,6 +2544,7 @@ class Worker:
                     output_mode,
                     ctx_param,
                     payload_param,
+                    is_async,
                 ) = self._inspect_serial_method(cls, getattr(cls, method_name))
             except Exception as exc:
                 logger.error(
@@ -2542,6 +2585,7 @@ class Worker:
                 output_schema_json=output_schema_json,
                 delta_schema_json=delta_schema_json,
                 timeout_ms=getattr(fn_spec, "timeout_ms", None),
+                is_async=is_async,
             )
             self._serial_class_specs[slug] = sspec
             self._discovered_resources[slug] = resources
@@ -2878,34 +2922,41 @@ class Worker:
         self,
         cls: type,
         method: Callable[..., Any],
-    ) -> Tuple[type, Optional[type], Optional[type], str, str, str]:
+    ) -> Tuple[type, Optional[type], Optional[type], str, str, str, bool]:
         """Validate a SerialWorker method signature.
 
         Must look like one of::
 
-            def fn(self, ctx: RequestContext, payload: MyInput) -> MyOutput: ...
-            def fn(self, ctx: RequestContext, payload: MyInput) -> Iterator[MyDelta]: ...
+            def fn(self, ctx, payload: MyInput) -> MyOutput: ...
+            def fn(self, ctx, payload: MyInput) -> Iterator[MyDelta]: ...
+            async def fn(self, ctx, payload: MyInput) -> MyOutput: ...
+            async def fn(self, ctx, payload: MyInput) -> AsyncIterator[MyDelta]: ...
 
         Returns
         -------
-        (payload_type, output_type, delta_type, output_mode, ctx_param_name, payload_param_name)
+        (payload_type, output_type, delta_type, output_mode, ctx_param_name,
+         payload_param_name, is_async)
 
         - ``output_mode`` is ``"single"`` when the return type is a
           ``msgspec.Struct`` subclass, or ``"incremental"`` when it's an
-          ``Iterator[Struct]`` / ``Iterable[Struct]``.
+          ``Iterator[Struct]`` / ``Iterable[Struct]`` (sync) or an
+          ``AsyncIterator[Struct]`` / ``AsyncIterable[Struct]`` (async).
         - ``output_type`` is set in both modes (incremental mode uses the
           yielded delta type for both ``output_type`` and ``delta_type``).
         - ``delta_type`` is only set in incremental mode.
+        - ``is_async`` is True for ``async def`` handlers (#345 Improvement B).
+          These run on the worker's shared asyncio loop (``_batched_loop``)
+          rather than blocking a ThreadPoolExecutor thread, so I/O-bound
+          handlers scale to thousands of concurrent coroutines per worker.
 
-        Async methods on a class otherwise classified as SerialWorker are a
-        validation error — they belong on the BatchedWorker leg.
+        #345 Improvement B: ``async def`` is no longer a validation error on a
+        SerialWorker class. ``inspect.iscoroutinefunction`` /
+        ``inspect.isasyncgenfunction`` decide ``is_async`` from the function
+        object itself — never a tenant-declared flag.
         """
-        if inspect.iscoroutinefunction(method) or inspect.isasyncgenfunction(method):
-            raise ValueError(
-                "SerialWorker @inference.function method must be sync (`def`); "
-                "use BatchedWorker (async class + runtime='sglang'|'vllm') for "
-                "continuous-batching endpoints."
-            )
+        is_coroutine = inspect.iscoroutinefunction(method)
+        is_async_gen = inspect.isasyncgenfunction(method)
+        is_async = is_coroutine or is_async_gen
 
         try:
             hints = typing.get_type_hints(
@@ -2938,12 +2989,47 @@ class Worker:
         if ret is None:
             raise ValueError("missing return type annotation")
 
-        # Single-output: bare msgspec.Struct return.
-        if isinstance(ret, type) and issubclass(ret, msgspec.Struct):
-            return payload_type, ret, None, "single", ctx_p.name, payload_p.name
-
-        # Incremental: Iterator[X] / Iterable[X].
         origin = get_origin(ret)
+
+        # #345 Improvement B validation: an async handler that streams must
+        # return AsyncIterator[Delta] (the function is an `async def` generator);
+        # a sync Iterator return on an async-gen function is a contradiction.
+        if is_async_gen:
+            if origin not in (AsyncIterator, AsyncIterable, cabc.AsyncIterator, cabc.AsyncIterable, cabc.AsyncGenerator):
+                raise ValueError(
+                    "async incremental SerialWorker method must annotate its "
+                    f"return as AsyncIterator[Delta] (got {ret!r}); a bare "
+                    "msgspec.Struct or sync Iterator is invalid for an "
+                    "`async def` generator."
+                )
+            args = get_args(ret)
+            if not args:
+                raise ValueError("AsyncIterator return type must declare a yield type")
+            dt = args[0]
+            if not (isinstance(dt, type) and issubclass(dt, msgspec.Struct)):
+                raise ValueError(
+                    f"SerialWorker async method must yield a msgspec.Struct (got {dt!r})"
+                )
+            return payload_type, dt, dt, "incremental", ctx_p.name, payload_p.name, True
+
+        # An `async def` (coroutine, not generator) must NOT annotate a sync
+        # Iterator/AsyncIterator return — it returns a single Struct.
+        if is_coroutine and origin in (
+            Iterator, Iterable, cabc.Iterator, cabc.Iterable,
+            AsyncIterator, AsyncIterable, cabc.AsyncIterator, cabc.AsyncIterable,
+        ):
+            raise ValueError(
+                "an `async def` SerialWorker handler that streams must be an "
+                "`async def` generator yielding deltas (return annotation "
+                "AsyncIterator[Delta]); a coroutine returning an iterator is "
+                f"not supported (got {ret!r})."
+            )
+
+        # Single-output: bare msgspec.Struct return (sync or async coroutine).
+        if isinstance(ret, type) and issubclass(ret, msgspec.Struct):
+            return payload_type, ret, None, "single", ctx_p.name, payload_p.name, is_async
+
+        # Sync incremental: Iterator[X] / Iterable[X].
         if origin in (Iterator, Iterable, cabc.Iterator, cabc.Iterable):
             args = get_args(ret)
             if not args:
@@ -2953,11 +3039,12 @@ class Worker:
                 raise ValueError(
                     f"SerialWorker method must yield a msgspec.Struct (got {dt!r})"
                 )
-            return payload_type, dt, dt, "incremental", ctx_p.name, payload_p.name
+            return payload_type, dt, dt, "incremental", ctx_p.name, payload_p.name, False
 
         raise ValueError(
-            "SerialWorker method return type must be msgspec.Struct or "
-            f"Iterator[msgspec.Struct] (got {ret!r})"
+            "SerialWorker method return type must be msgspec.Struct, "
+            "Iterator[msgspec.Struct], or (for async def) "
+            f"AsyncIterator[msgspec.Struct] (got {ret!r})"
         )
 
     def _inspect_request_spec(self, func: Callable[..., Any]) -> _RequestSpec:
@@ -3090,11 +3177,40 @@ class Worker:
             injection_json=injection_json,
         )
 
+    def _select_outgoing_queue(self, message: WorkerSchedulerMessage) -> "queue.Queue[Any]":
+        """#345 Improvement A: pick the outgoing queue for a message.
+
+        When split-streams are active, JobExecutionResult rides the dedicated
+        RESULTS queue and lifecycle WorkerEvent + IncrementalTokenDelta/Done/
+        Error ride the dedicated EVENTS queue, leaving the primary data queue
+        (_outgoing_queue) for control/registration traffic. When split-streams
+        are disabled or the aux streams aren't open yet (the (re)connect
+        window), everything falls back to the primary queue — exactly the
+        legacy single-stream behavior.
+        """
+        if not (getattr(self, "_split_streams_enabled", False) and getattr(self, "_aux_streams_active", False)):
+            return self._outgoing_queue
+        try:
+            which = message.WhichOneof("msg")
+        except Exception:
+            return self._outgoing_queue
+        if which == "job_result":
+            return getattr(self, "_results_outgoing_queue", None) or self._outgoing_queue
+        if which in (
+            "worker_event",
+            "incremental_token_delta",
+            "incremental_token_stream_done",
+            "incremental_token_stream_error",
+        ):
+            return getattr(self, "_events_outgoing_queue", None) or self._outgoing_queue
+        return self._outgoing_queue
+
     def _send_message(self, message: WorkerSchedulerMessage) -> None:
         """Add a message to the outgoing queue."""
         if self._running and not self._stop_event.is_set():
+            target_queue = self._select_outgoing_queue(message)
             try:
-                self._outgoing_queue.put_nowait(message)
+                target_queue.put_nowait(message)
             except queue.Full:
                 # gen-orchestrator #346 (Option 2): the outgoing queue persists
                 # across reconnects and is bounded; on overflow drop the OLDEST
@@ -3102,13 +3218,13 @@ class Worker:
                 # bounded-buffer policy. Dropping oldest keeps the freshest
                 # results/events most likely to still matter.
                 try:
-                    dropped = self._outgoing_queue.get_nowait()
+                    dropped = target_queue.get_nowait()
                     logger.warning(
                         "[outgoing-queue-drop] outgoing queue full (cap=%s); dropped oldest msg type=%s",
                         OUTGOING_QUEUE_MAXSIZE,
                         dropped.WhichOneof("msg") if hasattr(dropped, "WhichOneof") else "unknown",
                     )
-                    self._outgoing_queue.put_nowait(message)
+                    target_queue.put_nowait(message)
                 except queue.Empty:
                     logger.error("Outgoing message queue is full. Message dropped!")
                 except queue.Full:
@@ -3134,20 +3250,31 @@ class Worker:
         messages.
         """
         ids: List[str] = []
-        try:
-            q = self._outgoing_queue
-            with q.mutex:
-                snapshot = list(q.queue)
-            for message in snapshot:
-                try:
-                    if message.WhichOneof("msg") == "job_result":
-                        rid = message.job_result.request_id
-                        if rid:
-                            ids.append(rid)
-                except Exception:
-                    continue
-        except Exception:
-            return ids
+        # #345 Improvement A: with split-streams, results buffer in
+        # _results_outgoing_queue, not _outgoing_queue. Scan both so the #346
+        # reconnect recovery (re-report buffered-but-unshipped results so the
+        # orch keeps them assigned) keeps working in both stream modes.
+        queues = []
+        primary_q = getattr(self, "_outgoing_queue", None)
+        if primary_q is not None:
+            queues.append(primary_q)
+        results_q = getattr(self, "_results_outgoing_queue", None)
+        if results_q is not None:
+            queues.append(results_q)
+        for q in queues:
+            try:
+                with q.mutex:
+                    snapshot = list(q.queue)
+                for message in snapshot:
+                    try:
+                        if message.WhichOneof("msg") == "job_result":
+                            rid = message.job_result.request_id
+                            if rid:
+                                ids.append(rid)
+                    except Exception:
+                        continue
+            except Exception:
+                continue
         return ids
 
     def _ensure_job_dispatch_thread(self) -> None:
@@ -3755,6 +3882,12 @@ class Worker:
             self._heartbeat_drain_thread = threading.Thread(target=self._heartbeat_drain_loop, daemon=True)
             self._heartbeat_drain_thread.start()
 
+            # gen-orchestrator #345 Improvement A: open the dedicated RESULTS and
+            # EVENTS streams. Best-effort — if they fail to open the worker
+            # silently keeps using the single primary stream (legacy behavior),
+            # so this never blocks a successful connection.
+            self._open_aux_streams(interceptors)
+
             # Start the receive loop in a separate thread *after* stream is initiated
             self._receive_thread = threading.Thread(target=self._receive_loop, daemon=True)
             self._receive_thread.start()
@@ -3939,6 +4072,104 @@ class Worker:
         except Exception:
             # Stream closed or errored; nothing to recover here. Main loop
             # will notice via its own health checks.
+            return
+
+    def _open_aux_streams(self, interceptors: List[Any]) -> None:
+        """#345 Improvement A: open the dedicated RESULTS + EVENTS streams on
+        their own gRPC channels and send the opening WorkerRegistration
+        handshake on each so the orchestrator can demux by worker_id.
+
+        Best-effort: any failure leaves _aux_streams_active False so
+        _send_message keeps everything on the primary stream (legacy single-
+        stream behavior). Never raises.
+        """
+        if not self._split_streams_enabled:
+            return
+        try:
+            def _new_channel() -> Any:
+                if self.use_tls:
+                    ch = grpc.secure_channel(self.scheduler_addr, grpc.ssl_channel_credentials())
+                else:
+                    ch = grpc.insecure_channel(self.scheduler_addr)
+                if interceptors:
+                    ch = grpc.intercept_channel(ch, *interceptors)
+                return ch
+
+            self._results_channel = _new_channel()
+            self._results_stub = pb_grpc.SchedulerWorkerServiceStub(self._results_channel)
+            self._results_stream = self._results_stub.WorkerResults(
+                self._aux_outgoing_iterator(self._results_outgoing_queue, "results")
+            )
+
+            self._events_channel = _new_channel()
+            self._events_stub = pb_grpc.SchedulerWorkerServiceStub(self._events_channel)
+            self._events_stream = self._events_stub.WorkerEvents(
+                self._aux_outgoing_iterator(self._events_outgoing_queue, "events")
+            )
+
+            # Opening handshake on each aux stream: a WorkerRegistration that
+            # binds worker_id + role so the orchestrator routes subsequent
+            # results/events to this worker. is_heartbeat=True so the orch's
+            # control-stream registration path isn't triggered (these streams
+            # don't own the worker's liveness/assignment lifecycle).
+            self._results_outgoing_queue.put_nowait(
+                self._build_registration_message(is_heartbeat=True, stream_role="results")
+            )
+            self._events_outgoing_queue.put_nowait(
+                self._build_registration_message(is_heartbeat=True, stream_role="events")
+            )
+
+            self._results_drain_thread = threading.Thread(
+                target=self._aux_drain_loop, args=(self._results_stream, "results"), daemon=True
+            )
+            self._results_drain_thread.start()
+            self._events_drain_thread = threading.Thread(
+                target=self._aux_drain_loop, args=(self._events_stream, "events"), daemon=True
+            )
+            self._events_drain_thread.start()
+
+            self._aux_streams_active = True
+            logger.info("[split-streams] opened dedicated results + events streams")
+        except Exception as e:
+            self._aux_streams_active = False
+            logger.warning(
+                "[split-streams] failed to open aux streams (%s); falling back to single stream",
+                e,
+            )
+
+    def _aux_outgoing_iterator(
+        self, outbound_queue: "queue.Queue[Any]", role: str
+    ) -> Iterator[WorkerSchedulerMessage]:
+        """Yields messages from a #345 aux outgoing queue onto its stream."""
+        while not self._stop_event.is_set():
+            try:
+                message = outbound_queue.get(timeout=0.1)
+                yield message
+            except queue.Empty:
+                continue
+            except Exception as e:
+                if not self._stop_event.is_set():
+                    logger.exception("[split-streams] error in %s outgoing iterator: %s", role, e)
+                    # Losing an aux stream must not tear down the primary data
+                    # stream — fall back to single-stream routing.
+                    self._aux_streams_active = False
+                    break
+
+    def _aux_drain_loop(self, stream: Any, role: str) -> None:
+        """Drains any server->client messages on a #345 aux stream. The orch
+        only ever replies with control/no-op on these, but gRPC flow control
+        requires us to keep reading."""
+        if stream is None:
+            return
+        try:
+            for _ in stream:
+                if self._stop_event.is_set():
+                    return
+                # discard — primary receive loop handles real inbound traffic
+        except Exception:
+            # Aux stream closed/errored; fall back to single-stream routing so
+            # results/events keep flowing on the primary stream.
+            self._aux_streams_active = False
             return
 
     def _send_heartbeat_message(self, message: WorkerSchedulerMessage) -> None:
@@ -4593,6 +4824,31 @@ class Worker:
             scheduler_addr=getattr(self, "scheduler_addr", ""),
         )
 
+    def _build_registration_message(
+        self, *, is_heartbeat: bool, stream_role: str
+    ) -> WorkerSchedulerMessage:
+        """#345 Improvement A: build a lightweight WorkerRegistration used as
+        the opening handshake on an auxiliary (results/events) stream. Carries
+        just enough identity for the orchestrator to bind the stream to this
+        worker_id; it does NOT trigger full registration on the orch side
+        (is_heartbeat=True, and the orch's aux-stream handler never registers).
+        """
+        resources = pb.WorkerResources(
+            worker_id=self.worker_id,
+            release_id=self.release_id,
+            runpod_pod_id=self.runpod_pod_id,
+        )
+        registration = pb.WorkerRegistration(
+            resources=resources,
+            is_heartbeat=is_heartbeat,
+            protocol_major=WIRE_PROTOCOL_MAJOR,
+            protocol_minor=WIRE_PROTOCOL_MINOR,
+            stream_started_unix_ms=int(time.time() * 1000),
+            supports_split_streams=True,
+            stream_role=stream_role,
+        )
+        return pb.WorkerSchedulerMessage(worker_registration=registration)
+
     def _register_worker(self, is_heartbeat: bool = False) -> None:
         """Create and send a registration/heartbeat message."""
         try:
@@ -4662,6 +4918,11 @@ class Worker:
                 protocol_minor=WIRE_PROTOCOL_MINOR,
                 in_flight_request_ids=in_flight_request_ids,
                 stream_started_unix_ms=int(time.time() * 1000),
+                # #345 Improvement A: advertise the split-stream capability so
+                # the orchestrator records it (purely observational; handlers
+                # are stream-agnostic). The primary stream's role is "control".
+                supports_split_streams=bool(getattr(self, "_split_streams_enabled", False)),
+                stream_role="control",
             )
             message = pb.WorkerSchedulerMessage(worker_registration=registration)
             # logger.info(f"DEBUG: Preparing to send registration. Resource object: {resources}")
@@ -4998,6 +5259,39 @@ class Worker:
         while not self._heartbeat_outgoing_queue.empty():
             try:
                 self._heartbeat_outgoing_queue.get_nowait()
+            except queue.Empty:
+                break
+
+        # #345 Improvement A: tear down the dedicated results + events streams.
+        # The RESULTS queue PERSISTS across reconnects (same #346 policy as the
+        # primary data queue) so a buffered-but-unshipped JobExecutionResult
+        # re-ships on the new stream. The EVENTS queue is drained — lifecycle /
+        # incremental events are ephemeral and the reconnect requeues the
+        # request, so a stale mid-stream delta is pure noise.
+        self._aux_streams_active = False
+        for strm_attr, ch_attr, stub_attr in (
+            ("_results_stream", "_results_channel", "_results_stub"),
+            ("_events_stream", "_events_channel", "_events_stub"),
+        ):
+            strm = getattr(self, strm_attr, None)
+            if strm is not None:
+                try:
+                    if hasattr(strm, "cancel") and callable(strm.cancel):
+                        strm.cancel()
+                except Exception as e:
+                    logger.warning("Error cancelling %s: %s", strm_attr, e)
+            setattr(self, strm_attr, None)
+            ch = getattr(self, ch_attr, None)
+            if ch is not None:
+                try:
+                    ch.close()
+                except Exception as e:
+                    logger.warning("Error closing %s: %s", ch_attr, e)
+            setattr(self, ch_attr, None)
+            setattr(self, stub_attr, None)
+        while not self._events_outgoing_queue.empty():
+            try:
+                self._events_outgoing_queue.get_nowait()
             except queue.Empty:
                 break
 
@@ -6264,6 +6558,7 @@ class Worker:
         # Tensorhub #232: resolved hardware spec populated by the orchestrator.
         # Surfaced to tenant code read-only via ctx.compute.
         compute = _extract_resolved_compute(request)
+        resolved_models_metadata = self._resolved_models_for_request(request)
         parent_request_id = str(getattr(request, "parent_request_id", "") or "").strip() or None
         child_request_id = str(getattr(request, "child_request_id", "") or "").strip() or None
         item_id = str(getattr(request, "item_id", "") or "").strip() or None
@@ -6287,16 +6582,13 @@ class Worker:
         # Keyed by request_id; popped by _build_job_observation.
         self._request_recv_times[request_id] = t_recv_monotonic
         logger.info(f"Received Request: request_id={request_id}, function={function_name}, model='{required_model_id_for_exec or 'None'}'")
-        self._emit_request_event(
-            request_id,
-            "request.received",
-            {
-                "function_name": function_name,
-                "job_id": job_id or "",
-                "required_flavor_refs_count": len(required_models_raw),
-                "input_bytes": len(input_payload or b""),
-            },
-        )
+        # #345 Improvement C: the `request.received` lifecycle event is no longer
+        # emitted from the worker. The orchestrator synthesizes the equivalent
+        # signal authoritatively (`request.assigned`, fired from scheduler
+        # dispatch) — the worker shipping it here was redundant gRPC-stream
+        # traffic on the throughput-bound path. Custom domain events,
+        # request.rejected, the *.stuck watchdog, model.download.* and the final
+        # JobExecutionResult still ship from the worker.
 
         spec = self._request_specs.get(function_name)
         training_fn = self._training_specs.get(function_name) if spec is None else None
@@ -6480,6 +6772,7 @@ class Worker:
             source_info=source_info_raw,
             destination_info=destination_info_raw,
             compute=compute,
+            models=resolved_models_metadata,
             hf_token=self._settings.hf_token,
         )
         # Add to active requests *before* starting thread
@@ -6953,15 +7246,9 @@ class Worker:
             if inflight is not None:
                 inflight["engine"] = rec.get("engine")
 
-        self._emit_request_event(
-            request_id,
-            "request.started",
-            {
-                "function_name": spec.name,
-                "runtime": spec.runtime,
-                "input_bytes": len(input_payload or b""),
-            },
-        )
+        # #345 Improvement C: `request.started` removed from the worker wire.
+        # Orchestrator's `request.assigned` covers it (dispatch ≈ start with the
+        # common prefetch_depth=1). See _handle_job_request for the rationale.
 
         try:
             if ctx.is_canceled():
@@ -7102,15 +7389,10 @@ class Worker:
                 )
             _ = tenant_signaled_done  # suppress unused-warning; kept for log/debug parity
 
-            self._emit_request_event(
-                request_id,
-                "request.inference.completed",
-                {
-                    "function_name": spec.name,
-                    "duration_ms": int((time.monotonic() - t_infer0) * 1000),
-                    "deltas": seq,
-                },
-            )
+            # #345 Improvement C: `request.inference.completed` removed from the
+            # worker wire. The orchestrator synthesizes `request.completed` from
+            # handleJobResult, which arrives ~1ms after the final
+            # JobExecutionResult — semantically identical for any subscriber.
             success = True
 
         except Exception as e:
@@ -7265,8 +7547,17 @@ class Worker:
                 "SerialWorker setup starting: class=%s models=%s",
                 cls_name, sorted(models_kwargs.keys()),
             )
+            # #345 Improvement B: an async SerialWorker may declare
+            # `async def setup`. Run it (and warmup below) on the shared asyncio
+            # loop so awaits inside resolve before the first request dispatches.
+            def _run_serial_setup(**kw: Any) -> None:
+                res = setup_fn(**kw)
+                if inspect.iscoroutine(res):
+                    loop = self._ensure_batched_loop()
+                    asyncio.run_coroutine_threadsafe(res, loop).result()
+
             try:
-                setup_fn(**models_kwargs)
+                _run_serial_setup(**models_kwargs)
             except TypeError as exc:
                 # Setup signature doesn't accept the resolved kwargs. Fall
                 # back to bare setup() so classes that intentionally bind
@@ -7278,7 +7569,7 @@ class Worker:
                     cls_name, sorted(models_kwargs.keys()), exc,
                 )
                 try:
-                    setup_fn()
+                    _run_serial_setup()
                 except Exception as exc2:  # noqa: BLE001
                     logger.exception(
                         "@inference SerialWorker class %r: bare setup() also "
@@ -7305,7 +7596,12 @@ class Worker:
                     class_name=cls_name,
                 )
                 try:
-                    warmup_fn()
+                    res = warmup_fn()
+                    # #345 Improvement B: support `async def warmup` on async
+                    # SerialWorker classes — run it on the shared asyncio loop.
+                    if inspect.iscoroutine(res):
+                        loop = self._ensure_batched_loop()
+                        asyncio.run_coroutine_threadsafe(res, loop).result()
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "@inference SerialWorker class %r: warmup() raised "
@@ -7436,6 +7732,135 @@ class Worker:
                     )
             rec["shutdown_done"] = True
 
+    def _emit_serial_incremental_item(
+        self,
+        *,
+        request_id: str,
+        sspec: "_SerialWorkerSpec",
+        item: Any,
+        sequence: int,
+        max_delta_bytes: int = 65536,
+    ) -> str:
+        """Validate + emit one SerialWorker incremental delta. Shared by the
+        sync generator loop and the #345 Improvement B async-generator drainer.
+
+        Returns the resolved ``item_id`` (so the caller can pass it to the
+        terminating ``_emit_incremental_done_typed`` call).
+        """
+        if sspec.delta_type is not None and not isinstance(item, sspec.delta_type):
+            raise TypeError(
+                f"delta item type {type(item)!r} != {sspec.delta_type!r}"
+            )
+        # #327: peel off audio_chunk + audio_codec before JSON serialization so
+        # audio bytes ride the typed proto slots.
+        audio_chunk, audio_codec = self._extract_audio_from_delta(item)
+        payload = msgspec.to_builtins(item)
+        if isinstance(payload, dict) and audio_chunk:
+            payload.pop("audio_chunk", None)
+            payload.pop("audio_codec", None)
+        raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        if max_delta_bytes > 0 and len(raw) > max_delta_bytes:
+            raw = json.dumps(
+                {"truncated": True}, separators=(",", ":"), sort_keys=True,
+            ).encode("utf-8")
+        item_id = "item-0"
+        delta_text = ""
+        if isinstance(payload, dict):
+            iid = payload.get("item_id")
+            if isinstance(iid, str) and iid.strip():
+                item_id = iid.strip()
+            for key in (
+                "delta_text", "delta", "token", "text", "content", "caption_delta",
+            ):
+                val = payload.get(key)
+                if isinstance(val, str) and val.strip():
+                    delta_text = val.strip()
+                    break
+        self._emit_incremental_delta_typed(
+            request_id=request_id,
+            function_name=sspec.name,
+            item_id=item_id,
+            sequence=sequence,
+            timestamp_unix_ms=int(time.time() * 1000),
+            delta_text=delta_text,
+            payload_json=raw,
+            audio_chunk=audio_chunk,
+            audio_codec=audio_codec,
+        )
+        return item_id
+
+    def _drain_async_incremental(
+        self,
+        *,
+        ctx: RequestContext,
+        sspec: "_SerialWorkerSpec",
+        input_obj: Any,
+    ) -> Tuple[str, int]:
+        """#345 Improvement B: drive an `async def` SerialWorker generator on
+        the shared asyncio loop, emitting each delta as it arrives.
+
+        The GPU semaphore (when needed) is already held on the dispatcher
+        thread before this is called, so the coroutine never blocks on it. We
+        schedule ``__anext__`` onto the loop one delta at a time and block the
+        dispatcher thread on each concurrent.futures.Future — many requests'
+        coroutines interleave on the single loop, so I/O-bound streaming
+        handlers stay coroutine-bound rather than thread-bound.
+
+        Returns ``(last_item_id, count)`` for the terminating done event.
+        """
+        request_id = ctx.request_id
+        loop = self._ensure_batched_loop()
+        agen = sspec.method(ctx, input_obj)
+        if not hasattr(agen, "__anext__"):
+            raise TypeError(
+                "async incremental SerialWorker handler must return an async "
+                f"iterator (got {type(agen)!r})"
+            )
+        count = 0
+        last_item_id = "item-0"
+        _SENTINEL = object()
+
+        async def _next() -> Any:
+            try:
+                return await agen.__anext__()
+            except StopAsyncIteration:
+                return _SENTINEL
+
+        try:
+            while True:
+                if ctx.is_canceled():
+                    raise CanceledError("canceled")
+                fut = asyncio.run_coroutine_threadsafe(_next(), loop)
+                item = fut.result()
+                if item is _SENTINEL:
+                    break
+                last_item_id = self._emit_serial_incremental_item(
+                    request_id=request_id,
+                    sspec=sspec,
+                    item=item,
+                    sequence=count + 1,
+                )
+                count += 1
+        finally:
+            # Ensure the async generator is closed on the loop so any `finally`
+            # / cleanup inside the tenant generator runs (and we don't leak a
+            # suspended coroutine on cancellation or error).
+            aclose = getattr(agen, "aclose", None)
+            if aclose is not None:
+                try:
+                    asyncio.run_coroutine_threadsafe(aclose(), loop).result(timeout=5.0)
+                except Exception:
+                    pass
+
+        self._emit_incremental_done_typed(
+            request_id=request_id,
+            function_name=sspec.name,
+            item_id=last_item_id,
+            sequence=count + 1,
+            timestamp_unix_ms=int(time.time() * 1000),
+        )
+        return last_item_id, count
+
     def _execute_serial_class_request(
         self,
         ctx: RequestContext,
@@ -7469,16 +7894,8 @@ class Worker:
             pass
         rm.mark_compute_started()
 
-        self._emit_request_event(
-            request_id,
-            "request.started",
-            {
-                "function_name": str(sspec.name or ""),
-                "required_flavor_refs": list(getattr(ctx, "required_models", []) or []),
-                "execution_hints": getattr(ctx, "execution_hints", {}),
-                "archetype": "SerialWorker",
-            },
-        )
+        # #345 Improvement C: `request.started` removed from the worker wire
+        # (orch's `request.assigned` is authoritative).
 
         # Stage 5 semaphore: only acquire when the function declares
         # accelerator=cuda*. accelerator=none endpoints (marco-polo) skip
@@ -7538,13 +7955,42 @@ class Worker:
                     # — blocking is fine).
                     cfut = aggregator.submit(request_id, input_obj)
                     result = cfut.result()
+                elif sspec.is_async and sspec.output_mode == "single":
+                    # #345 Improvement B: `async def` single-output handler. The
+                    # GPU semaphore was already acquired ABOVE on this dispatcher
+                    # thread (before scheduling), so the coroutine never holds
+                    # the GIL while waiting on the semaphore. Schedule the
+                    # coroutine onto the shared asyncio loop and block this
+                    # dispatcher thread on the concurrent.futures.Future — many
+                    # such coroutines run concurrently on the single loop, so
+                    # I/O-bound handlers scale to thousands in flight.
+                    loop = self._ensure_batched_loop()
+                    fut = asyncio.run_coroutine_threadsafe(
+                        sspec.method(ctx, input_obj), loop
+                    )
+                    result = fut.result()
+                elif sspec.is_async:
+                    # #345 Improvement B: `async def` incremental handler returns
+                    # an AsyncIterator[Delta]. Drive it on the shared loop and
+                    # emit deltas as they arrive. Handled fully in the
+                    # incremental branch below via _drain_async_incremental.
+                    result = None
                 else:
                     result = sspec.method(ctx, input_obj)
 
                 if ctx.is_canceled():
                     raise CanceledError("canceled")
 
-                if sspec.output_mode == "single":
+                if sspec.is_async and sspec.output_mode == "incremental":
+                    # #345 Improvement B async streaming path.
+                    last_item_id, count = self._drain_async_incremental(
+                        ctx=ctx,
+                        sspec=sspec,
+                        input_obj=input_obj,
+                    )
+                    output_payload = b""
+                    success = True
+                elif sspec.output_mode == "single":
                     if sspec.output_type is not None and not isinstance(result, sspec.output_type):
                         raise TypeError(
                             f"Function {sspec.name} returned {type(result)!r}, "
@@ -7569,51 +8015,13 @@ class Worker:
                     for item in result:
                         if ctx.is_canceled():
                             raise CanceledError("canceled")
-                        if sspec.delta_type is not None and not isinstance(item, sspec.delta_type):
-                            raise TypeError(
-                                f"delta item type {type(item)!r} != {sspec.delta_type!r}"
-                            )
-                        # #327: peel off audio_chunk + audio_codec before JSON
-                        # serialization so audio bytes ride the typed proto slots.
-                        audio_chunk, audio_codec = self._extract_audio_from_delta(item)
-                        payload = msgspec.to_builtins(item)
-                        if isinstance(payload, dict) and audio_chunk:
-                            payload.pop("audio_chunk", None)
-                            payload.pop("audio_codec", None)
-                        raw = json.dumps(
-                            payload, separators=(",", ":"), sort_keys=True
-                        ).encode("utf-8")
-                        if max_delta_bytes > 0 and len(raw) > max_delta_bytes:
-                            raw = json.dumps(
-                                {"truncated": True},
-                                separators=(",", ":"), sort_keys=True,
-                            ).encode("utf-8")
-                        item_id = "item-0"
-                        delta_text = ""
-                        if isinstance(payload, dict):
-                            iid = payload.get("item_id")
-                            if isinstance(iid, str) and iid.strip():
-                                item_id = iid.strip()
-                            for key in (
-                                "delta_text", "delta", "token", "text", "content",
-                                "caption_delta",
-                            ):
-                                val = payload.get(key)
-                                if isinstance(val, str) and val.strip():
-                                    delta_text = val.strip()
-                                    break
-                        self._emit_incremental_delta_typed(
+                        last_item_id = self._emit_serial_incremental_item(
                             request_id=request_id,
-                            function_name=sspec.name,
-                            item_id=item_id,
+                            sspec=sspec,
+                            item=item,
                             sequence=count + 1,
-                            timestamp_unix_ms=int(time.time() * 1000),
-                            delta_text=delta_text,
-                            payload_json=raw,
-                            audio_chunk=audio_chunk,
-                            audio_codec=audio_codec,
+                            max_delta_bytes=max_delta_bytes,
                         )
-                        last_item_id = item_id
                         count += 1
                     self._emit_incremental_done_typed(
                         request_id=request_id,
@@ -7629,16 +8037,8 @@ class Worker:
                     rm.inference_ms = int((time.monotonic() - t_infer0) * 1000)
                 except Exception:
                     pass
-                self._emit_request_event(
-                    request_id,
-                    "request.inference.completed",
-                    {
-                        "function_name": sspec.name,
-                        "output_mode": sspec.output_mode,
-                        "duration_ms": int((time.monotonic() - t_infer0) * 1000),
-                        "archetype": "SerialWorker",
-                    },
-                )
+                # #345 Improvement C: `request.inference.completed` removed from
+                # the worker wire (orch synthesizes `request.completed`).
             except Exception as e:
                 logger.exception("SerialWorker task %s failed: %s", request_id, e)
                 error_type, retryable, safe_message, error_message = self._map_exception(e)
@@ -7726,18 +8126,10 @@ class Worker:
                 safe_json_bytes({"at": rm.compute_started_at}),
             )
 
-        self._emit_request_event(
-            request_id,
-            "request.started",
-            {
-                "function_name": function_name,
-                "required_flavor_refs": list(getattr(ctx, "required_models", []) or []),
-                "execution_hints": getattr(ctx, "execution_hints", {}),
-                "archetype": "ConversionWorker",
-                "endpoint_kind": cspec.endpoint_kind,
-                "sub_kind": cspec.sub_kind,
-            },
-        )
+        # #345 Improvement C: `request.started` removed from the worker wire
+        # (orch's `request.assigned` is authoritative). The conversion/training
+        # `request.training.started` domain event below is kept — it's a custom
+        # phase signal the orchestrator can't synthesize.
 
         from .models.ref_downloader import (
             reset_resolved_repos_by_id,
@@ -7871,16 +8263,9 @@ class Worker:
                 rm.inference_ms = int((time.monotonic() - t_infer0) * 1000)
             except Exception:
                 pass
-            self._emit_request_event(
-                request_id,
-                "request.inference.completed",
-                {
-                    "function_name": function_name,
-                    "duration_ms": int((time.monotonic() - t_infer0) * 1000),
-                    "archetype": "ConversionWorker",
-                    "endpoint_kind": cspec.endpoint_kind,
-                },
-            )
+            # #345 Improvement C: `request.inference.completed` removed from the
+            # worker wire (orch synthesizes the terminal `request.completed` /
+            # `job.completed` from handleJobResult).
         except CanceledError:
             error_type = "cancelled"
             retryable = False
@@ -8119,15 +8504,8 @@ class Worker:
                     # error — skip the check entirely, don't fail the job.
                     pass
 
-        self._emit_request_event(
-            request_id,
-            "request.started",
-            {
-                "function_name": str(spec.name or ""),
-                "required_flavor_refs": list(getattr(ctx, "required_models", []) or []),
-                "execution_hints": getattr(ctx, "execution_hints", {}),
-            },
-        )
+        # #345 Improvement C: `request.started` removed from the worker wire
+        # (orch's `request.assigned` is authoritative).
 
         # Initialize model cache_state for required models using worker's cache hints.
         try:
@@ -8858,15 +9236,8 @@ class Worker:
         if rm.compute_started_at:
             self._emit_worker_event_bytes(request_id, "metrics.compute.started", safe_json_bytes({"at": rm.compute_started_at}))
 
-        self._emit_request_event(
-            request_id,
-            "request.started",
-            {
-                "function_name": function_name,
-                "required_flavor_refs": list(getattr(ctx, "required_models", []) or []),
-                "execution_hints": getattr(ctx, "execution_hints", {}),
-            },
-        )
+        # #345 Improvement C: `request.started` removed from the worker wire
+        # (orch's `request.assigned` is authoritative).
 
         # Stage 5 semaphore: training functions carry their Resources on
         # the `_worker_resources` attribute (no _SerialWorkerSpec object
@@ -10083,6 +10454,9 @@ class Worker:
             flavor = ""
             source = ""
             slot_name = ""
+            checkpoint_id = ""
+            compatibility_status = ""
+            compatibility_detail = ""
             # Issue #18: extract `provider` from the stamped entry. Older
             # orchestrators (pre #358) didn't ship the provider field; those
             # entries are tensorhub-only by definition of the previous wire
@@ -10095,6 +10469,9 @@ class Worker:
                 provider = str(entry.get("provider") or "").strip() or "tensorhub"
                 source = str(entry.get("source") or "").strip()
                 slot_name = str(entry.get("slot_name") or "").strip()
+                checkpoint_id = str(entry.get("checkpoint_id") or "").strip()
+                compatibility_status = str(entry.get("compatibility_status") or "").strip()
+                compatibility_detail = str(entry.get("compatibility_detail") or "").strip()
                 raw_loras = entry.get("loras") or []
             else:
                 ref = str(getattr(entry, "ref", "") or "").strip()
@@ -10103,6 +10480,9 @@ class Worker:
                 provider = str(getattr(entry, "provider", "") or "").strip() or "tensorhub"
                 source = str(getattr(entry, "source", "") or "").strip()
                 slot_name = str(getattr(entry, "slot_name", "") or "").strip()
+                checkpoint_id = str(getattr(entry, "checkpoint_id", "") or "").strip()
+                compatibility_status = str(getattr(entry, "compatibility_status", "") or "").strip()
+                compatibility_detail = str(getattr(entry, "compatibility_detail", "") or "").strip()
                 raw_loras = getattr(entry, "loras", None) or []
             if ref:
                 out[str(param_name)] = {
@@ -10115,6 +10495,12 @@ class Worker:
                     out[str(param_name)]["source"] = source
                 if slot_name:
                     out[str(param_name)]["slot_name"] = slot_name
+                if checkpoint_id:
+                    out[str(param_name)]["checkpoint_id"] = checkpoint_id
+                if compatibility_status:
+                    out[str(param_name)]["compatibility_status"] = compatibility_status
+                if compatibility_detail:
+                    out[str(param_name)]["compatibility_detail"] = compatibility_detail
                 if raw_loras:
                     out[str(param_name)]["loras"] = msgspec.to_builtins(raw_loras)
         return out

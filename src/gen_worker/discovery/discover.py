@@ -1088,6 +1088,15 @@ def _extract_class_function_methods(
             "output_schema_sha256": output_sha,
             "output_schema": output_schema,
             "incremental_output": incremental,
+            # #345 Improvement B: surface whether the handler is an `async def`
+            # (coroutine or async generator). Derived from inspect — never
+            # tenant-declared. Lets the orchestrator/operators see which
+            # endpoints run coroutine-bound (high-concurrency I/O) vs
+            # ThreadPoolExecutor-bound (sync) on the SerialWorker archetype.
+            "is_async": bool(
+                inspect.iscoroutinefunction(method)
+                or inspect.isasyncgenfunction(method)
+            ),
             "decorator": f"@{spec.kind}.function",
             "label": fn_spec.label,
             "description": fn_spec.description,

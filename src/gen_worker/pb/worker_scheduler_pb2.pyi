@@ -97,7 +97,7 @@ class ActiveAssignmentResume(_message.Message):
     def __init__(self, request_id: _Optional[str] = ..., item_id: _Optional[str] = ..., assignment_attempt_epoch: _Optional[int] = ..., last_job_result_seq: _Optional[int] = ..., last_worker_event_seq: _Optional[int] = ..., last_incremental_seq: _Optional[int] = ...) -> None: ...
 
 class WorkerRegistration(_message.Message):
-    __slots__ = ("resources", "is_heartbeat", "protocol_major", "protocol_minor", "active_assignments", "in_flight_request_ids", "stream_started_unix_ms")
+    __slots__ = ("resources", "is_heartbeat", "protocol_major", "protocol_minor", "active_assignments", "in_flight_request_ids", "stream_started_unix_ms", "supports_split_streams", "stream_role")
     RESOURCES_FIELD_NUMBER: _ClassVar[int]
     IS_HEARTBEAT_FIELD_NUMBER: _ClassVar[int]
     PROTOCOL_MAJOR_FIELD_NUMBER: _ClassVar[int]
@@ -105,6 +105,8 @@ class WorkerRegistration(_message.Message):
     ACTIVE_ASSIGNMENTS_FIELD_NUMBER: _ClassVar[int]
     IN_FLIGHT_REQUEST_IDS_FIELD_NUMBER: _ClassVar[int]
     STREAM_STARTED_UNIX_MS_FIELD_NUMBER: _ClassVar[int]
+    SUPPORTS_SPLIT_STREAMS_FIELD_NUMBER: _ClassVar[int]
+    STREAM_ROLE_FIELD_NUMBER: _ClassVar[int]
     resources: WorkerResources
     is_heartbeat: bool
     protocol_major: int
@@ -112,7 +114,9 @@ class WorkerRegistration(_message.Message):
     active_assignments: _containers.RepeatedCompositeFieldContainer[ActiveAssignmentResume]
     in_flight_request_ids: _containers.RepeatedScalarFieldContainer[str]
     stream_started_unix_ms: int
-    def __init__(self, resources: _Optional[_Union[WorkerResources, _Mapping]] = ..., is_heartbeat: bool = ..., protocol_major: _Optional[int] = ..., protocol_minor: _Optional[int] = ..., active_assignments: _Optional[_Iterable[_Union[ActiveAssignmentResume, _Mapping]]] = ..., in_flight_request_ids: _Optional[_Iterable[str]] = ..., stream_started_unix_ms: _Optional[int] = ...) -> None: ...
+    supports_split_streams: bool
+    stream_role: str
+    def __init__(self, resources: _Optional[_Union[WorkerResources, _Mapping]] = ..., is_heartbeat: bool = ..., protocol_major: _Optional[int] = ..., protocol_minor: _Optional[int] = ..., active_assignments: _Optional[_Iterable[_Union[ActiveAssignmentResume, _Mapping]]] = ..., in_flight_request_ids: _Optional[_Iterable[str]] = ..., stream_started_unix_ms: _Optional[int] = ..., supports_split_streams: bool = ..., stream_role: _Optional[str] = ...) -> None: ...
 
 class ResolvedCompute(_message.Message):
     __slots__ = ("accelerator", "min_compute_capability", "vram_gb", "gpu_count", "gpu_tier", "memory_gb", "cpu_cores", "disk_gb", "gpu_index")
@@ -135,6 +139,48 @@ class ResolvedCompute(_message.Message):
     disk_gb: int
     gpu_index: int
     def __init__(self, accelerator: _Optional[str] = ..., min_compute_capability: _Optional[str] = ..., vram_gb: _Optional[int] = ..., gpu_count: _Optional[int] = ..., gpu_tier: _Optional[str] = ..., memory_gb: _Optional[int] = ..., cpu_cores: _Optional[int] = ..., disk_gb: _Optional[int] = ..., gpu_index: _Optional[int] = ...) -> None: ...
+
+class ResolvedLoraBinding(_message.Message):
+    __slots__ = ("ref", "tag", "flavor", "provider", "weight", "compatibility_status", "compatibility_detail")
+    REF_FIELD_NUMBER: _ClassVar[int]
+    TAG_FIELD_NUMBER: _ClassVar[int]
+    FLAVOR_FIELD_NUMBER: _ClassVar[int]
+    PROVIDER_FIELD_NUMBER: _ClassVar[int]
+    WEIGHT_FIELD_NUMBER: _ClassVar[int]
+    COMPATIBILITY_STATUS_FIELD_NUMBER: _ClassVar[int]
+    COMPATIBILITY_DETAIL_FIELD_NUMBER: _ClassVar[int]
+    ref: str
+    tag: str
+    flavor: str
+    provider: str
+    weight: float
+    compatibility_status: str
+    compatibility_detail: str
+    def __init__(self, ref: _Optional[str] = ..., tag: _Optional[str] = ..., flavor: _Optional[str] = ..., provider: _Optional[str] = ..., weight: _Optional[float] = ..., compatibility_status: _Optional[str] = ..., compatibility_detail: _Optional[str] = ...) -> None: ...
+
+class ResolvedModelBinding(_message.Message):
+    __slots__ = ("slot_name", "ref", "tag", "flavor", "provider", "source", "checkpoint_id", "compatibility_status", "compatibility_detail", "loras")
+    SLOT_NAME_FIELD_NUMBER: _ClassVar[int]
+    REF_FIELD_NUMBER: _ClassVar[int]
+    TAG_FIELD_NUMBER: _ClassVar[int]
+    FLAVOR_FIELD_NUMBER: _ClassVar[int]
+    PROVIDER_FIELD_NUMBER: _ClassVar[int]
+    SOURCE_FIELD_NUMBER: _ClassVar[int]
+    CHECKPOINT_ID_FIELD_NUMBER: _ClassVar[int]
+    COMPATIBILITY_STATUS_FIELD_NUMBER: _ClassVar[int]
+    COMPATIBILITY_DETAIL_FIELD_NUMBER: _ClassVar[int]
+    LORAS_FIELD_NUMBER: _ClassVar[int]
+    slot_name: str
+    ref: str
+    tag: str
+    flavor: str
+    provider: str
+    source: str
+    checkpoint_id: str
+    compatibility_status: str
+    compatibility_detail: str
+    loras: _containers.RepeatedCompositeFieldContainer[ResolvedLoraBinding]
+    def __init__(self, slot_name: _Optional[str] = ..., ref: _Optional[str] = ..., tag: _Optional[str] = ..., flavor: _Optional[str] = ..., provider: _Optional[str] = ..., source: _Optional[str] = ..., checkpoint_id: _Optional[str] = ..., compatibility_status: _Optional[str] = ..., compatibility_detail: _Optional[str] = ..., loras: _Optional[_Iterable[_Union[ResolvedLoraBinding, _Mapping]]] = ...) -> None: ...
 
 class LoadModelCommand(_message.Message):
     __slots__ = ("model_id",)
@@ -191,7 +237,7 @@ class ResolvedRepo(_message.Message):
     def __init__(self, snapshot_digest: _Optional[str] = ..., files: _Optional[_Iterable[_Union[ResolvedRepoFile, _Mapping]]] = ...) -> None: ...
 
 class JobExecutionRequest(_message.Message):
-    __slots__ = ("request_id", "function_name", "input_payload", "timeout_ms", "owner", "invoker_id", "file_base_url", "resolved_repos_by_id", "job_id", "worker_capability_token", "resolved_compute", "execution_hints")
+    __slots__ = ("request_id", "function_name", "input_payload", "timeout_ms", "owner", "invoker_id", "file_base_url", "resolved_repos_by_id", "job_id", "worker_capability_token", "resolved_compute", "execution_hints", "resolved_models")
     class ResolvedReposByIdEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
@@ -206,6 +252,13 @@ class JobExecutionRequest(_message.Message):
         key: str
         value: str
         def __init__(self, key: _Optional[str] = ..., value: _Optional[str] = ...) -> None: ...
+    class ResolvedModelsEntry(_message.Message):
+        __slots__ = ("key", "value")
+        KEY_FIELD_NUMBER: _ClassVar[int]
+        VALUE_FIELD_NUMBER: _ClassVar[int]
+        key: str
+        value: ResolvedModelBinding
+        def __init__(self, key: _Optional[str] = ..., value: _Optional[_Union[ResolvedModelBinding, _Mapping]] = ...) -> None: ...
     REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
     FUNCTION_NAME_FIELD_NUMBER: _ClassVar[int]
     INPUT_PAYLOAD_FIELD_NUMBER: _ClassVar[int]
@@ -218,6 +271,7 @@ class JobExecutionRequest(_message.Message):
     WORKER_CAPABILITY_TOKEN_FIELD_NUMBER: _ClassVar[int]
     RESOLVED_COMPUTE_FIELD_NUMBER: _ClassVar[int]
     EXECUTION_HINTS_FIELD_NUMBER: _ClassVar[int]
+    RESOLVED_MODELS_FIELD_NUMBER: _ClassVar[int]
     request_id: str
     function_name: str
     input_payload: bytes
@@ -230,7 +284,8 @@ class JobExecutionRequest(_message.Message):
     worker_capability_token: str
     resolved_compute: ResolvedCompute
     execution_hints: _containers.ScalarMap[str, str]
-    def __init__(self, request_id: _Optional[str] = ..., function_name: _Optional[str] = ..., input_payload: _Optional[bytes] = ..., timeout_ms: _Optional[int] = ..., owner: _Optional[str] = ..., invoker_id: _Optional[str] = ..., file_base_url: _Optional[str] = ..., resolved_repos_by_id: _Optional[_Mapping[str, ResolvedRepo]] = ..., job_id: _Optional[str] = ..., worker_capability_token: _Optional[str] = ..., resolved_compute: _Optional[_Union[ResolvedCompute, _Mapping]] = ..., execution_hints: _Optional[_Mapping[str, str]] = ...) -> None: ...
+    resolved_models: _containers.MessageMap[str, ResolvedModelBinding]
+    def __init__(self, request_id: _Optional[str] = ..., function_name: _Optional[str] = ..., input_payload: _Optional[bytes] = ..., timeout_ms: _Optional[int] = ..., owner: _Optional[str] = ..., invoker_id: _Optional[str] = ..., file_base_url: _Optional[str] = ..., resolved_repos_by_id: _Optional[_Mapping[str, ResolvedRepo]] = ..., job_id: _Optional[str] = ..., worker_capability_token: _Optional[str] = ..., resolved_compute: _Optional[_Union[ResolvedCompute, _Mapping]] = ..., execution_hints: _Optional[_Mapping[str, str]] = ..., resolved_models: _Optional[_Mapping[str, ResolvedModelBinding]] = ...) -> None: ...
 
 class JobExecutionResult(_message.Message):
     __slots__ = ("request_id", "success", "output_payload", "error_type", "retryable", "safe_message", "observation")
@@ -366,14 +421,16 @@ class IncrementalTokenStreamError(_message.Message):
     def __init__(self, request_id: _Optional[str] = ..., item_id: _Optional[str] = ..., function_name: _Optional[str] = ..., sequence: _Optional[int] = ..., timestamp_unix_ms: _Optional[int] = ..., error_message: _Optional[str] = ...) -> None: ...
 
 class LoadModelResult(_message.Message):
-    __slots__ = ("model_id", "success", "error_message")
+    __slots__ = ("model_id", "success", "error_message", "size_bytes")
     MODEL_ID_FIELD_NUMBER: _ClassVar[int]
     SUCCESS_FIELD_NUMBER: _ClassVar[int]
     ERROR_MESSAGE_FIELD_NUMBER: _ClassVar[int]
+    SIZE_BYTES_FIELD_NUMBER: _ClassVar[int]
     model_id: str
     success: bool
     error_message: str
-    def __init__(self, model_id: _Optional[str] = ..., success: bool = ..., error_message: _Optional[str] = ...) -> None: ...
+    size_bytes: int
+    def __init__(self, model_id: _Optional[str] = ..., success: bool = ..., error_message: _Optional[str] = ..., size_bytes: _Optional[int] = ...) -> None: ...
 
 class UnloadModelResult(_message.Message):
     __slots__ = ("model_id", "success", "error_message")

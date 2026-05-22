@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import os
 import threading
-from typing import Iterator
+from typing import AsyncIterator, Iterator
 
 import msgspec
 import pytest
@@ -163,27 +163,103 @@ def test_register_endpoint_class_serial_picks_up_incremental_return() -> None:
     assert sspec.delta_type is TokenDelta
 
 
-def test_register_endpoint_class_serial_rejects_async_method() -> None:
-    """A class declaring an async @inference.function method is BatchedWorker,
-    not SerialWorker. The decorator already enforces archetype detection;
-    confirm the serial-registration path doesn't accept async methods if it
-    somehow sees them (defensive).
+def test_register_endpoint_class_serial_accepts_async_method() -> None:
+    """#345 Improvement B: an `async def` @inference.function method WITHOUT
+    runtime= is now a first-class SerialWorker async handler (not BatchedWorker,
+    not rejected). `_inspect_serial_method` returns is_async=True for a properly
+    annotated async coroutine handler.
     """
-    async_methods_attempted: list = []
-
-    # The decorator catches this at class-decoration time. We can't even
-    # build the class without a runtime= kwarg, so the validation is at
-    # the decorator level — confirmed by the BatchedWorker test suite.
-
-    # Validate our inspector helper rejects async signatures explicitly.
     w = _bare_worker()
 
     class _Mock:
-        async def fn(self, ctx, payload):
+        async def fn(self, ctx: RequestContext, payload: GenerateInput) -> GenerateOutput:  # noqa: ANN001
+            return GenerateOutput(result="ok")
+
+    (
+        payload_type,
+        output_type,
+        delta_type,
+        output_mode,
+        ctx_param,
+        payload_param,
+        is_async,
+    ) = w._inspect_serial_method(_Mock, _Mock.fn)
+    assert is_async is True
+    assert output_mode == "single"
+    assert payload_type is GenerateInput
+    assert output_type is GenerateOutput
+    assert delta_type is None
+
+
+def test_inspect_serial_method_async_incremental_requires_async_iterator() -> None:
+    """#345 Improvement B validation: an `async def` generator handler must
+    annotate its return as AsyncIterator[Delta]; a sync Iterator annotation on
+    an async generator is rejected.
+    """
+    w = _bare_worker()
+
+    class _Bad:
+        async def fn(self, ctx: RequestContext, payload: GenerateInput) -> Iterator[TokenDelta]:  # noqa: ANN001
+            yield TokenDelta(delta_text="x")
+
+    with pytest.raises(ValueError, match="AsyncIterator"):
+        w._inspect_serial_method(_Bad, _Bad.fn)
+
+
+def test_inspect_serial_method_async_iterator_yields_delta() -> None:
+    """#345 Improvement B: a correctly-annotated async-generator handler
+    (AsyncIterator[Delta]) registers as incremental + async.
+    """
+    w = _bare_worker()
+
+    class _Good:
+        async def fn(self, ctx: RequestContext, payload: GenerateInput) -> AsyncIterator[TokenDelta]:  # noqa: ANN001
+            yield TokenDelta(delta_text="x")
+
+    (
+        payload_type,
+        output_type,
+        delta_type,
+        output_mode,
+        ctx_param,
+        payload_param,
+        is_async,
+    ) = w._inspect_serial_method(_Good, _Good.fn)
+    assert is_async is True
+    assert output_mode == "incremental"
+    assert delta_type is TokenDelta
+
+
+def test_discovery_emits_is_async_for_serial_methods() -> None:
+    """#345 Improvement B: the discovery manifest surfaces `is_async` per
+    function — True for an `async def` handler, False for a sync one.
+    """
+    from gen_worker.discovery.discover import _extract_class_function_methods
+
+    @inference()
+    class MixedSerial:
+        def setup(self):
             pass
 
-    with pytest.raises(ValueError, match="sync"):
-        w._inspect_serial_method(_Mock, _Mock.fn)
+        @inference.function
+        def sync_fn(self, ctx: RequestContext, payload: GenerateInput) -> GenerateOutput:
+            return GenerateOutput(result="s")
+
+    @inference()
+    class AsyncSerial:
+        def setup(self):
+            pass
+
+        @inference.function
+        async def async_fn(self, ctx: RequestContext, payload: GenerateInput) -> GenerateOutput:
+            return GenerateOutput(result="a")
+
+    sync_fns = _extract_class_function_methods(MixedSerial, "m")
+    async_fns = _extract_class_function_methods(AsyncSerial, "m")
+    assert sync_fns[0]["is_async"] is False
+    assert async_fns[0]["is_async"] is True
+    # Async-without-runtime stays SerialWorker (not BatchedWorker).
+    assert getattr(AsyncSerial, "__gen_worker_archetype__") == "SerialWorker"
 
 
 def test_torchinductor_cache_dir_set_on_serial_registration() -> None:
