@@ -232,6 +232,177 @@ def test_eager_serial_setup_acquires_gpu_semaphore_for_gpu_record() -> None:
     assert getattr(w._gpu_semaphore, "_value", None) == 1
 
 
+def test_eager_serial_setup_holds_gpu_semaphore_during_binding_resolution() -> None:
+    """gen-worker #336 defect B: the GPU semaphore must be held while
+    model-binding resolution runs (that's where weights land in VRAM), not
+    only while setup()/warmup() run. Regression: resolution previously ran
+    BEFORE the acquire, so two classes could load weights concurrently.
+    """
+    w = _semaphore_only_worker(gpu_count=1)
+    w._serial_class_specs = {}
+    w._conversion_class_specs = {}
+    w._micro_batch_aggregators = {}
+    w._configure_torchinductor_cache_dir = lambda: None
+
+    observed: dict[str, Any] = {}
+
+    def _fake_resolve(_ep_spec, _setup_fn):
+        # Resolution is where from_pretrained / FLUX modelopt loads weights.
+        observed["sema_during_resolution"] = getattr(w._gpu_semaphore, "_value", None)
+        observed["busy_during_resolution"] = w._get_gpu_busy_status()
+        return {}
+
+    w._resolve_serial_setup_kwargs = _fake_resolve
+
+    class Instance:
+        def setup(self) -> None:
+            pass
+
+    rec = {
+        "cls_name": "FluxVariant",
+        "instance": Instance(),
+        "endpoint_spec": _SpecStub(Resources(accelerator="cuda", requires_gpu=True)),
+        "started": False,
+        "started_lock": threading.Lock(),
+    }
+
+    w._ensure_serial_class_started(rec, acquire_gpu_semaphore=True)
+
+    # Semaphore was fully held (value 0) during resolution, GPU marked busy,
+    # and released cleanly afterward.
+    assert observed["sema_during_resolution"] == 0
+    assert observed["busy_during_resolution"] is True
+    assert getattr(w._gpu_semaphore, "_value", None) == 1
+    assert w._get_gpu_busy_status() is False
+    assert rec["started"] is True
+
+
+def test_eager_serial_setup_releases_semaphore_when_resolution_raises() -> None:
+    """gen-worker #336 defect B: a crash during binding resolution must NOT
+    strand the GPU semaphore — otherwise the GPU deadlocks for the pod's life.
+    """
+    w = _semaphore_only_worker(gpu_count=1)
+    w._serial_class_specs = {}
+    w._conversion_class_specs = {}
+    w._micro_batch_aggregators = {}
+    w._configure_torchinductor_cache_dir = lambda: None
+    w._emit_exception_diagnostic = lambda **_kw: None
+    w._sanitize_diagnostic_value = lambda v, **_kw: v
+
+    def _boom(_ep_spec, _setup_fn):
+        raise RuntimeError("weights load exploded")
+
+    w._resolve_serial_setup_kwargs = _boom
+
+    class Instance:
+        def setup(self) -> None:
+            pass
+
+    rec = {
+        "cls_name": "FluxVariant",
+        "instance": Instance(),
+        "endpoint_spec": _SpecStub(Resources(accelerator="cuda", requires_gpu=True)),
+        "started": False,
+        "started_lock": threading.Lock(),
+    }
+
+    with pytest.raises(RuntimeError, match="weights load exploded"):
+        w._ensure_serial_class_started(rec, acquire_gpu_semaphore=True)
+
+    # Semaphore returned to full and GPU no longer marked busy.
+    assert getattr(w._gpu_semaphore, "_value", None) == 1
+    assert w._get_gpu_busy_status() is False
+    assert rec["started"] is not True
+
+
+def test_serial_typed_model_load_routes_through_cache_and_evicts_lru() -> None:
+    """gen-worker #336 defect E: every SerialWorker typed-model load registers
+    in ModelCache, and loading a second variant evicts the LRU first one so the
+    two don't co-reside in VRAM (the flux bf16+fp8+nvfp4 thrash root cause).
+    """
+    from gen_worker.models.cache import ModelCache
+
+    w = _semaphore_only_worker(gpu_count=1)
+    # Tiny VRAM budget so the second 10GB model must evict the first.
+    cache = ModelCache(max_vram_gb=12.0, vram_safety_margin_gb=0.0, model_cache_dir="/tmp/gw336-cache")
+    w._model_cache = cache
+
+    class _FakePipe:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+    loaded_for: list[str] = []
+
+    def _fake_uncached(*, binding, requested_type, model_source, original_ref):  # noqa: ANN001
+        loaded_for.append(original_ref)
+        return _FakePipe(original_ref)
+
+    w._load_serial_setup_model_value_uncached = _fake_uncached
+
+    class _Binding:
+        def __init__(self, ref: str) -> None:
+            self.ref = ref
+            self._dtype = "bf16"
+
+    obj_bf16 = w._load_serial_setup_model_value(
+        binding=_Binding("org/flux-bf16"),
+        requested_type=_FakePipe,
+        model_source="/tmp/flux-bf16",
+        original_ref="org/flux-bf16",
+    )
+    assert isinstance(obj_bf16, _FakePipe)
+    key_bf16 = w._canonical_cache_key_for_ref("org/flux-bf16")
+    assert cache.is_in_vram(key_bf16)
+
+    obj_fp8 = w._load_serial_setup_model_value(
+        binding=_Binding("org/flux-fp8"),
+        requested_type=_FakePipe,
+        model_source="/tmp/flux-fp8",
+        original_ref="org/flux-fp8",
+    )
+    assert isinstance(obj_fp8, _FakePipe)
+    key_fp8 = w._canonical_cache_key_for_ref("org/flux-fp8")
+    assert cache.is_in_vram(key_fp8)
+    # The first (LRU) variant was evicted to make room — not co-resident.
+    assert not cache.is_in_vram(key_bf16)
+    assert loaded_for == ["org/flux-bf16", "org/flux-fp8"]
+
+
+def test_serial_typed_model_load_reuses_hot_vram_variant() -> None:
+    """gen-worker #336 defect E: re-resolving a variant already hot in VRAM
+    reuses the cached object instead of reloading it."""
+    from gen_worker.models.cache import ModelCache
+
+    w = _semaphore_only_worker(gpu_count=1)
+    w._model_cache = ModelCache(max_vram_gb=64.0, vram_safety_margin_gb=0.0, model_cache_dir="/tmp/gw336-cache2")
+
+    class _FakePipe:
+        pass
+
+    load_count = [0]
+
+    def _fake_uncached(*, binding, requested_type, model_source, original_ref):  # noqa: ANN001
+        load_count[0] += 1
+        return _FakePipe()
+
+    w._load_serial_setup_model_value_uncached = _fake_uncached
+
+    class _Binding:
+        ref = "org/flux-bf16"
+        _dtype = "bf16"
+
+    first = w._load_serial_setup_model_value(
+        binding=_Binding(), requested_type=_FakePipe,
+        model_source="/tmp/x", original_ref="org/flux-bf16",
+    )
+    second = w._load_serial_setup_model_value(
+        binding=_Binding(), requested_type=_FakePipe,
+        model_source="/tmp/x", original_ref="org/flux-bf16",
+    )
+    assert first is second
+    assert load_count[0] == 1  # second resolution hit the hot-VRAM cache
+
+
 def test_gpu_semaphore_serializes_two_acquires_when_size_one() -> None:
     """Direct semaphore behavior: with gpu_count=1, the second acquire blocks
     until the first releases. Simulates the SerialWorker dispatch pattern.

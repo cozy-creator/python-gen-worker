@@ -4853,6 +4853,33 @@ class Worker:
         except Exception:
             logger.exception("eager-load: force-heartbeat failed for %s", canon)
 
+        # gen-worker #336 (fix 3): the cold-boot eager-prewarm must respect the
+        # VRAM budget so a multi-variant endpoint (flux-4b bf16/fp8/nvfp4/...)
+        # does NOT pre-load every variant into VRAM at once. The cache's own
+        # `vram_free_gb` accounting is unreliable here because `model_sizes` is
+        # often empty (estimated_size_gb=0.0 above), so it would never report
+        # the budget as full and we'd keep loading every variant. Instead, read
+        # the LIVE GPU free VRAM after the load; once we're within the cache's
+        # safety margin of full, stop eager-loading further variants. They stay
+        # disk-resident and are promoted on demand (and the on-demand load path
+        # evicts LRU to fit), so the FIRST variant is hot but the GPU is not
+        # over-subscribed at boot.
+        try:
+            from .inference_memory import get_available_vram_gb as _get_available_vram_gb
+            live_free_gb = float(_get_available_vram_gb() or 0.0)
+            margin = float(getattr(cache, "_vram_safety_margin", 0.0) or 0.0)
+            if live_free_gb <= margin:
+                logger.info(
+                    "eager-load: VRAM budget reached after %s (live_free=%.2fGB <= "
+                    "margin=%.2fGB); not pre-loading further variants",
+                    canon, live_free_gb, margin,
+                )
+                return False
+        except Exception:
+            # No torch / can't read VRAM: fall back to the cache's coarse gate
+            # (checked on the next call). Don't block prewarm on this.
+            pass
+
         return True
 
     def _trigger_serial_setup_for_ref(self, canonical_ref: str) -> None:
@@ -7713,12 +7740,21 @@ class Worker:
             # the resolved kwargs; classes whose setup is bare ``def setup(self)``
             # still work because models_kwargs is empty when ep_spec.models
             # is empty.
-            models_kwargs = self._resolve_serial_setup_kwargs(ep_spec, setup_fn)
-
-            logger.info(
-                "SerialWorker setup starting: class=%s models=%s",
-                cls_name, sorted(models_kwargs.keys()),
-            )
+            #
+            # gen-worker #336 (defect B): the GPU semaphore MUST be held across
+            # model-binding resolution, not just across setup()/warmup(). Binding
+            # resolution (typed `from_pretrained` factories, the FLUX.2 Klein
+            # modelopt pipeline composer below) is where the weights actually land
+            # in VRAM — and the eager cold-boot prewarm (`_trigger_serial_setup_for_ref`)
+            # calls this helper with `acquire_gpu_semaphore=True` from a download
+            # thread while NOT holding any GPU mutex. Acquiring AFTER resolution
+            # let one class's weight-load run concurrently with another class's
+            # weight-load (or with an in-flight inference) on the same GPU, which
+            # is the ~170s contention / 1640s thrash seen on flux-4b/flux-9b. So
+            # acquire the semaphore HERE, before resolution, and release it in the
+            # `finally`-equivalent block after warmup. The request-dispatch path
+            # already holds the semaphore before calling this helper (acquire is
+            # gated on `acquire_gpu_semaphore`), so this never double-acquires.
             needs_gpu_setup_lock = bool(acquire_gpu_semaphore and self._serial_record_needs_gpu(rec))
             if needs_gpu_setup_lock:
                 logger.info(
@@ -7728,6 +7764,57 @@ class Worker:
                 )
                 self._gpu_semaphore.acquire()
                 self._gpu_busy_enter()
+
+            # #328 model binding → setup() kwargs. Resolve every binding in
+            # ep_spec.models to a local path the loader can pick up. Tenants
+            # whose setup signature is ``def setup(self, **models)`` load with
+            # the resolved kwargs.
+            #
+            # A failure here (the most common cold-start crash: weights load /
+            # quant pipeline assembly) would otherwise escape
+            # _ensure_serial_class_started with NO diagnostic forwarded over the
+            # worker→orchestrator channel — only the eager-load caller's local
+            # logger.exception, which we can't see remotely. The FLUX.2 modelopt
+            # path emits its own structured diagnostic, but generic typed-model
+            # loads do not. Forward a structured setup-failure diagnostic for any
+            # resolution failure so the orchestrator logs an actionable reason —
+            # and release the GPU semaphore (acquired above) before re-raising so
+            # a resolution crash never strands the GPU mutex.
+            try:
+                models_kwargs = self._resolve_serial_setup_kwargs(ep_spec, setup_fn)
+            except Exception as exc:  # noqa: BLE001
+                logger.exception(
+                    "@inference SerialWorker class %r: model-binding resolution "
+                    "for setup() raised; the worker cannot start this class. err=%r",
+                    cls_name, exc,
+                )
+                model_refs = {
+                    key: self._sanitize_diagnostic_value(getattr(binding, "ref", ""))
+                    for key, binding in dict(getattr(ep_spec, "models", {}) or {}).items()
+                }
+                self._emit_exception_diagnostic(
+                    category="serial_setup",
+                    message="SerialWorker model-binding resolution failed",
+                    exc=exc,
+                    endpoint_class=cls_name,
+                    setup_mode="model_kwargs_resolution",
+                    model_refs=model_refs,
+                )
+                if needs_gpu_setup_lock:
+                    self._gpu_busy_exit()
+                    try:
+                        self._gpu_semaphore.release()
+                    except ValueError:
+                        logger.exception(
+                            "gpu_semaphore over-release during SerialWorker "
+                            "model-binding resolution failure"
+                        )
+                raise
+
+            logger.info(
+                "SerialWorker setup starting: class=%s models=%s",
+                cls_name, sorted(models_kwargs.keys()),
+            )
             # #345 Improvement B: an async SerialWorker may declare
             # `async def setup`. Run it (and warmup below) on the shared asyncio
             # loop so awaits inside resolve before the first request dispatches.
@@ -8003,12 +8090,89 @@ class Worker:
         model_source: str,
         original_ref: str,
     ) -> Any:
-        local_path = Path(model_source)
+        # gen-worker #336 (defect E): every SerialWorker typed-model load must
+        # route through the worker's ModelCache as the VRAM gatekeeper. Each
+        # @inference class on a multi-variant endpoint (flux-4b bf16 / fp8 /
+        # nvfp4 / compiled / turbo / ...) binds its own model and loads it here.
+        # Previously the loaded pipeline was returned straight to the tenant
+        # setup() kwargs and NEVER registered in `_model_cache`, so every variant
+        # stayed co-resident in VRAM — bf16 + fp8 + nvfp4 together blow past a
+        # 32 GB budget into CPU-offload thrash (the 1640s flux-9b incident).
+        #
+        # The fix: before loading, ask the cache to evict LRU models until the
+        # new one fits (using `_evict_lru_for_space`), then after the load,
+        # register the object via `mark_loaded_to_vram` keyed by its canonical
+        # ref. The next variant's load then evicts THIS one. Loading runs while
+        # the GPU semaphore is held (defect B), so eviction + load is atomic
+        # w.r.t. inference and other loads on the same GPU.
+        cache = getattr(self, "_model_cache", None)
+        canon = self._canonical_cache_key_for_ref(original_ref or model_source)
+
+        # If this exact variant is already hot in VRAM, reuse it (touches recency).
+        if cache is not None and canon and cache.is_in_vram(canon):
+            cached = cache.get_pipeline(canon)
+            if cached is not None and (
+                not isinstance(requested_type, type) or isinstance(cached, requested_type)
+            ):
+                logger.info("SerialWorker typed setup: reusing hot VRAM model %s", canon)
+                return cached
+
+        loaded_obj = self._load_serial_setup_model_value_uncached(
+            binding=binding,
+            requested_type=requested_type,
+            model_source=model_source,
+            original_ref=original_ref,
+        )
+
+        # Register the freshly loaded model so future variant loads can evict it.
+        if cache is not None and canon is not None:
+            try:
+                from .inference_memory import estimate_pipeline_size_gb as _estimate_pipeline_size_gb
+                size_gb = float(_estimate_pipeline_size_gb(loaded_obj) or 0.0)
+                if size_gb <= 0.1:
+                    size_gb = 10.0  # noisy/unknown estimate — assume a large model
+                cache.mark_loaded_to_vram(canon, loaded_obj, size_gb)
+                logger.info(
+                    "SerialWorker typed setup: registered %s in ModelCache (size=%.1fGB)",
+                    canon, size_gb,
+                )
+            except Exception as _cache_exc:
+                logger.warning(
+                    "SerialWorker typed setup: ModelCache registration failed for %s: %s",
+                    canon, _cache_exc,
+                )
+        return loaded_obj
+
+    def _canonical_cache_key_for_ref(self, ref: str) -> Optional[str]:
+        """Best-effort canonical key for the worker ModelCache."""
+        raw = str(ref or "").strip()
+        if not raw:
+            return None
+        try:
+            return _canonicalize_model_ref_string(raw)
+        except Exception:
+            return raw
+
+    def _load_serial_setup_model_value_uncached(
+        self,
+        *,
+        binding: Any,
+        requested_type: Any,
+        model_source: str,
+        original_ref: str,
+    ) -> Any:
         kwargs: Dict[str, Any] = {}
         dtype_name = str(getattr(binding, "_dtype", "") or "").strip()
         torch_dtype = self._torch_dtype_from_binding(dtype_name)
         if torch_dtype is not None:
             kwargs["torch_dtype"] = torch_dtype
+
+        # gen-worker #336 (defect E): evict LRU VRAM models BEFORE loading the
+        # new one so the incoming weights have headroom and don't OOM/offload.
+        # We don't know the new model's exact size yet, so reserve a coarse
+        # estimate from the current free VRAM target. Eviction is a no-op when
+        # there's already room.
+        self._evict_for_incoming_serial_model(original_ref or model_source)
 
         try:
             loaded = self._try_load_flux2_klein_modelopt_pipeline(
@@ -8029,6 +8193,51 @@ class Worker:
 
         from_pretrained = getattr(requested_type, "from_pretrained")
         return from_pretrained(model_source, **kwargs)
+
+    def _evict_for_incoming_serial_model(self, ref: str) -> None:
+        """gen-worker #336 (defect E): make VRAM room before a typed-model load.
+
+        Evicts least-recently-used cache-tracked models (unloading them from
+        VRAM to disk) so the incoming model fits inside the cache's VRAM budget
+        (total VRAM minus safety margin). Best-effort: a missing cache, an
+        unknown size, or a torch-less host all degrade to a no-op rather than
+        blocking the load.
+        """
+        cache = getattr(self, "_model_cache", None)
+        if cache is None:
+            return
+        canon = self._canonical_cache_key_for_ref(ref)
+        if canon and cache.is_in_vram(canon):
+            return  # already resident — nothing to evict for it
+        try:
+            from .inference_memory import get_available_vram_gb as _get_available_vram_gb
+            free_now = float(_get_available_vram_gb() or 0.0)
+        except Exception:
+            free_now = 0.0
+        try:
+            # Reserve at least half the cache VRAM budget for the incoming model
+            # (we don't know its size yet). `_evict_lru_for_space` is a no-op
+            # when the cache already accounts for enough free space.
+            target_headroom = max(0.0, float(cache.max_vram_gb) * 0.5)
+        except Exception:
+            target_headroom = 0.0
+        if target_headroom <= 0.0:
+            return
+        # Only evict if the live GPU is actually tight; if torch reports plenty
+        # of free VRAM, trust it and skip eviction (avoids needless reloads when
+        # variants genuinely co-fit on a large card).
+        if free_now > target_headroom:
+            return
+        try:
+            freed = cache._evict_lru_for_space(target_headroom)
+            if freed > 0:
+                logger.info(
+                    "SerialWorker typed setup: evicted %.1fGB of LRU VRAM models "
+                    "to make room for incoming model %s",
+                    freed, canon,
+                )
+        except Exception as _ev_exc:
+            logger.warning("SerialWorker typed setup: LRU eviction failed: %s", _ev_exc)
 
     @staticmethod
     def _torch_dtype_from_binding(dtype_name: str) -> Any:
