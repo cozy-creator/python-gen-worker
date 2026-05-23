@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import struct
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence, cast
@@ -35,7 +37,11 @@ class HuggingFaceHubDownloader:
         self.hf_home = (hf_home or "").strip() or None
         self.hf_token = (hf_token or "").strip() or None
 
-    def download(self, ref: HuggingFaceRef) -> HuggingFaceDownloadResult:
+    def download(
+        self,
+        ref: HuggingFaceRef,
+        progress_callback: Optional[Callable[[int, Optional[int]], None]] = None,
+    ) -> HuggingFaceDownloadResult:
         try:
             from huggingface_hub import HfApi, hf_hub_download, snapshot_download
         except Exception as e:
@@ -65,8 +71,16 @@ class HuggingFaceHubDownloader:
 
         # Prefer minimal downloads for diffusers-style repos by default.
         if True:
-            # Non-configurable safety guard: refuse to download extremely large file sets by default.
-            max_total_bytes = 30_000_000_000  # 30GB
+            # Safety guard against accidental huge downloads. Default 60GB so
+            # large diffusers pipelines (e.g. FLUX.2-klein-9B at ~35GB: 9B
+            # transformer + Qwen text encoder + VAE) download out of the box;
+            # override with COZY_HF_MAX_REPO_BYTES for anything larger.
+            try:
+                max_total_bytes = int(os.getenv("COZY_HF_MAX_REPO_BYTES", "").strip() or 60_000_000_000)
+            except (TypeError, ValueError):
+                max_total_bytes = 60_000_000_000
+            if max_total_bytes <= 0:
+                max_total_bytes = 60_000_000_000
 
             policy = HFSelectionPolicy(
                 components_override=None,
@@ -126,7 +140,11 @@ class HuggingFaceHubDownloader:
                 except Exception:
                     repo_file_sizes = {}
 
-            # Fetch model_index.json if present; otherwise infer components from repo structure.
+            # Fetch model_index.json if present; otherwise infer components
+            # from repo structure. Public quantized repos may be a single
+            # root-level safetensors file plus small sidecars; those are valid
+            # HFRepo bindings even though they are not full Diffusers folders.
+            selected_files: set[str] | None = None
             model_index = _try_fetch_model_index_json(
                 hf_hub_download=hf_hub_download_fn,
                 repo_id=repo_id,
@@ -136,15 +154,18 @@ class HuggingFaceHubDownloader:
             )
             if model_index is None and policy.components_override is None:
                 inferred = _infer_diffusers_components_from_repo_files(repo_files)
-                policy = HFSelectionPolicy(
-                    components_override=inferred,
-                    include_optional_components=policy.include_optional_components,
-                    weight_precisions=policy.weight_precisions,
-                    allow_root_json=policy.allow_root_json,
-                )
-                model_index = {"_class_name": "Unknown"}
+                if inferred:
+                    policy = HFSelectionPolicy(
+                        components_override=inferred,
+                        include_optional_components=policy.include_optional_components,
+                        weight_precisions=policy.weight_precisions,
+                        allow_root_json=policy.allow_root_json,
+                    )
+                    model_index = {"_class_name": "Unknown"}
+                else:
+                    selected_files = _select_root_safetensors_repo_files(repo_files)
 
-            if model_index is None:
+            if model_index is None and selected_files is None:
                 raise RuntimeError(
                     f"huggingface ref {ref.repo_id!r} is missing model_index.json and no diffusers-like components could be inferred."
                 )
@@ -216,29 +237,71 @@ class HuggingFaceHubDownloader:
                     dtype_cache[rel_path] = None
                     return None
 
-            plan = plan_diffusers_download(
-                model_index=model_index,
-                repo_files=repo_files,
-                policy=policy,
-                weight_index_json_by_file=idx_json_by_file,
-                repo_file_sizes=repo_file_sizes,
-                probe_safetensors_dtypes=probe_safetensors_dtypes,
-            )
+            if selected_files is None:
+                plan = plan_diffusers_download(
+                    model_index=model_index or {},
+                    repo_files=repo_files,
+                    policy=policy,
+                    weight_index_json_by_file=idx_json_by_file,
+                    repo_file_sizes=repo_file_sizes,
+                    probe_safetensors_dtypes=probe_safetensors_dtypes,
+                )
 
-            selected_files = finalize_diffusers_download(plan=plan, repo_files=repo_files, weight_index_json_by_file=idx_json_by_file)
+                selected_files = finalize_diffusers_download(plan=plan, repo_files=repo_files, weight_index_json_by_file=idx_json_by_file)
 
+            total_hint: Optional[int] = None
             if repo_file_sizes:
-                total = sum(int(repo_file_sizes.get(p, 0) or 0) for p in selected_files)
-                if total > max_total_bytes:
+                total_hint = sum(int(repo_file_sizes.get(p, 0) or 0) for p in selected_files)
+                if total_hint > max_total_bytes:
                     raise RuntimeError(
-                        f"refusing to download an excessively large Hugging Face repo selection: {total} bytes "
+                        f"refusing to download an excessively large Hugging Face repo selection: {total_hint} bytes "
                         f"(limit {max_total_bytes} bytes)."
                     )
 
             # Deterministic order helps debugging and keeps behavior stable.
             kwargs["allow_patterns"] = sorted(selected_files)
 
-        local = snapshot_download_fn(repo_id=repo_id, revision=ref.revision, **kwargs)
+        poller_stop: Optional[threading.Event] = None
+        poller: Optional[threading.Thread] = None
+        progress_root: Optional[Path] = None
+        if progress_callback is not None:
+            progress_root = _progress_local_dir(self.hf_home, repo_id, ref.revision, ref.flavor)
+            progress_root.mkdir(parents=True, exist_ok=True)
+            kwargs["local_dir"] = str(progress_root)
+            try:
+                progress_callback(0, total_hint)
+            except Exception:
+                pass
+            poller_stop = threading.Event()
+
+            def _poll() -> None:
+                last = 0
+                while not poller_stop.wait(0.5):
+                    try:
+                        seen = _scan_bytes(progress_root)
+                        if seen > last:
+                            last = seen
+                            progress_callback(seen, total_hint)
+                    except Exception:
+                        pass
+
+            poller = threading.Thread(target=_poll, name="hf-download-progress", daemon=True)
+            poller.start()
+
+        try:
+            local = snapshot_download_fn(repo_id=repo_id, revision=ref.revision, **kwargs)
+        finally:
+            if poller_stop is not None:
+                poller_stop.set()
+            if poller is not None:
+                poller.join(timeout=2.0)
+        if progress_callback is not None:
+            try:
+                final_root = Path(local)
+                final_bytes = _scan_bytes(final_root)
+                progress_callback(final_bytes, total_hint or final_bytes or None)
+            except Exception:
+                pass
         return HuggingFaceDownloadResult(local_dir=Path(local))
 
 
@@ -287,6 +350,49 @@ def _infer_diffusers_components_from_repo_files(repo_files: Sequence[str]) -> li
     return present
 
 
+def _select_root_safetensors_repo_files(repo_files: Sequence[str]) -> Optional[set[str]]:
+    """Return a minimal safe selection for single-file/root-weight repos.
+
+    Some public HF repos intentionally publish a pre-quantized component as a
+    root-level ``.safetensors`` file rather than a full Diffusers directory.
+    The worker still owns materialization for ``HFRepo`` bindings, so support
+    that shape here instead of forcing endpoint code to call
+    ``hf_hub_download`` directly.
+    """
+    root_safetensors = sorted(
+        p for p in repo_files
+        if "/" not in p and p.lower().endswith(".safetensors")
+    )
+    if not root_safetensors:
+        return None
+
+    selected = set(root_safetensors)
+    sidecar_names = {
+        ".gitattributes",
+        "config.json",
+        "generation_config.json",
+        "model.safetensors.index.json",
+        "model_index.json",
+        "preprocessor_config.json",
+        "README.md",
+        "LICENSE",
+        "tokenizer.json",
+        "tokenizer_config.json",
+        "special_tokens_map.json",
+        "vocab.json",
+        "merges.txt",
+        "tokenizer.model",
+    }
+    for p in repo_files:
+        if "/" in p:
+            continue
+        name = p.rsplit("/", 1)[-1]
+        low = name.lower()
+        if name in sidecar_names or low.endswith(".json"):
+            selected.add(p)
+    return selected
+
+
 def _try_get_local_snapshot_dir(
     *,
     snapshot_download: Callable[..., str],
@@ -317,6 +423,39 @@ def _walk_relative_files(root: Path) -> set[str]:
         rel = p.relative_to(root).as_posix()
         out.add(rel)
     return out
+
+
+def _progress_local_dir(
+    hf_home: str | None,
+    repo_id: str,
+    revision: str | None,
+    flavor: str | None,
+) -> Path:
+    base = Path(hf_home) if hf_home else Path.home() / ".cache" / "huggingface"
+    safe = repo_id.replace("/", "--").replace(":", "_")
+    rev = (revision or "main").replace("/", "--").replace(":", "_")
+    flv = (flavor or "default").replace("/", "--").replace(":", "_")
+    return base / "gen-worker-progress-snapshots" / safe / rev / flv
+
+
+def _scan_bytes(root: Path) -> int:
+    total = 0
+    seen: set[tuple[int, int]] = set()
+    try:
+        for dirpath, _dirs, files in os.walk(root):
+            for name in files:
+                try:
+                    st = os.stat(os.path.join(dirpath, name))
+                except OSError:
+                    continue
+                key = (int(st.st_dev), int(st.st_ino))
+                if key in seen:
+                    continue
+                seen.add(key)
+                total += int(st.st_size)
+    except OSError:
+        return 0
+    return total
 
 
 def _try_load_local_model_index(root: Path) -> Optional[dict]:
