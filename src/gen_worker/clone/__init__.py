@@ -45,11 +45,17 @@ from .size_walk import compute_size_facts
 from .types import CheckpointRef, CivitaiMeta, HFMeta
 
 
-def from_huggingface(ctx: Any, payload: Any) -> Any:
+def from_huggingface(ctx: Any, payload: Any, *, hf_token: str | None = None) -> Any:
     """Clone a Hugging Face repo end-to-end: download, convert, upload.
 
     Returns the ingested ConversionOutput (same shape as the pre-issue-#20
     tenant-code path, just moved into the library).
+
+    `hf_token` is the credential used for the source download. The tenant
+    endpoint resolves precedence (per-request token > endpoint env) and passes
+    the effective value here; when None the library falls back to
+    `ctx.hf_token`. Per-request tokens let an invoker pull a gated/private repo
+    their own account can access. Never logged.
     """
     return _run_clone(
         ctx,
@@ -58,6 +64,7 @@ def from_huggingface(ctx: Any, payload: Any) -> Any:
         source_version_id=None,
         source_revision=getattr(payload, "source_revision", None),
         source_metadata_overrides=None,
+        hf_token=hf_token,
         destination_repo=getattr(payload, "destination_repo", None),
         destination_repo_tags=getattr(payload, "destination_repo_tags", None),
         target_layout=getattr(payload, "target_layout", None),
@@ -73,11 +80,16 @@ def from_huggingface(ctx: Any, payload: Any) -> Any:
     )
 
 
-def from_civitai(ctx: Any, payload: Any) -> Any:
+def from_civitai(ctx: Any, payload: Any, *, civitai_api_key: str | None = None) -> Any:
     """Clone a Civitai model end-to-end: download, convert, upload.
 
     Accepts a `civitai_model_version_id` plus optional `civitai_file_id`.
     Arbitrary model-weight URLs are not a supported provider surface.
+
+    `civitai_api_key` is the credential used for the source download. The tenant
+    endpoint resolves precedence (per-request key > endpoint env) and passes the
+    effective value here. Per-request keys let an invoker pull a gated/early-
+    access model their own account can access. Never logged.
     """
     source_url = str(getattr(payload, "source_url", "") or "").strip()
     if source_url:
@@ -98,6 +110,7 @@ def from_civitai(ctx: Any, payload: Any) -> Any:
         source_version_id=str(version_id) if version_id else None,
         source_revision=None,
         source_metadata_overrides=source_metadata_overrides or None,
+        civitai_api_key=civitai_api_key,
         destination_repo=getattr(payload, "destination_repo", None),
         destination_repo_tags=getattr(payload, "destination_repo_tags", None),
         target_layout=getattr(payload, "target_layout", None),

@@ -343,7 +343,9 @@ class _FakeHFDownloader:
         self.snapshot_dir = snapshot_dir
         self.calls: List[HuggingFaceRef] = []
 
-    def download(self, ref: HuggingFaceRef) -> HuggingFaceDownloadResult:
+    def download(self, ref: HuggingFaceRef, progress_callback: Any = None) -> HuggingFaceDownloadResult:
+        if progress_callback is not None:
+            progress_callback(1, 1)
         self.calls.append(ref)
         return HuggingFaceDownloadResult(local_dir=self.snapshot_dir)
 

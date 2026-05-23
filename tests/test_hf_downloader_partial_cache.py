@@ -237,6 +237,85 @@ def test_complete_cache_fast_path_skips_api_calls(
     assert result.local_dir == snapshot
 
 
+def test_hf_progress_callback_reports_selected_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    progress: list[tuple[int, int | None]] = []
+    model_index_text = json.dumps({
+        "_class_name": "StableDiffusionXLPipeline",
+        "text_encoder": ["transformers", "CLIPTextModel"],
+        "tokenizer": ["transformers", "CLIPTokenizer"],
+    })
+    tokenizer_text = "{}"
+    total_hint = len(model_index_text.encode("utf-8")) + 16 + len(tokenizer_text.encode("utf-8"))
+
+    def fake_snapshot_download(**kwargs: Any) -> str:
+        if kwargs.get("local_files_only"):
+            raise FileNotFoundError("not cached")
+        local_dir = Path(str(kwargs["local_dir"]))
+        (local_dir / "model_index.json").parent.mkdir(parents=True, exist_ok=True)
+        (local_dir / "model_index.json").write_text(model_index_text)
+        text_enc = local_dir / "text_encoder"
+        text_enc.mkdir(parents=True, exist_ok=True)
+        (text_enc / "model.fp16.safetensors").write_bytes(b"x" * 16)
+        tok = local_dir / "tokenizer"
+        tok.mkdir(parents=True, exist_ok=True)
+        (tok / "tokenizer.json").write_text(tokenizer_text)
+        return str(local_dir)
+
+    def fake_hf_hub_download(**kwargs: Any) -> str:
+        name = kwargs.get("filename", "")
+        scratch = tmp_path / "api_downloads"
+        scratch.mkdir(parents=True, exist_ok=True)
+        p = scratch / name.replace("/", "__")
+        if name == "model_index.json":
+            p.write_text(model_index_text)
+        else:
+            p.write_text(tokenizer_text)
+        return str(p)
+
+    class _TreeEntry:
+        def __init__(self, path: str, size: int) -> None:
+            self.path = path
+            self.size = size
+
+    class FakeHfApi:
+        def __init__(self, token: Any = None) -> None:  # noqa: ARG002
+            pass
+
+        def list_repo_files(self, **_: Any) -> Sequence[str]:
+            return [
+                "model_index.json",
+                "text_encoder/model.fp16.safetensors",
+                "tokenizer/tokenizer.json",
+            ]
+
+        def list_repo_tree(self, **_: Any) -> Sequence[_TreeEntry]:
+            return [
+                _TreeEntry("model_index.json", len(model_index_text.encode("utf-8"))),
+                _TreeEntry("text_encoder/model.fp16.safetensors", 16),
+                _TreeEntry("tokenizer/tokenizer.json", len(tokenizer_text.encode("utf-8"))),
+            ]
+
+    _install_fake_hf_hub(
+        monkeypatch,
+        snapshot_download=fake_snapshot_download,
+        hf_hub_download=fake_hf_hub_download,
+        hf_api_factory=FakeHfApi,
+    )
+
+    downloader = HuggingFaceHubDownloader(hf_home=str(tmp_path / "cache"))
+    result = downloader.download(
+        HuggingFaceRef(repo_id="acme/test-model", flavor="fp16"),
+        progress_callback=lambda done, total: progress.append((done, total)),
+    )
+
+    assert result.local_dir.exists()
+    assert progress[0] == (0, total_hint)
+    assert progress[-1] == (total_hint, total_hint)
+
+
 def test_finalize_raises_on_missing_shard_is_intentional() -> None:
     """Sanity test: the planner's raise-on-missing-shard behaviour is
     intentional — the FIX lives in the caller's error handling, not the
@@ -269,3 +348,63 @@ def test_finalize_raises_on_missing_shard_is_intentional() -> None:
             repo_files=repo_files,
             weight_index_json_by_file=weight_index_json_by_file,
         )
+
+
+def test_root_safetensors_repo_downloads_without_endpoint_hf_hub_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """HFRepo materialization supports single-file/root safetensors repos."""
+    calls: list[dict[str, Any]] = []
+
+    def fake_snapshot_download(**kwargs: Any) -> str:
+        if kwargs.get("local_files_only"):
+            raise FileNotFoundError("cache miss")
+        calls.append(dict(kwargs))
+        local = tmp_path / "completed-root-safetensors"
+        local.mkdir(parents=True, exist_ok=True)
+        (local / "flux-2-klein-base-4b-fp8.safetensors").write_bytes(b"fake")
+        return str(local)
+
+    def fake_hf_hub_download(**kwargs: Any) -> str:  # noqa: ARG001
+        raise FileNotFoundError("no model_index.json")
+
+    class _TreeEntry:
+        def __init__(self, path: str, size: int) -> None:
+            self.path = path
+            self.size = size
+
+    class FakeHfApi:
+        def __init__(self, token: Any = None) -> None:  # noqa: ARG002
+            pass
+
+        def list_repo_files(self, **_: Any) -> Sequence[str]:
+            return [
+                "README.md",
+                "flux-2-klein-base-4b-fp8.safetensors",
+                "sample.png",
+            ]
+
+        def list_repo_tree(self, **_: Any) -> Sequence[_TreeEntry]:
+            return [
+                _TreeEntry("README.md", 100),
+                _TreeEntry("flux-2-klein-base-4b-fp8.safetensors", 4_000_000_000),
+                _TreeEntry("sample.png", 100),
+            ]
+
+    _install_fake_hf_hub(
+        monkeypatch,
+        snapshot_download=fake_snapshot_download,
+        hf_hub_download=fake_hf_hub_download,
+        hf_api_factory=FakeHfApi,
+    )
+
+    result = HuggingFaceHubDownloader(hf_home=str(tmp_path / "cache")).download(
+        HuggingFaceRef(repo_id="black-forest-labs/FLUX.2-klein-base-4b-fp8")
+    )
+
+    assert result.local_dir == tmp_path / "completed-root-safetensors"
+    assert calls
+    assert calls[0]["allow_patterns"] == [
+        "README.md",
+        "flux-2-klein-base-4b-fp8.safetensors",
+    ]

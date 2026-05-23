@@ -1943,6 +1943,7 @@ def download_civitai_model_version_files(
     civitai_file_id: int | None = None,
     progress_callback: Callable[[int, int | None], None] | None = None,
     resolved_identity: CivitaiResolvedIdentity | None = None,
+    civitai_api_key: str = "",
 ) -> dict[str, object]:
     resolved = resolved_identity or resolve_civitai_source_identity(
         civitai_model_version_id,
@@ -1960,6 +1961,12 @@ def download_civitai_model_version_files(
             total_known = False
     if not total_known:
         total_hint = None
+
+    # Per-invocation download credential. When supplied, the Bearer token is
+    # only attached to requests against Civitai's own hosts (never to the
+    # signed CDN/S3 URL Civitai redirects to). Empty → unauthenticated
+    # (works for public models). Never logged.
+    civitai_auth_token = str(civitai_api_key or "").strip()
 
     downloaded_total = 0
     files: list[dict[str, object]] = []
@@ -1979,6 +1986,8 @@ def download_civitai_model_version_files(
                 local_path,
                 progress_callback=_file_progress,
                 source_provider="civitai",
+                source_auth_token=civitai_auth_token,
+                source_auth_hosts=_CIVITAI_SOURCE_AUTH_HOSTS,
                 expected_size_bytes=(item.size_bytes if item.size_bytes_exact else None),
                 expected_sha256=expected_sha256,
             )

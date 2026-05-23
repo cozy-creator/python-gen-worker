@@ -35,6 +35,17 @@ def _default_compute() -> Compute:
     """
     return Compute()
 
+
+def _copy_context_metadata(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(k): _copy_context_metadata(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_copy_context_metadata(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_copy_context_metadata(v) for v in value)
+    return value
+
+
 logger = logging.getLogger(__name__)
 
 _REPO_REVISION_FINALIZE_REQUEST_TIMEOUT_S = 30
@@ -107,6 +118,7 @@ class RequestContext:
         source_info: Optional[Dict[str, Any]] = None,
         destination_info: Optional[Dict[str, Any]] = None,
         compute: Optional["Compute"] = None,
+        models: Optional[Dict[str, Any]] = None,
         hf_token: str = "",
     ) -> None:
         self._request_id = str(request_id or "").strip()
@@ -147,6 +159,7 @@ class RequestContext:
         # Sentinel defaults when unset — tenants can safely read fields without
         # None-checks.
         self._compute: "Compute" = compute if compute is not None else _default_compute()
+        self._models = _copy_context_metadata(models or {})
 
         # Upload-session manager (issue #20). Lazy-created on first
         # ctx.save_file / ctx.save_checkpoint / ctx.save_output_stream use.
@@ -212,6 +225,17 @@ class RequestContext:
         on ``ctx.compute.gpu_count`` etc without None-checks.
         """
         return self._compute
+
+    @property
+    def models(self) -> Dict[str, Any]:
+        """Resolved model bindings for this invocation.
+
+        Read-only metadata resolved by the orchestrator from endpoint defaults
+        plus request-time ``_models`` overrides. The tenant input payload never
+        contains the reserved ``_models`` envelope; use this property when a
+        handler needs to inspect the effective base refs or LoRA attachments.
+        """
+        return _copy_context_metadata(self._models)
 
     @property
     def device(self) -> "torch.device":

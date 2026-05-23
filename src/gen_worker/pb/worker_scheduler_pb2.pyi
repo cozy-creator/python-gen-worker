@@ -2,8 +2,7 @@ from google.protobuf.internal import containers as _containers
 from google.protobuf.internal import enum_type_wrapper as _enum_type_wrapper
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
-from collections.abc import Iterable as _Iterable, Mapping as _Mapping
-from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
+from typing import ClassVar as _ClassVar, Iterable as _Iterable, Mapping as _Mapping, Optional as _Optional, Union as _Union
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
@@ -368,6 +367,26 @@ class WorkerEvent(_message.Message):
     payload_json: bytes
     def __init__(self, request_id: _Optional[str] = ..., event_type: _Optional[str] = ..., payload_json: _Optional[bytes] = ...) -> None: ...
 
+class WorkerDiagnosticLog(_message.Message):
+    __slots__ = ("worker_id", "release_id", "runpod_pod_id", "category", "severity", "message", "payload_json", "emitted_at_unix_ms")
+    WORKER_ID_FIELD_NUMBER: _ClassVar[int]
+    RELEASE_ID_FIELD_NUMBER: _ClassVar[int]
+    RUNPOD_POD_ID_FIELD_NUMBER: _ClassVar[int]
+    CATEGORY_FIELD_NUMBER: _ClassVar[int]
+    SEVERITY_FIELD_NUMBER: _ClassVar[int]
+    MESSAGE_FIELD_NUMBER: _ClassVar[int]
+    PAYLOAD_JSON_FIELD_NUMBER: _ClassVar[int]
+    EMITTED_AT_UNIX_MS_FIELD_NUMBER: _ClassVar[int]
+    worker_id: str
+    release_id: str
+    runpod_pod_id: str
+    category: str
+    severity: str
+    message: str
+    payload_json: bytes
+    emitted_at_unix_ms: int
+    def __init__(self, worker_id: _Optional[str] = ..., release_id: _Optional[str] = ..., runpod_pod_id: _Optional[str] = ..., category: _Optional[str] = ..., severity: _Optional[str] = ..., message: _Optional[str] = ..., payload_json: _Optional[bytes] = ..., emitted_at_unix_ms: _Optional[int] = ...) -> None: ...
+
 class IncrementalTokenDelta(_message.Message):
     __slots__ = ("request_id", "item_id", "function_name", "sequence", "timestamp_unix_ms", "delta_text", "payload_json", "audio_chunk", "audio_codec")
     REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
@@ -640,12 +659,13 @@ class EndpointConfig(_message.Message):
     def __init__(self, supported_repo_refs: _Optional[_Iterable[str]] = ..., repo_ref_by_key: _Optional[_Mapping[str, str]] = ..., resolved_repos_by_ref: _Optional[_Mapping[str, ResolvedRepo]] = ..., required_flavor_refs: _Optional[_Iterable[str]] = ..., models_by_function: _Optional[_Mapping[str, ModelsByKey]] = ..., disabled_functions: _Optional[_Iterable[_Union[DisabledFunction, _Mapping]]] = ..., ref_availability_by_function: _Optional[_Mapping[str, FunctionRefAvailability]] = ...) -> None: ...
 
 class WorkerSchedulerMessage(_message.Message):
-    __slots__ = ("worker_registration", "job_result", "load_model_result", "unload_model_result", "worker_event", "incremental_token_delta", "incremental_token_stream_done", "incremental_token_stream_error", "worker_function_unavailable", "worker_drain_result", "worker_startup_phase", "worker_model_ready", "worker_function_capabilities", "worker_kv_prefix_cache", "job_request", "load_model_cmd", "unload_model_cmd", "interrupt_job_cmd", "endpoint_config", "worker_drain_cmd", "download_model_cmd")
+    __slots__ = ("worker_registration", "job_result", "load_model_result", "unload_model_result", "worker_event", "worker_diagnostic_log", "incremental_token_delta", "incremental_token_stream_done", "incremental_token_stream_error", "worker_function_unavailable", "worker_drain_result", "worker_startup_phase", "worker_model_ready", "worker_function_capabilities", "worker_kv_prefix_cache", "job_request", "load_model_cmd", "unload_model_cmd", "interrupt_job_cmd", "endpoint_config", "worker_drain_cmd", "download_model_cmd")
     WORKER_REGISTRATION_FIELD_NUMBER: _ClassVar[int]
     JOB_RESULT_FIELD_NUMBER: _ClassVar[int]
     LOAD_MODEL_RESULT_FIELD_NUMBER: _ClassVar[int]
     UNLOAD_MODEL_RESULT_FIELD_NUMBER: _ClassVar[int]
     WORKER_EVENT_FIELD_NUMBER: _ClassVar[int]
+    WORKER_DIAGNOSTIC_LOG_FIELD_NUMBER: _ClassVar[int]
     INCREMENTAL_TOKEN_DELTA_FIELD_NUMBER: _ClassVar[int]
     INCREMENTAL_TOKEN_STREAM_DONE_FIELD_NUMBER: _ClassVar[int]
     INCREMENTAL_TOKEN_STREAM_ERROR_FIELD_NUMBER: _ClassVar[int]
@@ -667,6 +687,7 @@ class WorkerSchedulerMessage(_message.Message):
     load_model_result: LoadModelResult
     unload_model_result: UnloadModelResult
     worker_event: WorkerEvent
+    worker_diagnostic_log: WorkerDiagnosticLog
     incremental_token_delta: IncrementalTokenDelta
     incremental_token_stream_done: IncrementalTokenStreamDone
     incremental_token_stream_error: IncrementalTokenStreamError
@@ -683,4 +704,4 @@ class WorkerSchedulerMessage(_message.Message):
     endpoint_config: EndpointConfig
     worker_drain_cmd: WorkerDrainCommand
     download_model_cmd: DownloadModelCommand
-    def __init__(self, worker_registration: _Optional[_Union[WorkerRegistration, _Mapping]] = ..., job_result: _Optional[_Union[JobExecutionResult, _Mapping]] = ..., load_model_result: _Optional[_Union[LoadModelResult, _Mapping]] = ..., unload_model_result: _Optional[_Union[UnloadModelResult, _Mapping]] = ..., worker_event: _Optional[_Union[WorkerEvent, _Mapping]] = ..., incremental_token_delta: _Optional[_Union[IncrementalTokenDelta, _Mapping]] = ..., incremental_token_stream_done: _Optional[_Union[IncrementalTokenStreamDone, _Mapping]] = ..., incremental_token_stream_error: _Optional[_Union[IncrementalTokenStreamError, _Mapping]] = ..., worker_function_unavailable: _Optional[_Union[WorkerFunctionUnavailableSignal, _Mapping]] = ..., worker_drain_result: _Optional[_Union[WorkerDrainResult, _Mapping]] = ..., worker_startup_phase: _Optional[_Union[WorkerStartupPhaseSignal, _Mapping]] = ..., worker_model_ready: _Optional[_Union[WorkerModelReadySignal, _Mapping]] = ..., worker_function_capabilities: _Optional[_Union[WorkerFunctionCapabilitiesSignal, _Mapping]] = ..., worker_kv_prefix_cache: _Optional[_Union[WorkerKVPrefixCache, _Mapping]] = ..., job_request: _Optional[_Union[JobExecutionRequest, _Mapping]] = ..., load_model_cmd: _Optional[_Union[LoadModelCommand, _Mapping]] = ..., unload_model_cmd: _Optional[_Union[UnloadModelCommand, _Mapping]] = ..., interrupt_job_cmd: _Optional[_Union[InterruptJobCommand, _Mapping]] = ..., endpoint_config: _Optional[_Union[EndpointConfig, _Mapping]] = ..., worker_drain_cmd: _Optional[_Union[WorkerDrainCommand, _Mapping]] = ..., download_model_cmd: _Optional[_Union[DownloadModelCommand, _Mapping]] = ...) -> None: ...
+    def __init__(self, worker_registration: _Optional[_Union[WorkerRegistration, _Mapping]] = ..., job_result: _Optional[_Union[JobExecutionResult, _Mapping]] = ..., load_model_result: _Optional[_Union[LoadModelResult, _Mapping]] = ..., unload_model_result: _Optional[_Union[UnloadModelResult, _Mapping]] = ..., worker_event: _Optional[_Union[WorkerEvent, _Mapping]] = ..., worker_diagnostic_log: _Optional[_Union[WorkerDiagnosticLog, _Mapping]] = ..., incremental_token_delta: _Optional[_Union[IncrementalTokenDelta, _Mapping]] = ..., incremental_token_stream_done: _Optional[_Union[IncrementalTokenStreamDone, _Mapping]] = ..., incremental_token_stream_error: _Optional[_Union[IncrementalTokenStreamError, _Mapping]] = ..., worker_function_unavailable: _Optional[_Union[WorkerFunctionUnavailableSignal, _Mapping]] = ..., worker_drain_result: _Optional[_Union[WorkerDrainResult, _Mapping]] = ..., worker_startup_phase: _Optional[_Union[WorkerStartupPhaseSignal, _Mapping]] = ..., worker_model_ready: _Optional[_Union[WorkerModelReadySignal, _Mapping]] = ..., worker_function_capabilities: _Optional[_Union[WorkerFunctionCapabilitiesSignal, _Mapping]] = ..., worker_kv_prefix_cache: _Optional[_Union[WorkerKVPrefixCache, _Mapping]] = ..., job_request: _Optional[_Union[JobExecutionRequest, _Mapping]] = ..., load_model_cmd: _Optional[_Union[LoadModelCommand, _Mapping]] = ..., unload_model_cmd: _Optional[_Union[UnloadModelCommand, _Mapping]] = ..., interrupt_job_cmd: _Optional[_Union[InterruptJobCommand, _Mapping]] = ..., endpoint_config: _Optional[_Union[EndpointConfig, _Mapping]] = ..., worker_drain_cmd: _Optional[_Union[WorkerDrainCommand, _Mapping]] = ..., download_model_cmd: _Optional[_Union[DownloadModelCommand, _Mapping]] = ...) -> None: ...

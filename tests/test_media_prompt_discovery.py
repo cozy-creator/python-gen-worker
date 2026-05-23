@@ -15,6 +15,7 @@ from gen_worker import (
     PositivePrompt,
     PromptRole,
     RequestContext,
+    StringEnum,
     Tensors,
     VideoAsset,
     inference,
@@ -59,6 +60,26 @@ class _ImagePayload(msgspec.Struct):
     height: int = 1024
 
 
+class AspectRatio(StringEnum):
+    SQUARE = "1:1"
+    WIDE = "16:9"
+
+
+class _AspectRatioPayload(msgspec.Struct):
+    prompt: PositivePrompt
+    aspect_ratio: AspectRatio = AspectRatio.SQUARE
+
+
+class _AspectRatioImageOut(msgspec.Struct):
+    image: Annotated[
+        ImageAsset,
+        ExpectedOutput(
+            aspect_ratio="input.aspect_ratio",
+            mime_type="image/png",
+        ),
+    ]
+
+
 def test_prompt_and_media_types_are_public_msgspec_shapes() -> None:
     schema = msgspec.json.schema(_Payload)
     defs = schema["$defs"]
@@ -84,6 +105,18 @@ def test_moderation_metadata_discovers_prompt_and_media_only() -> None:
     assert "weights" not in repr(moderation)
 
 
+def test_endpoint_declared_string_enum_emits_json_schema_enum() -> None:
+    payload = msgspec.json.decode(b'{"prompt":"x","aspect_ratio":"16:9"}', type=_AspectRatioPayload)
+
+    assert payload.aspect_ratio is AspectRatio.WIDE
+    assert str(payload.aspect_ratio) == "16:9"
+
+    schema = msgspec.json.schema(_AspectRatioPayload)
+    aspect_ratio = schema["$defs"]["_AspectRatioPayload"]["properties"]["aspect_ratio"]
+    assert aspect_ratio == {"$ref": "#/$defs/AspectRatio", "default": "1:1"}
+    assert sorted(schema["$defs"]["AspectRatio"]["enum"]) == ["16:9", "1:1"]
+
+
 def test_prompt_role_requires_string_annotation() -> None:
     class BadPayload(msgspec.Struct):
         prompt: Annotated[int, PromptRole("positive")]
@@ -102,6 +135,20 @@ def test_expected_output_metadata_discovers_annotated_media_outputs() -> None:
             "count": "input.num_images",
             "width": "input.width",
             "height": "input.height",
+            "mime_type": "image/png",
+        }
+    ]
+
+
+def test_expected_output_metadata_discovers_aspect_ratio_ref() -> None:
+    expected = _collect_expected_output_metadata(_AspectRatioPayload, _AspectRatioImageOut)
+
+    assert expected == [
+        {
+            "field": "image",
+            "type": "image",
+            "count": 1,
+            "aspect_ratio": "input.aspect_ratio",
             "mime_type": "image/png",
         }
     ]

@@ -60,8 +60,12 @@ from __future__ import annotations
 # reconcile (requeue what the worker dropped, keep what it still holds)
 # instead of guessing. Additive — older orchestrators ignore the new fields,
 # older workers send them empty.
+# 1.9 (#332): WorkerDiagnosticLog typed internal/operator diagnostic lane
+# (worker_diagnostic_log = 36). Separate from tenant/request WorkerEvent so
+# setup/runtime diagnostics can be inspected without entering request_events
+# or request SSE.
 WIRE_PROTOCOL_MAJOR = 1
-WIRE_PROTOCOL_MINOR = 8
+WIRE_PROTOCOL_MINOR = 9
 
 
 def wire_protocol_version_string() -> str:

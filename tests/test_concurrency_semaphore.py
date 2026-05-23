@@ -202,6 +202,36 @@ def test_gpu_semaphore_sized_to_one_when_zero_gpus() -> None:
     assert getattr(w._gpu_semaphore, "_value", None) == 1
 
 
+def test_eager_serial_setup_acquires_gpu_semaphore_for_gpu_record() -> None:
+    w = _semaphore_only_worker(gpu_count=1)
+    w._serial_class_specs = {}
+    w._conversion_class_specs = {}
+    w._micro_batch_aggregators = {}
+    w._configure_torchinductor_cache_dir = lambda: None
+    w._resolve_serial_model_paths = lambda _ep_spec: {}
+
+    seen: list[tuple[Any, bool]] = []
+
+    class Instance:
+        def setup(self) -> None:
+            seen.append((getattr(w._gpu_semaphore, "_value", None), w._get_gpu_busy_status()))
+
+    rec = {
+        "cls_name": "CompilingEndpoint",
+        "instance": Instance(),
+        "endpoint_spec": _SpecStub(Resources(accelerator="cuda", requires_gpu=True)),
+        "started": False,
+        "started_lock": threading.Lock(),
+    }
+
+    w._ensure_serial_class_started(rec, acquire_gpu_semaphore=True)
+
+    assert seen == [(0, True)]
+    assert rec["started"] is True
+    assert w._get_gpu_busy_status() is False
+    assert getattr(w._gpu_semaphore, "_value", None) == 1
+
+
 def test_gpu_semaphore_serializes_two_acquires_when_size_one() -> None:
     """Direct semaphore behavior: with gpu_count=1, the second acquire blocks
     until the first releases. Simulates the SerialWorker dispatch pattern.

@@ -135,3 +135,14 @@ def test_wire_format_binding_carries_allow_lora() -> None:
 
     out = _binding_to_wire("pipeline", str, HFRepo("acme/x").allow_lora())
     assert out["binding"]["allow_lora"] is True
+
+
+def test_wire_format_fixed_binding_defaults_to_no_override_and_no_lora() -> None:
+    from gen_worker.worker import _binding_to_wire
+
+    out = _binding_to_wire("pipeline", str, HFRepo("acme/x").dtype("bf16"))
+    binding = out["binding"]
+
+    assert binding["allow_override"] is False
+    assert binding["allow_lora"] is False
+    assert binding["pipeline_classes"] == []

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import IO, Annotated, Literal, Optional
 
 import msgspec
@@ -82,6 +83,10 @@ class VideoAsset(MediaAsset):
 
 class AudioAsset(MediaAsset):
     """Reference to audio media bytes."""
+
+
+class StringEnum(StrEnum):
+    """Base class for endpoint-declared string enum payload fields."""
 
 
 @dataclass(frozen=True)

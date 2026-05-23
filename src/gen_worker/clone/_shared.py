@@ -77,11 +77,21 @@ def ingest_from_source(
     # path. Civitai / URL providers ignore this (multi-dtype only makes
     # sense for HF source repos that ship variants side-by-side).
     dtype_outputs: list[str] | None = None,
+    # Per-invocation download credentials. When set, the source download
+    # authenticates with these instead of (HF) `ctx.hf_token`. The caller
+    # (run_clone) has already applied per-request > env precedence. Empty /
+    # None falls back to `ctx.hf_token` for HF and unauthenticated for civitai.
+    # Never logged.
+    hf_token: str | None = None,
+    civitai_api_key: str | None = None,
 ) -> tuple[ConversionOutput, IngestResult]:
     src = str(source_ref or "").strip()
     provider_norm = str(provider or "").strip().lower()
     if src == "":
         raise ValueError("source_ref is required")
+
+    effective_hf_token = str(hf_token or "").strip() or str(getattr(ctx, "hf_token", "") or "").strip()
+    effective_civitai_api_key = str(civitai_api_key or "").strip()
 
     td = tempfile.mkdtemp(prefix=f"conv-{ctx.request_id}-ingest-")
     if src.startswith("http://") or src.startswith("https://"):
@@ -97,7 +107,7 @@ def ingest_from_source(
             gguf_quant=gguf_quant,
             progress_callback=progress_callback,
             dtype_outputs=list(dtype_outputs or []),
-            hf_token=ctx.hf_token,
+            hf_token=effective_hf_token,
         )
 
         files = [dict(item) for item in list(info.get("files") or []) if isinstance(item, dict)]
@@ -365,6 +375,7 @@ def ingest_from_source(
             civitai_file_id=(int(civitai_file_id or 0) or None),
             progress_callback=progress_callback,
             resolved_identity=resolved_civitai_identity,
+            civitai_api_key=effective_civitai_api_key,
         )
 
         files = [dict(item) for item in list(info.get("files") or []) if isinstance(item, dict)]

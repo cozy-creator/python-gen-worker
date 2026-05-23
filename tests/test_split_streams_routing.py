@@ -27,6 +27,8 @@ def _bare() -> Worker:
     w.worker_id = "w1"
     w.release_id = "r1"
     w.runpod_pod_id = ""
+    w.worker_jwt = ""
+    w._heartbeat_outgoing_queue = queue.Queue()
     return w
 
 
@@ -81,6 +83,23 @@ def test_send_message_routes_into_results_queue() -> None:
     assert w._results_outgoing_queue.qsize() == 1
     assert w._outgoing_queue.qsize() == 0
     assert w._events_outgoing_queue.qsize() == 0
+
+
+def test_heartbeat_uses_primary_queue_when_worker_jwt_enabled() -> None:
+    w = _bare()
+    w.worker_jwt = "worker.jwt"
+    w._send_heartbeat_message(_registration_msg())
+
+    assert w._outgoing_queue.qsize() == 1
+    assert w._heartbeat_outgoing_queue.qsize() == 0
+
+
+def test_heartbeat_uses_dedicated_queue_without_worker_jwt() -> None:
+    w = _bare()
+    w._send_heartbeat_message(_registration_msg())
+
+    assert w._outgoing_queue.qsize() == 0
+    assert w._heartbeat_outgoing_queue.qsize() == 1
 
 
 def test_aux_handshake_registration_advertises_capability() -> None:

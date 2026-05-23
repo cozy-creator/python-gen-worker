@@ -125,6 +125,7 @@ from .models.ref_downloader import (
     set_override_ref_keys,
     set_provider_by_ref,
 )
+from .models.download_progress import DownloadProgressReporter
 from .models.refs import parse_model_ref
 from .api.types import Asset, AudioAsset, ImageAsset, Tensors, VideoAsset
 from .models.cache import ModelCache
@@ -136,6 +137,7 @@ from .run_metrics_v1 import (
     resolved_entry_total_bytes,
     safe_json_bytes,
 )
+from .diagnostics import diagnostic_emitter_context
 from .models.cache_paths import tensorhub_cas_dir
 from .wire_protocol import WIRE_PROTOCOL_MAJOR, WIRE_PROTOCOL_MINOR, wire_protocol_version_string
 from dataclasses import dataclass as _injection_dataclass
@@ -311,6 +313,14 @@ _DOWNLOAD_CHUNK_BYTES = 4 * 1024 * 1024
 # running deep prefetch with chunked streaming outputs rarely buffers more
 # than a few dozen messages before the stream drains.
 OUTGOING_QUEUE_MAXSIZE = 1024
+DIAGNOSTIC_LOG_MAX_PAYLOAD_BYTES = 16 * 1024
+DIAGNOSTIC_LOG_MAX_DEPTH = 8
+DIAGNOSTIC_LOG_MAX_LIST_ITEMS = 64
+DIAGNOSTIC_LOG_MAX_STRING_CHARS = 2048
+_DIAGNOSTIC_SECRET_KEY_RE = re.compile(
+    r"(^|[_\-.])(token|secret|password|authorization|credential|jwt|api_key|access_key)($|[_\-.])",
+    re.IGNORECASE,
+)
 
 
 def _env_flag(name: str, *, default: bool) -> bool:
@@ -1295,6 +1305,159 @@ class Worker:
         except Exception:
             return False
 
+    def _sanitize_diagnostic_value(self, value: Any, *, depth: int = 0, key: str = "") -> Any:
+        if _DIAGNOSTIC_SECRET_KEY_RE.search(str(key or "")):
+            return "<redacted>"
+        if depth >= DIAGNOSTIC_LOG_MAX_DEPTH:
+            return "<truncated_depth>"
+        if value is None or isinstance(value, (bool, int, float)):
+            return value
+        if isinstance(value, bytes):
+            return {"type": "bytes", "size_bytes": len(value)}
+        if isinstance(value, str):
+            text = re.sub(r"Bearer\s+[A-Za-z0-9._\-]+", "Bearer <redacted>", value)
+            text = re.sub(r"([?&](?:token|access_token|signature|X-Amz-Signature)=)[^&\s]+", r"\1<redacted>", text, flags=re.IGNORECASE)
+            if len(text) > DIAGNOSTIC_LOG_MAX_STRING_CHARS:
+                return {
+                    "truncated": True,
+                    "original_length": len(text),
+                    "preview": text[:DIAGNOSTIC_LOG_MAX_STRING_CHARS],
+                }
+            return text
+        if isinstance(value, dict):
+            out: Dict[str, Any] = {}
+            for raw_key, raw_value in list(value.items())[:DIAGNOSTIC_LOG_MAX_LIST_ITEMS]:
+                child_key = str(raw_key)
+                out[child_key] = self._sanitize_diagnostic_value(raw_value, depth=depth + 1, key=child_key)
+            if len(value) > DIAGNOSTIC_LOG_MAX_LIST_ITEMS:
+                out["_truncated_items"] = len(value) - DIAGNOSTIC_LOG_MAX_LIST_ITEMS
+            return out
+        if isinstance(value, (list, tuple, set, frozenset)):
+            seq = list(value)
+            out = [
+                self._sanitize_diagnostic_value(item, depth=depth + 1, key=key)
+                for item in seq[:DIAGNOSTIC_LOG_MAX_LIST_ITEMS]
+            ]
+            if len(seq) > DIAGNOSTIC_LOG_MAX_LIST_ITEMS:
+                out.append({"_truncated_items": len(seq) - DIAGNOSTIC_LOG_MAX_LIST_ITEMS})
+            return out
+        return {"type": type(value).__name__, "repr": str(value)[:DIAGNOSTIC_LOG_MAX_STRING_CHARS]}
+
+    def _diagnostic_payload_json(
+        self,
+        payload: Any,
+        *,
+        endpoint_class: str = "",
+        function_name: str = "",
+        image_digest: str = "",
+    ) -> bytes:
+        if isinstance(payload, dict):
+            clean = self._sanitize_diagnostic_value(payload)
+        elif payload is None:
+            clean = {}
+        else:
+            clean = {"value": self._sanitize_diagnostic_value(payload)}
+        if not isinstance(clean, dict):
+            clean = {"value": clean}
+        if endpoint_class:
+            clean.setdefault("endpoint_class", str(endpoint_class))
+        if function_name:
+            clean.setdefault("function_name", str(function_name))
+        digest = str(image_digest or getattr(self, "image_digest", "") or "").strip()
+        if digest:
+            clean.setdefault("image_digest", digest)
+        try:
+            raw = safe_json_bytes(clean)
+        except Exception:
+            raw = safe_json_bytes({"payload_error": "json_encode_failed"})
+        if len(raw) <= DIAGNOSTIC_LOG_MAX_PAYLOAD_BYTES:
+            return raw
+
+        preview_budget = max(1024, DIAGNOSTIC_LOG_MAX_PAYLOAD_BYTES - 512)
+        preview = raw[:preview_budget].decode("utf-8", "replace")
+        truncated = {
+            "truncated": True,
+            "original_size_bytes": len(raw),
+            "payload_preview": preview,
+        }
+        while True:
+            out = safe_json_bytes(truncated)
+            if len(out) <= DIAGNOSTIC_LOG_MAX_PAYLOAD_BYTES or len(preview) <= 1024:
+                return out[:DIAGNOSTIC_LOG_MAX_PAYLOAD_BYTES]
+            preview = preview[: max(1024, len(preview) // 2)]
+            truncated["payload_preview"] = preview
+
+    def _emit_diagnostic_log(
+        self,
+        *,
+        category: str,
+        message: str = "",
+        payload: Any = None,
+        severity: str = "info",
+        endpoint_class: str = "",
+        function_name: str = "",
+        image_digest: str = "",
+    ) -> bool:
+        """Best-effort internal worker diagnostic emitter.
+
+        These diagnostics are not tenant WorkerEvent records and must not be
+        exposed through request_events/SSE by the orchestrator.
+        """
+        cls = getattr(pb, "WorkerDiagnosticLog", None)
+        if cls is None:
+            return False
+        try:
+            emitted_at = int(time.time() * 1000)
+            log = cls(
+                worker_id=str(getattr(self, "worker_id", "") or ""),
+                release_id=str(getattr(self, "release_id", "") or ""),
+                runpod_pod_id=str(getattr(self, "runpod_pod_id", "") or ""),
+                category=str(category or "diagnostic"),
+                severity=str(severity or "info"),
+                message=str(message or "")[:1024],
+                payload_json=self._diagnostic_payload_json(
+                    payload,
+                    endpoint_class=endpoint_class,
+                    function_name=function_name,
+                    image_digest=image_digest,
+                ),
+                emitted_at_unix_ms=emitted_at,
+            )
+            self._send_message(pb.WorkerSchedulerMessage(worker_diagnostic_log=log))
+            return True
+        except Exception:
+            return False
+
+    def _emit_exception_diagnostic(
+        self,
+        *,
+        category: str,
+        message: str,
+        exc: BaseException,
+        severity: str = "error",
+        endpoint_class: str = "",
+        function_name: str = "",
+        **fields: Any,
+    ) -> bool:
+        try:
+            tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        except Exception:
+            tb = traceback.format_exc()
+        payload = {
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+            "traceback": tb,
+        }
+        payload.update(fields)
+        return self._emit_diagnostic_log(
+            category=category,
+            message=message,
+            payload=payload,
+            severity=severity,
+            endpoint_class=endpoint_class,
+            function_name=function_name,
+        )
+
     def _emit_incremental_delta_typed(
         self,
         *,
@@ -1527,6 +1690,65 @@ class Worker:
         except Exception:
             pass
 
+    def _emit_worker_model_download_event(self, suffix: str, payload: Optional[Dict[str, Any]] = None) -> None:
+        event_suffix = str(suffix or "").strip().lstrip(".")
+        if not event_suffix:
+            return
+        try:
+            self._send_message(
+                pb.WorkerSchedulerMessage(
+                    worker_event=pb.WorkerEvent(
+                        request_id="",
+                        event_type=f"worker.model.download.{event_suffix}",
+                        payload_json=safe_json_bytes(payload or {}),
+                    )
+                )
+            )
+        except Exception:
+            pass
+
+    def _start_model_download_reporter(
+        self,
+        *,
+        model_id: str,
+        provider: str,
+        source: str,
+        request_id: str,
+        cache_dir: str,
+        resolved_entry: Any,
+        emit: Callable[[str, Dict[str, Any]], None],
+        enable_disk_sampler: bool,
+        sampler_name: str,
+    ) -> tuple[DownloadProgressReporter, threading.Event, Optional[threading.Thread]]:
+        total_bytes = resolved_entry_total_bytes(resolved_entry)
+        reporter = DownloadProgressReporter(
+            model_id=model_id,
+            provider=provider,
+            source=source,
+            request_id=request_id,
+            total_bytes=total_bytes,
+            emit=emit,
+        )
+        reporter.start()
+
+        stop = threading.Event()
+        sampler: Optional[threading.Thread] = None
+        if enable_disk_sampler and total_bytes and total_bytes > 0:
+            cache_path = Path(cache_dir)
+
+            def _sampler_loop() -> None:
+                while not stop.wait(1.0):
+                    try:
+                        on_disk = best_effort_bytes_on_disk(cache_path, resolved_entry)
+                        if on_disk is not None:
+                            reporter.update(int(on_disk), int(total_bytes))
+                    except Exception:
+                        pass
+
+            sampler = threading.Thread(target=_sampler_loop, daemon=True, name=sampler_name)
+            sampler.start()
+        return reporter, stop, sampler
+
     def _run_download_with_request_progress(
         self,
         *,
@@ -1535,6 +1757,9 @@ class Worker:
         cache_dir: str,
         resolved_entry: Any,
         download_fn: Callable[[], str],
+        provider: str = "tensorhub",
+        source: str = "tensorhub_cas",
+        progress_download_fn: Optional[Callable[[Callable[[int, Optional[int]], None]], str]] = None,
     ) -> str:
         """gen-orchestrator #348: run a blocking model fetch that was triggered
         by a specific request while emitting per-request model.download.*
@@ -1542,163 +1767,92 @@ class Worker:
         ``request_id``. These ride the existing WorkerEvent fabric and surface
         on the request's SSE stream (GET /v1/requests/:id/events).
 
-        The underlying downloader has no byte-level callback, so progress is
-        sampled by polling on-disk bytes for the resolved manifest entry. When
-        the manifest carries no per-file sizes (bootstrap fallback) we emit
-        ``estimated_total_bytes: 0`` / ``estimated_eta_seconds: -1`` and skip
-        byte-progress events; started/completed/failed still fire.
-
-        Rate limiting (per the issue): min 1s between progress events, force a
-        sample at most every 5s, also emit on >=10% byte deltas, hard cap of 25
-        progress events. ETA is computed locally from an EWMA of throughput
-        over the recent samples.
+        Providers that expose byte callbacks call the shared progress sink.
+        Tensorhub/CAS can also feed the same reporter through the on-disk
+        resolved-manifest sampler. The event math stays provider-agnostic.
         """
         rid = str(request_id or "").strip()
         if not rid:
             # Requestless fetch — not this issue's scope. Just run it.
+            if progress_download_fn is not None:
+                return progress_download_fn(lambda _done, _total=None: None)
             return download_fn()
 
-        cache_path = Path(cache_dir)
-        total_bytes = resolved_entry_total_bytes(resolved_entry)
-        baseline_on_disk = 0
-        try:
-            base = best_effort_bytes_on_disk(cache_path, resolved_entry)
-            if base is not None:
-                baseline_on_disk = int(base)
-        except Exception:
-            baseline_on_disk = 0
+        def _emit(suffix: str, payload: Dict[str, Any]) -> None:
+            self._emit_request_event(rid, f"model.download.{suffix}", payload)
 
-        started_at = time.monotonic()
-        self._emit_request_event(
-            rid,
-            "model.download.started",
-            {
-                "request_id": rid,
-                "model_id": model_id,
-                "estimated_total_bytes": int(total_bytes) if total_bytes else 0,
-                "estimated_eta_seconds": -1,
-                "source": "tensorhub_cas",
-            },
+        reporter, stop, sampler = self._start_model_download_reporter(
+            model_id=model_id,
+            provider=provider,
+            source=source,
+            request_id=rid,
+            cache_dir=cache_dir,
+            resolved_entry=resolved_entry,
+            emit=_emit,
+            enable_disk_sampler=(progress_download_fn is None),
+            sampler_name=f"dl-progress-{rid[:24]}",
         )
 
-        stop = threading.Event()
-        sampler: Optional[threading.Thread] = None
-
-        if total_bytes and total_bytes > 0:
-            # EWMA throughput estimate (~10s window via alpha) + rate gates.
-            state: Dict[str, Any] = {
-                "last_emit_t": 0.0,
-                "last_emit_pct": -100.0,
-                "emitted": 0,
-                "last_bytes": baseline_on_disk,
-                "last_sample_t": started_at,
-                "throughput_ewma": 0.0,
-            }
-            min_interval = 1.0
-            max_interval = 5.0
-            pct_step = 10.0
-            hard_cap = 25
-            alpha = 0.3  # ~last few seconds dominate the EWMA
-
-            def _sample_and_maybe_emit(force: bool = False) -> None:
-                if state["emitted"] >= hard_cap and not force:
-                    return
-                try:
-                    on_disk = best_effort_bytes_on_disk(cache_path, resolved_entry)
-                except Exception:
-                    on_disk = None
-                if on_disk is None:
-                    return
-                now = time.monotonic()
-                dt = now - float(state["last_sample_t"])
-                dbytes = int(on_disk) - int(state["last_bytes"])
-                if dt > 0 and dbytes >= 0:
-                    inst = float(dbytes) / dt
-                    if state["throughput_ewma"] <= 0:
-                        state["throughput_ewma"] = inst
-                    else:
-                        state["throughput_ewma"] = alpha * inst + (1.0 - alpha) * float(state["throughput_ewma"])
-                state["last_sample_t"] = now
-                state["last_bytes"] = int(on_disk)
-
-                pct = (float(on_disk) / float(total_bytes)) * 100.0 if total_bytes else 0.0
-                since_emit = now - float(state["last_emit_t"])
-                pct_delta = pct - float(state["last_emit_pct"])
-                should = force or (
-                    since_emit >= min_interval and (pct_delta >= pct_step or since_emit >= max_interval)
-                )
-                if not should:
-                    return
-                if state["emitted"] >= hard_cap and not force:
-                    return
-
-                tput = float(state["throughput_ewma"])
-                remaining = max(int(total_bytes) - int(on_disk), 0)
-                eta = int(remaining / tput) if tput > 0 else -1
-                self._emit_request_event(
-                    rid,
-                    "model.download.progress",
-                    {
-                        "request_id": rid,
-                        "model_id": model_id,
-                        "bytes_downloaded": int(on_disk),
-                        "bytes_total": int(total_bytes),
-                        "percent_complete": round(pct, 1),
-                        "eta_remaining_seconds": eta,
-                        "throughput_bytes_per_sec": int(tput),
-                    },
-                )
-                state["last_emit_t"] = now
-                state["last_emit_pct"] = pct
-                state["emitted"] = int(state["emitted"]) + 1
-
-            def _sampler_loop() -> None:
-                # Poll at min_interval; the rate gate decides what actually
-                # emits, so a fast download sends few events, a slow one samples
-                # at >=1s/event up to the hard cap.
-                while not stop.wait(min_interval):
-                    try:
-                        _sample_and_maybe_emit(force=False)
-                    except Exception:
-                        pass
-
-            sampler = threading.Thread(target=_sampler_loop, daemon=True, name=f"dl-progress-{rid[:24]}")
-            sampler.start()
-
         try:
-            local_path = download_fn()
+            if progress_download_fn is not None:
+                local_path = progress_download_fn(reporter.sink())
+            else:
+                local_path = download_fn()
         except Exception as e:
             stop.set()
             if sampler is not None:
                 sampler.join(timeout=2.0)
-            dur_ms = int((time.monotonic() - started_at) * 1000)
-            self._emit_request_event(
-                rid,
-                "model.download.failed",
-                {
-                    "request_id": rid,
-                    "model_id": model_id,
-                    "error_type": type(e).__name__,
-                    "duration_ms": dur_ms,
-                },
-            )
+            reporter.fail(e)
             raise
         else:
             stop.set()
             if sampler is not None:
                 sampler.join(timeout=2.0)
-            dur_ms = int((time.monotonic() - started_at) * 1000)
-            final_bytes = int(total_bytes) if total_bytes else 0
-            self._emit_request_event(
-                rid,
-                "model.download.completed",
-                {
-                    "request_id": rid,
-                    "model_id": model_id,
-                    "bytes_total": final_bytes,
-                    "duration_ms": dur_ms,
-                },
-            )
+            reporter.complete()
+            return local_path
+
+    def _run_download_with_worker_model_progress(
+        self,
+        *,
+        model_id: str,
+        cache_dir: str,
+        resolved_entry: Any,
+        download_fn: Callable[[], str],
+        provider: str = "tensorhub",
+        source: str = "tensorhub_cas",
+        progress_download_fn: Optional[Callable[[Callable[[int, Optional[int]], None]], str]] = None,
+    ) -> str:
+        def _emit(suffix: str, payload: Dict[str, Any]) -> None:
+            self._emit_worker_model_download_event(suffix, payload)
+
+        reporter, stop, sampler = self._start_model_download_reporter(
+            model_id=model_id,
+            provider=provider,
+            source=source,
+            request_id="",
+            cache_dir=cache_dir,
+            resolved_entry=resolved_entry,
+            emit=_emit,
+            enable_disk_sampler=(progress_download_fn is None),
+            sampler_name=f"worker-dl-progress-{model_id[:24]}",
+        )
+
+        try:
+            if progress_download_fn is not None:
+                local_path = progress_download_fn(reporter.sink())
+            else:
+                local_path = download_fn()
+        except Exception as e:
+            stop.set()
+            if sampler is not None:
+                sampler.join(timeout=2.0)
+            reporter.fail(e)
+            raise
+        else:
+            stop.set()
+            if sampler is not None:
+                sampler.join(timeout=2.0)
+            reporter.complete()
             return local_path
 
     def _start_task_phase_watchdog(
@@ -3198,6 +3352,7 @@ class Worker:
             return getattr(self, "_results_outgoing_queue", None) or self._outgoing_queue
         if which in (
             "worker_event",
+            "worker_diagnostic_log",
             "incremental_token_delta",
             "incremental_token_stream_done",
             "incremental_token_stream_error",
@@ -3862,25 +4017,26 @@ class Worker:
             self._registered_event.set()
             self._emit_startup_phase("registered", status="ok", scheduler_addr=self.scheduler_addr)
 
-            # Dedicated heartbeat channel + stream. Opens a second
-            # HTTP/2 connection to the scheduler so heartbeats aren't subject
-            # to flow control or Python-level queue head-of-line blocking from
-            # the primary data stream. Scheduler treats heartbeats on any
-            # stream as "bump LastActiveAt for the WorkerId carried in the
-            # message" so two parallel streams per worker are safe.
-            if self.use_tls:
-                hb_creds = grpc.ssl_channel_credentials()
-                self._heartbeat_channel = grpc.secure_channel(self.scheduler_addr, hb_creds)
+            # Dedicated heartbeat streams use ConnectWorker too. With
+            # WORKER_JWT auth enabled, gen-orchestrator enforces one active
+            # ConnectWorker lease per worker token, so heartbeats must ride
+            # the primary control stream instead of opening a second lease.
+            if self._use_dedicated_heartbeat_stream():
+                if self.use_tls:
+                    hb_creds = grpc.ssl_channel_credentials()
+                    self._heartbeat_channel = grpc.secure_channel(self.scheduler_addr, hb_creds)
+                else:
+                    self._heartbeat_channel = grpc.insecure_channel(self.scheduler_addr)
+                if interceptors:
+                    self._heartbeat_channel = grpc.intercept_channel(self._heartbeat_channel, *interceptors)
+                self._heartbeat_stub = pb_grpc.SchedulerWorkerServiceStub(self._heartbeat_channel)
+                self._heartbeat_stream = self._heartbeat_stub.ConnectWorker(
+                    self._heartbeat_outgoing_iterator(self._heartbeat_outgoing_queue)
+                )
+                self._heartbeat_drain_thread = threading.Thread(target=self._heartbeat_drain_loop, daemon=True)
+                self._heartbeat_drain_thread.start()
             else:
-                self._heartbeat_channel = grpc.insecure_channel(self.scheduler_addr)
-            if interceptors:
-                self._heartbeat_channel = grpc.intercept_channel(self._heartbeat_channel, *interceptors)
-            self._heartbeat_stub = pb_grpc.SchedulerWorkerServiceStub(self._heartbeat_channel)
-            self._heartbeat_stream = self._heartbeat_stub.ConnectWorker(
-                self._heartbeat_outgoing_iterator(self._heartbeat_outgoing_queue)
-            )
-            self._heartbeat_drain_thread = threading.Thread(target=self._heartbeat_drain_loop, daemon=True)
-            self._heartbeat_drain_thread.start()
+                logger.info("WORKER_JWT auth enabled; sending heartbeats on primary control stream")
 
             # gen-orchestrator #345 Improvement A: open the dedicated RESULTS and
             # EVENTS streams. Best-effort — if they fail to open the worker
@@ -4074,6 +4230,9 @@ class Worker:
             # will notice via its own health checks.
             return
 
+    def _use_dedicated_heartbeat_stream(self) -> bool:
+        return not bool(getattr(self, "worker_jwt", ""))
+
     def _open_aux_streams(self, interceptors: List[Any]) -> None:
         """#345 Improvement A: open the dedicated RESULTS + EVENTS streams on
         their own gRPC channels and send the opening WorkerRegistration
@@ -4175,6 +4334,9 @@ class Worker:
     def _send_heartbeat_message(self, message: WorkerSchedulerMessage) -> None:
         """Add a message to the dedicated heartbeat queue."""
         if self._running and not self._stop_event.is_set():
+            if not self._use_dedicated_heartbeat_stream():
+                self._send_message(message)
+                return
             try:
                 self._heartbeat_outgoing_queue.put_nowait(message)
             except queue.Full:
@@ -4730,7 +4892,7 @@ class Worker:
                         cls_name, canonical_ref,
                     )
                     try:
-                        self._ensure_serial_class_started(rec)
+                        self._ensure_serial_class_started(rec, acquire_gpu_semaphore=True)
                     except Exception:
                         logger.exception(
                             "eager-load: SerialWorker setup() raised for class=%s",
@@ -5965,28 +6127,43 @@ class Worker:
                         continue
 
                     self._model_cache.mark_downloading(canon, progress=0.0)
-                    try:
-                        payload = json.dumps({"model_id": canon}, separators=(",", ":"), sort_keys=True).encode("utf-8")
-                        self._send_message(
-                            pb.WorkerSchedulerMessage(
-                                worker_event=pb.WorkerEvent(request_id="", event_type="model.download.started", payload_json=payload)
-                            )
-                        )
-                    except Exception:
-                        pass
 
                     tok = set_resolved_repos_by_id(self._resolved_repos_by_id_baseline or None)
                     prov_tok = set_provider_by_ref(self._provider_by_ref_index or None)
+                    resolved_entry = None
                     try:
-                        local_path = self._downloader.download(canon, str(cache_dir)) if self._downloader else ""
+                        resolved_entry = (self._resolved_repos_by_id_baseline or {}).get(canon)
+                    except Exception:
+                        resolved_entry = None
+                    provider = self._provider_for_ref(canon)
+                    source = self._download_source_for_provider(provider)
+                    try:
+                        def _download_and_validate(progress_cb: Callable[[int, Optional[int]], None] | None = None) -> str:
+                            if not self._downloader:
+                                local = ""
+                            elif progress_cb is not None and callable(getattr(type(self._downloader), "download_with_progress", None)):
+                                local = self._downloader.download_with_progress(canon, str(cache_dir), progress_callback=progress_cb)
+                            else:
+                                local = self._downloader.download(canon, str(cache_dir))
+                            lp_inner = Path(local) if local else None
+                            if lp_inner is None or not lp_inner.exists():
+                                raise RuntimeError(f"model download returned missing path: {local!r}")
+                            return local
+
+                        local_path = self._run_download_with_worker_model_progress(
+                            model_id=canon,
+                            cache_dir=str(cache_dir),
+                            resolved_entry=resolved_entry,
+                            download_fn=lambda: _download_and_validate(None),
+                            provider=provider,
+                            source=source,
+                            progress_download_fn=_download_and_validate,
+                        )
                     finally:
                         reset_provider_by_ref(prov_tok)
                         reset_resolved_repos_by_id(tok)
 
                     lp = Path(local_path) if local_path else None
-                    if lp is None or not lp.exists():
-                        raise RuntimeError(f"model download returned missing path: {local_path!r}")
-
                     self._model_cache.mark_cached_to_disk(canon, lp)
                     # #321: typed signals (replaces 3 worker_event emits).
                     self._emit_model_ready(canon, self._MODEL_AVAILABILITY_READY)
@@ -6019,20 +6196,6 @@ class Worker:
                             )
                         except Exception:
                             pass
-                    try:
-                        dur_ms = int((time.monotonic() - started_at) * 1000)
-                        payload = json.dumps(
-                            {"model_id": canon, "duration_ms": dur_ms, "error_type": type(e).__name__},
-                            separators=(",", ":"),
-                            sort_keys=True,
-                        ).encode("utf-8")
-                        self._send_message(
-                            pb.WorkerSchedulerMessage(
-                                worker_event=pb.WorkerEvent(request_id="", event_type="model.download.failed", payload_json=payload)
-                            )
-                        )
-                    except Exception:
-                        pass
                     logger.warning("Startup prefetch failed for %s: %s", canon, e)
                     # gen-worker 0.7.21: record the terminal failure so
                     # `_emit_ready_if_all_cached` doesn't block on a ref
@@ -6102,6 +6265,15 @@ class Worker:
             return index[stripped]
         return default
 
+    @staticmethod
+    def _download_source_for_provider(provider: str) -> str:
+        p = str(provider or "").strip().lower()
+        if p == "hf":
+            return "huggingface"
+        if p == "civitai":
+            return "civitai"
+        return "tensorhub_cas"
+
     def _try_find_existing_cozy_snapshot_dir(self, canonical_model_id: str, cache_dir: Path) -> Optional[Path]:
         # Only applies to cozy:@sha256 refs where the snapshot digest is known.
         # Issue #17: consult the provider index so HF refs short-circuit to
@@ -6169,7 +6341,6 @@ class Worker:
         logger.info("Received LoadModelCommand for: %s", model_id)
         success = False
         error_msg = ""
-        started_at = time.monotonic()
 
         try:
             payload = json.dumps({"model_id": model_id}, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -6345,19 +6516,6 @@ class Worker:
         error_msg = ""
         started_at = time.monotonic()
 
-        # Announce start (best-effort, audit channel).
-        try:
-            payload = json.dumps({"model_id": canonical_ref}, separators=(",", ":"), sort_keys=True).encode("utf-8")
-            self._send_message(
-                pb.WorkerSchedulerMessage(
-                    worker_event=pb.WorkerEvent(
-                        request_id="", event_type="model.download.started", payload_json=payload
-                    )
-                )
-            )
-        except Exception:
-            pass
-
         try:
             # Short-circuit: if the snapshot is already on disk just refresh
             # the cache + emit the typed ready signal — no need to re-fetch.
@@ -6381,24 +6539,44 @@ class Worker:
                         pass
                 tok = set_resolved_repos_by_id(getattr(self, "_resolved_repos_by_id_baseline", None) or None)
                 prov_tok = set_provider_by_ref(getattr(self, "_provider_by_ref_index", None) or None)
+                resolved_entry = None
                 try:
-                    local_path = self._downloader.download(canonical_ref, str(cache_dir))
+                    resolved_entry = (getattr(self, "_resolved_repos_by_id_baseline", None) or {}).get(canonical_ref)
+                except Exception:
+                    resolved_entry = None
+                provider = self._provider_for_ref(canonical_ref)
+                source = self._download_source_for_provider(provider)
+                try:
+                    def _download_and_validate(progress_cb: Callable[[int, Optional[int]], None] | None = None) -> str:
+                        if progress_cb is not None and callable(getattr(type(self._downloader), "download_with_progress", None)):
+                            local = self._downloader.download_with_progress(
+                                canonical_ref,
+                                str(cache_dir),
+                                progress_callback=progress_cb,
+                            )
+                        else:
+                            local = self._downloader.download(canonical_ref, str(cache_dir))
+                        lp_inner = Path(local) if local else None
+                        if lp_inner is None or not lp_inner.exists():
+                            raise RuntimeError(f"download returned missing path: {local!r}")
+                        return local
+
+                    local_path = self._run_download_with_worker_model_progress(
+                        model_id=canonical_ref,
+                        cache_dir=str(cache_dir),
+                        resolved_entry=resolved_entry,
+                        download_fn=lambda: _download_and_validate(None),
+                        provider=provider,
+                        source=source,
+                        progress_download_fn=_download_and_validate,
+                    )
                 finally:
                     reset_provider_by_ref(prov_tok)
                     reset_resolved_repos_by_id(tok)
                 lp = Path(local_path) if local_path else None
-                if lp is None or not lp.exists():
-                    error_msg = f"download returned missing path: {local_path!r}"
-                    logger.error("DownloadModelCommand %s: %s", canonical_ref, error_msg)
-                    if self._model_cache:
-                        try:
-                            self._model_cache.unload_model(canonical_ref)
-                        except Exception:
-                            pass
-                else:
-                    if self._model_cache:
-                        self._model_cache.mark_cached_to_disk(canonical_ref, lp)
-                    success = True
+                if self._model_cache:
+                    self._model_cache.mark_cached_to_disk(canonical_ref, lp)
+                success = True
         except Exception as e:
             error_msg = f"Exception in DownloadModelCommand for {canonical_ref!r}: {e}"
             logger.exception(error_msg)
@@ -6437,27 +6615,6 @@ class Worker:
             # Fix 2c: scheduler-driven download can complete a missing
             # required ref. Flip the startup phase to `ready` if so.
             self._emit_ready_if_all_cached()
-
-        # Audit-channel completion event for observability.
-        try:
-            dur_ms = int((time.monotonic() - started_at) * 1000)
-            ev_type = "model.download.completed" if success else "model.download.failed"
-            payload = json.dumps(
-                {
-                    "model_id": canonical_ref,
-                    "duration_ms": dur_ms,
-                    "error_type": "" if success else "download_failed",
-                },
-                separators=(",", ":"),
-                sort_keys=True,
-            ).encode("utf-8")
-            self._send_message(
-                pb.WorkerSchedulerMessage(
-                    worker_event=pb.WorkerEvent(request_id="", event_type=ev_type, payload_json=payload)
-                )
-            )
-        except Exception:
-            pass
 
     def _handle_unload_model_cmd(self, cmd: Any) -> None:
         """Handle orchestrator command to unload a model from VRAM."""
@@ -7122,14 +7279,25 @@ class Worker:
         # callers (#322 cross-cutting hooks).
         self._emit_startup_phase("warming", status="ok", scheduler_addr=self.scheduler_addr)
 
-        await setup_fn(**setup_kwargs)
+        cls_name = rec.get("cls_name") or type(instance).__name__
+        with diagnostic_emitter_context(
+            lambda **event: self._emit_diagnostic_log(
+                **{**event, "endpoint_class": event.get("endpoint_class") or cls_name}
+            )
+        ):
+            await setup_fn(**setup_kwargs)
 
         # Optional warmup() — async or sync.
         warmup_fn = getattr(instance, "warmup", None)
         if callable(warmup_fn):
-            res = warmup_fn()
-            if inspect.iscoroutine(res):
-                await res
+            with diagnostic_emitter_context(
+                lambda **event: self._emit_diagnostic_log(
+                    **{**event, "endpoint_class": event.get("endpoint_class") or cls_name}
+                )
+            ):
+                res = warmup_fn()
+                if inspect.iscoroutine(res):
+                    await res
         rec["started"] = True
         logger.info(
             "BatchedWorker setup complete: class=%s runtime=%s",
@@ -7489,7 +7657,7 @@ class Worker:
         _call.__name__ = f"micro_batch_call_{slug}"
         return _call
 
-    def _ensure_serial_class_started(self, rec: Dict[str, Any]) -> None:
+    def _ensure_serial_class_started(self, rec: Dict[str, Any], *, acquire_gpu_semaphore: bool = False) -> None:
         """Lazy-call ``instance.setup(**models)`` once per SerialWorker class (#322/#328).
 
         Runs under the per-record lock so concurrent first-requests serialize
@@ -7498,6 +7666,10 @@ class Worker:
         body is where TeaCache typically attaches).
 
         Idempotent — second call is a no-op.
+
+        Request dispatch already holds the GPU semaphore before calling this
+        helper. Eager startup setup has no request context, so callers can ask
+        this helper to acquire the same semaphore around setup/warmup.
 
         Lifecycle:
           1. Confirm ``TORCHINDUCTOR_CACHE_DIR`` is set (defensive re-check —
@@ -7541,20 +7713,38 @@ class Worker:
             # the resolved kwargs; classes whose setup is bare ``def setup(self)``
             # still work because models_kwargs is empty when ep_spec.models
             # is empty.
-            models_kwargs = self._resolve_serial_model_paths(ep_spec)
+            models_kwargs = self._resolve_serial_setup_kwargs(ep_spec, setup_fn)
 
             logger.info(
                 "SerialWorker setup starting: class=%s models=%s",
                 cls_name, sorted(models_kwargs.keys()),
             )
+            needs_gpu_setup_lock = bool(acquire_gpu_semaphore and self._serial_record_needs_gpu(rec))
+            if needs_gpu_setup_lock:
+                logger.info(
+                    "SerialWorker setup acquiring GPU semaphore: class=%s sema_value=%s",
+                    cls_name,
+                    getattr(self._gpu_semaphore, "_value", None),
+                )
+                self._gpu_semaphore.acquire()
+                self._gpu_busy_enter()
             # #345 Improvement B: an async SerialWorker may declare
             # `async def setup`. Run it (and warmup below) on the shared asyncio
             # loop so awaits inside resolve before the first request dispatches.
+            diagnostic_emitter = lambda **event: self._emit_diagnostic_log(
+                **{**event, "endpoint_class": event.get("endpoint_class") or cls_name}
+            )
+
             def _run_serial_setup(**kw: Any) -> None:
-                res = setup_fn(**kw)
+                with diagnostic_emitter_context(diagnostic_emitter):
+                    res = setup_fn(**kw)
                 if inspect.iscoroutine(res):
+                    async def _await_with_diagnostics(coro: Any) -> Any:
+                        with diagnostic_emitter_context(diagnostic_emitter):
+                            return await coro
+
                     loop = self._ensure_batched_loop()
-                    asyncio.run_coroutine_threadsafe(res, loop).result()
+                    asyncio.run_coroutine_threadsafe(_await_with_diagnostics(res), loop).result()
 
             try:
                 _run_serial_setup(**models_kwargs)
@@ -7576,11 +7766,25 @@ class Worker:
                         "raised; continuing — the next request may fail. err=%r",
                         cls_name, exc2,
                     )
+                    self._emit_exception_diagnostic(
+                        category="serial_setup",
+                        message="SerialWorker setup failed",
+                        exc=exc2,
+                        endpoint_class=cls_name,
+                        setup_mode="bare",
+                    )
             except Exception as exc:  # noqa: BLE001
                 logger.exception(
                     "@inference SerialWorker class %r: setup() raised; "
                     "continuing — the next request may fail. err=%r",
                     cls_name, exc,
+                )
+                self._emit_exception_diagnostic(
+                    category="serial_setup",
+                    message="SerialWorker setup failed",
+                    exc=exc,
+                    endpoint_class=cls_name,
+                    setup_mode="model_kwargs",
                 )
 
             warmup_fn = getattr(instance, "warmup", None)
@@ -7596,17 +7800,40 @@ class Worker:
                     class_name=cls_name,
                 )
                 try:
-                    res = warmup_fn()
-                    # #345 Improvement B: support `async def warmup` on async
-                    # SerialWorker classes — run it on the shared asyncio loop.
-                    if inspect.iscoroutine(res):
-                        loop = self._ensure_batched_loop()
-                        asyncio.run_coroutine_threadsafe(res, loop).result()
+                    with diagnostic_emitter_context(diagnostic_emitter):
+                        res = warmup_fn()
+                        # #345 Improvement B: support `async def warmup` on async
+                        # SerialWorker classes — run it on the shared asyncio loop.
+                        if inspect.iscoroutine(res):
+                            async def _await_warmup_with_diagnostics(coro: Any) -> Any:
+                                with diagnostic_emitter_context(diagnostic_emitter):
+                                    return await coro
+
+                            loop = self._ensure_batched_loop()
+                            asyncio.run_coroutine_threadsafe(_await_warmup_with_diagnostics(res), loop).result()
                 except Exception as exc:  # noqa: BLE001
                     logger.warning(
                         "@inference SerialWorker class %r: warmup() raised "
                         "%r; continuing", cls_name, exc,
                     )
+                    self._emit_exception_diagnostic(
+                        category="serial_warmup",
+                        message="SerialWorker warmup failed",
+                        exc=exc,
+                        endpoint_class=cls_name,
+                    )
+
+            if needs_gpu_setup_lock:
+                self._gpu_busy_exit()
+                try:
+                    self._gpu_semaphore.release()
+                except ValueError:
+                    logger.exception("gpu_semaphore over-release during SerialWorker setup")
+                logger.info(
+                    "SerialWorker setup released GPU semaphore: class=%s sema_value=%s",
+                    cls_name,
+                    getattr(self._gpu_semaphore, "_value", None),
+                )
 
             # #324: re-scan for batch-breaking cache wrappers now that setup()
             # has attached them. Drop any aggregator that became invalid.
@@ -7646,6 +7873,18 @@ class Worker:
                     )),
             )
 
+    def _serial_record_needs_gpu(self, rec: Dict[str, Any]) -> bool:
+        instance = rec.get("instance")
+        if instance is None:
+            return False
+        for sspec in getattr(self, "_serial_class_specs", {}).values():
+            if getattr(sspec, "instance", None) is instance and self._function_needs_gpu(sspec):
+                return True
+        for cspec in getattr(self, "_conversion_class_specs", {}).values():
+            if getattr(cspec, "instance", None) is instance and self._function_needs_gpu(cspec):
+                return True
+        return self._function_needs_gpu(rec.get("endpoint_spec"))
+
     def _find_serial_record(self, instance: Any) -> Optional[Dict[str, Any]]:
         for rec in self._serial_class_instances:
             if rec.get("instance") is instance:
@@ -7656,10 +7895,12 @@ class Worker:
         """Resolve every binding in ``ep_spec.models`` to a local path
         suitable for ``instance.setup(**models)`` (#322/#328).
 
-        Returns ``{kwarg_name: model_path}``. Each value is the local
-        snapshot directory if the model is already in the tensorhub CAS
-        cache, otherwise the canonicalized ref string (which most loaders
-        — diffusers / transformers — accept directly).
+        Returns ``{kwarg_name: model_path}``. Tensorhub values use a local
+        snapshot directory when the orchestrator-provided CAS snapshot is
+        already present, otherwise the canonical ref string. Hugging Face and
+        Civitai bindings are materialized through the worker downloader so
+        tenant setup code receives a local path instead of reimplementing
+        provider-specific downloads.
 
         Bindings without a ``.ref`` attribute (Dispatch bindings — per-
         request lookup) are skipped here; tenants who use Dispatch
@@ -7677,20 +7918,335 @@ class Worker:
                 # are resolved at request time, not setup() time.
                 continue
             bare_ref = ref.strip()
+            ref_for_resolution = bare_ref
+            if isinstance(binding, HFRepo):
+                rev = str(getattr(binding, "_revision", "") or "").strip()
+                if rev:
+                    ref_for_resolution = f"{bare_ref}@{rev}"
+            elif isinstance(binding, (Repo, CivitaiRepo)):
+                tag = str(getattr(binding, "_tag", "prod") or "prod").strip() or "prod"
+                flavor = str(getattr(binding, "_flavor", "") or "").strip()
+                if tag and tag != "prod":
+                    ref_for_resolution = f"{ref_for_resolution}:{tag}"
+                if flavor:
+                    ref_for_resolution = f"{ref_for_resolution}#{flavor}"
+            provider = str(getattr(binding, "provider", "tensorhub") or "tensorhub").strip() or "tensorhub"
+            provider_index = {bare_ref: provider, ref_for_resolution: provider}
+            provider_tok = set_provider_by_ref(provider_index)
             try:
-                canon = _canonicalize_model_ref_string(bare_ref)
+                canon = _canonicalize_model_ref_string(ref_for_resolution)
                 cache_dir = tensorhub_cas_dir()
                 local = self._try_find_existing_cozy_snapshot_dir(canon, cache_dir)
                 if local is not None:
                     out[key] = str(local)
                     continue
+                if provider in ("hf", "civitai") and self._downloader is not None:
+                    local_path = self._downloader.download(ref_for_resolution, str(cache_dir))
+                    if local_path:
+                        out[key] = local_path
+                        continue
             except Exception:
-                # Fall through to ref-as-string (loader resolves via own cache).
+                if provider in ("hf", "civitai"):
+                    raise
+                # Tensorhub tag refs may be unavailable until request-time
+                # manifests are provided; fall through to ref-as-string.
                 pass
+            finally:
+                reset_provider_by_ref(provider_tok)
             # Wire-format refs are bare — provider is tracked separately,
             # no prefix-strip needed.
-            out[key] = bare_ref
+            out[key] = ref_for_resolution
         return out
+
+    def _resolve_serial_setup_kwargs(self, ep_spec: Any, setup_fn: Callable[..., Any]) -> Dict[str, Any]:
+        """Resolve model kwargs for SerialWorker ``setup``.
+
+        Untyped parameters keep the historical contract and receive local paths
+        / refs. Typed parameters with a ``from_pretrained`` factory receive the
+        loaded object, so endpoint code can declare the repo it wants and a
+        concrete setup type without doing provider-specific loading itself.
+        """
+        values = self._resolve_serial_model_paths(ep_spec)
+        if ep_spec is None or setup_fn is None:
+            return values
+
+        try:
+            hints = typing.get_type_hints(setup_fn, include_extras=True)
+        except Exception:
+            hints = {}
+        if not hints:
+            return values
+
+        models = dict(getattr(ep_spec, "models", {}) or {})
+        out: Dict[str, Any] = dict(values)
+        for key, binding in models.items():
+            requested_type = hints.get(key)
+            if requested_type is None or requested_type is Any:
+                continue
+            if key not in values:
+                continue
+            if not hasattr(requested_type, "from_pretrained"):
+                continue
+            out[key] = self._load_serial_setup_model_value(
+                binding=binding,
+                requested_type=requested_type,
+                model_source=str(values[key]),
+                original_ref=str(getattr(binding, "ref", "") or ""),
+            )
+        return out
+
+    def _load_serial_setup_model_value(
+        self,
+        *,
+        binding: Any,
+        requested_type: Any,
+        model_source: str,
+        original_ref: str,
+    ) -> Any:
+        local_path = Path(model_source)
+        kwargs: Dict[str, Any] = {}
+        dtype_name = str(getattr(binding, "_dtype", "") or "").strip()
+        torch_dtype = self._torch_dtype_from_binding(dtype_name)
+        if torch_dtype is not None:
+            kwargs["torch_dtype"] = torch_dtype
+
+        try:
+            loaded = self._try_load_flux2_klein_modelopt_pipeline(
+                requested_type=requested_type,
+                model_source=model_source,
+                original_ref=original_ref,
+                torch_dtype=torch_dtype,
+            )
+            if loaded is not None:
+                return loaded
+        except Exception:
+            logger.exception(
+                "SerialWorker typed setup failed to load FLUX.2 Klein modelopt pipeline: ref=%s source=%s",
+                original_ref,
+                model_source,
+            )
+            raise
+
+        from_pretrained = getattr(requested_type, "from_pretrained")
+        return from_pretrained(model_source, **kwargs)
+
+    @staticmethod
+    def _torch_dtype_from_binding(dtype_name: str) -> Any:
+        if torch is None:
+            return None
+        name = (dtype_name or "").strip().lower()
+        if not name:
+            return None
+        if name in ("bf16", "bfloat16"):
+            return torch.bfloat16
+        if name in ("fp16", "float16", "half"):
+            return torch.float16
+        if name in ("fp32", "float32"):
+            return torch.float32
+        return None
+
+    def _try_load_flux2_klein_modelopt_pipeline(
+        self,
+        *,
+        requested_type: Any,
+        model_source: str,
+        original_ref: str,
+        torch_dtype: Any,
+    ) -> Any | None:
+        """Load BFL's public root-level fp8/nvfp4 transformer repos.
+
+        These HF repos are valid endpoint model declarations, but they are not
+        full Diffusers pipeline directories. The worker composes the requested
+        Flux2KleinPipeline from the public base pipeline plus the quantized
+        transformer file so tenant endpoint code does not need to know that
+        packaging detail.
+        """
+        type_name = _type_qualname(requested_type)
+        if not type_name.endswith(".Flux2KleinPipeline"):
+            return None
+
+        path = Path(model_source)
+        if path.is_file():
+            candidates = [path]
+        elif path.is_dir():
+            candidates = sorted(path.glob("*.safetensors"))
+        else:
+            return None
+
+        selected: Path | None = None
+        quant_type = ""
+        for candidate in candidates:
+            name = candidate.name.lower()
+            if name == "flux-2-klein-base-4b-fp8.safetensors":
+                selected = candidate
+                quant_type = "FP8"
+                break
+            if name == "flux-2-klein-base-4b-nvfp4.safetensors":
+                selected = candidate
+                quant_type = "NVFP4"
+                break
+        if selected is None:
+            return None
+
+        base_ref = self._infer_flux2_klein_base_ref(original_ref)
+        if not base_ref:
+            return None
+        base_local = self._materialize_hf_ref_for_setup(base_ref)
+
+        try:
+            from diffusers import Flux2Transformer2DModel
+            from diffusers.quantizers.quantization_config import NVIDIAModelOptConfig
+            from modelopt.torch.opt import enable_huggingface_checkpointing
+        except Exception as exc:
+            raise RuntimeError(
+                "Loading FLUX.2 Klein fp8/nvfp4 HFRepo bindings requires diffusers "
+                "with nvidia-modelopt support installed in the worker image"
+            ) from exc
+
+        enable_huggingface_checkpointing()
+        quantization_config = NVIDIAModelOptConfig(
+            quant_type,
+            modelopt_config={"quant_cfg": {}, "algorithm": {"method": "max"}},
+        )
+        load_dtype = torch_dtype if torch_dtype is not None else (torch.bfloat16 if torch is not None else None)
+        # diffusers' single-file `config=` resolution treats a local directory
+        # and a Hub repo id differently. The minimal base snapshot we
+        # materialize does not always carry the exact files diffusers' local
+        # `load_config(subfolder=...)` path expects, and on this diffusers
+        # commit that local-dir branch is what produces the bare
+        # AttributeError. Prefer the local transformer config dir when it is
+        # actually present on disk; otherwise fall back to the base repo id
+        # (matching the tenant endpoint's known-good recipe), which diffusers
+        # resolves against the Hub directly.
+        transformer_config_dir = Path(base_local) / "transformer"
+        if transformer_config_dir.is_dir() and (transformer_config_dir / "config.json").is_file():
+            config_source = str(base_local)
+        else:
+            config_source = base_ref
+        transformer_kwargs: Dict[str, Any] = {
+            "config": config_source,
+            "subfolder": "transformer",
+            "quantization_config": quantization_config,
+        }
+        pipeline_kwargs: Dict[str, Any] = {}
+        if load_dtype is not None:
+            transformer_kwargs["torch_dtype"] = load_dtype
+            pipeline_kwargs["torch_dtype"] = load_dtype
+
+        # diffusers' single-file loader and `from_pretrained` raise bare
+        # AttributeError / TypeError from deep inside their config-resolution
+        # and pipeline-assembly code (e.g. accessing `.config`, `.quant_method`,
+        # or a component on a value that resolved to None for the locally
+        # materialized base snapshot). Those escape as opaque `error_type=
+        # AttributeError` in the worker/orchestrator logs with no object type,
+        # attribute name, or traceback — making the failure indistinguishable
+        # from a network blip. Surface the real diagnostic so the next failed
+        # run logs something actionable. We re-raise the original exception so
+        # behavior is unchanged for callers.
+        try:
+            transformer = Flux2Transformer2DModel.from_single_file(str(selected), **transformer_kwargs)
+        except Exception as exc:
+            self._emit_flux2_modelopt_load_diagnostic(
+                exc,
+                stage=f"transformer.from_single_file(config_source={config_source})",
+                quant_type=quant_type,
+                selected=str(selected),
+                base_local=str(base_local),
+                original_ref=original_ref,
+            )
+            raise
+        pipeline_kwargs["transformer"] = transformer
+        try:
+            return requested_type.from_pretrained(str(base_local), **pipeline_kwargs)
+        except Exception as exc:
+            self._emit_flux2_modelopt_load_diagnostic(
+                exc,
+                stage="pipeline.from_pretrained",
+                quant_type=quant_type,
+                selected=str(selected),
+                base_local=str(base_local),
+                original_ref=original_ref,
+            )
+            raise
+
+    def _emit_flux2_modelopt_load_diagnostic(
+        self,
+        exc: BaseException,
+        *,
+        stage: str,
+        quant_type: str,
+        selected: str,
+        base_local: str,
+        original_ref: str,
+    ) -> None:
+        """Log the concrete failure details for a FLUX.2 Klein modelopt load.
+
+        ``AttributeError`` raised from inside diffusers/modelopt surfaces in the
+        orchestrator as a bare ``error_type=AttributeError`` with no context.
+        This records the exception type, message, full traceback, and the
+        inputs that produced it so the failure is diagnosable from logs.
+        """
+        import traceback as _traceback
+
+        base_files: list[str] = []
+        try:
+            root = Path(base_local)
+            if root.is_dir():
+                base_files = sorted(p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file())[:200]
+        except Exception:
+            base_files = []
+
+        logger.exception(
+            "FLUX.2 Klein modelopt load failed at stage=%s error_type=%s error=%s "
+            "quant_type=%s selected=%s base_local=%s original_ref=%s base_files=%s",
+            stage,
+            type(exc).__name__,
+            exc,
+            quant_type,
+            selected,
+            base_local,
+            original_ref,
+            base_files,
+        )
+        try:
+            self._emit_diagnostic_log(
+                category="flux2_modelopt_load",
+                message=f"FLUX.2 Klein modelopt load failed at {stage}",
+                payload={
+                    "stage": stage,
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                    "traceback": _traceback.format_exc(),
+                    "quant_type": quant_type,
+                    "selected": selected,
+                    "base_local": base_local,
+                    "original_ref": original_ref,
+                    "base_files": base_files,
+                },
+                severity="error",
+            )
+        except Exception:
+            # Diagnostics must never mask the original load failure.
+            pass
+
+    @staticmethod
+    def _infer_flux2_klein_base_ref(ref: str) -> str:
+        raw = (ref or "").strip()
+        low = raw.lower()
+        if low.endswith("flux.2-klein-base-4b-fp8") or low.endswith("flux.2-klein-base-4b-nvfp4"):
+            owner = raw.rsplit("/", 1)[0] if "/" in raw else "black-forest-labs"
+            return f"{owner}/FLUX.2-klein-base-4B"
+        return ""
+
+    def _materialize_hf_ref_for_setup(self, ref: str) -> str:
+        if self._downloader is None:
+            return ref
+        tok = set_provider_by_ref({ref: "hf"})
+        try:
+            local = self._downloader.download(ref, str(tensorhub_cas_dir()))
+        finally:
+            reset_provider_by_ref(tok)
+        return local or ref
 
     def _shutdown_serial_workers(self) -> None:
         """Call ``instance.shutdown()`` on every registered SerialWorker class.
@@ -9050,6 +9606,17 @@ class Worker:
         except Exception as e:
             logger.exception("Task %s failed: %s", request_id, e)
             error_type, retryable, safe_message, error_message = self._map_exception(e)
+            self._emit_exception_diagnostic(
+                category="request_exception",
+                message="SerialWorker request failed",
+                exc=e,
+                endpoint_class=getattr(cspec, "cls_name", "") if "cspec" in locals() else "",
+                function_name=str(getattr(spec, "name", "") or ""),
+                request_id=request_id,
+                error_type=error_type,
+                retryable=bool(retryable),
+                safe_message=safe_message,
+            )
             if isinstance(e, HardwareUnmetError):
                 # tell the orchestrator to stop dispatching this
                 # function to this worker.
@@ -9732,18 +10299,35 @@ class Worker:
                         except Exception:
                             resolved_entry = None
                         request_id_for_dl = str(getattr(ctx, "request_id", "") or "").strip()
+                        provider_for_dl = self._provider_for_ref(str(model_id))
+                        source_for_dl = self._download_source_for_provider(provider_for_dl)
                         # Best-effort download timing.
                         t_dl0 = time.monotonic()
                         if request_id_for_dl:
+                            def _download_with_progress(progress_cb: Callable[[int, Optional[int]], None]) -> str:
+                                if callable(getattr(type(self._downloader), "download_with_progress", None)):
+                                    return self._downloader.download_with_progress(
+                                        model_id,
+                                        cache_dir,
+                                        progress_callback=progress_cb,
+                                    )
+                                return self._downloader.download(model_id, cache_dir)
+
                             local = self._run_download_with_request_progress(
                                 request_id=request_id_for_dl,
                                 model_id=canon or str(model_id),
                                 cache_dir=cache_dir,
                                 resolved_entry=resolved_entry,
                                 download_fn=lambda: self._downloader.download(model_id, cache_dir),
+                                provider=provider_for_dl,
+                                source=source_for_dl,
+                                progress_download_fn=_download_with_progress,
                             )
                         else:
-                            local = self._downloader.download(model_id, cache_dir)
+                            if callable(getattr(type(self._downloader), "download_with_progress", None)):
+                                local = self._downloader.download_with_progress(model_id, cache_dir)
+                            else:
+                                local = self._downloader.download(model_id, cache_dir)
                         t_dl_ms = int((time.monotonic() - t_dl0) * 1000)
 
                         warm = False
@@ -9933,8 +10517,12 @@ class Worker:
 
                     try:
                         t_pi0 = time.monotonic()
-                        from_pretrained = getattr(requested_type, "from_pretrained")
-                        obj = from_pretrained(local, **kwargs)
+                        if local_path.is_file() and hasattr(requested_type, "from_single_file"):
+                            from_single_file = getattr(requested_type, "from_single_file")
+                            obj = from_single_file(local, **kwargs)
+                        else:
+                            from_pretrained = getattr(requested_type, "from_pretrained")
+                            obj = from_pretrained(local, **kwargs)
                         if rm is not None:
                             rm.add_pipeline_init_time(int((time.monotonic() - t_pi0) * 1000))
                     except OSError as e:
@@ -9961,8 +10549,12 @@ class Worker:
                             kwargs2.setdefault("image_processor", None)
                             kwargs2.setdefault("requires_safety_checker", False)
                             t_pi0 = time.monotonic()
-                            from_pretrained = getattr(requested_type, "from_pretrained")
-                            obj = from_pretrained(local, **kwargs2)
+                            if local_path.is_file() and hasattr(requested_type, "from_single_file"):
+                                from_single_file = getattr(requested_type, "from_single_file")
+                                obj = from_single_file(local, **kwargs2)
+                            else:
+                                from_pretrained = getattr(requested_type, "from_pretrained")
+                                obj = from_pretrained(local, **kwargs2)
                             if rm is not None:
                                 rm.add_pipeline_init_time(int((time.monotonic() - t_pi0) * 1000))
                         else:
@@ -9982,7 +10574,7 @@ class Worker:
                             # branch fires for HF / civitai bindings.
                             prov = self._provider_for_ref(model_source)
                             parsed = parse_model_ref(model_source, provider=prov)
-                            if self._downloader is not None and parsed.provider in ("tensorhub", "hf"):
+                            if self._downloader is not None and parsed.provider in ("tensorhub", "hf", "civitai"):
                                 model_source = self._downloader.download(model_source, str(tensorhub_cas_dir()))
                             elif parsed.provider == "hf" and parsed.hf is not None:
                                 # Fallback path when downloader is unavailable.

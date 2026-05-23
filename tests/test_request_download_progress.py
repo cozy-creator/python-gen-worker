@@ -22,6 +22,8 @@ import time
 from pathlib import Path
 from typing import Any, List
 
+import pytest
+
 from gen_worker.run_metrics_v1 import _blob_path, _cozy_blobs_root
 from gen_worker.worker import Worker
 
@@ -157,7 +159,50 @@ def test_download_failure_emits_failed_with_error_type(tmp_path: Path) -> None:
     assert failed["request_id"] == "req-348-fail"
     # error_type carries the actual exception class from the download path.
     assert failed["error_type"] == "_BoomError", failed
+    assert failed["provider"] == "tensorhub"
+    assert failed["source"] == "tensorhub_cas"
     assert "duration_ms" in failed
+
+
+@pytest.mark.parametrize(
+    ("provider", "source"),
+    [
+        ("hf", "huggingface"),
+        ("civitai", "civitai"),
+    ],
+)
+def test_provider_progress_failure_emits_provider_source(
+    tmp_path: Path,
+    provider: str,
+    source: str,
+) -> None:
+    w = _bare_worker()
+
+    class _ProviderBoom(RuntimeError):
+        pass
+
+    def fake_download(progress_cb):  # noqa: ANN001
+        progress_cb(1, 10)
+        raise _ProviderBoom("download failed")
+
+    with pytest.raises(_ProviderBoom):
+        w._run_download_with_request_progress(
+            request_id=f"req-{provider}-fail",
+            model_id="provider/ref",
+            cache_dir=str(tmp_path),
+            resolved_entry=None,
+            download_fn=lambda: "not-used",
+            provider=provider,
+            source=source,
+            progress_download_fn=fake_download,
+        )
+
+    events = _download_events(w)
+    failed = events[-1]["payload"]
+    assert events[-1]["type"] == "model.download.failed"
+    assert failed["error_type"] == "_ProviderBoom"
+    assert failed["provider"] == provider
+    assert failed["source"] == source
 
 
 def test_requestless_fetch_emits_no_request_events(tmp_path: Path) -> None:
@@ -204,3 +249,55 @@ def test_bootstrap_fallback_no_manifest_sizes(tmp_path: Path) -> None:
     started = events[0]["payload"]
     assert started["estimated_total_bytes"] == 0
     assert started["estimated_eta_seconds"] == -1
+
+
+@pytest.mark.parametrize(
+    ("provider", "source", "model_id"),
+    [
+        ("hf", "huggingface", "owner/model#bf16"),
+        ("civitai", "civitai", "123456"),
+    ],
+)
+def test_provider_progress_sink_emits_same_shape_without_tensorhub_manifest(
+    tmp_path: Path,
+    provider: str,
+    source: str,
+    model_id: str,
+) -> None:
+    w = _bare_worker()
+    seen_callbacks: list[tuple[int, int | None]] = []
+
+    def fake_download(progress_cb):
+        progress_cb(0, 100)
+        seen_callbacks.append((0, 100))
+        time.sleep(1.05)
+        progress_cb(50, 100)
+        seen_callbacks.append((50, 100))
+        time.sleep(1.05)
+        progress_cb(100, 100)
+        seen_callbacks.append((100, 100))
+        return "ok"
+
+    out = w._run_download_with_request_progress(
+        request_id="req-hf-progress",
+        model_id=model_id,
+        cache_dir=str(tmp_path),
+        resolved_entry=None,
+        download_fn=lambda: "not-used",
+        provider=provider,
+        source=source,
+        progress_download_fn=fake_download,
+    )
+    assert out == "ok"
+    assert seen_callbacks == [(0, 100), (50, 100), (100, 100)]
+
+    events = _download_events(w)
+    assert [e["type"] for e in events][0] == "model.download.started"
+    assert [e["type"] for e in events][-1] == "model.download.completed"
+    progress = [e for e in events if e["type"] == "model.download.progress"]
+    assert progress, events
+    for e in events:
+        payload = e["payload"]
+        assert payload["provider"] == provider
+        assert payload["source"] == source
+    assert progress[-1]["payload"]["bytes_downloaded"] == 100

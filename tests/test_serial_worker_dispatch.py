@@ -19,13 +19,15 @@ the sync `@inference` class. The smoke test confirms:
 from __future__ import annotations
 
 import os
+import sys
 import threading
+import types
 from typing import AsyncIterator, Iterator
 
 import msgspec
 import pytest
 
-from gen_worker import Repo, RequestContext, inference
+from gen_worker import HFRepo, Repo, RequestContext, inference
 from gen_worker._worker_support import _SerialWorkerSpec
 from gen_worker.discovery import validate_endpoint_lock
 from gen_worker.worker import Worker
@@ -44,6 +46,15 @@ class TokenDelta(msgspec.Struct):
     delta_text: str = ""
     finished: bool = False
     item_id: str = "item-0"
+
+
+class FakeSetupPipeline:
+    calls = []
+
+    @classmethod
+    def from_pretrained(cls, source, **kwargs):  # noqa: ANN001
+        cls.calls.append((source, kwargs))
+        return cls()
 
 
 def _make_serial_class(setup_calls, warmup_calls, shutdown_calls):
@@ -310,6 +321,224 @@ def test_resolve_serial_model_paths_returns_kwargs_for_static_refs() -> None:
     assert paths["pipe"]
     # Empty bindings → empty dict (not None).
     assert w._resolve_serial_model_paths(None) == {}
+
+
+def test_resolve_serial_model_paths_materializes_hfrepo_bindings(tmp_path, monkeypatch) -> None:
+    """Static HFRepo setup kwargs are downloaded by the worker boundary."""
+
+    @inference(models={"pipe": HFRepo("black-forest-labs/FLUX.2-klein-base-4b-fp8")})
+    class TestHFSerial:
+        def setup(self, pipe):  # pragma: no cover - not invoked here
+            self.pipe = pipe
+
+        @inference.function
+        def generate(self, ctx: RequestContext, payload: GenerateInput) -> GenerateOutput:
+            return GenerateOutput(result="ok")
+
+    class FakeDownloader:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def download(self, model_ref, dest_dir, filename=None):  # noqa: ANN001
+            self.calls.append((model_ref, dest_dir, filename))
+            local = tmp_path / "hf-snapshot"
+            local.mkdir()
+            return str(local)
+
+    fake = FakeDownloader()
+    monkeypatch.setattr("gen_worker.worker.tensorhub_cas_dir", lambda: tmp_path / "cas")
+    w = _bare_worker()
+    w._downloader = fake
+
+    paths = w._resolve_serial_model_paths(TestHFSerial.__gen_worker_endpoint_spec__)
+
+    assert paths == {"pipe": str(tmp_path / "hf-snapshot")}
+    assert fake.calls == [
+        ("black-forest-labs/FLUX.2-klein-base-4b-fp8", str(tmp_path / "cas"), None)
+    ]
+
+
+def test_resolve_serial_setup_kwargs_loads_typed_hfrepo_binding(tmp_path, monkeypatch) -> None:
+    @inference(models={"pipe": HFRepo("acme/model").dtype("bf16")})
+    class TestTypedHFSerial:
+        def setup(self, pipe: FakeSetupPipeline):
+            self.pipe = pipe
+
+        @inference.function
+        def generate(self, ctx: RequestContext, payload: GenerateInput) -> GenerateOutput:
+            return GenerateOutput(result="ok")
+
+    class FakeDownloader:
+        def download(self, model_ref, dest_dir, filename=None):  # noqa: ANN001
+            local = tmp_path / "hf-snapshot"
+            local.mkdir(exist_ok=True)
+            return str(local)
+
+    monkeypatch.setattr("gen_worker.worker.tensorhub_cas_dir", lambda: tmp_path / "cas")
+    w = _bare_worker()
+    w._downloader = FakeDownloader()
+    FakeSetupPipeline.calls.clear()
+
+    kwargs = w._resolve_serial_setup_kwargs(
+        TestTypedHFSerial.__gen_worker_endpoint_spec__,
+        TestTypedHFSerial().setup,
+    )
+
+    assert isinstance(kwargs["pipe"], FakeSetupPipeline)
+    assert FakeSetupPipeline.calls == [(str(tmp_path / "hf-snapshot"), {})]
+
+
+def test_flux2_klein_modelopt_root_safetensors_loaded_by_worker(tmp_path, monkeypatch) -> None:
+    loaded: dict[str, object] = {}
+    quant_dir = tmp_path / "quant"
+    base_dir = tmp_path / "base"
+    quant_dir.mkdir()
+    base_dir.mkdir()
+    checkpoint = quant_dir / "flux-2-klein-base-4b-fp8.safetensors"
+    checkpoint.write_bytes(b"fake")
+    # The materialized base snapshot carries the transformer config that
+    # diffusers' single-file `config=<local dir>` path reads; create it so the
+    # loader keeps the local-dir config source (vs falling back to the repo id).
+    (base_dir / "transformer").mkdir()
+    (base_dir / "transformer" / "config.json").write_text("{}")
+
+    class FakeFlux2Transformer2DModel:
+        @staticmethod
+        def from_single_file(path, **kwargs):  # noqa: ANN001
+            loaded["single_file_path"] = path
+            loaded["single_file_kwargs"] = kwargs
+            return "transformer"
+
+    class FakeQuantConfig:
+        def __init__(self, quant_type, **kwargs):  # noqa: ANN001
+            loaded["quant_type"] = quant_type
+            loaded["quant_kwargs"] = kwargs
+
+    class Flux2KleinPipeline:
+        @classmethod
+        def from_pretrained(cls, source, **kwargs):  # noqa: ANN001
+            loaded["pipeline_source"] = source
+            loaded["pipeline_kwargs"] = kwargs
+            return cls()
+
+    Flux2KleinPipeline.__module__ = "diffusers.pipelines.flux2"
+
+    fake_diffusers = types.ModuleType("diffusers")
+    fake_diffusers.Flux2Transformer2DModel = FakeFlux2Transformer2DModel
+    fake_quantizers = types.ModuleType("diffusers.quantizers")
+    fake_quant_config = types.ModuleType("diffusers.quantizers.quantization_config")
+    fake_quant_config.NVIDIAModelOptConfig = FakeQuantConfig
+    fake_modelopt = types.ModuleType("modelopt")
+    fake_modelopt_torch = types.ModuleType("modelopt.torch")
+    fake_modelopt_opt = types.ModuleType("modelopt.torch.opt")
+    fake_modelopt_opt.enable_huggingface_checkpointing = lambda: loaded.setdefault("checkpointing", True)
+
+    monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
+    monkeypatch.setitem(sys.modules, "diffusers.quantizers", fake_quantizers)
+    monkeypatch.setitem(sys.modules, "diffusers.quantizers.quantization_config", fake_quant_config)
+    monkeypatch.setitem(sys.modules, "modelopt", fake_modelopt)
+    monkeypatch.setitem(sys.modules, "modelopt.torch", fake_modelopt_torch)
+    monkeypatch.setitem(sys.modules, "modelopt.torch.opt", fake_modelopt_opt)
+    monkeypatch.setattr("gen_worker.worker.tensorhub_cas_dir", lambda: tmp_path / "cas")
+
+    class FakeDownloader:
+        def download(self, model_ref, dest_dir, filename=None):  # noqa: ANN001
+            assert model_ref == "black-forest-labs/FLUX.2-klein-base-4B"
+            return str(base_dir)
+
+    w = _bare_worker()
+    w._downloader = FakeDownloader()
+
+    pipe = w._try_load_flux2_klein_modelopt_pipeline(
+        requested_type=Flux2KleinPipeline,
+        model_source=str(quant_dir),
+        original_ref="black-forest-labs/FLUX.2-klein-base-4b-fp8",
+        torch_dtype=object(),
+    )
+
+    assert isinstance(pipe, Flux2KleinPipeline)
+    assert loaded["checkpointing"] is True
+    assert loaded["quant_type"] == "FP8"
+    assert loaded["single_file_path"] == str(checkpoint)
+    assert loaded["single_file_kwargs"]["config"] == str(base_dir)
+    assert loaded["single_file_kwargs"]["subfolder"] == "transformer"
+    assert loaded["pipeline_source"] == str(base_dir)
+    assert loaded["pipeline_kwargs"]["transformer"] == "transformer"
+
+
+def test_flux2_klein_modelopt_falls_back_to_repo_id_config_when_transformer_missing(
+    tmp_path, monkeypatch
+) -> None:
+    """When the materialized base snapshot lacks ``transformer/config.json``,
+    `from_single_file` must receive the base repo id as ``config=`` (diffusers'
+    Hub-resolved path) instead of the local dir, whose local config-resolution
+    branch is the one that raises a bare AttributeError on this diffusers
+    commit. The pipeline still loads from the local dir.
+    """
+    loaded: dict[str, object] = {}
+    quant_dir = tmp_path / "quant"
+    base_dir = tmp_path / "base"
+    quant_dir.mkdir()
+    base_dir.mkdir()  # no transformer/ subfolder -> triggers the fallback
+    checkpoint = quant_dir / "flux-2-klein-base-4b-nvfp4.safetensors"
+    checkpoint.write_bytes(b"fake")
+
+    class FakeFlux2Transformer2DModel:
+        @staticmethod
+        def from_single_file(path, **kwargs):  # noqa: ANN001
+            loaded["single_file_kwargs"] = kwargs
+            return "transformer"
+
+    class FakeQuantConfig:
+        def __init__(self, quant_type, **kwargs):  # noqa: ANN001
+            loaded["quant_type"] = quant_type
+
+    class Flux2KleinPipeline:
+        @classmethod
+        def from_pretrained(cls, source, **kwargs):  # noqa: ANN001
+            loaded["pipeline_source"] = source
+            return cls()
+
+    Flux2KleinPipeline.__module__ = "diffusers.pipelines.flux2"
+
+    fake_diffusers = types.ModuleType("diffusers")
+    fake_diffusers.Flux2Transformer2DModel = FakeFlux2Transformer2DModel
+    fake_quantizers = types.ModuleType("diffusers.quantizers")
+    fake_quant_config = types.ModuleType("diffusers.quantizers.quantization_config")
+    fake_quant_config.NVIDIAModelOptConfig = FakeQuantConfig
+    fake_modelopt = types.ModuleType("modelopt")
+    fake_modelopt_torch = types.ModuleType("modelopt.torch")
+    fake_modelopt_opt = types.ModuleType("modelopt.torch.opt")
+    fake_modelopt_opt.enable_huggingface_checkpointing = lambda: None
+
+    monkeypatch.setitem(sys.modules, "diffusers", fake_diffusers)
+    monkeypatch.setitem(sys.modules, "diffusers.quantizers", fake_quantizers)
+    monkeypatch.setitem(sys.modules, "diffusers.quantizers.quantization_config", fake_quant_config)
+    monkeypatch.setitem(sys.modules, "modelopt", fake_modelopt)
+    monkeypatch.setitem(sys.modules, "modelopt.torch", fake_modelopt_torch)
+    monkeypatch.setitem(sys.modules, "modelopt.torch.opt", fake_modelopt_opt)
+    monkeypatch.setattr("gen_worker.worker.tensorhub_cas_dir", lambda: tmp_path / "cas")
+
+    class FakeDownloader:
+        def download(self, model_ref, dest_dir, filename=None):  # noqa: ANN001
+            return str(base_dir)
+
+    w = _bare_worker()
+    w._downloader = FakeDownloader()
+
+    pipe = w._try_load_flux2_klein_modelopt_pipeline(
+        requested_type=Flux2KleinPipeline,
+        model_source=str(quant_dir),
+        original_ref="black-forest-labs/FLUX.2-klein-base-4b-nvfp4",
+        torch_dtype=object(),
+    )
+
+    assert isinstance(pipe, Flux2KleinPipeline)
+    assert loaded["quant_type"] == "NVFP4"
+    # Fallback: from_single_file gets the repo id, not the (incomplete) local dir.
+    assert loaded["single_file_kwargs"]["config"] == "black-forest-labs/FLUX.2-klein-base-4B"
+    # Pipeline still assembles from the locally materialized snapshot.
+    assert loaded["pipeline_source"] == str(base_dir)
 
 
 def test_ensure_serial_class_started_calls_setup_with_resolved_models() -> None:

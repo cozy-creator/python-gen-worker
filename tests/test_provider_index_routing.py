@@ -271,7 +271,9 @@ class _FakeHFDownloader:
     def __init__(self) -> None:
         self.calls: List[HuggingFaceRef] = []
 
-    def download(self, ref: HuggingFaceRef) -> HuggingFaceDownloadResult:
+    def download(self, ref: HuggingFaceRef, progress_callback: Any = None) -> HuggingFaceDownloadResult:
+        if progress_callback is not None:
+            progress_callback(1, 1)
         self.calls.append(ref)
         return HuggingFaceDownloadResult(local_dir=Path("/tmp/fake-hf-dir"))
 
@@ -343,6 +345,54 @@ def test_tensorhub_ref_with_provider_index_still_works(tmp_path: Path) -> None:
 
     # And critically: HF downloader was NOT invoked for a tensorhub ref.
     assert fake_hf.calls == []
+
+
+def test_civitai_ref_with_provider_index_routes_to_civitai_downloader(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from gen_worker.conversion import ingest
+
+    calls: list[int] = []
+    progress: list[tuple[int, int | None]] = []
+
+    def fake_civitai_download(model_version_id: int, output_dir: Path, **kwargs: Any) -> dict[str, Any]:
+        calls.append(model_version_id)
+        cb = kwargs.get("progress_callback")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        artifact = output_dir / "model.safetensors"
+        if cb is not None:
+            cb(5, 10)
+            progress.append((5, 10))
+        artifact.write_bytes(b"0123456789")
+        if cb is not None:
+            cb(10, 10)
+            progress.append((10, 10))
+        return {
+            "files": [
+                {
+                    "local_path": artifact.as_posix(),
+                    "size_bytes": 10,
+                }
+            ],
+            "total_bytes": 10,
+        }
+
+    monkeypatch.setattr(ingest, "download_civitai_model_version_files", fake_civitai_download)
+
+    downloader = ModelRefDownloader()
+    ref = "123456"
+    tok = set_provider_by_ref({ref: "civitai"})
+    try:
+        out = downloader.download_with_progress(ref, str(tmp_path), progress_callback=lambda done, total: progress.append((done, total)))
+    finally:
+        reset_provider_by_ref(tok)
+
+    assert calls == [123456]
+    assert out.endswith("model.safetensors")
+    assert Path(out).exists()
+    assert (5, 10) in progress
+    assert (10, 10) in progress
 
 
 def test_invoker_override_not_in_index_defaults_to_tensorhub(tmp_path: Path) -> None:

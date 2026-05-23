@@ -18,6 +18,9 @@ this reason). We:
 
 from __future__ import annotations
 
+import hashlib
+import json
+import time
 from pathlib import Path
 from typing import Any, List
 from unittest.mock import MagicMock
@@ -26,6 +29,7 @@ import pytest
 
 from gen_worker.models.cache import ModelCache
 from gen_worker.pb import worker_scheduler_pb2 as pb
+from gen_worker.run_metrics_v1 import _blob_path, _cozy_blobs_root
 from gen_worker.worker import Worker
 
 
@@ -69,6 +73,32 @@ def _model_ready_signals(w: Worker) -> List[pb.WorkerModelReadySignal]:
         for msg in w._sent_messages
         if msg.WhichOneof("msg") == "worker_model_ready"
     ]
+
+
+def _worker_events(w: Worker) -> List[dict]:
+    events: List[dict] = []
+    for msg in w._sent_messages:
+        if msg.WhichOneof("msg") != "worker_event":
+            continue
+        ev = msg.worker_event
+        payload = json.loads(ev.payload_json.decode("utf-8")) if ev.payload_json else {}
+        events.append({"request_id": ev.request_id, "type": ev.event_type, "payload": payload})
+    return events
+
+
+class _FakeFile:
+    def __init__(self, blake3: str, size_bytes: int) -> None:
+        self.blake3 = blake3
+        self.size_bytes = size_bytes
+
+
+class _FakeResolvedEntry:
+    def __init__(self, files: List[_FakeFile]) -> None:
+        self.files = files
+
+
+def _digest_for(name: str) -> str:
+    return hashlib.blake2b(name.encode(), digest_size=16).hexdigest()
 
 
 # Use a non-canonicalized ref so we also exercise the canonicalize+echo
@@ -151,6 +181,114 @@ def test_download_success_emits_download_completed_signal(tmp_path: Path, monkey
         assert s.model_id == TEST_REF
 
 
+def test_download_success_emits_worker_lifecycle_events(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("gen_worker.worker.tensorhub_cas_dir", lambda: tmp_path)
+    downloaded_dir = tmp_path / "snapshot-lifecycle"
+    downloaded_dir.mkdir()
+
+    w = _bare_worker(tmp_path)
+    w._downloader = MagicMock()
+    w._downloader.download = lambda ref, dest_dir, filename=None: str(downloaded_dir)
+
+    w._run_download_model_cmd(echo_model_id=TEST_REF, canonical_ref=TEST_REF)
+
+    events = _worker_events(w)
+    types = [e["type"] for e in events]
+    assert "worker.model.download.started" in types, types
+    assert "worker.model.download.completed" in types, types
+    assert "model.download.started" not in types, types
+    assert "model.download.completed" not in types, types
+    for e in events:
+        if e["type"].startswith("worker.model.download."):
+            assert e["request_id"] == ""
+            assert e["payload"]["model_id"] == TEST_REF
+            assert e["payload"]["provider"] == "tensorhub"
+            assert e["payload"]["source"] == "tensorhub_cas"
+
+
+def test_download_success_emits_worker_lifecycle_progress(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("gen_worker.worker.tensorhub_cas_dir", lambda: tmp_path)
+    blobs_root = _cozy_blobs_root(tmp_path)
+    files = [_FakeFile(_digest_for(f"cmd-{i}"), 10 * 1024 * 1024) for i in range(3)]
+    entry = _FakeResolvedEntry(files)
+    downloaded_dir = tmp_path / "snapshot-progress"
+    downloaded_dir.mkdir()
+
+    w = _bare_worker(tmp_path)
+    w._resolved_repos_by_id_baseline = {TEST_REF: entry}
+    w._downloader = MagicMock()
+
+    def fake_download(ref: str, dest_dir: str, filename: str | None = None) -> str:
+        for f in files:
+            p = _blob_path(blobs_root, f.blake3)
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(b"\0" * f.size_bytes)
+            time.sleep(0.45)
+        return str(downloaded_dir)
+
+    w._downloader.download = fake_download
+
+    w._run_download_model_cmd(echo_model_id=TEST_REF, canonical_ref=TEST_REF)
+
+    events = _worker_events(w)
+    types = [e["type"] for e in events]
+    assert "worker.model.download.started" in types, types
+    assert "worker.model.download.progress" in types, types
+    assert "worker.model.download.completed" in types, types
+    progress = [e for e in events if e["type"] == "worker.model.download.progress"]
+    assert 1 <= len(progress) <= 25
+    assert progress[-1]["payload"]["bytes_total"] == 30 * 1024 * 1024
+
+
+@pytest.mark.parametrize(
+    ("provider", "source", "ref"),
+    [
+        ("hf", "huggingface", "owner/model#bf16"),
+        ("civitai", "civitai", "123456"),
+    ],
+)
+def test_download_model_command_provider_progress_parity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    source: str,
+    ref: str,
+) -> None:
+    monkeypatch.setattr("gen_worker.worker.tensorhub_cas_dir", lambda: tmp_path)
+    downloaded_dir = tmp_path / f"snapshot-{provider}"
+    downloaded_dir.mkdir()
+
+    class _ProviderDownloader:
+        def download(self, model_ref: str, dest_dir: str, filename: str | None = None) -> str:  # noqa: ARG002
+            return str(downloaded_dir)
+
+        def download_with_progress(self, model_ref: str, dest_dir: str, filename: str | None = None, progress_callback=None) -> str:  # noqa: ANN001, ARG002
+            assert model_ref == ref
+            if progress_callback is not None:
+                progress_callback(0, 100)
+                time.sleep(1.05)
+                progress_callback(50, 100)
+                time.sleep(1.05)
+                progress_callback(100, 100)
+            return str(downloaded_dir)
+
+    w = _bare_worker(tmp_path)
+    w._provider_by_ref_index = {ref: provider}
+    w._downloader = _ProviderDownloader()
+
+    w._run_download_model_cmd(echo_model_id=ref, canonical_ref=ref)
+
+    events = [e for e in _worker_events(w) if e["type"].startswith("worker.model.download.")]
+    assert [e["type"] for e in events][0] == "worker.model.download.started"
+    assert [e["type"] for e in events][-1] == "worker.model.download.completed"
+    progress = [e for e in events if e["type"] == "worker.model.download.progress"]
+    assert progress
+    for e in events:
+        assert e["payload"]["provider"] == provider
+        assert e["payload"]["source"] == source
+    assert progress[-1]["payload"]["bytes_total"] == 100
+
+
 def test_download_success_forces_heartbeat(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """After a successful download the worker must trigger an immediate
     `_register_worker(is_heartbeat=True)` so the next wire heartbeat
@@ -221,6 +359,15 @@ def test_download_failure_sends_load_model_result_with_error(tmp_path: Path, mon
     assert pb.MODEL_AVAILABILITY_DOWNLOAD_COMPLETED not in kinds
     # No force-heartbeat on failure (avoids advertising a ref that isn't there).
     assert not any(hb is True for hb in w._register_worker_calls)
+
+    events = _worker_events(w)
+    types = [e["type"] for e in events]
+    assert "worker.model.download.started" in types, types
+    assert "worker.model.download.failed" in types, types
+    assert "model.download.failed" not in types, types
+    failed = [e for e in events if e["type"] == "worker.model.download.failed"][-1]["payload"]
+    assert failed["provider"] == "tensorhub"
+    assert failed["source"] == "tensorhub_cas"
 
 
 def test_download_empty_ref_short_circuits_with_error(tmp_path: Path) -> None:

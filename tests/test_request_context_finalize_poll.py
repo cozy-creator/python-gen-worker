@@ -44,6 +44,25 @@ def _context(monkeypatch: pytest.MonkeyPatch) -> ConversionContext:
     return ctx
 
 
+def test_request_context_models_returns_copy() -> None:
+    ctx = RequestContext(
+        request_id="req-1",
+        models={
+            "model": {
+                "ref": "black-forest-labs/FLUX.2-klein-4B",
+                "loras": [{"ref": "alice/cozy-knit-lora", "weight": 0.8}],
+            }
+        },
+    )
+
+    first = ctx.models
+    first["model"]["ref"] = "mutated"
+    first["model"]["loras"][0]["weight"] = 99
+
+    assert ctx.models["model"]["ref"] == "black-forest-labs/FLUX.2-klein-4B"
+    assert ctx.models["model"]["loras"][0]["weight"] == 0.8
+
+
 def _publish(ctx: ConversionContext) -> dict[str, Any]:
     return ctx.publish_repo_revision(
         destination_repo="owner/repo",

@@ -2505,8 +2505,17 @@ def run_clone(
     auto_publish_public: bool = False,
     overwrite_repo: bool = False,
     gguf_quant: str | None = None,
+    hf_token: str | None = None,
+    civitai_api_key: str | None = None,
 ) -> ConversionOutput:
     started_at = time.monotonic()
+    # Per-invocation download credentials. The tenant endpoint already merged
+    # the per-request value with the endpoint env (per-request wins) before
+    # calling in. HF additionally falls back to `ctx.hf_token` when unset, so a
+    # public-repo clone with no token configured anywhere still works. Civitai
+    # has no ctx-level credential, so an unset key means unauthenticated.
+    effective_hf_token = str(hf_token or "").strip() or str(getattr(ctx, "hf_token", "") or "").strip()
+    effective_civitai_api_key = str(civitai_api_key or "").strip()
     stage_emit_state: dict[str, Any] = {
         "stage": "",
         "progress_pct": None,
@@ -2573,7 +2582,7 @@ def run_clone(
         provider=provider,
         source_ref=normalized_source,
         source_revision=source_revision,
-        hf_token=ctx.hf_token,
+        hf_token=effective_hf_token,
         civitai_model_version_id=civitai_model_version_id,
         civitai_file_id=civitai_file_id,
         source_metadata_overrides=source_metadata_overrides,
@@ -2673,6 +2682,8 @@ def run_clone(
             progress_callback=on_download_progress,
             gguf_quant=gguf_quant,
             dtype_outputs=dtype_outputs_pref,
+            hf_token=effective_hf_token,
+            civitai_api_key=effective_civitai_api_key,
         )
         emit_stage("clone.layout.detected",
             0.58,

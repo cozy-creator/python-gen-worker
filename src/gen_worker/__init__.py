@@ -76,6 +76,7 @@ from .api.types import (
     NegativePrompt,
     PositivePrompt,
     PromptRole,
+    StringEnum,
     Tensors,
     VideoAsset,
 )
@@ -89,6 +90,7 @@ from .api.streaming import (
 )
 from .utils.lora import load_loras
 from .inference_memory import apply_low_vram_config, with_oom_retry
+from .diagnostics import emit_diagnostic_log
 
 
 _REMOVED_PUBLIC_SYMBOLS = {
@@ -186,6 +188,7 @@ __all__ = [
     "NegativePrompt",
     "PositivePrompt",
     "PromptRole",
+    "StringEnum",
     "Tensors",
     "VideoAsset",
     "Clamp",
@@ -197,6 +200,7 @@ __all__ = [
     "load_loras",
     "apply_low_vram_config",
     "with_oom_retry",
+    "emit_diagnostic_log",
     "clone",
     "io",
 ]

@@ -59,6 +59,7 @@ class DiffusersModelManager(ModelManagementInterface):
         # these stay compatible.
         self._last_load_error: Optional[str] = None
         self._last_load_traceback: Optional[str] = None
+        self._materialized_non_pipeline_models: set[str] = set()
 
     async def process_supported_models_config(
         self,
@@ -173,6 +174,8 @@ class DiffusersModelManager(ModelManagementInterface):
         self._last_load_error = None
         self._last_load_traceback = None
         try:
+            if model_id in self._materialized_non_pipeline_models:
+                return True
             if self._loader.get(model_id) is not None:
                 return True
 
@@ -187,6 +190,15 @@ class DiffusersModelManager(ModelManagementInterface):
                     )
                 except Exception as e:
                     logger.warning("DiffusersModelManager: download failed for %s: %s", model_id, e)
+
+            if local_path and self._is_materialized_non_pipeline_repo(Path(local_path)):
+                self._materialized_non_pipeline_models.add(model_id)
+                logger.info(
+                    "DiffusersModelManager: materialized non-pipeline repo %s at %s",
+                    model_id,
+                    local_path,
+                )
+                return True
 
             loaded = await self._loader.load(model_id, model_path=local_path)
             logger.info(
@@ -215,4 +227,28 @@ class DiffusersModelManager(ModelManagementInterface):
         return self._loader.get(model_id)
 
     def get_vram_loaded_models(self) -> List[str]:
-        return list(self._loader._loaded_pipelines.keys())
+        loaded = set(self._loader._loaded_pipelines.keys())
+        loaded.update(self._materialized_non_pipeline_models)
+        return sorted(loaded)
+
+    @staticmethod
+    def _is_materialized_non_pipeline_repo(path: Path) -> bool:
+        """Return true for HF repos that are valid model components, not pipelines.
+
+        Some public Diffusers-compatible repos intentionally contain a single
+        component checkpoint, such as BFL FLUX.2 Klein fp8/nvfp4 transformer
+        repos. They should satisfy scheduler model placement once downloaded,
+        while typed tenant setup code constructs the full pipeline from the
+        base repo and component checkpoint.
+        """
+        try:
+            if not path.exists() or not path.is_dir():
+                return False
+            if (path / "model_index.json").exists():
+                return False
+            for child in path.iterdir():
+                if child.is_file() and child.suffix == ".safetensors":
+                    return True
+        except Exception:
+            return False
+        return False

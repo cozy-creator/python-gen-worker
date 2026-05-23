@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 from pathlib import Path
-from typing import Any, Coroutine, Iterable, Mapping, Optional
+from typing import Any, Callable, Coroutine, Iterable, Mapping, Optional
 
 from .cozy_snapshot_v2 import ensure_snapshot_async
 from .downloader import ModelDownloader
@@ -156,12 +156,17 @@ class ModelRefDownloader(ModelDownloader):
     ) -> None:
         self._hf = HuggingFaceHubDownloader(hf_home=hf_home, hf_token=hf_token)
 
-    async def _download_async(self, parsed: ParsedModelRef, dest_dir: Path) -> Path:
+    async def _download_async(
+        self,
+        parsed: ParsedModelRef,
+        dest_dir: Path,
+        progress_callback: Optional[Callable[[int, Optional[int]], None]] = None,
+    ) -> Path:
         if parsed.provider == "hf" and parsed.hf is not None:
             # Workers download HuggingFace refs directly from HF. Any
             # Cozy-Hub mirroring of HF repos is orchestrator-side
             # (pre-resolved into resolved_repos_by_id as a cozy: ref).
-            return self._hf.download(parsed.hf).local_dir
+            return self._hf.download(parsed.hf, progress_callback=progress_callback).local_dir
 
         if parsed.provider == "tensorhub" and parsed.tensorhub is not None:
             canonical = parsed.tensorhub.canonical()
@@ -186,9 +191,29 @@ class ModelRefDownloader(ModelDownloader):
                 resolved=resolved_entry,
             )
 
+        if parsed.provider == "civitai" and parsed.civitai is not None:
+            from gen_worker.conversion.ingest import download_civitai_model_version_files
+
+            model_version_id = _parse_civitai_model_version_id(parsed.civitai.model_id)
+            output_dir = dest_dir / "civitai" / str(model_version_id)
+            info = await asyncio.to_thread(
+                download_civitai_model_version_files,
+                model_version_id,
+                output_dir,
+                progress_callback=progress_callback,
+            )
+            local = _civitai_local_artifact_path(output_dir, info)
+            return local
+
         raise ValueError("invalid parsed model ref")
 
-    def download(self, model_ref: str, dest_dir: str, filename: Optional[str] = None) -> str:
+    def download_with_progress(
+        self,
+        model_ref: str,
+        dest_dir: str,
+        filename: Optional[str] = None,
+        progress_callback: Optional[Callable[[int, Optional[int]], None]] = None,
+    ) -> str:
         # Issue #17: bare ref strings on the wire don't carry their provider,
         # so consult the per-worker provider index built from endpoint.lock.
         # Missing entries (e.g. invoker-supplied overrides not in the build-
@@ -202,11 +227,11 @@ class ModelRefDownloader(ModelDownloader):
             loop = asyncio.get_running_loop()
             if loop.is_running():
                 # Nested loop scenario; run in a new loop in a thread.
-                local = _run_in_thread(self._download_async(parsed, base))
+                local = _run_in_thread(self._download_async(parsed, base, progress_callback))
         except RuntimeError:
             pass
         if local is None:
-            local = asyncio.run(self._download_async(parsed, base)).as_posix()
+            local = asyncio.run(self._download_async(parsed, base, progress_callback)).as_posix()
 
         # Issue #18: belt-and-braces safetensors-only gate for override
         # downloads. Binding-default refs already passed the build-time
@@ -217,6 +242,33 @@ class ModelRefDownloader(ModelDownloader):
         if override_keys and model_ref in override_keys:
             assert_safe_weight_format(Path(local), ref=model_ref)
         return local
+
+    def download(self, model_ref: str, dest_dir: str, filename: Optional[str] = None) -> str:
+        return self.download_with_progress(model_ref, dest_dir, filename=filename)
+
+
+def _parse_civitai_model_version_id(raw: str) -> int:
+    s = str(raw or "").strip()
+    if not s:
+        raise ValueError("empty civitai model ref")
+    for key in ("modelVersionId=", "model_version_id=", "version_id="):
+        if key in s:
+            s = s.split(key, 1)[1].split("&", 1)[0].strip()
+            break
+    if s.startswith("versions/"):
+        s = s.split("/", 1)[1].strip()
+    if not s.isdigit():
+        raise ValueError(f"civitai model ref must be a model version id, got {raw!r}")
+    return int(s)
+
+
+def _civitai_local_artifact_path(output_dir: Path, info: Mapping[str, object]) -> Path:
+    files = [f for f in list(info.get("files") or []) if isinstance(f, Mapping)]
+    local_paths = [Path(str(f.get("local_path") or "")) for f in files if str(f.get("local_path") or "").strip()]
+    existing = [p for p in local_paths if p.exists()]
+    if len(existing) == 1:
+        return existing[0]
+    return output_dir
 
 
 def _run_in_thread(coro: Coroutine[Any, Any, Path]) -> str:

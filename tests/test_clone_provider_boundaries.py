@@ -50,3 +50,116 @@ def test_ingest_from_source_rejects_arbitrary_url() -> None:
             source_revision=None,
             output_ref=None,
         )
+
+
+def test_from_huggingface_forwards_hf_token(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_run_clone(ctx, **kwargs):
+        calls.append(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr(clone, "_run_clone", fake_run_clone)
+
+    clone.from_huggingface(
+        SimpleNamespace(),
+        SimpleNamespace(huggingface_repo="org/model"),
+        hf_token="invoker-token",
+    )
+
+    assert calls[0]["hf_token"] == "invoker-token"
+
+
+def test_from_civitai_forwards_api_key(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_run_clone(ctx, **kwargs):
+        calls.append(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr(clone, "_run_clone", fake_run_clone)
+
+    clone.from_civitai(
+        SimpleNamespace(),
+        SimpleNamespace(civitai_model_version_id=123, civitai_file_id=0),
+        civitai_api_key="invoker-key",
+    )
+
+    assert calls[0]["civitai_api_key"] == "invoker-key"
+
+
+def test_ingest_from_source_hf_token_precedence(monkeypatch) -> None:
+    """Per-request hf_token wins over ctx.hf_token (endpoint env)."""
+    from gen_worker.clone import _shared
+
+    seen: dict[str, object] = {}
+
+    def fake_download(source_repo, repo_dir, **kwargs):
+        seen["hf_token"] = kwargs.get("hf_token")
+        # Bail before any real upload work — we only assert token threading.
+        raise RuntimeError("stop-after-download-call")
+
+    monkeypatch.setattr(_shared, "download_huggingface_repo_files", fake_download)
+
+    with pytest.raises(RuntimeError, match="stop-after-download-call"):
+        ingest_from_source(
+            SimpleNamespace(request_id="req-1", hf_token="endpoint-env-token"),
+            provider="huggingface",
+            source_ref="org/model",
+            source_revision=None,
+            output_ref=None,
+            hf_token="invoker-token",
+        )
+
+    assert seen["hf_token"] == "invoker-token"
+
+
+def test_ingest_from_source_hf_token_falls_back_to_ctx(monkeypatch) -> None:
+    """Unset per-request hf_token falls back to ctx.hf_token (endpoint env)."""
+    from gen_worker.clone import _shared
+
+    seen: dict[str, object] = {}
+
+    def fake_download(source_repo, repo_dir, **kwargs):
+        seen["hf_token"] = kwargs.get("hf_token")
+        raise RuntimeError("stop-after-download-call")
+
+    monkeypatch.setattr(_shared, "download_huggingface_repo_files", fake_download)
+
+    with pytest.raises(RuntimeError, match="stop-after-download-call"):
+        ingest_from_source(
+            SimpleNamespace(request_id="req-1", hf_token="endpoint-env-token"),
+            provider="huggingface",
+            source_ref="org/model",
+            source_revision=None,
+            output_ref=None,
+            hf_token=None,
+        )
+
+    assert seen["hf_token"] == "endpoint-env-token"
+
+
+def test_ingest_from_source_civitai_api_key_threaded(monkeypatch) -> None:
+    """Per-request civitai_api_key reaches download_civitai_model_version_files."""
+    from gen_worker.clone import _shared
+
+    seen: dict[str, object] = {}
+
+    def fake_download(model_version_id, repo_dir, **kwargs):
+        seen["civitai_api_key"] = kwargs.get("civitai_api_key")
+        raise RuntimeError("stop-after-download-call")
+
+    monkeypatch.setattr(_shared, "download_civitai_model_version_files", fake_download)
+
+    with pytest.raises(RuntimeError, match="stop-after-download-call"):
+        ingest_from_source(
+            SimpleNamespace(request_id="req-1", hf_token=""),
+            provider="civitai",
+            source_ref="123",
+            source_revision=None,
+            civitai_model_version_id=123,
+            output_ref=None,
+            civitai_api_key="invoker-key",
+        )
+
+    assert seen["civitai_api_key"] == "invoker-key"

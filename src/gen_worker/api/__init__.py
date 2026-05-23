@@ -35,6 +35,7 @@ from .types import (
     NegativePrompt,
     PositivePrompt,
     PromptRole,
+    StringEnum,
     Tensors,
     VideoAsset,
 )
@@ -73,6 +74,7 @@ __all__ = [
     "NegativePrompt",
     "PositivePrompt",
     "PromptRole",
+    "StringEnum",
     "Tensors",
     "VideoAsset",
 ]

@@ -76,6 +76,36 @@ def test_load_success_clears_previous_error_state() -> None:
     assert mgr._last_load_traceback is None
 
 
+def test_load_model_treats_root_safetensors_repo_as_materialized(tmp_path) -> None:
+    """Root-level safetensors HF repos can be component repos, not pipelines.
+
+    They should satisfy LoadModelCommand after download instead of failing the
+    generic Diffusers pipeline loader on missing model_index.json.
+    """
+
+    mgr = DiffusersModelManager()
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    (snapshot / "flux-2-klein-base-4b-fp8.safetensors").write_bytes(b"stub")
+
+    class _Downloader:
+        def download(self, model_id: str, cache_dir: str) -> str:
+            assert model_id == "black-forest-labs/FLUX.2-klein-base-4b-fp8"
+            assert cache_dir
+            return str(snapshot)
+
+    mgr._downloader = _Downloader()
+    mgr._loader.get = MagicMock(return_value=None)  # type: ignore[method-assign]
+    mgr._loader.load = MagicMock()  # type: ignore[assignment]
+
+    model_id = "black-forest-labs/FLUX.2-klein-base-4b-fp8"
+    assert asyncio.run(mgr.load_model_into_vram(model_id)) is True
+    mgr._loader.load.assert_not_called()
+    assert model_id in mgr.get_vram_loaded_models()
+    assert mgr._last_load_error is None
+    assert mgr._last_load_traceback is None
+
+
 def test_load_failure_resets_then_repopulates() -> None:
     """Two failures in a row should each see fresh state at the start."""
 
