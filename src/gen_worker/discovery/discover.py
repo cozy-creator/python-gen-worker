@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import msgspec
 
 from gen_worker import RequestContext
-from gen_worker.api.binding import Binding, Dispatch, HFRepo, Repo
+from gen_worker.api.binding import Binding, Dispatch, HFRepo, Repo, Variant
 from gen_worker.api.types import (
     Asset,
     AudioAsset,
@@ -373,6 +373,31 @@ def _binding_to_manifest(binding: Binding, param_annotation: Any, param_name: st
             # Issue #20 fix 2: HF entries can carry dtype.
             if isinstance(repo, HFRepo) and getattr(repo, "_dtype", ""):
                 entry["dtype"] = repo._dtype
+            # #337: a SharedBase variant records its shared-component refs + its
+            # per-variant swap-slot refs into the endpoint lock so the full
+            # residency footprint of each selectable model is visible (shared
+            # base loads once + pinned; only the variant slot swaps per model).
+            if isinstance(repo, Variant):
+                entry["variant_kind"] = "shared_base_variant"
+                entry["pipeline_class"] = repo.pipeline_class_fqn
+                entry["shared_components"] = {
+                    name: {
+                        "ref": comp.ref,
+                        "provider": comp.provider,
+                        "subfolder": str(getattr(comp, "_subfolder", "") or ""),
+                        "dtype": str(getattr(comp, "_dtype", "") or ""),
+                    }
+                    for name, comp in dict(repo.shared_components).items()
+                }
+                entry["variant_slots"] = {
+                    name: {
+                        "ref": comp.ref,
+                        "provider": comp.provider,
+                        "subfolder": str(getattr(comp, "_subfolder", "") or ""),
+                        "dtype": str(getattr(comp, "_dtype", "") or ""),
+                    }
+                    for name, comp in dict(repo.variant_slots).items()
+                }
             table[k] = entry
         return {
             "kind": "dispatch",

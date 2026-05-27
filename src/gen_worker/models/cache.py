@@ -27,12 +27,29 @@ from .cache_paths import tensorhub_cas_dir
 logger = logging.getLogger(__name__)
 
 DEFAULT_VRAM_SAFETY_MARGIN_GB = 3.5
+# #337: leave headroom for the host so warm-tier variants don't push it to swap.
+DEFAULT_RAM_SAFETY_MARGIN_GB = 8.0
 DEFAULT_MAX_CONCURRENT_DOWNLOADS = 2
 
 
 class ModelLocation(str, Enum):
-    """Where a model is currently stored."""
+    """Where a model is currently stored.
+
+    Issue #337 inserts a CPU-RAM warm tier between VRAM and disk so a swappable
+    variant (e.g. an SDXL UNet) can be demoted off the GPU but kept in host RAM
+    for a fast PCIe swap-in (~0.1-0.5s for ~2.5GB) instead of re-reading +
+    re-loading from disk. The residency ladder is:
+
+        VRAM  (GPU, active + hot)
+          ^  demote .to("cpu")  |  promote .to("cuda")
+        CPU   (host RAM, warm)
+          ^  drop bytes         |  re-load from disk
+        DISK  (cached, re-loadable)
+          ^  evict file         |  re-download from source
+        DOWNLOADING / (absent)
+    """
     VRAM = "vram"       # Loaded in GPU VRAM, ready for inference
+    CPU = "cpu"         # Warm in host RAM, fast PCIe swap-in to VRAM (#337)
     DISK = "disk"       # Cached on disk, needs loading to use
     DOWNLOADING = "downloading"  # Currently being downloaded
 
@@ -44,9 +61,12 @@ class CachedModel:
     location: ModelLocation
     size_gb: float = 0.0
     last_accessed: float = field(default_factory=time.time)
-    pipeline: Any = None  # The actual pipeline object (when in VRAM)
+    pipeline: Any = None  # The actual pipeline object (when in VRAM or CPU)
     disk_path: Optional[Path] = None  # Path on disk (when cached)
     download_progress: float = 0.0  # 0.0-1.0 progress for downloading models
+    # #337: pinned models are never evicted from VRAM (the shared base — text
+    # encoders + VAE — that every variant pipeline references by pointer).
+    pinned: bool = False
 
 
 @dataclass
@@ -121,6 +141,14 @@ class ModelCache:
             # Auto: total VRAM minus safety margin
             self._max_vram_gb = max(0.0, self._total_vram_gb - self._vram_safety_margin)
 
+        # #337 CPU-RAM warm tier auto-sizing: budget = host RAM minus a safety
+        # margin so demoted variants stay warm for a fast swap-in without
+        # pushing the host into swap. Auto-detected from psutil when available.
+        self._ram_safety_margin_gb = DEFAULT_RAM_SAFETY_MARGIN_GB
+        self._total_ram_gb = self._detect_total_ram()
+        self._max_ram_gb = max(0.0, self._total_ram_gb - self._ram_safety_margin_gb)
+        self._ram_used_gb = 0.0
+
         # Model tracking with LRU ordering
         # OrderedDict maintains insertion order; we move items to end on access
         self._models: OrderedDict[str, CachedModel] = OrderedDict()
@@ -131,8 +159,17 @@ class ModelCache:
 
         logger.info(
             f"ModelCache initialized: total_vram={self._total_vram_gb:.1f}GB, "
-            f"max_usable={self._max_vram_gb:.1f}GB, safety_margin={self._vram_safety_margin:.1f}GB"
+            f"max_usable={self._max_vram_gb:.1f}GB, safety_margin={self._vram_safety_margin:.1f}GB, "
+            f"ram_tier_budget={self._max_ram_gb:.1f}GB (total_ram={self._total_ram_gb:.1f}GB)"
         )
+
+    def _detect_total_ram(self) -> float:
+        """Detect total host RAM in GB (psutil; 0.0 when unavailable)."""
+        try:
+            import psutil
+            return float(psutil.virtual_memory().total) / (1024 ** 3)
+        except Exception:
+            return 0.0
 
     def _detect_total_vram(self) -> float:
         """Detect total GPU VRAM in GB."""
@@ -185,22 +222,36 @@ class ModelCache:
                 self._models[model_id].last_accessed = time.time()
 
     def _get_lru_vram_models(self) -> List[str]:
-        """Get VRAM-loaded models ordered by least recently used first."""
+        """VRAM-loaded models, LRU first. #337: PINNED models (the shared base)
+        are excluded — they are never eviction candidates."""
         with self._lock:
             return [
                 m.model_id for m in self._models.values()
-                if m.location == ModelLocation.VRAM
+                if m.location == ModelLocation.VRAM and not m.pinned
+            ]
+
+    def _get_lru_cpu_models(self) -> List[str]:
+        """Warm CPU-RAM-tier models, LRU first (#337). Pinned excluded."""
+        with self._lock:
+            return [
+                m.model_id for m in self._models.values()
+                if m.location == ModelLocation.CPU and not m.pinned
             ]
 
     def _evict_lru_for_space(self, needed_gb: float) -> float:
         """
         Evict least recently used models from VRAM until we have enough space.
 
+        #337: eviction now DEMOTES the LRU variant to the CPU-RAM warm tier
+        (``.to("cpu")``) rather than dropping straight to disk, so a re-selected
+        variant swaps back over PCIe instead of re-loading from disk. PINNED
+        models (the shared base) are never evicted.
+
         Args:
             needed_gb: Amount of VRAM space needed.
 
         Returns:
-            Amount of space freed in GB.
+            Amount of VRAM freed in GB.
         """
         freed = 0.0
         available = self._max_vram_gb - max(self._vram_used_gb, self._get_current_vram_used())
@@ -208,7 +259,7 @@ class ModelCache:
         if available >= needed_gb:
             return 0.0  # Already have enough space
 
-        # Get LRU-ordered VRAM models
+        # Get LRU-ordered VRAM models (pinned excluded)
         lru_models = self._get_lru_vram_models()
 
         for model_id in lru_models:
@@ -216,10 +267,10 @@ class ModelCache:
                 break
 
             model = self._models.get(model_id)
-            if model and model.location == ModelLocation.VRAM:
-                evicted_size = self._unload_from_vram(model_id, keep_on_disk=True)
+            if model and model.location == ModelLocation.VRAM and not model.pinned:
+                evicted_size = self._demote_to_cpu(model_id)
                 freed += evicted_size
-                logger.info(f"LRU evicted {model_id} from VRAM ({evicted_size:.1f}GB freed)")
+                logger.info(f"LRU demoted {model_id} VRAM->CPU ({evicted_size:.1f}GB freed)")
 
         return freed
 
@@ -261,6 +312,8 @@ class ModelCache:
         model_id: str,
         pipeline: Any,
         size_gb: float,
+        *,
+        pinned: bool = False,
     ) -> None:
         """
         Mark a model as loaded into VRAM.
@@ -272,6 +325,8 @@ class ModelCache:
             model_id: Model identifier.
             pipeline: The loaded pipeline object.
             size_gb: Size of the model in VRAM.
+            pinned: #337 — when True the model is NEVER evicted (the shared
+                base: text encoders + VAE that every variant references).
         """
         with self._lock:
             # Evict if needed
@@ -280,11 +335,15 @@ class ModelCache:
             model = self._models.get(model_id)
             if model:
                 # Update existing entry
+                if model.location == ModelLocation.CPU:
+                    self._ram_used_gb = max(0.0, self._ram_used_gb - model.size_gb)
                 if model.location != ModelLocation.VRAM:
                     self._vram_used_gb += size_gb
                 model.location = ModelLocation.VRAM
                 model.pipeline = pipeline
                 model.size_gb = size_gb
+                if pinned:
+                    model.pinned = True
             else:
                 # New entry
                 model = CachedModel(
@@ -292,12 +351,138 @@ class ModelCache:
                     location=ModelLocation.VRAM,
                     size_gb=size_gb,
                     pipeline=pipeline,
+                    pinned=pinned,
                 )
                 self._models[model_id] = model
                 self._vram_used_gb += size_gb
 
             self._touch(model_id)
-            logger.info(f"Model {model_id} loaded to VRAM ({size_gb:.1f}GB)")
+            logger.info(
+                f"Model {model_id} loaded to VRAM ({size_gb:.1f}GB)"
+                + (" [PINNED]" if model.pinned else "")
+            )
+
+    def pin(self, model_id: str) -> None:
+        """Mark a model as pinned — never evicted from VRAM (#337 shared base)."""
+        with self._lock:
+            model = self._models.get(model_id)
+            if model is not None:
+                model.pinned = True
+
+    def is_pinned(self, model_id: str) -> bool:
+        with self._lock:
+            model = self._models.get(model_id)
+            return bool(model is not None and model.pinned)
+
+    # -------------------------------------------------------------------------
+    # #337 CPU-RAM warm tier transitions (VRAM <-> CPU). All callers hold the
+    # GPU mutex (worker `_gpu_semaphore`), so demote/promote never race a load
+    # or an in-flight inference on the same device.
+    # -------------------------------------------------------------------------
+
+    def _move_pipeline_to_device(self, pipeline: Any, device: str) -> None:
+        """Best-effort ``pipeline.to(device)`` for a diffusers pipeline / module."""
+        if pipeline is None:
+            return
+        try:
+            to = getattr(pipeline, "to", None)
+            if callable(to):
+                to(device)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ModelCache: pipeline.to(%s) failed: %s", device, exc)
+
+    def _demote_to_cpu(self, model_id: str) -> float:
+        """Demote a VRAM model to the CPU-RAM warm tier (``.to("cpu")``).
+
+        Frees VRAM but keeps the object in host RAM for a fast PCIe swap-in.
+        Evicts LRU CPU-tier models to disk first if the RAM budget is tight.
+        Returns the VRAM (GB) freed.
+        """
+        with self._lock:
+            model = self._models.get(model_id)
+            if not model or model.location != ModelLocation.VRAM or model.pinned:
+                return 0.0
+            freed = model.size_gb
+            # Make room in the RAM tier before parking the object there.
+            self._evict_lru_cpu_for_space(model.size_gb, exclude=model_id)
+            self._move_pipeline_to_device(model.pipeline, "cpu")
+            self._vram_used_gb = max(0.0, self._vram_used_gb - freed)
+            model.location = ModelLocation.CPU
+            self._ram_used_gb += model.size_gb
+            self._flush_memory()
+            self._touch(model_id)
+            return freed
+
+    def _promote_from_cpu(self, model_id: str, device: str = "cuda") -> bool:
+        """Promote a warm CPU-tier model back into VRAM (``.to("cuda")``).
+
+        Evicts LRU VRAM models (to CPU) first to make room. Returns True when
+        the model is resident in VRAM afterward.
+        """
+        with self._lock:
+            model = self._models.get(model_id)
+            if not model or model.pipeline is None:
+                return False
+            if model.location == ModelLocation.VRAM:
+                self._touch(model_id)
+                return True
+            if model.location != ModelLocation.CPU:
+                return False
+            self._evict_lru_for_space(model.size_gb)
+            self._move_pipeline_to_device(model.pipeline, device)
+            self._ram_used_gb = max(0.0, self._ram_used_gb - model.size_gb)
+            model.location = ModelLocation.VRAM
+            self._vram_used_gb += model.size_gb
+            self._touch(model_id)
+            return True
+
+    def _evict_lru_cpu_for_space(self, needed_gb: float, *, exclude: str = "") -> float:
+        """Drop LRU CPU-tier models (keep disk file) until the RAM budget fits."""
+        if self._max_ram_gb <= 0.0:
+            return 0.0
+        freed = 0.0
+        available = self._max_ram_gb - self._ram_used_gb
+        if available >= needed_gb:
+            return 0.0
+        for model_id in self._get_lru_cpu_models():
+            if model_id == exclude:
+                continue
+            if available + freed >= needed_gb:
+                break
+            model = self._models.get(model_id)
+            if model and model.location == ModelLocation.CPU:
+                freed += model.size_gb
+                self._ram_used_gb = max(0.0, self._ram_used_gb - model.size_gb)
+                if model.pipeline is not None:
+                    try:
+                        del model.pipeline
+                    except Exception:
+                        pass
+                    model.pipeline = None
+                if model.disk_path:
+                    model.location = ModelLocation.DISK
+                else:
+                    del self._models[model_id]
+                logger.info(f"ModelCache: dropped warm CPU model {model_id} ({model.size_gb:.1f}GB)")
+        self._flush_memory()
+        return freed
+
+    def residency_tier(self, model_id: str) -> str:
+        """Return the residency tier string for a model (#337 availability).
+
+        One of ``"VRAM"``, ``"RAM"``, ``"DISK"``, ``"DOWNLOADING"``,
+        ``"ABSENT"`` — the vocabulary the orchestrator routes on.
+        """
+        with self._lock:
+            model = self._models.get(model_id)
+            if model is None:
+                return "ABSENT"
+            return {
+                ModelLocation.VRAM: "VRAM",
+                ModelLocation.CPU: "RAM",
+                ModelLocation.DISK: "DISK",
+                ModelLocation.DOWNLOADING: "DOWNLOADING",
+            }.get(model.location, "ABSENT")
 
     def mark_cached_to_disk(
         self,
@@ -318,6 +503,8 @@ class ModelCache:
             if model:
                 if model.location == ModelLocation.VRAM:
                     self._vram_used_gb -= model.size_gb
+                elif model.location == ModelLocation.CPU:
+                    self._ram_used_gb = max(0.0, self._ram_used_gb - model.size_gb)
                 model.location = ModelLocation.DISK
                 model.disk_path = disk_path
                 model.size_gb = size_gb
@@ -467,6 +654,11 @@ class ModelCache:
             for model in self._models.values():
                 if model.location == ModelLocation.VRAM:
                     vram_models.append(model.model_id)
+                elif model.location == ModelLocation.CPU:
+                    # #337 warm CPU-RAM tier: reported as disk-resident to the
+                    # legacy stats consumer (it can be served quickly). The
+                    # fine-grained tier is carried separately by residency_tier().
+                    disk_models.append(model.model_id)
                 elif model.location == ModelLocation.DISK:
                     disk_models.append(model.model_id)
                 elif model.location == ModelLocation.DOWNLOADING:
@@ -493,12 +685,26 @@ class ModelCache:
             ]
 
     def get_disk_models(self) -> List[str]:
-        """Get list of models cached on disk."""
+        """Get list of models cached on disk (incl. the warm CPU tier — both
+        are fast to serve relative to a cold download)."""
         with self._lock:
             return [
                 m.model_id for m in self._models.values()
-                if m.location == ModelLocation.DISK
+                if m.location in (ModelLocation.DISK, ModelLocation.CPU)
             ]
+
+    def get_cpu_models(self) -> List[str]:
+        """Get list of models warm in the CPU-RAM tier (#337)."""
+        with self._lock:
+            return [
+                m.model_id for m in self._models.values()
+                if m.location == ModelLocation.CPU
+            ]
+
+    def get_residency_map(self) -> Dict[str, str]:
+        """Snapshot of ``{model_id: tier}`` for tier-aware availability (#337)."""
+        with self._lock:
+            return {m.model_id: self.residency_tier(m.model_id) for m in self._models.values()}
 
     def get_max_concurrent_downloads(self) -> int:
         """Get the maximum number of concurrent downloads allowed."""

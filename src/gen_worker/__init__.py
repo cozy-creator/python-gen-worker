@@ -36,7 +36,16 @@ from . import cache  # noqa: F401 — exposed as gen_worker.cache
 from . import compile_helpers as compile  # noqa: F401 — exposed as gen_worker.compile
 from . import parallelism  # noqa: F401 — exposed as gen_worker.parallelism
 from . import quant  # noqa: F401 — exposed as gen_worker.quant
-from .api.binding import Binding, CivitaiRepo, Dispatch, HFRepo, Repo, dispatch
+from .api.binding import (
+    Binding,
+    CivitaiRepo,
+    Dispatch,
+    HFRepo,
+    Repo,
+    SharedBase,
+    Variant,
+    dispatch,
+)
 from .api.decorators import (
     Resources,
     batched_inference,
@@ -153,6 +162,8 @@ __all__ = [
     "Dispatch",
     "Binding",
     "dispatch",
+    "SharedBase",
+    "Variant",
     # Hard-cut migration stubs (raise ImportError if used).
     "inference_function",
     "training_function",

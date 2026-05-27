@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import collections.abc as cabc
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Optional, Tuple, TYPE_CHECKING
 
 import grpc
@@ -214,6 +214,17 @@ class _SerialWorkerSpec:
     # loop (`_batched_loop`) so I/O-bound endpoints scale to thousands of
     # concurrent coroutines instead of being bounded by the ThreadPoolExecutor.
     is_async: bool = False
+    # #337 model-selectable endpoints: per-request handler-injected model slots.
+    # Maps the handler param name -> the Dispatch binding (a dispatch over plain
+    # Repos / SharedBase variants / LoRA overlays). For each slot the dispatch
+    # path reads the discriminator field off the decoded payload, resolves the
+    # variant, ensures it is VRAM-ready, and passes the assembled pipeline as a
+    # keyword argument to the bound method. Empty for endpoints that bind all
+    # models once via setup() (the historical SerialWorker shape).
+    dispatch_injections: Dict[str, Any] = field(default_factory=dict)
+    # Param-type annotation for each handler-injected dispatch slot (used to
+    # validate the assembled pipeline matches the declared type).
+    dispatch_injection_types: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

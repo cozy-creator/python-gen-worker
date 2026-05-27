@@ -497,9 +497,28 @@ def _validate_models_against_setup(
     models: Mapping[str, Binding],
     setup_kwargs: Mapping[str, inspect.Parameter],
 ) -> dict[str, Binding]:
-    """Each models={} key must correspond to a setup() kwarg."""
+    """Classify each models={} slot as FIXED or DISPATCH and validate placement.
+
+    Issue #337 contract — ``setup()`` builds what is shared and load-once;
+    ``dispatch``/variant slots are resolved PER-REQUEST and injected into the
+    HANDLER, not setup(). Therefore:
+
+    - **FIXED slot** (a plain ``Repo``/``HFRepo``): loaded once at startup, so
+      it MUST correspond to a ``setup()`` kwarg (or ``**kwargs``). Same as the
+      historical contract.
+    - **DISPATCH slot** (a ``Dispatch``, incl. a dispatch over
+      ``SharedBase.variant(...)``): resolved per request. It MUST NOT appear as
+      a ``setup()`` parameter — that is the motivating crash (``setup(self,
+      pipeline)`` on a per-request slot called with no kwargs ->
+      ``TypeError: setup() missing 1 required positional argument``). Surface
+      it as a clear BUILD-TIME error instead of a runtime crash.
+
+    An explicit named ``setup()`` param for a dispatch slot is the error; a
+    bare ``def setup(self): ...`` (or ``**kwargs``) is correct and accepted.
+    """
     if not models:
         return {}
+    has_var_kwargs = "kwargs" in {p.kind.name.lower() for p in setup_kwargs.values()}
     out: dict[str, Binding] = {}
     for key, binding in models.items():
         if not isinstance(binding, (Repo, Dispatch)):
@@ -507,10 +526,28 @@ def _validate_models_against_setup(
                 f"@inference class {cls_name!r}: models[{key!r}] must be Repo or Dispatch; "
                 f"got {type(binding).__name__}"
             )
-        if key not in setup_kwargs and "kwargs" not in {p.kind.name.lower() for p in setup_kwargs.values()}:
+        if isinstance(binding, Dispatch):
+            # Per-request slot: must NOT be a named setup() parameter. A
+            # **kwargs catch-all on setup() does NOT count as "naming" the
+            # slot, so it is allowed.
+            if key in setup_kwargs:
+                raise ValueError(
+                    f"@inference class {cls_name!r}: models[{key!r}] is a per-request "
+                    f"dispatch slot, but setup() declares a {key!r} parameter. A "
+                    "dispatch/variant slot is resolved per REQUEST and injected into "
+                    "the handler — it is NOT available at setup() time. Remove "
+                    f"{key!r} from setup() and accept it on the handler instead:\n"
+                    f"    def setup(self): ...                       # build shared base only\n"
+                    f"    def generate(self, ctx, payload, {key}): ...  # SDK injects per request\n"
+                    "(issue #337)"
+                )
+            out[key] = binding
+            continue
+        # Fixed slot: loaded once → must be a setup() kwarg (or **kwargs).
+        if key not in setup_kwargs and not has_var_kwargs:
             raise ValueError(
-                f"@inference class {cls_name!r}: models[{key!r}] doesn't match any setup() "
-                f"parameter. setup signature: {list(setup_kwargs.keys())}"
+                f"@inference class {cls_name!r}: models[{key!r}] (a fixed model) doesn't "
+                f"match any setup() parameter. setup signature: {list(setup_kwargs.keys())}"
             )
         out[key] = binding
     return out

@@ -98,7 +98,7 @@ LoadModelResult = Any
 UnloadModelResult = Any
 JobExecutionRequest = Any
 JobExecutionResult = Any
-from .api.binding import Binding, CivitaiRepo, Dispatch, HFRepo, Repo
+from .api.binding import Binding, CivitaiRepo, Dispatch, HFRepo, Repo, Variant
 from .api.decorators import Resources
 from .api.errors import (
     ArtifactTransferError,
@@ -243,6 +243,32 @@ def _binding_to_wire(param_name: str, param_type: Any, binding: Binding) -> Dict
             # HF entries may carry a dtype.
             if isinstance(repo, HFRepo) and getattr(repo, "_dtype", ""):
                 entry["dtype"] = repo._dtype
+            # #337: a SharedBase variant records its shared component refs +
+            # its per-variant swap-slot refs into the lock so the orchestrator
+            # (and a cold-boot prewarm) can see the full residency footprint of
+            # each selectable model — the shared base loads once + is pinned;
+            # only the variant slot is the per-model swap unit.
+            if isinstance(repo, Variant):
+                entry["kind"] = "shared_base_variant"
+                entry["pipeline_class"] = repo.pipeline_class_fqn
+                entry["shared_components"] = {
+                    name: {
+                        "ref": comp.ref,
+                        "provider": comp.provider,
+                        "subfolder": str(getattr(comp, "_subfolder", "") or ""),
+                        "dtype": str(getattr(comp, "_dtype", "") or ""),
+                    }
+                    for name, comp in dict(repo.shared_components).items()
+                }
+                entry["variant_slots"] = {
+                    name: {
+                        "ref": comp.ref,
+                        "provider": comp.provider,
+                        "subfolder": str(getattr(comp, "_subfolder", "") or ""),
+                        "dtype": str(getattr(comp, "_dtype", "") or ""),
+                    }
+                    for name, comp in dict(repo.variant_slots).items()
+                }
             table[k] = entry
         return {
             "param": param_name,
@@ -2664,6 +2690,16 @@ class Worker:
         max_batch = getattr(ep_spec, "max_batch", None)
         batching_declared = batch_window_ms is not None and max_batch is not None
 
+        # #337 model-selectable endpoints: classify the class's model bindings.
+        # FIXED slots (plain Repo) are loaded once via setup(); DISPATCH slots
+        # (Dispatch — incl. dispatch over SharedBase variants / LoRA overlays)
+        # are resolved PER-REQUEST and injected into the handler. The dispatch
+        # slots that a handler can receive are keyed by slot name.
+        dispatch_slots: Dict[str, Dispatch] = {}
+        for slot_name, binding in dict(getattr(ep_spec, "models", {}) or {}).items():
+            if isinstance(binding, Dispatch):
+                dispatch_slots[slot_name] = binding
+
         registered = 0
 
         for method_name, _unbound, fn_spec in function_methods:
@@ -2699,13 +2735,35 @@ class Worker:
                     ctx_param,
                     payload_param,
                     is_async,
-                ) = self._inspect_serial_method(cls, getattr(cls, method_name))
+                ) = self._inspect_serial_method(
+                    cls, getattr(cls, method_name), injectable_slots=dispatch_slots
+                )
             except Exception as exc:
                 logger.error(
                     "@inference class %r method %r: signature invalid: %s",
                     cls.__name__, method_name, exc,
                 )
                 continue
+
+            # #337: build the per-request handler-injection map for THIS method.
+            # Only the dispatch slots the method actually declares as params are
+            # injected; the rest of the class's dispatch slots belong to other
+            # methods (or are simply unused by this one).
+            method_dispatch_injections: Dict[str, Dispatch] = {}
+            method_injection_types: Dict[str, Any] = {}
+            try:
+                method_hints = typing.get_type_hints(
+                    getattr(cls, method_name),
+                    globalns=getattr(getattr(cls, method_name), "__globals__", None),
+                    include_extras=True,
+                )
+            except Exception:
+                method_hints = {}
+            method_sig = inspect.signature(getattr(cls, method_name))
+            for p in list(method_sig.parameters.values())[3:]:
+                if p.name in dispatch_slots:
+                    method_dispatch_injections[p.name] = dispatch_slots[p.name]
+                    method_injection_types[p.name] = method_hints.get(p.name)
 
             input_schema = msgspec.json.schema(payload_type)
             input_schema_json = json.dumps(
@@ -2740,6 +2798,8 @@ class Worker:
                 delta_schema_json=delta_schema_json,
                 timeout_ms=getattr(fn_spec, "timeout_ms", None),
                 is_async=is_async,
+                dispatch_injections=method_dispatch_injections,
+                dispatch_injection_types=method_injection_types,
             )
             self._serial_class_specs[slug] = sspec
             self._discovered_resources[slug] = resources
@@ -3076,6 +3136,8 @@ class Worker:
         self,
         cls: type,
         method: Callable[..., Any],
+        *,
+        injectable_slots: Optional[Mapping[str, Any]] = None,
     ) -> Tuple[type, Optional[type], Optional[type], str, str, str, bool]:
         """Validate a SerialWorker method signature.
 
@@ -3085,6 +3147,14 @@ class Worker:
             def fn(self, ctx, payload: MyInput) -> Iterator[MyDelta]: ...
             async def fn(self, ctx, payload: MyInput) -> MyOutput: ...
             async def fn(self, ctx, payload: MyInput) -> AsyncIterator[MyDelta]: ...
+
+        #337 model-selectable endpoints: a method MAY declare extra parameters
+        beyond ``(self, ctx, payload)`` whose names match a per-request DISPATCH
+        slot in ``injectable_slots`` (the class's ``models={...}`` dispatch
+        bindings). Those are handler-injected per request and are accepted here
+        so the signature validates; ``payload`` is still the single
+        msgspec.Struct positional. A param that is neither the payload nor a
+        known injectable slot is a clear signature error.
 
         Returns
         -------
@@ -3138,6 +3208,19 @@ class Worker:
             raise ValueError(
                 f"third arg must be a msgspec.Struct payload (got {payload_type!r})"
             )
+
+        # #337: any parameter after `payload` must be a per-request dispatch
+        # slot declared in the class's models={...}. Reject unknown params with
+        # a clear message (vs. silently dropping or crashing at call time).
+        slots = dict(injectable_slots or {})
+        for extra in params[3:]:
+            if extra.name not in slots:
+                raise ValueError(
+                    f"SerialWorker method param {extra.name!r} is not a known "
+                    "per-request model slot. Handler params after `payload` must "
+                    "name a dispatch slot from this class's models={...} "
+                    f"(known slots: {sorted(slots.keys())}). (issue #337)"
+                )
 
         ret = hints.get("return")
         if ret is None:
@@ -8560,6 +8643,7 @@ class Worker:
         ctx: RequestContext,
         sspec: "_SerialWorkerSpec",
         input_obj: Any,
+        inject_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Tuple[str, int]:
         """#345 Improvement B: drive an `async def` SerialWorker generator on
         the shared asyncio loop, emitting each delta as it arrives.
@@ -8575,7 +8659,7 @@ class Worker:
         """
         request_id = ctx.request_id
         loop = self._ensure_batched_loop()
-        agen = sspec.method(ctx, input_obj)
+        agen = sspec.method(ctx, input_obj, **(inject_kwargs or {}))
         if not hasattr(agen, "__anext__"):
             raise TypeError(
                 "async incremental SerialWorker handler must return an async "
@@ -8625,6 +8709,372 @@ class Worker:
             timestamp_unix_ms=int(time.time() * 1000),
         )
         return last_item_id, count
+
+    # ------------------------------------------------------------------
+    # #337 model-selectable endpoints: per-request handler injection,
+    # shared-by-reference assembly, 3-tier residency, tier-aware emission.
+    # ------------------------------------------------------------------
+
+    # Tier -> proto ModelAvailabilityKind mapping for the availability signal.
+    # The proto enum (#321) carries READY / DOWNLOAD_COMPLETED / CACHED. We map
+    # the finer #337 residency tiers onto it backward-compatibly:
+    #   VRAM        -> READY    (hot, can serve immediately)
+    #   RAM / DISK  -> CACHED   (warm/cold-cached, fast to serve)
+    #   DOWNLOADING -> DOWNLOAD_COMPLETED is NOT used; DOWNLOADING has no hot
+    #                  kind, so we skip emission until it lands.
+    # The full residency tier string also rides the WorkerModelReadySignal's
+    # model_id as a "<ref>\ttier=<TIER>" suffix when COZY_EMIT_RESIDENCY_TIER is
+    # set, so an upgraded orchestrator can parse it without a proto bump while
+    # legacy orchestrators ignore the suffix (they match on the bare ref).
+    _RESIDENCY_TIER_TO_KIND = {
+        "VRAM": 1,  # MODEL_AVAILABILITY_READY
+        "RAM": 3,   # MODEL_AVAILABILITY_CACHED
+        "DISK": 3,  # MODEL_AVAILABILITY_CACHED
+    }
+
+    def _emit_residency_tier(self, model_id: str, tier: str) -> None:
+        """Emit a debounced tier-aware availability signal (#337).
+
+        Debounced per (model_id) — only emits when the tier actually changes
+        since the last emission, so a burst of load/evict transitions collapses
+        to one signal per net change. Maps the residency tier onto the existing
+        WorkerModelReadySignal kind enum (backward-compatible: no proto field
+        required for legacy orchestrators).
+        """
+        ref = str(model_id or "").strip()
+        if not ref:
+            return
+        tier = str(tier or "ABSENT").strip().upper()
+        # Debounce: skip if unchanged since last emission.
+        last = getattr(self, "_last_residency_tier", None)
+        if last is None:
+            last = {}
+            self._last_residency_tier = last
+        if last.get(ref) == tier:
+            return
+        last[ref] = tier
+        kind = self._RESIDENCY_TIER_TO_KIND.get(tier)
+        if kind is None:
+            # DOWNLOADING / ABSENT have no "available" kind — nothing to emit.
+            return
+        emit_id = ref
+        if _env_flag("COZY_EMIT_RESIDENCY_TIER", default=False):
+            emit_id = f"{ref}\ttier={tier}"
+        self._emit_model_ready(emit_id, kind)
+
+    def _emit_residency_for_refs(self, refs: List[str]) -> None:
+        """Emit tier signals for a set of refs based on the live cache state."""
+        cache = getattr(self, "_model_cache", None)
+        if cache is None:
+            return
+        for ref in refs:
+            canon = self._canonical_cache_key_for_ref(ref) or ref
+            try:
+                tier = cache.residency_tier(canon)
+            except Exception:
+                continue
+            self._emit_residency_tier(canon, tier)
+
+    def _shared_base_cache_key(self, variant: Variant) -> str:
+        """Stable cache key for a variant's shared-base component stack.
+
+        Every variant of one SharedBase shares ONE pinned entry. The key is
+        derived from the (sorted) shared component refs so two variants with
+        the same declared base map to the same pinned object.
+        """
+        parts = sorted(
+            f"{name}={getattr(comp, 'ref', '')}#{getattr(comp, '_subfolder', '')}"
+            for name, comp in dict(getattr(variant, "shared_components", {}) or {}).items()
+        )
+        return "sharedbase:" + variant.pipeline_class_fqn + ":" + "|".join(parts)
+
+    def _download_repo_local(self, ctx: RequestContext, repo: Repo) -> str:
+        """Materialize a Repo to a local path via the worker downloader."""
+        if self._downloader is None:
+            raise ValueError("model-selectable endpoint requires a model downloader")
+        cache_dir = str(tensorhub_cas_dir())
+        rev = str(getattr(repo, "_revision", "") or "").strip()
+        ref = repo.ref + (f"@{rev}" if rev else "")
+        provider = str(getattr(repo, "provider", "tensorhub") or "tensorhub")
+        provider_index = {repo.ref: provider, ref: provider}
+        tok = set_provider_by_ref(provider_index)
+        try:
+            return self._downloader.download(ref, cache_dir)
+        finally:
+            reset_provider_by_ref(tok)
+
+    def _load_component(self, ctx: RequestContext, repo: Repo, kind: str) -> Any:
+        """Load a single diffusers component (text_encoder / vae / unet / ...).
+
+        ``kind`` selects the diffusers model class. Loaded from the repo's
+        declared ``subfolder`` when set. Best-effort moved to the worker device.
+        """
+        local = self._download_repo_local(ctx, repo)
+        subfolder = str(getattr(repo, "_subfolder", "") or "").strip()
+        torch_dtype = self._torch_dtype_from_binding(str(getattr(repo, "_dtype", "") or ""))
+        load_kwargs: Dict[str, Any] = {}
+        if subfolder:
+            load_kwargs["subfolder"] = subfolder
+        if torch_dtype is not None:
+            load_kwargs["torch_dtype"] = torch_dtype
+
+        component_cls = self._diffusers_component_class(kind)
+        from_pretrained = getattr(component_cls, "from_pretrained")
+        obj = from_pretrained(local, **load_kwargs)
+        try:
+            if torch is not None and hasattr(obj, "to") and str(getattr(ctx, "device", "")).startswith("cuda"):
+                obj = obj.to("cuda")
+        except Exception:
+            pass
+        return obj
+
+    @staticmethod
+    def _diffusers_component_class(kind: str) -> Any:
+        """Resolve a diffusers/transformers class for a shared/variant slot name."""
+        name = (kind or "").strip().lower()
+        if name in ("text_encoder", "text_encoder_2"):
+            from transformers import CLIPTextModel, CLIPTextModelWithProjection
+            return CLIPTextModelWithProjection if name == "text_encoder_2" else CLIPTextModel
+        if name in ("vae",):
+            from diffusers import AutoencoderKL
+            return AutoencoderKL
+        if name in ("unet",):
+            from diffusers import UNet2DConditionModel
+            return UNet2DConditionModel
+        if name in ("transformer",):
+            # Generic transformer slot — diffusers exposes per-arch classes; the
+            # tenant's SharedBase pipeline_cls drives the actual assembly, so a
+            # missing dedicated class falls back to ModelMixin auto-load.
+            from diffusers import ModelMixin
+            return ModelMixin
+        from diffusers import ModelMixin
+        return ModelMixin
+
+    def _ensure_shared_base(self, ctx: RequestContext, variant: Variant) -> Dict[str, Any]:
+        """Load (once) + pin the shared component stack for a variant's base.
+
+        Returns ``{component_name: module}``. The assembled modules are cached
+        in ``_shared_base_components`` keyed by the shared-base key and pinned
+        in the ModelCache so they are never evicted (shared by reference across
+        every variant pipeline).
+        """
+        key = self._shared_base_cache_key(variant)
+        store = getattr(self, "_shared_base_components", None)
+        if store is None:
+            store = {}
+            self._shared_base_components = store
+        existing = store.get(key)
+        if existing is not None:
+            return existing
+
+        components: Dict[str, Any] = {}
+        for name, repo in dict(getattr(variant, "shared_components", {}) or {}).items():
+            components[name] = self._load_component(ctx, repo, name)
+        store[key] = components
+
+        # Pin the shared stack in the ModelCache so it is never evicted.
+        cache = getattr(self, "_model_cache", None)
+        if cache is not None and components:
+            try:
+                from .inference_memory import estimate_pipeline_size_gb as _est
+                size = 0.0
+                for mod in components.values():
+                    try:
+                        size += float(_est(mod) or 0.0)
+                    except Exception:
+                        pass
+                cache.mark_loaded_to_vram(key, components, max(0.1, size), pinned=True)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("shared-base pin failed for %s: %s", key, exc)
+        logger.info("Loaded + pinned shared base %s (%d components)", key, len(components))
+        return components
+
+    def _warn_component_mismatch(self, variant: Variant, variant_local_dirs: Dict[str, str]) -> None:
+        """#337 safety: warn when a variant ships its OWN text_encoder/VAE that
+        differs from the declared shared base. Pairing the shared CLIP with a
+        retrained UNet can yield subtly-wrong output; the SDK ignores the
+        variant's component (escape hatch: declare it as a standalone pipeline).
+        """
+        shared = dict(getattr(variant, "shared_components", {}) or {})
+        if not shared:
+            return
+        for slot, local in variant_local_dirs.items():
+            try:
+                root = Path(local)
+                if not root.is_dir():
+                    continue
+                for comp_name in shared:
+                    if (root / comp_name).is_dir():
+                        logger.warning(
+                            "variant slot %r ships its own %r which DIFFERS from the "
+                            "declared SharedBase component; it is being IGNORED (the "
+                            "shared base is used by reference). If this fine-tune "
+                            "retrained %r, declare it as a standalone full pipeline "
+                            "instead (issue #337).",
+                            slot, comp_name, comp_name,
+                        )
+            except Exception:
+                pass
+
+    def _assemble_variant_pipeline(self, ctx: RequestContext, variant: Variant) -> Any:
+        """Build a variant pipeline = shared base (by reference) + variant slot.
+
+        Loads the shared components once (pinned), loads this variant's swap
+        slot(s), and constructs the tenant-declared pipeline class passing the
+        SAME shared component objects so VRAM holds one copy of the shared
+        stack and only the per-model slot is duplicated.
+        """
+        from .api.binding import _qualname  # local import to avoid cycle at import time
+
+        shared = self._ensure_shared_base(ctx, variant)
+
+        # Load this variant's swap slot(s).
+        variant_modules: Dict[str, Any] = {}
+        variant_local_dirs: Dict[str, str] = {}
+        for slot, repo in dict(getattr(variant, "variant_slots", {}) or {}).items():
+            variant_local_dirs[slot] = self._download_repo_local(ctx, repo)
+            variant_modules[slot] = self._load_component(ctx, repo, slot)
+
+        # Component-compatibility warning (variant ships its own TE/VAE).
+        self._warn_component_mismatch(variant, variant_local_dirs)
+
+        # Resolve the pipeline class from its FQN and construct it from the
+        # shared + variant component objects. diffusers pipelines accept their
+        # components as constructor kwargs (containers of references).
+        pipeline_cls = self._resolve_class_fqn(variant.pipeline_class_fqn)
+        ctor_kwargs: Dict[str, Any] = {}
+        ctor_kwargs.update(shared)
+        ctor_kwargs.update(variant_modules)
+        pipe = pipeline_cls(**ctor_kwargs)
+        try:
+            if torch is not None and str(getattr(ctx, "device", "")).startswith("cuda") and hasattr(pipe, "to"):
+                pipe = pipe.to("cuda")
+        except Exception:
+            pass
+        return pipe
+
+    @staticmethod
+    def _resolve_class_fqn(fqn: str) -> Any:
+        """Import a class from its ``module.Qualname`` string."""
+        import importlib
+        mod_name, _, cls_name = str(fqn or "").rpartition(".")
+        if not mod_name:
+            raise ValueError(f"cannot resolve pipeline class from FQN {fqn!r}")
+        mod = importlib.import_module(mod_name)
+        obj: Any = mod
+        for part in cls_name.split("."):
+            obj = getattr(obj, part)
+        return obj
+
+    def _ensure_variant_vram_ready(self, ctx: RequestContext, variant: Variant) -> Any:
+        """Resolve a variant to a VRAM-ready assembled pipeline (3-tier promote).
+
+        - VRAM hit: reuse the hot pipeline (zero cost), touch recency.
+        - CPU (warm) hit: promote back over PCIe.
+        - DISK / ABSENT: assemble (download as needed) + register in VRAM.
+
+        Emits a debounced residency-tier signal on every transition.
+        """
+        cache = getattr(self, "_model_cache", None)
+        canon = self._canonical_cache_key_for_ref(variant.ref) or variant.ref
+
+        if cache is not None:
+            if cache.is_in_vram(canon):
+                pipe = cache.get_pipeline(canon)
+                if pipe is not None:
+                    self._emit_residency_tier(canon, "VRAM")
+                    return pipe
+            # Warm CPU tier — promote back to VRAM via PCIe.
+            if canon in set(cache.get_cpu_models()):
+                if cache._promote_from_cpu(canon, device="cuda"):
+                    self._emit_residency_tier(canon, "VRAM")
+                    pipe = cache.get_pipeline(canon)
+                    if pipe is not None:
+                        return pipe
+
+        # Cold path: assemble (downloads what is missing) then register in VRAM.
+        self._emit_residency_tier(canon, "DOWNLOADING")
+        pipe = self._assemble_variant_pipeline(ctx, variant)
+        if cache is not None:
+            try:
+                from .inference_memory import estimate_pipeline_size_gb as _est
+                size = float(_est(pipe) or 0.0)
+                if size <= 0.1:
+                    size = 5.0
+                cache.mark_loaded_to_vram(canon, pipe, size)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("variant VRAM registration failed for %s: %s", canon, exc)
+        self._emit_residency_tier(canon, "VRAM")
+        return pipe
+
+    def _resolve_dispatch_injection_kwargs(
+        self,
+        ctx: RequestContext,
+        sspec: "_SerialWorkerSpec",
+        input_obj: Any,
+    ) -> Dict[str, Any]:
+        """Resolve per-request handler-injected model slots (#337).
+
+        For each dispatch slot the handler declares: read the discriminator
+        field off the decoded payload, look up the variant in the dispatch
+        table, ensure it is VRAM-ready, and return ``{param_name: pipeline}``
+        to splat into the bound method.
+        """
+        injections = dict(getattr(sspec, "dispatch_injections", {}) or {})
+        if not injections:
+            return {}
+        out: Dict[str, Any] = {}
+        for param_name, binding in injections.items():
+            field = getattr(binding, "field", "")
+            try:
+                key = getattr(input_obj, field)
+            except Exception as exc:
+                raise ValueError(
+                    f"dispatch slot {param_name!r}: payload has no discriminator "
+                    f"field {field!r}"
+                ) from exc
+            key = str(getattr(key, "value", key))  # StringEnum -> str
+            table = dict(getattr(binding, "table", {}) or {})
+            pick = table.get(key)
+            if pick is None:
+                raise ValueError(
+                    f"dispatch slot {param_name!r}: payload {field}={key!r} is not "
+                    f"in the dispatch table (keys: {sorted(table.keys())})"
+                )
+            if isinstance(pick, Variant):
+                pipe = self._ensure_variant_vram_ready(ctx, pick)
+            else:
+                # Plain Repo / HFRepo (full pipeline) or LoRA overlay Repo — route
+                # through the existing per-request injection path, which already
+                # handles download + VRAM caching + LoRA attach.
+                requested_type = (getattr(sspec, "dispatch_injection_types", {}) or {}).get(param_name) or Any
+                inj = InjectionSpec(param_name=param_name, param_type=requested_type, binding=pick)
+                model_id = self._dispatch_pick_model_id(pick)
+                pipe = self._resolve_injected_value(ctx, requested_type, model_id, inj)
+                canon = self._canonical_cache_key_for_ref(model_id) or model_id
+                self._emit_residency_tier(canon, "VRAM")
+            # Optional type check against the declared handler annotation.
+            # (typing.Any is a class in py3.11+, so isinstance(x, Any) would
+            # raise — explicitly skip Any / object as "no constraint".)
+            requested_type = (getattr(sspec, "dispatch_injection_types", {}) or {}).get(param_name)
+            if (
+                isinstance(requested_type, type)
+                and requested_type not in (object, Any)
+                and not isinstance(pipe, requested_type)
+            ):
+                raise ValueError(
+                    f"dispatch slot {param_name!r}: assembled pipeline is "
+                    f"{type(pipe).__name__}, expected {requested_type.__name__}"
+                )
+            out[param_name] = pipe
+        return out
+
+    @staticmethod
+    def _dispatch_pick_model_id(pick: Repo) -> str:
+        """Canonical model id for a non-variant dispatch pick (Repo/HFRepo)."""
+        rev = str(getattr(pick, "_revision", "") or "").strip()
+        ref = pick.ref + (f"@{rev}" if rev else "")
+        return ref
 
     def _execute_serial_class_request(
         self,
@@ -8705,13 +9155,22 @@ class Worker:
 
                 input_obj = msgspec.msgpack.decode(input_payload, type=sspec.payload_type)
 
+                # #337: resolve any per-request handler-injected model slots
+                # (dispatch over SharedBase variants / plain Repos / LoRA). The
+                # GPU semaphore is already held here, so the variant assembly /
+                # 3-tier promote happens atomically w.r.t. other loads + inference.
+                inject_kwargs = self._resolve_dispatch_injection_kwargs(ctx, sspec, input_obj)
+
                 # #324: if a micro-batch aggregator is registered for this slug,
                 # route through it. Otherwise call the bound method directly.
                 aggregator = self._micro_batch_aggregators.get(sspec.name)
-                if aggregator is not None and sspec.output_mode == "single":
+                if aggregator is not None and sspec.output_mode == "single" and not inject_kwargs:
                     # Aggregator drains on the BatchedWorker asyncio loop —
                     # reusing it means one shared loop hosts every aggregator
                     # in the worker process (no per-function thread overhead).
+                    # Per-request model injection is incompatible with batching
+                    # (different requests may select different variants), so a
+                    # slot-injected request bypasses the aggregator.
                     loop = self._ensure_batched_loop()
                     if aggregator._loop is None:
                         aggregator.start(loop)
@@ -8731,7 +9190,7 @@ class Worker:
                     # I/O-bound handlers scale to thousands in flight.
                     loop = self._ensure_batched_loop()
                     fut = asyncio.run_coroutine_threadsafe(
-                        sspec.method(ctx, input_obj), loop
+                        sspec.method(ctx, input_obj, **inject_kwargs), loop
                     )
                     result = fut.result()
                 elif sspec.is_async:
@@ -8741,7 +9200,7 @@ class Worker:
                     # incremental branch below via _drain_async_incremental.
                     result = None
                 else:
-                    result = sspec.method(ctx, input_obj)
+                    result = sspec.method(ctx, input_obj, **inject_kwargs)
 
                 if ctx.is_canceled():
                     raise CanceledError("canceled")
@@ -8752,6 +9211,7 @@ class Worker:
                         ctx=ctx,
                         sspec=sspec,
                         input_obj=input_obj,
+                        inject_kwargs=inject_kwargs,
                     )
                     output_payload = b""
                     success = True
