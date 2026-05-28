@@ -29,6 +29,27 @@ polo
 interpreter — no docker-compose, no orchestrator. stdout for results,
 stderr for events. See [../../docs/local-dev.md](../../docs/local-dev.md).
 
+## Persistent dev server (warm, no cold start per poke)
+
+`gen-worker run` reloads on every call. To keep models resident and fire many
+requests warm, run `gen-worker serve` once and hit it with `gen-worker invoke`:
+
+```bash
+# terminal 1 — boot once, models held warm; Ctrl-C to stop
+$ gen-worker serve
+gen-worker serve: ready
+
+# terminal 2 — address by function NAME; no --class/--method
+$ gen-worker invoke marco_polo '{"text":"marco"}'
+{"response":"polo"}
+$ echo '{"text":"marco"}' | gen-worker invoke marco_polo -   # stdin works too
+```
+
+`serve` listens on `./.gen-worker.sock` (override `--socket`) and also reads
+NDJSON requests from its own stdin. Transport is NDJSON over stdin/UDS locally
+vs gRPC in production — see the fidelity caveat in
+[../../docs/local-dev.md](../../docs/local-dev.md).
+
 ## Files
 - `src/marco_polo/main.py` — 15 lines of handler.
 - `endpoint.toml`, `pyproject.toml` — Tensorhub generates the Dockerfile for this endpoint from managed build hints.

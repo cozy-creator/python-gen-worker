@@ -121,7 +121,7 @@ def iter_transformers_text_deltas(
             from transformers import StoppingCriteria, StoppingCriteriaList
 
             class _CancelStopCriteria(StoppingCriteria):
-                def __call__(self, input_ids: Any, scores: Any, **kwargs: Any) -> bool:
+                def __call__(self, _input_ids: Any, _scores: Any, **_kwargs: Any) -> bool:
                     try:
                         return bool(_checker())
                     except Exception:

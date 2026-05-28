@@ -2512,8 +2512,6 @@ class Worker:
         for this slice; the tenant builds + drives the engine inside their
         setup() body for now.
         """
-        from .api.streaming import _SIGNAL_TYPES  # local import to avoid cycle
-
         if not batched_inference_methods:
             logger.warning(
                 "@batched_inference class %r declares no .function methods; "
@@ -2700,9 +2698,27 @@ class Worker:
             if isinstance(binding, Dispatch):
                 dispatch_slots[slot_name] = binding
 
+        # ----- Function fan-out via parametrize= (#339 §2) ----------------
+        # A parametrize= table hosts ONE @invocable body stamped into N
+        # routable functions. Expand into one (method_name, fn_spec, resources,
+        # payload_override) row per Case; the shared method body backs them all.
+        parametrize = tuple(getattr(ep_spec, "parametrize", ()) or ())
+        expanded: List[tuple] = []  # (method_name, fn_spec, resources, payload_override)
+        if parametrize and function_methods:
+            base_method_name, _u, base_fn_spec = function_methods[0]
+            for case in parametrize:
+                case_res = case.resources if case.resources is not None else resources
+                case_fn_spec = msgspec.structs.replace(base_fn_spec, name=case.name)
+                expanded.append(
+                    (base_method_name, case_fn_spec, case_res, case.input)
+                )
+        else:
+            for method_name, _unbound, fn_spec in function_methods:
+                expanded.append((method_name, fn_spec, resources, None))
+
         registered = 0
 
-        for method_name, _unbound, fn_spec in function_methods:
+        for method_name, fn_spec, fn_resources, payload_override in expanded:
             method = getattr(instance, method_name, None)
             if method is None or not callable(method):
                 logger.warning(
@@ -2745,6 +2761,12 @@ class Worker:
                 )
                 continue
 
+            # #339 §2: a parametrize Case may override the payload struct per
+            # row (input=...). The shared method body still receives the decoded
+            # payload; only the decode/schema type differs.
+            if payload_override is not None:
+                payload_type = payload_override
+
             # #337: build the per-request handler-injection map for THIS method.
             # Only the dispatch slots the method actually declares as params are
             # injected; the rest of the class's dispatch slots belong to other
@@ -2786,7 +2808,7 @@ class Worker:
                 name=slug,
                 instance=instance,
                 method=method,
-                resources=resources,
+                resources=fn_resources,
                 ctx_param=ctx_param,
                 payload_param=payload_param,
                 payload_type=payload_type,
@@ -2802,7 +2824,7 @@ class Worker:
                 dispatch_injection_types=method_injection_types,
             )
             self._serial_class_specs[slug] = sspec
-            self._discovered_resources[slug] = resources
+            self._discovered_resources[slug] = fn_resources
             # Mirror schemas into _function_schemas so the function-capability
             # advertisement path picks them up. Shape:
             # (input, output, delta, injection).
@@ -5375,7 +5397,7 @@ class Worker:
         if self._startup_timeout_triggered:
             raise RuntimeError("startup_timeout_unregistered")
 
-    def _handle_interrupt(self, sig: int, frame: Optional[Any]) -> None:
+    def _handle_interrupt(self, sig: int, _frame: Optional[Any]) -> None:
         """Handle interrupt signal (Ctrl+C / SIGTERM)."""
         logger.info(f"Received signal {sig}, shutting down gracefully.")
         # gen-orchestrator #346 (bonus): announce that this worker is going

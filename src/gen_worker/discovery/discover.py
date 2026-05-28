@@ -746,6 +746,41 @@ def _load_endpoint_manifest_toml(root: Path) -> EndpointToml:
     return load_endpoint_toml(p)
 
 
+def _assert_unique_function_names(functions: List[Dict[str, Any]]) -> None:
+    """Fail the build if two functions share a routable name in one endpoint.
+
+    Function names are the endpoint's external routing identifiers
+    (``owner/endpoint/<name>``, the wire ``function_name``, the
+    ``invoke <name>`` / ``serve --function <name>`` key), so they MUST be
+    unique within an endpoint. A collision is an author error — e.g. two
+    classes each exposing a generic ``name="generate"`` without an explicit
+    override. The worker historically only logged ``Handler name conflict;
+    skipping`` and silently dropped one route; fail loudly at
+    discovery/endpoint.lock build time instead.
+    """
+    by_name: Dict[str, List[Dict[str, Any]]] = {}
+    for fn in functions:
+        nm = str(fn.get("name") or "").strip()
+        if nm:
+            by_name.setdefault(nm, []).append(fn)
+    dupes = {nm: fns for nm, fns in by_name.items() if len(fns) > 1}
+    if not dupes:
+        return
+    lines = []
+    for nm, fns in sorted(dupes.items()):
+        where = ", ".join(
+            f"{f.get('class_name') or '<module-level>'} in "
+            f"{f.get('module') or f.get('declared_module') or '?'}"
+            for f in fns
+        )
+        lines.append(f"  {nm!r}: defined {len(fns)}x ({where})")
+    raise ValueError(
+        "duplicate function name(s) within the endpoint — function names are the "
+        "external routing identifiers and must be unique. Give each method an "
+        "explicit @invocable(name=...):\n" + "\n".join(lines)
+    )
+
+
 def discover_functions(root: Optional[Path] = None, *, main_module: str | None = None) -> List[Dict[str, Any]]:
     """
     Discover all @inference decorated functions in the project.
@@ -884,6 +919,7 @@ def discover_functions(root: Optional[Path] = None, *, main_module: str | None =
                 else:
                     fn_meta = _extract_function_metadata(obj, module_name)
                 functions.append(fn_meta)
+        _assert_unique_function_names(functions)
         return functions
 
     # Fallback: no main_module declared. Scan the filesystem for decorated
@@ -967,6 +1003,7 @@ def discover_functions(root: Optional[Path] = None, *, main_module: str | None =
                 print(f"warning: failed to extract metadata from {name}: {e}", file=sys.stderr)
                 raise
 
+    _assert_unique_function_names(functions)
     return functions
 
 
@@ -988,15 +1025,19 @@ def _extract_class_function_methods(
     if not function_methods:
         return []
 
+    def _res_to_dict(res: Any) -> Dict[str, Any]:
+        d: Dict[str, Any] = {}
+        if res is not None:
+            try:
+                raw = msgspec.to_builtins(res)
+                if isinstance(raw, dict):
+                    d.update(raw)
+            except Exception:
+                pass
+        return d
+
     # Class-level resources serialize once; shared across all functions.
-    res_dict: Dict[str, Any] = {}
-    if spec.resources is not None:
-        try:
-            raw = msgspec.to_builtins(spec.resources)
-            if isinstance(raw, dict):
-                res_dict.update(raw)
-        except Exception:
-            pass
+    res_dict: Dict[str, Any] = _res_to_dict(spec.resources)
 
     # Class-level bindings — same shape as old function-decorator bindings,
     # keyed by setup() kwarg name. For each method, the bindings block is
@@ -1006,8 +1047,32 @@ def _extract_class_function_methods(
     for key, binding in bindings_map.items():
         bindings_block[key] = _binding_to_manifest(binding, None, key)
 
+    # ----- Function fan-out via parametrize= (#339 §2) --------------------
+    # When the class declares a parametrize= table it hosts ONE @invocable
+    # body stamped into N routable functions. Expand each (attr_name, method,
+    # fn_spec) tuple into one tuple per Case, carrying per-row overrides for
+    # the function name, Resources, model binding, and input struct.
+    parametrize = tuple(getattr(spec, "parametrize", ()) or ())
+    work: List[tuple] = []  # (attr_name, method, fn_spec, res_dict, bindings_block, payload_override)
+    if parametrize:
+        attr_name, method, fn_spec = function_methods[0]
+        for case in parametrize:
+            case_res = _res_to_dict(case.resources) if case.resources is not None else res_dict
+            case_bindings = bindings_block
+            if case.model is not None:
+                # Override the single declared model slot (or add a 'model'
+                # slot when the class declares none) with this row's binding.
+                slot = next(iter(bindings_map), "model")
+                case_bindings = dict(bindings_block)
+                case_bindings[slot] = _binding_to_manifest(case.model, None, slot)
+            case_fn_spec = msgspec.structs.replace(fn_spec, name=case.name)
+            work.append((attr_name, method, case_fn_spec, case_res, case_bindings, case.input))
+    else:
+        for attr_name, method, fn_spec in function_methods:
+            work.append((attr_name, method, fn_spec, res_dict, bindings_block, None))
+
     out: List[Dict[str, Any]] = []
-    for attr_name, method, fn_spec in function_methods:
+    for attr_name, method, fn_spec, fn_res_dict, fn_bindings_block, payload_override in work:
         # Method signature: (self, ctx, payload) — skip self.
         hints = typing.get_type_hints(method, include_extras=True)
         sig = inspect.signature(method)
@@ -1019,17 +1084,26 @@ def _extract_class_function_methods(
                 f"Got params: {[p.name for p in params]}"
             )
 
-        # First non-self param is ctx; second is payload struct.
+        # First non-self param is ctx; second is payload struct. A parametrize
+        # Case may override the payload type per-row (input=...); otherwise we
+        # read it off the shared method's annotation.
         ctx_name = params[0].name
         payload_param = params[1]
-        payload_ann = hints.get(payload_param.name)
-        if payload_ann is None or not _is_msgspec_struct(payload_ann):
-            raise ValueError(
-                f"{cls.__name__}.{attr_name}: payload param {payload_param.name!r} "
-                f"must be a msgspec.Struct (got {payload_ann!r})"
-            )
-
-        payload_type = payload_ann
+        if payload_override is not None:
+            if not _is_msgspec_struct(payload_override):
+                raise ValueError(
+                    f"{cls.__name__}.{attr_name}: parametrize Case input= must be "
+                    f"a msgspec.Struct (got {payload_override!r})"
+                )
+            payload_type = payload_override
+        else:
+            payload_ann = hints.get(payload_param.name)
+            if payload_ann is None or not _is_msgspec_struct(payload_ann):
+                raise ValueError(
+                    f"{cls.__name__}.{attr_name}: payload param {payload_param.name!r} "
+                    f"must be a msgspec.Struct (got {payload_ann!r})"
+                )
+            payload_type = payload_ann
 
         ret = hints.get("return")
         if ret is None:
@@ -1101,8 +1175,8 @@ def _extract_class_function_methods(
             "kind": spec.kind,
             "sub_kind": spec.sub_kind,
             "runtime": spec.runtime,
-            "resources": res_dict,
-            "bindings": bindings_block,
+            "resources": fn_res_dict,
+            "bindings": fn_bindings_block,
             "payload_type": _type_id(payload_type),
             "payload_schema_sha256": input_sha,
             "input_schema": input_schema,

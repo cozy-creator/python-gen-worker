@@ -20,6 +20,7 @@ from typing import Iterator
 
 import msgspec
 
+from gen_worker import invocable
 from gen_worker.api.decorators import conversion
 from gen_worker.conversion import ConversionContext, ProducedFlavor
 
@@ -43,7 +44,7 @@ class FromScratch:
     def setup(self) -> None:
         pass
 
-    @conversion.function(name="generate")
+    @invocable(name="generate")
     def generate(
         self,
         ctx: ConversionContext,
@@ -74,9 +75,6 @@ class FromScratch:
         # longer stamped on produced checkpoints — server-side inference
         # reads the uploaded bytes for these.
         yield ProducedFlavor(path=weights_path, flavor="fp32")
-
-    def shutdown(self) -> None:
-        pass
 
 
 __all__ = ["FromScratchInput", "FromScratch"]

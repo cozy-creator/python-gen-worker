@@ -47,12 +47,14 @@ from .api.binding import (
     dispatch,
 )
 from .api.decorators import (
+    Case,
     Resources,
     batched_inference,
     conversion,
     dataset,
     inference,
     inference_function,  # hard-cut migration stub (raises ImportError if called)
+    invocable,
     realtime_function,   # hard-cut migration stub
     training,
     training_function,   # hard-cut migration stub
@@ -150,12 +152,14 @@ def __getattr__(name: str):
 
 __all__ = [
     # Decorators + binding model (#322 class-only).
+    "invocable",
     "inference",
     "batched_inference",
     "training",
     "dataset",
     "conversion",
     "Resources",
+    "Case",
     "Repo",
     "HFRepo",
     "CivitaiRepo",

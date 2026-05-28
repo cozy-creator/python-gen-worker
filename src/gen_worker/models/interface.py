@@ -59,7 +59,7 @@ class ModelManager(ABC):
     """
 
     @abstractmethod
-    def load(self, model_ref: str, local_path: Optional[str] = None, **opts: Any) -> Any:
+    def load(self, model_ref: str, local_path: Optional[str] = None, **_opts: Any) -> Any:
         pass
 
     @abstractmethod

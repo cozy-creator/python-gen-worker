@@ -380,9 +380,40 @@ class ModelCache:
     # or an in-flight inference on the same device.
     # -------------------------------------------------------------------------
 
+    @staticmethod
+    def _pipeline_manages_own_device(pipeline: Any) -> bool:
+        """True when diffusers offload hooks already own device placement.
+
+        ``enable_model_cpu_offload`` / ``enable_sequential_cpu_offload`` /
+        ``enable_group_offload`` install accelerate hooks that stream each
+        component on/off the GPU per forward pass. For such a pipeline a manual
+        ``.to("cuda")`` either WARNS and loses the savings (model offload) or
+        outright RAISES (sequential / group offload), and ``.to("cpu")`` is a
+        no-op for residency since the bulk of the weights already live on CPU.
+        So the warm tier dance must be a TIER-ONLY transition: we leave the
+        pipeline's hooks alone and just record the move in the cache. The mode
+        is stamped on the pipeline by ``inference_memory.apply_low_vram_config``
+        as ``_cozy_low_vram_mode``.
+        """
+        mode = getattr(pipeline, "_cozy_low_vram_mode", None)
+        return mode in ("model_offload", "group_offload", "sequential")
+
     def _move_pipeline_to_device(self, pipeline: Any, device: str) -> None:
-        """Best-effort ``pipeline.to(device)`` for a diffusers pipeline / module."""
+        """Best-effort ``pipeline.to(device)`` for a diffusers pipeline / module.
+
+        Skips the move for offload-managed pipelines (see
+        ``_pipeline_manages_own_device``) — those keep their accelerate hooks
+        and a manual ``.to()`` would either raise or undo the offload. The cache
+        still records the tier transition; the hooks handle real placement.
+        """
         if pipeline is None:
+            return
+        if self._pipeline_manages_own_device(pipeline):
+            logger.info(
+                "ModelCache: pipeline is offload-managed (%s); skipping .to(%s), "
+                "tier transition only",
+                getattr(pipeline, "_cozy_low_vram_mode", "?"), device,
+            )
             return
         try:
             to = getattr(pipeline, "to", None)

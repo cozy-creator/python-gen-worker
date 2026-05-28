@@ -24,7 +24,6 @@ from .api.types import Asset
 
 if TYPE_CHECKING:
     import numpy as np
-    from PIL.Image import Image as _PILImage
 
 
 def _local_path(asset: Asset) -> Path:
@@ -54,7 +53,7 @@ def exists(asset: Asset) -> bool:
     return p is not None and Path(p).exists()
 
 
-def read_image(asset: Asset, mode: str = "RGB") -> "_PILImage":
+def read_image(asset: Asset, mode: str = "RGB") -> Any:
     """Decode an Asset as a PIL image.
 
     Requires Pillow (``pip install gen-worker[images]``). If ``mode`` is set
@@ -124,7 +123,7 @@ def read_audio(
 def write_image(
     ctx: Any,
     ref: str,
-    image: "_PILImage",
+    image: Any,
     *,
     format: str = "webp",
     quality: int = 90,

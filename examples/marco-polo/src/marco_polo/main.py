@@ -1,6 +1,6 @@
 # source-hash bust: 2026-05-15T01:25Z (force-fresh enqueue after API split)
 import msgspec
-from gen_worker import RequestContext, inference
+from gen_worker import RequestContext, inference, invocable
 
 
 class MarcoPoloInput(msgspec.Struct):
@@ -16,7 +16,7 @@ class MarcoPolo:
     def setup(self) -> None:
         pass
 
-    @inference.function(name="marco_polo")
+    @invocable(name="marco_polo")
     def marco_polo(self, ctx: RequestContext, data: MarcoPoloInput) -> MarcoPoloOutput:
         """Returns 'polo' when input is 'marco'; otherwise a fallback response."""
         # Deterministic minimal handler used for latency tests.
@@ -26,7 +26,4 @@ class MarcoPolo:
             return MarcoPoloOutput(response="polo")
 
         return MarcoPoloOutput(response="Bro you're supposed to say 'marco'!")
-
-    def shutdown(self) -> None:
-        pass
 # bust 1778809586

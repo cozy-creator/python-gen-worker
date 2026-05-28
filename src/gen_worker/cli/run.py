@@ -642,7 +642,7 @@ class _SigintHandler:
             pass
         self._installed = False
 
-    def _on_sigint(self, signum: int, frame: Any) -> None:
+    def _on_sigint(self, _signum: int, _frame: Any) -> None:
         now = time.monotonic()
         if self._last_at and (now - self._last_at) < 2.0:
             # Second hit within 2s — hard exit.
@@ -701,6 +701,115 @@ class _UsageError(Exception):
 
 
 # --------------------------------------------------------------------------
+# Shared loading + dispatch (reused by `run` and `serve`)
+# --------------------------------------------------------------------------
+
+def load_endpoint_module(
+    *, config_path: Optional[str], module: Optional[str],
+) -> Tuple[Path, Any]:
+    """Resolve endpoint.toml (or ``--module``), prime sys.path, import `main`.
+
+    Returns ``(project_root, imported_module)``. Shared by ``run`` and
+    ``serve`` so both discover endpoint classes the same way. Raises
+    ``_UsageError`` on import / config failure (exit 2).
+    """
+    if module:
+        root = Path.cwd().resolve()
+        main_module = module
+    else:
+        root, main_module = _load_endpoint_toml_main(config_path)
+    _ensure_sys_path(root)
+    try:
+        mod = importlib.import_module(main_module)
+    except Exception as e:
+        raise _UsageError(
+            f"failed to import module {main_module!r}: {e}"
+        ) from e
+    return root, mod
+
+
+def discover_candidates(mod: Any) -> List[_SelectedFunction]:
+    """Collect every @inference.function method, exit-2 if none exist."""
+    candidates = _collect_class_methods(mod)
+    if not candidates:
+        raise _UsageError(
+            f"no @inference / @training / @conversion / @dataset classes "
+            f"with @inference.function methods found in module "
+            f"{getattr(mod, '__name__', '?')!r}"
+        )
+    return candidates
+
+
+def instantiate_class(cls: type) -> Any:
+    """Instantiate a discovered endpoint class (no setup yet)."""
+    return cls()
+
+
+def run_setup(instance: Any, resolved_models: Dict[str, str]) -> None:
+    """Call ``instance.setup(**resolved_models)`` once, tolerating bare
+    ``def setup(self)`` signatures (matches ``_run_inner`` behavior).
+    """
+    setup_fn = getattr(instance, "setup", None)
+    if setup_fn is None:
+        return
+    try:
+        setup_fn(**resolved_models)
+    except TypeError:
+        setup_fn()
+
+
+def dispatch_request(
+    *,
+    selected: _SelectedFunction,
+    instance: Any,
+    ctx: Any,
+    raw_bytes: bytes,
+    offline: bool,
+    emit: Callable[[Dict[str, Any]], None],
+    write_event: Callable[[str, Any], None],
+    on_resolved: Optional[Callable[[Dict[str, str]], None]] = None,
+) -> int:
+    """Decode payload → resolve models → (optional setup) → invoke → encode.
+
+    This is the dispatch half of ``_run_inner`` factored out so ``serve``
+    reuses the exact code path. After model resolution, ``on_resolved`` is
+    invoked with the ``{param: local_path}`` map — ``run`` uses it to call
+    ``setup(**resolved)`` per-invocation; ``serve`` passes ``None`` because it
+    already ran ``setup`` once at boot. ``write_event(kind, value)`` emits one
+    result / yield event.
+
+    Returns an EXIT_* code. Raises ``_UsageError`` / ``_ModelResolutionError``
+    / ``CanceledError`` for the caller's error mapping.
+    """
+    stripped_bytes, overrides = _extract_models_override(raw_bytes)
+    payload = _decode_payload(stripped_bytes, selected.payload_type)
+
+    resolved_models = _resolve_models_for_setup(
+        bindings=selected.bindings,
+        payload=payload,
+        overrides=overrides,
+        offline=offline,
+        emit=emit,
+    )
+    if on_resolved is not None:
+        on_resolved(resolved_models)
+
+    bound_method = getattr(instance, selected.attr_name)
+    result = bound_method(ctx, payload)
+    if selected.is_generator or inspect.isgenerator(result):
+        count = 0
+        for item in result:
+            if ctx.is_canceled():
+                raise CanceledError("canceled")
+            write_event("yield", item)
+            count += 1
+        write_event("result", {"yielded": count})
+    else:
+        write_event("result", result)
+    return EXIT_OK
+
+
+# --------------------------------------------------------------------------
 # Handler
 # --------------------------------------------------------------------------
 
@@ -721,52 +830,100 @@ def _handle_run(args: argparse.Namespace) -> int:
         return EXIT_SIGINT
 
 
-def _run_inner(args: argparse.Namespace) -> int:
-    # 1. Load endpoint.toml + import the main module.
-    if args.module:
-        # --module wins; cwd is the project root.
-        root = Path.cwd().resolve()
-        main_module = args.module
-    else:
-        root, main_module = _load_endpoint_toml_main(args.config_path)
-    _ensure_sys_path(root)
+def _warm_serve_socket() -> Optional[Path]:
+    """Return the default serve socket path if a warm ``gen-worker serve`` is
+    listening, else None (#340).
+
+    A ``gen-worker serve`` at the default ``./.gen-worker.sock`` already has the
+    endpoint loaded and ``setup()`` run. When present, ``run`` attaches to it
+    rather than paying the cold-load cost again. Importing ``serve`` lazily
+    keeps it off the hot import path.
+    """
+    from .serve import DEFAULT_SOCKET_PATH
+
+    sock = Path(DEFAULT_SOCKET_PATH).resolve()
+    try:
+        is_sock = sock.exists() and sock.is_socket()
+    except OSError:
+        is_sock = False
+    return sock if is_sock else None
+
+
+def _run_via_warm_serve(
+    args: argparse.Namespace, sock: Path, raw_bytes: bytes
+) -> int:
+    """Dispatch one request through a running ``gen-worker serve`` (#340).
+
+    Reuses ``cli/invoke.py``'s socket client. ``run`` addresses by
+    class/method, but serve addresses by FUNCTION NAME — so we still import the
+    module to resolve the selected function's wire name (cheap; no model load).
+    """
+    from . import invoke as invoke_mod
+
+    _root, mod = load_endpoint_module(
+        config_path=args.config_path, module=args.module,
+    )
+    candidates = discover_candidates(mod)
+    selected = _select_function(
+        candidates, cls_name=args.cls_name, method_name=args.method_name,
+    )
 
     try:
-        mod = importlib.import_module(main_module)
-    except Exception as e:
-        raise _UsageError(
-            f"failed to import module {main_module!r}: {e}"
-        ) from e
+        payload_obj = json.loads(raw_bytes.decode("utf-8") or "{}")
+    except json.JSONDecodeError as e:
+        raise _UsageError(f"--payload is not valid JSON: {e}") from e
+
+    request = {"function": selected.fn_name, "payload": payload_obj}
+    resp = invoke_mod._send_request(sock, request)
+
+    if not resp.get("ok", False):
+        err = resp.get("error") or {}
+        kind = err.get("kind", "error")
+        msg = err.get("message", "unknown error")
+        sys.stderr.write(f"gen-worker run: {kind}: {msg}\n")
+        if kind in ("usage", "not_found"):
+            return EXIT_USAGE
+        if kind == "model_resolution":
+            return EXIT_MODEL_RESOLUTION
+        if kind == "canceled":
+            return EXIT_SIGINT
+        return EXIT_USER_EXCEPTION
+
+    for ev in resp.get("events") or []:
+        _write_stdout_event(
+            ev.get("event", "result"), ev.get("value"), pretty=bool(args.pretty)
+        )
+    return EXIT_OK
+
+
+def _run_inner(args: argparse.Namespace) -> int:
+    # 0. Read the payload up front (decode happens later / on the server).
+    raw_bytes = _read_payload_bytes(inline=args.payload, path=args.payload_file)
+
+    # #340 auto-attach: if a warm `gen-worker serve` is listening on the
+    # default socket, dispatch through it (endpoint already loaded + setup run)
+    # instead of cold-loading. Falls back to the one-shot path when no server
+    # is up, preserving all of `run`'s existing flags/behavior.
+    warm_sock = _warm_serve_socket()
+    if warm_sock is not None:
+        return _run_via_warm_serve(args, warm_sock, raw_bytes)
+
+    # 1. Load endpoint.toml + import the main module.
+    _root, mod = load_endpoint_module(
+        config_path=args.config_path, module=args.module,
+    )
 
     # 2. Discover @inference.function methods on every endpoint class.
-    candidates = _collect_class_methods(mod)
-    if not candidates:
-        raise _UsageError(
-            f"no @inference / @training / @conversion / @dataset classes "
-            f"with @inference.function methods found in {main_module!r}"
-        )
+    candidates = discover_candidates(mod)
     selected = _select_function(
         candidates,
         cls_name=args.cls_name,
         method_name=args.method_name,
     )
 
-    # 3. Read + decode payload (with _models override extraction).
-    raw_bytes = _read_payload_bytes(inline=args.payload, path=args.payload_file)
-    stripped_bytes, overrides = _extract_models_override(raw_bytes)
-    payload = _decode_payload(stripped_bytes, selected.payload_type)
-
-    # 4. Resolve every binding to a local path / loader-ready string.
     from .local_context import _stderr_emitter
-    resolved_models = _resolve_models_for_setup(
-        bindings=selected.bindings,
-        payload=payload,
-        overrides=overrides,
-        offline=bool(args.offline),
-        emit=_stderr_emitter,
-    )
 
-    # 5. Build the local context for this kind.
+    # 4. Build the local context for this kind.
     ctx = build_local_context(
         kind=selected.kind,
         allow_publish=bool(args.allow_publish),
@@ -778,38 +935,28 @@ def _run_inner(args: argparse.Namespace) -> int:
     if args.device:
         os.environ["GEN_WORKER_LOCAL_DEVICE"] = args.device
 
-    # 6. Instantiate the user class + call setup(**resolved_models) once.
-    instance = selected.cls()
-    setup_fn = getattr(instance, "setup", None)
-    if setup_fn is not None:
-        try:
-            setup_fn(**resolved_models)
-        except TypeError:
-            # Tenants who declared `def setup(self)` (no model kwargs) still
-            # work — bare setup is a valid choice when bindings are empty.
-            setup_fn()
+    # 5. Instantiate the user class. `run` calls setup() per-invocation, once
+    #    the models have been resolved against this request's payload — wired
+    #    via the on_resolved callback below.
+    instance = instantiate_class(selected.cls)
 
-    bound_method = getattr(instance, selected.attr_name)
+    def _write_event(kind: str, value: Any) -> None:
+        _write_stdout_event(kind, value, pretty=bool(args.pretty))
 
-    # 7. Install SIGINT handler around the user call.
+    # 6. Install SIGINT handler around the user call + dispatch.
     sig = _SigintHandler(ctx)
     sig.install()
     try:
-        result = bound_method(ctx, payload)
-        if selected.is_generator or inspect.isgenerator(result):
-            count = 0
-            for item in result:
-                if ctx.is_canceled():
-                    raise CanceledError("canceled")
-                _write_stdout_event("yield", item, pretty=bool(args.pretty))
-                count += 1
-            _write_stdout_event(
-                "result",
-                {"yielded": count},
-                pretty=bool(args.pretty),
-            )
-        else:
-            _write_stdout_event("result", result, pretty=bool(args.pretty))
+        return dispatch_request(
+            selected=selected,
+            instance=instance,
+            ctx=ctx,
+            raw_bytes=raw_bytes,
+            offline=bool(args.offline),
+            emit=_stderr_emitter,
+            write_event=_write_event,
+            on_resolved=lambda resolved: run_setup(instance, resolved),
+        )
     except CanceledError:
         raise
     except _UsageError:
@@ -828,5 +975,3 @@ def _run_inner(args: argparse.Namespace) -> int:
             except Exception:
                 # Best-effort cleanup.
                 pass
-
-    return EXIT_OK

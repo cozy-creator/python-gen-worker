@@ -225,6 +225,66 @@ If `endpoint.toml` is missing or you want to invoke a sibling module:
 gen-worker run --module my_pkg.alt_main --payload '{"prompt":"x"}'
 ```
 
+## Persistent dev server — `gen-worker serve` + `gen-worker invoke`
+
+`gen-worker run` reloads the model on **every** invocation — a fresh cold
+start per poke (minutes for a real model). For tight local iteration use
+`gen-worker serve`: it boots the endpoint **once** (imports `main`, runs
+`setup()` per class, holds the instances + loaded models VRAM-resident), then
+serves many requests warm. Ctrl-C tears down (`shutdown()` if present, socket
+removed, exit 0).
+
+One endpoint per `serve` process (matches prod: one worker = one release).
+`--config PATH` serves an endpoint outside the cwd; run several serves with
+distinct `--socket` paths to host multiple endpoints at once.
+
+Two transports, **one shared dispatch handler** (the same code path `run`
+uses):
+
+- **Unix domain socket (always on):** `serve` listens on `./.gen-worker.sock`
+  (override `--socket PATH`). Fire requests from another shell with
+  `gen-worker invoke`:
+
+  ```bash
+  # terminal 1
+  $ cd examples/marco-polo
+  $ gen-worker serve
+  gen-worker serve: listening on .../.gen-worker.sock (functions: marco_polo)
+  gen-worker serve: ready
+
+  # terminal 2 — address by FUNCTION NAME (no --class/--method)
+  $ gen-worker invoke marco_polo '{"text":"marco"}'
+  {"response":"polo"}
+  $ gen-worker invoke marco_polo @req.json          # curl-style @file
+  $ echo '{"text":"marco"}' | gen-worker invoke marco_polo -   # stdin
+  ```
+
+  If launching `serve` in the background, pass `--no-stdin` so it doesn't
+  consume the parent shell's stdin.
+
+- **stdin/stdout NDJSON (default, single process):** pipe a batch of
+  newline-delimited JSON requests in; get one NDJSON response line each. Logs
+  go to stderr. The process exits when stdin closes.
+
+  ```bash
+  $ printf '{"function":"marco_polo","payload":{"text":"marco"}}\n' \
+      | gen-worker serve
+  {"ok":true,"events":[{"event":"result","value":{"response":"polo"}}]}
+  ```
+
+**Wire format** (symmetric between the two transports):
+
+- request:  `{"function": "<fn_name>", "payload": <json>}`
+- response: `{"ok": true, "events": [{"event":"result","value":...}, ...]}`
+            or `{"ok": false, "error": {"kind":"...","message":"..."}}`
+
+**Transport-fidelity caveat.** Production dispatch is gRPC-from-the-orchestrator.
+`serve` mirrors setup, context wiring, memory management, and GPU serialization
+faithfully (shared code with `run`), but the **transport** differs (NDJSON over
+stdin/UDS locally vs gRPC in prod). That's the right trade for warm-model fast
+iteration; byte-for-byte prod fidelity would need the real gRPC Worker against a
+local stub-scheduler.
+
 ## When `gen-worker run` is the wrong tool
 
 - **Resource gating.** The CLI doesn't enforce VRAM / compute-capability

@@ -196,19 +196,24 @@ def select_auto_mode(
     t_model = _DEFAULT_MODEL_OFFLOAD_THRESHOLD_GB
     t_vae = _DEFAULT_VAE_SLICE_THRESHOLD_GB
 
-    # Very low VRAM: escalate aggressively.
+    # Very low VRAM: even a model that "fits" needs aggressive help for activations.
     if total <= t_group:
         return "group_offload"
+
+    # Model-size-aware (the key efficiency rule): when we can estimate the model
+    # and it fits within (total VRAM - activation margin), keep it FULLY RESIDENT
+    # (no offload) even on a modest card — offload ONLY when it genuinely won't
+    # fit. This avoids the ~10-50% offload penalty for models that fit (e.g. sd1.5
+    # on an 8GB card) while big models (e.g. SDXL @1024 on an 8GB card) still
+    # offload. Falls through to total-VRAM thresholds only when size is unknown.
+    if model_gb > 0.0:
+        return "vae_only" if model_gb <= max(0.0, total - margin) else "model_offload"
+
+    # Unknown model size: conservative total-VRAM thresholds.
     if total <= t_model:
         return "model_offload"
-
-    # Model-size driven escalation when we can estimate it.
-    if model_gb > 0.0 and model_gb > max(0.0, total - margin):
-        return "model_offload"
-
     if total <= t_vae:
         return "vae_only"
-
     return "vae_only"
 
 

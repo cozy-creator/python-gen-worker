@@ -19,15 +19,25 @@ Lifecycle hooks (SDK calls these):
   - `warmup(self) -> None` — optional, expensive. Run forward(s) at every
     declared `allowed_shapes` to flush compile graphs. Worker stays in
     `warming` startup phase until this returns.
-  - `shutdown(self) -> None` — required. Release CUDA graphs, engines, etc.
+  - `shutdown(self) -> None` — OPTIONAL. A missing hook is a no-op: the
+    runtime calls it only at process end (SIGTERM / Ctrl-C / drain), and
+    `getattr(inst, "shutdown", None)` + callable already treats absence as
+    nothing-to-do. For the common DI-injected endpoint it is pure ceremony —
+    the model is framework-owned and freed by the model cache, and the OS
+    reclaims VRAM on exit. Define it ONLY when you hold non-DI resources that
+    need explicit release: engine subprocesses, CUDA graphs, threads, network
+    connections, torch.distributed groups, scratch dirs. `setup` stays
+    required.
 
 Inner decorators:
-  - `@inference.function(...)` — marks a method as externally invocable
-    (route at `org/endpoint/<method-name>`). Carries per-function metadata
-    (timeout, allowed_shapes, etc).
-  - `@inference.stage(name=..., gpu_class=...)` — marks a method as a
-    pipeline stage. Today: in-process method call. Future: SDK can route
-    to remote workers for disaggregated inference.
+  - `@invocable(...)` / `@inference.function(...)` — marks a method as
+    externally invocable (route at `org/endpoint/<method-name>`). Carries
+    per-function metadata (timeout, allowed_shapes, etc). `@invocable` is the
+    kind-agnostic marker; the per-kind `<kind>.function` aliases remain for
+    backward compatibility.
+  - `@invocable.stage(...)` / `@inference.stage(name=..., gpu_class=...)` —
+    marks a method as a pipeline stage. Today: in-process method call. Future:
+    SDK can route to remote workers for disaggregated inference.
 
 See progress.json #322 for the full design.
 """
@@ -202,6 +212,37 @@ class Resources(msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True):
 # ============================================================================
 
 
+class Case(msgspec.Struct, frozen=True, kw_only=True):
+    """One row of an ``@inference(parametrize=[...])`` fan-out table (#339 §2).
+
+    A multi-variant endpoint (e.g. the FLUX base+turbo x bf16/fp8/nvfp4 grid)
+    is a set of near-identical classes that differ only by
+    ``(function_name, Resources, model_ref, input_struct)`` — the body is the
+    same shared ``_generate``. ``parametrize=`` stamps one separately-routable
+    function per ``Case`` from a SINGLE class + single ``@invocable`` body, so
+    authors stop hand-writing N near-identical classes.
+
+    Each row becomes its own discovered function with its own placement
+    (``resources``), model binding (``model``), and input type (``input``),
+    all backed by the one decorated method body.
+
+    Fields:
+      - ``name``: the routable function name (slugified for the wire route).
+      - ``resources``: per-row hardware envelope. Falls back to the class-level
+        ``resources=`` when omitted.
+      - ``model``: per-row model binding (``Repo`` / ``HFRepo`` / ...). When the
+        class declares a single-slot ``models={...}`` the row's ``model``
+        overrides that slot's binding; placement still resolves per row.
+      - ``input``: per-row payload ``msgspec.Struct`` type. Falls back to the
+        decorated method's declared payload annotation when omitted.
+    """
+
+    name: str
+    resources: Resources | None = None
+    model: Any = None
+    input: Any = None
+
+
 class _FunctionSpec(msgspec.Struct, frozen=True, kw_only=True):
     """Metadata attached to a method by @inference.function."""
 
@@ -279,6 +320,12 @@ class _EndpointClassSpec(msgspec.Struct, frozen=True, kw_only=True):
     # discovered endpoint metadata so the orchestrator can act on it.
     # SLA-aware automatic selection is a follow-up depending on #320.
     prefer_distilled: bool = False
+    # ----- Function fan-out (#339 §2) -------------------------------------
+    # When non-empty, the class hosts a SINGLE @invocable body that is stamped
+    # into one separately-routable function per Case row (distinct
+    # function_name / Resources / model binding / input type). Empty = plain
+    # @inference class (one function per @invocable method, the escape hatch).
+    parametrize: tuple[Case, ...] = ()
 
 
 # ============================================================================
@@ -599,6 +646,7 @@ def _make_endpoint_decorator(kind: Literal["inference", "training", "dataset", "
         max_batch: Optional[int] = None,
         prefer_distilled: bool = False,
         calibration: Optional[Mapping[str, str]] = None,
+        parametrize: Optional[typing.Sequence[Case]] = None,
     ) -> Callable[[C], C]: ...
     def decorator(
         cls: Optional[C] = None,
@@ -614,6 +662,7 @@ def _make_endpoint_decorator(kind: Literal["inference", "training", "dataset", "
         max_batch: Optional[int] = None,
         prefer_distilled: bool = False,
         calibration: Optional[Mapping[str, str]] = None,
+        parametrize: Optional[typing.Sequence[Case]] = None,
     ) -> Any:
         resources_value: Resources = resources if resources is not None else Resources()
         shapes_value = tuple(tuple(s) for s in (allowed_shapes or ()))
@@ -633,6 +682,51 @@ def _make_endpoint_decorator(kind: Literal["inference", "training", "dataset", "
             validated_models = _validate_models_against_setup(
                 cls_name, models or {}, setup_kwargs
             )
+
+            # ----- Function fan-out via parametrize= (#339 §2) ------------
+            # One class + one @invocable body, stamped into N routable
+            # functions. Validate the table here so authors see errors at
+            # import time, not at discovery/dispatch.
+            parametrize_value: tuple[Case, ...] = ()
+            if parametrize:
+                if len(function_methods) != 1:
+                    raise ValueError(
+                        f"@{kind} class {cls_name!r}: parametrize= requires "
+                        f"exactly ONE @invocable method body to fan out over "
+                        f"(found {len(function_methods)}). Each Case row stamps "
+                        "that single body into its own routable function."
+                    )
+                seen_case_names: set[str] = set()
+                rows: list[Case] = []
+                for i, case in enumerate(parametrize):
+                    if not isinstance(case, Case):
+                        raise TypeError(
+                            f"@{kind} class {cls_name!r}: parametrize[{i}] must "
+                            f"be a gen_worker.Case, got {type(case).__name__}."
+                        )
+                    cname = (case.name or "").strip()
+                    if not cname:
+                        raise ValueError(
+                            f"@{kind} class {cls_name!r}: parametrize[{i}] has "
+                            "an empty name; each Case needs a unique function name."
+                        )
+                    if cname in seen_case_names:
+                        raise ValueError(
+                            f"@{kind} class {cls_name!r}: duplicate parametrize "
+                            f"Case name {cname!r}; each row must route to a "
+                            "distinct function."
+                        )
+                    seen_case_names.add(cname)
+                    if case.model is not None and not isinstance(
+                        case.model, (Repo, Dispatch)
+                    ):
+                        raise TypeError(
+                            f"@{kind} class {cls_name!r}: parametrize[{i}].model "
+                            f"must be a Repo/Dispatch binding, got "
+                            f"{type(case.model).__name__}."
+                        )
+                    rows.append(case)
+                parametrize_value = tuple(rows)
 
             is_async = _is_async_class(target, function_methods)
             # #345 Improvement B: an async class is BatchedWorker ONLY when it
@@ -696,6 +790,7 @@ def _make_endpoint_decorator(kind: Literal["inference", "training", "dataset", "
                 batch_window_ms=batch_window_ms,
                 max_batch=max_batch,
                 prefer_distilled=bool(prefer_distilled),
+                parametrize=parametrize_value,
             )
 
             # Attach metadata for discovery.
@@ -1131,7 +1226,75 @@ class _ConversionDecorator:
         return _stage_inner(*args, **kwargs)
 
 
+# ============================================================================
+# @invocable — single kind-agnostic method marker (#339 §5).
+#
+# `@inference.function` / `@training.function` / `@conversion.function` /
+# `@dataset.function` (and their `.stage`) all resolve to the same
+# kind-agnostic `_function_inner` / `_stage_inner` — four names for one marker,
+# with the kind living on the CLASS decorator. `@invocable` collapses those to
+# a single neutral name. It is ADDITIVE: the per-kind `.function` / `.stage`
+# aliases keep working unchanged (production endpoints depend on them).
+# ============================================================================
+
+
+class _InvocableDecorator:
+    """Kind-agnostic externally-callable method marker.
+
+    Functionally identical to ``@inference.function`` / ``@<kind>.function``
+    — it attaches the same ``__gen_worker_function_spec__`` that discovery and
+    dispatch already read, so an ``@invocable`` method is discovered and routed
+    exactly like a ``<kind>.function`` one. The endpoint *kind* is declared on
+    the class decorator (``@inference`` / ``@training`` / ...); the method
+    marker does not need to repeat it.
+
+    Usage::
+
+        @inference(models={...}, resources=...)
+        class MyEndpoint:
+            def setup(self, pipe):
+                self.pipe = pipe
+
+            @invocable(name="generate")
+            def generate(self, ctx, payload): ...
+
+            @invocable.stage(name="encode", gpu_class="small")
+            def encode(self, prompt): ...
+    """
+
+    def __call__(
+        self,
+        fn: Optional[F] = None,
+        *,
+        name: Optional[str] = None,
+        timeout_ms: Optional[int] = None,
+        allowed_shapes: Optional[tuple[tuple[int, ...], ...]] = None,
+        rate_limit_per_invoker: Optional[int] = None,
+        label: Optional[str] = None,
+        description: Optional[str] = None,
+    ) -> Any:
+        return _function_inner(
+            fn,
+            name=name,
+            timeout_ms=timeout_ms,
+            allowed_shapes=allowed_shapes,
+            rate_limit_per_invoker=rate_limit_per_invoker,
+            label=label,
+            description=description,
+        )
+
+    @staticmethod
+    def stage(
+        fn: Optional[F] = None,
+        *,
+        name: Optional[str] = None,
+        gpu_class: Literal["small", "large"] = "large",
+    ) -> Any:
+        return _stage_inner(fn, name=name, gpu_class=gpu_class)
+
+
 # Singletons exported as the public API.
+invocable = _InvocableDecorator()
 inference = _InferenceDecorator()
 batched_inference = _BatchedInferenceDecorator()
 training = _TrainingDecorator()
@@ -1162,7 +1325,6 @@ def _migration_error(old_name: str, new_name: str) -> Callable[..., Any]:
             f"            self.pipe = pipe\n"
             f"        @{new_name}.function\n"
             f"        def my_fn(self, ctx, payload): ...\n"
-            f"        def shutdown(self): pass\n"
             f"See progress.json #322 + #328 for the full migration guide."
         )
 
@@ -1176,6 +1338,8 @@ realtime_function = _migration_error("realtime_function", "inference")
 
 __all__ = [
     "Resources",
+    "Case",
+    "invocable",
     "inference",
     "batched_inference",
     "training",

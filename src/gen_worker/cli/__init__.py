@@ -1,7 +1,13 @@
 """gen-worker CLI — top-level argparse dispatcher.
 
-First subcommand: ``run`` — invoke an endpoint method in the local Python
-interpreter against a JSON payload. See ``docs/local-dev.md``.
+Subcommands:
+
+- ``run``    — invoke ONE endpoint method one-shot (loads the model, runs, exits).
+- ``serve``  — persistent local dev server: load models once, serve many
+               requests warm over NDJSON on stdin/stdout + a Unix socket.
+- ``invoke`` — client for ``serve``: fire one request by function name.
+
+See ``docs/local-dev.md``.
 
 Exit codes (mirrored by every subcommand):
 
@@ -33,10 +39,16 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", metavar="<command>")
     sub.required = False  # so `gen-worker --help` works without a sub
 
-    # Lazy-import the run subcommand wiring so the cli stays cheap to import
+    # Lazy-import the subcommand wiring so the cli stays cheap to import
     # for `gen-worker --help` in CI.
     from . import run as _run_mod
     _run_mod.add_subparser(sub)
+
+    from . import serve as _serve_mod
+    _serve_mod.add_subparser(sub)
+
+    from . import invoke as _invoke_mod
+    _invoke_mod.add_subparser(sub)
 
     return parser
 

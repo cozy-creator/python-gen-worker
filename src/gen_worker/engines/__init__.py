@@ -85,7 +85,6 @@ class EngineBase:
         endpoint's typed delta struct before yielding back to the SDK.
         """
         raise NotImplementedError
-        yield  # pragma: no cover — type hint as async generator
 
     async def abort(self, request_id: str) -> None:
         """Drop the named request from the engine's in-flight batch.

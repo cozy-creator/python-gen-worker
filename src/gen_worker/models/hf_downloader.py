@@ -20,8 +20,36 @@ class HuggingFaceDownloadResult:
 
 
 def _default_weight_precisions() -> list[str]:
-    # Default: only reduced-precision weights.
-    return ["fp16", "bf16"]
+    # Default: prefer 16-bit (bf16 OR fp16, whichever the repo has). fp32 is
+    # NOT listed, so it is only ever selected as a last resort when no smaller
+    # precision exists — never preferred. `COZY_HF_WEIGHT_PRECISIONS` overrides
+    # this list (e.g. add `fp32` to allow downloading full-precision weights).
+    return ["bf16", "fp16"]
+
+
+def _weight_precisions_from_env() -> Optional[list[str]]:
+    """Read `COZY_HF_WEIGHT_PRECISIONS` (comma-separated) if set.
+
+    Honored as documented in the planner's error messages. Adding `fp32`
+    flips on full-precision selection; otherwise it just reorders/limits the
+    accepted precision family. Returns None when unset/empty so the caller
+    falls back to `_default_weight_precisions()`.
+    """
+    raw = (os.getenv("COZY_HF_WEIGHT_PRECISIONS") or "").strip()
+    if not raw:
+        return None
+    parts = [p.strip().lower() for p in raw.split(",") if p.strip()]
+    return parts or None
+
+
+def _full_repo_download_requested() -> bool:
+    """Whether `COZY_HF_FULL_REPO_DOWNLOAD` asks for the entire repo.
+
+    When set truthy, selection is bypassed and the whole repo is downloaded
+    (no `allow_patterns`). Escape hatch for repos the planner can't reduce.
+    """
+    raw = (os.getenv("COZY_HF_FULL_REPO_DOWNLOAD") or "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
 
 
 class HuggingFaceHubDownloader:
@@ -69,195 +97,199 @@ class HuggingFaceHubDownloader:
         if self.hf_token:
             kwargs["token"] = self.hf_token
 
-        # Prefer minimal downloads for diffusers-style repos by default.
-        if True:
-            # Safety guard against accidental huge downloads. Default 60GB so
-            # large diffusers pipelines (e.g. FLUX.2-klein-9B at ~35GB: 9B
-            # transformer + Qwen text encoder + VAE) download out of the box;
-            # override with COZY_HF_MAX_REPO_BYTES for anything larger.
+        # Safety guard against accidental huge downloads. Default 60GB so
+        # large diffusers pipelines (e.g. FLUX.2-klein-9B at ~35GB: 9B
+        # transformer + Qwen text encoder + VAE) download out of the box;
+        # override with COZY_HF_MAX_REPO_BYTES for anything larger.
+        try:
+            max_total_bytes = int(os.getenv("COZY_HF_MAX_REPO_BYTES", "").strip() or 60_000_000_000)
+        except (TypeError, ValueError):
+            max_total_bytes = 60_000_000_000
+        if max_total_bytes <= 0:
+            max_total_bytes = 60_000_000_000
+
+        full_repo = _full_repo_download_requested()
+        policy = HFSelectionPolicy(
+            components_override=None,
+            include_optional_components=False,
+            weight_precisions=_weight_precisions_from_env() or _default_weight_precisions(),
+            allow_root_json=False,
+        )
+
+        # Best-effort local completeness check: if we already have a local snapshot folder that
+        # contains all required files, skip network calls and downloads.
+        local_snapshot = _try_get_local_snapshot_dir(
+            snapshot_download=snapshot_download_fn,
+            repo_id=repo_id,
+            revision=ref.revision,
+            cache_dir=self.hf_home,
+            token=self.hf_token,
+        )
+        if local_snapshot is not None:
+            # `snapshot_download(local_files_only=True)` only checks for the
+            # `refs/<branch>` file — a partial cache (some LFS blobs still
+            # unmaterialized) still returns the snapshot path. Walking it
+            # then feeds an incomplete file list into the planner, which
+            # raises (e.g. "weight shard referenced by ... not found in
+            # repo: ...") because the index JSON references shards that
+            # aren't on disk yet. The fast-path is only valid for *fully
+            # complete* caches; on ANY failure fall through to the API
+            # path below — never let the partial-cache RuntimeError bubble.
             try:
-                max_total_bytes = int(os.getenv("COZY_HF_MAX_REPO_BYTES", "").strip() or 60_000_000_000)
-            except (TypeError, ValueError):
-                max_total_bytes = 60_000_000_000
-            if max_total_bytes <= 0:
-                max_total_bytes = 60_000_000_000
-
-            policy = HFSelectionPolicy(
-                components_override=None,
-                include_optional_components=False,
-                weight_precisions=_default_weight_precisions(),
-                allow_root_json=False,
-            )
-
-            # Best-effort local completeness check: if we already have a local snapshot folder that
-            # contains all required files, skip network calls and downloads.
-            local_snapshot = _try_get_local_snapshot_dir(
-                snapshot_download=snapshot_download_fn,
-                repo_id=repo_id,
-                revision=ref.revision,
-                cache_dir=self.hf_home,
-                token=self.hf_token,
-            )
-            if local_snapshot is not None:
-                # `snapshot_download(local_files_only=True)` only checks for the
-                # `refs/<branch>` file — a partial cache (some LFS blobs still
-                # unmaterialized) still returns the snapshot path. Walking it
-                # then feeds an incomplete file list into the planner, which
-                # raises (e.g. "weight shard referenced by ... not found in
-                # repo: ...") because the index JSON references shards that
-                # aren't on disk yet. The fast-path is only valid for *fully
-                # complete* caches; on ANY failure fall through to the API
-                # path below — never let the partial-cache RuntimeError bubble.
-                try:
-                    local_files = _walk_relative_files(local_snapshot)
-                    model_index = _try_load_local_model_index(local_snapshot)
-                    if model_index is not None:
-                        plan = plan_diffusers_download(model_index=model_index, repo_files=sorted(local_files), policy=policy)
-                        needed = finalize_diffusers_download(
-                            plan=plan,
-                            repo_files=sorted(local_files),
-                            weight_index_json_by_file=_load_local_weight_indexes(local_snapshot, plan.required_weight_index_files),
-                        )
-                        if needed.issubset(local_files) and not _has_incomplete_markers(local_snapshot):
-                            return HuggingFaceDownloadResult(local_dir=local_snapshot)
-                except Exception:
-                    pass  # partial cache or planner mismatch — fall through to API path
-
-            api = HfApi(token=self.hf_token)
-            repo_files: Sequence[str] = api.list_repo_files(repo_id=repo_id, repo_type="model", revision=ref.revision)
-
-            # Best-effort: get file sizes from list_repo_tree when available.
-            repo_file_sizes: dict[str, int] = {}
-            if hasattr(api, "list_repo_tree"):
-                try:
-                    tree = api.list_repo_tree(repo_id=repo_id, repo_type="model", revision=ref.revision, recursive=True)
-                    for ent in tree:
-                        # huggingface_hub RepoFile has .path and .size
-                        p = getattr(ent, "path", None)
-                        sz = getattr(ent, "size", None)
-                        if isinstance(p, str) and isinstance(sz, int):
-                            repo_file_sizes[p] = sz
-                except Exception:
-                    repo_file_sizes = {}
-
-            # Fetch model_index.json if present; otherwise infer components
-            # from repo structure. Public quantized repos may be a single
-            # root-level safetensors file plus small sidecars; those are valid
-            # HFRepo bindings even though they are not full Diffusers folders.
-            selected_files: set[str] | None = None
-            model_index = _try_fetch_model_index_json(
-                hf_hub_download=hf_hub_download_fn,
-                repo_id=repo_id,
-                revision=ref.revision,
-                cache_dir=self.hf_home,
-                token=self.hf_token,
-            )
-            if model_index is None and policy.components_override is None:
-                inferred = _infer_diffusers_components_from_repo_files(repo_files)
-                if inferred:
-                    policy = HFSelectionPolicy(
-                        components_override=inferred,
-                        include_optional_components=policy.include_optional_components,
-                        weight_precisions=policy.weight_precisions,
-                        allow_root_json=policy.allow_root_json,
+                local_files = _walk_relative_files(local_snapshot)
+                model_index = _try_load_local_model_index(local_snapshot)
+                if model_index is not None:
+                    plan = plan_diffusers_download(model_index=model_index, repo_files=sorted(local_files), policy=policy)
+                    needed = finalize_diffusers_download(
+                        plan=plan,
+                        repo_files=sorted(local_files),
+                        weight_index_json_by_file=_load_local_weight_indexes(local_snapshot, plan.required_weight_index_files),
                     )
-                    model_index = {"_class_name": "Unknown"}
-                else:
-                    selected_files = _select_root_safetensors_repo_files(repo_files)
+                    if needed.issubset(local_files) and not _has_incomplete_markers(local_snapshot):
+                        return HuggingFaceDownloadResult(local_dir=local_snapshot)
+            except Exception:
+                pass  # partial cache or planner mismatch — fall through to API path
 
-            if model_index is None and selected_files is None:
-                raise RuntimeError(
-                    f"huggingface ref {ref.repo_id!r} is missing model_index.json and no diffusers-like components could be inferred."
+        api = HfApi(token=self.hf_token)
+        repo_files: Sequence[str] = api.list_repo_files(repo_id=repo_id, repo_type="model", revision=ref.revision)
+
+        # Best-effort: get file sizes from list_repo_tree when available.
+        repo_file_sizes: dict[str, int] = {}
+        if hasattr(api, "list_repo_tree"):
+            try:
+                tree = api.list_repo_tree(repo_id=repo_id, repo_type="model", revision=ref.revision, recursive=True)
+                for ent in tree:
+                    # huggingface_hub RepoFile has .path and .size
+                    p = getattr(ent, "path", None)
+                    sz = getattr(ent, "size", None)
+                    if isinstance(p, str) and isinstance(sz, int):
+                        repo_file_sizes[p] = sz
+            except Exception:
+                repo_file_sizes = {}
+
+        # Fetch model_index.json if present; otherwise infer components
+        # from repo structure. Public quantized repos may be a single
+        # root-level safetensors file plus small sidecars; those are valid
+        # HFRepo bindings even though they are not full Diffusers folders.
+        selected_files: set[str] | None = None
+        model_index = _try_fetch_model_index_json(
+            hf_hub_download=hf_hub_download_fn,
+            repo_id=repo_id,
+            revision=ref.revision,
+            cache_dir=self.hf_home,
+            token=self.hf_token,
+        )
+        if model_index is None and policy.components_override is None:
+            inferred = _infer_diffusers_components_from_repo_files(repo_files)
+            if inferred:
+                policy = HFSelectionPolicy(
+                    components_override=inferred,
+                    include_optional_components=policy.include_optional_components,
+                    weight_precisions=policy.weight_precisions,
+                    allow_root_json=policy.allow_root_json,
                 )
+                model_index = {"_class_name": "Unknown"}
+            else:
+                selected_files = _select_root_safetensors_repo_files(repo_files)
 
-            # Prefetch all sharded-weight index JSONs (small) so we can choose the best weight set per component.
-            idx_json_by_file: dict[str, dict] = {}
-            for pth in repo_files:
-                if not pth.lower().endswith(".safetensors.index.json"):
-                    continue
-                try:
-                    p = hf_hub_download_fn(
-                        repo_id=repo_id,
-                        revision=ref.revision,
-                        filename=pth,
-                        cache_dir=self.hf_home,
-                        token=self.hf_token,
-                    )
-                    idx_json_by_file[pth] = json.loads(Path(p).read_text("utf-8"))
-                except Exception:
-                    continue
+        if model_index is None and selected_files is None:
+            raise RuntimeError(
+                f"huggingface ref {ref.repo_id!r} is missing model_index.json and no diffusers-like components could be inferred."
+            )
 
-            session = requests.Session()
-            dtype_cache: dict[str, Optional[set[str]]] = {}
+        # Prefetch all sharded-weight index JSONs (small) so we can choose the best weight set per component.
+        idx_json_by_file: dict[str, dict] = {}
+        for pth in repo_files:
+            if not pth.lower().endswith(".safetensors.index.json"):
+                continue
+            try:
+                p = hf_hub_download_fn(
+                    repo_id=repo_id,
+                    revision=ref.revision,
+                    filename=pth,
+                    cache_dir=self.hf_home,
+                    token=self.hf_token,
+                )
+                idx_json_by_file[pth] = json.loads(Path(p).read_text("utf-8"))
+            except Exception:
+                continue
 
-            def probe_safetensors_dtypes(rel_path: str) -> Optional[set[str]]:
-                if rel_path in dtype_cache:
-                    return dtype_cache[rel_path]
-                if hf_hub_url_fn is None:
+        session = requests.Session()
+        dtype_cache: dict[str, Optional[set[str]]] = {}
+
+        def probe_safetensors_dtypes(rel_path: str) -> Optional[set[str]]:
+            if rel_path in dtype_cache:
+                return dtype_cache[rel_path]
+            if hf_hub_url_fn is None:
+                dtype_cache[rel_path] = None
+                return None
+            if not rel_path.lower().endswith(".safetensors"):
+                dtype_cache[rel_path] = None
+                return None
+
+            url = hf_hub_url_fn(repo_id=repo_id, filename=rel_path, repo_type="model", revision=ref.revision)
+            headers = {"Range": "bytes=0-7"}
+            if self.hf_token:
+                headers["Authorization"] = f"Bearer {self.hf_token}"
+
+            try:
+                r = session.get(url, headers=headers, allow_redirects=True, timeout=60)
+                r.raise_for_status()
+                if len(r.content) != 8:
                     dtype_cache[rel_path] = None
                     return None
-                if not rel_path.lower().endswith(".safetensors"):
+                (header_len,) = struct.unpack("<Q", r.content)
+                if header_len <= 0 or header_len > (32 << 20):
                     dtype_cache[rel_path] = None
                     return None
 
-                url = hf_hub_url_fn(repo_id=repo_id, filename=rel_path, repo_type="model", revision=ref.revision)
-                headers = {"Range": "bytes=0-7"}
+                headers2 = {"Range": f"bytes=8-{8 + header_len - 1}"}
                 if self.hf_token:
-                    headers["Authorization"] = f"Bearer {self.hf_token}"
+                    headers2["Authorization"] = f"Bearer {self.hf_token}"
+                r2 = session.get(url, headers=headers2, allow_redirects=True, timeout=60)
+                r2.raise_for_status()
+                raw = json.loads(r2.content.decode("utf-8"))
+                dtypes: set[str] = set()
+                for name, meta in raw.items():
+                    if name == "__metadata__":
+                        continue
+                    if not isinstance(meta, dict):
+                        continue
+                    dt = meta.get("dtype")
+                    if isinstance(dt, str) and dt.strip():
+                        dtypes.add(dt.strip())
+                dtype_cache[rel_path] = dtypes or None
+                return dtype_cache[rel_path]
+            except Exception:
+                dtype_cache[rel_path] = None
+                return None
 
-                try:
-                    r = session.get(url, headers=headers, allow_redirects=True, timeout=60)
-                    r.raise_for_status()
-                    if len(r.content) != 8:
-                        dtype_cache[rel_path] = None
-                        return None
-                    (header_len,) = struct.unpack("<Q", r.content)
-                    if header_len <= 0 or header_len > (32 << 20):
-                        dtype_cache[rel_path] = None
-                        return None
+        if full_repo:
+            # COZY_HF_FULL_REPO_DOWNLOAD escape hatch: bypass selection and let
+            # huggingface_hub pull the entire repo (no allow_patterns).
+            selected_files = set(repo_files)
+        elif selected_files is None:
+            plan = plan_diffusers_download(
+                model_index=model_index or {},
+                repo_files=repo_files,
+                policy=policy,
+                weight_index_json_by_file=idx_json_by_file,
+                repo_file_sizes=repo_file_sizes,
+                probe_safetensors_dtypes=probe_safetensors_dtypes,
+            )
 
-                    headers2 = {"Range": f"bytes=8-{8 + header_len - 1}"}
-                    if self.hf_token:
-                        headers2["Authorization"] = f"Bearer {self.hf_token}"
-                    r2 = session.get(url, headers=headers2, allow_redirects=True, timeout=60)
-                    r2.raise_for_status()
-                    raw = json.loads(r2.content.decode("utf-8"))
-                    dtypes: set[str] = set()
-                    for name, meta in raw.items():
-                        if name == "__metadata__":
-                            continue
-                        if not isinstance(meta, dict):
-                            continue
-                        dt = meta.get("dtype")
-                        if isinstance(dt, str) and dt.strip():
-                            dtypes.add(dt.strip())
-                    dtype_cache[rel_path] = dtypes or None
-                    return dtype_cache[rel_path]
-                except Exception:
-                    dtype_cache[rel_path] = None
-                    return None
+            selected_files = finalize_diffusers_download(plan=plan, repo_files=repo_files, weight_index_json_by_file=idx_json_by_file)
 
-            if selected_files is None:
-                plan = plan_diffusers_download(
-                    model_index=model_index or {},
-                    repo_files=repo_files,
-                    policy=policy,
-                    weight_index_json_by_file=idx_json_by_file,
-                    repo_file_sizes=repo_file_sizes,
-                    probe_safetensors_dtypes=probe_safetensors_dtypes,
+        total_hint: Optional[int] = None
+        if repo_file_sizes:
+            total_hint = sum(int(repo_file_sizes.get(p, 0) or 0) for p in selected_files)
+            if total_hint > max_total_bytes:
+                raise RuntimeError(
+                    f"refusing to download an excessively large Hugging Face repo selection: {total_hint} bytes "
+                    f"(limit {max_total_bytes} bytes)."
                 )
 
-                selected_files = finalize_diffusers_download(plan=plan, repo_files=repo_files, weight_index_json_by_file=idx_json_by_file)
-
-            total_hint: Optional[int] = None
-            if repo_file_sizes:
-                total_hint = sum(int(repo_file_sizes.get(p, 0) or 0) for p in selected_files)
-                if total_hint > max_total_bytes:
-                    raise RuntimeError(
-                        f"refusing to download an excessively large Hugging Face repo selection: {total_hint} bytes "
-                        f"(limit {max_total_bytes} bytes)."
-                    )
-
+        if not full_repo:
             # Deterministic order helps debugging and keeps behavior stable.
             kwargs["allow_patterns"] = sorted(selected_files)
 
