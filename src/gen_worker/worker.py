@@ -4779,14 +4779,16 @@ class Worker:
                 sorted(unavailable.keys()),
             )
 
-    def _collect_model_inventory(self) -> tuple[List[str], List[str], List[str], bool]:
-        """Return `(vram_models, disk_models, downloading_models, supports_model_loading)`.
+    def _collect_model_inventory(self) -> tuple[List[str], List[str], List[str], List[str], bool]:
+        """Return `(vram_models, ram_models, disk_models, downloading_models, supports_model_loading)`.
 
         Prefers `self._model_manager` for VRAM info; falls back to the newer
-        `self._model_cache` when the legacy manager isn't wired. Disk and
-        downloading-model lists come from the model cache when present.
+        `self._model_cache` when the legacy manager isn't wired. RAM (the #337
+        CPU-RAM warm tier), disk, and downloading-model lists come from the
+        model cache when present.
         """
         vram_models: List[str] = []
+        ram_models: List[str] = []
         disk_models: List[str] = []
         downloading_models: List[str] = []
         supports_model_loading_flag = False
@@ -4799,15 +4801,22 @@ class Worker:
             supports_model_loading_flag = True
 
         if self._model_cache:
+            # #337 CPU-RAM warm tier: weights demoted from VRAM but still in
+            # host RAM, so promotion back is a fast PCIe copy. Advertised so the
+            # orchestrator can route VRAM > RAM > DISK > cold (#337 4b).
+            try:
+                ram_models = self._model_cache.get_cpu_models()
+            except Exception:
+                ram_models = []
             disk_models = self._model_cache.get_disk_models()
             stats = self._model_cache.get_stats()
             downloading_models = stats.downloading_models
             logger.debug(
-                f"Model cache: vram={len(vram_models)}, disk={len(disk_models)}, "
-                f"downloading={len(downloading_models)}"
+                f"Model cache: vram={len(vram_models)}, ram={len(ram_models)}, "
+                f"disk={len(disk_models)}, downloading={len(downloading_models)}"
             )
 
-        return vram_models, disk_models, downloading_models, supports_model_loading_flag
+        return vram_models, ram_models, disk_models, downloading_models, supports_model_loading_flag
 
     # #321: _build_function_schemas removed — WorkerResources.function_schemas
     # was never read by the orchestrator. Schemas are served by tensorhub HTTP.
@@ -5306,7 +5315,7 @@ class Worker:
         try:
             gpu_info = self._collect_gpu_and_memory_info()
             self._refresh_worker_local_function_availability(gpu_info)
-            vram_models, disk_models, downloading_models, supports_model_loading_flag = (
+            vram_models, ram_models, disk_models, downloading_models, supports_model_loading_flag = (
                 self._collect_model_inventory()
             )
             _ = downloading_models  # surfaced via `loading_functions` below;
@@ -5341,6 +5350,7 @@ class Worker:
                 available_functions=self._available_function_names(),
                 loading_functions=loading_functions,
                 vram_models=vram_models,   # Models in VRAM (hot)
+                ram_models=ram_models,     # #337 CPU-RAM warm tier (fast PCIe promote)
                 disk_models=disk_models,   # Models on disk (warm)
             )
             # gen-orchestrator #346: on RE-registration (a non-heartbeat

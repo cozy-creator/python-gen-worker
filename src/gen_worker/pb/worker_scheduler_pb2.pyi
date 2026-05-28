@@ -44,7 +44,7 @@ KV_PREFIX_CACHE_EVENT_ADDED: KVPrefixCacheEvent
 KV_PREFIX_CACHE_EVENT_REMOVED: KVPrefixCacheEvent
 
 class WorkerResources(_message.Message):
-    __slots__ = ("worker_id", "gpu_count", "gpu_memory_bytes", "available_functions", "vram_models", "release_id", "runpod_pod_id", "gpu_is_busy", "gpu_name", "gpu_memory_free_bytes", "gpu_sm", "disk_models", "installed_libs", "image_digest", "git_commit", "loading_functions")
+    __slots__ = ("worker_id", "gpu_count", "gpu_memory_bytes", "available_functions", "vram_models", "release_id", "runpod_pod_id", "gpu_is_busy", "gpu_name", "gpu_memory_free_bytes", "gpu_sm", "disk_models", "installed_libs", "image_digest", "git_commit", "loading_functions", "ram_models")
     WORKER_ID_FIELD_NUMBER: _ClassVar[int]
     GPU_COUNT_FIELD_NUMBER: _ClassVar[int]
     GPU_MEMORY_BYTES_FIELD_NUMBER: _ClassVar[int]
@@ -61,6 +61,7 @@ class WorkerResources(_message.Message):
     IMAGE_DIGEST_FIELD_NUMBER: _ClassVar[int]
     GIT_COMMIT_FIELD_NUMBER: _ClassVar[int]
     LOADING_FUNCTIONS_FIELD_NUMBER: _ClassVar[int]
+    RAM_MODELS_FIELD_NUMBER: _ClassVar[int]
     worker_id: str
     gpu_count: int
     gpu_memory_bytes: int
@@ -77,7 +78,8 @@ class WorkerResources(_message.Message):
     image_digest: str
     git_commit: str
     loading_functions: _containers.RepeatedScalarFieldContainer[str]
-    def __init__(self, worker_id: _Optional[str] = ..., gpu_count: _Optional[int] = ..., gpu_memory_bytes: _Optional[int] = ..., available_functions: _Optional[_Iterable[str]] = ..., vram_models: _Optional[_Iterable[str]] = ..., release_id: _Optional[str] = ..., runpod_pod_id: _Optional[str] = ..., gpu_is_busy: bool = ..., gpu_name: _Optional[str] = ..., gpu_memory_free_bytes: _Optional[int] = ..., gpu_sm: _Optional[str] = ..., disk_models: _Optional[_Iterable[str]] = ..., installed_libs: _Optional[_Iterable[str]] = ..., image_digest: _Optional[str] = ..., git_commit: _Optional[str] = ..., loading_functions: _Optional[_Iterable[str]] = ...) -> None: ...
+    ram_models: _containers.RepeatedScalarFieldContainer[str]
+    def __init__(self, worker_id: _Optional[str] = ..., gpu_count: _Optional[int] = ..., gpu_memory_bytes: _Optional[int] = ..., available_functions: _Optional[_Iterable[str]] = ..., vram_models: _Optional[_Iterable[str]] = ..., release_id: _Optional[str] = ..., runpod_pod_id: _Optional[str] = ..., gpu_is_busy: bool = ..., gpu_name: _Optional[str] = ..., gpu_memory_free_bytes: _Optional[int] = ..., gpu_sm: _Optional[str] = ..., disk_models: _Optional[_Iterable[str]] = ..., installed_libs: _Optional[_Iterable[str]] = ..., image_digest: _Optional[str] = ..., git_commit: _Optional[str] = ..., loading_functions: _Optional[_Iterable[str]] = ..., ram_models: _Optional[_Iterable[str]] = ...) -> None: ...
 
 class ActiveAssignmentResume(_message.Message):
     __slots__ = ("request_id", "item_id", "assignment_attempt_epoch", "last_job_result_seq", "last_worker_event_seq", "last_incremental_seq")
