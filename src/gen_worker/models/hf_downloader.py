@@ -1,17 +1,143 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import struct
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Optional, Sequence, cast
+from typing import Any, Callable, Dict, Optional, Sequence, cast
 
 import requests
 
 from .refs import HuggingFaceRef
 from .hf_selection import HFSelectionPolicy, finalize_diffusers_download, plan_diffusers_download
+
+_LOG = logging.getLogger(__name__)
+
+
+class DownloadStalledError(RuntimeError):
+    """#379: raised when a HuggingFace snapshot download makes no byte progress
+    for the stall window (or exceeds the wall-clock cap). Converts an indefinite
+    silent hang in the prefetch path into a bounded, OBSERVABLE failure so the
+    worker reports ``model.download.failed`` and the orchestrator reaps/replaces
+    it, instead of the worker sitting forever in ``models_downloading``.
+    """
+
+
+def _hf_stall_timeout_s() -> float:
+    """No-byte-progress window before a download is declared stalled (#379).
+    `COZY_HF_DOWNLOAD_STALL_TIMEOUT_S` overrides; 0 disables stall detection."""
+    raw = os.environ.get("COZY_HF_DOWNLOAD_STALL_TIMEOUT_S", "").strip()
+    if raw:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            pass
+    return 180.0
+
+
+def _hf_wallclock_max_s() -> float:
+    """Hard wall-clock cap for a single repo download (#379 backstop, covers the
+    no-progress-dir case). `COZY_HF_DOWNLOAD_MAX_SECONDS` overrides; 0 (default)
+    disables it so legitimately-slow large downloads aren't false-tripped."""
+    raw = os.environ.get("COZY_HF_DOWNLOAD_MAX_SECONDS", "").strip()
+    if raw:
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            pass
+    return 0.0
+
+
+def _run_with_stall_watchdog(
+    download_fn: Callable[[], str],
+    *,
+    label: str,
+    progress_root: Optional[Path],
+    progress_callback: Optional[Callable[[int, Optional[int]], None]],
+    total_hint: Optional[int],
+    stall_timeout: float,
+    wall_clock_max: float,
+    scan_bytes: Callable[[Path], int],
+    poll_interval: float = 0.5,
+) -> str:
+    """Run a blocking ``download_fn`` on a daemon thread and watch it (#379).
+
+    The watchdog doubles as the progress emitter: it scans bytes-on-disk under
+    ``progress_root``, reports growth via ``progress_callback``, and — crucially —
+    trips when there is NO byte progress for ``stall_timeout`` seconds (or the
+    download exceeds ``wall_clock_max``), raising :class:`DownloadStalledError`.
+    The old emit-only-when-growing poller stayed silent on a stall while the
+    synchronous call blocked forever, producing the observed "models_downloading
+    then silence" hang with no error and no liveness signal.
+
+    Returns the download's local path, or re-raises the download's own exception,
+    or raises :class:`DownloadStalledError` on stall / wall-clock breach. On a
+    stall the still-wedged daemon thread is abandoned (it dies with the process /
+    on reap); the caller's failure path emits ``model.download.failed``.
+    """
+    holder: Dict[str, Any] = {}
+
+    def _run() -> None:
+        try:
+            holder["local"] = download_fn()
+        except BaseException as exc:  # noqa: BLE001 — re-raised on the caller thread
+            holder["exc"] = exc
+        finally:
+            holder["done"] = True
+
+    dl_thread = threading.Thread(target=_run, name="hf-snapshot-download", daemon=True)
+    dl_thread.start()
+
+    started_at = time.monotonic()
+    last_bytes = 0
+    last_progress_at = started_at
+    while not holder.get("done"):
+        dl_thread.join(timeout=poll_interval)
+        if holder.get("done"):
+            break
+        now = time.monotonic()
+        if progress_root is not None:
+            try:
+                seen = scan_bytes(progress_root)
+            except Exception:
+                seen = last_bytes
+            if seen > last_bytes:
+                last_bytes = seen
+                last_progress_at = now
+                if progress_callback is not None:
+                    try:
+                        progress_callback(seen, total_hint)
+                    except Exception:
+                        pass
+            elif stall_timeout > 0 and (now - last_progress_at) > stall_timeout:
+                _LOG.error(
+                    "hf download STALLED %s: no byte progress for %.0fs (downloaded=%d "
+                    "bytes) — abandoning the wedged download thread and raising so the "
+                    "worker reports model.download.failed instead of hanging silently in "
+                    "models_downloading (#379).",
+                    label, now - last_progress_at, last_bytes,
+                )
+                raise DownloadStalledError(
+                    f"snapshot_download({label}) stalled: no progress for "
+                    f"{stall_timeout:.0f}s after {last_bytes} bytes"
+                )
+        if wall_clock_max > 0 and (now - started_at) > wall_clock_max:
+            _LOG.error(
+                "hf download exceeded wall-clock cap %s: %.0fs > %.0fs — abandoning + "
+                "raising (#379).",
+                label, now - started_at, wall_clock_max,
+            )
+            raise DownloadStalledError(
+                f"snapshot_download({label}) exceeded {wall_clock_max:.0f}s wall-clock cap"
+            )
+
+    if "exc" in holder:
+        raise holder["exc"]
+    return cast(str, holder["local"])
 
 
 @dataclass(frozen=True)
@@ -293,8 +419,6 @@ class HuggingFaceHubDownloader:
             # Deterministic order helps debugging and keeps behavior stable.
             kwargs["allow_patterns"] = sorted(selected_files)
 
-        poller_stop: Optional[threading.Event] = None
-        poller: Optional[threading.Thread] = None
         progress_root: Optional[Path] = None
         if progress_callback is not None:
             progress_root = _progress_local_dir(self.hf_home, repo_id, ref.revision, ref.flavor)
@@ -304,29 +428,21 @@ class HuggingFaceHubDownloader:
                 progress_callback(0, total_hint)
             except Exception:
                 pass
-            poller_stop = threading.Event()
 
-            def _poll() -> None:
-                last = 0
-                while not poller_stop.wait(0.5):
-                    try:
-                        seen = _scan_bytes(progress_root)
-                        if seen > last:
-                            last = seen
-                            progress_callback(seen, total_hint)
-                    except Exception:
-                        pass
+        # #379: bound the blocking download with a stall watchdog so a wedged
+        # HTTP/hf_xet read surfaces as DownloadStalledError instead of an
+        # indefinite silent hang in models_downloading.
+        local = _run_with_stall_watchdog(
+            lambda: snapshot_download_fn(repo_id=repo_id, revision=ref.revision, **kwargs),
+            label=f"{repo_id}@{ref.revision}",
+            progress_root=progress_root,
+            progress_callback=progress_callback,
+            total_hint=total_hint,
+            stall_timeout=_hf_stall_timeout_s(),
+            wall_clock_max=_hf_wallclock_max_s(),
+            scan_bytes=_scan_bytes,
+        )
 
-            poller = threading.Thread(target=_poll, name="hf-download-progress", daemon=True)
-            poller.start()
-
-        try:
-            local = snapshot_download_fn(repo_id=repo_id, revision=ref.revision, **kwargs)
-        finally:
-            if poller_stop is not None:
-                poller_stop.set()
-            if poller is not None:
-                poller.join(timeout=2.0)
         if progress_callback is not None:
             try:
                 final_root = Path(local)
