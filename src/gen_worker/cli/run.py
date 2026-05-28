@@ -21,6 +21,7 @@ import signal
 import sys
 import time
 import traceback
+import types
 import typing
 import urllib.parse
 import urllib.request
@@ -46,7 +47,7 @@ EXIT_SIGINT = 130
 # argparse wiring
 # --------------------------------------------------------------------------
 
-def add_subparser(sub: "argparse._SubParsersAction[Any]") -> None:
+def add_subparser(sub: argparse._SubParsersAction[Any]) -> None:
     """Register the ``run`` subcommand on the top-level parser."""
     p = sub.add_parser(
         "run",
@@ -622,7 +623,7 @@ class _SigintHandler:
     def __init__(self, ctx: Any) -> None:
         self._ctx = ctx
         self._last_at: float = 0.0
-        self._prev_handler: Any = signal.SIG_DFL
+        self._prev_handler: signal.Handlers | Callable[[int, types.FrameType | None], Any] = signal.SIG_DFL
         self._installed = False
 
     def install(self) -> None:
@@ -642,7 +643,7 @@ class _SigintHandler:
             pass
         self._installed = False
 
-    def _on_sigint(self, _signum: int, _frame: Any) -> None:
+    def _on_sigint(self, _signum: int, _frame: types.FrameType | None) -> None:
         now = time.monotonic()
         if self._last_at and (now - self._last_at) < 2.0:
             # Second hit within 2s — hard exit.
@@ -706,7 +707,7 @@ class _UsageError(Exception):
 
 def load_endpoint_module(
     *, config_path: Optional[str], module: Optional[str],
-) -> Tuple[Path, Any]:
+) -> Tuple[Path, types.ModuleType]:
     """Resolve endpoint.toml (or ``--module``), prime sys.path, import `main`.
 
     Returns ``(project_root, imported_module)``. Shared by ``run`` and
@@ -728,7 +729,7 @@ def load_endpoint_module(
     return root, mod
 
 
-def discover_candidates(mod: Any) -> List[_SelectedFunction]:
+def discover_candidates(mod: types.ModuleType) -> List[_SelectedFunction]:
     """Collect every @inference.function method, exit-2 if none exist."""
     candidates = _collect_class_methods(mod)
     if not candidates:

@@ -1,14 +1,12 @@
 from abc import ABC, abstractmethod
 from typing import List, Any, Optional, Dict
 
-DownloaderType = Any 
-
 class ModelManagementInterface(ABC):
     @abstractmethod
     async def process_supported_models_config(
         self, 
         supported_model_ids: List[str], 
-        downloader_instance: Optional[DownloaderType] 
+        downloader_instance: object | None
     ) -> None:
         pass
 

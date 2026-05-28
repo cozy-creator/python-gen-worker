@@ -67,6 +67,12 @@ class CachedModel:
     # #337: pinned models are never evicted from VRAM (the shared base — text
     # encoders + VAE — that every variant pipeline references by pointer).
     pinned: bool = False
+    # #335: number of live pipelines/functions that hold a reference to this
+    # entry. When > 0 the bytes are still in use by another endpoint class or
+    # in-flight request, so the entry must NOT be evicted/unloaded even though
+    # it isn't pinned. Acquire/release is driven by SharedComponentCache; a
+    # plain (non-shared) model keeps refcount==0 and behaves as before.
+    refcount: int = 0
 
 
 @dataclass
@@ -223,19 +229,22 @@ class ModelCache:
 
     def _get_lru_vram_models(self) -> List[str]:
         """VRAM-loaded models, LRU first. #337: PINNED models (the shared base)
-        are excluded — they are never eviction candidates."""
+        are excluded — they are never eviction candidates. #335: REFCOUNTED
+        models (shared components still held by a live pipeline) are also
+        excluded — freeing them would corrupt every pipeline pointing at them."""
         with self._lock:
             return [
                 m.model_id for m in self._models.values()
-                if m.location == ModelLocation.VRAM and not m.pinned
+                if m.location == ModelLocation.VRAM and not m.pinned and m.refcount <= 0
             ]
 
     def _get_lru_cpu_models(self) -> List[str]:
-        """Warm CPU-RAM-tier models, LRU first (#337). Pinned excluded."""
+        """Warm CPU-RAM-tier models, LRU first (#337). Pinned + refcounted (#335)
+        excluded."""
         with self._lock:
             return [
                 m.model_id for m in self._models.values()
-                if m.location == ModelLocation.CPU and not m.pinned
+                if m.location == ModelLocation.CPU and not m.pinned and m.refcount <= 0
             ]
 
     def _evict_lru_for_space(self, needed_gb: float) -> float:
@@ -267,7 +276,12 @@ class ModelCache:
                 break
 
             model = self._models.get(model_id)
-            if model and model.location == ModelLocation.VRAM and not model.pinned:
+            if (
+                model
+                and model.location == ModelLocation.VRAM
+                and not model.pinned
+                and model.refcount <= 0
+            ):
                 evicted_size = self._demote_to_cpu(model_id)
                 freed += evicted_size
                 logger.info(f"LRU demoted {model_id} VRAM->CPU ({evicted_size:.1f}GB freed)")
@@ -375,6 +389,52 @@ class ModelCache:
             return bool(model is not None and model.pinned)
 
     # -------------------------------------------------------------------------
+    # #335 shared-component refcounting. A shared immutable component (e.g. one
+    # VAE + text-encoder set used by both a bf16 and a compiled variant) lives
+    # in the cache ONCE; each pipeline that points at it acquires a reference.
+    # Eviction/unload skip any entry with refcount > 0. VRAM is therefore
+    # accounted ONCE (the entry's size_gb is added on first mark_loaded_to_vram
+    # and never duplicated per holder). The SharedComponentCache is the only
+    # intended caller of acquire/release; ModelCache just enforces the invariant.
+    # -------------------------------------------------------------------------
+
+    def acquire_ref(self, model_id: str) -> int:
+        """Increment the refcount of a cached model; returns the new count.
+
+        Touches recency so an actively shared component stays hot. A model that
+        is not yet tracked is a no-op returning 0 (callers register via
+        ``mark_loaded_to_vram`` first).
+        """
+        with self._lock:
+            model = self._models.get(model_id)
+            if model is None:
+                return 0
+            model.refcount += 1
+            self._touch(model_id)
+            return model.refcount
+
+    def release_ref(self, model_id: str) -> int:
+        """Decrement the refcount of a cached model; returns the new count.
+
+        Never drops below 0. Releasing the last reference does NOT immediately
+        evict — it merely makes the entry an eligible LRU/eviction candidate
+        again (the actual free happens on the next space pressure / unload).
+        """
+        with self._lock:
+            model = self._models.get(model_id)
+            if model is None:
+                return 0
+            if model.refcount > 0:
+                model.refcount -= 1
+            return model.refcount
+
+    def refcount(self, model_id: str) -> int:
+        """Current number of live pipelines holding this entry (#335)."""
+        with self._lock:
+            model = self._models.get(model_id)
+            return int(model.refcount) if model is not None else 0
+
+    # -------------------------------------------------------------------------
     # #337 CPU-RAM warm tier transitions (VRAM <-> CPU). All callers hold the
     # GPU mutex (worker `_gpu_semaphore`), so demote/promote never race a load
     # or an in-flight inference on the same device.
@@ -432,6 +492,11 @@ class ModelCache:
         with self._lock:
             model = self._models.get(model_id)
             if not model or model.location != ModelLocation.VRAM or model.pinned:
+                return 0.0
+            # #335: a shared component still held by a live pipeline must stay
+            # resident — demoting it to CPU would yank weights out from under
+            # an endpoint class / in-flight request that points at it.
+            if model.refcount > 0:
                 return 0.0
             freed = model.size_gb
             # Make room in the RAM tier before parking the object there.
@@ -629,6 +694,16 @@ class ModelCache:
             if not model:
                 return False
 
+            # #335: a refcounted shared component is still referenced by a live
+            # pipeline; an orchestrator-commanded unload must not free its bytes.
+            if model.refcount > 0:
+                logger.info(
+                    "unload_model(%s) refused: refcount=%d (shared component "
+                    "still held by a live pipeline)",
+                    model_id, model.refcount,
+                )
+                return False
+
             if model.location == ModelLocation.VRAM:
                 self._unload_from_vram(model_id, keep_on_disk=False)
             else:
@@ -654,10 +729,19 @@ class ModelCache:
         # Evict outside the lock (flush can be slow).
         while True:
             with self._lock:
+                # #335: count ALL VRAM models for the budget check, but only
+                # pick non-refcounted, non-pinned ones as victims so shared
+                # components held by a live pipeline are never unloaded.
                 vram = [m.model_id for m in self._models.values() if m.location == ModelLocation.VRAM]
                 if len(vram) <= max_vram_models:
                     break
-                victim = vram[0]
+                victims = [
+                    m.model_id for m in self._models.values()
+                    if m.location == ModelLocation.VRAM and m.refcount <= 0 and not m.pinned
+                ]
+                if not victims:
+                    break  # everything left is in-use/pinned; can't shrink further
+                victim = victims[0]
             freed = self._unload_from_vram(victim, keep_on_disk=True)
             if freed <= 0:
                 # Avoid infinite loops if unload fails for some reason.

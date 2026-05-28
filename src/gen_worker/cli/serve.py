@@ -60,7 +60,7 @@ DEFAULT_SOCKET_PATH = "./.gen-worker.sock"
 # argparse wiring
 # --------------------------------------------------------------------------
 
-def add_subparser(sub: "argparse._SubParsersAction[Any]") -> None:
+def add_subparser(sub: argparse._SubParsersAction[Any]) -> None:
     """Register the ``serve`` subcommand on the top-level parser."""
     p = sub.add_parser(
         "serve",

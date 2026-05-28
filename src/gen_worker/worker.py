@@ -633,10 +633,36 @@ class Worker:
         # False during __init__, so the loop would exit immediately.
         self._job_dispatch_thread: Optional[threading.Thread] = None
 
-        self._reconnect_delay_base = max(0, reconnect_delay)
-        self._reconnect_delay_max = 60
+        # gen-worker #338 fix 2: bounded exponential backoff with FULL jitter
+        # on the reconnect loop. Previously a worker that lost an
+        # already-established stream looped straight back into connect() with
+        # no delay (~0.1s tight retry, ~280 attempts observed through a brief
+        # orchestrator-restart window), hammering the router exactly while it
+        # was coming back up. Base 0.5s, cap 30s; the delay is computed by
+        # _next_reconnect_delay as full-jitter uniform(0, capped_backoff).
+        self._reconnect_delay_base = max(0.5, reconnect_delay) if reconnect_delay else 0.5
+        self._reconnect_delay_max = 30
+        # full jitter: the realized delay is uniform(0, capped_backoff), so the
+        # jitter span tracks the backoff rather than a fixed +1s. Kept as an
+        # attribute so it can be tuned/inspected; _next_reconnect_delay reads it.
         self._reconnect_jitter_seconds = 1.0
         self._lb_only_retries = lb_only_retries
+        # gen-worker #338 fix 3: timestamp (monotonic) of the last message
+        # received from the scheduler on the control stream. The half-open
+        # watchdog in _heartbeat_loop compares this against now() to detect a
+        # write-only-dead stream (heartbeats leave but nothing ever comes back)
+        # and force a teardown+reconnect. Initialized here so the bare-Worker
+        # test path and the first connect both have a sane baseline.
+        self._last_server_msg_at = time.monotonic()
+        # Tear the stream down as half-open after this many seconds of inbound
+        # silence. Generous (well above HEARTBEAT_INTERVAL) so a legitimately
+        # idle worker that the orchestrator simply isn't talking to is not
+        # killed spuriously; the orchestrator pushes config/liveness traffic
+        # well within this window on a healthy stream. 0 disables the check.
+        self._half_open_silence_timeout_s = float(
+            os.environ.get("WORKER_HALF_OPEN_SILENCE_TIMEOUT_S", str(HEARTBEAT_INTERVAL * 6))
+            or 0
+        )
 
         resolved_model_manager = model_manager
         # Auto-wire: if no explicit manager and diffusers is available, use the
@@ -718,6 +744,14 @@ class Worker:
 
         # LRU model cache for tracking VRAM and disk-cached models
         self._model_cache = ModelCache()
+        # #335: worker-owned shared loaded-component cache. Lets multiple
+        # bindings/classes that pin IDENTICAL immutable base components (e.g.
+        # FLUX.2 Klein bf16 base across GenerateBf16 + GenerateBf16Compiled)
+        # share a single loaded copy per GPU instead of duplicating CUDA
+        # storages. Refcounted + integrated with the ModelCache above so shared
+        # VRAM is counted once and never evicted while referenced.
+        from .models.shared_components import SharedComponentCache
+        self._shared_components = SharedComponentCache(model_cache=self._model_cache)
 
         # Initialize model config from the manifest
         if manifest and isinstance(manifest, dict):
@@ -1048,12 +1082,54 @@ class Worker:
         if not self._lb_only_retries and addr not in self.scheduler_addrs:
             self.scheduler_addrs.insert(0, addr)
 
+    def _grpc_channel_options(self) -> List[Tuple[str, int]]:
+        """gRPC channel options enabling HTTP/2 keepalive pings (gen-worker
+        #338 fix 3, primary layer).
+
+        Without keepalive, a write-only-dead TCP connection (orchestrator
+        restarted, NAT/router dropped the flow) is invisible to gRPC: the
+        worker keeps queueing heartbeats into a black hole and never errors, so
+        the receive loop never raises and the worker never reconnects.
+        Keepalive makes the gRPC core ping the peer on an idle stream; an
+        unanswered ping closes the channel, which surfaces as an RpcError in
+        ``_receive_loop`` → ``_handle_connection_error`` → reconnect.
+
+        ``keepalive_permit_without_calls`` lets pings fire on an idle (no
+        active RPC) connection, which is exactly the long-lived idle worker
+        case. Values are conservative so the orchestrator's keepalive-enforcement
+        policy (min ping interval) isn't violated.
+        """
+        ping_ms = HEARTBEAT_INTERVAL * 1000
+        return [
+            ("grpc.keepalive_time_ms", ping_ms),
+            ("grpc.keepalive_timeout_ms", min(ping_ms, 20000)),
+            ("grpc.keepalive_permit_without_calls", 1),
+            ("grpc.http2.max_pings_without_data", 0),
+        ]
+
+    def _make_channel(self, addr: str) -> Any:
+        """Create a gRPC channel to ``addr`` with keepalive options applied
+        (gen-worker #338 fix 3). Centralizes TLS vs insecure selection so every
+        stream (control, heartbeat, aux) gets the same half-open detection."""
+        options = self._grpc_channel_options()
+        if self.use_tls:
+            return grpc.secure_channel(addr, grpc.ssl_channel_credentials(), options=options)
+        return grpc.insecure_channel(addr, options=options)
+
     def _next_reconnect_delay(self, attempt: int) -> float:
+        """Bounded exponential backoff with FULL jitter (gen-worker #338 fix 2).
+
+        ``backoff = min(base * 2**(attempt-1), cap)`` then the realized delay
+        is ``uniform(0, backoff)`` (AWS "full jitter"): every realized delay is
+        in ``[0, cap]`` and the expected wait still grows exponentially, so a
+        fleet of workers reconnecting through an orchestrator restart spreads
+        out instead of synchronizing into a thundering herd. ``attempt`` is
+        1-based; attempt<=1 collapses to ``uniform(0, base)``.
+        """
         backoff = self._reconnect_delay_base * (2 ** max(attempt - 1, 0))
         if self._reconnect_delay_max > 0:
             backoff = min(backoff, self._reconnect_delay_max)
-        jitter = random.uniform(0, self._reconnect_jitter_seconds) if self._reconnect_jitter_seconds > 0 else 0.0
-        return backoff + jitter
+        return random.uniform(0, backoff) if backoff > 0 else 0.0
 
     def _iter_scheduler_addrs(self) -> Iterator[str]:
         seen = set()
@@ -4085,15 +4161,14 @@ class Worker:
 
     def _connect_once(self) -> bool:
         try:
-            if self.use_tls:
-                # Default system CA bundle — adequate for orchestrator endpoints
-                # reachable via a trusted public certificate. Pass custom creds
-                # explicitly via the orchestrator deployment if a private CA is
-                # involved.
-                creds = grpc.ssl_channel_credentials()
-                self._channel = grpc.secure_channel(self.scheduler_addr, creds)
-            else:
-                self._channel = grpc.insecure_channel(self.scheduler_addr)
+            # gen-worker #338 fix 3: _make_channel applies HTTP/2 keepalive
+            # options so a write-only-dead connection is detected by the gRPC
+            # core (idle ping goes unanswered -> channel closes -> RpcError in
+            # the receive loop -> reconnect) instead of silently wedging.
+            # Default system CA bundle (TLS path) is adequate for orchestrator
+            # endpoints reachable via a trusted public certificate; pass custom
+            # creds via the deployment if a private CA is involved.
+            self._channel = self._make_channel(self.scheduler_addr)
 
             interceptors = []
             if self.worker_jwt:
@@ -4117,6 +4192,19 @@ class Worker:
 
             logger.info(f"Attempting to connect to scheduler at {self.scheduler_addr}...")
 
+            # gen-worker #338 fix 1: clear the once-only ready latch on every
+            # (re)connect so _emit_ready_if_all_cached (called below) re-fires
+            # `ready` on the freshly-established stream. Without this an
+            # already-connected worker that lost its stream to an orchestrator
+            # restart re-registered but never re-advertised `ready`, so the
+            # orchestrator kept it at connected=0. Must run BEFORE the
+            # register/emit pair below.
+            self._reset_ready_phase_latch()
+            # gen-worker #338 fix 3: a fresh stream is, by definition, not yet
+            # half-open. Reset the inbound-liveness clock so the half-open
+            # watchdog measures silence from this connection, not the last.
+            self._last_server_msg_at = time.monotonic()
+
             # Send initial registration immediately
             self._register_worker(is_heartbeat=False)
             self._registered_event.set()
@@ -4127,11 +4215,8 @@ class Worker:
             # ConnectWorker lease per worker token, so heartbeats must ride
             # the primary control stream instead of opening a second lease.
             if self._use_dedicated_heartbeat_stream():
-                if self.use_tls:
-                    hb_creds = grpc.ssl_channel_credentials()
-                    self._heartbeat_channel = grpc.secure_channel(self.scheduler_addr, hb_creds)
-                else:
-                    self._heartbeat_channel = grpc.insecure_channel(self.scheduler_addr)
+                # #338 fix 3: keepalive options here too via _make_channel.
+                self._heartbeat_channel = self._make_channel(self.scheduler_addr)
                 if interceptors:
                     self._heartbeat_channel = grpc.intercept_channel(self._heartbeat_channel, *interceptors)
                 self._heartbeat_stub = pb_grpc.SchedulerWorkerServiceStub(self._heartbeat_channel)
@@ -4351,10 +4436,8 @@ class Worker:
             return
         try:
             def _new_channel() -> Any:
-                if self.use_tls:
-                    ch = grpc.secure_channel(self.scheduler_addr, grpc.ssl_channel_credentials())
-                else:
-                    ch = grpc.insecure_channel(self.scheduler_addr)
+                # #338 fix 3: keepalive options here too via _make_channel.
+                ch = self._make_channel(self.scheduler_addr)
                 if interceptors:
                     ch = grpc.intercept_channel(ch, *interceptors)
                 return ch
@@ -4447,9 +4530,52 @@ class Worker:
             except queue.Full:
                 logger.error("Heartbeat outgoing queue is full. Heartbeat dropped!")
 
+    def _stream_is_half_open(self, now: Optional[float] = None) -> bool:
+        """True when the control stream looks write-only-dead (gen-worker #338
+        fix 3).
+
+        A half-open stream is one where the worker can still enqueue heartbeats
+        (``queue.put`` never fails on a dead-but-not-yet-reset socket) but the
+        orchestrator no longer sees them and never sends anything back — so the
+        orchestrator silently drops the worker to ``connected=0`` while the
+        worker happily believes it is still attached. gRPC keepalive
+        (configured on the channel) is the primary defense and surfaces this as
+        an RpcError in the receive loop; this application-level watchdog is a
+        belt-and-suspenders backstop for environments where keepalive pings are
+        stripped by an intermediary.
+
+        Detection: no message of any kind received from the scheduler within
+        ``_half_open_silence_timeout_s``. The window is several heartbeat
+        intervals wide so a merely-idle worker is never torn down. Returns
+        False (never trips) when the timeout is disabled (<= 0) or the liveness
+        clock is missing (bare-Worker test path that didn't connect).
+        """
+        timeout = getattr(self, "_half_open_silence_timeout_s", 0) or 0
+        if timeout <= 0:
+            return False
+        last = getattr(self, "_last_server_msg_at", None)
+        if last is None:
+            return False
+        if now is None:
+            now = time.monotonic()
+        return (now - last) >= timeout
+
     def _heartbeat_loop(self) -> None:
         """Periodically sends heartbeat messages on the dedicated heartbeat stream."""
         while not self._stop_event.wait(HEARTBEAT_INTERVAL):
+            # gen-worker #338 fix 3: before sending the next heartbeat, check
+            # whether the stream has gone write-only-dead (heartbeats leaving
+            # but nothing ever coming back). If so, tear it down and let the
+            # run loop reconnect rather than settling on a registered-but-dead
+            # stream the orchestrator already abandoned.
+            if not self._stop_event.is_set() and self._stream_is_half_open():
+                logger.warning(
+                    "No message from scheduler for >= %.0fs; treating stream as "
+                    "half-open and forcing reconnect.",
+                    getattr(self, "_half_open_silence_timeout_s", 0),
+                )
+                self._handle_connection_error()
+                break
             try:
                 self._register_worker(is_heartbeat=True)
                 logger.debug("Sent heartbeat to scheduler")
@@ -5067,6 +5193,32 @@ class Worker:
                         fn_name, canonical_ref, detail or "unspecified",
                     )
 
+    def _reset_ready_phase_latch(self) -> None:
+        """Clear the once-only ``_ready_phase_emitted`` latch so the next call
+        to ``_emit_ready_if_all_cached`` re-advertises ``ready`` (gen-worker
+        #338, fix 1).
+
+        ``_emit_ready_if_all_cached`` is gated by ``_ready_phase_emitted`` so
+        the typed ``ready`` startup-phase signal fires exactly once per
+        connection. But the latch was never reset on a RE-connect: after the
+        gRPC stream re-established (orchestrator restart) the worker
+        re-registered yet ``_emit_ready_if_all_cached`` short-circuited on the
+        still-set latch, so the orchestrator never saw the worker return to
+        ``ready`` and pinned it at ``connected=0`` until it was killed.
+
+        Resetting the latch here — invoked from ``_connect_once`` on every
+        (re)connect BEFORE re-registration — lets the helper re-evaluate the
+        cache and re-emit ``ready`` (or ``models_downloading`` if a ref is
+        still outstanding). Safe to call from the bare-``Worker`` test path:
+        no-ops when the lock hasn't been initialized.
+        """
+        lock = getattr(self, "_ready_phase_lock", None)
+        if lock is None:
+            self._ready_phase_emitted = False
+            return
+        with lock:
+            self._ready_phase_emitted = False
+
     def _emit_ready_if_all_cached(self) -> None:
         """Emit the typed ``ready`` startup-phase signal exactly once, when
         every required ref has been cached to disk (Fix 2c).
@@ -5353,6 +5505,24 @@ class Worker:
                     logger.info("Worker run loop received stop/disconnect signal.")
                     # If stopped normally (self.stop() called), _running will be False
                     # If disconnected, connect() failed, threads stopped, _handle_connection_error called _stop_event.set()
+                    #
+                    # gen-worker #338 fix 2: a LOST stream (we connected, then
+                    # _handle_connection_error woke us) previously looped
+                    # straight back into connect() with NO delay — the ~0.1s
+                    # retry storm. Apply the same bounded backoff here as the
+                    # failed-connect path so a dropped stream doesn't hammer the
+                    # orchestrator/router through its restart window. _running
+                    # is False on a clean stop(), so this only delays genuine
+                    # reconnects. _connect_once resets _reconnect_count to 0 on
+                    # a successful connect, so the first post-disconnect retry
+                    # waits uniform(0, base) and escalates only if it keeps
+                    # failing.
+                    if self._running and not self._stop_event.is_set():
+                        delay = self._next_reconnect_delay(self._reconnect_count + 1)
+                        logger.info(f"Stream lost; reconnecting in {delay:.2f} seconds...")
+                        if self._stop_event.wait(delay):
+                            logger.info("Stop requested during reconnect delay.")
+                            break
                 else:
                     # Connection failed
                     if self.max_reconnect_attempts > 0 and self._reconnect_count >= self.max_reconnect_attempts:
@@ -5672,6 +5842,11 @@ class Worker:
 
     def _process_message(self, message: WorkerSchedulerMessage) -> None:
         """Process a single message received from the scheduler."""
+        # gen-worker #338 fix 3: every inbound message proves the stream is
+        # bidirectionally alive. Stamp the liveness clock the half-open
+        # watchdog reads. Done first so even a message that fails downstream
+        # processing still counts as proof-of-liveness.
+        self._last_server_msg_at = time.monotonic()
         msg_type = message.WhichOneof('msg')
         # logger.debug(f"Received message of type: {msg_type}")
 
@@ -8213,6 +8388,46 @@ class Worker:
         cache = getattr(self, "_model_cache", None)
         canon = self._canonical_cache_key_for_ref(original_ref or model_source)
 
+        # #335: when two endpoint classes pin IDENTICAL immutable base
+        # components, load the bytes ONCE and share them across pipelines via
+        # the worker-owned SharedComponentCache. The cache KEY folds every
+        # dimension that would make the bytes incompatible to share (provider /
+        # ref / revision / dtype / device / placement / pipeline class) plus an
+        # adapter identity that ISOLATES LoRA-capable / override-capable
+        # bindings — so a mutable wrapper can never alias the clean base another
+        # function depends on. Only shareable (immutable, non-LoRA, non-override)
+        # bindings take this path; everything else keeps the legacy per-ref
+        # ModelCache flow below unchanged.
+        shared = getattr(self, "_shared_components", None)
+        share_key = self._shared_component_key_for_binding(
+            binding=binding, requested_type=requested_type, model_source=model_source
+        )
+        if shared is not None and share_key is not None:
+            def _do_load() -> Any:
+                return self._load_serial_setup_model_value_uncached(
+                    binding=binding,
+                    requested_type=requested_type,
+                    model_source=model_source,
+                    original_ref=original_ref,
+                )
+
+            try:
+                obj = shared.acquire(share_key, _do_load)
+                logger.info(
+                    "SerialWorker typed setup: acquired shared component %s "
+                    "(refcount=%d, ref=%s)",
+                    share_key.cache_id(), shared.refcount(share_key), share_key.ref,
+                )
+                return obj
+            except Exception as _share_exc:  # noqa: BLE001
+                # Sharing is an optimization — never let it block a load. Fall
+                # through to the legacy per-ref path on any failure.
+                logger.warning(
+                    "SerialWorker typed setup: shared-component acquire failed "
+                    "for %s (%s); falling back to per-ref load",
+                    share_key.ref, _share_exc,
+                )
+
         # If this exact variant is already hot in VRAM, reuse it (touches recency).
         if cache is not None and canon and cache.is_in_vram(canon):
             cached = cache.get_pipeline(canon)
@@ -8247,6 +8462,73 @@ class Worker:
                     canon, _cache_exc,
                 )
         return loaded_obj
+
+    def _shared_component_key_for_binding(
+        self,
+        *,
+        binding: Any,
+        requested_type: Any,
+        model_source: str,
+    ) -> Optional[Any]:
+        """Build a :class:`LoadedComponentKey` for a SHAREABLE binding, else None.
+
+        Returns ``None`` (skip sharing, use the legacy per-ref path) for bindings
+        whose base components must NOT be shared:
+
+        - Dispatch / unrefable bindings — resolved per request, not a fixed base.
+        - LoRA-capable bindings (``.allow_lora()``) — they mutate the runtime
+          with per-request overlays; sharing the base object would let one
+          function's overlay leak into another's.
+        - Override-capable bindings (``.allow_override(...)``) — the actual ref
+          is caller-chosen at request time, so the setup-time base is not a
+          stable shared identity.
+
+        For a shareable binding the key folds in the resolved dtype, GPU device
+        id, placement/offload mode, and the requested pipeline class as the
+        component-set identity. Bindings differing in ANY of those get distinct
+        keys (so bf16 ≠ fp16, dev0 ≠ dev1, PipelineA ≠ PipelineB never share).
+        """
+        from .models.shared_components import LoadedComponentKey
+
+        if binding is None:
+            return None
+        ref = str(getattr(binding, "ref", "") or "").strip()
+        if not ref:
+            return None
+        # Mutable-capable bindings are isolated — never share their base object.
+        if bool(getattr(binding, "_allow_lora", False)):
+            return None
+        if bool(getattr(binding, "_allow_override", False)):
+            return None
+
+        device_id = self._current_gpu_device_id()
+        component_set = _type_qualname(requested_type) if requested_type is not None else ""
+        # Use the resolved snapshot path as a stable revision fallback when the
+        # binding pins no explicit revision, so two un-pinned bindings that
+        # resolved to the SAME on-disk snapshot still share (and different
+        # snapshots do not).
+        snapshot_digest = str(model_source or "").strip()
+        return LoadedComponentKey.from_binding(
+            binding,
+            device_id=device_id,
+            placement="full",
+            component_set=component_set,
+            snapshot_digest=snapshot_digest,
+        )
+
+    @staticmethod
+    def _current_gpu_device_id() -> int:
+        """Current CUDA device index (0 when torch/CUDA is unavailable).
+
+        Part of the #335 cache key so a multi-GPU worker never shares CUDA
+        storage across devices.
+        """
+        try:
+            if torch is not None and torch.cuda.is_available():
+                return int(torch.cuda.current_device())
+        except Exception:
+            pass
+        return 0
 
     def _canonical_cache_key_for_ref(self, ref: str) -> Optional[str]:
         """Best-effort canonical key for the worker ModelCache."""
@@ -8601,6 +8883,19 @@ class Worker:
                         rec.get("cls_name"),
                     )
             rec["shutdown_done"] = True
+
+        # #335: force-drain the shared component cache once all SerialWorker
+        # instances have shut down. Force is correct here — every endpoint
+        # class is being torn down, so no live pipeline still holds a shared
+        # base. Best-effort; a failure here must not block worker stop().
+        shared = getattr(self, "_shared_components", None)
+        if shared is not None:
+            try:
+                freed = shared.shutdown()
+                if freed:
+                    logger.info("SharedComponentCache drained %d entries on shutdown", freed)
+            except Exception:
+                logger.exception("SharedComponentCache shutdown raised; continuing")
 
     def _emit_serial_incremental_item(
         self,

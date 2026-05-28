@@ -9,6 +9,12 @@ from .cache_paths import (
 from .downloader import ModelDownloader
 from .interface import ModelManagementInterface, ModelManager
 from .refs import TensorhubRef, HuggingFaceRef, ParsedModelRef, parse_model_ref
+from .shared_components import (
+    LoadedComponentKey,
+    SharedComponentCache,
+    SharedComponentStats,
+    build_function_owned_pipeline,
+)
 
 __all__ = [
     "ModelCache",
@@ -24,4 +30,8 @@ __all__ = [
     "HuggingFaceRef",
     "ParsedModelRef",
     "parse_model_ref",
+    "LoadedComponentKey",
+    "SharedComponentCache",
+    "SharedComponentStats",
+    "build_function_owned_pipeline",
 ]
