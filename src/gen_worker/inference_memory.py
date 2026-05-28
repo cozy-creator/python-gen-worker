@@ -173,6 +173,7 @@ def select_auto_mode(
     pipeline: Any,
     total_vram_gb: Optional[float] = None,
     model_size_gb: Optional[float] = None,
+    peak_vram_gb: Optional[float] = None,
 ) -> str:
     """
     Pick the least-aggressive ladder step that should keep the pipeline in memory.
@@ -183,14 +184,26 @@ def select_auto_mode(
       - total VRAM <= group_offload_threshold  -> group_offload
       - total VRAM <= model_offload_threshold  -> model_offload
       - total VRAM <= vae_slice_threshold      -> vae_only
-      - model_size > (total - margin)          -> model_offload
+      - requirement > (total - margin)         -> model_offload
       - otherwise                              -> vae_only
+
+    ``peak_vram_gb`` is the endpoint's DECLARED peak VRAM during one request
+    (``Resources.peak_vram_per_request_gb``, issue #339). When provided it
+    drives the fit check instead of the framework guessing from weights alone:
+    the requirement becomes ``max(model_gb, peak_vram_gb)`` so a tenant who
+    declares a large per-request peak (big activations / many images) offloads
+    sooner, while one who declares a small peak still never drops below the
+    measured weight footprint. Absent a declaration the behavior is unchanged.
     """
     total = total_vram_gb if total_vram_gb is not None else get_total_vram_gb()
     if total <= 0.0:
         return "off"
 
     model_gb = model_size_gb if model_size_gb is not None else estimate_pipeline_size_gb(pipeline)
+    # Declared per-request peak (#339) raises — never lowers — the requirement.
+    requirement = model_gb
+    if peak_vram_gb is not None and peak_vram_gb > 0.0:
+        requirement = max(model_gb, float(peak_vram_gb))
     margin = _DEFAULT_SAFETY_MARGIN_GB
     t_group = _DEFAULT_GROUP_OFFLOAD_THRESHOLD_GB
     t_model = _DEFAULT_MODEL_OFFLOAD_THRESHOLD_GB
@@ -200,14 +213,14 @@ def select_auto_mode(
     if total <= t_group:
         return "group_offload"
 
-    # Model-size-aware (the key efficiency rule): when we can estimate the model
+    # Size/peak-aware (the key efficiency rule): when we know the requirement
     # and it fits within (total VRAM - activation margin), keep it FULLY RESIDENT
     # (no offload) even on a modest card — offload ONLY when it genuinely won't
     # fit. This avoids the ~10-50% offload penalty for models that fit (e.g. sd1.5
     # on an 8GB card) while big models (e.g. SDXL @1024 on an 8GB card) still
     # offload. Falls through to total-VRAM thresholds only when size is unknown.
-    if model_gb > 0.0:
-        return "vae_only" if model_gb <= max(0.0, total - margin) else "model_offload"
+    if requirement > 0.0:
+        return "vae_only" if requirement <= max(0.0, total - margin) else "model_offload"
 
     # Unknown model size: conservative total-VRAM thresholds.
     if total <= t_model:
@@ -358,6 +371,7 @@ def apply_low_vram_config(
     mode: Mode = "auto",
     logger: Optional[logging.Logger] = None,
     model_size_gb: Optional[float] = None,
+    peak_vram_gb: Optional[float] = None,
     offload_to_disk_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
@@ -369,6 +383,10 @@ def apply_low_vram_config(
             An env override ``COZY_INFERENCE_MEMORY_MODE`` takes precedence when set.
       logger: optional logger for user-facing INFO lines.
       model_size_gb: precomputed model size in GB (skips the probe).
+      peak_vram_gb: endpoint-declared peak VRAM per request
+            (``Resources.peak_vram_per_request_gb``, #339). In ``auto`` mode it
+            raises the fit requirement so a declared-heavy endpoint offloads
+            sooner; ignored for explicit modes.
       offload_to_disk_path: if set, group-offload stores offloaded weights on disk
             instead of CPU RAM. Required when CPU RAM is insufficient.
 
@@ -389,7 +407,9 @@ def apply_low_vram_config(
         return {"mode": prior, "already_applied": True}
 
     if effective_mode == "auto":
-        effective_mode = select_auto_mode(pipeline=pipeline, model_size_gb=model_size_gb)
+        effective_mode = select_auto_mode(
+            pipeline=pipeline, model_size_gb=model_size_gb, peak_vram_gb=peak_vram_gb,
+        )
         log.info("low_vram: auto-selected mode=%s", effective_mode)
 
     applied: Dict[str, Any] = {

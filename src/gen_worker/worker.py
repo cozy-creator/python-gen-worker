@@ -175,6 +175,11 @@ class InjectionSpec:
     param_name: str
     param_type: Any
     binding: Binding
+    # #339: the endpoint's declared peak VRAM per request
+    # (Resources.peak_vram_per_request_gb). Threaded into the framework's
+    # auto-offload decision so OOM offload is driven by what the tenant
+    # declared rather than a hardcoded activation margin. None = undeclared.
+    peak_vram_gb: Optional[float] = None
 
 
 @_injection_dataclass(frozen=True)
@@ -3425,6 +3430,7 @@ class Worker:
                         param_name=p.name,
                         param_type=ann,
                         binding=bindings_map[p.name],
+                        peak_vram_gb=getattr(resources, "peak_vram_per_request_gb", None),
                     )
                 )
                 continue
@@ -11636,10 +11642,17 @@ class Worker:
                             total_vram = _get_total_vram_gb()
                             free_vram = _get_available_vram_gb()
                             safety_margin = 2.0
-                            if model_gb > 0 and model_gb > max(0.0, free_vram - safety_margin):
+                            # #339: the endpoint's DECLARED peak VRAM per request
+                            # raises the requirement so a declared-heavy endpoint
+                            # offloads before .to() even if its weights alone fit.
+                            declared_peak = getattr(inj, "peak_vram_gb", None)
+                            requirement = model_gb
+                            if declared_peak is not None and float(declared_peak) > 0.0:
+                                requirement = max(model_gb, float(declared_peak))
+                            if requirement > 0 and requirement > max(0.0, free_vram - safety_margin):
                                 logger.warning(
-                                    "low_vram preflight: model=%s size=%.1fGB free_vram=%.1fGB total_vram=%.1fGB -> enabling offload before .to()",
-                                    model_id, model_gb, free_vram, total_vram,
+                                    "low_vram preflight: model=%s size=%.1fGB declared_peak=%sGB free_vram=%.1fGB total_vram=%.1fGB -> enabling offload before .to()",
+                                    model_id, model_gb, declared_peak, free_vram, total_vram,
                                 )
                                 # Pick the right offload based on how tight we are.
                                 if total_vram > 0 and total_vram <= 6.0:
@@ -11724,6 +11737,7 @@ class Worker:
                             try:
                                 applied = _apply_low_vram_config(
                                     obj, mode="auto", logger=logger,
+                                    peak_vram_gb=getattr(inj, "peak_vram_gb", None),
                                 )
                                 try:
                                     self._emit_worker_event_bytes("", "low_vram_mode_applied", json.dumps({
