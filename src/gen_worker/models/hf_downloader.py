@@ -195,6 +195,7 @@ class HuggingFaceHubDownloader:
         self,
         ref: HuggingFaceRef,
         progress_callback: Optional[Callable[[int, Optional[int]], None]] = None,
+        allow_patterns: Optional[Sequence[str]] = None,
     ) -> HuggingFaceDownloadResult:
         try:
             from huggingface_hub import HfApi, hf_hub_download, snapshot_download
@@ -222,6 +223,20 @@ class HuggingFaceHubDownloader:
             kwargs["cache_dir"] = self.hf_home
         if self.hf_token:
             kwargs["token"] = self.hf_token
+
+        # Explicit file selection (HFRepo.files(...)): fetch exactly these globs
+        # and SKIP all diffusers-layout inference. This is how ComfyUI /
+        # split-checkpoint repos (no model_index.json, weights nested under
+        # subdirs, no root .safetensors) load from HF — and it avoids pulling
+        # unused shards / sibling models.
+        if allow_patterns:
+            local = snapshot_download_fn(
+                repo_id=repo_id,
+                revision=ref.revision,
+                allow_patterns=list(allow_patterns),
+                **kwargs,
+            )
+            return HuggingFaceDownloadResult(local_dir=Path(local))
 
         # Safety guard against accidental huge downloads. Default 60GB so
         # large diffusers pipelines (e.g. FLUX.2-klein-9B at ~35GB: 9B

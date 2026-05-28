@@ -243,6 +243,12 @@ class HFRepo(Repo):
     # #337 SharedBase: a text_encoder / vae lives under a named subfolder of
     # a full SDXL repo). Empty = load the repo root.
     _subfolder: str = ""
+    # File-selection globs (snapshot_download allow_patterns) to fetch ONLY
+    # specific files from the repo. Set via .files(...). When present, the
+    # downloader does a direct snapshot_download(allow_patterns=...) and skips
+    # the diffusers-layout inference — so ComfyUI / split-checkpoint repos
+    # (no model_index.json) resolve by explicitly listing their component files.
+    _allow_patterns: tuple[str, ...] = ()
 
     def __init__(
         self,
@@ -261,6 +267,7 @@ class HFRepo(Repo):
         _revision: str = "",
         _dtype: str = "",
         _subfolder: str = "",
+        _allow_patterns: tuple[str, ...] = (),
     ) -> None:
         super().__init__(
             ref_or_name,
@@ -277,7 +284,23 @@ class HFRepo(Repo):
         object.__setattr__(self, "_revision", str(_revision or "").strip())
         object.__setattr__(self, "_dtype", str(_dtype or "").strip())
         object.__setattr__(self, "_subfolder", str(subfolder or _subfolder or "").strip())
+        object.__setattr__(self, "_allow_patterns", tuple(_allow_patterns or ()))
         self.__post_init__()
+
+    def files(self, *patterns: str) -> "HFRepo":
+        """Return a new HFRepo that downloads only the matching files.
+
+        Patterns are ``huggingface_hub.snapshot_download`` ``allow_patterns``
+        globs (e.g. ``"split_files/vae/*.safetensors"``). When set, the worker
+        fetches exactly these files and SKIPS the diffusers-layout inference —
+        this is how a ComfyUI / split-checkpoint repo (no ``model_index.json``,
+        weights nested under subdirs) loads from HF, and it avoids pulling
+        unused shards / sibling models.
+        """
+        pats = tuple(str(p).strip() for p in patterns if str(p).strip())
+        if not pats:
+            raise ValueError("HFRepo.files() requires at least one pattern")
+        return replace(self, _allow_patterns=pats)
 
     def subfolder(self, name: str) -> "HFRepo":
         """Return a new HFRepo that loads the named subfolder of the repo.
@@ -386,6 +409,90 @@ class CivitaiRepo(Repo):
         if not version_id:
             raise ValueError("CivitaiRepo.version() requires a non-empty version id")
         return replace(self, _version_id=version_id)
+
+
+@dataclass(frozen=True, init=False)
+class ModelScopeRepo(Repo):
+    """ModelScope-backed binding.
+
+    The ref is the ModelScope repo id (``"owner/repo"``). ModelScope is
+    DiffSynth-Studio's native model source and is **file-oriented** (no
+    diffusers-layout requirement), so this is the clean way to fetch
+    ComfyUI / DiffSynth-style split checkpoints (e.g. ``circlestone-labs/Anima``)
+    that the HuggingFace resolver rejects.
+
+        anima = ModelScopeRepo("circlestone-labs/Anima")
+        anima = anima.revision("master")
+        # fetch only specific files (skip unused shards / sibling models):
+        anima = anima.files("split_files/diffusion_models/anima-base-v1.0.safetensors")
+
+    ``.files(*patterns)`` carries ``allow_patterns`` as binding metadata (like
+    :meth:`HFRepo.dtype` / :meth:`HFRepo.subfolder`) — it is NOT encoded into the
+    ref string; the downloader passes it to
+    ``modelscope.snapshot_download(allow_patterns=...)``.
+    """
+
+    PROVIDER: ClassVar[str] = "modelscope"
+    _revision: str = ""
+    _allow_patterns: tuple[str, ...] = ()
+
+    def __init__(
+        self,
+        ref_or_name: str | None = None,
+        default_ref: str | None = None,
+        *,
+        name: str = "",
+        ref: str = "",
+        _slot_name: str = "",
+        _flavor: str = "",
+        _tag: str = "prod",
+        _allow_override: bool = False,
+        _pipeline_classes: tuple[str, ...] = (),
+        _allow_lora: bool = False,
+        _revision: str = "",
+        _allow_patterns: tuple[str, ...] = (),
+    ) -> None:
+        super().__init__(
+            ref_or_name,
+            default_ref,
+            name=name,
+            ref=ref,
+            _slot_name=_slot_name,
+            _flavor=_flavor,
+            _tag=_tag,
+            _allow_override=_allow_override,
+            _pipeline_classes=_pipeline_classes,
+            _allow_lora=_allow_lora,
+        )
+        object.__setattr__(self, "_revision", str(_revision or "").strip())
+        object.__setattr__(self, "_allow_patterns", tuple(_allow_patterns or ()))
+        self.__post_init__()
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if "/" not in self.ref:
+            raise ValueError(
+                f"ModelScopeRepo(ref=) must be 'owner/repo', got {self.ref!r}"
+            )
+
+    def revision(self, rev: str) -> "ModelScopeRepo":
+        """Return a new ModelScopeRepo pinned to a specific revision."""
+        rev = str(rev or "").strip()
+        if not rev:
+            raise ValueError("ModelScopeRepo.revision() requires a non-empty revision")
+        return replace(self, _revision=rev)
+
+    def files(self, *patterns: str) -> "ModelScopeRepo":
+        """Return a new ModelScopeRepo that downloads only the matching files.
+
+        Patterns are ``modelscope.snapshot_download`` ``allow_patterns`` globs
+        (e.g. ``"split_files/vae/*.safetensors"``). Use this to fetch only the
+        needed components and skip unused shards / sibling models.
+        """
+        pats = tuple(str(p).strip() for p in patterns if str(p).strip())
+        if not pats:
+            raise ValueError("ModelScopeRepo.files() requires at least one pattern")
+        return replace(self, _allow_patterns=pats)
 
 
 @dataclass(frozen=True)

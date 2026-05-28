@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 
@@ -8,7 +9,16 @@ DEFAULT_WORKER_LOCAL_MODEL_CACHE_DIR = "/tmp/tensorhub/local-model-cache"
 
 
 def tensorhub_cache_dir() -> Path:
-    """TensorHub cache root directory."""
+    """TensorHub cache root directory.
+
+    Honors the ``TENSORHUB_CACHE_DIR`` environment variable when set, so the
+    cozy local runner can point the CAS at a persistent ``~/.cache/tensorhub``
+    (weights survive reboots) instead of ``/tmp``. Falls back to the ``/tmp``
+    default when unset, preserving existing worker/orchestrator behavior.
+    """
+    env = os.environ.get("TENSORHUB_CACHE_DIR")
+    if env and env.strip():
+        return Path(env).expanduser()
     return Path(TENSORHUB_CACHE_DIR)
 
 

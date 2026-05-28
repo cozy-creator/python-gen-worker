@@ -65,7 +65,15 @@ def _stderr_emitter(event: Dict[str, Any]) -> None:
 
 
 def _local_outputs_root() -> Path:
-    root = Path.cwd() / _LOCAL_OUTPUT_DIR_NAME / "outputs"
+    # cozy sets GEN_WORKER_LOCAL_OUTPUT_DIR so generated assets land in a
+    # user-facing dir (e.g. ~/.cache/cozy/outputs) instead of being buried in
+    # the endpoint's install dir, while serve still runs with cwd=endpoint dir
+    # so discovery can find `main`. Falls back to cwd/.gen-worker-run as before.
+    env = os.environ.get("GEN_WORKER_LOCAL_OUTPUT_DIR")
+    if env and env.strip():
+        root = Path(env).expanduser()
+    else:
+        root = Path.cwd() / _LOCAL_OUTPUT_DIR_NAME / "outputs"
     root.mkdir(parents=True, exist_ok=True)
     return root
 

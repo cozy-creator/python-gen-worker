@@ -205,6 +205,23 @@ class ModelRefDownloader(ModelDownloader):
             local = _civitai_local_artifact_path(output_dir, info)
             return local
 
+        if parsed.provider == "modelscope" and parsed.modelscope is not None:
+            # File-oriented fetch — no diffusers-layout requirement. allow_patterns
+            # threading on the wire is a follow-up (binding metadata isn't carried
+            # in the bare ref); the local CLI passes it directly.
+            ms = parsed.modelscope
+
+            def _ms_download() -> str:
+                from modelscope import snapshot_download as ms_snap
+
+                kw: dict[str, Any] = {"cache_dir": str(dest_dir / "modelscope")}
+                if ms.revision:
+                    kw["revision"] = ms.revision
+                return ms_snap(model_id=ms.repo_id, **kw)
+
+            local_dir = await asyncio.to_thread(_ms_download)
+            return Path(local_dir)
+
         raise ValueError("invalid parsed model ref")
 
     def download_with_progress(

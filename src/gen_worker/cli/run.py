@@ -482,6 +482,7 @@ def _resolve_binding_to_ref(
 
 def _resolve_local_path(
     *, ref: str, provider: str, offline: bool, emit: Callable[[Dict[str, Any]], None],
+    allow_patterns: tuple[str, ...] = (),
 ) -> str:
     """Resolve one model ref to a local snapshot dir / loader-ready string.
 
@@ -530,6 +531,7 @@ def _resolve_local_path(
                     local_files_only=True,
                     cache_dir=os.getenv("HF_HOME") or None,
                     token=os.getenv("HF_TOKEN") or os.getenv("HUGGING_FACE_HUB_TOKEN") or None,
+                    allow_patterns=list(allow_patterns) or None,
                 )
                 return str(p)
             except Exception as e:
@@ -546,7 +548,7 @@ def _resolve_local_path(
                 hf_home=os.getenv("HF_HOME") or None,
                 hf_token=os.getenv("HF_TOKEN") or os.getenv("HUGGING_FACE_HUB_TOKEN") or None,
             )
-            res = dl.download(parsed.hf)
+            res = dl.download(parsed.hf, allow_patterns=list(allow_patterns) or None)
         except Exception as e:
             raise _ModelResolutionError(
                 f"failed to fetch huggingface ref {parsed.hf.canonical()}: {e}"
@@ -557,6 +559,33 @@ def _resolve_local_path(
             "local_dir": str(res.local_dir),
         })
         return str(res.local_dir)
+
+    # ModelScope refs: fetch directly via modelscope.snapshot_download. This is
+    # file-oriented (allow_patterns) and has NO diffusers-layout requirement, so
+    # it handles ComfyUI/DiffSynth split checkpoints the HF resolver rejects.
+    if parsed.provider == "modelscope" and parsed.modelscope is not None:
+        try:
+            from modelscope import snapshot_download as _ms_snap
+        except Exception as e:
+            raise _ModelResolutionError(
+                f"modelscope is required for modelscope refs ({parsed.modelscope.canonical()}): {e}"
+            ) from e
+        kwargs: Dict[str, Any] = {}
+        if parsed.modelscope.revision:
+            kwargs["revision"] = parsed.modelscope.revision
+        if allow_patterns:
+            kwargs["allow_patterns"] = list(allow_patterns)
+        if offline:
+            kwargs["local_files_only"] = True
+        emit({"kind": "model_fetch.started", "ref": parsed.modelscope.canonical(), "provider": "modelscope"})
+        try:
+            local = _ms_snap(model_id=parsed.modelscope.repo_id, **kwargs)
+        except Exception as e:
+            raise _ModelResolutionError(
+                f"failed to fetch modelscope ref {parsed.modelscope.canonical()}: {e}"
+            ) from e
+        emit({"kind": "model_fetch.completed", "ref": parsed.modelscope.canonical(), "local_dir": str(local)})
+        return str(local)
 
     # Cozy refs that miss the CAS: not yet wired to tensorhub directly from
     # the CLI (requires the presigned-manifest fetch that's owned by the
@@ -602,8 +631,12 @@ def _resolve_models_for_setup(
             payload=payload,
             overrides=overrides,
         )
+        # ModelScopeRepo carries file-selection (allow_patterns) as binding
+        # metadata; thread it through so only the requested files download.
+        allow_patterns = tuple(getattr(binding, "_allow_patterns", ()) or ())
         out[param_name] = _resolve_local_path(
             ref=ref, provider=provider, offline=offline, emit=emit,
+            allow_patterns=allow_patterns,
         )
     return out
 

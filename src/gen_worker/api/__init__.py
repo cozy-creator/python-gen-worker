@@ -1,6 +1,6 @@
 """Public SDK surface: decorators, types, errors, and helpers for tenant code."""
 
-from .binding import Binding, CivitaiRepo, Dispatch, HFRepo, Repo, dispatch
+from .binding import Binding, CivitaiRepo, Dispatch, HFRepo, ModelScopeRepo, Repo, dispatch
 from .decorators import (
     Resources,
     inference_function,
@@ -45,6 +45,7 @@ __all__ = [
     "CivitaiRepo",
     "Dispatch",
     "HFRepo",
+    "ModelScopeRepo",
     "Repo",
     "Resources",
     "dispatch",

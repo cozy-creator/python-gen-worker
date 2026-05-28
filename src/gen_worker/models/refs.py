@@ -59,6 +59,17 @@ class CivitaiRef:
 
 
 @dataclass(frozen=True)
+class ModelScopeRef:
+    repo_id: str
+    revision: Optional[str] = None
+
+    def canonical(self) -> str:
+        if self.revision:
+            return f"{self.repo_id}@{self.revision}"
+        return self.repo_id
+
+
+@dataclass(frozen=True)
 class ParsedModelRef:
     """Decoded model ref.
 
@@ -68,10 +79,11 @@ class ParsedModelRef:
     populated to match the provider tag.
     """
 
-    provider: str  # "tensorhub" | "hf" | "civitai"
+    provider: str  # "tensorhub" | "hf" | "civitai" | "modelscope"
     tensorhub: Optional[TensorhubRef] = None
     hf: Optional[HuggingFaceRef] = None
     civitai: Optional[CivitaiRef] = None
+    modelscope: Optional[ModelScopeRef] = None
 
 
 def parse_model_ref(raw: str, *, provider: str = "tensorhub") -> ParsedModelRef:
@@ -114,6 +126,23 @@ def parse_model_ref(raw: str, *, provider: str = "tensorhub") -> ParsedModelRef:
 
     if provider == "civitai":
         return ParsedModelRef(provider="civitai", civitai=CivitaiRef(model_id=s))
+
+    if provider == "modelscope":
+        # ModelScope repos are 'owner/repo' with an optional '@revision'. Like
+        # HF there is no flavor; file selection (allow_patterns) is binding
+        # metadata carried separately, not encoded in the ref string.
+        repo = s
+        revision = None
+        if "@" in repo:
+            repo, revision = repo.split("@", 1)
+            repo = repo.strip()
+            revision = revision.strip() or None
+        if "/" not in repo:
+            raise ValueError("modelscope ref must be 'owner/repo'")
+        return ParsedModelRef(
+            provider="modelscope",
+            modelscope=ModelScopeRef(repo_id=repo, revision=revision),
+        )
 
     if provider == "tensorhub":
         digest = None
