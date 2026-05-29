@@ -41,6 +41,7 @@ import signal
 import socket
 import sys
 import threading
+import time
 import traceback
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -131,11 +132,28 @@ def add_subparser(sub: argparse._SubParsersAction[Any]) -> None:
         ),
     )
     p.add_argument(
+        "--json", dest="json_output", action="store_true",
+        help=(
+            "With --list-functions, emit JSON — one object per function with its "
+            "name, hosting class, kind, and input JSON Schema (from the msgspec "
+            "payload type) — instead of the text listing. No model is loaded."
+        ),
+    )
+    p.add_argument(
         "--eager", dest="eager", action="store_true",
         help=(
             "Run setup() for every booted class at startup (load all their "
             "models up front) instead of lazily on first invoke. Useful for "
             "fail-fast / pre-warming; default is lazy per-function loading."
+        ),
+    )
+    p.add_argument(
+        "--idle-timeout", dest="idle_timeout", type=float, default=0.0,
+        metavar="SECONDS",
+        help=(
+            "Self-shut-down after SECONDS with no request (frees VRAM when a "
+            "warm serve goes unused). 0 (default) = run until SIGINT / stdin EOF. "
+            "The idle clock starts after boot and resets on every request."
         ),
     )
     p.set_defaults(_handler=_handle_serve)
@@ -251,6 +269,8 @@ class _Endpoint:
         # the built pipeline object the cache moves between tiers.
         self._model_id_by_inst: Dict[int, str] = {}
         self._pipeline_by_inst: Dict[int, Any] = {}
+        # Wall-clock of the last dispatched request; drives --idle-timeout.
+        self.last_activity = time.time()
 
     def boot(
         self,
@@ -391,6 +411,7 @@ class _Endpoint:
         Never raises — all errors are mapped into ``{"ok": false, "error": ...}``
         so the transport loop keeps serving.
         """
+        self.last_activity = time.time()  # reset the --idle-timeout clock
         served = self.functions.get(function_name)
         if served is None:
             return _error_envelope(
@@ -748,6 +769,25 @@ def _serve_inner(args: argparse.Namespace) -> int:
 
     # --list-functions: print routable names + hosting class, exit; no boot.
     if getattr(args, "list_functions", False):
+        if getattr(args, "json_output", False):
+            funcs = []
+            for c in sorted(candidates, key=lambda c: c.fn_name):
+                schema: Dict[str, Any] = {}
+                pt = getattr(c, "payload_type", None)
+                if pt is not None:
+                    try:
+                        schema = msgspec.json.schema(pt)
+                    except Exception:
+                        schema = {}
+                funcs.append({
+                    "name": c.fn_name,
+                    "class": getattr(c.cls, "__name__", "?"),
+                    "kind": getattr(c, "kind", ""),
+                    "input_schema": schema,
+                })
+            sys.stdout.write(json.dumps({"functions": funcs}) + "\n")
+            sys.stdout.flush()
+            return run_mod.EXIT_OK
         rows = sorted(
             ((c.fn_name, getattr(c.cls, "__name__", "?")) for c in candidates),
             key=lambda r: r[0],
@@ -805,10 +845,19 @@ def _serve_inner(args: argparse.Namespace) -> int:
     # an immediate stdin EOF would tear the socket down before any `invoke`
     # could connect (the common footgun).
     detached = args.no_stdin or not getattr(sys.stdin, "isatty", lambda: True)()
+    idle_timeout = float(getattr(args, "idle_timeout", 0.0) or 0.0)
+    # The idle clock starts now (after boot), so model load time isn't counted.
+    endpoint.last_activity = time.time()
     try:
         if detached:
             while not stop.is_set():
                 stop.wait(0.5)
+                if idle_timeout > 0 and (time.time() - endpoint.last_activity) > idle_timeout:
+                    sys.stderr.write(
+                        f"gen-worker serve: idle for >{idle_timeout:g}s; shutting down\n"
+                    )
+                    sys.stderr.flush()
+                    stop.set()
         else:
             _serve_stdin(endpoint, stop)
     except KeyboardInterrupt:

@@ -50,6 +50,9 @@ def _build_parser() -> argparse.ArgumentParser:
     from . import invoke as _invoke_mod
     _invoke_mod.add_subparser(sub)
 
+    from . import prefetch as _prefetch_mod
+    _prefetch_mod.add_subparser(sub)
+
     return parser
 
 
