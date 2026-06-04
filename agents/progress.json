@@ -77,7 +77,7 @@
         "[x] Map Civitai model id \u2192 latest version id via `fetch_civitai_model`.",
         "[x] Honor `CivitaiRepo.version()` pins: thread `_version_id`, guard against `_models` overrides, use the pinned id directly (skip model lookup).",
         "[x] Fail loud on failed model lookup / no published versions (remove `except: version_id = ref_id`).",
-        "[ ] Add `tests/test_run_civitai.py`: pinned-skips-lookup, bad-model-id-raises, no-versions-raises, happy-path-picks-modelVersions[0] (stub `fetch_civitai_model` / `download_civitai_model_version_files`).",
+        "[x] Add `tests/test_run_civitai.py`: pinned-skips-lookup, bad-model-id-raises, no-versions-raises, happy-path-picks-modelVersions[0] (stub `fetch_civitai_model` / `download_civitai_model_version_files`).",
         "[x] Commit the working-tree changes (landed in 568e72a)."
       ],
       "related": [
@@ -87,7 +87,7 @@
         "downloader: conversion/ingest.fetch_civitai_model + download_civitai_model_version_files"
       ],
       "completed": false,
-      "status": "in_progress"
+      "status": "completed"
     },
     {
       "id": 352,
