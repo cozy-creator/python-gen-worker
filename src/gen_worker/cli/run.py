@@ -483,6 +483,7 @@ def _resolve_binding_to_ref(
 def _resolve_local_path(
     *, ref: str, provider: str, offline: bool, emit: Callable[[Dict[str, Any]], None],
     allow_patterns: tuple[str, ...] = (),
+    civitai_version_id: str = "",
 ) -> str:
     """Resolve one model ref to a local snapshot dir / loader-ready string.
 
@@ -614,23 +615,57 @@ def _resolve_local_path(
                 f"--offline: civitai ref {ref!r} not available offline (no local "
                 "civitai cache); run once online to fetch it."
             )
-        from ..conversion.ingest import download_civitai_model_version_files
+        from ..conversion.ingest import (
+            download_civitai_model_version_files,
+            fetch_civitai_model,
+        )
         from ..models.ref_downloader import (
             _civitai_local_artifact_path,
             _parse_civitai_model_version_id,
         )
         api_key = os.getenv("CIVITAI_API_KEY", "") or os.getenv("CIVITAI_TOKEN", "")
-        try:
-            mvid = _parse_civitai_model_version_id(parsed.civitai.model_id)
-        except Exception as e:
-            raise _ModelResolutionError(f"bad civitai ref {ref!r}: {e}") from e
-        out_dir = cache_dir / "civitai" / str(mvid)
+
+        if civitai_version_id:
+            # Explicit version pin via CivitaiRepo.version("<id>"). The pinned id
+            # IS a model-VERSION id, so use it directly — no model lookup.
+            try:
+                version_id = _parse_civitai_model_version_id(civitai_version_id)
+            except Exception as e:
+                raise _ModelResolutionError(
+                    f"bad civitai version pin {civitai_version_id!r} on ref {ref!r}: {e}"
+                ) from e
+        else:
+            # CivitaiRepo's ref is a MODEL id by convention; map it to its latest
+            # version id. No silent fallback: if the lookup fails or the model
+            # has no versions, the ref is wrong (e.g. a bare version id was
+            # passed where a model id was expected) — surface it rather than
+            # guessing and downloading an unrelated model.
+            try:
+                model_id = _parse_civitai_model_version_id(parsed.civitai.model_id)
+            except Exception as e:
+                raise _ModelResolutionError(f"bad civitai ref {ref!r}: {e}") from e
+            try:
+                model = fetch_civitai_model(model_id)
+            except Exception as e:
+                raise _ModelResolutionError(
+                    f"failed to resolve civitai model {model_id} for ref {ref!r}: {e}; "
+                    "CivitaiRepo's ref must be a MODEL id (pin a specific version "
+                    'with .version("<version_id>")).'
+                ) from e
+            versions = model.get("modelVersions") or []
+            version_id = int(versions[0].get("id") or 0) if versions else 0
+            if version_id <= 0:
+                raise _ModelResolutionError(
+                    f"civitai model {model_id} (ref {ref!r}) has no published "
+                    'version to download (pin one with .version("<version_id>")).'
+                )
+        out_dir = cache_dir / "civitai" / str(version_id)
         emit({"kind": "model_fetch.started", "ref": ref, "provider": "civitai"})
         try:
-            info = download_civitai_model_version_files(mvid, out_dir, civitai_api_key=api_key)
+            info = download_civitai_model_version_files(version_id, out_dir, civitai_api_key=api_key)
         except Exception as e:
             raise _ModelResolutionError(
-                f"failed to fetch civitai ref {ref!r}: {e}"
+                f"failed to fetch civitai ref {ref!r} (resolved version {version_id}): {e}"
             ) from e
         local = _civitai_local_artifact_path(out_dir, info)
         emit({"kind": "model_fetch.completed", "ref": ref, "local_dir": str(local)})
@@ -666,9 +701,17 @@ def _resolve_models_for_setup(
         # ModelScopeRepo carries file-selection (allow_patterns) as binding
         # metadata; thread it through so only the requested files download.
         allow_patterns = tuple(getattr(binding, "_allow_patterns", ()) or ())
+        # CivitaiRepo.version("<id>") pins a specific model version. Skip the
+        # pin when this slot was overridden via payload._models — the override
+        # replaces the model wholesale, so the binding's pin no longer applies.
+        civitai_version_id = (
+            "" if param_name in overrides
+            else str(getattr(binding, "_version_id", "") or "")
+        )
         out[param_name] = _resolve_local_path(
             ref=ref, provider=provider, offline=offline, emit=emit,
             allow_patterns=allow_patterns,
+            civitai_version_id=civitai_version_id,
         )
     return out
 
