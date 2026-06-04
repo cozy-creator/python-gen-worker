@@ -770,22 +770,13 @@ def _serve_inner(args: argparse.Namespace) -> int:
     # --list-functions: print routable names + hosting class, exit; no boot.
     if getattr(args, "list_functions", False):
         if getattr(args, "json_output", False):
-            funcs = []
-            for c in sorted(candidates, key=lambda c: c.fn_name):
-                schema: Dict[str, Any] = {}
-                pt = getattr(c, "payload_type", None)
-                if pt is not None:
-                    try:
-                        schema = msgspec.json.schema(pt)
-                    except Exception:
-                        schema = {}
-                funcs.append({
-                    "name": c.fn_name,
-                    "class": getattr(c.cls, "__name__", "?"),
-                    "kind": getattr(c, "kind", ""),
-                    "input_schema": schema,
-                })
-            sys.stdout.write(json.dumps({"functions": funcs}) + "\n")
+            # Thin alias of `gen-worker describe`'s functions array — one shared
+            # builder, one shape (#349).
+            from .describe import function_entries
+
+            sys.stdout.write(
+                json.dumps({"functions": function_entries(candidates)}) + "\n"
+            )
             sys.stdout.flush()
             return run_mod.EXIT_OK
         rows = sorted(
