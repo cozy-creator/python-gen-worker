@@ -112,6 +112,10 @@ ignore_errors = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Prefer the working-tree source so a bare `pytest` never tests a stale wheel.
+# The supported command is still `uv run --extra dev pytest` (pytest is a dev
+# extra); tests/conftest.py hard-fails if gen_worker resolves outside src/.
+pythonpath = ["src"]
 
 [[tool.uv.index]]
 name = "pytorch-cu128"

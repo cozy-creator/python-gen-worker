@@ -156,15 +156,15 @@
       "tasks": [
         "[x] Remove the stale user-global `gen-worker 0.1.4` install (`pip uninstall --break-system-packages gen-worker`).",
         "[ ] Document the `uv run`-only workflow in README/CONTRIBUTING (no global pip installs).",
-        "[ ] Add a conftest guard asserting `gen_worker` imports from the repo `src/`, else fail with a clear message.",
-        "[ ] (Optional) `pythonpath = [\"src\"]` under `[tool.pytest.ini_options]`."
+        "[x] Add a conftest guard asserting `gen_worker` imports from the repo `src/`, else fail with a clear message.",
+        "[x] (Optional) `pythonpath = [\"src\"]` under `[tool.pytest.ini_options]`."
       ],
       "related": [
         "CLI run/serve/invoke under src/gen_worker/cli",
         "build: pyproject.toml [tool.hatch.build] / [tool.pytest.ini_options]"
       ],
       "completed": false,
-      "status": "planned"
+      "status": "in_progress"
     },
     {
       "id": 346,
