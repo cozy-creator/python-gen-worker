@@ -107,6 +107,15 @@ def add_subparser(sub: argparse._SubParsersAction[Any]) -> None:
         "--pretty", action="store_true",
         help="Pretty-print the stdout result with newlines + 2-space indent.",
     )
+    p.add_argument(
+        "fields", nargs="*", metavar="FIELD=VALUE",
+        help=(
+            "Ergonomic payload args instead of (or merged over) --payload: "
+            "'field=value' (coerced to the field's type), 'field:=<json>' (raw "
+            "JSON), 'field@path' (from file), or a bare value for the primary "
+            "field. E.g. gen-worker run \"a cat\" seed=42 hires=true"
+        ),
+    )
     p.set_defaults(_handler=_handle_run)
 
 
@@ -371,6 +380,31 @@ def _normalize_one_override(param: str, value: Any) -> Dict[str, str]:
         f"_models[{param!r}] must be a string shorthand or "
         f"{{ref, tag, flavor}} object; got {type(value).__name__}"
     )
+
+
+def _apply_field_tokens(
+    raw_bytes: bytes, fields: Optional[List[str]], payload_type: type,
+) -> bytes:
+    """Merge ergonomic ``field=value`` tokens over the base JSON payload.
+
+    No tokens -> ``raw_bytes`` unchanged. Coercion uses ``payload_type`` so
+    types/bounds match the real decode. Raises ``_UsageError`` on a bad token.
+    """
+    if not fields:
+        return raw_bytes
+    from .args import ArgError, build_payload
+
+    try:
+        base = json.loads(raw_bytes.decode("utf-8") or "{}")
+    except json.JSONDecodeError as e:
+        raise _UsageError(f"--payload is not valid JSON: {e}") from e
+    if not isinstance(base, dict):
+        base = {}
+    try:
+        merged = build_payload(list(fields), payload_type, base=base)
+    except ArgError as e:
+        raise _UsageError(str(e)) from e
+    return json.dumps(merged, separators=(",", ":")).encode("utf-8")
 
 
 def _decode_payload(
@@ -1063,6 +1097,9 @@ def _run_via_warm_serve(
         candidates, cls_name=args.cls_name, method_name=args.method_name,
     )
 
+    raw_bytes = _apply_field_tokens(
+        raw_bytes, getattr(args, "fields", None), selected.payload_type,
+    )
     try:
         payload_obj = json.loads(raw_bytes.decode("utf-8") or "{}")
     except json.JSONDecodeError as e:
@@ -1114,6 +1151,12 @@ def _run_inner(args: argparse.Namespace) -> int:
         candidates,
         cls_name=args.cls_name,
         method_name=args.method_name,
+    )
+
+    # Ergonomic `field=value` tokens -> payload bytes (coerced via the function's
+    # msgspec type), merged over any --payload base.
+    raw_bytes = _apply_field_tokens(
+        raw_bytes, getattr(args, "fields", None), selected.payload_type,
     )
 
     from .local_context import _stderr_emitter

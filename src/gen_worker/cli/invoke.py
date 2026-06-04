@@ -54,13 +54,22 @@ def add_subparser(sub: argparse._SubParsersAction[Any]) -> None:
         help="The @inference.function(name=...) to invoke (e.g. marco_polo).",
     )
     p.add_argument(
-        "payload",
-        nargs="?",
-        default="{}",
+        "args",
+        nargs="*",
         help=(
-            "JSON payload: inline string, @file.json, or - for stdin "
-            "(default: {})."
+            "Either a single JSON payload (inline string, @file.json, or - for "
+            "stdin), OR ergonomic tokens: 'field=value' (coerced), 'field:=<json>', "
+            "'field@path', or a bare value for the primary field. "
+            "E.g. gen-worker invoke generate \"a cat\" seed=42"
         ),
+    )
+    p.add_argument(
+        "--config", dest="config_path", default=None,
+        help="Path to endpoint.toml (for schema-aware coercion of ergonomic args).",
+    )
+    p.add_argument(
+        "--module", dest="module", default=None,
+        help="Python module to import for schema (overrides endpoint.toml `main`).",
     )
     p.add_argument(
         "--socket", dest="socket_path", default=DEFAULT_SOCKET_PATH,
@@ -89,7 +98,7 @@ def add_subparser(sub: argparse._SubParsersAction[Any]) -> None:
 # --------------------------------------------------------------------------
 
 def _read_payload(spec: str) -> Any:
-    """Resolve the payload argument into a decoded JSON value."""
+    """Resolve a single JSON-blob payload arg into a decoded JSON value."""
     if spec == "-":
         raw = sys.stdin.read()
     elif spec.startswith("@"):
@@ -104,6 +113,51 @@ def _read_payload(spec: str) -> Any:
         return json.loads(raw)
     except json.JSONDecodeError as e:
         raise run_mod._UsageError(f"payload is not valid JSON: {e}") from e
+
+
+def _schema_for(function_name: str, config_path: Any, module: Any) -> Any:
+    """Best-effort payload Struct for ``function_name`` (None if unimportable).
+
+    Importing the endpoint module is only attempted when ergonomic tokens are
+    used; the plain ``invoke fn '<json>'`` path never imports it (stays thin).
+    """
+    try:
+        _root, mod = run_mod.load_endpoint_module(config_path=config_path, module=module)
+        for c in run_mod.discover_candidates(mod):
+            if c.fn_name == function_name:
+                return c.payload_type
+    except Exception:
+        return None
+    return None
+
+
+def _resolve_payload(args: argparse.Namespace) -> Any:
+    """Turn invoke's positional ``args`` into a decoded JSON payload.
+
+    A single JSON/@file/- blob takes the thin path. Otherwise the tokens are
+    ergonomic ``field=value`` args coerced against the function's schema (#350).
+    """
+    from .args import ArgError, build_payload, looks_like_field_token
+
+    tokens: List[str] = list(getattr(args, "args", []) or [])
+    if not tokens:
+        return {}
+
+    # Single blob (JSON / @file / -) -> thin path, no module import.
+    if len(tokens) == 1 and not looks_like_field_token(tokens[0]):
+        only = tokens[0]
+        if only == "-" or only.startswith("@"):
+            return _read_payload(only)
+        try:
+            return json.loads(only)  # explicit JSON blob
+        except json.JSONDecodeError:
+            pass  # a bare primary value like "a cat" -> fall through to ergonomic
+
+    struct_type = _schema_for(args.function_name, args.config_path, args.module)
+    try:
+        return build_payload(tokens, struct_type)
+    except ArgError as e:
+        raise run_mod._UsageError(str(e)) from e
 
 
 # --------------------------------------------------------------------------
@@ -192,7 +246,7 @@ def _send_request(sock_path: Path, request: dict, timeout: float = 0.0) -> dict:
 
 def _handle_invoke(args: argparse.Namespace) -> int:
     try:
-        payload = _read_payload(args.payload)
+        payload = _resolve_payload(args)
         sock_path = Path(args.socket_path).resolve()
         request = {"function": args.function_name, "payload": payload}
         resp = _send_request(

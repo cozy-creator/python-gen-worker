@@ -254,12 +254,12 @@
       "name": "Ergonomic schema-driven payload args for run/invoke: typed `field=value` (httpie-style) instead of raw JSON",
       "description": "## Why\n\nToday `run`/`invoke` take payloads only as raw JSON (`--payload '{\"positive_prompt\":\"hello\",\"seed\":123}'`) \u2014 command-line quoting + brackets are painful. The payload type is a known `msgspec.Struct` (the same one #349's `describe` exposes), so the CLI can accept TYPED key/value tokens and assemble + COERCE the payload itself.\n\n## Proposed grammar (httpie-inspired, schema-coerced)\n\n`gen-worker invoke flux/generate \"a cat\" seed=123 guidance=3.5 hires=true`\n\n- `field=value` -> set `field`; value COERCED by the schema type (str/int/float/bool). `seed=123` -> int because the Struct says int; `prompt=hi` stays str.\n- `field:=rawjson` -> raw JSON value for lists/objects/explicit types: `tags:='[\"a\",\"b\"]'`, `size:=1024`.\n- `field@path` -> load the field's value from a FILE (long prompts, images, audio): `image@./cat.png` (bytes/base64 per field type).\n- bare positional -> the endpoint's declared PRIMARY field (e.g. the prompt), so `invoke flux/generate \"a cat\"` works.\n- dotted keys for nested structs: `sampler.steps=30`.\n- `--payload '<json>'` stays as the escape hatch; `field=` tokens merge OVER it.\n\n### Syntax (DECIDED: httpie-style `field=value`)\n\nBare `field=value` tokens. Chosen over `--arg:field value`: terser, and leading-`--` stays reserved for the TOOL's own flags (`--socket`, `--timeout`, `--device`) so user fields never collide with them. (`--arg:` rejected as verbose.)\n\n## Coercion / validation\n\nReuse the existing msgspec decode + payload-constraints path (`_decode_payload` / `apply_payload_constraints`) so clamps, bounds (ge/le/multiple_of) and error messages are IDENTICAL to production. Edge cases: bool = true/false/1/0/yes/no; null via `field:=null` or empty `field=` only if Optional; repeated `field=` builds a list (or `field:=[...]`); unknown field -> error LISTING valid fields (typo catcher).\n\n## Home / reuse\n\ngen-worker owns payload decoding + the msgspec Struct, so the precise coercion lives in `run`/`invoke`. cozy-local's `cozy invoke ... key=value` (cozy #6) and the REPL (cozy #20) reuse THIS one grammar \u2014 either by delegating to gen-worker's arg parser or by reproducing it from `describe --json`. One coercion spec, documented once.",
       "tasks": [
-        "[ ] Parse `field=value` / `field:=json` / `field@file` / dotted-nested / bare-primary tokens in run + invoke; merge over optional --payload.",
-        "[ ] Coerce against the function's msgspec Struct types (str/int/float/bool/Optional/list/nested); reuse `_decode_payload` + `apply_payload_constraints` for validation.",
-        "[ ] Derive the 'primary' field for the bare positional (decorator hint, else first required str field).",
-        "[ ] Friendly errors: unknown field -> list valid fields; bad coercion -> field-level message matching production.",
+        "[x] Parse `field=value` / `field:=json` / `field@file` / dotted-nested / bare-primary tokens in run + invoke; merge over optional --payload.",
+        "[x] Coerce against the function's msgspec Struct types (str/int/float/bool/Optional/list/nested); reuse `_decode_payload` + `apply_payload_constraints` for validation.",
+        "[x] Derive the 'primary' field for the bare positional (decorator hint, else first required str field).",
+        "[x] Friendly errors: unknown field -> list valid fields; bad coercion -> field-level message matching production.",
         "[ ] Document the arg grammar in docs/local-dev.md + host-integration.md so cozy invoke (#6) / REPL (#20) reuse one spec.",
-        "[ ] Tests: coercion matrix (int/float/bool/list/nested/optional), := raw json, @file, primary positional, unknown-field error."
+        "[x] Tests: coercion matrix (int/float/bool/list/nested/optional), := raw json, @file, primary positional, unknown-field error."
       ],
       "related": [
         "Schema source: #349 describe --json + msgspec Struct (_decode_payload/apply_payload_constraints, run.py)",
@@ -267,7 +267,7 @@
         "Prior art: httpie request-item grammar (=, :=, @)"
       ],
       "completed": false,
-      "status": "planned"
+      "status": "in_progress"
     }
   ]
 }
