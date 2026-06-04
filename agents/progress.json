@@ -99,7 +99,7 @@
         "[x] Run each request handler on a dispatch thread so the accept loop can receive cancels concurrently (keep `_dispatch_lock` + GPU-semaphore serialization).",
         "[x] `{\"cancel\":{request_id}}` control message \u2192 `endpoint.interrupt_request(request_id)` \u2192 `ctx.cancel()` (+ `engine.abort` for batched).",
         "[x] run warm-attach + invoke: two-stage SIGINT \u2014 1st C sends cancel for its request_id and waits for the canceled response; 2nd C `os._exit(130)` client only.",
-        "[ ] Client-disconnect backstop: a dropped request connection trips `ctx.cancel()` for that request_id.",
+        "[x] Client-disconnect backstop: a dropped request connection trips `ctx.cancel()` for that request_id.",
         "[x] Standalone run `_SigintHandler`: call public `ctx.cancel()` (not `_canceled`/`_cancel_event`).",
         "[x] Tests: cancel mid-stream cancels only that request; server serves a subsequent request; disconnect backstop fires; standalone-run two-stage."
       ],
@@ -136,10 +136,10 @@
       "name": "Stream handler events over the `serve` socket (currently buffered until completion)",
       "description": "Stream handler events over the `serve` socket instead of buffering them until the request completes.\n\n## Today\n\n`_Endpoint.dispatch` collects every `write_event` into an `events` list (serve.py:426) and returns them all at once inside the final `{\"ok\": true, \"events\": [...]}` envelope. For a generator/streaming handler the client (`run` warm-attach / `invoke`) sees nothing until the entire handler finishes \u2014 no incremental yields, no progress.\n\n## Goal\n\nEmit each `yield`/event as its own NDJSON line on the connection as produced, terminated by a final result/summary line. This matches the standalone `run` path, which already writes events to stdout incrementally (`_write_stdout_event`).\n\n## Why it matters here\n\n- UX parity with standalone `run` for streaming endpoints.\n- Prerequisite for #353 (Tier B cancellation) to be worthwhile: a streamed protocol lets the client show partial output and a confirmed cancel ack mid-flight.\n\nTouches: serve.py `dispatch` / `_handle_conn` / `_write_response_line`, and invoke.py's single-response read loop (must become a multi-line read until a terminal frame).",
       "tasks": [
-        "[ ] serve: stream each event as an NDJSON line as produced; emit a terminal result/summary frame.",
-        "[ ] invoke client: read NDJSON lines until the terminal frame instead of a single response.",
-        "[ ] run warm-attach: forward streamed events to stdout via `_write_stdout_event` as they arrive.",
-        "[ ] Framing/back-compat: define the terminal-frame marker; keep error envelopes working."
+        "[x] serve: stream each event as an NDJSON line as produced; emit a terminal result/summary frame.",
+        "[x] invoke client: read NDJSON lines until the terminal frame instead of a single response.",
+        "[x] run warm-attach: forward streamed events to stdout via `_write_stdout_event` as they arrive.",
+        "[x] Framing/back-compat: define the terminal-frame marker; keep error envelopes working."
       ],
       "related": [
         "Enables #353 (Tier B cancellation)",
@@ -147,7 +147,7 @@
         "Needed for prompt cancel + delivering the canceled envelope mid-flight: #352, #353"
       ],
       "completed": false,
-      "status": "planned"
+      "status": "in_progress"
     },
     {
       "id": 345,

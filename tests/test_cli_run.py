@@ -129,8 +129,12 @@ def test_run_auto_attaches_to_warm_serve(monkeypatch, capsys, tmp_path) -> None:
     monkeypatch.setattr(run_mod, "_warm_serve_socket", lambda: tmp_path / ".gen-worker.sock")
     captured: dict = {}
 
-    def _fake_send(sock_path, request):
+    def _fake_send(sock_path, request, timeout=0.0, on_frame=None):
         captured["request"] = request
+        # run warm-attach streams: deliver the result via on_frame, terminal ok.
+        if on_frame is not None:
+            on_frame({"event": "result", "value": {"response": "polo"}})
+            return {"ok": True, "done": True}
         return {"ok": True, "events": [{"event": "result", "value": {"response": "polo"}}]}
 
     monkeypatch.setattr(invoke_mod, "_send_request", _fake_send)

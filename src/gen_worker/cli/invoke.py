@@ -157,6 +157,14 @@ def add_subparser(sub: argparse._SubParsersAction[Any]) -> None:
         help="Pretty-print the result with newlines + 2-space indent.",
     )
     p.add_argument(
+        "--stream", action="store_true",
+        help=(
+            "Stream events as they are produced (one JSON line each) instead of "
+            "buffering until the request completes — useful for generator "
+            "endpoints (#344)."
+        ),
+    )
+    p.add_argument(
         "--timeout", type=float, default=0.0,
         help=(
             "Seconds to wait for the response (0 = wait forever, the "
@@ -242,8 +250,15 @@ _CONNECT_TIMEOUT_SECONDS = 10.0
 _WAIT_NOTICE_SECONDS = 15.0
 
 
-def _send_request(sock_path: Path, request: dict, timeout: float = 0.0) -> dict:
-    """Connect, send one NDJSON request, read one NDJSON response.
+def _send_request(
+    sock_path: Path, request: dict, timeout: float = 0.0, on_frame: Any = None,
+) -> dict:
+    """Connect, send one NDJSON request, read the NDJSON response(s).
+
+    With ``on_frame`` (streaming, #344): each streamed event frame
+    (``{"event",...}``) is passed to ``on_frame`` as it arrives; the TERMINAL
+    envelope (``{"ok":...}``) is returned. Without it, the single response
+    envelope is returned (default).
 
     The CONNECT is always bounded (a healthy serve accepts instantly). The
     RESPONSE wait is unbounded by default (``timeout`` <= 0): a first request
@@ -283,9 +298,28 @@ def _send_request(sock_path: Path, request: dict, timeout: float = 0.0) -> dict:
             canceler = _ClientCanceler(sock_path, rid)
             canceler.install()
         buf = bytearray()
+        terminal: Any = None
         deadline = (time.monotonic() + timeout) if timeout and timeout > 0 else None
         notified = False
-        while b"\n" not in buf:
+        while terminal is None:
+            # Drain any complete lines already buffered.
+            while b"\n" in buf:
+                raw_line, _, rest = bytes(buf).partition(b"\n")
+                buf = bytearray(rest)
+                ln = raw_line.strip()
+                if not ln:
+                    continue
+                try:
+                    frame = json.loads(ln.decode("utf-8"))
+                except json.JSONDecodeError as e:
+                    raise run_mod._UsageError(f"serve returned invalid JSON: {e}") from e
+                if on_frame is not None and isinstance(frame, dict) and "event" in frame:
+                    on_frame(frame)  # streamed event; keep reading
+                    continue
+                terminal = frame  # terminal envelope
+                break
+            if terminal is not None:
+                break
             if deadline is not None:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -315,20 +349,25 @@ def _send_request(sock_path: Path, request: dict, timeout: float = 0.0) -> dict:
         if canceler is not None:
             canceler.restore()
         s.close()
-    if not buf:
+    if terminal is None:
         raise run_mod._UsageError("serve closed the connection with no response")
-    resp_line = bytes(buf).split(b"\n", 1)[0]
-    try:
-        return json.loads(resp_line.decode("utf-8"))
-    except json.JSONDecodeError as e:
-        raise run_mod._UsageError(f"serve returned invalid JSON: {e}") from e
+    return terminal
 
 
 # --------------------------------------------------------------------------
 # Handler
 # --------------------------------------------------------------------------
 
+def _print_value(value: Any, pretty: bool) -> None:
+    if pretty:
+        sys.stdout.write(json.dumps(value, indent=2, default=str) + "\n")
+    else:
+        sys.stdout.write(json.dumps(value, separators=(",", ":"), default=str) + "\n")
+    sys.stdout.flush()
+
+
 def _handle_invoke(args: argparse.Namespace) -> int:
+    stream = bool(getattr(args, "stream", False))
     try:
         payload = _resolve_payload(args)
         sock_path = Path(args.socket_path).resolve()
@@ -337,9 +376,13 @@ def _handle_invoke(args: argparse.Namespace) -> int:
             "function": args.function_name,
             "payload": payload,
         }
+        if stream:
+            request["stream"] = True
+        on_frame = (lambda ev: _print_value(ev.get("value"), args.pretty)) if stream else None
         resp = _send_request(
             sock_path, request,
             timeout=float(getattr(args, "timeout", 0.0) or 0.0),
+            on_frame=on_frame,
         )
     except run_mod._UsageError as e:
         sys.stderr.write(f"gen-worker invoke: {e}\n")

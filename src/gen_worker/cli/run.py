@@ -1111,8 +1111,15 @@ def _run_via_warm_serve(
         "request_id": uuid.uuid4().hex,
         "function": selected.fn_name,
         "payload": payload_obj,
+        "stream": True,  # forward events to stdout as produced, like the cold path
     }
-    resp = invoke_mod._send_request(sock, request)
+
+    def _on_frame(ev: Dict[str, Any]) -> None:
+        _write_stdout_event(
+            ev.get("event", "result"), ev.get("value"), pretty=bool(args.pretty)
+        )
+
+    resp = invoke_mod._send_request(sock, request, on_frame=_on_frame)
 
     if not resp.get("ok", False):
         err = resp.get("error") or {}
@@ -1127,6 +1134,7 @@ def _run_via_warm_serve(
             return EXIT_SIGINT
         return EXIT_USER_EXCEPTION
 
+    # Streaming already wrote each event; a buffered fallback is handled too.
     for ev in resp.get("events") or []:
         _write_stdout_event(
             ev.get("event", "result"), ev.get("value"), pretty=bool(args.pretty)

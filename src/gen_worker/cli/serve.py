@@ -443,14 +443,24 @@ class _Endpoint:
         return sorted(self.functions.keys())
 
     def dispatch(
-        self, function_name: str, payload_obj: Any, request_id: Optional[str] = None,
+        self,
+        function_name: str,
+        payload_obj: Any,
+        request_id: Optional[str] = None,
+        on_event: Optional[Any] = None,
     ) -> Dict[str, Any]:
-        """Run one request. Returns the response envelope dict.
+        """Run one request. Returns the (terminal) response envelope dict.
 
         Never raises — all errors are mapped into ``{"ok": false, "error": ...}``
         so the transport loop keeps serving. ``request_id`` registers the
         request's ctx in the cancellation registry so a concurrent cancel frame
         (or server SIGINT) can trip ``ctx.cancel()`` while the handler runs.
+
+        ``on_event`` (streaming, #344): if given, each event is delivered to it
+        as a frame ``{"event","value","request_id"}`` AS PRODUCED, and the return
+        value is the terminal envelope (``{"ok":true,"done":true}`` or an error).
+        If absent, events are buffered and returned in ``{"ok":true,"events":[...]}``.
+        ``on_event`` may raise (e.g. on client disconnect) to abort the handler.
         """
         self.last_activity = time.time()  # reset the --idle-timeout clock
         served = self.functions.get(function_name)
@@ -472,7 +482,12 @@ class _Endpoint:
                 body["value"] = msgspec.to_builtins(value)
             except Exception:
                 body["value"] = value
-            events.append(body)
+            if request_id:
+                body["request_id"] = request_id
+            if on_event is not None:
+                on_event(body)  # stream as produced (may raise to abort)
+            else:
+                events.append(body)
 
         ctx = build_local_context(
             kind=selected.kind,
@@ -525,6 +540,8 @@ class _Endpoint:
                 with self._active_lock:
                     self._active.pop(request_id, None)
 
+        if on_event is not None:
+            return {"ok": True, "done": True}
         return {"ok": True, "events": events}
 
     def shutdown(self) -> None:
@@ -698,6 +715,7 @@ def _parse_frame(line: bytes) -> Dict[str, Any]:
         "function": fn,
         "payload": obj.get("payload", {}),
         "request_id": obj.get("request_id"),
+        "stream": bool(obj.get("stream")),
     }
 
 
@@ -731,10 +749,16 @@ def _serve_stdin(endpoint: _Endpoint, stop: threading.Event) -> None:
             found = endpoint.interrupt_request(frame.get("request_id"))
             _write_response_line(_emit_stdout, {"ok": True, "canceled": found})
             continue
-        envelope = endpoint.dispatch(
-            frame["function"], frame["payload"], request_id=frame.get("request_id"),
-        )
-        _write_response_line(_emit_stdout, envelope)
+        rid = frame.get("request_id")
+        if frame.get("stream"):
+            terminal = endpoint.dispatch(
+                frame["function"], frame["payload"], request_id=rid,
+                on_event=lambda ev: _write_response_line(_emit_stdout, ev),
+            )
+            _write_response_line(_emit_stdout, terminal)
+        else:
+            envelope = endpoint.dispatch(frame["function"], frame["payload"], request_id=rid)
+            _write_response_line(_emit_stdout, envelope)
 
 
 def _serve_socket(
@@ -824,21 +848,52 @@ def _handle_conn(endpoint: _Endpoint, conn: socket.socket) -> None:
     if not line:
         return
     frame = _parse_frame(line)
+
+    def _send(env: Dict[str, Any]) -> None:
+        conn.sendall((json.dumps(env, separators=(",", ":"), default=str) + "\n").encode("utf-8"))
+
     if frame["kind"] == "cancel":
         found = endpoint.interrupt_request(frame.get("request_id"))
-        envelope: Dict[str, Any] = {
-            "ok": True, "canceled": found, "request_id": frame.get("request_id"),
-        }
-    elif frame["kind"] == "error":
-        envelope = _error_envelope("usage", frame["message"])
-    else:
-        rid = frame.get("request_id")
-        envelope = endpoint.dispatch(frame["function"], frame["payload"], request_id=rid)
+        try:
+            _send({"ok": True, "canceled": found, "request_id": frame.get("request_id")})
+        except OSError:
+            pass
+        return
+    if frame["kind"] == "error":
+        try:
+            _send(_error_envelope("usage", frame["message"]))
+        except OSError:
+            pass
+        return
+
+    rid = frame.get("request_id")
+    if frame.get("stream"):
+        # Stream each event as its own frame as produced; a write failure means
+        # the client is gone -> cancel the in-flight request (the disconnect
+        # backstop deferred from #352) and let the handler unwind.
+        def _on_event(ev: Dict[str, Any]) -> None:
+            try:
+                _send(ev)
+            except OSError:
+                endpoint.interrupt_request(rid)
+                raise CanceledError("client disconnected")
+
+        terminal = endpoint.dispatch(
+            frame["function"], frame["payload"], request_id=rid, on_event=_on_event,
+        )
         if rid is not None:
-            envelope.setdefault("request_id", rid)
-    out = (json.dumps(envelope, separators=(",", ":"), default=str) + "\n").encode("utf-8")
+            terminal.setdefault("request_id", rid)
+        try:
+            _send(terminal)
+        except OSError:
+            pass
+        return
+
+    envelope = endpoint.dispatch(frame["function"], frame["payload"], request_id=rid)
+    if rid is not None:
+        envelope.setdefault("request_id", rid)
     try:
-        conn.sendall(out)
+        _send(envelope)
     except OSError:
         pass
 

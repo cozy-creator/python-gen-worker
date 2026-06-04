@@ -151,7 +151,7 @@ def test_parse_frame_request_and_cancel() -> None:
     import json
 
     req = serve_mod._parse_frame(json.dumps({"request_id": "a", "function": "f", "payload": {"x": 1}}).encode())
-    assert req == {"kind": "request", "function": "f", "payload": {"x": 1}, "request_id": "a"}
+    assert req == {"kind": "request", "function": "f", "payload": {"x": 1}, "request_id": "a", "stream": False}
 
     can = serve_mod._parse_frame(json.dumps({"cancel": {"request_id": "a"}}).encode())
     assert can == {"kind": "cancel", "request_id": "a"}
