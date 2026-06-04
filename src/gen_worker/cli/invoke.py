@@ -23,14 +23,88 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import signal
 import socket
 import sys
 import time
+import types
+import uuid
 from pathlib import Path
-from typing import Any, List
+from typing import Any, List, Optional
 
 from . import run as run_mod
 from .serve import DEFAULT_SOCKET_PATH
+
+
+# --------------------------------------------------------------------------
+# Client-side cancellation — two-stage Ctrl-C
+# --------------------------------------------------------------------------
+
+class _ClientCanceler:
+    """Two-stage SIGINT for a request in flight against a warm ``serve``.
+
+    1st Ctrl-C: open a FRESH connection and send a ``{"cancel":{request_id}}``
+    control frame, then keep waiting — the server trips ``ctx.cancel()`` for
+    THIS request and the (canceled) response comes back on the original socket;
+    the server stays running. 2nd Ctrl-C within 2s: detach hard (exit 130).
+    Cancelling the request and killing the worker are deliberately separate
+    (#352): this only ever exits the CLIENT.
+    """
+
+    def __init__(self, sock_path: Path, request_id: str) -> None:
+        self._sock_path = sock_path
+        self._request_id = request_id
+        self._last_at = 0.0
+        self._installed = False
+        self._prev: Any = signal.SIG_DFL
+
+    def install(self) -> None:
+        try:
+            self._prev = signal.signal(signal.SIGINT, self._on_sigint)
+            self._installed = True
+        except (ValueError, OSError):
+            self._installed = False
+
+    def restore(self) -> None:
+        if not self._installed:
+            return
+        try:
+            signal.signal(signal.SIGINT, self._prev)
+        except Exception:
+            pass
+        self._installed = False
+
+    def _send_cancel(self) -> None:
+        try:
+            c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            c.settimeout(5.0)
+            c.connect(str(self._sock_path))
+            c.sendall(
+                (json.dumps({"cancel": {"request_id": self._request_id}}) + "\n").encode("utf-8")
+            )
+            try:
+                c.shutdown(socket.SHUT_WR)
+            except OSError:
+                pass
+            c.close()
+        except OSError:
+            pass
+
+    def _on_sigint(self, _signum: int, _frame: Optional[types.FrameType]) -> None:
+        now = time.monotonic()
+        if self._last_at and (now - self._last_at) < 2.0:
+            sys.stderr.write("\ngen-worker invoke: detaching (exit 130); the "
+                             "request may still finish server-side.\n")
+            sys.stderr.flush()
+            os._exit(run_mod.EXIT_SIGINT)
+        self._last_at = now
+        sys.stderr.write(
+            "\ngen-worker invoke: canceling request on server "
+            "(Ctrl-C again within 2s to detach)\n"
+        )
+        sys.stderr.flush()
+        self._send_cancel()
 
 
 # --------------------------------------------------------------------------
@@ -186,6 +260,7 @@ def _send_request(sock_path: Path, request: dict, timeout: float = 0.0) -> dict:
         )
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     s.settimeout(_CONNECT_TIMEOUT_SECONDS)
+    canceler: Optional[_ClientCanceler] = None
     try:
         try:
             s.connect(str(sock_path))
@@ -200,6 +275,13 @@ def _send_request(sock_path: Path, request: dict, timeout: float = 0.0) -> dict:
             s.shutdown(socket.SHUT_WR)
         except OSError:
             pass
+        # Ctrl-C while waiting cancels THIS request (by request_id) and leaves
+        # the server running; a second Ctrl-C detaches. No-op if the request
+        # carries no id.
+        rid = request.get("request_id")
+        if rid:
+            canceler = _ClientCanceler(sock_path, rid)
+            canceler.install()
         buf = bytearray()
         deadline = (time.monotonic() + timeout) if timeout and timeout > 0 else None
         notified = False
@@ -230,6 +312,8 @@ def _send_request(sock_path: Path, request: dict, timeout: float = 0.0) -> dict:
                 break
             buf.extend(chunk)
     finally:
+        if canceler is not None:
+            canceler.restore()
         s.close()
     if not buf:
         raise run_mod._UsageError("serve closed the connection with no response")
@@ -248,7 +332,11 @@ def _handle_invoke(args: argparse.Namespace) -> int:
     try:
         payload = _resolve_payload(args)
         sock_path = Path(args.socket_path).resolve()
-        request = {"function": args.function_name, "payload": payload}
+        request = {
+            "request_id": uuid.uuid4().hex,
+            "function": args.function_name,
+            "payload": payload,
+        }
         resp = _send_request(
             sock_path, request,
             timeout=float(getattr(args, "timeout", 0.0) or 0.0),

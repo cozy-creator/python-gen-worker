@@ -25,6 +25,7 @@ import types
 import typing
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -801,8 +802,9 @@ class _SigintHandler:
         )
         sys.stderr.flush()
         try:
-            self._ctx._canceled = True
-            self._ctx._cancel_event.set()
+            # Canonical public cancel — same entry point the production worker
+            # uses for an orchestrator interrupt (#352).
+            self._ctx.cancel()
         except Exception:
             pass
 
@@ -1105,7 +1107,11 @@ def _run_via_warm_serve(
     except json.JSONDecodeError as e:
         raise _UsageError(f"--payload is not valid JSON: {e}") from e
 
-    request = {"function": selected.fn_name, "payload": payload_obj}
+    request = {
+        "request_id": uuid.uuid4().hex,
+        "function": selected.fn_name,
+        "payload": payload_obj,
+    }
     resp = invoke_mod._send_request(sock, request)
 
     if not resp.get("ok", False):

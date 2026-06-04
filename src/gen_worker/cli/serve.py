@@ -44,7 +44,7 @@ import threading
 import time
 import traceback
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import msgspec
 
@@ -271,6 +271,43 @@ class _Endpoint:
         self._pipeline_by_inst: Dict[int, Any] = {}
         # Wall-clock of the last dispatched request; drives --idle-timeout.
         self.last_activity = time.time()
+        # Per-request cancellation registry — request_id -> live RequestContext,
+        # mirroring the production worker's ``self._active_requests`` (worker.py).
+        # A cancel (socket control frame or server SIGINT) looks the ctx up here
+        # and calls the canonical ``ctx.cancel()``; tenant code observes it via
+        # ``raise_if_canceled()`` / ``cancel_event`` exactly as in production.
+        self._active: Dict[str, Any] = {}
+        self._active_lock = threading.Lock()
+
+    def interrupt_request(self, request_id: Optional[str]) -> bool:
+        """Cancel ONE in-flight request by id via the canonical ``ctx.cancel()``.
+
+        Returns True if a matching active request was found. The server keeps
+        running — only that request is canceled (#352).
+        """
+        if not request_id:
+            return False
+        with self._active_lock:
+            ctx = self._active.get(request_id)
+        if ctx is None:
+            return False
+        ctx.cancel()
+        return True
+
+    def cancel_all(self) -> int:
+        """Cancel every in-flight request (server SIGINT/SIGTERM drain, #353).
+
+        Returns how many were signaled. Each tenant handler observes the cancel
+        and unwinds cooperatively; teardown then runs shutdown().
+        """
+        with self._active_lock:
+            ctxs = list(self._active.values())
+        for ctx in ctxs:
+            try:
+                ctx.cancel()
+            except Exception:
+                pass
+        return len(ctxs)
 
     def boot(
         self,
@@ -405,11 +442,15 @@ class _Endpoint:
     def function_names(self) -> List[str]:
         return sorted(self.functions.keys())
 
-    def dispatch(self, function_name: str, payload_obj: Any) -> Dict[str, Any]:
+    def dispatch(
+        self, function_name: str, payload_obj: Any, request_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Run one request. Returns the response envelope dict.
 
         Never raises — all errors are mapped into ``{"ok": false, "error": ...}``
-        so the transport loop keeps serving.
+        so the transport loop keeps serving. ``request_id`` registers the
+        request's ctx in the cancellation registry so a concurrent cancel frame
+        (or server SIGINT) can trip ``ctx.cancel()`` while the handler runs.
         """
         self.last_activity = time.time()  # reset the --idle-timeout clock
         served = self.functions.get(function_name)
@@ -437,41 +478,52 @@ class _Endpoint:
             kind=selected.kind,
             allow_publish=self.allow_publish,
         )
+        # Register BEFORE acquiring the dispatch lock so a cancel for a request
+        # still queued behind a slow one trips its ctx too (the handler then
+        # bails at its first raise_if_canceled / yield check).
+        if request_id:
+            with self._active_lock:
+                self._active[request_id] = ctx
 
-        # Serialize dispatch + acquire the GPU semaphore around the handler,
-        # exactly like the production worker (sequential local handling).
-        with self._dispatch_lock:
-            self.gpu_semaphore.acquire()
-            try:
-                # Drive residency through the ModelCache under the GPU
-                # semaphore (same as prod): first invoke builds the pipeline via
-                # setup() and registers it; later invokes promote it back into
-                # VRAM if the cache demoted it to the CPU-RAM warm tier.
-                self._ensure_resident(served)
-                run_mod.dispatch_request(
-                    selected=selected,
-                    instance=served.instance,
-                    ctx=ctx,
-                    raw_bytes=raw_bytes,
-                    offline=self.offline,
-                    emit=_stderr_emitter,
-                    write_event=_write_event,
-                    on_resolved=None,  # setup handled by _ensure_setup above
-                )
-            except run_mod._UsageError as e:
-                return _error_envelope("usage", str(e))
-            except run_mod._ModelResolutionError as e:
-                return _error_envelope("model_resolution", str(e))
-            except CanceledError as e:
-                return _error_envelope("canceled", str(e))
-            except Exception as e:  # noqa: BLE001
-                traceback.print_exc(file=sys.stderr)
-                return _error_envelope("user_exception", str(e))
-            finally:
+        try:
+            # Serialize dispatch + acquire the GPU semaphore around the handler,
+            # exactly like the production worker (sequential local handling).
+            with self._dispatch_lock:
+                self.gpu_semaphore.acquire()
                 try:
-                    self.gpu_semaphore.release()
-                except ValueError:
-                    pass
+                    # Drive residency through the ModelCache under the GPU
+                    # semaphore (same as prod): first invoke builds the pipeline
+                    # via setup() and registers it; later invokes promote it back
+                    # into VRAM if the cache demoted it to the CPU-RAM warm tier.
+                    self._ensure_resident(served)
+                    run_mod.dispatch_request(
+                        selected=selected,
+                        instance=served.instance,
+                        ctx=ctx,
+                        raw_bytes=raw_bytes,
+                        offline=self.offline,
+                        emit=_stderr_emitter,
+                        write_event=_write_event,
+                        on_resolved=None,  # setup handled by _ensure_setup above
+                    )
+                except run_mod._UsageError as e:
+                    return _error_envelope("usage", str(e))
+                except run_mod._ModelResolutionError as e:
+                    return _error_envelope("model_resolution", str(e))
+                except CanceledError as e:
+                    return _error_envelope("canceled", str(e))
+                except Exception as e:  # noqa: BLE001
+                    traceback.print_exc(file=sys.stderr)
+                    return _error_envelope("user_exception", str(e))
+                finally:
+                    try:
+                        self.gpu_semaphore.release()
+                    except ValueError:
+                        pass
+        finally:
+            if request_id:
+                with self._active_lock:
+                    self._active.pop(request_id, None)
 
         return {"ok": True, "events": events}
 
@@ -620,23 +672,33 @@ def _encode_payload_bytes(payload_obj: Any) -> bytes:
     return json.dumps(payload_obj, separators=(",", ":")).encode("utf-8")
 
 
-def _parse_request_line(line: bytes) -> Tuple[Optional[str], Any, Optional[str]]:
-    """Parse one NDJSON request line.
+def _parse_frame(line: bytes) -> Dict[str, Any]:
+    """Parse one NDJSON frame into a tagged dict.
 
-    Returns ``(function_name, payload_obj, error_message)``. On a parse error
-    the first two are ``None`` and the third carries a message.
+    Kinds:
+      - ``{"kind":"request","function","payload","request_id"}``
+      - ``{"kind":"cancel","request_id"}``  (control frame: ``{"cancel":{...}}``)
+      - ``{"kind":"error","message"}``
     """
     try:
         obj = json.loads(line.decode("utf-8"))
     except Exception as e:
-        return None, None, f"request is not valid JSON: {e}"
+        return {"kind": "error", "message": f"request is not valid JSON: {e}"}
     if not isinstance(obj, dict):
-        return None, None, "request must be a JSON object"
+        return {"kind": "error", "message": "request must be a JSON object"}
+    if "cancel" in obj:
+        c = obj.get("cancel") or {}
+        rid = c.get("request_id") if isinstance(c, dict) else None
+        return {"kind": "cancel", "request_id": rid}
     fn = obj.get("function")
     if not isinstance(fn, str) or not fn:
-        return None, None, "request.function (string) is required"
-    payload = obj.get("payload", {})
-    return fn, payload, None
+        return {"kind": "error", "message": "request.function (string) is required"}
+    return {
+        "kind": "request",
+        "function": fn,
+        "payload": obj.get("payload", {}),
+        "request_id": obj.get("request_id"),
+    }
 
 
 def _write_response_line(write: Any, envelope: Dict[str, Any]) -> None:
@@ -660,11 +722,18 @@ def _serve_stdin(endpoint: _Endpoint, stop: threading.Event) -> None:
         line = raw.strip()
         if not line:
             continue
-        fn, payload, err = _parse_request_line(line)
-        if err is not None:
-            _write_response_line(_emit_stdout, _error_envelope("usage", err))
+        frame = _parse_frame(line)
+        if frame["kind"] == "error":
+            _write_response_line(_emit_stdout, _error_envelope("usage", frame["message"]))
             continue
-        envelope = endpoint.dispatch(fn, payload)  # type: ignore[arg-type]
+        if frame["kind"] == "cancel":
+            # stdin requests are sequential — nothing is in-flight to cancel.
+            found = endpoint.interrupt_request(frame.get("request_id"))
+            _write_response_line(_emit_stdout, {"ok": True, "canceled": found})
+            continue
+        envelope = endpoint.dispatch(
+            frame["function"], frame["payload"], request_id=frame.get("request_id"),
+        )
         _write_response_line(_emit_stdout, envelope)
 
 
@@ -701,8 +770,13 @@ def _serve_socket(
                 continue
             except OSError:
                 break
-            with conn:
-                _handle_conn(endpoint, conn)
+            # Handle each connection on its own thread so the accept loop stays
+            # free to receive a cancel control frame WHILE a request runs (the
+            # request itself still serializes on the dispatch lock + GPU sema).
+            t = threading.Thread(
+                target=_handle_conn_safe, args=(endpoint, conn), daemon=True,
+            )
+            t.start()
     finally:
         try:
             srv.close()
@@ -713,9 +787,28 @@ def _serve_socket(
                 pass
 
 
+def _handle_conn_safe(endpoint: _Endpoint, conn: socket.socket) -> None:
+    """Thread target: handle one connection, always closing the socket."""
+    try:
+        _handle_conn(endpoint, conn)
+    finally:
+        try:
+            conn.close()
+        except OSError:
+            pass
+
+
 def _handle_conn(endpoint: _Endpoint, conn: socket.socket) -> None:
-    """Read one NDJSON request line, dispatch, write one NDJSON response."""
+    """Read one NDJSON frame; dispatch a request OR apply a cancel; respond.
+
+    A cancel control frame (``{"cancel":{"request_id"}}``) is the CLI analog of
+    the orchestrator's ``interrupt_job_cmd``: it trips ``ctx.cancel()`` for the
+    named in-flight request on ANOTHER connection's dispatch thread and returns
+    immediately — the server keeps running (#352).
+    """
     buf = bytearray()
+    # Bound only the request-LINE read (the client sends it immediately); the
+    # long cold-model wait happens later inside dispatch(), not here.
     conn.settimeout(30.0)
     try:
         while b"\n" not in buf:
@@ -730,11 +823,19 @@ def _handle_conn(endpoint: _Endpoint, conn: socket.socket) -> None:
     line = bytes(buf).split(b"\n", 1)[0].strip()
     if not line:
         return
-    fn, payload, err = _parse_request_line(line)
-    if err is not None:
-        envelope = _error_envelope("usage", err)
+    frame = _parse_frame(line)
+    if frame["kind"] == "cancel":
+        found = endpoint.interrupt_request(frame.get("request_id"))
+        envelope: Dict[str, Any] = {
+            "ok": True, "canceled": found, "request_id": frame.get("request_id"),
+        }
+    elif frame["kind"] == "error":
+        envelope = _error_envelope("usage", frame["message"])
     else:
-        envelope = endpoint.dispatch(fn, payload)  # type: ignore[arg-type]
+        rid = frame.get("request_id")
+        envelope = endpoint.dispatch(frame["function"], frame["payload"], request_id=rid)
+        if rid is not None:
+            envelope.setdefault("request_id", rid)
     out = (json.dumps(envelope, separators=(",", ":"), default=str) + "\n").encode("utf-8")
     try:
         conn.sendall(out)
