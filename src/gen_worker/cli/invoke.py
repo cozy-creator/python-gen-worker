@@ -34,6 +34,7 @@ from pathlib import Path
 from typing import Any, List, Optional
 
 from . import run as run_mod
+from . import transport
 from .serve import DEFAULT_SOCKET_PATH
 
 
@@ -77,9 +78,7 @@ class _ClientCanceler:
 
     def _send_cancel(self) -> None:
         try:
-            c = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            c.settimeout(5.0)
-            c.connect(str(self._sock_path))
+            c = transport.create_client(str(self._sock_path), 5.0)
             c.sendall(
                 (json.dumps({"cancel": {"request_id": self._request_id}}) + "\n").encode("utf-8")
             )
@@ -268,21 +267,17 @@ def _send_request(
     one-time notice is printed so a long cold load is distinguishable from a
     hang. A crashed serve closes the socket, which ends the wait immediately.
     """
-    if not sock_path.exists():
-        raise run_mod._UsageError(
-            f"no serve socket at {sock_path}; is 'gen-worker serve' running? "
-            f"(start it with `gen-worker serve` or pass --socket PATH)"
-        )
-    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(_CONNECT_TIMEOUT_SECONDS)
+    spec = str(sock_path)
     canceler: Optional[_ClientCanceler] = None
+    s: Optional[socket.socket] = None
     try:
         try:
-            s.connect(str(sock_path))
+            s = transport.create_client(spec, _CONNECT_TIMEOUT_SECONDS)
         except (ConnectionRefusedError, FileNotFoundError, OSError) as e:
             raise run_mod._UsageError(
-                f"could not connect to serve socket {sock_path}: {e}; "
-                "is 'gen-worker serve' running?"
+                f"could not connect to serve at {transport.display(spec)}: {e}; "
+                "is 'gen-worker serve' running? (start it with `gen-worker serve` "
+                "or pass --socket PATH / tcp://host:port)"
             ) from e
         line = (json.dumps(request, separators=(",", ":")) + "\n").encode("utf-8")
         s.sendall(line)
@@ -348,7 +343,8 @@ def _send_request(
     finally:
         if canceler is not None:
             canceler.restore()
-        s.close()
+        if s is not None:
+            s.close()
     if terminal is None:
         raise run_mod._UsageError("serve closed the connection with no response")
     return terminal
@@ -370,7 +366,12 @@ def _handle_invoke(args: argparse.Namespace) -> int:
     stream = bool(getattr(args, "stream", False))
     try:
         payload = _resolve_payload(args)
-        sock_path = Path(args.socket_path).resolve()
+        # Unix paths resolve to absolute; a tcp://host:port spec passes through.
+        if transport.is_unix(args.socket_path):
+            _, _p = transport.parse_addr(args.socket_path)
+            sock_path: Any = str(Path(_p).resolve())
+        else:
+            sock_path = args.socket_path
         request = {
             "request_id": uuid.uuid4().hex,
             "function": args.function_name,

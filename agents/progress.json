@@ -188,11 +188,11 @@
       "description": "## Decision\n\nThe canonical local-dev model is the EXPLICIT two-process shape, mirroring production/Docker:\n- `gen-worker serve` = the worker (loads model into VRAM once, stays resident, accepts requests). Maps to the production worker CONTAINER (PID 1, long-lived).\n- `gen-worker run` / `invoke` = submit a request to it, as many times as you want. Maps to the orchestrator sending a job.\n- Two terminals: terminal 1 shows the worker (logs, model load, progress); terminal 2 submits requests. Ctrl-C in terminal 2 cancels the REQUEST (#352); Ctrl-C in terminal 1 stops the WORKER (#353).\n\n`run` keeps #340 \u2014 it AUTO-ATTACHES to a `serve` the user already started, so the same `run` command works warm-against-serve or standalone-cold. Non-magical: it only attaches to something explicitly started.\n\n### Dropped: auto-spawn `run`\n\nAn earlier idea \u2014 `run` auto-SPAWNS a background `serve` and self-reaps on idle \u2014 was DROPPED. The Docker framing showed the explicit two-process model IS the correct topology (same as prod), not ceremony to hide. Auto-spawn added spawn-race, idle-reap, per-endpoint-socket, and background-log complexity to paper over a workflow that is actually clearer when explicit. (`--cold` is moot \u2014 explicit `run` with no running serve is already the one-shot path.)\n\n## New work: transport for the Docker / cross-process story\n\n`serve` currently listens ONLY on a Unix domain socket (`AF_UNIX` at `./.gen-worker.sock`; invoke.py connects via `AF_UNIX`). That covers same-host / same-container submission but NOT host->container over a network port.\n\nDocker patterns to support + document:\n1. **`docker exec`** (works today): container `CMD [\"gen-worker\",\"serve\"]`; submit via `docker exec <ctr> gen-worker invoke <fn> --payload '{...}'` (shares the in-container UDS).\n2. **Bind-mounted socket** (works today): `-v /tmp/gw:/run` + `serve --socket /run/gw.sock`; host `invoke --socket /tmp/gw/gw.sock`.\n3. **TCP / host:port listener (NEW):** optional `serve --listen tcp://0.0.0.0:PORT` alongside the UDS, and teach `invoke`/`run` to dial `tcp://host:PORT`, so `docker run -p PORT:PORT` + host-side submission works without exec/bind-mounts. UDS stays the default; TCP is opt-in. (Production dispatch is gRPC-from-orchestrator \u2014 this TCP mode is a LOCAL/dev convenience, not the prod transport.)\n\n## Deployment shapes \u2014 `run` is RETAINED (decision)\n\n`run` and `serve` are not redundant; they are two deployment topologies, both first-class:\n- `gen-worker run` = ONE-SHOT job: load -> run -> emit result to stdout -> exit(code). Docker `docker run --rm`; Kubernetes **Job/CronJob**. For CI, fixtures, batch/scheduled inference, `| jq`. Shares the `dispatch_request` path with serve, so it is nearly free to keep.\n- `gen-worker serve` + `invoke` = LONG-RUNNING service. Docker `docker run -d`; Kubernetes **Deployment/Service**.\n- `gen-worker repl` = one-process load-once interactive dev session (#348).\n\nDocker one-off job: `docker run --rm -v ~/.cache/cozy:/cache -e TENSORHUB_CAS_DIR=/cache <img> gen-worker run generate \"a cat\" seed=42`. CAS volume persists weights across runs; exit code propagates to CI / the k8s Job. A 'job image' default CMD is `[\"gen-worker\",\"run\"]`; a 'service image' is `[\"gen-worker\",\"serve\",\"--listen\",\"tcp://0.0.0.0:PORT\"]`.\n\nCaveat: in PRODUCTION the worker container entrypoint is the gRPC worker that dials the orchestrator \u2014 `serve`/`run` are the LOCAL / self-hosted containerization shapes, not the prod transport.\n\n## Tie-in\n\nThe cancellation suite (#352/#353) lands naturally here: the long-lived thing is `serve`; request-cancel vs worker-stop are different terminals. This per-endpoint worker is also the building block cozy-local (~/cozy/cozy-local) orchestrates across many endpoints.",
       "tasks": [
         "[ ] Document the explicit serve + run/invoke model as canonical (README / docs/local-dev.md): two terminals, worker vs client.",
-        "[ ] Keep #340 run auto-attach to a user-started serve; ensure there is NO auto-spawn behavior.",
-        "[ ] serve: optional TCP listener `--listen tcp://host:port` alongside the UDS (UDS remains default).",
-        "[ ] invoke/run: dial `tcp://host:port` when given; default remains the UDS path.",
+        "[x] Keep #340 run auto-attach to a user-started serve; ensure there is NO auto-spawn behavior.",
+        "[x] serve: optional TCP listener `--listen tcp://host:port` alongside the UDS (UDS remains default).",
+        "[x] invoke/run: dial `tcp://host:port` when given; default remains the UDS path.",
         "[ ] Document Docker submission patterns: docker exec; bind-mounted socket; published TCP port (-p).",
-        "[ ] Tests: TCP round-trip (serve --listen tcp + invoke tcp://); UDS path unchanged; docker-exec smoke if CI has docker.",
+        "[x] Tests: TCP round-trip (serve --listen tcp + invoke tcp://); UDS path unchanged; docker-exec smoke if CI has docker.",
         "[ ] Document the deployment-shape mapping (run=Job/`docker run --rm`, serve=Deployment, repl=dev) + the CAS-volume one-off Docker recipe in docs."
       ],
       "related": [
@@ -203,7 +203,7 @@
         "Higher multi-endpoint layer: cozy-local (~/cozy/cozy-local)"
       ],
       "completed": false,
-      "status": "planned"
+      "status": "in_progress"
     },
     {
       "id": 348,
@@ -237,7 +237,7 @@
         "[x] capabilities + protocol_version handshake; coordinate removing cozy's `--help` scraping (cozy serveproc.go gwSupports*).",
         "[ ] serve ready-sidecar `.gen-worker.serve.json` {pid, listen, protocol_version, ready_at, functions, idle_timeout}; write on ready, remove on teardown; explicit `ready` event.",
         "[ ] docs/host-integration.md: describe schema, NDJSON IPC protocol (request_id/function/payload, streamed events, terminal frame, error kinds, cancel msg), sidecar, capabilities, exit codes; versioned by protocol_version.",
-        "[ ] Advertise tcp_listen + cancel + streaming in capabilities as #347/#352/#344 land.",
+        "[x] Advertise tcp_listen + cancel + streaming in capabilities as #347/#352/#344 land.",
         "[ ] Tests: describe --json schema snapshot; sidecar lifecycle; capability handshake; serve alias parity."
       ],
       "related": [

@@ -33,9 +33,9 @@ CAPABILITIES: List[str] = [
     "prefetch",
     "cancel",
     "streaming",
-    # "serve_sidecar", "tcp_listen" are appended by the commits that actually
-    # ship them (#349-sidecar, #347) so `describe` never advertises a
-    # capability that isn't implemented yet.
+    "tcp_listen",
+    # "serve_sidecar" is appended by the commit that ships it (#349-sidecar) so
+    # `describe` never advertises a capability that isn't implemented yet.
 ]
 
 

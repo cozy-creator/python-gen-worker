@@ -51,6 +51,7 @@ import msgspec
 from ..api.errors import CanceledError
 from ..models.cache import ModelCache
 from . import run as run_mod
+from . import transport
 from .local_context import _stderr_emitter, build_local_context
 
 
@@ -88,6 +89,15 @@ def add_subparser(sub: argparse._SubParsersAction[Any]) -> None:
             "Unix domain socket path the server listens on "
             f"(default: {DEFAULT_SOCKET_PATH}). Use distinct paths to run "
             "several serves concurrently."
+        ),
+    )
+    p.add_argument(
+        "--listen", dest="listen", default=None, metavar="ADDR",
+        help=(
+            "Listen address, overriding --socket: 'tcp://0.0.0.0:PORT' for TCP "
+            "(host:port; works across containers with `docker run -p`), "
+            "'unix:///path' or a bare path for a Unix socket. Default: the "
+            "--socket Unix path (#347)."
         ),
     )
     p.add_argument(
@@ -762,25 +772,18 @@ def _serve_stdin(endpoint: _Endpoint, stop: threading.Event) -> None:
 
 
 def _serve_socket(
-    endpoint: _Endpoint, sock_path: Path, stop: threading.Event,
+    endpoint: _Endpoint, listen_spec: str, stop: threading.Event,
 ) -> None:
-    """Accept sequential UDS connections; one NDJSON request/response each."""
-    if sock_path.exists():
-        # Stale socket from a crashed serve — remove it.
-        try:
-            sock_path.unlink()
-        except OSError:
-            pass
-    sock_path.parent.mkdir(parents=True, exist_ok=True)
+    """Accept connections (Unix socket or TCP); one NDJSON request each.
 
-    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(str(sock_path))
-    srv.listen(8)
+    Each connection is handled on its own thread so the accept loop stays free
+    to receive a cancel control frame WHILE a request runs.
+    """
+    srv = transport.create_listener(listen_spec, backlog=8)
     srv.settimeout(0.5)  # so we can poll `stop`
 
     sys.stderr.write(
-        f"gen-worker serve: listening on {sock_path} "
+        f"gen-worker serve: listening on {transport.display(listen_spec)} "
         f"(functions: {', '.join(endpoint.function_names())})\n"
     )
     sys.stderr.write("gen-worker serve: ready\n")
@@ -794,9 +797,6 @@ def _serve_socket(
                 continue
             except OSError:
                 break
-            # Handle each connection on its own thread so the accept loop stays
-            # free to receive a cancel control frame WHILE a request runs (the
-            # request itself still serializes on the dispatch lock + GPU sema).
             t = threading.Thread(
                 target=_handle_conn_safe, args=(endpoint, conn), daemon=True,
             )
@@ -805,10 +805,7 @@ def _serve_socket(
         try:
             srv.close()
         finally:
-            try:
-                sock_path.unlink()
-            except OSError:
-                pass
+            transport.cleanup_listener(listen_spec)
 
 
 def _handle_conn_safe(endpoint: _Endpoint, conn: socket.socket) -> None:
@@ -978,7 +975,12 @@ def _serve_inner(args: argparse.Namespace) -> int:
     )
     endpoint.boot(candidates, eager=bool(getattr(args, "eager", False)))
 
-    sock_path = Path(args.socket_path).resolve()
+    # Listen address: --listen overrides --socket. Resolve a Unix path to an
+    # absolute form so teardown unlinks the right file regardless of cwd.
+    listen_spec = getattr(args, "listen", None) or args.socket_path
+    if transport.is_unix(listen_spec):
+        _, _p = transport.parse_addr(listen_spec)
+        listen_spec = str(Path(_p).resolve())
     stop = threading.Event()
 
     # 3. SIGINT / SIGTERM -> cancel in-flight requests, then clean teardown.
@@ -1012,7 +1014,7 @@ def _serve_inner(args: argparse.Namespace) -> int:
     # 4. Run the socket listener on a background thread; the foreground either
     #    reads stdin (default) or blocks until stop (--no-stdin / detached).
     sock_thread = threading.Thread(
-        target=_serve_socket, args=(endpoint, sock_path, stop), daemon=True,
+        target=_serve_socket, args=(endpoint, listen_spec, stop), daemon=True,
     )
     sock_thread.start()
 
@@ -1053,11 +1055,8 @@ def _serve_inner(args: argparse.Namespace) -> int:
                 except Exception:
                     pass
         endpoint.shutdown()
-        # Belt-and-suspenders: ensure the socket file is gone.
-        try:
-            sock_path.unlink()
-        except OSError:
-            pass
+        # Belt-and-suspenders: ensure a Unix socket file is gone (no-op for TCP).
+        transport.cleanup_listener(listen_spec)
 
     sys.stderr.write("gen-worker serve: stopped\n")
     sys.stderr.flush()
