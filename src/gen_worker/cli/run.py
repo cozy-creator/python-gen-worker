@@ -792,6 +792,53 @@ def run_setup(instance: Any, resolved_models: Dict[str, str]) -> None:
         setup_fn()
 
 
+_INJECTED_CACHE: Dict[Tuple[str, str], Any] = {}
+
+
+def _build_injected_kwargs(bound_method: Any, resolved_models: Dict[str, str]) -> Dict[str, Any]:
+    """Local #337 shim: inject per-request model slots into the handler.
+
+    Production assembles SharedBase variants in the worker; locally we load a
+    complete pipeline from the resolved snapshot using the parameter's type
+    annotation (from_pretrained for diffusers-layout dirs, from_single_file
+    for single-checkpoint repos).
+    """
+    try:
+        sig = inspect.signature(bound_method)
+        hints = typing.get_type_hints(bound_method)
+    except (TypeError, ValueError, NameError):
+        return {}
+    kwargs: Dict[str, Any] = {}
+    for name in list(sig.parameters)[2:]:  # skip ctx, payload (self already bound)
+        if name in resolved_models:
+            kwargs[name] = _load_injected_model(hints.get(name), resolved_models[name])
+    return kwargs
+
+
+def _load_injected_model(annotation: Any, local_path: str) -> Any:
+    key = (str(annotation), str(local_path))
+    if key in _INJECTED_CACHE:
+        return _INJECTED_CACHE[key]
+    import torch
+    cls = annotation if isinstance(annotation, type) else None
+    if cls is None or not hasattr(cls, "from_pretrained"):
+        from diffusers import DiffusionPipeline
+        cls = DiffusionPipeline
+    p = Path(local_path)
+    if p.is_dir() and (p / "model_index.json").exists():
+        pipe = cls.from_pretrained(str(p), torch_dtype=torch.float16)
+    else:
+        single = p if p.is_file() else next(iter(sorted(p.glob("*.safetensors"))), None)
+        if single is None or not hasattr(cls, "from_single_file"):
+            raise _ModelResolutionError(
+                f"cannot materialize injected model slot from {p} "
+                f"(no model_index.json, no single-file checkpoint)"
+            )
+        pipe = cls.from_single_file(str(single), torch_dtype=torch.float16)
+    _INJECTED_CACHE[key] = pipe
+    return pipe
+
+
 def dispatch_request(
     *,
     selected: _SelectedFunction,
@@ -829,7 +876,8 @@ def dispatch_request(
         on_resolved(resolved_models)
 
     bound_method = getattr(instance, selected.attr_name)
-    result = bound_method(ctx, payload)
+    extra_kwargs = _build_injected_kwargs(bound_method, resolved_models)
+    result = bound_method(ctx, payload, **extra_kwargs)
     if selected.is_generator or inspect.isgenerator(result):
         count = 0
         for item in result:
