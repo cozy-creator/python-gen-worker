@@ -285,6 +285,127 @@ stdin/UDS locally vs gRPC in prod). That's the right trade for warm-model fast
 iteration; byte-for-byte prod fidelity would need the real gRPC Worker against a
 local stub-scheduler.
 
+## The three shapes
+
+`gen-worker` gives you three ways to run an endpoint locally, differing in
+process model and how often the model loads:
+
+| Shape | Process model | When to use |
+|---|---|---|
+| `gen-worker run` | One-shot: load → run → exit (one process). | Scripting, CI, one-off pokes, piping to `jq`. Cold-loads each time (unless a warm `serve` is already up on the default socket — then `run` attaches to it). |
+| `gen-worker serve` + `gen-worker invoke` | Two processes / terminals: a warm worker + a thin client. | Tight iteration; this is the production/Docker topology (long-running worker, requests fired at it). |
+| `gen-worker repl` | One process: load once, then interactive. | Interactive exploration with the model held resident; type many requests at a prompt. |
+
+## Ergonomic payload args (#350)
+
+Instead of hand-writing JSON, `run`, `invoke`, and `repl` accept httpie-style
+tokens that are **coerced against the function's `msgspec.Struct`** so types
+and bounds match the real decode path:
+
+- **`field=value`** — set `field`; value coerced to the field's declared type
+  (`seed=42` → int, `hires=true` → bool, `prompt=hi` → str).
+- **`field:=<json>`** — raw JSON value, for lists / objects / explicit types:
+  `tags:='["a","b"]'`, `size:=1024`.
+- **`field@path`** — load the field's value from a file (long prompts, etc.).
+- **bare positional** — fills the payload's *primary* field (the first required
+  `str` field), so you don't have to name the prompt.
+- **`a.b=value`** — dotted key sets a nested object (best-effort coercion).
+
+```bash
+gen-worker run "a cat" seed=42 hires=true
+gen-worker invoke generate "a cat" seed=42
+```
+
+`--payload '<json>'` still works as the escape hatch; ergonomic tokens **merge
+over** it. In `repl`, tokens are split shell-style, so a multi-word value must
+be quoted just like in a shell (`"a cat" steps=5`).
+
+## `gen-worker repl`
+
+A load-once interactive session: it boots the endpoint (eager `setup()`, model
+resident) and loops over typed requests, reusing the same engine as `serve`.
+
+```bash
+$ cd examples/marco-polo
+$ gen-worker repl
+gen-worker repl — marco_polo.main (1 function(s): marco_polo)
+type ':help' for commands, ':quit' to exit
+active function: marco_polo
+marco_polo> "marco"
+{"response":"polo"}
+```
+
+Each line is either ergonomic tokens / raw JSON (a request to the active
+function) or a meta-command:
+
+| Command | Action |
+|---|---|
+| `:use <fn>` | switch the active function |
+| `:functions` | list functions |
+| `:schema` | print the active function's input JSON Schema |
+| `:help` | show help |
+| `:quit` (or `:q`) | exit |
+
+**Ctrl-C** cancels the in-flight request and returns to the prompt; **Ctrl-D**
+exits (and runs `shutdown()`).
+
+## Deployment shapes (Docker / k8s)
+
+> In real production the worker container's entrypoint is the **gRPC worker**
+> that dials the orchestrator. `serve` and `run` are the **local / self-hosted**
+> shapes — handy for one-off jobs and self-managed deployments.
+
+### `run` = one-off Job
+
+A single load-run-exit invocation. Mount the CAS volume so weights are reused,
+and the exit code propagates out of the container:
+
+```bash
+docker run --rm \
+  -v ~/.cache/cozy:/cache -e TENSORHUB_CAS_DIR=/cache \
+  <img> gen-worker run generate "a cat" seed=42
+```
+
+Maps cleanly to a Kubernetes **Job** / **CronJob** (exit 0 = success).
+
+### `serve` = long-running service
+
+A warm, always-on worker. Run detached, listen on TCP for cross-container
+access, and submit work either via `docker exec` or over a published port:
+
+```bash
+docker run -d -p 8731:8731 \
+  -v ~/.cache/cozy:/cache -e TENSORHUB_CAS_DIR=/cache \
+  <img> gen-worker serve --listen tcp://0.0.0.0:8731
+
+# submit via exec (shares the container's unix socket)…
+docker exec <ctr> gen-worker invoke generate "a cat" seed=42
+# …or over the published TCP port from the host:
+gen-worker invoke generate "a cat" --socket tcp://localhost:8731
+```
+
+Maps to a Kubernetes **Deployment** (one endpoint per Pod, mirroring prod's
+one-worker-per-release model).
+
+## Cancellation & signals (#352 / #353)
+
+Cancelling a request and stopping the worker both funnel through the same
+`ctx.cancel()` — so tenant code observes them identically, in prod and locally.
+
+- **`run` / `invoke` client, Ctrl-C:** cancels **that request** on the server;
+  the warm `serve` stays running. A **second** Ctrl-C within 2s detaches the
+  client (exit 130) — the request may still finish server-side.
+- **`serve` terminal, Ctrl-C / SIGTERM:** cancels **all** in-flight requests,
+  drains them cooperatively, then shuts down (runs `shutdown()`, removes the
+  socket). SIGTERM (k8s/orchestrator graceful stop) takes the identical path.
+  `SIGKILL` is uncatchable — it bypasses all cleanup.
+- **`repl`, Ctrl-C:** cancels the in-flight request and returns to the prompt;
+  Ctrl-D exits.
+
+Tenant code should observe cancellation by calling `ctx.raise_if_canceled()`
+inside loops, or by waiting on `ctx.cancel_event` — the **same idiom**
+production uses for an orchestrator interrupt.
+
 ## When `gen-worker run` is the wrong tool
 
 - **Resource gating.** The CLI doesn't enforce VRAM / compute-capability

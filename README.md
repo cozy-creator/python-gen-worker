@@ -158,8 +158,26 @@ gen-worker run --payload '{"prompt": "hello"}'
 
 stdout for results, stderr for events; exit 0 / 1 / 2 / 3 / 130 for
 success / user-exception / usage / model-resolution / SIGINT. Full
-two-input model, `--offline` story, SIGINT semantics, and worked
-examples in [docs/local-dev.md](docs/local-dev.md).
+two-input model, the three CLI shapes (`run` / `serve` + `invoke` /
+`repl`), ergonomic `field=value` args, `--offline` story, SIGINT
+semantics, and worked examples in [docs/local-dev.md](docs/local-dev.md).
+The machine-readable host-integration contract (versioning, `describe
+--json`, the NDJSON protocol, the serve sidecar) lives in
+[docs/host-integration.md](docs/host-integration.md).
+
+### Running tests
+
+`pytest` lives in the `dev` optional-dependency extra, so the supported
+command is:
+
+```bash
+uv run --extra dev pytest
+```
+
+Plain `uv run pytest` would fall through to a global launcher — always pass
+`--extra dev`. **Never `pip install` gen-worker globally:** a stale
+`~/.local` install silently shadows the working tree (`tests/conftest.py`
+hard-fails if `gen_worker` resolves outside `src/`).
 
 ## Documentation
 
