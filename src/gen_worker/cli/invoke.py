@@ -177,6 +177,13 @@ def _send_request(sock_path: Path, request: dict, timeout: float = 0.0) -> dict:
             buf.extend(chunk)
     finally:
         s.close()
+    if not buf:
+        raise run_mod._UsageError("serve closed the connection with no response")
+    resp_line = bytes(buf).split(b"\n", 1)[0]
+    try:
+        return json.loads(resp_line.decode("utf-8"))
+    except json.JSONDecodeError as e:
+        raise run_mod._UsageError(f"serve returned invalid JSON: {e}") from e
 
 
 # --------------------------------------------------------------------------
