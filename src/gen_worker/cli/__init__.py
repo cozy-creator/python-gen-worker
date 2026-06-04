@@ -56,6 +56,9 @@ def _build_parser() -> argparse.ArgumentParser:
     from . import describe as _describe_mod
     _describe_mod.add_subparser(sub)
 
+    from . import repl as _repl_mod
+    _repl_mod.add_subparser(sub)
+
     return parser
 
 

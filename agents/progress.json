@@ -210,12 +210,12 @@
       "name": "Single-endpoint interactive REPL `gen-worker repl` (load-once; interactive sibling of `serve --stdin`)",
       "description": "## What\n\n`cd my-endpoint && uv run gen-worker repl` \u2014 a single PROCESS that loads the endpoint + model ONCE and stays resident for the session, looping over typed requests. It is the interactive sibling of `serve --stdin` (which already loads once and reads NDJSON line-by-line via `_serve_stdin`); `repl` is that same engine plus a human prompt, the ergonomic arg grammar (#350), and meta-commands.\n\nThis is the THIN, SINGLE-endpoint REPL \u2014 bounded to the endpoint you're standing in. The RICH, multi-endpoint console (switch endpoints, schema completion across the catalog, warm/VRAM panel) is cozy-local's `cozy repl` (cozy #20); keep that there.\n\n## Mechanic\n\n1. Discover the endpoint (`endpoint.toml` -> functions); run `setup()` ONCE -> model resident in this process.\n2. Loop: read a line -> parse (function + `field=value` args per #350, or raw JSON) -> dispatch in-process -> stream/print result -> back to prompt. Model stays warm between lines.\n3. `Ctrl-C` cancels the IN-FLIGHT request (the #352 mechanism) and returns to the prompt; the session stays alive.\n4. Exit (`Ctrl-D` / `:quit`) -> `shutdown()` -> free the GPU.\n5. Meta-commands: `:use <fn>` (multi-function endpoints), `:schema` (fields/types/defaults/bounds from #349), `:help`, `:quit`. Tab-complete field names + bound hints from the schema.\n\n## Implementation\n\nReuse serve's boot + dispatch internals (the `_Endpoint` object) with a readline loop instead of a socket \u2014 low duplication; the load-once + dispatch path already exists in `_serve_stdin`.\n\n## Sits between the other shapes\n\n- `run` = one-shot (load, run, exit) \u2014 scripting/CI.\n- `serve` + `invoke` = two processes / two terminals \u2014 the Docker/prod topology (#347).\n- `repl` = ONE process, load-once, interactive \u2014 poking one endpoint in one terminal.",
       "tasks": [
-        "[ ] `gen-worker repl` subcommand: discover endpoint, run setup() once (model resident), readline loop; reuse serve's `_Endpoint` / `_serve_stdin` engine.",
-        "[ ] Per-line parsing via the #350 `field=value` grammar (+ raw-JSON fallback); function inferred when single, else `:use <fn>` / `fn ...` prefix.",
-        "[ ] `Ctrl-C` cancels the in-flight request (#352) and returns to the prompt; `Ctrl-D`/`:quit` -> shutdown() -> free GPU.",
-        "[ ] Meta-commands: `:use`, `:schema` (from #349 describe), `:help`, `:quit`; tab-complete field names + bound hints.",
-        "[ ] Stream events live + render result (path/value) + timings.",
-        "[ ] Tests: load-once (model not reloaded between lines), arg parsing, cancel-returns-to-prompt, clean shutdown on exit."
+        "[x] `gen-worker repl` subcommand: discover endpoint, run setup() once (model resident), readline loop; reuse serve's `_Endpoint` / `_serve_stdin` engine.",
+        "[x] Per-line parsing via the #350 `field=value` grammar (+ raw-JSON fallback); function inferred when single, else `:use <fn>` / `fn ...` prefix.",
+        "[x] `Ctrl-C` cancels the in-flight request (#352) and returns to the prompt; `Ctrl-D`/`:quit` -> shutdown() -> free GPU.",
+        "[x] Meta-commands: `:use`, `:schema` (from #349 describe), `:help`, `:quit`; tab-complete field names + bound hints.",
+        "[x] Stream events live + render result (path/value) + timings.",
+        "[x] Tests: load-once (model not reloaded between lines), arg parsing, cancel-returns-to-prompt, clean shutdown on exit."
       ],
       "related": [
         "Arg grammar: #350 (field=value)",
@@ -225,7 +225,7 @@
         "Rich multi-endpoint superset lives in cozy-local: cozy #20"
       ],
       "completed": false,
-      "status": "planned"
+      "status": "in_progress"
     },
     {
       "id": 349,
