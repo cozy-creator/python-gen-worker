@@ -34,8 +34,7 @@ CAPABILITIES: List[str] = [
     "cancel",
     "streaming",
     "tcp_listen",
-    # "serve_sidecar" is appended by the commit that ships it (#349-sidecar) so
-    # `describe` never advertises a capability that isn't implemented yet.
+    "serve_sidecar",
 ]
 
 

@@ -64,6 +64,41 @@ def _wait_tcp(port: int, proc: subprocess.Popen, timeout: float = 15.0) -> None:
     not (_EXAMPLE_DIR / "endpoint.toml").exists(),
     reason="marco-polo example not present",
 )
+def test_serve_sidecar_written_and_removed(tmp_path) -> None:
+    """serve writes a machine-readable .gen-worker.serve.json on ready (pid,
+    listen, functions, protocol_version) and removes it on teardown (#349)."""
+    sock = tmp_path / "sc.sock"
+    sidecar = tmp_path / "sc.sock.json"
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "gen_worker.cli", "serve", "--socket", str(sock), "--no-stdin"],
+        cwd=str(_EXAMPLE_DIR), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        deadline = time.time() + 12
+        while not sidecar.exists() and time.time() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(f"serve exited rc={proc.returncode}: {proc.stderr.read()}")
+            time.sleep(0.05)
+        assert sidecar.exists()
+        doc = json.loads(sidecar.read_text())
+        assert doc["pid"] == proc.pid
+        assert "protocol_version" in doc and "functions" in doc
+        assert doc["listen"] == str(sock)
+        assert "marco_polo" in doc["functions"]
+    finally:
+        proc.send_signal(signal.SIGTERM)
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+    assert not sidecar.exists()  # removed on teardown
+
+
+@pytest.mark.skipif(
+    not (_EXAMPLE_DIR / "endpoint.toml").exists(),
+    reason="marco-polo example not present",
+)
 def test_tcp_roundtrip(capsys) -> None:
     port = _free_port()
     addr = f"tcp://127.0.0.1:{port}"

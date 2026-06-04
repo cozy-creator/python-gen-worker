@@ -235,10 +235,10 @@
         "[x] First-class `gen-worker describe --json` (no model load): protocol_version, gen_worker_version, capabilities, endpoint kind/classes, functions[] with input JSON Schema + bounds + output + is_generator + model bindings + profiles.",
         "[x] Keep `serve --list-functions --json` as a thin alias of `describe` (back-compat).",
         "[x] capabilities + protocol_version handshake; coordinate removing cozy's `--help` scraping (cozy serveproc.go gwSupports*).",
-        "[ ] serve ready-sidecar `.gen-worker.serve.json` {pid, listen, protocol_version, ready_at, functions, idle_timeout}; write on ready, remove on teardown; explicit `ready` event.",
+        "[x] serve ready-sidecar `.gen-worker.serve.json` {pid, listen, protocol_version, ready_at, functions, idle_timeout}; write on ready, remove on teardown; explicit `ready` event.",
         "[ ] docs/host-integration.md: describe schema, NDJSON IPC protocol (request_id/function/payload, streamed events, terminal frame, error kinds, cancel msg), sidecar, capabilities, exit codes; versioned by protocol_version.",
         "[x] Advertise tcp_listen + cancel + streaming in capabilities as #347/#352/#344 land.",
-        "[ ] Tests: describe --json schema snapshot; sidecar lifecycle; capability handshake; serve alias parity."
+        "[x] Tests: describe --json schema snapshot; sidecar lifecycle; capability handshake; serve alias parity."
       ],
       "related": [
         "Consumed by cozy-local: function-discovery (cozy #7), warm-serve/invoke (cozy #6), REPL (cozy #20)",

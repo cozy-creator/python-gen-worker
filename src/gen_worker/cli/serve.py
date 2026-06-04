@@ -53,6 +53,7 @@ from ..models.cache import ModelCache
 from . import run as run_mod
 from . import transport
 from .local_context import _stderr_emitter, build_local_context
+from .protocol import PROTOCOL_VERSION, gen_worker_version
 
 
 DEFAULT_SOCKET_PATH = "./.gen-worker.sock"
@@ -771,8 +772,41 @@ def _serve_stdin(endpoint: _Endpoint, stop: threading.Event) -> None:
             _write_response_line(_emit_stdout, envelope)
 
 
+def _sidecar_path(listen_spec: str) -> Path:
+    """Where the machine-readable serve handle lives (#349).
+
+    Adjacent to the Unix socket (``<sock>.json``) so several serves don't
+    collide; in cwd for TCP (no socket file).
+    """
+    addr = transport.parse_addr(listen_spec)
+    if addr[0] == "unix":
+        return Path(str(addr[1]) + ".json")
+    return Path.cwd() / ".gen-worker.serve.json"
+
+
+def _write_sidecar(listen_spec: str, endpoint: _Endpoint, idle_timeout: float) -> Path:
+    """Write the serve sidecar so a host (cozy) reads pid/listen/functions
+    instead of reimplementing pidfile/socket/ready guesswork."""
+    path = _sidecar_path(listen_spec)
+    doc = {
+        "protocol_version": PROTOCOL_VERSION,
+        "gen_worker_version": gen_worker_version(),
+        "pid": os.getpid(),
+        "listen": transport.display(listen_spec),
+        "ready_at": time.time(),
+        "idle_timeout": idle_timeout or 0.0,
+        "functions": endpoint.function_names(),
+    }
+    try:
+        path.write_text(json.dumps(doc), encoding="utf-8")
+    except OSError:
+        pass
+    return path
+
+
 def _serve_socket(
     endpoint: _Endpoint, listen_spec: str, stop: threading.Event,
+    idle_timeout: float = 0.0,
 ) -> None:
     """Accept connections (Unix socket or TCP); one NDJSON request each.
 
@@ -782,6 +816,7 @@ def _serve_socket(
     srv = transport.create_listener(listen_spec, backlog=8)
     srv.settimeout(0.5)  # so we can poll `stop`
 
+    sidecar = _write_sidecar(listen_spec, endpoint, idle_timeout)
     sys.stderr.write(
         f"gen-worker serve: listening on {transport.display(listen_spec)} "
         f"(functions: {', '.join(endpoint.function_names())})\n"
@@ -806,6 +841,10 @@ def _serve_socket(
             srv.close()
         finally:
             transport.cleanup_listener(listen_spec)
+            try:
+                sidecar.unlink()
+            except OSError:
+                pass
 
 
 def _handle_conn_safe(endpoint: _Endpoint, conn: socket.socket) -> None:
@@ -1011,10 +1050,13 @@ def _serve_inner(args: argparse.Namespace) -> int:
     except (ValueError, OSError):
         prev_term = None
 
+    idle_timeout = float(getattr(args, "idle_timeout", 0.0) or 0.0)
+
     # 4. Run the socket listener on a background thread; the foreground either
     #    reads stdin (default) or blocks until stop (--no-stdin / detached).
     sock_thread = threading.Thread(
-        target=_serve_socket, args=(endpoint, listen_spec, stop), daemon=True,
+        target=_serve_socket, args=(endpoint, listen_spec, stop, idle_timeout),
+        daemon=True,
     )
     sock_thread.start()
 
@@ -1024,7 +1066,6 @@ def _serve_inner(args: argparse.Namespace) -> int:
     # an immediate stdin EOF would tear the socket down before any `invoke`
     # could connect (the common footgun).
     detached = args.no_stdin or not getattr(sys.stdin, "isatty", lambda: True)()
-    idle_timeout = float(getattr(args, "idle_timeout", 0.0) or 0.0)
     # The idle clock starts now (after boot), so model load time isn't counted.
     endpoint.last_activity = time.time()
     try:
