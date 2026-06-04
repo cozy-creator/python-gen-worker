@@ -606,7 +606,9 @@ def _resolve_local_path(
             "orchestrator once to populate the cache, then re-run."
         )
 
-    raise _ModelResolutionError(f"unsupported model ref: {canon!r}")
+    raise _ModelResolutionError(
+        f"unsupported model ref: {ref!r} (provider={provider!r})"
+    )
 
 
 def _resolve_models_for_setup(
@@ -780,16 +782,54 @@ def instantiate_class(cls: type) -> Any:
 
 
 def run_setup(instance: Any, resolved_models: Dict[str, str]) -> None:
-    """Call ``instance.setup(**resolved_models)`` once, tolerating bare
-    ``def setup(self)`` signatures (matches ``_run_inner`` behavior).
+    """Call ``instance.setup(...)`` once, passing exactly the resolved model
+    slots its signature declares.
+
+    A bare ``def setup(self)`` is legitimate (#337 model-selectable endpoints
+    receive their model per-request in the handler instead), so unclaimed
+    slots are fine. But a setup() that declares parameters we CANNOT satisfy
+    is an authoring error and must fail loudly -- the previous blanket
+    ``except TypeError: setup_fn()`` swallowed signature mismatches and let
+    them resurface as confusing downstream failures.
     """
     setup_fn = getattr(instance, "setup", None)
     if setup_fn is None:
         return
     try:
+        params = inspect.signature(setup_fn).parameters
+    except (TypeError, ValueError):
+        # Odd callables without an inspectable signature: keep the legacy
+        # best-effort behavior for them only.
+        try:
+            setup_fn(**resolved_models)
+        except TypeError:
+            setup_fn()
+        return
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
         setup_fn(**resolved_models)
-    except TypeError:
-        setup_fn()
+        return
+    wanted = {
+        name for name, p in params.items()
+        if p.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        )
+    }
+    missing = sorted(
+        name for name, p in params.items()
+        if name in wanted
+        and p.default is inspect.Parameter.empty
+        and name not in resolved_models
+    )
+    if missing:
+        raise _UsageError(
+            f"setup() declares parameter(s) {missing} but the resolved model "
+            f"slots are {sorted(resolved_models) or '(none)'}; each setup "
+            f"parameter must match a key in the @inference models={{...}} "
+            f"dict (static bindings are injected into setup; dispatch "
+            f"bindings are injected into the handler per-request)."
+        )
+    setup_fn(**{k: v for k, v in resolved_models.items() if k in wanted})
 
 
 _INJECTED_CACHE: Dict[Tuple[str, str], Any] = {}

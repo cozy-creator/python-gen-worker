@@ -25,6 +25,7 @@ import argparse
 import json
 import socket
 import sys
+import time
 from pathlib import Path
 from typing import Any, List
 
@@ -72,6 +73,14 @@ def add_subparser(sub: argparse._SubParsersAction[Any]) -> None:
         "--pretty", action="store_true",
         help="Pretty-print the result with newlines + 2-space indent.",
     )
+    p.add_argument(
+        "--timeout", type=float, default=0.0,
+        help=(
+            "Seconds to wait for the response (0 = wait forever, the "
+            "default -- a first request per model may cold-load weights "
+            "for minutes)."
+        ),
+    )
     p.set_defaults(_handler=_handle_invoke)
 
 
@@ -101,15 +110,28 @@ def _read_payload(spec: str) -> Any:
 # Socket client
 # --------------------------------------------------------------------------
 
-def _send_request(sock_path: Path, request: dict) -> dict:
-    """Connect, send one NDJSON request, read one NDJSON response."""
+_CONNECT_TIMEOUT_SECONDS = 10.0
+_WAIT_NOTICE_SECONDS = 15.0
+
+
+def _send_request(sock_path: Path, request: dict, timeout: float = 0.0) -> dict:
+    """Connect, send one NDJSON request, read one NDJSON response.
+
+    The CONNECT is always bounded (a healthy serve accepts instantly). The
+    RESPONSE wait is unbounded by default (``timeout`` <= 0): a first request
+    per model may legitimately cold-load weights for minutes, and a client-side
+    deadline firing while the server works correctly misleads the developer
+    into debugging a healthy system. While waiting without a deadline, a
+    one-time notice is printed so a long cold load is distinguishable from a
+    hang. A crashed serve closes the socket, which ends the wait immediately.
+    """
     if not sock_path.exists():
         raise run_mod._UsageError(
             f"no serve socket at {sock_path}; is 'gen-worker serve' running? "
             f"(start it with `gen-worker serve` or pass --socket PATH)"
         )
     s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    s.settimeout(120.0)
+    s.settimeout(_CONNECT_TIMEOUT_SECONDS)
     try:
         try:
             s.connect(str(sock_path))
@@ -125,20 +147,36 @@ def _send_request(sock_path: Path, request: dict) -> dict:
         except OSError:
             pass
         buf = bytearray()
+        deadline = (time.monotonic() + timeout) if timeout and timeout > 0 else None
+        notified = False
         while b"\n" not in buf:
-            chunk = s.recv(65536)
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise run_mod._UsageError(
+                        f"no response from serve within --timeout={timeout:g}s "
+                        f"(the request may still be running server-side)"
+                    )
+                s.settimeout(min(remaining, _WAIT_NOTICE_SECONDS))
+            else:
+                s.settimeout(_WAIT_NOTICE_SECONDS)
+            try:
+                chunk = s.recv(65536)
+            except socket.timeout:
+                if deadline is None and not notified:
+                    sys.stderr.write(
+                        "gen-worker invoke: still waiting (a cold model load "
+                        "can take minutes; Ctrl-C to abort, or pass "
+                        "--timeout SECONDS)\n"
+                    )
+                    sys.stderr.flush()
+                    notified = True
+                continue
             if not chunk:
                 break
             buf.extend(chunk)
     finally:
         s.close()
-    if not buf:
-        raise run_mod._UsageError("serve closed the connection with no response")
-    resp_line = bytes(buf).split(b"\n", 1)[0]
-    try:
-        return json.loads(resp_line.decode("utf-8"))
-    except json.JSONDecodeError as e:
-        raise run_mod._UsageError(f"serve returned invalid JSON: {e}") from e
 
 
 # --------------------------------------------------------------------------
@@ -150,7 +188,10 @@ def _handle_invoke(args: argparse.Namespace) -> int:
         payload = _read_payload(args.payload)
         sock_path = Path(args.socket_path).resolve()
         request = {"function": args.function_name, "payload": payload}
-        resp = _send_request(sock_path, request)
+        resp = _send_request(
+            sock_path, request,
+            timeout=float(getattr(args, "timeout", 0.0) or 0.0),
+        )
     except run_mod._UsageError as e:
         sys.stderr.write(f"gen-worker invoke: {e}\n")
         return run_mod.EXIT_USAGE
