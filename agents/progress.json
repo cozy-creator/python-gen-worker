@@ -117,11 +117,11 @@
       "name": "Signal \u2192 cancellation mapping: SIGINT/SIGTERM funnel through `ctx.cancel()`; separate request-cancel from server teardown (worker + CLI)",
       "description": "OS signals must drive the SAME `ctx.cancel()` mechanism (#352) so endpoint/tenant code stops cleanly \u2014 the local analog of the orchestrator's `interrupt_job_cmd` / `worker_drain_cmd`. Killing the server and cancelling a request are DISTINCT actions:\n\n- **Cancel a request** (client `Ctrl-C`, orchestrator interrupt, socket cancel): `ctx.cancel()` for ONE request_id; server + endpoint keep running. (#352.)\n- **Stop the server** (server-terminal SIGINT; SIGTERM): cancel ALL in-flight ctx, let them unwind, run `shutdown()`, exit.\n\n## Mapping (both `gen-worker serve` and the production worker)\n\n- **SIGINT to `serve`'s own terminal:** iterate the per-request registry \u2192 `ctx.cancel()` for each \u2192 bounded drain \u2192 `endpoint.shutdown()` \u2192 exit. Replaces serve's current `stop`-event + 2s daemon-thread `join` (serve.py:865) which never cancels in-flight work.\n- **SIGTERM (orchestrator/k8s graceful stop, to worker or serve):** same as the production `worker_drain_cmd` path (worker.py:5887) \u2014 cancel in-flight via `ctx.cancel()`, await unwind, `instance.shutdown()` per class, exit 0. Wire SIGTERM to that drain entry point.\n- **SIGKILL:** uncatchable by definition \u2014 bypasses all cleanup (no `shutdown()`, no GPU free). Document as the hard-kill of last resort; the two-stage client `Ctrl-C` (#352) and bounded drain timeouts exist precisely so SIGKILL is rarely needed.\n- **Standalone `run` SIGINT:** two-stage via the public `ctx.cancel()` (1st = cancel, 2nd within ~2s = `os._exit(130)`) \u2014 implemented under #352.\n\n## Tenant contract (single source of truth, documented)\n\nTenant/endpoint code observes cancellation IDENTICALLY in prod and locally: `ctx.raise_if_canceled()` in loops (canonical), or wait on `ctx.cancel_event` / `ctx.done()`. One idiom, every cancel source.",
       "tasks": [
-        "[ ] serve own-SIGINT: cancel all in-flight ctx via the registry, bounded drain, then `endpoint.shutdown()` (replace the 2s join at serve.py:865).",
-        "[ ] Wire SIGTERM (worker + serve) to the existing drain path (`worker_drain_cmd` semantics): cancel in-flight, await, shutdown, exit 0.",
-        "[ ] Document SIGKILL as uncatchable / no-cleanup; add bounded drain timeouts so it is rarely needed.",
+        "[x] serve own-SIGINT: cancel all in-flight ctx via the registry, bounded drain, then `endpoint.shutdown()` (replace the 2s join at serve.py:865).",
+        "[x] Wire SIGTERM (worker + serve) to the existing drain path (`worker_drain_cmd` semantics): cancel in-flight, await, shutdown, exit 0.",
+        "[x] Document SIGKILL as uncatchable / no-cleanup; add bounded drain timeouts so it is rarely needed.",
         "[ ] Document the tenant cancellation idiom (raise_if_canceled / cancel_event) as identical in prod and CLI.",
-        "[ ] Tests: serve SIGINT cancels in-flight + shuts down; SIGTERM drains; a single request-cancel (#352) leaves the server running (contrast)."
+        "[x] Tests: serve SIGINT cancels in-flight + shuts down; SIGTERM drains; a single request-cancel (#352) leaves the server running (contrast)."
       ],
       "related": [
         "Built on the #352 primitive + registry",
@@ -129,7 +129,7 @@
         "SIGINT precedent: run.py _SigintHandler"
       ],
       "completed": false,
-      "status": "planned"
+      "status": "in_progress"
     },
     {
       "id": 344,

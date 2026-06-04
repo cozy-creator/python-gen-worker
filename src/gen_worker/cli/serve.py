@@ -847,6 +847,20 @@ def _handle_conn(endpoint: _Endpoint, conn: socket.socket) -> None:
 # Handler
 # --------------------------------------------------------------------------
 
+def _drain_active(endpoint: _Endpoint, timeout: float) -> None:
+    """Wait (bounded) for in-flight requests to unwind after cancel_all().
+
+    Cooperative handlers return promptly once canceled; a handler that ignores
+    cancellation is bounded by ``timeout`` so teardown still proceeds.
+    """
+    deadline = time.time() + max(0.0, timeout)
+    while time.time() < deadline:
+        with endpoint._active_lock:
+            if not endpoint._active:
+                return
+        time.sleep(0.05)
+
+
 def _handle_serve(args: argparse.Namespace) -> int:
     try:
         return _serve_inner(args)
@@ -912,17 +926,33 @@ def _serve_inner(args: argparse.Namespace) -> int:
     sock_path = Path(args.socket_path).resolve()
     stop = threading.Event()
 
-    # 3. SIGINT -> clean teardown.
-    def _on_sigint(_signum: int, _frame: Any) -> None:
-        sys.stderr.write("\ngen-worker serve: received SIGINT; shutting down\n")
+    # 3. SIGINT / SIGTERM -> cancel in-flight requests, then clean teardown.
+    #    Stopping the worker and cancelling a request both funnel through the
+    #    same ctx.cancel() (#353): here we cancel ALL in-flight requests so each
+    #    tenant handler unwinds cooperatively, then drain + shutdown(). SIGTERM
+    #    (k8s/orchestrator graceful stop) maps to the identical drain path.
+    #    SIGKILL is uncatchable — it bypasses all cleanup (no shutdown / GPU
+    #    free); the bounded drain below exists so SIGKILL is rarely needed.
+    def _on_signal(signum: int, _frame: Any) -> None:
+        name = "SIGTERM" if signum == signal.SIGTERM else "SIGINT"
+        n = endpoint.cancel_all()
+        sys.stderr.write(
+            f"\ngen-worker serve: received {name}; canceling {n} in-flight "
+            "request(s) and shutting down\n"
+        )
         sys.stderr.flush()
         stop.set()
 
-    prev = signal.getsignal(signal.SIGINT)
+    prev_int = signal.getsignal(signal.SIGINT)
+    prev_term = signal.getsignal(signal.SIGTERM)
     try:
-        signal.signal(signal.SIGINT, _on_sigint)
+        signal.signal(signal.SIGINT, _on_signal)
     except (ValueError, OSError):
-        prev = None
+        prev_int = None
+    try:
+        signal.signal(signal.SIGTERM, _on_signal)
+    except (ValueError, OSError):
+        prev_term = None
 
     # 4. Run the socket listener on a background thread; the foreground either
     #    reads stdin (default) or blocks until stop (--no-stdin / detached).
@@ -956,12 +986,17 @@ def _serve_inner(args: argparse.Namespace) -> int:
         pass
     finally:
         stop.set()
+        # Cancel any in-flight requests (idempotent with the signal handler) and
+        # give them a bounded window to unwind cooperatively before teardown.
+        endpoint.cancel_all()
+        _drain_active(endpoint, timeout=10.0)
         sock_thread.join(timeout=2.0)
-        if prev is not None:
-            try:
-                signal.signal(signal.SIGINT, prev)
-            except Exception:
-                pass
+        for sig, prev in ((signal.SIGINT, prev_int), (signal.SIGTERM, prev_term)):
+            if prev is not None:
+                try:
+                    signal.signal(sig, prev)
+                except Exception:
+                    pass
         endpoint.shutdown()
         # Belt-and-suspenders: ensure the socket file is gone.
         try:

@@ -9,10 +9,13 @@ client-canceler unit checks.
 
 from __future__ import annotations
 
+import signal
+import subprocess
 import sys
 import threading
 import time
 import types
+from pathlib import Path
 from typing import Iterator
 
 import msgspec
@@ -21,6 +24,8 @@ import pytest
 import gen_worker.cli.run as run_mod
 import gen_worker.cli.serve as serve_mod
 from gen_worker import RequestContext, inference
+
+_EXAMPLE_DIR = Path(__file__).resolve().parents[1] / "examples" / "marco-polo"
 
 
 class _In(msgspec.Struct):
@@ -90,6 +95,56 @@ def test_interrupt_cancels_inflight_and_server_keeps_serving() -> None:
 
     assert ep.interrupt_request("nope") is False  # unknown id
     ep.shutdown()
+
+
+def test_cancel_all_cancels_every_inflight() -> None:
+    mod = _slow_module("_cancel_all_slow")
+    ep = serve_mod._Endpoint(offline=False, allow_publish=False)
+    ep.boot(run_mod.discover_candidates(mod))
+
+    threads = []
+    for rid in ("a", "b"):
+        t, box = _dispatch_async(ep, "slow", {"text": "x"}, rid)
+        threads.append((t, box))
+    deadline = time.time() + 5
+    while len(ep._active) < 2 and time.time() < deadline:
+        time.sleep(0.005)
+    assert len(ep._active) == 2
+
+    assert ep.cancel_all() == 2
+    for t, box in threads:
+        t.join(timeout=5)
+        assert box["env"]["error"]["kind"] == "canceled"
+    ep.shutdown()
+
+
+@pytest.mark.skipif(
+    not (_EXAMPLE_DIR / "endpoint.toml").exists(),
+    reason="marco-polo example not present",
+)
+def test_serve_sigterm_clean_teardown(tmp_path) -> None:
+    """SIGTERM (k8s/orchestrator graceful stop) tears the serve down cleanly and
+    removes the socket — the same drain path as SIGINT (#353)."""
+    sock = tmp_path / "term.sock"
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "gen_worker.cli", "serve", "--socket", str(sock), "--no-stdin"],
+        cwd=str(_EXAMPLE_DIR), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        deadline = time.time() + 10
+        while not sock.exists() and time.time() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(f"serve exited early rc={proc.returncode}")
+            time.sleep(0.05)
+        assert sock.exists()
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=10)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait(timeout=5)
+    assert proc.returncode == 0
+    assert not sock.exists()
 
 
 def test_parse_frame_request_and_cancel() -> None:
