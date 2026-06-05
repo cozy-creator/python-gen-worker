@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.8.2
+
+### Added
+
+- **`gen-worker describe --json`** — machine-readable endpoint introspection
+  with no model load: `protocol_version`, `capabilities`, and every function's
+  input JSON Schema + model bindings. `serve --list-functions --json` is now a
+  thin alias. This is the stable host-integration contract (see
+  `docs/host-integration.md`) for tools like cozy.
+- **Ergonomic CLI payload args** — `gen-worker run/invoke "a cat" seed=42
+  hires=true`: httpie-style `field=value` (coerced to the payload struct's field
+  type), `field:=<json>`, `field@file`, and a bare positional for the primary
+  field. `--payload '<json>'` still works; tokens merge over it.
+- **Request cancellation** — `Ctrl-C` on `run`/`invoke` cancels the in-flight
+  request (via `ctx.cancel()`) while a warm `serve` keeps running; a second
+  `Ctrl-C` detaches the client. A `{"cancel":{"request_id"}}` control frame is
+  the wire mechanism. SIGINT/SIGTERM on `serve` cancel all in-flight requests,
+  drain, then shut down.
+- **Streamed responses** — `serve` streams each event as produced when a request
+  sets `stream:true` (`invoke --stream`, and `run`'s warm-attach), with a
+  client-disconnect cancellation backstop.
+- **TCP transport** — `serve --listen tcp://0.0.0.0:PORT` + `invoke --socket
+  tcp://host:PORT` for cross-process / Docker submission (the Unix socket
+  remains the default).
+- **`gen-worker repl`** — a load-once interactive single-endpoint session.
+- **serve sidecar** — `.gen-worker.serve.json` (pid, listen, protocol_version,
+  functions) written on ready and removed on teardown, for host orchestration.
+- **`serve --vram-budget GB`** — size the in-process `ModelCache` to a host
+  allotment instead of the whole GPU, so several serves co-reside with
+  deterministic budgets.
+- New docs: `docs/host-integration.md` (the contract) and an expanded
+  `docs/local-dev.md` (the three shapes, ergonomic args, Docker topologies).
+
+### Fixed
+
+- Civitai model refs now resolve a MODEL id to its latest version; `.version()`
+  pins are honored; a failed lookup fails loud instead of silently downloading
+  an unrelated model.
+- `describe` accepts the documented `--json` flag (it is the default + only
+  format).
+
 ## 0.7.21
 
 ### Fixed
