@@ -221,18 +221,33 @@ gen-worker invoke generate "a cat" --socket tcp://host:8731 # TCP
 Address forms accepted everywhere: `tcp://host:port`, `unix:///abs/path`, or a
 bare path (treated as a Unix socket).
 
-## Cancellation
+## Cancellation — the end-to-end contract
 
-Two paths, both funneling through the canonical `ctx.cancel()`:
+There is exactly **one** cancellation primitive — `RequestContext.cancel()` —
+fed by many sources and observed by tenant code one way. Every source resolves a
+`request_id`, looks the ctx up in a per-request registry, and calls
+`ctx.cancel()`; cancelling a request never stops the worker.
 
-- **Explicit:** a `{"cancel":{"request_id"}}` frame on any connection trips
-  `ctx.cancel()` for that in-flight request. The server stays up.
-- **Client disconnect (backstop):** if a streaming client's connection drops
-  mid-response, the server cancels that request automatically.
+**Sources → `ctx.cancel()`:**
 
-Tenant code observes cancellation cooperatively — via
-`ctx.raise_if_canceled()` in loops, or by waiting on `ctx.cancel_event`. This
-is the **same idiom** in production (orchestrator interrupt) and locally.
+| Where | Source | Path |
+|---|---|---|
+| Production | orchestrator user-facing cancel → `interrupt_job_cmd{request_id}` over gRPC | `Worker._handle_interrupt_request` looks up `_active_requests[request_id]` → `ctx.cancel()` (+ `engine.abort` for batched) |
+| Local — explicit | `{"cancel":{"request_id"}}` frame on any connection | `serve` looks up its in-flight registry → `ctx.cancel()` |
+| Local — client `Ctrl-C` | `run`/`invoke` SIGINT (1st press) sends the cancel frame | same as above |
+| Local — disconnect | a streaming client's connection drops | server cancels that request (backstop) |
+| Worker stop | `serve` `Ctrl-C`/SIGTERM, or production drain | `cancel_all()` → `ctx.cancel()` on every in-flight request, then `shutdown()` |
+
+**Observation (tenant side) — identical everywhere:** call
+`ctx.raise_if_canceled()` inside loops, or wait on `ctx.cancel_event`
+(`ctx.done()`). Cancellation is only *prompt* for cooperative handlers; a
+single-shot handler stuck in a tight C/CUDA call won't observe it until it
+returns.
+
+**Request-cancel vs. worker-stop are separate actions.** Cancelling a request
+(client `Ctrl-C`, orchestrator interrupt, cancel frame) leaves the server warm.
+Stopping the worker (`serve` terminal `Ctrl-C`/SIGTERM) cancels all in-flight
+requests *and then* tears down. `SIGKILL` is uncatchable and bypasses cleanup.
 
 ## Exit codes
 

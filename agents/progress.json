@@ -75,7 +75,7 @@
       "tasks": [
         "[ ] Audit gen-orchestrator for a user-facing cancel-request API; confirm it emits `interrupt_job_cmd` to the owning worker.",
         "[ ] Auto-cancel on client / response-stream disconnect in the orchestrator (production analog of #352's disconnect backstop).",
-        "[ ] Write the single end-to-end cancellation contract doc (sources \u2192 request_id \u2192 ctx.cancel() \u2192 tenant idiom)."
+        "[x] Write the single end-to-end cancellation contract doc (sources \u2192 request_id \u2192 ctx.cancel() \u2192 tenant idiom)."
       ],
       "related": [
         "Worker side already done: interrupt_job_cmd \u2192 _handle_interrupt_request \u2192 ctx.cancel() (worker.py:5881/7363)",
