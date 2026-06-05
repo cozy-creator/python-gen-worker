@@ -27,3 +27,5 @@ src/gen_worker/pb/**/*.pyo
 .hf-cache-*
 .pytest_cache
 .mock-files*
+# CodeGraph index (local, regenerated)
+.codegraph/

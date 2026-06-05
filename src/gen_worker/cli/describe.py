@@ -51,6 +51,10 @@ def add_subparser(sub: argparse._SubParsersAction[Any]) -> None:
         help="Python module path to import (overrides endpoint.toml `main`).",
     )
     p.add_argument(
+        "--json", dest="json_output", action="store_true",
+        help="Emit JSON (the default and only format; accepted for explicitness).",
+    )
+    p.add_argument(
         "--pretty", action="store_true",
         help="Pretty-print the JSON with newlines + 2-space indent.",
     )
