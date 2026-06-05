@@ -355,3 +355,27 @@ def test_socket_roundtrip_sigint_teardown_and_nontty_stdin(tmp_path, capsys, std
         _stop_serve(proc)
     assert proc.returncode == 0
     assert not sock.exists()  # SIGINT teardown removed the socket
+
+
+# --------------------------------------------------------------------------- #
+# serve --vram-budget sizes the in-process ModelCache to a host allotment (#347)
+# --------------------------------------------------------------------------- #
+
+
+def test_vram_budget_sizes_model_cache(monkeypatch) -> None:
+    captured = {}
+
+    class _FakeCache:
+        def __init__(self, max_vram_gb=None, **kw):
+            captured["max_vram_gb"] = max_vram_gb
+
+    monkeypatch.setattr(serve_mod, "ModelCache", _FakeCache)
+    # Explicit budget -> ModelCache sized to it, regardless of host VRAM.
+    c = serve_mod._build_model_cache(vram_budget_gb=4.0)
+    assert isinstance(c, _FakeCache)
+    assert captured["max_vram_gb"] == 4.0
+
+    # _Endpoint threads the budget through.
+    captured.clear()
+    serve_mod._Endpoint(offline=False, allow_publish=False, vram_budget_gb=6.0)
+    assert captured["max_vram_gb"] == 6.0

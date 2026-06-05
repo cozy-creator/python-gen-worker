@@ -159,6 +159,15 @@ def add_subparser(sub: argparse._SubParsersAction[Any]) -> None:
         ),
     )
     p.add_argument(
+        "--vram-budget", dest="vram_budget", type=float, default=0.0,
+        metavar="GB",
+        help=(
+            "Size the in-process ModelCache to GB of VRAM instead of the whole "
+            "GPU, so a host can co-reside several serves on one card with "
+            "deterministic budgets (#347). 0 (default) = auto (whole GPU - margin)."
+        ),
+    )
+    p.add_argument(
         "--idle-timeout", dest="idle_timeout", type=float, default=0.0,
         metavar="SECONDS",
         help=(
@@ -260,7 +269,9 @@ class _Endpoint:
     loading + residency + offload go through the identical ``ModelCache`` path.
     """
 
-    def __init__(self, *, offline: bool, allow_publish: bool) -> None:
+    def __init__(
+        self, *, offline: bool, allow_publish: bool, vram_budget_gb: float = 0.0,
+    ) -> None:
         self.offline = offline
         self.allow_publish = allow_publish
         self.gpu_semaphore = _make_gpu_semaphore()
@@ -275,7 +286,7 @@ class _Endpoint:
         # PRODUCTION GPU memory manager — drives model residency (LRU eviction /
         # VRAM<->CPU demote+promote). Sized from real VRAM so the local card's
         # budget (e.g. an 8GB 4070) over-subscribes exactly like prod would.
-        self._model_cache = _build_model_cache()
+        self._model_cache = _build_model_cache(vram_budget_gb=vram_budget_gb)
         # id(instance) -> model_id used as that instance's ModelCache key, and
         # the built pipeline object the cache moves between tiers.
         self._model_id_by_inst: Dict[int, str] = {}
@@ -604,7 +615,7 @@ def _resolve_static_models(
 # ModelCache wiring — the SAME production residency manager, driven locally
 # --------------------------------------------------------------------------
 
-def _build_model_cache() -> Optional[ModelCache]:
+def _build_model_cache(vram_budget_gb: float = 0.0) -> Optional[ModelCache]:
     """Construct the production ``ModelCache`` sized from real local VRAM.
 
     Identical to the worker's ``ModelCache()`` except we size ``max_vram_gb``
@@ -613,7 +624,18 @@ def _build_model_cache() -> Optional[ModelCache]:
     pipelines deliberately can't both stay VRAM-resident, forcing demote/promote
     through the cache). Returns ``None`` on a CPU-only host — there is no VRAM to
     manage, so serve falls back to plain warm-instance behavior.
+
+    ``vram_budget_gb`` (>0) overrides the auto sizing so a HOST (cozy-local in
+    local-provider mode) can allot this serve a slice of a shared GPU instead of
+    the whole card, letting several serves co-reside with deterministic budgets
+    (#347 / cozy #15). 0 = auto (whole-GPU minus margin).
     """
+    if vram_budget_gb and vram_budget_gb > 0.0:
+        try:
+            return ModelCache(max_vram_gb=float(vram_budget_gb))
+        except Exception as exc:  # noqa: BLE001
+            sys.stderr.write(f"gen-worker serve: ModelCache budget init failed: {exc}\n")
+            return None
     try:
         from ..inference_memory import get_total_vram_gb
 
@@ -1011,6 +1033,7 @@ def _serve_inner(args: argparse.Namespace) -> int:
     endpoint = _Endpoint(
         offline=bool(args.offline),
         allow_publish=bool(args.allow_publish),
+        vram_budget_gb=float(getattr(args, "vram_budget", 0.0) or 0.0),
     )
     endpoint.boot(candidates, eager=bool(getattr(args, "eager", False)))
 
