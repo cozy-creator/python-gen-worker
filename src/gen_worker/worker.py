@@ -344,6 +344,24 @@ _DOWNLOAD_CHUNK_BYTES = 4 * 1024 * 1024
 # running deep prefetch with chunked streaming outputs rarely buffers more
 # than a few dozen messages before the stream drains.
 OUTGOING_QUEUE_MAXSIZE = 1024
+
+
+def _env_int(key: str, default: int) -> int:
+    """Read a non-negative int from env ``key``; fall back to ``default``.
+
+    Used for #447 load-test capacity knobs (job queue depth / executor width).
+    A value <= 0 (or unparseable) yields the default so the knobs are safe to
+    leave unset in production.
+    """
+    raw = os.environ.get(key, "").strip()
+    if not raw:
+        return default
+    try:
+        val = int(raw)
+    except ValueError:
+        return default
+    return val if val >= 0 else default
+
 DIAGNOSTIC_LOG_MAX_PAYLOAD_BYTES = 16 * 1024
 DIAGNOSTIC_LOG_MAX_DEPTH = 8
 DIAGNOSTIC_LOG_MAX_LIST_ITEMS = 64
@@ -631,8 +649,20 @@ class Worker:
         self._receive_thread: Optional[threading.Thread] = None
         self._heartbeat_thread: Optional[threading.Thread] = None
         self._heartbeat_drain_thread: Optional[threading.Thread] = None
-        self._job_queue: "queue.Queue[Tuple[Callable[..., Any], Tuple[Any, ...], str, float]]" = queue.Queue(maxsize=1024)
-        self._job_executor = ThreadPoolExecutor(thread_name_prefix="gen-worker-job")
+        # #447: the job queue depth and executor width are env-tunable so a
+        # failover-at-scale load test can hold ~1000 concurrent async jobs in
+        # flight on a single worker. Each async (`async def`) handler runs on the
+        # shared asyncio loop but its dispatcher thread blocks on the result
+        # future, so the EXECUTOR width is the real concurrency ceiling for
+        # async handlers — raise both for the test. Defaults preserve prior
+        # behavior (queue 1024; executor = Python default min(32, cpu+4)).
+        _job_queue_maxsize = _env_int("GEN_WORKER_JOB_QUEUE_MAXSIZE", 1024)
+        _job_executor_max_workers = _env_int("GEN_WORKER_JOB_EXECUTOR_MAX_WORKERS", 0)
+        self._job_queue: "queue.Queue[Tuple[Callable[..., Any], Tuple[Any, ...], str, float]]" = queue.Queue(maxsize=_job_queue_maxsize)
+        self._job_executor = ThreadPoolExecutor(
+            max_workers=(_job_executor_max_workers or None),
+            thread_name_prefix="gen-worker-job",
+        )
         # Started lazily from run() (and re-checked on every reconnect via
         # _ensure_job_dispatch_thread). Don't start here — self._running is
         # False during __init__, so the loop would exit immediately.
