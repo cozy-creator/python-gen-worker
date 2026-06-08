@@ -599,6 +599,102 @@ def _validate_models_against_setup(
         out[key] = binding
     return out
 
+def _validate_handler_injection(
+    cls_name: str,
+    validated_models: Mapping[str, Binding],
+    function_methods: list[tuple[str, Callable[..., Any], "_FunctionSpec"]],
+    parametrize_value: tuple["Case", ...],
+) -> None:
+    """Validate per-request model slots against handler signatures (#337).
+
+    Hard errors, by design (no bypass):
+      * Every extra handler parameter (after ctx, payload) MUST correspond to
+        an injectable model slot — an unmatched parameter can never be filled
+        and would crash at call time (this is the #337 dispatch bug, caught at
+        import instead of mid-request).
+      * Every per-request (dispatch) slot MUST be consumed by at least one
+        handler — a declared slot no handler accepts is dead.
+
+    Fixed (Repo) slots are injected into setup() and validated by
+    ``_validate_models_against_setup``; a non-parametrized handler that names a
+    fixed slot therefore counts as an unmatched parameter here.
+
+    Parametrize fan-out hosts ONE body with a single model slot named
+    ``next(iter(models), "model")`` (mirrors discover.py). When the class
+    declares that slot the name is authoritative and enforced; when it does not
+    (slot supplied only per-Case), the name is not knowable here, so we enforce
+    only the unsatisfiable case of more than one injected parameter.
+    """
+    RULE = (
+        "static bindings are injected into setup(); dispatch bindings are "
+        "injected into the handler per request"
+    )
+
+    def extra_params(method: Callable[..., Any]) -> Optional[list[str]]:
+        try:
+            sig = inspect.signature(method)
+        except (TypeError, ValueError):
+            return None  # uninspectable -> cannot prove a mismatch; skip
+        ps = [p for p in sig.parameters.values() if p.name != "self"]
+        if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in ps):
+            return None  # **kwargs absorbs anything -> cannot prove a mismatch
+        return [
+            p.name for p in ps[2:]  # after ctx, payload
+            if p.kind in (
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                inspect.Parameter.KEYWORD_ONLY,
+            )
+        ]
+
+    if parametrize_value:
+        attr_name, method, _ = function_methods[0]
+        names = extra_params(method)
+        if names is None:
+            return
+        if validated_models:
+            slot = next(iter(validated_models))
+            for n in names:
+                if n != slot:
+                    raise ValueError(
+                        f"@inference class {cls_name!r}: parametrized handler "
+                        f"{attr_name!r} declares parameter {n!r}, but the single "
+                        f"model slot is {slot!r}. ({RULE}.)"
+                    )
+        elif len(names) > 1:
+            raise ValueError(
+                f"@inference class {cls_name!r}: parametrized handler "
+                f"{attr_name!r} declares {len(names)} injected parameters "
+                f"{names}, but a parametrize fan-out has a single model slot. "
+                f"({RULE}.)"
+            )
+        return
+
+    dispatch_slots = {
+        k for k, b in validated_models.items() if isinstance(b, Dispatch)
+    }
+    used: set[str] = set()
+    for attr_name, method, _ in function_methods:
+        names = extra_params(method)
+        if names is None:
+            used |= dispatch_slots  # cannot prove non-use; treat as satisfied
+            continue
+        for n in names:
+            if n not in dispatch_slots:
+                raise ValueError(
+                    f"@inference class {cls_name!r}: handler {attr_name!r} "
+                    f"declares parameter {n!r}, which matches no per-request "
+                    f"(dispatch) model slot. Dispatch slot(s): "
+                    f"{sorted(dispatch_slots) or '(none)'}. If {n!r} is a fixed "
+                    f"model, receive it in setup() instead. ({RULE}.)"
+                )
+            used.add(n)
+    missing = sorted(dispatch_slots - used)
+    if missing:
+        raise ValueError(
+            f"@inference class {cls_name!r}: dispatch model slot(s) {missing} "
+            f"are declared but no handler accepts them. Add a matching "
+            f"parameter after (ctx, payload) on a handler. ({RULE}.)"
+        )
 
 # ============================================================================
 # Class detection: sync vs async (determines SerialWorker vs BatchedWorker).
@@ -727,6 +823,13 @@ def _make_endpoint_decorator(kind: Literal["inference", "training", "dataset", "
                         )
                     rows.append(case)
                 parametrize_value = tuple(rows)
+
+            # #337 contract: per-request model slots must line up with handler
+            # signatures. Validate at import so a mismatch fails here with a
+            # teaching message instead of crashing mid-request.
+            _validate_handler_injection(
+                cls_name, validated_models, function_methods, parametrize_value
+            )
 
             is_async = _is_async_class(target, function_methods)
             # #345 Improvement B: an async class is BatchedWorker ONLY when it
