@@ -7060,7 +7060,7 @@ class Worker:
         input_payload = request.input_payload
         required_model_id_for_exec = ""
         timeout_ms = int(getattr(request, "timeout_ms", 0) or 0)
-        owner = str(getattr(request, "owner", "") or "") or (self.owner or "")
+        owner = str(getattr(request, "tenant", "") or "") or (self.owner or "")
         invoker_id = str(getattr(request, "invoker_id", "") or "")
         file_base_url = str(getattr(request, "file_base_url", "") or "")
         worker_capability_token = _extract_worker_capability_token(request)
