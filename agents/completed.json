@@ -819,20 +819,6 @@
       ],
       "completed": true,
       "status": "completed"
-    },
-    {
-      "id": 354,
-      "name": "Concurrent request handling for CPU/no-GPU functions (worker serializes at concurrency=1)",
-      "status": "CLOSED 2026-06-08 \u2014 NO worker change needed. Verified the worker is not the serializer (instant per-request, fed 1-at-a-time, submits to a ThreadPoolExecutor + skips the GPU sema for accelerator=none). The bottleneck was entirely the tensorhub SCHEDULER's serial CPU dispatch (single dispatch loop blocking on the ~40ms synchronous worker-token mint + a CPU overload gate of 2 + no multi-slot CPU model). Fixed in tensorhub 7b89b43 (#443): async dispatch + CPU in-flight cap=32. Throughput 23->~37 req/s; the worker fans out as the scheduler now sends concurrently. Revisit worker-side thread-pool sizing only if a non-trivial CPU workload later shows the worker (not the scheduler) as the ceiling.",
-      "description": "The worker processes requests SERIALLY even for trivial CPU functions, which is the dominant inference throughput/latency bottleneck (see tensorhub #443 1000-req profile).\n\nEVIDENCE (1000 requests, client concurrency 50, marco-polo, accelerator=none, on the e2e stack):\n - Worker peak concurrency = 1 for ALL 1004 requests ([concurrency-debug] active never exceeded 1).\n - Throughput 23.3 req/s; per-request exec (assigned->completed) 1406ms avg / 1858ms p95 \u2014 but the actual compute is 0ms (fetch/gpu_load/inference/worker_rpc all ~0). The 1.4s is QUEUE-WAIT behind the serial handler, not work. The worker host was ~13% CPU / 54MiB (idle) \u2014 pure serialization, not resource limits.\n\nCONTRADICTION: src/gen_worker/worker.py (~line 555) says accelerator=none endpoints SKIP the GPU semaphore and 'scale to regular-Python-webserver throughput (~5-10K req/sec per worker)'. In practice they do not \u2014 active concurrency caps at 1. So either the gRPC receive->dispatch->handler loop handles each request fully before reading the next (serial intake), or the ThreadPoolExecutor/async path is not actually used for SerialWorker/accelerator=none handlers.\n\nGOAL: a trivial CPU function on ONE worker should reach thousands of req/s with sub-100ms exec. GPU functions must remain serialized via the GPU semaphore (one slot per physical GPU) \u2014 only accelerator=none gets concurrency.",
-      "tasks": [
-        "Trace the request lifecycle in worker.py: the receive loop (Receive loop / split-streams), how a Request is dispatched to the handler, and whether the handler runs inline on the receive goroutine/thread vs a pool. Identify exactly where serialization happens (active stays 1).",
-        "For accelerator=none (needs_gpu=False) handlers, dispatch concurrently (ThreadPoolExecutor or async) so the receive loop keeps pulling + multiple handlers run in parallel; do NOT acquire the GPU semaphore (already intended).",
-        "Bound the CPU concurrency with a config knob (avoid unbounded thread growth / memory spikes); sensible default.",
-        "Keep GPU/accelerator=cuda handlers serialized via the existing _gpu_semaphore (one slot per GPU) \u2014 verify no regression.",
-        "Re-profile with tensorhub's marco load (TENSORHUB_BASE/ORCHESTRATOR_BASE=:3867 marco-polo --load-requests=1000 --load-concurrency=50): expect worker peak concurrency >> 1, throughput >> 23 req/s, exec p95 << 1.8s, no 429/timeout."
-      ],
-      "completed": true
     }
   ]
 }
