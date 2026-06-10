@@ -651,11 +651,13 @@ class Worker:
         self._heartbeat_drain_thread: Optional[threading.Thread] = None
         # #447: the job queue depth and executor width are env-tunable so a
         # failover-at-scale load test can hold ~1000 concurrent async jobs in
-        # flight on a single worker. Each async (`async def`) handler runs on the
-        # shared asyncio loop but its dispatcher thread blocks on the result
-        # future, so the EXECUTOR width is the real concurrency ceiling for
-        # async handlers — raise both for the test. Defaults preserve prior
-        # behavior (queue 1024; executor = Python default min(32, cpu+4)).
+        # flight on a single worker. Async (`async def`) SerialWorker handlers
+        # are scheduled onto the shared asyncio loop and FREE their dispatcher
+        # thread for the duration of the await (completion is callback-driven
+        # on the loop — see _execute_serial_async_request), so the executor
+        # width only bounds SYNC handlers plus the brief pre-work hop of async
+        # dispatch. Defaults preserve prior behavior (queue 1024; executor =
+        # Python default min(32, cpu+4)).
         _job_queue_maxsize = _env_int("GEN_WORKER_JOB_QUEUE_MAXSIZE", 1024)
         _job_executor_max_workers = _env_int("GEN_WORKER_JOB_EXECUTOR_MAX_WORKERS", 0)
         self._job_queue: "queue.Queue[Tuple[Callable[..., Any], Tuple[Any, ...], str, float]]" = queue.Queue(maxsize=_job_queue_maxsize)
@@ -681,6 +683,15 @@ class Worker:
         # jitter span tracks the backoff rather than a fixed +1s. Kept as an
         # attribute so it can be tuned/inspected; _next_reconnect_delay reads it.
         self._reconnect_jitter_seconds = 1.0
+        # #462-T4: exit when the capability token is permanently rejected.
+        # Counts CONSECUTIVE auth rejections (UNAUTHENTICATED / PERMISSION_DENIED
+        # on connect/register or an established stream); any inbound scheduler
+        # message proves auth succeeded and resets the counter. Transient
+        # network errors neither count nor reset. 0 disables the cap.
+        self._max_auth_failures = _env_int("GEN_WORKER_MAX_AUTH_FAILURES", 10)
+        self._auth_failure_count = 0
+        # Injectable for tests; the real thing must not return.
+        self._fatal_exit: Callable[[int], Any] = os._exit
         self._lb_only_retries = lb_only_retries
         # gen-worker #338 fix 3: timestamp (monotonic) of the last message
         # received from the scheduler on the control stream. The half-open
@@ -4326,6 +4337,10 @@ class Worker:
                     )
                     self._leader_hint = leader
                     self._set_scheduler_addr(leader)
+            elif self._is_auth_rejection(code):
+                # #462-T4: auth rejection at connect/register — count it and
+                # exit after the consecutive-failure budget is spent.
+                self._note_auth_failure(code, details)
             else:
                 logger.error(f"Failed to connect to scheduler: {code} - {details}")
             self._emit_startup_phase(
@@ -5859,6 +5874,13 @@ class Worker:
                         self._leader_hint = leader
                         self._set_scheduler_addr(leader)
                 self._handle_connection_error()
+            elif self._is_auth_rejection(code):
+                # #462-T4: the orchestrator refused our token on the control
+                # stream (register or mid-stream). Count it; exit after the
+                # consecutive-failure budget so a revoked-token worker doesn't
+                # zombie-spin in the reconnect loop forever.
+                self._note_auth_failure(code, details)
+                self._handle_connection_error()
             elif code == grpc.StatusCode.CANCELLED:
                 logger.warning("gRPC stream unexpectedly cancelled by server or network.")
                 self._handle_connection_error()
@@ -5885,6 +5907,37 @@ class Worker:
          # else: # Already stopping or stopped
              # logger.debug("Connection error detected but worker is already stopping.")
 
+    @staticmethod
+    def _is_auth_rejection(code: Any) -> bool:
+        """True for gRPC codes that mean the orchestrator rejected our
+        credentials (#462-T4) — never for transient transport errors."""
+        return code in (
+            grpc.StatusCode.UNAUTHENTICATED,
+            grpc.StatusCode.PERMISSION_DENIED,
+        )
+
+    def _note_auth_failure(self, code: Any, details: Any) -> None:
+        """#462-T4: count a consecutive auth rejection; exit once the budget
+        is spent. A worker whose capability token is revoked/expired would
+        otherwise spin in the reconnect backoff loop forever (observed
+        zombies). Any inbound scheduler message resets the counter via
+        ``_process_message``; transient network errors don't touch it."""
+        self._auth_failure_count = int(getattr(self, "_auth_failure_count", 0) or 0) + 1
+        n = self._auth_failure_count
+        limit = int(getattr(self, "_max_auth_failures", 0) or 0)
+        logger.error(
+            "scheduler rejected worker credentials (%s): %s [consecutive auth failures %d/%s]",
+            code, details, n, limit if limit > 0 else "unlimited",
+        )
+        if limit > 0 and n >= limit:
+            logger.critical(
+                "capability token rejected %d times; exiting — token is likely revoked/expired",
+                n,
+            )
+            self._running = False
+            self._stop_event.set()
+            self._fatal_exit(1)
+
 
     def _process_message(self, message: WorkerSchedulerMessage) -> None:
         """Process a single message received from the scheduler."""
@@ -5893,6 +5946,9 @@ class Worker:
         # watchdog reads. Done first so even a message that fails downstream
         # processing still counts as proof-of-liveness.
         self._last_server_msg_at = time.monotonic()
+        # #462-T4: any inbound message proves the scheduler accepted our
+        # credentials — reset the consecutive auth-failure counter.
+        self._auth_failure_count = 0
         msg_type = message.WhichOneof('msg')
         # logger.debug(f"Received message of type: {msg_type}")
 
@@ -7360,9 +7416,11 @@ class Worker:
             target = self._submit_batched_request
             args = (ctx, batched_spec, input_payload)
         elif serial_spec is not None:
-            # #322/#328: SerialWorker path. Sync `@inference` class — runs
-            # on the job_executor thread pool (same pool as the legacy
-            # function-shape `_execute_request` path).
+            # #322/#328: SerialWorker path. Sync handlers run on the
+            # job_executor thread pool (same pool as the legacy function-shape
+            # `_execute_request` path); `async def` handlers release their
+            # pool thread once the coroutine is scheduled on the shared
+            # asyncio loop (#447 — see _execute_serial_async_request).
             target = self._execute_serial_class_request
             args = (ctx, serial_spec, input_payload)
         elif conversion_spec is not None:
@@ -9000,7 +9058,7 @@ class Worker:
         )
         return item_id
 
-    def _drain_async_incremental(
+    async def _drain_async_incremental(
         self,
         *,
         ctx: RequestContext,
@@ -9008,20 +9066,18 @@ class Worker:
         input_obj: Any,
         inject_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Tuple[str, int]:
-        """#345 Improvement B: drive an `async def` SerialWorker generator on
-        the shared asyncio loop, emitting each delta as it arrives.
+        """#345 Improvement B / #447: drive an `async def` SerialWorker
+        generator natively on the shared asyncio loop, emitting each delta as
+        it arrives. Runs inside ``_run_serial_async_request``'s coroutine, so
+        no dispatcher thread is held while deltas trickle out — many requests'
+        generators interleave on the single loop.
 
-        The GPU semaphore (when needed) is already held on the dispatcher
-        thread before this is called, so the coroutine never blocks on it. We
-        schedule ``__anext__`` onto the loop one delta at a time and block the
-        dispatcher thread on each concurrent.futures.Future — many requests'
-        coroutines interleave on the single loop, so I/O-bound streaming
-        handlers stay coroutine-bound rather than thread-bound.
+        The GPU semaphore (when needed) is already held by the dispatcher
+        thread that scheduled us, so this coroutine never blocks on it.
 
         Returns ``(last_item_id, count)`` for the terminating done event.
         """
         request_id = ctx.request_id
-        loop = self._ensure_batched_loop()
         agen = sspec.method(ctx, input_obj, **(inject_kwargs or {}))
         if not hasattr(agen, "__anext__"):
             raise TypeError(
@@ -9030,22 +9086,10 @@ class Worker:
             )
         count = 0
         last_item_id = "item-0"
-        _SENTINEL = object()
-
-        async def _next() -> Any:
-            try:
-                return await agen.__anext__()
-            except StopAsyncIteration:
-                return _SENTINEL
-
         try:
-            while True:
+            async for item in agen:
                 if ctx.is_canceled():
                     raise CanceledError("canceled")
-                fut = asyncio.run_coroutine_threadsafe(_next(), loop)
-                item = fut.result()
-                if item is _SENTINEL:
-                    break
                 last_item_id = self._emit_serial_incremental_item(
                     request_id=request_id,
                     sspec=sspec,
@@ -9054,13 +9098,12 @@ class Worker:
                 )
                 count += 1
         finally:
-            # Ensure the async generator is closed on the loop so any `finally`
-            # / cleanup inside the tenant generator runs (and we don't leak a
-            # suspended coroutine on cancellation or error).
+            # Close the generator so tenant `finally` cleanup runs even on
+            # cancellation/error (don't leak a suspended coroutine).
             aclose = getattr(agen, "aclose", None)
             if aclose is not None:
                 try:
-                    asyncio.run_coroutine_threadsafe(aclose(), loop).result(timeout=5.0)
+                    await aclose()
                 except Exception:
                     pass
 
@@ -9451,7 +9494,14 @@ class Worker:
         Skipping the injection pipeline (models bind once at setup time);
         routing optionally through the cross-request micro-batching
         aggregator when one is registered for this function.
+
+        `async def` handlers branch to ``_execute_serial_async_request``,
+        which frees this dispatcher thread once the coroutine is scheduled
+        (#447) — the executor width only bounds sync handler concurrency.
         """
+        if sspec.is_async:
+            self._execute_serial_async_request(ctx, sspec, input_payload)
+            return
         request_id = ctx.request_id
         output_payload: Optional[bytes] = None
         error_type: str = ""
@@ -9542,43 +9592,13 @@ class Worker:
                     # — blocking is fine).
                     cfut = aggregator.submit(request_id, input_obj)
                     result = cfut.result()
-                elif sspec.is_async and sspec.output_mode == "single":
-                    # #345 Improvement B: `async def` single-output handler. The
-                    # GPU semaphore was already acquired ABOVE on this dispatcher
-                    # thread (before scheduling), so the coroutine never holds
-                    # the GIL while waiting on the semaphore. Schedule the
-                    # coroutine onto the shared asyncio loop and block this
-                    # dispatcher thread on the concurrent.futures.Future — many
-                    # such coroutines run concurrently on the single loop, so
-                    # I/O-bound handlers scale to thousands in flight.
-                    loop = self._ensure_batched_loop()
-                    fut = asyncio.run_coroutine_threadsafe(
-                        sspec.method(ctx, input_obj, **inject_kwargs), loop
-                    )
-                    result = fut.result()
-                elif sspec.is_async:
-                    # #345 Improvement B: `async def` incremental handler returns
-                    # an AsyncIterator[Delta]. Drive it on the shared loop and
-                    # emit deltas as they arrive. Handled fully in the
-                    # incremental branch below via _drain_async_incremental.
-                    result = None
                 else:
                     result = sspec.method(ctx, input_obj, **inject_kwargs)
 
                 if ctx.is_canceled():
                     raise CanceledError("canceled")
 
-                if sspec.is_async and sspec.output_mode == "incremental":
-                    # #345 Improvement B async streaming path.
-                    last_item_id, count = self._drain_async_incremental(
-                        ctx=ctx,
-                        sspec=sspec,
-                        input_obj=input_obj,
-                        inject_kwargs=inject_kwargs,
-                    )
-                    output_payload = b""
-                    success = True
-                elif sspec.output_mode == "single":
+                if sspec.output_mode == "single":
                     if sspec.output_type is not None and not isinstance(result, sspec.output_type):
                         raise TypeError(
                             f"Function {sspec.name} returned {type(result)!r}, "
@@ -9654,6 +9674,234 @@ class Worker:
         finally:
             if needs_gpu:
                 self._gpu_semaphore.release()
+
+    def _execute_serial_async_request(
+        self,
+        ctx: RequestContext,
+        sspec: "_SerialWorkerSpec",
+        input_payload: bytes,
+    ) -> None:
+        """Dispatcher-thread half of the `async def` SerialWorker path.
+
+        #447: the await must NOT consume a job-executor thread — otherwise the
+        executor width (Python default min(32, cpu+4)) caps async concurrency
+        at ~32. Blocking pre-work (GPU semaphore, lazy setup, payload decode,
+        #337 model injection) stays here on the pooled dispatcher thread; the
+        tenant coroutine is then scheduled onto the shared asyncio loop and
+        this thread returns immediately. Completion — result encode + send +
+        GPU bookkeeping — runs on the loop in ``_run_serial_async_request``.
+        """
+        request_id = ctx.request_id
+
+        rm = RunMetricsV1(
+            request_id=str(request_id or ""),
+            function_name=str(sspec.name or ""),
+            required_models=list(getattr(ctx, "required_models", []) or []),
+            resolved_repos_by_id=getattr(ctx, "resolved_repos_by_id", None) or None,
+        )
+        try:
+            setattr(ctx, "_run_metrics", rm)
+        except Exception:
+            pass
+        rm.mark_compute_started()
+
+        needs_gpu = self._function_needs_gpu(sspec)
+        try:
+            logger.info(
+                "[concurrency-debug] enter rid=%s active=%d sema_value=%s needs_gpu=%s",
+                request_id,
+                len(self._active_requests),
+                getattr(self._gpu_semaphore, "_value", None),
+                needs_gpu,
+            )
+        except Exception:
+            pass
+        # Acquire BEFORE scheduling (same as the sync path, #345) so the
+        # coroutine never blocks the shared loop waiting on the GPU semaphore.
+        if needs_gpu:
+            self._gpu_semaphore.acquire()
+        self._gpu_busy_enter()
+        t_infer0 = time.monotonic()
+        try:
+            if needs_gpu:
+                self._bind_gpu_for_request(ctx)
+            if ctx.is_canceled():
+                raise CanceledError("canceled")
+
+            # Lazy setup on first dispatch (may block — fine on this thread).
+            rec = self._find_serial_record(sspec.instance)
+            if rec is None:
+                raise RuntimeError(
+                    f"SerialWorker instance for {sspec.name!r} not registered"
+                )
+            self._ensure_serial_class_started(rec)
+
+            if ctx.is_canceled():
+                raise CanceledError("canceled")
+
+            input_obj = msgspec.msgpack.decode(input_payload, type=sspec.payload_type)
+            # #337: variant assembly / 3-tier promote can block on downloads —
+            # keep it off the loop. The GPU semaphore is held when needed.
+            inject_kwargs = self._resolve_dispatch_injection_kwargs(ctx, sspec, input_obj)
+
+            loop = self._ensure_batched_loop()
+            asyncio.run_coroutine_threadsafe(
+                self._run_serial_async_request(
+                    ctx=ctx,
+                    sspec=sspec,
+                    rm=rm,
+                    input_obj=input_obj,
+                    inject_kwargs=inject_kwargs,
+                    needs_gpu=needs_gpu,
+                    t_infer0=t_infer0,
+                ),
+                loop,
+            )
+            # Ownership of completion (result send, busy/semaphore release)
+            # transferred to the loop. This dispatcher thread is free.
+        except Exception as e:
+            logger.exception(
+                "SerialWorker async task %s failed before scheduling: %s",
+                request_id, e,
+            )
+            error_type, retryable, safe_message, error_message = self._map_exception(e)
+            self._finish_serial_async_request(
+                ctx=ctx,
+                success=False,
+                output_payload=None,
+                error_type=error_type,
+                retryable=bool(retryable),
+                safe_message=safe_message,
+                error_message=error_message,
+                needs_gpu=needs_gpu,
+            )
+
+    async def _run_serial_async_request(
+        self,
+        *,
+        ctx: RequestContext,
+        sspec: "_SerialWorkerSpec",
+        rm: RunMetricsV1,
+        input_obj: Any,
+        inject_kwargs: Dict[str, Any],
+        needs_gpu: bool,
+        t_infer0: float,
+    ) -> None:
+        """Loop-hosted half of the async SerialWorker path (#447).
+
+        Awaits the tenant coroutine on the shared asyncio loop — thousands can
+        interleave here — then encodes + sends the terminal result from the
+        loop thread (precedent: the BatchedWorker path already sends results
+        from this thread; ``_send_request_result`` is a queue put).
+        """
+        request_id = ctx.request_id
+        output_payload: Optional[bytes] = None
+        error_type = ""
+        safe_message = ""
+        error_message = ""
+        retryable = False
+        success = False
+        try:
+            if ctx.is_canceled():
+                raise CanceledError("canceled")
+
+            if sspec.output_mode == "single":
+                aggregator = self._micro_batch_aggregators.get(sspec.name)
+                if aggregator is not None and not inject_kwargs:
+                    # #324 micro-batching: same routing rule as the sync path,
+                    # but awaited instead of blocking a dispatcher thread.
+                    if aggregator._loop is None:
+                        aggregator.start(asyncio.get_running_loop())
+                    result = await asyncio.wrap_future(
+                        aggregator.submit(request_id, input_obj)
+                    )
+                else:
+                    result = await sspec.method(ctx, input_obj, **inject_kwargs)
+                if ctx.is_canceled():
+                    raise CanceledError("canceled")
+                if sspec.output_type is not None and not isinstance(result, sspec.output_type):
+                    raise TypeError(
+                        f"Function {sspec.name} returned {type(result)!r}, "
+                        f"expected {sspec.output_type!r}"
+                    )
+                output_payload = msgspec.msgpack.encode(msgspec.to_builtins(result))
+                if self.max_output_bytes > 0 and len(output_payload) > self.max_output_bytes:
+                    raise OutputTooLargeError(
+                        size_bytes=len(output_payload),
+                        max_bytes=self.max_output_bytes,
+                    )
+            else:
+                # Incremental: drive the tenant async generator natively on
+                # the loop, emitting each delta as it arrives (#345 B).
+                await self._drain_async_incremental(
+                    ctx=ctx,
+                    sspec=sspec,
+                    input_obj=input_obj,
+                    inject_kwargs=inject_kwargs,
+                )
+                if ctx.is_canceled():
+                    raise CanceledError("canceled")
+                output_payload = b""
+            success = True
+            try:
+                rm.inference_ms = int((time.monotonic() - t_infer0) * 1000)
+            except Exception:
+                pass
+        except Exception as e:
+            logger.exception("SerialWorker async task %s failed: %s", request_id, e)
+            error_type, retryable, safe_message, error_message = self._map_exception(e)
+        finally:
+            self._finish_serial_async_request(
+                ctx=ctx,
+                success=success,
+                output_payload=output_payload,
+                error_type=error_type,
+                retryable=bool(retryable),
+                safe_message=safe_message,
+                error_message=error_message,
+                needs_gpu=needs_gpu,
+            )
+
+    def _finish_serial_async_request(
+        self,
+        *,
+        ctx: RequestContext,
+        success: bool,
+        output_payload: Optional[bytes],
+        error_type: str,
+        retryable: bool,
+        safe_message: str,
+        error_message: str,
+        needs_gpu: bool,
+    ) -> None:
+        """Terminal bookkeeping for the async SerialWorker path: GPU busy /
+        semaphore release, active-request removal, result send. Thread-
+        agnostic — runs on the dispatcher thread (pre-schedule failure) or
+        the shared loop (normal completion). Exactly one call per request.
+        """
+        request_id = ctx.request_id
+        self._gpu_busy_exit()
+        with self._active_requests_lock:
+            self._active_requests.pop(request_id, None)
+        try:
+            logger.info(
+                "[concurrency-debug] exit rid=%s active=%d",
+                request_id, len(self._active_requests),
+            )
+        except Exception:
+            pass
+        self._request_handler_done_times[request_id] = time.monotonic()
+        self._send_request_result(
+            request_id,
+            success,
+            output_payload if success else None,
+            error_type,
+            bool(retryable),
+            safe_message,
+            error_message,
+        )
+        if needs_gpu:
+            self._gpu_semaphore.release()
 
     def _execute_conversion_class_request(
         self,

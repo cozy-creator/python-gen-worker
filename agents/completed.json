@@ -819,6 +819,22 @@
       ],
       "completed": true,
       "status": "completed"
+    },
+    {
+      "id": 355,
+      "name": "Unblock async concurrency past executor width + exit on persistent auth rejection",
+      "description": "## Fix 1 (#447 follow-up): async SerialWorker dispatch no longer consumes a job-executor thread for the await\n\nPre-fix, `async def` handlers ran on the shared asyncio loop BUT each job's dispatcher thread blocked on `run_coroutine_threadsafe(...).result()`, so the ThreadPoolExecutor default width min(32, cpu+4) capped async concurrency at ~32. Now `_execute_serial_class_request` branches async specs to `_execute_serial_async_request`: blocking pre-work (GPU semaphore acquire, lazy setup, payload decode, #337 injection) stays on the pooled dispatcher thread, then the tenant coroutine is scheduled onto the shared loop and the thread returns immediately. Completion (encode + `_send_request_result` + GPU busy/semaphore release) runs on the loop in `_run_serial_async_request` / `_finish_serial_async_request` (precedent: the BatchedWorker path already sends results from the loop thread). `_drain_async_incremental` became loop-native (`async for` instead of per-item cross-thread futures). Sync handlers keep the executor unchanged. Invariants preserved: GPU semaphore acquired before scheduling and released exactly once; ctx.cancel()/interrupt maps to a terminal `canceled` result; one terminal result per request; delta-then-done ordering within the single coroutine.\n\n## Fix 2 (tensorhub #462-T4): exit on persistent capability-token rejection\n\nReconnect already had bounded full-jitter backoff (#338), but a worker whose token is revoked/expired spun forever (observed zombies). Now UNAUTHENTICATED/PERMISSION_DENIED at connect/register (`_connect_once`) or on the control stream (`_receive_loop`) increments a CONSECUTIVE auth-failure counter; after GEN_WORKER_MAX_AUTH_FAILURES (default 10, 0 disables) the worker logs 'capability token rejected N times; exiting \u2014 token is likely revoked/expired' and exits (`_fatal_exit = os._exit`, injectable for tests). Any inbound scheduler message resets the counter; transient network errors neither count nor reset.",
+      "tasks": [
+        "[x] Branch async serial specs out of the blocking dispatch body (_execute_serial_async_request / _run_serial_async_request / _finish_serial_async_request).",
+        "[x] Make _drain_async_incremental loop-native (no per-delta cross-thread future round-trips).",
+        "[x] Auth-failure counter + exit: _is_auth_rejection, _note_auth_failure, reset in _process_message, hooks in _connect_once + _receive_loop.",
+        "[x] Tests: 64 sequential dispatches all simultaneously in flight (>32); failure + canceled terminal results via the callback path; auth counter consecutive/reset/exit + receive-loop wiring + transient codes don't count."
+      ],
+      "related": [
+        "tensorhub #462-T4 (auth give-up), gen-worker #447 (load-test concurrency), #338 (reconnect backoff), #345 Improvement B (async handlers on shared loop)"
+      ],
+      "completed": true,
+      "status": "completed"
     }
   ]
 }

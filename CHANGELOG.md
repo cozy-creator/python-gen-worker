@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.8.3
+
+### Fixed
+
+- **Async handler concurrency is no longer capped by the job-executor
+  width (~32).** `async def` SerialWorker handlers ran on the shared asyncio
+  loop, but each job's dispatcher thread blocked on the coroutine's future, so
+  the ThreadPoolExecutor default `min(32, cpu+4)` was the real ceiling for
+  async in-flight work (#447). Dispatch is now callback-driven: blocking
+  pre-work (GPU semaphore, lazy setup, payload decode, model injection) stays
+  on the pooled dispatcher thread, then the coroutine is scheduled onto the
+  shared loop and the thread is freed — result encode + send and GPU
+  bookkeeping run on the loop at completion. Async streaming handlers are
+  driven natively on the loop too (no per-delta cross-thread round-trips).
+  Sync handlers are unchanged. Cancellation, GPU-semaphore, and
+  one-terminal-result-per-request invariants are preserved.
+
+### Added
+
+- **Workers exit when the capability token is permanently rejected**
+  (tensorhub #462-T4). Reconnect already had bounded full-jitter backoff
+  (#338), but a worker whose token was revoked/expired spun in that loop
+  forever. UNAUTHENTICATED / PERMISSION_DENIED at connect/register or on the
+  control stream now counts a CONSECUTIVE auth failure; after
+  `GEN_WORKER_MAX_AUTH_FAILURES` (default 10, `0` disables) the worker logs
+  `capability token rejected N times; exiting — token is likely
+  revoked/expired` and exits so the container is reaped. Any inbound
+  scheduler message resets the counter; transient network errors neither
+  count nor reset.
+
 ## 0.8.2
 
 ### Added

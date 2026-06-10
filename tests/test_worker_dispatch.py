@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from typing import AsyncIterator, Iterator, List, Tuple
+import time
+from typing import AsyncIterator, Callable, Iterator, List, Tuple
 
 import msgspec
 import pytest
@@ -74,6 +75,17 @@ def _bare_worker() -> Worker:
     w.max_input_bytes = 0
     w._gpu_semaphore = threading.Semaphore(4)
     return w
+
+
+def _wait_until(pred: Callable[[], bool], timeout: float = 10.0) -> None:
+    """Poll until pred() is True. Async dispatch completes on the shared loop
+    (#447), so tests must wait for the callback-driven result send."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if pred():
+            return
+        time.sleep(0.01)
+    raise AssertionError("condition not met within timeout")
 
 
 # --------------------------------------------------------------------------- #
@@ -186,18 +198,23 @@ def test_async_single_and_streaming_dispatch() -> None:
     assert chat_spec.delta_type is TokenDelta
 
     # Single-output async handler round-trips through the shared loop.
+    # #447: dispatch returns once the coroutine is scheduled; the result is
+    # sent from a loop-side callback, so wait for it.
     w._execute_serial_class_request(
         RequestContext(request_id="r1"), echo_spec, msgspec.msgpack.encode(GenIn(prompt="hi"))
     )
-    assert len(results) == 1 and results[0]["success"] is True
+    _wait_until(lambda: len(results) == 1)
+    assert results[0]["success"] is True
     assert msgspec.msgpack.decode(results[0]["output_payload"], type=GenOut).result == "echo:hi"
 
     # Async-generator handler streams 2 word deltas + 1 finished delta.
     w._execute_serial_class_request(
         RequestContext(request_id="r2"), chat_spec, msgspec.msgpack.encode(GenIn(prompt="a b"))
     )
+    _wait_until(lambda: len(dones) == 1 and len(results) == 2)
     assert [d["delta_text"] for d in deltas[:2]] == ["a", "b"]
     assert len(deltas) == 3 and len(dones) == 1
+    assert results[1]["success"] is True
 
 
 # --------------------------------------------------------------------------- #
