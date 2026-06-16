@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import io as _io
 from pathlib import Path
-from typing import IO, TYPE_CHECKING, Any
+from typing import IO, TYPE_CHECKING, Any, Optional
 
 from .api.errors import ValidationError
 from .api.types import Asset
@@ -127,18 +127,31 @@ def write_image(
     *,
     format: str = "webp",
     quality: int = 90,
+    as_type: Optional[type] = None,
+    **encode_kwargs: Any,
 ) -> Asset:
     """Encode ``image`` to bytes and save via ``ctx.save_bytes(ref, ...)``.
 
     Replaces the undocumented ``ctx.save_image()``. ``format`` and ``quality``
-    are passed to :meth:`PIL.Image.Image.save`.
+    are passed to :meth:`PIL.Image.Image.save`; any extra ``encode_kwargs`` are
+    forwarded too (e.g. ``method=6`` for higher-effort WebP).
+
+    ``as_type`` optionally re-wraps the returned ``Asset`` as a subclass such as
+    :class:`~gen_worker.api.types.ImageAsset`, so endpoints whose output struct
+    is typed ``ImageAsset`` don't have to round-trip through
+    ``msgspec.to_builtins``.
     """
     buf = _io.BytesIO()
     save_kwargs: dict[str, Any] = {"format": format.upper()}
     if format.lower() in ("webp", "jpeg", "jpg"):
         save_kwargs["quality"] = quality
+    save_kwargs.update(encode_kwargs)
     image.save(buf, **save_kwargs)
-    return ctx.save_bytes(ref, buf.getvalue())
+    out = ctx.save_bytes(ref, buf.getvalue())
+    if as_type is not None and type(out) is not as_type:
+        import msgspec
+        return as_type(**msgspec.to_builtins(out))
+    return out
 
 
 __all__ = [
