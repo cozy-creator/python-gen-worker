@@ -217,15 +217,26 @@ def _collect_class_methods(mod: Any) -> List[_SelectedFunction]:
 
         function_methods = getattr(obj, "__gen_worker_function_methods__", None) or []
         bindings = dict(getattr(spec, "models", {}) or {})
-        for attr_name, method, fn_spec in function_methods:
+        kind = str(getattr(spec, "kind", "inference") or "inference")
+
+        def _emit(
+            attr_name: str,
+            method: Callable[..., Any],
+            fn_name: str,
+            payload_override: Optional[type],
+            fn_bindings: Dict[str, Any],
+        ) -> None:
             hints = typing.get_type_hints(method, include_extras=False)
             sig = inspect.signature(method)
             params = [p for p in sig.parameters.values() if p.name != "self"]
             if len(params) < 2:
                 # Validated by decorator; defensive only.
-                continue
-            payload_param = params[1]
-            payload_type = hints.get(payload_param.name)
+                return
+            payload_type = (
+                payload_override
+                if payload_override is not None
+                else hints.get(params[1].name)
+            )
             ret = hints.get("return")
             origin = typing.get_origin(ret)
             is_gen = origin in (
@@ -250,13 +261,47 @@ def _collect_class_methods(mod: Any) -> List[_SelectedFunction]:
                 cls=obj,
                 attr_name=attr_name,
                 method=method,
-                fn_name=str(fn_spec.name or attr_name),
-                kind=str(getattr(spec, "kind", "inference") or "inference"),
+                fn_name=fn_name,
+                kind=kind,
                 payload_type=payload_type,
                 output_type=output_type,
                 is_generator=bool(is_gen),
-                bindings=bindings,
+                bindings=fn_bindings,
             ))
+
+        # Function fan-out via parametrize= (#339 §2): a class with a
+        # parametrize table hosts ONE @invocable body stamped into N routable
+        # functions, each with its own name, payload (Case.input), and model
+        # binding (Case.model). The production discovery walker expands these;
+        # the local CLI must too, or fp8/nvfp4/etc. variants are invisible and
+        # untestable locally (they only appear in production).
+        parametrize = tuple(getattr(spec, "parametrize", ()) or ())
+        if parametrize and function_methods:
+            attr_name, method, _fn_spec = function_methods[0]
+            for case in parametrize:
+                case_bindings = bindings
+                if getattr(case, "model", None) is not None:
+                    # Override the single declared model slot (or add a 'model'
+                    # slot when the class declares none) — mirrors discover.py.
+                    slot = next(iter(bindings), "model")
+                    case_bindings = dict(bindings)
+                    case_bindings[slot] = case.model
+                _emit(
+                    attr_name,
+                    method,
+                    str(case.name),
+                    getattr(case, "input", None),
+                    case_bindings,
+                )
+        else:
+            for attr_name, method, fn_spec in function_methods:
+                _emit(
+                    attr_name,
+                    method,
+                    str(fn_spec.name or attr_name),
+                    None,
+                    bindings,
+                )
     return out
 
 
