@@ -50,6 +50,11 @@ _DEFAULT_MODEL_OFFLOAD_THRESHOLD_GB = 8.0
 _DEFAULT_GROUP_OFFLOAD_THRESHOLD_GB = 6.0
 # Safety margin below total VRAM we reserve for activations.
 _DEFAULT_SAFETY_MARGIN_GB = 2.0
+# When a model fits with at least this much VRAM still free beyond it, run
+# fully unoptimized (mode "off") — VAE slicing/tiling only trades speed for
+# memory we demonstrably don't need. Below this slack we keep "vae_only" as a
+# cheap guard against high-resolution VAE-decode spikes.
+_DEFAULT_OFF_HEADROOM_GB = 8.0
 
 # Sentinel attribute set on pipelines to make apply_low_vram_config idempotent.
 _COZY_MODE_ATTR = "_cozy_low_vram_mode"
@@ -180,6 +185,7 @@ def select_auto_mode(
 
     Decision logic:
       - no CUDA                                -> off
+      - model fits with generous headroom      -> off
       - model fits (incl. safety margin)       -> vae_only
       - total VRAM <= group_offload_threshold  -> group_offload
       - total VRAM <= model_offload_threshold  -> model_offload
@@ -220,7 +226,15 @@ def select_auto_mode(
     # on an 8GB card) while big models (e.g. SDXL @1024 on an 8GB card) still
     # offload. Falls through to total-VRAM thresholds only when size is unknown.
     if requirement > 0.0:
-        return "vae_only" if requirement <= max(0.0, total - margin) else "model_offload"
+        usable = max(0.0, total - margin)
+        if requirement > usable:
+            return "model_offload"
+        # Fits. With generous headroom, run fully unoptimized — slicing/tiling
+        # would only trade speed for memory we don't need. Otherwise keep the
+        # cheap vae_only guard for high-res VAE-decode spikes.
+        if (usable - requirement) >= _DEFAULT_OFF_HEADROOM_GB:
+            return "off"
+        return "vae_only"
 
     # Unknown model size: conservative total-VRAM thresholds.
     if total <= t_model:
