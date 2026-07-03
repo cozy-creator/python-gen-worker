@@ -25,10 +25,10 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev
 
-      - name: Type check
-        continue-on-error: true  # Type debt in clone/conversion/etc — visible in logs, doesn't block CI.
-        run: uv run mypy src/gen_worker
-
+      # No mypy step: 88 errors of continue-on-error type debt made a job that
+      # could never fail — red CI must mean something (#356). Type checking
+      # stays in the local loop via `task lint`; re-add a gating step once the
+      # worker-core rewrite (#365) lands mypy-clean.
       - name: Lint
         continue-on-error: true  # Lint debt (mostly worker.py, being rewritten) — visible in logs, doesn't block CI.
         run: uv run ruff check src/gen_worker

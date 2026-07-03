@@ -23,7 +23,7 @@ Migration::
         ...
 
     # After (0.7.0):
-    from gen_worker import Resources, inference_function
+    from gen_worker import Resources, inference
 
     _flux_bf16 = Resources(requires_gpu=True, min_vram_gb=22.0, min_compute_capability=8.0)
 

@@ -4,12 +4,12 @@ This is the stable contract a **host orchestrator** (cozy-local, a Go CLI)
 integrates against when it drives `gen-worker` — over the CLI and over the
 `serve` socket. Everything here is machine-readable and versioned. A host
 should **never** scrape `--help` or guess wire shapes; it keys behavior off
-the `protocol_version` and `capabilities` carried in `describe --json` and the
+the `protocol_version` and `capabilities` carried in `describe` and the
 serve sidecar.
 
 ## Versioning
 
-Every machine-readable surface (`describe --json`, the serve ready-sidecar)
+Every machine-readable surface (`describe`, the serve ready-sidecar)
 carries two version markers:
 
 - **`protocol_version`** — an integer, currently **`1`**. Bumped on any
@@ -23,7 +23,7 @@ Current capabilities:
 
 | Token | Meaning |
 |---|---|
-| `describe` | `gen-worker describe --json` |
+| `describe` | `gen-worker describe` |
 | `list_functions` | `gen-worker serve --list-functions [--json]` |
 | `prefetch` | `gen-worker prefetch` |
 | `cancel` | per-request `{"cancel":{"request_id"}}` control frame |
@@ -34,14 +34,14 @@ Current capabilities:
 Rule of thumb: **gate every behavior off `capabilities`.** New tokens are
 added when a feature ships; absence means "not available in this build."
 
-## `gen-worker describe --json`
+## `gen-worker describe`
 
 Introspect the endpoint and emit a stable JSON document **without loading any
 model**. This is how a host learns an endpoint's functions, schemas, and model
 bindings before booting anything.
 
 ```bash
-gen-worker describe --json            # compact, single line
+gen-worker describe                   # compact, single line (JSON is the only format)
 gen-worker describe --pretty          # newlines + 2-space indent
 gen-worker describe --module my.main  # override endpoint.toml `main`
 ```

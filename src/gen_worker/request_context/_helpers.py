@@ -14,13 +14,11 @@ import json
 import logging
 import re
 import socket
-import time
 import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional
 
 from ..api.errors import OutputTooLargeError
-from ..models.ref_downloader import lookup_provider_for_ref
 from ..models.refs import parse_model_ref
 
 logger = logging.getLogger(__name__)
@@ -121,10 +119,6 @@ def _infer_mime_type(ref: str, head: bytes) -> str:
     return guessed or "application/octet-stream"
 
 
-def _default_output_prefix(request_id: str) -> str:
-    return f"outputs/{request_id}/"
-
-
 def _normalize_output_ref(ref: str) -> str:
     out = str(ref or "").strip()
     if not out:
@@ -220,22 +214,6 @@ def _decode_unverified_jwt_claims(token: str) -> Dict[str, Any]:
 
 def _normalize_repo_name(value: str) -> str:
     return str(value or "").strip().strip("/").lower()
-
-
-def _error_code_from_exception(exc: Exception, *, fallback: str = "unknown") -> str:
-    raw = str(exc or "").strip()
-    if not raw:
-        return fallback
-    parts = [p.strip().lower() for p in raw.split(":") if p and p.strip()]
-    if not parts:
-        return fallback
-    if len(parts) >= 2:
-        return parts[1]
-    return parts[0]
-
-
-def _utc_timestamp_rfc3339() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
 def _enforce_output_file_size_limit(size_bytes: int) -> None:
@@ -373,6 +351,8 @@ def _canonicalize_model_ref_string(raw: str) -> str:
     if not s:
         return s
     try:
+        from ..models.ref_downloader import lookup_provider_for_ref  # lazy: pulls requests
+
         provider = lookup_provider_for_ref(s)
         parsed = parse_model_ref(s, provider=provider)
         if parsed.provider == "tensorhub" and parsed.tensorhub is not None:

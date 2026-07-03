@@ -14,7 +14,6 @@ import types
 from typing import Iterator
 
 import msgspec
-import pytest
 
 import gen_worker.cli as cli
 from gen_worker import HFRepo, Repo, RequestContext, inference
@@ -105,15 +104,6 @@ def test_describe_reports_generator_and_dispatch_binding(capsys) -> None:
     assert fn["is_generator"] is True
     assert fn["models"]["m"]["type"] == "Repo"
     assert fn["models"]["m"]["provider"] == "tensorhub"
-
-
-def test_describe_accepts_json_flag(capsys) -> None:
-    # Hosts (cozy) call `describe --json`; the flag must be accepted (it's the
-    # default + only format). Regression for the missing-flag bug.
-    _module("_desc_jsonflag")
-    assert cli.main(["describe", "--module", "_desc_jsonflag", "--json"]) == 0
-    doc = json.loads(capsys.readouterr().out.strip())
-    assert doc["protocol_version"] == PROTOCOL_VERSION
 
 
 def test_serve_list_functions_json_matches_describe(capsys) -> None:

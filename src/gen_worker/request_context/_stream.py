@@ -16,13 +16,13 @@ import time
 import tempfile
 import urllib.parse
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from blake3 import blake3
 
 logger = logging.getLogger(__name__)
 
-from ..api.errors import AuthError, CanceledError
+from ..api.errors import CanceledError
 from ..api.types import Asset, Tensors
 from ._helpers import _enforce_output_file_size_limit, _infer_mime_type, _infer_tensors_format, _normalize_output_ref
 
@@ -56,7 +56,6 @@ class _RequestOutputStream:
         flavor: Optional[str] = None,
         attributes: Optional[dict] = None,
     ) -> None:
-        from ..presigned_upload import blake3_hash_file, presigned_upload_file
 
         self._ctx = ctx
         self._ref = _normalize_output_ref(ref)
@@ -135,11 +134,6 @@ class _RequestOutputStream:
     @property
     def elapsed_s(self) -> float:
         return float(max(time.monotonic() - self._started_mono, 0.0))
-
-    @property
-    def average_upload_bps(self) -> float:
-        elapsed = max(self.elapsed_s, 1e-6)
-        return float(self.bytes_uploaded) / elapsed
 
     @property
     def ref(self) -> str:
@@ -245,13 +239,6 @@ class _RequestOutputStream:
         self._maybe_emit_progress(stage="stream_aborted", force=True)
         self._finalized = True
 
-    def _abort_due_to_cancel(self) -> None:
-        if self._abort_remote:
-            return
-        self._abort_remote = True
-        self._signal_remote_done()
-        self._maybe_emit_progress(stage="stream_canceled", force=True)
-
     def _with_stream_mode(self, value: Any) -> Any:
         if isinstance(value, Asset):
             return Asset(
@@ -329,7 +316,7 @@ class _RequestOutputStream:
 
     def _finalize_presigned_upload(self) -> Any:
         """Hash the buffered temp file, then upload via presigned S3 multipart."""
-        from ..presigned_upload import blake3_hash_file, presigned_upload_file
+        from ..presigned_upload import presigned_upload_file
 
         assert self._tmp_path is not None
         file_size = os.path.getsize(self._tmp_path)
@@ -467,28 +454,6 @@ class _RequestOutputStream:
         except Exception:
             head = b""
         return _infer_mime_type(self._ref, head)
-
-    @staticmethod
-    def _classify_error(exc: BaseException) -> str:
-        msg = str(exc or "").lower()
-        if isinstance(exc, InterruptedError):
-            return "canceled"
-        if isinstance(exc, AuthError):
-            return "auth_error"
-        if "network_error" in msg:
-            return "network_error"
-        if "already exists" in msg:
-            return "conflict"
-        if "unauthorized" in msg:
-            return "auth_error"
-        if "file save failed (" in msg:
-            left = msg.split("file save failed (", 1)[1]
-            code = left.split(")", 1)[0].strip()
-            if code.isdigit() and code.startswith("5"):
-                return "server_error"
-            if code.isdigit() and code.startswith("4"):
-                return "client_error"
-        return "unknown_error"
 
     def __enter__(self) -> "_RequestOutputStream":
         return self

@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional
+from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from .models.cache_paths import tensorhub_cas_dir
 from .models.ref_downloader import lookup_provider_for_ref
@@ -99,7 +99,6 @@ class ModelMetricsV1:
     cache_state: Optional[str] = None  # hot_vram|warm_disk|cold_remote
     bytes_downloaded: Optional[int] = None
     download_ms: Optional[int] = None
-    bytes_read_disk: Optional[int] = None
     disk_fstype: Optional[str] = None
     disk_backend: Optional[str] = None  # local|nfs
     localized: Optional[bool] = None
@@ -118,8 +117,6 @@ class ModelMetricsV1:
             out["bytes_downloaded"] = int(self.bytes_downloaded)
         if self.download_ms is not None:
             out["download_ms"] = int(self.download_ms)
-        if self.bytes_read_disk is not None:
-            out["bytes_read_disk"] = int(self.bytes_read_disk)
         if self.disk_fstype is not None:
             out["disk_fstype"] = str(self.disk_fstype)
         if self.disk_backend is not None:
@@ -144,10 +141,7 @@ class RunMetricsV1:
     fetch_ms: Optional[int] = None
     pipeline_init_ms: Optional[int] = None
     gpu_load_ms: Optional[int] = None
-    warmup_ms: Optional[int] = None
     inference_ms: Optional[int] = None
-    png_encode_ms: Optional[int] = None
-    upload_ms: Optional[int] = None
 
     # Diffusion-ish (optional)
     steps: Optional[int] = None
@@ -167,7 +161,6 @@ class RunMetricsV1:
     models: Dict[str, ModelMetricsV1] = field(default_factory=dict)  # canonical model_id -> metrics
 
     _t0_monotonic: float = field(default_factory=time.monotonic, repr=False)
-    _upload_ms_accum: int = field(default=0, repr=False)
     _fetch_ms_accum: int = field(default=0, repr=False)
     _pipeline_init_ms_accum: int = field(default=0, repr=False)
     _gpu_load_ms_accum: int = field(default=0, repr=False)
@@ -257,11 +250,6 @@ class RunMetricsV1:
         if ms_i is not None:
             self._gpu_load_ms_accum += ms_i
 
-    def add_upload_time(self, ms: int) -> None:
-        ms_i = self._coerce_nonneg_ms(ms)
-        if ms_i is not None:
-            self._upload_ms_accum += ms_i
-
     def finalize(self) -> None:
         # Avoid emitting misleading zeros: only set *_ms fields when we observed
         # the corresponding activity (or models exist for fetch_ms).
@@ -272,8 +260,6 @@ class RunMetricsV1:
             self.pipeline_init_ms = int(self._pipeline_init_ms_accum)
         if self.gpu_load_ms is None and self._gpu_load_ms_accum > 0:
             self.gpu_load_ms = int(self._gpu_load_ms_accum)
-        if self.upload_ms is None and self._upload_ms_accum > 0:
-            self.upload_ms = int(self._upload_ms_accum)
 
         if self.inference_ms is not None and self.steps is not None and self.inference_ms > 0:
             try:
@@ -310,15 +296,12 @@ class RunMetricsV1:
         for k, v in (
             ("pipeline_init_ms", self.pipeline_init_ms),
             ("gpu_load_ms", self.gpu_load_ms),
-            ("warmup_ms", self.warmup_ms),
             ("inference_ms", self.inference_ms),
             ("steps", self.steps),
             ("iters_per_s", self.iters_per_s),
             ("width", self.width),
             ("height", self.height),
             ("guidance", self.guidance),
-            ("png_encode_ms", self.png_encode_ms),
-            ("upload_ms", self.upload_ms),
             ("peak_vram_bytes", self.peak_vram_bytes),
             ("peak_ram_bytes", self.peak_ram_bytes),
         ):
@@ -446,16 +429,3 @@ def best_effort_bytes_on_disk(base_dir: Path, resolved_entry: Any) -> Optional[i
 
 def safe_json_bytes(payload: Dict[str, Any]) -> bytes:
     return json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
-
-
-def emit_best_effort(
-    emitter: Callable[[str, bytes], None],
-    *,
-    event_type: str,
-    payload: Dict[str, Any],
-) -> None:
-    try:
-        emitter(event_type, safe_json_bytes(payload))
-    except Exception:
-        # must never fail a run
-        return

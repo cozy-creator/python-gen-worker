@@ -9,7 +9,7 @@ from .cozy_snapshot_v2 import ensure_snapshot_async
 from .downloader import ModelDownloader
 from .hf_downloader import HuggingFaceHubDownloader
 from .refs import ParsedModelRef, parse_model_ref
-from .unsafe_format import UnsafeFileFormat, assert_safe_weight_format
+from .unsafe_format import assert_safe_weight_format
 
 # Per-request resolved manifests provided by gen-orchestrator (issue #92).
 # Shape: {canonical_model_id: ResolvedRepo-like object}

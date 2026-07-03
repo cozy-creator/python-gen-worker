@@ -6,10 +6,8 @@ Pulled out of worker.py to keep that file focused on the Worker class.
 
 from __future__ import annotations
 
-import collections.abc as cabc
-import json
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Optional, Tuple, TYPE_CHECKING
+from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
 
 import grpc
 import msgspec
@@ -104,27 +102,6 @@ def _extract_checkpoint_id_from_result(result: Any) -> str:
 
 
 @dataclass(frozen=True)
-class _RequestSpec:
-    name: str
-    func: Callable[..., Any]
-    resources: Resources
-    ctx_param: str
-    payload_param: str
-    payload_type: type[msgspec.Struct]
-    output_mode: str  # "single" | "incremental"
-    output_type: Optional[type[msgspec.Struct]] = None
-    delta_type: Optional[type[msgspec.Struct]] = None
-    # `injections` carries the per-parameter binding specs; type is left as
-    # ``tuple[Any, ...]`` here to avoid a circular import on the worker-side
-    # ``InjectionSpec`` (it's defined alongside the Worker class).
-    injections: Tuple[Any, ...] = ()
-    input_schema_json: bytes = b""
-    output_schema_json: bytes = b""
-    delta_schema_json: Optional[bytes] = None
-    injection_json: bytes = b""
-
-
-@dataclass(frozen=True)
 class _BatchedWorkerSpec:
     """Dispatch entry for one ``@inference.function`` method on a
     ``BatchedWorker`` (continuous-batching) class (#273).
@@ -143,9 +120,8 @@ class _BatchedWorkerSpec:
         expects (matches @inference.function signature
         ``async def fn(self, ctx, payload)``).
 
-    Unlike ``_RequestSpec`` we do NOT carry ``injections`` — model
-    download is owned by the SDK lifecycle (``setup(engine=...)``), not
-    per-request injection. The engine instance + class instance both
+    We do NOT carry ``injections`` — model download is owned by the SDK
+    lifecycle (``setup(engine=...)``), not per-request injection. The engine instance + class instance both
     live on the Worker object alongside this spec.
     """
 
@@ -188,8 +164,8 @@ class _SerialWorkerSpec:
         expects (matches @inference.function signature
         ``def fn(self, ctx, payload)``).
 
-    Unlike ``_RequestSpec`` we don't carry ``injections`` — models are
-    loaded once via ``setup(**models)``, then re-used across requests.
+    We don't carry ``injections`` — models are loaded once via
+    ``setup(**models)``, then re-used across requests.
     The class instance lives on the Worker object alongside this spec
     (one record per class in ``_serial_class_instances``).
     """

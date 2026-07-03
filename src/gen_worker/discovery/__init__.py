@@ -1,7 +1,7 @@
 """Build-time function and endpoint discovery."""
 
 from .names import slugify_name
-from .toml_manifest import TensorhubModelSpec, EndpointResources, EndpointToml, load_endpoint_toml
+from .toml_manifest import EndpointResources, EndpointToml, load_endpoint_toml
 from .validation import (
     EndpointLockValidationResult,
     EndpointValidationResult,
@@ -11,7 +11,6 @@ from .validation import (
 
 __all__ = [
     "slugify_name",
-    "TensorhubModelSpec",
     "EndpointResources",
     "EndpointToml",
     "load_endpoint_toml",

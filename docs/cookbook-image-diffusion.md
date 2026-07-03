@@ -11,11 +11,7 @@ gen-worker conventions.
 Cross-links:
 - [endpoint-authoring.md](endpoint-authoring.md) — base SDK reference
   (bindings, Resources, payload structs, RequestContext).
-- [cookbook-acceleration.md](cookbook-acceleration.md) — the
-  `gen_worker.accel` five-call surface in isolation.
 - [cookbook-video-diffusion.md](cookbook-video-diffusion.md) — video DiTs.
-- [cookbook-stages.md](cookbook-stages.md) — `@inference.stage` for
-  multi-stage pipelines (mostly 3D and very large DiTs).
 
 ---
 
@@ -418,10 +414,6 @@ What this gives you on a 4090:
   Inject multiple bindings in `models={}` and consume them as separate
   `setup` kwargs. See the multi-param injection section in
   [endpoint-authoring.md](endpoint-authoring.md#multi-param-injection--each-binding-is-independent).
-- **Multi-stage pipelines where future disaggregation will pay off**
-  (very large DiTs where the text encoder and VAE could batch on
-  small GPUs)? Use `@inference.stage(name=..., gpu_class=...)`. See
-  [cookbook-stages.md](cookbook-stages.md).
 - **Video generation?** See [cookbook-video-diffusion.md](cookbook-video-diffusion.md)
   — different acceleration tradeoffs (TeaCache, FP8/NVFP4, xDiT
   sequence parallelism on multi-GPU).

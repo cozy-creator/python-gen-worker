@@ -11,21 +11,6 @@ next_id: 369
 
 ---
 
-# #356: fix red master — 6 failing tests, CI ignored since Jun 8
-
-**Completed:** no
-**Status:** OPEN — master pytest is GREEN again (fix/p0-correctness); only the CI-gating hardening (task 3) remains.
-
-## Tasks
-- [x] Fix 4 failures in `tests/test_cli_describe.py`: fixture at :36-43 injects a static `HFRepo` into handler param `pipe`, rejected by the injection validation added in a53627b (`api/decorators.py:683`). Update fixtures to the new contract (static repos inject into `setup()`, not handler params). [DONE: dropped the static `pipe`/`m` params from the two describe-test handler signatures; the class-level `@inference(models=...)` still drives the reported bindings.]
-- [x] Fix 2 failures in `tests/test_inference_memory_select.py` (:45, :66): re-derive expectations for the OFF_HEADROOM threshold added in 5347209 — but do this together with #358 (free-vs-total fix changes the answers again). [DONE with #358: keyword renamed to `available_vram_gb`; both 24GB-free cases now correctly resolve to "off" (15+GB free headroom > OFF_HEADROOM).]
-- [ ] Make CI red mean something: mypy currently `continue-on-error` in `.github/workflows/ci.yml`; either gate on it or drop the job. Add branch protection or a pre-push habit so red master can't sit for weeks.
-
-## Acceptance
-`uv run --extra dev pytest -q` fully green on master; CI failure blocks merge.
-
----
-
 # #357: worker P0 reliability bugs (drain, result loss, reconnect storm, load events)
 
 **Completed:** no
@@ -71,60 +56,8 @@ A worker with an occupied GPU chooses an offload mode that fits *free* VRAM; a f
 
 ---
 
-# #359: delete dead code, sweep 1 — the unreachable legacy function-shape stack (~2,500 LOC)
 
-**Completed:** no
-**Status:** OPEN — nothing in the package sets `_is_inference_function`/`_is_training_function` anymore (the decorators that did were hard-cut in #322); everything keyed on them is unreachable at runtime. Verified by repo-wide grep: only `getattr` reads remain.
 
-## Tasks
-- [ ] Delete from worker.py: function-shape scan in `_discover_and_register_functions` (2234-2290), `_inspect_request_spec` (3431-3560), `_execute_request` (10255-11046), `_execute_training_request` (11048-11277), `_resolve_model_id_for_injection` (12388-12468), LoRA overlay stack (12074-12303), asset-materialization suite `_materialize_assets`/`_auto_upload_output_assets`/`_materialize_asset`/`_download_url_to_file`/`_validate_url_asset`/`_stream_to_file` (3710-4122), `_binding_to_wire`/`_wire_ref` (192-291), `_looks_like_ref_compatibility_surprise` (1212-1281), `_RequestSpec` (_worker_support.py:106-124).
-- [ ] Delete always-one-value knobs and their dead branches: `_jwks_cache`/JWT-verify plumbing incl. all of `_worker_auth.py` (worker.py:449-453, 1189-1210), `max_input_bytes`/`max_output_bytes` + 4 checks (446-447; 7226, 9608, 9828, 10741), `_models_ready_on_connect` + branch reading a nonexistent env var (536, 4307-4312), `_drain_timeout_seconds` + stop() drain-wait (532, 5690-5697), `_local_model_cache_dir` + `_get_local_model_cache` + NFS localization block (549, 11279-11316, 11652-11691), `_filter_prefetch_for_disabled_functions` (6362-6393).
-- [ ] Delete zero-caller functions: `_enforce_model_allowlist` (12470-12477), `_prefs_for_canonical` (6623-6652), `payload_key_status` (6450-6467), `_emit_residency_for_refs` (9171-9182), `_reconnect_jitter_seconds` (685); run_metrics_v1: `emit_best_effort` (451-461), `add_upload_time` (260-263), never-set fields `warmup_ms`/`png_encode_ms`/`bytes_read_disk`/`upload_ms`.
-- [ ] Remove reads of proto fields that no longer exist in `_handle_job_request` (7128-7143: `required_flavor_refs`, `parent_request_id`, `child_request_id`, `item_id`, `item_index`) and the permanent `model='None'` dispatch-log noise (7150).
-- [ ] Fix `tests/test_worker_dispatch.py:52-77` / `test_async_dispatch_concurrency.py:36-61` bare-`Worker.__new__` fixtures that hand-set `_request_specs` — extract one conftest fixture while touching them.
-- [ ] Collapse `wire_protocol.py` (67 lines of changelog around two ints) to the two constants.
-
-## Acceptance
-Suite green; `grep -rn "_is_inference_function\|_request_specs\|_training_specs" src/` returns nothing.
-
----
-
-# #360: delete dead code, sweep 2 — zero-caller packages and unused exports (~2,600 LOC)
-
-**Completed:** no
-**Status:** OPEN — verified zero callers across src/, tests/, inference-endpoints, training-endpoints (venvs excluded).
-
-## Tasks
-- [ ] Delete packages: `quant/` (455), `accel/` (598 — keep `apply_low_vram_config` by moving it to `inference_memory`), `cache/` (219 — keep the `breaks_cross_request_batching` attr convention as a comment where micro_batch reads it), `compile_helpers/` (285), `parallelism/` (225), `engines/` (425) + the never-satisfied gating branch worker.py:7669.
-- [ ] Delete `conversion/dtype_utils.py` (289, 100% dead) and `presets.py`.
-- [ ] Prune `__init__.py` exports never imported by any consumer: `batched_inference` re-export, `Clamp`, `PositivePrompt`, `NegativePrompt`, `PromptRole`, `MediaAsset`, `Compute`, `Tensors`, `load_loras`, `with_oom_retry`, `Done`, `Error`, `TokenStreamSignal`, `IncrementalTokenDelta`, `Binding`, and the unused error classes (keep `FatalError`, `ValidationError`, `RetryableError`, `CanceledError`).
-- [ ] Delete `runtimes/` registry surface except `ar_tts.lookup` (used by chatterbox-tts, musicgen): drop `register`/`all_specs`/bark entry.
-- [ ] `pipeline/loader.py`: production injection path bypasses `PipelineLoader` entirely — keep `detect_diffusers_variant`, `get_torch_dtype`, quant-config synthesis (~200 LOC); delete `MODEL_COMPONENTS`, `_class_name` parsing, `DiffusersModelManager` fallback (~1,000 LOC). (Or defer to #366 which deletes the module wholesale.)
-- [ ] `clone/`: delete dead dedup scaffolding (`maybe_noop` always-None pipeline.py:2730-2739, `preflight_clone` empty struct :1344-1357, identity-hash machinery :2723-2726), the 4 `NotImplementedError` stubs advertised as public API (:2777-2797), twin `_tensors_artifact`/`_tensors_artifact_module` (:2171/:476). Merge `_finalize_clone` (:1718-2449) and `_finalize_publish_as_is` (:498-928) into one finalize path (~1,800-2,000 LOC saved). (Superseded by #367 if that lands first.)
-
-## Acceptance
-Suite green; both endpoint repos still import cleanly (`uv run python -c "import gen_worker"` + grep-verified consumer imports unaffected).
-
----
-
-# #361: delete dead code, sweep 3 — discovery/API layer + tombstones (~1,500 LOC)
-
-**Completed:** no
-**Status:** OPEN.
-
-## Tasks
-- [ ] discovery/discover.py: delete legacy-marker paths — `_extract_function_metadata` (524-668), `_extract_conversion_function_metadata` (671-734), `_file_uses_worker_decorator` + no-main fallback scan (472-493, 925-1004), function-shape scan in main-module path (883-921), `_compute_module_name` (496-521), `batch_dimension` merge (1259-1264).
-- [ ] discovery/toml_manifest.py (~330 of 592): `TensorhubModelSpec` (17-31), `_parse_model_spec` + ref validators (188-313), `_parse_function_resource_hints` (316-432), `constraint_satisfied` + version helpers (106-185), the four always-empty `EndpointToml` fields.
-- [ ] api/decorators.py: migration stubs + `_REMOVED_PUBLIC_SYMBOLS` + module `__getattr__` (1414-1439; `__init__.py:57-61,108-151,174-176`) — pre-launch tombstones; delete. `rate_limit_per_invoker` (accepted, emitted nowhere). `prefer_distilled` (no consumer). `@invocable.stage`/`_StageSpec`/`gpu_class` + per-kind `.stage` aliases (~150 LOC — worker never reads `__gen_worker_stage_methods__`) + `docs/cookbook-stages.md` (568 lines documenting the no-op).
-- [ ] Either wire or delete the orphaned dispatch validators `_payload_field_names`/`_payload_field_type`/`_literal_members` (decorators.py:440-471). Wiring them is ~5 lines and makes the binding.py:509-513 documented contract true — prefer wiring.
-- [ ] request_context/__init__.py: `save_bytes_create` (963-992), `save_output_stream` self-alias (914-929), `finalize_checkpoints` (1124-1136), discarded `publish_intent`/`metrics` blocks (1213-1237, 1437, 1472-1473), dedupe `TrainingContext.read/write_repo_metadata` (2112-2193 ≡ 1656-1726) and `DatasetContext.materialize_blob` (2098-2109 ≡ 1729-1740) into a mixin; remove the import-time `setattr` monkey-patch loop (1839-1843). Unused: `workspace_scope_id` (196), `partition_context` (540), `item_output_ref` (553); _helpers.py `_default_output_prefix`/`_error_code_from_exception`/`_utc_timestamp_rfc3339`; _stream.py `average_upload_bps`/`_abort_due_to_cancel`/`_classify_error`; _concurrent_upload.py `inflight_bytes`/`parallel_save_checkpoints`; models/cache.py `is_pinned`/`get_residency_map`; api/binding.py `primary_slot_name`.
-- [ ] cli: delete `repl` (229 LOC, duplicates `serve --stdin`) and the no-op `describe --json` flag (describe.py:53-56).
-- [ ] Move torch/requests imports out of module import time (request_context/__init__.py:19-24) and make `cli/__init__.py` parser building not import the world — `gen-worker --help` should not import torch.
-
-## Acceptance
-Suite green; `python -X importtime -c "import gen_worker" ` shows no torch; `gen-worker --help` < 300ms on a torch-equipped machine.
-
----
 
 # #362: docs teach a deleted API — every README quickstart raises ImportError
 

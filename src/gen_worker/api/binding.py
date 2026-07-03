@@ -508,8 +508,8 @@ class Dispatch:
 
     The discriminator ``field`` must be a ``Literal[...]``-typed member of
     the function's payload struct; every ``table`` key must be one of the
-    Literal's members. Validated at decoration time by
-    :func:`inference_function`.
+    Literal's members. Validated at decoration time by the endpoint-class
+    decorator (``@inference`` et al.).
     """
 
     field: str
@@ -647,11 +647,6 @@ class Variant(Repo):
         # A Variant's effective provider is its primary slot's provider.
         primary = next(iter(self.variant_slots.values()), None)
         return getattr(primary, "provider", type(self).PROVIDER) if primary else type(self).PROVIDER
-
-    @property
-    def primary_slot_name(self) -> str:
-        """Name of the swappable slot that drives this variant's identity."""
-        return next(iter(self.variant_slots.keys()), "")
 
     def _respawn(
         self,

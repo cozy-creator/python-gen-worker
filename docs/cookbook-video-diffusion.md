@@ -10,8 +10,6 @@ Cross-links:
 - [endpoint-authoring.md](endpoint-authoring.md) — base SDK reference.
 - [cookbook-image-diffusion.md](cookbook-image-diffusion.md) — image
   DiTs (Flux, SD3, SDXL).
-- [cookbook-stages.md](cookbook-stages.md) — `@inference.stage` for
-  multi-stage pipelines.
 
 ---
 
@@ -410,8 +408,3 @@ What this gives you on B200:
   conditioning model as a second binding in `models={}` and consume it
   as a second `setup` kwarg. See the multi-param injection section in
   [endpoint-authoring.md](endpoint-authoring.md#multi-param-injection--each-binding-is-independent).
-- **Multi-stage pipelines** (separate text encoder, DiT, VAE that
-  could be disaggregated)? See
-  [cookbook-stages.md](cookbook-stages.md) — `@inference.stage`
-  annotations let the SDK route stages to different GPU pools in a
-  future release without rewriting endpoint code.

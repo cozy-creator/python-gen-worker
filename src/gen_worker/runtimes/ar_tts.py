@@ -46,7 +46,7 @@ References:
 
 from __future__ import annotations
 
-from typing import Mapping, Optional
+from typing import Optional
 
 import msgspec
 
@@ -110,23 +110,6 @@ _REGISTRY: dict[str, ARTTSModelSpec] = {
             "via `ModelRegistry.register_model` at import time."
         ),
     ),
-    # Bark (Suno). Three-stage cascade (text→semantic, semantic→coarse,
-    # coarse→fine). HF transformers ships native batching; the upgrade
-    # is moving the three decoders onto a continuous-batching engine.
-    "bark": ARTTSModelSpec(
-        model_class="Bark",
-        vllm_arch=None,
-        sglang_runner=None,
-        audio_codec_decoder="bark.api.codec_decode",
-        sample_rate_hz=24000,
-        audio_token_vocab_size=10048,
-        supports_streaming=False,
-        notes=(
-            "Three GPT-style decoders (text→semantic→coarse→fine). "
-            "Each stage is independently AR; engine batching applies "
-            "per-stage. EnCodec waveform decoder."
-        ),
-    ),
     # MusicGen (Meta). T5 encoder + transformer decoder emitting EnCodec
     # tokens. HF transformers ships native batching. Continuous batching
     # via vLLM is being explored in vllm#21989.
@@ -160,31 +143,8 @@ def lookup(model_class: str) -> Optional[ARTTSModelSpec]:
     return _REGISTRY.get(key)
 
 
-def all_specs() -> Mapping[str, ARTTSModelSpec]:
-    """Return an immutable view of the registry. Useful for tests + docs."""
-    return dict(_REGISTRY)
-
-
-def register(spec: ARTTSModelSpec) -> None:
-    """Add or override a registry entry.
-
-    Tenant code shouldn't normally call this — endpoints look up the
-    built-in registry. But out-of-tree experiments can register custom
-    AR-TTS model classes without forking gen-worker.
-    """
-    if not isinstance(spec, ARTTSModelSpec):
-        raise TypeError(
-            f"register() expects ARTTSModelSpec, got {type(spec).__name__}"
-        )
-    key = spec.model_class.strip().lower()
-    if not key:
-        raise ValueError("ARTTSModelSpec.model_class must be non-empty")
-    _REGISTRY[key] = spec
-
 
 __all__ = [
     "ARTTSModelSpec",
     "lookup",
-    "all_specs",
-    "register",
 ]

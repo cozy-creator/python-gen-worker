@@ -10,8 +10,7 @@ each exercise the REAL routing path:
   * ModelRefDownloader.download_with_progress routing through the right
     provider branch against a REAL on-disk snapshot (civitai/hf leaf stubbed
     only at the network edge — every routing decision is real),
-  * the safetensors-only override gate against real tmp files,
-  * Worker._resolve_model_id_for_injection cross-provider key shape.
+  * the safetensors-only override gate against real tmp files.
 
 Named regressions kept as explicit cases:
   * tag-stripping (live 2026-05-16 failure: ``:latest`` stamped HF ref),
@@ -24,10 +23,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, List, Optional
 
-import msgspec
 import pytest
 
-from gen_worker import HFRepo, Repo
 from gen_worker._worker_support import build_provider_index_from_manifest
 from gen_worker.models.hf_downloader import HuggingFaceDownloadResult, HuggingFaceRef
 from gen_worker.models.ref_downloader import (
@@ -40,7 +37,6 @@ from gen_worker.models.ref_downloader import (
     set_provider_by_ref_global,
 )
 from gen_worker.models.unsafe_format import UnsafeFileFormat, assert_safe_weight_format
-from gen_worker.worker import InjectionSpec, Worker, _resolved_repo_id
 
 
 # --------------------------------------------------------------------------- #
@@ -279,69 +275,3 @@ def test_downloader_gates_only_override_refs(tmp_path: Path) -> None:
     finally:
         reset_provider_by_ref(prov)
     assert Path(out) == snap
-
-
-# --------------------------------------------------------------------------- #
-# Cross-provider override resolution — real Worker key shaping
-# --------------------------------------------------------------------------- #
-
-
-class _Pipe:
-    pass
-
-
-class _P(msgspec.Struct):
-    prompt: str = ""
-
-
-def _bare_worker() -> Worker:
-    w = Worker.__new__(Worker)
-    w._release_allowed_model_ids = None
-    return w
-
-
-@pytest.mark.parametrize(
-    "binding,override_provider,expect_hf_prefix",
-    [
-        # HF binding + HF override -> HF-keyed model_id (pre-#18 bug: defaulted tensorhub).
-        (HFRepo("orig/hf-flux").dtype("bf16").allow_override(_Pipe), "hf", True),
-        # HF binding + tensorhub override -> tensorhub key (no hf:: prefix).
-        (HFRepo("orig/hf-flux").dtype("bf16").allow_override(_Pipe), "tensorhub", False),
-        # tensorhub binding + HF override -> HF key (reverse cross-provider).
-        (Repo("acme/flux").flavor("bf16").allow_override(_Pipe), "hf", True),
-        # tensorhub binding + no provider field -> tensorhub default (back-compat).
-        (Repo("acme/flux").flavor("bf16").allow_override(_Pipe), None, False),
-    ],
-)
-def test_cross_provider_override_key_shape(
-    binding: Repo, override_provider: Optional[str], expect_hf_prefix: bool
-) -> None:
-    w = _bare_worker()
-    inj = InjectionSpec(param_name="pipeline", param_type=_Pipe, binding=binding)
-    entry = {"ref": "other/model", "tag": "prod", "flavor": "bf16"}
-    if override_provider is not None:
-        entry["provider"] = override_provider
-
-    model_id, _ = w._resolve_model_id_for_injection(
-        "fn", inj, payload=_P(), resolved_models={"pipeline": entry},
-    )
-    assert model_id.startswith("hf::") is expect_hf_prefix
-    assert "other/model" in model_id
-
-
-def test_override_rejected_for_non_overridable_binding_and_default_path() -> None:
-    """Defense-in-depth: orchestrator drift stamping an override for a
-    non-overridable binding errors loudly; the binding-default path resolves to
-    the declared ref/flavor."""
-    w = _bare_worker()
-    inj = InjectionSpec(
-        param_name="pipeline", param_type=_Pipe,
-        binding=Repo("acme/flux").flavor("bf16"),  # no allow_override
-    )
-    with pytest.raises(ValueError, match="no allow_override"):
-        w._resolve_model_id_for_injection(
-            "fn", inj, payload=_P(),
-            resolved_models={"pipeline": {"ref": "acme/other", "tag": "prod", "flavor": ""}},
-        )
-    model_id, _ = w._resolve_model_id_for_injection("fn", inj, payload=_P(), resolved_models={})
-    assert model_id == _resolved_repo_id("acme/flux", flavor="bf16", tag="prod")

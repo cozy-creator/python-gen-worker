@@ -61,7 +61,6 @@ def _handle_prefetch(args: argparse.Namespace) -> int:
         _collect_class_methods,
         _ensure_sys_path,
         _load_endpoint_toml_main,
-        _ModelResolutionError,
         _resolve_binding_to_ref,
         _resolve_local_path,
     )

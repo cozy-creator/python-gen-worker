@@ -3,7 +3,6 @@
 from .binding import Binding, CivitaiRepo, Dispatch, HFRepo, ModelScopeRepo, Repo, dispatch
 from .decorators import (
     Resources,
-    inference_function,
 )
 from .errors import (
     AuthError,
@@ -49,7 +48,6 @@ __all__ = [
     "Repo",
     "Resources",
     "dispatch",
-    "inference_function",
     "AuthError",
     "CanceledError",
     "FatalError",

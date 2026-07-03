@@ -20,11 +20,10 @@ import types
 from typing import Iterator
 
 import msgspec
-import pytest
 
 import gen_worker.cli as cli
 import gen_worker.cli.run as run_mod
-from gen_worker import HFRepo, Repo, RequestContext, inference
+from gen_worker import Repo, RequestContext, inference
 
 
 class _In(msgspec.Struct):

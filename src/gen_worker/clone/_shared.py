@@ -19,7 +19,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Optional
 
-from gen_worker import RequestContext, Tensors
+from gen_worker import RequestContext
+from gen_worker.api.types import Tensors
 from gen_worker.conversion.core_types import (
     ConversionArtifact,
     ConversionOutput,
