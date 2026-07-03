@@ -12,7 +12,6 @@ import sys
 import types
 
 import msgspec
-import pytest
 
 import gen_worker.cli as cli
 from gen_worker import RequestContext, inference

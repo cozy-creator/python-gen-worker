@@ -15,7 +15,6 @@ gRPC init the dispatch tables don't need) for every archetype in the floor:
 from __future__ import annotations
 
 import asyncio
-import threading
 import time
 from typing import AsyncIterator, Callable, Iterator, List, Tuple
 
@@ -49,34 +48,6 @@ class TokenDelta(msgspec.Struct):
     item_id: str = "item-0"
 
 
-def _bare_worker() -> Worker:
-    w = Worker.__new__(Worker)
-    w._request_specs = {}
-    w._training_specs = {}
-    w._batched_specs = {}
-    w._batched_instances = []
-    w._serial_class_specs = {}
-    w._serial_class_instances = []
-    w._conversion_class_specs = {}
-    w._discovered_resources = {}
-    w._function_schemas = {}
-    w._batched_loop = None
-    w._batched_loop_thread = None
-    w._batched_inflight_lock = threading.Lock()
-    w._batched_inflight = {}
-    w._micro_batch_aggregators = {}
-    w._active_requests = {}
-    w._active_requests_lock = threading.Lock()
-    w._request_handler_done_times = {}
-    w._request_recv_times = {}
-    w.scheduler_addr = ""
-    w.worker_id = "test"
-    w.max_output_bytes = 0
-    w.max_input_bytes = 0
-    w._gpu_semaphore = threading.Semaphore(4)
-    return w
-
-
 def _wait_until(pred: Callable[[], bool], timeout: float = 10.0) -> None:
     """Poll until pred() is True. Async dispatch completes on the shared loop
     (#447), so tests must wait for the callback-driven result send."""
@@ -93,7 +64,7 @@ def _wait_until(pred: Callable[[], bool], timeout: float = 10.0) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_serial_sync_register_dispatch_and_drain() -> None:
+def test_serial_sync_register_dispatch_and_drain(bare_worker) -> None:
     setup_calls: list = []
     shutdown_calls: list = []
 
@@ -114,7 +85,7 @@ def test_serial_sync_register_dispatch_and_drain() -> None:
     assert getattr(TestSerial, "__gen_worker_archetype__") == "SerialWorker"
     assert spec.runtime is None
 
-    w = _bare_worker()
+    w = bare_worker()
     assert w._register_endpoint_class(TestSerial, spec) == 1
     sspec = w._serial_class_specs["generate"]
     assert isinstance(sspec, _SerialWorkerSpec)
@@ -134,7 +105,7 @@ def test_serial_sync_register_dispatch_and_drain() -> None:
     assert shutdown_calls == [True]
 
 
-def test_serial_streaming_method_registers_incremental() -> None:
+def test_serial_streaming_method_registers_incremental(bare_worker) -> None:
     @inference()
     class Streamer:
         def setup(self):
@@ -146,7 +117,7 @@ def test_serial_streaming_method_registers_incremental() -> None:
                 yield TokenDelta(delta_text=tok)
             yield TokenDelta(finished=True)
 
-    w = _bare_worker()
+    w = bare_worker()
     w._register_endpoint_class(Streamer, Streamer.__gen_worker_endpoint_spec__)
     sspec = w._serial_class_specs["chat"]
     assert sspec.output_mode == "incremental"
@@ -158,8 +129,8 @@ def test_serial_streaming_method_registers_incremental() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _build_with_capture(cls: type) -> Tuple[Worker, List[dict], List[dict], List[dict]]:
-    w = _bare_worker()
+def _build_with_capture(bare_worker, cls: type) -> Tuple[Worker, List[dict], List[dict], List[dict]]:
+    w = bare_worker()
     w._register_endpoint_class(cls, cls.__gen_worker_endpoint_spec__)
     results: List[dict] = []
     deltas: List[dict] = []
@@ -172,7 +143,7 @@ def _build_with_capture(cls: type) -> Tuple[Worker, List[dict], List[dict], List
     return w, results, deltas, dones
 
 
-def test_async_single_and_streaming_dispatch() -> None:
+def test_async_single_and_streaming_dispatch(bare_worker) -> None:
     @inference()
     class AsyncEcho:
         def setup(self):
@@ -190,7 +161,7 @@ def test_async_single_and_streaming_dispatch() -> None:
                 yield TokenDelta(delta_text=tok)
             yield TokenDelta(finished=True)
 
-    w, results, deltas, dones = _build_with_capture(AsyncEcho)
+    w, results, deltas, dones = _build_with_capture(bare_worker, AsyncEcho)
     echo_spec = w._serial_class_specs["echo"]
     chat_spec = w._serial_class_specs["chat"]
     assert echo_spec.is_async and echo_spec.output_mode == "single"
@@ -232,7 +203,7 @@ class CaptionDelta(msgspec.Struct):
     finished: bool = False
 
 
-def test_batched_inference_tenant_engine_registers_and_iterates() -> None:
+def test_batched_inference_tenant_engine_registers_and_iterates(bare_worker) -> None:
     @batched_inference(
         models={"llm": Repo("fancyfeast/llama-joycaption")},
         resources=Resources(accelerator="cuda", min_vram_gb=24),
@@ -253,7 +224,7 @@ def test_batched_inference_tenant_engine_registers_and_iterates() -> None:
     cls = JoyCaption
     assert getattr(cls, "__gen_worker_archetype__") == "BatchedWorker"
 
-    w = _bare_worker()
+    w = bare_worker()
     assert w._register_endpoint_class(cls, cls.__gen_worker_endpoint_spec__) == 1
     spec = w._batched_specs["caption"]
     assert isinstance(spec, _BatchedWorkerSpec)
@@ -281,7 +252,7 @@ def test_batched_inference_tenant_engine_registers_and_iterates() -> None:
     assert isinstance(signals[-1], Done) and len(signals) == 4
 
 
-def test_inference_runtime_sglang_registers_batched_spec() -> None:
+def test_inference_runtime_sglang_registers_batched_spec(bare_worker) -> None:
     @inference(models={"engine": Repo("org/joy").flavor("bf16")}, runtime="sglang")
     class JoySglang:
         async def setup(self, engine):
@@ -295,7 +266,7 @@ def test_inference_runtime_sglang_registers_batched_spec() -> None:
     assert spec.runtime == "sglang"
     assert getattr(JoySglang, "__gen_worker_archetype__") == "BatchedWorker"
 
-    w = _bare_worker()
+    w = bare_worker()
     assert w._register_endpoint_class(JoySglang, spec) == 1
     bspec = w._batched_specs["caption-image"]  # slugified
     assert bspec.runtime == "sglang"

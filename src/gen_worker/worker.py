@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import grpc
 import logging
-import sys
 import time
 import json
 import re
 import urllib.request
 import urllib.parse
-import urllib.error
 import random
 import threading
 import os
@@ -22,18 +20,15 @@ import typing
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import collections.abc as cabc
-from typing import Any, AsyncIterable, AsyncIterator, Callable, Dict, Optional, Type, TypeVar, Iterator, List, Tuple, Iterable, get_args, get_origin
+from typing import Any, AsyncIterable, AsyncIterator, Callable, Dict, Mapping, Optional, Type, TypeVar, Iterator, List, Tuple, Iterable, get_args, get_origin
 import hashlib
 import msgspec
-from contextlib import ExitStack, contextmanager
 try:
     import torch
 except Exception:  # pragma: no cover - optional dependency
     torch = None
 import asyncio
 
-import jwt
-from ._worker_auth import _JWKSCache
 from .config import Settings
 
 
@@ -63,24 +58,17 @@ from ._worker_support import (
     _binding_canonical_ref,
     _collect_binding_entries,
     _ConversionWorkerSpec,
-    _RequestSpec,
     _SerialWorkerSpec,
     _extract_checkpoint_id_from_result,
     _extract_resolved_compute,
     _extract_worker_capability_token,
     _parse_manifest_model_mapping,
-    _workspace_scope_id,
     build_provider_index_from_manifest,
 )
 from .request_context import (
     RequestContext,
     _canonicalize_model_ref_string,
     _decode_unverified_jwt_claims,
-    _encode_ref_for_url,
-    _http_request,
-    _infer_mime_type,
-    _normalize_output_ref,
-    _url_is_blocked,
 )
 # Use relative imports within the package
 from .pb import worker_scheduler_pb2 as _pb
@@ -105,8 +93,6 @@ from .api.errors import (
     AuthError,
     CanceledError,
     FatalError,
-    InputTooLargeError,
-    OutputTooLargeError,
     RefCompatibilitySurprise,
     ResourceError,
     RetryableError,
@@ -119,21 +105,17 @@ from .models.downloader import ModelDownloader
 from .models.ref_downloader import (
     ModelRefDownloader,
     lookup_provider_for_ref,
-    reset_override_ref_keys,
     reset_provider_by_ref,
     set_provider_by_ref_global,
-    set_override_ref_keys,
     set_provider_by_ref,
 )
 from .models.download_progress import DownloadProgressReporter
 from .models.refs import parse_model_ref
-from .api.types import Asset, AudioAsset, ImageAsset, Tensors, VideoAsset
 from .models.cache import ModelCache
 from .run_metrics_v1 import (
     RunMetricsV1,
     best_effort_bytes_downloaded,
     best_effort_bytes_on_disk,
-    best_effort_init_model_metrics,
     resolved_entry_total_bytes,
     safe_json_bytes,
 )
@@ -180,115 +162,6 @@ class InjectionSpec:
     # auto-offload decision so OOM offload is driven by what the tenant
     # declared rather than a hardcoded activation margin. None = undeclared.
     peak_vram_gb: Optional[float] = None
-
-
-@_injection_dataclass(frozen=True)
-class _RuntimeLoraSpec:
-    tensors: Tensors
-    weight: float
-    adapter_name: str
-
-
-def _wire_ref(repo: Repo) -> str:
-    """Canonical wire ref for a Repo binding.
-
-    The wire format is bare ref + explicit ``provider`` field — never
-    prefixed. Caller emits ``provider`` alongside ``ref`` (see
-    :func:`_binding_to_wire`). The implicit default on the consumer
-    side is ``"tensorhub"`` when the provider field is absent on a payload.
-    """
-    return repo.ref
-
-
-def _binding_to_wire(param_name: str, param_type: Any, binding: Binding) -> Dict[str, Any]:
-    """Serialize an InjectionSpec to the wire shape consumed by the
-    orchestrator's release resolver.
-    """
-    # Provider-aware match: Repo (cozy/tensorhub), HFRepo (huggingface),
-    # CivitaiRepo (civitai). HFRepo/CivitaiRepo are Repo subclasses today,
-    # so plain Repo would already match — the tuple form makes the typed
-    # provider surface explicit at the call site (issue #10).
-    if isinstance(binding, (Repo, HFRepo, CivitaiRepo)):
-        out: Dict[str, Any] = {
-            "kind": "fixed",
-            "slot_name": str(getattr(binding, "slot_name", "") or param_name),
-            "ref": _wire_ref(binding),
-            "flavor": binding._flavor,
-            "tag": binding._tag,
-            "allow_override": binding._allow_override,
-            "allow_lora": bool(getattr(binding, "_allow_lora", False)),
-            "pipeline_classes": list(binding._pipeline_classes),
-        }
-        # Tensorhub is the implicit default — omit `provider` when it
-        # would be tensorhub so the wire stays clean. Non-tensorhub
-        # providers MUST emit the field explicitly.
-        if binding.provider != "tensorhub":
-            out["provider"] = binding.provider
-        # Issue #20 fix 2: HF bindings carry a `dtype` field for load-time
-        # torch_dtype selection (replaces the old #flavor-suffix hack).
-        # Only emitted for HFRepo and only when non-empty.
-        if isinstance(binding, HFRepo) and getattr(binding, "_dtype", ""):
-            out["dtype"] = binding._dtype
-        return {"param": param_name, "type": _type_qualname(param_type), "binding": out}
-    if isinstance(binding, Dispatch):
-        table: Dict[str, Dict[str, Any]] = {}
-        dispatch_slot_name = ""
-        for k, repo in binding.table.items():
-            if not dispatch_slot_name:
-                dispatch_slot_name = str(getattr(repo, "slot_name", "") or param_name)
-            entry: Dict[str, Any] = {
-                "slot_name": str(getattr(repo, "slot_name", "") or param_name),
-                "ref": _wire_ref(repo),
-                "flavor": repo._flavor,
-                "tag": repo._tag,
-            }
-            if repo.provider != "tensorhub":
-                entry["provider"] = repo.provider
-            # Issue #20 fix 2: dispatch tables can mix providers and the
-            # HF entries may carry a dtype.
-            if isinstance(repo, HFRepo) and getattr(repo, "_dtype", ""):
-                entry["dtype"] = repo._dtype
-            # #337: a SharedBase variant records its shared component refs +
-            # its per-variant swap-slot refs into the lock so the orchestrator
-            # (and a cold-boot prewarm) can see the full residency footprint of
-            # each selectable model — the shared base loads once + is pinned;
-            # only the variant slot is the per-model swap unit.
-            if isinstance(repo, Variant):
-                entry["kind"] = "shared_base_variant"
-                entry["pipeline_class"] = repo.pipeline_class_fqn
-                entry["shared_components"] = {
-                    name: {
-                        "ref": comp.ref,
-                        "provider": comp.provider,
-                        "subfolder": str(getattr(comp, "_subfolder", "") or ""),
-                        "dtype": str(getattr(comp, "_dtype", "") or ""),
-                    }
-                    for name, comp in dict(repo.shared_components).items()
-                }
-                entry["variant_slots"] = {
-                    name: {
-                        "ref": comp.ref,
-                        "provider": comp.provider,
-                        "subfolder": str(getattr(comp, "_subfolder", "") or ""),
-                        "dtype": str(getattr(comp, "_dtype", "") or ""),
-                    }
-                    for name, comp in dict(repo.variant_slots).items()
-                }
-            table[k] = entry
-        return {
-            "param": param_name,
-            "type": _type_qualname(param_type),
-            "binding": {
-                "kind": "dispatch",
-                "field": binding.field,
-                "slot_name": dispatch_slot_name or param_name,
-                "table": table,
-                "allow_override": binding._allow_override,
-                "allow_lora": bool(getattr(binding, "_allow_lora", False)),
-                "pipeline_classes": list(binding._pipeline_classes),
-            },
-        }
-    raise TypeError(f"unknown binding type: {type(binding).__name__}")
 
 
 def _resolved_repo_id(ref: str, flavor: str = "", tag: str = "prod", provider: str = "tensorhub") -> str:
@@ -443,14 +316,6 @@ class Worker:
         self.use_tls = use_tls
         self.reconnect_delay = reconnect_delay
         self.max_reconnect_attempts = max_reconnect_attempts
-        self.max_input_bytes = 0
-        self.max_output_bytes = 0
-
-        self._jwks_url = ""
-        self._jwks_ttl_seconds = 300
-        self._jwt_issuer = ""
-        self._jwt_audience = ""
-        self._jwks_cache: Optional[_JWKSCache] = None
 
         # Worker containers are treated as untrusted. Do not depend on
         # RELEASE_ID/OWNER env vars. Release + owner identity come from the
@@ -463,11 +328,6 @@ class Worker:
 
         logger.info(f"RUNPOD_POD_ID: {self.runpod_pod_id}")
 
-        self._request_specs: Dict[str, _RequestSpec] = {}
-        # Transform-kind (@conversion) handlers, keyed by function
-        # name. Dispatch shape is (request_context, payload_dict) → list[ProducedFlavor];
-        # see gen_worker/conversion/dispatch.py for the contract.
-        self._training_specs: Dict[str, Callable[..., Any]] = {}
         # #273: BatchedWorker (`@inference(runtime="sglang"|"vllm")`) handlers,
         # keyed by externally-addressable function name. Each spec carries the
         # singleton class instance + bound async method + payload/delta types.
@@ -529,11 +389,7 @@ class Worker:
         self._request_recv_times: Dict[str, float] = {}
         self._request_handler_done_times: Dict[str, float] = {}
         # #321: batch context state removed alongside BatchExecutionRequest.
-        self._drain_timeout_seconds = 0
         self._draining = False
-        # Emit model.ready immediately on connect by default; downstream model-load
-        # events still apply for workers that need to gate on GPU model pre-load.
-        self._models_ready_on_connect: bool = False
         self._discovered_resources: Dict[str, Resources] = {} # Store resources per function
         self._function_schemas: Dict[str, Tuple[bytes, bytes, Optional[bytes], bytes]] = {}  # func_name -> (input_schema_json, output_schema_json, delta_schema_json, injection_json)
         # #321: runtime batching state removed alongside RuntimeBatchingConfigCommand.
@@ -541,14 +397,6 @@ class Worker:
 
         self._custom_runtime_cache: Dict[Tuple[str, str], Any] = {}  # (model_id, injected_type_qualname) -> runtime handle
         self._custom_runtime_locks: Dict[Tuple[str, str], threading.Lock] = {}
-        self._lora_overlay_locks: Dict[int, threading.Lock] = {}
-        self._lora_overlay_locks_lock = threading.Lock()
-
-        # Local (non-NFS) cache for NFS->local snapshot localization.
-        # Empty string disables localization entirely.
-        self._local_model_cache_dir = ""
-        self._local_model_cache: Optional[Any] = None
-        self._local_model_cache_lock = threading.Lock()
         self._last_disk_inventory_hash: str = ""
 
         self._gpu_busy_lock = threading.Lock()
@@ -679,10 +527,6 @@ class Worker:
         # _next_reconnect_delay as full-jitter uniform(0, capped_backoff).
         self._reconnect_delay_base = max(0.5, reconnect_delay) if reconnect_delay else 0.5
         self._reconnect_delay_max = 30
-        # full jitter: the realized delay is uniform(0, capped_backoff), so the
-        # jitter span tracks the backoff rather than a fixed +1s. Kept as an
-        # attribute so it can be tuned/inspected; _next_reconnect_delay reads it.
-        self._reconnect_jitter_seconds = 1.0
         # #462-T4: exit when the capability token is permanently rejected.
         # Counts CONSECUTIVE auth rejections (UNAUTHENTICATED / PERMISSION_DENIED
         # on connect/register or an established stream); any inbound scheduler
@@ -777,14 +621,6 @@ class Worker:
         self._disabled_functions_by_name: Dict[str, Dict[str, Any]] = {}
         self._worker_local_unavailable_functions_by_name: Dict[str, Dict[str, Any]] = {}
         self._payload_ref_availability_by_function: Dict[str, Dict[str, Dict[str, Any]]] = {}
-        # Per-request tracking of which caller-supplied refs the active
-        # invocation bound via the orchestrator-stamped `resolved_models` map
-        # (the 0.7.0 override channel — replaces the old Src.PAYLOAD_REF
-        # signature pattern). Set by the dispatch path before the tenant
-        # body runs; read by `_map_exception` to classify post-download
-        # failures as `ref_compatibility_surprise`. Empty dict = no caller
-        # refs on this request; the classifier returns False.
-        self._current_payload_ref_keys: Dict[str, str] = {}
         self._prefetch_thread: Optional[threading.Thread] = None
         self._model_init_done_event = threading.Event() # To signal model init is complete
 
@@ -1067,8 +903,6 @@ class Worker:
         # Discover functions before setting signals? Maybe after. Let's do it here.
         self._discover_and_register_functions()
 
-        self._verify_worker_jwt()
-
         # The worker is usually a top-level process. When embedded in tests/dev
         # helpers, it might be constructed in a non-main thread (signal handlers
         # are only allowed in the main thread).
@@ -1186,100 +1020,6 @@ class Worker:
             seen.add(addr)
             yield addr
 
-    def _verify_worker_jwt(self) -> None:
-        if not self.worker_jwt or not self._jwks_cache:
-            return
-        try:
-            header = jwt.get_unverified_header(self.worker_jwt)
-            kid = header.get("kid")
-            key = self._jwks_cache.get_key(kid)
-            if not key:
-                raise ValueError("JWKS key not found for token")
-            options: Any = {"verify_aud": bool(self._jwt_audience)}
-            jwt.decode(
-                self.worker_jwt,
-                key=key,
-                algorithms=["RS256"],
-                audience=self._jwt_audience or None,
-                issuer=self._jwt_issuer or None,
-                options=options,
-            )
-            logger.info("Worker-connect JWT verified against scheduler JWKS.")
-        except Exception as e:
-            logger.error(f"Worker-connect JWT verification failed: {e}")
-            raise
-
-    def _looks_like_ref_compatibility_surprise(self, exc: BaseException) -> bool:
-        """Classify load-time errors as ``ref_compatibility_surprise``.
-
-        Runs when the current request carried a
-        caller-supplied ref.
-
-        Runs only when ``_current_payload_ref_keys`` is populated (meaning
-        the orchestrator stamped a `resolved_models` override on this
-        request and the dispatch path recorded which params the caller
-        substituted). Without that flag we don't want to false-positive on
-        requests that never involved a caller-supplied ref — an internal
-        fine-tune or a fixed-binding endpoint's state_dict mismatch is NOT
-        a compatibility surprise, it's a real bug.
-
-        Detection patterns (sufficient, not exhaustive):
-
-        - ``RuntimeError`` whose message starts with ``Error(s) in
-          loading state_dict`` — the canonical PyTorch load failure when
-          tensor names don't match.
-        - ``KeyError`` on a diffusers component name (text_encoder,
-          text_encoder_2, unet, vae, transformer, scheduler) — the repo's
-          model_index declared a layout the pipeline class doesn't
-          understand, or the tenant looked up a component that isn't
-          there.
-        - ``OSError`` / ``FileNotFoundError`` mentioning ``config.json``,
-          ``model_index.json``, or a known diffusers component dir — the
-          ref doesn't have the expected file layout despite having the
-          right top-level class name.
-        - The substrings ``"Cannot load"`` / ``"does not appear to be a
-          valid"`` / ``"missing keys"`` / ``"unexpected keys"`` /
-          ``"size mismatch for"`` anywhere in the message.
-        """
-        if not getattr(self, "_current_payload_ref_keys", None):
-            return False
-        msg = str(exc or "")
-        lowered = msg.lower()
-        # 1. State-dict key / shape mismatches — the reliable signal.
-        if "error(s) in loading state_dict" in lowered:
-            return True
-        if "missing keys" in lowered or "unexpected keys" in lowered:
-            return True
-        if "size mismatch for" in lowered:
-            return True
-        # 2. Diffusers component KeyError during pipeline construction.
-        if isinstance(exc, KeyError):
-            comp_names = {
-                "text_encoder", "text_encoder_2", "text_encoder_3",
-                "unet", "transformer", "vae", "scheduler",
-                "tokenizer", "tokenizer_2", "image_encoder", "prior",
-            }
-            # KeyError's str is the repr of the key — peel the quotes.
-            key = msg.strip().strip("'\"")
-            if key in comp_names:
-                return True
-        # 3. Missing config at from_pretrained.
-        if isinstance(exc, (OSError, FileNotFoundError)):
-            for tok in ("config.json", "model_index.json", "pytorch_model.bin",
-                        "diffusion_pytorch_model", "safetensors"):
-                if tok in lowered:
-                    return True
-        # 4. Free-form diffusers / transformers load errors.
-        for tok in (
-            "cannot load",
-            "does not appear to be a valid",
-            "cannot instantiate",
-            "tried to load but failed",
-        ):
-            if tok in lowered:
-                return True
-        return False
-
     def _sanitize_safe_message(self, message: str) -> str:
         message = (message or "").strip()
         if not message:
@@ -1315,20 +1055,6 @@ class Worker:
                 "ref_compatibility_surprise",
                 False,
                 self._sanitize_safe_message(str(exc) or "ref compatibility failure"),
-                internal,
-            )
-        # Heuristic: common load-time errors that almost always mean the
-        # caller's ref doesn't match the function's expected shape. Runs
-        # only when the current request carried a caller-supplied ref
-        # (set via `_current_payload_ref_keys` in the dispatch path).
-        if self._looks_like_ref_compatibility_surprise(exc):
-            msg = str(exc) or ""
-            if len(msg) > 240:
-                msg = msg[:240] + "…"
-            return (
-                "ref_compatibility_surprise",
-                False,
-                self._sanitize_safe_message(msg or "ref compatibility failure"),
                 internal,
             )
         if isinstance(exc, ValidationError) or isinstance(exc, ValueError):
@@ -2201,11 +1927,6 @@ class Worker:
         is the whole point of issue #12: when they drift, the worker boots
         fine but the orchestrator's dispatch fails with `Unknown function
         requested` (the conversion-endpoint outage of 2026-05-16).
-
-        Legacy function-shape ``@inference`` / ``@conversion`` decorators are
-        still scanned per-module so a stray decorator surfaces as a registered
-        handler (or a loud error) instead of vanishing silently. Post-#322 the
-        canonical shape is class-based.
         """
         logger.info(
             "Discovering worker handlers in modules: %s...",
@@ -2228,66 +1949,6 @@ class Worker:
                 )
                 continue
             discovered += n
-
-        # Function-shape: per-module dict scan. Walks the same modules the
-        # walker imported (they're now in sys.modules) so we don't re-import.
-        for module_name in self.user_module_names:
-            module = sys.modules.get(module_name)
-            if module is None:
-                # The walker logs the import failure already; nothing to scan.
-                continue
-            for _, obj in inspect.getmembers(module):
-                if not inspect.isfunction(obj):
-                    continue
-
-                # Transform-kind endpoints: @conversion decorated.
-                # The wrapper's (request_context, payload) signature isn't a
-                # regular @inference shape; register via TrainingFunctionSpec
-                # without running _inspect_request_spec.
-                if getattr(obj, "_is_training_function", False) is True:
-                    python_name = getattr(obj, "__name__", None)
-                    if not python_name:
-                        logger.error("Skipping unnamed @conversion in %s", module_name)
-                        continue
-                    # Slugify the Python name to match what orchestrator dispatches
-                    # (matches the inference-function registration convention so
-                    # function_name lookups agree at RPC time).
-                    name = slugify_name(python_name)
-                    if not name:
-                        logger.error("@conversion '%s' in %s: function name cannot be normalized",
-                                     python_name, module_name)
-                        continue
-                    if name in self._training_specs:
-                        logger.warning("Handler name conflict for '%s'; skipping", name)
-                        continue
-                    resources = getattr(obj, "_worker_resources", None)
-                    self._training_specs[name] = obj
-                    if resources is not None:
-                        self._discovered_resources[name] = resources
-                    discovered += 1
-                    logger.info("Registered training_function: '%s'", name)
-                    continue
-
-                if getattr(obj, "_is_inference_function", False) is True:
-                    try:
-                        spec = self._inspect_request_spec(obj)
-                    except Exception as exc:
-                        logger.error("Skipping function '%s': %s", getattr(obj, "__name__", "<unknown>"), exc)
-                        continue
-                    if spec.name in self._request_specs:
-                        logger.warning("Handler name conflict for '%s'; skipping", spec.name)
-                        continue
-                    self._request_specs[spec.name] = spec
-                    self._discovered_resources[spec.name] = spec.resources
-                    self._function_schemas[spec.name] = (
-                        spec.input_schema_json,
-                        spec.output_schema_json,
-                        spec.delta_schema_json,
-                        spec.injection_json,
-                    )
-                    discovered += 1
-                    logger.info("Registered function: '%s' (%s)", spec.name, spec.output_mode)
-                    continue
 
         if discovered == 0:
             logger.error(
@@ -2399,7 +2060,7 @@ class Worker:
                     cls.__name__, method_name,
                 )
                 continue
-            if slug in self._request_specs or slug in self._training_specs or slug in self._batched_specs:
+            if slug in self._batched_specs:
                 logger.warning("Handler name conflict for '%s'; skipping", slug)
                 continue
 
@@ -2676,9 +2337,7 @@ class Worker:
                 )
                 continue
             if (
-                slug in self._request_specs
-                or slug in self._training_specs
-                or slug in self._batched_specs
+                slug in self._batched_specs
                 or slug in self._serial_class_specs
             ):
                 logger.warning("Handler name conflict for '%s'; skipping", slug)
@@ -2857,9 +2516,7 @@ class Worker:
                     cls.__name__, method_name,
                 )
                 continue
-            if (slug in self._request_specs
-                    or slug in self._training_specs
-                    or slug in self._batched_specs
+            if (slug in self._batched_specs
                     or slug in self._serial_class_specs):
                 logger.warning("Handler name conflict for '%s'; skipping", slug)
                 continue
@@ -3098,9 +2755,7 @@ class Worker:
                 )
                 continue
             if (
-                slug in self._request_specs
-                or slug in self._training_specs
-                or slug in self._batched_specs
+                slug in self._batched_specs
                 or slug in self._serial_class_specs
                 or slug in self._conversion_class_specs
             ):
@@ -3428,137 +3083,6 @@ class Worker:
             f"AsyncIterator[msgspec.Struct] (got {ret!r})"
         )
 
-    def _inspect_request_spec(self, func: Callable[..., Any]) -> _RequestSpec:
-        python_name = func.__name__
-        func_name = slugify_name(python_name)
-        if not func_name:
-            raise ValueError(f"{python_name}: function name cannot be normalized")
-        resources: Resources = getattr(func, "_worker_resources", Resources())
-
-        try:
-            hints = typing.get_type_hints(func, globalns=func.__globals__, include_extras=True)
-        except Exception as exc:
-            raise ValueError(f"failed to resolve type hints: {exc}")
-
-        sig = inspect.signature(func)
-        params = list(sig.parameters.values())
-        if not params:
-            raise ValueError("must accept ctx: RequestContext as first arg")
-
-        ctx_name = params[0].name
-        ctx_type = hints.get(ctx_name)
-        if ctx_type is not RequestContext:
-            raise ValueError("first argument must be ctx: RequestContext")
-
-        # New 0.7.0 binding model: @inference(models={...}) attaches
-        # __gen_worker_bindings__ keyed by parameter name. Treat any parameter
-        # listed there as an injected binding; any msgspec.Struct parameter as
-        # the payload. Everything else is a signature error.
-        bindings_map: Dict[str, Binding] = dict(
-            getattr(func, "__gen_worker_bindings__", None) or {}
-        )
-
-        injections: list[InjectionSpec] = []
-        payload_type: Optional[type[msgspec.Struct]] = None
-        payload_param: Optional[str] = None
-        for p in params[1:]:
-            ann = hints.get(p.name)
-            if ann is None:
-                raise ValueError(f"missing type annotation for param: {p.name}")
-            if p.name in bindings_map:
-                injections.append(
-                    InjectionSpec(
-                        param_name=p.name,
-                        param_type=ann,
-                        binding=bindings_map[p.name],
-                        peak_vram_gb=getattr(resources, "peak_vram_per_request_gb", None),
-                    )
-                )
-                continue
-            if isinstance(ann, type) and issubclass(ann, msgspec.Struct):
-                if payload_type is not None:
-                    raise ValueError("must accept exactly one msgspec.Struct payload arg")
-                payload_type = ann
-                payload_param = p.name
-                continue
-            raise ValueError(
-                f"unsupported param type for {p.name!r}: {ann!r}. "
-                "Inject models via @inference(models={...}); payload must be msgspec.Struct."
-            )
-
-        if payload_type is None or payload_param is None:
-            raise ValueError("must accept exactly one msgspec.Struct payload arg")
-
-        ret = hints.get("return")
-        if ret is None:
-            raise ValueError("missing return type annotation")
-
-        output_mode = "single"
-        output_type: Optional[type[msgspec.Struct]] = None
-        delta_type: Optional[type[msgspec.Struct]] = None
-
-        if isinstance(ret, type) and issubclass(ret, msgspec.Struct):
-            output_type = ret
-        else:
-            origin = get_origin(ret)
-            if origin in (Iterator, Iterable, cabc.Iterator, cabc.Iterable):
-                args = get_args(ret)
-                if len(args) != 1:
-                    raise ValueError("incremental output return type must be Iterator[DeltaStruct]")
-                dt = args[0]
-                if not isinstance(dt, type) or not issubclass(dt, msgspec.Struct):
-                    raise ValueError("delta type must be msgspec.Struct")
-                output_mode = "incremental"
-                delta_type = dt
-                output_type = dt  # best-effort schema until proto adds delta schema field
-            else:
-                raise ValueError("return type must be msgspec.Struct or Iterator[msgspec.Struct]")
-
-        input_schema = msgspec.json.schema(payload_type)
-        output_schema = msgspec.json.schema(output_type)
-        try:
-            from .api.payload_constraints import apply_schema_constraints
-
-            input_schema = apply_schema_constraints(input_schema, payload_type)
-            output_schema = apply_schema_constraints(output_schema, output_type)
-        except Exception:
-            pass
-        input_schema_json = json.dumps(input_schema, separators=(",", ":"), sort_keys=True).encode("utf-8")
-        output_schema_json = json.dumps(output_schema, separators=(",", ":"), sort_keys=True).encode("utf-8")
-        delta_schema_json = None
-        if delta_type is not None:
-            delta_schema = msgspec.json.schema(delta_type)
-            try:
-                from .api.payload_constraints import apply_schema_constraints
-
-                delta_schema = apply_schema_constraints(delta_schema, delta_type)
-            except Exception:
-                pass
-            delta_schema_json = json.dumps(delta_schema, separators=(",", ":"), sort_keys=True).encode("utf-8")
-
-        injection_payload = [
-            _binding_to_wire(inj.param_name, inj.param_type, inj.binding)
-            for inj in injections
-        ]
-        injection_json = json.dumps(injection_payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
-
-        return _RequestSpec(
-            name=func_name,
-            func=func,
-            resources=resources,
-            ctx_param=ctx_name,
-            payload_param=payload_param,
-            payload_type=payload_type,
-            output_mode=output_mode,
-            output_type=output_type,
-            delta_type=delta_type,
-            injections=tuple(injections),
-            input_schema_json=input_schema_json,
-            output_schema_json=output_schema_json,
-            delta_schema_json=delta_schema_json,
-            injection_json=injection_json,
-        )
-
     def _select_outgoing_queue(self, message: WorkerSchedulerMessage) -> "queue.Queue[Any]":
         """#345 Improvement A: pick the outgoing queue for a message.
 
@@ -3715,420 +3239,6 @@ class Worker:
             obs["local_queue_ms"] = max(0, int((started_at - enqueued_at) * 1000))
             obs["started_at"] = started_at
         target(*args)
-
-    def _materialize_assets(self, ctx: RequestContext, obj: Any) -> None:
-        if isinstance(obj, (Asset, Tensors)):
-            self._materialize_asset(ctx, obj)
-            return
-        if isinstance(obj, list):
-            for it in obj:
-                self._materialize_assets(ctx, it)
-            return
-        if isinstance(obj, dict):
-            for it in obj.values():
-                self._materialize_assets(ctx, it)
-            return
-        fields = getattr(obj, "__struct_fields__", None)
-        if fields and isinstance(fields, (tuple, list)):
-            for name in fields:
-                try:
-                    val = getattr(obj, name)
-                except Exception as e:
-                    logger.warning("_materialize_assets: could not access field %r on %s: %s", name, type(obj).__name__, e)
-                    continue
-                self._materialize_assets(ctx, val)
-
-    def _auto_upload_output_assets(self, ctx: RequestContext, output_obj: Any) -> Any:
-        """
-        Auto-persist tenant-returned local assets.
-
-        If a returned Asset/Tensors has local_path set, upload it through RequestContext.
-        save_file()/save_checkpoint() and replace it with persisted metadata. This gives
-        tenant code an optional shorthand: return local artifacts directly and let the
-        worker persist them.
-        """
-        upload_idx = 0
-
-        def _default_ref(local_path: str) -> str:
-            nonlocal upload_idx
-            leaf = os.path.basename(local_path) or "artifact.bin"
-            ref = f"outputs/{ctx.request_id}/auto/{upload_idx:06d}-{leaf}"
-            upload_idx += 1
-            return _normalize_output_ref(ref)
-
-        def _walk(v: Any) -> Any:
-            if isinstance(v, Asset):
-                local = str(getattr(v, "local_path", "") or "").strip()
-                if not local:
-                    return v
-                ref = str(getattr(v, "ref", "") or "").strip() or _default_ref(local)
-                saved: Asset | Tensors = ctx.save_file(ref, local)
-                return saved
-
-            if isinstance(v, Tensors):
-                local = str(getattr(v, "local_path", "") or "").strip()
-                if not local:
-                    return v
-                ref = str(getattr(v, "ref", "") or "").strip() or _default_ref(local)
-                fmt = str(getattr(v, "format", "") or "").strip() or None
-                saved = ctx.save_checkpoint(ref, local, format=fmt)
-                return saved
-
-            if isinstance(v, list):
-                changed = False
-                out: List[Any] = []
-                for it in v:
-                    ni = _walk(it)
-                    out.append(ni)
-                    if ni is not it:
-                        changed = True
-                if changed:
-                    v[:] = out
-                return v
-
-            if isinstance(v, tuple):
-                changed = False
-                out_items: List[Any] = []
-                for it in v:
-                    ni = _walk(it)
-                    out_items.append(ni)
-                    if ni is not it:
-                        changed = True
-                return tuple(out_items) if changed else v
-
-            if isinstance(v, dict):
-                for k in list(v.keys()):
-                    nv = _walk(v[k])
-                    if nv is not v[k]:
-                        v[k] = nv
-                return v
-
-            fields = getattr(v, "__struct_fields__", None)
-            if fields and isinstance(fields, (tuple, list)):
-                for name in fields:
-                    try:
-                        cur = getattr(v, name)
-                    except Exception:
-                        continue
-                    nv = _walk(cur)
-                    if nv is not cur:
-                        try:
-                            setattr(v, name, nv)
-                        except Exception:
-                            pass
-            return v
-
-        return _walk(output_obj)
-
-    def _materialize_asset(self, ctx: RequestContext, asset: Asset | Tensors) -> None:
-        if asset.local_path:
-            return
-        ref = (asset.ref or "").strip()
-        if not ref:
-            return
-        if not (ref.startswith("http://") or ref.startswith("https://")):
-            if mapped := ctx._materialized_input_url_for_ref(ref):
-                ref = mapped
-        base_dir = "/tmp/tensorhub/job"
-        scope_id = _workspace_scope_id(ctx.request_id, getattr(ctx, "job_id", None))
-        local_inputs_dir = os.path.join(base_dir, scope_id, "inputs")
-        os.makedirs(local_inputs_dir, exist_ok=True)
-        cache_dir = os.path.join(base_dir, "cache")
-        os.makedirs(cache_dir, exist_ok=True)
-
-        default_max_bytes = 200 * 1024 * 1024
-        max_bytes = int(getattr(asset, "url_max_bytes", None) or default_max_bytes)
-        if max_bytes <= 0:
-            max_bytes = default_max_bytes
-
-        # External URL inputs — check shared cache first, download on miss.
-        if ref.startswith("http://") or ref.startswith("https://"):
-            if _url_is_blocked(ref):
-                raise RuntimeError("input url blocked")
-            download_token = (asset.download_token or "").strip() or None
-            ext = os.path.splitext(urllib.parse.urlparse(ref).path)[1] or os.path.splitext(ref)[1]
-            if not ext:
-                try:
-                    head_req = urllib.request.Request(ref, method="HEAD")
-                    if download_token:
-                        head_req.add_header("Authorization", f"Bearer {download_token}")
-                    with urllib.request.urlopen(head_req, timeout=10) as head_resp:
-                        cd = head_resp.headers.get("Content-Disposition") or ""
-                        fname_match = re.search(r'filename\*?=["\']?(?:UTF-8\'\')?([^"\';\r\n]+)', cd, re.IGNORECASE)
-                        if fname_match:
-                            ext = os.path.splitext(fname_match.group(1).strip())[1]
-                except Exception:
-                    pass
-            cache_key_material = ref
-            if download_token:
-                token_hash = hashlib.sha256(download_token.encode("utf-8")).hexdigest()
-                cache_key_material = f"{ref}\n{token_hash}"
-            validation_context = str(getattr(asset, "url_validation_context", "") or "").strip()
-            if validation_context:
-                cache_key_material = f"{cache_key_material}\n{validation_context}"
-            name_hash = hashlib.sha256(cache_key_material.encode("utf-8")).hexdigest()[:32]
-            cache_path = os.path.join(cache_dir, f"{name_hash}{ext}")
-            sidecar_path = cache_path + ".sha256"
-            if not os.path.exists(cache_path):
-                size, sha256_hex, mime = self._download_url_to_file(ref, cache_path, max_bytes, token=download_token)
-                try:
-                    with open(sidecar_path, "w") as _sf:
-                        _sf.write(sha256_hex)
-                except Exception:
-                    pass
-            else:
-                size = os.path.getsize(cache_path)
-                with open(cache_path, "rb") as f:
-                    head = f.read(512)
-                mime = _infer_mime_type(ref, head)
-                try:
-                    with open(sidecar_path) as _sf:
-                        sha256_hex = _sf.read().strip()
-                except FileNotFoundError:
-                    # Sidecar missing for entries cached before this change — compute from file.
-                    h = hashlib.sha256()
-                    with open(cache_path, "rb") as f:
-                        for chunk in iter(lambda: f.read(1 << 20), b""):
-                            h.update(chunk)
-                    sha256_hex = h.hexdigest()
-                    try:
-                        with open(sidecar_path, "w") as _sf:
-                            _sf.write(sha256_hex)
-                    except Exception:
-                        pass
-            local_path = os.path.join(local_inputs_dir, f"{name_hash}{ext}")
-            if not os.path.exists(local_path):
-                try:
-                    os.link(cache_path, local_path)
-                except Exception:
-                    try:
-                        import shutil
-                        shutil.copyfile(cache_path, local_path)
-                    except Exception:
-                        local_path = cache_path
-            if isinstance(asset, Asset):
-                self._validate_url_asset(asset, local_path, mime)
-            asset.local_path = local_path
-            if not asset.owner:
-                asset.owner = self.owner
-            if isinstance(asset, Asset):
-                asset.mime_type = mime
-            asset.size_bytes = size
-            asset.sha256 = sha256_hex
-            return
-
-        # Non-URL refs require explicit file API credentials. Standard execution should
-        # receive presigned input URLs from orchestrator and avoid this path.
-        base = (getattr(ctx, "_file_api_base_url", None) or "").strip()
-        token = (getattr(ctx, "_worker_capability_token", None) or "").strip()
-        if not base or not token:
-            raise RuntimeError("input ref was not materialized to URL and no file API credentials were provided")
-        base = base.rstrip("/")
-        url = f"{base}/api/v1/file/{_encode_ref_for_url(ref)}"
-
-        head_req = _http_request("HEAD", url, token, owner=ctx.owner)
-        try:
-            with urllib.request.urlopen(head_req, timeout=10) as resp:
-                if resp.status < 200 or resp.status >= 300:
-                    raise RuntimeError(f"failed to stat asset ({resp.status})")
-                sha256_hex = (resp.headers.get("X-Cozy-SHA256") or "").strip()
-                size_hdr = (resp.headers.get("X-Cozy-Size-Bytes") or "").strip()
-                mime = (resp.headers.get("X-Cozy-Mime-Type") or "").strip()
-        except urllib.error.HTTPError as e:
-            code = getattr(e, "code", 0)
-            if code in (401, 403):
-                raise AuthError(f"file read unauthorized ({code}): check worker_capability_token validity") from e
-            raise RuntimeError(f"failed to stat asset ({code or 'unknown'})") from e
-        size = int(size_hdr) if size_hdr.isdigit() else 0
-        if max_bytes > 0 and size > max_bytes:
-            raise InputTooLargeError(size_bytes=size, max_bytes=max_bytes, source="input file")
-
-        ext = os.path.splitext(ref)[1]
-        if not ext and mime:
-            guessed = {
-                "image/png": ".png",
-                "image/jpeg": ".jpg",
-                "image/webp": ".webp",
-                "image/gif": ".gif",
-            }.get(mime)
-            ext = guessed or ""
-
-        if not sha256_hex:
-            sha256_hex = hashlib.sha256(ref.encode("utf-8")).hexdigest()
-        cache_name = f"{sha256_hex[:32]}{ext}"
-        cache_path = os.path.join(cache_dir, cache_name)
-
-        if not os.path.exists(cache_path):
-            get_req = _http_request("GET", url, token, owner=ctx.owner)
-            try:
-                with urllib.request.urlopen(get_req, timeout=30) as resp:
-                    if resp.status < 200 or resp.status >= 300:
-                        raise RuntimeError(f"failed to download asset ({resp.status})")
-                    _size, _sha = self._stream_to_file(resp, cache_path, max_bytes)
-                    if not size:
-                        size = _size
-                    if not sha256_hex:
-                        sha256_hex = _sha
-            except urllib.error.HTTPError as e:
-                code = getattr(e, "code", 0)
-                if code in (401, 403):
-                    raise AuthError(f"file read unauthorized ({code}): check worker_capability_token validity") from e
-                raise RuntimeError(f"failed to download asset ({code or 'unknown'})") from e
-
-        local_path = os.path.join(local_inputs_dir, cache_name)
-        if not os.path.exists(local_path):
-            try:
-                os.link(cache_path, local_path)
-            except Exception:
-                try:
-                    import shutil
-
-                    shutil.copyfile(cache_path, local_path)
-                except Exception:
-                    local_path = cache_path
-
-        if not mime:
-            with open(local_path, "rb") as f:
-                head = f.read(512)
-            mime = _infer_mime_type(ref, head)
-
-        asset.local_path = local_path
-        if not asset.owner:
-            asset.owner = (ctx.owner or self.owner)
-        if isinstance(asset, Asset):
-            asset.mime_type = mime or None
-        asset.size_bytes = size or None
-        asset.sha256 = sha256_hex or None
-
-    def _download_url_to_file(self, src: str, dst: str, max_bytes: int, token: Optional[str] = None) -> Tuple[int, str, Optional[str]]:
-        attempts = 3
-        attempt = 0
-        last_err: Optional[Exception] = None
-        while attempt < max(1, attempts):
-            attempt += 1
-            try:
-                class _StripAuthOnRedirect(urllib.request.HTTPRedirectHandler):
-                    def redirect_request(self, req: urllib.request.Request, fp: Any, code: int, msg: str, headers: Any, newurl: str) -> Optional[urllib.request.Request]:
-                        if _url_is_blocked(newurl):
-                            raise ValidationError("input url redirect target blocked")
-                        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
-                        if new_req is not None:
-                            new_req.headers.pop("Authorization", None)
-                            new_req.unredirected_hdrs.pop("Authorization", None)
-                        return new_req
-
-                client = urllib.request.build_opener(_StripAuthOnRedirect())
-                # CivitAI download endpoints require the token as a query
-                # parameter rather than an Authorization header.
-                parsed = urllib.parse.urlparse(src)
-                _is_civitai = parsed.netloc == "civitai.com" or (parsed.netloc or "").endswith(".civitai.com")
-                if token and _is_civitai:
-                    qs = parsed.query + ("&" if parsed.query else "") + urllib.parse.urlencode({"token": token})
-                    request_src = urllib.parse.urlunparse(parsed._replace(query=qs))
-                    logger.info("_download_url_to_file: appending token (last 4: ...%s) to civitai URL", token[-4:])
-                else:
-                    request_src = src
-                req = urllib.request.Request(request_src, method="GET")
-                # Use a non-Python User-Agent; Cloudflare returns 403 for the default "Python-urllib/x.y" UA.
-                req.add_header("User-Agent", "curl/8.7.1")
-                if token and not _is_civitai:
-                    req.add_header("Authorization", f"Bearer {token}")
-                    logger.info("_download_url_to_file: using token (last 4: ...%s) for %s", token[-4:], src)
-                with client.open(req, timeout=30) as resp:
-                    response_mime = (resp.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
-                    size, sha = self._stream_to_file(resp, dst, max_bytes)
-                with open(dst, "rb") as f:
-                    head = f.read(512)
-                sniffed_mime = (_infer_mime_type(src, head) or "application/octet-stream").lower()
-                if (
-                    response_mime
-                    and sniffed_mime != "application/octet-stream"
-                    and response_mime.split("/", 1)[0] != sniffed_mime.split("/", 1)[0]
-                ):
-                    raise ValidationError(
-                        f"input url content-type mismatch: response={response_mime} sniffed={sniffed_mime}"
-                    )
-                mime = sniffed_mime if sniffed_mime != "application/octet-stream" else (response_mime or sniffed_mime)
-                return size, sha, mime
-            except Exception as e:
-                last_err = e
-                if isinstance(e, (ValidationError, InputTooLargeError)):
-                    raise
-                if attempt >= max(1, attempts):
-                    break
-                sleep_s = min(10.0, 0.5 * (2 ** (attempt - 1))) + random.random() * 0.2
-                time.sleep(sleep_s)
-        raise RuntimeError(f"failed to download url: {last_err}")
-
-    def _validate_url_asset(self, asset: Asset, local_path: str, mime: Optional[str]) -> None:
-        normalized_mime = (mime or "application/octet-stream").split(";", 1)[0].strip().lower()
-        allowed = tuple(
-            str(x or "").strip().lower()
-            for x in getattr(asset, "url_allowed_mime_types", ()) or ()
-            if str(x or "").strip()
-        )
-        if allowed and normalized_mime not in allowed:
-            raise ValidationError(
-                f"input url MIME type {normalized_mime!r} not in allowed set"
-            )
-
-        expected_prefix = ""
-        if isinstance(asset, ImageAsset):
-            expected_prefix = "image/"
-        elif isinstance(asset, VideoAsset):
-            expected_prefix = "video/"
-        elif isinstance(asset, AudioAsset):
-            expected_prefix = "audio/"
-        if expected_prefix and not normalized_mime.startswith(expected_prefix):
-            raise ValidationError(
-                f"input url MIME type {normalized_mime!r} is not valid for {type(asset).__name__}"
-            )
-
-        if isinstance(asset, ImageAsset):
-            max_width = getattr(asset, "url_max_width", None)
-            max_height = getattr(asset, "url_max_height", None)
-            max_pixels = getattr(asset, "url_max_pixels", None)
-            if max_width is None and max_height is None and max_pixels is None:
-                return
-            try:
-                from PIL import Image
-
-                with Image.open(local_path) as image:
-                    width, height = image.size
-                    image.verify()
-            except Exception as exc:
-                raise ValidationError("input url image could not be decoded") from exc
-            if max_width is not None and width > int(max_width):
-                raise InputTooLargeError(size_bytes=width, max_bytes=int(max_width), source="input image width")
-            if max_height is not None and height > int(max_height):
-                raise InputTooLargeError(size_bytes=height, max_bytes=int(max_height), source="input image height")
-            pixels = width * height
-            if max_pixels is not None and pixels > int(max_pixels):
-                raise InputTooLargeError(size_bytes=pixels, max_bytes=int(max_pixels), source="input image pixels")
-
-    def _stream_to_file(self, src: Any, dst: str, max_bytes: int) -> Tuple[int, str]:
-        tmp = f"{dst}.tmp-{os.getpid()}-{threading.get_ident()}-{random.randint(0, 1_000_000)}"
-        total = 0
-        h = hashlib.sha256()
-        try:
-            with open(tmp, "wb") as out:
-                while True:
-                    chunk = src.read(_DOWNLOAD_CHUNK_BYTES)
-                    if not chunk:
-                        break
-                    total += len(chunk)
-                    if total > max_bytes:
-                        raise InputTooLargeError(size_bytes=total, max_bytes=max_bytes, source="input file")
-                    h.update(chunk)
-                    out.write(chunk)
-            os.replace(tmp, dst)
-        finally:
-            try:
-                if os.path.exists(tmp):
-                    os.remove(tmp)
-            except Exception:
-                pass
-        return total, h.hexdigest()
 
     def _start_registration_watchdog(self) -> None:
         timeout_s = int(getattr(self, "_register_timeout_s", 0) or 0)
@@ -4313,12 +3423,6 @@ class Worker:
             # Reset redirect chain on a successful registration so a future
             # owner change (legitimate failover) starts with a fresh budget.
             self._redirect_chain_count = 0
-            if self._models_ready_on_connect:
-                # Conversion workers: signal ModelsReady immediately since there is
-                # no GPU model to pre-load. Without this the scheduler's ModelsReady
-                # gate would block all job dispatch to this worker indefinitely.
-                self._emit_worker_event_bytes("", "model.ready", safe_json_bytes({}))
-                logger.info("emitted model.ready (WORKER_MODELS_READY_ON_CONNECT=true)")
             self._reconnect_count = 0
             return True
 
@@ -4882,9 +3986,7 @@ class Worker:
         """
         return list(
             dict.fromkeys(
-                list(self._request_specs.keys())
-                + list(self._training_specs.keys())
-                + list(self._batched_specs.keys())
+                list(self._batched_specs.keys())
                 + list(self._serial_class_specs.keys())
                 + list(self._conversion_class_specs.keys())
             )
@@ -5501,17 +4603,10 @@ class Worker:
 
     def _emit_function_capabilities_event(self) -> None:
         functions: List[Dict[str, Any]] = []
-        all_names = dict.fromkeys(
-            list(self._discovered_resources.keys())
-            + list(self._request_specs.keys())
-            + list(self._training_specs.keys())
-        )
+        all_names = dict.fromkeys(self._discovered_resources.keys())
         for fn_name in all_names:
             req = self._discovered_resources.get(fn_name)
             caps: Dict[str, Any] = dict(msgspec.to_builtins(req)) if req is not None else {}
-            spec = self._request_specs.get(fn_name)
-            if spec is not None:
-                caps["output_mode"] = spec.output_mode
             caps["function_name"] = fn_name
             unavailable = self._function_unavailable_entry(fn_name)
             caps["available"] = unavailable is None
@@ -5696,15 +4791,6 @@ class Worker:
 
         # Cancel any active requests
         active_request_ids = []
-        if self._drain_timeout_seconds > 0:
-            deadline = time.time() + self._drain_timeout_seconds
-            while time.time() < deadline:
-                with self._active_requests_lock:
-                    remaining = len(self._active_requests)
-                if remaining == 0:
-                    break
-                time.sleep(0.2)
-
         with self._active_requests_lock:
             active_request_ids = list(self._active_requests.keys())
             for request_id in active_request_ids:
@@ -6191,12 +5277,7 @@ class Worker:
                 if out:
                     self._payload_ref_availability_by_function[name] = out
 
-            # Filter out refs that belong ONLY to disabled functions from
-            # the prefetch set. Refs referenced by at least one enabled
-            # function still prefetch (they serve that enabled path).
-            prefetch_refs = self._filter_prefetch_for_disabled_functions(
-                self._required_flavor_refs_from_scheduler or []
-            )
+            prefetch_refs = list(self._required_flavor_refs_from_scheduler or [])
 
             # Start background prefetch regardless of model manager; disk readiness is useful even
             # for lightweight workers and enables cache-aware routing.
@@ -6244,7 +5325,7 @@ class Worker:
         deadline_ms = int(getattr(cmd, "deadline_unix_ms", 0) or 0)
         terminate_after_deadline = bool(getattr(cmd, "terminate_after_deadline", True))
         now_ms = int(time.time() * 1000)
-        drain_seconds = max(0.0, (deadline_ms - now_ms) / 1000.0) if deadline_ms > 0 else float(self._drain_timeout_seconds or 0)
+        drain_seconds = max(0.0, (deadline_ms - now_ms) / 1000.0) if deadline_ms > 0 else 0.0
 
         logger.info(
             "Received worker drain command reason=%s deadline_ms=%s active_requests=%d",
@@ -6370,39 +5451,6 @@ class Worker:
                 pass
         return out
 
-    def _filter_prefetch_for_disabled_functions(self, refs: List[str]) -> List[str]:
-        """Drop refs from the prefetch set when they belong ONLY to disabled
-        functions (no enabled function references them anymore).
-
-        Refs that are shared between a disabled function and at least one
-        enabled function still prefetch — they serve the enabled path.
-        """
-        if not refs or not self._disabled_functions_by_name:
-            return refs
-        # Collect the ref set referenced by each disabled function. For now
-        # we only have the top-level offending ref in DisabledFunction; the
-        # full keyspace-by-function map lives on the release manifest (not
-        # plumbed to the worker yet). So we do a simple filter: if a ref
-        # appears in ANY disabled-function record AND we don't have
-        # evidence of it being used by an enabled function, skip it.
-        disabled_refs = {
-            d.get("ref", "") for d in self._disabled_functions_by_name.values()
-            if d.get("ref")
-        }
-        if not disabled_refs:
-            return refs
-        # Conservative: we don't have enough info to know which refs are
-        # shared. For now, keep all refs; the orchestrator already narrows
-        # required_flavor_refs on disable (via BuildEndpointConfig dropping
-        # the entries that only resolve for disabled functions). This hook
-        # exists as a forward-compat point. Future: plumb the full
-        # fn->refs map from the release manifest to enable actual filter.
-        logger.debug(
-            "prefetch filter: disabled-function refs detected %s; retaining all refs pending keyspace plumbing",
-            sorted(disabled_refs),
-        )
-        return refs
-
     def is_function_runnable(self, function_name: str) -> bool:
         """Return False when the orchestrator has reported the function as
         disabled (a FIXED ref failed terminally) or the local worker has
@@ -6457,25 +5505,6 @@ class Worker:
             return set(self._loading_function_names())
         except Exception:
             return set()
-
-    def payload_key_status(self, function_name: str, model_key: str) -> Optional[str]:
-        """Return the status string for a PAYLOAD-bound short_key on a
-        function, or None when no status is tracked. A terminal status
-        other than "resolved" means the worker should reject the request
-        locally before invoking the tenant function.
-        """
-        fn = (function_name or "").strip()
-        key = (model_key or "").strip()
-        if not fn or not key:
-            return None
-        byKey = self._payload_ref_availability_by_function.get(fn)
-        if not byKey:
-            return None
-        entry = byKey.get(key)
-        if not entry:
-            return None
-        s = entry.get("status", "")
-        return str(s) if s else None
 
     def _start_startup_prefetch(self, model_ids: List[str]) -> None:
         model_ids = [str(m or "").strip() for m in (model_ids or []) if str(m or "").strip()]
@@ -6630,37 +5659,6 @@ class Worker:
             t.start()
         for t in threads:
             t.join()
-
-    def _prefs_for_canonical(self, canonical_ref: str) -> Dict[str, Any]:
-        """Lookup the baked endpoint.lock attributes (dtype/file_type/file_layout)
-        for the model whose canonical ref matches ``canonical_ref``. Returns the
-        shape the ref_downloader's prefs contextvar expects.
-        """
-        prefs: Dict[str, Any] = {}
-        # Both fixed and per-function model keyspaces can reference the same
-        # ref, so walk all of them and take the first match.
-        keyspace_specs: List[Dict[str, Dict[str, Any]]] = []
-        if self._fixed_model_spec_by_key:
-            keyspace_specs.append(self._fixed_model_spec_by_key)
-        for per_fn in self._payload_model_spec_by_key_by_function.values():
-            keyspace_specs.append(per_fn)
-        for ks in keyspace_specs:
-            for _key, spec in ks.items():
-                spec_ref = str(spec.get("ref") or "").strip()
-                if _canonicalize_model_ref_string(spec_ref) != canonical_ref:
-                    continue
-                dtypes = spec.get("dtypes") or []
-                file_type = spec.get("file_type") or []
-                file_layout = spec.get("file_layout") or []
-                if dtypes:
-                    prefs["dtypes"] = list(dtypes)
-                if file_type:
-                    prefs["file_types"] = list(file_type)
-                if file_layout:
-                    prefs["file_layouts"] = list(file_layout)
-                if prefs:
-                    return prefs
-        return prefs
 
     def _provider_for_ref(self, ref: str, *, default: str = "tensorhub") -> str:
         """Issue #17: look up the provider for a bare ref from the
@@ -7125,7 +6123,6 @@ class Worker:
         job_id = str(getattr(request, "job_id", "") or "").strip() or None
         function_name = request.function_name
         input_payload = request.input_payload
-        required_model_id_for_exec = ""
         timeout_ms = int(getattr(request, "timeout_ms", 0) or 0)
         owner = str(getattr(request, "tenant", "") or "") or (self.owner or "")
         invoker_id = str(getattr(request, "invoker_id", "") or "")
@@ -7136,29 +6133,12 @@ class Worker:
         # Surfaced to tenant code read-only via ctx.compute.
         compute = _extract_resolved_compute(request)
         resolved_models_metadata = self._resolved_models_for_request(request)
-        parent_request_id = str(getattr(request, "parent_request_id", "") or "").strip() or None
-        child_request_id = str(getattr(request, "child_request_id", "") or "").strip() or None
-        item_id = str(getattr(request, "item_id", "") or "").strip() or None
-        raw_item_index = getattr(request, "item_index", None)
-        item_index: Optional[int] = None
-        if raw_item_index is not None:
-            try:
-                item_index = int(raw_item_index)
-            except Exception:
-                item_index = None
-        # #321: input URLs flow inside input_payload msgpack; no separate field.
-        materialized_input_urls: Optional[Dict[str, str]] = None
-
-        required_models_raw = list(getattr(request, "required_flavor_refs", []) or [])
-        if required_models_raw:
-            required_model_id_for_exec = str(required_models_raw[0] or "").strip()
-
         t_recv_monotonic = time.monotonic()
         # Stash on the active-requests observation so _outgoing_message_iterator
         # can compute a recv→yield delta when the result message ships.
         # Keyed by request_id; popped by _build_job_observation.
         self._request_recv_times[request_id] = t_recv_monotonic
-        logger.info(f"Received Request: request_id={request_id}, function={function_name}, model='{required_model_id_for_exec or 'None'}'")
+        logger.info(f"Received Request: request_id={request_id}, function={function_name}")
         # #345 Improvement C: the `request.received` lifecycle event is no longer
         # emitted from the worker. The orchestrator synthesizes the equivalent
         # signal authoritatively (`request.assigned`, fired from scheduler
@@ -7167,34 +6147,21 @@ class Worker:
         # request.rejected, the *.stuck watchdog, model.download.* and the final
         # JobExecutionResult still ship from the worker.
 
-        spec = self._request_specs.get(function_name)
-        training_fn = self._training_specs.get(function_name) if spec is None else None
         # #273: BatchedWorker (`@inference(runtime="sglang"|"vllm")`) lookup.
-        batched_spec = (
-            self._batched_specs.get(function_name)
-            if spec is None and training_fn is None
-            else None
-        )
+        batched_spec = self._batched_specs.get(function_name)
         # #322/#328: SerialWorker (sync `@inference` class) lookup.
         serial_spec = (
             self._serial_class_specs.get(function_name)
-            if spec is None and training_fn is None and batched_spec is None
+            if batched_spec is None
             else None
         )
         # #332: conversion / training / dataset sync class lookup.
         conversion_spec = (
             self._conversion_class_specs.get(function_name)
-            if spec is None and training_fn is None
-            and batched_spec is None and serial_spec is None
+            if batched_spec is None and serial_spec is None
             else None
         )
-        if (
-            spec is None
-            and training_fn is None
-            and batched_spec is None
-            and serial_spec is None
-            and conversion_spec is None
-        ):
+        if batched_spec is None and serial_spec is None and conversion_spec is None:
             error_msg = f"Unknown function requested: {function_name}"
             logger.error(error_msg)
             self._emit_request_event(
@@ -7234,30 +6201,12 @@ class Worker:
                 error_msg,
             )
             return
-        if self.max_input_bytes > 0 and len(input_payload) > self.max_input_bytes:
-            error_msg = f"Input payload too large: {len(input_payload)} bytes (max {self.max_input_bytes})"
-            logger.error(error_msg)
-            self._emit_request_event(
-                request_id,
-                "request.rejected",
-                {"reason": "input_too_large", "input_bytes": len(input_payload)},
-            )
-            self._send_request_result(request_id, False, None, "validation", False, "invalid input", error_msg)
-            return
         if self._draining:
             error_msg = "Worker is draining; refusing new tasks"
             logger.warning(error_msg)
             self._emit_request_event(request_id, "request.rejected", {"reason": "worker_draining"})
             self._send_request_result(request_id, False, None, "retryable", True, "worker busy", error_msg)
             return
-
-        # required_flavor_refs are pinned flavor refs chosen by the scheduler; the worker must not guess.
-        required_models: List[str] = []
-        for raw in required_models_raw:
-            s = str(raw or "").strip()
-            if not s:
-                continue
-            required_models.append(_canonicalize_model_ref_string(s))
 
         resource_req = self._discovered_resources.get(function_name)
         req_cfg: Dict[str, Any] = dict(msgspec.to_builtins(resource_req)) if resource_req is not None else {}
@@ -7313,16 +6262,7 @@ class Worker:
         # touch this code path. The handler's typed annotation
         # (`ctx: ConversionContext`) is the source of truth — we match it here.
         ctx_cls: Type[RequestContext] = RequestContext
-        if training_fn is not None:
-            training_spec = getattr(training_fn, "__training_spec__", None)
-            spec_kind = str(getattr(training_spec, "kind", "") or "").strip()
-            if spec_kind.startswith("dataset-generation"):
-                from .request_context import DatasetContext
-                ctx_cls = DatasetContext
-            else:
-                from .request_context import ConversionContext
-                ctx_cls = ConversionContext
-        elif conversion_spec is not None:
+        if conversion_spec is not None:
             # #332: class-shape conversion / training / dataset endpoints.
             # The register-time inspector resolved the ctx subclass already
             # and stored it on the spec — honor it.
@@ -7337,15 +6277,9 @@ class Worker:
             timeout_ms=timeout_ms if timeout_ms > 0 else None,
             file_api_base_url=(file_base_url or self._settings.tensorhub_public_url or None),
             worker_capability_token=worker_capability_token or None,
-            materialized_input_urls=materialized_input_urls or None,
             local_output_dir=None,
             resolved_repos_by_id=resolved_repos_by_id or None,
-            required_models=required_models or None,
             execution_hints=execution_hints or None,
-            parent_request_id=parent_request_id,
-            child_request_id=child_request_id,
-            item_id=item_id,
-            item_index=item_index,
             source_info=source_info_raw,
             destination_info=destination_info_raw,
             compute=compute,
@@ -7392,12 +6326,8 @@ class Worker:
                  archetype = "BatchedWorker"
              elif serial_spec is not None:
                  archetype = "SerialWorker"
-             elif conversion_spec is not None:
-                 archetype = "ConversionWorker"
-             elif training_fn is not None:
-                 archetype = "training_function"
              else:
-                 archetype = "legacy_inference_function"
+                 archetype = "ConversionWorker"
              self._active_requests[request_id] = ctx
              self._request_observations[request_id] = {
                  "release_id": self.release_id,
@@ -7412,13 +6342,7 @@ class Worker:
 
         # Queue execution locally to keep the receive loop responsive and report
         # local queue delay back to the scheduler.
-        # Training-function handlers take a different dispatch path — the
-        # dispatch wrapper already owns msgspec-decode of the raw payload dict,
-        # tenant-call, and ProducedFlavor upload via RequestContext.save_checkpoint.
-        if training_fn is not None:
-            target = self._execute_training_request
-            args = (ctx, function_name, training_fn, input_payload)
-        elif batched_spec is not None:
+        if batched_spec is not None:
             # #273: BatchedWorker path. Schedule the async invocation on the
             # dedicated asyncio loop and return immediately; the loop drives
             # the engine + emits IncrementalTokenDelta typed wire events. The
@@ -7428,21 +6352,17 @@ class Worker:
             args = (ctx, batched_spec, input_payload)
         elif serial_spec is not None:
             # #322/#328: SerialWorker path. Sync handlers run on the
-            # job_executor thread pool (same pool as the legacy function-shape
-            # `_execute_request` path); `async def` handlers release their
+            # job_executor thread pool; `async def` handlers release their
             # pool thread once the coroutine is scheduled on the shared
             # asyncio loop (#447 — see _execute_serial_async_request).
             target = self._execute_serial_class_request
             args = (ctx, serial_spec, input_payload)
-        elif conversion_spec is not None:
+        else:
             # #332: conversion / training / dataset class-shape path.
             # Sync class that returns ProducedFlavors; library uploads +
             # publishes a revision via `_finalize_produced_variants`.
             target = self._execute_conversion_class_request
             args = (ctx, conversion_spec, input_payload)
-        else:
-            target = self._execute_request
-            args = (ctx, spec, input_payload, request)
         try:
             self._job_queue.put_nowait((target, args, request_id, time.monotonic()))
         except queue.Full:
@@ -8043,9 +6963,8 @@ class Worker:
     # ========================================================================
     #
     # SerialWorker = sync `@inference` class. Each request fully owns the GPU
-    # end-to-end. Compared to the legacy function-shape (`_execute_request`)
-    # this path is lighter because models are bound at class-level
-    # (loaded once via `setup(**models)`) rather than per-request injection.
+    # end-to-end. Models are bound at class-level (loaded once via
+    # `setup(**models)`) rather than per-request injection.
     #
     # #324: when the class declares both `batch_window_ms` and `max_batch`,
     # concurrent requests are routed through a `MicroBatchAggregator` that
@@ -9179,19 +8098,6 @@ class Worker:
             emit_id = f"{ref}\ttier={tier}"
         self._emit_model_ready(emit_id, kind)
 
-    def _emit_residency_for_refs(self, refs: List[str]) -> None:
-        """Emit tier signals for a set of refs based on the live cache state."""
-        cache = getattr(self, "_model_cache", None)
-        if cache is None:
-            return
-        for ref in refs:
-            canon = self._canonical_cache_key_for_ref(ref) or ref
-            try:
-                tier = cache.residency_tier(canon)
-            except Exception:
-                continue
-            self._emit_residency_tier(canon, tier)
-
     def _shared_base_cache_key(self, variant: Variant) -> str:
         """Stable cache key for a variant's shared-base component stack.
 
@@ -9341,7 +8247,6 @@ class Worker:
         SAME shared component objects so VRAM holds one copy of the shared
         stack and only the per-model slot is duplicated.
         """
-        from .api.binding import _qualname  # local import to avoid cycle at import time
 
         shared = self._ensure_shared_base(ctx, variant)
 
@@ -9373,7 +8278,6 @@ class Worker:
     @staticmethod
     def _resolve_class_fqn(fqn: str) -> Any:
         """Import a class from its ``module.Qualname`` string."""
-        import importlib
         mod_name, _, cls_name = str(fqn or "").rpartition(".")
         if not mod_name:
             raise ValueError(f"cannot resolve pipeline class from FQN {fqn!r}")
@@ -9501,9 +8405,8 @@ class Worker:
     ) -> None:
         """Run a SerialWorker class-shape request on the job-executor thread.
 
-        Mirrors ``_execute_request`` but for the class-shape SerialWorker.
-        Skipping the injection pipeline (models bind once at setup time);
-        routing optionally through the cross-request micro-batching
+        Skips the injection pipeline (models bind once at setup time);
+        routes optionally through the cross-request micro-batching
         aggregator when one is registered for this function.
 
         `async def` handlers branch to ``_execute_serial_async_request``,
@@ -9616,11 +8519,6 @@ class Worker:
                             f"expected {sspec.output_type!r}"
                         )
                     output_payload = msgspec.msgpack.encode(msgspec.to_builtins(result))
-                    if self.max_output_bytes > 0 and len(output_payload) > self.max_output_bytes:
-                        raise OutputTooLargeError(
-                            size_bytes=len(output_payload),
-                            max_bytes=self.max_output_bytes,
-                        )
                     success = True
                 else:
                     # Incremental: iterate the sync generator and emit deltas.
@@ -9836,11 +8734,6 @@ class Worker:
                         f"expected {sspec.output_type!r}"
                     )
                 output_payload = msgspec.msgpack.encode(msgspec.to_builtins(result))
-                if self.max_output_bytes > 0 and len(output_payload) > self.max_output_bytes:
-                    raise OutputTooLargeError(
-                        size_bytes=len(output_payload),
-                        max_bytes=self.max_output_bytes,
-                    )
             else:
                 # Incremental: drive the tenant async generator natively on
                 # the loop, emitting each delta as it arrives (#345 B).
@@ -9922,8 +8815,7 @@ class Worker:
     ) -> None:
         """Run a class-shape conversion / training / dataset request (#332).
 
-        Mirrors ``_execute_training_request`` but for the class-shape
-        endpoint contract:
+        Class-shape endpoint contract:
 
           1. Lazy setup on first dispatch (reuses
              ``_ensure_serial_class_started`` — same lifecycle as the
@@ -10089,8 +8981,7 @@ class Worker:
             )
             _finalize_produced_variants(ctx, variants, kind=finalize_kind)
 
-            # Apply destination.tags to the produced checkpoint. Same
-            # best-effort dance as `_execute_training_request`.
+            # Apply destination.tags to the produced checkpoint (best-effort).
             destination_info = getattr(ctx, "destination", None) or {}
             if isinstance(destination_info, dict) and destination_info.get("tags"):
                 checkpoint_id = _extract_checkpoint_id_from_result(variants)
@@ -10263,1069 +9154,6 @@ class Worker:
                     f"remove the dataset or choose a calibrated scheme."
                 )
 
-    def _execute_request(
-        self,
-        ctx: RequestContext,
-        spec: _RequestSpec,
-        input_payload: bytes,
-        request: Any = None,
-    ) -> None:
-        """Execute a discovered request handler and send result/events back."""
-        request_id = ctx.request_id
-        output_payload: Optional[bytes] = None
-        error_type: str = ""
-        safe_message: str = ""
-        error_message: str = ""  # internal/legacy
-        retryable = False
-        success = False
-
-        # Metrics (best-effort): never fail a job.
-        resolved_map = getattr(ctx, "resolved_repos_by_id", None) or None
-        rm = RunMetricsV1(
-            request_id=str(request_id or ""),
-            function_name=str(spec.name or ""),
-            required_models=list(getattr(ctx, "required_models", []) or []),
-            resolved_repos_by_id=resolved_map,
-        )
-        # Attach to ctx so RequestContext.save_* and injection paths can accumulate.
-        try:
-            setattr(ctx, "_run_metrics", rm)
-        except Exception:
-            pass
-        rm.mark_compute_started()
-        if rm.compute_started_at:
-            self._emit_worker_event_bytes(request_id, "metrics.compute.started", safe_json_bytes({"at": rm.compute_started_at}))
-
-        # Tensorhub #232: auto-bind the dispatched hardware into per-job logs
-        # so operators grep "dispatched_tier=A100-80" for incident response
-        # without needing tenant-side logging cooperation. Best-effort; uses
-        # the ctx.compute sentinel defaults when the orchestrator didn't
-        # attach resolved_compute.
-        _c = getattr(ctx, "compute", None)
-        if _c is not None and (_c.accelerator or _c.vram_gb or _c.gpu_count or _c.gpu_tier):
-            logger.info(
-                "request.dispatched rid=%s fn=%s dispatched_accelerator=%s "
-                "dispatched_tier=%s dispatched_vram_gb=%s dispatched_gpu_count=%s "
-                "dispatched_memory_gb=%s dispatched_cpu_cores=%s",
-                request_id,
-                spec.name,
-                _c.accelerator or "none",
-                _c.gpu_tier or "",
-                _c.vram_gb,
-                _c.gpu_count,
-                _c.memory_gb,
-                _c.cpu_cores,
-            )
-            # One-shot hardware_match_check — cross-reference the orchestrator's
-            # selected tier against the worker's actual GPU name. WARN on
-            # mismatch; doesn't fail the job. Catches scheduler bugs where a
-            # job lands on unintended hardware without surfacing failure-mode
-            # noise to tenants.
-            if _c.gpu_tier and _c.accelerator == "cuda":
-                try:
-                    # Use the module-level `torch` (None when torch is
-                    # unavailable). A function-local `import torch` here
-                    # shadows the module binding and turns later references
-                    # (e.g. the peak-mem tracker) into UnboundLocalError.
-                    if torch is not None and torch.cuda.is_available():
-                        actual = torch.cuda.get_device_name(0)
-                        # Tier strings are heuristic (e.g. "A100-80") — accept
-                        # any SUBSTRING match against the driver-reported name
-                        # (e.g. "NVIDIA A100-SXM4-80GB"). Canonicalize both
-                        # sides by lowercasing + stripping non-alnum before
-                        # the contains-check.
-                        import re  # noqa: PLC0415
-                        def _canon(s: str) -> str:
-                            return re.sub(r"[^a-z0-9]+", "", s.lower())
-                        canon_tier = _canon(_c.gpu_tier.split("-", 1)[0])  # "A100"
-                        canon_actual = _canon(actual)
-                        if canon_tier and canon_tier not in canon_actual:
-                            logger.warning(
-                                "hardware_match_check rid=%s tier=%s actual=%r — "
-                                "scheduler dispatched to unexpected hardware; "
-                                "job proceeds but investigate scheduler placement",
-                                request_id, _c.gpu_tier, actual,
-                            )
-                except Exception:
-                    # torch missing / cuda not available / any inspection
-                    # error — skip the check entirely, don't fail the job.
-                    pass
-
-        # #345 Improvement C: `request.started` removed from the worker wire
-        # (orch's `request.assigned` is authoritative).
-
-        # Initialize model cache_state for required models using worker's cache hints.
-        try:
-            vram = self._model_cache.get_vram_models() if self._model_cache else []
-            disk = self._model_cache.get_disk_models() if self._model_cache else []
-            best_effort_init_model_metrics(
-                rm,
-                rm.required_models,
-                vram_models=vram,
-                disk_models=disk,
-                cache_dir=tensorhub_cas_dir(),
-            )
-        except Exception:
-            pass
-
-        # Best-effort peak tracking
-        if torch is not None:
-            try:
-                if torch.cuda.is_available():
-                    torch.cuda.reset_peak_memory_stats()
-            except Exception:
-                pass
-
-        # Stage 5 semaphore: gate on the function's declared accelerator.
-        # Only serialize handlers whose function declares accelerator=cuda*.
-        needs_gpu = self._function_needs_gpu(spec)
-        if needs_gpu:
-            self._gpu_semaphore.acquire()
-            self._bind_gpu_for_request(ctx)
-        # Refcounted BUSY so overlapping jobs/model ops can't flip BUSY -> NOT BUSY early.
-        self._gpu_busy_enter()
-
-        from .models.ref_downloader import (
-            reset_resolved_repos_by_id,
-            set_resolved_repos_by_id,
-        )
-
-        baseline = getattr(self, "_resolved_repos_by_id_baseline", None) or None
-        resolved_map = getattr(ctx, "resolved_repos_by_id", None) or baseline
-        resolved_tok = set_resolved_repos_by_id(resolved_map)
-        # Issue #17: pair the provider index with the resolved-repos map so
-        # ModelRefDownloader.download routes HF/civitai bindings correctly
-        # when the tenant body triggers a model fetch.
-        provider_tok = set_provider_by_ref(getattr(self, "_provider_by_ref_index", None) or None)
-
-        models_in_use: set[str] = set()
-        inference_watchdog: Optional[threading.Timer] = None
-        # Issue #18: declared here so the `finally` cleanup can reference it
-        # even if the try body raises before resolved_models extraction.
-        _request_provider_tok: Optional[Any] = None
-        _request_override_keys_tok: Optional[Any] = None
-        try:
-            if ctx.is_canceled():
-                raise CanceledError("canceled")
-
-            # Decode payload strictly.
-            input_obj = msgspec.msgpack.decode(input_payload, type=spec.payload_type)
-            # Optional post-decode constraints (e.g. clamping) declared on the payload type.
-            try:
-                from .api.payload_constraints import apply_payload_constraints
-
-                _ = apply_payload_constraints(input_obj)
-            except Exception:
-                pass
-            self._materialize_assets(ctx, input_obj)
-            # Best-effort extract diffusion-ish numeric fields for metrics.job.
-            try:
-                def _get_num(name: str) -> Optional[float]:
-                    try:
-                        v = getattr(input_obj, name)
-                    except Exception:
-                        return None
-                    if isinstance(v, bool):
-                        return None
-                    if isinstance(v, (int, float)):
-                        return float(v)
-                    return None
-
-                steps = _get_num("num_inference_steps") or _get_num("steps")
-                if steps is not None:
-                    rm.steps = int(steps)
-                guidance = _get_num("guidance_scale") or _get_num("guidance")
-                if guidance is not None:
-                    rm.guidance = float(guidance)
-                w = _get_num("width")
-                h = _get_num("height")
-                if w is not None:
-                    rm.width = int(w)
-                if h is not None:
-                    rm.height = int(h)
-            except Exception:
-                pass
-
-            # Resolve injected args.
-            call_kwargs: Dict[str, Any] = {}
-            call_kwargs[spec.ctx_param] = ctx
-            call_kwargs[spec.payload_param] = input_obj
-
-            # 0.7.0 binding model: caller-supplied overrides arrive on the wire
-            # as orchestrator-stamped `resolved_models[param_name]` (typed by
-            # orchestrator after validating the caller's `_models` block).
-            # Record them here so _map_exception can classify post-download
-            # load failures as `ref_compatibility_surprise`.
-            resolved_models = self._resolved_models_for_request(request)
-            payload_ref_keys_this_request: Dict[str, str] = {}
-            for inj in spec.injections:
-                if inj.binding._allow_override and inj.param_name in resolved_models:
-                    payload_ref_keys_this_request[inj.param_name] = str(
-                        (resolved_models.get(inj.param_name) or {}).get("ref") or ""
-                    )
-            self._current_payload_ref_keys = payload_ref_keys_this_request
-
-            # Issue #18: layer per-request override providers on top of the
-            # build-time `_provider_by_ref` index so the downloader resolves
-            # invoker-supplied refs (which aren't in endpoint.lock) through
-            # the right branch. Keys must match the bare-ref form that
-            # `ModelRefDownloader.download()` receives — the same form
-            # `_resolved_repo_id()` produces (provider-prefixed for non-
-            # tensorhub, plus tag/flavor decorations).
-            request_provider_overrides: Dict[str, str] = {}
-            for _param, _override in resolved_models.items():
-                _ref = str(_override.get("ref") or "").strip()
-                _prov = str(_override.get("provider") or "tensorhub").strip() or "tensorhub"
-                if not _ref:
-                    continue
-                _tag = str(_override.get("tag") or "prod").strip() or "prod"
-                _flavor = str(_override.get("flavor") or "").strip()
-                _key = _resolved_repo_id(_ref, flavor=_flavor, tag=_tag, provider=_prov)
-                if _key:
-                    request_provider_overrides[_key] = _prov
-                # Also index the bare ref + flavor (no tag, no provider prefix)
-                # because `ModelRefDownloader.download` receives whatever the
-                # caller passed and `lookup_provider_for_ref` does a literal
-                # lookup. The HF parser strips `#flavor` itself.
-                _bare = _ref
-                if _flavor and "#" not in _bare:
-                    _bare = f"{_bare}#{_flavor}"
-                request_provider_overrides.setdefault(_bare, _prov)
-                request_provider_overrides.setdefault(_ref, _prov)
-            if request_provider_overrides:
-                _base_index = getattr(self, "_provider_by_ref_index", None) or {}
-                # Build-time index wins for refs the manifest declared; per-
-                # request overrides only add new entries. (Tenant bindings
-                # in the manifest should never collide with caller overrides
-                # because override refs are different from binding refs by
-                # construction.)
-                _merged = {**request_provider_overrides, **_base_index}
-                _request_provider_tok = set_provider_by_ref(_merged)
-            else:
-                _request_provider_tok = None
-
-            # Issue #18: mark every override-derived ref key so the
-            # downloader runs the safetensors-only gate on its snapshot.
-            # The key set must match whatever string ends up at
-            # `ModelRefDownloader.download(model_ref)` — that's the
-            # `_resolved_repo_id` output for these overrides.
-            _request_override_keys_tok = set_override_ref_keys(
-                request_provider_overrides.keys() if request_provider_overrides else None
-            )
-
-            for inj in spec.injections:
-                resolve_t0 = time.monotonic()
-                resolve_watchdog = self._start_task_phase_watchdog(
-                    request_id=request_id,
-                    phase="model_resolve",
-                    warn_after_s=float(getattr(self, "_warn_model_resolve_s", 30.0)),
-                    payload={"function_name": spec.name, "param_name": inj.param_name},
-                )
-                self._emit_request_event(
-                    request_id,
-                    "request.model_resolve.started",
-                    {"function_name": spec.name, "param_name": inj.param_name},
-                )
-                model_id = ""
-                model_key: Optional[str] = None
-                canon_model_id = ""
-                try:
-                    model_id, model_key = self._resolve_model_id_for_injection(
-                        spec.name, inj, payload=input_obj, resolved_models=resolved_models,
-                    )
-                    canon_model_id = _canonicalize_model_ref_string(str(model_id or "").strip()) if model_id else ""
-                    self._emit_request_event(
-                        request_id,
-                        "request.model_resolve.completed",
-                        {
-                            "function_name": spec.name,
-                            "param_name": inj.param_name,
-                            "model_id": canon_model_id,
-                            "model_key": model_key or "",
-                            "duration_ms": int((time.monotonic() - resolve_t0) * 1000),
-                        },
-                    )
-                except Exception as resolve_exc:
-                    self._emit_request_event(
-                        request_id,
-                        "request.model_resolve.failed",
-                        {
-                            "function_name": spec.name,
-                            "param_name": inj.param_name,
-                            "error_type": type(resolve_exc).__name__,
-                            "duration_ms": int((time.monotonic() - resolve_t0) * 1000),
-                        },
-                    )
-                    raise
-                finally:
-                    if resolve_watchdog is not None:
-                        resolve_watchdog.cancel()
-                # NOTE: 0.7.0 dropped the per-`[models]` dtype preference path
-                # (the [models] toml table was deleted). Dtype preferences flow
-                # in via the orchestrator-resolved checkpoint metadata if needed.
-                if canon_model_id and canon_model_id not in models_in_use:
-                    self._model_use_enter(canon_model_id)
-                    models_in_use.add(canon_model_id)
-                load_t0 = time.monotonic()
-                load_watchdog = self._start_task_phase_watchdog(
-                    request_id=request_id,
-                    phase="model_load",
-                    warn_after_s=float(getattr(self, "_warn_model_load_s", 60.0)),
-                    payload={
-                        "function_name": spec.name,
-                        "param_name": inj.param_name,
-                        "model_id": canon_model_id,
-                    },
-                )
-                self._emit_request_event(
-                    request_id,
-                    "request.model_load.started",
-                    {
-                        "function_name": spec.name,
-                        "param_name": inj.param_name,
-                        "model_id": canon_model_id,
-                    },
-                )
-                try:
-                    call_kwargs[inj.param_name] = self._resolve_injected_value(ctx, inj.param_type, model_id, inj)
-                    logger.info(
-                        "[request_id=%s] model load resolved: param=%s model=%s duration_ms=%d",
-                        request_id, inj.param_name, canon_model_id,
-                        int((time.monotonic() - load_t0) * 1000),
-                    )
-                    self._emit_request_event(
-                        request_id,
-                        "request.model_load.completed",
-                        {
-                            "function_name": spec.name,
-                            "param_name": inj.param_name,
-                            "model_id": canon_model_id,
-                            "duration_ms": int((time.monotonic() - load_t0) * 1000),
-                        },
-                    )
-                except Exception as load_exc:
-                    self._emit_request_event(
-                        request_id,
-                        "request.model_load.failed",
-                        {
-                            "function_name": spec.name,
-                            "param_name": inj.param_name,
-                            "model_id": canon_model_id,
-                            "error_type": type(load_exc).__name__,
-                            "duration_ms": int((time.monotonic() - load_t0) * 1000),
-                        },
-                    )
-                    raise
-                finally:
-                    if load_watchdog is not None:
-                        load_watchdog.cancel()
-
-            # Invoke.
-            execution_hints = getattr(ctx, "execution_hints", {}) or {}
-            execution_kind = str(execution_hints.get("kind", "") or "").strip().lower()
-            if execution_kind not in {"inference", "training"}:
-                execution_kind = "inference"
-            logger.info(
-                "[request_id=%s] all injections resolved, entering %s phase for function=%s canceled=%s",
-                request_id, execution_kind, spec.name, ctx.is_canceled(),
-            )
-            t_infer0 = time.monotonic()
-            inference_watchdog = self._start_task_phase_watchdog(
-                request_id=request_id,
-                phase=execution_kind,
-                warn_after_s=float(getattr(self, "_warn_inference_s", 60.0)),
-                payload={"function_name": spec.name, "output_mode": spec.output_mode, "phase": execution_kind},
-            )
-            self._emit_request_event(
-                request_id,
-                f"request.{execution_kind}.started",
-                {"function_name": spec.name, "output_mode": spec.output_mode, "phase": execution_kind},
-            )
-
-            # Reserved-name source materialization for training jobs.
-            # If the payload declared payload.source (a SourceRepo-shaped dict),
-            # resolve it against tensorhub via the worker's downloader and
-            # populate ctx.source_path with the local snapshot dir.
-            if execution_kind == "training":
-                src_info = getattr(ctx, "source", None) or {}
-                if isinstance(src_info, dict) and str(src_info.get("ref") or "").strip():
-                    try:
-                        self._materialize_source_for_training(ctx, src_info)
-                    except Exception as exc:
-                        logger.exception(
-                            "[request_id=%s] source materialization failed: %s",
-                            request_id, exc,
-                        )
-                        raise
-
-            logger.info("[request_id=%s] calling %s", request_id, spec.name)
-            # OOM-retry: escalate offload on injected pipelines if the tenant call
-            # raises torch.cuda.OutOfMemoryError. Only meaningful for non-generator
-            # single-output functions — streaming/incremental runs can't be rewound.
-            try:
-                from .inference_memory import (
-                    _escalate_pipeline_mode as _escalate_pipeline_mode,
-                    flush_memory as _flush_memory,
-                )
-            except Exception:
-                _escalate_pipeline_mode = None  # type: ignore[assignment]
-                _flush_memory = None  # type: ignore[assignment]
-
-            _injected_pipes: List[Any] = []
-            try:
-                for _inj in spec.injections:
-                    v = call_kwargs.get(_inj.param_name)
-                    if v is not None and hasattr(v, "__class__"):
-                        _injected_pipes.append(v)
-            except Exception:
-                _injected_pipes = []
-
-            _oom_types: tuple[type, ...] = ()
-            try:
-                if torch is not None:
-                    _oom_types = (torch.cuda.OutOfMemoryError,)  # type: ignore[attr-defined]
-            except Exception:
-                _oom_types = ()
-
-            _can_retry_oom = (
-                spec.output_mode == "single"
-                and not inspect.isasyncgenfunction(spec.func)
-                and _escalate_pipeline_mode is not None
-                and _oom_types
-            )
-            _max_oom_retries = 2
-            _oom_attempt = 0
-            with self._lora_overlay_context(ctx, spec.injections, call_kwargs, resolved_models):
-                while True:
-                    try:
-                        if inspect.iscoroutinefunction(spec.func):
-                            result = asyncio.run(spec.func(**call_kwargs))
-                        elif inspect.isasyncgenfunction(spec.func):
-                            result = spec.func(**call_kwargs)
-                        else:
-                            result = spec.func(**call_kwargs)
-                        break
-                    except _oom_types as _oom_exc:  # type: ignore[misc]
-                        _oom_attempt += 1
-                        if _flush_memory is not None:
-                            _flush_memory()
-                        if not _can_retry_oom or _oom_attempt > _max_oom_retries:
-                            logger.error(
-                                "[request_id=%s] inference OOM (attempt %d); giving up",
-                                request_id, _oom_attempt,
-                            )
-                            raise
-                        escalated = False
-                        for _pipe in _injected_pipes:
-                            try:
-                                if _escalate_pipeline_mode(_pipe, logger=logger, escalation=("vae_only", "model_offload", "group_offload", "sequential")):
-                                    escalated = True
-                            except Exception:
-                                pass
-                        if not escalated:
-                            logger.warning(
-                                "[request_id=%s] inference OOM (attempt %d); no further escalation possible, re-raising",
-                                request_id, _oom_attempt,
-                            )
-                            raise
-                        logger.warning(
-                            "[request_id=%s] inference OOM (attempt %d); retrying with escalated offload",
-                            request_id, _oom_attempt,
-                        )
-                        try:
-                            self._emit_worker_event_bytes(request_id, "inference.oom_retry", safe_json_bytes({
-                                "function_name": spec.name,
-                                "attempt": _oom_attempt,
-                            }))
-                        except Exception:
-                            pass
-            logger.info("[request_id=%s] %s returned, output_mode=%s", request_id, spec.name, spec.output_mode)
-
-            if ctx.is_canceled():
-                raise CanceledError("canceled")
-
-            if spec.output_mode == "single":
-                if spec.output_type is not None and not isinstance(result, spec.output_type):
-                    raise TypeError(f"Function {spec.name} returned {type(result)!r}, expected {spec.output_type!r}")
-                result = self._auto_upload_output_assets(ctx, result)
-                output_payload = msgspec.msgpack.encode(msgspec.to_builtins(result))
-                if self.max_output_bytes > 0 and len(output_payload) > self.max_output_bytes:
-                    raise OutputTooLargeError(size_bytes=len(output_payload), max_bytes=self.max_output_bytes)
-                success = True
-
-                # Training: apply destination.tags to the produced
-                # checkpoint. Non-fatal on failure — upload already succeeded.
-                if execution_kind == "training":
-                    dest_info = getattr(ctx, "destination", None) or {}
-                    if isinstance(dest_info, dict) and dest_info.get("tags"):
-                        checkpoint_id = _extract_checkpoint_id_from_result(result)
-                        if checkpoint_id:
-                            try:
-                                self._apply_destination_tags(ctx, dest_info, checkpoint_id)
-                            except Exception as exc:
-                                logger.warning(
-                                    "[request_id=%s] tag apply raised (non-fatal): %s",
-                                    request_id, exc,
-                                )
-                        else:
-                            logger.warning(
-                                "[request_id=%s] destination.tags set but could not extract checkpoint_id from result",
-                                request_id,
-                            )
-            else:
-                # Incremental output: the function returns an iterator of delta structs.
-                max_delta_bytes = 65536
-                max_events = 0
-                count = 0
-                last_item_id = "item-0"
-
-                def emit_delta(delta_obj: msgspec.Struct) -> None:
-                    nonlocal count, last_item_id
-                    # #327: route audio_chunk / audio_codec to the typed
-                    # IncrementalTokenDelta proto slots instead of base64-
-                    # in-payload_json.
-                    audio_chunk, audio_codec = self._extract_audio_from_delta(delta_obj)
-                    payload = msgspec.to_builtins(delta_obj)
-                    if isinstance(payload, dict) and audio_chunk:
-                        payload.pop("audio_chunk", None)
-                        payload.pop("audio_codec", None)
-                    raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
-                    if max_delta_bytes > 0 and len(raw) > max_delta_bytes:
-                        raw = json.dumps({"truncated": True}, separators=(",", ":"), sort_keys=True).encode("utf-8")
-                    item_id = "item-0"
-                    delta_text = ""
-                    if isinstance(payload, dict):
-                        iid = payload.get("item_id")
-                        if isinstance(iid, str) and iid.strip():
-                            item_id = iid.strip()
-                        for key in ("delta_text", "delta", "token", "text", "content", "caption_delta"):
-                            val = payload.get(key)
-                            if isinstance(val, str) and val.strip():
-                                delta_text = val.strip()
-                                break
-                    ts_ms = int(time.time() * 1000)
-                    # #321: dual streaming path removed. The typed
-                    # IncrementalToken* messages are the contract; a False
-                    # return now means the proto class is missing on the wire
-                    # (deployment skew with the scheduler) — drop the delta
-                    # and log rather than silently routing through
-                    # worker_event, which the orchestrator wouldn't typed-
-                    # branch on anyway.
-                    if not self._emit_incremental_delta_typed(
-                        request_id=request_id,
-                        function_name=spec.name,
-                        item_id=item_id,
-                        sequence=count + 1,
-                        timestamp_unix_ms=ts_ms,
-                        delta_text=delta_text,
-                        payload_json=raw,
-                        audio_chunk=audio_chunk,
-                        audio_codec=audio_codec,
-                    ):
-                        logger.warning(
-                            "IncrementalTokenDelta proto class unavailable; dropping delta rid=%s seq=%d",
-                            request_id, count + 1,
-                        )
-                    last_item_id = item_id
-                    count += 1
-
-                iterator_obj = result
-
-                async def consume_async() -> None:
-                    nonlocal count
-                    async for item in iterator_obj:
-                        if ctx.is_canceled():
-                            raise CanceledError("canceled")
-                        if spec.delta_type is not None and not isinstance(item, spec.delta_type):
-                            raise TypeError(f"delta item type {type(item)!r} != {spec.delta_type!r}")
-                        emit_delta(item)
-                        if max_events > 0 and count >= max_events:
-                            break
-
-                if hasattr(iterator_obj, "__aiter__"):
-                    asyncio.run(consume_async())
-                else:
-                    if not isinstance(iterator_obj, cabc.Iterator) and not isinstance(iterator_obj, cabc.Iterable):
-                        raise TypeError("incremental output functions must return an iterator/iterable")
-
-                    for item in iterator_obj:
-                        if ctx.is_canceled():
-                            raise CanceledError("canceled")
-                        if spec.delta_type is not None and not isinstance(item, spec.delta_type):
-                            raise TypeError(f"delta item type {type(item)!r} != {spec.delta_type!r}")
-                        emit_delta(item)
-                        if max_events > 0 and count >= max_events:
-                            break
-
-                # Emit completion marker (#321: typed-only, no worker_event fallback).
-                done_ts_ms = int(time.time() * 1000)
-                if not self._emit_incremental_done_typed(
-                    request_id=request_id,
-                    function_name=spec.name,
-                    item_id=last_item_id,
-                    sequence=count + 1,
-                    timestamp_unix_ms=done_ts_ms,
-                ):
-                    logger.warning(
-                        "IncrementalTokenStreamDone proto class unavailable; cannot signal stream end rid=%s",
-                        request_id,
-                    )
-                output_payload = b""
-                success = True
-
-            # inference_ms is best-effort and currently reflects the time spent in the user function
-            # (including incremental consumption for streaming outputs).
-            try:
-                rm.inference_ms = int((time.monotonic() - t_infer0) * 1000)
-            except Exception:
-                pass
-            if inference_watchdog is not None:
-                inference_watchdog.cancel()
-            self._emit_request_event(
-                request_id,
-                f"request.{execution_kind}.completed",
-                {
-                    "function_name": spec.name,
-                    "output_mode": spec.output_mode,
-                    "phase": execution_kind,
-                    "duration_ms": int((time.monotonic() - t_infer0) * 1000),
-                },
-            )
-
-            logger.info("Task %s completed successfully. inference_ms=%d", request_id, int((time.monotonic() - t_infer0) * 1000))
-
-        except Exception as e:
-            logger.exception("Task %s failed: %s", request_id, e)
-            error_type, retryable, safe_message, error_message = self._map_exception(e)
-            self._emit_exception_diagnostic(
-                category="request_exception",
-                message="SerialWorker request failed",
-                exc=e,
-                endpoint_class=getattr(cspec, "cls_name", "") if "cspec" in locals() else "",
-                function_name=str(getattr(spec, "name", "") or ""),
-                request_id=request_id,
-                error_type=error_type,
-                retryable=bool(retryable),
-                safe_message=safe_message,
-            )
-            if isinstance(e, HardwareUnmetError):
-                # tell the orchestrator to stop dispatching this
-                # function to this worker.
-                self._emit_function_unavailable_signal(function_name=str(spec.name or ""), exc=e)
-            if inference_watchdog is not None:
-                inference_watchdog.cancel()
-            self._emit_request_event(
-                request_id,
-                "request.failed",
-                {
-                    "function_name": spec.name,
-                    "error_type": error_type,
-                    "retryable": bool(retryable),
-                    "safe_message": safe_message,
-                },
-            )
-            if "t_infer0" in locals():
-                self._emit_request_event(
-                    request_id,
-                    f"request.{execution_kind}.failed",
-                    {
-                        "function_name": spec.name,
-                        "phase": execution_kind,
-                        "error_type": error_type,
-                        "duration_ms": int((time.monotonic() - float(locals().get("t_infer0", time.monotonic()))) * 1000),
-                    },
-                )
-            if spec.output_mode == "incremental":
-                try:
-                    # #321: typed-only, no worker_event fallback.
-                    if not self._emit_incremental_error_typed(
-                        request_id=request_id,
-                        function_name=spec.name,
-                        item_id="item-0",
-                        sequence=0,
-                        timestamp_unix_ms=int(time.time() * 1000),
-                        error_message=safe_message,
-                    ):
-                        logger.warning(
-                            "IncrementalTokenStreamError proto class unavailable; cannot signal stream error rid=%s",
-                            request_id,
-                        )
-                except Exception:
-                    pass
-            success = False
-        finally:
-            if inference_watchdog is not None:
-                inference_watchdog.cancel()
-            # Issue #18: tear down in reverse order — request-level overrides
-            # first, then the build-time index — so the contextvar lands back
-            # at its pre-request state regardless of which layers fired.
-            if _request_override_keys_tok is not None:
-                try:
-                    reset_override_ref_keys(_request_override_keys_tok)
-                except Exception:
-                    pass
-            if _request_provider_tok is not None:
-                try:
-                    reset_provider_by_ref(_request_provider_tok)
-                except Exception:
-                    pass
-            try:
-                reset_provider_by_ref(provider_tok)
-            except Exception:
-                pass
-            reset_resolved_repos_by_id(resolved_tok)
-
-            for mid in models_in_use:
-                try:
-                    self._model_use_exit(mid)
-                except Exception:
-                    pass
-            self._gpu_busy_exit()
-            # Stage 5: release the GPU semaphore mirroring the acquire above.
-            if needs_gpu:
-                try:
-                    self._gpu_semaphore.release()
-                except ValueError:
-                    logger.exception("gpu_semaphore over-release on inference path")
-            # Clear per-request PAYLOAD_REF tracking so the classifier doesn't
-            # mis-fire on the next request that didn't involve caller refs.
-            self._current_payload_ref_keys = {}
-
-            # Best-effort resource peaks.
-            try:
-                import resource as _resource  # linux/mac
-                r = _resource.getrusage(_resource.RUSAGE_SELF)
-                # Linux: ru_maxrss is KB. macOS: bytes. We only run linux in prod, but keep best-effort.
-                rss = int(getattr(r, "ru_maxrss", 0) or 0)
-                if rss > 0:
-                    # Heuristic: treat small values as KB.
-                    rm.peak_ram_bytes = rss * 1024 if rss < (1 << 40) else rss
-            except Exception:
-                pass
-            if torch is not None:
-                try:
-                    if torch.cuda.is_available():
-                        rm.peak_vram_bytes = int(torch.cuda.max_memory_allocated())
-                except Exception:
-                    pass
-
-            rm.mark_compute_completed()
-            if rm.compute_completed_at:
-                self._emit_worker_event_bytes(request_id, "metrics.compute.completed", safe_json_bytes({"at": rm.compute_completed_at}))
-
-                # Emit canonical metric events if values exist.
-                try:
-                    rm.finalize()
-                    for ev_type, event_payload in rm.canonical_events():
-                        # compute.* already emitted in real time above
-                        if ev_type in ("metrics.compute.started", "metrics.compute.completed"):
-                            continue
-                        self._emit_worker_event_bytes(request_id, ev_type, safe_json_bytes(event_payload))
-                except Exception:
-                    pass
-            # Emit extended debug payload at end (best-effort).
-            try:
-                self._emit_worker_event_bytes(request_id, "metrics.job", safe_json_bytes(rm.to_metrics_run_payload()))
-            except Exception:
-                pass
-            with self._active_requests_lock:
-                obs = self._request_observations.setdefault(request_id, {})
-                obs["peak_memory_bytes"] = int(getattr(rm, "peak_ram_bytes", 0) or 0)
-                obs["peak_vram_bytes"] = int(getattr(rm, "peak_vram_bytes", 0) or 0)
-            if success:
-                self._emit_request_event(
-                    request_id,
-                    "request.completed",
-                    {
-                        "function_name": spec.name,
-                        "duration_ms": int((time.monotonic() - float(getattr(rm, "_t0_monotonic", time.monotonic()))) * 1000),
-                    },
-                )
-
-            self._send_request_result(request_id, success, output_payload, error_type, bool(retryable), safe_message, error_message)
-
-            # Issue #20: close any still-open upload sessions at request end.
-            # Successful finalize removes the session from the cache so this
-            # is a no-op for the happy path; aborts any lingering sessions
-            # from partial failures (tenant function raised before finalize).
-            try:
-                ctx._close_upload_sessions(abort_open=True)
-            except Exception:
-                logger.debug("upload_session_close_on_request_end_failed", exc_info=True)
-
-            with self._active_requests_lock:
-                self._active_requests.pop(request_id, None)
-
-    def _execute_training_request(
-        self,
-        ctx: RequestContext,
-        function_name: str,
-        training_fn: Callable[..., Any],
-        input_payload: bytes,
-    ) -> None:
-        """Dispatch a @conversion handler.
-
-        The dispatch wrapper (conversion/dispatch.py) owns tenant-call plumbing:
-        msgspec-decoding each tenant parameter, building Source/Dataset helpers,
-        invoking the tenant function, and uploading each returned
-        ProducedFlavor via ctx.save_checkpoint. The worker's job here is the
-        outer shell — metrics, events, source materialization, destination tag
-        application, and the success/fail RPC response.
-        """
-        request_id = ctx.request_id
-        output_payload: Optional[bytes] = None
-        error_type: str = ""
-        safe_message: str = ""
-        error_message: str = ""
-        retryable = False
-        success = False
-
-        rm = RunMetricsV1(
-            request_id=str(request_id or ""),
-            function_name=str(function_name or ""),
-            required_models=list(getattr(ctx, "required_models", []) or []),
-            resolved_repos_by_id=getattr(ctx, "resolved_repos_by_id", None) or None,
-        )
-        try:
-            setattr(ctx, "_run_metrics", rm)
-        except Exception:
-            pass
-        rm.mark_compute_started()
-        if rm.compute_started_at:
-            self._emit_worker_event_bytes(request_id, "metrics.compute.started", safe_json_bytes({"at": rm.compute_started_at}))
-
-        # #345 Improvement C: `request.started` removed from the worker wire
-        # (orch's `request.assigned` is authoritative).
-
-        # Stage 5 semaphore: training functions carry their Resources on
-        # the `_worker_resources` attribute (no _SerialWorkerSpec object
-        # exists for the legacy function-shape path). Build a minimal
-        # accessor so `_function_needs_gpu` can inspect the same way.
-        class _TrainingSpecShim:
-            def __init__(self, res: Any) -> None:
-                self.resources = res
-        _tr_res = getattr(training_fn, "_worker_resources", None)
-        needs_gpu = self._function_needs_gpu(_TrainingSpecShim(_tr_res))
-        if needs_gpu:
-            self._gpu_semaphore.acquire()
-            self._bind_gpu_for_request(ctx)
-        self._gpu_busy_enter()
-        t_infer0 = time.monotonic()
-        self._emit_request_event(
-            request_id,
-            "request.training.started",
-            {"function_name": function_name, "phase": "training"},
-        )
-
-        # Populate the resolved_repos_by_id contextvar from this request's
-        # ctx so the downloader (used by `_materialize_source_for_training`
-        # and tenant code that calls Source.* helpers) can look up the
-        # orchestrator-pre-resolved snapshot URLs. Without this, training
-        # jobs fail at materialize-source time with "tensorhub ref ... not in
-        # resolved_repos_by_id" even when the orchestrator did pre-resolve.
-        # Mirrors the inference path's set at line ~4172 below.
-        from .models.ref_downloader import (
-            reset_resolved_repos_by_id,
-            set_resolved_repos_by_id,
-        )
-
-        baseline = getattr(self, "_resolved_repos_by_id_baseline", None) or None
-        resolved_map = getattr(ctx, "resolved_repos_by_id", None) or baseline
-        resolved_tok = set_resolved_repos_by_id(resolved_map)
-        # Issue #17: pair the provider index alongside the resolved-repos
-        # set so model downloads inside the tenant body route to the
-        # correct provider branch (HF / civitai / tensorhub).
-        provider_tok = set_provider_by_ref(getattr(self, "_provider_by_ref_index", None) or None)
-
-        try:
-            if ctx.is_canceled():
-                raise CanceledError("canceled")
-
-            # Decode the raw payload dict. Training dispatch wrapper handles
-            # msgspec.convert per tenant-declared field itself — we don't
-            # pre-type the top-level dict.
-            raw_payload: Any = msgspec.msgpack.decode(input_payload) if input_payload else {}
-
-            # Reserved-name source materialization — populate ctx.source_path
-            # with the local snapshot dir so the dispatch wrapper can build
-            # Source helpers on top of it.
-            src_info = getattr(ctx, "source", None) or {}
-            if isinstance(src_info, dict) and str(src_info.get("ref") or "").strip():
-                self._materialize_source_for_training(ctx, src_info)
-
-            logger.info("[request_id=%s] calling training_function %s", request_id, function_name)
-            result = training_fn(ctx, raw_payload)
-            logger.info("[request_id=%s] training_function %s returned (%d variants)",
-                        request_id, function_name, len(result) if isinstance(result, list) else -1)
-
-            if ctx.is_canceled():
-                raise CanceledError("canceled")
-
-            # Apply destination.tags to the produced checkpoint. Dispatch wrapper
-            # skips tag apply when RequestContext.apply_destination_tag isn't set;
-            # handle it here against the tensorhub API instead.
-            destination_info = getattr(ctx, "destination", None) or {}
-            if isinstance(destination_info, dict) and destination_info.get("tags"):
-                checkpoint_id = _extract_checkpoint_id_from_result(result)
-                if checkpoint_id:
-                    try:
-                        self._apply_destination_tags(ctx, destination_info, checkpoint_id)
-                    except Exception as exc:
-                        logger.warning(
-                            "[request_id=%s] tag apply raised (non-fatal): %s",
-                            request_id, exc,
-                        )
-
-            # Synthesize a minimal success payload. Training functions don't
-            # emit a canonical response body — uploads + the job record are the
-            # durable outputs. Send an empty msgpack map so orchestrator sees
-            # structured output.
-            output_payload = msgspec.msgpack.encode({})
-            success = True
-
-        except CanceledError:
-            error_type = "cancelled"
-            retryable = False
-            safe_message = "cancelled"
-            error_message = "cancelled"
-            self._emit_request_event(
-                request_id,
-                "request.cancelled",
-                {"function_name": function_name},
-            )
-            success = False
-
-        except Exception as exc:
-            # HardwareUnmetError → function-level self-disable terminal.
-            # Classify separately before the catch-all so (a) the error_type is
-            # hardware_unmet (not internal), (b) the WorkerFunctionUnavailableSignal
-            # goes upstream so the orchestrator narrows dispatch.
-            if isinstance(exc, HardwareUnmetError):
-                error_type = "hardware_unmet"
-                retryable = False
-                safe_message = self._sanitize_safe_message(str(exc) or "hardware unmet")
-                error_message = f"{type(exc).__name__}: {exc}"
-                self._emit_function_unavailable_signal(function_name=function_name, exc=exc)
-                logger.warning(
-                    "[request_id=%s] training_function %s self-disabled: %s",
-                    request_id, function_name, exc,
-                )
-            else:
-                error_type = "internal"
-                retryable = False
-                safe_message = f"{type(exc).__name__}: {exc}"
-                error_message = safe_message
-                logger.exception("[request_id=%s] training_function %s failed: %s",
-                                 request_id, function_name, exc)
-            self._emit_request_event(
-                request_id,
-                "request.failed",
-                {
-                    "function_name": function_name,
-                    "error_type": error_type,
-                    "retryable": retryable,
-                    "safe_message": safe_message,
-                },
-            )
-            self._emit_request_event(
-                request_id,
-                "request.training.failed",
-                {
-                    "function_name": function_name,
-                    "phase": "training",
-                    "error_type": error_type,
-                    "duration_ms": int((time.monotonic() - t_infer0) * 1000),
-                },
-            )
-            success = False
-
-        finally:
-            try:
-                reset_provider_by_ref(provider_tok)
-            except Exception:
-                pass
-            try:
-                reset_resolved_repos_by_id(resolved_tok)
-            except Exception:
-                pass
-            self._gpu_busy_exit()
-            # Stage 5: release the GPU semaphore mirroring the acquire above.
-            if needs_gpu:
-                try:
-                    self._gpu_semaphore.release()
-                except ValueError:
-                    logger.exception("gpu_semaphore over-release on training path")
-            rm.mark_compute_completed()
-            if rm.compute_completed_at:
-                self._emit_worker_event_bytes(request_id, "metrics.compute.completed", safe_json_bytes({"at": rm.compute_completed_at}))
-            try:
-                rm.finalize()
-                for ev_type, event_payload in rm.canonical_events():
-                    if ev_type in ("metrics.compute.started", "metrics.compute.completed"):
-                        continue
-                    self._emit_worker_event_bytes(request_id, ev_type, safe_json_bytes(event_payload))
-            except Exception:
-                pass
-            try:
-                self._emit_worker_event_bytes(request_id, "metrics.job", safe_json_bytes(rm.to_metrics_run_payload()))
-            except Exception:
-                pass
-            with self._active_requests_lock:
-                obs = self._request_observations.setdefault(request_id, {})
-                obs["peak_memory_bytes"] = int(getattr(rm, "peak_ram_bytes", 0) or 0)
-                obs["peak_vram_bytes"] = int(getattr(rm, "peak_vram_bytes", 0) or 0)
-            if success:
-                self._emit_request_event(
-                    request_id,
-                    "request.completed",
-                    {
-                        "function_name": function_name,
-                        "duration_ms": int((time.monotonic() - t_infer0) * 1000),
-                    },
-                )
-            self._send_request_result(request_id, success, output_payload, error_type, bool(retryable), safe_message, error_message)
-            with self._active_requests_lock:
-                self._active_requests.pop(request_id, None)
-
-    def _get_local_model_cache(self) -> Optional[Any]:
-        """
-        Best-effort initialize a local (non-NFS) model cache for NFS->local localization.
-
-        Returns None when disabled or misconfigured (e.g. local cache dir is itself on NFS).
-        """
-        d = (self._local_model_cache_dir or "").strip()
-        if not d:
-            return None
-        with self._local_model_cache_lock:
-            if self._local_model_cache is not None:
-                return self._local_model_cache
-            try:
-                from .pipeline.mount_backend import mount_backend_for_path
-                mb = mount_backend_for_path(d)
-                if mb is not None and mb.is_nfs:
-                    logger.warning(
-                        "WORKER_LOCAL_MODEL_CACHE_DIR appears to be on NFS (%s, %s); disabling localization cache",
-                        mb.fstype,
-                        mb.mountpoint,
-                    )
-                    # Disable for the rest of the process lifetime.
-                    self._local_model_cache_dir = ""
-                    return None
-            except Exception:
-                pass
-
-            try:
-                from .pipeline.local_cache import LocalModelCache  # local import to avoid heavy import at worker init
-
-                max_cache_gb = 100.0
-                self._local_model_cache = LocalModelCache(d, max_cache_gb)
-                logger.info("Local model cache enabled: %s (%.1fGB max)", d, max_cache_gb)
-                return self._local_model_cache
-            except Exception as e:
-                logger.warning("Failed to init local model cache: %s", e)
-                self._local_model_cache_dir = ""
-                return None
-
     def _shared_disk_volume_info(self, path: Optional[Path] = None) -> Dict[str, Any]:
         """
         Best-effort identify the disk backend and volume identity for the shared model cache.
@@ -11422,8 +9250,6 @@ class Worker:
             logger.warning("[request_id=%s] no worker_capability_token; skipping destination tag apply", ctx.request_id)
             return
 
-        import urllib.parse
-        import urllib.request
 
         for raw_tag in tags:
             tag = str(raw_tag or "").strip()
@@ -11660,7 +9486,7 @@ class Worker:
                         except Exception:
                             pass
 
-                    # Detect mount backend (NFS vs local) and localize snapshot to local disk if needed.
+                    # Detect mount backend (NFS vs local) so residency metrics record it.
                     try:
                         from .pipeline.mount_backend import mount_backend_for_path
 
@@ -11673,33 +9499,8 @@ class Worker:
                                 disk_backend="nfs" if mb_src.is_nfs else "local",
                                 localized=False,
                             )
-
-                        if mb_src is not None and mb_src.is_nfs and src_path.exists() and src_path.is_dir():
-                            lcache = self._get_local_model_cache()
-                            if lcache is not None:
-                                t_cp0 = time.monotonic()
-                                cached_path, bytes_copied = lcache.cache_model_blocking_with_stats(canon, src_path)
-                                cp_ms = int((time.monotonic() - t_cp0) * 1000)
-
-                                # Update metrics with effective backend used for loading.
-                                if rm is not None:
-                                    try:
-                                        mb_eff = mount_backend_for_path(cached_path)
-                                        kw: Dict[str, Any] = {
-                                            "disk_fstype": mb_eff.fstype if mb_eff is not None else None,
-                                            "disk_backend": "local",
-                                            "localized": True,
-                                        }
-                                        if bytes_copied is not None:
-                                            kw["nfs_to_local_copy_ms"] = cp_ms
-                                            kw["bytes_copied"] = bytes_copied
-                                        rm.set_model_disk_backend(canon, **kw)
-                                    except Exception:
-                                        pass
-
-                                local = str(cached_path)
                     except Exception:
-                                pass
+                        pass
 
                     if local is None:
                         raise ValueError(f"diffusers pipeline local path is empty for model {model_id!r}")
@@ -12082,237 +9883,6 @@ class Worker:
 
         raise ValueError(f"no injection provider for type {qn} (model_id={model_id})")
 
-    def _normalize_lora_overlays(
-        self,
-        inj: InjectionSpec,
-        resolved_models: Dict[str, Dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        entry = resolved_models.get(inj.param_name) or {}
-        raw = entry.get("loras") or []
-        if not raw:
-            return []
-        if not getattr(inj.binding, "_allow_lora", False):
-            raise ValueError(
-                f"function binding {inj.param_name!r} received LoRA overlays but did not declare allow_lora()"
-            )
-        if not isinstance(raw, list):
-            raise ValueError(f"function binding {inj.param_name!r}: loras must be a list")
-        out: list[dict[str, Any]] = []
-        for idx, item in enumerate(raw):
-            if not isinstance(item, dict):
-                item = msgspec.to_builtins(item)
-            if not isinstance(item, dict):
-                raise ValueError(f"function binding {inj.param_name!r}: lora {idx} must be an object")
-            ref = str(item.get("ref") or "").strip()
-            if not ref:
-                raise ValueError(f"function binding {inj.param_name!r}: lora {idx} missing ref")
-            provider = str(item.get("provider") or "tensorhub").strip() or "tensorhub"
-            tag = str(item.get("tag") or "prod").strip() or "prod"
-            flavor = str(item.get("flavor") or "").strip()
-            try:
-                weight = float(item.get("weight", 1.0))
-            except Exception as exc:
-                raise ValueError(
-                    f"function binding {inj.param_name!r}: lora {idx} weight must be numeric"
-                ) from exc
-            out.append(
-                {
-                    "ref": ref,
-                    "provider": provider,
-                    "tag": tag,
-                    "flavor": flavor,
-                    "weight": weight,
-                }
-            )
-        return out
-
-    def _pipeline_lora_lock(self, pipeline: Any) -> threading.Lock:
-        locks = getattr(self, "_lora_overlay_locks", None)
-        locks_lock = getattr(self, "_lora_overlay_locks_lock", None)
-        if locks is None:
-            self._lora_overlay_locks = {}
-            locks = self._lora_overlay_locks
-        if locks_lock is None:
-            self._lora_overlay_locks_lock = threading.Lock()
-            locks_lock = self._lora_overlay_locks_lock
-        key = id(pipeline)
-        with locks_lock:
-            lock = locks.get(key)
-            if lock is None:
-                lock = threading.Lock()
-                locks[key] = lock
-            return lock
-
-    def _materialize_lora_overlay(
-        self,
-        overlay: dict[str, Any],
-        *,
-        adapter_name: str,
-    ) -> _RuntimeLoraSpec:
-        ref = str(overlay["ref"])
-        provider = str(overlay.get("provider") or "tensorhub")
-        tag = str(overlay.get("tag") or "prod")
-        flavor = str(overlay.get("flavor") or "")
-        weight = float(overlay.get("weight", 1.0))
-        model_id = _resolved_repo_id(ref, flavor=flavor, tag=tag, provider=provider)
-
-        local: str | None = None
-        try:
-            p = Path(ref)
-            if p.exists():
-                local = p.as_posix()
-        except Exception:
-            local = None
-        if local is None:
-            if self._downloader is None:
-                raise ValueError("LoRA overlay materialization requires a model downloader")
-            local = self._downloader.download(model_id, str(tensorhub_cas_dir()))
-
-        path = Path(local)
-        if path.is_dir():
-            preferred = (
-                path / "adapter_model.safetensors",
-                path / "pytorch_lora_weights.safetensors",
-            )
-            selected = next((p for p in preferred if p.exists()), None)
-            if selected is None:
-                matches = sorted(path.rglob("*.safetensors"))
-                selected = matches[0] if matches else None
-            if selected is None:
-                raise ValueError(f"LoRA overlay {ref!r} did not materialize a safetensors file")
-            path = selected
-        if not path.exists():
-            raise ValueError(f"LoRA overlay {ref!r} materialized to missing path {path}")
-        return _RuntimeLoraSpec(
-            tensors=Tensors(ref=ref, local_path=path.as_posix()),
-            weight=weight,
-            adapter_name=adapter_name,
-        )
-
-    def _read_safetensors_keys(self, path: Path) -> list[str]:
-        try:
-            from safetensors import safe_open
-        except Exception:
-            return []
-        try:
-            with safe_open(path.as_posix(), framework="pt", device="cpu") as handle:
-                return list(handle.keys())
-        except Exception:
-            return []
-
-    def _pipeline_weight_keys(self, pipeline: Any) -> set[str]:
-        out: set[str] = set()
-        state_dict = getattr(pipeline, "state_dict", None)
-        if callable(state_dict):
-            try:
-                raw = state_dict()
-                if isinstance(raw, dict):
-                    out.update(str(k) for k in raw.keys())
-            except Exception:
-                pass
-        components = getattr(pipeline, "components", None)
-        if isinstance(components, dict):
-            for name, component in components.items():
-                component_state_dict = getattr(component, "state_dict", None)
-                if not callable(component_state_dict):
-                    continue
-                try:
-                    raw = component_state_dict()
-                except Exception:
-                    continue
-                if isinstance(raw, dict):
-                    prefix = str(name)
-                    out.update(f"{prefix}.{k}" for k in raw.keys())
-        return out
-
-    def _lora_target_from_key(self, key: str) -> str:
-        suffixes = (
-            ".lora_down.weight",
-            ".lora_up.weight",
-            ".lora_A.weight",
-            ".lora_B.weight",
-            ".alpha",
-        )
-        for suffix in suffixes:
-            if key.endswith(suffix):
-                return key[: -len(suffix)]
-        return ""
-
-    def _validate_lora_specs_compatible(
-        self,
-        pipeline: Any,
-        specs: list[_RuntimeLoraSpec],
-    ) -> None:
-        for spec in specs:
-            keys = self._read_safetensors_keys(Path(spec.tensors.local_path or ""))
-            if not keys:
-                continue
-            target_prefixes = {
-                target
-                for key in keys
-                if (target := self._lora_target_from_key(str(key)))
-            }
-            if not target_prefixes:
-                raise ValidationError(
-                    f"LoRA artifact {spec.tensors.ref!r} does not contain recognized LoRA adapter weights"
-                )
-            pipeline_keys = self._pipeline_weight_keys(pipeline)
-            if not pipeline_keys:
-                continue
-            unmatched = [
-                target
-                for target in sorted(target_prefixes)
-                if not any(
-                    base == f"{target}.weight"
-                    or base == target
-                    or base.startswith(f"{target}.")
-                    for base in pipeline_keys
-                )
-            ]
-            if unmatched:
-                raise ValidationError(
-                    f"LoRA artifact {spec.tensors.ref!r} targets modules not present on "
-                    f"{type(pipeline).__name__}: {', '.join(unmatched[:5])}"
-                )
-
-    @contextmanager
-    def _lora_overlay_context(
-        self,
-        ctx: RequestContext,
-        injections: list[InjectionSpec],
-        call_kwargs: Dict[str, Any],
-        resolved_models: Dict[str, Dict[str, Any]],
-    ) -> Iterator[None]:
-        with ExitStack() as stack:
-            for inj in injections:
-                overlays = self._normalize_lora_overlays(inj, resolved_models)
-                if not overlays:
-                    continue
-                pipeline = call_kwargs.get(inj.param_name)
-                if pipeline is None:
-                    raise ValueError(f"LoRA overlays require injected pipeline {inj.param_name!r}")
-                required_methods = ("load_lora_weights", "set_adapters", "unload_lora_weights")
-                missing = [name for name in required_methods if not callable(getattr(pipeline, name, None))]
-                if missing:
-                    raise ValueError(
-                        f"binding {inj.param_name!r} declared allow_lora(), but injected runtime "
-                        f"{type(pipeline).__name__} lacks {', '.join(missing)}"
-                    )
-                lock = self._pipeline_lora_lock(pipeline)
-                stack.enter_context(lock)
-                specs = [
-                    self._materialize_lora_overlay(
-                        overlay,
-                        adapter_name=f"cozy_lora_{ctx.request_id}_{inj.param_name}_{idx}",
-                    )
-                    for idx, overlay in enumerate(overlays)
-                ]
-                self._validate_lora_specs_compatible(pipeline, specs)
-                from .utils.lora import load_loras
-
-                stack.enter_context(load_loras(pipeline, specs, ctx.request_id))
-            yield
-
     def _resolved_models_for_request(self, request: Any) -> Dict[str, Dict[str, Any]]:
         """Extract the orchestrator-stamped ``resolved_models`` map from a
         JobExecutionRequest envelope.
@@ -12395,97 +9965,6 @@ class Worker:
                 if raw_loras:
                     out[str(param_name)]["loras"] = msgspec.to_builtins(raw_loras)
         return out
-
-    def _resolve_model_id_for_injection(
-        self,
-        fn_name: str,
-        inj: InjectionSpec,
-        payload: msgspec.Struct,
-        *,
-        resolved_models: Optional[Dict[str, Dict[str, Any]]] = None,
-    ) -> tuple[str, Optional[str]]:
-        """Resolve the model id for a binding.
-
-        Order:
-          1. Orchestrator-stamped ``resolved_models[param_name]`` (caller
-             override that has already passed the orchestrator's allowlist).
-          2. Binding default — fixed ``(ref, flavor, tag)`` or dispatch table
-             lookup on the discriminator field.
-        """
-        resolved_models = resolved_models or {}
-
-        # 1. Orchestrator-resolved ref. source=default is the endpoint
-        # owner's current model-slot default; any other source is a caller
-        # override that has already passed orchestrator policy.
-        override = resolved_models.get(inj.param_name)
-        if override:
-            is_caller_override = str(override.get("source") or "").strip() != "default"
-            if is_caller_override and not inj.binding._allow_override:
-                # Defense-in-depth — orchestrator should already have rejected.
-                raise ValueError(
-                    f"function {fn_name!r} param {inj.param_name!r}: binding has no "
-                    "allow_override declared, but resolved_models was stamped — orchestrator drift?"
-                )
-            ref = override.get("ref", "")
-            flavor = override.get("flavor", "")
-            tag = override.get("tag", "prod")
-            # Issue #18: route the override through the right provider so
-            # an HFRepo binding overridden with `{provider: "hf", ref: ...}`
-            # resolves through the HF downloader, not tensorhub's
-            # resolved_repos_by_id map. Older orchestrators that haven't
-            # shipped the provider field land on "tensorhub" via the
-            # default in `_resolved_models_for_request` — same as the
-            # pre-#358 behavior.
-            provider = override.get("provider", "tensorhub") or "tensorhub"
-            model_id = _resolved_repo_id(ref, flavor=flavor, tag=tag, provider=provider)
-            return model_id, None
-
-        # 2. Binding default.
-        binding = inj.binding
-        # The wire format is bare ref + explicit provider field. Internal
-        # canonical model_id keys discriminate by provider so the same
-        # `owner/repo` on cozy vs. hf stays disjoint in the cache.
-        if isinstance(binding, (Repo, HFRepo, CivitaiRepo)):
-            model_id = _resolved_repo_id(
-                binding.ref, flavor=binding._flavor, tag=binding._tag, provider=binding.provider
-            )
-            return model_id, None
-
-        if isinstance(binding, Dispatch):
-            # Discriminator field → table key → repo pick.
-            try:
-                chosen = getattr(payload, binding.field)
-            except Exception:
-                raise ValueError(
-                    f"function {fn_name!r}: dispatch field {binding.field!r} missing on payload"
-                ) from None
-            if not isinstance(chosen, str):
-                raise ValueError(
-                    f"function {fn_name!r}: dispatch field {binding.field!r} must be a string, "
-                    f"got {type(chosen).__name__}"
-                )
-            key = chosen.strip()
-            pick = binding.table.get(key)
-            if pick is None:
-                allowed = sorted(binding.table.keys())
-                raise ValueError(
-                    f"function {fn_name!r}: dispatch key {key!r} not in table {allowed!r}"
-                )
-            model_id = _resolved_repo_id(
-                pick.ref, flavor=pick._flavor, tag=pick._tag, provider=pick.provider
-            )
-            return model_id, key
-
-        raise TypeError(f"unknown binding type: {type(binding).__name__}")
-
-    def _enforce_model_allowlist(self, model_id: str, inj: InjectionSpec, *, allowed_ids: Optional[set[str]] = None) -> None:
-        # Enforce BOTH:
-        # - any per-function mapping restriction (allowed_ids), AND
-        # - the release-level allowlist from the scheduler (defense-in-depth).
-        if allowed_ids is not None and model_id not in allowed_ids:
-            raise ValueError(f"model_id not allowed for function: {model_id!r} (injection param {inj.param_name})")
-        if self._release_allowed_model_ids is not None and model_id not in self._release_allowed_model_ids:
-            raise ValueError(f"model_id not allowed for release: {model_id!r} (injection param {inj.param_name})")
 
     def _send_request_result(
         self,

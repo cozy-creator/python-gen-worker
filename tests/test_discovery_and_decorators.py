@@ -22,7 +22,6 @@ from __future__ import annotations
 import logging
 import sys
 import textwrap
-import threading
 from pathlib import Path
 from typing import Annotated, Iterator
 
@@ -43,7 +42,6 @@ from gen_worker.discovery.discover import (
     _extract_class_function_methods,
 )
 from gen_worker.discovery.walk import find_endpoint_classes
-from gen_worker.worker import Worker
 
 
 class _In(msgspec.Struct):
@@ -59,34 +57,12 @@ class BoundedInput(msgspec.Struct):
     name: Annotated[str, msgspec.Meta(min_length=1, max_length=64)] = "x"
 
 
-def _bare_worker() -> Worker:
-    """Real Worker with only the dispatch dicts populated (skips gRPC init)."""
-    w = Worker.__new__(Worker)
-    w._request_specs = {}
-    w._training_specs = {}
-    w._batched_specs = {}
-    w._batched_instances = []
-    w._serial_class_specs = {}
-    w._serial_class_instances = []
-    w._conversion_class_specs = {}
-    w._discovered_resources = {}
-    w._function_schemas = {}
-    w._batched_loop = None
-    w._batched_loop_thread = None
-    w._batched_inflight_lock = threading.Lock()
-    w._batched_inflight = {}
-    w._micro_batch_aggregators = {}
-    w.scheduler_addr = ""
-    w.worker_id = "test"
-    return w
-
-
 # --------------------------------------------------------------------------- #
 # 1. @invocable parity: discovered + dispatched like @inference.function       #
 # --------------------------------------------------------------------------- #
 
 
-def test_invocable_discovered_and_dispatched_like_inference_function() -> None:
+def test_invocable_discovered_and_dispatched_like_inference_function(bare_worker) -> None:
     @inference()
     class ViaInvocable:
         def setup(self) -> None:
@@ -125,7 +101,7 @@ def test_invocable_discovered_and_dispatched_like_inference_function() -> None:
     assert stage_spec.name == "encode" and stage_spec.gpu_class == "small"
 
     # Both register a routable serial spec on a real Worker.
-    w = _bare_worker()
+    w = bare_worker()
     assert w._register_endpoint_class(
         ViaInvocable, ViaInvocable.__gen_worker_endpoint_spec__
     ) == 1
@@ -200,7 +176,7 @@ def test_parametrize_stamps_n_functions_with_per_row_overrides() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_class_with_no_shutdown_registers_serves_and_tears_down() -> None:
+def test_class_with_no_shutdown_registers_serves_and_tears_down(bare_worker) -> None:
     served: list = []
 
     @inference()
@@ -215,7 +191,7 @@ def test_class_with_no_shutdown_registers_serves_and_tears_down() -> None:
 
     assert not hasattr(NoShutdown, "shutdown")
 
-    w = _bare_worker()
+    w = bare_worker()
     assert w._register_endpoint_class(NoShutdown, NoShutdown.__gen_worker_endpoint_spec__) == 1
     assert "generate" in w._serial_class_specs
 

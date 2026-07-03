@@ -14,7 +14,6 @@ import types
 from typing import Iterator
 
 import msgspec
-import pytest
 
 import gen_worker.cli as cli
 from gen_worker import HFRepo, Repo, RequestContext, inference

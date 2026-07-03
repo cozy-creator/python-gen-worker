@@ -26,3 +26,42 @@ if _REPO_SRC not in _LOCATION.parents:
         "`uv run --extra dev pytest`, and remove any global install with "
         "`python3 -m pip uninstall --break-system-packages gen-worker`."
     )
+
+
+import threading
+
+import pytest
+
+
+@pytest.fixture
+def bare_worker():
+    """Factory for a real Worker with only dispatch state populated (no gRPC).
+
+    Shared by the dispatch-path suites; ``gpu_slots`` sizes the GPU semaphore.
+    """
+    from gen_worker.worker import Worker
+
+    def make(gpu_slots: int = 4) -> "Worker":
+        w = Worker.__new__(Worker)
+        w._batched_specs = {}
+        w._batched_instances = []
+        w._serial_class_specs = {}
+        w._serial_class_instances = []
+        w._conversion_class_specs = {}
+        w._discovered_resources = {}
+        w._function_schemas = {}
+        w._batched_loop = None
+        w._batched_loop_thread = None
+        w._batched_inflight_lock = threading.Lock()
+        w._batched_inflight = {}
+        w._micro_batch_aggregators = {}
+        w._active_requests = {}
+        w._active_requests_lock = threading.Lock()
+        w._request_handler_done_times = {}
+        w._request_recv_times = {}
+        w.scheduler_addr = ""
+        w.worker_id = "test"
+        w._gpu_semaphore = threading.Semaphore(gpu_slots)
+        return w
+
+    return make

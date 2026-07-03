@@ -21,7 +21,6 @@ import threading
 import time
 from typing import Any, List, Tuple
 
-import pytest
 
 from gen_worker.worker import HEARTBEAT_INTERVAL, Worker
 
@@ -117,7 +116,6 @@ def _backoff_worker(base: float = 0.5, cap: float = 30.0) -> Worker:
     w = Worker.__new__(Worker)
     w._reconnect_delay_base = base
     w._reconnect_delay_max = cap
-    w._reconnect_jitter_seconds = 1.0  # unused by full-jitter, kept for parity
     return w
 
 

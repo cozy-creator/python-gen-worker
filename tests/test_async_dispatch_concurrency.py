@@ -18,7 +18,6 @@ from typing import Callable, Dict, List
 import msgspec
 
 from gen_worker import RequestContext, Resources, inference
-from gen_worker.worker import Worker
 
 # Strictly above the default ThreadPoolExecutor width of min(32, cpu+4) so the
 # barrier below can ONLY release if the await holds no executor thread.
@@ -33,34 +32,6 @@ class HoldOut(msgspec.Struct):
     tag: str = ""
 
 
-def _bare_worker() -> Worker:
-    w = Worker.__new__(Worker)
-    w._request_specs = {}
-    w._training_specs = {}
-    w._batched_specs = {}
-    w._batched_instances = []
-    w._serial_class_specs = {}
-    w._serial_class_instances = []
-    w._conversion_class_specs = {}
-    w._discovered_resources = {}
-    w._function_schemas = {}
-    w._batched_loop = None
-    w._batched_loop_thread = None
-    w._batched_inflight_lock = threading.Lock()
-    w._batched_inflight = {}
-    w._micro_batch_aggregators = {}
-    w._active_requests = {}
-    w._active_requests_lock = threading.Lock()
-    w._request_handler_done_times = {}
-    w._request_recv_times = {}
-    w.scheduler_addr = ""
-    w.worker_id = "test"
-    w.max_output_bytes = 0
-    w.max_input_bytes = 0
-    w._gpu_semaphore = threading.Semaphore(1)
-    return w
-
-
 def _wait(pred: Callable[[], bool], timeout: float = 30.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -70,7 +41,7 @@ def _wait(pred: Callable[[], bool], timeout: float = 30.0) -> None:
     raise AssertionError("condition not met within timeout")
 
 
-def test_async_dispatch_exceeds_executor_width() -> None:
+def test_async_dispatch_exceeds_executor_width(bare_worker) -> None:
     """Dispatch N_INFLIGHT (=64 > 32) async requests SEQUENTIALLY from one
     thread. Each handler parks on a shared barrier that only releases once all
     64 have STARTED — so the test completes iff all 64 coroutines are in
@@ -96,7 +67,7 @@ def test_async_dispatch_exceeds_executor_width() -> None:
             await state["release"].wait()  # type: ignore[union-attr]
             return HoldOut(tag=payload.tag)
 
-    w = _bare_worker()
+    w = bare_worker(gpu_slots=1)
     assert w._register_endpoint_class(Holder, Holder.__gen_worker_endpoint_spec__) == 1
     sspec = w._serial_class_specs["hold"]
     assert sspec.is_async and sspec.output_mode == "single"
@@ -135,7 +106,7 @@ def test_async_dispatch_exceeds_executor_width() -> None:
     _wait(lambda: len(w._active_requests) == 0, timeout=5.0)
 
 
-def test_async_dispatch_failure_still_sends_terminal_result() -> None:
+def test_async_dispatch_failure_still_sends_terminal_result(bare_worker) -> None:
     """The callback-driven completion path must deliver a mapped failure
     result when the coroutine raises (no thread waiting to catch it)."""
 
@@ -149,7 +120,7 @@ def test_async_dispatch_failure_still_sends_terminal_result() -> None:
             await asyncio.sleep(0)
             raise RuntimeError("kaboom")
 
-    w = _bare_worker()
+    w = bare_worker(gpu_slots=1)
     w._register_endpoint_class(Exploder, Exploder.__gen_worker_endpoint_spec__)
     sspec = w._serial_class_specs["boom"]
 
@@ -168,7 +139,7 @@ def test_async_dispatch_failure_still_sends_terminal_result() -> None:
     assert "rfail" not in w._active_requests
 
 
-def test_async_dispatch_cancel_before_run_maps_to_canceled() -> None:
+def test_async_dispatch_cancel_before_run_maps_to_canceled(bare_worker) -> None:
     """cancel-on-disconnect invariant: a ctx canceled before/while dispatched
     yields a terminal `canceled` result, not a success."""
 
@@ -182,7 +153,7 @@ def test_async_dispatch_cancel_before_run_maps_to_canceled() -> None:
             await asyncio.sleep(60)
             return HoldOut(tag=payload.tag)
 
-    w = _bare_worker()
+    w = bare_worker(gpu_slots=1)
     w._register_endpoint_class(Slow, Slow.__gen_worker_endpoint_spec__)
     sspec = w._serial_class_specs["crawl"]
 
