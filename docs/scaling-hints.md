@@ -93,21 +93,22 @@ across the fleet, per `(function, gpu_class, field)`. The tenant declares
 
 ---
 
-## Validation: scales_with fields must exist on the payload
+## scales_with fields must name real payload fields
 
 Every name in `vram_scales_with` and `runtime_scales_with` must reference a
 real field on the function's payload struct (the first segment, before any
-`.` or `[`, is checked). Drift fails discovery with `unknown_payload_field`:
+`.` or `[`). Keep them in sync with the struct — a name that doesn't match a
+payload field is a silent bug: the cost-shape coefficient never fires.
 
 ```python
 class Input(msgspec.Struct):
     prompt: str
     num_images: int = 1
 
-# OK:
+# OK — `num_images` is a real field:
 Resources(runtime_scales_with=("num_images",))
 
-# Fails: payload struct has no `width` field
+# Bug — payload struct has no `width` field, so this hint never applies:
 Resources(vram_scales_with=("width",))
 ```
 
@@ -144,7 +145,7 @@ _flux_dispatch = Resources(
     runtime_scales_with=("num_inference_steps", "num_images_per_prompt"),
 )
 
-@inference_function(
+@inference(
     resources=_flux_dispatch,
     models={"pipeline": dispatch(
         field="variant",
@@ -154,7 +155,12 @@ _flux_dispatch = Resources(
         },
     )},
 )
-def generate_bnb(ctx, pipeline, payload: BnbInput) -> Output: ...
+class GenerateBnb:
+    def setup(self, pipeline) -> None:
+        self.pipeline = pipeline
+
+    @invocable(name="generate_bnb")
+    def generate_bnb(self, ctx, payload: BnbInput) -> Output: ...
 ```
 
 A request for `variant="nf4"` with small dimensions can still admit on a
@@ -163,5 +169,5 @@ the cost-shape fields would actually fit on a smaller GPU, but the floor
 gate stays where the largest pick demands.
 
 When you need finer-grained per-variant VRAM floors, split the function:
-one `@inference_function` per variant, each with its own `Resources` and a
+one `@inference` class per variant, each with its own `Resources` and a
 fixed pick.

@@ -33,8 +33,7 @@ from __future__ import annotations
 _MIGRATION_MESSAGE = (
     "gen_worker.api.injection (ModelRef / ModelRefSource / Src / parse_injection / "
     "InjectionSpec) was removed in gen-worker 0.7.0. Use the models={...} kwarg on "
-    "@inference with Repo / Dispatch bindings instead. See `progress.json` "
-    "issue #9 (decorator-table-model-bindings)."
+    "@inference with Repo / Dispatch bindings instead."
 )
 
 

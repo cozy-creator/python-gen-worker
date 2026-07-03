@@ -132,10 +132,10 @@ Suite green; `python -X importtime -c "import gen_worker" ` shows no torch; `gen
 **Status:** OPEN — README.md:47-135 and docs/endpoint-authoring.md (+endpoint-envs, endpoint-toml, scaling-hints, dockerfile) teach `@inference_function`, a stub that raises ImportError referencing an internal progress.json. Time-to-hello-world through the front door is infinite.
 
 ## Tasks
-- [ ] Rewrite README quickstart against the shipped class API (verified working example: `examples/marco-polo/src/marco_polo/main.py`). Keep it short.
-- [ ] Purge `@inference_function` from all docs/ (27 occurrences in README + 5 docs) or delete the stale pages outright pending API v2 (#368) — prefer deletion + one accurate page.
-- [ ] Fix doc lies flagged in audit: `accelerator` "gpu"/"cpu" shorthands claimed normalized but rejected (endpoint-authoring.md:97 vs decorators.py:129-140); promised `unknown_payload_field` discovery validation that doesn't exist (endpoint-authoring.md:117-118); nonexistent `max_concurrent_per_worker` kwarg (cookbook-image-diffusion.md:205).
-- [ ] Strip "See progress.json #NNN" from ~15 developer-facing error strings (decorators.py:770,1036,1431; toml_manifest.py:520; etc.).
+- [x] Rewrite README quickstart against the shipped class API (verified working example: `examples/marco-polo/src/marco_polo/main.py`). Keep it short. [DONE (docs/dev-experience): README minimum-viable + model + dispatch examples now `@inference`/`@invocable` class-shape; verified `gen-worker run --payload '{"prompt":"hello"}'` on the copied README example returns a result in one try.]
+- [ ] Purge `@inference_function` from all docs/ (27 occurrences in README + 5 docs) or delete the stale pages outright pending API v2 (#368) — prefer deletion + one accurate page. [PARTIAL (docs/dev-experience): front-door purged — README + endpoint-envs/scaling-hints/endpoint-toml/dockerfile fixed to class-shape. endpoint-authoring.md got a staleness banner + fixed table/quickstart; its ~19 advanced `@inference_function`/`@training_function` examples deliberately left for the #368 rewrite (don't re-port them here).]
+- [ ] Fix doc lies flagged in audit: `accelerator` "gpu"/"cpu" shorthands claimed normalized but rejected (endpoint-authoring.md:97 vs decorators.py:129-140); promised `unknown_payload_field` discovery validation that doesn't exist (endpoint-authoring.md:117-118); nonexistent `max_concurrent_per_worker` kwarg (cookbook-image-diffusion.md:205). [PARTIAL (docs/dev-experience): fixed the two front-door lies — accelerator now says `"gpu"/"cpu"` are rejected (not normalized); `unknown_payload_field` reworded to "silent bug, hint never fires" in endpoint-authoring + scaling-hints. `max_concurrent_per_worker` left for #368 (cookbooks, not front-door).]
+- [x] Strip "See progress.json #NNN" from ~15 developer-facing error strings (decorators.py:770,1036,1431; toml_manifest.py:520; etc.). [DONE (docs/dev-experience): stripped from every RAISED error string — decorators.py (@class-required, @batched_inference.function, migration stub), __init__.py `_REMOVED_PUBLIC_SYMBOLS` (ModelRef/ModelRefSource), injection.py, discovery/validation.py, toml_manifest.py. Internal module docstrings/comments (decorators.py:42, injection.py:27) left as-is — not error strings.]
 
 ## Acceptance
 A new dev can copy the README example and get a working `gen-worker run` in one try.
@@ -148,12 +148,12 @@ A new dev can copy the README example and get a working `gen-worker run` in one 
 **Status:** OPEN.
 
 ## Tasks
-- [ ] Drop unused dep `tomli-w` (pyproject.toml:25 — zero imports).
-- [ ] Resolve redundant/conflicting extras: `images`/`audio` duplicate core Pillow/numpy with a different Pillow floor (pyproject.toml:35-36 vs extras). Keep one.
-- [ ] Add `task proto` (grpc_tools codegen) — currently no reproducible path from proto/ to pb/; regen the stale `pb/worker_scheduler_pb2.pyi` (still has 3 pre-rename `owner` refs).
-- [ ] Fix Taskfile: `task test`/`task lint` fail on fresh clone (need `uv run --extra dev`); `lint` is mypy-only while ruff is used ad hoc — declare ruff in dev extra + Taskfile + CI.
-- [ ] Note the `[tool.uv.sources]` cu128 torch pin (pyproject.toml:120-128) is uv-only; document or accept that `pip install gen-worker[torch]` resolves differently.
-- [ ] CHANGELOG the three unreleased commits on master (2300c3b, 5347209, f6284bf) at next release.
+- [x] Drop unused dep `tomli-w` (pyproject.toml:25 — zero imports). [DONE (docs/dev-experience): removed; confirmed zero `tomli_w` imports and `uv sync --extra dev` uninstalls it, suite still green.]
+- [x] Resolve redundant/conflicting extras: `images`/`audio` duplicate core Pillow/numpy with a different Pillow floor (pyproject.toml:35-36 vs extras). Keep one. [DONE: removed Pillow+numpy from CORE (both are lazy/TYPE_CHECKING-only in io.py — no eager import anywhere), so `[images]`=Pillow>=10 and `[audio]`=soundfile+numpy are now the single home; base wheel is truly lean, matching the README "plain Python" claim + io.py's own install hints. 212 tests pass with numpy/Pillow uninstalled.]
+- [x] Add `task proto` (grpc_tools codegen) — currently no reproducible path from proto/ to pb/; regen the stale `pb/worker_scheduler_pb2.pyi` (still has 3 pre-rename `owner` refs). [DONE: `task proto` added (grpcio-tools protoc → python/grpc/pyi out). Regen is byte-identical for pb2.py/_grpc.py; only the stale `.pyi` changed (owner→tenant). Idempotent re-run = same single-file diff.]
+- [x] Fix Taskfile: `task test`/`task lint` fail on fresh clone (need `uv run --extra dev`); `lint` is mypy-only while ruff is used ad hoc — declare ruff in dev extra + Taskfile + CI. [DONE: `test`/`lint` now `uv run --extra dev ...`; `ruff>=0.6` added to dev extra + `[tool.ruff]` config (excludes generated pb/ + mypy-exempt legacy, ignores deliberate lazy-import E402); `lint` runs mypy+ruff advisory (both ignore_error, matching CI); CI got a `continue-on-error` ruff step alongside mypy.]
+- [x] Note the `[tool.uv.sources]` cu128 torch pin (pyproject.toml:120-128) is uv-only; document or accept that `pip install gen-worker[torch]` resolves differently. [DONE: added a comment above `[[tool.uv.index]]` stating the cu128 pin is uv-only (read by uv, not pip) and `pip install gen-worker[torch]` resolves torch from PyPI differently.]
+- [x] CHANGELOG the three unreleased commits on master (2300c3b, 5347209, f6284bf) at next release. [DONE: added `## Unreleased` — io.write_image as_type/encode_kwargs, cli parametrized-Case method collection, inference_memory OFF_HEADROOM.]
 
 ## Acceptance
 Fresh clone: `task test` and `task lint` work; `task proto` regenerates pb/ identically to what's committed.

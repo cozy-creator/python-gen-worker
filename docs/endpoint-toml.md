@@ -38,8 +38,8 @@ accelerator = "none"
 
 What this declares:
 
-- `main` — Python import path containing your `@inference_function`
-  decorators. Discovery scans it at build time.
+- `main` — Python import path containing your `@inference` endpoint
+  classes. Discovery scans it at build time.
 - `[[build.profiles]]` — at least one routing target. `accelerator` plus
   `cuda_min` + `compute_capabilities` for GPU profiles.
 
@@ -324,7 +324,7 @@ Per-endpoint variations:
 ## What lives where
 
 Model state, per-function hardware envelopes, and cost-shape declarations live
-entirely in **Python** on the `@inference_function` decorator. `endpoint.toml`
+entirely in **Python** on the `@inference` decorator. `endpoint.toml`
 carries only:
 
 - `schema_version` + `main`

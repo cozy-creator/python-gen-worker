@@ -14,12 +14,29 @@ tasks:
     cmds:
       - sh -c 'unset UV_PUBLISH_USERNAME; uv publish'
 
-  lint:
-    desc: Type checking
+  proto:
+    desc: Regenerate src/gen_worker/pb/ from proto/ (grpcio-tools codegen)
     cmds:
-      - uv run mypy src/gen_worker
+      - >-
+        uv run --extra dev python -m grpc_tools.protoc
+        -Iproto
+        --python_out=src/gen_worker/pb
+        --grpc_python_out=src/gen_worker/pb
+        --pyi_out=src/gen_worker/pb
+        proto/worker_scheduler.proto
+
+  lint:
+    desc: Type check (mypy) + lint (ruff)
+    # Both carry pre-existing advisory debt (matched by continue-on-error in CI):
+    # they run independently and report, so neither masks the other. Tighten to
+    # hard gates once the dead-code sweeps + v2 rewrites land.
+    cmds:
+      - cmd: uv run --extra dev mypy src/gen_worker
+        ignore_error: true
+      - cmd: uv run --extra dev ruff check src/gen_worker
+        ignore_error: true
 
   test:
     desc: Run tests
     cmds:
-      - uv run pytest tests/
+      - uv run --extra dev pytest tests/

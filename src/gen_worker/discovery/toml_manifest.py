@@ -516,8 +516,7 @@ def load_endpoint_toml_with_warnings(path: Path) -> tuple[EndpointToml, list[str
         raise ValueError(
             "endpoint.toml: [models] / [models.<fn>] tables were removed in "
             "gen-worker 0.7.0. Declare model bindings in Python via "
-            "@inference(models={...}) with Repo / Dispatch. See "
-            "`progress.json` issue #9 (decorator-table-model-bindings)."
+            "@inference(models={...}) with Repo / Dispatch."
         )
 
     # Reject legacy endpoint.toml blocks that became platform-controlled.

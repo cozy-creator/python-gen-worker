@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`io.write_image` gained `as_type` and `encode_kwargs`.** `as_type`
+  re-wraps the returned `Asset` as a typed subclass (e.g. `ImageAsset`) so
+  endpoints whose output struct is typed don't round-trip through
+  `msgspec.to_builtins`; extra `encode_kwargs` pass through to
+  `PIL.Image.save` (e.g. `method=6` for higher-effort WebP).
+- **`gen-worker run` handles parametrized (`Case`) functions.** Local method
+  collection now enumerates the per-`Case` fan-out functions stamped from a
+  single `@invocable` body, binding each row's model + input type.
+
+### Changed
+
+- **Auto-offload ladder gained an `OFF_HEADROOM` threshold.**
+  `inference_memory.select_auto_mode` now only drops to fully-unoptimized
+  (`"off"`) mode when free VRAM clears a headroom margin, so a
+  partially-occupied GPU keeps the vae_only guard against high-resolution
+  VAE-decode spikes instead of OOMing.
+
 ## 0.8.3
 
 ### Fixed

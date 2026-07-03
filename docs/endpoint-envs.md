@@ -30,19 +30,24 @@ endpoint's README.
 import os
 import requests
 
-from gen_worker import inference_function
+from gen_worker import inference, invocable
 
 CIVITAI_API_KEY = os.getenv("CIVITAI_API_KEY", "")
 
-@inference_function
-def generate(ctx, payload):
-    if not CIVITAI_API_KEY:
-        raise RuntimeError("CIVITAI_API_KEY env is not configured for this endpoint")
-    resp = requests.get(
-        f"https://civitai.com/api/v1/models/{payload.model_id}",
-        headers={"Authorization": f"Bearer {CIVITAI_API_KEY}"},
-    )
-    ...
+@inference()
+class CivitaiProxy:
+    def setup(self) -> None:
+        pass
+
+    @invocable(name="generate")
+    def generate(self, ctx, payload):
+        if not CIVITAI_API_KEY:
+            raise RuntimeError("CIVITAI_API_KEY env is not configured for this endpoint")
+        resp = requests.get(
+            f"https://civitai.com/api/v1/models/{payload.model_id}",
+            headers={"Authorization": f"Bearer {CIVITAI_API_KEY}"},
+        )
+        ...
 ```
 
 In the endpoint's README:

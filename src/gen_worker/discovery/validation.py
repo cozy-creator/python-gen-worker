@@ -96,11 +96,10 @@ def validate_endpoint_lock(lock_dict: Dict[str, Any]) -> EndpointLockValidationR
             errors.append(
                 f"functions[{idx}] ({fn_label!r}): missing required class-shape "
                 f"field(s) {missing}. This is an old function-shape entry from "
-                "before the #322 SDK refactor. Migration steps in progress.json "
-                "#328 — rewrite the endpoint as a class with @inference / "
-                "@training / @dataset / @conversion decorator. Bake-time hard "
-                "fail to prevent shipping a stale endpoint that the worker "
-                "can't dispatch."
+                "before the class-shape refactor. Rewrite the endpoint as a "
+                "class with an @inference / @training / @dataset / @conversion "
+                "decorator. Bake-time hard fail to prevent shipping a stale "
+                "endpoint that the worker can't dispatch."
             )
             continue
 

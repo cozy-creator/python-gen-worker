@@ -44,7 +44,7 @@ dependencies = ["gen-worker>=0.7.5", "msgspec"]
 
 ```python
 import msgspec
-from gen_worker import RequestContext, inference_function
+from gen_worker import RequestContext, inference, invocable
 
 class Input(msgspec.Struct):
     prompt: str
@@ -52,10 +52,19 @@ class Input(msgspec.Struct):
 class Output(msgspec.Struct):
     text: str
 
-@inference_function
-def run(ctx: RequestContext, payload: Input) -> Output:
-    return Output(text=f"got: {payload.prompt}")
+@inference()
+class Echo:
+    def setup(self) -> None:
+        pass
+
+    @invocable(name="run")
+    def run(self, ctx: RequestContext, payload: Input) -> Output:
+        return Output(text=f"got: {payload.prompt}")
 ```
+
+An endpoint is a class: `@inference()` marks it, `setup()` runs once (load
+weights here), and each `@invocable`-decorated method is one externally routed
+function. `examples/marco-polo/` is the copy-paste starting point.
 
 That's it. `cozyctl endpoint deploy` (or the platform UI) takes it from here.
 For custom base images, multi-stage builds, or non-pip setup, add a Dockerfile;
@@ -68,25 +77,32 @@ loads and caches each binding; your function receives the live instance.
 
 ```python
 from diffusers import StableDiffusionXLPipeline
-from gen_worker import Repo, Resources, inference_function
+from gen_worker import HFRepo, RequestContext, Resources, inference, invocable
+from gen_worker import io as gw_io
 
-sdxl = Repo("base_model", "stabilityai/stable-diffusion-xl-base-1.0")
+sdxl = HFRepo("stabilityai/stable-diffusion-xl-base-1.0")
 
-@inference_function(
+@inference(
     resources=Resources(requires_gpu=True, min_vram_gb=12.0),
-    models={"pipe": sdxl.flavor("bf16")},
+    models={"pipe": sdxl.dtype("bf16")},
 )
-def generate(ctx, pipe: StableDiffusionXLPipeline, payload: Input) -> Output:
-    images = pipe(payload.prompt).images
-    return Output(image=gw_io.write_image(ctx, "out", images[0]))
+class Generate:
+    def setup(self, pipe: StableDiffusionXLPipeline) -> None:
+        self.pipe = pipe
+
+    @invocable(name="generate")
+    def generate(self, ctx: RequestContext, payload: Input) -> Output:
+        images = self.pipe(payload.prompt).images
+        return Output(image=gw_io.write_image(ctx, "out", images[0]))
 ```
 
-`Resources` is the per-function hardware envelope plus dynamic cost shape (used
-by the orchestrator for placement and admission). `Repo(name, default_ref)` is
-the binding. The `name` is the stable model-slot config key Tensorhub can update
-after publish; `default_ref` is only the initial/default repo ref. The old
-`Repo(ref)` / `HFRepo(ref)` / `CivitaiRepo(ref)` shape still works for existing
-endpoints and uses the model parameter name as the slot key when discovered.
+Each `models={...}` key is injected into `setup()` as the same-named argument —
+`{"pipe": ...}` arrives as `setup(self, pipe)` — so weights are resolved once and
+held on the instance. `Resources` is the per-class hardware envelope plus dynamic
+cost shape (used by the orchestrator for placement and admission). `Repo(ref)` is
+a tensorhub binding; `HFRepo(ref)` / `CivitaiRepo(ref)` select Hugging Face /
+Civitai. `Repo("slot", "default_ref")` gives the slot a stable config key
+Tensorhub can repoint after publish.
 
 ## Three binding shapes
 
@@ -105,7 +121,7 @@ class Input(msgspec.Struct):
     variant: Literal["nf4", "int8"]
     prompt: str
 
-@inference_function(
+@inference(
     resources=Resources(requires_gpu=True, min_vram_gb=14.0),
     models={"pipe": dispatch(
         field="variant",
@@ -115,7 +131,12 @@ class Input(msgspec.Struct):
         },
     )},
 )
-def generate(ctx, pipe, payload: Input) -> Output: ...
+class Generate:
+    def setup(self, pipe) -> None:
+        self.pipe = pipe
+
+    @invocable(name="generate")
+    def generate(self, ctx, payload: Input) -> Output: ...
 ```
 
 **Override-allowed** — caller may substitute the default, subject to a
@@ -132,7 +153,7 @@ to substitute. Class mismatch → request rejected before dispatch.
 
 Top-level `gen_worker` exports only what endpoint authors need:
 
-- Decorators + bindings: `inference_function`, `Resources`, `Repo`, `Dispatch`, `dispatch`
+- Decorators + bindings: `inference`, `invocable`, `training`, `conversion`, `dataset`, `Resources`, `Repo`, `HFRepo`, `CivitaiRepo`, `Dispatch`, `dispatch`
 - Context types: `RequestContext`, `ConversionContext`, `DatasetContext`, `TrainingContext`
 - Value types: `Asset`, `ImageAsset`, `VideoAsset`, `AudioAsset`, `MediaAsset`, `Tensors`, `Compute`
 - Errors: `ValidationError`, `RetryableError`, `FatalError`, `ResourceError`,

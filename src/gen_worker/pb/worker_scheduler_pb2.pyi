@@ -2,7 +2,8 @@ from google.protobuf.internal import containers as _containers
 from google.protobuf.internal import enum_type_wrapper as _enum_type_wrapper
 from google.protobuf import descriptor as _descriptor
 from google.protobuf import message as _message
-from typing import ClassVar as _ClassVar, Iterable as _Iterable, Mapping as _Mapping, Optional as _Optional, Union as _Union
+from collections.abc import Iterable as _Iterable, Mapping as _Mapping
+from typing import ClassVar as _ClassVar, Optional as _Optional, Union as _Union
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
@@ -238,7 +239,7 @@ class ResolvedRepo(_message.Message):
     def __init__(self, snapshot_digest: _Optional[str] = ..., files: _Optional[_Iterable[_Union[ResolvedRepoFile, _Mapping]]] = ...) -> None: ...
 
 class JobExecutionRequest(_message.Message):
-    __slots__ = ("request_id", "function_name", "input_payload", "timeout_ms", "owner", "invoker_id", "file_base_url", "resolved_repos_by_id", "job_id", "worker_capability_token", "resolved_compute", "execution_hints", "resolved_models")
+    __slots__ = ("request_id", "function_name", "input_payload", "timeout_ms", "tenant", "invoker_id", "file_base_url", "resolved_repos_by_id", "job_id", "worker_capability_token", "resolved_compute", "execution_hints", "resolved_models")
     class ResolvedReposByIdEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
@@ -264,7 +265,7 @@ class JobExecutionRequest(_message.Message):
     FUNCTION_NAME_FIELD_NUMBER: _ClassVar[int]
     INPUT_PAYLOAD_FIELD_NUMBER: _ClassVar[int]
     TIMEOUT_MS_FIELD_NUMBER: _ClassVar[int]
-    OWNER_FIELD_NUMBER: _ClassVar[int]
+    TENANT_FIELD_NUMBER: _ClassVar[int]
     INVOKER_ID_FIELD_NUMBER: _ClassVar[int]
     FILE_BASE_URL_FIELD_NUMBER: _ClassVar[int]
     RESOLVED_REPOS_BY_ID_FIELD_NUMBER: _ClassVar[int]
@@ -277,7 +278,7 @@ class JobExecutionRequest(_message.Message):
     function_name: str
     input_payload: bytes
     timeout_ms: int
-    owner: str
+    tenant: str
     invoker_id: str
     file_base_url: str
     resolved_repos_by_id: _containers.MessageMap[str, ResolvedRepo]
@@ -286,7 +287,7 @@ class JobExecutionRequest(_message.Message):
     resolved_compute: ResolvedCompute
     execution_hints: _containers.ScalarMap[str, str]
     resolved_models: _containers.MessageMap[str, ResolvedModelBinding]
-    def __init__(self, request_id: _Optional[str] = ..., function_name: _Optional[str] = ..., input_payload: _Optional[bytes] = ..., timeout_ms: _Optional[int] = ..., owner: _Optional[str] = ..., invoker_id: _Optional[str] = ..., file_base_url: _Optional[str] = ..., resolved_repos_by_id: _Optional[_Mapping[str, ResolvedRepo]] = ..., job_id: _Optional[str] = ..., worker_capability_token: _Optional[str] = ..., resolved_compute: _Optional[_Union[ResolvedCompute, _Mapping]] = ..., execution_hints: _Optional[_Mapping[str, str]] = ..., resolved_models: _Optional[_Mapping[str, ResolvedModelBinding]] = ...) -> None: ...
+    def __init__(self, request_id: _Optional[str] = ..., function_name: _Optional[str] = ..., input_payload: _Optional[bytes] = ..., timeout_ms: _Optional[int] = ..., tenant: _Optional[str] = ..., invoker_id: _Optional[str] = ..., file_base_url: _Optional[str] = ..., resolved_repos_by_id: _Optional[_Mapping[str, ResolvedRepo]] = ..., job_id: _Optional[str] = ..., worker_capability_token: _Optional[str] = ..., resolved_compute: _Optional[_Union[ResolvedCompute, _Mapping]] = ..., execution_hints: _Optional[_Mapping[str, str]] = ..., resolved_models: _Optional[_Mapping[str, ResolvedModelBinding]] = ...) -> None: ...
 
 class JobExecutionResult(_message.Message):
     __slots__ = ("request_id", "success", "output_payload", "error_type", "retryable", "safe_message", "observation")

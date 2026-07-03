@@ -108,13 +108,12 @@ from .diagnostics import emit_diagnostic_log
 _REMOVED_PUBLIC_SYMBOLS = {
     "ModelRef": (
         "gen_worker.ModelRef was removed in gen-worker 0.7.0. Use Repo / dispatch / "
-        "the models={...} kwarg on @inference instead. See `progress.json` "
-        "issue #9 (decorator-table-model-bindings)."
+        "the models={...} kwarg on @inference instead."
     ),
     "ModelRefSource": (
         "gen_worker.ModelRefSource was removed in gen-worker 0.7.0. The ModelRef "
         "concept was replaced by Repo / Dispatch bindings on the decorator's "
-        "models={...} kwarg. See `progress.json` issue #9."
+        "models={...} kwarg."
     ),
     "Src": (
         "gen_worker.Src was removed in gen-worker 0.7.0. The Src.FIXED / Src.PAYLOAD / "

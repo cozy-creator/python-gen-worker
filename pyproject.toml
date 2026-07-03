@@ -22,7 +22,6 @@ requires-python = ">=3.11"
 dependencies = [
     "grpcio>=1.80.0",
     "msgspec>=0.18.6",
-    "tomli-w>=1.2.0",
     "protobuf>=6.30.0",
     "PyJWT[crypto]>=2.8.0",
     "requests>=2.32.0",
@@ -32,9 +31,10 @@ dependencies = [
     "backoff>=2.2.1",
     "blake3>=1.0.0",
     "huggingface-hub>=0.26.0",
-    "numpy>=1.24.0",
-    "Pillow>=9.0.0",
 ]
+# Pillow (image I/O) and numpy/soundfile (audio I/O) are lazy-imported by
+# gen_worker.io and live in the [images] / [audio] extras — the base wheel
+# stays lean for plain-Python (API-proxy) endpoints.
 
 [project.urls]
 Homepage = "https://github.com/cozy-creator/python-gen-worker"
@@ -66,6 +66,7 @@ audio = [
 dev = [
     "grpcio-tools>=1.80.0",
     "mypy>=1.10.0",
+    "ruff>=0.6.0",
     "pytest>=9.0.0",
     "types-PyYAML>=6.0.12.20250915",
     "types-requests>=2.32.4.20250913",
@@ -110,6 +111,30 @@ ignore_errors = true
 module = ["gen_worker.conversion.*"]
 ignore_errors = true
 
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+# Generated + legacy modules are lint-exempt (mirrors the mypy overrides above):
+# pb/ is generated; conversion/ + clone/ are the ETL slated to split into
+# cozy_convert; trainer/ + testing/ carry their own debt. Ruff is enforced on
+# the actively-maintained core.
+extend-exclude = [
+    "src/gen_worker/pb",
+    "src/gen_worker/conversion",
+    "src/gen_worker/clone",
+    "src/gen_worker/trainer",
+    "src/gen_worker/testing",
+]
+
+[tool.ruff.lint]
+# E402: gen_worker defers heavy imports (torch, request_context, cli
+# subcommands) below module-level guards on purpose so `import gen_worker` and
+# `gen-worker --help` stay cheap. Not a defect.
+ignore = ["E402"]
+
+[tool.ruff.lint.per-file-ignores]
+"**/__init__.py" = ["F401", "F403"]  # intentional public re-exports
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # Prefer the working-tree source so a bare `pytest` never tests a stale wheel.
@@ -117,6 +142,11 @@ testpaths = ["tests"]
 # extra); tests/conftest.py hard-fails if gen_worker resolves outside src/.
 pythonpath = ["src"]
 
+# NOTE: the CUDA 12.8 torch pin below is uv-only — it is read by `uv sync` /
+# `uv build` in this repo, NOT by `pip`. `pip install gen-worker[torch]`
+# resolves torch from PyPI (a CPU or default-CUDA build) and may differ. Tenant
+# images built by Tensorhub pin their own torch/CUDA build; this pin only fixes
+# the local dev + CI environment.
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"

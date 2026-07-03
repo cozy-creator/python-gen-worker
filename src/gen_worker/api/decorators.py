@@ -767,8 +767,8 @@ def _make_endpoint_decorator(kind: Literal["inference", "training", "dataset", "
             if not inspect.isclass(target):
                 raise TypeError(
                     f"@{kind} requires a class. Got {type(target).__name__}. "
-                    "Migration: rewrite your function as a class with setup/generate/shutdown methods. "
-                    "See progress.json #322 for migration guide."
+                    "Rewrite your function as a class with setup + @invocable "
+                    "methods (see the README or examples/marco-polo)."
                 )
 
             cls_name = target.__name__
@@ -1032,8 +1032,7 @@ def _batched_function_inner(
                     "method (``async def`` with ``yield``)."
                 )
             raise TypeError(
-                f"@batched_inference.function rejected {qname!r}: {hint} "
-                "See progress.json #273 for the BatchedWorker shape."
+                f"@batched_inference.function rejected {qname!r}: {hint}"
             )
         spec = _BatchedInferenceFunctionSpec(
             name=name or method.__name__,
@@ -1426,9 +1425,9 @@ def _migration_error(old_name: str, new_name: str) -> Callable[..., Any]:
             f"    class MyEndpoint:\n"
             f"        def setup(self, pipe):\n"
             f"            self.pipe = pipe\n"
-            f"        @{new_name}.function\n"
+            f"        @invocable\n"
             f"        def my_fn(self, ctx, payload): ...\n"
-            f"See progress.json #322 + #328 for the full migration guide."
+            f"See the README or examples/marco-polo for the class shape."
         )
 
     return stub

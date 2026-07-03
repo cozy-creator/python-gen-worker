@@ -2,14 +2,23 @@
 
 Write a Python function, ship it as a serverless endpoint. The SDK handles
 discovery, scheduling, model loading, cancellation, streaming, file I/O, and
-terminal reporting. You write the function body.
+terminal reporting. You write the endpoint class.
+
+> **Note (API migration):** the runnable current-API endpoint is the class
+> shape shown in the quick-start below and in
+> [`examples/marco-polo/`](../examples/marco-polo/). The *advanced* examples
+> further down this page still use the pre-#322 `@inference_function` /
+> `@training_function` **function** shape and no longer import — they're kept
+> for the concepts (Resources, bindings, dispatch, streaming) and are being
+> rewritten in #368. For copy-paste code, prefer the
+> [README](../README.md) and the examples.
 
 Three endpoint kinds:
 
 | Kind       | Decorator                                          | Module                  | What it does                              |
 |------------|----------------------------------------------------|-------------------------|-------------------------------------------|
-| Inference  | `@inference_function`                              | `gen_worker`            | Request/response, optionally streaming    |
-| Conversion | `@training_function(kind="format-conversion")` (and other conversion kinds) | `gen_worker.conversion` | Produces new weight artifacts on a repo  |
+| Inference  | `@inference` class + `@invocable` methods          | `gen_worker`            | Request/response, optionally streaming    |
+| Conversion | `@conversion(sub_kind="...")` class                | `gen_worker.conversion` | Produces new weight artifacts on a repo  |
 | Training   | trainer class                                      | `gen_worker.trainer`    | Long-running, periodic checkpoints        |
 
 ---
@@ -37,7 +46,7 @@ dependencies = ["gen-worker>=0.7.5", "msgspec"]
 
 ```python
 import msgspec
-from gen_worker import RequestContext, inference_function
+from gen_worker import RequestContext, inference, invocable
 
 class Input(msgspec.Struct):
     prompt: str
@@ -45,9 +54,14 @@ class Input(msgspec.Struct):
 class Output(msgspec.Struct):
     text: str
 
-@inference_function
-def run(ctx: RequestContext, payload: Input) -> Output:
-    return Output(text=f"got: {payload.prompt}")
+@inference()
+class Echo:
+    def setup(self) -> None:
+        pass
+
+    @invocable(name="run")
+    def run(self, ctx: RequestContext, payload: Input) -> Output:
+        return Output(text=f"got: {payload.prompt}")
 ```
 
 That's everything. Discovery still runs at image-build time and bakes
@@ -100,7 +114,7 @@ _flux_dispatch = Resources(
 
 | Field                    | Purpose                                                                                                         |
 |--------------------------|-----------------------------------------------------------------------------------------------------------------|
-| `accelerator`            | `"cuda"` or `"none"`. Normalized from `"gpu"`/`"cpu"` shorthand.                                                |
+| `accelerator`            | `"cuda"`, `"none"`, or unset. `"gpu"`/`"cpu"` are rejected at decoration time (use `"cuda"`/`"none"`).           |
 | `requires_gpu`           | Implies `accelerator="cuda"` for placement.                                                                     |
 | `min_vram_gb`            | Hard VRAM floor in GiB. Function unavailable on hosts below this.                                              |
 | `min_compute_capability`       | Minimum SM compute capability (e.g. `8.0`). Function unavailable on hosts below this.                          |
@@ -112,7 +126,8 @@ _flux_dispatch = Resources(
 | `runtime_scales_with`    | Payload field names that grow runtime. Coefficients learned per `(function, gpu_class, field)`.                |
 
 `vram_scales_with` and `runtime_scales_with` must reference real fields on the
-payload struct. Drift fails discovery with `unknown_payload_field`.
+payload struct. A name that doesn't match a payload field is a silent bug — the
+cost-shape coefficient never fires — so keep them in sync with the struct.
 
 See [scaling-hints.md](scaling-hints.md) for the cost-shape fields in depth.
 

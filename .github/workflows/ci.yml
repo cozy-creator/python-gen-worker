@@ -29,6 +29,10 @@ jobs:
         continue-on-error: true  # Type debt in clone/conversion/etc — visible in logs, doesn't block CI.
         run: uv run mypy src/gen_worker
 
+      - name: Lint
+        continue-on-error: true  # Lint debt (mostly worker.py, being rewritten) — visible in logs, doesn't block CI.
+        run: uv run ruff check src/gen_worker
+
       - name: Run tests
         run: uv run pytest tests/ -v
 

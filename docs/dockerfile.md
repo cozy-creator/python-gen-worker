@@ -25,7 +25,7 @@ You satisfy three contract points; everything else is up to you.
        && python -m gen_worker.discovery > /app/.tensorhub/endpoint.lock
    ```
 
-   This serializes every `@inference_function`'s `Resources`, bindings, and
+   This serializes every `@inference` class's `Resources`, bindings, and
    payload schemas. The control plane reads the lock from the built image.
 
 3. **The entrypoint runs `gen_worker.entrypoint`.**
