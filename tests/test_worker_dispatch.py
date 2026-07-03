@@ -22,14 +22,13 @@ import msgspec
 import pytest
 
 from gen_worker import (
-    Done,
-    IncrementalTokenDelta,
     Repo,
     RequestContext,
     Resources,
-    batched_inference,
     inference,
 )
+from gen_worker.api.decorators import batched_inference
+from gen_worker.api.streaming import Done, IncrementalTokenDelta
 from gen_worker._worker_support import _BatchedWorkerSpec, _SerialWorkerSpec
 from gen_worker.worker import Worker
 

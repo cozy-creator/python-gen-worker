@@ -6490,50 +6490,6 @@ class Worker:
         logger.info("BatchedWorker asyncio loop started on dedicated thread")
         return loop
 
-    def _resolve_batched_model_path(self, ep_spec: Any) -> str:
-        """Resolve the on-disk model_path the engine should load.
-
-        Reads the @inference(models={"engine": <Repo>}) declaration on
-        the class. v1 path: read the canonical ref, look up the tensorhub
-        CAS snapshot dir if one already exists, otherwise pass the raw
-        ref through (SGLang/vLLM both accept HuggingFace org/repo refs
-        and will pull through their own HF caching).
-
-        Future: tighten this to always materialize through the worker's
-        downloader so the model_path is a local directory the engine can
-        mmap. For #273 v1 we accept either local-dir or remote-ref since
-        SGLang and vLLM both handle both shapes.
-        """
-        models = dict(getattr(ep_spec, "models", {}) or {})
-        if not models:
-            raise ValueError(
-                "BatchedWorker class declared no models={} mapping — "
-                "@inference(models={'engine': Repo('owner/repo')}) is required "
-                "so the SDK can resolve a model_path for engine.start()."
-            )
-        # Prefer the "engine" key by convention; fall back to first entry.
-        binding = models.get("engine") or next(iter(models.values()))
-        ref = getattr(binding, "ref", None)
-        if not isinstance(ref, str) or not ref.strip():
-            raise ValueError(
-                "BatchedWorker class models[...] binding has no .ref attribute"
-            )
-        ref = ref.strip()
-        # If it's a tensorhub-style ref (`cozy:owner/repo[:tag][@digest]`),
-        # try to resolve via the worker's existing snapshot machinery.
-        try:
-            canon = _canonicalize_model_ref_string(ref)
-            cache_dir = tensorhub_cas_dir()
-            local = self._try_find_existing_cozy_snapshot_dir(canon, cache_dir)
-            if local is not None:
-                return str(local)
-        except Exception:
-            # Best-effort — fall through to raw ref.
-            pass
-        # Wire-format refs are bare (issue wire-format-bare-refs-typed-provider);
-        # no prefix-strip needed.
-        return ref
-
     async def _start_one_batched_instance(self, rec: Dict[str, Any]) -> None:
         """One-shot per-class setup: SDK engine.start (when adopted) →
         instance.setup(**resolved_models[, engine=…]) → warmup.
@@ -6543,10 +6499,8 @@ class Worker:
              to a local snapshot dir (or ref string) via the same path SerialWorker
              uses (_resolve_serial_model_paths), so tenants get materialized model
              paths as kwargs matching their setup() signature.
-          2. Match resolved kwargs against the tenant's setup() signature. If the
-             tenant declared `engine` as a kwarg (or accepts **kwargs), construct
-             the SDK engine wrapper and pass it. Otherwise the tenant owns engine
-             construction inside setup() — skip make_engine entirely.
+          2. Match resolved kwargs against the tenant's setup() signature.
+             The tenant owns engine construction inside setup().
           3. Call `await setup(**filtered_kwargs)` then optional `warmup()`.
         """
         if rec.get("started"):
@@ -6593,28 +6547,9 @@ class Worker:
             if accepts_var_kw or key in declared_kw:
                 setup_kwargs[key] = value
 
-        # SDK-managed engine: only construct + start it if the tenant opted in
-        # by declaring `engine` as a setup kwarg (or accepts **kwargs). Tenants
-        # like chatterbox-tts manage their own AsyncLLMEngine inside setup and
-        # don't take `engine=` — for those, skip make_engine entirely.
-        wants_sdk_engine = accepts_var_kw or ("engine" in declared_kw)
-        engine: Any = None
-        if wants_sdk_engine:
-            from .engines import make_engine
-
-            model_path = self._resolve_batched_model_path(ep_spec)
-            engine = make_engine(runtime)
-            rec["engine"] = engine
-            logger.info(
-                "BatchedWorker SDK engine starting: class=%s runtime=%s model_path=%s",
-                rec.get("cls_name"), runtime, model_path,
-            )
-            await engine.start(model_path)
-            setup_kwargs["engine"] = engine
-
         logger.info(
-            "BatchedWorker setup starting: class=%s runtime=%s sdk_engine=%s setup_kwargs=%s",
-            rec.get("cls_name"), runtime, wants_sdk_engine, sorted(setup_kwargs.keys()),
+            "BatchedWorker setup starting: class=%s runtime=%s setup_kwargs=%s",
+            rec.get("cls_name"), runtime, sorted(setup_kwargs.keys()),
         )
         # Emit `warming` phase before setup() — model load / engine init is
         # the longest part of startup and the orchestrator surfaces this to

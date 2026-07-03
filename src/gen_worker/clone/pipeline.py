@@ -11,7 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from gen_worker import RequestContext, Tensors
+from gen_worker import RequestContext
+from gen_worker.api.types import Tensors
 
 # clone_pipeline calls the library streaming primitives directly (see
 # _apply_save_format) instead of going through the transform-endpoint tenant
@@ -410,14 +411,6 @@ def _is_http_source(source_ref: str) -> bool:
 
 
 @dataclass(frozen=True)
-class MirrorPreflight:
-    destination_exists: bool
-    destination_metadata: dict[str, Any]
-    noop: bool
-    mirror_metadata: dict[str, str]
-
-
-@dataclass(frozen=True)
 class SourceIdentity:
     provider: str
     source_ref: str
@@ -473,11 +466,8 @@ def _pick_primary_source_file(repo_dir: Path) -> Path:
     raise FileNotFoundError(f"no .safetensors entry point found under {repo_dir}")
 
 
-def _tensors_artifact_module(t: Any) -> dict[str, Any]:
-    """Extract artifact dict from a Tensors object. Module-level mirror of the
-    inner `_tensors_artifact` defined inside `_finalize_clone` — used by
-    `_finalize_publish_as_is` which is at
-    module scope and can't see the inner function."""
+def _tensors_artifact(t: Any) -> dict[str, Any]:
+    """Extract artifact dict from a Tensors object."""
     art: dict[str, Any] = {}
     digest = str(getattr(t, "blob_digest", "") or getattr(t, "blake3", "") or "").strip()
     if digest and ":" not in digest:
@@ -569,7 +559,7 @@ def _finalize_publish_as_is(
     for saved, rel_path in uploaded_pairs:
         if saved is None:
             continue
-        art = _tensors_artifact_module(saved)
+        art = _tensors_artifact(saved)
         digest = str(art.get("digest") or "").strip()
         if not digest:
             continue
@@ -783,7 +773,7 @@ def _finalize_publish_as_is(
 
             for out_path, saved in uploaded_inline:
                 rel = out_path.name
-                art = _tensors_artifact_module(saved)
+                art = _tensors_artifact(saved)
                 digest = str(art.get("digest") or "").strip()
                 if not digest:
                     continue
@@ -1339,25 +1329,6 @@ def _build_snapshot_manifest(
         "snapshot_digest": str(snapshot_digest or "").strip(),
         "entries": entries,
     }
-
-
-def preflight_clone(
-    ctx: RequestContext,
-    *,
-    provider: str,
-    source_ref: str,
-    source_revision: str | None,
-    destination_repo: str,
-) -> MirrorPreflight:
-    _ = ctx
-    _ = provider
-    _ = source_ref
-    _ = source_revision
-    _ = destination_repo
-    return MirrorPreflight(destination_exists=False, destination_metadata={}, noop=False, mirror_metadata={})
-
-
-_FP8_PROFILE_TO_TORCH_DTYPE = {"e4m3": "float8_e4m3fn", "e5m2": "float8_e5m2"}
 
 
 def _stage_sharded_input(
@@ -2168,24 +2139,6 @@ def _finalize_clone(
     identity_hash_raw = str(source_identity.identity_hash or "").strip().lower()
     version_id = f"sha256:{identity_hash_raw}" if identity_hash_raw and ":" not in identity_hash_raw else identity_hash_raw
 
-    def _tensors_artifact(t: Any) -> dict[str, Any]:
-        """Extract artifact dict from a Tensors object."""
-        art: dict[str, Any] = {}
-        digest = str(getattr(t, "blob_digest", "") or getattr(t, "blake3", "") or "").strip()
-        if digest and ":" not in digest:
-            digest = f"blake3:{digest}"
-        if digest:
-            art["digest"] = digest
-        path = str(getattr(t, "ref", "") or "").strip()
-        if path:
-            art["path"] = path
-        size = getattr(t, "size_bytes", None)
-        if size is not None:
-            art["size_bytes"] = int(size)
-        domain = str(getattr(t, "blob_domain", "") or "private").strip()
-        art["domain"] = domain
-        return art
-
     commit_checkpoint_flavors: list[dict[str, Any]] = []
 
     # Non-weight files (configs/tokenizers/scheduler/model_index.json/README/
@@ -2651,100 +2604,76 @@ def run_clone(
         dl_state["last_ts"] = now
         dl_state["last_bytes"] = int(bytes_written)
 
-    def execute_miss() -> dict[str, Any]:
-        source_expected_sha256 = str(source_identity.source_metadata.get("source_expected_sha256") or "").strip()
-        source_expected_size_bytes = _parse_positive_int(
-            source_identity.source_metadata.get("source_expected_size_bytes")
-        )
-        # Thread the requested concrete dtypes
-        # from `resolved_outputs` so the HF downloader can multi-select
-        # when N>1. Single-element / unset falls back to single-checkpoint
-        # behavior. Drop entries with empty `dtype` (defaults from the
-        # `[]` no-outputs case).
-        dtype_outputs_pref = [
-            str(s.dtype or "").strip().lower()
-            for s in resolved_outputs
-            if str(s.dtype or "").strip()
-        ]
-        ingested, ingest_result = ingest_from_source(
-            ctx,
-            provider=source_identity.provider,
-            source_ref=source_identity.source_ref,
-            source_revision=source_identity.source_revision,
-            source_layout_preference=normalized_source_layout_preference,
-            source_dtype_preference=list(normalized_source_dtype_preference),
-            source_expected_sha256=(source_expected_sha256 if source_expected_sha256 != "" else None),
-            source_expected_size_bytes=source_expected_size_bytes,
-            civitai_model_version_id=source_identity.civitai_model_version_id,
-            civitai_file_id=source_identity.civitai_file_id,
-            resolved_civitai_identity=source_identity.resolved_civitai_identity,
-            output_ref=output_ref,
-            progress_callback=on_download_progress,
-            gguf_quant=gguf_quant,
-            dtype_outputs=dtype_outputs_pref,
-            hf_token=effective_hf_token,
-            civitai_api_key=effective_civitai_api_key,
-        )
-        emit_stage("clone.layout.detected",
-            0.58,
-            {
-                "source_layout": str(ingested.metadata.get("source_layout") or "unknown"),
-                "model_family": str(ingested.metadata.get("model_family") or "unknown"),
-                "target_layout": normalized_layout,
-            },
-        )
-        emit_stage("clone.ingest.completed", 0.60)
-
-        finalized = _finalize_clone(
-            ctx,
-            source_identity=source_identity,
-            source_version_id=source_version_id,
-            destination_repo=normalized_destination,
-            destination_owner=destination_owner,
-            destination_repo_name=normalized_destination_name,
-            destination_repo_tags=normalized_tags,
-            target_layout=normalized_layout,
-            outputs=list(resolved_outputs),
-            save_formats=None,
-            ingested=ingested,
-            ingest_result=ingest_result,
-            emit_stage=emit_stage,
-            quantize_components=quantize_components,
-            auto_publish_public=auto_publish_public,
-            overwrite_repo=overwrite_repo,
-        )
-        return {
-            "output": finalized.output,
-            "version_id": finalized.published_version_id,
-            "primary_artifact_ref": str(finalized.output.weights.ref or "").strip(),
-            "primary_artifact_format": str(finalized.output.weights.format or "").strip(),
-        }
-
-    emit_stage("clone.dedupe.skipped",
-        0.18,
-        {"reason": "removed"},
+    source_expected_sha256 = str(source_identity.source_metadata.get("source_expected_sha256") or "").strip()
+    source_expected_size_bytes = _parse_positive_int(
+        source_identity.source_metadata.get("source_expected_size_bytes")
     )
-    return execute_miss()["output"]
+    # Thread the requested concrete dtypes
+    # from `resolved_outputs` so the HF downloader can multi-select
+    # when N>1. Single-element / unset falls back to single-checkpoint
+    # behavior. Drop entries with empty `dtype` (defaults from the
+    # `[]` no-outputs case).
+    dtype_outputs_pref = [
+        str(s.dtype or "").strip().lower()
+        for s in resolved_outputs
+        if str(s.dtype or "").strip()
+    ]
+    ingested, ingest_result = ingest_from_source(
+        ctx,
+        provider=source_identity.provider,
+        source_ref=source_identity.source_ref,
+        source_revision=source_identity.source_revision,
+        source_layout_preference=normalized_source_layout_preference,
+        source_dtype_preference=list(normalized_source_dtype_preference),
+        source_expected_sha256=(source_expected_sha256 if source_expected_sha256 != "" else None),
+        source_expected_size_bytes=source_expected_size_bytes,
+        civitai_model_version_id=source_identity.civitai_model_version_id,
+        civitai_file_id=source_identity.civitai_file_id,
+        resolved_civitai_identity=source_identity.resolved_civitai_identity,
+        output_ref=output_ref,
+        progress_callback=on_download_progress,
+        gguf_quant=gguf_quant,
+        dtype_outputs=dtype_outputs_pref,
+        hf_token=effective_hf_token,
+        civitai_api_key=effective_civitai_api_key,
+    )
+    emit_stage("clone.layout.detected",
+        0.58,
+        {
+            "source_layout": str(ingested.metadata.get("source_layout") or "unknown"),
+            "model_family": str(ingested.metadata.get("model_family") or "unknown"),
+            "target_layout": normalized_layout,
+        },
+    )
+    emit_stage("clone.ingest.completed", 0.60)
+
+    finalized = _finalize_clone(
+        ctx,
+        source_identity=source_identity,
+        source_version_id=source_version_id,
+        destination_repo=normalized_destination,
+        destination_owner=destination_owner,
+        destination_repo_name=normalized_destination_name,
+        destination_repo_tags=normalized_tags,
+        target_layout=normalized_layout,
+        outputs=list(resolved_outputs),
+        save_formats=None,
+        ingested=ingested,
+        ingest_result=ingest_result,
+        emit_stage=emit_stage,
+        quantize_components=quantize_components,
+        auto_publish_public=auto_publish_public,
+        overwrite_repo=overwrite_repo,
+    )
+    return finalized.output
 
 
-def maybe_noop(
-    preflight: MirrorPreflight,
-    *,
-    destination_owner: str,
-    destination_repo_name: str,
-) -> ConversionOutput | None:
-    _ = preflight
-    _ = destination_owner
-    _ = destination_repo_name
-    return None
 
 
 __all__ = [
-    "MirrorPreflight",
     "SourceIdentity",
     "compute_source_hash",
     "finalize_clone",
-    "maybe_noop",
     "normalize_destination_owner",
     "normalize_destination_repo_name",
     "normalize_destination_repo_tags",
@@ -2752,48 +2681,5 @@ __all__ = [
     "normalize_source_ref",
     "normalize_source_layout_preference",
     "normalize_target_layout",
-    "preflight_clone",
     "run_clone",
 ]
-
-
-# ---------------------------------------------------------------------------
-# Intermediate API stubs (issue #20 — `gen_worker.clone` six-method surface).
-# These expose library-internal pieces of the clone pipeline as public
-# entry points for tenants who need custom flows. Currently stubs pending
-# refactor of the pipeline to expose these cleanly — `from_huggingface` /
-# `from_civitai` are the documented stable surface.
-# ---------------------------------------------------------------------------
-
-
-def _fetch_hf_snapshot_only(
-    *,
-    source_ref: str,
-    revision: str | None = None,
-    dest_dir: str | None = None,
-    include: list[str] | None = None,
-    exclude: list[str] | None = None,
-) -> str:
-    raise NotImplementedError(
-        "fetch_huggingface_snapshot is pending extraction from pipeline internals; "
-        "use clone.from_huggingface(ctx, payload) for the full clone flow."
-    )
-
-
-def _fetch_civitai_file_only(*, model_version_id: int, file_id: int, dest_dir: str) -> str:
-    raise NotImplementedError(
-        "fetch_civitai_file is pending extraction from pipeline internals; "
-        "use clone.from_civitai(ctx, payload) for the full clone flow."
-    )
-
-
-def _parse_hf_metadata_only(*, source_ref: str, revision: str | None = None) -> dict[str, Any]:
-    raise NotImplementedError(
-        "parse_huggingface_metadata is pending extraction; use clone.from_huggingface for now."
-    )
-
-
-def _parse_civitai_metadata_only(*, model_version_id: int) -> dict[str, Any]:
-    raise NotImplementedError(
-        "parse_civitai_metadata is pending extraction; use clone.from_civitai for now."
-    )

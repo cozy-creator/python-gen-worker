@@ -20,7 +20,7 @@ import msgspec
 # The wire format already exists — these classes only give tenants a stable
 # import:
 #
-#     from gen_worker import IncrementalTokenDelta, Done, Error
+#     from gen_worker.api.streaming import IncrementalTokenDelta, Done, Error
 #
 # instead of having to define their own msgspec.Struct shapes per endpoint.
 # Endpoints that need richer payloads (image bytes, structured tool calls,

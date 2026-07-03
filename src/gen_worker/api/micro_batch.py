@@ -34,9 +34,10 @@ Hard rules:
     "no batching" and dispatch falls back to one-at-a-time.
   * Auto-disabled when any cache wrapper attached to the tenant's pipe
     objects has ``breaks_cross_request_batching=True`` (TeaCache today, per
-    nunchaku #597). The aggregator inspects ``pipe._gen_worker_*`` markers
-    placed there by ``gen_worker.cache.*.apply()`` plus
-    ``cache.<wrapper>.breaks_cross_request_batching`` to decide.
+    nunchaku #597). Convention: any cache/acceleration wrapper whose state
+    must not be shared across concurrent requests stamps
+    ``breaks_cross_request_batching = True`` on itself (attribute name is
+    the contract; there is no base class).
   * Aggregator runs on an asyncio loop (one drain coroutine per registered
     function). The tenant ``@inference.function`` body is sync — it runs on
     a worker thread via ``loop.run_in_executor`` so it doesn't block the loop.

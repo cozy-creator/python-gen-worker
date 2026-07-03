@@ -31,13 +31,7 @@ Bindings (issue #9: decorator-table-model-bindings, #10: typed-provider-repo):
 """
 
 from . import io
-from . import accel  # noqa: F401 — exposed as gen_worker.accel (#324)
-from . import cache  # noqa: F401 — exposed as gen_worker.cache
-from . import compile_helpers as compile  # noqa: F401 — exposed as gen_worker.compile
-from . import parallelism  # noqa: F401 — exposed as gen_worker.parallelism
-from . import quant  # noqa: F401 — exposed as gen_worker.quant
 from .api.binding import (
-    Binding,
     CivitaiRepo,
     Dispatch,
     HFRepo,
@@ -50,7 +44,6 @@ from .api.binding import (
 from .api.decorators import (
     Case,
     Resources,
-    batched_inference,
     conversion,
     dataset,
     inference,
@@ -67,41 +60,21 @@ from .request_context import (
     TrainingContext,
 )
 from .api.errors import (
-    AuthError,
     CanceledError,
     FatalError,
-    InputTooLargeError,
-    OutputTooLargeError,
-    RefCompatibilitySurprise,
-    ResourceError,
     RetryableError,
     ValidationError,
-    WorkerError,
 )
 from .api.types import (
     Asset,
     AudioAsset,
-    Compute,
     ExpectedOutput,
     ImageAsset,
-    MediaAsset,
-    NegativePrompt,
-    PositivePrompt,
-    PromptRole,
     StringEnum,
-    Tensors,
     VideoAsset,
 )
-from .api.payload_constraints import Clamp
-from .api.streaming import (
-    Done,
-    Error,
-    IncrementalTokenDelta,
-    TokenStreamSignal,
-    iter_transformers_text_deltas,
-)
-from .utils.lora import load_loras
-from .inference_memory import apply_low_vram_config, with_oom_retry
+from .api.streaming import iter_transformers_text_deltas
+from .inference_memory import apply_low_vram_config
 from .diagnostics import emit_diagnostic_log
 
 
@@ -154,7 +127,6 @@ __all__ = [
     # Decorators + binding model (#322 class-only).
     "invocable",
     "inference",
-    "batched_inference",
     "training",
     "dataset",
     "conversion",
@@ -165,7 +137,6 @@ __all__ = [
     "CivitaiRepo",
     "ModelScopeRepo",
     "Dispatch",
-    "Binding",
     "dispatch",
     "SharedBase",
     "Variant",
@@ -173,49 +144,25 @@ __all__ = [
     "inference_function",
     "training_function",
     "realtime_function",
-    # Acceleration helpers (#324):
-    "accel",
-    "cache",
-    "compile",
-    "quant",
     # Context types.
     "RequestContext",
     "ConversionContext",
     "DatasetContext",
     "TrainingContext",
     # Errors.
-    "AuthError",
     "CanceledError",
     "RetryableError",
-    "ResourceError",
     "ValidationError",
     "FatalError",
-    "InputTooLargeError",
-    "OutputTooLargeError",
-    "RefCompatibilitySurprise",
-    "WorkerError",
     # Payload + media helpers.
     "Asset",
     "AudioAsset",
-    "Compute",
     "ExpectedOutput",
     "ImageAsset",
-    "MediaAsset",
-    "NegativePrompt",
-    "PositivePrompt",
-    "PromptRole",
     "StringEnum",
-    "Tensors",
     "VideoAsset",
-    "Clamp",
-    "Done",
-    "Error",
-    "IncrementalTokenDelta",
-    "TokenStreamSignal",
     "iter_transformers_text_deltas",
-    "load_loras",
     "apply_low_vram_config",
-    "with_oom_retry",
     "emit_diagnostic_log",
     "clone",
     "io",

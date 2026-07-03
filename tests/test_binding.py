@@ -86,7 +86,8 @@ def test_allow_override_accepts_class_string_dedups_and_rejects_zero_arg() -> No
 
 
 def test_typed_payload_size_errors_expose_structured_fields() -> None:
-    from gen_worker import InputTooLargeError, OutputTooLargeError, ValidationError
+    from gen_worker import ValidationError
+    from gen_worker.api.errors import InputTooLargeError, OutputTooLargeError
 
     out = OutputTooLargeError(size_bytes=200, max_bytes=100)
     assert out.size_bytes == 200 and out.max_bytes == 100
