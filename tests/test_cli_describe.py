@@ -39,7 +39,7 @@ def _module(name: str) -> types.ModuleType:
             self.pipe = pipe
 
         @inference.function(name="generate")
-        def generate(self, ctx: RequestContext, data: _In, pipe) -> _Out:
+        def generate(self, ctx: RequestContext, data: _In) -> _Out:
             return _Out(response=data.prompt)
 
     Endpoint.__module__ = name
@@ -92,7 +92,7 @@ def test_describe_reports_generator_and_dispatch_binding(capsys) -> None:
             self.m = m
 
         @inference.function(name="stream")
-        def stream(self, ctx: RequestContext, data: _In, m) -> Iterator[_Out]:
+        def stream(self, ctx: RequestContext, data: _In) -> Iterator[_Out]:
             yield _Out(response="x")
 
     Streamer.__module__ = name

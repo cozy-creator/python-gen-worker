@@ -48,7 +48,7 @@ _VALID_MODES: tuple[str, ...] = (
 _DEFAULT_VAE_SLICE_THRESHOLD_GB = 10.0
 _DEFAULT_MODEL_OFFLOAD_THRESHOLD_GB = 8.0
 _DEFAULT_GROUP_OFFLOAD_THRESHOLD_GB = 6.0
-# Safety margin below total VRAM we reserve for activations.
+# Safety margin below free VRAM we reserve for activations.
 _DEFAULT_SAFETY_MARGIN_GB = 2.0
 # When a model fits with at least this much VRAM still free beyond it, run
 # fully unoptimized (mode "off") — VAE slicing/tiling only trades speed for
@@ -176,21 +176,26 @@ def flush_memory() -> None:
 def select_auto_mode(
     *,
     pipeline: Any,
-    total_vram_gb: Optional[float] = None,
+    available_vram_gb: Optional[float] = None,
     model_size_gb: Optional[float] = None,
     peak_vram_gb: Optional[float] = None,
 ) -> str:
     """
     Pick the least-aggressive ladder step that should keep the pipeline in memory.
 
-    Decision logic:
-      - no CUDA                                -> off
+    Decisions are made against FREE VRAM (what is actually available right now),
+    not the card's TOTAL capacity. Placing a second model on a card that already
+    holds a resident model must see the reduced free space — comparing against
+    total made the ladder believe the model fit and pick ``off``, then OOM.
+
+    Decision logic (``avail`` = free VRAM):
+      - no CUDA / no free VRAM                  -> off
       - model fits with generous headroom      -> off
       - model fits (incl. safety margin)       -> vae_only
-      - total VRAM <= group_offload_threshold  -> group_offload
-      - total VRAM <= model_offload_threshold  -> model_offload
-      - total VRAM <= vae_slice_threshold      -> vae_only
-      - requirement > (total - margin)         -> model_offload
+      - avail VRAM <= group_offload_threshold  -> group_offload
+      - avail VRAM <= model_offload_threshold  -> model_offload
+      - avail VRAM <= vae_slice_threshold      -> vae_only
+      - requirement > (avail - margin)         -> model_offload
       - otherwise                              -> vae_only
 
     ``peak_vram_gb`` is the endpoint's DECLARED peak VRAM during one request
@@ -201,8 +206,8 @@ def select_auto_mode(
     sooner, while one who declares a small peak still never drops below the
     measured weight footprint. Absent a declaration the behavior is unchanged.
     """
-    total = total_vram_gb if total_vram_gb is not None else get_total_vram_gb()
-    if total <= 0.0:
+    avail = available_vram_gb if available_vram_gb is not None else get_available_vram_gb()
+    if avail <= 0.0:
         return "off"
 
     model_gb = model_size_gb if model_size_gb is not None else estimate_pipeline_size_gb(pipeline)
@@ -215,31 +220,32 @@ def select_auto_mode(
     t_model = _DEFAULT_MODEL_OFFLOAD_THRESHOLD_GB
     t_vae = _DEFAULT_VAE_SLICE_THRESHOLD_GB
 
-    # Very low VRAM: even a model that "fits" needs aggressive help for activations.
-    if total <= t_group:
+    # Very low free VRAM: even a model that "fits" needs aggressive help for activations.
+    if avail <= t_group:
         return "group_offload"
 
     # Size/peak-aware (the key efficiency rule): when we know the requirement
-    # and it fits within (total VRAM - activation margin), keep it FULLY RESIDENT
+    # and it fits within (free VRAM - activation margin), keep it FULLY RESIDENT
     # (no offload) even on a modest card — offload ONLY when it genuinely won't
     # fit. This avoids the ~10-50% offload penalty for models that fit (e.g. sd1.5
     # on an 8GB card) while big models (e.g. SDXL @1024 on an 8GB card) still
-    # offload. Falls through to total-VRAM thresholds only when size is unknown.
+    # offload. Falls through to free-VRAM thresholds only when size is unknown.
     if requirement > 0.0:
-        usable = max(0.0, total - margin)
+        usable = max(0.0, avail - margin)
         if requirement > usable:
             return "model_offload"
-        # Fits. With generous headroom, run fully unoptimized — slicing/tiling
-        # would only trade speed for memory we don't need. Otherwise keep the
-        # cheap vae_only guard for high-res VAE-decode spikes.
+        # Fits. With generous FREE headroom, run fully unoptimized — slicing/tiling
+        # would only trade speed for memory we don't need. On a partially-occupied
+        # card the free headroom is small, so we keep the cheap vae_only guard for
+        # high-res VAE-decode spikes.
         if (usable - requirement) >= _DEFAULT_OFF_HEADROOM_GB:
             return "off"
         return "vae_only"
 
-    # Unknown model size: conservative total-VRAM thresholds.
-    if total <= t_model:
+    # Unknown model size: conservative free-VRAM thresholds.
+    if avail <= t_model:
         return "model_offload"
-    if total <= t_vae:
+    if avail <= t_vae:
         return "vae_only"
     return "vae_only"
 

@@ -3589,8 +3589,17 @@ class Worker:
         return self._outgoing_queue
 
     def _send_message(self, message: WorkerSchedulerMessage) -> None:
-        """Add a message to the outgoing queue."""
-        if self._running and not self._stop_event.is_set():
+        """Add a message to the outgoing queue.
+
+        Gate on _running only, NOT _stop_event. _stop_event is set on every
+        transient reconnect (_handle_connection_error) while _running stays
+        True; the outgoing queue persists across reconnects and is drained by
+        the new stream's iterator after redial. Refusing on _stop_event dropped
+        any JobExecutionResult a handler finished during the reconnect window,
+        stranding the request orchestrator-side. Only a genuine stop() clears
+        _running, and it does so before setting _stop_event.
+        """
+        if self._running:
             target_queue = self._select_outgoing_queue(message)
             try:
                 target_queue.put_nowait(message)
@@ -6214,7 +6223,9 @@ class Worker:
         self._send_message(
             pb.WorkerSchedulerMessage(
                 worker_drain_result=pb.WorkerDrainResult(
-                    worker_id=self.worker_id,
+                    # worker_id removed from the proto in #321 (reserved 1) — the
+                    # stream identifies the worker. Passing it raised ValueError,
+                    # swallowed by the receive loop, so drain never ran.
                     reason=reason,
                     status=status,
                     active_requests=active,
