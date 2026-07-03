@@ -847,9 +847,6 @@ per-model recommended config, and a complete working example:
   parallelism.
 - [cookbook-audio.md](cookbook-audio.md) — Stable Audio style SerialWorkers
   and Chatterbox-style BatchedWorkers via vLLM.
-- [cookbook-stages.md](cookbook-stages.md) — `@inference.stage`
-  annotations for multi-stage pipelines (3D, large DiTs with batch-
-  friendly encoders).
 
 ## Examples
 

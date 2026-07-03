@@ -47,11 +47,8 @@ from .api.decorators import (
     conversion,
     dataset,
     inference,
-    inference_function,  # hard-cut migration stub (raises ImportError if called)
     invocable,
-    realtime_function,   # hard-cut migration stub
     training,
-    training_function,   # hard-cut migration stub
 )
 from .request_context import (
     ConversionContext,
@@ -78,48 +75,11 @@ from .inference_memory import apply_low_vram_config
 from .diagnostics import emit_diagnostic_log
 
 
-_REMOVED_PUBLIC_SYMBOLS = {
-    "ModelRef": (
-        "gen_worker.ModelRef was removed in gen-worker 0.7.0. Use Repo / dispatch / "
-        "the models={...} kwarg on @inference instead."
-    ),
-    "ModelRefSource": (
-        "gen_worker.ModelRefSource was removed in gen-worker 0.7.0. The ModelRef "
-        "concept was replaced by Repo / Dispatch bindings on the decorator's "
-        "models={...} kwarg."
-    ),
-    "Src": (
-        "gen_worker.Src was removed in gen-worker 0.7.0. The Src.FIXED / Src.PAYLOAD / "
-        "Src.PAYLOAD_REF discriminators are gone — fixed bindings use Repo(...), "
-        "payload-driven dispatch uses dispatch(field, table), and caller overrides "
-        "use .allow_override(*classes)."
-    ),
-    "ResourceRequirements": (
-        "gen_worker.ResourceRequirements was renamed to gen_worker.Resources in "
-        "gen-worker 0.7.0. The five ScalingHints fields (vram_must_fit, vram_base, "
-        "vram_size_multiplier, vram_scales_with, runtime_scales_with) are now part "
-        "of the same struct. The `kind` field was dropped."
-    ),
-    "ScalingHints": (
-        "gen_worker.ScalingHints was merged into gen_worker.Resources in gen-worker "
-        "0.7.0. Pass vram_must_fit / vram_base / vram_size_multiplier / "
-        "vram_scales_with / runtime_scales_with directly on Resources(...)."
-    ),
-    "LoraSpec": (
-        "gen_worker.LoraSpec was removed. LoRA bytes are tensor artifacts; define "
-        "endpoint-owned structs with a `tensors: Tensors` field, or use "
-        "model-binding LoRA overlays for platform-managed adapters."
-    ),
-}
-
-
 def __getattr__(name: str):
     if name == "clone":
         import importlib
 
         return importlib.import_module(".clone", __name__)
-    if name in _REMOVED_PUBLIC_SYMBOLS:
-        raise ImportError(_REMOVED_PUBLIC_SYMBOLS[name])
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
@@ -140,10 +100,6 @@ __all__ = [
     "dispatch",
     "SharedBase",
     "Variant",
-    # Hard-cut migration stubs (raise ImportError if used).
-    "inference_function",
-    "training_function",
-    "realtime_function",
     # Context types.
     "RequestContext",
     "ConversionContext",

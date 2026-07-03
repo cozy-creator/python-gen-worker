@@ -32,7 +32,7 @@ from typing import Any, Dict, List, Optional
 
 import msgspec
 
-from .config import Settings, load_settings
+from .config import load_settings
 from .models.cache_paths import tensorhub_cas_dir
 try:
     from .worker import Worker

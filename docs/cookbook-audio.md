@@ -13,7 +13,6 @@ Cross-links:
 - [endpoint-authoring.md](endpoint-authoring.md) — base SDK reference.
 - [cookbook-image-diffusion.md](cookbook-image-diffusion.md) — image DiTs.
 - [cookbook-video-diffusion.md](cookbook-video-diffusion.md) — video DiTs.
-- [cookbook-stages.md](cookbook-stages.md) — `@inference.stage`.
 
 ---
 
@@ -529,13 +528,5 @@ occupying engine slots until they hit their token budget.
 
 ## Next steps
 
-- **Two-stage AR + diffusion hybrids** (e.g., AR text-to-codec
-  followed by diffusion super-resolution)? Use
-  `@inference.stage(name=..., gpu_class=...)` on the diffusion
-  stage so future disaggregation can split it onto a separate GPU
-  pool. See [cookbook-stages.md](cookbook-stages.md).
-- **Custom AR-TTS model**? Register an `ARTTSModelSpec` at module
-  import time via `gen_worker.runtimes.ar_tts.register(...)` and use
-  the same BatchedWorker shape.
 - **Whisper / ASR**? SerialWorker, no special engine. Standard
   encoder-decoder.

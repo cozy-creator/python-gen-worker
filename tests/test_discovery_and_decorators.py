@@ -3,7 +3,7 @@
 One test per distinct discovery/decorator behavior in the HARD floor:
 
   1. @invocable parity: discovered AND dispatched identically to
-     @inference.function (and @invocable.stage delegates to .stage).
+     @inference.function.
   2. parametrize=[Case(...)] stamps N routable functions with per-row
      Resources / model / input override.
   3. Optional shutdown: a class with NO shutdown registers, serves a real
@@ -11,7 +11,6 @@ One test per distinct discovery/decorator behavior in the HARD floor:
   4. msgspec.Meta bounds compile into the discovered endpoint.lock schema.
   5. Duplicate routable function name within an endpoint → discovery raises.
   6. Discovery walks submodules / class-shape endpoints across package layouts.
-  9. @inference.stage / @invocable.stage pipeline-stage handling + manifest.
 
 Every test exercises the REAL discovery walker / registration path on a real
 Worker (built bare to skip the gRPC init the dispatch tables don't need).
@@ -72,10 +71,6 @@ def test_invocable_discovered_and_dispatched_like_inference_function(bare_worker
         def run(self, ctx: RequestContext, payload: _In) -> _Out:
             return _Out(result="ok")
 
-        @invocable.stage(name="encode", gpu_class="small")
-        def encode(self, prompt: str) -> str:
-            return prompt
-
     @inference()
     class ViaFunction:
         def setup(self) -> None:
@@ -95,10 +90,6 @@ def test_invocable_discovered_and_dispatched_like_inference_function(bare_worker
     inv_spec = getattr(ViaInvocable.run, "__gen_worker_function_spec__")
     fn_spec = getattr(ViaFunction.run, "__gen_worker_function_spec__")
     assert type(inv_spec) is type(fn_spec) and inv_spec.name == fn_spec.name == "run"
-
-    # @invocable.stage delegates to the same stage marker (floor 9).
-    [(_attr, _m, stage_spec)] = getattr(ViaInvocable, "__gen_worker_stage_methods__")
-    assert stage_spec.name == "encode" and stage_spec.gpu_class == "small"
 
     # Both register a routable serial spec on a real Worker.
     w = bare_worker()

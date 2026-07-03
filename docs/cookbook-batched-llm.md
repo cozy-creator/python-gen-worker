@@ -108,10 +108,6 @@ Differences from `@inference`:
   maps these onto the existing `IncrementalTokenDelta` /
   `IncrementalTokenStreamDone` / `IncrementalTokenStreamError` proto
   messages.
-- **No `@inference.stage`.** BatchedWorker hosts a single long-lived
-  engine; pipeline staging is a SerialWorker concept. Stray
-  `@inference.stage` annotations on a `@batched_inference` class raise
-  at decoration time.
 - **Tenant owns the engine.** The SDK does NOT pick or construct the
   engine for you. Build `AsyncLLMEngine.from_engine_args(...)` (or
   `sgl.Engine(...)`) inside `setup()` and store it on `self`. The

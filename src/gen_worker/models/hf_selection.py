@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Iterable, Mapping, Optional, Sequence, Set
+from typing import Callable, Mapping, Optional, Sequence, Set
 
 
 _OPTIONAL_COMPONENTS = {"safety_checker", "feature_extractor"}

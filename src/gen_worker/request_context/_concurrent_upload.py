@@ -26,7 +26,7 @@ from __future__ import annotations
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Callable, Iterable, List, Tuple, TypeVar
+from typing import Sequence, Callable, List, TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -90,11 +90,6 @@ class BudgetGate:
     @property
     def max_bytes_per_file(self) -> int:
         return self._max_bytes_per_file
-
-    @property
-    def inflight_bytes(self) -> int:
-        with self._cond:
-            return self._inflight
 
     def reserve(self, size_bytes: int) -> "_BudgetReservation":
         return _BudgetReservation(self, int(size_bytes))
@@ -217,34 +212,3 @@ def parallel_map_uploads(
     logger.debug("%s_concurrent_upload_start items=%d workers=%d", label, n, max_workers)
     with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix=f"gw-{label}") as pool:
         return list(pool.map(upload_fn, items))
-
-
-def parallel_save_checkpoints(
-    ctx: Any,
-    items: Iterable[Tuple[str, str, str]],
-    *,
-    extra_kwargs_for_index: Callable[[int], dict] | None = None,
-) -> List[Any]:
-    """Bulk wrapper around ``ctx.save_checkpoint``.
-
-    ``items`` is an iterable of ``(ref, local_path, format)`` tuples.
-    Returns the per-item Tensors in input order.
-
-    For per-item lineage metadata (step/epoch/flavor/etc.), pass a
-    callable via ``extra_kwargs_for_index`` that yields the kwargs map
-    for index i. Most callers in the clone pipeline don't need lineage
-    on each shard; the trainer's checkpoint-emission path is the only
-    one that uses per-item lineage today, and it uploads one file at a
-    time (no fan-out opportunity), so it stays on the direct API.
-    """
-    materialized = list(items)
-
-    def _one(idx_item: Tuple[int, Tuple[str, str, str]]) -> Any:
-        i, (ref, local_path, fmt) = idx_item
-        extra: dict = {}
-        if extra_kwargs_for_index is not None:
-            extra = dict(extra_kwargs_for_index(i) or {})
-        return ctx.save_checkpoint(ref, local_path, format=fmt, **extra)
-
-    indexed: List[Tuple[int, Tuple[str, str, str]]] = list(enumerate(materialized))
-    return parallel_map_uploads(indexed, _one, label="save-checkpoint")

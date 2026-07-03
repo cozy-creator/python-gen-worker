@@ -1,7 +1,7 @@
 """Removed in gen-worker 0.7.0 (decorator-table-model-bindings).
 
 The ``Annotated[T, ModelRef(...)]`` injection pattern has been replaced by
-the ``models={...}`` kwarg on :func:`gen_worker.inference_function`, carrying
+the ``models={...}`` kwarg on the ``@inference`` class decorator, carrying
 :class:`gen_worker.Repo` and :class:`gen_worker.Dispatch` bindings.
 
 Migration::
@@ -17,7 +17,7 @@ Migration::
     ) -> GenerateOutput: ...
 
     # After (0.7.0):
-    from gen_worker import Repo, inference_function
+    from gen_worker import Repo, inference
 
     flux = Repo("owner/repo")
 

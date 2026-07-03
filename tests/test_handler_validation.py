@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Literal
 
 import msgspec
 import pytest
@@ -32,6 +33,16 @@ from gen_worker import (  # noqa: E402
 
 class _In(msgspec.Struct):
     prompt: str = "x"
+    model: Literal["a", "b"] = "a"
+
+
+class _NoField(msgspec.Struct):
+    prompt: str = "x"
+
+
+class _StrField(msgspec.Struct):
+    prompt: str = "x"
+    model: str = "a"
 
 
 _TABLE = {"a": HFRepo("acme/a"), "b": HFRepo("acme/b")}
@@ -135,3 +146,43 @@ def test_error_messages_state_the_two_site_rule() -> None:
 
     assert "setup()" in str(ei.value)
     assert "per request" in str(ei.value)
+
+# --------------------------------------------------------------------------- #
+# dispatch() Literal contract (binding.py) — wired validators                  #
+# --------------------------------------------------------------------------- #
+
+
+def test_dispatch_field_missing_from_payload_is_rejected() -> None:
+    with pytest.raises(ValueError, match="does not exist"):
+        @inference(models={"pipeline": dispatch(field="model", table=_TABLE)})
+        class Bad:
+            def setup(self) -> None:
+                ...
+
+            @invocable(name="gen_nofield")
+            def generate(self, ctx: RequestContext, payload: _NoField, pipeline: object):
+                return None
+
+
+def test_dispatch_field_not_literal_is_rejected() -> None:
+    with pytest.raises(ValueError, match="Literal"):
+        @inference(models={"pipeline": dispatch(field="model", table=_TABLE)})
+        class Bad2:
+            def setup(self) -> None:
+                ...
+
+            @invocable(name="gen_strfield")
+            def generate(self, ctx: RequestContext, payload: _StrField, pipeline: object):
+                return None
+
+
+def test_dispatch_table_key_outside_literal_is_rejected() -> None:
+    with pytest.raises(ValueError, match="not members of Literal"):
+        @inference(models={"pipeline": dispatch(field="model", table={**_TABLE, "c": HFRepo("acme/c")})})
+        class Bad3:
+            def setup(self) -> None:
+                ...
+
+            @invocable(name="gen_extrakey")
+            def generate(self, ctx: RequestContext, payload: _In, pipeline: object):
+                return None

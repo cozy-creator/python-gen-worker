@@ -2,33 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 import tomllib
 import re
 
-from .names import slugify_name
 
 _RE_CLAUSE = re.compile(r"^\s*(>=|<=|==|~=|>|<)?\s*([0-9]+(?:\.[0-9]+)*)\s*$")
 _RE_VERSION_PREFIX = re.compile(r"^\s*([0-9]+(?:\.[0-9]+)*)")
 _RE_MODEL_SEGMENT = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
-
-
-@dataclass(frozen=True)
-class TensorhubModelSpec:
-    """Legacy holder, kept for type-stub compatibility on the EndpointToml
-    dataclass. The endpoint.toml [models] / [models.<fn>] tables that this
-    used to parse were removed in gen-worker 0.7.0 — model bindings now live
-    in Python via @inference(models={...}). load_endpoint_toml
-    raises on [models] presence.
-    """
-
-    ref: str
-    flavor: str = ""
-    flavors: tuple[str, ...] = ()
-    dtype: str = ""
-    file_layout: str = ""
-    file_type: str = ""
 
 
 @dataclass(frozen=True)
@@ -83,12 +65,6 @@ class EndpointToml:
     main: str
     cuda: str | None
     compute_capabilities: tuple[str, ...]
-    models: dict[str, TensorhubModelSpec]
-    # top-level fixed keyspace: model_key -> spec
-    function_models: dict[str, dict[str, TensorhubModelSpec]]
-    # function payload keyspace: function_name -> model_key -> spec
-    function_resources: dict[str, dict[str, Any]]  # function_name -> runtime/resource hints
-    function_batch_dimensions: dict[str, str]  # function_name -> payload-root batch dimension path
     resources: EndpointResources
 
 
@@ -102,335 +78,6 @@ def _validate_constraint(raw: str, *, field: str) -> None:
             continue
         if not _RE_CLAUSE.match(clause):
             raise ValueError(f"invalid {field} constraint clause: {clause!r}")
-
-def _parse_version_tuple(raw: str) -> tuple[int, ...]:
-    m = _RE_VERSION_PREFIX.match(raw or "")
-    if not m:
-        raise ValueError(f"invalid version: {raw!r}")
-    parts = tuple(int(x) for x in m.group(1).split(".") if x != "")
-    if not parts:
-        raise ValueError(f"invalid version: {raw!r}")
-    return parts
-
-
-def _cmp_versions(a: tuple[int, ...], b: tuple[int, ...]) -> int:
-    n = max(len(a), len(b))
-    aa = a + (0,) * (n - len(a))
-    bb = b + (0,) * (n - len(b))
-    if aa < bb:
-        return -1
-    if aa > bb:
-        return 1
-    return 0
-
-
-def _compatible_upper_bound(v: tuple[int, ...]) -> tuple[int, ...]:
-    # PEP 440 compatible release:
-    # - ~=1.4    => <2.0
-    # - ~=1.4.5  => <1.5.0
-    if len(v) == 1:
-        return (v[0] + 1,)
-    prefix = list(v[:-1])
-    prefix[-1] += 1
-    return tuple(prefix) + (0,)
-
-
-def constraint_satisfied(spec: str, version: str) -> bool:
-    """
-    Best-effort evaluator for simple comparator sets like:
-      - ">=0.2.0,<0.3.0"
-      - "~=0.2.1"
-      - "0.2.1" (treated as ==0.2.1)
-
-    This is intentionally minimal and intended for dev validation only.
-    """
-    v = _parse_version_tuple(version)
-    s = (spec or "").strip()
-    if not s:
-        return True
-    for clause in s.split(","):
-        clause = clause.strip()
-        if not clause:
-            continue
-        m = _RE_CLAUSE.match(clause)
-        if not m:
-            return False
-        op = m.group(1) or "=="
-        target = _parse_version_tuple(m.group(2))
-
-        c = _cmp_versions(v, target)
-        if op == "==":
-            if c != 0:
-                return False
-        elif op == ">=":
-            if c < 0:
-                return False
-        elif op == "<=":
-            if c > 0:
-                return False
-        elif op == ">":
-            if c <= 0:
-                return False
-        elif op == "<":
-            if c >= 0:
-                return False
-        elif op == "~=":
-            upper = _compatible_upper_bound(target)
-            if _cmp_versions(v, target) < 0:
-                return False
-            if _cmp_versions(v, upper) >= 0:
-                return False
-        else:
-            return False
-    return True
-
-
-def _parse_model_spec(v: Any, *, warnings: list[str] | None = None) -> TensorhubModelSpec:
-    """Parse a single endpoint.toml [models] entry.
-
-    Two accepted input shapes:
-      1. Bare string "owner/repo" or "owner/repo#flavor".
-      2. Table: {ref, flavor?, flavors?, dtype?, file_layout?, file_type?}.
-    """
-    del warnings
-    if isinstance(v, str):
-        ref, flavor = _split_model_ref_flavor(v.strip(), field="model ref")
-        _validate_endpoint_model_ref(ref, field="model ref")
-        return TensorhubModelSpec(ref=ref, flavor=flavor)
-
-    if isinstance(v, Mapping):
-        ref, ref_flavor = _split_model_ref_flavor(
-            str(v.get("ref") or "").strip(),
-            field="model spec ref",
-        )
-        _validate_endpoint_model_ref(ref, field="model spec ref")
-
-        if "dtypes" in v:
-            raise ValueError(
-                "model spec 'dtypes' field removed — use flavor/flavors or dtype/file_layout/file_type"
-            )
-        if "attributes" in v:
-            raise ValueError(
-                "model spec 'attributes' field removed — use flavor/flavors or dtype/file_layout/file_type"
-            )
-
-        flavor = _string_field(v, "flavor")
-        if ref_flavor and flavor:
-            raise ValueError("model spec cannot set both ref#flavor and flavor")
-        flavors = _string_list_field(v, "flavors")
-        if (ref_flavor or flavor) and flavors:
-            raise ValueError("model spec cannot set both flavor and flavors")
-
-        return TensorhubModelSpec(
-            ref=ref,
-            flavor=flavor or ref_flavor,
-            flavors=tuple(flavors),
-            dtype=_string_field(v, "dtype"),
-            file_layout=_string_field(v, "file_layout"),
-            file_type=_string_field(v, "file_type"),
-        )
-
-    raise ValueError("model spec must be a string or a table {ref=...}")
-
-
-def _split_model_ref_flavor(raw: str, *, field: str) -> tuple[str, str]:
-    if "#" not in raw:
-        return raw, ""
-    if raw.count("#") != 1:
-        raise ValueError(f"{field} has invalid flavor selector: {raw!r}")
-    ref, flavor = raw.rsplit("#", 1)
-    flavor = flavor.strip()
-    if not flavor:
-        raise ValueError(f"{field} has empty flavor selector: {raw!r}")
-    return ref.strip(), flavor
-
-
-def _string_field(raw: Mapping[str, Any], key: str) -> str:
-    if key not in raw:
-        return ""
-    value = raw.get(key)
-    if value is None:
-        return ""
-    if not isinstance(value, str):
-        raise ValueError(f"model spec {key!r} must be a string")
-    return value.strip()
-
-
-def _string_list_field(raw: Mapping[str, Any], key: str) -> list[str]:
-    if key not in raw:
-        return []
-    value = raw.get(key)
-    if value is None:
-        return []
-    if not isinstance(value, list):
-        raise ValueError(f"model spec {key!r} must be a list of strings")
-    out: list[str] = []
-    for item in value:
-        if not isinstance(item, str):
-            raise ValueError(f"model spec {key!r} entries must be strings")
-        s = item.strip()
-        if not s:
-            raise ValueError(f"model spec {key!r} entries must be non-empty")
-        if s not in out:
-            out.append(s)
-    return out
-
-
-def _validate_endpoint_model_ref(ref: str, *, field: str) -> None:
-    raw = (ref or "").strip()
-    if not raw:
-        raise ValueError(f"{field} cannot be empty")
-    if raw.lower() != raw:
-        raise ValueError(f"{field} must be lowercase: {raw!r}")
-    for p in ("hf:", "civitai:", "tensorhub:", "huggingface:"):
-        if raw.startswith(p):
-            raise ValueError(
-                f"{field} must not include a provider prefix; use bare owner/repo form (got {raw!r})"
-            )
-
-    base = raw
-    if "@" in base:
-        if base.count("@") != 1:
-            raise ValueError(f"{field} has invalid digest selector: {raw!r}")
-        base, digest = base.split("@", 1)
-        if not digest.strip():
-            raise ValueError(f"{field} has empty digest selector: {raw!r}")
-
-    if ":" in base:
-        base, tag = base.rsplit(":", 1)
-        if not tag.strip():
-            raise ValueError(f"{field} has empty tag selector: {raw!r}")
-
-    parts = [p.strip() for p in base.split("/")]
-    if len(parts) != 2 or not parts[0] or not parts[1]:
-        raise ValueError(
-            f"{field} must be 'owner/repo' (optionally with :tag or @digest), got {raw!r}"
-        )
-    owner, repo = parts
-    if not _RE_MODEL_SEGMENT.match(owner):
-        raise ValueError(f"{field} has invalid owner segment: {owner!r}")
-    if not _RE_MODEL_SEGMENT.match(repo):
-        raise ValueError(f"{field} has invalid repo segment: {repo!r}")
-
-
-def _parse_function_resource_hints(v: Any) -> dict[str, Any]:
-    if not isinstance(v, Mapping):
-        return {}
-    if "max_concurrency" in v or "max_inflight_requests" in v:
-        raise ValueError(
-            "function-level concurrency hints are not supported in endpoint.toml; "
-            "Tensorhub learns scheduling concurrency from runtime observations"
-        )
-    out: dict[str, Any] = {}
-    for key in (
-        "batch_size_min",
-        "batch_size_target",
-        "batch_size_max",
-        "prefetch_depth",
-        "max_wait_ms",
-        "memory_hint_mb",
-    ):
-        if key not in v:
-            continue
-        raw = v.get(key)
-        if raw is None:
-            continue
-        try:
-            iv = int(raw)
-        except Exception:
-            raise ValueError(f"function resource hint {key} must be an integer")
-        if iv <= 0:
-            raise ValueError(f"function resource hint {key} must be > 0")
-        out[key] = iv
-
-    if "stage_profile" in v or "stage_traits" in v:
-        raise ValueError(
-            "function resource hints stage_profile/stage_traits were removed; "
-            "use a single string hint: kind"
-        )
-    if "kind" in v:
-        kind = str(v.get("kind") or "").strip()
-        if kind:
-            out["kind"] = kind
-
-    if "accelerator" in v:
-        accelerator = str(v.get("accelerator") or "").strip().lower()
-        if accelerator == "gpu":
-            accelerator = "cuda"
-        elif accelerator == "cpu":
-            accelerator = "none"
-        if accelerator and accelerator not in {"none", "cuda"}:
-            raise ValueError("function resource hint accelerator must be 'none' or 'cuda'")
-        if accelerator:
-            out["accelerator"] = accelerator
-
-    if "accelerator_preference" in v:
-        preference = str(v.get("accelerator_preference") or "").strip().lower()
-        if preference and preference not in {"required", "preferred"}:
-            raise ValueError("function resource hint accelerator_preference must be 'required' or 'preferred'")
-        if preference:
-            out["accelerator_preference"] = preference
-
-    if "requires_gpu" in v:
-        raw = v.get("requires_gpu")
-        if isinstance(raw, bool):
-            out["requires_gpu"] = raw
-        else:
-            raise ValueError("function resource hint requires_gpu must be a boolean")
-
-    compute_min_raw = v.get("compute_capability_min")
-    if compute_min_raw is None:
-        compute_min_raw = v.get("min_compute_capability")
-    if compute_min_raw is not None:
-        raw = str(compute_min_raw or "").strip()
-        if raw:
-            try:
-                parsed = float(raw)
-            except Exception:
-                raise ValueError("function resource hint compute_capability_min must be numeric")
-            if parsed <= 0:
-                raise ValueError("function resource hint compute_capability_min must be > 0")
-            out["compute_capability_min"] = f"{parsed:.1f}"
-            if "min_compute_capability" in v:
-                out["min_compute_capability"] = f"{parsed:.1f}"
-
-    if "min_vram_gb" in v:
-        raw = v.get("min_vram_gb")
-        try:
-            val = float(raw)
-        except Exception:
-            raise ValueError("function resource hint min_vram_gb must be numeric")
-        if val <= 0:
-            raise ValueError("function resource hint min_vram_gb must be > 0")
-        out["min_vram_gb"] = val
-
-    if "vram_multiplier" in v:
-        raw = v.get("vram_multiplier")
-        try:
-            val = float(raw)
-        except Exception:
-            raise ValueError("function resource hint vram_multiplier must be numeric")
-        if val <= 0:
-            raise ValueError("function resource hint vram_multiplier must be > 0")
-        out["vram_multiplier"] = val
-
-    for key in ("supported_conversion_profiles", "supported_precisions", "required_libraries"):
-        if key not in v:
-            continue
-        raw = v.get(key)
-        if not isinstance(raw, list):
-            raise ValueError(f"function resource hint {key} must be a list of strings")
-        items: list[str] = []
-        for item in raw:
-            if not isinstance(item, str):
-                raise ValueError(f"function resource hint {key} must be a list of strings")
-            trimmed = item.strip()
-            if trimmed:
-                items.append(trimmed)
-        if items:
-            out[key] = items
-    return out
-
 
 def _parse_compute_capabilities(raw: Any, *, field: str) -> tuple[str, ...]:
     if raw is None:
@@ -507,8 +154,6 @@ def load_endpoint_toml_with_warnings(path: Path) -> tuple[EndpointToml, list[str
                 field="host.requirements.compute_capabilities",
             )
 
-    models: dict[str, TensorhubModelSpec] = {}
-    function_models: dict[str, dict[str, TensorhubModelSpec]] = {}
     if "models" in data:
         # 0.7.0 hard cut: [models] and [models.<fn>] toml tables were replaced
         # by the Python-side @inference(models={...}) binding kwarg.
@@ -520,8 +165,6 @@ def load_endpoint_toml_with_warnings(path: Path) -> tuple[EndpointToml, list[str
         )
 
     # Reject legacy endpoint.toml blocks that became platform-controlled.
-    # Function-scoped [resources] is accepted for mixed CPU/GPU endpoints;
-    # concurrency inside it remains rejected by _parse_function_resource_hints.
     _REJECTED_ENDPOINT_BLOCKS = {
         "scaling": (
             "autoscaling is platform-controlled; remove the [scaling] block from "
@@ -538,11 +181,7 @@ def load_endpoint_toml_with_warnings(path: Path) -> tuple[EndpointToml, list[str
             "declare function metadata in Python decorators"
         )
 
-    function_resources: dict[str, dict[str, Any]] = {}
-    function_batch_dimensions: dict[str, str] = {}
-
-    # Endpoint-level [resources] is the default. Function-level [resources]
-    # may narrow/override hardware for mixed CPU/GPU endpoints.
+    # Endpoint-level [resources] is the default.
     raw_resources = data.get("resources")
     res_kwargs: dict[str, Any] = {}
     if isinstance(raw_resources, dict):
@@ -581,10 +220,6 @@ def load_endpoint_toml_with_warnings(path: Path) -> tuple[EndpointToml, list[str
             main=main,
             cuda=cuda,
             compute_capabilities=compute_capabilities,
-            models=models,
-            function_models=function_models,
-            function_resources=function_resources,
-            function_batch_dimensions=function_batch_dimensions,
             resources=resources,
         ),
         warnings,

@@ -35,11 +35,6 @@ Inner decorators:
     per-function metadata (timeout, allowed_shapes, etc). `@invocable` is the
     kind-agnostic marker; the per-kind `<kind>.function` aliases remain for
     backward compatibility.
-  - `@invocable.stage(...)` / `@inference.stage(name=..., gpu_class=...)` —
-    marks a method as a pipeline stage. Today: in-process method call. Future:
-    SDK can route to remote workers for disaggregated inference.
-
-See progress.json #322 for the full design.
 """
 
 from __future__ import annotations
@@ -50,7 +45,7 @@ from typing import Any, Callable, Literal, Mapping, Optional, TypeVar, Union, ov
 
 import msgspec
 
-from .binding import Binding, Dispatch, Repo, _qualname
+from .binding import Binding, Dispatch, Repo
 
 F = TypeVar("F", bound=Callable[..., Any])
 C = TypeVar("C", bound=type)
@@ -249,7 +244,6 @@ class _FunctionSpec(msgspec.Struct, frozen=True, kw_only=True):
     name: str
     timeout_ms: int | None = None
     allowed_shapes: tuple[tuple[int, ...], ...] = ()
-    rate_limit_per_invoker: int | None = None
     label: str | None = None
     description: str | None = None
 
@@ -266,21 +260,8 @@ class _BatchedInferenceFunctionSpec(msgspec.Struct, frozen=True, kw_only=True):
 
     name: str
     timeout_ms: int | None = None
-    rate_limit_per_invoker: int | None = None
     label: str | None = None
     description: str | None = None
-
-
-class _StageSpec(msgspec.Struct, frozen=True, kw_only=True):
-    """Metadata attached to a method by @inference.stage.
-
-    Forward-compatibility hook for future disaggregated inference. Today
-    the SDK runs the method in-process; tomorrow it can route the call to
-    a remote worker on a different gpu_class.
-    """
-
-    name: str
-    gpu_class: Literal["small", "large"] = "large"
 
 
 class _EndpointClassSpec(msgspec.Struct, frozen=True, kw_only=True):
@@ -312,14 +293,6 @@ class _EndpointClassSpec(msgspec.Struct, frozen=True, kw_only=True):
     # nunchaku #597). Validated by TetriServe (https://arxiv.org/html/2510.01565).
     batch_window_ms: int | None = None
     max_batch: int | None = None
-    # ----- Distilled-checkpoint awareness (#324) -------------------------
-    # When True, the SDK will auto-substitute a Lightning/Turbo/Schnell/Sprint
-    # variant of the declared model Repo(...) when one is published in the
-    # same repository. The actual ref-resolution happens at tensorhub-resolve
-    # time (orchestrator-side); this flag only surfaces tenant intent on the
-    # discovered endpoint metadata so the orchestrator can act on it.
-    # SLA-aware automatic selection is a follow-up depending on #320.
-    prefer_distilled: bool = False
     # ----- Function fan-out (#339 §2) -------------------------------------
     # When non-empty, the class hosts a SINGLE @invocable body that is stamped
     # into one separately-routable function per Case row (distinct
@@ -329,7 +302,7 @@ class _EndpointClassSpec(msgspec.Struct, frozen=True, kw_only=True):
 
 
 # ============================================================================
-# Inner decorators — @inference.function and @inference.stage.
+# Inner decorators — @inference.function.
 # Implemented as classmethods on a marker class below; the public API exposes
 # them via attributes on the outer decorator object.
 # ============================================================================
@@ -341,7 +314,6 @@ def _function_inner(
     name: Optional[str] = None,
     timeout_ms: Optional[int] = None,
     allowed_shapes: Optional[tuple[tuple[int, ...], ...]] = None,
-    rate_limit_per_invoker: Optional[int] = None,
     label: Optional[str] = None,
     description: Optional[str] = None,
 ) -> Any:
@@ -355,76 +327,10 @@ def _function_inner(
             name=name or method.__name__,
             timeout_ms=timeout_ms,
             allowed_shapes=tuple(tuple(s) for s in (allowed_shapes or ())),
-            rate_limit_per_invoker=rate_limit_per_invoker,
             label=(label or "").strip() or None,
             description=(description or "").strip() or None,
         )
         setattr(method, "__gen_worker_function_spec__", spec)
-        return method
-
-    if fn is not None:
-        return apply(fn)
-    return apply
-
-
-_VALID_GPU_CLASSES = ("small", "large")
-
-
-def _stage_inner(
-    fn: Optional[F] = None,
-    *,
-    name: Optional[str] = None,
-    gpu_class: Literal["small", "large"] = "large",
-) -> Any:
-    """Inner decorator marking a method as a pipeline stage.
-
-    Today: SDK calls the method in-process. Future: SDK may route to a
-    remote worker for disaggregated inference. The contract is identical
-    to local method calls, so tenant code is portable.
-
-    Usable as ``@inference.stage(name='encode', gpu_class='small')``.
-
-    Validation (raised at decoration time so tenants see the error during
-    ``import``, not at bake / dispatch):
-
-      - ``gpu_class`` must be ``'small'`` or ``'large'`` — the orchestrator's
-        future remote-dispatch path uses this as a placement hint.
-      - ``name`` (or the method name if not supplied) must produce a
-        non-empty slug under ``slugify_name`` — same slug rules as
-        ``@inference.function`` wire routes.
-    """
-    # gpu_class is typed ``Literal``, but msgspec.Struct does NOT enforce
-    # Literal members at construction time. Validate explicitly so a typo
-    # ('medium', 'big') fails fast at decoration time.
-    if gpu_class not in _VALID_GPU_CLASSES:
-        raise ValueError(
-            f"@inference.stage: gpu_class must be one of "
-            f"{list(_VALID_GPU_CLASSES)}, got {gpu_class!r}"
-        )
-
-    # Lazy import to avoid a circular dep between api.decorators and discovery.
-    from gen_worker.discovery.names import slugify_name
-
-    def apply(method: F) -> F:
-        raw_name = name if name is not None else method.__name__
-        if not isinstance(raw_name, str):
-            raise TypeError(
-                f"@inference.stage on {method.__name__!r}: name must be a str, "
-                f"got {type(raw_name).__name__}"
-            )
-        slug = slugify_name(raw_name)
-        if not slug:
-            raise ValueError(
-                f"@inference.stage on {method.__name__!r}: name {raw_name!r} "
-                "produces an empty slug. Use a name with at least one "
-                "alphanumeric character (slug rules: lowercased, _ -> -, "
-                "non-[a-z0-9.] -> -)."
-            )
-        spec = _StageSpec(
-            name=slug,
-            gpu_class=gpu_class,
-        )
-        setattr(method, "__gen_worker_stage_spec__", spec)
         return method
 
     if fn is not None:
@@ -471,6 +377,63 @@ def _literal_members(t: Any) -> Optional[tuple[Any, ...]]:
     return None
 
 
+def _validate_dispatch_literals(
+    cls_name: str,
+    validated_models: Mapping[str, Binding],
+    function_methods: list[tuple[str, Callable[..., Any], "_FunctionSpec"]],
+) -> None:
+    """Enforce the documented ``dispatch()`` contract (api/binding.py): the
+    discriminator ``field`` must be a ``Literal[...]``-typed member of the
+    consuming handler's payload struct, and every table key must be one of
+    the Literal's members. Skips handlers whose payload type is not an
+    introspectable msgspec Struct."""
+    dispatch_slots = {k: b for k, b in validated_models.items() if isinstance(b, Dispatch)}
+    if not dispatch_slots:
+        return
+    for attr_name, method, _spec in function_methods:
+        try:
+            sig = inspect.signature(method)
+        except (TypeError, ValueError):
+            continue
+        try:
+            hints = typing.get_type_hints(method)
+        except Exception:
+            hints = {}
+        ps = [p for p in sig.parameters.values() if p.name != "self"]
+        if len(ps) < 2:
+            continue
+        consumed = {p.name for p in ps[2:]} & set(dispatch_slots)
+        if not consumed:
+            continue
+        payload_type = hints.get(ps[1].name, ps[1].annotation)
+        fields = _payload_field_names(payload_type)
+        if not fields:
+            continue
+        for slot in sorted(consumed):
+            d = dispatch_slots[slot]
+            if d.field not in fields:
+                raise ValueError(
+                    f"@inference class {cls_name!r}: dispatch slot {slot!r} "
+                    f"discriminates on payload field {d.field!r}, which does not "
+                    f"exist on {payload_type.__name__!r} (fields: {sorted(fields)})."
+                )
+            field_type = _payload_field_type(payload_type, d.field)
+            members = _literal_members(field_type)
+            if members is None:
+                raise ValueError(
+                    f"@inference class {cls_name!r}: dispatch field {d.field!r} on "
+                    f"{payload_type.__name__!r} must be Literal[...]-typed so table "
+                    f"keys are validated (got {field_type!r})."
+                )
+            unknown = sorted(set(d.table) - {str(m) for m in members})
+            if unknown:
+                raise ValueError(
+                    f"@inference class {cls_name!r}: dispatch table key(s) {unknown} "
+                    f"for slot {slot!r} are not members of Literal{list(members)} "
+                    f"on payload field {d.field!r}."
+                )
+
+
 def _validate_setup_signature(cls: type) -> dict[str, Any]:
     """Return the model kwargs of ``setup``. setup must take (self, **models).
 
@@ -505,37 +468,6 @@ def _validate_invocable_methods(cls: type) -> list[tuple[str, Callable[..., Any]
             f"@inference class {cls.__name__!r}: no @inference.function-decorated "
             "methods found. At least one invocable function is required."
         )
-    return out
-
-
-def _validate_stage_methods(cls: type) -> list[tuple[str, Callable[..., Any], _StageSpec]]:
-    """Find @inference.stage-decorated methods. Optional — empty is fine.
-
-    Rejects duplicate stage names within a class: two stages sharing a name
-    would clash in the manifest's ``stages`` list and silently shadow each
-    other in any future remote-dispatch routing table.
-    """
-    out: list[tuple[str, Callable[..., Any], _StageSpec]] = []
-    seen_names: dict[str, str] = {}  # stage_name -> method attr_name
-    for attr_name in dir(cls):
-        if attr_name.startswith("_"):
-            continue
-        member = getattr(cls, attr_name, None)
-        if member is None or not callable(member):
-            continue
-        spec = getattr(member, "__gen_worker_stage_spec__", None)
-        if spec is None:
-            continue
-        prior = seen_names.get(spec.name)
-        if prior is not None and prior != attr_name:
-            raise ValueError(
-                f"@inference class {cls.__name__!r}: duplicate stage name "
-                f"{spec.name!r} on methods {prior!r} and {attr_name!r}. "
-                "Stage names must be unique within a class (each name maps "
-                "to one routable pipeline stage)."
-            )
-        seen_names[spec.name] = attr_name
-        out.append((attr_name, member, spec))
     return out
 
 
@@ -740,7 +672,6 @@ def _make_endpoint_decorator(kind: Literal["inference", "training", "dataset", "
         sub_kind: Optional[str] = None,
         batch_window_ms: Optional[int] = None,
         max_batch: Optional[int] = None,
-        prefer_distilled: bool = False,
         calibration: Optional[Mapping[str, str]] = None,
         parametrize: Optional[typing.Sequence[Case]] = None,
     ) -> Callable[[C], C]: ...
@@ -756,7 +687,6 @@ def _make_endpoint_decorator(kind: Literal["inference", "training", "dataset", "
         sub_kind: Optional[str] = None,
         batch_window_ms: Optional[int] = None,
         max_batch: Optional[int] = None,
-        prefer_distilled: bool = False,
         calibration: Optional[Mapping[str, str]] = None,
         parametrize: Optional[typing.Sequence[Case]] = None,
     ) -> Any:
@@ -774,7 +704,6 @@ def _make_endpoint_decorator(kind: Literal["inference", "training", "dataset", "
             cls_name = target.__name__
             setup_kwargs = _validate_setup_signature(target)
             function_methods = _validate_invocable_methods(target)
-            stage_methods = _validate_stage_methods(target)
             validated_models = _validate_models_against_setup(
                 cls_name, models or {}, setup_kwargs
             )
@@ -830,6 +759,9 @@ def _make_endpoint_decorator(kind: Literal["inference", "training", "dataset", "
             _validate_handler_injection(
                 cls_name, validated_models, function_methods, parametrize_value
             )
+            # binding.py dispatch() contract: discriminator field is Literal-
+            # typed on the payload and table keys are Literal members.
+            _validate_dispatch_literals(cls_name, validated_models, function_methods)
 
             is_async = _is_async_class(target, function_methods)
             # #345 Improvement B: an async class is BatchedWorker ONLY when it
@@ -892,7 +824,6 @@ def _make_endpoint_decorator(kind: Literal["inference", "training", "dataset", "
                 runtime=runtime,
                 batch_window_ms=batch_window_ms,
                 max_batch=max_batch,
-                prefer_distilled=bool(prefer_distilled),
                 parametrize=parametrize_value,
             )
 
@@ -900,7 +831,6 @@ def _make_endpoint_decorator(kind: Literal["inference", "training", "dataset", "
             setattr(target, "__gen_worker_endpoint_spec__", spec)
             setattr(target, "__gen_worker_archetype__", archetype)
             setattr(target, "__gen_worker_function_methods__", function_methods)
-            setattr(target, "__gen_worker_stage_methods__", stage_methods)
             # #332: per-scheme calibration policy for @conversion / @training
             # quantization endpoints. Free-form dict (scheme → 'required' |
             # 'beneficial' | 'unsupported'); the worker enforces this at
@@ -918,7 +848,7 @@ def _make_endpoint_decorator(kind: Literal["inference", "training", "dataset", "
 
 # ============================================================================
 # Public decorators.
-# `inference` is a callable that ALSO has `.function` and `.stage` attributes.
+# `inference` is a callable that ALSO has a `.function` attribute.
 # ============================================================================
 
 
@@ -930,9 +860,6 @@ class _InferenceDecorator:
         class MyEndpoint:
             @inference.function
             def generate(self, ctx, payload): ...
-
-            @inference.stage(name='encode', gpu_class='small')
-            def encode(self, prompt): ...
     """
 
     def __init__(self) -> None:
@@ -948,7 +875,6 @@ class _InferenceDecorator:
         name: Optional[str] = None,
         timeout_ms: Optional[int] = None,
         allowed_shapes: Optional[tuple[tuple[int, ...], ...]] = None,
-        rate_limit_per_invoker: Optional[int] = None,
         label: Optional[str] = None,
         description: Optional[str] = None,
     ) -> Any:
@@ -957,19 +883,10 @@ class _InferenceDecorator:
             name=name,
             timeout_ms=timeout_ms,
             allowed_shapes=allowed_shapes,
-            rate_limit_per_invoker=rate_limit_per_invoker,
             label=label,
             description=description,
         )
 
-    @staticmethod
-    def stage(
-        fn: Optional[F] = None,
-        *,
-        name: Optional[str] = None,
-        gpu_class: Literal["small", "large"] = "large",
-    ) -> Any:
-        return _stage_inner(fn, name=name, gpu_class=gpu_class)
 
 
 # ============================================================================
@@ -987,7 +904,6 @@ def _batched_function_inner(
     *,
     name: Optional[str] = None,
     timeout_ms: Optional[int] = None,
-    rate_limit_per_invoker: Optional[int] = None,
     label: Optional[str] = None,
     description: Optional[str] = None,
 ) -> Any:
@@ -1037,7 +953,6 @@ def _batched_function_inner(
         spec = _BatchedInferenceFunctionSpec(
             name=name or method.__name__,
             timeout_ms=timeout_ms,
-            rate_limit_per_invoker=rate_limit_per_invoker,
             label=(label or "").strip() or None,
             description=(description or "").strip() or None,
         )
@@ -1148,30 +1063,6 @@ def _make_batched_inference_decorator():
                 cls_name, models or {}, setup_kwargs
             )
 
-            # @batched_inference does NOT support @inference.stage —
-            # pipelines (sync stages) are a SerialWorker concept. Reject
-            # any stray @inference.stage methods loud rather than letting
-            # them silently no-op.
-            stage_method_names: list[str] = []
-            for attr_name in dir(target):
-                if attr_name.startswith("_"):
-                    continue
-                member = getattr(target, attr_name, None)
-                if member is None or not callable(member):
-                    continue
-                if (
-                    getattr(member, "__gen_worker_stage_spec__", None)
-                    is not None
-                ):
-                    stage_method_names.append(attr_name)
-            if stage_method_names:
-                raise ValueError(
-                    f"@batched_inference class {cls_name!r}: @inference.stage "
-                    f"is not supported (found {', '.join(stage_method_names)}). "
-                    "Stages are a SerialWorker feature; BatchedWorker hosts a "
-                    "single long-lived engine."
-                )
-
             spec = _EndpointClassSpec(
                 kind="inference",
                 sub_kind=None,
@@ -1187,7 +1078,6 @@ def _make_batched_inference_decorator():
                 runtime=None,
                 batch_window_ms=None,
                 max_batch=None,
-                prefer_distilled=False,
             )
 
             setattr(target, "__gen_worker_endpoint_spec__", spec)
@@ -1218,8 +1108,6 @@ class _BatchedInferenceDecorator:
         SDK does NOT pick or own the engine.
       * @batched_inference.function methods MUST be async generators yielding
         ``IncrementalTokenDelta | Done | Error`` signals.
-      * No ``@inference.stage`` — BatchedWorker hosts a single long-lived
-        engine, not a pipeline of stages.
 
     Usage::
 
@@ -1260,7 +1148,6 @@ class _BatchedInferenceDecorator:
         *,
         name: Optional[str] = None,
         timeout_ms: Optional[int] = None,
-        rate_limit_per_invoker: Optional[int] = None,
         label: Optional[str] = None,
         description: Optional[str] = None,
     ) -> Any:
@@ -1268,7 +1155,6 @@ class _BatchedInferenceDecorator:
             fn,
             name=name,
             timeout_ms=timeout_ms,
-            rate_limit_per_invoker=rate_limit_per_invoker,
             label=label,
             description=description,
         )
@@ -1287,9 +1173,6 @@ class _TrainingDecorator:
     def function(*args: Any, **kwargs: Any) -> Any:
         return _function_inner(*args, **kwargs)
 
-    @staticmethod
-    def stage(*args: Any, **kwargs: Any) -> Any:
-        return _stage_inner(*args, **kwargs)
 
 
 class _DatasetDecorator:
@@ -1305,9 +1188,6 @@ class _DatasetDecorator:
     def function(*args: Any, **kwargs: Any) -> Any:
         return _function_inner(*args, **kwargs)
 
-    @staticmethod
-    def stage(*args: Any, **kwargs: Any) -> Any:
-        return _stage_inner(*args, **kwargs)
 
 
 class _ConversionDecorator:
@@ -1323,20 +1203,17 @@ class _ConversionDecorator:
     def function(*args: Any, **kwargs: Any) -> Any:
         return _function_inner(*args, **kwargs)
 
-    @staticmethod
-    def stage(*args: Any, **kwargs: Any) -> Any:
-        return _stage_inner(*args, **kwargs)
 
 
 # ============================================================================
 # @invocable — single kind-agnostic method marker (#339 §5).
 #
 # `@inference.function` / `@training.function` / `@conversion.function` /
-# `@dataset.function` (and their `.stage`) all resolve to the same
-# kind-agnostic `_function_inner` / `_stage_inner` — four names for one marker,
-# with the kind living on the CLASS decorator. `@invocable` collapses those to
-# a single neutral name. It is ADDITIVE: the per-kind `.function` / `.stage`
-# aliases keep working unchanged (production endpoints depend on them).
+# `@dataset.function` all resolve to the same kind-agnostic `_function_inner`
+# — four names for one marker, with the kind living on the CLASS decorator.
+# `@invocable` collapses those to a single neutral name. It is ADDITIVE: the
+# per-kind `.function` aliases keep working unchanged (production endpoints
+# depend on them).
 # ============================================================================
 
 
@@ -1359,9 +1236,6 @@ class _InvocableDecorator:
 
             @invocable(name="generate")
             def generate(self, ctx, payload): ...
-
-            @invocable.stage(name="encode", gpu_class="small")
-            def encode(self, prompt): ...
     """
 
     def __call__(
@@ -1371,7 +1245,6 @@ class _InvocableDecorator:
         name: Optional[str] = None,
         timeout_ms: Optional[int] = None,
         allowed_shapes: Optional[tuple[tuple[int, ...], ...]] = None,
-        rate_limit_per_invoker: Optional[int] = None,
         label: Optional[str] = None,
         description: Optional[str] = None,
     ) -> Any:
@@ -1380,19 +1253,10 @@ class _InvocableDecorator:
             name=name,
             timeout_ms=timeout_ms,
             allowed_shapes=allowed_shapes,
-            rate_limit_per_invoker=rate_limit_per_invoker,
             label=label,
             description=description,
         )
 
-    @staticmethod
-    def stage(
-        fn: Optional[F] = None,
-        *,
-        name: Optional[str] = None,
-        gpu_class: Literal["small", "large"] = "large",
-    ) -> Any:
-        return _stage_inner(fn, name=name, gpu_class=gpu_class)
 
 
 # Singletons exported as the public API.
@@ -1404,40 +1268,6 @@ dataset = _DatasetDecorator()
 conversion = _ConversionDecorator()
 
 
-# ============================================================================
-# Hard-cut migration shim — old decorator names import-error with a clear
-# message pointing at the new shape.
-# ============================================================================
-
-
-def _migration_error(old_name: str, new_name: str) -> Callable[..., Any]:
-    """Return a fake decorator that raises a migration error if called."""
-
-    def stub(*args: Any, **kwargs: Any) -> Any:
-        raise ImportError(
-            f"`{old_name}` was removed in gen-worker SDK foundation (#322). "
-            f"Use `{new_name}` with a class instead of a function. Migration:\n"
-            f"  Before:\n"
-            f"    @{old_name}(models={{'pipe': repo}})\n"
-            f"    def my_fn(ctx, pipe, payload): ...\n"
-            f"  After:\n"
-            f"    @{new_name}(models={{'pipe': repo}})\n"
-            f"    class MyEndpoint:\n"
-            f"        def setup(self, pipe):\n"
-            f"            self.pipe = pipe\n"
-            f"        @invocable\n"
-            f"        def my_fn(self, ctx, payload): ...\n"
-            f"See the README or examples/marco-polo for the class shape."
-        )
-
-    return stub
-
-
-inference_function = _migration_error("inference_function", "inference")
-training_function = _migration_error("training_function", "training")
-realtime_function = _migration_error("realtime_function", "inference")
-
-
 __all__ = [
     "Resources",
     "Case",
@@ -1447,13 +1277,8 @@ __all__ = [
     "training",
     "dataset",
     "conversion",
-    # Hard-cut migration stubs (will raise ImportError on use):
-    "inference_function",
-    "training_function",
-    "realtime_function",
     # Internal specs (for discovery):
     "_EndpointClassSpec",
     "_FunctionSpec",
     "_BatchedInferenceFunctionSpec",
-    "_StageSpec",
 ]

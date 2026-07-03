@@ -20,7 +20,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional
 
 from .cache_paths import tensorhub_cas_dir
 
@@ -382,11 +382,6 @@ class ModelCache:
             model = self._models.get(model_id)
             if model is not None:
                 model.pinned = True
-
-    def is_pinned(self, model_id: str) -> bool:
-        with self._lock:
-            model = self._models.get(model_id)
-            return bool(model is not None and model.pinned)
 
     # -------------------------------------------------------------------------
     # #335 shared-component refcounting. A shared immutable component (e.g. one
@@ -815,11 +810,6 @@ class ModelCache:
                 m.model_id for m in self._models.values()
                 if m.location == ModelLocation.CPU
             ]
-
-    def get_residency_map(self) -> Dict[str, str]:
-        """Snapshot of ``{model_id: tier}`` for tier-aware availability (#337)."""
-        with self._lock:
-            return {m.model_id: self.residency_tier(m.model_id) for m in self._models.values()}
 
     def get_max_concurrent_downloads(self) -> int:
         """Get the maximum number of concurrent downloads allowed."""
