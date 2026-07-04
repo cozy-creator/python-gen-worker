@@ -7,7 +7,7 @@
 > Source for all findings: /home/fidika/cozy/python-gen-worker/AUDIT.md (2026-07-03 full-stack audit,
 > file:line evidence for every claim). Counterpart protocol/orchestrator issues: tensorhub #503-#510.
 
-next_id: 372
+next_id: 376
 
 ---
 
@@ -379,3 +379,88 @@ Tasks:
 Alternating requests across two endpoints on one GPU show demote/promote transitions (no full reloads) and both run unoffloaded when resident alone.
 
 ---
+
+---
+
+# #372: transport hardening — auth-failure gating, HelloAck deadline, redirect hop reset, TLS on redirects
+
+**Completed:** no
+**Status:** OPEN (2026-07-04, gRPC connect audit; counterpart tensorhub #539)
+
+## Metadata
+- Category: bug / transport
+- Status: planned
+- Passes: false
+
+## Tasks
+- [ ] `_AUTH_FAILURE_EXIT_THRESHOLD=3` (transport.py:32, 260-267) fires inside ~5s of full-jitter backoff — the hub currently returns UNAUTHENTICATED for duplicate-stream and transient-pg conditions, so an asymmetric network blip kills the worker. Gate the fatal exit on true auth rejections AND elapsed time (e.g. 3 failures over >60s); tensorhub #539 fixes the status codes.
+- [ ] No timeout on the HelloAck wait (`await stream.read()`, transport.py:329): a hub that accepts the stream but stalls mid-registration hangs the worker FOREVER (keepalive is answered at the h2 layer; `worker_disconnected_timeout_s` is only checked between attempts). `asyncio.wait_for(..., 30)` → ConnectionError → normal backoff; also enforce the disconnected timeout inside `_connect_once`.
+- [ ] `redirect_hops` never resets after the 3-hop fallback (transport.py:270-275 vs 297-301 — reset only on successful HelloAck), permanently disabling `not_leader` routing for exactly the leadership-churn case it exists for. Reset when falling back with backoff.
+- [ ] TLS is decided by URL scheme with a bare `:443` heuristic (transport.py:41-50) and redirect targets are schemeless host:port → TLS deployments redirect into plaintext dials. Inherit TLS mode from the connection that issued the redirect; add a CA-bundle setting instead of system-roots-only `grpc.ssl_channel_credentials()`.
+- [ ] Exit fast on permanent FAILED_PRECONDITION (`worker_id_mismatch`/`release_id_mismatch`/missing identity) instead of burning the full disconnected-timeout (transport.py:279).
+
+## Acceptance
+Worker survives hub restarts/pg blips/leadership churn without process death; doomed configs die in seconds not minutes; TLS redirects work.
+
+---
+
+# #373: download failure path — fail fast on expired URLs, bounded verify retries, disk headroom, CAS progress, error mapping
+
+**Completed:** no
+**Status:** OPEN (2026-07-04, download-flow audit; counterparts tensorhub #540/#541; disk-retention/eviction itself is #370, VRAM juggling is #371). Success path verified live end-to-end (tensorhub PR #73); these are the failure-path holes that reproduce the old flakiness.
+
+## Metadata
+- Category: bug / model-distribution
+- Status: planned
+- Passes: false
+
+## Tasks
+- [ ] cozy_cas.py:27-34 blanket-retries `requests.RequestException|ValueError|OSError` 30 tries/1h per file: an expired presigned URL (403, 15-min TTL hub-side) is retried against the same dead URL for up to an hour, then `_is_terminal_download_error` (executor.py:108-112) reads `exc.status_code` — which `requests.HTTPError` doesn't have (`exc.response.status_code`) — so it's classified transient and re-run 3 more outer times. Raise a typed UrlExpiredError on 4xx, emit `ModelEvent{FAILED, url_expired}` within seconds, fix the attribute bug.
+- [ ] Same decorator retries blake3/size mismatches (ValueError) up to 30 full re-downloads and ENOSPC (OSError) 30 times against a full disk. Cap verify retries at 2; ENOSPC → immediate `insufficient_disk`.
+- [ ] Pre-download disk-headroom check: sum missing SnapshotFile.size_bytes vs `shutil.disk_usage(cas_dir).free` with margin; on shortfall trigger the #370 eviction path or emit `insufficient_disk` immediately (`InsufficientDiskError` in capability.py:141-166 is defined but never raised).
+- [ ] The CAS path never passes `progress=` to `ensure_snapshot_async` (download.py:169-173) — `bytes_done/bytes_total` never flows for tensorhub models (the main production path). Wire it.
+- [ ] "tensorhub ref needs an orchestrator-resolved snapshot" (download.py:164-168) maps ValueError→INVALID→client-visible 400 for a hub-side residency bug. Map to RETRYABLE.
+- [ ] civitai: no internal retry, and auth/rate-limit failures are ValueError→terminal INVALID (download.py:575); classify 429/5xx as retryable.
+
+## Acceptance
+An expired URL, a corrupted blob, and a full disk each converge in seconds with the correct CONTRACT §9 error code; CAS downloads report progress.
+
+---
+
+# #374: cozy_convert publish/clone robustness — retries, resume, ingest junk in published trees, silent empty publish
+
+**Completed:** no
+**Status:** OPEN (2026-07-04, mirror-flow audit + live probe)
+
+## Metadata
+- Category: bug / cozy_convert
+- Status: planned
+- Passes: false
+
+## Tasks
+- [ ] Live probe: the published repo contains `.cache/huggingface/**` lock/metadata files and `.gitignore` — `ingest_huggingface` snapshots into the tree and `files_from_tree` (hub.py) uploads EVERYTHING. Filter HF-cache internals (or snapshot to a clean copy) so mirrors are byte-faithful to the source repo, not to huggingface_hub's cache layout.
+- [ ] HubClient has no retry/backoff/429 handling on part PUTs, commit POST, or complete (hub.py:113-156) — one transient S3 hiccup after a multi-GB download+convert fails the whole clone; run_clone `shutil.rmtree`s the workdir in `finally` (clone.py:552) so a retry is a full re-download. Add bounded retries + a keyed persistent workdir for resume.
+- [ ] `run_clone` with an empty `outputs` list publishes NOTHING and returns success (the specs loop simply doesn't run; the no-publish error only fires when failed_flavors is non-empty). Default to publish-as-is or make empty outputs an error.
+- [ ] Kill the second publish path: `gen_worker.publish_repo_revision` (request_context/__init__.py:995) still posts to the legacy `/repos/:tenant/:name/publish` route while cozy_convert uses `/commits` (#515 "the ONE publish path"). Convert remaining callers or delete.
+
+## Acceptance
+A mirrored repo's tree equals the source repo's tree; transient network errors don't restart multi-GB work; publishing nothing cannot read as success.
+
+---
+
+# #375: `yield ProducedFlavor` conversion contract is gone — from-scratch example (and training-endpoints quant endpoints) silently publish nothing
+
+**Completed:** no
+**Status:** OPEN (2026-07-04) — examples/from-scratch yields `ProducedFlavor` from a `kind="conversion"` generator, but post-#367/#368 gen_worker contains ZERO ProducedFlavor handling: the executor treats the generator as a streaming handler and nothing publishes. training-endpoints' quant/convert endpoints are written against the same dead contract (their #37 depends on this decision).
+
+## Metadata
+- Category: bug / api-contract
+- Status: planned
+- Passes: false
+
+## Tasks
+- [ ] Decide the ONE contract: (a) endpoints call `cozy_convert.publish_flavors(ctx, flavors)` explicitly and return a result struct, or (b) the executor collects `ProducedFlavor` yields from conversion-kind handlers and publishes them. Pick, document on @endpoint, delete the other shape.
+- [ ] Fix examples/from-scratch to the chosen contract and cover it (discovery+lock smoke at minimum; ideally the e2e publish-then-consume scenario of tensorhub #542).
+
+## Acceptance
+from-scratch runs against a live stack and its commit lands in the CAS; the dead shape no longer imports.
