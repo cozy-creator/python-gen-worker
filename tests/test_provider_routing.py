@@ -25,10 +25,10 @@ from typing import Any, List, Optional
 
 import pytest
 
-from gen_worker._worker_support import build_provider_index_from_manifest
 from gen_worker.models.hf_downloader import HuggingFaceDownloadResult, HuggingFaceRef
 from gen_worker.models.ref_downloader import (
     ModelRefDownloader,
+    build_provider_index_from_manifest,
     lookup_provider_for_ref,
     reset_override_ref_keys,
     reset_provider_by_ref,

@@ -306,3 +306,68 @@ def _run_in_thread(coro: Coroutine[Any, Any, Path]) -> str:
     if "e" in err:
         raise err["e"]
     return out["v"]
+
+
+# ---------------------------------------------------------------------------
+# endpoint.lock -> provider index (bare ref string -> provider). The runtime
+# wire format passes refs as bare strings; this index recovers the provider.
+# ---------------------------------------------------------------------------
+
+
+def _binding_canonical_ref(entry: Mapping[str, Any]) -> str:
+    ref = str(entry.get("ref") or "").strip()
+    if not ref:
+        return ""
+    provider = str(entry.get("provider") or "").strip() or "tensorhub"
+    flavor = str(entry.get("flavor") or "").strip()
+    tag = str(entry.get("tag") or "").strip()
+    if provider == "tensorhub":
+        out = ref if ("@" in ref or ":" in ref) else f"{ref}:{tag or 'latest'}"
+    else:
+        out = ref
+    if flavor and "#" not in out:
+        out = f"{out}#{flavor}"
+    return out
+
+
+def _collect_binding_entries(bindings: Any) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    if not isinstance(bindings, dict):
+        return out
+    for entry in bindings.values():
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("kind") or "").strip() == "dispatch":
+            table = entry.get("table")
+            if isinstance(table, dict):
+                out.extend(sub for sub in table.values() if isinstance(sub, dict))
+            continue
+        if entry.get("ref"):
+            out.append(entry)
+    return out
+
+
+def build_provider_index_from_manifest(manifest: Optional[Mapping[str, Any]]) -> dict[str, str]:
+    """{bare_ref_string: provider} from a loaded endpoint.lock manifest."""
+    index: dict[str, str] = {}
+    if not isinstance(manifest, Mapping):
+        return index
+    functions = manifest.get("functions")
+    if not isinstance(functions, list):
+        return index
+    for fn in functions:
+        if not isinstance(fn, dict):
+            continue
+        for entry in _collect_binding_entries(fn.get("bindings")):
+            ref_key = _binding_canonical_ref(entry)
+            if not ref_key:
+                continue
+            provider = str(entry.get("provider") or "").strip() or "tensorhub"
+            index.setdefault(ref_key, provider)
+            ref_bare = str(entry.get("ref") or "").strip()
+            flavor = str(entry.get("flavor") or "").strip()
+            if ref_bare:
+                if flavor:
+                    index.setdefault(f"{ref_bare}#{flavor}", provider)
+                index.setdefault(ref_bare, provider)
+    return index

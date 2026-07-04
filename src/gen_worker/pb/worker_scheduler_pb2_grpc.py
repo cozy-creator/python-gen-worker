@@ -25,22 +25,8 @@ if _version_not_supported:
     )
 
 
-class SchedulerWorkerServiceStub(object):
-    """The gRPC service. ConnectWorker carries the primary bidi protocol (control +
-    dispatch + heartbeats, and — for legacy single-stream workers — results and
-    events too).
-
-    gen-orchestrator #345 Improvement A: split outgoing streams. A worker that
-    sets WorkerRegistration.supports_split_streams ALSO opens WorkerResults and
-    WorkerEvents at boot, shedding JobExecutionResult + lifecycle/incremental
-    traffic off ConnectWorker so the result-send path isn't serialized behind
-    event traffic on one wire. Both new RPCs are worker→orchestrator bidi
-    (the orchestrator only ever replies with control/no-op on them today, but
-    keeping them bidi mirrors ConnectWorker so the worker's stream-send plumbing
-    is uniform). The FIRST message a worker sends on each new stream MUST be a
-    WorkerRegistration carrying worker_id + the matching stream_role so the
-    orchestrator can demux subsequent messages to the right worker.
-    """
+class WorkerSchedulerStub(object):
+    """Missing associated documentation comment in .proto file."""
 
     def __init__(self, channel):
         """Constructor.
@@ -48,109 +34,43 @@ class SchedulerWorkerServiceStub(object):
         Args:
             channel: A grpc.Channel.
         """
-        self.ConnectWorker = channel.stream_stream(
-                '/scheduler.v1.SchedulerWorkerService/ConnectWorker',
-                request_serializer=worker__scheduler__pb2.WorkerSchedulerMessage.SerializeToString,
-                response_deserializer=worker__scheduler__pb2.WorkerSchedulerMessage.FromString,
-                _registered_method=True)
-        self.WorkerResults = channel.stream_stream(
-                '/scheduler.v1.SchedulerWorkerService/WorkerResults',
-                request_serializer=worker__scheduler__pb2.WorkerSchedulerMessage.SerializeToString,
-                response_deserializer=worker__scheduler__pb2.WorkerSchedulerMessage.FromString,
-                _registered_method=True)
-        self.WorkerEvents = channel.stream_stream(
-                '/scheduler.v1.SchedulerWorkerService/WorkerEvents',
-                request_serializer=worker__scheduler__pb2.WorkerSchedulerMessage.SerializeToString,
-                response_deserializer=worker__scheduler__pb2.WorkerSchedulerMessage.FromString,
+        self.Connect = channel.stream_stream(
+                '/cozy.scheduler.WorkerScheduler/Connect',
+                request_serializer=worker__scheduler__pb2.WorkerMessage.SerializeToString,
+                response_deserializer=worker__scheduler__pb2.SchedulerMessage.FromString,
                 _registered_method=True)
 
 
-class SchedulerWorkerServiceServicer(object):
-    """The gRPC service. ConnectWorker carries the primary bidi protocol (control +
-    dispatch + heartbeats, and — for legacy single-stream workers — results and
-    events too).
+class WorkerSchedulerServicer(object):
+    """Missing associated documentation comment in .proto file."""
 
-    gen-orchestrator #345 Improvement A: split outgoing streams. A worker that
-    sets WorkerRegistration.supports_split_streams ALSO opens WorkerResults and
-    WorkerEvents at boot, shedding JobExecutionResult + lifecycle/incremental
-    traffic off ConnectWorker so the result-send path isn't serialized behind
-    event traffic on one wire. Both new RPCs are worker→orchestrator bidi
-    (the orchestrator only ever replies with control/no-op on them today, but
-    keeping them bidi mirrors ConnectWorker so the worker's stream-send plumbing
-    is uniform). The FIRST message a worker sends on each new stream MUST be a
-    WorkerRegistration carrying worker_id + the matching stream_role so the
-    orchestrator can demux subsequent messages to the right worker.
-    """
-
-    def ConnectWorker(self, request_iterator, context):
+    def Connect(self, request_iterator, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def WorkerResults(self, request_iterator, context):
-        """#345 Improvement A: dedicated results stream. Carries JobExecutionResult
-        envelopes (plus the opening WorkerRegistration handshake). Demuxed by
-        worker_id.
-        """
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
 
-    def WorkerEvents(self, request_iterator, context):
-        """#345 Improvement A: dedicated events stream. Carries lifecycle WorkerEvent
-        + IncrementalTokenDelta/Done/Error envelopes (plus the opening
-        WorkerRegistration handshake). Demuxed by worker_id.
-        """
-        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
-        context.set_details('Method not implemented!')
-        raise NotImplementedError('Method not implemented!')
-
-
-def add_SchedulerWorkerServiceServicer_to_server(servicer, server):
+def add_WorkerSchedulerServicer_to_server(servicer, server):
     rpc_method_handlers = {
-            'ConnectWorker': grpc.stream_stream_rpc_method_handler(
-                    servicer.ConnectWorker,
-                    request_deserializer=worker__scheduler__pb2.WorkerSchedulerMessage.FromString,
-                    response_serializer=worker__scheduler__pb2.WorkerSchedulerMessage.SerializeToString,
-            ),
-            'WorkerResults': grpc.stream_stream_rpc_method_handler(
-                    servicer.WorkerResults,
-                    request_deserializer=worker__scheduler__pb2.WorkerSchedulerMessage.FromString,
-                    response_serializer=worker__scheduler__pb2.WorkerSchedulerMessage.SerializeToString,
-            ),
-            'WorkerEvents': grpc.stream_stream_rpc_method_handler(
-                    servicer.WorkerEvents,
-                    request_deserializer=worker__scheduler__pb2.WorkerSchedulerMessage.FromString,
-                    response_serializer=worker__scheduler__pb2.WorkerSchedulerMessage.SerializeToString,
+            'Connect': grpc.stream_stream_rpc_method_handler(
+                    servicer.Connect,
+                    request_deserializer=worker__scheduler__pb2.WorkerMessage.FromString,
+                    response_serializer=worker__scheduler__pb2.SchedulerMessage.SerializeToString,
             ),
     }
     generic_handler = grpc.method_handlers_generic_handler(
-            'scheduler.v1.SchedulerWorkerService', rpc_method_handlers)
+            'cozy.scheduler.WorkerScheduler', rpc_method_handlers)
     server.add_generic_rpc_handlers((generic_handler,))
-    server.add_registered_method_handlers('scheduler.v1.SchedulerWorkerService', rpc_method_handlers)
+    server.add_registered_method_handlers('cozy.scheduler.WorkerScheduler', rpc_method_handlers)
 
 
  # This class is part of an EXPERIMENTAL API.
-class SchedulerWorkerService(object):
-    """The gRPC service. ConnectWorker carries the primary bidi protocol (control +
-    dispatch + heartbeats, and — for legacy single-stream workers — results and
-    events too).
-
-    gen-orchestrator #345 Improvement A: split outgoing streams. A worker that
-    sets WorkerRegistration.supports_split_streams ALSO opens WorkerResults and
-    WorkerEvents at boot, shedding JobExecutionResult + lifecycle/incremental
-    traffic off ConnectWorker so the result-send path isn't serialized behind
-    event traffic on one wire. Both new RPCs are worker→orchestrator bidi
-    (the orchestrator only ever replies with control/no-op on them today, but
-    keeping them bidi mirrors ConnectWorker so the worker's stream-send plumbing
-    is uniform). The FIRST message a worker sends on each new stream MUST be a
-    WorkerRegistration carrying worker_id + the matching stream_role so the
-    orchestrator can demux subsequent messages to the right worker.
-    """
+class WorkerScheduler(object):
+    """Missing associated documentation comment in .proto file."""
 
     @staticmethod
-    def ConnectWorker(request_iterator,
+    def Connect(request_iterator,
             target,
             options=(),
             channel_credentials=None,
@@ -163,63 +83,9 @@ class SchedulerWorkerService(object):
         return grpc.experimental.stream_stream(
             request_iterator,
             target,
-            '/scheduler.v1.SchedulerWorkerService/ConnectWorker',
-            worker__scheduler__pb2.WorkerSchedulerMessage.SerializeToString,
-            worker__scheduler__pb2.WorkerSchedulerMessage.FromString,
-            options,
-            channel_credentials,
-            insecure,
-            call_credentials,
-            compression,
-            wait_for_ready,
-            timeout,
-            metadata,
-            _registered_method=True)
-
-    @staticmethod
-    def WorkerResults(request_iterator,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
-        return grpc.experimental.stream_stream(
-            request_iterator,
-            target,
-            '/scheduler.v1.SchedulerWorkerService/WorkerResults',
-            worker__scheduler__pb2.WorkerSchedulerMessage.SerializeToString,
-            worker__scheduler__pb2.WorkerSchedulerMessage.FromString,
-            options,
-            channel_credentials,
-            insecure,
-            call_credentials,
-            compression,
-            wait_for_ready,
-            timeout,
-            metadata,
-            _registered_method=True)
-
-    @staticmethod
-    def WorkerEvents(request_iterator,
-            target,
-            options=(),
-            channel_credentials=None,
-            call_credentials=None,
-            insecure=False,
-            compression=None,
-            wait_for_ready=None,
-            timeout=None,
-            metadata=None):
-        return grpc.experimental.stream_stream(
-            request_iterator,
-            target,
-            '/scheduler.v1.SchedulerWorkerService/WorkerEvents',
-            worker__scheduler__pb2.WorkerSchedulerMessage.SerializeToString,
-            worker__scheduler__pb2.WorkerSchedulerMessage.FromString,
+            '/cozy.scheduler.WorkerScheduler/Connect',
+            worker__scheduler__pb2.WorkerMessage.SerializeToString,
+            worker__scheduler__pb2.SchedulerMessage.FromString,
             options,
             channel_credentials,
             insecure,

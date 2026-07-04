@@ -1,6 +1,7 @@
-# source-hash bust: 2026-06-08T01:00Z (#447: add marco_polo_slow ~15s async-I/O fn for failover-at-scale e2e)
+# source-hash bust: 2026-07-03 (#365: add marco_polo_stream async-generator fn for the new worker core)
 import asyncio
 import time
+from typing import AsyncIterator
 
 import msgspec
 from gen_worker import RequestContext, ValidationError, inference, invocable
@@ -66,4 +67,17 @@ class MarcoPolo:
             return MarcoPoloOutput(response="polo")
 
         raise ValidationError(f"expected 'marco', got {data.text!r}")
+
+    @invocable(name="marco_polo_stream")
+    async def marco_polo_stream(
+        self, ctx: RequestContext, data: MarcoPoloInput
+    ) -> AsyncIterator[MarcoPoloOutput]:
+        """Streams 'p', 'po', 'pol', 'polo' as four JobProgress chunks."""
+        if str(data.text or "").strip().lower() != "marco":
+            raise ValidationError(f"expected 'marco', got {data.text!r}")
+        word = "polo"
+        for i in range(1, len(word) + 1):
+            ctx.raise_if_canceled()
+            await asyncio.sleep(0.05)
+            yield MarcoPoloOutput(response=word[:i])
 # bust 1780099200

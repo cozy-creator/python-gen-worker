@@ -1,874 +1,318 @@
 syntax = "proto3";
 
-package scheduler.v1;
+package cozy.scheduler;
 
-option go_package = "github.com/cozy-creator/gen-orchestrator/internal/grpc/pb/workerschedulerv1;workerschedulerv1";
+option go_package = "github.com/cozy-creator/tensorhub/internal/orchestrator/grpc/pb/workerscheduler;workerscheduler";
 
 // ============================================================================
-// Worker ↔ Orchestrator protocol.
+// Worker <-> Orchestrator wire protocol.
 //
-// One bidirectional stream (`SchedulerWorkerService.ConnectWorker`) carrying
-// `WorkerSchedulerMessage` envelopes. Each envelope's `oneof msg` selects the
-// direction-tagged variant.
+// ONE bidi stream: WorkerScheduler.Connect. The worker sends WorkerMessage
+// envelopes; the orchestrator sends SchedulerMessage envelopes.
 //
-// Many fields/messages were cut in progress.json #321 (worker↔orchestrator
-// gRPC protocol cleanup). `reserved` markers stay so old workers connecting
-// to a new orchestrator (or vice versa) don't silently reinterpret bytes
-// against a renamed/reused tag. When in doubt, leave the reservation.
+// Identity is per CONNECTION: the worker attaches `authorization: Bearer
+// <worker JWT>` gRPC metadata when dialing. JWT claims (sub = worker_id,
+// release_id) are authoritative; Hello echoes them only for the no-auth dev
+// mode and for cross-checking.
+//
+// Liveness is gRPC HTTP/2 keepalive ONLY. There are no application-level
+// heartbeats; StateDelta is edge-triggered, never periodic.
+//
+// Fencing is a single `attempt` integer bumped only by the orchestrator.
+//
+// Full field-by-field semantics: CONTRACT.md next to this file.
 // ============================================================================
 
-// Represents resource info the worker can provide to the scheduler.
-message WorkerResources {
-  // Test-only when WorkerVerifier is nil; production paths take the JWT `sub`
-  // claim as authoritative (connect_worker.go authenticateWorker).
-  string worker_id       = 1;
-
-  // 2,3 removed (#321): cpu_cores, memory_bytes — never read by orchestrator.
-  reserved 2, 3;
-  reserved "cpu_cores", "memory_bytes";
-
-  int32  gpu_count       = 4;   // Number of GPUs
-  int64  gpu_memory_bytes= 5;   // GPU memory total
-  repeated string available_functions = 6;
-
-  repeated string vram_models = 7;  // Models loaded in VRAM (hot) — ready for instant inference.
-
-  // 8 removed (#321): supports_model_loading — inferred from protocol version
-  // (see worker_protocol.go FeatureGatesForVersion).
-  reserved 8;
-  reserved "supports_model_loading";
-
-  string release_id = 9;                     // Release ID this worker belongs to
-  string runpod_pod_id = 10;                 // Runpod Pod ID
-  bool gpu_is_busy = 11;                     // Worker reports if its GPU is busy
-
-  // 12,14,18,19 removed (#321): gpu_memory_used_bytes, gpu_driver,
-  // cuda_version, torch_version — collected but never read by orchestrator.
-  reserved 12, 14, 18, 19;
-  reserved "gpu_memory_used_bytes", "gpu_driver", "cuda_version", "torch_version";
-
-  string gpu_name = 13;                      // GPU model name
-  int64 gpu_memory_free_bytes = 15;          // Free VRAM
-
-  // 20 removed (#321): function_schemas (+ FunctionSchema sub-message) —
-  // tensorhub HTTP serves function schemas; orchestrator never read this.
-  reserved 20;
-  reserved "function_schemas";
-
-  // Optional backend capability reporting for placement decisions.
-  // gpu_sm is read by placement filters; tensorrt/onnxruntime versions were
-  // never consumed and have been removed.
-  string gpu_sm = 21;               // GPU compute capability (e.g. "89")
-
-  // 22,23 removed (#321): tensorrt_version, onnxruntime_version — collected
-  // but never read by orchestrator. Reintroduce when placement actually
-  // filters on backend version.
-  reserved 22, 23;
-  reserved "tensorrt_version", "onnxruntime_version";
-
-  // Models cached on disk (warm) — fast to load but not yet in VRAM.
-  // For cache-aware routing: prefer VRAM (vram_models) > RAM (ram_models) >
-  // disk (disk_models) > cold.
-  repeated string disk_models = 24;
-
-  // Optional: installed libraries that affect Tensorhub artifact compatibility/selection.
-  // Examples: "flashpack", "torchao", "bitsandbytes", "transformer_engine".
-  repeated string installed_libs = 25;
-
-  // Worker image version metadata for tracking/debugging.
-  string image_digest = 26;    // Docker image SHA256 digest
-  string git_commit = 27;      // Git commit hash the image was built from
-
-  // 28 removed (#321): build_timestamp — never read by orchestrator.
-  reserved 28;
-  reserved "build_timestamp";
-
-  // Functions whose models are still loading (downloading from disk → VRAM,
-  // or fetching weights). Reported alongside available_functions so the
-  // orchestrator distinguishes "permanently disabled / not yet shipped" from
-  // "coming soon — eligible later but not now".
-  //
-  // Routing rule (see scheduler.workerSupportsFunction):
-  //   eligible iff (fn in available_functions) AND (fn not in loading_functions)
-  //
-  // Capacity counting (see autoscale.supplyForRelease): a worker contributes
-  // 1 unit of supply for each function in available_functions, 0 for any
-  // function in loading_functions. So a worker with 1/10 functions ready
-  // counts as 1 unit of supply for that 1 function, 0 for the other 9.
-  //
-  // Workers SHOULD emit an out-of-band heartbeat the moment a function moves
-  // from loading_functions → available_functions so queued jobs dispatch
-  // without waiting for the next periodic heartbeat tick.
-  repeated string loading_functions = 29;
-
-  // Models held in the CPU-RAM warm tier (#337): demoted from VRAM but with
-  // their weights still resident in host RAM, so promotion back to VRAM is a
-  // fast PCIe copy (~0.1-0.5s) rather than a disk reload + from_pretrained.
-  // For cache-aware routing (#337 4b) the residency preference is
-  // VRAM > RAM > DISK > cold: a worker that has the ref RAM-warm outranks one
-  // that only has it on disk. A model may appear in both ram_models and
-  // disk_models (its bytes are on disk too); the RAM tier wins for scoring.
-  repeated string ram_models = 30;
+// Exactly one live protocol version. Hello.protocol_version must equal
+// PROTOCOL_VERSION_CURRENT or the orchestrator closes the stream with
+// FAILED_PRECONDITION. No minor versions, no feature gates, no negotiation.
+enum ProtocolVersion {
+  PROTOCOL_VERSION_UNSPECIFIED = 0;
+  PROTOCOL_VERSION_CURRENT     = 2;
 }
 
-// Worker -> Scheduler reconnect hint describing an in-flight assignment.
-// The worker advertises these on registration so the scheduler can apply
-// fencing/replay checks across reconnect/failover.
-message ActiveAssignmentResume {
-  string request_id = 1;
-  string item_id = 2;
-  int64 assignment_attempt_epoch = 3;
-  int64 last_job_result_seq = 4;
-  int64 last_worker_event_seq = 5;
-  int64 last_incremental_seq = 6;
+service WorkerScheduler {
+  rpc Connect (stream WorkerMessage) returns (stream SchedulerMessage);
 }
 
-// A request from worker to scheduler that it is connecting (and/or sending heartbeats).
-message WorkerRegistration {
-  WorkerResources resources = 1;
-  bool is_heartbeat         = 2;
-  // Wire protocol version advertised by the worker runtime.
-  // MAJOR: breaking changes, MINOR: additive/backward-compatible changes.
-  int32 protocol_major      = 3;
-  int32 protocol_minor      = 4;
-  repeated ActiveAssignmentResume active_assignments = 5;
-
-  // gen-orchestrator #346: orchestrator-restart recovery.
-  //
-  // Request IDs the worker is currently processing or has just completed
-  // (within the last ~60s) but whose JobExecutionResult may not have reached
-  // the orchestrator yet (because the gRPC stream broke before the result
-  // shipped). The orchestrator uses this on RE-registration to reconcile its
-  // (worker -> request_id) assignment map against the durable postgres state
-  // after a replica restart wiped the in-memory map:
-  //   - request_ids the worker reports here are kept assigned to it
-  //     (verified against postgres: must be `assigned` + worker_id matches);
-  //   - request_ids postgres still has assigned to this worker but the worker
-  //     does NOT report here get requeued (the worker no longer owns them).
-  // Empty on first registration and on heartbeats. This is a lighter-weight
-  // companion to `active_assignments` (which carries per-assignment epoch /
-  // seq fencing for in-process reconnect); `in_flight_request_ids` is the
-  // authoritative "what am I still running" snapshot used for cross-restart
-  // reconcile. See ReconcileWorkerAssignments in runtimestore.
-  repeated string in_flight_request_ids = 30;
-
-  // Wall-clock timestamp (unix milliseconds) when the worker opened its
-  // current ConnectWorker stream. The orchestrator uses this together with
-  // WorkerWasPreviouslyKnown to distinguish a genuine re-registration (the
-  // worker process survived an orch restart and is re-reporting in-flight
-  // work) from a brand-new worker. 0 when unset (older workers).
-  int64 stream_started_unix_ms = 31;
-
-  // gen-orchestrator #345 Improvement A: split outgoing streams. When true the
-  // worker has ALSO opened the dedicated WorkerResults + WorkerEvents RPC
-  // streams (in addition to ConnectWorker) and routes JobExecutionResult onto
-  // WorkerResults and lifecycle/incremental events onto WorkerEvents, leaving
-  // ConnectWorker for control + heartbeats. The orchestrator demuxes the new
-  // streams by worker_id (carried on the first WorkerRegistration of each
-  // stream). Legacy workers leave this false and keep shipping everything on
-  // ConnectWorker — the orchestrator handles both shapes identically since the
-  // per-message handlers are stream-agnostic. Advertised on EVERY registration
-  // (including the WorkerResults/WorkerEvents opening handshake) so a stream's
-  // identity is unambiguous.
-  bool supports_split_streams = 32;
-
-  // gen-orchestrator #345 Improvement A: which logical stream this
-  // WorkerRegistration is opening. Empty / "control" = the primary
-  // ConnectWorker stream (default; legacy). "results" = a WorkerResults
-  // stream; "events" = a WorkerEvents stream. Lets the orchestrator bind the
-  // auxiliary stream to the right worker_id + role without guessing.
-  string stream_role = 33;
-}
-
-// Resolved hardware spec attached to JobExecutionRequest / BatchExecutionItem
-// (tensorhub #232). For inference this equals the endpoint's [resources]
-// block. For training this is the endpoint resources merged with the
-// invoker's `compute` overrides from the wire payload. Worker surfaces it
-// read-only on RequestContext.compute so tenants can adapt behavior
-// (DeepSpeed ZeRO-3 branching, batch-size scaling) if they want to.
-message ResolvedCompute {
-  string accelerator       = 1;   // "cuda" | "none"
-  string min_compute_capability = 2;   // SM floor, e.g. "8.0"
-  int32  vram_gb           = 3;   // total VRAM across GPUs
-  int32  gpu_count         = 4;
-  string gpu_tier          = 5;   // e.g. "A100-80"; empty when scheduler picked any tier matching the size axes
-  int32  memory_gb         = 6;   // host RAM
-  int32  cpu_cores         = 7;
-  int32  disk_gb           = 8;   // container scratch
-  // gpu_index is the 0-based GPU ordinal on the assigned worker that this
-  // request was placed onto by the orchestrator's per-GPU slot scheduler
-  // (gen-orchestrator #337). Worker uses it to bind CUDA context
-  // (CUDA_VISIBLE_DEVICES / torch.cuda.set_device) before running the
-  // handler. Ignored for accelerator="none" requests and for single-GPU
-  // workers (always 0). Defaults to 0 on the wire so older worker code
-  // that doesn't read this field continues to function on the first GPU.
-  int32  gpu_index         = 9;
-}
-
-message ResolvedLoraBinding {
-  string ref                  = 1;
-  string tag                  = 2;
-  string flavor               = 3;
-  string provider             = 4;
-  double weight               = 5;
-  string compatibility_status = 6;  // "verified", "unknown", "not_checked", etc.
-  string compatibility_detail = 7;
-}
-
-message ResolvedModelBinding {
-  // Public model slot name declared by the endpoint. The enclosing map key is
-  // also the slot name; this field is repeated for consumers that want a
-  // self-contained object.
-  string slot_name            = 1;
-  string ref                  = 2;
-  string tag                  = 3;
-  string flavor               = 4;
-  string provider             = 5;
-  string source               = 6;  // "default" | "override"
-  string checkpoint_id        = 7;
-  string compatibility_status = 8;  // "verified", "unknown", "not_checked", etc.
-  string compatibility_detail = 9;
-  repeated ResolvedLoraBinding loras = 10;
-}
-
-// A command from scheduler to worker to load a model into GPU memory.
-message LoadModelCommand {
-  string model_id = 1;
-}
-
-// A command from scheduler to worker to download a model checkpoint to
-// local disk WITHOUT promoting it into VRAM. Used for cold-locality
-// requests (issue #339): the orchestrator picks one worker to host the
-// fresh fetch and parks the job until the worker advertises the ref in
-// `disk_models`; subsequent requests for the same ref affinitize to the
-// same worker via the pending-download index instead of racing parallel
-// duplicate downloads onto OTHER cold workers.
-//
-// On success the worker MUST emit a WorkerModelReadySignal with kind=
-// MODEL_AVAILABILITY_DOWNLOAD_COMPLETED (or CACHED) and reflect the ref
-// in its next WorkerResources.disk_models advertisement.
-message DownloadModelCommand {
-  string model_id = 1;
-  // Canonical ref string the worker should resolve and download
-  // (e.g. "owner/repo:tag#flavor"). When empty, the worker may treat
-  // model_id as the ref (legacy paths).
-  string ref      = 2;
-  // Hint to the worker's local disk-eviction policy. Higher values mean
-  // the worker should prefer keeping THIS ref cached over evicting it
-  // to make headroom for another download. 0 is the default.
-  int32  priority = 3;
-}
-
-// A command from scheduler to worker to unload a model from GPU memory.
-// Producer: connect_worker_handlers.handleLoadModelResult — on
-// LoadModelResult{success=false} with an OOM signature, the orchestrator
-// picks the oldest model from info.Resources.VramModels and sends this
-// command to make headroom. Worker enforces a "model_in_use" refusal so
-// concurrent in-flight requests aren't disrupted.
-message UnloadModelCommand {
-  string model_id = 1;
-}
-
-message InterruptJobCommand {
-  string request_id = 1;
-  repeated string item_ids = 2;     // optional item-level cancel target
-  bool cancel_queued_only = 3;      // true => only queued/not-yet-started items
-  int64 assignment_attempt_epoch = 4;
-}
-
-// One file inside a Tensorhub repo snapshot — orchestrator pre-resolves the
-// presigned URL, worker downloads directly from S3 and verifies BLAKE3.
-message ResolvedRepoFile {
-  string path = 1;
-  int64 size_bytes = 2;
-  string blake3 = 3;
-  string url = 4;
-}
-
-// A Tensorhub repo snapshot the orchestrator has resolved on the worker's
-// behalf. Pinned by snapshot_digest; files carry presigned download URLs.
-message ResolvedRepo {
-  string snapshot_digest = 1;
-  repeated ResolvedRepoFile files = 2;
-}
-
-// A request from scheduler to worker to execute a job ("Action") with some input data.
-// Worker capability contract (issue #261):
-// - `input_payload` should already contain URL-materialized input refs (short-lived read URLs).
-// - Workers should treat file refs as opaque and must not assume storage key layouts.
-// - `worker_capability_token` is the canonical worker scoped credential.
-message JobExecutionRequest {
-  string request_id      = 1;  // Unique request ID
-  string function_name   = 2;  // Name of the function to execute
-  bytes input_payload    = 3;  // unstructured input data (MessagePack encoded struct)
-
-  // 4 removed (#321): required_flavor_refs on dispatch — orchestrator never
-  // set it; static refs are conveyed via EndpointConfig, runtime refs via
-  // resolved_repos_by_id.
-  reserved 4;
-  reserved "required_flavor_refs";
-
-  int64 timeout_ms = 5; // Timeout in milliseconds (0 = no explicit timeout)
-  string tenant = 6; // Invoking owner (org/user slug)
-  string invoker_id = 7;   // Optional invoker id
-
-  // Tensorhub base URL the worker uses for capability-token-authenticated
-  // file + repo API calls. Empty when worker reads it from its own settings.
-  string file_base_url = 8;
-
-  // 9 removed (#321): file_token — legacy alias for worker_capability_token,
-  // never set anywhere.
-  reserved 9;
-  reserved "file_token";
-
-  // Orchestrator-resolved Tensorhub repo snapshots the worker needs for this job.
-  // Key: canonical ref string. Value: pinned snapshot_digest + presigned blob URLs.
-  map<string, ResolvedRepo> resolved_repos_by_id = 10;
-
-  // 11,12,13,14,15 removed (#321): parent_request_id, child_request_id,
-  // item_id, item_index, assignment_attempt_epoch — orchestrator never set
-  // any of these on outbound dispatch; worker echoed empty strings/zeros back
-  // into results. Parent/child tracing lives in orchestrator state, not on
-  // every wire message; epoch is authoritative only on ActiveAssignmentResume.
-  reserved 11, 12, 13, 14, 15;
-  reserved "parent_request_id", "child_request_id", "item_id", "item_index", "assignment_attempt_epoch";
-
-  string job_id          = 16; // Internal orchestrator job grouping id for append/workspace affinity.
-  string worker_capability_token = 17; // canonical worker capability token
-
-  // Resolved hardware for this invocation (tensorhub #232). Surfaced to
-  // tenant code via RequestContext.compute and auto-bound into the worker's
-  // structured logs (dispatched_tier / dispatched_vram_gb / etc).
-  ResolvedCompute resolved_compute = 18;
-  // Free-form execution hints surfaced to tenant code via
-  // RequestContext._execution_hints. Used to scope worker-side behavior
-  // that depends on orchestrator-resolved context (e.g. destination_repo +
-  // job_id for repo-CAS uploads on clone/conversion jobs — otherwise the
-  // worker defaults to media uploads and gets 403'd on worker-cap tokens).
-  map<string, string> execution_hints = 19;
-
-  // Control-plane model binding metadata resolved by the orchestrator from
-  // endpoint defaults plus the caller's `_models` envelope. This is not tenant
-  // input; workers surface it read-only as RequestContext.models and use it for
-  // model injection / LoRA application.
-  map<string, ResolvedModelBinding> resolved_models = 20;
-}
-
-// The worker's response with results of the job (either success or error).
-message JobExecutionResult {
-  string request_id   = 1;
-  bool success         = 2;
-  bytes output_payload = 3;  // The output data if success = true (MessagePack encoded struct)
-
-  // 4 removed (#321): error_message — unsanitized internal-only string;
-  // safe_message is the canonical client-facing error, error_type is the
-  // canonical classification. Keeping the unsanitized field on the wire
-  // invited accidental leakage.
-  reserved 4;
-  reserved "error_message";
-
-  // Structured error reporting (preferred).
-  // NOTE: safe_message must be sanitized by the worker (no secrets/paths/signed URLs).
-  string error_type = 5;   // e.g. validation|retryable|fatal|resource|canceled|internal|duplicate_request_id
-  bool retryable = 6;      // Scheduler uses this (with max retry cap) to decide retries.
-  string safe_message = 7; // Client-facing error message.
-
-  // 8,9,10,11,12,13 removed (#321): parent_request_id, child_request_id,
-  // item_id, item_index, assignment_attempt_epoch, stream_seq — orchestrator
-  // never set any of these on dispatch; worker echoed empty back. Keep
-  // observation for scheduling/autoscaling enrichment.
-  reserved 8, 9, 10, 11, 12, 13;
-  reserved "parent_request_id", "child_request_id", "item_id", "item_index", "assignment_attempt_epoch", "stream_seq";
-
-  JobExecutionObservation observation = 14;
-}
-
-// Minimal worker observation used by gen-orchestrator scheduling/autoscaling.
-// Keep this small: only fields read by scheduling/planning decisions belong here.
-message JobExecutionObservation {
-  string release_id = 1;
-  string function_name = 2;
-  string build_profile = 3;
-  string image_digest = 4;
-  string provider = 5;
-  string worker_id = 6;
-  string machine_class = 7;
-  string status = 8;
-  string error_type = 9;
-  int64 runtime_ms = 10;
-  int64 local_queue_ms = 11;
-  int64 peak_memory_bytes = 12;
-  int64 peak_vram_bytes = 13;
-  int32 active_count_at_start = 14;
-  int32 local_queued_count_at_start = 15;
-
-  // #273 Phase 2: BatchedWorker (LLM/AR-TTS) observability for SLO planning
-  // and capacity decisions. Fields default to 0 when not measured — workers
-  // that don't run a continuous-batching engine emit nothing here.
-  int64 ttft_ms = 16;            // time to first token (BatchedWorker: ms from request admit to first delta)
-  int64 itl_p50_ms = 17;         // inter-token-latency p50 over the generation
-  int32 prefix_hit_rate_pct = 18; // % of input tokens served from prefix cache (0-100; 0 = no cache info)
-  int64 kv_blocks_used = 19;     // peak KV blocks consumed by this request
-  int64 kv_blocks_total = 20;    // engine's total KV block pool size
-
-  // #343: per-request runtime prediction. Worker reports the runtime-evaluated
-  // scaling parameters extracted from the request payload (e.g. {steps: 30,
-  // image_px: 1048576, video_seconds: 5}). Keys/values are SDK-declared via
-  // the function decorator's `Scaling(...)` annotation; orchestrator treats
-  // names as opaque tags and learns a per-key linear coefficient via online
-  // recursive-least-squares. Empty when the function has no Scaling()
-  // annotation or the worker hasn't been upgraded to emit them — falls back
-  // to the scalar RuntimeMsEWMA path.
-  map<string, double> scaling_factors = 21;
-}
-
-// #321: BatchExecutionItem / BatchExecutionRequest / BatchExecutionItemResult
-// / BatchExecutionResult removed. The worker's batch handler unpacked the
-// envelope into N JobExecutionRequest values and ran them through the
-// serial path — there was no GPU-level batching, no KV-cache sharing,
-// nothing that would deliver the actual win for an LLM workload. Plus no
-// orchestrator-side dispatcher ever existed. Real batching for LLM serving
-// needs continuous batching (vLLM-style token-stepper with shared KV-cache)
-// and the wire shape will look different — N concurrent token streams, not
-// N independent items. Reintroduce then with the right primitives.
-
-// Worker -> Scheduler progress/events.
-//
-// NOTE(#321): kept as the opaque audit channel for low-frequency lifecycle
-// events. event_type values are not enumerated here on purpose — the channel
-// is intentionally untyped. Today the orchestrator branches on a small
-// closed set (volume_stats, startup_phase, function_capabilities,
-// model.ready / model.download.completed / model.cached); everything else
-// is persisted to request_events as JSON.
-message WorkerEvent {
-  string request_id = 1;
-  string event_type = 2;
-  bytes payload_json = 3;
-
-  // 4,5,6,7,8,9 removed (#321): parent_request_id, child_request_id, item_id,
-  // item_index, assignment_attempt_epoch, stream_seq — were merged into the
-  // payload_json on the orchestrator side and never used for routing.
-  reserved 4, 5, 6, 7, 8, 9;
-  reserved "parent_request_id", "child_request_id", "item_id", "item_index", "assignment_attempt_epoch", "stream_seq";
-}
-
-// Worker -> Scheduler internal/operator diagnostics.
-//
-// This is deliberately separate from WorkerEvent. WorkerEvent is the
-// tenant/request event fabric and request-scoped events can surface to clients
-// through request_events/SSE. WorkerDiagnosticLog is for worker-runtime and
-// endpoint setup debugging only.
-message WorkerDiagnosticLog {
-  string worker_id = 1;
-  string release_id = 2;
-  string runpod_pod_id = 3;
-  string category = 4;
-  string severity = 5;
-  string message = 6;
-  bytes payload_json = 7;
-  int64 emitted_at_unix_ms = 8;
-}
-
-// Worker -> Scheduler incremental token delta event (typed streaming contract).
-//
-// #327: audio token streaming. AR-TTS endpoints (Chatterbox, GPT-SoVITS, Bark,
-// MusicGen) emit raw audio chunk bytes on the same wire as text token deltas.
-// Set `audio_chunk` + `audio_codec` for audio-shaped deltas; set
-// `delta_text` / `payload_json` for text-shaped deltas. Fields are mutually
-// exclusive at the semantic level — the receiver branches on whichever is set.
-// Avoiding base64-in-payload_json cuts ~33% wire size and the JSON CPU tax.
-message IncrementalTokenDelta {
-  string request_id = 1;
-  string item_id = 2;
-  string function_name = 3;
-  int64 sequence = 4;
-  int64 timestamp_unix_ms = 5;
-  string delta_text = 6;
-  bytes payload_json = 7; // optional full delta payload for schema-aware incremental outputs
-
-  // 8,9,10,11 removed (#321): parent_request_id, child_request_id,
-  // item_index, assignment_attempt_epoch — never set on outbound dispatch.
-  reserved 8, 9, 10, 11;
-  reserved "parent_request_id", "child_request_id", "item_index", "assignment_attempt_epoch";
-
-  // #327: typed binary envelope for AR-TTS audio chunks. `audio_chunk` is the
-  // raw codec bytes (e.g. PCM_S16LE samples, Opus frames); `audio_codec`
-  // identifies the codec + sample-rate (e.g. "pcm_s16le_24000",
-  // "opus_48000") so the receiver can route to the right decoder. Empty when
-  // the delta is text-shaped.
-  bytes  audio_chunk = 12;
-  string audio_codec = 13;
-}
-
-// Worker -> Scheduler incremental token stream terminal marker.
-message IncrementalTokenStreamDone {
-  string request_id = 1;
-  string item_id = 2;
-  string function_name = 3;
-  int64 sequence = 4;
-  int64 timestamp_unix_ms = 5;
-
-  // 6,7,8,9 removed (#321): parent_request_id, child_request_id, item_index,
-  // assignment_attempt_epoch.
-  reserved 6, 7, 8, 9;
-  reserved "parent_request_id", "child_request_id", "item_index", "assignment_attempt_epoch";
-}
-
-// Worker -> Scheduler incremental token stream error marker.
-message IncrementalTokenStreamError {
-  string request_id = 1;
-  string item_id = 2;
-  string function_name = 3;
-  int64 sequence = 4;
-  int64 timestamp_unix_ms = 5;
-  string error_message = 6;
-
-  // 7,8,9,10 removed (#321): parent_request_id, child_request_id, item_index,
-  // assignment_attempt_epoch.
-  reserved 7, 8, 9, 10;
-  reserved "parent_request_id", "child_request_id", "item_index", "assignment_attempt_epoch";
-}
-
-// NEW: Worker -> Scheduler immediate response when attempting to load a model.
-message LoadModelResult {
-  string model_id     = 1;
-  bool success        = 2;
-  string error_message= 3;   // e.g. "OOM, can't load"
-  // size_bytes is the VRAM footprint of the model once resident, as observed
-  // by the worker at load time (e.g. delta in torch.cuda.memory_allocated()
-  // across the load, or the pipeline-size probe). Used by the orchestrator's
-  // per-model VRAM placement optimizer (gen-orchestrator #361) to budget how
-  // many models fit per worker. 0 means "unknown" — the optimizer falls back
-  // to a per-release default and refines as observations arrive. Worker-side
-  // emission lands with python-gen-worker #21 / the LoadModelResult emit path.
-  int64 size_bytes    = 4;
-}
-
-// NEW: Worker -> Scheduler immediate response when attempting to unload a model.
-message UnloadModelResult {
-  string model_id     = 1;
-  bool success        = 2;
-  string error_message= 3;
-}
-
-// ModelSpec is a tenant-controlled (tag-based) model reference. Flavor and
-// pin-by-checkpoint_id are encoded directly in the ref string syntax.
-message ModelSpec {
-  string ref = 1;
-}
-
-message ModelsByKey {
-  map<string, ModelSpec> models = 1; // short key -> spec
-}
-
-// DisabledFunction describes a function that cannot run because at least one
-// of its FIXED-bound model refs is currently unresolvable. The worker reads
-// this to skip prefetch + omit the function from its advertised spec; the
-// orchestrator reads this when gating invocation dispatch (returns 424).
-message DisabledFunction {
-  string function_name    = 1;
-  // model_key (from the declaring endpoint.toml entry) whose ref failed.
-  // When multiple FIXED refs on a function failed, only the first is
-  // surfaced here — use the model-availability admin route for the full
-  // per-ref breakdown.
-  string model_key        = 2;
-  string ref              = 3;
-  // Terminal status: one of read_access_revoked, repo_deleted, flavor_not_found.
-  string reason           = 4;
-  string detail           = 5;
-  int64  detected_at_unix = 6;
-}
-
-// RefStatus describes the availability of a single (function, model_key)
-// pair. Used for PAYLOAD-bound refs; FIXED-bound ref failures promote the
-// whole function to DisabledFunction instead.
-message RefStatus {
-  string ref                = 1;
-  // One of: resolved, access_revoked, repo_deleted, flavor_not_found,
-  // transient_error.
-  string status             = 2;
-  string reason             = 3;
-  string detail             = 4;
-  int64  last_checked_unix  = 5;
-}
-
-// FunctionRefAvailability is the per-PAYLOAD-key availability snapshot for
-// one function. Keys mirror the function's [models.<fn>] keyspace; entries
-// for FIXED-bound refs are omitted (their failure lives in DisabledFunction).
-message FunctionRefAvailability {
-  map<string, RefStatus> by_model_key = 1;
-}
-
-// WorkerFunctionUnavailableSignal — worker self-disables ONE function on
-// ITSELF because a hardware-axis gate failed (e2e issue #40). Scheduler
-// persists the (release_id, function_name, worker_id) → {reason, axes} entry
-// into AvailabilitySnapshot.DisabledFnsByWorker and narrows subsequent
-// dispatches for that function to candidate workers where the gate has not
-// fired.
-//
-// Cleared by re-registration: on a fresh connect (worker reboot, hardware
-// swap), connect_worker.go calls ClearWorkerFunctionDisable(release, worker,
-// "") wiping all prior entries before processing the new resource report.
-message WorkerFunctionUnavailableSignal {
-  string worker_id        = 1;
-  string release_id       = 2;
-  string function_name    = 3;
-  // reason vocabulary (future-extensible):
-  //   compute_capability_unmet, insufficient_vram, missing_cuda_library,
-  //   insufficient_disk.
-  string reason           = 4;
-  string detail           = 5;
-  int64  detected_at_unix = 6;
-  // Axis-specific hardware details, e.g. {detected_sm:"8.9", required_sm:"10.0"}
-  // or {available_bytes:"25769803776", required_bytes:"32212254720"}.
-  map<string, string> axes = 7;
-}
-
-// ============================================================================
-// Typed worker lifecycle signals (#321).
-//
-// Previously these traveled as `WorkerEvent(event_type=<string>, payload_json=...)`
-// and the orchestrator dispatched via a string switch over event_type. That was
-// fragile — a real bug found during this cleanup: the worker emitted
-// `worker.function_capabilities` while the orchestrator matched
-// `function_capabilities`, so capabilities have been silently dropped. Typed
-// dispatch is unambiguous and prevents this class of bug.
-//
-// `worker_event` remains the opaque channel for audit-only event types
-// (metrics.*, model.download.*, model.unload.*, inference.oom_retry, etc).
-// The 4 actionable types below were promoted to typed variants.
-// ============================================================================
-
-enum WorkerStartupPhase {
-  WORKER_STARTUP_PHASE_UNSPECIFIED       = 0;
-  WORKER_STARTUP_PHASE_BOOTING           = 1;
-  WORKER_STARTUP_PHASE_MODELS_DOWNLOADING = 2;
-  WORKER_STARTUP_PHASE_PIPELINE_LOADING  = 3;
-  WORKER_STARTUP_PHASE_READY             = 4;
-  WORKER_STARTUP_PHASE_ERROR             = 5;
-  // #322: warming = torch.compile graph capture + cache warmup running.
-  // Ordered between PIPELINE_LOADING and READY.
-  WORKER_STARTUP_PHASE_WARMING           = 6;
-}
-
-// Worker -> Scheduler: startup phase transition. Replaces
-// worker_event(event_type="startup_phase"|"worker.startup.phase").
-message WorkerStartupPhaseSignal {
-  WorkerStartupPhase phase = 1;
-  // Free-form status; "ok" | "starting" | "error" | "timeout" | etc.
-  string status            = 2;
-  // Informational fields used in triage / structured logs. The orchestrator
-  // doesn't gate dispatch on these.
-  string scheduler_addr    = 3;
-  int64  elapsed_ms        = 4;
-  string detail            = 5;
-}
-
-enum ModelAvailabilityKind {
-  MODEL_AVAILABILITY_UNSPECIFIED         = 0;
-  MODEL_AVAILABILITY_READY               = 1; // loaded in VRAM
-  MODEL_AVAILABILITY_DOWNLOAD_COMPLETED  = 2; // bytes downloaded to disk
-  MODEL_AVAILABILITY_CACHED              = 3; // saved to disk warm-cache
-}
-
-// Worker -> Scheduler: a model is now available on this worker. Replaces
-// the three event_type strings model.ready / model.cached /
-// model.download.completed; collapsed into one variant with a `kind` enum
-// because the orchestrator's dispatch behavior was identical for all three
-// (mark worker available). Kind is preserved for triage.
-message WorkerModelReadySignal {
-  string model_id              = 1;
-  ModelAvailabilityKind kind   = 2;
-}
-
-// Worker -> Scheduler: per-function capability snapshot. Replaces
-// worker_event(event_type="function_capabilities"). Capabilities are
-// open-ended (every @inference_function / @training_function decorator can
-// add new resource fields), so the payload stays JSON-encoded; `signature`
-// is the hash of capabilities_json so the orchestrator can short-circuit
-// repeated identical updates without unmarshaling.
-message WorkerFunctionCapabilitiesSignal {
-  bytes  capabilities_json = 1;
-  string signature         = 2;
-}
-
-// #273 Phase 2: cache-aware routing. Worker -> Scheduler delta updates as the
-// engine's prefix cache adds or evicts KV blocks. Orchestrator maintains a
-// (block_hash -> set<worker_id>) index used by the placement filter to bias
-// placement toward workers that already have the prompt's prefix cached.
-//
-// SGLang's RadixCache and vLLM's prefix-cache both expose block-hash + block-
-// size accounting; the worker computes the hash for the incoming prompt and
-// emits an ADDED event when the engine reports the block hit/insertion, a
-// REMOVED event on eviction. Worker emit is Phase-2 production work; this
-// proto + orchestrator-side index land first so the placement filter has a
-// stable surface to consume.
-enum KVPrefixCacheEvent {
-  KV_PREFIX_CACHE_EVENT_UNSPECIFIED = 0;
-  KV_PREFIX_CACHE_EVENT_ADDED       = 1;
-  KV_PREFIX_CACHE_EVENT_REMOVED     = 2;
-}
-
-message WorkerKVPrefixCache {
-  repeated bytes block_hashes = 1;
-  int32 block_size = 2;
-  string model_id = 3;
-  KVPrefixCacheEvent event = 4;
-}
-
-// Scheduler -> Worker: planned shutdown/drain request.
-message WorkerDrainCommand {
-  string reason = 1;
-  int64 deadline_unix_ms = 2;
-  bool terminate_after_deadline = 3;
-}
-
-// Worker -> Scheduler: best-effort final drain status before exit.
-message WorkerDrainResult {
-  // 1 removed (#321): worker_id — stream identifies the worker; orchestrator
-  // already falls back to wc.workerID when this was empty.
-  reserved 1;
-  reserved "worker_id";
-
-  string reason = 2;
-  string status = 3;
-  int64 active_requests = 4;
-  int64 emitted_at_unix_ms = 5;
-}
-
-// Scheduler -> Worker: sent after worker registers to describe endpoint-level config.
-// This message is *not* a per-job selector; per-job required flavors are carried on JobExecutionRequest.
-message EndpointConfig {
-  // Strict allowlist of Cozy repo refs this endpoint release may access (tag form). "*" is supported as a wildcard.
-  repeated string supported_repo_refs = 1;
-
-  // Mapping from endpoint release-defined short keys/labels to canonical repo refs.
-  // Legacy support — predates the typed dispatch binding (issue #9) where the
-  // worker reads `bindings[].table[<key>]` directly from the function manifest.
-  map<string, string> repo_ref_by_key = 2;
-
-  // Orchestrator-resolved Tensorhub repo snapshots prefetched for this endpoint.
-  // Key: pinned checkpoint-flavor ref string. Value: pinned snapshot_digest + presigned blob URLs.
-  map<string, ResolvedRepo> resolved_repos_by_ref = 3;
-
-  // Baseline pinned checkpoint flavors the worker should prefetch/load for this endpoint release (warm start).
-  // These are pinned refs for Cozy models (e.g. "cozy:owner/repo@blake3:...#int4") or raw refs for non-Cozy schemes.
-  repeated string required_flavor_refs = 4;
-
-  // Per-function model keyspace (authoritative) used for payload key resolution + dtype constraints.
-  // Key is function_name as seen by the worker (typically endpoint_name).
-  map<string, ModelsByKey> models_by_function = 5;
-
-  // Functions that cannot run because at least one FIXED-bound model ref
-  // failed to resolve. Worker MUST skip prefetch + NOT advertise these
-  // functions in its registration spec. See e2e/agents/progress.json #6.
-  repeated DisabledFunction disabled_functions = 6;
-
-  // Per-function per-PAYLOAD-key availability. Covers only functions that
-  // are still runnable (functions with broken FIXED refs are in
-  // disabled_functions instead). Worker uses this to reject invocations
-  // that name an unavailable key locally — mirrors the orchestrator's
-  // dispatch-gate behavior.
-  map<string, FunctionRefAvailability> ref_availability_by_function = 7;
-
-  reserved 8, 9;
-}
-
-// A general "envelope" for streaming messages in **both** directions.
-message WorkerSchedulerMessage {
-  // 3 removed pre-#321: spawn_jobs.
-  reserved 3;
-  reserved "spawn_jobs";
-
-  // Cut variants (#321):
-  //  7  repo_url_refresh_request    — speculative, never wired
-  //  15 realtime_open_cmd           — broken half-built; deleted
-  //  16 realtime_frame              — broken half-built; deleted
-  //  17 realtime_close_cmd          — broken half-built; deleted
-  //  18 repo_url_refresh_response   — speculative, never wired
-  //  19 runtime_batching_config_result — producer never landed
-  //  20 runtime_batching_config_cmd    — producer never landed
-  //  21 batch_job_result            — fake batching (sequential under the hood)
-  //  22 batch_job_request           — fake batching (no GPU-level win)
-  //  27 worker_function_availability_cleared — never emitted; reconnect wipes
-  //  31 worker_volume_stats         — typed slot reserved, never produced
-  reserved 7, 15, 16, 17, 18, 19, 20, 21, 22, 27, 31;
-  reserved "repo_url_refresh_request", "realtime_open_cmd", "realtime_frame",
-           "realtime_close_cmd", "repo_url_refresh_response",
-           "runtime_batching_config_result", "runtime_batching_config_cmd",
-           "batch_job_result", "batch_job_request",
-           "worker_function_availability_cleared",
-           "worker_volume_stats";
-
+// ---------------------------------------------------------------------------
+// Envelopes
+// ---------------------------------------------------------------------------
+
+message WorkerMessage {
   oneof msg {
-    // Worker -> Scheduler
-    WorkerRegistration worker_registration  = 1;   // Worker connecting/heartbeating
-    JobExecutionResult job_result         = 2;   // Worker completed a job
-    LoadModelResult    load_model_result    = 4;
-    UnloadModelResult  unload_model_result  = 5;
-    WorkerEvent        worker_event         = 6;
-    WorkerDiagnosticLog worker_diagnostic_log = 36;
-    IncrementalTokenDelta incremental_token_delta = 23;
-    IncrementalTokenStreamDone incremental_token_stream_done = 24;
-    IncrementalTokenStreamError incremental_token_stream_error = 25;
-    // e2e #40: worker-reported per-function hardware availability.
-    WorkerFunctionUnavailableSignal worker_function_unavailable = 26;
-    WorkerDrainResult worker_drain_result = 29;
-
-    // #321: typed lifecycle signals — replace string-switched worker_event
-    // dispatch for the 3 actionable event types. (volume_stats was dropped:
-    // orchestrator had a handler but no worker emit site; if/when shared-
-    // volume tracking actually wires through, add the typed message then.)
-    WorkerStartupPhaseSignal         worker_startup_phase         = 30;
-    WorkerModelReadySignal           worker_model_ready           = 32;
-    WorkerFunctionCapabilitiesSignal worker_function_capabilities = 33;
-    // #273 Phase 2: prefix-cache delta — feeds the orchestrator's
-    // KvPrefixIndex (block_hash -> set<worker_id>) used by cache-aware
-    // placement.
-    WorkerKVPrefixCache              worker_kv_prefix_cache       = 34;
-
-    // Scheduler -> Worker
-    JobExecutionRequest job_request       = 10;  // Scheduler wants worker to execute a job
-    LoadModelCommand     load_model_cmd     = 11;
-    UnloadModelCommand   unload_model_cmd   = 12;
-
-    InterruptJobCommand interrupt_job_cmd = 13;
-    EndpointConfig endpoint_config = 14;
-    WorkerDrainCommand worker_drain_cmd = 28;
-    // #339: fresh-fetch parallel to LoadModelCommand. Worker downloads the
-    // ref to disk (does NOT promote to VRAM) and reports completion via
-    // WorkerModelReadySignal + the next disk_models heartbeat.
-    DownloadModelCommand download_model_cmd = 35;
+    Hello         hello          = 1;
+    StateDelta    state_delta    = 2;
+    JobAccepted   job_accepted   = 3;
+    JobResult     job_result     = 4;
+    JobProgress   job_progress   = 5;
+    ModelEvent    model_event    = 6;
+    FnUnavailable fn_unavailable = 7;
   }
 }
 
-// The gRPC service. ConnectWorker carries the primary bidi protocol (control +
-// dispatch + heartbeats, and — for legacy single-stream workers — results and
-// events too).
-//
-// gen-orchestrator #345 Improvement A: split outgoing streams. A worker that
-// sets WorkerRegistration.supports_split_streams ALSO opens WorkerResults and
-// WorkerEvents at boot, shedding JobExecutionResult + lifecycle/incremental
-// traffic off ConnectWorker so the result-send path isn't serialized behind
-// event traffic on one wire. Both new RPCs are worker→orchestrator bidi
-// (the orchestrator only ever replies with control/no-op on them today, but
-// keeping them bidi mirrors ConnectWorker so the worker's stream-send plumbing
-// is uniform). The FIRST message a worker sends on each new stream MUST be a
-// WorkerRegistration carrying worker_id + the matching stream_role so the
-// orchestrator can demux subsequent messages to the right worker.
-service SchedulerWorkerService {
-  rpc ConnectWorker (stream WorkerSchedulerMessage)
-      returns (stream WorkerSchedulerMessage);
+message SchedulerMessage {
+  oneof msg {
+    HelloAck  hello_ack = 1;
+    RunJob    run_job   = 2;
+    CancelJob cancel_job = 3;
+    ModelOp   model_op  = 4;
+    Drain     drain     = 5;
+  }
+}
 
-  // #345 Improvement A: dedicated results stream. Carries JobExecutionResult
-  // envelopes (plus the opening WorkerRegistration handshake). Demuxed by
-  // worker_id.
-  rpc WorkerResults (stream WorkerSchedulerMessage)
-      returns (stream WorkerSchedulerMessage);
+// ---------------------------------------------------------------------------
+// Connection lifecycle
+// ---------------------------------------------------------------------------
 
-  // #345 Improvement A: dedicated events stream. Carries lifecycle WorkerEvent
-  // + IncrementalTokenDelta/Done/Error envelopes (plus the opening
-  // WorkerRegistration handshake). Demuxed by worker_id.
-  rpc WorkerEvents (stream WorkerSchedulerMessage)
-      returns (stream WorkerSchedulerMessage);
+// First message on every stream, worker -> orchestrator. Full snapshot of
+// static resources, dynamic state, model residency, and in-flight work.
+message Hello {
+  ProtocolVersion protocol_version = 1;
+  string worker_id  = 2; // must equal JWT `sub` when auth is enabled
+  string release_id = 3; // must equal JWT `release_id` claim when auth is enabled
+  WorkerResources resources = 4;   // static hardware/build identity
+  StateDelta      state     = 5;   // initial dynamic state snapshot
+  repeated ModelResidency models = 6; // full residency snapshot (reconcile baseline)
+  repeated InFlightJob in_flight = 7; // running + completed-with-unshipped-result
+}
+
+// Static per-boot facts. Sent once in Hello; never updated mid-connection.
+message WorkerResources {
+  int32  gpu_count        = 1;
+  int64  vram_total_bytes = 2; // total VRAM across GPUs
+  string gpu_name         = 3; // e.g. "NVIDIA GeForce RTX 4090"
+  string gpu_sm           = 4; // compute capability, e.g. "89"
+  repeated string installed_libs = 5; // e.g. "flashpack", "torchao"
+  string image_digest     = 6; // docker image sha256
+  string git_commit       = 7;
+  string instance_id      = 8; // cloud provider instance id (e.g. runpod pod id)
+}
+
+message ModelResidency {
+  string ref = 1;              // canonical model ref string
+  ResidencyTier tier = 2;      // highest tier the model currently occupies
+  int64 vram_bytes = 3;        // measured footprint; set when tier = VRAM, else 0
+}
+
+enum ResidencyTier {
+  RESIDENCY_TIER_UNSPECIFIED = 0;
+  RESIDENCY_TIER_DISK        = 1;
+  RESIDENCY_TIER_RAM         = 2;
+  RESIDENCY_TIER_VRAM        = 3;
+}
+
+message InFlightJob {
+  string request_id = 1;
+  int64  attempt    = 2;
+}
+
+// Orchestrator -> worker reply to Hello. Also re-sent mid-connection whenever
+// the release config changes (full-replace semantics).
+message HelloAck {
+  ProtocolVersion protocol_version = 1; // orchestrator's version, for symmetric validation
+  string file_base_url = 2;  // tensorhub base URL for capability-token HTTP calls (uploads, blob refs)
+  repeated string keep = 3;  // refs the worker's disk eviction must protect
+}
+
+// Worker -> orchestrator dynamic state. FULL-REPLACE snapshot of every field,
+// sent only when at least one field changed (edge-triggered, never periodic).
+message StateDelta {
+  WorkerPhase phase = 1;
+  repeated string available_functions = 2; // dispatchable now
+  repeated string loading_functions   = 3; // present but models still materializing
+  int64 free_vram_bytes = 4; // measured free VRAM; sent on material change
+}
+
+enum WorkerPhase {
+  WORKER_PHASE_UNSPECIFIED        = 0;
+  WORKER_PHASE_BOOTING            = 1;
+  WORKER_PHASE_DOWNLOADING_MODELS = 2;
+  WORKER_PHASE_LOADING_PIPELINES  = 3;
+  WORKER_PHASE_WARMING            = 4; // torch.compile graph capture / cache warmup
+  WORKER_PHASE_READY              = 5;
+  WORKER_PHASE_ERROR              = 6;
+}
+
+// ---------------------------------------------------------------------------
+// Jobs
+// ---------------------------------------------------------------------------
+
+// Orchestrator -> worker job dispatch. Retransmitted (same attempt) until the
+// worker answers with JobAccepted or a JobResult.
+message RunJob {
+  string request_id = 1;
+  int64  attempt    = 2; // fencing token; bumped by the orchestrator on every (re)queue
+  string function_name = 3;
+  bytes  input_payload = 4; // MessagePack-encoded input struct (input file refs pre-materialized to URLs)
+  int64  timeout_ms = 5;    // execution deadline; 0 = no explicit timeout
+  string tenant     = 6;    // invoking owner (org/user slug)
+  string invoker_id = 7;    // surfaced read-only as ctx.invoker_id
+  string capability_token = 8; // per-job worker capability token for tensorhub HTTP calls
+  OutputMode output_mode = 9;  // client's inline-vs-url preference for media outputs
+  ResolvedCompute compute = 10;
+  repeated ModelBinding models = 11; // slot -> ref bindings resolved by the orchestrator
+  // Presigned snapshots for tensorhub-CAS refs this job may need and the
+  // orchestrator does not know to be on the worker's disk. Key: canonical ref.
+  map<string, Snapshot> snapshots = 12;
+}
+
+enum OutputMode {
+  OUTPUT_MODE_UNSPECIFIED = 0;
+  OUTPUT_MODE_URL         = 1; // upload media, return refs (default behavior)
+  OUTPUT_MODE_INLINE      = 2; // small outputs inline in the result payload
+}
+
+// Resolved hardware for this invocation. gpu_index binds the CUDA context;
+// the rest is surfaced read-only to tenant code as ctx.compute.
+message ResolvedCompute {
+  string accelerator = 1; // "cuda" | "none"
+  int32  gpu_index   = 2; // 0-based GPU ordinal picked by the per-GPU slot scheduler
+  int32  gpu_count   = 3;
+  int32  vram_gb     = 4;
+}
+
+message ModelBinding {
+  string slot = 1; // model slot name declared by the endpoint
+  string ref  = 2; // canonical ref string (tag/flavor/digest encoded in the ref grammar)
+}
+
+// A pinned tensorhub repo snapshot with presigned download URLs. The worker
+// never calls tensorhub for ref resolution; the orchestrator is the only
+// resolver and ships snapshots on ModelOp / RunJob.
+message Snapshot {
+  string digest = 1; // snapshot digest the download is pinned to
+  repeated SnapshotFile files = 2;
+}
+
+message SnapshotFile {
+  string path       = 1;
+  int64  size_bytes = 2;
+  string blake3     = 3; // content hash the worker verifies after download
+  string url        = 4; // presigned GET
+}
+
+// Worker -> orchestrator: dispatch acknowledged; the worker now owns
+// (request_id, attempt). Stops orchestrator retransmission.
+message JobAccepted {
+  string request_id = 1;
+  int64  attempt    = 2;
+}
+
+// Worker -> orchestrator terminal outcome. Exactly one per accepted
+// (request_id, attempt). Never dropped: buffered and resent across reconnects.
+message JobResult {
+  string request_id = 1;
+  int64  attempt    = 2;
+  JobStatus status  = 3;
+  // Result payload (MessagePack-encoded output struct) when status = OK.
+  // Inline when small; blob_ref (uploaded via presigned PUT) above the
+  // inline threshold (~64KB).
+  oneof output {
+    bytes  inline   = 4;
+    string blob_ref = 5;
+  }
+  string safe_message = 6; // sanitized client-facing error text; empty when OK
+  JobMetrics metrics = 7;
+}
+
+enum JobStatus {
+  JOB_STATUS_UNSPECIFIED = 0;
+  JOB_STATUS_OK          = 1;
+  JOB_STATUS_INVALID     = 2; // bad input; never retry
+  JOB_STATUS_RETRYABLE   = 3; // transient; orchestrator may requeue (bumping attempt)
+  JOB_STATUS_FATAL       = 4; // permanent execution failure; do not retry
+  JOB_STATUS_CANCELED    = 5; // terminal ack of CancelJob (or local deadline abort)
+}
+
+// The one metrics vehicle. Worker-observed values only; the orchestrator
+// enriches with its own state (release, function, machine class) off-wire.
+message JobMetrics {
+  int64 runtime_ms     = 1; // handler start -> handler completion
+  int64 queue_ms       = 2; // worker-local queue wait before start
+  int64 peak_rss_bytes = 3; // peak host RSS during execution; 0 = unmeasured
+  int64 peak_vram_bytes = 4; // peak VRAM during execution; 0 = unmeasured
+  int32 concurrency_at_start = 5; // jobs already active on the worker at admit
+}
+
+// Worker -> orchestrator streaming output chunk. Ordered per (request_id,
+// attempt); fanned out to attached SSE/wait subscribers, never persisted.
+message JobProgress {
+  string request_id = 1;
+  int64  attempt    = 2;
+  int64  seq        = 3; // starts at 1, strictly increasing per (request_id, attempt)
+  bytes  data       = 4; // chunk bytes: UTF-8 text delta, JSON delta, or raw audio
+  string content_type = 5; // e.g. "text/plain", "application/json", "audio/pcm;rate=24000"
+}
+
+// Orchestrator -> worker: abort (request_id, attempt). Worker answers with
+// JobResult{status: CANCELED} (or the natural terminal result if it raced).
+message CancelJob {
+  string request_id = 1;
+  int64  attempt    = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Models
+// ---------------------------------------------------------------------------
+
+// Orchestrator -> worker model residency command. Every op is answered by at
+// least one ModelEvent for the same ref.
+message ModelOp {
+  ModelOpKind op = 1;
+  string ref = 2;
+  // Presigned snapshot for tensorhub-CAS refs; unset for hf/civitai refs the
+  // worker fetches from the upstream provider directly. Set on DOWNLOAD (and
+  // on LOAD when the ref may not be on disk yet).
+  Snapshot snapshot = 3;
+}
+
+enum ModelOpKind {
+  MODEL_OP_KIND_UNSPECIFIED = 0;
+  MODEL_OP_KIND_DOWNLOAD    = 1; // fetch to disk; do NOT promote to VRAM
+  MODEL_OP_KIND_LOAD        = 2; // promote to VRAM (downloading first if needed)
+  MODEL_OP_KIND_UNLOAD      = 3; // demote out of VRAM
+}
+
+// Worker -> orchestrator model residency transition. The single channel for
+// download progress, load/unload outcomes, VRAM footprints, and evictions —
+// whether triggered by a ModelOp or by the worker's own cache policy.
+message ModelEvent {
+  string ref = 1;
+  ModelState state = 2;
+  int64 vram_bytes = 3;  // measured VRAM footprint; set when state = IN_VRAM
+  string error = 4;      // set when state = FAILED (e.g. "oom", "model_in_use", "url_expired")
+  int64 bytes_done = 5;  // download progress; set while state = DOWNLOADING
+  int64 bytes_total = 6; // set while state = DOWNLOADING (0 = unknown)
+}
+
+enum ModelState {
+  MODEL_STATE_UNSPECIFIED = 0;
+  MODEL_STATE_DOWNLOADING = 1; // fetch in progress; may repeat with progress
+  MODEL_STATE_ON_DISK     = 2; // bytes local; not resident in RAM or VRAM
+  MODEL_STATE_IN_RAM      = 3; // weights host-RAM resident (fast VRAM promote)
+  MODEL_STATE_IN_VRAM     = 4; // hot; ready for inference
+  MODEL_STATE_EVICTED     = 5; // removed from disk entirely
+  MODEL_STATE_FAILED      = 6; // last op on this ref failed; residency unchanged
+}
+
+// ---------------------------------------------------------------------------
+// Availability / drain
+// ---------------------------------------------------------------------------
+
+// Worker -> orchestrator: this worker self-disables ONE function on itself
+// because a hardware gate failed. Cleared implicitly by the next Hello.
+message FnUnavailable {
+  string function_name = 1;
+  // reason vocabulary: compute_capability_unmet, insufficient_vram,
+  // missing_cuda_library, insufficient_disk, cuda_unavailable.
+  string reason = 2;
+  string detail = 3; // human-readable elaboration for the admin availability view
+  map<string, string> axes = 4; // e.g. {detected_sm: "8.9", required_sm: "10.0"}
+}
+
+// Orchestrator -> worker: stop accepting work, finish in-flight jobs, ship
+// results, close the stream, exit. No reply message; stream close is the ack.
+message Drain {
+  int64 deadline_ms = 1; // relative grace budget; worker aborts remaining work at expiry
 }

@@ -218,10 +218,6 @@ def _run_main() -> int:
         logger.error(str(e))
         return 1
 
-    reconnect_delay = 0.1
-    max_reconnect_attempts = 0  # 0 = infinite
-    lb_only_retries = True
-
     if not settings.orchestrator_public_addr:
         logger.error("Settings.orchestrator_public_addr is empty (set ORCHESTRATOR_PUBLIC_ADDR env). Refusing to start worker.")
         return 1
@@ -230,9 +226,6 @@ def _run_main() -> int:
     logger.info("  Orchestrator Public Address: %s", settings.orchestrator_public_addr)
     logger.info("  User Function Modules: %s", user_modules)
     logger.info("  Worker ID: %s", settings.worker_id or "(from JWT)")
-    logger.info("  Reconnect Delay (base): %.3fs", reconnect_delay)
-    logger.info("  Max Reconnect Attempts: %s", max_reconnect_attempts or "Infinite")
-    logger.info("  LB-only retries: %s", lb_only_retries)
     logger.info("  Model Cache Dir: %s", cache_cfg["model_cache_dir"])
     if cache_cfg["local_model_cache_dir"]:
         logger.info("  Local Model Cache Dir: %s", cache_cfg["local_model_cache_dir"])
@@ -249,14 +242,11 @@ def _run_main() -> int:
         worker = Worker(
             settings=settings,
             user_module_names=user_modules,
-            reconnect_delay=reconnect_delay,
-            max_reconnect_attempts=max_reconnect_attempts,
-            lb_only_retries=lb_only_retries,
             manifest=manifest,
         )
-        worker.run()
-        logger.info("Worker process finished gracefully.")
-        return 0
+        code = worker.run()
+        logger.info("Worker process finished gracefully (exit=%d).", code)
+        return code
     except ImportError as e:
         logger.exception(
             "Failed to import user module(s) or dependencies: %s. "

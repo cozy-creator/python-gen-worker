@@ -9,9 +9,7 @@ by scanning .py files and extracting metadata. Run as:
 Outputs TOML endpoint lock to stdout.
 """
 
-import collections.abc
 import hashlib
-import inspect
 import json
 import sys
 import typing
@@ -578,211 +576,100 @@ def discover_functions(root: Optional[Path] = None, *, main_module: str | None =
 def _extract_class_function_methods(
     cls: type, module_name: str
 ) -> List[Dict[str, Any]]:
-    """Extract per-function manifest entries from a class-shape endpoint (#322).
+    """Manifest entries for a class-shape endpoint.
 
-    A class decorated with ``@inference`` / ``@training`` / ``@dataset`` /
-    ``@conversion`` carries one or more ``@inference.function``-decorated
-    methods. Each method becomes a separate entry in the manifest's
-    ``functions`` list, sharing the class-level resources/bindings.
+    Signature inspection (payload/output types, streaming shape, parametrize
+    fan-out) is delegated to ``gen_worker.registry`` — the one walker shared
+    with the worker runtime and the CLI. This function only adds the
+    manifest-specific enrichment (schemas, moderation, bindings blocks).
     """
+    from gen_worker.registry import extract_specs
+
     spec = getattr(cls, "__gen_worker_endpoint_spec__", None)
     if spec is None:
         return []
-
-    function_methods = getattr(cls, "__gen_worker_function_methods__", None) or []
-    if not function_methods:
+    # Parity with the historical manifest: only @<kind>.function/@invocable
+    # methods are baked; @batched_inference methods stay runtime-only.
+    plain_attrs = {
+        attr for attr, _m, _s in getattr(cls, "__gen_worker_function_methods__", []) or []
+    }
+    if not plain_attrs:
         return []
 
-    def _res_to_dict(res: Any) -> Dict[str, Any]:
-        d: Dict[str, Any] = {}
-        if res is not None:
-            try:
-                raw = msgspec.to_builtins(res)
-                if isinstance(raw, dict):
-                    d.update(raw)
-            except Exception:
-                pass
-        return d
-
-    # Class-level resources serialize once; shared across all functions.
-    res_dict: Dict[str, Any] = _res_to_dict(spec.resources)
-
-    # Class-level bindings — same shape as old function-decorator bindings,
-    # keyed by setup() kwarg name. For each method, the bindings block is
-    # the same (every method shares the loaded models).
-    bindings_map: Dict[str, Binding] = dict(spec.models or {})
-    bindings_block: Dict[str, Dict[str, Any]] = {}
-    for key, binding in bindings_map.items():
-        bindings_block[key] = _binding_to_manifest(binding, None, key)
-
-    # ----- Function fan-out via parametrize= (#339 §2) --------------------
-    # When the class declares a parametrize= table it hosts ONE @invocable
-    # body stamped into N routable functions. Expand each (attr_name, method,
-    # fn_spec) tuple into one tuple per Case, carrying per-row overrides for
-    # the function name, Resources, model binding, and input struct.
-    parametrize = tuple(getattr(spec, "parametrize", ()) or ())
-    work: List[tuple] = []  # (attr_name, method, fn_spec, res_dict, bindings_block, payload_override)
-    if parametrize:
-        attr_name, method, fn_spec = function_methods[0]
-        for case in parametrize:
-            case_res = _res_to_dict(case.resources) if case.resources is not None else res_dict
-            case_bindings = bindings_block
-            if case.model is not None:
-                # Override the single declared model slot (or add a 'model'
-                # slot when the class declares none) with this row's binding.
-                slot = next(iter(bindings_map), "model")
-                case_bindings = dict(bindings_block)
-                case_bindings[slot] = _binding_to_manifest(case.model, None, slot)
-            case_fn_spec = msgspec.structs.replace(fn_spec, name=case.name)
-            work.append((attr_name, method, case_fn_spec, case_res, case_bindings, case.input))
-    else:
-        for attr_name, method, fn_spec in function_methods:
-            work.append((attr_name, method, fn_spec, res_dict, bindings_block, None))
-
     out: List[Dict[str, Any]] = []
-    for attr_name, method, fn_spec, fn_res_dict, fn_bindings_block, payload_override in work:
-        # Method signature: (self, ctx, payload) — skip self.
-        hints = typing.get_type_hints(method, include_extras=True)
-        sig = inspect.signature(method)
-        params = [p for p in sig.parameters.values() if p.name != "self"]
+    for es in extract_specs(cls, walked_module=module_name):
+        if es.attr_name not in plain_attrs:
+            continue
+        res_dict: Dict[str, Any] = {}
+        try:
+            raw = msgspec.to_builtins(es.resources)
+            if isinstance(raw, dict):
+                res_dict.update(raw)
+        except Exception:
+            pass
+        bindings_block = {
+            key: _binding_to_manifest(binding, None, key)
+            for key, binding in es.models.items()
+        }
 
-        if len(params) < 2:
+        input_schema, input_sha = _schema_and_hash(es.payload_type)
+        moderation = _collect_payload_moderation_metadata(es.payload_type)
+        output_type = es.output_type
+        if output_type is None:
             raise ValueError(
-                f"{cls.__name__}.{attr_name}: must accept (self, ctx, payload). "
-                f"Got params: {[p.name for p in params]}"
+                f"{cls.__name__}.{es.attr_name}: manifest requires a concrete "
+                "msgspec.Struct output/delta type"
             )
-
-        # First non-self param is ctx; second is payload struct. A parametrize
-        # Case may override the payload type per-row (input=...); otherwise we
-        # read it off the shared method's annotation.
-        ctx_name = params[0].name
-        payload_param = params[1]
-        if payload_override is not None:
-            if not _is_msgspec_struct(payload_override):
-                raise ValueError(
-                    f"{cls.__name__}.{attr_name}: parametrize Case input= must be "
-                    f"a msgspec.Struct (got {payload_override!r})"
-                )
-            payload_type = payload_override
-        else:
-            payload_ann = hints.get(payload_param.name)
-            if payload_ann is None or not _is_msgspec_struct(payload_ann):
-                raise ValueError(
-                    f"{cls.__name__}.{attr_name}: payload param {payload_param.name!r} "
-                    f"must be a msgspec.Struct (got {payload_ann!r})"
-                )
-            payload_type = payload_ann
-
-        ret = hints.get("return")
-        if ret is None:
-            raise ValueError(
-                f"{cls.__name__}.{attr_name}: missing return type annotation"
-            )
-
-        output_mode = "single"
-        incremental = False
-        output_type: Optional[type] = None
-        delta_type: Optional[type] = None
-
-        # BatchedWorker async generator returning AsyncIterator[X] OR
-        # SerialWorker sync function returning Iterator[X] → incremental.
-        origin = typing.get_origin(ret)
-        if _is_msgspec_struct(ret):
-            output_type = ret
-        elif origin in (
-            typing.Iterator,
-            typing.Iterable,
-            typing.AsyncIterator,
-            typing.AsyncIterable,
-            collections.abc.Iterator,
-            collections.abc.Iterable,
-            collections.abc.AsyncIterator,
-            collections.abc.AsyncIterable,
-        ):
-            args = typing.get_args(ret)
-            if len(args) != 1 or not _is_msgspec_struct(args[0]):
-                raise ValueError(
-                    f"{cls.__name__}.{attr_name}: incremental return must be "
-                    f"Iterator[msgspec.Struct] or AsyncIterator[msgspec.Struct]"
-                )
-            incremental = True
-            output_mode = "incremental"
-            delta_type = args[0]
-            output_type = args[0]
-        else:
-            raise ValueError(
-                f"{cls.__name__}.{attr_name}: return type must be msgspec.Struct "
-                f"or (Async)Iterator[msgspec.Struct], got {ret!r}"
-            )
-
-        input_schema, input_sha = _schema_and_hash(payload_type)
-        moderation = _collect_payload_moderation_metadata(payload_type)
         output_schema, output_sha = _schema_and_hash(output_type)
-        expected_outputs = _collect_expected_output_metadata(payload_type, output_type)
+        expected_outputs = _collect_expected_output_metadata(es.payload_type, output_type)
+        incremental = es.output_mode == "stream"
         delta_schema = None
         delta_sha = ""
-        if delta_type is not None:
-            delta_schema, delta_sha = _schema_and_hash(delta_type)
+        if incremental and es.delta_type is not None:
+            delta_schema, delta_sha = _schema_and_hash(es.delta_type)
 
-        function_name = slugify_name(fn_spec.name)
+        function_name = slugify_name(es.name)
         if not function_name:
             raise ValueError(
-                f"{cls.__name__}.{attr_name}: function name cannot be normalized "
-                f"from {fn_spec.name!r}"
+                f"{cls.__name__}.{es.attr_name}: function name cannot be "
+                f"normalized from {es.name!r}"
             )
 
         fn: Dict[str, Any] = {
             "name": function_name,
-            "python_name": attr_name,
+            "python_name": es.attr_name,
             "module": module_name,
-            # Class's declaration module (vs the module being walked) — used
-            # by discover_manifest to dedup re-exported classes.
             "declared_module": getattr(cls, "__module__", "") or module_name,
             "class_name": cls.__name__,
             "archetype": getattr(cls, "__gen_worker_archetype__", "SerialWorker"),
-            "kind": spec.kind,
-            "sub_kind": spec.sub_kind,
-            "runtime": spec.runtime,
-            "resources": fn_res_dict,
-            "bindings": fn_bindings_block,
-            "payload_type": _type_id(payload_type),
+            "kind": es.kind,
+            "sub_kind": es.sub_kind,
+            "runtime": es.runtime,
+            "resources": res_dict,
+            "bindings": bindings_block,
+            "payload_type": _type_id(es.payload_type),
             "payload_schema_sha256": input_sha,
             "input_schema": input_schema,
             "moderation": moderation,
             "expected_outputs": expected_outputs,
-            "output_mode": output_mode,
-            "output_type": _type_id(output_type) if output_type else None,
+            "output_mode": "incremental" if incremental else "single",
+            "output_type": _type_id(output_type),
             "output_schema_sha256": output_sha,
             "output_schema": output_schema,
             "incremental_output": incremental,
-            # #345 Improvement B: surface whether the handler is an `async def`
-            # (coroutine or async generator). Derived from inspect — never
-            # tenant-declared. Lets the orchestrator/operators see which
-            # endpoints run coroutine-bound (high-concurrency I/O) vs
-            # ThreadPoolExecutor-bound (sync) on the SerialWorker archetype.
-            "is_async": bool(
-                inspect.iscoroutinefunction(method)
-                or inspect.isasyncgenfunction(method)
-            ),
-            "decorator": f"@{spec.kind}.function",
-            "label": fn_spec.label,
-            "description": fn_spec.description,
-            "timeout_ms": fn_spec.timeout_ms,
-            "allowed_shapes": [list(s) for s in fn_spec.allowed_shapes]
-                              or [list(s) for s in spec.allowed_shapes],
-            # #324: SerialWorker cross-request micro-batching declaration.
-            # Surfaced so the orchestrator can scorecard / route around this
-            # at scheduling time. Both must be set for the worker to actually
-            # enable batching; either-None means "no batching".
+            "is_async": es.is_async,
+            "decorator": f"@{es.kind}.function",
+            "label": es.label,
+            "description": es.description,
+            "timeout_ms": es.timeout_ms,
+            "allowed_shapes": [list(s) for s in es.allowed_shapes],
             "batch_window_ms": getattr(spec, "batch_window_ms", None),
             "max_batch": getattr(spec, "max_batch", None),
         }
-
-        if delta_type is not None:
-            fn["delta_type"] = _type_id(delta_type)
+        if incremental and es.delta_type is not None:
+            fn["delta_type"] = _type_id(es.delta_type)
             fn["delta_schema_sha256"] = delta_sha
             fn["delta_output_schema"] = delta_schema
-
         out.append(fn)
 
     return out
