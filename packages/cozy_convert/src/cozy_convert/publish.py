@@ -1,8 +1,10 @@
-"""Publish ProducedFlavor outputs to Tensorhub (replaces conversion/dispatch.py).
+"""Publish ProducedFlavor outputs to Tensorhub — THE producer publish contract.
 
-A conversion / dataset tenant returns ``list[ProducedFlavor]``; each flavor's
+A conversion / dataset / training endpoint writes files locally, calls
+``publish_flavors(ctx, flavors)``, and returns a result struct. Each flavor's
 ``path`` (file or directory) becomes ONE Tensorhub commit against the
-destination repo declared on the job payload.
+destination repo (explicit ``destination_repo=`` or the job payload's
+reserved ``destination.repo`` field). Nothing publishes implicitly.
 """
 
 from __future__ import annotations

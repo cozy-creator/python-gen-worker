@@ -376,3 +376,49 @@ def test_discovery_walks_layouts_dedups_and_skips_third_party(tmp_pkg: Path, cap
     assert any(
         "outside the walked package" in r.message for r in caplog.records
     )
+
+
+# --------------------------------------------------------------------------- #
+# 9. producer kinds publish explicitly — generator handlers are rejected       #
+# --------------------------------------------------------------------------- #
+
+
+def test_producer_kind_rejects_sync_generator_class_handler() -> None:
+    with pytest.raises(TypeError, match="publish_flavors"):
+        @endpoint(kind="conversion")
+        class BadConversion:
+            def run(self, ctx: RequestContext, data: _In):
+                yield _Out(result="x")
+
+
+def test_producer_kind_rejects_async_generator_class_handler() -> None:
+    with pytest.raises(TypeError, match="inference-only"):
+        @endpoint(kind="training")
+        class BadTraining:
+            async def run(self, ctx: RequestContext, data: _In):
+                yield _Out(result="x")
+
+
+def test_producer_kind_rejects_generator_function() -> None:
+    with pytest.raises(TypeError, match="must not be a generator"):
+        @endpoint(kind="dataset")
+        def bad_dataset(ctx: RequestContext, data: _In):
+            yield _Out(result="x")
+
+
+def test_from_scratch_example_uses_publish_contract() -> None:
+    """Discovery smoke for examples/from-scratch: imports, one conversion-kind
+    non-generator handler, result struct output (the explicit-publish shape)."""
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[1] / "examples" / "from-scratch" / "from_scratch.py"
+    spec = importlib.util.spec_from_file_location("from_scratch_example", path)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    (s,) = extract_specs(mod.FromScratch)
+    assert s.kind == "conversion"
+    assert s.output_mode == "single"
+    assert not s.is_async_gen
+    assert s.output_type is mod.FromScratchResult

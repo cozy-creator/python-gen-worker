@@ -15,7 +15,12 @@
           def generate(self, ctx, p: Input) -> Output: ...
 
 * ``kind="conversion" | "training" | "dataset"`` selects the context subclass.
-* An async-generator handler streams; there is no separate streaming decorator.
+  Producer kinds publish explicitly — write files locally, call
+  ``cozy_convert.publish_flavors(ctx, flavors)`` (one Tensorhub commit per
+  ``ProducedFlavor``), and return a result struct. Generator handlers are
+  rejected for producer kinds: nothing is ever published by yielding.
+* An async-generator handler streams (inference only); there is no separate
+  streaming decorator.
 * ``runtime="vllm"`` boots an engine-hosting server subprocess before setup.
 * ``variants={name: (binding, Resources)}`` stamps one separately-routable,
   separately-placeable function per variant from a single handler body.
@@ -109,6 +114,21 @@ def _validate_handler_shape(owner: str, fn: Callable[..., Any], *, is_method: bo
             f"(got params {[p.name for p in params]}). Handlers take the "
             "request context first and a msgspec.Struct payload second; "
             "prefix non-handler methods with an underscore."
+        )
+
+
+def _reject_producer_generator(owner: str, fn: Callable[..., Any], kind: str) -> None:
+    """Producer kinds (conversion/training/dataset) publish explicitly and
+    return a result; a generator handler would stream chunks and publish
+    NOTHING. Fail at decoration time instead of silently at runtime."""
+    if kind == "inference":
+        return
+    if inspect.isgeneratorfunction(fn) or inspect.isasyncgenfunction(fn):
+        raise TypeError(
+            f"@endpoint(kind={kind!r}): {owner} must not be a generator. "
+            "Producer endpoints write files locally, publish explicitly "
+            "(cozy_convert.publish_flavors(ctx, flavors)), and return a "
+            "result struct; streaming generators are inference-only."
         )
 
 
@@ -301,6 +321,8 @@ def _decorate_class(
     runtime: Optional[str],
 ) -> type:
     handlers = _find_handler_methods(cls)
+    for attr, member in handlers:
+        _reject_producer_generator(f"{cls.__name__}.{attr}", member, kind)
     models = _resolve_single_slot(cls, models, handlers)
     _validate_class_models(cls, models)
 
@@ -345,6 +367,7 @@ def _decorate_function(
     name: Optional[str],
 ) -> Callable[..., Any]:
     _validate_handler_shape(fn.__name__, fn, is_method=False)
+    _reject_producer_generator(fn.__name__, fn, kind)
     if "" in models:
         binding = models.pop("")
         injected = [p.name for p in _handler_params(fn, is_method=False)[2:]]
