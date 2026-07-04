@@ -8,15 +8,21 @@ import re
 import shutil
 import threading
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from .cozy_cas import _download_one_file as _download_one_file
 from .cozy_cas import _norm_rel_path
 from .hub_client import WorkerResolvedRepo, WorkerResolvedRepoFile
 from .refs import TensorhubRef
+from ..capability import InsufficientDiskError
 from ..s3_transfer import S3TransferGrant, download_file_with_grant
 
 _log = logging.getLogger("gen_worker.download")
+
+ProgressFn = Callable[[int, Optional[int]], None]
+
+# Free space that must remain after downloading the missing blobs.
+_DISK_HEADROOM_BYTES = 1 << 30
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +166,7 @@ class CozySnapshotDownloader:
         ref: TensorhubRef,
         *,
         resolved: Any,
+        progress: Optional[ProgressFn] = None,
     ) -> Path:
         blobs_root = base_dir / "blobs"
         snaps_root = base_dir / "snapshots"
@@ -201,7 +208,7 @@ class CozySnapshotDownloader:
 
         try:
             _log.info("snapshot_build_start digest=%s files=%d", res.snapshot_digest[:16], len(res.files))
-            await self._ensure_blobs(blobs_root, res.files)
+            await self._ensure_blobs(blobs_root, res.files, progress=progress)
 
             tmp = snaps_root / f"{res.snapshot_digest}.building"
             if tmp.exists():
@@ -241,7 +248,13 @@ class CozySnapshotDownloader:
     # Blob download (deduplicated, parallel)
     # ------------------------------------------------------------------
 
-    async def _ensure_blobs(self, blobs_root: Path, files: List[WorkerResolvedRepoFile]) -> None:
+    async def _ensure_blobs(
+        self,
+        blobs_root: Path,
+        files: List[WorkerResolvedRepoFile],
+        *,
+        progress: Optional[ProgressFn] = None,
+    ) -> None:
         # Deduplicate by digest — same blob referenced by multiple paths (e.g.
         # fp16 and normal variants sharing the same part) is downloaded once.
         seen: Set[str] = set()
@@ -257,6 +270,37 @@ class CozySnapshotDownloader:
                 unique.append(f)
 
         _log.info("ensure_blobs total_entries=%d unique_blobs=%d", len(files), len(unique))
+
+        cached_digests = {
+            f.blake3.strip().lower() for f in unique
+            if _blob_path(blobs_root, f.blake3.strip().lower()).exists()
+        }
+        missing_bytes = sum(
+            int(f.size_bytes or 0) for f in unique
+            if f.blake3.strip().lower() not in cached_digests
+        )
+        self._check_disk_headroom(blobs_root, missing_bytes)
+
+        total = sum(int(f.size_bytes or 0) for f in unique) or None
+        done = total - missing_bytes if total else 0
+        done_lock = threading.Lock()
+
+        def _on_bytes(n: int) -> None:
+            nonlocal done
+            with done_lock:
+                done += n
+                d = done if total is None else min(done, total)
+            if progress is not None:
+                try:
+                    progress(d, total)
+                except Exception:
+                    pass
+
+        if progress is not None:
+            try:
+                progress(min(done, total) if total else done, total)
+            except Exception:
+                pass
 
         # Sort largest first for better overlap, then download in parallel.
         unique.sort(key=lambda f: int(f.size_bytes or 0), reverse=True)
@@ -287,6 +331,7 @@ class CozySnapshotDownloader:
                             expected_blake3=digest,
                         ),
                     )
+                    _on_bytes(int(f.size_bytes or 0))
                 else:
                     assert f.url is not None  # validated above in _ensure_blobs loop
                     await _download_one_file(
@@ -294,10 +339,29 @@ class CozySnapshotDownloader:
                         dst,
                         expected_size=int(f.size_bytes or 0),
                         expected_blake3=digest,
+                        on_bytes=_on_bytes,
                     )
                 _log.info("blob_download_done path=%s digest=%s", f.path, digest[:16])
 
         await asyncio.gather(*(_dl(f) for f in unique))
+
+    @staticmethod
+    def _check_disk_headroom(blobs_root: Path, missing_bytes: int) -> None:
+        if missing_bytes <= 0:
+            return
+        try:
+            free = shutil.disk_usage(blobs_root).free
+        except OSError:
+            return
+        required = missing_bytes + _DISK_HEADROOM_BYTES
+        if required > free:
+            raise InsufficientDiskError(
+                f"insufficient disk for snapshot download: need {required} bytes "
+                f"({missing_bytes} blobs + headroom), {free} free at {blobs_root}",
+                available_bytes=free,
+                required_bytes=required,
+                path=str(blobs_root),
+            )
 
     # ------------------------------------------------------------------
     # Chunked file reassembly
@@ -371,6 +435,7 @@ async def ensure_snapshot_async(
     base_dir: Path,
     ref: TensorhubRef,
     resolved: Any,
+    progress: Optional[ProgressFn] = None,
 ) -> Path:
     dl = CozySnapshotDownloader()
-    return await dl.ensure_snapshot(base_dir, ref, resolved=resolved)
+    return await dl.ensure_snapshot(base_dir, ref, resolved=resolved, progress=progress)

@@ -30,7 +30,19 @@ _RESULT, _PROGRESS, _EVENT = "result", "progress", "event"
 
 _MAX_REDIRECT_HOPS = 3
 _AUTH_FAILURE_EXIT_THRESHOLD = 3
+# UNAUTHENTICATED can be transient hub-side (duplicate stream teardown, pg
+# blip): exit only when failures persist across a real time window.
+_AUTH_FAILURE_EXIT_WINDOW_S = 60.0
 _BACKOFF_RESET_AFTER_S = 60.0
+_HELLO_ACK_TIMEOUT_S = 30.0
+# FAILED_PRECONDITION details that can never heal by retrying: identity is
+# wrong for this deployment, so exit for reap instead of burning the full
+# disconnected timeout.
+_PERMANENT_PRECONDITION_MARKERS = (
+    "worker_id_mismatch",
+    "release_id_mismatch",
+    "missing worker identity",
+)
 
 
 class FatalTransportError(Exception):
@@ -38,8 +50,13 @@ class FatalTransportError(Exception):
     disconnected-timeout elapsed. The worker process should exit."""
 
 
-def normalize_grpc_addr(addr: str) -> Tuple[str, bool]:
-    """Normalize a scheduler address into (host:port, use_tls)."""
+def normalize_grpc_addr(addr: str, default_tls: Optional[bool] = None) -> Tuple[str, bool]:
+    """Normalize a scheduler address into (host:port, use_tls).
+
+    ``default_tls`` is the TLS mode for schemeless addresses (e.g. a
+    ``not_leader`` redirect target inherits it from the connection that issued
+    the redirect); when None, fall back to the bare ``:443`` heuristic.
+    """
     a = (addr or "").strip()
     if not a:
         return "", False
@@ -47,6 +64,8 @@ def normalize_grpc_addr(addr: str) -> Tuple[str, bool]:
     for prefix, tls in (("grpcs://", True), ("grpc://", False), ("https://", True), ("http://", False)):
         if lower.startswith(prefix):
             return a[len(prefix):].strip(), tls
+    if default_tls is not None:
+        return a, default_tls
     return a, a.endswith(":443")
 
 
@@ -185,6 +204,7 @@ class Transport:
         self._clean_close = False
         self.reconnect_delays: List[float] = []  # observability + tests
         self._consecutive_auth_failures = 0
+        self._first_auth_failure_at: Optional[float] = None
         self._connected_at: Optional[float] = None  # set on each HelloAck
 
     # ---- send API --------------------------------------------------------
@@ -227,11 +247,17 @@ class Transport:
             ("grpc.max_receive_message_length", 64 * 1024 * 1024),
         ]
 
-    def _make_channel(self, addr: str) -> grpc.aio.Channel:
-        target, use_tls = normalize_grpc_addr(addr)
+    def _make_channel(self, target: str, use_tls: bool) -> grpc.aio.Channel:
         if use_tls:
+            roots: Optional[bytes] = None
+            bundle = (getattr(self._settings, "grpc_ca_bundle", "") or "").strip()
+            if bundle:
+                with open(bundle, "rb") as f:
+                    roots = f.read()
             return grpc.aio.secure_channel(
-                target, grpc.ssl_channel_credentials(), options=self._channel_options()
+                target,
+                grpc.ssl_channel_credentials(root_certificates=roots),
+                options=self._channel_options(),
             )
         return grpc.aio.insecure_channel(target, options=self._channel_options())
 
@@ -246,35 +272,52 @@ class Transport:
         FatalTransportError on version mismatch / auth lockout / timeout."""
         attempt = 0
         redirect_addr: Optional[str] = None
+        redirect_tls: Optional[bool] = None
         redirect_hops = 0
         last_connected = time.monotonic()
 
         while not self._stopping.is_set():
-            addr = redirect_addr or self._settings.orchestrator_public_addr
-            redirect_addr = None
+            if redirect_addr is not None:
+                # Schemeless redirect targets inherit the TLS mode of the
+                # connection that issued the redirect — never downgrade.
+                target, use_tls = normalize_grpc_addr(redirect_addr, default_tls=redirect_tls)
+                redirect_addr = None
+            else:
+                target, use_tls = normalize_grpc_addr(self._settings.orchestrator_public_addr)
             self._connected_at = None
             try:
-                await self._connect_once(addr)
+                await self._connect_once(target, use_tls)
             except grpc.aio.AioRpcError as e:
                 code, details = e.code(), str(e.details() or "")
                 if code == grpc.StatusCode.UNAUTHENTICATED:
+                    now = time.monotonic()
+                    if self._first_auth_failure_at is None:
+                        self._first_auth_failure_at = now
                     self._consecutive_auth_failures += 1
-                    logger.error("stream rejected UNAUTHENTICATED (%d consecutive): %s",
-                                 self._consecutive_auth_failures, details)
-                    if self._consecutive_auth_failures >= _AUTH_FAILURE_EXIT_THRESHOLD:
+                    logger.error("stream rejected UNAUTHENTICATED (%d consecutive over %.0fs): %s",
+                                 self._consecutive_auth_failures,
+                                 now - self._first_auth_failure_at, details)
+                    if (
+                        self._consecutive_auth_failures >= _AUTH_FAILURE_EXIT_THRESHOLD
+                        and now - self._first_auth_failure_at >= _AUTH_FAILURE_EXIT_WINDOW_S
+                    ):
                         raise FatalTransportError(
-                            f"authentication rejected {self._consecutive_auth_failures} times: {details}"
+                            f"authentication rejected {self._consecutive_auth_failures} times "
+                            f"over {now - self._first_auth_failure_at:.0f}s: {details}"
                         ) from e
                 elif code == grpc.StatusCode.FAILED_PRECONDITION:
                     if details.startswith("not_leader:"):
                         if redirect_hops < _MAX_REDIRECT_HOPS:
                             redirect_hops += 1
                             redirect_addr = details.split(":", 1)[1].strip()
+                            redirect_tls = use_tls
                             logger.info("not_leader redirect -> %s (hop %d)", redirect_addr, redirect_hops)
                             continue  # immediate, no backoff
                         logger.warning("redirect hop limit reached; falling back with backoff")
                     elif "protocol_version_mismatch" in details:
                         raise FatalTransportError(f"protocol version mismatch: {details}") from e
+                    elif any(m in details for m in _PERMANENT_PRECONDITION_MARKERS):
+                        raise FatalTransportError(f"permanent registration rejection: {details}") from e
                     else:
                         logger.error("protocol violation: %s", details)
                 else:
@@ -282,7 +325,7 @@ class Transport:
             except FatalTransportError:
                 raise
             except Exception as e:
-                logger.warning("connection to %s failed: %s: %s", addr, type(e).__name__, e)
+                logger.warning("connection to %s failed: %s: %s", target, type(e).__name__, e)
             finally:
                 self._connected.clear()
                 await self.queue.reset_for_reconnect()
@@ -294,10 +337,13 @@ class Transport:
             if self._stopping.is_set():
                 return
 
+            # The immediate-redirect chain is over; the hop budget refreshes
+            # for the next leadership-churn episode.
+            redirect_hops = 0
+
             now = time.monotonic()
             if self._connected_at is not None:
                 last_connected = now
-                redirect_hops = 0
                 if now - self._connected_at >= _BACKOFF_RESET_AFTER_S:
                     attempt = 0
             timeout_s = float(self._settings.worker_disconnected_timeout_s or 0)
@@ -316,17 +362,26 @@ class Transport:
             except asyncio.TimeoutError:
                 pass
 
-    async def _connect_once(self, addr: str) -> None:
+    async def _connect_once(self, target: str, use_tls: bool) -> None:
         """One connection lifetime; sets self._connected_at once HelloAck lands."""
-        channel = self._make_channel(addr)
+        channel = self._make_channel(target, use_tls)
         try:
             stub = pb_grpc.WorkerSchedulerStub(channel)
             stream = stub.Connect(metadata=self._metadata())
 
-            hello = self._handlers.build_hello()
-            await stream.write(pb.WorkerMessage(hello=hello))
+            async def _handshake() -> Any:
+                await stream.write(pb.WorkerMessage(hello=self._handlers.build_hello()))
+                return await stream.read()
 
-            first = await stream.read()
+            # Deadline on the whole dial+Hello+HelloAck handshake: a hub that
+            # accepts the stream but never answers must not hang the worker
+            # forever (h2 keepalive is answered below the app layer).
+            try:
+                first = await asyncio.wait_for(_handshake(), _HELLO_ACK_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                raise ConnectionError(
+                    f"no HelloAck within {_HELLO_ACK_TIMEOUT_S:.0f}s"
+                ) from None
             if first is grpc.aio.EOF:
                 raise ConnectionError("stream closed before HelloAck")
             if first.WhichOneof("msg") != "hello_ack":
@@ -339,8 +394,9 @@ class Transport:
                 )
             self._connected_at = time.monotonic()
             self._consecutive_auth_failures = 0
+            self._first_auth_failure_at = None
             self._connected.set()
-            logger.info("connected to %s (HelloAck ok)", addr)
+            logger.info("connected to %s (HelloAck ok)", target)
             await self._handlers.on_hello_ack(ack)
 
             send_task = asyncio.create_task(self._send_loop(stream), name="transport-send")

@@ -34,6 +34,9 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     # Single shared value across the cluster — the router resolves us to the
     # per-release lease owner. gen-orchestrator issue #317.
     orchestrator_public_addr: str = ""
+    # Optional PEM CA bundle for the orchestrator gRPC TLS connection.
+    # Empty = system roots.
+    grpc_ca_bundle: str = ""
 
     # Per-pod worker identity (orchestrator-injected).
     worker_id: str = ""

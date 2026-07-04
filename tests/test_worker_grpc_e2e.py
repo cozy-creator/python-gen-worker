@@ -434,7 +434,13 @@ def test_marco_polo_example_serves_under_the_new_core() -> None:
         sys.path.remove(str(src))
 
 
-def test_auth_rejection_exits_instead_of_spinning() -> None:
+def test_auth_rejection_exits_instead_of_spinning(monkeypatch) -> None:
+    # UNAUTHENTICATED can be transient hub-side; the fatal exit is gated on
+    # BOTH a failure count and an elapsed window (#372). Shrink the window so
+    # the test observes the exit quickly.
+    import gen_worker.transport as transport_mod
+
+    monkeypatch.setattr(transport_mod, "_AUTH_FAILURE_EXIT_WINDOW_S", 0.3)
     scheduler = FakeScheduler(reject_unauthenticated=True)
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
     pb_grpc.add_WorkerSchedulerServicer_to_server(scheduler, server)
@@ -446,6 +452,131 @@ def test_auth_rejection_exits_instead_of_spinning() -> None:
         assert harness.join(timeout=_TIMEOUT) == 1
     finally:
         server.stop(grace=0)
+
+
+def test_auth_rejection_within_window_keeps_retrying() -> None:
+    """3 quick UNAUTHENTICATED strikes must NOT kill the worker while the
+    exit window has not elapsed — a hub pg blip is survivable (#372)."""
+    scheduler = FakeScheduler(reject_unauthenticated=True)
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+    pb_grpc.add_WorkerSchedulerServicer_to_server(scheduler, server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    try:
+        harness = _Harness(scheduler, port)
+        harness.start()
+        deadline = time.monotonic() + 3.0
+        while len(harness.worker.transport.reconnect_delays) < 4:
+            assert harness._thread.is_alive(), "worker exited inside the auth window"
+            assert time.monotonic() < deadline, "worker never retried"
+            time.sleep(0.02)
+        assert harness.exit_code is None
+    finally:
+        harness.stop()
+        server.stop(grace=0)
+
+
+def test_permanent_precondition_exits_fast() -> None:
+    """worker_id_mismatch cannot heal by retrying: exit for reap immediately
+    instead of burning the disconnected timeout (#372)."""
+
+    class _Mismatch(FakeScheduler):
+        def Connect(self, request_iterator, context):
+            context.abort(grpc.StatusCode.FAILED_PRECONDITION,
+                          "worker_id_mismatch: hello=w1 jwt_sub=w2")
+
+    scheduler = _Mismatch()
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+    pb_grpc.add_WorkerSchedulerServicer_to_server(scheduler, server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    try:
+        harness = _Harness(scheduler, port)
+        harness.start()
+        assert harness.join(timeout=_TIMEOUT) == 1
+    finally:
+        server.stop(grace=0)
+
+
+def test_hello_ack_deadline_reconnects_instead_of_hanging(monkeypatch) -> None:
+    """A hub that accepts the stream but never sends HelloAck must not hang
+    the worker forever (#372): the handshake deadline fires and the worker
+    reconnects with backoff."""
+    import gen_worker.transport as transport_mod
+
+    monkeypatch.setattr(transport_mod, "_HELLO_ACK_TIMEOUT_S", 0.3)
+
+    stalls = {"n": 0}
+
+    class _Stall(FakeScheduler):
+        def Connect(self, request_iterator, context):
+            stalls["n"] += 1
+            if stalls["n"] == 1:
+                next(request_iterator)      # read Hello, then say nothing
+                time.sleep(5.0)             # stall well past the deadline
+                return iter(())
+            return super().Connect(request_iterator, context)
+
+    scheduler = _Stall()
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+    pb_grpc.add_WorkerSchedulerServicer_to_server(scheduler, server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    harness = _Harness(scheduler, port)
+    harness.start()
+    try:
+        # The SECOND attempt (after the deadline fired) completes the handshake.
+        conn = scheduler.wait_connection(0)
+        assert conn.hello is not None
+        assert stalls["n"] >= 2
+    finally:
+        harness.stop()
+        server.stop(grace=0)
+
+
+def test_not_leader_redirect_is_followed() -> None:
+    """FAILED_PRECONDITION not_leader:<addr> redirects the worker to the
+    leader immediately; schemeless targets keep the dialing TLS mode (#372,
+    plaintext here on both ends)."""
+    real = FakeScheduler()
+    real_server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
+    pb_grpc.add_WorkerSchedulerServicer_to_server(real, real_server)
+    real_port = real_server.add_insecure_port("127.0.0.1:0")
+    real_server.start()
+
+    class _NotLeader(FakeScheduler):
+        def Connect(self, request_iterator, context):
+            context.abort(grpc.StatusCode.FAILED_PRECONDITION,
+                          f"not_leader:127.0.0.1:{real_port}")
+
+    stale = _NotLeader()
+    stale_server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+    pb_grpc.add_WorkerSchedulerServicer_to_server(stale, stale_server)
+    stale_port = stale_server.add_insecure_port("127.0.0.1:0")
+    stale_server.start()
+
+    harness = _Harness(stale, stale_port)
+    harness.start()
+    try:
+        conn = real.wait_connection(0)
+        assert conn.hello is not None and conn.hello.worker_id == "e2e-worker"
+    finally:
+        harness.stop()
+        real_server.stop(grace=0)
+        stale_server.stop(grace=0)
+
+
+def test_normalize_grpc_addr_inherits_tls_for_schemeless_redirects() -> None:
+    from gen_worker.transport import normalize_grpc_addr
+
+    assert normalize_grpc_addr("10.0.0.1:7000", default_tls=True) == ("10.0.0.1:7000", True)
+    assert normalize_grpc_addr("10.0.0.1:7000", default_tls=False) == ("10.0.0.1:7000", False)
+    # Explicit schemes always win.
+    assert normalize_grpc_addr("grpc://10.0.0.1:7000", default_tls=True) == ("10.0.0.1:7000", False)
+    assert normalize_grpc_addr("grpcs://10.0.0.1:7000", default_tls=False) == ("10.0.0.1:7000", True)
+    # No hint: the bare :443 heuristic stands.
+    assert normalize_grpc_addr("example.com:443") == ("example.com:443", True)
+    assert normalize_grpc_addr("example.com:7000") == ("example.com:7000", False)
 
 
 # ---------------------------------------------------------------------------
