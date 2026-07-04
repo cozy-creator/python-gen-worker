@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- **API rewrite (#368) — breaking, no aliases.** ONE `@endpoint` decorator
+  (function = stateless, class + optional `setup()` = stateful, `kind=` for
+  conversion/training/dataset, async-generator = streaming, `runtime="vllm"`/
+  `"llama-server"` = engine-hosted server subprocess with boot/health-wait/
+  abort/shutdown). Deleted `@inference`/`@invocable`/`@batched_inference` and
+  the per-kind `.function` aliases. Bindings are now single-positional-ref
+  `HF(id, revision=, dtype=, subfolder=, files=)` / `Hub(ref, tag=, flavor=)` /
+  `Civitai(id, version=)` / `ModelScope(id, ...)`; slot names come only from
+  the models-dict key or injected param name; `variants={name: (binding,
+  Resources)}` is the one variant mechanism (replaces Case/parametrize +
+  dispatch + `.flavor()`/`.dtype()` chainables). `Resources(gpu, vram_gb,
+  compute_capability, libraries)` with `vram_gb` implying `gpu`.
+  `RequestContext` slimmed to 15 members (`cancelled`/`raise_if_cancelled`,
+  typed `save_image/audio/video`, `generator(seed)`); producer methods live on
+  the Conversion/Dataset/Training subclasses. The worker owns placement/
+  offload (`models.memory.place_pipeline`); `gen_worker.apply_low_vram_config`
+  re-export removed. `[tool.gen_worker] main` in pyproject replaces
+  endpoint.toml. CLI: `describe` folded into `run --list`; warm-socket attach
+  is explicit `--attach`; `_models` payload overrides dropped. New
+  `BatchItemDelta` streaming struct. Legacy worker-side capability-claims
+  precheck deleted (server enforces).
+
 - models layer rewrite (#366, #358): one async `ensure_local()` download path
   (tensorhub CAS / HF snapshot + small variant selector / civitai fetch), `Residency`
   LRU VRAM/RAM/disk manager (shared components counted once, pin-while-executing,
