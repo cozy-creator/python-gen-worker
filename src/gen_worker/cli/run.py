@@ -235,9 +235,14 @@ def _select_function(
             if c.cls is not None and c.cls.__name__ == cls_name
         ]
     if method_name:
+        # fn_name is the canonical slug; accept the python attr name or
+        # either slug spelling.
+        from gen_worker.discovery.names import slugify_name
+
+        wanted_slug = slugify_name(method_name)
         matches = [
             c for c in matches
-            if c.attr_name == method_name or c.fn_name == method_name
+            if c.attr_name == method_name or c.fn_name == wanted_slug
         ]
 
     if not matches:
@@ -254,8 +259,10 @@ def _select_function(
         )
     if len(matches) > 1:
         if not cls_name and not method_name and default_name:
-            wanted = default_name.replace("-", "_").lower()
-            defaults = [m for m in matches if m.fn_name.lower() == wanted]
+            from gen_worker.discovery.names import slugify_name
+
+            wanted = slugify_name(default_name)
+            defaults = [m for m in matches if m.fn_name == wanted]
             if len(defaults) == 1:
                 return defaults[0]
         listing = "\n  - " + "\n  - ".join(_label(c) for c in matches)

@@ -83,7 +83,7 @@ def test_serve_sidecar_written_and_removed(tmp_path) -> None:
         assert doc["pid"] == proc.pid
         assert "protocol_version" in doc and "functions" in doc
         assert doc["listen"] == str(sock)
-        assert "marco_polo" in doc["functions"]
+        assert "marco-polo" in doc["functions"]
     finally:
         proc.send_signal(signal.SIGTERM)
         try:

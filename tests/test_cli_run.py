@@ -126,7 +126,7 @@ def test_run_attach_dispatches_through_warm_serve(monkeypatch, capsys, tmp_path)
 
     assert cli.main(["run", "--attach", "--module", "_test_marco", "--payload", json.dumps({"text": "marco"})]) == 0
     # Routed through the warm server with the resolved function NAME + payload.
-    assert captured["request"]["function"] == "marco_polo"
+    assert captured["request"]["function"] == "marco-polo"
     assert captured["request"]["payload"] == {"text": "marco"}
     assert _last_event(capsys)["value"]["response"] == "polo"
 
@@ -223,9 +223,9 @@ def test_run_list_emits_description_document(capsys, monkeypatch) -> None:
     doc = json.loads(capsys.readouterr().out)
     assert doc["protocol_version"] >= 1
     fns = {f["name"]: f for f in doc["functions"]}
-    assert "marco_polo" in fns
-    assert fns["marco_polo"]["class"] == "MarcoPolo"
-    assert "properties" in fns["marco_polo"]["input_schema"]
+    assert "marco-polo" in fns
+    assert fns["marco-polo"]["class"] == "MarcoPolo"
+    assert "properties" in fns["marco-polo"]["input_schema"]
 
 
 def test_pyproject_tool_gen_worker_main(tmp_path) -> None:

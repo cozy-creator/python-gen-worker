@@ -49,6 +49,7 @@ from typing import Any, Dict, List, Optional
 import msgspec
 
 from ..api.errors import CanceledError
+from ..discovery.names import slugify_name
 from ..models import memory
 from ..models.residency import Residency, Tier
 from . import run as run_mod
@@ -197,9 +198,14 @@ def _filter_candidates_by_function(
 
     # Accept both repeated flags (--function a --function b) and a
     # comma-separated list (--function a,b,c), so either spelling works.
+    # Function names are canonical slugs; slugify so marco_polo == marco-polo.
     names: List[str] = []
     for raw in wanted:
-        names.extend(part.strip() for part in str(raw or "").split(",") if part.strip())
+        names.extend(
+            slugify_name(part.strip())
+            for part in str(raw or "").split(",")
+            if part.strip()
+        )
     if not names:
         return candidates
 
@@ -468,7 +474,9 @@ class _Endpoint:
         ``on_event`` may raise (e.g. on client disconnect) to abort the handler.
         """
         self.last_activity = time.time()  # reset the --idle-timeout clock
-        served = self.functions.get(function_name)
+        served = self.functions.get(function_name) or self.functions.get(
+            slugify_name(function_name)
+        )
         if served is None:
             return _error_envelope(
                 "not_found",
