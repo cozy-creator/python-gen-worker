@@ -17,6 +17,7 @@ import msgspec
 
 from .api.binding import Binding
 from .api.decorators import ATTR, EndpointDecl, Resources
+from .discovery.names import slugify_name
 from .discovery.walk import find_endpoints
 
 _ITER_ORIGINS = (
@@ -40,7 +41,7 @@ class EndpointSpec:
     calls ``method`` directly with no instance/setup.
     """
 
-    name: str                     # routable function name (pre-slug)
+    name: str                     # routable function name (canonical slug)
     method: Callable[..., Any]    # unbound function object
     kind: str                     # inference | training | dataset | conversion
     payload_type: type            # msgspec.Struct
@@ -127,8 +128,16 @@ def _spec_for_handler(
         raise ValueError(f"{owner}: missing return type annotation")
     output_mode, output_type, delta_type = _inspect_return(owner, ret)
 
+    # The wire/dispatch name is the SLUG (matches the discovery manifest and
+    # tensorhub's canonical function names — `_` -> `-`): the orchestrator's
+    # RunJob.function_name and the worker's advertised available_functions
+    # must agree, and the platform normalizes to slugs everywhere.
+    slug = slugify_name(fn_name)
+    if not slug:
+        raise ValueError(f"{owner}: function name {fn_name!r} cannot be normalized")
+
     return EndpointSpec(
-        name=fn_name,
+        name=slug,
         method=method,
         kind=decl.kind,
         payload_type=payload_type,

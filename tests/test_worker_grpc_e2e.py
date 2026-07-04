@@ -405,17 +405,17 @@ def test_marco_polo_example_serves_under_the_new_core() -> None:
             conn.wait_for(
                 lambda m: m.WhichOneof("msg") == "state_delta"
                 and m.state_delta.phase == pb.WORKER_PHASE_READY
-                and "marco_polo" in m.state_delta.available_functions
+                and "marco-polo" in m.state_delta.available_functions
             )
             conn.send(run_job=pb.RunJob(
-                request_id="mp-1", attempt=1, function_name="marco_polo",
+                request_id="mp-1", attempt=1, function_name="marco-polo",
                 input_payload=_msgpack("marco")))
             res = conn.wait_for(_is_result_for("mp-1")).job_result
             assert res.status == pb.JOB_STATUS_OK
             assert _decode_out(res.inline).response == "polo"
 
             conn.send(run_job=pb.RunJob(
-                request_id="mp-2", attempt=1, function_name="marco_polo_stream",
+                request_id="mp-2", attempt=1, function_name="marco-polo-stream",
                 input_payload=_msgpack("marco")))
             res = conn.wait_for(_is_result_for("mp-2")).job_result
             assert res.status == pb.JOB_STATUS_OK
@@ -562,8 +562,8 @@ def test_model_op_download_load_unload_round_trip(tmp_path, monkeypatch) -> None
             and m.state_delta.phase == pb.WORKER_PHASE_READY
         )
         # Gated until its model loads: present in loading, absent from available.
-        assert "model_echo" not in ready.state_delta.available_functions
-        assert "model_echo" in ready.state_delta.loading_functions
+        assert "model-echo" not in ready.state_delta.available_functions
+        assert "model-echo" in ready.state_delta.loading_functions
 
         # DOWNLOAD -> DOWNLOADING then ON_DISK.
         conn.send(model_op=pb.ModelOp(
@@ -578,12 +578,12 @@ def test_model_op_download_load_unload_round_trip(tmp_path, monkeypatch) -> None
         conn.wait_for(_is_model_event("e2e/tiny", pb.MODEL_STATE_IN_RAM))
         conn.wait_for(
             lambda m: m.WhichOneof("msg") == "state_delta"
-            and "model_echo" in m.state_delta.available_functions
+            and "model-echo" in m.state_delta.available_functions
         )
 
         # The handler sees the materialized snapshot content.
         conn.send(run_job=pb.RunJob(
-            request_id="r-model", attempt=1, function_name="model_echo",
+            request_id="r-model", attempt=1, function_name="model-echo",
             input_payload=_msgpack("marco")))
         res = conn.wait_for(_is_result_for("r-model")).job_result
         assert res.status == pb.JOB_STATUS_OK
@@ -602,8 +602,8 @@ def test_model_op_download_load_unload_round_trip(tmp_path, monkeypatch) -> None
             time.sleep(0.02)
         conn.wait_for(
             lambda m: m.WhichOneof("msg") == "state_delta"
-            and "model_echo" not in m.state_delta.available_functions
-            and "model_echo" in m.state_delta.loading_functions
+            and "model-echo" not in m.state_delta.available_functions
+            and "model-echo" in m.state_delta.loading_functions
         )
     finally:
         harness.stop()

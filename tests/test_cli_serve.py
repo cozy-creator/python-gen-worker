@@ -88,7 +88,7 @@ def test_lazy_setup_on_first_invoke_only_invoked_class_and_eager_at_boot() -> No
 
     ep = serve_mod._Endpoint(offline=False, allow_publish=False)
     ep.boot(candidates)
-    assert sorted(ep.function_names()) == ["do_alpha", "do_beta"]
+    assert sorted(ep.function_names()) == ["do-alpha", "do-beta"]
     assert setups == {}  # LAZY: boot indexes but does NOT setup
 
     # First invoke sets up ONLY Alpha; Beta (never called) stays cold. Warm after.
@@ -186,8 +186,8 @@ def test_serve_drives_residency_demote_promote_evict(monkeypatch) -> None:
     # Tiny VRAM budget so the two models over-subscribe (forces eviction).
     ep._residency = Residency(vram_budget_bytes=5 * 1024 ** 3)
     res = ep._residency
-    big_id = ep._model_id_by_inst[id(ep.functions["gen_big"].instance)]
-    small_id = ep._model_id_by_inst[id(ep.functions["gen_small"].instance)]
+    big_id = ep._model_id_by_inst[id(ep.functions["gen-big"].instance)]
+    small_id = ep._model_id_by_inst[id(ep.functions["gen-small"].instance)]
 
     # 1) big: cold setup + registered VRAM-resident.
     assert ep.dispatch("gen_big", {"text": "x"})["ok"] is True
@@ -199,7 +199,7 @@ def test_serve_drives_residency_demote_promote_evict(monkeypatch) -> None:
     assert ep.dispatch("gen_small", {"text": "x"})["ok"] is True
     assert res.tier(small_id) is Tier.VRAM
     assert res.tier(big_id) is Tier.RAM            # demoted, NOT re-setup
-    big_pipe = ep._pipeline_by_inst[id(ep.functions["gen_big"].instance)]
+    big_pipe = ep._pipeline_by_inst[id(ep.functions["gen-big"].instance)]
     assert big_pipe.moves[-1] == "cpu"             # real .to("cpu") demote
     assert setups == {"big": 1, "small": 1}
 
@@ -250,11 +250,11 @@ def test_filter_by_function_and_list_functions_without_booting(capsys) -> None:
 
     # --function alpha_one keeps the WHOLE Alpha class (both fns), drops Beta.
     filtered = serve_mod._filter_candidates_by_function(candidates, ["alpha_one"])
-    assert sorted(c.fn_name for c in filtered) == ["alpha_one", "alpha_two"]
+    assert sorted(c.fn_name for c in filtered) == ["alpha-one", "alpha-two"]
     assert all(c.cls.__name__ == "Alpha" for c in filtered)
     ep = serve_mod._Endpoint(offline=False, allow_publish=False)
     ep.boot(filtered)
-    assert ep.function_names() == ["alpha_one", "alpha_two"]
+    assert ep.function_names() == ["alpha-one", "alpha-two"]
     ep.dispatch("alpha_one", {"text": "x"})
     assert setups == {"Alpha": 1}  # only Alpha; Beta never set up
     ep.shutdown()
@@ -268,7 +268,7 @@ def test_filter_by_function_and_list_functions_without_booting(capsys) -> None:
     rc = cli.main(["serve", "--list-functions", "--module", name])
     assert rc == 0
     out = capsys.readouterr().out
-    assert "alpha_one" in out and "beta_one" in out and "Alpha" in out and "Beta" in out
+    assert "alpha-one" in out and "beta-one" in out and "Alpha" in out and "Beta" in out
     assert setups == {}
 
 
