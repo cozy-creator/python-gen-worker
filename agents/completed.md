@@ -8,6 +8,69 @@
 
 ---
 
+# #369: residency registry must own the executor's pipelines — honest vram_bytes, no load races
+
+**Completed:** yes
+**Status:** DONE (2026-07-04, Claude) — Residency now owns the executor's pipelines: per-slot allocator-delta measurement in `_injection_kwargs` (worker-built pipelines registered per ref with obj+measured bytes; tenant-loaded refs split the residual delta), loads serialized under a dedicated `Executor._load_lock` (same exclusion the GPU-semaphore option would give, without coupling loads to job slots), `demote`/`promote` only perform transitions they can actually execute (movable obj + RAM headroom) and `_vacate_record` books every held ref back to disk on teardown — registry and instance state cannot diverge. Free-VRAM probes sum across ALL CUDA devices (residency probe + lifecycle StateDelta). Also fixed: residency events from worker threads were dropped when no loop was captured (`ModelStore.bind_loop`). Tests: tests/test_executor_residency.py.
+
+Planner-audit finding (tensorhub docs/planner.md; counterpart hub issues #533-#537). The wire executor and the `Residency` registry are two disconnected worlds: loaded pipelines live in `Executor._classes[key].instance` while `Residency` entries get `obj=None` (`ModelStore.mark_in_vram(ref, vram_delta)` never passes the object). Consequences: `make_room`/`promote`/`demote` are inert in production (only the CLI serve path uses them); `demote()` on an executor-loaded ref would flip the hub's view to ON_DISK while the pipeline still sits in VRAM; and the reported footprint is wrong in the common cases below. The hub's cost-based router (tensorhub #535) and pre-positioner (#537) both consume `vram_bytes` — garbage in, garbage placement out.
+
+Bugs, file:line:
+- **Multi-model setups report 0**: `ensure_setup` books `vram_delta if len(refs)==1 else 0` per ref (executor.py:439) — every ref of a multi-binding endpoint lands IN_VRAM with `vram_bytes=0`, and with `obj=None` the `estimate_cuda_resident_gb` fallback in `track_vram` measures nothing.
+- **Concurrent setup cross-contamination**: `ensure_setup` runs BEFORE the GPU semaphore acquire (executor.py:720 vs 745), so two jobs for different specs can interleave `from_pretrained` and both allocator deltas double-count each other's weights. Loads must serialize (a load lock or the GPU semaphore) — also protects `place_pipeline`'s free-VRAM read.
+- **Device-0-only probes**: `lifecycle.free_vram_bytes()` and `Residency._default_free_vram_bytes` read `mem_get_info(0)`; multi-GPU workers report GPU0 only while `ResolvedCompute.gpu_index` spreads jobs across cards.
+
+Tasks:
+- [x] Register the actual owner in Residency: `track_vram(ref, obj=<instance-or-teardown-handle>, ...)` from `ensure_setup`; `_unload_ref` becomes `Residency`-driven so registry state and instance state cannot diverge.
+- [x] Per-ref attribution for multi-binding setups: measure each slot's load separately (allocator delta around each `load_from_pretrained`) instead of one blob delta around the whole setup.
+- [x] Serialize model loads under a lock shared with the GPU semaphore path; take the allocator-delta measurement inside it.
+- [x] Multi-GPU: sum `mem_get_info` across devices for StateDelta.free_vram_bytes (or report per-device once the hub consumes it); make Residency's probe device-aware.
+- [x] (shipped separately) LOAD failures now emit `error="oom"` when OOM so the hub's UNLOAD-for-headroom reaction (connect_worker.handleModelFailure) is reachable — was dead code because the worker only ever said "load_failed".
+
+## Acceptance
+Hub's `WorkerInfo.Models[ref].VRAMBytes` matches `torch.cuda.memory_allocated` attribution per ref on a two-model endpoint; concurrent RunJobs for two cold specs produce non-overlapping measurements.
+
+---
+
+# #370: keep-set disk retention — `keep` is write-only, no disk GC exists
+
+**Completed:** yes
+**Status:** DONE (2026-07-04, Claude) — pre-download headroom gate in `ModelStore.ensure_local` (snapshot sizes vs disk-free probe → GC first → `ModelEvent{FAILED, insufficient_disk}` + typed `InsufficientDiskError`, which fails the job RETRYABLE without self-disabling the function), LRU disk GC over Residency DISK-tier refs honoring keep + in-use pins + 300s grace, keep-pressure escape hatch still emits EVICTED; deletion units in models/disk_gc.py (CAS snapshot dir + hardlink-count orphan-blob sweep; HF `models--*` repo dir), boot-time rescan wired into lifecycle.startup(). Deliberate: rescan reads the persisted `ref-index.json` instead of walking bare CAS digests (digests don't map back to wire refs); hf/civitai downloads have no up-front size and skip the pre-gate. Tests: tests/test_disk_gc.py (real files, budgeted probe).
+
+Contract §7 promises: "W's eviction policy never removes a `keep` ref from disk while headroom allows; if disk pressure forces it, W emits ModelEvent{EVICTED} so O knows to re-download later." None of that exists. `ModelStore.keep` is assigned from HelloAck (lifecycle.py:141) and never read again; nothing ever deletes model bytes from disk; a long-lived worker serving rotating tenant fine-tunes fills its disk until the pod dies. Downloads also start with no disk-headroom check (snapshot file sizes are known up front — `SnapshotFile.size_bytes`).
+
+Tasks:
+- [x] Pre-download headroom gate in `ModelStore.ensure_local`: `statvfs` free vs `sum(size_bytes)` + margin; on shortfall run disk GC first; if still short emit `ModelEvent{FAILED, error="insufficient_disk"}` (vocab already exists).
+- [x] Disk GC: LRU over Residency DISK-tier entries, never evicting `keep` refs or refs of in-flight jobs; delete bytes + `evict()` + emit EVICTED.
+- [x] Keep-pressure escape hatch per contract: when GC of non-keep refs is insufficient, evict LRU keep refs too (still emitting EVICTED — the hub's 15s prefetch refresh re-downloads when demand returns).
+- [x] Boot-time disk rescan: after restart, Residency starts empty while the CAS dir is full — Hello.models omits refs that are actually local until first touch. Walk the CAS dir at startup and `track_disk` complete snapshots so the hub's baseline (and GC's view) is honest.
+- [x] e2e: fill a small TENSORHUB_CACHE_DIR, download over budget → LRU non-keep ref evicted with EVICTED event; keep ref survives.
+
+## Acceptance
+A worker with a bounded cache dir serves an unbounded rotation of refs without manual cleanup; hub residency view matches disk truth across worker restarts.
+
+---
+
+# #371: worker-side VRAM juggling — make_room before load; UNLOAD demotes instead of destroying
+
+**Completed:** yes
+**Status:** DONE (2026-07-04, Claude) — `ensure_setup` runs make_room before loading (estimate: per-ref `vram_hint` from a prior load, else declared `resources.vram_gb`); movable LRU victims demote to the warm RAM tier, non-movable victims vacate via record teardown; hub UNLOAD demotes instead of destroying (instance stays ready) and the next RunJob/LOAD promotes RAM→VRAM under the load lock; the offload ladder remains the fallback when make_room can't reach the requirement. Simulated-VRAM e2e (vram_budget_bytes): alternating endpoints swap via demote/promote with IN_VRAM⇄IN_RAM ModelEvents and zero teardowns (tests/test_executor_residency.py).
+
+Depends on #369. Today a new pipeline load never evicts an idle endpoint's pipeline: `place_pipeline` reads free VRAM and degrades ITSELF down the offload ladder (vae_only → model_offload → ...) even when demoting an idle LRU pipeline would let both run at full speed. And hub-initiated `UNLOAD` is a full instance teardown (`_unload_ref` → shutdown + del): re-serving the model later pays a complete disk reload + setup, making the hub's future UNLOAD/LOAD juggling (tensorhub #537 pre-positioner) needlessly expensive. The warm RAM tier — designed, reported on the wire, scored by the hub's router (localityRAM) — is unreachable in the wire path.
+
+Tasks:
+- [x] `ensure_setup` calls `store.residency.make_room(estimated_bytes)` before loading (estimate: binding resources.vram_gb, or the ref's `vram_hint` from a prior load); LRU victims demote per Residency policy. Requires #369's obj ownership so demote actually frees VRAM.
+- [x] Demote = pipeline `.to("cpu")` keeping the `_ClassRecord` instance alive (RAM tier, honest IN_RAM event) when host RAM allows (`_RAM_FLOOR_GB` logic exists); teardown only on RAM pressure or explicit evict.
+- [x] `_unload_ref` (hub UNLOAD) demotes to RAM/disk through the same path instead of destroying the instance; next LOAD/RunJob promotes RAM→VRAM (`.to("cuda")`) in seconds instead of a cold setup.
+- [x] Promotion path: RunJob for a RAM-tier instance re-promotes before dispatch to the handler (executor checks tier in `ensure_setup`).
+- [x] Re-evaluate `place_pipeline` interplay: offload ladder remains the fallback when make_room cannot reach the requirement (single model bigger than the card), not the first response to a busy card.
+- [x] e2e (CPU-tier simulable with vram_budget_bytes): two endpoints, budget for one — alternating jobs demote/promote instead of tearing down; ModelEvents follow IN_VRAM ⇄ IN_RAM.
+
+## Acceptance
+Alternating requests across two endpoints on one GPU show demote/promote transitions (no full reloads) and both run unoffloaded when resident alone.
+
+---
+
 # #375: `yield ProducedFlavor` conversion contract is gone — from-scratch example (and training-endpoints quant endpoints) silently publish nothing
 
 **Completed:** yes
