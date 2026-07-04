@@ -582,6 +582,8 @@ class RequestContext:
                 import numpy as np
                 import soundfile as sf
             except ImportError as exc:
+                from ..api.errors import ValidationError
+
                 raise ValidationError(
                     "save_audio needs the audio extra: pip install 'gen-worker[audio]'"
                 ) from exc

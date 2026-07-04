@@ -4,7 +4,6 @@ producer contexts (no import-time setattr)."""
 
 from __future__ import annotations
 
-import msgspec
 import pytest
 
 from gen_worker import (
