@@ -12,30 +12,6 @@ next_id: 369
 ---
 
 
-# #358: VRAM/memory correctness — free-vs-total, double-counting, digest poisoning
-
-**Completed:** no
-**Status:** OPEN — the offload/eviction layer makes decisions from wrong numbers.
-
-## Tasks
-- [x] `select_auto_mode` compares against **total** VRAM minus margin (inference_memory.py:204, 228-237); `get_available_vram_gb` (:81-91) is never consulted. Second model on an occupied card gets `"off"` → OOM. Base the ladder on free VRAM. [DONE (fix/p0-correctness): param renamed `total_vram_gb`→`available_vram_gb`, defaults to `get_available_vram_gb()`; the sole caller `apply_low_vram_config` inherits it. Every threshold/headroom check now reads free VRAM.]
-- [x] `OFF_HEADROOM` (commit 5347209, inference_memory.py:235) inherits the same defect and proactively strips the vae_only guard on partially-occupied cards. Re-derive against free VRAM; then fix the two #356 tests once. [DONE: OFF_HEADROOM now measures free headroom, so a partially-occupied card (small free space) keeps the vae_only guard instead of falling to "off". #356 memory tests re-derived to match.]
-- [ ] `estimate_pipeline_size_gb` (inference_memory.py:126-147) sums all params regardless of device: CPU-offloaded pipelines booked as full VRAM in `ModelCache._vram_used_gb` (models/cache.py:355, 371); shared components double-counted (once via SharedComponentCache shared_components.py:272, again inside each owner's estimate). Count only CUDA-resident params; account shared components once.
-- [ ] Kill the fantasy constants: hardcoded `size = 5.0` GB fallback (worker.py:9409) and "evict half the cache budget because we don't know its size" (worker.py:8710). Measure via `torch.cuda.memory_allocated` deltas at load time.
-- [ ] **Digest poisoning**: a failed snapshot build leaves the entry + set event in `_SNAP_ENTRIES` and re-raises the stale exception forever (models/cozy_snapshot_v2.py:188-201, 228-232). Evict failed entries so the next request retries.
-- [ ] Blocking HF download inside `async def _download_async` (models/ref_downloader.py:169) — wrap in `to_thread` like the civitai/modelscope branches. Same for loader.py rglob/stat/JSON on the loop (:1130, 1162, 1207, 1214).
-- [ ] Unify the three disagreeing low-VRAM deciders: `inference_memory.select_auto_mode` (total), `pipeline/loader._apply_memory_optimizations` (:983-1021, free), worker.py inline preflight (:11928-11949, free + private 6GB/2GB thresholds). One decider, one input (free VRAM).
-- [ ] Conversion dtype mislabels: fp8:e5m2→e4m3 kernels stamped `fp8:e5m2` (conversion/inline_convert.py:102-103 vs :624), int4→nf4 same (:115 vs :757) — inference dispatches on this label (core_types.py:71-81). Stamp the produced dtype. Unknown dtype strings silently load as bf16 (pipeline/loader.py:313-326) — warn or fail.
-- [ ] Delete the ~190-line Flux2-Klein filename-hardcoded hack from the generic worker (worker.py:8748-8940); express it as endpoint-side config or a variant selector.
-
-## Acceptance
-A worker with an occupied GPU chooses an offload mode that fits *free* VRAM; a failed download retries cleanly; `test_inference_memory_select.py` green against the new semantics.
-
----
-
-
-
-
 # #362: docs teach a deleted API — every README quickstart raises ImportError
 
 **Completed:** no
@@ -71,24 +47,6 @@ Fresh clone: `task test` and `task lint` work; `task proto` regenerates pb/ iden
 ---
 
 
-
-# #366: models layer v2 — download/cache/memory/residency, ~2,500 LOC
-
-**Completed:** no
-**Status:** OPEN — replaces models/ + pipeline/ + the worker's injection half. Two HF download stacks, two loaded-pipeline registries, dtype logic in ≥5 places, SM detection ×5 today.
-
-## Tasks
-- [ ] `refs.py` (~150): keep the current ref grammar/parsing (models/refs.py is fine).
-- [ ] `download.py` (~500): one `async def ensure_local(ref) -> Path` dispatching to (a) tensorhub CAS (keep cozy_cas/cozy_snapshot_v2 with the #358 poisoning fix), (b) `huggingface_hub.snapshot_download` in `to_thread` with `allow_patterns` from a ~100-line variant selector (replaces hf_selection's 522 LOC + hf_classifier for this purpose), (c) one civitai fetch (~200, extracted from conversion/ingest.py:1939 — the only conversion function the generation path uses). One progress reporter (today: three).
-- [ ] `memory.py` (~400): merged inference_memory + ModelCache accounting per #358 — free-VRAM ladder, CUDA-resident-only estimates, single eviction policy.
-- [ ] `residency.py` (~450): ModelCache LRU VRAM/CPU/disk tiers + SharedComponentCache folded in, keyed once, public eviction API (no `_private` reach-ins from the worker, no `\ttier=` string smuggling worker.py:9134-9169).
-- [ ] No PipelineLoader: endpoints receive a typed local path/pipeline and call `from_pretrained` themselves (they already do — flux.1-dev/main.py:103-110).
-- [ ] Absorb multi-model VRAM residency management currently hand-rolled inside flux.2-klein-9b (700 lines of endpoint code doing cross-pipeline eviction) — that's this layer's job.
-
-## Acceptance
-Endpoint `setup(self, model: FluxPipeline)` receives exactly what the annotation says, every SDK version; the 7 consumer `_resolve_model_path` hacks become deletable (inference-endpoints #343).
-
----
 
 # #367: split clone+conversion out as `cozy_convert`; move the tenant SDK to training-endpoints
 
