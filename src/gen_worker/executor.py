@@ -105,6 +105,16 @@ def _snapshot_to_resolved(snap: pb.Snapshot) -> Dict[str, Any]:
     }
 
 
+def _model_op_error_vocab(exc: BaseException) -> str:
+    """Contract §9 ModelEvent.error vocabulary for LOAD/UNLOAD failures."""
+    if type(exc).__name__ in ("OutOfMemoryError", "CUDAOutOfMemoryError"):
+        return "oom"
+    text = str(exc).lower()
+    if "out of memory" in text or "cuda oom" in text:
+        return "oom"
+    return "load_failed"
+
+
 def _is_terminal_download_error(exc: BaseException) -> bool:
     status = getattr(exc, "status_code", None)
     if isinstance(status, int) and 400 <= status < 500 and status != 429:
@@ -569,10 +579,13 @@ class Executor:
         except Exception as exc:
             logger.warning("ModelOp %s on %s failed: %s", op.op, ref, exc)
             # ensure_local already emitted FAILED for download errors; emit for
-            # load/unload paths that failed outside it.
+            # load/unload paths that failed outside it. OOM must say "oom" —
+            # it is the orchestrator's trigger to UNLOAD a resident model for
+            # headroom (contract §9 vocabulary).
             if op.op != pb.MODEL_OP_KIND_DOWNLOAD:
                 await self._send(pb.WorkerMessage(model_event=pb.ModelEvent(
-                    ref=ref, state=pb.MODEL_STATE_FAILED, error="load_failed")))
+                    ref=ref, state=pb.MODEL_STATE_FAILED,
+                    error=_model_op_error_vocab(exc))))
 
     def _ref_in_use(self, ref: str) -> bool:
         for job in self.jobs.values():
