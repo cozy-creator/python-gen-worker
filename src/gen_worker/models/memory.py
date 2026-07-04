@@ -1,25 +1,18 @@
-"""
-Robust low-VRAM inference helpers for diffusers pipelines.
+"""VRAM/memory decisions for the models layer (#358/#366).
 
-This module provides a progressive offload ladder and OOM-retry machinery so
-that inference on hosts with less VRAM than a model nominally requires degrades
-gracefully (slower) instead of crashing with ``torch.cuda.OutOfMemoryError``.
+One low-VRAM decider for the whole worker, driven by FREE VRAM only (never
+total capacity), plus size/measurement probes used by residency accounting.
 
 Ladder (auto mode, least-aggressive first):
 
   off           : no optimizations (pipeline on CUDA as-is)
-  vae_only      : VAE slicing + VAE tiling (+ attention slicing when available)
+  vae_only      : VAE slicing + tiling (+ attention slicing when available)
   model_offload : vae_only + ``enable_model_cpu_offload()``  (~10% slower)
   group_offload : leaf-level group offload with CUDA streams   (~25% slower)
   sequential    : ``enable_sequential_cpu_offload()``          (~50%+ slower)
 
-Defaults are chosen from upstream diffusers docs:
-  https://huggingface.co/docs/diffusers/main/en/optimization/memory
-
 Upstream foot-gun: ``enable_sequential_cpu_offload`` must NOT be called on a
-pipeline that was already moved to CUDA, or the memory savings are minimal.
-``apply_low_vram_config`` moves the pipeline back to CPU first when escalating
-to sequential mode.
+pipeline already moved to CUDA; ``apply_low_vram_config`` moves it back first.
 """
 
 from __future__ import annotations
@@ -27,33 +20,22 @@ from __future__ import annotations
 import gc
 import logging
 import os
-from typing import Any, Callable, Dict, List, Optional, TypeVar
+from typing import Any, Callable, Dict, Iterable, List, Optional, TypeVar
 
 _LOG = logging.getLogger(__name__)
 
-Mode = str  # Literal["auto", "off", "vae_only", "model_offload", "group_offload", "sequential"]
+Mode = str  # "auto" | "off" | "vae_only" | "model_offload" | "group_offload" | "sequential"
 
 _VALID_MODES: tuple[str, ...] = (
-    "auto",
-    "off",
-    "vae_only",
-    "model_offload",
-    "group_offload",
-    "sequential",
+    "auto", "off", "vae_only", "model_offload", "group_offload", "sequential",
 )
 
-# Default VRAM thresholds in GB for auto mode.
-# These match the de-facto standards used by the qwen-image and
-# multi-sdxl-checkpoints endpoints before centralization.
 _DEFAULT_VAE_SLICE_THRESHOLD_GB = 10.0
 _DEFAULT_MODEL_OFFLOAD_THRESHOLD_GB = 8.0
 _DEFAULT_GROUP_OFFLOAD_THRESHOLD_GB = 6.0
-# Safety margin below free VRAM we reserve for activations.
+# Safety margin below free VRAM reserved for activations.
 _DEFAULT_SAFETY_MARGIN_GB = 2.0
-# When a model fits with at least this much VRAM still free beyond it, run
-# fully unoptimized (mode "off") — VAE slicing/tiling only trades speed for
-# memory we demonstrably don't need. Below this slack we keep "vae_only" as a
-# cheap guard against high-resolution VAE-decode spikes.
+# Free headroom beyond the requirement above which "off" beats "vae_only".
 _DEFAULT_OFF_HEADROOM_GB = 8.0
 
 # Sentinel attribute set on pipelines to make apply_low_vram_config idempotent.
@@ -63,19 +45,6 @@ _COZY_MODE_ATTR = "_cozy_low_vram_mode"
 # ---------------------------------------------------------------------------
 # Probes
 # ---------------------------------------------------------------------------
-
-
-def get_total_vram_gb(device_index: int = 0) -> float:
-    """Total VRAM on the selected CUDA device. 0.0 if no CUDA."""
-    try:
-        import torch
-
-        if not torch.cuda.is_available():
-            return 0.0
-        props = torch.cuda.get_device_properties(device_index)
-        return float(props.total_memory) / float(1024**3)
-    except Exception:
-        return 0.0
 
 
 def get_available_vram_gb(device_index: int = 0) -> float:
@@ -101,50 +70,79 @@ def get_available_ram_gb() -> float:
         return 0.0
 
 
-def estimate_pipeline_size_gb(pipeline: Any) -> float:
-    """
-    Best-effort size estimate for a loaded pipeline via parameter bytes.
-    Returns 0.0 when torch is unavailable or the pipeline has no parameters.
-    """
+def cuda_allocated_bytes(device_index: Optional[int] = None) -> int:
+    """``torch.cuda.memory_allocated`` (0 without CUDA). Deltas across a load
+    are the measured VRAM footprint reported in ModelEvent.vram_bytes."""
     try:
         import torch
 
-        total = 0
-        seen: set[int] = set()
-        # Diffusers pipelines expose `components` dict; fall back to attrs.
-        comps: List[Any] = []
-        raw_components = getattr(pipeline, "components", None)
-        if isinstance(raw_components, dict):
-            comps.extend(raw_components.values())
-        else:
-            for attr in ("unet", "transformer", "vae", "text_encoder",
-                         "text_encoder_2", "text_encoder_3"):
-                v = getattr(pipeline, attr, None)
-                if v is not None:
-                    comps.append(v)
+        if torch.cuda.is_available():
+            return int(torch.cuda.memory_allocated(device_index))
+    except Exception:
+        pass
+    return 0
 
-        for c in comps:
+
+def _iter_components(pipeline: Any) -> List[Any]:
+    comps: List[Any] = []
+    raw = getattr(pipeline, "components", None)
+    if isinstance(raw, dict):
+        comps.extend(raw.values())
+    else:
+        for attr in ("unet", "transformer", "vae", "text_encoder",
+                     "text_encoder_2", "text_encoder_3"):
+            v = getattr(pipeline, attr, None)
+            if v is not None:
+                comps.append(v)
+    if not comps and hasattr(pipeline, "parameters"):
+        comps.append(pipeline)  # bare nn.Module
+    return comps
+
+
+def _sum_tensor_bytes(objs: Iterable[Any], *, cuda_only: bool) -> int:
+    import torch
+
+    total = 0
+    seen: set[int] = set()  # data_ptr dedupe: shared storages counted ONCE
+    for obj in objs:
+        for c in _iter_components(obj):
             if c is None or not hasattr(c, "parameters"):
                 continue
-            for p in c.parameters():
-                if not isinstance(p, torch.Tensor):
-                    continue
-                pid = id(p)
-                if pid in seen:
-                    continue
-                seen.add(pid)
-                total += p.numel() * p.element_size()
-            # Also count buffers (norm stats etc.)
+            tensors = list(c.parameters())
             if hasattr(c, "buffers"):
-                for b in c.buffers():
-                    if not isinstance(b, torch.Tensor):
-                        continue
-                    bid = id(b)
-                    if bid in seen:
-                        continue
-                    seen.add(bid)
-                    total += b.numel() * b.element_size()
-        return float(total) / float(1024**3)
+                tensors.extend(c.buffers())
+            for t in tensors:
+                if not isinstance(t, torch.Tensor):
+                    continue
+                if cuda_only and t.device.type != "cuda":
+                    continue
+                try:
+                    key = t.data_ptr()
+                except Exception:
+                    key = id(t)
+                if key in seen:
+                    continue
+                seen.add(key)
+                total += t.numel() * t.element_size()
+    return total
+
+
+def estimate_pipeline_size_gb(pipeline: Any) -> float:
+    """Total weight bytes of a pipeline regardless of device — the *requirement*
+    estimate the offload ladder compares against free VRAM. Tensors that share
+    storage (shared components) are counted once. 0.0 without torch."""
+    try:
+        return float(_sum_tensor_bytes([pipeline], cuda_only=False)) / float(1024**3)
+    except Exception:
+        return 0.0
+
+
+def estimate_cuda_resident_gb(*objects: Any) -> float:
+    """CUDA-resident bytes across the given pipelines/modules, shared storages
+    counted once — the *residency accounting* estimate (#358: CPU-offloaded
+    pipelines must not be booked as full VRAM; shared components once)."""
+    try:
+        return float(_sum_tensor_bytes(objects, cuda_only=True)) / float(1024**3)
     except Exception:
         return 0.0
 
@@ -169,7 +167,7 @@ def flush_memory() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Mode selection (auto)
+# Mode selection (auto) — the ONE low-VRAM decider, free-VRAM inputs only
 # ---------------------------------------------------------------------------
 
 
@@ -180,73 +178,43 @@ def select_auto_mode(
     model_size_gb: Optional[float] = None,
     peak_vram_gb: Optional[float] = None,
 ) -> str:
-    """
-    Pick the least-aggressive ladder step that should keep the pipeline in memory.
+    """Pick the least-aggressive ladder step that keeps the pipeline in memory.
 
-    Decisions are made against FREE VRAM (what is actually available right now),
-    not the card's TOTAL capacity. Placing a second model on a card that already
-    holds a resident model must see the reduced free space — comparing against
-    total made the ladder believe the model fit and pick ``off``, then OOM.
+    Decisions are made against FREE VRAM (what is actually available right
+    now), never the card's TOTAL capacity: a second model on an occupied card
+    must see the reduced free space.
 
-    Decision logic (``avail`` = free VRAM):
-      - no CUDA / no free VRAM                  -> off
-      - model fits with generous headroom      -> off
-      - model fits (incl. safety margin)       -> vae_only
-      - avail VRAM <= group_offload_threshold  -> group_offload
-      - avail VRAM <= model_offload_threshold  -> model_offload
-      - avail VRAM <= vae_slice_threshold      -> vae_only
-      - requirement > (avail - margin)         -> model_offload
-      - otherwise                              -> vae_only
-
-    ``peak_vram_gb`` is the endpoint's DECLARED peak VRAM during one request
-    (``Resources.peak_vram_per_request_gb``, issue #339). When provided it
-    drives the fit check instead of the framework guessing from weights alone:
-    the requirement becomes ``max(model_gb, peak_vram_gb)`` so a tenant who
-    declares a large per-request peak (big activations / many images) offloads
-    sooner, while one who declares a small peak still never drops below the
-    measured weight footprint. Absent a declaration the behavior is unchanged.
+    ``peak_vram_gb`` is the endpoint's DECLARED per-request peak
+    (``Resources.peak_vram_per_request_gb``, #339); when provided the fit
+    requirement becomes ``max(model_gb, peak_vram_gb)``.
     """
     avail = available_vram_gb if available_vram_gb is not None else get_available_vram_gb()
     if avail <= 0.0:
         return "off"
 
     model_gb = model_size_gb if model_size_gb is not None else estimate_pipeline_size_gb(pipeline)
-    # Declared per-request peak (#339) raises — never lowers — the requirement.
     requirement = model_gb
     if peak_vram_gb is not None and peak_vram_gb > 0.0:
         requirement = max(model_gb, float(peak_vram_gb))
     margin = _DEFAULT_SAFETY_MARGIN_GB
-    t_group = _DEFAULT_GROUP_OFFLOAD_THRESHOLD_GB
-    t_model = _DEFAULT_MODEL_OFFLOAD_THRESHOLD_GB
-    t_vae = _DEFAULT_VAE_SLICE_THRESHOLD_GB
 
-    # Very low free VRAM: even a model that "fits" needs aggressive help for activations.
-    if avail <= t_group:
+    # Very low free VRAM: even a fitting model needs aggressive help for activations.
+    if avail <= _DEFAULT_GROUP_OFFLOAD_THRESHOLD_GB:
         return "group_offload"
 
-    # Size/peak-aware (the key efficiency rule): when we know the requirement
-    # and it fits within (free VRAM - activation margin), keep it FULLY RESIDENT
-    # (no offload) even on a modest card — offload ONLY when it genuinely won't
-    # fit. This avoids the ~10-50% offload penalty for models that fit (e.g. sd1.5
-    # on an 8GB card) while big models (e.g. SDXL @1024 on an 8GB card) still
-    # offload. Falls through to free-VRAM thresholds only when size is unknown.
     if requirement > 0.0:
         usable = max(0.0, avail - margin)
         if requirement > usable:
             return "model_offload"
-        # Fits. With generous FREE headroom, run fully unoptimized — slicing/tiling
-        # would only trade speed for memory we don't need. On a partially-occupied
-        # card the free headroom is small, so we keep the cheap vae_only guard for
-        # high-res VAE-decode spikes.
+        # Fits. With generous FREE headroom run fully unoptimized; on a tighter
+        # card keep the cheap vae_only guard for VAE-decode spikes.
         if (usable - requirement) >= _DEFAULT_OFF_HEADROOM_GB:
             return "off"
         return "vae_only"
 
     # Unknown model size: conservative free-VRAM thresholds.
-    if avail <= t_model:
+    if avail <= _DEFAULT_MODEL_OFFLOAD_THRESHOLD_GB:
         return "model_offload"
-    if avail <= t_vae:
-        return "vae_only"
     return "vae_only"
 
 
@@ -263,7 +231,6 @@ def _call_if_present(obj: Any, method: str, **kwargs: Any) -> bool:
         fn(**kwargs) if kwargs else fn()
         return True
     except TypeError:
-        # Some signatures accept fewer kwargs on older diffusers.
         try:
             fn()
             return True
@@ -275,21 +242,18 @@ def _call_if_present(obj: Any, method: str, **kwargs: Any) -> bool:
 
 
 def _move_pipeline_to_cpu(pipeline: Any) -> None:
-    """Move the pipeline back to CPU (required before sequential offload)."""
     try:
         import torch
 
         if not torch.cuda.is_available():
             return
-        if hasattr(pipeline, "to") and callable(getattr(pipeline, "to", None)):
+        if callable(getattr(pipeline, "to", None)):
             pipeline.to("cpu")
     except Exception as exc:
         _LOG.debug("low_vram: move-to-cpu failed: %s", exc)
 
 
 def _apply_vae_and_attention(pipeline: Any, applied: Dict[str, bool]) -> None:
-    # VAE slicing / tiling: prefer the pipeline-level methods when present,
-    # otherwise reach into the VAE module directly.
     if not _call_if_present(pipeline, "enable_vae_slicing"):
         vae = getattr(pipeline, "vae", None)
         if vae is not None and _call_if_present(vae, "enable_slicing"):
@@ -304,7 +268,6 @@ def _apply_vae_and_attention(pipeline: Any, applied: Dict[str, bool]) -> None:
     else:
         applied["vae_tiling"] = True
 
-    # Attention slicing is UNet-flavored; safe no-op on pipelines that don't expose it.
     if _call_if_present(pipeline, "enable_attention_slicing"):
         applied["attention_slicing"] = True
 
@@ -319,22 +282,18 @@ def _apply_group_offload(
         import torch
     except Exception:
         return False
-
     if not torch.cuda.is_available():
         return False
 
-    onload = torch.device("cuda")
-    offload = torch.device("cpu")
     kwargs: Dict[str, Any] = {
-        "onload_device": onload,
-        "offload_device": offload,
+        "onload_device": torch.device("cuda"),
+        "offload_device": torch.device("cpu"),
         "offload_type": "leaf_level",
         "use_stream": True,
     }
     if offload_to_disk_path:
         kwargs["offload_to_disk_path"] = offload_to_disk_path
 
-    # Prefer the pipeline-level entry point when diffusers exposes it.
     fn = getattr(pipeline, "enable_group_offload", None)
     if callable(fn):
         try:
@@ -346,12 +305,11 @@ def _apply_group_offload(
         except Exception as exc:
             _LOG.debug("low_vram: pipeline.enable_group_offload failed: %s", exc)
 
-    # Fallback: apply to individual components that support it.
     any_applied = False
     try:
-        from diffusers.hooks import apply_group_offloading  # type: ignore
+        from diffusers.hooks import apply_group_offloading
     except Exception:
-        apply_group_offloading = None  # type: ignore
+        apply_group_offloading = None
 
     for attr in ("transformer", "unet", "vae", "text_encoder", "text_encoder_2"):
         mod = getattr(pipeline, attr, None)
@@ -369,7 +327,7 @@ def _apply_group_offload(
             try:
                 apply_group_offloading(
                     mod,
-                    onload_device=onload,
+                    onload_device=kwargs["onload_device"],
                     offload_type="block_level",
                     num_blocks_per_group=2,
                     **({"offload_to_disk_path": offload_to_disk_path} if offload_to_disk_path else {}),
@@ -394,38 +352,20 @@ def apply_low_vram_config(
     peak_vram_gb: Optional[float] = None,
     offload_to_disk_path: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """
-    Apply a low-VRAM configuration to a diffusers pipeline.
+    """Apply a low-VRAM configuration to a diffusers pipeline.
 
-    Args:
-      pipeline: diffusers pipeline or a component exposing ``enable_*`` methods.
-      mode: "auto" | "off" | "vae_only" | "model_offload" | "group_offload" | "sequential".
-            An env override ``COZY_INFERENCE_MEMORY_MODE`` takes precedence when set.
-      logger: optional logger for user-facing INFO lines.
-      model_size_gb: precomputed model size in GB (skips the probe).
-      peak_vram_gb: endpoint-declared peak VRAM per request
-            (``Resources.peak_vram_per_request_gb``, #339). In ``auto`` mode it
-            raises the fit requirement so a declared-heavy endpoint offloads
-            sooner; ignored for explicit modes.
-      offload_to_disk_path: if set, group-offload stores offloaded weights on disk
-            instead of CPU RAM. Required when CPU RAM is insufficient.
-
-    Returns a dict describing what was applied, with keys:
-      mode, vae_slicing, vae_tiling, attention_slicing, model_offload,
-      group_offload, sequential_offload, disk_offload_path, already_applied.
+    ``mode="auto"`` runs :func:`select_auto_mode` against free VRAM. Returns a
+    dict describing what was applied. Idempotent per pipeline object.
     """
     log = logger or _LOG
-
     if mode not in _VALID_MODES:
         raise ValueError(f"invalid low-VRAM mode: {mode!r}; expected one of {_VALID_MODES}")
 
-    effective_mode = mode
-
-    # Idempotency
     prior = getattr(pipeline, _COZY_MODE_ATTR, None)
     if prior is not None:
         return {"mode": prior, "already_applied": True}
 
+    effective_mode = mode
     if effective_mode == "auto":
         effective_mode = select_auto_mode(
             pipeline=pipeline, model_size_gb=model_size_gb, peak_vram_gb=peak_vram_gb,
@@ -448,7 +388,6 @@ def apply_low_vram_config(
         setattr(pipeline, _COZY_MODE_ATTR, "off")
         return applied
 
-    # vae_only (and every escalation above it) always turns on VAE tiling/slicing.
     _apply_vae_and_attention(pipeline, applied)
 
     if effective_mode == "vae_only":
@@ -456,7 +395,6 @@ def apply_low_vram_config(
         log.info("low_vram: vae_only applied (%s)", _applied_summary(applied))
         return applied
 
-    # For model/group/sequential offload we need CUDA.
     try:
         import torch
 
@@ -465,12 +403,10 @@ def apply_low_vram_config(
         cuda_ok = False
 
     if not cuda_ok:
-        # No GPU: nothing more to do.
         setattr(pipeline, _COZY_MODE_ATTR, "vae_only")
         log.info("low_vram: CUDA unavailable, stopping at vae_only")
         return applied
 
-    # Auto disk-offload when CPU RAM is tight.
     if offload_to_disk_path is None and _should_auto_disk_offload():
         offload_to_disk_path = _default_disk_offload_path()
         if offload_to_disk_path:
@@ -483,8 +419,7 @@ def apply_low_vram_config(
         ok = _call_if_present(pipeline, "enable_model_cpu_offload")
         if not ok:
             try:
-                # Older diffusers builds require gpu_id.
-                pipeline.enable_model_cpu_offload(gpu_id=0)  # type: ignore[attr-defined]
+                pipeline.enable_model_cpu_offload(gpu_id=0)
                 ok = True
             except Exception as exc:
                 log.warning("low_vram: enable_model_cpu_offload failed: %s", exc)
@@ -496,18 +431,16 @@ def apply_low_vram_config(
     if effective_mode == "group_offload":
         ok = _apply_group_offload(pipeline, applied, offload_to_disk_path=offload_to_disk_path)
         if not ok:
-            # Fall through to sequential if group offload is not available.
             log.warning("low_vram: group_offload unavailable; falling back to sequential")
             effective_mode = "sequential"
 
     if effective_mode == "sequential":
-        # Upstream requires pipeline NOT be on CUDA before enabling sequential offload.
         _move_pipeline_to_cpu(pipeline)
         flush_memory()
         ok = _call_if_present(pipeline, "enable_sequential_cpu_offload")
         if not ok:
             try:
-                pipeline.enable_sequential_cpu_offload(gpu_id=0)  # type: ignore[attr-defined]
+                pipeline.enable_sequential_cpu_offload(gpu_id=0)
                 ok = True
             except Exception as exc:
                 log.error("low_vram: enable_sequential_cpu_offload failed: %s", exc)
@@ -529,10 +462,7 @@ def _applied_summary(applied: Dict[str, Any]) -> str:
 
 def _should_auto_disk_offload() -> bool:
     ram = get_available_ram_gb()
-    if ram <= 0.0:
-        return False
-    threshold = 16.0
-    return ram < threshold
+    return 0.0 < ram < 16.0
 
 
 def _default_disk_offload_path() -> Optional[str]:
@@ -550,12 +480,8 @@ def _default_disk_offload_path() -> Optional[str]:
 
 
 _DEFAULT_ESCALATION: tuple[str, ...] = (
-    "vae_only",
-    "model_offload",
-    "group_offload",
-    "sequential",
+    "vae_only", "model_offload", "group_offload", "sequential",
 )
-
 
 T = TypeVar("T")
 
@@ -566,17 +492,13 @@ def _escalate_pipeline_mode(
     logger: logging.Logger,
     escalation: tuple[str, ...],
 ) -> bool:
-    """Move a pipeline one step further up the offload ladder. Returns False if already maxed."""
+    """Move a pipeline one step further up the offload ladder. False if maxed."""
     cur = getattr(pipeline, _COZY_MODE_ATTR, None)
-    try:
-        idx = escalation.index(cur) if cur in escalation else -1
-    except ValueError:
-        idx = -1
+    idx = escalation.index(cur) if cur in escalation else -1
     next_idx = idx + 1
     if next_idx >= len(escalation):
         return False
     next_mode = escalation[next_idx]
-    # Reset the sentinel so apply_low_vram_config re-runs.
     try:
         delattr(pipeline, _COZY_MODE_ATTR)
     except Exception:
@@ -598,20 +520,14 @@ def with_oom_retry(
     logger: Optional[logging.Logger] = None,
     **kwargs: Any,
 ) -> T:
-    """
-    Call ``fn(*args, **kwargs)``. On ``torch.cuda.OutOfMemoryError``, flush memory,
-    escalate offload on each pipeline in ``pipelines`` by one ladder step, and retry.
-
-    Stops after ``max_retries`` additional attempts (default: 2).
-    Raises the last OOM if escalation cannot recover.
-    """
+    """Call ``fn``; on ``torch.cuda.OutOfMemoryError`` flush, escalate offload
+    one ladder step on each pipeline, retry (up to ``max_retries`` extra)."""
     log = logger or _LOG
     try:
         import torch
 
         OOMType = torch.cuda.OutOfMemoryError
     except Exception:
-        # No torch: degenerate case - just call.
         return fn(*args, **kwargs)
 
     last_exc: Optional[BaseException] = None
@@ -629,7 +545,6 @@ def with_oom_retry(
                 if _escalate_pipeline_mode(pipe, logger=log, escalation=escalation):
                     escalated_any = True
             if not escalated_any and not pipelines:
-                # No pipelines to escalate; just retry after flushing.
                 log.warning("low_vram: OOM (attempt %d/%d), retrying after flush", attempt + 1, attempts)
                 continue
             if not escalated_any:
@@ -645,7 +560,8 @@ __all__ = [
     "with_oom_retry",
     "select_auto_mode",
     "estimate_pipeline_size_gb",
-    "get_total_vram_gb",
+    "estimate_cuda_resident_gb",
+    "cuda_allocated_bytes",
     "get_available_vram_gb",
     "get_available_ram_gb",
     "flush_memory",

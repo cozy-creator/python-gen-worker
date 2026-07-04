@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from gen_worker.models.hf_downloader import (
+from gen_worker.models.download import (
     DownloadStalledError,
     _run_with_stall_watchdog,
 )

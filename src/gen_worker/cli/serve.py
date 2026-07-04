@@ -49,7 +49,8 @@ from typing import Any, Dict, List, Optional
 import msgspec
 
 from ..api.errors import CanceledError
-from ..models.cache import ModelCache
+from ..models import memory
+from ..models.residency import Residency, Tier
 from . import run as run_mod
 from . import transport
 from .local_context import _stderr_emitter, build_local_context
@@ -162,9 +163,9 @@ def add_subparser(sub: argparse._SubParsersAction[Any]) -> None:
         "--vram-budget", dest="vram_budget", type=float, default=0.0,
         metavar="GB",
         help=(
-            "Size the in-process ModelCache to GB of VRAM instead of the whole "
-            "GPU, so a host can co-reside several serves on one card with "
-            "deterministic budgets (#347). 0 (default) = auto (whole GPU - margin)."
+            "Cap this serve's VRAM residency budget at GB instead of live free "
+            "VRAM, so a host can co-reside several serves on one card with "
+            "deterministic budgets (#347). 0 (default) = live free VRAM - margin."
         ),
     )
     p.add_argument(
@@ -254,19 +255,18 @@ class _Endpoint:
     """One booted endpoint: every (selected) @inference class instantiated and
     its @inference.function methods indexed by routable name.
 
-    Model residency is driven by the SAME ``ModelCache`` the production worker
-    uses (``worker.py``: ``self._model_cache = ModelCache()``). ``setup()`` is
-    LAZY by default — a class's setup (which BUILDS its pipeline) runs on the
-    FIRST invoke of one of its functions, then the built pipeline is registered
-    with the cache (``mark_loaded_to_vram``) after asking the cache to make room
-    (``_evict_lru_for_space`` — which DEMOTES the LRU model to the CPU-RAM warm
-    tier). On EVERY subsequent dispatch the cache ensures the invoked model is
-    VRAM-resident (``_promote_from_cpu`` when it was demoted), so setup() runs
-    ONCE per model and thereafter the cache moves models VRAM<->CPU instead of
-    re-running setup. ``eager=True`` runs all setups at boot.
+    Model residency is driven by the SAME ``Residency`` manager the production
+    worker uses. ``setup()`` is LAZY by default — a class's setup (which BUILDS
+    its pipeline) runs on the FIRST invoke of one of its functions, then the
+    built pipeline is registered (``track_vram``) after asking for headroom
+    (``make_room`` — which DEMOTES the LRU model to the CPU-RAM warm tier). On
+    EVERY subsequent dispatch the manager ensures the invoked model is
+    VRAM-resident (``promote`` when it was demoted), so setup() runs ONCE per
+    model and thereafter models move VRAM<->CPU instead of re-running setup.
+    ``eager=True`` runs all setups at boot.
 
     Only the TRANSPORT differs from production (local stdin/UDS vs gRPC); model
-    loading + residency + offload go through the identical ``ModelCache`` path.
+    loading + residency + offload go through the identical ``Residency`` path.
     """
 
     def __init__(
@@ -284,11 +284,11 @@ class _Endpoint:
         self._setup_done: set[int] = set()
         self._setup_locks: Dict[int, threading.Lock] = {}
         # PRODUCTION GPU memory manager — drives model residency (LRU eviction /
-        # VRAM<->CPU demote+promote). Sized from real VRAM so the local card's
-        # budget (e.g. an 8GB 4070) over-subscribes exactly like prod would.
-        self._model_cache = _build_model_cache(vram_budget_gb=vram_budget_gb)
-        # id(instance) -> model_id used as that instance's ModelCache key, and
-        # the built pipeline object the cache moves between tiers.
+        # VRAM<->CPU demote+promote) off measured free VRAM (or an explicit
+        # --vram-budget slice of the card).
+        self._residency = _build_residency(vram_budget_gb=vram_budget_gb)
+        # id(instance) -> ref used as that instance's residency key, and
+        # the built pipeline object the manager moves between tiers.
         self._model_id_by_inst: Dict[int, str] = {}
         self._pipeline_by_inst: Dict[int, Any] = {}
         # Wall-clock of the last dispatched request; drives --idle-timeout.
@@ -352,7 +352,7 @@ class _Endpoint:
                 instances_by_cls[cls_id] = inst
                 self._instances.append(inst)
                 self._setup_locks[id(inst)] = threading.Lock()
-                # Stable per-class ModelCache key (the class qualname is unique
+                # Stable per-class residency key (the class qualname is unique
                 # within an endpoint and maps 1:1 to one held instance/pipeline).
                 self._model_id_by_inst[id(inst)] = (
                     f"{sel.cls.__module__}.{sel.cls.__qualname__}"
@@ -372,92 +372,75 @@ class _Endpoint:
                 self._ensure_resident(served)
 
     def _ensure_resident(self, served: "_ServedFunction") -> None:
-        """Make the invoked function's model VRAM-resident via the ModelCache.
+        """Make the invoked function's model VRAM-resident via ``Residency``.
 
-        First invoke of a class: run setup() ONCE to BUILD the pipeline, then
-        register it in the cache — asking the cache for space first
-        (``_evict_lru_for_space``, which demotes the LRU VRAM model to the
-        CPU-RAM warm tier). Subsequent invokes: if the model was demoted to CPU
-        (because another model needed the VRAM), promote it back
-        (``_promote_from_cpu``, which itself demotes/evicts others as needed);
-        otherwise just ``_touch`` it for LRU recency. setup() therefore runs
-        exactly once per model; the cache moves models VRAM<->CPU thereafter.
-
-        Static model bindings (Repo/HFRepo) are resolved + loaded inside
-        setup(); Dispatch bindings (payload-dependent) still resolve per-request
-        inside ``dispatch_request``.
+        First invoke of a class: run setup() ONCE to BUILD the pipeline, ask
+        for headroom (``make_room`` demotes LRU VRAM models to the CPU-RAM warm
+        tier), then register it with its MEASURED footprint (allocator delta
+        across setup). Subsequent invokes: promote back if demoted, else touch
+        for LRU recency. setup() therefore runs exactly once per model; the
+        manager moves models VRAM<->CPU thereafter (its public API only).
         """
         inst = served.instance
         iid = id(inst)
         lock = self._setup_locks.setdefault(iid, threading.Lock())
         with lock:
-            cache = self._model_cache
+            res = self._residency
             model_id = self._model_id_by_inst.get(iid) or f"inst:{iid}"
 
             if iid not in self._setup_done:
-                # COLD: build the pipeline via setup(), then register with the
-                # cache so it participates in LRU residency from now on.
+                # COLD: build the pipeline via setup() with the allocator delta
+                # measured, then register for LRU residency from now on.
                 resolved = _resolve_static_models(
                     served.selected.bindings, offline=self.offline,
                 )
+                before = memory.cuda_allocated_bytes()
                 run_mod.run_setup(inst, resolved)
+                measured = max(0, memory.cuda_allocated_bytes() - before)
                 self._setup_done.add(iid)
 
                 pipeline = _find_pipeline_object(inst)
                 self._pipeline_by_inst[iid] = pipeline
-                if cache is not None and pipeline is not None:
-                    size_gb = _estimate_size_gb(pipeline)
-                    # Make room BEFORE registering — demotes the LRU VRAM model
-                    # to the CPU-RAM warm tier when this one won't otherwise fit.
-                    try:
-                        cache._evict_lru_for_space(size_gb)
-                    except Exception as exc:  # noqa: BLE001
-                        sys.stderr.write(
-                            f"gen-worker serve: cache make-room failed for "
-                            f"{model_id}: {exc}\n"
-                        )
-                    cache.mark_loaded_to_vram(model_id, pipeline, size_gb)
+                if res is not None and pipeline is not None:
+                    if measured <= 0:
+                        measured = int(memory.estimate_cuda_resident_gb(pipeline) * (1024 ** 3))
+                    res.make_room(measured)
+                    res.track_vram(model_id, pipeline, vram_bytes=measured)
                     sys.stderr.write(
-                        f"gen-worker serve: registered {model_id} in ModelCache "
-                        f"(size={size_gb:.2f}GB, tier={cache.residency_tier(model_id)}, "
-                        f"vram_models={cache.get_vram_models()})\n"
+                        f"gen-worker serve: registered {model_id} "
+                        f"(vram={measured / (1024 ** 3):.2f}GB, tier={res.tier(model_id)}, "
+                        f"vram_models={res.refs_in(Tier.VRAM)})\n"
                     )
                     sys.stderr.flush()
                 return
 
             # WARM: setup already ran. Ensure the model is back in VRAM.
-            if cache is None:
+            if res is None:
                 return
-            tier = cache.residency_tier(model_id)
-            if tier == "VRAM":
-                cache._touch(model_id)
+            tier = res.tier(model_id)
+            if tier is Tier.VRAM:
+                res.touch(model_id)
                 return
-            if tier == "RAM":
-                # Demoted to the CPU-RAM warm tier on a prior eviction — promote
-                # it back (evicting/demoting others as needed) for a fast PCIe
-                # swap-in instead of re-running setup().
-                sys.stderr.write(
-                    f"gen-worker serve: promoting {model_id} RAM->VRAM "
-                    f"(vram_models before={cache.get_vram_models()})\n"
-                )
-                ok = cache._promote_from_cpu(model_id, device="cuda")
+            if tier is Tier.RAM:
+                # Demoted on a prior eviction — promote back (making room as
+                # needed) for a fast PCIe swap-in instead of re-running setup().
+                ok = res.promote(model_id, device="cuda")
                 sys.stderr.write(
                     f"gen-worker serve: promote {model_id} ok={ok} "
-                    f"tier={cache.residency_tier(model_id)} "
-                    f"vram_models={cache.get_vram_models()}\n"
+                    f"tier={res.tier(model_id)} vram_models={res.refs_in(Tier.VRAM)}\n"
                 )
                 sys.stderr.flush()
             else:
-                # ABSENT/DISK (dropped from RAM under memory pressure) — the
-                # object is still held on the instance; re-register it (the
-                # cache will make room first).
+                # Dropped under memory pressure — the object is still held on
+                # the instance; re-register it after making room.
                 pipeline = self._pipeline_by_inst.get(iid) or _find_pipeline_object(inst)
                 if pipeline is not None:
-                    size_gb = _estimate_size_gb(pipeline)
-                    cache.mark_loaded_to_vram(model_id, pipeline, size_gb)
+                    measured = int(memory.estimate_cuda_resident_gb(pipeline) * (1024 ** 3))
+                    res.make_room(measured)
+                    res.track_vram(model_id, pipeline, vram_bytes=measured)
                     sys.stderr.write(
-                        f"gen-worker serve: re-registered {model_id} in VRAM "
-                        f"(tier={cache.residency_tier(model_id)})\n"
+                        f"gen-worker serve: re-registered {model_id} "
+                        f"(tier={res.tier(model_id)})\n"
                     )
                     sys.stderr.flush()
 
@@ -528,7 +511,7 @@ class _Endpoint:
             with self._dispatch_lock:
                 self.gpu_semaphore.acquire()
                 try:
-                    # Drive residency through the ModelCache under the GPU
+                    # Drive residency through the Residency manager under the GPU
                     # semaphore (same as prod): first invoke builds the pipeline
                     # via setup() and registers it; later invokes promote it back
                     # into VRAM if the cache demoted it to the CPU-RAM warm tier.
@@ -612,60 +595,23 @@ def _resolve_static_models(
 
 
 # --------------------------------------------------------------------------
-# ModelCache wiring — the SAME production residency manager, driven locally
+# Residency wiring — the SAME production residency manager, driven locally
 # --------------------------------------------------------------------------
 
-def _build_model_cache(vram_budget_gb: float = 0.0) -> Optional[ModelCache]:
-    """Construct the production ``ModelCache`` sized from real local VRAM.
+def _build_residency(vram_budget_gb: float = 0.0) -> Optional[Residency]:
+    """Construct the production ``Residency`` manager.
 
-    Identical to the worker's ``ModelCache()`` except we size ``max_vram_gb``
-    explicitly from ``inference_memory.get_total_vram_gb`` minus a margin so the
-    local card's true budget governs residency (on an 8GB card two SDXL/SD1.5
-    pipelines deliberately can't both stay VRAM-resident, forcing demote/promote
-    through the cache). Returns ``None`` on a CPU-only host — there is no VRAM to
+    Eviction is driven by measured FREE VRAM; ``vram_budget_gb`` (>0) replaces
+    the probe with a fixed slice so a HOST (cozy-local in local-provider mode)
+    can co-reside several serves on one card with deterministic budgets (#347 /
+    cozy #15). Returns ``None`` on a CPU-only host — there is no VRAM to
     manage, so serve falls back to plain warm-instance behavior.
-
-    ``vram_budget_gb`` (>0) overrides the auto sizing so a HOST (cozy-local in
-    local-provider mode) can allot this serve a slice of a shared GPU instead of
-    the whole card, letting several serves co-reside with deterministic budgets
-    (#347 / cozy #15). 0 = auto (whole-GPU minus margin).
     """
     if vram_budget_gb and vram_budget_gb > 0.0:
-        try:
-            return ModelCache(max_vram_gb=float(vram_budget_gb))
-        except Exception as exc:  # noqa: BLE001
-            sys.stderr.write(f"gen-worker serve: ModelCache budget init failed: {exc}\n")
-            return None
-    try:
-        from ..inference_memory import get_total_vram_gb
-
-        total = float(get_total_vram_gb() or 0.0)
-    except Exception:
-        total = 0.0
-    if total <= 0.0:
+        return Residency(vram_budget_bytes=int(vram_budget_gb * (1024 ** 3)))
+    if memory.get_available_vram_gb() <= 0.0:
         return None
-    try:
-        return ModelCache(max_vram_gb=None)  # auto: total - default safety margin
-    except Exception as exc:  # noqa: BLE001
-        sys.stderr.write(f"gen-worker serve: ModelCache init failed: {exc}\n")
-        return None
-
-
-def _estimate_size_gb(pipeline: Any) -> float:
-    """Best-effort VRAM footprint (GB) of a built pipeline, via inference_memory.
-
-    Falls back to a conservative non-zero size so the cache still tracks the
-    model (and can evict it) when the parameter probe can't see the weights
-    (e.g. a fully offloaded pipeline reporting 0)."""
-    try:
-        from ..inference_memory import estimate_pipeline_size_gb
-
-        size = float(estimate_pipeline_size_gb(pipeline) or 0.0)
-    except Exception:
-        size = 0.0
-    if size <= 0.1:
-        size = 5.0  # mirror worker.py's floor for un-probeable pipelines
-    return size
+    return Residency()
 
 
 # diffusers/transformers pipeline-ish duck type: has .to() AND at least one of

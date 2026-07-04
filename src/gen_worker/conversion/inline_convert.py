@@ -29,9 +29,12 @@ endpoint.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -433,6 +436,15 @@ def _run_torchao_inline(
             reason=f"_run_torchao_inline got unexpected dtype {dtype!r}",
             target_dtype=dtype,
         )
+    # Stamp the PRODUCED dtype, not the requested one: torchao's fp8 wo path
+    # always emits e4m3 kernels (an e5m2 request falls back), so a checkpoint
+    # labeled fp8:e5m2 would make inference dispatch on a lie (#358).
+    produced_dtype = {"fp8_wo": "fp8:e4m3", "int8_wo": "int8"}[scheme]
+    if produced_dtype != dtype:
+        logger.warning(
+            "inline torchao: requested dtype %s produces %s kernels; stamping %s",
+            dtype, produced_dtype, produced_dtype,
+        )
 
     repo_dir = Path(source_repo_dir)
     if not repo_dir.exists() or not repo_dir.is_dir():
@@ -621,7 +633,7 @@ def _run_torchao_inline(
         torchao_version = ""
 
     attrs = {
-        "dtype": dtype,
+        "dtype": produced_dtype,
         "file_type": "safetensors",
         "conversion_strategy": "inline_torchao",
         "quant_scheme": f"torchao:{scheme}",
@@ -632,7 +644,7 @@ def _run_torchao_inline(
     return InlineConversionResult(
         output_paths=saved_files,
         index_path=None,
-        target_dtype=dtype,
+        target_dtype=produced_dtype,
         target_file_type="safetensors",
         attributes=attrs,
         summary={
@@ -668,6 +680,14 @@ def _run_bnb_inline(
         raise InlineConversionNotPossible(
             reason=f"_run_bnb_inline got unexpected dtype {dtype!r}",
             target_dtype=dtype,
+        )
+    # Stamp the PRODUCED dtype: an "int4" request routes through bnb nf4, so
+    # the checkpoint must be labeled nf4/fp4 — inference dispatches on it (#358).
+    produced_dtype = bnb_quant_type  # "nf4" | "fp4"
+    if produced_dtype != dtype:
+        logger.warning(
+            "inline bnb: requested dtype %s produces %s; stamping %s",
+            dtype, produced_dtype, produced_dtype,
         )
 
     repo_dir = Path(source_repo_dir)
@@ -754,7 +774,7 @@ def _run_bnb_inline(
         bnb_version = ""
 
     attrs = {
-        "dtype": dtype,
+        "dtype": produced_dtype,
         "file_type": "safetensors",
         "conversion_strategy": "inline_bitsandbytes",
         "quant_scheme": f"bitsandbytes:{bnb_quant_type}",
@@ -765,7 +785,7 @@ def _run_bnb_inline(
     return InlineConversionResult(
         output_paths=saved_files,
         index_path=None,
-        target_dtype=dtype,
+        target_dtype=produced_dtype,
         target_file_type="safetensors",
         attributes=attrs,
         summary={

@@ -535,12 +535,14 @@ def _resolve_local_path(
 
         emit({"kind": "model_fetch.started", "ref": parsed.hf.canonical()})
         try:
-            from ..models.hf_downloader import HuggingFaceHubDownloader
-            dl = HuggingFaceHubDownloader(
+            from ..models.download import download_hf
+
+            local_dir = download_hf(
+                parsed.hf,
                 hf_home=os.getenv("HF_HOME") or None,
                 hf_token=os.getenv("HF_TOKEN") or os.getenv("HUGGING_FACE_HUB_TOKEN") or None,
+                allow_patterns=tuple(allow_patterns),
             )
-            res = dl.download(parsed.hf, allow_patterns=list(allow_patterns) or None)
         except Exception as e:
             raise _ModelResolutionError(
                 f"failed to fetch huggingface ref {parsed.hf.canonical()}: {e}"
@@ -548,9 +550,9 @@ def _resolve_local_path(
         emit({
             "kind": "model_fetch.completed",
             "ref": parsed.hf.canonical(),
-            "local_dir": str(res.local_dir),
+            "local_dir": str(local_dir),
         })
-        return str(res.local_dir)
+        return str(local_dir)
 
     # ModelScope refs: fetch directly via modelscope.snapshot_download. This is
     # file-oriented (allow_patterns) and has NO diffusers-layout requirement, so
@@ -606,13 +608,10 @@ def _resolve_local_path(
                 f"--offline: civitai ref {ref!r} not available offline (no local "
                 "civitai cache); run once online to fetch it."
             )
-        from ..conversion.ingest import (
-            download_civitai_model_version_files,
+        from ..models.download import (
+            download_civitai,
             fetch_civitai_model,
-        )
-        from ..models.ref_downloader import (
-            _civitai_local_artifact_path,
-            _parse_civitai_model_version_id,
+            parse_civitai_version_id,
         )
         api_key = os.getenv("CIVITAI_API_KEY", "") or os.getenv("CIVITAI_TOKEN", "")
 
@@ -620,7 +619,7 @@ def _resolve_local_path(
             # Explicit version pin via CivitaiRepo.version("<id>"). The pinned id
             # IS a model-VERSION id, so use it directly — no model lookup.
             try:
-                version_id = _parse_civitai_model_version_id(civitai_version_id)
+                version_id = parse_civitai_version_id(civitai_version_id)
             except Exception as e:
                 raise _ModelResolutionError(
                     f"bad civitai version pin {civitai_version_id!r} on ref {ref!r}: {e}"
@@ -632,11 +631,11 @@ def _resolve_local_path(
             # passed where a model id was expected) — surface it rather than
             # guessing and downloading an unrelated model.
             try:
-                model_id = _parse_civitai_model_version_id(parsed.civitai.model_id)
+                model_id = parse_civitai_version_id(parsed.civitai.model_id)
             except Exception as e:
                 raise _ModelResolutionError(f"bad civitai ref {ref!r}: {e}") from e
             try:
-                model = fetch_civitai_model(model_id)
+                model = fetch_civitai_model(model_id, api_key=api_key)
             except Exception as e:
                 raise _ModelResolutionError(
                     f"failed to resolve civitai model {model_id} for ref {ref!r}: {e}; "
@@ -653,12 +652,11 @@ def _resolve_local_path(
         out_dir = cache_dir / "civitai" / str(version_id)
         emit({"kind": "model_fetch.started", "ref": ref, "provider": "civitai"})
         try:
-            info = download_civitai_model_version_files(version_id, out_dir, civitai_api_key=api_key)
+            local = download_civitai(version_id, out_dir, api_key=api_key)
         except Exception as e:
             raise _ModelResolutionError(
                 f"failed to fetch civitai ref {ref!r} (resolved version {version_id}): {e}"
             ) from e
-        local = _civitai_local_artifact_path(out_dir, info)
         emit({"kind": "model_fetch.completed", "ref": ref, "local_dir": str(local)})
         return str(local)
 

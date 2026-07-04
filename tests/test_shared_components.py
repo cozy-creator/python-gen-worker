@@ -1,15 +1,9 @@
-"""Worker-owned shared Diffusers component cache (issue #335).
+"""Shared-component identity + single-count VRAM accounting (#335, now folded
+into the models-layer Residency manager, #366).
 
-Validates the sharing + refcount + VRAM-accounting logic with lightweight REAL
-objects (not deep mocks): a fake "pipeline" is a plain object carrying a
-``.components`` dict so the cache's component-id collection and size estimate
-exercise the same code paths a diffusers pipeline would.
-
-What is NOT covered here (needs a GPU + real multi-variant Diffusers models):
-proving two pipelines built from one shared entry alias the same CUDA storages
-via ``data_ptr()``, and the before/after VRAM residency drop on flux.2-klein-4b.
-Those live in the live-validation step; this file proves the framework logic
-that makes them possible.
+Validates sharing + refcount + accounting with lightweight REAL objects: a fake
+"pipeline" is a plain object carrying a ``.components`` dict, exercising the
+same code paths a diffusers pipeline would (no GPU needed).
 """
 
 from __future__ import annotations
@@ -19,10 +13,12 @@ import pytest
 from gen_worker import CivitaiRepo, HFRepo, Repo
 from gen_worker.models import (
     LoadedComponentKey,
-    ModelCache,
-    SharedComponentCache,
+    Residency,
+    Tier,
     build_function_owned_pipeline,
 )
+
+_GiB = 1024 ** 3
 
 
 # --------------------------------------------------------------------------- #
@@ -31,19 +27,12 @@ from gen_worker.models import (
 
 
 class _FakeModule:
-    """A stand-in for an nn.Module component — no torch, just identity."""
-
     def __init__(self, name: str) -> None:
         self.name = name
 
 
 class _FakePipeline:
-    """A stand-in diffusers pipeline: a container of component references.
-
-    Exposes ``.components`` (the dict diffusers pipelines carry) and a
-    ``from_pipe`` classmethod / ``__init__(**components)`` so
-    ``build_function_owned_pipeline`` exercises both assembly paths.
-    """
+    """A stand-in diffusers pipeline: a container of component references."""
 
     def __init__(self, **components: object) -> None:
         self.components = dict(components)
@@ -63,9 +52,9 @@ def _new_base() -> _FakePipeline:
     )
 
 
-def _model_cache_no_gpu() -> ModelCache:
-    # max_vram_gb fixed so accounting is deterministic without a GPU.
-    return ModelCache(max_vram_gb=100.0)
+def _residency_100gb() -> Residency:
+    # Fixed budget so accounting is deterministic without a GPU.
+    return Residency(vram_budget_bytes=100 * _GiB)
 
 
 # --------------------------------------------------------------------------- #
@@ -85,9 +74,9 @@ def test_identical_bindings_produce_equal_keys() -> None:
 @pytest.mark.parametrize(
     "mutate",
     [
-        lambda b: b.dtype("fp16"),            # dtype differs
-        lambda b: b.revision("deadbeef"),     # revision differs
-        lambda b: b.subfolder("text_encoder"),  # subfolder differs
+        lambda b: b.dtype("fp16"),
+        lambda b: b.revision("deadbeef"),
+        lambda b: b.subfolder("text_encoder"),
     ],
 )
 def test_binding_attribute_differences_do_not_share(mutate) -> None:
@@ -101,21 +90,16 @@ def test_binding_attribute_differences_do_not_share(mutate) -> None:
 def test_device_dtype_quant_component_set_differences_do_not_share() -> None:
     b = HFRepo("bfl/flux.2-klein-4b").dtype("bf16")
     k0 = LoadedComponentKey.from_binding(b, device_id=0, component_set="P")
-    # different GPU
     assert k0 != LoadedComponentKey.from_binding(b, device_id=1, component_set="P")
-    # different pipeline class / component set
     assert k0 != LoadedComponentKey.from_binding(b, device_id=0, component_set="Q")
-    # different quantization
     assert k0 != LoadedComponentKey.from_binding(
         b, device_id=0, component_set="P", quantization="fp8"
     )
-    # different quant config (same scheme)
     assert LoadedComponentKey.from_binding(
         b, device_id=0, component_set="P", quantization="fp8", quant_config={"a": 1}
     ) != LoadedComponentKey.from_binding(
         b, device_id=0, component_set="P", quantization="fp8", quant_config={"a": 2}
     )
-    # different provider (hf vs tensorhub vs civitai)
     assert LoadedComponentKey.from_binding(Repo("o/r"), device_id=0) != LoadedComponentKey.from_binding(
         CivitaiRepo("123"), device_id=0
     )
@@ -126,18 +110,17 @@ def test_unpinned_revision_falls_back_to_snapshot_digest() -> None:
     same = LoadedComponentKey.from_binding(b, snapshot_digest="/cache/snap-A")
     same2 = LoadedComponentKey.from_binding(b, snapshot_digest="/cache/snap-A")
     diff = LoadedComponentKey.from_binding(b, snapshot_digest="/cache/snap-B")
-    assert same == same2          # same on-disk snapshot -> share
-    assert same != diff           # different snapshot -> do not share
+    assert same == same2
+    assert same != diff
 
 
 # --------------------------------------------------------------------------- #
-# Sharing + refcount                                                            #
+# Sharing + refcount + single-count accounting                                  #
 # --------------------------------------------------------------------------- #
 
 
 def test_identical_components_are_shared_one_instance_refcount_two() -> None:
-    mc = _model_cache_no_gpu()
-    cache = SharedComponentCache(model_cache=mc)
+    res = _residency_100gb()
     key = LoadedComponentKey(ref="bfl/flux.2-klein-4b", dtype="bf16", component_set="P")
 
     base = _new_base()
@@ -145,101 +128,88 @@ def test_identical_components_are_shared_one_instance_refcount_two() -> None:
 
     def loader() -> _FakePipeline:
         loads["n"] += 1
-        return base  # always the same object; we assert it is loaded ONCE
+        return base
 
-    # GenerateBf16 acquires.
-    a = cache.acquire(key, loader, size_gb=20.0)
-    # GenerateBf16Compiled acquires the IDENTICAL binding.
-    b = cache.acquire(key, loader, size_gb=20.0)
+    a = res.acquire_shared(key, loader, vram_bytes=20 * _GiB)
+    b = res.acquire_shared(key, loader, vram_bytes=20 * _GiB)
 
     assert a is b is base                 # one shared instance
-    assert loads["n"] == 1                # loaded exactly once (cache hit on 2nd)
-    assert cache.refcount(key) == 2       # both classes hold a reference
-    stats = cache.stats()
-    assert stats.hits == 1 and stats.misses == 1
-    assert len(stats.entries) == 1
+    assert loads["n"] == 1                # loaded exactly once (hit on 2nd)
+    assert res.shared_refcount(key) == 2  # both holders counted
+    stats = res.shared_stats()
+    assert stats["hits"] == 1 and stats["misses"] == 1
+    assert len(stats["entries"]) == 1
 
 
 def test_shared_vram_counted_once() -> None:
-    mc = _model_cache_no_gpu()
-    cache = SharedComponentCache(model_cache=mc)
+    res = _residency_100gb()
     key = LoadedComponentKey(ref="bfl/flux.2-klein-4b", dtype="bf16", component_set="P")
     base = _new_base()
 
-    before = mc.vram_used_gb
-    cache.acquire(key, lambda: base, size_gb=20.0)
-    after_first = mc.vram_used_gb
-    cache.acquire(key, lambda: base, size_gb=20.0)  # second holder, SAME bytes
-    after_second = mc.vram_used_gb
+    before = res.free_vram_bytes()
+    res.acquire_shared(key, lambda: base, vram_bytes=20 * _GiB)
+    after_first = res.free_vram_bytes()
+    res.acquire_shared(key, lambda: base, vram_bytes=20 * _GiB)  # 2nd holder, SAME bytes
+    after_second = res.free_vram_bytes()
 
-    assert after_first - before == pytest.approx(20.0)
-    # The second acquire must NOT add another 20GB — shared bytes counted once.
-    assert after_second == pytest.approx(after_first)
-    assert mc.refcount(key.cache_id()) == 2
+    assert before - after_first == 20 * _GiB
+    # The second acquire must NOT book another 20GB — shared bytes counted once.
+    assert after_second == after_first
+    assert res.shared_refcount(key) == 2
 
 
 def test_shared_component_not_evicted_while_referenced() -> None:
-    mc = _model_cache_no_gpu()
-    cache = SharedComponentCache(model_cache=mc)
+    res = _residency_100gb()
     key = LoadedComponentKey(ref="shared/base", dtype="bf16", component_set="P")
     base = _new_base()
-    cache.acquire(key, lambda: base, size_gb=20.0)
-    cache.acquire(key, lambda: base, size_gb=20.0)  # refcount 2
+    res.acquire_shared(key, lambda: base, vram_bytes=20 * _GiB)
+    res.acquire_shared(key, lambda: base, vram_bytes=20 * _GiB)  # refcount 2
     cid = key.cache_id()
 
-    # Try to make the cache reclaim VRAM far beyond budget — the refcounted
-    # shared entry must NOT be demoted/evicted.
-    mc._evict_lru_for_space(mc.max_vram_gb + 50.0)
-    assert mc.is_in_vram(cid)
-    assert mc.refcount(cid) == 2
+    # Demand VRAM far beyond budget — the referenced entry must survive.
+    res.make_room(150 * _GiB)
+    assert res.tier(cid) is Tier.VRAM
+    assert res.shared_refcount(key) == 2
 
-    # An explicit orchestrator-style unload is also refused while referenced.
-    assert mc.unload_model(cid) is False
-    assert mc.is_in_vram(cid)
-
-    # The shared cache itself refuses to evict while referenced.
-    assert cache.evict(key) is False
-    assert cache.get(key) is base
+    # Explicit unload-style calls are also refused while referenced.
+    assert res.release_to_disk(cid) is False
+    assert res.evict(cid) is False
+    assert res.shared_obj(key) is base
 
 
 def test_releasing_all_refs_makes_entry_evictable() -> None:
-    mc = _model_cache_no_gpu()
-    cache = SharedComponentCache(model_cache=mc)
+    res = _residency_100gb()
     key = LoadedComponentKey(ref="shared/base", dtype="bf16", component_set="P")
     base = _new_base()
-    cache.acquire(key, lambda: base, size_gb=20.0)
-    cache.acquire(key, lambda: base, size_gb=20.0)
+    res.acquire_shared(key, lambda: base, vram_bytes=20 * _GiB)
+    res.acquire_shared(key, lambda: base, vram_bytes=20 * _GiB)
     cid = key.cache_id()
 
-    assert cache.release(key) == 1   # one holder left
-    assert mc.unload_model(cid) is False  # still referenced -> refused
-    assert cache.release(key) == 0   # last holder released
+    assert res.release_shared(key) == 1     # one holder left
+    assert res.evict(cid) is False          # still referenced -> refused
+    assert res.release_shared(key) == 0     # last holder released
 
-    # Now the entry is reclaimable. ModelCache VRAM drops back to baseline.
-    assert cache.evict(key) is True
-    assert not mc.is_in_vram(cid)
-    assert mc.vram_used_gb == pytest.approx(0.0)
-    assert cache.get(key) is None
+    assert res.evict(cid) is True
+    assert res.tier(cid) is None
+    assert res.free_vram_bytes() == 100 * _GiB  # accounting back to baseline
+    assert res.shared_obj(key) is None
 
 
 def test_drain_skips_referenced_then_force_clears_all() -> None:
-    mc = _model_cache_no_gpu()
-    cache = SharedComponentCache(model_cache=mc)
+    res = _residency_100gb()
     held = LoadedComponentKey(ref="a/held", component_set="P")
     free = LoadedComponentKey(ref="b/free", component_set="P")
-    cache.acquire(held, _new_base, size_gb=5.0)     # refcount 1
-    cache.acquire(free, _new_base, size_gb=5.0)
-    cache.release(free)                              # refcount 0
+    res.acquire_shared(held, _new_base, vram_bytes=5 * _GiB)   # refcount 1
+    res.acquire_shared(free, _new_base, vram_bytes=5 * _GiB)
+    res.release_shared(free)                                    # refcount 0
 
-    # Soft drain frees only the unreferenced entry.
-    assert cache.drain() == 1
-    assert cache.contains(held)
-    assert not cache.contains(free)
+    assert res.drain_shared() == 1          # only the unreferenced entry
+    assert res.tier(held.cache_id()) is not None
+    assert res.tier(free.cache_id()) is None
 
-    # Force drain (worker shutdown) clears everything regardless of refcount.
-    assert cache.shutdown() == 1
-    assert not cache.contains(held)
-    assert mc.vram_used_gb == pytest.approx(0.0)
+    assert res.drain_shared(force=True) == 1  # worker shutdown clears all
+    assert res.tier(held.cache_id()) is None
+    assert res.free_vram_bytes() == 100 * _GiB
 
 
 # --------------------------------------------------------------------------- #
@@ -253,10 +223,6 @@ def test_lora_and_override_bindings_isolate_from_clean_base() -> None:
     override = HFRepo("bfl/flux.2-klein-4b").dtype("bf16").allow_override(_FakePipeline)
 
     k_clean = LoadedComponentKey.from_binding(clean, component_set="P")
-    # The worker explicitly REFUSES to share LoRA/override bindings (handled by
-    # _shared_component_key_for_binding returning None). Here we assert the key
-    # construction itself separates them when an adapter identity is supplied,
-    # so even a forced share can't alias the clean base.
     k_lora = LoadedComponentKey.from_binding(lora, component_set="P", adapter_id="lora:set-7")
     k_override = LoadedComponentKey.from_binding(override, component_set="P", adapter_id="override:Pipe")
 
@@ -281,16 +247,13 @@ def test_adapter_identity_separates_two_lora_overlays() -> None:
 def test_build_function_owned_pipeline_shares_modules_not_pipeline() -> None:
     base = _new_base()
     fn_pipe = build_function_owned_pipeline(base, _FakePipeline)
-    # Different pipeline object (own mutable scheduler) ...
     assert fn_pipe is not base
     assert fn_pipe.scheduler is not base.scheduler
-    # ... but the heavy immutable modules are the SAME objects (shared VRAM).
     assert fn_pipe.components["vae"] is base.components["vae"]
     assert fn_pipe.components["text_encoder"] is base.components["text_encoder"]
 
 
 def test_build_function_owned_pipeline_assembles_from_components_dict() -> None:
-    # A pipeline class with no from_pipe — must reassemble from .components.
     class _NoFromPipe:
         def __init__(self, **components: object) -> None:
             self.components = dict(components)
@@ -299,17 +262,3 @@ def test_build_function_owned_pipeline_assembles_from_components_dict() -> None:
     fn = build_function_owned_pipeline(base, _NoFromPipe)
     assert isinstance(fn, _NoFromPipe)
     assert fn.components["vae"] is base.components["vae"]
-
-
-def test_component_id_diagnostics_prove_object_sharing() -> None:
-    mc = _model_cache_no_gpu()
-    cache = SharedComponentCache(model_cache=mc)
-    key = LoadedComponentKey(ref="shared/base", component_set="P")
-    base = _new_base()
-    cache.acquire(key, lambda: base, size_gb=3.0)
-    entry = cache.stats().entries[0]
-    # Diagnostics expose per-component object ids — the cheap proof that two
-    # pipelines built from this entry point at the SAME module objects.
-    assert entry["component_ids"]["vae"] == id(base.components["vae"])
-    assert entry["refcount"] == 1
-    assert entry["object_id"] == id(base)

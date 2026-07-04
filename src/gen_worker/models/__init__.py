@@ -1,37 +1,40 @@
-"""Model references, downloading, and caching."""
+"""Models layer: refs, download (ensure_local), memory decisions, residency."""
 
-from .cache import ModelCache, ModelCacheStats, ModelLocation
 from .cache_paths import (
     tensorhub_cache_dir,
     tensorhub_cas_dir,
     worker_local_model_cache_dir_default,
 )
-from .downloader import ModelDownloader
-from .interface import ModelManagementInterface, ModelManager
-from .refs import TensorhubRef, HuggingFaceRef, ParsedModelRef, parse_model_ref
-from .shared_components import (
+from .download import (
+    build_provider_index_from_manifest,
+    ensure_local,
+    ensure_local_sync,
+    lookup_provider_for_ref,
+    set_provider_index,
+)
+from .refs import HuggingFaceRef, ParsedModelRef, TensorhubRef, parse_model_ref
+from .residency import (
     LoadedComponentKey,
-    SharedComponentCache,
-    SharedComponentStats,
+    Residency,
+    Tier,
     build_function_owned_pipeline,
 )
 
 __all__ = [
-    "ModelCache",
-    "ModelCacheStats",
-    "ModelLocation",
     "tensorhub_cache_dir",
     "tensorhub_cas_dir",
     "worker_local_model_cache_dir_default",
-    "ModelDownloader",
-    "ModelManagementInterface",
-    "ModelManager",
+    "ensure_local",
+    "ensure_local_sync",
+    "set_provider_index",
+    "lookup_provider_for_ref",
+    "build_provider_index_from_manifest",
     "TensorhubRef",
     "HuggingFaceRef",
     "ParsedModelRef",
     "parse_model_ref",
+    "Residency",
+    "Tier",
     "LoadedComponentKey",
-    "SharedComponentCache",
-    "SharedComponentStats",
     "build_function_owned_pipeline",
 ]

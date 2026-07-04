@@ -33,7 +33,8 @@ import gen_worker.cli as cli
 import gen_worker.cli.serve as serve_mod
 from gen_worker import RequestContext, inference, invocable
 from gen_worker.cli import run as run_mod
-from gen_worker.models.cache import ModelCache
+from gen_worker.models import residency as residency_mod
+from gen_worker.models.residency import Residency, Tier
 
 
 class _In(msgspec.Struct):
@@ -114,9 +115,9 @@ def test_lazy_setup_on_first_invoke_only_invoked_class_and_eager_at_boot() -> No
 
 
 # --------------------------------------------------------------------------- #
-# ModelCache-backed residency: serve drives the PRODUCTION ModelCache for       #
-# model placement (demote/promote/evict), not a parallel warm-only path.        #
-# Uses fake pipeline-shaped objects + a tiny-VRAM ModelCache so it runs on CPU.  #
+# Residency-backed placement: serve drives the PRODUCTION Residency manager     #
+# (demote/promote/evict), not a parallel warm-only path. Uses fake pipeline-    #
+# shaped objects + a tiny VRAM budget so it runs on CPU.                        #
 # --------------------------------------------------------------------------- #
 
 
@@ -167,47 +168,49 @@ def _two_model_module(name: str, setups: dict, sizes: dict) -> types.ModuleType:
     return mod
 
 
-def test_serve_drives_modelcache_demote_promote_evict(monkeypatch) -> None:
-    """Over-subscribe a tiny-VRAM ModelCache with two models, then invoke
-    big -> small -> big and assert the cache demoted/promoted them (setup runs
-    ONCE per model; the cache moves them VRAM<->CPU thereafter)."""
+def test_serve_drives_residency_demote_promote_evict(monkeypatch) -> None:
+    """Over-subscribe a tiny VRAM budget with two models, then invoke
+    big -> small -> big and assert the manager demoted/promoted them (setup
+    runs ONCE per model; models move VRAM<->CPU thereafter)."""
     setups: dict = {}
     sizes = {"big": 6.0, "small": 2.0}  # 8 > 5GB budget => can't both reside
     mod = _two_model_module("_test_serve_cache", setups, sizes)
     candidates = run_mod.discover_candidates(mod)
 
-    # estimate_pipeline_size_gb has no torch here — feed it the fake size.
+    # No torch/CUDA here — feed the fake sizes to the measurement probe and
+    # keep the warm tier deterministic regardless of host RAM.
     monkeypatch.setattr(
-        serve_mod, "_estimate_size_gb",
-        lambda pipe: float(getattr(pipe, "size_gb", 5.0)),
+        serve_mod.memory, "estimate_cuda_resident_gb",
+        lambda *objs: float(getattr(objs[0], "size_gb", 5.0)) if objs else 0.0,
     )
+    monkeypatch.setattr(residency_mod, "get_available_ram_gb", lambda: 64.0)
 
     ep = serve_mod._Endpoint(offline=False, allow_publish=False)
     ep.boot(candidates)
     # Tiny VRAM budget so the two models over-subscribe (forces eviction).
-    ep._model_cache = ModelCache(max_vram_gb=5.0, model_cache_dir="/tmp/_gw_cache_test")
-    cache = ep._model_cache
+    ep._residency = Residency(vram_budget_bytes=5 * 1024 ** 3)
+    res = ep._residency
     big_id = ep._model_id_by_inst[id(ep.functions["gen_big"].instance)]
     small_id = ep._model_id_by_inst[id(ep.functions["gen_small"].instance)]
 
     # 1) big: cold setup + registered VRAM-resident.
     assert ep.dispatch("gen_big", {"text": "x"})["ok"] is True
-    assert cache.residency_tier(big_id) == "VRAM"
-    assert cache.get_vram_models() == [big_id]
+    assert res.tier(big_id) is Tier.VRAM
+    assert res.refs_in(Tier.VRAM) == [big_id]
     assert setups == {"big": 1}
 
-    # 2) small: cold setup; cache makes room => big DEMOTED to the CPU-RAM tier.
+    # 2) small: cold setup; make_room => big DEMOTED to the CPU-RAM warm tier.
     assert ep.dispatch("gen_small", {"text": "x"})["ok"] is True
-    assert cache.residency_tier(small_id) == "VRAM"
-    assert cache.residency_tier(big_id) == "RAM"   # demoted, NOT re-setup
+    assert res.tier(small_id) is Tier.VRAM
+    assert res.tier(big_id) is Tier.RAM            # demoted, NOT re-setup
     big_pipe = ep._pipeline_by_inst[id(ep.functions["gen_big"].instance)]
     assert big_pipe.moves[-1] == "cpu"             # real .to("cpu") demote
     assert setups == {"big": 1, "small": 1}
 
     # 3) big AGAIN: promoted RAM->VRAM (small demoted), setup NOT re-run.
     assert ep.dispatch("gen_big", {"text": "x"})["ok"] is True
-    assert cache.residency_tier(big_id) == "VRAM"  # promoted back
-    assert cache.residency_tier(small_id) == "RAM"  # small demoted to make room
+    assert res.tier(big_id) is Tier.VRAM           # promoted back
+    assert res.tier(small_id) is Tier.RAM          # small demoted to make room
     assert big_pipe.moves[-1] == "cuda"            # PCIe swap-in, not reload
     assert setups == {"big": 1, "small": 1}        # setup() ran ONCE per model
     ep.shutdown()
@@ -358,24 +361,17 @@ def test_socket_roundtrip_sigint_teardown_and_nontty_stdin(tmp_path, capsys, std
 
 
 # --------------------------------------------------------------------------- #
-# serve --vram-budget sizes the in-process ModelCache to a host allotment (#347)
+# serve --vram-budget caps the Residency manager to a host allotment (#347)
 # --------------------------------------------------------------------------- #
 
 
-def test_vram_budget_sizes_model_cache(monkeypatch) -> None:
-    captured = {}
-
-    class _FakeCache:
-        def __init__(self, max_vram_gb=None, **kw):
-            captured["max_vram_gb"] = max_vram_gb
-
-    monkeypatch.setattr(serve_mod, "ModelCache", _FakeCache)
-    # Explicit budget -> ModelCache sized to it, regardless of host VRAM.
-    c = serve_mod._build_model_cache(vram_budget_gb=4.0)
-    assert isinstance(c, _FakeCache)
-    assert captured["max_vram_gb"] == 4.0
+def test_vram_budget_sizes_residency() -> None:
+    # Explicit budget -> Residency capped to it, regardless of host VRAM.
+    c = serve_mod._build_residency(vram_budget_gb=4.0)
+    assert isinstance(c, Residency)
+    assert c.free_vram_bytes() == 4 * 1024 ** 3
 
     # _Endpoint threads the budget through.
-    captured.clear()
-    serve_mod._Endpoint(offline=False, allow_publish=False, vram_budget_gb=6.0)
-    assert captured["max_vram_gb"] == 6.0
+    ep = serve_mod._Endpoint(offline=False, allow_publish=False, vram_budget_gb=6.0)
+    assert ep._residency is not None
+    assert ep._residency.free_vram_bytes() == 6 * 1024 ** 3

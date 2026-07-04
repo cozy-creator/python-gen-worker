@@ -1,0 +1,587 @@
+"""Model residency: LRU VRAM/RAM/disk tiers + shared-component cache (#366).
+
+One registry for everything loaded or on disk, keyed once by canonical ref
+string. Public API only — no private reach-ins, no tier strings smuggled
+through model ids. Emits residency transitions through an ``on_event``
+callback (the worker maps them to wire ``ModelEvent``s; the local CLI ignores
+them).
+
+Eviction is driven by FREE VRAM, never total capacity: ``make_room(needed)``
+demotes LRU entries until measured free VRAM covers the request. An explicit
+``vram_budget_bytes`` (shared-GPU slice, tests) replaces the probe with
+``budget - tracked``.
+
+Multi-pipeline endpoints (e.g. several variants of one family on one GPU) use
+the same registry: register each pipeline under its ref, wrap handler
+execution in :meth:`executing` (pin-while-executing), and call
+:meth:`make_room` before promoting — cross-pipeline eviction picks the LRU
+non-pinned, non-executing victim.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import logging
+import threading
+import time
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from enum import Enum
+from pathlib import Path
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
+
+from .memory import (
+    estimate_cuda_resident_gb,
+    flush_memory,
+    get_available_ram_gb,
+)
+
+logger = logging.getLogger(__name__)
+
+_GiB = 1024 ** 3
+# Free-VRAM slack preserved beyond the requested headroom (activations).
+_VRAM_MARGIN_BYTES = 2 * _GiB
+# Host-RAM floor below which VRAM demotions skip the warm tier and drop
+# straight to disk (don't push the host into swap).
+_RAM_FLOOR_GB = 8.0
+
+# Residency event states (mirrors the wire ModelEvent vocabulary).
+ON_DISK = "on_disk"
+IN_RAM = "in_ram"
+IN_VRAM = "in_vram"
+EVICTED = "evicted"
+
+EventFn = Callable[[str, str, int], None]  # (ref, state, vram_bytes)
+
+
+class Tier(str, Enum):
+    VRAM = "VRAM"
+    RAM = "RAM"
+    DISK = "DISK"
+
+
+@dataclass
+class _Entry:
+    ref: str
+    tier: Tier
+    path: Optional[Path] = None
+    obj: Any = None
+    vram_bytes: int = 0
+    vram_hint: int = 0           # last measured footprint (survives demotion)
+    pinned: bool = False
+    refcount: int = 0            # live executions / shared holders
+    last_used: float = field(default_factory=time.monotonic)
+
+
+def _default_free_vram_bytes() -> int:
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            free, _total = torch.cuda.mem_get_info(0)
+            return int(free)
+    except Exception:
+        pass
+    return 0
+
+
+def _obj_manages_own_device(obj: Any) -> bool:
+    """diffusers offload hooks own placement; manual .to() would break them."""
+    return getattr(obj, "_cozy_low_vram_mode", None) in (
+        "model_offload", "group_offload", "sequential",
+    )
+
+
+def _move_obj(obj: Any, device: str) -> None:
+    if obj is None or _obj_manages_own_device(obj):
+        return
+    try:
+        to = getattr(obj, "to", None)
+        if callable(to):
+            to(device)
+    except Exception as exc:
+        logger.warning("residency: .to(%s) failed: %s", device, exc)
+
+
+class Residency:
+    """LRU-tiered model registry. Thread-safe."""
+
+    def __init__(
+        self,
+        *,
+        on_event: Optional[EventFn] = None,
+        vram_budget_bytes: Optional[int] = None,
+        free_vram_bytes_fn: Optional[Callable[[], int]] = None,
+        move_fn: Callable[[Any, str], None] = _move_obj,
+    ) -> None:
+        self._on_event = on_event
+        self._vram_budget = vram_budget_bytes
+        self._free_vram_fn = free_vram_bytes_fn
+        self._move = move_fn
+        self._entries: Dict[str, _Entry] = {}
+        self._lock = threading.RLock()
+        self._shared_hits = 0
+        self._shared_misses = 0
+
+    # ---- events -------------------------------------------------------------
+
+    def _emit(self, ref: str, state: str, vram_bytes: int = 0) -> None:
+        if self._on_event is None:
+            return
+        try:
+            self._on_event(ref, state, int(vram_bytes))
+        except Exception:
+            logger.exception("residency event callback failed for %s", ref)
+
+    # ---- probes ---------------------------------------------------------------
+
+    def free_vram_bytes(self) -> int:
+        if self._vram_budget is not None:
+            with self._lock:
+                used = sum(e.vram_bytes for e in self._entries.values() if e.tier is Tier.VRAM)
+            return max(0, int(self._vram_budget) - used)
+        if self._free_vram_fn is not None:
+            return int(self._free_vram_fn())
+        return _default_free_vram_bytes()
+
+    # ---- queries ---------------------------------------------------------------
+
+    def tier(self, ref: str) -> Optional[Tier]:
+        with self._lock:
+            e = self._entries.get(ref)
+            return e.tier if e else None
+
+    def local_path(self, ref: str) -> Optional[Path]:
+        with self._lock:
+            e = self._entries.get(ref)
+            return e.path if e else None
+
+    def obj(self, ref: str) -> Any:
+        with self._lock:
+            e = self._entries.get(ref)
+            return e.obj if e else None
+
+    def vram_bytes(self, ref: str) -> int:
+        with self._lock:
+            e = self._entries.get(ref)
+            return e.vram_bytes if e else 0
+
+    def refs_in(self, tier: Tier) -> List[str]:
+        with self._lock:
+            return [r for r, e in self._entries.items() if e.tier is tier]
+
+    def snapshot(self) -> List[Tuple[str, Tier, int]]:
+        """(ref, tier, vram_bytes) for every tracked entry (Hello.models)."""
+        with self._lock:
+            return [(r, e.tier, e.vram_bytes) for r, e in self._entries.items()]
+
+    # ---- registration / transitions ---------------------------------------------
+
+    def touch(self, ref: str) -> None:
+        with self._lock:
+            e = self._entries.get(ref)
+            if e:
+                e.last_used = time.monotonic()
+
+    def track_disk(self, ref: str, path: Path) -> None:
+        """Register (or demote-to) an on-disk snapshot."""
+        with self._lock:
+            e = self._entries.get(ref)
+            if e is None:
+                self._entries[ref] = _Entry(ref=ref, tier=Tier.DISK, path=Path(path))
+            else:
+                e.path = Path(path)
+                if e.tier is Tier.DISK:
+                    e.last_used = time.monotonic()
+                    return  # no transition, no event
+        self._emit(ref, ON_DISK)
+
+    def track_ram(self, ref: str, obj: Any = None, *, path: Optional[Path] = None) -> None:
+        """Register a loaded-but-not-VRAM object (CPU-only hosts, warm tier)."""
+        with self._lock:
+            e = self._entries.setdefault(ref, _Entry(ref=ref, tier=Tier.RAM))
+            e.tier = Tier.RAM
+            if obj is not None:
+                e.obj = obj
+            if path is not None:
+                e.path = Path(path)
+            e.vram_bytes = 0
+            e.last_used = time.monotonic()
+        self._emit(ref, IN_RAM)
+
+    def track_vram(
+        self,
+        ref: str,
+        obj: Any = None,
+        *,
+        vram_bytes: int = 0,
+        path: Optional[Path] = None,
+        pinned: bool = False,
+    ) -> None:
+        """Register a VRAM-resident object with its MEASURED footprint
+        (``torch.cuda.memory_allocated`` delta across the load, or
+        :func:`~gen_worker.models.memory.estimate_cuda_resident_gb`)."""
+        measured = int(vram_bytes)
+        if measured <= 0 and obj is not None:
+            measured = int(estimate_cuda_resident_gb(obj) * _GiB)
+        with self._lock:
+            e = self._entries.setdefault(ref, _Entry(ref=ref, tier=Tier.VRAM))
+            e.tier = Tier.VRAM
+            if obj is not None:
+                e.obj = obj
+            if path is not None:
+                e.path = Path(path)
+            e.vram_bytes = max(0, measured)
+            e.vram_hint = max(e.vram_hint, e.vram_bytes)
+            if pinned:
+                e.pinned = True
+            e.last_used = time.monotonic()
+        self._emit(ref, IN_VRAM, max(0, measured))
+
+    def demote(self, ref: str) -> bool:
+        """VRAM -> RAM warm tier (or straight to disk when host RAM is tight).
+        Refuses pinned / executing entries. Returns True when VRAM was freed."""
+        with self._lock:
+            e = self._entries.get(ref)
+            if e is None or e.tier is not Tier.VRAM or e.pinned or e.refcount > 0:
+                return False
+            keep_warm = e.obj is not None and get_available_ram_gb() >= _RAM_FLOOR_GB
+            e.vram_bytes = 0
+            if keep_warm:
+                self._move(e.obj, "cpu")
+                e.tier = Tier.RAM
+                state = IN_RAM
+            elif e.path is not None:
+                e.obj = None
+                e.tier = Tier.DISK
+                state = ON_DISK
+            else:
+                del self._entries[ref]
+                state = EVICTED
+        flush_memory()
+        self._emit(ref, state)
+        return True
+
+    def promote(self, ref: str, device: str = "cuda") -> bool:
+        """RAM -> VRAM (makes room first). True when resident afterward."""
+        with self._lock:
+            e = self._entries.get(ref)
+            if e is None or e.obj is None:
+                return False
+            if e.tier is Tier.VRAM:
+                e.last_used = time.monotonic()
+                return True
+            hint = e.vram_hint
+        self.make_room(hint)
+        with self._lock:
+            e = self._entries.get(ref)
+            if e is None or e.obj is None:
+                return False
+            self._move(e.obj, device)
+            e.tier = Tier.VRAM
+            e.vram_bytes = int(estimate_cuda_resident_gb(e.obj) * _GiB) or hint
+            e.vram_hint = max(e.vram_hint, e.vram_bytes)
+            e.last_used = time.monotonic()
+            measured = e.vram_bytes
+        self._emit(ref, IN_VRAM, measured)
+        return True
+
+    def release_to_disk(self, ref: str) -> bool:
+        """Drop the loaded object entirely (UNLOAD); disk snapshot kept.
+        Refuses executing/shared-held entries."""
+        with self._lock:
+            e = self._entries.get(ref)
+            if e is None:
+                return False
+            if e.refcount > 0:
+                return False
+            was_loaded = e.tier in (Tier.VRAM, Tier.RAM)
+            e.obj = None
+            e.vram_bytes = 0
+            if e.path is not None:
+                e.tier = Tier.DISK
+                state = ON_DISK
+            else:
+                del self._entries[ref]
+                state = EVICTED
+        if was_loaded:
+            flush_memory()
+        self._emit(ref, state)
+        return True
+
+    def evict(self, ref: str, *, force: bool = False) -> bool:
+        """Remove the entry entirely (fully gone -> EVICTED). Refuses
+        executing/shared-held entries unless ``force``. Does not delete disk
+        files — callers own filesystem GC."""
+        with self._lock:
+            e = self._entries.get(ref)
+            if e is None:
+                return False
+            if e.refcount > 0 and not force:
+                return False
+            was_loaded = e.tier in (Tier.VRAM, Tier.RAM)
+            del self._entries[ref]
+        if was_loaded:
+            flush_memory()
+        self._emit(ref, EVICTED)
+        return True
+
+    # ---- protection ----------------------------------------------------------
+
+    def pin(self, ref: str) -> None:
+        with self._lock:
+            e = self._entries.get(ref)
+            if e:
+                e.pinned = True
+
+    def unpin(self, ref: str) -> None:
+        with self._lock:
+            e = self._entries.get(ref)
+            if e:
+                e.pinned = False
+
+    @contextmanager
+    def executing(self, *refs: str) -> Iterator[None]:
+        """Pin-while-executing: entries named here are not eviction candidates
+        for the duration (cross-pipeline eviction never yanks a model that a
+        handler is actively using)."""
+        with self._lock:
+            for ref in refs:
+                e = self._entries.get(ref)
+                if e:
+                    e.refcount += 1
+                    e.last_used = time.monotonic()
+        try:
+            yield
+        finally:
+            with self._lock:
+                for ref in refs:
+                    e = self._entries.get(ref)
+                    if e and e.refcount > 0:
+                        e.refcount -= 1
+
+    def in_use(self, ref: str) -> bool:
+        with self._lock:
+            e = self._entries.get(ref)
+            return bool(e and e.refcount > 0)
+
+    # ---- pressure -------------------------------------------------------------
+
+    def _lru_vram_victims(self) -> List[str]:
+        with self._lock:
+            candidates = [
+                e for e in self._entries.values()
+                if e.tier is Tier.VRAM and not e.pinned and e.refcount <= 0
+            ]
+            candidates.sort(key=lambda e: e.last_used)
+            return [e.ref for e in candidates]
+
+    def make_room(self, needed_bytes: int) -> bool:
+        """Demote LRU VRAM entries until measured free VRAM covers
+        ``needed_bytes`` + margin. True when the headroom was reached."""
+        target = int(needed_bytes) + _VRAM_MARGIN_BYTES
+        if self.free_vram_bytes() >= target:
+            return True
+        for ref in self._lru_vram_victims():
+            logger.info("residency: demoting LRU %s for %d bytes headroom", ref, needed_bytes)
+            self.demote(ref)
+            if self.free_vram_bytes() >= target:
+                return True
+        return self.free_vram_bytes() >= target
+
+    # ---- shared components (#335, folded in) -----------------------------------
+
+    def acquire_shared(
+        self,
+        key: "LoadedComponentKey",
+        loader: Callable[[], Any],
+        *,
+        vram_bytes: int = 0,
+        pin: bool = False,
+    ) -> Any:
+        """Load-once-or-reuse a shared immutable component set. The entry is
+        registered ONCE (VRAM counted once) under ``key.cache_id()`` and held
+        (refcount) so eviction never reclaims it while any pipeline uses it."""
+        ref = key.cache_id()
+        with self._lock:
+            e = self._entries.get(ref)
+            if e is not None and e.obj is not None:
+                self._shared_hits += 1
+                e.refcount += 1
+                e.last_used = time.monotonic()
+                return e.obj
+            # MISS: load under the lock so a concurrent acquire of the same key
+            # can't double-load (loads are GPU-semaphore-serialized anyway).
+            self._shared_misses += 1
+            obj = loader()
+            measured = int(vram_bytes)
+            if measured <= 0:
+                measured = int(estimate_cuda_resident_gb(obj) * _GiB)
+            e = _Entry(
+                ref=ref,
+                tier=Tier.VRAM if measured > 0 else Tier.RAM,
+                obj=obj,
+                vram_bytes=measured,
+                pinned=pin,
+                refcount=1,
+            )
+            self._entries[ref] = e
+            state, vb = (IN_VRAM, measured) if e.tier is Tier.VRAM else (IN_RAM, 0)
+        self._emit(ref, state, vb)
+        return obj
+
+    def release_shared(self, key: "LoadedComponentKey") -> int:
+        """Drop one shared reference; returns the new count. The last release
+        makes the entry an LRU candidate — it is not freed eagerly."""
+        with self._lock:
+            e = self._entries.get(key.cache_id())
+            if e is None:
+                return 0
+            if e.refcount > 0:
+                e.refcount -= 1
+            return e.refcount
+
+    def shared_refcount(self, key: "LoadedComponentKey") -> int:
+        with self._lock:
+            e = self._entries.get(key.cache_id())
+            return e.refcount if e else 0
+
+    def shared_obj(self, key: "LoadedComponentKey") -> Any:
+        return self.obj(key.cache_id())
+
+    def shared_stats(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                "hits": self._shared_hits,
+                "misses": self._shared_misses,
+                "entries": [
+                    {"ref": e.ref, "tier": e.tier.value, "refcount": e.refcount,
+                     "vram_bytes": e.vram_bytes, "pinned": e.pinned}
+                    for e in self._entries.values() if e.ref.startswith("shared::")
+                ],
+            }
+
+    def drain_shared(self, *, force: bool = False) -> int:
+        """Evict shared entries with refcount 0 (or everything when ``force``)."""
+        with self._lock:
+            victims = [
+                r for r, e in self._entries.items()
+                if r.startswith("shared::") and (force or e.refcount <= 0)
+            ]
+        freed = 0
+        for r in victims:
+            if self.evict(r, force=force):
+                freed += 1
+        return freed
+
+
+# ---------------------------------------------------------------------------
+# Shared-component identity (#335)
+# ---------------------------------------------------------------------------
+
+
+def _digest(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        raw = value.strip()
+    elif isinstance(value, dict):
+        raw = repr(sorted((str(k), repr(v)) for k, v in value.items()))
+    else:
+        raw = repr(value)
+    if not raw:
+        return ""
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+@dataclass(frozen=True)
+class LoadedComponentKey:
+    """Canonical identity of a loadable immutable component set. Two bindings
+    share one loaded entry IFF every field is equal — the fields cover every
+    dimension that would make the loaded bytes unshareable (provider/ref,
+    revision/snapshot, dtype, quant scheme+config, GPU index, placement mode,
+    subfolder, component-set/pipeline-class identity, adapter overlays)."""
+
+    provider: str = "tensorhub"
+    ref: str = ""
+    revision: str = ""
+    dtype: str = ""
+    quantization: str = ""
+    quant_config_digest: str = ""
+    device_id: int = 0
+    placement: str = "full"
+    subfolder: str = ""
+    component_set: str = ""
+    adapter_id: str = ""
+
+    @classmethod
+    def from_binding(
+        cls,
+        binding: Any,
+        *,
+        device_id: int = 0,
+        placement: str = "full",
+        component_set: str = "",
+        snapshot_digest: str = "",
+        quantization: str = "",
+        quant_config: Any = None,
+        adapter_id: str = "",
+    ) -> "LoadedComponentKey":
+        provider = str(getattr(binding, "provider", "tensorhub") or "tensorhub").strip()
+        ref = str(getattr(binding, "ref", "") or "").strip()
+        dtype = str(getattr(binding, "_dtype", "") or "").strip().lower()
+        revision = str(getattr(binding, "_revision", "") or "").strip() or str(snapshot_digest or "").strip()
+        subfolder = str(getattr(binding, "_subfolder", "") or "").strip()
+        return cls(
+            provider=provider,
+            ref=ref,
+            revision=revision,
+            dtype=dtype,
+            quantization=str(quantization or "").strip().lower(),
+            quant_config_digest=_digest(quant_config),
+            device_id=int(device_id),
+            placement=str(placement or "full").strip() or "full",
+            subfolder=subfolder,
+            component_set=str(component_set or "").strip(),
+            adapter_id=str(adapter_id or "").strip(),
+        )
+
+    def cache_id(self) -> str:
+        fields = (
+            self.provider, self.ref, self.revision, self.dtype,
+            self.quantization, self.quant_config_digest, str(self.device_id),
+            self.placement, self.subfolder, self.component_set, self.adapter_id,
+        )
+        digest = hashlib.sha256("\x1f".join(fields).encode("utf-8")).hexdigest()[:16]
+        readable = (self.ref or "?").replace("/", "--")[:48]
+        return f"shared::{readable}::dev{self.device_id}::{digest}"
+
+
+def build_function_owned_pipeline(
+    shared: Any,
+    pipeline_cls: Optional[Any] = None,
+    **extra_components: Any,
+) -> Any:
+    """Build a *function-owned* pipeline over SHARED immutable components:
+    own scheduler/mutable state, same heavy modules (same CUDA storages).
+    Tries ``pipeline_cls.from_pipe(shared)`` then ``pipeline_cls(**components)``."""
+    cls = pipeline_cls or type(shared)
+    from_pipe = getattr(cls, "from_pipe", None)
+    if callable(from_pipe):
+        return from_pipe(shared, **extra_components)
+    comps = getattr(shared, "components", None)
+    if isinstance(comps, dict):
+        return cls(**{**comps, **extra_components})
+    raise TypeError(
+        f"cannot build a function-owned pipeline from {type(shared).__name__}: "
+        "no from_pipe() and no .components dict to re-assemble"
+    )
+
+
+__all__ = [
+    "Residency",
+    "Tier",
+    "LoadedComponentKey",
+    "build_function_owned_pipeline",
+    "ON_DISK", "IN_RAM", "IN_VRAM", "EVICTED",
+]

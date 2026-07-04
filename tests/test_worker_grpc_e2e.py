@@ -499,3 +499,113 @@ def test_send_queue_results_survive_reconnect_until_shipped() -> None:
         assert len(q) == 0  # progress was shed on reconnect
 
     asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# ModelOp DOWNLOAD / LOAD / UNLOAD round-trip (#366): a tensorhub-bound
+# function is gated until LOAD; ModelEvents follow the contract state machine.
+# ---------------------------------------------------------------------------
+
+
+def _is_model_event(ref: str, state: int):
+    return lambda m: (
+        m.WhichOneof("msg") == "model_event"
+        and m.model_event.ref == ref
+        and m.model_event.state == state
+    )
+
+
+def test_model_op_download_load_unload_round_trip(tmp_path, monkeypatch) -> None:
+    import http.server
+
+    from blake3 import blake3
+
+    monkeypatch.setenv("TENSORHUB_CACHE_DIR", str(tmp_path / "hub-cache"))
+
+    # Serve one real weight file over HTTP (the presigned-URL stand-in).
+    payload = b"tiny-weights"
+    digest = blake3(payload).hexdigest()
+    serve_dir = tmp_path / "www"
+    serve_dir.mkdir()
+    (serve_dir / "blob").write_bytes(payload)
+
+    class _Quiet(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **kw):
+            super().__init__(*a, directory=str(serve_dir), **kw)
+
+        def log_message(self, *a):
+            pass
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Quiet)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    blob_url = f"http://127.0.0.1:{httpd.server_address[1]}/blob"
+
+    snapshot = pb.Snapshot(
+        digest="e2e-snap-1",
+        files=[pb.SnapshotFile(
+            path="model.safetensors", size_bytes=len(payload),
+            blake3=digest, url=blob_url,
+        )],
+    )
+
+    scheduler = FakeScheduler()
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
+    pb_grpc.add_WorkerSchedulerServicer_to_server(scheduler, server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    harness = _Harness(scheduler, port)
+    harness.start()
+    try:
+        conn = scheduler.wait_connection(0)
+        ready = conn.wait_for(
+            lambda m: m.WhichOneof("msg") == "state_delta"
+            and m.state_delta.phase == pb.WORKER_PHASE_READY
+        )
+        # Gated until its model loads: present in loading, absent from available.
+        assert "model_echo" not in ready.state_delta.available_functions
+        assert "model_echo" in ready.state_delta.loading_functions
+
+        # DOWNLOAD -> DOWNLOADING then ON_DISK.
+        conn.send(model_op=pb.ModelOp(
+            op=pb.MODEL_OP_KIND_DOWNLOAD, ref="e2e/tiny", snapshot=snapshot))
+        conn.wait_for(_is_model_event("e2e/tiny", pb.MODEL_STATE_DOWNLOADING))
+        conn.wait_for(_is_model_event("e2e/tiny", pb.MODEL_STATE_ON_DISK))
+
+        # LOAD -> setup runs (typed str path injection); CPU host => IN_RAM;
+        # the function flips to available.
+        conn.send(model_op=pb.ModelOp(
+            op=pb.MODEL_OP_KIND_LOAD, ref="e2e/tiny", snapshot=snapshot))
+        conn.wait_for(_is_model_event("e2e/tiny", pb.MODEL_STATE_IN_RAM))
+        conn.wait_for(
+            lambda m: m.WhichOneof("msg") == "state_delta"
+            and "model_echo" in m.state_delta.available_functions
+        )
+
+        # The handler sees the materialized snapshot content.
+        conn.send(run_job=pb.RunJob(
+            request_id="r-model", attempt=1, function_name="model_echo",
+            input_payload=_msgpack("marco")))
+        res = conn.wait_for(_is_result_for("r-model")).job_result
+        assert res.status == pb.JOB_STATUS_OK
+        assert _decode_out(res.inline).response == payload.decode()
+
+        # Hello-shape sanity: the residency snapshot carries the ref.
+        snap_refs = {r.ref for r in harness.worker.executor.store.residency_snapshot()}
+        assert "e2e/tiny" in snap_refs
+
+        # UNLOAD -> teardown; residency falls back to ON_DISK (a SECOND
+        # on-disk event, after the download's); function gated again.
+        conn.send(model_op=pb.ModelOp(op=pb.MODEL_OP_KIND_UNLOAD, ref="e2e/tiny"))
+        deadline = time.monotonic() + _TIMEOUT
+        while conn.count(_is_model_event("e2e/tiny", pb.MODEL_STATE_ON_DISK)) < 2:
+            assert time.monotonic() < deadline, "no ON_DISK event after UNLOAD"
+            time.sleep(0.02)
+        conn.wait_for(
+            lambda m: m.WhichOneof("msg") == "state_delta"
+            and "model_echo" not in m.state_delta.available_functions
+            and "model_echo" in m.state_delta.loading_functions
+        )
+    finally:
+        harness.stop()
+        server.stop(grace=0)
+        httpd.shutdown()

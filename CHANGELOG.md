@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- models layer rewrite (#366, #358): one async `ensure_local()` download path
+  (tensorhub CAS / HF snapshot + small variant selector / civitai fetch), `Residency`
+  LRU VRAM/RAM/disk manager (shared components counted once, pin-while-executing,
+  free-VRAM-driven eviction), `models.memory` free-VRAM offload ladder, measured
+  `ModelEvent.vram_bytes`, snapshot digest-poisoning retry fix, produced-dtype
+  stamping for inline conversion. Deleted `pipeline/` (PipelineLoader),
+  `inference_memory` (now `gen_worker.models.memory`), and the legacy
+  cache/shared_components/hf_selection/hf_downloader/ref_downloader modules.
+
 ### Breaking
 
 - **New worker <-> orchestrator wire protocol** (`proto/worker_scheduler.proto`,

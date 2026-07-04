@@ -11,7 +11,7 @@ from urllib.parse import quote, urlparse
 from blake3 import blake3
 
 from .uploader import ArtifactUploadError, ArtifactUploader
-from gen_worker.models.ref_downloader import ModelRefDownloader
+from gen_worker.models.download import ensure_local_sync
 
 
 def is_truthy(value: object) -> bool:
@@ -360,12 +360,8 @@ class RuntimeInputDownloader:
         self._root = Path(root_dir)
         self._root.mkdir(parents=True, exist_ok=True)
         self._token = (capability_token or "").strip() or None
-        self._model_downloader = ModelRefDownloader(
-            cozy_base_url=tensorhub_public_url or None,
-            cozy_token=self._token,
-            hf_home=hf_home or None,
-            hf_token=hf_token or None,
-        )
+        self._hf_home = hf_home or None
+        self._hf_token = hf_token or None
 
     def _hash_name(self, ref: str) -> str:
         return hashlib.sha256(ref.encode("utf-8")).hexdigest()
@@ -414,7 +410,13 @@ class RuntimeInputDownloader:
             return str(out.parent)
 
         try:
-            return str(Path(self._model_downloader.download(ref, str(self._root / "models"))).resolve())
+            local = ensure_local_sync(
+                ref,
+                cache_dir=self._root / "models",
+                hf_home=self._hf_home,
+                hf_token=self._hf_token,
+            )
+            return str(Path(local).resolve())
         except Exception as exc:
             raise InputMaterializationError(f"failed to materialize model ref: {ref}") from exc
 

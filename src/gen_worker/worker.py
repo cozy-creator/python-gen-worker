@@ -39,12 +39,12 @@ class Worker:
         self.settings = settings
 
         if manifest:
-            from .models.ref_downloader import (
+            from .models.download import (
                 build_provider_index_from_manifest,
-                set_provider_by_ref_global,
+                set_provider_index,
             )
 
-            set_provider_by_ref_global(build_provider_index_from_manifest(manifest))
+            set_provider_index(build_provider_index_from_manifest(manifest))
 
         specs = collect_endpoints(list(user_module_names))
         if not specs:
