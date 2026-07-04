@@ -7,7 +7,26 @@
 > Source for all findings: /home/fidika/cozy/python-gen-worker/AUDIT.md (2026-07-03 full-stack audit,
 > file:line evidence for every claim). Counterpart protocol/orchestrator issues: tensorhub #503-#510.
 
-next_id: 376
+next_id: 377
+
+---
+
+
+# #376: reserved-source materialization — ctx.source_path is never populated
+
+**Completed:** no
+**Status:** OPEN — filed 2026-07-04 from training-endpoints #37 rewrite. `RequestContext.source_path` + `_set_source_path()` exist (request_context/__init__.py:770,777) but no caller: grep shows zero call sites in src/ or packages/. training-endpoints transform/quant producers (cast-dtype, convert-gguf, convert-flashpack, repackage-singlefile, torchao/bnb/modelopt quant) read `ctx.source_path` expecting the library to have materialized the payload's reserved `source` repo locally before invoke. Today they get None and fail.
+
+Executor should, for producer-kind endpoints whose payload carries the reserved `source` struct: resolve the source ref → `ensure_local` (models/download.py, same snapshot path as model bindings) → `ctx._set_source_path(local_dir)` before the handler runs; download failures map to the same RETRYABLE/INVALID classification as model bindings. No new wire messages — the source ref resolves like any tensorhub ref (hub snapshot on RunJob or resolve-at-worker per CONTRACT §5).
+
+## Tasks
+- [ ] Executor pre-invoke hook: detect reserved `source` in payload for producer kinds, ensure_local, set ctx.source_path
+- [ ] Failure classification + ModelEvent parity with model-binding downloads
+- [ ] Tests: producer endpoint with source ref gets a real local dir; missing/invalid source → INVALID not crash
+- [ ] Verify training-endpoints cast-dtype runs live against the hub (their #37 deferral)
+
+## Acceptance
+A transform endpoint (e.g. cast-dtype) invoked with `source: {repo: owner/name:tag}` receives a materialized local snapshot at ctx.source_path.
 
 ---
 
