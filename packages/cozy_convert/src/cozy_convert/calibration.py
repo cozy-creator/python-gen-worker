@@ -68,7 +68,7 @@ def validate_policy_map(fn_name: str, policy_map) -> dict[str, CalibrationPolicy
                 f"{fn_name}: @conversion calibration={policy_map!r} "
                 f"is not valid. Use one of {sorted(VALID_POLICIES)}."
             )
-        return {"*": policy_map}  # type: ignore[return-value]
+        return {"*": policy_map}  # type: ignore[dict-item,return-value]
     if not isinstance(policy_map, dict):
         raise TypeError(
             f"{fn_name}: @conversion calibration= must be a string or "

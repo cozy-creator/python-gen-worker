@@ -219,7 +219,7 @@ class Source:
         Handles pickle → safetensors conversion and sharded-safetensors via
         .index.json internally. Tenant sees a flat iteration.
         """
-        from ._tensor_iter import iter_source_tensors
+        from .writer import iter_source_tensors
 
         yield from iter_source_tensors(
             self._path,

@@ -5,6 +5,7 @@ requires-python = ">=3.12,<3.13"
 dependencies = [
     "torch>=2.11.0",
     "gen-worker>=0.8.0",
+    "cozy-convert>=0.1.0",
     "safetensors",
 ]
 

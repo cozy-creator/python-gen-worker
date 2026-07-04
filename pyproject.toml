@@ -50,7 +50,6 @@ gen-worker = "gen_worker.cli:main"
 torch = [
     "torch>=2.11.0",
     "safetensors>=0.7.0",
-    "flashpack>=0.2.1",
 ]
 vision = [
     "torchvision>=0.26.0",
@@ -105,25 +104,14 @@ ignore_errors = true
 module = ["gen_worker.trainer.*"]
 ignore_errors = true
 
-[[tool.mypy.overrides]]
-module = ["gen_worker.clone.*"]
-ignore_errors = true
-
-[[tool.mypy.overrides]]
-module = ["gen_worker.conversion.*"]
-ignore_errors = true
-
 [tool.ruff]
 line-length = 100
 target-version = "py311"
 # Generated + legacy modules are lint-exempt (mirrors the mypy overrides above):
-# pb/ is generated; conversion/ + clone/ are the ETL slated to split into
-# cozy_convert; trainer/ + testing/ carry their own debt. Ruff is enforced on
-# the actively-maintained core.
+# pb/ is generated; trainer/ + testing/ carry their own debt. Ruff is enforced
+# on the actively-maintained core.
 extend-exclude = [
     "src/gen_worker/pb",
-    "src/gen_worker/conversion",
-    "src/gen_worker/clone",
     "src/gen_worker/trainer",
     "src/gen_worker/testing",
 ]
@@ -149,6 +137,9 @@ pythonpath = ["src"]
 # resolves torch from PyPI (a CPU or default-CUDA build) and may differ. Tenant
 # images built by Tensorhub pin their own torch/CUDA build; this pin only fixes
 # the local dev + CI environment.
+[tool.uv.workspace]
+members = ["packages/cozy_convert"]
+
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"

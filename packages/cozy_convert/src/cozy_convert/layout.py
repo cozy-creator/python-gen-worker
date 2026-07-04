@@ -1,12 +1,12 @@
 """Model-family / variant detection from a HuggingFace repo's file listing.
 
-File-selection logic lives in :mod:`gen_worker.conversion.hf_classifier`.
+File-selection logic lives in :mod:`cozy_convert.classifier`.
 This module only contains downstream metadata inference: given a repo_dir +
 file list, what model family / variant is this? The output feeds destination
 checkpoint tags so inference workers can pick the right pipeline class.
 
 The legacy ``select_huggingface_source_files`` / ``HFSourceFileSelection``
-that lived here were replaced by :mod:`hf_classifier`'s classify_huggingface_repo
+that lived here were replaced by the classifier's classify_repo
 + per-strategy selectors.
 """
 

@@ -346,7 +346,7 @@ def _run_cast_inline(
     """bf16/fp16/fp32 streaming dtype cast."""
     import torch
 
-    from .streaming_primitives import streaming_dtype_cast
+    from .writer import streaming_dtype_cast
 
     dtype = _normalize(target_dtype)
     if dtype in {"bf16"}:
@@ -522,7 +522,6 @@ def _run_torchao_inline(
     # CLIPTextModel, etc.) and transformers causal LMs both load via their
     # canonical class. AutoModelForCausalLM was wrong here — it only handles
     # decoder-only LM checkpoints, not diffusers transformers or CLIP encoders.
-    import json as _json
     cfg_path = repo_dir / "config.json"
     try:
         cfg_blob = _json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.is_file() else {}
@@ -1134,10 +1133,9 @@ def _run_gguf_inline(
     encoding: str,
 ) -> InlineConversionResult:
     """GGUF quantization — convert_hf_to_gguf.py (+ optional llama-quantize)."""
-    import os
     import subprocess
 
-    from .gguf_utils import (
+    from .gguf_tools import (
         prepare_hf_source_tree_for_gguf,
         resolve_gguf_convert_script,
         run_hf_to_gguf_conversion,

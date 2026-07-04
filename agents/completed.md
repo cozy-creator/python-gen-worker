@@ -8,6 +8,23 @@
 
 ---
 
+# #367: split clone+conversion out as `cozy_convert`; move the tenant SDK to training-endpoints
+
+**Completed:** yes
+**Status:** DONE (2026-07-03, Claude) — new uv-workspace package `packages/cozy_convert` (wheel `cozy-convert`, depends on gen-worker, movable to its own repo). gen_worker has NO clone/ or conversion/; `import gen_worker` is torch- and conversion-free (tests/test_import_graph.py); ConversionContext stays in gen_worker minus `open_output_writer` (tenants construct `cozy_convert.StreamingWriter` directly); flashpack dep moved out of gen_worker extras. Shipped: ONE writer module (writer.py ~640 LOC replaces the 7 IO modules, streaming_primitives facade deleted); small classifier (classifier.py ~300 LOC + `HfApi.list_repo_tree` + `snapshot_download(allow_patterns=…)` replaces hf_classifier's 1,324 LOC / 14 refusal classes → ONE `RepoRefusal(reason=…)`); gguf_utils' 390-line binary parser deleted (gguf package's GGUFReader in gguf_tools.py); ONE finalize path (clone.py `run_clone` — per-flavor local tree → one Tensorhub `/commits` commit with `mode: replace|merge`; the enumerate-prior-latest-and-delete overwrite hack and the `_finalize_clone`/`_finalize_publish_as_is` twins are gone; hub.py is the commit client: blake3, presigned part PUTs, batchless complete, 202-poll finalize, dedup skips). dispatch.py replaced by publish.py `publish_flavors` (ProducedFlavor → one commit each). First ETL tests: 38 in packages/cozy_convert/tests — writer/classifier/hub units (hub against a threaded fake /commits server) + integration on real tiny HF models (transformers + diffusers ingest, fp16 cast, per-component flavor tree, diffusers→singlefile SDXL repackage, bnb nf4 quant; gguf direction skips unless llama.cpp toolchain on PATH). mypy clean for all of cozy_convert (exemption NOT carried; `disallow_untyped_defs` stays off for the moved-verbatim tenant-SDK modules). Deliberate: legacy `save_formats` payload field dropped (use `outputs`); `ConversionOutput`/`IngestResult` (Tensors-based) replaced by `CloneResult`; singlefile→diffusers repackage not integration-tested (needs canonical-config-sized weights); modelopt/hqq calibrated quants still refuse inline with structured `deferred_requirement` (they run in training-endpoints' own jobs). training-endpoints #34 import map — `gen_worker.conversion.{Source,Dataset,FileLayout,ProducedFlavor,CalibrationPolicy,resolve_calibration_action,StreamingWriter}` → same names in `cozy_convert`; `gen_worker.conversion.repackage.{diffusers_to_singlefile,singlefile_to_diffusers}` → `cozy_convert.repackage`; `gen_worker.conversion.flashpack.convert_safetensors_to_flashpack` → `cozy_convert.flashpack`; `gen_worker.conversion.core_types.ConversionOutput` → deleted, clone returns `cozy_convert.CloneResult`; `gen_worker.clone.from_huggingface/from_civitai` → `cozy_convert.clone.from_huggingface/from_civitai`; `gen_worker.conversion.ConversionContext` → `gen_worker.ConversionContext` (unchanged home); `dtype_vocab`/`base_model_families` → `cozy_convert.*`; old `@conversion`+`invocable` decorators → `@endpoint(kind="conversion")` (#368, their #35).
+
+## Tasks
+- [x] New package `cozy_convert` (~4,000 LOC target): hub-API ingest (HF + civitai), ONE streaming shard writer (collapse the 7 IO modules ~1,300 LOC to ~400; `streaming_primitives.py` is a pure re-export facade), dtype cast + quant via the libraries training-endpoints already calls directly (modelopt/bnb/torchao/hqq), repackage.py kept, ONE finalize path (see #360 clone tasks), `gguf` package instead of the hand-rolled binary parser (gguf_utils.py:390).
+- [x] Replace hf_classifier.py (1,324 LOC, zero hf-hub imports, 14 refusal exception classes) with `HfApi.list_repo_files` + `snapshot_download(allow_patterns=...)` + a small classifier.
+- [x] Move `Source`/`Dataset`/`ConversionContext` tenant SDK to training-endpoints (their #34), or into `cozy_convert` if tensorhub also needs it — either way, out of gen_worker.
+- [x] gen_worker keeps only `ensure_local`'s civitai fetch (#366) and the `@endpoint(kind="conversion")` shim that hands a `ConversionContext`.
+- [x] Give the ETL its first tests — clone/ and conversion/ are mypy-exempt (pyproject.toml:100-110) and have zero test coverage today. One integration test per conversion direction on a small real model.
+
+## Acceptance
+gen_worker has no `clone/`; `import gen_worker` never imports conversion machinery; training-endpoints/conversion imports from the new home.
+
+---
+
 # #368: API v2 — one decorator, slim context, pyproject config
 
 **Completed:** yes

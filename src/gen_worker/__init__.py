@@ -46,14 +46,6 @@ from .request_context import (
 )
 
 
-def __getattr__(name: str):
-    if name == "clone":
-        import importlib
-
-        return importlib.import_module(".clone", __name__)
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-
-
 __all__ = [
     # The decorator + bindings.
     "endpoint",
@@ -86,6 +78,5 @@ __all__ = [
     "StringEnum",
     "VideoAsset",
     "emit_diagnostic_log",
-    "clone",
     "io",
 ]

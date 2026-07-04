@@ -1,0 +1,70 @@
+"""Publish ProducedFlavor outputs to Tensorhub (replaces conversion/dispatch.py).
+
+A conversion / dataset tenant returns ``list[ProducedFlavor]``; each flavor's
+``path`` (file or directory) becomes ONE Tensorhub commit against the
+destination repo declared on the job payload.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Iterable, Mapping
+
+from .hub import CommitFile, CommitResult, HubClient, files_from_tree
+from .produced import ProducedFlavor
+
+
+def _flavor_files(flavor: ProducedFlavor) -> list[CommitFile]:
+    path = Path(flavor.path)
+    if path.is_dir():
+        files = files_from_tree(path)
+    elif path.is_file():
+        files = [CommitFile(path=path.name, local_path=path)]
+    else:
+        raise FileNotFoundError(f"ProducedFlavor.path does not exist: {path}")
+    for extra in flavor.extra_files or []:
+        p = Path(extra)
+        if p.is_file():
+            files.append(CommitFile(path=p.name, local_path=p))
+    return files
+
+
+def publish_flavors(
+    ctx: Any,
+    flavors: Iterable[ProducedFlavor],
+    *,
+    destination_repo: str = "",
+    tags: Iterable[str] | None = None,
+    mode: str = "merge",
+    metadata: Mapping[str, Any] | None = None,
+) -> list[CommitResult]:
+    """Publish each ProducedFlavor as one commit. ``destination_repo`` falls
+    back to the reserved-name ``ctx.destination`` payload field."""
+    dest = str(destination_repo or "").strip()
+    if not dest:
+        info = getattr(ctx, "destination", None) or {}
+        dest = str((info.get("repo") if isinstance(info, dict) else "") or "").strip()
+    if not dest:
+        raise ValueError("destination_repo is required (payload.destination.repo)")
+
+    client = HubClient.from_ctx(ctx)
+    results: list[CommitResult] = []
+    for flavor in flavors:
+        attrs = {str(k): str(v) for k, v in (flavor.attributes or {}).items()}
+        label = str(flavor.flavor or attrs.get("flavor") or attrs.get("dtype") or "").strip()
+        results.append(client.commit(
+            destination_repo=dest,
+            files=_flavor_files(flavor),
+            tags=list(tags or []),
+            mode=mode,
+            flavor=label,
+            flavors=list(flavor.flavors or []),
+            dtype=attrs.get("dtype", ""),
+            file_layout=attrs.get("file_layout", ""),
+            file_type=attrs.get("file_type", ""),
+            metadata={**(dict(metadata) if metadata else {}), **attrs},
+        ))
+    return results
+
+
+__all__ = ["publish_flavors"]
