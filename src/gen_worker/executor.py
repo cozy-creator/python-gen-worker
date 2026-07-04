@@ -645,7 +645,7 @@ class Executor:
         job = _Job(request_id=run.request_id, attempt=run.attempt, spec=spec)
         self.jobs[key] = job
         self._idle.clear()
-        logger.debug("job admitted %s attempt=%d", run.request_id, run.attempt)
+        logger.info("job admitted %s attempt=%d", run.request_id, run.attempt)
         await self._send(pb.WorkerMessage(job_accepted=pb.JobAccepted(
             request_id=run.request_id, attempt=run.attempt)))
         job.task = asyncio.create_task(self._run_job(job, run), name=f"job-{run.request_id}")
@@ -991,7 +991,7 @@ class Executor:
         if job.finished:
             return
         job.finished = True
-        logger.debug("job finished %s attempt=%d status=%s", job.request_id, job.attempt, status)
+        logger.info("job finished %s attempt=%d status=%s", job.request_id, job.attempt, status)
         if not job.superseded:
             await self._send_result(job.request_id, job.attempt, status, **kw)
         # Keep finished records so a RunJob retransmission doesn't re-execute;
