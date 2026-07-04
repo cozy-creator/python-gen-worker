@@ -2,7 +2,27 @@
 
 ## Unreleased
 
+### Breaking
+
+- **New worker <-> orchestrator wire protocol** (`proto/worker_scheduler.proto`,
+  package `cozy.scheduler`): ONE bidi `Connect` stream, 12 typed messages,
+  single `attempt` fencing token, gRPC HTTP/2 keepalive as the only liveness
+  mechanism, results >64KB shipped as `blob_ref`. Full semantics in
+  `proto/CONTRACT.md`. No compatibility with the old protocol.
+- **Worker core rewritten asyncio-first**: `transport.py` / `registry.py` /
+  `executor.py` / `lifecycle.py` / thin `worker.py` replace the old
+  ~10k-line `worker.py`. Deleted: aux streams, heartbeats, the JSON
+  `worker_event` fabric, `run_metrics_v1`, `api/micro_batch.py`,
+  `_worker_support.py`, `wire_protocol.py`. One decorator walker
+  (`gen_worker.registry`) now backs the worker, build-time discovery, and
+  the CLI.
+
 ### Added
+
+- **`gen-worker run` dispatches async handlers** — coroutine and
+  async-generator methods run under `asyncio.run`, streaming yields as
+  events. marco-polo gained `marco_polo_stream`, an async-generator
+  streaming endpoint.
 
 - **`io.write_image` gained `as_type` and `encode_kwargs`.** `as_type`
   re-wraps the returned `Asset` as a typed subclass (e.g. `ImageAsset`) so

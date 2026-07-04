@@ -8,6 +8,81 @@
 
 ---
 
+# #365: worker core rewrite — asyncio-first, ~1,600 LOC replacing worker.py
+
+**Completed:** yes
+**Status:** DONE (2026-07-03, Claude) — old 9,957-line worker.py deleted; replaced by transport.py (~360: one stream, JWT metadata, keepalive-only liveness, jittered backoff, not_leader redirects, bounded send queue w/ results-never-dropped) + registry.py (~250: the ONE walker producing EndpointSpec, now consumed by worker, discovery/discover.py AND cli/run.py) + executor.py (~700: single dispatch path sync-on-thread/async-on-loop, (a)sync generators → JobProgress, GPU semaphore, real deadline+cancel watchdog, attempt fencing, blob_ref results, JobMetrics, thin model seam w/ ModelOp/ModelEvent + retry/backoff downloads) + lifecycle.py (~290: Hello/in_flight reconcile, edge-triggered full-replace StateDelta, FnUnavailable gates, phases, working drain) + worker.py (~120 wiring); entrypoint kept. Upload stack untouched. api/micro_batch.py deleted (structurally inert; decorator kwargs remain declarative-only). The previously-nonexistent e2e now exists: `tests/test_worker_grpc_e2e.py` — fake `grpc.server` scheduler over a real socket driving connect/Hello/dispatch/progress/result/cancel/stream-kill/backoff-reconnect/kill-mid-job/reconcile-ships-result-exactly-once/drain, plus deadline, GPU-serialization, auth-exit, queue-policy tests, and marco-polo (with a new `marco_polo_stream` async-generator fn) served under the new core; `gen-worker run --payload` verified offline (CLI gained coroutine/async-gen dispatch). Deferred to #366: real VRAM residency/eviction (ModelStore is a thin ensure-local + residency map; LOAD maps to endpoint setup, UNLOAD tears down holding classes). Deferred to #368: dispatch-slot injection passes local paths (no PipelineLoader by design).
+
+## Tasks
+- [x] `transport.py` (~300): channel + auth interceptor, one bidi stream, bounded send queue with results-never-dropped, receive loop, reconnect with jittered backoff (actually reachable this time), redirect (`not_leader`) handling.
+- [x] `registry.py` (~200): ONE decorator walker producing `EndpointSpec{instance, method, payload_type, output_mode ∈ {single, stream}, is_async, needs_gpu, finalizer}` — shared by worker, discovery, and CLI (today three separate walkers: discovery/discover.py, worker.py:2200+, cli/run.py:199-305 with a "mirrors discover.py" comment).
+- [x] `executor.py` (~350): intake, GPU semaphore, real deadline + cancellation watchdog, sync-on-`to_thread` / async-on-loop, delta emission, result send. One path; "conversion" is a finalizer, not an archetype. Kills SerialWorker/BatchedWorker/Conversion triplication and both `_execute_serial_*` clones.
+- [x] `lifecycle.py` (~150): Hello/StateDelta, startup phases, working drain.
+- [x] `worker.py` (~150) wiring + keep `entrypoint.py` (~100) as-is.
+- [x] Keep the upload stack byte-for-byte (presigned_upload.py, _upload_transport.py, s3_transfer.py — best code in the repo, already has real-socket tests).
+- [x] Decide micro-batching's fate: current one is structurally inert (GPU semaphore acquired before aggregator submit, worker.py:9544→9593 — batch always 1 on 1-GPU). Either batch *inside* the semaphore or delete api/micro_batch.py (383 LOC) until an endpoint needs it. Recommend delete.
+- [x] The e2e test that doesn't exist today: fake gRPC scheduler (`grpc.server` appears nowhere in tests/) driving real worker: connect → register → dispatch → stream deltas → result → interrupt → stream-kill → reconnect-with-backoff → drain. Style-match the existing real-socket/SIGINT tests.
+
+## Acceptance
+marco-polo example runs against the fake scheduler and against a real tensorhub (v2) end to end; thread count at steady state ≤ 6 + executor pool; old worker.py deleted.
+
+---
+
+# #364: protocol v2 — one stream, ~12 typed messages, attempt fencing (worker side)
+
+**Completed:** yes
+**Status:** DONE (2026-07-03, Claude) — `proto/worker_scheduler.proto` (package `cozy.scheduler`, ONE `Connect` bidi stream, 12 typed messages, `attempt` fencing, renumbered from field 1, single `PROTOCOL_VERSION_CURRENT=2`) written jointly with tensorhub #504 and committed byte-identical in both repos; full producer/consumer contract in `proto/CONTRACT.md`. pb regenerated via `task proto`. Deleted wire machinery: mega-oneof envelope, split results/events/heartbeat streams + handshakes, WorkerRegistration-as-heartbeat, `duplicate_request_id`/`ActiveAssignmentResume`/assignment epochs, the JSON `worker_event` fabric, RunMetricsV1 triple-emission (JobResult.metrics is the one vehicle), app-level watchdogs (gRPC HTTP/2 keepalive is the only liveness). Outputs >64KB go as `blob_ref` via the existing presigned-upload stack.
+
+## Tasks
+- [x] Write `proto/worker_scheduler_v2.proto` jointly with tensorhub #504. Worker→orch: `Hello{worker_id, release_id, ver, resources, in_flight[{request_id, attempt}]}`, `StateDelta` (on change only; heartbeat is gRPC keepalive), `JobAccepted{request_id, attempt}`, `JobResult{request_id, attempt, status, output|blob_ref, metrics}`, `JobProgress{request_id, seq, chunk}`, `ModelEvent{ref, state: DOWNLOADING|ON_DISK|IN_VRAM|EVICTED|FAILED, vram_bytes}` (collapses LoadModelResult/UnloadModelResult/WorkerModelReadySignal/download events — and finally reports the `size_bytes` the orchestrator's placement optimizer has been starving for), `FnUnavailable{fn, reason}`. Orch→worker: `HelloAck{config, keep[]}`, `RunJob`, `CancelJob{request_id, attempt}`, `ModelOp{ref, DOWNLOAD|LOAD|UNLOAD}`, `Drain{deadline_ms}`.
+- [x] One bidi stream; identity per connection (JWT), not per message. Delete: split results/events streams + handshakes, dedicated heartbeat stream (exists only for no-auth dev mode), WorkerRegistration-as-heartbeat.
+- [x] Fencing = single `attempt` int on dispatch/ack/result. Delete: `duplicate_request_id` reconcile handshake, `ActiveAssignmentResume` (never sent today; Go path unreachable), assignment epochs.
+- [x] Outputs > ~64KB: presigned PUT to blob storage, result carries the ref — removes the head-of-line blocking that motivated split streams.
+- [x] Delete the untyped `worker_event` JSON fabric. Today the worker emits `model.load.started`, `model.unload.*`, `model.url_refresh`, `models.disk_inventory`, `worker.fatal`, `worker.draining`, `worker.drain.status`, `worker.startup_timeout_unregistered`, legacy `model.ready` — Go drops all of them unread (only `worker.model.download.*` is parsed). Typed messages or logging pipeline, nothing else.
+- [x] Liveness = gRPC HTTP/2 keepalive both sides, period. Delete the app-level 60s inbound-silence watchdog and the 10s full-snapshot heartbeat.
+- [x] Pick ONE metrics vehicle: `JobResult.metrics` replaces RunMetricsV1 triple-emission (canonical_events + metrics.job + observation). Drop never-produced observation fields (ttft/itl/prefix-hit/kv-blocks/scaling_factors) until something emits them.
+
+## Acceptance
+Both repos compile against v2; a contract doc lists every message with producer/consumer; zero fields without both.
+
+---
+
+# #357: worker P0 reliability bugs (drain, result loss, reconnect storm, load events)
+
+**Completed:** yes
+**Status:** DONE (2026-07-03, Claude) — folded into #365: the new asyncio-first core makes each bug class structurally impossible rather than patched. Per-bullet coverage:
+- Drain crash → `lifecycle.drain()`: stop admitting → finish in-flight → ship buffered results → close stream → exit 0; full round-trip driven by `tests/test_worker_grpc_e2e.py` (RunJob-after-Drain = RETRYABLE "worker draining" with no JobAccepted).
+- Results lost during reconnect → `transport.SendQueue` keeps every unshipped `JobResult` in `pending_results` across reconnects until written to a live stream; e2e kills the stream mid-job and asserts the buffered result ships exactly once after `Hello.in_flight` reconcile.
+- Drop-oldest discards results → queue policy per CONTRACT.md §1: results exempt from the bound and never dropped; overflow sheds oldest `JobProgress` only; everything else blocks the producer (unit-tested).
+- Aux-stream death strands results → aux streams deleted; ONE bidi stream.
+- Reconnect backoff unreachable → `Transport.run()` applies full-jitter backoff before every redial (`rand(0, min(cap, base*2^n))`, reset after 60s connected); e2e asserts delays were applied across forced stream-kills.
+- Model-load events never emitted → typed `ModelEvent` is the single residency channel (DOWNLOADING/ON_DISK/IN_VRAM/EVICTED/FAILED); the JSON event fabric is gone.
+- VRAM load blocks receive thread → `ModelOp`s run as asyncio tasks off the receive loop (`lifecycle.on_message` → `create_task`); the receive path never blocks on model work.
+- Deadlines decorative → executor deadline watchdog: expiry sends `JobResult{FATAL,"deadline exceeded"}`, releases the GPU slot, and escalates to process recycle (`os._exit(70)`) if a sync handler thread ignores cancel for 30s; e2e covers expiry + slot reuse.
+- Transient prefetch failure permanently disables → `ModelStore.ensure_local` retries with exponential backoff; only 4xx-class errors are terminal.
+- `cancel_queued_only` cancels running work → fields deleted from the protocol; cancel is whole-request (`CancelJob{request_id, attempt}`).
+- `_ensure_batched_loop` race → moot: ONE asyncio loop owns everything; no check-then-create anywhere.
+- Per-request `CUDA_VISIBLE_DEVICES` mutation → executor passes `RunJob.compute.gpu_index` via `torch.cuda.set_device` inside the handler thread; no process-wide env mutation.
+
+## Tasks
+- [x] **Drain crash**: `_emit_worker_drain_result` constructs `pb.WorkerDrainResult(worker_id=...)` (worker.py:6216) — field removed from proto in #321 → `ValueError` swallowed by receive-loop except (5838-5842). Net: on `WorkerDrainCommand` the worker rejects new jobs but never runs `_drain_then_stop`, never reports, never exits; pods only die by external kill. Remove the field, add a test that drives a full drain round-trip. [DONE (fix/p0-correctness): removed the `worker_id=` kwarg; `test_worker_p0_reliability.py::test_emit_worker_drain_result_builds_valid_proto` guards it.]
+- [x] **Results lost during reconnect**: `_send_message` drops any message while `_stop_event` is set (5593-5616) — a handler finishing in the reconnect window loses its `JobExecutionResult` forever (stuck request orchestrator-side). Results must be enqueued (bounded, non-droppable), never refused. [DONE: `_send_message` now gates on `_running` only (persistent queue survives the reconnect); `stop()` clears `_running` before setting `_stop_event`, so genuine shutdown still refuses. Note: the drop-oldest-discards-results and aux-stream tasks below remain open.]
+- [x] **Drop-oldest overflow discards results**: `_send_message` overflow policy (3597-3614) treats job results and fire-and-forget events identically. Separate policies: events droppable, results never.
+- [x] **Aux-stream death strands queued results**: when the results stream dies, `_aux_drain_loop` exits and messages already in `_results_outgoing_queue` have no consumer until a full primary reconnect that may never happen (4548-4571). On aux death, drain the aux queue back onto the primary.
+- [x] **Reconnect backoff unreachable**: after `_stop_event.wait()` returns in `run()` (5565), the guard `not self._stop_event.is_set()` (5581) is false by definition → the #338 backoff never runs, lost stream = immediate reconnect storm. Restructure so backoff applies before redial; test with a fake scheduler that kills the stream N times.
+- [x] **Model-load events never emitted**: `_handle_load_model_cmd` references undefined `started_at` (6834), NameError swallowed at 6846-6847 → `model.load.completed/failed` never sent. Define it (siblings at 6926/7034 do).
+- [x] **VRAM load blocks the receive thread**: `_process_message` runs `_handle_load_model_cmd` inline (5958-5959) — up to 300s wait (6774) + `asyncio.run(load_model_into_vram)` on the only thread that processes dispatches/interrupts. Move to a worker thread like `_handle_download_model_cmd` (6901-6910).
+- [x] **Deadlines are decorative**: `timeout_ms` lands in `ctx._deadline` and nothing reads it; no watchdog aborts a hung handler, which holds the GPU semaphore forever (worker bricked). Enforce deadline: mark request failed, release the slot, and report; escalate to process recycle if the thread won't die.
+- [x] **Transient prefetch failure permanently disables functions**: `_startup_prefetch_loop` calls `_mark_ref_terminally_failed` on any exception (6608-6615). Retry with backoff; reserve terminal for 4xx-class errors.
+- [x] **`cancel_queued_only` cancels running work**: `_handle_interrupt_request` logs `item_ids`/`cancel_queued_only` then unconditionally cancels (7451-7482). Honor the flag (or delete the fields in protocol v2 — see #364).
+- [x] **`_ensure_batched_loop` race**: check-then-create with no lock (7515-7560) can leak a second loop/thread. Guard with a lock (or moot under #365 asyncio-first).
+- [x] **Per-request `CUDA_VISIBLE_DEVICES` mutation** (2107-2147): process-wide, ineffective post-CUDA-init, racy for gpu_count>1. Pass explicit `device` down instead.
+
+## Acceptance
+Fake-scheduler integration test (see #365 task list) covers: drain round-trip, stream-kill × N with backoff, result survives reconnect, hung handler is reaped at deadline.
+
+---
+
 # #356: fix red master — 6 failing tests, CI ignored since Jun 8
 
 **Completed:** yes
