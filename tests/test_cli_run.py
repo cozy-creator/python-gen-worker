@@ -23,7 +23,7 @@ import msgspec
 
 import gen_worker.cli as cli
 import gen_worker.cli.run as run_mod
-from gen_worker import Repo, RequestContext, inference
+from gen_worker import RequestContext, endpoint
 
 
 class _In(msgspec.Struct):
@@ -41,18 +41,11 @@ class _Delta(msgspec.Struct):
 def _marco_module(name: str = "_test_marco") -> types.ModuleType:
     mod = types.ModuleType(name)
 
-    @inference()
+    @endpoint
     class MarcoPolo:
-        def setup(self) -> None:
-            pass
-
-        @inference.function(name="marco_polo")
         def marco_polo(self, ctx: RequestContext, data: _In) -> _Out:
-            ctx.raise_if_canceled()
+            ctx.raise_if_cancelled()
             return _Out(response="polo" if (data.text or "").strip().lower() == "marco" else "bro")
-
-        def shutdown(self) -> None:
-            pass
 
     MarcoPolo.__module__ = name
     mod.MarcoPolo = MarcoPolo
@@ -89,18 +82,11 @@ def test_run_streams_generator_yields(capsys, monkeypatch) -> None:
     name = "_test_stream"
     mod = types.ModuleType(name)
 
-    @inference()
+    @endpoint
     class Streamer:
-        def setup(self) -> None:
-            pass
-
-        @inference.function
         def stream(self, ctx: RequestContext, data: _In) -> Iterator[_Delta]:
             for word in (data.text or "").split():
                 yield _Delta(chunk=word)
-
-        def shutdown(self) -> None:
-            pass
 
     Streamer.__module__ = name
     mod.Streamer = Streamer
@@ -119,9 +105,9 @@ def test_run_streams_generator_yields(capsys, monkeypatch) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_run_auto_attaches_to_warm_serve(monkeypatch, capsys, tmp_path) -> None:
-    """When a warm serve socket exists, `run` dispatches through it (reusing the
-    invoke client) instead of cold-loading."""
+def test_run_attach_dispatches_through_warm_serve(monkeypatch, capsys, tmp_path) -> None:
+    """`run --attach` dispatches through a warm serve socket (reusing the
+    invoke client) instead of cold-loading; without --attach it never does."""
     _marco_module()
     import gen_worker.cli.invoke as invoke_mod
 
@@ -138,10 +124,16 @@ def test_run_auto_attaches_to_warm_serve(monkeypatch, capsys, tmp_path) -> None:
 
     monkeypatch.setattr(invoke_mod, "_send_request", _fake_send)
 
-    assert cli.main(["run", "--module", "_test_marco", "--payload", json.dumps({"text": "marco"})]) == 0
+    assert cli.main(["run", "--attach", "--module", "_test_marco", "--payload", json.dumps({"text": "marco"})]) == 0
     # Routed through the warm server with the resolved function NAME + payload.
     assert captured["request"]["function"] == "marco_polo"
     assert captured["request"]["payload"] == {"text": "marco"}
+    assert _last_event(capsys)["value"]["response"] == "polo"
+
+    # WITHOUT --attach the warm socket is ignored (cold path).
+    captured.clear()
+    assert cli.main(["run", "--module", "_test_marco", "--payload", json.dumps({"text": "marco"})]) == 0
+    assert "request" not in captured
     assert _last_event(capsys)["value"]["response"] == "polo"
 
 
@@ -160,23 +152,19 @@ def test_run_exit_code_matrix(tmp_path, capsys, monkeypatch) -> None:
     # Ambiguous class selection -> usage (2), lists candidates.
     name = "_test_two"
     mod = types.ModuleType(name)
-    for cls_name in ("Alpha", "Beta"):
-        @inference()
-        class _C:
-            def setup(self) -> None:
-                pass
+    @endpoint
+    class Alpha:
+        def run_a(self, ctx: RequestContext, data: _In) -> _Out:
+            return _Out(response="x")
 
-            @inference.function
-            def run(self, ctx: RequestContext, data: _In) -> _Out:
-                return _Out(response="x")
+    @endpoint
+    class Beta:
+        def run_b(self, ctx: RequestContext, data: _In) -> _Out:
+            return _Out(response="x")
 
-            def shutdown(self) -> None:
-                pass
-
-        _C.__name__ = cls_name
-        _C.__qualname__ = cls_name
+    for _C in (Alpha, Beta):
         _C.__module__ = name
-        setattr(mod, cls_name, _C)
+        setattr(mod, _C.__name__, _C)
     sys.modules[name] = mod
     assert cli.main(["run", "--module", name, "--payload", json.dumps({"text": "x"})]) == 2
     assert "ambiguous" in capsys.readouterr().err
@@ -190,17 +178,15 @@ def test_run_exit_code_matrix(tmp_path, capsys, monkeypatch) -> None:
     cozy_name = "_test_cozy"
     cmod = types.ModuleType(cozy_name)
 
-    @inference(models={"pipe": Repo("test-org/test-repo").flavor("bf16").allow_override(_Out)})
+    from gen_worker import Hub
+
+    @endpoint(models={"pipe": Hub("test-org/test-repo", flavor="bf16")})
     class CozyEndpoint:
         def setup(self, pipe=None) -> None:
             self.pipe = pipe
 
-        @inference.function
         def run(self, ctx: RequestContext, data: _In) -> _Out:
             return _Out(response="cozy")
-
-        def shutdown(self) -> None:
-            pass
 
     CozyEndpoint.__module__ = cozy_name
     cmod.CozyEndpoint = CozyEndpoint
@@ -213,17 +199,10 @@ def test_run_exit_code_matrix(tmp_path, capsys, monkeypatch) -> None:
     exc_name = "_test_exc"
     emod = types.ModuleType(exc_name)
 
-    @inference()
+    @endpoint
     class Broken:
-        def setup(self) -> None:
-            pass
-
-        @inference.function
         def run(self, ctx: RequestContext, data: _In) -> _Out:
             raise RuntimeError("boom")
-
-        def shutdown(self) -> None:
-            pass
 
     Broken.__module__ = exc_name
     emod.Broken = Broken
@@ -231,3 +210,34 @@ def test_run_exit_code_matrix(tmp_path, capsys, monkeypatch) -> None:
     assert cli.main(["run", "--module", exc_name, "--payload", json.dumps({"text": "x"})]) == 1
     err = capsys.readouterr().err
     assert "RuntimeError" in err and "boom" in err
+
+
+# --------------------------------------------------------------------------- #
+# run --list (folded-in describe) + pyproject config                           #
+# --------------------------------------------------------------------------- #
+
+
+def test_run_list_emits_description_document(capsys, monkeypatch) -> None:
+    _marco_module()
+    assert cli.main(["run", "--module", "_test_marco", "--list"]) == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc["protocol_version"] >= 1
+    fns = {f["name"]: f for f in doc["functions"]}
+    assert "marco_polo" in fns
+    assert fns["marco_polo"]["class"] == "MarcoPolo"
+    assert "properties" in fns["marco_polo"]["input_schema"]
+
+
+def test_pyproject_tool_gen_worker_main(tmp_path) -> None:
+    from gen_worker.discovery.project import load_project_config
+
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "my-ep"\n\n[tool.gen_worker]\nmain = "my_ep.main"\n'
+    )
+    cfg = load_project_config(tmp_path)
+    assert (cfg.root, cfg.name, cfg.main) == (tmp_path, "my-ep", "my_ep.main")
+
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "x"\n')
+    import pytest as _pytest
+    with _pytest.raises(ValueError, match=r"tool\.gen_worker"):
+        load_project_config(tmp_path)

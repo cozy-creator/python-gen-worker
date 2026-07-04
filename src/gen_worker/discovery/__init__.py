@@ -1,7 +1,7 @@
 """Build-time function and endpoint discovery."""
 
 from .names import slugify_name
-from .toml_manifest import EndpointResources, EndpointToml, load_endpoint_toml
+from .project import ProjectConfig, load_project_config
 from .validation import (
     EndpointLockValidationResult,
     EndpointValidationResult,
@@ -11,9 +11,8 @@ from .validation import (
 
 __all__ = [
     "slugify_name",
-    "EndpointResources",
-    "EndpointToml",
-    "load_endpoint_toml",
+    "ProjectConfig",
+    "load_project_config",
     "EndpointValidationResult",
     "EndpointLockValidationResult",
     "validate_endpoint",

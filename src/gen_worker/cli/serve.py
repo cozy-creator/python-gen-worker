@@ -79,11 +79,11 @@ def add_subparser(sub: argparse._SubParsersAction[Any]) -> None:
     )
     p.add_argument(
         "--config", dest="config_path", default=None,
-        help="Path to endpoint.toml (defaults to ./endpoint.toml).",
+        help="Path to the endpoint's pyproject.toml (defaults to ./pyproject.toml).",
     )
     p.add_argument(
         "--module", dest="module", default=None,
-        help="Python module path to import (overrides endpoint.toml `main`).",
+        help="Python module path to import (overrides [tool.gen_worker] main).",
     )
     p.add_argument(
         "--socket", dest="socket_path", default=DEFAULT_SOCKET_PATH,
@@ -296,13 +296,13 @@ class _Endpoint:
         # Per-request cancellation registry — request_id -> live RequestContext,
         # mirroring the production worker's ``self._active_requests`` (worker.py).
         # A cancel (socket control frame or server SIGINT) looks the ctx up here
-        # and calls the canonical ``ctx.cancel()``; tenant code observes it via
-        # ``raise_if_canceled()`` / ``cancel_event`` exactly as in production.
+        # and calls the canonical ``ctx._cancel()``; tenant code observes it via
+        # ``raise_if_cancelled()`` / ``cancel_event`` exactly as in production.
         self._active: Dict[str, Any] = {}
         self._active_lock = threading.Lock()
 
     def interrupt_request(self, request_id: Optional[str]) -> bool:
-        """Cancel ONE in-flight request by id via the canonical ``ctx.cancel()``.
+        """Cancel ONE in-flight request by id (worker-internal ctx._cancel).
 
         Returns True if a matching active request was found. The server keeps
         running — only that request is canceled (#352).
@@ -313,7 +313,7 @@ class _Endpoint:
             ctx = self._active.get(request_id)
         if ctx is None:
             return False
-        ctx.cancel()
+        ctx._cancel()
         return True
 
     def cancel_all(self) -> int:
@@ -326,7 +326,7 @@ class _Endpoint:
             ctxs = list(self._active.values())
         for ctx in ctxs:
             try:
-                ctx.cancel()
+                ctx._cancel()
             except Exception:
                 pass
         return len(ctxs)
@@ -459,7 +459,7 @@ class _Endpoint:
         Never raises — all errors are mapped into ``{"ok": false, "error": ...}``
         so the transport loop keeps serving. ``request_id`` registers the
         request's ctx in the cancellation registry so a concurrent cancel frame
-        (or server SIGINT) can trip ``ctx.cancel()`` while the handler runs.
+        (or server SIGINT) can trip ``ctx._cancel()`` while the handler runs.
 
         ``on_event`` (streaming, #344): if given, each event is delivered to it
         as a frame ``{"event","value","request_id"}`` AS PRODUCED, and the return
@@ -500,7 +500,7 @@ class _Endpoint:
         )
         # Register BEFORE acquiring the dispatch lock so a cancel for a request
         # still queued behind a slow one trips its ctx too (the handler then
-        # bails at its first raise_if_canceled / yield check).
+        # bails at its first raise_if_cancelled / yield check).
         if request_id:
             with self._active_lock:
                 self._active[request_id] = ctx
@@ -572,23 +572,19 @@ def _resolve_static_models(
 ) -> Dict[str, str]:
     """Resolve bindings that DON'T depend on the request payload, at boot.
 
-    Dispatch bindings (which pick a model from a payload field) cannot be
-    resolved without a request; they are skipped here and resolved per-request
-    inside ``dispatch_request``. Static Repo / HFRepo / CivitaiRepo bindings
-    are resolved so weights land in VRAM during ``setup()``.
+    All bindings are static picks now; resolved at boot so weights land in
+    VRAM during ``setup()``.
     """
-    from ..api.binding import CivitaiRepo, HFRepo, Repo
+    from ..api.binding import BINDING_TYPES
 
     static = {
         k: v for k, v in (bindings or {}).items()
-        if isinstance(v, (HFRepo, CivitaiRepo, Repo))
+        if isinstance(v, BINDING_TYPES)
     }
     if not static:
         return {}
     return run_mod._resolve_models_for_setup(
         bindings=static,
-        payload=None,
-        overrides={},
         offline=offline,
         emit=_stderr_emitter,
     )
@@ -830,7 +826,7 @@ def _handle_conn(endpoint: _Endpoint, conn: socket.socket) -> None:
     """Read one NDJSON frame; dispatch a request OR apply a cancel; respond.
 
     A cancel control frame (``{"cancel":{"request_id"}}``) is the CLI analog of
-    the orchestrator's ``interrupt_job_cmd``: it trips ``ctx.cancel()`` for the
+    the orchestrator's ``interrupt_job_cmd``: it trips ``ctx._cancel()`` for the
     named in-flight request on ANOTHER connection's dispatch thread and returns
     immediately — the server keeps running (#352).
     """
@@ -944,9 +940,9 @@ def _serve_inner(args: argparse.Namespace) -> int:
     # --list-functions: print routable names + hosting class, exit; no boot.
     if getattr(args, "list_functions", False):
         if getattr(args, "json_output", False):
-            # Thin alias of `gen-worker describe`'s functions array — one shared
-            # builder, one shape (#349).
-            from .describe import function_entries
+            # Thin alias of `gen-worker run --list`'s functions array — one
+            # shared builder, one shape.
+            from .listing import function_entries
 
             sys.stdout.write(
                 json.dumps({"functions": function_entries(candidates)}) + "\n"
@@ -954,7 +950,7 @@ def _serve_inner(args: argparse.Namespace) -> int:
             sys.stdout.flush()
             return run_mod.EXIT_OK
         rows = sorted(
-            ((c.fn_name, getattr(c.cls, "__name__", "?")) for c in candidates),
+            ((c.fn_name, c.cls.__name__ if c.cls is not None else "<function>") for c in candidates),
             key=lambda r: r[0],
         )
         if not rows:

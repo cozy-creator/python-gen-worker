@@ -1,50 +1,34 @@
 # gen-worker
 
-Python SDK for writing **endpoints** that run on Cozy's worker pool. You write a
-decorated function, the SDK handles discovery, scheduling, model loading,
-cancellation, file I/O, streaming, and reporting back to the control plane.
-
-Three endpoint kinds:
-
-- **Inference** — request/response, optionally streaming.
-- **Training** — long-running, stateful, periodic checkpoints.
-- **Conversion** — produces weight artifacts on a destination repo.
+Python SDK for writing **endpoints** that run on Cozy's worker pool. You write
+one decorated function or class; the SDK handles discovery, scheduling, model
+download + placement, cancellation, file I/O, streaming, and reporting back to
+the control plane.
 
 ## Install
 
 ```bash
 pip install gen-worker[torch]   # for PyTorch inference/training
-pip install gen-worker[vision]  # add torchvision for image/video models
 pip install gen-worker          # plain Python (e.g. API-proxy endpoints)
 ```
 
-Optional extras: `[images]` for `gw.io.read_image / write_image`,
-`[audio]` for `gw.io.read_audio`, `[trainer]` for trainer-class endpoints.
+Optional extras: `[images]` for image I/O, `[audio]` for audio I/O,
+`[trainer]` for trainer-class endpoints.
 
-## Minimum viable endpoint
+## Hello world
 
-Two files when deploying through Tensorhub's generated-Dockerfile path.
-Tensorhub generates the Dockerfile when `endpoint.toml` has build hints,
-installs your dependencies, runs discovery, and wires the runtime entrypoint.
-
-**`endpoint.toml`**:
+**`pyproject.toml`** — the one config value:
 
 ```toml
-schema_version = 1
+[tool.gen_worker]
 main = "myendpoint.main"
-
-[[build.profiles]]
-name = "default"
-accelerator = "none"
-python = "3.12"
-dependencies = ["gen-worker>=0.7.5", "msgspec"]
 ```
 
 **`main.py`**:
 
 ```python
 import msgspec
-from gen_worker import RequestContext, inference, invocable
+from gen_worker import RequestContext, endpoint
 
 class Input(msgspec.Struct):
     prompt: str
@@ -52,144 +36,85 @@ class Input(msgspec.Struct):
 class Output(msgspec.Struct):
     text: str
 
-@inference()
-class Echo:
-    def setup(self) -> None:
-        pass
-
-    @invocable(name="run")
-    def run(self, ctx: RequestContext, payload: Input) -> Output:
-        return Output(text=f"got: {payload.prompt}")
+@endpoint
+def echo(ctx: RequestContext, payload: Input) -> Output:
+    return Output(text=f"got: {payload.prompt}")
 ```
 
-An endpoint is a class: `@inference()` marks it, `setup()` runs once (load
-weights here), and each `@invocable`-decorated method is one externally routed
-function. `examples/marco-polo/` is the copy-paste starting point.
+Run it locally, no orchestrator:
 
-That's it. `cozyctl endpoint deploy` (or the platform UI) takes it from here.
-For custom base images, multi-stage builds, or non-pip setup, add a Dockerfile;
-Tensorhub will use it instead of generating one.
+```bash
+gen-worker run --payload '{"prompt": "hello"}'
+```
+
+`cozyctl endpoint deploy` (or the platform UI) takes it from here.
 
 ## Adding a model
 
-Declare model dependencies on the decorator's `models={...}` kwarg. The worker
-loads and caches each binding; your function receives the live instance.
+Hold state in a class: `setup()` runs once, every public method is one
+routable function. The worker downloads the binding, constructs the pipeline
+from the `setup()` annotation, and owns device placement + low-VRAM offload —
+endpoint code never touches `.to("cuda")` or offload config.
 
 ```python
 from diffusers import StableDiffusionXLPipeline
-from gen_worker import HFRepo, RequestContext, Resources, inference, invocable
-from gen_worker import io as gw_io
+from gen_worker import HF, RequestContext, Resources, endpoint
 
-sdxl = HFRepo("stabilityai/stable-diffusion-xl-base-1.0")
-
-@inference(
-    resources=Resources(requires_gpu=True, min_vram_gb=12.0),
-    models={"pipe": sdxl.dtype("bf16")},
+@endpoint(
+    model=HF("stabilityai/stable-diffusion-xl-base-1.0", dtype="bf16"),
+    resources=Resources(vram_gb=12),
 )
 class Generate:
     def setup(self, pipe: StableDiffusionXLPipeline) -> None:
         self.pipe = pipe
 
-    @invocable(name="generate")
     def generate(self, ctx: RequestContext, payload: Input) -> Output:
-        images = self.pipe(payload.prompt).images
-        return Output(image=gw_io.write_image(ctx, "out", images[0]))
+        image = self.pipe(payload.prompt, generator=ctx.generator(42)).images[0]
+        return Output(text=ctx.save_image(image).ref)
 ```
 
-Each `models={...}` key is injected into `setup()` as the same-named argument —
-`{"pipe": ...}` arrives as `setup(self, pipe)` — so weights are resolved once and
-held on the instance. `Resources` is the per-class hardware envelope plus dynamic
-cost shape (used by the orchestrator for placement and admission). `Repo(ref)` is
-a tensorhub binding; `HFRepo(ref)` / `CivitaiRepo(ref)` select Hugging Face /
-Civitai. `Repo("slot", "default_ref")` gives the slot a stable config key
-Tensorhub can repoint after publish.
+Bindings: `HF(id, revision=, dtype=, subfolder=, files=)`,
+`Hub(ref, tag=, flavor=)`, `Civitai(id, version=)`, `ModelScope(id, ...)`.
+The slot name comes from the `models={}` key or the `setup()` parameter —
+never a constructor argument.
 
-## Three binding shapes
+Multi-variant endpoints (`bf16`/`fp8`/... checkpoints with different VRAM
+envelopes) declare `variants={name: (binding, Resources)}` — one handler body,
+one routable function per variant. Streaming = an async-generator handler.
+Engine-hosted endpoints declare `runtime="vllm"` and get a booted,
+health-checked server subprocess injected into `setup()`.
 
-**Fixed pick** — function pins one specific `(repo, flavor?, tag?)`:
-
-```python
-models={"pipe": Repo("base_model", "acme/flux").flavor("bf16")}
-```
-
-**Dispatch pick** — payload-driven, keyed by a `Literal[...]`-typed field:
-
-```python
-from typing import Literal
-
-class Input(msgspec.Struct):
-    variant: Literal["nf4", "int8"]
-    prompt: str
-
-@inference(
-    resources=Resources(requires_gpu=True, min_vram_gb=14.0),
-    models={"pipe": dispatch(
-        field="variant",
-        table={
-            "nf4":  flux.flavor("nf4"),
-            "int8": flux.flavor("int8"),
-        },
-    )},
-)
-class Generate:
-    def setup(self, pipe) -> None:
-        self.pipe = pipe
-
-    @invocable(name="generate")
-    def generate(self, ctx, payload: Input) -> Output: ...
-```
-
-**Override-allowed** — caller may substitute the default, subject to a
-pipeline-class allowlist the tenant declares:
-
-```python
-models={"pipe": flux.flavor("bf16").allow_override(StableDiffusionXLPipeline)}
-```
-
-The caller then sends `{"prompt": "...", "_models": {"pipe": "acme/my-finetune:prod#bf16"}}`
-to substitute. Class mismatch → request rejected before dispatch.
+Full reference: [docs/endpoint-authoring.md](docs/endpoint-authoring.md).
 
 ## Public surface
 
-Top-level `gen_worker` exports only what endpoint authors need:
-
-- Decorators + bindings: `inference`, `invocable`, `training`, `conversion`, `dataset`, `Resources`, `Repo`, `HFRepo`, `CivitaiRepo`, `Dispatch`, `dispatch`
-- Context types: `RequestContext`, `ConversionContext`, `DatasetContext`, `TrainingContext`
-- Value types: `Asset`, `ImageAsset`, `VideoAsset`, `AudioAsset`, `MediaAsset`, `Tensors`, `Compute`
-- Errors: `ValidationError`, `RetryableError`, `FatalError`, `ResourceError`,
-  `AuthError`, `CanceledError`, `OutputTooLargeError`, `InputTooLargeError`,
-  `WorkerError`
-- Helpers: `Clamp`, `iter_transformers_text_deltas`, `load_loras`,
-  `apply_low_vram_config`, `with_oom_retry`
-- I/O codecs: `gen_worker.io` (`read_image`, `read_audio`, `write_image`,
-  `read_bytes`, `open`, `exists`)
+- The decorator + bindings: `endpoint`, `Resources`, `HF`, `Hub`, `Civitai`, `ModelScope`
+- Contexts: `RequestContext` (≤15 members), `ConversionContext`,
+  `DatasetContext`, `TrainingContext`
+- Errors: `ValidationError`, `RetryableError`, `CanceledError`, `FatalError`
+- Streaming: `BatchItemDelta`, `IncrementalTokenDelta`, `Done`, `Error`
+- Value types: `Asset`, `ImageAsset`, `AudioAsset`, `VideoAsset`
+- I/O codecs: `gen_worker.io`
 
 Training and conversion live in their own submodules: `gen_worker.trainer`,
 `gen_worker.conversion`, `gen_worker.clone`.
 
 ## Local development
 
-`gen-worker run` executes one endpoint method in the local Python
-interpreter against a JSON payload — no docker-compose, no orchestrator.
-
 ```bash
-pip install -e .
-gen-worker run --payload '{"prompt": "hello"}'
+gen-worker run --payload '{"prompt": "hello"}'  # one-shot in-process
+gen-worker run --list                            # describe functions (JSON)
+gen-worker serve                                 # warm local server
+gen-worker invoke <fn> prompt=hello              # client for serve
+gen-worker prefetch                              # weights only, no GPU
 ```
 
-stdout for results, stderr for events; exit 0 / 1 / 2 / 3 / 130 for
-success / user-exception / usage / model-resolution / SIGINT. Full
-two-input model, the three CLI shapes (`run` / `serve` + `invoke` /
-`repl`), ergonomic `field=value` args, `--offline` story, SIGINT
-semantics, and worked examples in [docs/local-dev.md](docs/local-dev.md).
-The machine-readable host-integration contract (versioning, `describe
---json`, the NDJSON protocol, the serve sidecar) lives in
+stdout for results, stderr for events; exit 0 / 1 / 2 / 3 / 130 for success /
+user-exception / usage / model-resolution / SIGINT. Details:
+[docs/local-dev.md](docs/local-dev.md); host contract:
 [docs/host-integration.md](docs/host-integration.md).
 
 ### Running tests
-
-`pytest` lives in the `dev` optional-dependency extra, so the supported
-command is:
 
 ```bash
 uv run --extra dev pytest
@@ -202,26 +127,14 @@ hard-fails if `gen_worker` resolves outside `src/`).
 
 ## Documentation
 
-- [docs/endpoint-authoring.md](docs/endpoint-authoring.md) — full reference: the
-  three layers, `Resources`, bindings, `dispatch`, `allow_override`,
-  multi-param injection, the `_models` envelope, atomic substitution.
-- [docs/local-dev.md](docs/local-dev.md) — `gen-worker run` CLI: two-input
-  invocation model, `--offline` story, SIGINT semantics, exit codes,
-  worked examples.
-- [docs/endpoint-toml.md](docs/endpoint-toml.md) — `endpoint.toml` reference:
-  build modes, placement fields, build hints, `BASE_IMAGE` injection.
-- [docs/dockerfile.md](docs/dockerfile.md) — when to provide your own
-  Dockerfile, the three Dockerfile contract points, when `ARG BASE_IMAGE`
-  matters, multi-profile builds.
-- [docs/scaling-hints.md](docs/scaling-hints.md) — `Resources` cost-shape
-  fields used by the orchestrator for admission and scheduling.
-- [docs/endpoint-envs.md](docs/endpoint-envs.md) — tenant-defined envs/secrets
-  attached to a deployed endpoint at runtime.
+- [docs/endpoint-authoring.md](docs/endpoint-authoring.md) — the `@endpoint`
+  reference: bindings, variants, Resources, contexts, streaming, runtimes.
+- [docs/local-dev.md](docs/local-dev.md) — the CLI: `run`/`serve`/`invoke`/
+  `prefetch`, `field=value` grammar, `--offline`, exit codes.
+- [docs/dockerfile.md](docs/dockerfile.md) — bring-your-own-Dockerfile contract.
+- [docs/endpoint-envs.md](docs/endpoint-envs.md) — tenant envs/secrets.
 
 ## Examples
 
-Working endpoints to copy from in `examples/`:
-
-- `marco-polo/` — minimal inference endpoint
-- `training-smoke/` — minimal trainer
-- `from-scratch/` — boilerplate template
+- `examples/marco-polo/` — minimal inference endpoint (sync, async, streaming)
+- `examples/training-smoke/` — minimal trainer

@@ -30,16 +30,15 @@ endpoint's README.
 import os
 import requests
 
-from gen_worker import inference, invocable
+from gen_worker import endpoint
 
 CIVITAI_API_KEY = os.getenv("CIVITAI_API_KEY", "")
 
-@inference()
+@endpoint
 class CivitaiProxy:
     def setup(self) -> None:
         pass
 
-    @invocable(name="generate")
     def generate(self, ctx, payload):
         if not CIVITAI_API_KEY:
             raise RuntimeError("CIVITAI_API_KEY env is not configured for this endpoint")
@@ -112,7 +111,7 @@ takes effect on the **next pod spawn** for that endpoint. Existing pods
 keep their stale env until they're recycled. There is no in-pod live
 reload in v1.
 
-## Why not declare envs in endpoint.toml?
+## Why not declare envs in project config?
 
 Considered and explicitly rejected. The endpoint author writes Python and
 documents expected envs in their README; the tenant attaches values

@@ -1,12 +1,10 @@
 """gen-worker prefetch — download an endpoint's model weights into the CAS
 WITHOUT instantiating pipelines or touching the GPU.
 
-It enumerates every endpoint class's model bindings (HFRepo / CivitaiRepo /
-ModelScopeRepo / Repo) via the same discovery path as ``run``/``serve``, then
-resolves + downloads each ref through the shared downloaders into the local
-cache. With ``--all-variants`` it also walks Dispatch tables (every variant);
-by default pure-Dispatch bindings are skipped (they need a payload to pick a
-branch, which prefetch doesn't have). No ``setup()``, no torch device.
+It enumerates every endpoint's model bindings (HF / Hub / Civitai /
+ModelScope) via the same discovery path as ``run``/``serve``, then resolves +
+downloads each ref through the shared downloaders into the local cache.
+No ``setup()``, no torch device.
 
 Honors ``--offline`` and ``TENSORHUB_CACHE_DIR`` (via the shared resolver).
 
@@ -23,10 +21,9 @@ import argparse
 import importlib
 import json
 import sys
-import types
 from typing import Any, Dict, Tuple
 
-from ..api.binding import Dispatch, Repo
+from ..api.binding import BINDING_TYPES
 
 
 def add_subparser(sub: "argparse._SubParsersAction[Any]") -> None:
@@ -39,11 +36,7 @@ def add_subparser(sub: "argparse._SubParsersAction[Any]") -> None:
             "download. Does not instantiate pipelines or load the GPU."
         ),
     )
-    p.add_argument("--config", help="Path to endpoint.toml (default: ./endpoint.toml or cwd).")
-    p.add_argument(
-        "--all-variants", action="store_true",
-        help="Also download every entry in Dispatch tables, not just static bindings.",
-    )
+    p.add_argument("--config", help="Path to the endpoint's pyproject.toml (default: ./pyproject.toml).")
     p.add_argument(
         "--offline", action="store_true",
         help="Use only the local cache; fail (exit 3) on a miss instead of downloading.",
@@ -60,7 +53,7 @@ def _handle_prefetch(args: argparse.Namespace) -> int:
     from .run import (
         _collect_class_methods,
         _ensure_sys_path,
-        _load_endpoint_toml_main,
+        _load_project_main,
         _resolve_binding_to_ref,
         _resolve_local_path,
     )
@@ -79,7 +72,7 @@ def _handle_prefetch(args: argparse.Namespace) -> int:
             sys.stderr.flush()
 
     try:
-        root, main_module = _load_endpoint_toml_main(args.config)
+        root, main_module = _load_project_main(args.config)
     except Exception as e:
         sys.stderr.write(f"prefetch: {e}\n")
         return 2
@@ -92,36 +85,22 @@ def _handle_prefetch(args: argparse.Namespace) -> int:
 
     candidates = _collect_class_methods(mod)
 
-    # Collect unique (ref, provider) -> (ref, provider, allow_patterns) jobs so a
-    # binding shared across functions/classes is downloaded once.
+    # Collect unique (ref, provider) jobs so a binding shared across
+    # functions/classes is downloaded once.
     jobs: Dict[Tuple[str, str], Tuple[str, str, tuple]] = {}
-    skipped_dispatch = 0
     for c in candidates:
         for param_name, binding in c.bindings.items():
             try:
-                if isinstance(binding, Repo):
+                if isinstance(binding, BINDING_TYPES):
                     ref, provider = _resolve_binding_to_ref(
-                        param_name=param_name, binding=binding, payload=None, overrides={})
-                    ap = tuple(getattr(binding, "_allow_patterns", ()) or ())
+                        param_name=param_name, binding=binding)
+                    ap = tuple(getattr(binding, "files", ()) or ())
                     jobs[(ref, provider)] = (ref, provider, ap)
-                elif isinstance(binding, Dispatch):
-                    if not args.all_variants:
-                        skipped_dispatch += 1
-                        continue
-                    for key, pick in binding.table.items():
-                        payload = types.SimpleNamespace(**{binding.field: key})
-                        ref, provider = _resolve_binding_to_ref(
-                            param_name=param_name, binding=binding, payload=payload, overrides={})
-                        ap = tuple(getattr(pick, "_allow_patterns", ()) or ())
-                        jobs[(ref, provider)] = (ref, provider, ap)
             except Exception as e:
                 sys.stderr.write(f"prefetch: skipping binding {param_name!r}: {e}\n")
 
     if not jobs:
-        msg = "prefetch: no model bindings to fetch"
-        if skipped_dispatch:
-            msg += f" ({skipped_dispatch} dispatch binding(s) skipped — pass --all-variants to include them)"
-        sys.stderr.write(msg + "\n")
+        sys.stderr.write("prefetch: no model bindings to fetch\n")
         return 0
 
     emit({"kind": "prefetch.plan", "count": len(jobs)})
@@ -139,10 +118,6 @@ def _handle_prefetch(args: argparse.Namespace) -> int:
             emit({"kind": "prefetch.ref.failed", "ref": ref, "provider": provider, "error": str(e)})
             if not args.json:
                 sys.stderr.write(f"prefetch: FAILED {ref} ({provider}): {e}\n")
-
-    if skipped_dispatch and not args.all_variants:
-        sys.stderr.write(
-            f"prefetch: skipped {skipped_dispatch} dispatch binding(s); pass --all-variants to fetch them too\n")
 
     emit({"kind": "prefetch.done", "fetched": len(jobs) - failures, "failed": failures})
     if failures:

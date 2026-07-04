@@ -23,7 +23,7 @@ import pytest
 
 import gen_worker.cli.run as run_mod
 import gen_worker.cli.serve as serve_mod
-from gen_worker import RequestContext, inference
+from gen_worker import RequestContext, endpoint
 
 _EXAMPLE_DIR = Path(__file__).resolve().parents[1] / "examples" / "marco-polo"
 
@@ -39,19 +39,15 @@ class _Out(msgspec.Struct):
 def _slow_module(name: str) -> types.ModuleType:
     mod = types.ModuleType(name)
 
-    @inference()
+    @endpoint
     class Slow:
-        def setup(self) -> None:
-            pass
-
-        @inference.function(name="slow")
         def slow(self, ctx: RequestContext, data: _In) -> Iterator[_Out]:
             # Stream one item, then block-poll until canceled (the cooperative
             # idiom). raise_if_canceled turns the cancel into a CanceledError.
             yield _Out(response="started")
-            while not ctx.is_canceled():
+            while not ctx.cancelled:
                 time.sleep(0.005)
-            ctx.raise_if_canceled()
+            ctx.raise_if_cancelled()
 
     Slow.__module__ = name
     mod.Slow = Slow
@@ -119,7 +115,7 @@ def test_cancel_all_cancels_every_inflight() -> None:
 
 
 @pytest.mark.skipif(
-    not (_EXAMPLE_DIR / "endpoint.toml").exists(),
+    not (_EXAMPLE_DIR / "pyproject.toml").exists(),
     reason="marco-polo example not present",
 )
 def test_serve_sigterm_clean_teardown(tmp_path) -> None:

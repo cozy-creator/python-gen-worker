@@ -529,9 +529,9 @@ class LoadedComponentKey:
     ) -> "LoadedComponentKey":
         provider = str(getattr(binding, "provider", "tensorhub") or "tensorhub").strip()
         ref = str(getattr(binding, "ref", "") or "").strip()
-        dtype = str(getattr(binding, "_dtype", "") or "").strip().lower()
-        revision = str(getattr(binding, "_revision", "") or "").strip() or str(snapshot_digest or "").strip()
-        subfolder = str(getattr(binding, "_subfolder", "") or "").strip()
+        dtype = str(getattr(binding, "dtype", "") or "").strip().lower()
+        revision = str(getattr(binding, "revision", "") or "").strip() or str(snapshot_digest or "").strip()
+        subfolder = str(getattr(binding, "subfolder", "") or "").strip()
         return cls(
             provider=provider,
             ref=ref,

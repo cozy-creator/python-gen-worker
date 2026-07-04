@@ -1,12 +1,10 @@
-"""``gen-worker run`` — execute one endpoint method against a local Python
+"""``gen-worker run`` — execute one endpoint function against a local Python
 interpreter.
 
 Two inputs: which function to call, what payload to send. Everything else
 (model resolution, payload validation, context wiring) derives from the
-decorator declarations and the endpoint.toml — exactly the way the
-production worker does it.
-
-The full design and rationale live in ``progress.json`` issue #12.
+``@endpoint`` declarations and pyproject's ``[tool.gen_worker]`` — exactly
+the way the production worker does it.
 """
 
 from __future__ import annotations
@@ -28,7 +26,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import msgspec
 
-from ..api.binding import CivitaiRepo, Dispatch, HFRepo, Repo
+from ..api.binding import BINDING_TYPES, wire_ref
 from ..api.errors import CanceledError
 from .local_context import build_local_context
 
@@ -51,7 +49,7 @@ def add_subparser(sub: argparse._SubParsersAction[Any]) -> None:
         "run",
         help="Run an endpoint method against a local JSON payload.",
         description=(
-            "Execute one @inference.function method in the local Python "
+            "Execute one endpoint function in the local Python "
             "interpreter against a JSON payload. Mirrors production behavior "
             "for model resolution, payload validation, and context wiring. "
             "Result on stdout (msgspec-JSON encoded); events on stderr "
@@ -76,11 +74,11 @@ def add_subparser(sub: argparse._SubParsersAction[Any]) -> None:
     )
     p.add_argument(
         "--config", dest="config_path", default=None,
-        help="Path to endpoint.toml (defaults to ./endpoint.toml).",
+        help="Path to the endpoint's pyproject.toml (defaults to ./pyproject.toml).",
     )
     p.add_argument(
         "--module", dest="module", default=None,
-        help="Python module path to import (overrides endpoint.toml `main`).",
+        help="Python module path to import (overrides [tool.gen_worker] main).",
     )
     p.add_argument(
         "--offline", action="store_true",
@@ -106,6 +104,18 @@ def add_subparser(sub: argparse._SubParsersAction[Any]) -> None:
         help="Pretty-print the stdout result with newlines + 2-space indent.",
     )
     p.add_argument(
+        "--attach", action="store_true",
+        help=(
+            "Dispatch through a warm `gen-worker serve` socket when one is "
+            "listening (endpoint already loaded, setup() already run)."
+        ),
+    )
+    p.add_argument(
+        "--list", dest="list_functions", action="store_true",
+        help="Print a JSON description of the endpoint's functions and exit "
+             "(no model load).",
+    )
+    p.add_argument(
         "fields", nargs="*", metavar="FIELD=VALUE",
         help=(
             "Ergonomic payload args instead of (or merged over) --payload: "
@@ -121,29 +131,15 @@ def add_subparser(sub: argparse._SubParsersAction[Any]) -> None:
 # endpoint.toml + module loading
 # --------------------------------------------------------------------------
 
-def _load_endpoint_toml_main(config_path: Optional[str]) -> Tuple[Path, str]:
-    """Return ``(project_root, main_module)`` from the endpoint.toml.
+def _load_project_main(config_path: Optional[str]) -> Tuple[Path, str]:
+    """Return ``(project_root, main_module)`` from pyproject [tool.gen_worker]."""
+    from ..discovery.project import load_project_config
 
-    ``main_module`` defaults to the toml file's ``main`` field. The caller
-    may override with ``--module`` (handled at the call site).
-    """
-    from ..discovery.toml_manifest import load_endpoint_toml
-
-    if config_path:
-        path = Path(config_path).resolve()
-        if not path.exists():
-            raise FileNotFoundError(f"endpoint.toml not found: {path}")
-        root = path.parent
-    else:
-        root = Path.cwd().resolve()
-        path = root / "endpoint.toml"
-        if not path.exists():
-            raise FileNotFoundError(
-                f"endpoint.toml not found at {path}; pass --config or run from "
-                "the endpoint root."
-            )
-    et = load_endpoint_toml(path)
-    return root, et.main
+    try:
+        cfg = load_project_config(config_path)
+    except (FileNotFoundError, ValueError) as e:
+        raise _UsageError(str(e)) from e
+    return cfg.root, cfg.main
 
 
 def _ensure_sys_path(root: Path) -> None:
@@ -161,7 +157,7 @@ def _ensure_sys_path(root: Path) -> None:
 # --------------------------------------------------------------------------
 
 class _SelectedFunction:
-    """Live handle to one selected @inference.function method.
+    """Live handle to one selected endpoint function.
 
     Carries the actual class object, bound method, payload type, and the
     endpoint-level binding map (``models={...}``). The run pipeline uses
@@ -194,10 +190,9 @@ class _SelectedFunction:
 
 
 def _collect_class_methods(mod: Any) -> List[_SelectedFunction]:
-    """Collect every invocable method on every endpoint-decorated class in a
-    module namespace. Delegates signature inspection (payload/output types,
-    streaming shape, parametrize fan-out) to ``gen_worker.registry`` — the one
-    walker shared with the worker runtime and build-time discovery."""
+    """Collect every routable function on every @endpoint object in a module
+    namespace. Delegates signature inspection to ``gen_worker.registry`` — the
+    one walker shared with the worker runtime and build-time discovery."""
     from gen_worker.registry import collect_from_namespace
 
     return [
@@ -221,14 +216,24 @@ def _select_function(
     *,
     cls_name: Optional[str],
     method_name: Optional[str],
+    default_name: Optional[str] = None,
 ) -> _SelectedFunction:
-    """Filter candidates by --class / --method and exit-2 on ambiguity."""
+    """Filter candidates by --class / --method and exit-2 on ambiguity.
+
+    ``default_name`` (the endpoint package name) breaks a no-filter tie when
+    exactly one candidate's function name matches it — so an endpoint whose
+    primary function is named after the package runs with zero flags.
+    """
     def _label(c: _SelectedFunction) -> str:
-        return f"{c.cls.__name__}.{c.attr_name} (fn_name={c.fn_name!r})"
+        owner = c.cls.__name__ + "." + c.attr_name if c.cls is not None else "<function>"
+        return f"{owner} (fn_name={c.fn_name!r})"
 
     matches = list(candidates)
     if cls_name:
-        matches = [c for c in matches if c.cls.__name__ == cls_name]
+        matches = [
+            c for c in matches
+            if c.cls is not None and c.cls.__name__ == cls_name
+        ]
     if method_name:
         matches = [
             c for c in matches
@@ -244,10 +249,15 @@ def _select_function(
             filt_desc.append(f"--method={method_name!r}")
         filt_msg = " ".join(filt_desc) or "(no filters)"
         raise _UsageError(
-            f"no @inference.function method matches {filt_msg}.\n"
+            f"no endpoint function matches {filt_msg}.\n"
             f"available:{available}"
         )
     if len(matches) > 1:
+        if not cls_name and not method_name and default_name:
+            wanted = default_name.replace("-", "_").lower()
+            defaults = [m for m in matches if m.fn_name.lower() == wanted]
+            if len(defaults) == 1:
+                return defaults[0]
         listing = "\n  - " + "\n  - ".join(_label(c) for c in matches)
         raise _UsageError(
             f"ambiguous: {len(matches)} methods match the given filters; "
@@ -275,68 +285,6 @@ def _read_payload_bytes(
     if not p.exists():
         raise _UsageError(f"--payload-file not found: {p}")
     return p.read_bytes()
-
-
-def _extract_models_override(raw_bytes: bytes) -> Tuple[bytes, Dict[str, Any]]:
-    """Pull the reserved ``_models`` field out of a JSON payload.
-
-    Returns ``(stripped_bytes, overrides_dict)``. Mirrors the orchestrator's
-    pre-dispatch strip — payload structs cannot declare ``_models``, so
-    msgspec.decode on the stripped payload always sees a clean shape.
-    """
-    try:
-        obj = json.loads(raw_bytes.decode("utf-8") or "{}")
-    except json.JSONDecodeError as e:
-        raise _UsageError(f"--payload is not valid JSON: {e}") from e
-    if not isinstance(obj, dict):
-        # msgspec will reject; let it produce the typed error.
-        return raw_bytes, {}
-    overrides_raw = obj.pop("_models", None)
-    if not overrides_raw:
-        return json.dumps(obj, separators=(",", ":")).encode("utf-8"), {}
-    if not isinstance(overrides_raw, dict):
-        raise _UsageError(
-            f"payload._models must be an object mapping param -> ref/spec; "
-            f"got {type(overrides_raw).__name__}"
-        )
-    normalized: Dict[str, Any] = {}
-    for k, v in overrides_raw.items():
-        normalized[str(k)] = _normalize_one_override(str(k), v)
-    return json.dumps(obj, separators=(",", ":")).encode("utf-8"), normalized
-
-
-def _normalize_one_override(param: str, value: Any) -> Dict[str, str]:
-    """Accept either a string shorthand or a structured ``{ref, tag, flavor}``.
-
-    Grammar (same as production): ``owner/repo[:tag][#flavor]``.
-    """
-    if isinstance(value, str):
-        s = value.strip()
-        if not s:
-            raise _UsageError(f"_models[{param!r}] is empty")
-        ref = s
-        tag = "prod"
-        flavor = ""
-        if "#" in ref:
-            ref, flavor = ref.split("#", 1)
-            flavor = flavor.strip()
-        if ":" in ref:
-            ref, tag = ref.rsplit(":", 1)
-            tag = tag.strip() or "prod"
-        return {"ref": ref.strip(), "tag": tag, "flavor": flavor}
-    if isinstance(value, dict):
-        ref = str(value.get("ref") or "").strip()
-        if not ref:
-            raise _UsageError(f"_models[{param!r}].ref is required")
-        return {
-            "ref": ref,
-            "tag": str(value.get("tag") or "prod").strip() or "prod",
-            "flavor": str(value.get("flavor") or "").strip(),
-        }
-    raise _UsageError(
-        f"_models[{param!r}] must be a string shorthand or "
-        f"{{ref, tag, flavor}} object; got {type(value).__name__}"
-    )
 
 
 def _apply_field_tokens(
@@ -395,77 +343,10 @@ class _ModelResolutionError(Exception):
     """Raised when a model binding cannot be resolved (exit 3)."""
 
 
-def _resolve_binding_to_ref(
-    *,
-    param_name: str,
-    binding: Any,
-    payload: Any,
-    overrides: Dict[str, Dict[str, str]],
-) -> Tuple[str, str]:
-    """Return ``(model_ref, provider)`` for one binding.
-
-    Resolution order matches the live worker:
-      1. payload._models[param] override (already validated upstream).
-      2. Binding default — Repo / HFRepo / CivitaiRepo / Dispatch.
-    """
-    over = overrides.get(param_name)
-    if over:
-        if not getattr(binding, "_allow_override", False):
-            raise _UsageError(
-                f"_models[{param_name!r}]: binding has no .allow_override() "
-                "declared — override rejected (production would 400 with "
-                "model_override_not_allowed)."
-            )
-        ref = over["ref"]
-        tag = over.get("tag", "prod")
-        flavor = over.get("flavor", "")
-        out = ref
-        if tag and tag != "prod":
-            out = f"{out}:{tag}"
-        if flavor:
-            out = f"{out}#{flavor}"
-        # The override carries its own ref + optional provider. Absent
-        # provider on the override payload defaults to "tensorhub"
-        # (consistent with the wire-format contract: absence = tensorhub).
-        # Callers who want to override with a non-tensorhub provider must
-        # pass the structured form with an explicit "provider" key.
-        return out, over.get("provider", "tensorhub") if isinstance(over, dict) else "tensorhub"
-
-    if isinstance(binding, (HFRepo, CivitaiRepo, Repo)):
-        provider = binding.provider
-        ref = binding.ref
-        out = ref
-        if binding._tag and binding._tag != "prod":
-            out = f"{out}:{binding._tag}"
-        if binding._flavor:
-            out = f"{out}#{binding._flavor}"
-        return out, provider
-
-    if isinstance(binding, Dispatch):
-        try:
-            chosen = getattr(payload, binding.field)
-        except AttributeError:
-            raise _UsageError(
-                f"dispatch field {binding.field!r} not found on payload"
-            ) from None
-        if not isinstance(chosen, str):
-            raise _UsageError(
-                f"dispatch field {binding.field!r} must be a string, "
-                f"got {type(chosen).__name__}"
-            )
-        pick = binding.table.get(chosen.strip())
-        if pick is None:
-            raise _UsageError(
-                f"dispatch key {chosen.strip()!r} not in table; "
-                f"allowed: {sorted(binding.table.keys())}"
-            )
-        out = pick.ref
-        if pick._tag and pick._tag != "prod":
-            out = f"{out}:{pick._tag}"
-        if pick._flavor:
-            out = f"{out}#{pick._flavor}"
-        return out, pick.provider
-
+def _resolve_binding_to_ref(*, param_name: str, binding: Any) -> Tuple[str, str]:
+    """Return ``(model_ref, provider)`` for one binding."""
+    if isinstance(binding, BINDING_TYPES):
+        return wire_ref(binding), binding.provider
     raise _UsageError(
         f"unknown binding type for param {param_name!r}: {type(binding).__name__}"
     )
@@ -616,7 +497,7 @@ def _resolve_local_path(
         api_key = os.getenv("CIVITAI_API_KEY", "") or os.getenv("CIVITAI_TOKEN", "")
 
         if civitai_version_id:
-            # Explicit version pin via CivitaiRepo.version("<id>"). The pinned id
+            # Explicit version pin via Civitai(version="<id>"). The pinned id
             # IS a model-VERSION id, so use it directly — no model lookup.
             try:
                 version_id = parse_civitai_version_id(civitai_version_id)
@@ -625,7 +506,7 @@ def _resolve_local_path(
                     f"bad civitai version pin {civitai_version_id!r} on ref {ref!r}: {e}"
                 ) from e
         else:
-            # CivitaiRepo's ref is a MODEL id by convention; map it to its latest
+            # Civitai's ref is a MODEL id by convention; map it to its latest
             # version id. No silent fallback: if the lookup fails or the model
             # has no versions, the ref is wrong (e.g. a bare version id was
             # passed where a model id was expected) — surface it rather than
@@ -639,7 +520,7 @@ def _resolve_local_path(
             except Exception as e:
                 raise _ModelResolutionError(
                     f"failed to resolve civitai model {model_id} for ref {ref!r}: {e}; "
-                    "CivitaiRepo's ref must be a MODEL id (pin a specific version "
+                    "Civitai's ref must be a MODEL id (pin a specific version "
                     'with .version("<version_id>")).'
                 ) from e
             versions = model.get("modelVersions") or []
@@ -668,39 +549,17 @@ def _resolve_local_path(
 def _resolve_models_for_setup(
     *,
     bindings: Dict[str, Any],
-    payload: Any,
-    overrides: Dict[str, Dict[str, str]],
     offline: bool,
     emit: Callable[[Dict[str, Any]], None],
 ) -> Dict[str, str]:
-    """Resolve every binding in ``bindings`` to a local path / loader string.
-
-    Skips bindings that don't carry a static ref (pure Dispatch with a
-    discriminator handled at invoke time would otherwise blow up here;
-    Dispatch IS resolved here against the decoded payload).
-    """
+    """Resolve every binding in ``bindings`` to a local path / loader string."""
     out: Dict[str, str] = {}
     for param_name, binding in bindings.items():
-        ref, provider = _resolve_binding_to_ref(
-            param_name=param_name,
-            binding=binding,
-            payload=payload,
-            overrides=overrides,
-        )
-        # ModelScopeRepo carries file-selection (allow_patterns) as binding
-        # metadata; thread it through so only the requested files download.
-        allow_patterns = tuple(getattr(binding, "_allow_patterns", ()) or ())
-        # CivitaiRepo.version("<id>") pins a specific model version. Skip the
-        # pin when this slot was overridden via payload._models — the override
-        # replaces the model wholesale, so the binding's pin no longer applies.
-        civitai_version_id = (
-            "" if param_name in overrides
-            else str(getattr(binding, "_version_id", "") or "")
-        )
+        ref, provider = _resolve_binding_to_ref(param_name=param_name, binding=binding)
         out[param_name] = _resolve_local_path(
             ref=ref, provider=provider, offline=offline, emit=emit,
-            allow_patterns=allow_patterns,
-            civitai_version_id=civitai_version_id,
+            allow_patterns=tuple(getattr(binding, "files", ()) or ()),
+            civitai_version_id=str(getattr(binding, "version", "") or ""),
         )
     return out
 
@@ -712,8 +571,8 @@ def _resolve_models_for_setup(
 class _SigintHandler:
     """Install a two-stage SIGINT handler.
 
-    First Ctrl-C: trip ``ctx._canceled`` so user code observes via
-    ``ctx.is_canceled() / raise_if_canceled()``.
+    First Ctrl-C: trip cancellation so user code observes via
+    ``ctx.cancelled / raise_if_cancelled()``.
     Second Ctrl-C within 2s: hard-exit 130.
     """
 
@@ -756,9 +615,9 @@ class _SigintHandler:
         )
         sys.stderr.flush()
         try:
-            # Canonical public cancel — same entry point the production worker
-            # uses for an orchestrator interrupt (#352).
-            self._ctx.cancel()
+            # Same entry point the production worker uses for an
+            # orchestrator cancel (#352).
+            self._ctx._cancel()
         except Exception:
             pass
 
@@ -806,7 +665,7 @@ class _UsageError(Exception):
 def load_endpoint_module(
     *, config_path: Optional[str], module: Optional[str],
 ) -> Tuple[Path, types.ModuleType]:
-    """Resolve endpoint.toml (or ``--module``), prime sys.path, import `main`.
+    """Resolve pyproject [tool.gen_worker] (or ``--module``), prime sys.path, import ``main``.
 
     Returns ``(project_root, imported_module)``. Shared by ``run`` and
     ``serve`` so both discover endpoint classes the same way. Raises
@@ -816,7 +675,7 @@ def load_endpoint_module(
         root = Path.cwd().resolve()
         main_module = module
     else:
-        root, main_module = _load_endpoint_toml_main(config_path)
+        root, main_module = _load_project_main(config_path)
     _ensure_sys_path(root)
     try:
         mod = importlib.import_module(main_module)
@@ -828,20 +687,20 @@ def load_endpoint_module(
 
 
 def discover_candidates(mod: types.ModuleType) -> List[_SelectedFunction]:
-    """Collect every @inference.function method, exit-2 if none exist."""
+    """Collect every routable function, exit-2 if none exist."""
     candidates = _collect_class_methods(mod)
     if not candidates:
         raise _UsageError(
-            f"no @inference / @training / @conversion / @dataset classes "
-            f"with @inference.function methods found in module "
+            f"no @endpoint functions or classes found in module "
             f"{getattr(mod, '__name__', '?')!r}"
         )
     return candidates
 
 
-def instantiate_class(cls: type) -> Any:
-    """Instantiate a discovered endpoint class (no setup yet)."""
-    return cls()
+def instantiate_class(cls: Optional[type]) -> Any:
+    """Instantiate a discovered endpoint class (no setup yet); None for
+    function-shaped endpoints."""
+    return cls() if cls is not None else None
 
 
 def run_setup(instance: Any, resolved_models: Dict[str, str]) -> None:
@@ -856,7 +715,7 @@ def run_setup(instance: Any, resolved_models: Dict[str, str]) -> None:
     them resurface as confusing downstream failures.
     """
     setup_fn = getattr(instance, "setup", None)
-    if setup_fn is None:
+    if instance is None or setup_fn is None:
         return
     try:
         params = inspect.signature(setup_fn).parameters
@@ -888,7 +747,7 @@ def run_setup(instance: Any, resolved_models: Dict[str, str]) -> None:
         raise _UsageError(
             f"setup() declares parameter(s) {missing} but the resolved model "
             f"slots are {sorted(resolved_models) or '(none)'}; each setup "
-            f"parameter must match a key in the @inference models={{...}} "
+            f"parameter must match a key in the @endpoint models={{...}} "
             f"dict (static bindings are injected into setup; dispatch "
             f"bindings are injected into the handler per-request)."
         )
@@ -901,7 +760,7 @@ _INJECTED_CACHE: Dict[Tuple[str, str], Any] = {}
 def _build_injected_kwargs(bound_method: Any, resolved_models: Dict[str, str]) -> Dict[str, Any]:
     """Local #337 shim: inject per-request model slots into the handler.
 
-    Production assembles SharedBase variants in the worker; locally we load a
+    Locally we load a
     complete pipeline from the resolved snapshot using the parameter's type
     annotation (from_pretrained for diffusers-layout dirs, from_single_file
     for single-checkpoint repos).
@@ -965,25 +824,25 @@ def dispatch_request(
     Returns an EXIT_* code. Raises ``_UsageError`` / ``_ModelResolutionError``
     / ``CanceledError`` for the caller's error mapping.
     """
-    stripped_bytes, overrides = _extract_models_override(raw_bytes)
-    payload = _decode_payload(stripped_bytes, selected.payload_type)
+    payload = _decode_payload(raw_bytes, selected.payload_type)
 
     resolved_models = _resolve_models_for_setup(
         bindings=selected.bindings,
-        payload=payload,
-        overrides=overrides,
         offline=offline,
         emit=emit,
     )
     if on_resolved is not None:
         on_resolved(resolved_models)
 
-    bound_method = getattr(instance, selected.attr_name)
+    bound_method = (
+        selected.method if instance is None
+        else getattr(instance, selected.attr_name)
+    )
     extra_kwargs = _build_injected_kwargs(bound_method, resolved_models)
     result = bound_method(ctx, payload, **extra_kwargs)
 
     def _emit_item(item: Any) -> None:
-        if ctx.is_canceled():
+        if ctx.cancelled:
             raise CanceledError("canceled")
         write_event("yield", item)
 
@@ -1035,14 +894,8 @@ def _handle_run(args: argparse.Namespace) -> int:
 
 
 def _warm_serve_socket() -> Optional[Path]:
-    """Return the default serve socket path if a warm ``gen-worker serve`` is
-    listening, else None (#340).
-
-    A ``gen-worker serve`` at the default ``./.gen-worker.sock`` already has the
-    endpoint loaded and ``setup()`` run. When present, ``run`` attaches to it
-    rather than paying the cold-load cost again. Importing ``serve`` lazily
-    keeps it off the hot import path.
-    """
+    """Return the default serve socket path if a warm ``gen-worker serve``
+    is listening, else None. Used by the explicit ``--attach`` flag."""
     from .serve import DEFAULT_SOCKET_PATH
 
     sock = Path(DEFAULT_SOCKET_PATH).resolve()
@@ -1070,6 +923,7 @@ def _run_via_warm_serve(
     candidates = discover_candidates(mod)
     selected = _select_function(
         candidates, cls_name=args.cls_name, method_name=args.method_name,
+        default_name=getattr(mod, "__name__", "").split(".", 1)[0],
     )
 
     raw_bytes = _apply_field_tokens(
@@ -1116,15 +970,36 @@ def _run_via_warm_serve(
 
 
 def _run_inner(args: argparse.Namespace) -> int:
+    # --list: print the endpoint description (folded-in `describe`) and exit.
+    if getattr(args, "list_functions", False):
+        from .listing import build_description
+
+        _root, mod = load_endpoint_module(
+            config_path=args.config_path, module=args.module,
+        )
+        candidates = discover_candidates(mod)
+        doc = build_description(
+            main_module=getattr(mod, "__name__", args.module or "?"),
+            candidates=candidates,
+        )
+        indent = 2 if args.pretty else None
+        sys.stdout.write(json.dumps(doc, indent=indent, default=str) + "\n")
+        return EXIT_OK
+
     # 0. Read the payload up front (decode happens later / on the server).
     raw_bytes = _read_payload_bytes(inline=args.payload, path=args.payload_file)
 
-    # #340 auto-attach: if a warm `gen-worker serve` is listening on the
-    # default socket, dispatch through it (endpoint already loaded + setup run)
-    # instead of cold-loading. Falls back to the one-shot path when no server
-    # is up, preserving all of `run`'s existing flags/behavior.
-    warm_sock = _warm_serve_socket()
-    if warm_sock is not None:
+    # Explicit --attach: dispatch through a warm `gen-worker serve` socket
+    # (endpoint already loaded + setup run) instead of cold-loading. Errors
+    # loudly when no server is listening — attaching silently would change
+    # semantics (--device/--offline don't apply to the serve process).
+    if getattr(args, "attach", False):
+        warm_sock = _warm_serve_socket()
+        if warm_sock is None:
+            raise _UsageError(
+                "--attach: no warm `gen-worker serve` socket found; start "
+                "`gen-worker serve` first or drop --attach."
+            )
         return _run_via_warm_serve(args, warm_sock, raw_bytes)
 
     # 1. Load endpoint.toml + import the main module.
@@ -1132,12 +1007,13 @@ def _run_inner(args: argparse.Namespace) -> int:
         config_path=args.config_path, module=args.module,
     )
 
-    # 2. Discover @inference.function methods on every endpoint class.
+    # 2. Discover routable functions on every @endpoint object.
     candidates = discover_candidates(mod)
     selected = _select_function(
         candidates,
         cls_name=args.cls_name,
         method_name=args.method_name,
+        default_name=getattr(mod, "__name__", "").split(".", 1)[0],
     )
 
     # Ergonomic `field=value` tokens -> payload bytes (coerced via the function's

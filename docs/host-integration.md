@@ -4,17 +4,17 @@ This is the stable contract a **host orchestrator** (cozy-local, a Go CLI)
 integrates against when it drives `gen-worker` — over the CLI and over the
 `serve` socket. Everything here is machine-readable and versioned. A host
 should **never** scrape `--help` or guess wire shapes; it keys behavior off
-the `protocol_version` and `capabilities` carried in `describe` and the
+the `protocol_version` and `capabilities` carried in `run --list` and the
 serve sidecar.
 
 ## Versioning
 
-Every machine-readable surface (`describe`, the serve ready-sidecar)
+Every machine-readable surface (`run --list`, the serve ready-sidecar)
 carries two version markers:
 
 - **`protocol_version`** — an integer, currently **`1`**. Bumped on any
   incompatible change to the request/response/cancel frame shapes, the
-  `describe` document, or the serve sidecar.
+  `run --list` document, or the serve sidecar.
 - **`capabilities`** — a list of feature tokens the build actually ships. A
   host that wants to use an optional feature must check for its token here, not
   infer support from a version number or `--help` text.
@@ -23,7 +23,7 @@ Current capabilities:
 
 | Token | Meaning |
 |---|---|
-| `describe` | `gen-worker describe` |
+| `describe` | `gen-worker run --list` |
 | `list_functions` | `gen-worker serve --list-functions [--json]` |
 | `prefetch` | `gen-worker prefetch` |
 | `cancel` | per-request `{"cancel":{"request_id"}}` control frame |
@@ -34,16 +34,16 @@ Current capabilities:
 Rule of thumb: **gate every behavior off `capabilities`.** New tokens are
 added when a feature ships; absence means "not available in this build."
 
-## `gen-worker describe`
+## `gen-worker run --list`
 
 Introspect the endpoint and emit a stable JSON document **without loading any
 model**. This is how a host learns an endpoint's functions, schemas, and model
 bindings before booting anything.
 
 ```bash
-gen-worker describe                   # compact, single line (JSON is the only format)
-gen-worker describe --pretty          # newlines + 2-space indent
-gen-worker describe --module my.main  # override endpoint.toml `main`
+gen-worker run --list                   # compact, single line (JSON is the only format)
+gen-worker run --list --pretty          # newlines + 2-space indent
+gen-worker run --list --module my.main  # override [tool.gen_worker] main
 ```
 
 Document shape:
@@ -68,7 +68,7 @@ Document shape:
       "is_generator": false,
       "input_schema": { "type": "object", "properties": { "...": {} } },
       "output": "Output",
-      "models": { "pipe": { "type": "HFRepo", "provider": "hf", "ref": "..." } }
+      "models": { "pipe": { "type": "HF", "provider": "hf", "ref": "..." } }
     }
   ]
 }
@@ -84,13 +84,13 @@ Notes:
   ref** so `input_schema["properties"]` is directly available (a host builds
   field prompts off it). Nested struct references stay under `$defs`.
 - **`models`** maps each model param to its binding descriptor — `Repo` /
-  `HFRepo` / `CivitaiRepo` carry `provider`/`ref`/`tag`/`flavor`/
+  `HF` / `Civitai` carry `provider`/`ref`/`tag`/`flavor`/
   `allow_override`; a `Dispatch` binding carries `field` + a `table` of
   per-key bindings.
 
 `serve --list-functions --json` is a **thin alias** — it emits
 `{"functions": [...]}` using the identical per-function builder, so the array
-matches `describe`'s `functions` field exactly:
+matches `run --list`'s `functions` field exactly:
 
 ```bash
 gen-worker serve --list-functions --json   # {"functions":[...]} — no model load
@@ -109,7 +109,7 @@ One frame per line.
 {"request_id": "abc123", "function": "generate", "payload": { }, "stream": false}
 ```
 
-- `function` (string, required) — the routable `@inference.function(name=...)`.
+- `function` (string, required) — the routable function name.
 - `payload` (object) — the decoded JSON payload; the reserved `_models` field
   inside it overrides bindings exactly as in production.
 - `request_id` (string) — required for cancellation to work; echoed back on

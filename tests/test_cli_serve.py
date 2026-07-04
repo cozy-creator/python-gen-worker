@@ -31,7 +31,7 @@ import pytest
 
 import gen_worker.cli as cli
 import gen_worker.cli.serve as serve_mod
-from gen_worker import RequestContext, inference, invocable
+from gen_worker import RequestContext, endpoint
 from gen_worker.cli import run as run_mod
 from gen_worker.models import residency as residency_mod
 from gen_worker.models.residency import Residency, Tier
@@ -57,22 +57,20 @@ _EXAMPLE_DIR = Path(__file__).resolve().parents[1] / "examples" / "marco-polo"
 def _multi_class_module(name: str, setups: dict) -> types.ModuleType:
     mod = types.ModuleType(name)
 
-    @inference()
+    @endpoint
     class Alpha:
         def setup(self) -> None:
             setups["alpha"] = setups.get("alpha", 0) + 1
 
-        @invocable(name="do_alpha")
-        def go(self, ctx: RequestContext, data: _In) -> _Out:
+        def do_alpha(self, ctx: RequestContext, data: _In) -> _Out:
             return _Out(response="a", setup_calls=setups.get("alpha", 0))
 
-    @inference()
+    @endpoint
     class Beta:
         def setup(self) -> None:
             setups["beta"] = setups.get("beta", 0) + 1
 
-        @invocable(name="do_beta")
-        def go(self, ctx: RequestContext, data: _In) -> _Out:
+        def do_beta(self, ctx: RequestContext, data: _In) -> _Out:
             return _Out(response="b")
 
     Alpha.__module__ = name
@@ -140,24 +138,22 @@ class _FakePipeline:
 def _two_model_module(name: str, setups: dict, sizes: dict) -> types.ModuleType:
     mod = types.ModuleType(name)
 
-    @inference()
+    @endpoint
     class Big:
         def setup(self) -> None:
             setups["big"] = setups.get("big", 0) + 1
             self.pipeline = _FakePipeline(sizes["big"]).to("cuda")
 
-        @invocable(name="gen_big")
-        def go(self, ctx: RequestContext, data: _In) -> _Out:
+        def gen_big(self, ctx: RequestContext, data: _In) -> _Out:
             return _Out(response="big", setup_calls=setups.get("big", 0))
 
-    @inference()
+    @endpoint
     class Small:
         def setup(self) -> None:
             setups["small"] = setups.get("small", 0) + 1
             self.pipeline = _FakePipeline(sizes["small"]).to("cuda")
 
-        @invocable(name="gen_small")
-        def go(self, ctx: RequestContext, data: _In) -> _Out:
+        def gen_small(self, ctx: RequestContext, data: _In) -> _Out:
             return _Out(response="small", setup_calls=setups.get("small", 0))
 
     Big.__module__ = name
@@ -226,25 +222,22 @@ def test_filter_by_function_and_list_functions_without_booting(capsys) -> None:
     name = "_test_serve_filter"
     mod = types.ModuleType(name)
 
-    @inference()
+    @endpoint
     class Alpha:
         def setup(self) -> None:
             setups["Alpha"] = setups.get("Alpha", 0) + 1
 
-        @inference.function(name="alpha_one")
         def alpha_one(self, ctx: RequestContext, data: _In) -> _Out:
             return _Out(response="a1")
 
-        @inference.function(name="alpha_two")
         def alpha_two(self, ctx: RequestContext, data: _In) -> _Out:
             return _Out(response="a2")
 
-    @inference()
+    @endpoint
     class Beta:
         def setup(self) -> None:
             setups["Beta"] = setups.get("Beta", 0) + 1
 
-        @inference.function(name="beta_one")
         def beta_one(self, ctx: RequestContext, data: _In) -> _Out:
             return _Out(response="b1")
 
@@ -330,7 +323,7 @@ def _stop_serve(proc: subprocess.Popen) -> None:
 
 
 @pytest.mark.skipif(
-    not (_EXAMPLE_DIR / "endpoint.toml").exists(),
+    not (_EXAMPLE_DIR / "pyproject.toml").exists(),
     reason="marco-polo example not present",
 )
 @pytest.mark.parametrize("stdin_mode", ["no-stdin", "devnull"])

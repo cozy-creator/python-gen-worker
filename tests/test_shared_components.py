@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from gen_worker import CivitaiRepo, HFRepo, Repo
+from gen_worker import HF, Civitai, Hub
 from gen_worker.models import (
     LoadedComponentKey,
     Residency,
@@ -63,8 +63,8 @@ def _residency_100gb() -> Residency:
 
 
 def test_identical_bindings_produce_equal_keys() -> None:
-    a = HFRepo("bfl/flux.2-klein-4b").dtype("bf16")
-    b = HFRepo("bfl/flux.2-klein-4b").dtype("bf16")
+    a = HF("bfl/flux.2-klein-4b", dtype="bf16")
+    b = HF("bfl/flux.2-klein-4b", dtype="bf16")
     ka = LoadedComponentKey.from_binding(a, device_id=0, component_set="pkg.Flux2KleinPipeline")
     kb = LoadedComponentKey.from_binding(b, device_id=0, component_set="pkg.Flux2KleinPipeline")
     assert ka == kb
@@ -74,13 +74,13 @@ def test_identical_bindings_produce_equal_keys() -> None:
 @pytest.mark.parametrize(
     "mutate",
     [
-        lambda b: b.dtype("fp16"),
-        lambda b: b.revision("deadbeef"),
-        lambda b: b.subfolder("text_encoder"),
+        lambda b: HF(b.ref, dtype="fp16"),
+        lambda b: HF(b.ref, dtype=b.dtype, revision="deadbeef"),
+        lambda b: HF(b.ref, dtype=b.dtype, subfolder="text_encoder"),
     ],
 )
 def test_binding_attribute_differences_do_not_share(mutate) -> None:
-    base = HFRepo("bfl/flux.2-klein-4b").dtype("bf16")
+    base = HF("bfl/flux.2-klein-4b", dtype="bf16")
     k_base = LoadedComponentKey.from_binding(base, device_id=0, component_set="P")
     k_other = LoadedComponentKey.from_binding(mutate(base), device_id=0, component_set="P")
     assert k_base != k_other
@@ -88,7 +88,7 @@ def test_binding_attribute_differences_do_not_share(mutate) -> None:
 
 
 def test_device_dtype_quant_component_set_differences_do_not_share() -> None:
-    b = HFRepo("bfl/flux.2-klein-4b").dtype("bf16")
+    b = HF("bfl/flux.2-klein-4b", dtype="bf16")
     k0 = LoadedComponentKey.from_binding(b, device_id=0, component_set="P")
     assert k0 != LoadedComponentKey.from_binding(b, device_id=1, component_set="P")
     assert k0 != LoadedComponentKey.from_binding(b, device_id=0, component_set="Q")
@@ -100,13 +100,13 @@ def test_device_dtype_quant_component_set_differences_do_not_share() -> None:
     ) != LoadedComponentKey.from_binding(
         b, device_id=0, component_set="P", quantization="fp8", quant_config={"a": 2}
     )
-    assert LoadedComponentKey.from_binding(Repo("o/r"), device_id=0) != LoadedComponentKey.from_binding(
-        CivitaiRepo("123"), device_id=0
+    assert LoadedComponentKey.from_binding(Hub("o/r"), device_id=0) != LoadedComponentKey.from_binding(
+        Civitai("123"), device_id=0
     )
 
 
 def test_unpinned_revision_falls_back_to_snapshot_digest() -> None:
-    b = HFRepo("bfl/flux.2-klein-4b")  # no explicit revision
+    b = HF("bfl/flux.2-klein-4b")  # no explicit revision
     same = LoadedComponentKey.from_binding(b, snapshot_digest="/cache/snap-A")
     same2 = LoadedComponentKey.from_binding(b, snapshot_digest="/cache/snap-A")
     diff = LoadedComponentKey.from_binding(b, snapshot_digest="/cache/snap-B")
@@ -218,13 +218,11 @@ def test_drain_skips_referenced_then_force_clears_all() -> None:
 
 
 def test_lora_and_override_bindings_isolate_from_clean_base() -> None:
-    clean = HFRepo("bfl/flux.2-klein-4b").dtype("bf16")
-    lora = HFRepo("bfl/flux.2-klein-4b").dtype("bf16").allow_lora()
-    override = HFRepo("bfl/flux.2-klein-4b").dtype("bf16").allow_override(_FakePipeline)
+    base = HF("bfl/flux.2-klein-4b", dtype="bf16")
 
-    k_clean = LoadedComponentKey.from_binding(clean, component_set="P")
-    k_lora = LoadedComponentKey.from_binding(lora, component_set="P", adapter_id="lora:set-7")
-    k_override = LoadedComponentKey.from_binding(override, component_set="P", adapter_id="override:Pipe")
+    k_clean = LoadedComponentKey.from_binding(base, component_set="P")
+    k_lora = LoadedComponentKey.from_binding(base, component_set="P", adapter_id="lora:set-7")
+    k_override = LoadedComponentKey.from_binding(base, component_set="P", adapter_id="override:Pipe")
 
     assert k_clean != k_lora
     assert k_clean != k_override
@@ -233,7 +231,7 @@ def test_lora_and_override_bindings_isolate_from_clean_base() -> None:
 
 
 def test_adapter_identity_separates_two_lora_overlays() -> None:
-    b = HFRepo("bfl/flux.2-klein-4b").dtype("bf16")
+    b = HF("bfl/flux.2-klein-4b", dtype="bf16")
     k1 = LoadedComponentKey.from_binding(b, component_set="P", adapter_id="lora:A")
     k2 = LoadedComponentKey.from_binding(b, component_set="P", adapter_id="lora:B")
     assert k1 != k2

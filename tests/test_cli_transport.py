@@ -60,7 +60,7 @@ def _wait_tcp(port: int, proc: subprocess.Popen, timeout: float = 15.0) -> None:
 
 
 @pytest.mark.skipif(
-    not (_EXAMPLE_DIR / "endpoint.toml").exists(),
+    not (_EXAMPLE_DIR / "pyproject.toml").exists(),
     reason="marco-polo example not present",
 )
 def test_serve_sidecar_written_and_removed(tmp_path) -> None:
@@ -95,7 +95,7 @@ def test_serve_sidecar_written_and_removed(tmp_path) -> None:
 
 
 @pytest.mark.skipif(
-    not (_EXAMPLE_DIR / "endpoint.toml").exists(),
+    not (_EXAMPLE_DIR / "pyproject.toml").exists(),
     reason="marco-polo example not present",
 )
 def test_tcp_roundtrip(capsys) -> None:

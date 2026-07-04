@@ -31,6 +31,8 @@ dependencies = [
     "backoff>=2.2.1",
     "blake3>=1.0.0",
     "huggingface-hub>=0.26.0",
+    # endpoint.lock is TOML; msgspec.toml.encode needs tomli-w at bake time.
+    "tomli-w>=1.0.0",
 ]
 # Pillow (image I/O) and numpy/soundfile (audio I/O) are lazy-imported by
 # gen_worker.io and live in the [images] / [audio] extras — the base wheel

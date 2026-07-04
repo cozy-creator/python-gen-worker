@@ -343,6 +343,31 @@ def _apply_group_offload(
     return any_applied
 
 
+def place_pipeline(pipeline: Any, *, logger: Optional[logging.Logger] = None) -> Dict[str, Any]:
+    """Worker-owned placement + offload policy for a freshly-loaded pipeline.
+
+    Runs the one low-VRAM decider against free VRAM: plenty of headroom puts
+    the whole pipeline on CUDA; tighter budgets step down the offload ladder.
+    Endpoints never write device/offload code — the worker calls this around
+    ``setup()`` injection. No-op without CUDA.
+    """
+    log = logger or _LOG
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return {"mode": "cpu"}
+    except Exception:
+        return {"mode": "cpu"}
+    mode = select_auto_mode(pipeline=pipeline)
+    if mode in ("off", "vae_only") and callable(getattr(pipeline, "to", None)):
+        try:
+            pipeline.to("cuda")
+        except Exception as exc:
+            log.warning("place_pipeline: .to('cuda') failed: %s", exc)
+    return apply_low_vram_config(pipeline, mode=mode, logger=log)
+
+
 def apply_low_vram_config(
     pipeline: Any,
     *,
@@ -557,6 +582,7 @@ def with_oom_retry(
 
 __all__ = [
     "apply_low_vram_config",
+    "place_pipeline",
     "with_oom_retry",
     "select_auto_mode",
     "estimate_pipeline_size_gb",

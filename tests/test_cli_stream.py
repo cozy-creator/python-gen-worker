@@ -23,7 +23,7 @@ import pytest
 import gen_worker.cli as cli
 import gen_worker.cli.run as run_mod
 import gen_worker.cli.serve as serve_mod
-from gen_worker import RequestContext, inference
+from gen_worker import RequestContext, endpoint
 
 
 class _In(msgspec.Struct):
@@ -37,12 +37,8 @@ class _Delta(msgspec.Struct):
 def _counter_module(name: str) -> types.ModuleType:
     mod = types.ModuleType(name)
 
-    @inference()
+    @endpoint
     class Counter:
-        def setup(self) -> None:
-            pass
-
-        @inference.function(name="count")
         def count(self, ctx: RequestContext, data: _In) -> Iterator[_Delta]:
             for i in range(data.n):
                 yield _Delta(i=i)
@@ -83,7 +79,7 @@ _EXAMPLE_DIR = Path(__file__).resolve().parents[1] / "examples" / "marco-polo"
 
 
 @pytest.mark.skipif(
-    not (_EXAMPLE_DIR / "endpoint.toml").exists(),
+    not (_EXAMPLE_DIR / "pyproject.toml").exists(),
     reason="marco-polo example not present",
 )
 def test_invoke_stream_roundtrip(tmp_path, capsys) -> None:
@@ -96,21 +92,19 @@ def test_invoke_stream_roundtrip(tmp_path, capsys) -> None:
     (pkg / name / "main.py").write_text(
         "import msgspec\n"
         "from typing import Iterator\n"
-        "from gen_worker import RequestContext, inference\n"
+        "from gen_worker import RequestContext, endpoint\n"
         "class In(msgspec.Struct):\n"
         "    n: int = 3\n"
         "class Delta(msgspec.Struct):\n"
         "    i: int\n"
-        "@inference()\n"
+        "@endpoint\n"
         "class Counter:\n"
-        "    def setup(self): pass\n"
-        "    @inference.function(name='count')\n"
         "    def count(self, ctx: RequestContext, data: In) -> Iterator[Delta]:\n"
         "        for i in range(data.n):\n"
         "            yield Delta(i=i)\n"
     )
-    (pkg / "endpoint.toml").write_text(
-        f'schema_version = 1\nmain = "{name}.main"\n'
+    (pkg / "pyproject.toml").write_text(
+        f'[tool.gen_worker]\nmain = "{name}.main"\n'
     )
     sock = tmp_path / "s.sock"
     proc = subprocess.Popen(

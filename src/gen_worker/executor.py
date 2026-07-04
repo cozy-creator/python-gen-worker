@@ -19,14 +19,14 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 import msgspec
 
-from .api.binding import Repo
+from .api.binding import wire_ref
 from .api.errors import (
     ArtifactTransferError,
     CanceledError,
     RetryableError,
     ValidationError,
 )
-from .api.streaming import Done, Error, IncrementalTokenDelta
+from .api.streaming import BatchItemDelta, Done, Error, IncrementalTokenDelta
 from .api.types import Compute
 from .capability import HardwareUnmetError
 from .models import residency as residency_mod
@@ -35,7 +35,19 @@ from .models.download import ensure_local
 from .models.residency import Residency
 from .pb import worker_scheduler_pb2 as pb
 from .registry import EndpointSpec
-from .request_context import RequestContext
+from .request_context import (
+    ConversionContext,
+    DatasetContext,
+    RequestContext,
+    TrainingContext,
+)
+
+_CONTEXT_BY_KIND: Dict[str, type] = {
+    "inference": RequestContext,
+    "conversion": ConversionContext,
+    "dataset": DatasetContext,
+    "training": TrainingContext,
+}
 
 logger = logging.getLogger(__name__)
 
@@ -184,9 +196,16 @@ class ModelStore:
     def _lock(self, ref: str) -> asyncio.Lock:
         return self._locks.setdefault(ref, asyncio.Lock())
 
-    async def ensure_local(self, ref: str, snapshot: Optional[pb.Snapshot] = None) -> Path:
+    async def ensure_local(
+        self,
+        ref: str,
+        snapshot: Optional[pb.Snapshot] = None,
+        *,
+        binding: Any = None,
+    ) -> Path:
         """Materialize `ref` on disk. Transient failures retry with backoff;
-        terminal (4xx-class) failures raise immediately. Emits ModelEvents."""
+        terminal (4xx-class) failures raise immediately. Emits ModelEvents.
+        ``binding`` (when known) supplies provider + file-selection metadata."""
         async with self._lock(ref):
             cached = self.residency.local_path(ref)
             if cached is not None and cached.exists():
@@ -216,10 +235,12 @@ class ModelStore:
                         resolved = _snapshot_to_resolved(snapshot)
                     path = await ensure_local(
                         ref,
+                        provider=getattr(binding, "provider", None),
                         snapshot=resolved,
                         cache_dir=self._cache_dir,
                         hf_home=self._hf_home,
                         hf_token=self._hf_token,
+                        allow_patterns=tuple(getattr(binding, "files", ()) or ()),
                         progress=_progress,
                     )
                     self.residency.track_disk(ref, path)
@@ -258,6 +279,7 @@ class _ClassRecord:
     cls: type
     specs: List[EndpointSpec] = dc_field(default_factory=list)
     instance: Any = None
+    server: Any = None  # ServerHandle for runtime="vllm"/"llama-server"
     ready: bool = False
     failed: Optional[str] = None
     lock: asyncio.Lock = dc_field(default_factory=asyncio.Lock)
@@ -298,9 +320,14 @@ class Executor:
         self.jobs: Dict[Tuple[str, int], _Job] = {}
         self._idle = asyncio.Event()
         self._idle.set()
-        self._classes: Dict[type, _ClassRecord] = {}
+        # Instance groups: specs sharing (cls, bindings) share one instance;
+        # variant specs of the same class get separate instances. Function-
+        # shaped endpoints (cls=None) have no instance at all.
+        self._classes: Dict[Any, _ClassRecord] = {}
         for s in specs:
-            rec = self._classes.setdefault(s.cls, _ClassRecord(cls=s.cls))
+            if s.cls is None:
+                continue
+            rec = self._classes.setdefault(s.instance_key, _ClassRecord(cls=s.cls))
             rec.specs.append(s)
         # Hardware-gate failures: fn name -> (reason, detail, axes).
         self.unavailable: Dict[str, Tuple[str, str, Dict[str, str]]] = {}
@@ -321,21 +348,21 @@ class Executor:
                     "cuda_unavailable", "function requires CUDA but no GPU detected",
                     {"gpu_count": str(gpu_count)})
                 continue
-            if r.min_compute_capability is not None and detected_cc is not None \
-                    and detected_cc < float(r.min_compute_capability):
+            if r.compute_capability is not None and detected_cc is not None \
+                    and detected_cc < float(r.compute_capability):
                 self.unavailable[name] = (
                     "compute_capability_unmet",
-                    f"requires SM {r.min_compute_capability:.1f}, detected {detected_cc:.1f}",
-                    {"detected_sm": f"{detected_cc:.1f}", "required_sm": f"{float(r.min_compute_capability):.1f}"})
+                    f"requires SM {r.compute_capability:.1f}, detected {detected_cc:.1f}",
+                    {"detected_sm": f"{detected_cc:.1f}", "required_sm": f"{float(r.compute_capability):.1f}"})
                 continue
-            if r.min_vram_gb is not None and total_vram_gb and total_vram_gb < float(r.min_vram_gb):
+            if r.vram_gb is not None and total_vram_gb and total_vram_gb < float(r.vram_gb):
                 self.unavailable[name] = (
                     "insufficient_vram",
-                    f"requires {r.min_vram_gb:.0f}GiB VRAM, detected {total_vram_gb:.0f}GiB",
-                    {"required_vram_gb": f"{float(r.min_vram_gb):.0f}",
+                    f"requires {r.vram_gb:.0f}GiB VRAM, detected {total_vram_gb:.0f}GiB",
+                    {"required_vram_gb": f"{float(r.vram_gb):.0f}",
                      "detected_vram_gb": f"{total_vram_gb:.0f}"})
                 continue
-            missing = [lib for lib in (r.required_libraries or ()) if lib not in libs]
+            missing = [lib for lib in (r.libraries or ()) if lib not in libs]
             if missing:
                 import importlib.util
                 missing = [m for m in missing if importlib.util.find_spec(m) is None]
@@ -349,8 +376,11 @@ class Executor:
         for name, spec in self.specs.items():
             if name in self.unavailable or self.draining:
                 continue
-            rec = self._classes[spec.cls]
-            if rec.ready or (not spec.fixed_models and rec.failed is None):
+            if spec.cls is None:
+                out.append(name)
+                continue
+            rec = self._classes[spec.instance_key]
+            if rec.ready or (not spec.models and rec.failed is None):
                 out.append(name)
         return sorted(out)
 
@@ -359,7 +389,8 @@ class Executor:
         return sorted(
             name for name, spec in self.specs.items()
             if name not in avail and name not in self.unavailable
-            and self._classes[spec.cls].failed is None
+            and spec.cls is not None
+            and self._classes[spec.instance_key].failed is None
         )
 
     def in_flight_keys(self) -> List[Tuple[str, int]]:
@@ -368,23 +399,31 @@ class Executor:
     # ---- setup -------------------------------------------------------------
 
     async def ensure_setup(self, spec: EndpointSpec, snapshots: Optional[Dict[str, pb.Snapshot]] = None) -> Any:
-        rec = self._classes[spec.cls]
+        if spec.cls is None:
+            return None  # function-shaped endpoint: no instance, no setup
+        rec = self._classes[spec.instance_key]
         async with rec.lock:
             if rec.ready:
                 return rec.instance
+            setup_slots = self._setup_slots(spec)
             paths: Dict[str, str] = {}
-            for slot, repo in spec.fixed_models.items():
-                snap = (snapshots or {}).get(repo.ref)
-                path = await self.store.ensure_local(repo.ref, snap)
+            for slot in setup_slots:
+                binding = spec.models[slot]
+                ref = wire_ref(binding)
+                snap = (snapshots or {}).get(ref)
+                path = await self.store.ensure_local(ref, snap, binding=binding)
                 paths[slot] = str(path)
             instance = spec.cls()
-            setup = getattr(instance, "setup")
+            setup = getattr(instance, "setup", None)
             vram_before = self._vram_allocated()
-            kwargs = await self._injection_kwargs(spec, setup, paths)
-            if asyncio.iscoroutinefunction(setup):
-                await setup(**kwargs)
-            else:
-                await asyncio.to_thread(setup, **kwargs)
+            if spec.runtime:
+                rec.server = await self._boot_engine_server(spec, paths)
+            if callable(setup):
+                kwargs = await self._injection_kwargs(spec, setup, paths, server=rec.server)
+                if asyncio.iscoroutinefunction(setup):
+                    await setup(**kwargs)
+                else:
+                    await asyncio.to_thread(setup, **kwargs)
             warmup = getattr(instance, "warmup", None)
             if callable(warmup):
                 if asyncio.iscoroutinefunction(warmup):
@@ -394,7 +433,7 @@ class Executor:
             # Measured VRAM (allocator delta across the load) — the number the
             # orchestrator's VRAM packer sees; never an estimate constant.
             vram_delta = max(0, self._vram_allocated() - vram_before)
-            refs = [r.ref for r in spec.fixed_models.values()]
+            refs = [wire_ref(spec.models[s]) for s in setup_slots]
             for ref in refs:
                 if vram_delta > 0:
                     self.store.mark_in_vram(ref, vram_delta if len(refs) == 1 else 0)
@@ -406,18 +445,53 @@ class Executor:
             return instance
 
     @staticmethod
+    def _setup_slots(spec: EndpointSpec) -> List[str]:
+        """Model slots loaded once at setup time. Classes without setup()
+        take their models per call via handler-parameter injection."""
+        if spec.cls is None or not spec.models:
+            return []
+        if getattr(spec.cls, "setup", None) is None:
+            return []
+        return list(spec.models)
+
+    async def _boot_engine_server(self, spec: EndpointSpec, paths: Dict[str, str]) -> Any:
+        """Boot the runtime="vllm"/"llama-server" subprocess and health-wait."""
+        from .runtimes.server import RUNTIME_FACTORIES
+
+        factory = RUNTIME_FACTORIES[spec.runtime]  # validated at decoration
+        if not paths:
+            raise ValidationError(
+                f"runtime={spec.runtime!r} on {spec.name!r} requires a model binding"
+            )
+        model_path = next(iter(paths.values()))
+        proc = factory(model_path)
+        return await asyncio.to_thread(proc.start)
+
     async def _injection_kwargs(
-        spec: EndpointSpec, setup: Callable[..., Any], paths: Dict[str, str]
+        self,
+        spec: EndpointSpec,
+        setup: Callable[..., Any],
+        paths: Dict[str, str],
+        *,
+        server: Any = None,
     ) -> Dict[str, Any]:
         """Typed injection: each slot receives exactly what its ``setup``
         annotation says — a ``str``/``Path`` local path, or a constructed
         pipeline for a class annotation exposing ``from_pretrained`` (built off
-        the loop; the endpoint's binding dtype is honored)."""
+        the loop; the binding dtype is honored and the worker applies its
+        placement/offload policy to the result). A parameter annotated
+        ``ServerHandle`` receives the booted engine server."""
+        from .runtimes.server import ServerHandle
+
         try:
             hints = typing.get_type_hints(setup)
         except Exception:
             hints = {}
         kwargs: Dict[str, Any] = {}
+        if server is not None:
+            for pname, ann in hints.items():
+                if ann is ServerHandle:
+                    kwargs[pname] = server
         for slot, path in paths.items():
             ann = hints.get(slot)
             if ann is None or ann is str:
@@ -426,12 +500,17 @@ class Executor:
                 kwargs[slot] = Path(path)
             elif isinstance(ann, type) and callable(getattr(ann, "from_pretrained", None)):
                 from .models.loading import load_from_pretrained
+                from .models.memory import place_pipeline
 
-                binding = spec.fixed_models.get(slot)
-                dtype = str(getattr(binding, "_dtype", "") or "")
-                kwargs[slot] = await asyncio.to_thread(
+                binding = spec.models.get(slot)
+                dtype = str(getattr(binding, "dtype", "") or "")
+                pipe = await asyncio.to_thread(
                     load_from_pretrained, ann, path, dtype=dtype
                 )
+                # Worker-owned placement/offload policy: one decider for the
+                # whole worker; endpoints never write device/offload code.
+                await asyncio.to_thread(place_pipeline, pipe)
+                kwargs[slot] = pipe
             else:
                 kwargs[slot] = path
         return kwargs
@@ -457,6 +536,9 @@ class Executor:
                         await asyncio.to_thread(shutdown)
                 except Exception:
                     logger.exception("shutdown() failed for %s", rec.cls.__name__)
+            server, rec.server = rec.server, None
+            if server is not None:
+                await asyncio.to_thread(server.stop)
 
     # ---- ModelOp -----------------------------------------------------------
 
@@ -471,7 +553,7 @@ class Executor:
                 loaded = False
                 snapshots = {ref: snap} if snap is not None else None
                 for spec in self.specs.values():
-                    if ref in (r.ref for r in spec.fixed_models.values()):
+                    if ref in (wire_ref(b) for b in spec.models.values()):
                         await self.ensure_setup(spec, snapshots)
                         loaded = True
                 if not loaded:
@@ -496,7 +578,7 @@ class Executor:
         for job in self.jobs.values():
             if job.finished or job.superseded or job.spec is None:
                 continue
-            if ref in (r.ref for r in job.spec.fixed_models.values()):
+            if ref in (wire_ref(b) for b in job.spec.models.values()):
                 return True
         return False
 
@@ -504,7 +586,7 @@ class Executor:
         """Demote a ref out of VRAM by tearing down the classes that hold it."""
         for rec in self._classes.values():
             holds = any(
-                ref in (r.ref for r in s.fixed_models.values()) for s in rec.specs
+                ref in (wire_ref(b) for b in s.models.values()) for s in rec.specs
             )
             if holds and rec.ready:
                 inst, rec.instance, rec.ready = rec.instance, None, False
@@ -515,6 +597,9 @@ class Executor:
                     except Exception:
                         logger.exception("shutdown() during UNLOAD failed")
                 del inst
+                server, rec.server = rec.server, None
+                if server is not None:
+                    await asyncio.to_thread(server.stop)
         if torch is not None and torch.cuda.is_available():
             try:
                 await asyncio.to_thread(torch.cuda.empty_cache)
@@ -538,7 +623,7 @@ class Executor:
             if rid == run.request_id and att != run.attempt and not job.finished:
                 job.superseded = True
                 if job.ctx is not None:
-                    job.ctx.cancel()
+                    job.ctx._cancel()
                 if job.exec_task is not None:
                     job.exec_task.cancel()
 
@@ -570,7 +655,7 @@ class Executor:
         if job is None or job.finished:
             return  # unknown pair or natural result already stands
         if job.ctx is not None:
-            job.ctx.cancel()  # cooperative: sync handlers poll ctx
+            job.ctx._cancel()  # cooperative: sync handlers poll ctx
         if job.exec_task is not None and job.spec is not None and job.spec.is_async:
             job.exec_task.cancel()  # async handlers are cancelled on the loop
 
@@ -586,7 +671,7 @@ class Executor:
             if job.finished or job.superseded:
                 continue
             if job.ctx is not None:
-                job.ctx.cancel()
+                job.ctx._cancel()
             if job.exec_task is not None:
                 job.exec_task.cancel()
             await self._finish(job, pb.JOB_STATUS_RETRYABLE, safe_message=safe_message)
@@ -609,7 +694,8 @@ class Executor:
         gpu_index = int(compute.gpu_index) if compute is not None else 0
         timeout_ms = int(run.timeout_ms or 0) or int(spec.timeout_ms or 0)
 
-        ctx = RequestContext(
+        ctx_cls = _CONTEXT_BY_KIND.get(spec.kind, RequestContext)
+        ctx = ctx_cls(
             request_id=run.request_id,
             owner=run.tenant or None,
             invoker_id=run.invoker_id or None,
@@ -632,7 +718,7 @@ class Executor:
 
         try:
             instance = await self.ensure_setup(spec, snapshots)
-            kwargs = await self._dispatch_kwargs(spec, payload, snapshots)
+            kwargs = await self._handler_kwargs(spec, snapshots)
         except asyncio.CancelledError:
             await self._finish(job, pb.JOB_STATUS_CANCELED, safe_message="canceled")
             return
@@ -658,12 +744,12 @@ class Executor:
             if needs_gpu:
                 await self._gpu_semaphore.acquire()
                 acquired = True
-                if job.ctx.is_canceled():
+                if job.ctx.cancelled:
                     raise CanceledError("canceled")
             started = time.monotonic()
             # Pin-while-executing: the models this job uses are not eviction
             # candidates for its duration (cross-pipeline eviction safety).
-            exec_refs = [r.ref for r in spec.fixed_models.values()]
+            exec_refs = [wire_ref(b) for b in spec.models.values()]
             with self.store.residency.executing(*exec_refs):
                 output = await self._execute(job, spec, instance, ctx, payload, kwargs,
                                              timeout_ms=timeout_ms, gpu_index=gpu_index)
@@ -689,22 +775,30 @@ class Executor:
                 self._gpu_semaphore.release()
             self._maybe_idle()
 
-    async def _dispatch_kwargs(
-        self, spec: EndpointSpec, payload: Any, snapshots: Dict[str, pb.Snapshot]
+    async def _handler_kwargs(
+        self, spec: EndpointSpec, snapshots: Dict[str, pb.Snapshot]
     ) -> Dict[str, Any]:
-        """Per-request dispatch-slot injection: discriminator field -> Repo ->
-        local path handed to the handler."""
+        """Per-call model injection: handler parameters (after ctx, payload)
+        whose names match model slots receive the local snapshot path."""
+        try:
+            sig = typing.get_type_hints(spec.method)
+        except Exception:
+            sig = {}
+        import inspect as _inspect
+
+        params = [
+            p.name for p in _inspect.signature(spec.method).parameters.values()
+            if p.name != "self"
+        ][2:]
+        setup_slots = set(self._setup_slots(spec))
         kwargs: Dict[str, Any] = {}
-        for slot, dispatch in spec.dispatch_models.items():
-            variant = str(getattr(payload, dispatch.field, "") or "")
-            pick = dispatch.table.get(variant)
-            if not isinstance(pick, Repo):
-                raise ValidationError(
-                    f"payload field {dispatch.field!r}={variant!r} matches no variant "
-                    f"(known: {sorted(dispatch.table)})"
-                )
-            path = await self.store.ensure_local(pick.ref, snapshots.get(pick.ref))
-            kwargs[slot] = str(path)
+        for name in params:
+            binding = spec.models.get(name)
+            if binding is None or name in setup_slots:
+                continue
+            ref = wire_ref(binding)
+            path = await self.store.ensure_local(ref, snapshots.get(ref), binding=binding)
+            kwargs[name] = Path(path) if sig.get(name) is Path else str(path)
         return kwargs
 
     async def _execute(
@@ -719,7 +813,7 @@ class Executor:
         timeout_ms: int,
         gpu_index: int,
     ) -> Any:
-        bound = getattr(instance, spec.attr_name)
+        bound = spec.method if instance is None else getattr(instance, spec.attr_name)
         call_kwargs = {spec.ctx_param: ctx, spec.payload_param: payload, **kwargs}
         timeout_s = (timeout_ms / 1000.0) if timeout_ms > 0 else None
 
@@ -737,7 +831,7 @@ class Executor:
         try:
             return await asyncio.wait_for(asyncio.shield(job.exec_task), timeout_s)
         except asyncio.TimeoutError:
-            ctx.cancel()
+            ctx._cancel()
             job.exec_task.cancel()
             if not spec.is_async:
                 self._reap_stuck_thread(job)
@@ -783,6 +877,9 @@ class Executor:
             raise ValidationError(getattr(item, "message", "") or "stream error")
         if isinstance(item, IncrementalTokenDelta):
             return item.text.encode("utf-8"), "text/plain"
+        if isinstance(item, BatchItemDelta):
+            # First-class multi-item delta: msgpack keeps `chunk` binary.
+            return msgspec.msgpack.encode(item), "application/x-batch-item+msgpack"
         return msgspec.json.encode(item), "application/json"
 
     async def _emit_progress(self, job: _Job, seq: int, data: bytes, content_type: str) -> None:
@@ -794,7 +891,7 @@ class Executor:
         seq = 0
         async for item in agen:
             if job.ctx is not None:
-                job.ctx.raise_if_canceled()
+                job.ctx.raise_if_cancelled()
             enc = self._encode_chunk(item)
             if enc is None:
                 break
@@ -817,7 +914,7 @@ class Executor:
         seq = 0
         for item in bound(**call_kwargs):
             if job.ctx is not None:
-                job.ctx.raise_if_canceled()
+                job.ctx.raise_if_cancelled()
             enc = self._encode_chunk(item)
             if enc is None:
                 break
