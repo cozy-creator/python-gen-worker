@@ -35,7 +35,7 @@ def _resolved() -> dict:
 def test_failed_build_is_evicted_and_retry_succeeds(tmp_path: Path, monkeypatch) -> None:
     calls = {"n": 0}
 
-    async def _flaky_download(url: str, dst: Path, expected_size: int, expected_blake3: str) -> None:
+    async def _flaky_download(url: str, dst: Path, expected_size: int, expected_blake3: str, on_bytes=None) -> None:
         calls["n"] += 1
         if calls["n"] == 1:
             raise RuntimeError("transient blob failure")

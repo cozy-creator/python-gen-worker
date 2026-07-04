@@ -32,6 +32,7 @@ _ENV_TO_FIELD: Dict[str, str] = {
     "HF_HOME": "hf_home",
     "TENSORHUB_PUBLIC_URL": "tensorhub_public_url",
     "ORCHESTRATOR_PUBLIC_ADDR": "orchestrator_public_addr",
+    "GRPC_CA_BUNDLE": "grpc_ca_bundle",
     "WORKER_ID": "worker_id",
     "WORKER_MODE": "worker_mode",
     "WORKER_JWT": "worker_jwt",

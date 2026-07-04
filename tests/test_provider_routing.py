@@ -179,11 +179,14 @@ def test_civitai_ref_routes_to_civitai_branch(tmp_path: Path, monkeypatch) -> No
 def test_tensorhub_refs_require_a_snapshot(tmp_path: Path, monkeypatch, ref, index) -> None:
     """Workers never resolve tensorhub refs themselves — the orchestrator
     pre-resolves and ships a Snapshot. Without one, the tensorhub branch
-    raises (and the HF branch is NOT touched)."""
+    raises RETRYABLE (a hub residency bug, not client input; #373) and the
+    HF branch is NOT touched."""
+    from gen_worker.api.errors import RetryableError
+
     calls: list = []
     monkeypatch.setattr(dl_mod, "download_hf", lambda *a, **k: calls.append(a) or tmp_path)
     set_provider_index(index)
-    with pytest.raises(ValueError, match="orchestrator-resolved snapshot"):
+    with pytest.raises(RetryableError, match="orchestrator-resolved snapshot"):
         asyncio.run(ensure_local(ref, cache_dir=tmp_path))
     assert calls == []
 

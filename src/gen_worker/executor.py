@@ -28,10 +28,11 @@ from .api.errors import (
 )
 from .api.streaming import BatchItemDelta, Done, Error, IncrementalTokenDelta
 from .api.types import Compute
-from .capability import HardwareUnmetError
+from .capability import HardwareUnmetError, InsufficientDiskError
 from .models import residency as residency_mod
 from .models.cache_paths import tensorhub_cas_dir
 from .models.download import ensure_local
+from .models.errors import UrlExpiredError
 from .models.residency import Residency
 from .pb import worker_scheduler_pb2 as pb
 from .registry import EndpointSpec
@@ -83,6 +84,9 @@ def _map_exception(exc: BaseException) -> Tuple[int, str]:
         return pb.JOB_STATUS_RETRYABLE, _sanitize(str(exc) or "artifact transfer failed")
     if isinstance(exc, HardwareUnmetError):
         return pb.JOB_STATUS_RETRYABLE, _sanitize(str(exc) or "hardware unmet")
+    if isinstance(exc, UrlExpiredError):
+        # Hub-side URL staleness, not a client problem — retry re-mints URLs.
+        return pb.JOB_STATUS_RETRYABLE, "model download url expired"
     if type(exc).__name__ in ("OutOfMemoryError", "CUDAOutOfMemoryError"):
         return pb.JOB_STATUS_RETRYABLE, "out of memory"
     return pb.JOB_STATUS_FATAL, "internal error"
@@ -116,8 +120,13 @@ def _model_op_error_vocab(exc: BaseException) -> str:
 
 
 def _is_terminal_download_error(exc: BaseException) -> bool:
+    if isinstance(exc, (UrlExpiredError, InsufficientDiskError)):
+        return True
     status = getattr(exc, "status_code", None)
-    if isinstance(status, int) and 400 <= status < 500 and status != 429:
+    if not isinstance(status, int):
+        # requests.HTTPError carries the code on .response, not the exception.
+        status = getattr(getattr(exc, "response", None), "status_code", None)
+    if isinstance(status, int) and 400 <= status < 500 and status not in (408, 429):
         return True
     return isinstance(exc, (ValueError, KeyError))
 
@@ -269,6 +278,10 @@ class ModelStore:
 
     @staticmethod
     def _error_vocab(exc: BaseException) -> str:
+        if isinstance(exc, UrlExpiredError):
+            return "url_expired"
+        if isinstance(exc, InsufficientDiskError):
+            return "insufficient_disk"
         text = str(exc).lower()
         if "expired" in text or "403" in text:
             return "url_expired"

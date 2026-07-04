@@ -28,7 +28,6 @@ dependencies = [
     "boto3>=1.41.0",
     "psutil>=7.0.0",
     "pyyaml>=6.0.0",
-    "backoff>=2.2.1",
     "blake3>=1.0.0",
     "huggingface-hub>=0.26.0",
     # endpoint.lock is TOML; msgspec.toml.encode needs tomli-w at bake time.

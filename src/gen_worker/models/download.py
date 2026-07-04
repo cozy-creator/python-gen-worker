@@ -162,14 +162,18 @@ async def ensure_local(
 
     if parsed.provider == "tensorhub" and parsed.tensorhub is not None:
         if snapshot is None:
-            raise ValueError(
+            # Hub-side residency bug (the orchestrator failed to pre-resolve),
+            # not bad client input — RETRYABLE, never a client-visible 400.
+            from ..api.errors import RetryableError
+
+            raise RetryableError(
                 f"tensorhub ref {ref!r} needs an orchestrator-resolved snapshot "
                 "and none was provided"
             )
         from .cozy_snapshot import ensure_snapshot_async
 
         return await ensure_snapshot_async(
-            base_dir=base, ref=parsed.tensorhub, resolved=snapshot,
+            base_dir=base, ref=parsed.tensorhub, resolved=snapshot, progress=progress,
         )
 
     if parsed.provider == "hf" and parsed.hf is not None:

@@ -1,17 +1,30 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import logging
+import random
+import time
 from pathlib import Path
-from typing import Dict
+from typing import Callable, Dict, Optional
 
-import backoff
 import requests
 from blake3 import blake3
+
+from ..capability import InsufficientDiskError
+from .errors import UrlExpiredError
 
 _log = logging.getLogger(__name__)
 
 _DOWNLOAD_CHUNK_BYTES = 4 * 1024 * 1024
+
+# Retry policy: transient network errors get a long budget; verification
+# failures (size/blake3 mismatch) mean the source blob is likely corrupt —
+# 2 re-downloads, then give up. UrlExpiredError / ENOSPC never retry.
+_TRANSIENT_MAX_TRIES = 30
+_MAX_RETRY_TIME_S = 3600.0
+_VERIFY_MAX_FAILURES = 3  # initial try + 2 retries
+_RETRY_BACKOFF_CAP_S = 30.0
 
 
 def _norm_rel_path(p: str) -> str:
@@ -24,22 +37,62 @@ def _norm_rel_path(p: str) -> str:
     return s
 
 
-@backoff.on_exception(
-    backoff.expo,
-    (requests.RequestException, ValueError, OSError),
-    max_tries=30,
-    max_time=3600,
-    factor=1,
-    max_value=30,  # cap backoff at 30s between retries
-)
-async def _download_one_file(url: str, dst: Path, expected_size: int, expected_blake3: str) -> None:
-    await asyncio.get_running_loop().run_in_executor(
-        None,
-        lambda: _download_one_file_sync(url, dst, expected_size, expected_blake3),
-    )
+def _check_status(resp: requests.Response) -> None:
+    """4xx (except 408/429) on a presigned URL is dead — no retry can help."""
+    sc = int(resp.status_code)
+    if 400 <= sc < 500 and sc not in (408, 429):
+        raise UrlExpiredError(f"download URL rejected with HTTP {sc}", status_code=sc)
+    resp.raise_for_status()
 
 
-def _download_one_file_sync(url: str, dst: Path, expected_size: int, expected_blake3: str) -> None:
+async def _download_one_file(
+    url: str,
+    dst: Path,
+    expected_size: int,
+    expected_blake3: str,
+    on_bytes: Optional[Callable[[int], None]] = None,
+) -> None:
+    loop = asyncio.get_running_loop()
+    started = time.monotonic()
+    transient_failures = 0
+    verify_failures = 0
+    while True:
+        try:
+            await loop.run_in_executor(
+                None,
+                lambda: _download_one_file_sync(
+                    url, dst, expected_size, expected_blake3, on_bytes=on_bytes
+                ),
+            )
+            return
+        except (UrlExpiredError, InsufficientDiskError):
+            raise
+        except (requests.RequestException, ValueError, OSError) as exc:
+            if getattr(exc, "errno", None) == errno.ENOSPC:
+                raise InsufficientDiskError(
+                    f"insufficient disk while downloading {dst.name}", path=str(dst.parent)
+                ) from exc
+            if isinstance(exc, ValueError):
+                verify_failures += 1
+                failures, cap = verify_failures, _VERIFY_MAX_FAILURES
+            else:
+                transient_failures += 1
+                failures, cap = transient_failures, _TRANSIENT_MAX_TRIES
+            if failures >= cap or time.monotonic() - started >= _MAX_RETRY_TIME_S:
+                raise
+            delay = random.uniform(0.5, 1.0) * min(_RETRY_BACKOFF_CAP_S, 2.0 ** failures)
+            _log.warning("download of %s failed (%s, failure %d/%d): %s; retrying in %.1fs",
+                         dst.name, type(exc).__name__, failures, cap, exc, delay)
+            await asyncio.sleep(delay)
+
+
+def _download_one_file_sync(
+    url: str,
+    dst: Path,
+    expected_size: int,
+    expected_blake3: str,
+    on_bytes: Optional[Callable[[int], None]] = None,
+) -> None:
     """Download a single file with HTTP Range resume, size + blake3 validation.
 
     Caller runs this in a worker thread; the transfer itself uses the same
@@ -120,6 +173,8 @@ def _download_one_file_sync(url: str, dst: Path, expected_size: int, expected_bl
                     continue
                 f.write(chunk)
                 downloaded += len(chunk)
+                if on_bytes is not None:
+                    on_bytes(len(chunk))
                 if expected_size and downloaded > expected_size:
                     raise ValueError(f"download exceeded expected size ({downloaded} > {expected_size})")
                 if downloaded - last_log >= log_every:
@@ -141,10 +196,10 @@ def _download_one_file_sync(url: str, dst: Path, expected_size: int, expected_bl
                 log.info("download_range_ignored path=%s status=%s (restarting from 0)", dst.name, resp.status_code)
                 resp.close()
                 with session.get(url, stream=True, timeout=(60, 180)) as resp2:
-                    resp2.raise_for_status()
+                    _check_status(resp2)
                     _stream(resp2, write_mode="wb", start=0)
             else:
-                resp.raise_for_status()
+                _check_status(resp)
                 _stream(resp, write_mode=mode, start=offset)
 
     # Validate.
