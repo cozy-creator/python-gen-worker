@@ -12,7 +12,6 @@ The full design and rationale live in ``progress.json`` issue #12.
 from __future__ import annotations
 
 import argparse
-import collections.abc as cabc
 import importlib
 import inspect
 import json
@@ -195,112 +194,26 @@ class _SelectedFunction:
 
 
 def _collect_class_methods(mod: Any) -> List[_SelectedFunction]:
-    """Walk a module dict and collect every @inference.function method on
-    every endpoint-decorated class (sync + async). Skips non-class endpoints
-    — the SDK is class-shape after the 0.7.6 refactor (#322).
-    """
-    out: List[_SelectedFunction] = []
-    seen_classes: set[int] = set()
+    """Collect every invocable method on every endpoint-decorated class in a
+    module namespace. Delegates signature inspection (payload/output types,
+    streaming shape, parametrize fan-out) to ``gen_worker.registry`` — the one
+    walker shared with the worker runtime and build-time discovery."""
+    from gen_worker.registry import collect_from_namespace
 
-    for name, obj in mod.__dict__.items():
-        if not inspect.isclass(obj):
-            continue
-        spec = getattr(obj, "__gen_worker_endpoint_spec__", None)
-        if spec is None:
-            continue
-        # Avoid double-counting re-exported classes.
-        if id(obj) in seen_classes:
-            continue
-        seen_classes.add(id(obj))
-
-        function_methods = getattr(obj, "__gen_worker_function_methods__", None) or []
-        bindings = dict(getattr(spec, "models", {}) or {})
-        kind = str(getattr(spec, "kind", "inference") or "inference")
-
-        def _emit(
-            attr_name: str,
-            method: Callable[..., Any],
-            fn_name: str,
-            payload_override: Optional[type],
-            fn_bindings: Dict[str, Any],
-        ) -> None:
-            hints = typing.get_type_hints(method, include_extras=False)
-            sig = inspect.signature(method)
-            params = [p for p in sig.parameters.values() if p.name != "self"]
-            if len(params) < 2:
-                # Validated by decorator; defensive only.
-                return
-            payload_type = (
-                payload_override
-                if payload_override is not None
-                else hints.get(params[1].name)
-            )
-            ret = hints.get("return")
-            origin = typing.get_origin(ret)
-            is_gen = origin in (
-                typing.Iterator,
-                typing.Iterable,
-                typing.AsyncIterator,
-                typing.AsyncIterable,
-                cabc.Iterator,
-                cabc.Iterable,
-                cabc.AsyncIterator,
-                cabc.AsyncIterable,
-            )
-            output_type: Optional[type] = None
-            if is_gen:
-                args = typing.get_args(ret) or ()
-                if args:
-                    output_type = args[0]
-            else:
-                output_type = ret if isinstance(ret, type) else None
-
-            out.append(_SelectedFunction(
-                cls=obj,
-                attr_name=attr_name,
-                method=method,
-                fn_name=fn_name,
-                kind=kind,
-                payload_type=payload_type,
-                output_type=output_type,
-                is_generator=bool(is_gen),
-                bindings=fn_bindings,
-            ))
-
-        # Function fan-out via parametrize= (#339 §2): a class with a
-        # parametrize table hosts ONE @invocable body stamped into N routable
-        # functions, each with its own name, payload (Case.input), and model
-        # binding (Case.model). The production discovery walker expands these;
-        # the local CLI must too, or fp8/nvfp4/etc. variants are invisible and
-        # untestable locally (they only appear in production).
-        parametrize = tuple(getattr(spec, "parametrize", ()) or ())
-        if parametrize and function_methods:
-            attr_name, method, _fn_spec = function_methods[0]
-            for case in parametrize:
-                case_bindings = bindings
-                if getattr(case, "model", None) is not None:
-                    # Override the single declared model slot (or add a 'model'
-                    # slot when the class declares none) — mirrors discover.py.
-                    slot = next(iter(bindings), "model")
-                    case_bindings = dict(bindings)
-                    case_bindings[slot] = case.model
-                _emit(
-                    attr_name,
-                    method,
-                    str(case.name),
-                    getattr(case, "input", None),
-                    case_bindings,
-                )
-        else:
-            for attr_name, method, fn_spec in function_methods:
-                _emit(
-                    attr_name,
-                    method,
-                    str(fn_spec.name or attr_name),
-                    None,
-                    bindings,
-                )
-    return out
+    return [
+        _SelectedFunction(
+            cls=es.cls,
+            attr_name=es.attr_name,
+            method=es.method,
+            fn_name=es.name,
+            kind=es.kind,
+            payload_type=es.payload_type,
+            output_type=es.output_type,
+            is_generator=es.output_mode == "stream",
+            bindings=dict(es.models),
+        )
+        for es in collect_from_namespace(mod)
+    ]
 
 
 def _select_function(

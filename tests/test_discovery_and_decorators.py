@@ -61,7 +61,7 @@ class BoundedInput(msgspec.Struct):
 # --------------------------------------------------------------------------- #
 
 
-def test_invocable_discovered_and_dispatched_like_inference_function(bare_worker) -> None:
+def test_invocable_discovered_and_dispatched_like_inference_function() -> None:
     @inference()
     class ViaInvocable:
         def setup(self) -> None:
@@ -91,12 +91,12 @@ def test_invocable_discovered_and_dispatched_like_inference_function(bare_worker
     fn_spec = getattr(ViaFunction.run, "__gen_worker_function_spec__")
     assert type(inv_spec) is type(fn_spec) and inv_spec.name == fn_spec.name == "run"
 
-    # Both register a routable serial spec on a real Worker.
-    w = bare_worker()
-    assert w._register_endpoint_class(
-        ViaInvocable, ViaInvocable.__gen_worker_endpoint_spec__
-    ) == 1
-    assert "run" in w._serial_class_specs
+    # Both produce a routable EndpointSpec via the one registry walker.
+    from gen_worker.registry import extract_specs
+
+    specs = extract_specs(ViaInvocable)
+    assert [s.name for s in specs] == ["run"]
+    assert specs[0].output_mode == "single" and specs[0].payload_type is _In
 
 
 # --------------------------------------------------------------------------- #
@@ -167,7 +167,7 @@ def test_parametrize_stamps_n_functions_with_per_row_overrides() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_class_with_no_shutdown_registers_serves_and_tears_down(bare_worker) -> None:
+def test_class_with_no_shutdown_registers_serves_and_tears_down() -> None:
     served: list = []
 
     @inference()
@@ -182,21 +182,27 @@ def test_class_with_no_shutdown_registers_serves_and_tears_down(bare_worker) -> 
 
     assert not hasattr(NoShutdown, "shutdown")
 
-    w = bare_worker()
-    assert w._register_endpoint_class(NoShutdown, NoShutdown.__gen_worker_endpoint_spec__) == 1
-    assert "generate" in w._serial_class_specs
+    import asyncio
 
-    # Serve a real request through the registered spec.
-    rec = w._serial_class_instances[0]
-    w._ensure_serial_class_started(rec)
-    out = w._serial_class_specs["generate"].method(
-        RequestContext.__new__(RequestContext), _In(prompt="hi")
-    )
-    assert out.result == "echo:hi" and served == ["hi"]
+    from gen_worker.executor import Executor
+    from gen_worker.registry import extract_specs
 
-    # Drain: missing shutdown() is a no-op, must not raise.
-    w._shutdown_serial_workers()
-    assert rec["shutdown_done"] is True
+    async def _drive() -> None:
+        sent: list = []
+
+        async def _send(msg) -> None:
+            sent.append(msg)
+
+        ex = Executor(extract_specs(NoShutdown), _send)
+        spec = ex.specs["generate"]
+        inst = await ex.ensure_setup(spec)
+        assert inst.ready is True
+        out = inst.generate(RequestContext.__new__(RequestContext), _In(prompt="hi"))
+        assert out.result == "echo:hi" and served == ["hi"]
+        # Drain: missing shutdown() is a no-op, must not raise.
+        await ex.shutdown_instances()
+
+    asyncio.run(_drive())
 
 
 # --------------------------------------------------------------------------- #
