@@ -71,19 +71,3 @@ def detect_worker_capabilities(*, extra_libs: Optional[List[str]] = None) -> Ten
         torch_version=torch_version,
         installed_libs=installed,
     )
-
-
-def default_resolve_preferences() -> Dict[str, List[str]]:
-    """
-    Hardcoded worker-side preference order for Cozy Hub selection.
-
-    Policy:
-      - Prefer file_type: flashpack -> safetensors
-      - Prefer quantization: fp8 -> bf16 -> fp16 (fp16 is a pragmatic fallback)
-      - Prefer file_layout: diffusers
-    """
-    return {
-        "file_type_preference": ["flashpack", "safetensors"],
-        "quantization_preference": ["fp8", "bf16", "fp16"],
-        "file_layout_preference": ["diffusers"],
-    }

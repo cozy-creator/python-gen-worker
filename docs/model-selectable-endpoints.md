@@ -1,7 +1,7 @@
 # Model-selectable endpoints (SharedBase + per-request variants)
 
 Issue: `agents/progress.json` #337. Builds on #336 (GPU mutex + VRAM↔disk
-`ModelCache`) and #21 (per-model readiness).
+`Residency` tiering) and #21 (per-model readiness).
 
 ## When to use this
 

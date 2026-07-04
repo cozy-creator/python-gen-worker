@@ -6,7 +6,7 @@ card (no offload penalty); a model that doesn't fit gets model_offload. This is
 the "efficient when there's enough VRAM, low-VRAM mode only when necessary" rule.
 """
 
-from gen_worker.inference_memory import select_auto_mode
+from gen_worker.models.memory import select_auto_mode
 
 # select_auto_mode probes a pipeline only when model_size_gb is omitted; passing
 # both available_vram_gb (FREE VRAM) and model_size_gb exercises the decision

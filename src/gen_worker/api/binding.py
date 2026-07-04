@@ -333,7 +333,7 @@ class HFRepo(Repo):
         Accepts diffusers / transformers-friendly names: ``"bf16"`` /
         ``"bfloat16"``, ``"fp16"`` / ``"float16"``, ``"fp32"`` /
         ``"float32"``. The value flows through
-        :class:`~gen_worker.pipeline.loader.PipelineConfig.dtype` into
+        :func:`gen_worker.models.loading.get_torch_dtype` into
         ``from_pretrained(torch_dtype=...)``.
         """
         name = str(name or "").strip()

@@ -351,7 +351,7 @@ def _canonicalize_model_ref_string(raw: str) -> str:
     if not s:
         return s
     try:
-        from ..models.ref_downloader import lookup_provider_for_ref  # lazy: pulls requests
+        from ..models.download import lookup_provider_for_ref
 
         provider = lookup_provider_for_ref(s)
         parsed = parse_model_ref(s, provider=provider)

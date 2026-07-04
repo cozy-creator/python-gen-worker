@@ -12,6 +12,7 @@ import asyncio
 import logging
 import os
 import time
+import typing
 from dataclasses import dataclass, field as dc_field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
@@ -28,8 +29,10 @@ from .api.errors import (
 from .api.streaming import Done, Error, IncrementalTokenDelta
 from .api.types import Compute
 from .capability import HardwareUnmetError
+from .models import residency as residency_mod
 from .models.cache_paths import tensorhub_cas_dir
-from .models.refs import parse_model_ref
+from .models.download import ensure_local
+from .models.residency import Residency
 from .pb import worker_scheduler_pb2 as pb
 from .registry import EndpointSpec
 from .request_context import RequestContext
@@ -74,8 +77,8 @@ def _map_exception(exc: BaseException) -> Tuple[int, str]:
 
 
 # ---------------------------------------------------------------------------
-# Model seam: disk materialization + residency snapshot (thin; #366 owns the
-# full models layer). Single-loop, per-ref asyncio locks — no
+# Model seam: models.download (ensure-local) + models.residency (tier map),
+# with ModelEvent emission. Single-loop, per-ref asyncio locks — no
 # check-then-create races.
 # ---------------------------------------------------------------------------
 
@@ -97,8 +100,24 @@ def _is_terminal_download_error(exc: BaseException) -> bool:
     return isinstance(exc, (ValueError, KeyError))
 
 
+_RESIDENCY_STATE_TO_PB = {
+    residency_mod.ON_DISK: pb.MODEL_STATE_ON_DISK,
+    residency_mod.IN_RAM: pb.MODEL_STATE_IN_RAM,
+    residency_mod.IN_VRAM: pb.MODEL_STATE_IN_VRAM,
+    residency_mod.EVICTED: pb.MODEL_STATE_EVICTED,
+}
+
+_TIER_TO_PB = {
+    residency_mod.Tier.VRAM: pb.RESIDENCY_TIER_VRAM,
+    residency_mod.Tier.RAM: pb.RESIDENCY_TIER_RAM,
+    residency_mod.Tier.DISK: pb.RESIDENCY_TIER_DISK,
+}
+
+
 class ModelStore:
-    """ensure-local + residency map. Emits ModelEvent via the injected sender."""
+    """The worker's model seam: ensure-local with retries + the residency map.
+    All tier transitions flow through :class:`~gen_worker.models.residency.
+    Residency`, whose events this store forwards as wire ``ModelEvent``s."""
 
     def __init__(
         self,
@@ -112,30 +131,55 @@ class ModelStore:
         self._hf_home = hf_home or None
         self._hf_token = hf_token or None
         self._cache_dir = cache_dir or tensorhub_cas_dir()
-        self._local: Dict[str, Path] = {}
-        self._vram: Dict[str, int] = {}
+        self.residency = Residency(on_event=self._on_residency_event)
         self._locks: Dict[str, asyncio.Lock] = {}
         self.keep: set[str] = set()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
-    def residency_snapshot(self) -> List[pb.ModelResidency]:
-        out = []
-        for ref, path in self._local.items():
-            tier = pb.RESIDENCY_TIER_VRAM if ref in self._vram else pb.RESIDENCY_TIER_DISK
-            out.append(pb.ModelResidency(ref=ref, tier=tier, vram_bytes=self._vram.get(ref, 0)))
-        return out
+    # ---- events ------------------------------------------------------------
 
-    def local_path(self, ref: str) -> Optional[Path]:
-        return self._local.get(ref)
-
-    def mark_in_vram(self, ref: str, vram_bytes: int) -> None:
-        self._vram[ref] = int(vram_bytes)
-
-    def mark_out_of_vram(self, ref: str) -> None:
-        self._vram.pop(ref, None)
+    def _on_residency_event(self, ref: str, state: str, vram_bytes: int) -> None:
+        pb_state = _RESIDENCY_STATE_TO_PB.get(state)
+        if pb_state is None:
+            return
+        kw: Dict[str, Any] = {}
+        if state == residency_mod.IN_VRAM:
+            kw["vram_bytes"] = int(vram_bytes)
+        coro = self._event(ref, pb_state, **kw)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            if self._loop is not None and not self._loop.is_closed():
+                asyncio.run_coroutine_threadsafe(coro, self._loop)
+            else:
+                coro.close()
+            return
+        loop.create_task(coro)
 
     async def _event(self, ref: str, state: int, **kw: Any) -> None:
         await self._emit(pb.WorkerMessage(model_event=pb.ModelEvent(ref=ref, state=state, **kw)))
+
+    # ---- residency facade ----------------------------------------------------
+
+    def residency_snapshot(self) -> List[pb.ModelResidency]:
+        return [
+            pb.ModelResidency(ref=ref, tier=_TIER_TO_PB[tier], vram_bytes=vram)
+            for ref, tier, vram in self.residency.snapshot()
+        ]
+
+    def local_path(self, ref: str) -> Optional[Path]:
+        return self.residency.local_path(ref)
+
+    def mark_in_vram(self, ref: str, vram_bytes: int, obj: Any = None) -> None:
+        self.residency.track_vram(ref, obj, vram_bytes=int(vram_bytes))
+
+    def mark_in_ram(self, ref: str, obj: Any = None) -> None:
+        self.residency.track_ram(ref, obj)
+
+    def mark_unloaded(self, ref: str) -> None:
+        self.residency.release_to_disk(ref)
+
+    # ---- ensure-local ----------------------------------------------------------
 
     def _lock(self, ref: str) -> asyncio.Lock:
         return self._locks.setdefault(ref, asyncio.Lock())
@@ -144,7 +188,7 @@ class ModelStore:
         """Materialize `ref` on disk. Transient failures retry with backoff;
         terminal (4xx-class) failures raise immediately. Emits ModelEvents."""
         async with self._lock(ref):
-            cached = self._local.get(ref)
+            cached = self.residency.local_path(ref)
             if cached is not None and cached.exists():
                 return cached
             self._loop = asyncio.get_running_loop()
@@ -167,9 +211,18 @@ class ModelStore:
             delay = 1.0
             for attempt in range(1, _DOWNLOAD_RETRIES + 1):
                 try:
-                    path = await self._download_once(ref, snapshot, _progress)
-                    self._local[ref] = path
-                    await self._event(ref, pb.MODEL_STATE_ON_DISK)
+                    resolved = None
+                    if snapshot is not None and snapshot.digest:
+                        resolved = _snapshot_to_resolved(snapshot)
+                    path = await ensure_local(
+                        ref,
+                        snapshot=resolved,
+                        cache_dir=self._cache_dir,
+                        hf_home=self._hf_home,
+                        hf_token=self._hf_token,
+                        progress=_progress,
+                    )
+                    self.residency.track_disk(ref, path)
                     return path
                 except Exception as exc:
                     terminal = _is_terminal_download_error(exc) or attempt >= _DOWNLOAD_RETRIES
@@ -193,32 +246,6 @@ class ModelStore:
         if "no space" in text or "disk" in text:
             return "insufficient_disk"
         return "download_failed"
-
-    async def _download_once(
-        self,
-        ref: str,
-        snapshot: Optional[pb.Snapshot],
-        progress: Callable[[int, Optional[int]], None],
-    ) -> Path:
-        from .models.ref_downloader import ModelRefDownloader, lookup_provider_for_ref
-
-        provider = lookup_provider_for_ref(ref)
-        parsed = parse_model_ref(ref, provider=provider)
-        if parsed.provider == "tensorhub" and parsed.tensorhub is not None:
-            if snapshot is None or not snapshot.digest:
-                raise ValueError(f"tensorhub ref {ref!r} needs a Snapshot and none was provided")
-            from .models.cozy_snapshot_v2 import ensure_snapshot_async
-
-            return await ensure_snapshot_async(
-                base_dir=self._cache_dir,
-                ref=parsed.tensorhub,
-                resolved=_snapshot_to_resolved(snapshot),
-            )
-        dl = ModelRefDownloader(hf_home=self._hf_home, hf_token=self._hf_token)
-        local = await asyncio.to_thread(
-            dl.download_with_progress, ref, str(self._cache_dir), None, progress
-        )
-        return Path(local)
 
 
 # ---------------------------------------------------------------------------
@@ -351,30 +378,63 @@ class Executor:
                 path = await self.store.ensure_local(repo.ref, snap)
                 paths[slot] = str(path)
             instance = spec.cls()
-            vram_before = self._vram_allocated()
             setup = getattr(instance, "setup")
+            vram_before = self._vram_allocated()
+            kwargs = await self._injection_kwargs(spec, setup, paths)
             if asyncio.iscoroutinefunction(setup):
-                await setup(**paths)
+                await setup(**kwargs)
             else:
-                await asyncio.to_thread(setup, **paths)
+                await asyncio.to_thread(setup, **kwargs)
             warmup = getattr(instance, "warmup", None)
             if callable(warmup):
                 if asyncio.iscoroutinefunction(warmup):
                     await warmup()
                 else:
                     await asyncio.to_thread(warmup)
+            # Measured VRAM (allocator delta across the load) — the number the
+            # orchestrator's VRAM packer sees; never an estimate constant.
             vram_delta = max(0, self._vram_allocated() - vram_before)
             refs = [r.ref for r in spec.fixed_models.values()]
             for ref in refs:
-                measured = vram_delta if len(refs) == 1 else 0
                 if vram_delta > 0:
-                    self.store.mark_in_vram(ref, measured)
-                    await self._send(pb.WorkerMessage(model_event=pb.ModelEvent(
-                        ref=ref, state=pb.MODEL_STATE_IN_VRAM, vram_bytes=measured)))
+                    self.store.mark_in_vram(ref, vram_delta if len(refs) == 1 else 0)
+                else:
+                    self.store.mark_in_ram(ref)
             rec.instance = instance
             rec.ready = True
             self._on_state_change()
             return instance
+
+    @staticmethod
+    async def _injection_kwargs(
+        spec: EndpointSpec, setup: Callable[..., Any], paths: Dict[str, str]
+    ) -> Dict[str, Any]:
+        """Typed injection: each slot receives exactly what its ``setup``
+        annotation says — a ``str``/``Path`` local path, or a constructed
+        pipeline for a class annotation exposing ``from_pretrained`` (built off
+        the loop; the endpoint's binding dtype is honored)."""
+        try:
+            hints = typing.get_type_hints(setup)
+        except Exception:
+            hints = {}
+        kwargs: Dict[str, Any] = {}
+        for slot, path in paths.items():
+            ann = hints.get(slot)
+            if ann is None or ann is str:
+                kwargs[slot] = path
+            elif ann is Path:
+                kwargs[slot] = Path(path)
+            elif isinstance(ann, type) and callable(getattr(ann, "from_pretrained", None)):
+                from .models.loading import load_from_pretrained
+
+                binding = spec.fixed_models.get(slot)
+                dtype = str(getattr(binding, "_dtype", "") or "")
+                kwargs[slot] = await asyncio.to_thread(
+                    load_from_pretrained, ann, path, dtype=dtype
+                )
+            else:
+                kwargs[slot] = path
+        return kwargs
 
     @staticmethod
     def _vram_allocated() -> int:
@@ -460,9 +520,7 @@ class Executor:
                 await asyncio.to_thread(torch.cuda.empty_cache)
             except Exception:
                 pass
-        self.store.mark_out_of_vram(ref)
-        await self._send(pb.WorkerMessage(model_event=pb.ModelEvent(
-            ref=ref, state=pb.MODEL_STATE_ON_DISK)))
+        self.store.mark_unloaded(ref)
         self._on_state_change()
 
     # ---- job intake --------------------------------------------------------
@@ -603,8 +661,12 @@ class Executor:
                 if job.ctx.is_canceled():
                     raise CanceledError("canceled")
             started = time.monotonic()
-            output = await self._execute(job, spec, instance, ctx, payload, kwargs,
-                                         timeout_ms=timeout_ms, gpu_index=gpu_index)
+            # Pin-while-executing: the models this job uses are not eviction
+            # candidates for its duration (cross-pipeline eviction safety).
+            exec_refs = [r.ref for r in spec.fixed_models.values()]
+            with self.store.residency.executing(*exec_refs):
+                output = await self._execute(job, spec, instance, ctx, payload, kwargs,
+                                             timeout_ms=timeout_ms, gpu_index=gpu_index)
             metrics = self._metrics(queue_ms, started, concurrency_at_start, gpu_index)
             if spec.output_mode == "stream":
                 await self._finish(job, pb.JOB_STATUS_OK, metrics=metrics)

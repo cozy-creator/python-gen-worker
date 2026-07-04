@@ -8,6 +8,45 @@
 
 ---
 
+# #366: models layer v2 — download/cache/memory/residency, ~2,500 LOC
+
+**Completed:** yes
+**Status:** DONE (2026-07-03, Claude) — new layer: models/download.py (ONE async `ensure_local` → tensorhub CAS / HF snapshot_download in to_thread with a ~90-line variant selector replacing hf_selection's 522 LOC / conversion-free civitai fetch / modelscope; one progress-reporter shape; #379 stall watchdog kept; provider index folded in), models/residency.py (Residency LRU VRAM/RAM/disk manager, public eviction API, free-VRAM-driven `make_room`, pin-while-executing, SharedComponentCache folded in with VRAM counted once, ModelEvent emission with measured vram_bytes), models/memory.py (moved inference_memory; ONE free-VRAM decider; deduped + CUDA-resident estimates), models/loading.py (get_torch_dtype/detect_diffusers_variant/quant synthesis/load_from_pretrained, ~180 LOC). Executor's ModelStore now composes these; setup() injection is typed (str/Path path or pipeline-class via from_pretrained per annotation). Deleted: pipeline/ (all 7 modules incl. PipelineLoader), models/{cache,shared_components,hf_selection,hf_downloader,ref_downloader,interface,downloader,download_progress}, inference_memory.py. cli serve drives the production Residency with no private reach-ins; cli run + trainer use the new download API. Deliberately kept: cozy_cas transfer leaf and s3_transfer grants (#19 owns transport consolidation); conversion/ingest.py untouched (its civitai ETL is #367's move). e2e: ModelOp DOWNLOAD/LOAD/UNLOAD round-trip over a real gRPC socket + local HTTP CAS blob added to tests/test_worker_grpc_e2e.py.
+
+## Tasks
+- [x] `refs.py`: kept as-is.
+- [x] `download.py`: one `async def ensure_local(ref) -> Path` (tensorhub CAS w/ #358 poisoning fix, HF snapshot_download in to_thread + small selector, civitai fetch extracted from conversion). One progress reporter feeding ModelEvent DOWNLOADING.
+- [x] `memory.py`: merged inference_memory accounting per #358 — free-VRAM ladder, CUDA-resident estimates, single eviction policy (residency `make_room`).
+- [x] `residency.py`: LRU VRAM/CPU/disk tiers + shared components folded in, keyed once, public eviction API (no `_private` reach-ins, no tier-string smuggling).
+- [x] No PipelineLoader: endpoints receive a typed local path (or a pipeline built from their annotation) and call `from_pretrained` themselves; pipeline/ deleted keeping detect_diffusers_variant + get_torch_dtype + quant-config synthesis in models/loading.py.
+- [x] Multi-model VRAM residency capability: Residency covers multiple pipelines per worker — cross-pipeline LRU eviction via `make_room`, `executing()` pin-while-executing, `pin()` for shared bases (endpoint-side deletion is inference-endpoints #343).
+
+## Acceptance
+Met at the layer: `setup(self, model: <ann>)` receives exactly what the annotation says (str/Path/pipeline-class), verified by the e2e ModelOp LOAD test; the `_resolve_model_path` hacks become deletable in inference-endpoints #343.
+
+---
+
+# #358: VRAM/memory correctness — free-vs-total, double-counting, digest poisoning
+
+**Completed:** yes
+**Status:** DONE (2026-07-03, Claude) — remaining bullets landed with the #366 models-layer rewrite (same PR). Free-VRAM-only decider in models/memory.py; CUDA-resident + data_ptr-deduped estimates; measured allocator deltas everywhere; digest-poisoning fixed with a retry test; several bullets died with the #365 worker.py deletion (disposition per bullet below).
+
+## Tasks
+- [x] `select_auto_mode` free-vs-total. [DONE earlier (fix/p0-correctness); carried into models/memory.py.]
+- [x] `OFF_HEADROOM` re-derived against free VRAM. [DONE earlier; carried into models/memory.py.]
+- [x] estimate double-counting: `estimate_pipeline_size_gb` now dedupes shared storages by data_ptr; NEW `estimate_cuda_resident_gb` counts only CUDA-resident tensors for residency accounting; shared components live ONCE in Residency (single entry, refcounted) so VRAM is booked once. ModelCache/`_vram_used_gb` deleted with cache.py.
+- [x] Fantasy constants: worker.py:9409 `size=5.0` and worker.py:8710 evict-half DIED with worker.py (#365); serve.py's mirrored 5.0GB floor deleted — residency uses measured `torch.cuda.memory_allocated` deltas at load (executor.ensure_setup, serve._ensure_resident), and eviction is driven by measured free VRAM so unknown sizes can't corrupt decisions.
+- [x] Digest poisoning: failed snapshot builds are evicted from `_SNAP_ENTRIES` (models/cozy_snapshot.py, renamed from cozy_snapshot_v2) so the next request rebuilds; regression test tests/test_cozy_snapshot.py.
+- [x] Blocking HF download inside async: ref_downloader.py deleted; models/download.py `ensure_local` runs every blocking provider call via `asyncio.to_thread`. loader.py rglob/stat/JSON: loader deleted; the surviving variant/quant probes run inside `load_from_pretrained` which the executor calls in `to_thread`.
+- [x] Three low-VRAM deciders → ONE: `models.memory.select_auto_mode` (free VRAM). loader.py's `_apply_memory_optimizations` died with pipeline/; worker.py's inline preflight died with worker.py (#365).
+- [x] Conversion dtype mislabels: inline_convert now stamps the PRODUCED dtype (torchao fp8_wo → `fp8:e4m3` even for e5m2 requests; bnb int4 → `nf4`/`fp4`) into attrs + target_dtype with a warning on mismatch. Unknown dtype strings in the loader path now RAISE (`models.loading.get_torch_dtype`) instead of silently loading bf16.
+- [x] ~190-line Flux2-Klein filename hack (worker.py:8748-8940) DIED with worker.py (#365); variant selection is the binding's flavor through `select_hf_files`.
+
+## Acceptance
+Met: the ladder reads free VRAM only (test_inference_memory_select.py green against models/memory.py); a failed download retries cleanly (test_cozy_snapshot.py, test_provider_routing retry test).
+
+---
+
 # #365: worker core rewrite — asyncio-first, ~1,600 LOC replacing worker.py
 
 **Completed:** yes

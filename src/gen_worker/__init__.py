@@ -71,7 +71,7 @@ from .api.types import (
     VideoAsset,
 )
 from .api.streaming import iter_transformers_text_deltas
-from .inference_memory import apply_low_vram_config
+from .models.memory import apply_low_vram_config
 from .diagnostics import emit_diagnostic_log
 
 

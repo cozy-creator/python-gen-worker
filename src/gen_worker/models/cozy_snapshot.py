@@ -8,7 +8,7 @@ import re
 import shutil
 import threading
 from pathlib import Path
-from typing import Any, Coroutine, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 from .cozy_cas import _download_one_file as _download_one_file
 from .cozy_cas import _norm_rel_path
@@ -98,13 +98,12 @@ def _try_hardlink_or_copy(src: Path, dst: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def _coerce_resolved_model(ref: TensorhubRef, resolved: Any) -> WorkerResolvedRepo:
-    """Handle both legacy (.files[]) and v2 (.entries[], blake3:-prefixed digests)."""
+    """Accept both wire spellings: .entries[] (blake3:-prefixed digests) and .files[]."""
     snapshot_digest = str(_field(resolved, "snapshot_digest", "snapshotDigest") or "").strip()
     if not snapshot_digest:
         raise ValueError("resolved model missing snapshot_digest")
     snapshot_digest = _strip_blake3_prefix(snapshot_digest) or snapshot_digest
 
-    # v2 uses "entries", legacy uses "files"
     files_raw = list(_field(resolved, "entries", "files") or [])
     files: List[WorkerResolvedRepoFile] = []
     for ent in files_raw:
@@ -144,7 +143,7 @@ def _coerce_resolved_model(ref: TensorhubRef, resolved: Any) -> WorkerResolvedRe
 # Main downloader
 # ---------------------------------------------------------------------------
 
-class CozySnapshotV2Downloader:
+class CozySnapshotDownloader:
     """Downloads blobs into a CAS layout, reassembles chunked files, materializes snapshot.
 
     Layout under <base_dir>:
@@ -197,7 +196,7 @@ class CozySnapshotV2Downloader:
             _log.info("snapshot_waiting digest=%s (another builder active)", res.snapshot_digest[:16])
             await loop.run_in_executor(None, entry.event.wait)
             if entry.exception is not None:
-                raise RuntimeError(f"concurrent snapshot build failed") from entry.exception
+                raise RuntimeError("concurrent snapshot build failed") from entry.exception
             return snap_dir
 
         try:
@@ -229,6 +228,13 @@ class CozySnapshotV2Downloader:
             entry.exception = exc
             raise
         finally:
+            # Digest-poisoning fix (#358): a FAILED build must not park a
+            # set-event + stale exception under this digest forever. Evict the
+            # entry so the next request creates a fresh builder and retries;
+            # waiters already holding this entry still see its exception once.
+            with _SNAP_LOCK:
+                if _SNAP_ENTRIES.get(res.snapshot_digest) is entry:
+                    del _SNAP_ENTRIES[res.snapshot_digest]
             entry.event.set()
 
     # ------------------------------------------------------------------
@@ -366,23 +372,5 @@ async def ensure_snapshot_async(
     ref: TensorhubRef,
     resolved: Any,
 ) -> Path:
-    dl = CozySnapshotV2Downloader()
+    dl = CozySnapshotDownloader()
     return await dl.ensure_snapshot(base_dir, ref, resolved=resolved)
-
-
-def _run_in_thread(coro: Coroutine[Any, Any, Path]) -> str:
-    out: dict[str, str] = {}
-    err: dict[str, BaseException] = {}
-
-    def runner() -> None:
-        try:
-            out["v"] = asyncio.run(coro).as_posix()
-        except BaseException as e:
-            err["e"] = e
-
-    t = threading.Thread(target=runner, daemon=True)
-    t.start()
-    t.join()
-    if "e" in err:
-        raise err["e"]
-    return out["v"]

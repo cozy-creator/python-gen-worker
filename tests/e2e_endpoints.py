@@ -6,9 +6,11 @@ import asyncio
 import time
 from typing import AsyncIterator
 
+from pathlib import Path
+
 import msgspec
 
-from gen_worker import RequestContext, ValidationError, inference, invocable
+from gen_worker import Repo, RequestContext, ValidationError, inference, invocable
 
 
 class EchoIn(msgspec.Struct):
@@ -46,3 +48,16 @@ class E2EEndpoint:
     def sleepy(self, ctx: RequestContext, data: EchoIn) -> EchoOut:
         time.sleep(0.5)
         return EchoOut(response="done")
+
+
+@inference(models={"model": Repo("e2e/tiny")})
+class ModelBoundEndpoint:
+    """Tensorhub-bound endpoint: only becomes available after ModelOp LOAD."""
+
+    def setup(self, model: str) -> None:
+        self.model_path = model
+
+    @invocable(name="model_echo")
+    def model_echo(self, ctx: RequestContext, data: EchoIn) -> EchoOut:
+        weights = Path(self.model_path) / "model.safetensors"
+        return EchoOut(response=weights.read_text())
