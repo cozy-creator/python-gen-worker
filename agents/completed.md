@@ -8,6 +8,33 @@
 
 ---
 
+# #377: HF binding files= not honored on every download path (14GB instead of ~3GB)
+
+**Completed:** yes
+**Status:** DONE (2026-07-04, Claude) — root-cause fix: `Executor.__init__` registers every endpoint binding by wire ref on the `ModelStore` (`register_binding`), and `ModelStore.ensure_local` falls back to that index when called with a bare ref — so `files=`/provider now apply on the ModelOp DOWNLOAD/LOAD and lifecycle startup-prefetch paths, not just setup. Also found + fixed the fp32-pull selector bug: `select_hf_files` treated root monolithic checkpoints (sd1.5's untagged `v1-5-pruned*.safetensors`, 12GB) as their own weight group and "untagged" won for that group even though component dirs had fp16 — diffusers-layout repos now exclude root single-file checkpoints entirely. Boundary tests (no network) assert allow_patterns/provider at the download layer: tests/test_executor_prefetch_binding.py, tests/test_hf_selection.py.
+
+## Metadata
+- Category: models
+- Status: done
+
+---
+
+# #376: reserved-source materialization — ctx.source_path is never populated
+
+**Completed:** yes
+**Status:** DONE (2026-07-04, Claude) — `Executor._run_job` now extracts the reserved `source`/`destination` structs from producer-kind (non-inference) payloads, populates `ctx.source`/`ctx.destination`, and materializes `payload.source` through the same `ModelStore.ensure_local` path as model bindings (identical retry + RETRYABLE/INVALID classification + ModelEvent emission) before the handler runs — `ctx._set_source_path` finally has a caller. Missing `source` is a no-op (dataset producers like generate_prompt_corpus carry none); present-but-empty ref → INVALID. Deferred: live cast-dtype run against the hub (needs hub infra + GPU; training-endpoints #37 deferral stands). Tests: tests/test_executor_source_materialization.py.
+
+## Tasks
+- [x] Executor pre-invoke hook: detect reserved `source` in payload for producer kinds, ensure_local, set ctx.source_path
+- [x] Failure classification + ModelEvent parity with model-binding downloads
+- [x] Tests: producer endpoint with source ref gets a real local dir; missing/invalid source → INVALID not crash
+- [ ] Verify training-endpoints cast-dtype runs live against the hub (their #37 deferral) — deferred, needs live hub + GPU
+
+## Acceptance
+A transform endpoint (e.g. cast-dtype) invoked with `source: {repo: owner/name:tag}` receives a materialized local snapshot at ctx.source_path.
+
+---
+
 # #369: residency registry must own the executor's pipelines — honest vram_bytes, no load races
 
 **Completed:** yes
