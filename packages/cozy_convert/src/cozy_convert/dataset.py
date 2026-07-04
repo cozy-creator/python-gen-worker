@@ -56,7 +56,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Iterable, Iterator, Optional
+from typing import TYPE_CHECKING, Any, Iterator
 
 if TYPE_CHECKING:
     from torch.utils.data import DataLoader

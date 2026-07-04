@@ -35,6 +35,8 @@ dev = [
     "safetensors>=0.7.0",
     "transformers>=4.50.0",
     "accelerate>=1.0.0",
+    "bitsandbytes>=0.45.0; sys_platform == 'linux'",
+    "types-requests>=2.32.0",
 ]
 
 [build-system]
@@ -68,3 +70,4 @@ ignore = ["E402"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["integration: network tests against real tiny HF models"]

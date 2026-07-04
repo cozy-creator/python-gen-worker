@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-from .hub import CommitFile, HubClient, files_from_tree
+from .hub import HubClient, files_from_tree
 from .ingest import IngestedSource, ingest_civitai, ingest_huggingface
 from .writer import MAX_SAFETENSORS_SHARD_BYTES, shard_safetensors_by_offset
 
@@ -400,7 +400,8 @@ def run_clone(
 
         # Non-diffusers-class sources publish as-is; extra output specs that
         # would need conversion are refused per-flavor, not per-job.
-        publish_as_is = source.classification is not None and source.classification.strategy in {
+        strategy = source.classification.strategy if source.classification is not None else ""
+        publish_as_is = strategy in {
             "transformers", "peft", "sentence_transformers", "gguf", "native_lora",
         }
 
@@ -414,7 +415,7 @@ def run_clone(
                         # non-diffusers classes (quant runs as a separate job).
                         if spec.dtype != source_dtype:
                             raise InlineConversionNotPossible(
-                                reason=f"{source.classification.strategy} sources publish as-is; "
+                                reason=f"{strategy} sources publish as-is; "
                                        f"run a conversion job for {spec.dtype}",
                                 target_dtype=spec.dtype,
                             )
@@ -431,8 +432,9 @@ def run_clone(
                     "spec_label": spec.label, "dtype": spec.dtype,
                     "file_type": spec.file_type, "reason": exc.reason,
                 }
-                if getattr(exc, "deferred_requirement", None) is not None:
-                    entry["deferred_requirement"] = exc.deferred_requirement.as_dict()
+                deferred = getattr(exc, "deferred_requirement", None)
+                if deferred is not None:
+                    entry["deferred_requirement"] = deferred.as_dict()
                 result.failed_flavors.append(entry)
                 continue
             except Exception as exc:  # noqa: BLE001 — partial success per flavor

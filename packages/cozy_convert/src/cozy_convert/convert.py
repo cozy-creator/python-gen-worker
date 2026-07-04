@@ -522,7 +522,6 @@ def _run_torchao_inline(
     # CLIPTextModel, etc.) and transformers causal LMs both load via their
     # canonical class. AutoModelForCausalLM was wrong here — it only handles
     # decoder-only LM checkpoints, not diffusers transformers or CLIP encoders.
-    import json as _json
     cfg_path = repo_dir / "config.json"
     try:
         cfg_blob = _json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.is_file() else {}
@@ -1134,7 +1133,6 @@ def _run_gguf_inline(
     encoding: str,
 ) -> InlineConversionResult:
     """GGUF quantization — convert_hf_to_gguf.py (+ optional llama-quantize)."""
-    import os
     import subprocess
 
     from .gguf_tools import (

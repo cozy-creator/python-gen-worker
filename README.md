@@ -96,8 +96,9 @@ Full reference: [docs/endpoint-authoring.md](docs/endpoint-authoring.md).
 - Value types: `Asset`, `ImageAsset`, `AudioAsset`, `VideoAsset`
 - I/O codecs: `gen_worker.io`
 
-Training and conversion live in their own submodules: `gen_worker.trainer`,
-`gen_worker.conversion`, `gen_worker.clone`.
+Training lives in `gen_worker.trainer`. The conversion ETL (hub ingest,
+dtype cast / quant, clone, Tensorhub publish) is the separate
+[`cozy-convert`](packages/cozy_convert/) workspace package.
 
 ## Local development
 

@@ -185,8 +185,8 @@ def classify_repo(
 
     # 3. diffusers pipeline
     if "model_index.json" in root_set:
-        weights: list[str] = []
-        indexes: list[str] = []
+        d_weights: list[str] = []
+        d_indexes: list[str] = []
         resolved: dict[str, str] = {}
         by_component: dict[str, list[str]] = {}
         for p in paths:
@@ -195,12 +195,12 @@ def classify_repo(
             comp = p.split("/", 1)[0] if "/" in p else ""
             by_component.setdefault(comp, []).append(p)
         for comp, group in by_component.items():
-            picked, dtype = _pick_weight_set(group, dtype_pref)
-            weights.extend(picked)
-            if comp and dtype:
-                resolved[comp] = dtype
+            comp_weights, comp_dtype = _pick_weight_set(group, dtype_pref)
+            d_weights.extend(comp_weights)
+            if comp and comp_dtype:
+                resolved[comp] = comp_dtype
         # Sharded-set indexes for the picked weights only.
-        picked_set = set(weights)
+        picked_set = set(d_weights)
         for p in paths:
             if p.lower().endswith(".safetensors.index.json"):
                 stem = p[: -len(".index.json")]
@@ -208,13 +208,13 @@ def classify_repo(
                 comp = p.split("/", 1)[0] if "/" in p else ""
                 comp_pick = [w for w in picked_set if w.startswith(f"{comp}/")] if comp else list(picked_set)
                 if any(_variant_tag(w) == tag for w in comp_pick):
-                    indexes.append(p)
-        if not weights:
+                    d_indexes.append(p)
+        if not d_weights:
             raise RepoRefusal("missing_safetensors", files_seen=paths)
         dtypes = sorted(set(resolved.values()))
-        attrs = {"dtype": dtypes[0] if len(dtypes) == 1 else ""}
-        attrs["file_layout"] = "diffusers"
-        return _finish("diffusers", "diffusers", weights, indexes, attrs,
+        return _finish("diffusers", "diffusers", d_weights, d_indexes,
+                       {"dtype": dtypes[0] if len(dtypes) == 1 else "",
+                        "file_layout": "diffusers"},
                        "model_index.json at root")
 
     has_st = any(p.lower().endswith(".safetensors") for p in paths)
@@ -222,18 +222,18 @@ def classify_repo(
 
     # 4. transformers
     if config_json is not None and "config.json" in root_set and (has_st or has_st_index):
-        st_root = [p for p in root if p.lower().endswith(".safetensors")]
-        indexes = [p for p in root if p.lower().endswith(".safetensors.index.json")]
-        weights, dtype = _pick_weight_set(st_root, dtype_pref)
+        t_indexes = [p for p in root if p.lower().endswith(".safetensors.index.json")]
+        t_weights, t_dtype = _pick_weight_set(
+            [p for p in root if p.lower().endswith(".safetensors")], dtype_pref)
         attrs: dict[str, str] = {"file_layout": "singlefile"}
-        if dtype:
-            attrs["dtype"] = dtype
+        if t_dtype:
+            attrs["dtype"] = t_dtype
         arch = config_json.get("architectures")
         if isinstance(arch, list) and arch:
             attrs["architecture"] = str(arch[0])
         if config_json.get("quantization_config") is not None:
             attrs["subtype"] = "quantized"
-        return _finish("transformers", "transformers", weights, indexes, attrs,
+        return _finish("transformers", "transformers", t_weights, t_indexes, attrs,
                        "config.json + safetensors")
 
     # 5. GGUF
@@ -245,20 +245,20 @@ def classify_repo(
                 if q in base:
                     return q
             return ""
-        picked = None
+        gguf_pick: Optional[str] = None
         if gguf_quant:
             want = str(gguf_quant).strip().lower()
-            picked = next((p for p in gguf_files if want in p.lower()), None)
-            if picked is None:
+            gguf_pick = next((p for p in gguf_files if want in p.lower()), None)
+            if gguf_pick is None:
                 raise RepoRefusal("gguf_quant_not_found", files_seen=gguf_files, detail=want)
         else:
             for q in _GGUF_QUANT_PREFERENCE:
-                picked = next((p for p in sorted(gguf_files) if _quant_of(p) == q), None)
-                if picked is not None:
+                gguf_pick = next((p for p in sorted(gguf_files) if _quant_of(p) == q), None)
+                if gguf_pick is not None:
                     break
-            picked = picked or sorted(gguf_files)[0]
-        return _finish("gguf", "llama-cpp", [picked], [],
-                       {"dtype": f"gguf:{_quant_of(picked) or 'unknown'}",
+            gguf_pick = gguf_pick or sorted(gguf_files)[0]
+        return _finish("gguf", "llama-cpp", [gguf_pick], [],
+                       {"dtype": f"gguf:{_quant_of(gguf_pick) or 'unknown'}",
                         "file_type": "gguf", "file_layout": "singlefile"},
                        f"{len(gguf_files)} *.gguf at root")
 

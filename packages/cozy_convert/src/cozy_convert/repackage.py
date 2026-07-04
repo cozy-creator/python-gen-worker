@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from .writer import ConversionImplementationError
+
+if TYPE_CHECKING:
+    import torch
 
 
 class NotImplementedFamilyError(ConversionImplementationError):
@@ -307,7 +310,7 @@ def _convert_sd15_sd2(model_path: Path) -> dict[str, torch.Tensor]:
     )
     text_enc_dict = _load_component_state_dict(
         text_enc_path,
-        safetensors_bases=["pytorch_model"],
+        safetensors_bases=["model", "pytorch_model"],
         bin_base="pytorch_model",
     )
 
@@ -525,12 +528,12 @@ def _convert_sdxl(model_path: Path) -> dict[str, torch.Tensor]:
     )
     text_enc_dict = _load_component_state_dict(
         text_enc_path,
-        safetensors_bases=["pytorch_model"],
+        safetensors_bases=["model", "pytorch_model"],
         bin_base="pytorch_model",
     )
     text_enc2_dict = _load_component_state_dict(
         text_enc2_path,
-        safetensors_bases=["pytorch_model"],
+        safetensors_bases=["model", "pytorch_model"],
         bin_base="pytorch_model",
     )
 

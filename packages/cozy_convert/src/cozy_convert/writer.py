@@ -21,7 +21,7 @@ import shutil
 import struct
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Iterator, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Iterator, Mapping, Optional
 
 if TYPE_CHECKING:
     import torch

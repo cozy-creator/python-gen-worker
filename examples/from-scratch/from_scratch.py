@@ -1,28 +1,19 @@
-"""from-scratch — example @conversion endpoint that generates random weights.
+"""from-scratch — example ``@endpoint(kind="conversion")`` that generates
+random weights and publishes them as an orphan checkpoint (no parent lineage).
 
-Class-shape #322/#332. Demonstrates the orphan-checkpoint pattern (issue
-#20): tenant code emits a new checkpoint with no parent. The lineage
-list is empty; the finalize handler accepts it; the checkpoint lands as
-a root node in the DAG.
-
-Tenant code never touches tensorhub's upload contract. It just:
-  1. Generates weights
-  2. Yields ProducedFlavors via the class-shape contract
-
-The library handles the session lifecycle + upload + finalize via
-``gen_worker.conversion.dispatch._finalize_produced_variants``.
+Tenant code never touches tensorhub's upload contract: it writes files
+locally, yields ``ProducedFlavor``s, and ``cozy_convert.publish_flavors``
+turns each into one Tensorhub commit.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Iterator
 
 import msgspec
 
-from gen_worker import invocable
-from gen_worker.api.decorators import conversion
-from gen_worker.conversion import ConversionContext, ProducedFlavor
+from cozy_convert import ProducedFlavor
+from gen_worker import ConversionContext, endpoint
 
 
 class FromScratchInput(msgspec.Struct, forbid_unknown_fields=True):
@@ -31,29 +22,17 @@ class FromScratchInput(msgspec.Struct, forbid_unknown_fields=True):
     hidden_dim: int = 64
 
 
-@conversion(sub_kind="from-scratch")
+@endpoint(kind="conversion")
 class FromScratch:
-    """Generate random weights and emit as an orphan checkpoint.
+    """Generate random weights and emit them as an orphan checkpoint."""
 
-    No source repo, no parent lineage. The ``sub_kind='from-scratch'``
-    declaration tells the library this produces checkpoints that
-    genuinely have no upstream; the lineage array will be empty; the
-    finalize handler accepts empty lineage as the root case.
-    """
-
-    def setup(self) -> None:
-        pass
-
-    @invocable(name="generate")
     def generate(
         self,
         ctx: ConversionContext,
         payload: FromScratchInput,
     ) -> Iterator[ProducedFlavor]:
-        try:
-            import torch  # noqa: WPS433
-        except ImportError:
-            raise RuntimeError("torch required for random-init example")
+        import torch
+        from safetensors.torch import save_file
 
         torch.manual_seed(payload.seed)
         weights = {
@@ -62,18 +41,8 @@ class FromScratch:
             ),
             "linear.bias": torch.zeros(payload.hidden_dim, dtype=torch.float32),
         }
-
-        tmpdir = ctx.mktemp()
-        weights_path = tmpdir / "weights.safetensors"
-        try:
-            from safetensors.torch import save_file  # noqa: WPS433
-        except ImportError:
-            raise RuntimeError("safetensors required for random-init example")
+        weights_path = ctx.mktemp() / "weights.safetensors"
         save_file(weights, str(weights_path))
-
-        # Attribute provenance (dtype/file_layout/file_type/kind) is no
-        # longer stamped on produced checkpoints — server-side inference
-        # reads the uploaded bytes for these.
         yield ProducedFlavor(path=weights_path, flavor="fp32")
 
 
