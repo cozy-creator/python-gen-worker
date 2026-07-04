@@ -7,9 +7,21 @@
 > Source for all findings: /home/fidika/cozy/python-gen-worker/AUDIT.md (2026-07-03 full-stack audit,
 > file:line evidence for every claim). Counterpart protocol/orchestrator issues: tensorhub #503-#510.
 
-next_id: 377
+next_id: 378
 
 ---
+
+# #377: HF binding files= not honored on every download path (14GB instead of ~3GB)
+
+**Completed:** no
+**Status:** OPEN (2026-07-04, filed from e2e #105 J4) — the sd15-image example binds `HF("stable-diffusion-v1-5/stable-diffusion-v1-5", dtype="fp16", files=("*.json","*.txt","*.fp16.safetensors"))`, yet the worker's cold download fetched the FULL fp32 root checkpoints too (v1-5-pruned.safetensors 7.7GB + v1-5-pruned-emaonly.safetensors 4.3GB) — ~14GB on disk where ~3GB suffices. `Store.ensure_local` threads `allow_patterns=binding.files` on the setup path (executor.py:540→359), but at least one download path reaches `models/download.py` without the binding (ModelOp/prefetch path calls `store.ensure_local(ref, snap)` with no binding, executor.py:753) and falls back to `select_hf_files`' variant selector or the whole repo. Fix: the worker knows the binding for every ref in its own endpoint spec — resolve binding-by-ref once (registry) and apply its files/provider on ALL download paths. Also worth checking why the variant selector (if it ran) still took fp32 root weights when an fp16 group exists.
+
+## Metadata
+- Category: models
+- Status: planned
+
+---
+
 
 
 # #376: reserved-source materialization — ctx.source_path is never populated
