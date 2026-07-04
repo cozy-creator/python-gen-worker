@@ -255,6 +255,19 @@ def _setup_params(cls: type) -> Optional[dict[str, inspect.Parameter]]:
     return {p.name: p for p in params}
 
 
+def _is_server_handle_param(p: inspect.Parameter) -> bool:
+    """True when the param is annotated ``ServerHandle`` (a runtime= injection
+    target, not a model slot)."""
+    ann = p.annotation
+    if ann is inspect.Parameter.empty:
+        return False
+    from ..runtimes.server import ServerHandle
+
+    if ann is ServerHandle:
+        return True
+    return isinstance(ann, str) and ann.split(".")[-1] == "ServerHandle"
+
+
 def _resolve_single_slot(
     cls: type,
     models: dict[str, Binding],
@@ -269,6 +282,7 @@ def _resolve_single_slot(
         named = [
             n for n, p in setup_kwargs.items()
             if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+            and not _is_server_handle_param(p)
         ]
         if len(named) == 1:
             models[named[0]] = binding

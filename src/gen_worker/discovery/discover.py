@@ -390,13 +390,16 @@ def discover_functions(root: Optional[Path] = None, *, main_module: str | None =
         ) from e
 
     functions: List[Dict[str, Any]] = []
-    seen: Set[Tuple[str, str, str]] = set()
+    seen: Set[Tuple[str, str, str, str]] = set()
     for f in found:
         for entry in _extract_entries(f.obj, f.walked_module):
+            # name is part of the key: variants= share (module, class,
+            # python_name) with their base function but stamp distinct names.
             key = (
                 entry.get("declared_module", entry.get("module", "")),
                 entry.get("class_name", ""),
                 entry.get("python_name", ""),
+                entry.get("name", ""),
             )
             if key in seen:
                 continue

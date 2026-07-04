@@ -7,7 +7,7 @@
 > Source for all findings: /home/fidika/cozy/python-gen-worker/AUDIT.md (2026-07-03 full-stack audit,
 > file:line evidence for every claim). Counterpart protocol/orchestrator issues: tensorhub #503-#510.
 
-next_id: 378
+next_id: 379
 
 ---
 

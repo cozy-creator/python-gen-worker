@@ -8,6 +8,18 @@
 
 ---
 
+# #378: discovery drops variants= from the manifest; model= shorthand breaks with ServerHandle setup param
+
+**Completed:** yes
+**Status:** DONE (2026-07-04, Claude) — two @endpoint API bugs found by the inference-endpoints #343 port. (1) `discover_functions` deduped manifest entries by (declared_module, class_name, python_name) — variants= rows share all three with their base function, so every variant was silently dropped from endpoint.lock; the stamped `name` is now part of the dedup key. (2) The `model=` shorthand counted a `ServerHandle`-annotated setup() param as a slot candidate, so the documented runtime= shape `setup(self, model: str, server: ServerHandle)` failed at decoration; ServerHandle params are now excluded from slot resolution. Regression tests for both; suite 223 passed, 1 skipped.
+
+## Tasks
+- [x] Include entry name in the discovery dedup key (discovery/discover.py).
+- [x] Skip ServerHandle-annotated setup params in `_resolve_single_slot` (api/decorators.py).
+- [x] Regression tests (manifest keeps variant entries; documented runtime= shape decorates).
+
+---
+
 # #377: HF binding files= not honored on every download path (14GB instead of ~3GB)
 
 **Completed:** yes
