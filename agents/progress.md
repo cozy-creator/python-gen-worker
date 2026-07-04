@@ -48,23 +48,6 @@ Fresh clone: `task test` and `task lint` work; `task proto` regenerates pb/ iden
 
 
 
-# #367: split clone+conversion out as `cozy_convert`; move the tenant SDK to training-endpoints
-
-**Completed:** no
-**Status:** OPEN — clone/ (3,769) + conversion/ (11,063) is a mirror/convert/publish ETL product living inside the worker library. Its tenant SDK (`Source`, `Dataset`, `ConversionContext`, dispatch, calibration, writer, produced — ~3,000 LOC) has zero generation-path callers; its only consumers are training-endpoints.
-
-## Tasks
-- [ ] New package `cozy_convert` (~4,000 LOC target): hub-API ingest (HF + civitai), ONE streaming shard writer (collapse the 7 IO modules ~1,300 LOC to ~400; `streaming_primitives.py` is a pure re-export facade), dtype cast + quant via the libraries training-endpoints already calls directly (modelopt/bnb/torchao/hqq), repackage.py kept, ONE finalize path (see #360 clone tasks), `gguf` package instead of the hand-rolled binary parser (gguf_utils.py:390).
-- [ ] Replace hf_classifier.py (1,324 LOC, zero hf-hub imports, 14 refusal exception classes) with `HfApi.list_repo_files` + `snapshot_download(allow_patterns=...)` + a small classifier.
-- [ ] Move `Source`/`Dataset`/`ConversionContext` tenant SDK to training-endpoints (their #34), or into `cozy_convert` if tensorhub also needs it — either way, out of gen_worker.
-- [ ] gen_worker keeps only `ensure_local`'s civitai fetch (#366) and the `@endpoint(kind="conversion")` shim that hands a `ConversionContext`.
-- [ ] Give the ETL its first tests — clone/ and conversion/ are mypy-exempt (pyproject.toml:100-110) and have zero test coverage today. One integration test per conversion direction on a small real model.
-
-## Acceptance
-gen_worker has no `clone/`; `import gen_worker` never imports conversion machinery; training-endpoints/conversion imports from the new home.
-
----
-
 # #19: Standardize model upload/download transfers on trusted libraries
 
 **Status:** in_progress

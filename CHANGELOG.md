@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- **Conversion ETL split out as `cozy-convert` (#367) — breaking.**
+  `gen_worker.clone` and `gen_worker.conversion` are gone; the mirror /
+  convert / publish ETL and the conversion tenant SDK (`Source`, `Dataset`,
+  `ProducedFlavor`, `StreamingWriter`, calibration) now live in the
+  `packages/cozy_convert` workspace package (wheel `cozy-convert`).
+  `import gen_worker` is torch- and conversion-free (guarded by an
+  import-graph test). Inside cozy_convert: one streaming shard writer
+  replaces the seven IO modules, a ~300-LOC classifier +
+  `snapshot_download(allow_patterns=…)` replaces the 1,324-LOC
+  hf_classifier, the hand-rolled GGUF binary parser is replaced by the
+  `gguf` package, and clone finalize is ONE path targeting tensorhub's
+  HF-shaped `/commits` write API (`mode: merge|replace`) — the
+  enumerate-prior-latest-and-delete overwrite hack is gone.
+  `ConversionContext` stays in gen_worker but loses `open_output_writer`;
+  the `flashpack` dependency moved to cozy_convert.
+
 - **API rewrite (#368) — breaking, no aliases.** ONE `@endpoint` decorator
   (function = stateless, class + optional `setup()` = stateful, `kind=` for
   conversion/training/dataset, async-generator = streaming, `runtime="vllm"`/
