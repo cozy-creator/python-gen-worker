@@ -1,11 +1,10 @@
 # from-scratch
 
-A `@conversion` that emits an **orphan checkpoint** — a brand-new set of weights with no source repo, no parent lineage. The SDK accepts an empty lineage array and lands the checkpoint as a root node in the lineage DAG.
+An `@endpoint(kind="conversion")` that publishes an **orphan checkpoint** — a brand-new set of weights with no source repo, no parent lineage.
 
 ## What it demonstrates
-- The `from-scratch` training kind: `@conversion(kind="from-scratch", concurrency="sequential")` — declares to the runtime that this job genuinely has no upstream model to materialize.
-- **`ProducedFlavor`** as the return contract — the function generates weights, writes them to a path, returns `[ProducedFlavor(path=..., flavor=...)]`; the library handles upload + finalize + tag application.
-- Tenant code never touches tensorhub's upload API directly — the SDK owns the session lifecycle.
+- **The producer publish contract**: write files locally, call `cozy_convert.publish_flavors(ctx, flavors)` — one Tensorhub commit per `ProducedFlavor` — and return a result struct. Nothing publishes implicitly; generator handlers are rejected for producer kinds.
+- Tenant code never touches tensorhub's upload API directly — `publish_flavors` owns hashing, presigned part PUTs, dedup, and finalize.
 
 ## When to copy it
 - Generating random-init weights for a new architecture.
@@ -13,5 +12,5 @@ A `@conversion` that emits an **orphan checkpoint** — a brand-new set of weigh
 - Any job that produces checkpoints from nothing (synthesis, distillation from a non-Cozy source, etc.).
 
 ## Files
-- `from_scratch.py` — the function; uses `torch.manual_seed` for deterministic output.
+- `from_scratch.py` — the endpoint; uses `torch.manual_seed` for deterministic output.
 - `endpoint.toml` — declares CPU-only resources (this example doesn't need GPU).

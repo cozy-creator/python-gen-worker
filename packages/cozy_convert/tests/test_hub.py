@@ -1,109 +1,19 @@
 """HubClient against a threaded fake of tensorhub's /commits API.
 
 Exercises the real HTTP code path: POST /commits (presign), part PUTs,
-per-upload complete, finalize (202 poll -> 200), and blake3 dedup skips.
+per-upload complete, finalize (202 poll -> 200), blake3 dedup skips, and
+bounded retries on transient failures.
 """
 
 from __future__ import annotations
 
-import json
-import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any
 
 import pytest
 
-from cozy_convert.hub import CommitFile, HubClient, HubPublishError, blake3_file, files_from_tree
+from cozy_convert.hub import CommitFile, HubPublishError, blake3_file, files_from_tree
 
-
-class _FakeHub(BaseHTTPRequestHandler):
-    server_version = "FakeTensorhub/1.0"
-    state: dict[str, Any] = {}
-
-    def log_message(self, *args: Any) -> None:  # silence
-        pass
-
-    def _read_json(self) -> dict:
-        n = int(self.headers.get("Content-Length") or 0)
-        body = self.rfile.read(n) if n else b""
-        return json.loads(body) if body else {}
-
-    def _send(self, code: int, payload: dict | None = None) -> None:
-        body = json.dumps(payload or {}).encode()
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def do_POST(self) -> None:  # noqa: N802
-        st = _FakeHub.state
-        if self.path.endswith("/commits"):
-            req = self._read_json()
-            st["commit_request"] = req
-            st["auth"] = self.headers.get("Authorization", "")
-            uploads = []
-            for i, op in enumerate(req.get("operations", [])):
-                if op["type"] != "add":
-                    continue
-                if op["blake3"] in st.get("existing_blobs", set()):
-                    uploads.append({"path": op["path"], "blake3": op["blake3"], "exists": True})
-                    continue
-                uid = f"up-{i}"
-                base = f"http://127.0.0.1:{self.server.server_port}"
-                uploads.append({
-                    "path": op["path"], "blake3": op["blake3"], "exists": False,
-                    "upload_id": uid,
-                    "part_urls": [f"{base}/put/{uid}/1"],
-                    "part_size": max(int(op["size_bytes"]), 1),
-                    "total_parts": 1,
-                })
-            self._send(201, {"revision_id": "rev-1", "uploads": uploads,
-                             "deletions": [], "copies": [], "tags": req.get("tags") or [],
-                             "mode": req.get("mode") or "merge"})
-            return
-        if "/uploads/" in self.path and self.path.endswith("/complete"):
-            st.setdefault("completed", []).append(self.path)
-            body = self._read_json()
-            st.setdefault("complete_bodies", []).append(body)
-            self._send(200, {"ok": True})
-            return
-        if self.path.endswith("/finalize"):
-            n = st.get("finalize_calls", 0) + 1
-            st["finalize_calls"] = n
-            if n == 1:
-                self._send(202, {"status": "running"})  # first call -> poll
-            else:
-                self._send(200, {"ok": True, "checkpoint_id": "blake3:abc"})
-            return
-        self._send(404, {"error": "not_found"})
-
-    def do_PUT(self) -> None:  # noqa: N802
-        n = int(self.headers.get("Content-Length") or 0)
-        data = self.rfile.read(n) if n else b""
-        _FakeHub.state.setdefault("put_bytes", {})[self.path] = data
-        self.send_response(200)
-        self.send_header("ETag", '"etag-1"')
-        self.send_header("Content-Length", "0")
-        self.end_headers()
-
-
-@pytest.fixture()
-def fake_hub():
-    _FakeHub.state = {"existing_blobs": set()}
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _FakeHub)
-    t = threading.Thread(target=server.serve_forever, daemon=True)
-    t.start()
-    yield server
-    server.shutdown()
-
-
-def _client(server) -> HubClient:
-    return HubClient(
-        base_url=f"http://127.0.0.1:{server.server_port}",
-        token="cap-token", owner="acme",
-    )
+from conftest import _FakeHub, _client
 
 
 def test_commit_uploads_completes_and_finalizes(fake_hub, tmp_path: Path, monkeypatch) -> None:
@@ -165,3 +75,36 @@ def test_destination_must_be_owner_repo(fake_hub) -> None:
             destination_repo="just-a-name",
             files=[CommitFile(path="x", local_path=Path("/nonexistent"))],
         )
+
+
+def test_transient_failures_are_retried(fake_hub, tmp_path: Path, monkeypatch) -> None:
+    """One 503 on the commit POST, one 500 on a part PUT, one 500 on complete:
+    the commit still lands (bounded retries, no restart of the whole job)."""
+    monkeypatch.setattr("time.sleep", lambda *_: None)
+    f = tmp_path / "model.safetensors"
+    f.write_bytes(b"\x02" * 48)
+    _FakeHub.state.update(
+        {"fail_commit_posts": 1, "fail_puts": 1, "fail_completes": 1,
+         "finalize_calls": 1})
+
+    result = _client(fake_hub).commit(
+        destination_repo="acme/my-model",
+        files=[CommitFile(path="model.safetensors", local_path=f)],
+    )
+    assert result.revision_id == "rev-1"
+    assert result.uploaded == 1
+    # the successful PUT actually carried the bytes
+    assert list(_FakeHub.state["put_bytes"].values()) == [b"\x02" * 48]
+
+
+def test_files_from_tree_skips_hf_cache_junk(tmp_path: Path) -> None:
+    (tmp_path / "config.json").write_text("{}")
+    junk = tmp_path / ".cache" / "huggingface" / "download"
+    junk.mkdir(parents=True)
+    (junk / "config.json.metadata").write_text("etag")
+    (tmp_path / ".cache" / "huggingface" / ".gitignore").write_text("*")
+    # a real dotfile at repo root is content, not junk
+    (tmp_path / ".gitignore").write_text("logs/")
+
+    paths = [f.path for f in files_from_tree(tmp_path)]
+    assert paths == [".gitignore", "config.json"]

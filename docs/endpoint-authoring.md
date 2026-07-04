@@ -100,14 +100,35 @@ Resources(gpu=True, vram_gb=24, compute_capability=8.0, libraries=("nunchaku",))
 ## Kinds
 
 `@endpoint(kind="conversion" | "training" | "dataset")` selects the context
-subclass the handler receives: `ConversionContext` adds
-`publish_repo_revision` / `save_checkpoint` / `mktemp` / `source` /
-`destination`; `DatasetContext` adds `publish_dataset_revision` /
-`resolve_dataset`; `TrainingContext` adds the repo-metadata RPCs.
+subclass the handler receives: `ConversionContext` adds `save_checkpoint` /
+`mktemp` / `source` / `destination`; `DatasetContext` adds
+`publish_dataset_revision` / `resolve_dataset`; `TrainingContext` adds the
+repo-metadata RPCs.
+
+Producer endpoints publish **explicitly**: write files locally, call
+`cozy_convert.publish_flavors(ctx, flavors)` — one Tensorhub commit per
+`ProducedFlavor` (path = file or directory) — and return a result struct:
+
+```python
+@endpoint(kind="conversion")
+class Convert:
+    def run(self, ctx: ConversionContext, p: In) -> Out:
+        out_dir = ctx.mktemp()
+        ...  # write model files under out_dir
+        commits = publish_flavors(
+            ctx, [ProducedFlavor(path=out_dir, flavor="bf16")],
+            destination_repo=p.destination_repo,
+        )
+        return Out(revision_ids=[c.revision_id for c in commits])
+```
+
+Generator handlers are rejected for producer kinds — yielding streams
+chunks, it never publishes.
 
 ## Streaming
 
-An async-generator handler streams; each yielded struct is one chunk:
+An async-generator handler streams (inference kinds only); each yielded
+struct is one chunk:
 
 ```python
 async def stream(self, ctx, p: In) -> AsyncIterator[Out]:

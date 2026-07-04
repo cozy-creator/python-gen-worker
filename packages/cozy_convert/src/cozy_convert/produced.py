@@ -1,9 +1,10 @@
-"""ProducedFlavor — what a tenant transform returns per output.
+"""ProducedFlavor — what a tenant transform hands to ``publish_flavors``.
 
-A tenant's ``@conversion`` returns ``list[ProducedFlavor]`` — one
-entry per flavor the job produces into the destination checkpoint. The
-library uploads each flavor's ``path`` (file OR directory) and attaches
-the declared ``attributes`` to the final checkpoint flavor publish payload.
+A producer endpoint builds ``list[ProducedFlavor]`` — one entry per flavor
+the job produces into the destination checkpoint — and calls
+``cozy_convert.publish_flavors(ctx, flavors)``. The library uploads each
+flavor's ``path`` (file OR directory) as one Tensorhub commit and attaches
+the declared ``attributes`` to the commit payload.
 
 Attribute-bag ownership (issue #22 — server-authoritative metadata):
   - Tenant declares ONLY tenant-specific attributes (technique config,

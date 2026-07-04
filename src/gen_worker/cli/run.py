@@ -94,9 +94,8 @@ def add_subparser(sub: argparse._SubParsersAction[Any]) -> None:
     p.add_argument(
         "--allow-publish", action="store_true",
         help=(
-            "Allow ConversionContext.publish_repo_revision / materialize_blob "
-            "to call the real tensorhub APIs. Default: stubbed (print payload "
-            "to stderr, return a fake response)."
+            "Allow ConversionContext.materialize_blob to call the real "
+            "tensorhub APIs. Default: stubbed against the local CAS."
         ),
     )
     p.add_argument(

@@ -11,6 +11,8 @@ and :func:`run_clone` (keyword-explicit).
 
 from __future__ import annotations
 
+import hashlib
+import logging
 import os
 import re
 import shutil
@@ -22,6 +24,8 @@ from typing import Any, Iterable, Optional
 from .hub import HubClient, files_from_tree
 from .ingest import IngestedSource, ingest_civitai, ingest_huggingface
 from .writer import MAX_SAFETENSORS_SHARD_BYTES, shard_safetensors_by_offset
+
+logger = logging.getLogger(__name__)
 
 _PUBLIC_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{0,127}$")
 _PUBLIC_TAG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
@@ -177,6 +181,8 @@ def _copy_non_weights(source_dir: Path, out_dir: Path, *, skip_components: set[s
         if not f.is_file():
             continue
         rel = f.relative_to(source_dir)
+        if rel.parts[:2] == (".cache", "huggingface"):
+            continue  # hf local-dir download metadata, not repo content
         comp = rel.parts[0] if len(rel.parts) > 1 else ""
         name = f.name
         is_weightish = _is_weight(f) or name.endswith(".safetensors.index.json")
@@ -326,6 +332,20 @@ def build_flavor_tree(
 # run_clone — ingest, convert, ONE finalize path
 # ---------------------------------------------------------------------------
 
+def _clone_workdir(provider: str, source_key: str, destination: str) -> Path:
+    """Persistent workdir keyed by (provider, source, destination): a failed
+    clone keeps its downloaded snapshot so a retry resumes instead of
+    re-downloading. Deleted on success. Base dir: ``$COZY_CONVERT_WORKDIR``
+    or ``<tmp>/cozy-convert``."""
+    base = Path(os.environ.get("COZY_CONVERT_WORKDIR", "").strip()
+                or Path(tempfile.gettempdir()) / "cozy-convert")
+    digest = hashlib.sha256(
+        f"{provider}|{source_key}|{destination}".encode("utf-8")).hexdigest()[:16]
+    workdir = base / f"clone-{digest}"
+    workdir.mkdir(parents=True, exist_ok=True)
+    return workdir
+
+
 def run_clone(
     ctx: Any,
     *,
@@ -359,7 +379,11 @@ def run_clone(
             except Exception:
                 pass
 
-    workdir = Path(tempfile.mkdtemp(prefix=f"clone-{getattr(ctx, 'request_id', 'x')}-"))
+    source_key = source_ref if provider == "huggingface" else str(civitai_model_version_id or 0)
+    if source_revision:
+        source_key = f"{source_key}@{source_revision}"
+    workdir = _clone_workdir(provider, source_key, destination)
+    succeeded = False
     try:
         _progress(0.05, "clone.ingest")
 
@@ -423,8 +447,14 @@ def run_clone(
                     attrs = dict(source.attrs)
                     flavor_label = source_dtype or spec.dtype
                 else:
+                    # Wipe any partial flavor tree from a prior failed run —
+                    # only the downloaded source is resumable.
+                    flavor_dir = workdir / f"flavor-{spec.label}"
+                    shutil.rmtree(flavor_dir, ignore_errors=True)
+                    shutil.rmtree(workdir / f"flavor-{spec.label}.__repack__",
+                                  ignore_errors=True)
                     tree, attrs = build_flavor_tree(
-                        source, spec, workdir / f"flavor-{spec.label}",
+                        source, spec, flavor_dir,
                         quantize_components=quantize_components,
                     )
             except InlineConversionNotPossible as exc:
@@ -490,8 +520,10 @@ def run_clone(
                 "total_bytes": commit.total_bytes,
             })
 
-        if not result.published and result.failed_flavors:
-            reasons = "; ".join(str(f.get("reason") or "") for f in result.failed_flavors)
+        if not result.published:
+            reasons = "; ".join(
+                str(f.get("reason") or "") for f in result.failed_flavors
+            ) or "no output spec produced anything"
             raise RuntimeError(f"clone produced no publishable flavor: {reasons}")
 
         result.metadata["destination_repo"] = destination
@@ -499,9 +531,13 @@ def run_clone(
         if result.failed_flavors:
             result.metadata["failed_flavor_count"] = str(len(result.failed_flavors))
         _progress(1.0, "clone.completed")
+        succeeded = True
         return result
     finally:
-        shutil.rmtree(workdir, ignore_errors=True)
+        if succeeded:
+            shutil.rmtree(workdir, ignore_errors=True)
+        else:
+            logger.warning("clone failed; workdir retained for resume: %s", workdir)
 
 
 def from_huggingface(ctx: Any, payload: Any, *, hf_token: str | None = None) -> CloneResult:

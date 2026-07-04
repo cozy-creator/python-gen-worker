@@ -17,17 +17,59 @@ with the ETags, and finally POST …/commits/{revision_id}/finalize (no body;
 from __future__ import annotations
 
 import json
+import logging
+import random
 import time
 import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Callable, Mapping, Optional
 
 import requests
+
+logger = logging.getLogger(__name__)
+
+_RETRY_ATTEMPTS = 5
+_RETRY_BASE_DELAY_S = 1.0
+_RETRY_MAX_DELAY_S = 30.0
 
 
 class HubPublishError(RuntimeError):
     """Terminal failure talking to tensorhub's commit API."""
+
+
+def _retry_after_s(resp: requests.Response) -> Optional[float]:
+    try:
+        value = float(str(resp.headers.get("Retry-After") or "").strip())
+    except Exception:
+        return None
+    return min(value, _RETRY_MAX_DELAY_S) if value > 0 else None
+
+
+def _send_with_retries(what: str, send: Callable[[], requests.Response]) -> requests.Response:
+    """Bounded retries on network errors, 429, and 5xx (honors Retry-After).
+
+    Returns the last response for non-retryable statuses — callers keep their
+    own status handling.
+    """
+    delay = _RETRY_BASE_DELAY_S
+    for attempt in range(1, _RETRY_ATTEMPTS + 1):
+        try:
+            resp = send()
+        except requests.RequestException as exc:
+            if attempt == _RETRY_ATTEMPTS:
+                raise HubPublishError(f"{what} failed (network): {exc}") from exc
+        else:
+            code = int(resp.status_code)
+            if code != 429 and code < 500:
+                return resp
+            if attempt == _RETRY_ATTEMPTS:
+                return resp
+            delay = _retry_after_s(resp) or delay
+        logger.warning("%s retrying (attempt %d/%d)", what, attempt, _RETRY_ATTEMPTS)
+        time.sleep(delay + random.uniform(0, delay * 0.1))
+        delay = min(delay * 2, _RETRY_MAX_DELAY_S)
+    raise HubPublishError(f"{what} failed after {_RETRY_ATTEMPTS} attempts")
 
 
 def blake3_file(path: Path, *, chunk: int = 8 * 1024 * 1024) -> str:
@@ -113,12 +155,12 @@ class HubClient:
         )
 
     def _post(self, path: str, payload: Optional[dict] = None, *, timeout: float | None = None) -> requests.Response:
-        return requests.post(
+        return _send_with_retries(f"POST {path}", lambda: requests.post(
             f"{self.base_url}{path}",
             headers=self._headers(),
             data=json.dumps(payload) if payload is not None else None,
             timeout=timeout or self.timeout_s,
-        )
+        ))
 
     @staticmethod
     def _json(resp: requests.Response) -> dict[str, Any]:
@@ -141,7 +183,10 @@ class HubClient:
                 buf = f.read(part_size)
                 if not buf and i > 0:
                     break
-                resp = requests.put(url, data=buf, timeout=self.timeout_s * 5)
+                def _put(u: str = url, b: bytes = buf) -> requests.Response:
+                    return requests.put(u, data=b, timeout=self.timeout_s * 5)
+
+                resp = _send_with_retries(f"part PUT {entry.get('path')!r} #{i + 1}", _put)
                 if resp.status_code < 200 or resp.status_code >= 300:
                     raise HubPublishError(
                         f"part PUT failed ({resp.status_code}) for {entry.get('path')!r}")
@@ -287,11 +332,17 @@ class HubClient:
 
 
 def files_from_tree(tree: Path, *, prefix: str = "") -> list[CommitFile]:
-    """Build CommitFile entries for every regular file under ``tree``."""
+    """Build CommitFile entries for every regular file under ``tree``.
+
+    ``.cache/huggingface/**`` is skipped: huggingface_hub's local-dir download
+    metadata is cache-layout junk, never repo content."""
     tree = Path(tree)
     out: list[CommitFile] = []
     for f in sorted(tree.rglob("*")):
         if not f.is_file():
+            continue
+        rel_parts = f.relative_to(tree).parts
+        if rel_parts[:2] == (".cache", "huggingface"):
             continue
         rel = f.relative_to(tree).as_posix()
         if prefix:

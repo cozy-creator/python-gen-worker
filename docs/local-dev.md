@@ -173,10 +173,13 @@ The `.gen-worker-run/` directory is throwaway. Add it to `.gitignore` /
 
 ## Conversion / dataset endpoints
 
-`ConversionContext.publish_repo_revision` and `materialize_blob` are
-stubbed by default — they print the would-be call to stderr and return
-a fake response. Pass `--allow-publish` to call the real tensorhub APIs
-(useful for round-tripping against a dev tensorhub).
+Checkpoint publishing goes through `cozy_convert.publish_flavors(ctx,
+flavors)`, which talks to tensorhub directly using the worker capability
+token — with no token configured (plain local runs) it fails loudly
+instead of pretending to publish. `ConversionContext.materialize_blob`
+is stubbed against the local CAS by default; pass `--allow-publish` to
+call the real tensorhub API (useful for round-tripping against a dev
+tensorhub).
 
 ```bash
 gen-worker run --payload '{"source":{"ref":"..."},"specs":[...]}' --allow-publish

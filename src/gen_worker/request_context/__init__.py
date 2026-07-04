@@ -5,7 +5,6 @@ import json
 import logging
 import os
 import base64
-import random
 import re
 import shutil
 import tempfile
@@ -57,10 +56,6 @@ def _as_asset(asset: Asset, cls: type) -> Any:
 
 logger = logging.getLogger(__name__)
 
-_REPO_REVISION_FINALIZE_REQUEST_TIMEOUT_S = 30
-_REPO_REVISION_FINALIZE_POLL_MAX_S = 30 * 60
-_REPO_REVISION_FINALIZE_POLL_INITIAL_S = 1.0
-_REPO_REVISION_FINALIZE_POLL_MAX_DELAY_S = 10.0
 
 # Helpers, constants, and JWT/SSRF utilities live in _helpers.py. They are
 # re-exported here so existing `from gen_worker.request_context import _foo`
@@ -75,7 +70,6 @@ from ._helpers import (
     _FILE_API_STREAM_CHUNK_TIMEOUT_S,
     _FILE_API_STREAM_FINALIZE_TIMEOUT_S,
     _FILE_API_STREAM_REPLAY_TIMEOUT_S,
-    _PUBLIC_TAG_RE,
     _canonicalize_model_ref_string,
     _decode_unverified_jwt_claims,
     _encode_ref_for_url,
@@ -84,11 +78,9 @@ from ._helpers import (
     _infer_mime_type,
     _infer_tensors_format,
     _is_private_ip_str,
-    _normalize_destination_repo_tags,
     _normalize_output_ref,
     _normalize_repo_name,
     _parse_owner_repo,
-    _parse_owner_repo_with_optional_tag,
     _require_worker_capability_token,
     _resolve_hint_first_string,
     _sha256_file,
@@ -734,13 +726,13 @@ class RequestContext:
 #
 # RequestContext is the per-inference base. Conversion, dataset-producing,
 # and trainer endpoints get richer subclasses that carry the
-# producer-contract RPCs (publish_repo_revision, publish_dataset_revision,
-# resolve_dataset, read/write_repo_metadata, materialize_blob).
+# producer-contract RPCs (publish_dataset_revision, resolve_dataset,
+# read/write_repo_metadata, materialize_blob).
 #
 # ConversionContext / DatasetContext / TrainingContext share `_PublisherMixin`
 # for the producer-contract HTTP helpers (repo metadata read/write, blob
-# fetch + materialization by digest). publish_repo_revision lives on the base
-# RequestContext — producer-style @inference handlers (clone) call it too.
+# fetch + materialization by digest). Checkpoint publishing is NOT here:
+# producer endpoints call cozy_convert.publish_flavors (the /commits path).
 # ---------------------------------------------------------------------------
 
 
@@ -992,455 +984,6 @@ class _PublisherMixin:
             attributes=attributes,
         )
 
-    def publish_repo_revision(
-        self,
-        *,
-        destination_repo: str,
-        artifact_refs: Optional[List[Any]] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-        create_if_missing: bool = True,
-        destination_repo_tags: Optional[List[str]] = None,
-        source_repo: Optional[str] = None,
-        source_version_id: Optional[str] = None,
-        target_version_id: Optional[str] = None,
-        snapshot_manifest: Optional[Dict[str, Any]] = None,
-        # HARD-CUT issue #14: the /publish endpoint takes checkpoint_flavors
-        # plus per-checkpoint lineage and a tags map.
-        relationship_kind: str = "import",
-        auto_create_external_parent: bool = True,
-    ) -> dict[str, Any]:
-        """Publish checkpoints + lineage to Tensorhub via the worker-cap /publish endpoint.
-
-        Every entry in metadata['checkpoint_flavors'] becomes one concrete
-        checkpoint attached to the destination tag group in Tensorhub.
-        tensorhub.repo_checkpoints (checkpoint_id IS the snapshot digest).
-        `source_repo` + `source_version_id` (if set) produce one lineage
-        edge per checkpoint with relationship_kind. Tags in
-        `destination_repo_tags` all get pointed at the first checkpoint in
-        the list (typical case: one output_spec with tag='prod').
-
-        For imports (clone_huggingface), pass source_repo as
-        'external-sources/upstream' and source_version_id as the external
-        reference. The external-source identifier is an internal tensorhub
-        schema encoding (separate from the model-ref wire format) that
-        prefixes the upstream provider, e.g. 'hf:black-forest-labs/FLUX.2-klein-4B'
-        for huggingface or 'civitai:<id>' for civitai. Set
-        `relationship_kind='import'` + `auto_create_external_parent=True`.
-        """
-        import requests
-        owner, repo = _parse_owner_repo(destination_repo)
-        normalized_source_version_id = str(source_version_id or "").strip().lower()
-        normalized_tags = _normalize_destination_repo_tags(destination_repo_tags)
-
-        md = dict(metadata or {})
-        base = (self._file_api_base_url or "").strip().rstrip("/")
-        token = (self._worker_capability_token or "").strip()
-        logger.info(
-            "worker_finalize_attempt request_id=%s job_id=%s owner=%s repo=%s",
-            self.request_id,
-            self._job_id or "",
-            owner,
-            repo,
-        )
-        if not base or not token:
-            # Local/dev mode: no remote publish channel configured.
-            return {"ok": False, "skipped": True, "reason": "missing_worker_capability_channel", "owner": owner, "name": repo}
-
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "X-Cozy-Owner": owner,
-        }
-
-        def _parse_retry_after(raw: Any) -> Optional[float]:
-            try:
-                value = float(str(raw or "").strip())
-            except Exception:
-                return None
-            if value <= 0:
-                return None
-            return min(value, _REPO_REVISION_FINALIZE_POLL_MAX_DELAY_S)
-
-        def _response_json(resp: requests.Response) -> Dict[str, Any]:
-            try:
-                parsed = resp.json()
-                if isinstance(parsed, dict):
-                    return parsed
-            except Exception:
-                pass
-            return {"ok": True} if not resp.text else {"ok": False, "raw": resp.text}
-
-        def _raise_publish_http_error(code: int, path: str, text: str) -> None:
-            if code in (401, 403):
-                detail = ""
-                try:
-                    detail = str((text or "").strip())
-                except Exception:
-                    detail = ""
-                if detail != "":
-                    raise AuthError(
-                        f"repo publish unauthorized ({code}): check worker_capability_token validity; response={detail[:256]}"
-                    )
-                raise AuthError(f"repo publish unauthorized ({code}): check worker_capability_token validity")
-            raise RuntimeError(f"repo publish request failed ({code}) {path}: {text[:512]}")
-
-        def _poll_repo_revision_finalize(status_path: str, initial_delay_s: Optional[float] = None) -> Dict[str, Any]:
-            delay_s = initial_delay_s or _REPO_REVISION_FINALIZE_POLL_INITIAL_S
-            deadline = time.monotonic() + _REPO_REVISION_FINALIZE_POLL_MAX_S
-            while True:
-                if self._cancel_event.is_set():
-                    raise RuntimeError("repo finalize canceled while polling")
-                sleep_s = max(0.0, min(delay_s, _REPO_REVISION_FINALIZE_POLL_MAX_DELAY_S))
-                if sleep_s > 0:
-                    time.sleep(sleep_s + random.uniform(0, min(0.25, sleep_s * 0.1)))
-                url = f"{base}{status_path}"
-                resp = requests.get(url, headers=headers, timeout=_REPO_REVISION_FINALIZE_REQUEST_TIMEOUT_S)
-                code = int(resp.status_code)
-                if code in (401, 403):
-                    _raise_publish_http_error(code, status_path, resp.text or "")
-                if code < 200 or code >= 300:
-                    raise RuntimeError(f"repo finalize status poll failed ({code}) {status_path}: {resp.text[:512]}")
-                parsed = _response_json(resp)
-                state = str(parsed.get("state") or "").strip().lower()
-                finalize_status = str(parsed.get("finalize_status") or "").strip().lower()
-                if state == "finalized" or finalize_status == "succeeded":
-                    result = parsed.get("finalize_result")
-                    if isinstance(result, dict):
-                        return result
-                    return parsed
-                if state == "failed" or finalize_status == "failed":
-                    err = parsed.get("finalize_error")
-                    if isinstance(err, dict):
-                        err_msg = json.dumps(err, sort_keys=True)
-                    else:
-                        err_msg = str(err or parsed)
-                    raise RuntimeError(f"repo finalize failed: {err_msg[:512]}")
-                retry_after = _parse_retry_after(parsed.get("retry_after_seconds"))
-                if retry_after is not None:
-                    delay_s = retry_after
-                else:
-                    delay_s = min(delay_s * 1.6, _REPO_REVISION_FINALIZE_POLL_MAX_DELAY_S)
-                if time.monotonic() >= deadline:
-                    raise RuntimeError(
-                        f"repo finalize timed out after {_REPO_REVISION_FINALIZE_POLL_MAX_S}s polling {status_path}"
-                    )
-
-        def _status_path_from_location(path: str, location: str) -> str:
-            loc = str(location or "").strip()
-            if not loc:
-                return path[:-len("/finalize")] if path.endswith("/finalize") else path
-            parsed = urllib.parse.urlparse(loc)
-            if parsed.scheme or parsed.netloc:
-                status_path = parsed.path or "/"
-                if parsed.query:
-                    status_path = f"{status_path}?{parsed.query}"
-                return status_path
-            return loc
-
-        def _request_repo_revision_finalize(path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-            deadline = time.monotonic() + _REPO_REVISION_FINALIZE_POLL_MAX_S
-            body = json.dumps(payload)
-            delay_s = _REPO_REVISION_FINALIZE_POLL_INITIAL_S
-            while True:
-                url = f"{base}{path}"
-                try:
-                    resp = requests.post(
-                        url,
-                        headers=headers,
-                        data=body,
-                        timeout=_REPO_REVISION_FINALIZE_REQUEST_TIMEOUT_S,
-                    )
-                except requests.RequestException as exc:
-                    if time.monotonic() >= deadline:
-                        raise RuntimeError(f"repo finalize failed (network): {exc}") from exc
-                    logger.warning(
-                        "worker_finalize_post_retry request_id=%s job_id=%s path=%s error=%r",
-                        self.request_id,
-                        self._job_id or "",
-                        path,
-                        exc,
-                    )
-                    time.sleep(delay_s + random.uniform(0, min(0.25, delay_s * 0.1)))
-                    delay_s = min(delay_s * 1.6, _REPO_REVISION_FINALIZE_POLL_MAX_DELAY_S)
-                    continue
-
-                code = int(resp.status_code)
-                if code == 202:
-                    status_path = _status_path_from_location(path, resp.headers.get("Location", ""))
-                    retry_after = _parse_retry_after(resp.headers.get("Retry-After"))
-                    if retry_after is None:
-                        try:
-                            retry_after = _parse_retry_after(_response_json(resp).get("retry_after_seconds"))
-                        except Exception:
-                            retry_after = None
-                    return _poll_repo_revision_finalize(status_path, retry_after)
-                if code in (401, 403):
-                    _raise_publish_http_error(code, path, resp.text or "")
-                if code >= 500 and time.monotonic() < deadline:
-                    logger.warning(
-                        "worker_finalize_post_retry request_id=%s job_id=%s path=%s status=%s response=%s",
-                        self.request_id,
-                        self._job_id or "",
-                        path,
-                        code,
-                        (resp.text or "")[:256],
-                    )
-                    time.sleep(delay_s + random.uniform(0, min(0.25, delay_s * 0.1)))
-                    delay_s = min(delay_s * 1.6, _REPO_REVISION_FINALIZE_POLL_MAX_DELAY_S)
-                    continue
-                if code < 200 or code >= 300:
-                    _raise_publish_http_error(code, path, resp.text or "")
-                return _response_json(resp)
-
-        def _request_json(method: str, path: str, payload: Dict[str, Any], *, allow_404: bool = False) -> Dict[str, Any]:
-            if method.upper() == "POST" and path.endswith("/finalize"):
-                return _request_repo_revision_finalize(path, payload)
-            url = f"{base}{path}"
-            resp = requests.request(
-                method=method,
-                url=url,
-                headers=headers,
-                data=json.dumps(payload),
-                timeout=30,
-            )
-            code = int(resp.status_code)
-            if code in (401, 403):
-                _raise_publish_http_error(code, path, resp.text or "")
-            if allow_404 and code == 404:
-                return {"ok": False, "not_found": True}
-            if code < 200 or code >= 300:
-                # Create may be idempotent and already exists.
-                if path == "/api/v1/repos" and code in (400, 409):
-                    return {"ok": True, "already_exists": True}
-                _raise_publish_http_error(code, path, resp.text or "")
-            return _response_json(resp)
-
-        # TensorHub auto-creates the repo and lineage record on the upload path,
-        # so no explicit repo creation or conversion-jobs/start call is needed.
-        # The job_id comes from the capability token (via execution_hints).
-        scope = self._repo_job_upload_scope()
-        if scope is not None:
-            _, _, job_id = scope
-        else:
-            job_id = ""
-        if job_id == "":
-            raise RuntimeError("repo publish failed: no job_id in execution_hints (missing destination_repo or job scope)")
-
-        commit_checkpoint_flavors = []
-        raw_checkpoint_flavors = md.get("checkpoint_flavors")
-        if isinstance(raw_checkpoint_flavors, list):
-            for item in raw_checkpoint_flavors:
-                if isinstance(item, dict):
-                    commit_checkpoint_flavors.append(dict(item))
-
-        # Wire artifact_refs into checkpoint_flavors if not already present.
-        parsed_artifacts = []
-        for ref in (artifact_refs or []):
-            if isinstance(ref, dict):
-                art: Dict[str, Any] = {}
-                digest = str(ref.get("digest") or ref.get("blob_digest") or "").strip()
-                if digest:
-                    art["digest"] = digest
-                path_val = str(ref.get("path") or ref.get("blob_path") or "").strip()
-                if path_val:
-                    art["path"] = path_val
-                size_val = ref.get("size_bytes")
-                if size_val is not None:
-                    art["size_bytes"] = int(size_val)
-                domain_val = str(ref.get("domain") or ref.get("blob_domain") or "private").strip()
-                art["domain"] = domain_val
-                if art.get("digest"):
-                    parsed_artifacts.append(art)
-            elif isinstance(ref, str) and ref.strip():
-                parsed_artifacts.append({"path": ref.strip()})
-
-        if parsed_artifacts and commit_checkpoint_flavors:
-            for flavor_item in commit_checkpoint_flavors:
-                if "artifacts" not in flavor_item:
-                    flavor_item["artifacts"] = parsed_artifacts
-
-        # ----- Build the /publish request body (issue #14 shape). -----
-        manifest_entries: List[Dict[str, Any]] = []
-        if isinstance(snapshot_manifest, dict):
-            raw_entries = snapshot_manifest.get("entries")
-            if isinstance(raw_entries, list):
-                manifest_entries = [e for e in raw_entries if isinstance(e, dict)]
-
-        # Each commit_checkpoint_flavors entry becomes one checkpoint row. The
-        # server computes checkpoint_id from the per-flavor snapshot_manifest.
-        publish_checkpoints: List[Dict[str, Any]] = []
-        parent_repo_ref = ""
-        if source_repo and str(source_repo).strip():
-            parent_repo_ref = str(source_repo).strip()
-        parent_checkpoint_id = normalized_source_version_id
-
-        for v in commit_checkpoint_flavors:
-            # The server computes checkpoint_id from the per-flavor
-            # snapshot_manifest. Checkpoint rows carry only concrete fields and
-            # flavor pointers; no arbitrary checkpoint attributes are sent.
-            flavor = str(v.get("flavor") or "").strip()
-            raw_flavors = v.get("flavors")
-            flavors: List[str] = []
-            if isinstance(raw_flavors, list):
-                for raw_flavor in raw_flavors:
-                    item = str(raw_flavor or "").strip()
-                    if item and item not in flavors:
-                        flavors.append(item)
-            if flavor and flavor not in flavors:
-                flavors.insert(0, flavor)
-            label = str(v.get("display_label") or "").strip()
-            lineage: List[Dict[str, Any]] = []
-            if parent_repo_ref and parent_checkpoint_id:
-                edge: Dict[str, Any] = {
-                    "parent_repo":          parent_repo_ref,
-                    "parent_checkpoint_id": parent_checkpoint_id,
-                    "relationship_kind":    relationship_kind or "import",
-                }
-                # Issue #258 task 3: forward per-edge metadata when the
-                # caller attached it (e.g. quantization_method +
-                # quantization_library for quantization edges). The
-                # publish handler in tensorhub validates the shape via
-                # ValidateQuantizationLineageMetadata for relationship_kind
-                # == "quantization" and rejects with 400 if required
-                # fields are missing.
-                raw_meta = v.get("lineage_metadata")
-                if isinstance(raw_meta, dict) and raw_meta:
-                    edge["metadata"] = raw_meta
-                lineage.append(edge)
-            # Per-flavor snapshot_manifest is taken from the caller's
-            # v["snapshot_manifest"] when present; otherwise falls back to
-            # the shared top-level manifest_entries (clone path).
-            v_manifest = v.get("snapshot_manifest")
-            if isinstance(v_manifest, list):
-                per_flavor_entries = [e for e in v_manifest if isinstance(e, dict)]
-            else:
-                per_flavor_entries = manifest_entries
-            # Explicit deletions list — paths from the prior :latest checkpoint
-            # that the caller wants removed from this revision. The server
-            # always merges with :latest, so this is the only way to express
-            # overwrite semantics (e.g. clone's overwrite_repo path enumerates
-            # the prior manifest and lists every path here).
-            v_deletions_raw = v.get("deletions")
-            per_flavor_deletions: List[str] = []
-            if isinstance(v_deletions_raw, list):
-                for d in v_deletions_raw:
-                    if isinstance(d, str):
-                        s = d.strip()
-                        if s:
-                            per_flavor_deletions.append(s)
-            ck_entry: Dict[str, Any] = {
-                "snapshot_manifest": per_flavor_entries,
-                "flavor":            flavor,
-                "flavors":           flavors,
-                "lineage":           lineage,
-            }
-            if label:
-                ck_entry["display_label"] = label
-            for axis_key in ("dtype", "file_layout", "file_type"):
-                axis_value = str(v.get(axis_key) or "").strip()
-                if axis_value:
-                    ck_entry[axis_key] = axis_value
-            if per_flavor_deletions:
-                ck_entry["deletions"] = per_flavor_deletions
-            # Per-checkpoint metadata — tensorhub stores this as
-            # `checkpoints.metadata` jsonb. Carries intrinsic facts like
-            # `size_facts` used by the orchestrator's VRAM-aware placement.
-            raw_metadata = v.get("metadata")
-            if isinstance(raw_metadata, dict) and raw_metadata:
-                ck_entry["metadata"] = dict(raw_metadata)
-            publish_checkpoints.append(ck_entry)
-
-        primary_default_flavor = ""
-        if publish_checkpoints:
-            primary_default_flavor = str(publish_checkpoints[0].get("flavor") or "").strip()
-            if not primary_default_flavor:
-                raw_primary_flavors = publish_checkpoints[0].get("flavors")
-                if isinstance(raw_primary_flavors, list) and raw_primary_flavors:
-                    primary_default_flavor = str(raw_primary_flavors[0] or "").strip()
-        # Top-level tags list (renamed from tag_groups). Each entry points
-        # at a flavor; the server selects which checkpoint that flavor
-        # resolves to. `default_checkpoint_id` is no longer sent —
-        # `default_flavor` carries the same information.
-        tags: List[Dict[str, Any]] = []
-        for tag in normalized_tags:
-            clean_tag = str(tag or "").strip()
-            if not clean_tag or clean_tag.lower() == "latest":
-                continue
-            entry: Dict[str, Any] = {"tag": clean_tag}
-            if primary_default_flavor:
-                entry["default_flavor"] = primary_default_flavor
-            tags.append(entry)
-
-        if not publish_checkpoints:
-            logger.warning(
-                "worker_finalize_skipped request_id=%s job_id=%s owner=%s repo=%s reason=no_checkpoints",
-                self.request_id, self._job_id or "", owner, repo,
-            )
-        else:
-            # `merge_with_existing` is no longer sent: the server always
-            # merges with :latest. Overwrite semantics are expressed by
-            # the caller populating per-checkpoint `deletions` lists; this
-            # method passes them through unchanged.
-            publish_req_body = {
-                "tags":                        tags,
-                "checkpoint_flavors":          publish_checkpoints,
-                "auto_create_external_parent": bool(auto_create_external_parent),
-            }
-            # Issue #20: finalize hits the session-scoped URL. The session
-            # was opened lazily on the first save_* call to this repo and
-            # cached in the ctx-level manager.
-            finalize_resp: Dict[str, Any] = {}
-            try:
-                revision_id = self._checkpoint_revision_id(owner, repo)
-                finalize_resp = _request_json(
-                    "POST",
-                    f"/api/v1/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}/revisions/{urllib.parse.quote(revision_id, safe='')}/finalize",
-                    publish_req_body,
-                ) or {}
-                # Finalize succeeded — drop the session from the manager's
-                # cache so close_all at request end doesn't try to abort it.
-                mgr = self._upload_session_manager()
-                sess = mgr.get("checkpoint", {"repo_owner": owner, "repo_name": repo})
-                if sess is not None:
-                    # Finalize endpoint already returned; just forget cache.
-                    mgr._sessions.pop(sess.scope_key, None)  # type: ignore[attr-defined]
-            except Exception as exc:
-                logger.warning(
-                    "worker_finalize_catalog_failed request_id=%s job_id=%s owner=%s repo=%s error=%r",
-                    self.request_id, self._job_id or "", owner, repo, exc,
-                )
-                raise
-
-            # extract server-computed checkpoint_ids from the
-            # finalize response so callers (and the post-finalize tag
-            # promotion below) can reference them.
-            resp_checkpoints = finalize_resp.get("checkpoints")
-            if isinstance(resp_checkpoints, list):
-                for idx, rc in enumerate(resp_checkpoints):
-                    if idx < len(publish_checkpoints) and isinstance(rc, dict):
-                        cid = str(rc.get("checkpoint_id") or "").strip()
-                        if cid:
-                            publish_checkpoints[idx]["checkpoint_id"] = cid
-
-        published_ids = [str(c.get("checkpoint_id") or "") for c in publish_checkpoints]
-        logger.info(
-            "worker_finalize_succeeded request_id=%s job_id=%s owner=%s repo=%s checkpoints=%d primary=%s",
-            self.request_id, self._job_id or "", owner, repo,
-            len(published_ids), published_ids[0] if published_ids else "",
-        )
-
-        out: Dict[str, Any] = {
-            "ok":                 True,
-            "owner":              owner,
-            "name":               repo,
-            "job_id":             job_id,
-            "checkpoint_ids":     published_ids,
-            "output_versions":    published_ids,
-        }
-        if normalized_tags:
-            out["destination_repo_tags"] = normalized_tags
-        return out
-
     def _download_blob_by_digest(self, digest: str, dest: Path) -> None:
         """Fetch a blob by ``<algo>:<hex>`` digest to ``dest``.
 
@@ -1661,7 +1204,7 @@ class DatasetContext(_PublisherMixin, RequestContext):
     ) -> dict[str, Any]:
         """Publish a dataset revision into ``tensorhub.datasets``.
 
-        Parallel to ``publish_repo_revision`` but writes to the datasets
+        Writes to the datasets
         subsystem instead of ``repo_checkpoints``. The flow:
 
         1. Resolve ``destination_dataset`` (owner/name) against tensorhub.
