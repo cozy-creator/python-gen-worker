@@ -16,7 +16,7 @@ import re
 import socket
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from ..api.errors import OutputTooLargeError
 from ..models.refs import parse_model_ref
@@ -164,35 +164,6 @@ def _parse_owner_repo(value: str) -> tuple[str, str]:
     if not owner or not repo:
         raise ValueError("destination_repo must be in '<owner>/<repo>' format")
     return owner, repo
-
-
-def _parse_owner_repo_with_optional_tag(value: str) -> tuple[str, str, str]:
-    raw = str(value or "").strip().strip("/")
-    tag = ""
-    if ":" in raw:
-        raw, tag = raw.rsplit(":", 1)
-        tag = str(tag or "").strip().lower()
-    owner, repo = _parse_owner_repo(raw)
-    return owner, repo, tag
-
-
-def _normalize_destination_repo_tags(values: Optional[List[str]]) -> List[str]:
-    out: List[str] = []
-    seen: set[str] = set()
-    for item in list(values or []):
-        tag = str(item or "").strip().lower()
-        if not tag:
-            continue
-        if not _PUBLIC_TAG_RE.match(tag):
-            raise ValueError("destination_repo_tags contains an invalid tag")
-        if tag == "latest":
-            raise ValueError("destination_repo_tags must not include latest")
-        if tag in seen:
-            continue
-        seen.add(tag)
-        out.append(tag)
-    out.sort()
-    return out
 
 
 def _decode_unverified_jwt_claims(token: str) -> Dict[str, Any]:

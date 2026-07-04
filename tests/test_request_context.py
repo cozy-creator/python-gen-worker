@@ -100,14 +100,15 @@ def test_producer_contexts_are_real_subclasses() -> None:
         assert issubclass(cls, RequestContext)
         ctx = cls(request_id="r1")
         # producer surface lives on the subclass, not the base
-        assert hasattr(ctx, "publish_repo_revision")
         assert hasattr(ctx, "save_checkpoint")
         assert hasattr(ctx, "set_repo_spec")
         assert hasattr(ctx, "hf_token")
+        # checkpoint publishing is cozy_convert.publish_flavors, not a ctx RPC
+        assert not hasattr(ctx, "publish_repo_revision")
     assert hasattr(ConversionContext(request_id="r1"), "mktemp")
     assert hasattr(DatasetContext(request_id="r1"), "resolve_dataset")
     base = RequestContext(request_id="r1")
-    for producer_only in ("publish_repo_revision", "save_checkpoint", "mktemp"):
+    for producer_only in ("save_checkpoint", "mktemp"):
         assert not hasattr(base, producer_only)
 
 

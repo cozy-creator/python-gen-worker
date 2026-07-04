@@ -65,8 +65,7 @@ class _RequestOutputStream:
         self._expected_size_bytes = int(expected_size_bytes or 0)
         # Lineage/attributes are retained for local fallback compatibility.
         # Repo-CAS `/complete` is deliberately parts-only; checkpoint-level
-        # metadata is sent once in publish_repo_revision's final
-        # checkpoint_flavors[] payload.
+        # metadata rides the commit payload (cozy_convert.publish_flavors).
         self._lineage_produced_by_kind = (str(produced_by_kind or "").strip() or None)
         self._lineage_step_number = step_number if isinstance(step_number, int) else None
         self._lineage_epoch_number = epoch_number if isinstance(epoch_number, int) else None

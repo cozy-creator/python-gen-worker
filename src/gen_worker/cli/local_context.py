@@ -10,9 +10,10 @@ local-mode equivalents:
 - ``save_bytes`` / ``save_file`` materialize files under
   ``./.gen-worker-run/outputs/<ref>`` and return an Asset with ``local_path``
   set (no tensorhub upload).
-- ``publish_repo_revision`` and ``materialize_blob`` on ConversionContext
-  print the would-be payload to stderr and return a fake response, gated
-  by ``--allow-publish``.
+- ``materialize_blob`` on ConversionContext falls back to the local CAS
+  unless ``--allow-publish`` delegates to the real implementation.
+  (Checkpoint publishing goes through ``cozy_convert.publish_flavors``,
+  which talks to tensorhub directly and fails loudly without credentials.)
 - ``_canceled`` is toggled by the installed SIGINT handler in ``run.py``.
 
 Construction is shaped so the only producer of a LocalRequestContext is the
@@ -133,24 +134,10 @@ class LocalRequestContext(LocalRequestContextMixin, RequestContext):
 class LocalConversionContext(LocalRequestContextMixin, ConversionContext):
     """Conversion-kind local context.
 
-    ``publish_repo_revision`` / ``materialize_blob`` are stubbed: they print
-    the would-be payload to stderr and return a fake response unless
+    ``materialize_blob`` is stubbed against the local CAS unless
     ``--allow-publish`` was passed (in which case we delegate to the real
     implementation — useful for round-tripping against a dev tensorhub).
     """
-
-    def publish_repo_revision(self, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[override]
-        if self._local_allow_publish:
-            return super().publish_repo_revision(**kwargs)
-        _stderr_emitter({
-            "kind": "publish_repo_revision.stubbed",
-            "would_publish": kwargs,
-        })
-        return {
-            "stubbed": True,
-            "destination_repo": kwargs.get("destination_repo"),
-            "revision_id": f"local-{uuid.uuid4().hex[:8]}",
-        }
 
     def materialize_blob(self, digest: str, dest: "str | os.PathLike[str]") -> Path:  # type: ignore[override]
         if self._local_allow_publish:

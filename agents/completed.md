@@ -8,6 +8,46 @@
 
 ---
 
+# #375: `yield ProducedFlavor` conversion contract is gone — from-scratch example (and training-endpoints quant endpoints) silently publish nothing
+
+**Completed:** yes
+**Status:** DONE (2026-07-04, Claude) — settled the ONE contract, option (a): producer endpoints (conversion/dataset/training) write files locally, call `cozy_convert.publish_flavors(ctx, flavors)` — one Tensorhub /commits commit per ProducedFlavor (path = file or dir) — and return a result struct; the executor stays contract-free. The dead yield-shape is deleted AND enforced: @endpoint rejects generator handlers for producer kinds at decoration time (TypeError pointing at publish_flavors), so the old shape fails loudly at import instead of silently streaming. examples/from-scratch rewritten to the contract (returns FromScratchResult w/ revision_ids) + discovery smoke test (kind=conversion, output_mode=single, result struct) + publish_flavors e2e against the fake /commits server. Docs: @endpoint docstring, endpoint-authoring.md (worked example), local-dev.md, produced.py/publish.py docstrings. training-endpoints quant/convert endpoints rewrite against this contract (their #37); live publish-then-consume e2e (tensorhub #542 scenario) deferred to the e2e suite.
+
+## Metadata
+- Category: bug / api-contract
+- Status: planned
+- Passes: false
+
+## Tasks
+- [x] Decide the ONE contract: (a) endpoints call `cozy_convert.publish_flavors(ctx, flavors)` explicitly and return a result struct, or (b) the executor collects `ProducedFlavor` yields from conversion-kind handlers and publishes them. Pick, document on @endpoint, delete the other shape.
+- [x] Fix examples/from-scratch to the chosen contract and cover it (discovery+lock smoke at minimum; ideally the e2e publish-then-consume scenario of tensorhub #542).
+
+## Acceptance
+from-scratch runs against a live stack and its commit lands in the CAS; the dead shape no longer imports.
+
+---
+
+# #374: cozy_convert publish/clone robustness — retries, resume, ingest junk in published trees, silent empty publish
+
+**Completed:** yes
+**Status:** DONE (2026-07-04, Claude) — hub.py: bounded retries w/ backoff + Retry-After on commit POST, part PUTs, complete, and finalize polling (429/5xx/network; abort-DELETE on terminal failure unchanged). run_clone: persistent workdir keyed by sha256(provider|source|destination) under $COZY_CONVERT_WORKDIR (default <tmp>/cozy-convert) — retained on failure so a retry resumes the HF snapshot (hf local-dir metadata kept for exactly that reason), deleted on success; partial flavor trees are wiped per-retry. Junk filtering: files_from_tree AND _copy_non_weights skip `.cache/huggingface/**` so mirrors are byte-faithful (root dotfiles like a real `.gitignore` still publish). `if not result.published: raise` — publishing nothing can never read as success (empty `outputs` was already defaulted to bf16 by normalize_outputs; the guard now covers every path). Legacy `publish_repo_revision` (~450 LOC, legacy /publish route) deleted from _PublisherMixin along with its local-context stub, finalize-poll constants, and orphaned _helpers; checkpoint publishing is ONLY cozy_convert.publish_flavors (/commits). New tests: retry/junk in test_hub.py + run_clone lifecycle in test_publish.py (fake /commits server, real HTTP). Deliberate: publish_dataset_revision (datasets subsystem) untouched; civitai download resume is #373's scope.
+
+## Metadata
+- Category: bug / cozy_convert
+- Status: planned
+- Passes: false
+
+## Tasks
+- [x] Live probe: the published repo contains `.cache/huggingface/**` lock/metadata files and `.gitignore` — `ingest_huggingface` snapshots into the tree and `files_from_tree` (hub.py) uploads EVERYTHING. Filter HF-cache internals (or snapshot to a clean copy) so mirrors are byte-faithful to the source repo, not to huggingface_hub's cache layout.
+- [x] HubClient has no retry/backoff/429 handling on part PUTs, commit POST, or complete (hub.py:113-156) — one transient S3 hiccup after a multi-GB download+convert fails the whole clone; run_clone `shutil.rmtree`s the workdir in `finally` (clone.py:552) so a retry is a full re-download. Add bounded retries + a keyed persistent workdir for resume.
+- [x] `run_clone` with an empty `outputs` list publishes NOTHING and returns success (the specs loop simply doesn't run; the no-publish error only fires when failed_flavors is non-empty). Default to publish-as-is or make empty outputs an error.
+- [x] Kill the second publish path: `gen_worker.publish_repo_revision` (request_context/__init__.py:995) still posts to the legacy `/repos/:tenant/:name/publish` route while cozy_convert uses `/commits` (#515 "the ONE publish path"). Convert remaining callers or delete.
+
+## Acceptance
+A mirrored repo's tree equals the source repo's tree; transient network errors don't restart multi-GB work; publishing nothing cannot read as success.
+
+---
+
 # #372: transport hardening — auth-failure gating, HelloAck deadline, redirect hop reset, TLS on redirects
 
 **Completed:** yes
