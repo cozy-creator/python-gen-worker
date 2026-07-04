@@ -74,8 +74,16 @@ class Worker:
     def run(self) -> int:
         return asyncio.run(self.arun())
 
+    _loop: Optional[asyncio.AbstractEventLoop] = None
+
+    def stop(self) -> None:
+        """Thread-safe stop (tests / embedding); production exits via Drain."""
+        loop = self._loop
+        if loop is not None and not loop.is_closed():
+            loop.call_soon_threadsafe(self.transport.stop)
+
     async def arun(self) -> int:
-        loop = asyncio.get_running_loop()
+        loop = self._loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
             try:
                 loop.add_signal_handler(

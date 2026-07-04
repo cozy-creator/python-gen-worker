@@ -983,12 +983,31 @@ def dispatch_request(
     bound_method = getattr(instance, selected.attr_name)
     extra_kwargs = _build_injected_kwargs(bound_method, resolved_models)
     result = bound_method(ctx, payload, **extra_kwargs)
-    if selected.is_generator or inspect.isgenerator(result):
+
+    def _emit_item(item: Any) -> None:
+        if ctx.is_canceled():
+            raise CanceledError("canceled")
+        write_event("yield", item)
+
+    if inspect.isasyncgen(result):
+        import asyncio
+
+        async def _drain() -> int:
+            count = 0
+            async for item in result:
+                _emit_item(item)
+                count += 1
+            return count
+
+        write_event("result", {"yielded": asyncio.run(_drain())})
+    elif inspect.iscoroutine(result):
+        import asyncio
+
+        write_event("result", asyncio.run(result))
+    elif selected.is_generator or inspect.isgenerator(result):
         count = 0
         for item in result:
-            if ctx.is_canceled():
-                raise CanceledError("canceled")
-            write_event("yield", item)
+            _emit_item(item)
             count += 1
         write_event("result", {"yielded": count})
     else:

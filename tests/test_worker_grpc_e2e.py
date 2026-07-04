@@ -185,9 +185,7 @@ class _Harness:
         self._thread.start()
 
     def stop(self, timeout: float = _TIMEOUT) -> Optional[int]:
-        loop_call = getattr(self.worker.transport, "stop", None)
-        if loop_call is not None:
-            self.worker.transport.stop()
+        self.worker.stop()
         self._thread.join(timeout)
         return self.exit_code
 
@@ -379,6 +377,61 @@ def test_gpu_semaphore_serializes_cuda_jobs(scheduler_and_worker) -> None:
         assert res.status == pb.JOB_STATUS_OK
     elapsed = time.monotonic() - t0
     assert elapsed >= 1.0, f"cuda jobs must serialize on 1 gpu slot (took {elapsed:.2f}s)"
+
+
+def test_marco_polo_example_serves_under_the_new_core() -> None:
+    """#365 acceptance: examples/marco-polo runs against the fake scheduler."""
+    import sys
+    from pathlib import Path
+
+    src = Path(__file__).resolve().parents[1] / "examples" / "marco-polo" / "src"
+    sys.path.insert(0, str(src))
+    try:
+        scheduler = FakeScheduler()
+        server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
+        pb_grpc.add_WorkerSchedulerServicer_to_server(scheduler, server)
+        port = server.add_insecure_port("127.0.0.1:0")
+        server.start()
+        settings = load_settings(
+            orchestrator_public_addr=f"127.0.0.1:{port}",
+            worker_id="marco-polo-worker",
+            worker_jwt="",
+        )
+        worker = Worker(settings, ["marco_polo.main"], backoff_base_s=0.05)
+        thread = threading.Thread(target=worker.run, daemon=True)
+        thread.start()
+        try:
+            conn = scheduler.wait_connection(0)
+            conn.wait_for(
+                lambda m: m.WhichOneof("msg") == "state_delta"
+                and m.state_delta.phase == pb.WORKER_PHASE_READY
+                and "marco_polo" in m.state_delta.available_functions
+            )
+            conn.send(run_job=pb.RunJob(
+                request_id="mp-1", attempt=1, function_name="marco_polo",
+                input_payload=_msgpack("marco")))
+            res = conn.wait_for(_is_result_for("mp-1")).job_result
+            assert res.status == pb.JOB_STATUS_OK
+            assert _decode_out(res.inline).response == "polo"
+
+            conn.send(run_job=pb.RunJob(
+                request_id="mp-2", attempt=1, function_name="marco_polo_stream",
+                input_payload=_msgpack("marco")))
+            res = conn.wait_for(_is_result_for("mp-2")).job_result
+            assert res.status == pb.JOB_STATUS_OK
+            chunks = [
+                m.job_progress for m in conn.received
+                if m.WhichOneof("msg") == "job_progress"
+                and m.job_progress.request_id == "mp-2"
+            ]
+            assert [c.seq for c in chunks] == [1, 2, 3, 4]
+            assert msgspec.json.decode(chunks[-1].data)["response"] == "polo"
+        finally:
+            worker.stop()
+            thread.join(_TIMEOUT)
+            server.stop(grace=0)
+    finally:
+        sys.path.remove(str(src))
 
 
 def test_auth_rejection_exits_instead_of_spinning() -> None:
