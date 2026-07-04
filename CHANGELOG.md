@@ -2,6 +2,23 @@
 
 ## Unreleased
 
+- **Residency unification + worker-side VRAM juggling + disk GC (#369,
+  #370, #371).** The `Residency` registry now owns the executor's pipelines:
+  worker-built pipelines register per ref with their own measured allocator
+  delta (multi-model endpoints no longer report `vram_bytes=0`); tenant-loaded
+  refs carry the residual. Model loads serialize under a load lock; free-VRAM
+  probes sum across all CUDA devices. `ensure_setup` runs `make_room` before
+  loading — idle LRU pipelines demote to the warm CPU-RAM tier instead of the
+  new load degrading down the offload ladder — and hub `UNLOAD` demotes
+  instead of destroying; the next RunJob/LOAD promotes RAM→VRAM in seconds.
+  `demote()` only performs transitions it can actually execute (movable
+  object + RAM headroom); otherwise the executor tears the owning record down
+  and books every ref back to disk. Disk retention exists now: a persisted
+  ref index, a pre-download headroom gate, LRU disk GC honoring `keep` +
+  in-use pins + a grace window (keep-pressure escape still emits EVICTED),
+  fail-fast `insufficient_disk`, and a boot-time rescan so Hello.models
+  matches disk truth across restarts.
+
 - **Conversion ETL split out as `cozy-convert` (#367) — breaking.**
   `gen_worker.clone` and `gen_worker.conversion` are gone; the mirror /
   convert / publish ETL and the conversion tenant SDK (`Source`, `Dataset`,

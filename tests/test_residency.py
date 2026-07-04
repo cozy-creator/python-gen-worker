@@ -94,13 +94,19 @@ def test_track_disk_is_idempotent_no_event_spam(tmp_path: Path) -> None:
     assert [s for _, s, _ in events] == ["on_disk"]
 
 
-def test_demote_without_disk_path_or_obj_evicts(tmp_path: Path) -> None:
+def test_demote_refuses_unmovable_entries(monkeypatch) -> None:
+    """demote() never books a transition it can't perform: entries without a
+    movable object (tenant-loaded weights) and RAM-tight hosts are refused —
+    freeing them is the owner's (executor teardown) job."""
     events: list = []
     res = _res(events)
-    res.track_vram("no-obj", None, vram_bytes=1 * _GiB)  # nothing to keep warm
-    assert res.demote("no-obj") is True
-    assert res.tier("no-obj") is None
-    assert events[-1] == ("no-obj", "evicted", 0)
+    res.track_vram("no-obj", None, vram_bytes=1 * _GiB)
+    assert res.demote("no-obj") is False
+    assert res.tier("no-obj") is Tier.VRAM  # still the truth
+
+    res.track_vram("movable", _Pipe(), vram_bytes=1 * _GiB)
+    monkeypatch.setattr(residency_mod, "get_available_ram_gb", lambda: 1.0)
+    assert res.demote("movable") is False  # RAM floor: no warm tier
 
 
 # --------------------------------------------------------------------------- #
