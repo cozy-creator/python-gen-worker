@@ -17,6 +17,9 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/marco_polo"]
 
+[tool.gen_worker]
+main = "marco_polo.main"
+
 [tool.mypy]
 python_version = "3.12"
 ignore_missing_imports = true

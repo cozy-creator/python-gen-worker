@@ -20,7 +20,14 @@ if TYPE_CHECKING:  # heavy deps stay import-time-free; methods import lazily
     import torch
 
 from ..api.errors import AuthError
-from ..api.types import Asset, Compute, Tensors
+from ..api.types import (
+    Asset,
+    AudioAsset,
+    Compute,
+    ImageAsset,
+    Tensors,
+    VideoAsset,
+)
 
 
 def _default_compute() -> Compute:
@@ -40,6 +47,12 @@ def _copy_context_metadata(value: Any) -> Any:
     if isinstance(value, tuple):
         return tuple(_copy_context_metadata(v) for v in value)
     return value
+
+
+def _as_asset(asset: Asset, cls: type) -> Any:
+    """Re-type a plain Asset as a media Asset subclass (same fields)."""
+    kw = {f: getattr(asset, f) for f in asset.__struct_fields__}
+    return cls(**kw)
 
 
 logger = logging.getLogger(__name__)
@@ -63,7 +76,6 @@ from ._helpers import (
     _FILE_API_STREAM_FINALIZE_TIMEOUT_S,
     _FILE_API_STREAM_REPLAY_TIMEOUT_S,
     _PUBLIC_TAG_RE,
-    _assert_token_repo_scope_matches_destination,
     _canonicalize_model_ref_string,
     _decode_unverified_jwt_claims,
     _encode_ref_for_url,
@@ -184,76 +196,34 @@ class RequestContext:
         return self._request_id
 
     @property
-    def job_id(self) -> Optional[str]:
-        return self._job_id
-
-    @property
-    def owner(self) -> Optional[str]:
-        return self._owner
-
-    @property
-    def invoker_id(self) -> Optional[str]:
-        return self._invoker_id
-
-    @property
-    def timeout_ms(self) -> Optional[int]:
-        return self._timeout_ms
-
-    @property
     def deadline(self) -> Optional[float]:
+        """Absolute unix-time deadline, or None when the request is unbounded."""
         return self._deadline
 
     @property
-    def compute(self) -> Compute:
-        """Resolved hardware for this invocation (tensorhub #232).
-
-        Read-only. For inference this equals the endpoint's ``[resources]``.
-        For training this is the endpoint resources merged with the invoker's
-        ``compute`` overrides from the wire payload. Fields default to zero /
-        empty strings when the orchestrator hasn't attached resolved_compute
-        (older protobuf, inference-only callpath, etc) — tenants can branch
-        on ``ctx.compute.gpu_count`` etc without None-checks.
-        """
-        return self._compute
-
-    @property
     def models(self) -> Dict[str, Any]:
-        """Resolved model bindings for this invocation.
-
-        Read-only metadata resolved by the orchestrator from endpoint defaults
-        plus request-time ``_models`` overrides. The tenant input payload never
-        contains the reserved ``_models`` envelope; use this property when a
-        handler needs to inspect the effective base refs or LoRA attachments.
-        """
+        """Resolved model refs for this invocation, keyed by slot name."""
         return _copy_context_metadata(self._models)
 
     @property
     def device(self) -> "torch.device":
-        """Torch device for this worker runtime (e.g. cuda:0 or cpu).
-
-        Tenant functions should prefer `ctx.device` over choosing a device
-        themselves so the platform can standardize device selection.
-        """
+        """Torch device for this worker runtime (e.g. cuda:0 or cpu)."""
         try:
             import torch
         except Exception:
             raise RuntimeError("torch is not available in this runtime") from None
-
         if torch.cuda.is_available():
             return torch.device(f"cuda:{torch.cuda.current_device()}")
-
         return torch.device("cpu")
 
-    @property
-    def hf_token(self) -> str:
-        """HuggingFace API token, sourced from gen_worker.config.Settings.
+    def generator(self, seed: Optional[int] = None) -> "torch.Generator":
+        """A ``torch.Generator`` on ``ctx.device``, seeded when ``seed`` is set."""
+        import torch
 
-        Tenant code calling into `gen_worker.clone` / `gen_worker.conversion`
-        helpers passes `hf_token=ctx.hf_token` so the library never reads env
-        on the tenant's behalf. Empty string when no token is configured —
-        helpers fall back to unauthenticated calls (works for public HF repos).
-        """
-        return self._hf_token
+        gen = torch.Generator(device=self.device)
+        if seed is not None:
+            gen.manual_seed(int(seed))
+        return gen
 
     def _get_file_api_base_url(self) -> str:
         if not self._file_api_base_url:
@@ -310,36 +280,6 @@ class RequestContext:
                         repo_spec_provider=_repo_spec_provider,
                     )
         return self._upload_sessions
-
-    def set_repo_spec(
-        self,
-        *,
-        kind: str = "",
-        library_name: str = "",
-        model_family: str = "",
-        class_name: str = "",
-        adapter_for_checkpoint_group: str = "",
-        adapter_for_family: str = "",
-    ) -> None:
-        """Set destination repo fields for upload sessions opened from this ctx.
-
-        Must be called before the first save_checkpoint / save_file call for
-        the destination repo because these fields are sent when the upload
-        session opens.
-        """
-        spec = {
-            "kind": kind,
-            "library_name": library_name,
-            "model_family": model_family,
-            "class_name": class_name,
-            "adapter_for_checkpoint_group": adapter_for_checkpoint_group,
-            "adapter_for_family": adapter_for_family,
-        }
-        self._repo_spec = {
-            k: str(v or "").strip()
-            for k, v in spec.items()
-            if str(v or "").strip()
-        }
 
     def _checkpoint_revision_id(self, repo_owner: str, repo_name: str) -> str:
         """Return the revision_id for a checkpoint upload session on this
@@ -466,123 +406,57 @@ class RequestContext:
                 "tensor upload requires repo job scope (execution_hints.kind with destination_repo and job_id)"
             )
 
-    @property
-    def resolved_repos_by_id(self) -> Optional[dict[str, Any]]:
-        return self._resolved_repos_by_id
-
-    @property
-    def required_models(self) -> list[str]:
-        return list(self._required_models)
-
-    @property
-    def execution_hints(self) -> dict[str, Any]:
-        return dict(self._execution_hints)
-
-    # Reserved-name conversion/training contract. `source` and `destination`
-    # come from the job payload's reserved fields (the Worker extracts and
-    # populates them before invoking tenant code). `source_path` is populated
-    # by the library after it materializes the source snapshot to local disk.
-    # Tenant code reads these; writes happen only inside the library.
-    @property
-    def source(self) -> dict[str, Any]:
-        """Echoed source descriptor: {ref, checkpoint_id?, attributes}. Empty dict
-        if this isn't a conversion/training job or the payload didn't supply
-        the reserved `source` field."""
-        return dict(self._source_info)
-
-    @property
-    def source_path(self) -> Optional[str]:
-        """Local path to the materialized source snapshot. Populated by the
-        library after resolve+download; None before materialization or when
-        this isn't a conversion/training job."""
-        return self._source_path
-
-    @property
-    def destination(self) -> dict[str, Any]:
-        """Echoed destination descriptor: {ref, tags}. Empty dict if this isn't
-        a conversion/training job or the payload didn't supply the reserved
-        `destination` field."""
-        return dict(self._destination_info)
-
-    def _set_source_path(self, path: str) -> None:
-        """Library-internal: called by Worker after the source snapshot has
-        been materialized locally. Tenant code must not call this."""
-        self._source_path = str(path) if path else None
-
-    @property
-    def parent_request_id(self) -> Optional[str]:
-        return self._parent_request_id
-
-    @property
-    def child_request_id(self) -> Optional[str]:
-        return self._child_request_id
-
-    @property
-    def item_id(self) -> Optional[str]:
-        return self._item_id
-
-    @property
-    def item_index(self) -> Optional[int]:
-        return self._item_index
-
-    @property
-    def item_span(self) -> dict[str, int]:
-        return dict(self._item_span)
-
     # #321: preferred_batch_size() / prefetch_depth() removed alongside
     # RuntimeBatchingConfigCommand — they only ever read state set by the
     # orchestrator's runtime override, and that producer never landed.
 
-    def time_remaining_s(self) -> Optional[float]:
+    def time_remaining(self) -> Optional[float]:
+        """Seconds until the deadline; None when unbounded."""
         if self._deadline is None:
             return None
         return max(0.0, self._deadline - time.time())
 
-    def is_canceled(self) -> bool:
-        """Check if the request was canceled."""
+    @property
+    def cancelled(self) -> bool:
+        """True once the request has been cancelled."""
         return self._canceled
 
-    def raise_if_canceled(self, message: str = "request canceled") -> None:
-        """Raise ``CanceledError(message)`` if this request has been canceled. No-op otherwise.
+    def raise_if_cancelled(self, message: str = "request cancelled") -> None:
+        """Raise ``CanceledError(message)`` if cancelled. No-op otherwise.
 
-        Canonical cancellation idiom — call inside long-running loops.
+        The one cancellation idiom — call inside long-running loops.
         """
-        if self.is_canceled():
+        if self._canceled:
             from ..api.errors import CanceledError
             raise CanceledError(message)
 
-    def cancel(self) -> None:
-        """Mark the request as canceled."""
+    def _cancel(self) -> None:
+        """Worker-internal: mark the request as cancelled."""
         if not self._canceled:
             self._canceled = True
             self._cancel_event.set()
-            logger.info(f"Action {self.request_id} marked for cancellation.")
+            logger.info("request %s marked for cancellation.", self.request_id)
 
-    def done(self) -> threading.Event:
-        """Returns an event that is set when the request is cancelled."""
-        return self._cancel_event
-
-    def emit(self, event_type: str, payload: Optional[Dict[str, Any]] = None) -> None:
-        """Emit a progress/event payload (best-effort)."""
+    def _emit_event(self, event_type: str, payload: Optional[Dict[str, Any]] = None) -> None:
+        """Worker-internal: emit a progress/event payload (best-effort)."""
         if not self._emitter:
-            logger.debug(f"emit({event_type}) dropped: no emitter configured")
+            logger.debug("emit(%s) dropped: no emitter configured", event_type)
             return
-        event = {
+        self._emitter({
             "request_id": self._request_id,
             "type": event_type,
             "payload": payload or {},
             "timestamp": time.time(),
-        }
-        self._emitter(event)
+        })
 
     def progress(self, progress: float, stage: Optional[str] = None) -> None:
         payload: Dict[str, Any] = {"progress": progress}
         if stage is not None:
             payload["stage"] = stage
-        self.emit("request.progress", payload)
+        self._emit_event("request.progress", payload)
 
     def log(self, message: str, level: str = "info") -> None:
-        self.emit("request.log", {"message": message, "level": level})
+        self._emit_event("request.log", {"message": message, "level": level})
 
     # Inline-bytes threshold: when the client requested
     # `Prefer: bytes=inline` AND the payload is at or below this many
@@ -606,7 +480,7 @@ class RequestContext:
             sha = hashlib.sha256(data).hexdigest()
             return Asset(
                 ref=ref,
-                owner=self.owner,
+                owner=self._owner,
                 local_path=str(p),
                 mime_type=None,
                 size_bytes=len(data),
@@ -625,13 +499,13 @@ class RequestContext:
         if output_format == "inline" and len(data) <= self._SAVE_BYTES_INLINE_THRESHOLD:
             return Asset(
                 ref=ref,
-                owner=self.owner,
+                owner=self._owner,
                 size_bytes=len(data),
                 sha256=hashlib.sha256(data).hexdigest(),
                 inline_bytes=data,
             )
 
-        stream = self.open_output_stream(ref, create=False, expected_size_bytes=len(data))
+        stream = self._open_output_stream(ref, create=False, expected_size_bytes=len(data))
         stream.write(data)
         out = stream.finalize()
         if isinstance(out, Asset):
@@ -646,7 +520,7 @@ class RequestContext:
         format: str = "webp",
         quality: int = 95,
         lossless: bool = False,
-    ) -> Asset:
+    ) -> ImageAsset:
         fmt = str(format or "webp").strip().lower()
         if fmt in {"jpg", "jpeg"}:
             pil_format = "JPEG"
@@ -679,7 +553,71 @@ class RequestContext:
             save_kwargs["lossless"] = bool(lossless)
             save_kwargs["method"] = 6
         img.save(buf, format=pil_format, **save_kwargs)
-        return self.save_bytes(ref, buf.getvalue())
+        return _as_asset(self.save_bytes(ref, buf.getvalue()), ImageAsset)
+
+    def save_audio(
+        self,
+        audio: Any,
+        ref: Optional[str] = None,
+        *,
+        sample_rate: int = 44100,
+        format: str = "wav",
+    ) -> AudioAsset:
+        """Encode + save audio; returns a typed :class:`AudioAsset`.
+
+        ``audio`` is a numpy array (frames[, channels]) or a torch tensor;
+        raw ``bytes`` are stored as-is (assumed already encoded).
+        """
+        fmt = str(format or "wav").strip().lower()
+        if ref is None or str(ref).strip() == "":
+            ref = f"outputs/{self.request_id}/audio.{fmt}"
+        else:
+            ref = _normalize_output_ref(str(ref))
+            if Path(ref).suffix == "":
+                ref += f".{fmt}"
+        if isinstance(audio, (bytes, bytearray)):
+            data = bytes(audio)
+        else:
+            try:
+                import numpy as np
+                import soundfile as sf
+            except ImportError as exc:
+                from ..api.errors import ValidationError
+
+                raise ValidationError(
+                    "save_audio needs the audio extra: pip install 'gen-worker[audio]'"
+                ) from exc
+            arr = audio
+            if hasattr(arr, "detach"):
+                arr = arr.detach().cpu().numpy()
+            arr = np.asarray(arr)
+            if arr.ndim == 2 and arr.shape[0] < arr.shape[1]:
+                arr = arr.T  # (channels, frames) -> (frames, channels)
+            buf = BytesIO()
+            sf.write(buf, arr, int(sample_rate), format=fmt.upper())
+            data = buf.getvalue()
+        return _as_asset(self.save_bytes(ref, data), AudioAsset)
+
+    def save_video(
+        self,
+        video: "bytes | str | os.PathLike[str]",
+        ref: Optional[str] = None,
+        *,
+        format: str = "mp4",
+    ) -> VideoAsset:
+        """Save an encoded video (bytes or a local file path); returns a
+        typed :class:`VideoAsset`."""
+        fmt = str(format or "mp4").strip().lower()
+        if ref is None or str(ref).strip() == "":
+            ref = f"outputs/{self.request_id}/video.{fmt}"
+        else:
+            ref = _normalize_output_ref(str(ref))
+            if Path(ref).suffix == "":
+                ref += f".{fmt}"
+        if isinstance(video, (bytes, bytearray)):
+            return _as_asset(self.save_bytes(ref, bytes(video)), VideoAsset)
+        return _as_asset(self.save_file(ref, video), VideoAsset)
+
 
     def save_file(self, ref: str, local_path: str | os.PathLike[str]) -> Asset:
         ref = _normalize_output_ref(ref)
@@ -701,7 +639,7 @@ class RequestContext:
             sha = _sha256_file(str(dst))
             return Asset(
                 ref=ref,
-                owner=self.owner,
+                owner=self._owner,
                 local_path=str(dst),
                 mime_type=None,
                 size_bytes=size,
@@ -712,7 +650,7 @@ class RequestContext:
         # inside save_checkpoint's non-streaming branch is a no-op for
         # the same thread.
         with self._get_upload_budget_gate().reserve(size):
-            stream = self.open_output_stream(ref, create=False, expected_size_bytes=size)
+            stream = self._open_output_stream(ref, create=False, expected_size_bytes=size)
             with open(src, "rb") as fin:
                 while True:
                     chunk = fin.read(8 * 1024 * 1024)
@@ -723,6 +661,171 @@ class RequestContext:
             if isinstance(out, Asset):
                 return out
             raise RuntimeError("file save failed (invalid_asset_response)")
+
+    def _open_output_stream(
+        self,
+        ref: str,
+        *,
+        create: bool = False,
+        expected_size_bytes: Optional[int] = None,
+    ) -> _RequestOutputStream:
+        """Library-internal: chunk-writable output stream finalizing to an Asset."""
+        return _RequestOutputStream(
+            ctx=self,
+            ref=ref,
+            kind="asset",
+            create=create,
+            expected_size_bytes=expected_size_bytes,
+        )
+
+    def _save_file_create(self, ref: str, local_path: str | os.PathLike[str]) -> Asset:
+        ref = _normalize_output_ref(ref)
+        src = str(os.fspath(local_path) if local_path else "").strip()
+        if not src:
+            raise ValueError("local_path is required")
+        if not os.path.exists(src):
+            raise FileNotFoundError(src)
+
+        size = int(os.path.getsize(src))
+        _enforce_output_file_size_limit(size)
+
+        local_out = self._resolve_local_output_path(ref)
+        if local_out:
+            dst = Path(local_out)
+            if dst.exists():
+                raise RuntimeError("output path already exists")
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            with open(src, "rb") as fin, open(dst, "wb") as fout:
+                shutil.copyfileobj(fin, fout, length=1024 * 1024)
+            sha = _sha256_file(str(dst))
+            return Asset(
+                ref=ref,
+                owner=self._owner,
+                local_path=str(dst),
+                mime_type=None,
+                size_bytes=size,
+                sha256=sha,
+            )
+        # Reserve aggregate-bytes budget (issue #269 back-pressure).
+        with self._get_upload_budget_gate().reserve(size):
+            stream = self._open_output_stream(ref, create=True, expected_size_bytes=size)
+            with open(src, "rb") as fin:
+                while True:
+                    chunk = fin.read(8 * 1024 * 1024)
+                    if not chunk:
+                        break
+                    stream.write(chunk)
+            out = stream.finalize()
+            if isinstance(out, Asset):
+                return out
+            raise RuntimeError("file save failed (invalid_asset_response)")
+
+    # Issue #1 (slim-request-context): admin-plane visibility toggles
+    # (publish_checkpoint / publish_dataset / publish_endpoint /
+    # publish_endpoint_release / publish_media + their unpublish_ counterparts)
+    # were deleted as a hard cut. They were not used by any worker-author
+    # endpoint; visibility flips belong in cozyctl / the tensorhub UI, not on
+    # a per-request object.
+
+
+
+# ---------------------------------------------------------------------------
+# Issue #1 (slim-request-context): kind-specific subclasses.
+#
+# RequestContext is the per-inference base. Conversion, dataset-producing,
+# and trainer endpoints get richer subclasses that carry the
+# producer-contract RPCs (publish_repo_revision, publish_dataset_revision,
+# resolve_dataset, read/write_repo_metadata, materialize_blob).
+#
+# ConversionContext / DatasetContext / TrainingContext share `_PublisherMixin`
+# for the producer-contract HTTP helpers (repo metadata read/write, blob
+# fetch + materialization by digest). publish_repo_revision lives on the base
+# RequestContext — producer-style @inference handlers (clone) call it too.
+# ---------------------------------------------------------------------------
+
+
+class _PublisherMixin:
+    """Producer-contract helpers shared by ConversionContext, DatasetContext
+    and TrainingContext: repo metadata read/write, blob fetch by digest, and
+    ``materialize_blob``. Always combined with ``RequestContext`` via multiple
+    inheritance (so ``self`` has ``_file_api_base_url`` / ``_owner`` /
+    ``_get_worker_capability_token``).
+
+    Not a public surface: tenants should never import this directly.
+    """
+
+    @property
+    def hf_token(self) -> str:
+        """HuggingFace API token for gen_worker.clone / conversion helpers.
+
+        Empty string when unconfigured — helpers fall back to
+        unauthenticated calls (public repos work)."""
+        return self._hf_token
+
+    @property
+    def compute(self) -> Compute:
+        """Resolved hardware for this invocation (read-only)."""
+        return self._compute
+
+    # Reserved-name conversion/training contract. `source` and `destination`
+    # come from the job payload's reserved fields; `source_path` is populated
+    # by the library after it materializes the source snapshot locally.
+    @property
+    def source(self) -> dict[str, Any]:
+        return dict(self._source_info)
+
+    @property
+    def source_path(self) -> Optional[str]:
+        return self._source_path
+
+    @property
+    def destination(self) -> dict[str, Any]:
+        return dict(self._destination_info)
+
+    def _set_source_path(self, path: str) -> None:
+        """Library-internal: called after source materialization."""
+        self._source_path = str(path) if path else None
+
+    def set_repo_spec(
+        self,
+        *,
+        kind: str = "",
+        library_name: str = "",
+        model_family: str = "",
+        class_name: str = "",
+        adapter_for_checkpoint_group: str = "",
+        adapter_for_family: str = "",
+    ) -> None:
+        """Set destination repo fields for upload sessions opened from this ctx.
+
+        Must be called before the first save_checkpoint / save_file call for
+        the destination repo (the fields are sent when the session opens).
+        """
+        spec = {
+            "kind": kind,
+            "library_name": library_name,
+            "model_family": model_family,
+            "class_name": class_name,
+            "adapter_for_checkpoint_group": adapter_for_checkpoint_group,
+            "adapter_for_family": adapter_for_family,
+        }
+        self._repo_spec = {
+            k: str(v or "").strip()
+            for k, v in spec.items()
+            if str(v or "").strip()
+        }
+
+    def open_output_stream(
+        self,
+        ref: str,
+        *,
+        create: bool = False,
+        expected_size_bytes: Optional[int] = None,
+    ) -> _RequestOutputStream:
+        """Open a chunk-writable output stream that finalizes to an Asset."""
+        return self._open_output_stream(
+            ref, create=create, expected_size_bytes=expected_size_bytes
+        )
 
     def save_checkpoint(
         self,
@@ -857,27 +960,6 @@ class RequestContext:
             download_token=asset.download_token,
         )
 
-    def open_output_stream(
-        self,
-        ref: str,
-        *,
-        create: bool = False,
-        expected_size_bytes: Optional[int] = None,
-    ) -> _RequestOutputStream:
-        """Open a chunk-writable output stream that finalizes to an Asset.
-
-        Public API name (issue #20): prefer ``ctx.save_output_stream(...)``
-        — same behavior, the preferred name for consistency with other
-        save_* methods.
-        """
-        return _RequestOutputStream(
-            ctx=self,
-            ref=ref,
-            kind="asset",
-            create=create,
-            expected_size_bytes=expected_size_bytes,
-        )
-
     def open_checkpoint_stream(
         self,
         ref: str,
@@ -909,55 +991,6 @@ class RequestContext:
             flavor=flavor,
             attributes=attributes,
         )
-
-    def save_file_create(self, ref: str, local_path: str | os.PathLike[str]) -> Asset:
-        ref = _normalize_output_ref(ref)
-        src = str(os.fspath(local_path) if local_path else "").strip()
-        if not src:
-            raise ValueError("local_path is required")
-        if not os.path.exists(src):
-            raise FileNotFoundError(src)
-
-        size = int(os.path.getsize(src))
-        _enforce_output_file_size_limit(size)
-
-        local_out = self._resolve_local_output_path(ref)
-        if local_out:
-            dst = Path(local_out)
-            if dst.exists():
-                raise RuntimeError("output path already exists")
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            with open(src, "rb") as fin, open(dst, "wb") as fout:
-                shutil.copyfileobj(fin, fout, length=1024 * 1024)
-            sha = _sha256_file(str(dst))
-            return Asset(
-                ref=ref,
-                owner=self.owner,
-                local_path=str(dst),
-                mime_type=None,
-                size_bytes=size,
-                sha256=sha,
-            )
-        # Reserve aggregate-bytes budget (issue #269 back-pressure).
-        with self._get_upload_budget_gate().reserve(size):
-            stream = self.open_output_stream(ref, create=True, expected_size_bytes=size)
-            with open(src, "rb") as fin:
-                while True:
-                    chunk = fin.read(8 * 1024 * 1024)
-                    if not chunk:
-                        break
-                    stream.write(chunk)
-            out = stream.finalize()
-            if isinstance(out, Asset):
-                return out
-            raise RuntimeError("file save failed (invalid_asset_response)")
-
-    # Issue #1 (slim-request-context): admin-plane visibility toggles
-    # (publish_checkpoint / publish_dataset / publish_endpoint /
-    # publish_endpoint_release / publish_media + their unpublish_ counterparts)
-    # were deleted as a hard cut. They were not used by any worker-author
-    # endpoint; visibility flips belong in cozyctl / the tensorhub UI, not on
-    # a per-request object.
 
     def publish_repo_revision(
         self,
@@ -1002,15 +1035,10 @@ class RequestContext:
         md = dict(metadata or {})
         base = (self._file_api_base_url or "").strip().rstrip("/")
         token = (self._worker_capability_token or "").strip()
-        if token:
-            required_permissions = ["repo-version:create"]
-            if create_if_missing:
-                required_permissions.insert(0, "tensor-repo:create")
-            _assert_token_repo_scope_matches_destination(token, owner, repo, required_permissions=required_permissions)
         logger.info(
             "worker_finalize_attempt request_id=%s job_id=%s owner=%s repo=%s",
             self.request_id,
-            self.job_id or "",
+            self._job_id or "",
             owner,
             repo,
         )
@@ -1128,7 +1156,7 @@ class RequestContext:
                     logger.warning(
                         "worker_finalize_post_retry request_id=%s job_id=%s path=%s error=%r",
                         self.request_id,
-                        self.job_id or "",
+                        self._job_id or "",
                         path,
                         exc,
                     )
@@ -1152,7 +1180,7 @@ class RequestContext:
                     logger.warning(
                         "worker_finalize_post_retry request_id=%s job_id=%s path=%s status=%s response=%s",
                         self.request_id,
-                        self.job_id or "",
+                        self._job_id or "",
                         path,
                         code,
                         (resp.text or "")[:256],
@@ -1346,7 +1374,7 @@ class RequestContext:
         if not publish_checkpoints:
             logger.warning(
                 "worker_finalize_skipped request_id=%s job_id=%s owner=%s repo=%s reason=no_checkpoints",
-                self.request_id, self.job_id or "", owner, repo,
+                self.request_id, self._job_id or "", owner, repo,
             )
         else:
             # `merge_with_existing` is no longer sent: the server always
@@ -1379,7 +1407,7 @@ class RequestContext:
             except Exception as exc:
                 logger.warning(
                     "worker_finalize_catalog_failed request_id=%s job_id=%s owner=%s repo=%s error=%r",
-                    self.request_id, self.job_id or "", owner, repo, exc,
+                    self.request_id, self._job_id or "", owner, repo, exc,
                 )
                 raise
 
@@ -1397,7 +1425,7 @@ class RequestContext:
         published_ids = [str(c.get("checkpoint_id") or "") for c in publish_checkpoints]
         logger.info(
             "worker_finalize_succeeded request_id=%s job_id=%s owner=%s repo=%s checkpoints=%d primary=%s",
-            self.request_id, self.job_id or "", owner, repo,
+            self.request_id, self._job_id or "", owner, repo,
             len(published_ids), published_ids[0] if published_ids else "",
         )
 
@@ -1412,32 +1440,6 @@ class RequestContext:
         if normalized_tags:
             out["destination_repo_tags"] = normalized_tags
         return out
-
-
-# ---------------------------------------------------------------------------
-# Issue #1 (slim-request-context): kind-specific subclasses.
-#
-# RequestContext is the per-inference base. Conversion, dataset-producing,
-# and trainer endpoints get richer subclasses that carry the
-# producer-contract RPCs (publish_repo_revision, publish_dataset_revision,
-# resolve_dataset, read/write_repo_metadata, materialize_blob).
-#
-# ConversionContext / DatasetContext / TrainingContext share `_PublisherMixin`
-# for the producer-contract HTTP helpers (repo metadata read/write, blob
-# fetch + materialization by digest). publish_repo_revision lives on the base
-# RequestContext — producer-style @inference handlers (clone) call it too.
-# ---------------------------------------------------------------------------
-
-
-class _PublisherMixin:
-    """Producer-contract helpers shared by ConversionContext, DatasetContext
-    and TrainingContext: repo metadata read/write, blob fetch by digest, and
-    ``materialize_blob``. Always combined with ``RequestContext`` via multiple
-    inheritance (so ``self`` has ``_file_api_base_url`` / ``_owner`` /
-    ``_get_worker_capability_token``).
-
-    Not a public surface: tenants should never import this directly.
-    """
 
     def _download_blob_by_digest(self, digest: str, dest: Path) -> None:
         """Fetch a blob by ``<algo>:<hex>`` digest to ``dest``.
@@ -1473,8 +1475,6 @@ class _PublisherMixin:
         owner, repo = _parse_owner_repo(destination_repo)
         base = (self._file_api_base_url or "").strip().rstrip("/")
         token = (self._worker_capability_token or "").strip()
-        if token:
-            _assert_token_repo_scope_matches_destination(token, owner, repo, required_permissions=["tensor-repo:read"])
         if not base or not token:
             return {"ok": False, "skipped": True, "reason": "missing_worker_capability_channel", "exists": False, "metadata": {}}
 
@@ -1512,8 +1512,6 @@ class _PublisherMixin:
             raise ValueError("metadata must be an object")
         base = (self._file_api_base_url or "").strip().rstrip("/")
         token = (self._worker_capability_token or "").strip()
-        if token:
-            _assert_token_repo_scope_matches_destination(token, owner, repo, required_permissions=["repo-version:create"])
         if not base or not token:
             return {"ok": False, "skipped": True, "reason": "missing_worker_capability_channel", "owner": owner, "name": repo}
 
@@ -1587,16 +1585,6 @@ class ConversionContext(_PublisherMixin, RequestContext):
     # share the same name and the wrapper has no per-method state that
     # RequestContext doesn't already track).
 
-    @property
-    def cancelled(self) -> bool:
-        """Return True if the scheduler has signaled cancellation.
-
-        Same semantics as ``is_canceled()`` — kept under the British
-        spelling for back-compat with conversion-endpoint code that read
-        ``ctx.cancelled`` before the slim-context refactor.
-        """
-        return self.is_canceled()
-
     def mktemp(self) -> Path:
         """Return a job-scoped scratch directory. Contents are NOT persisted.
 
@@ -1620,7 +1608,7 @@ class ConversionContext(_PublisherMixin, RequestContext):
         so ``resume_from_checkpoint=True`` can pick up where a preempted job
         left off.
         """
-        job_id = self.job_id or self.request_id or "x"
+        job_id = self._job_id or self.request_id or "x"
         base = Path(tempfile.gettempdir()) / "txform-persistent" / str(job_id)
         safe_key = "".join(c if c.isalnum() or c in "-_" else "_" for c in key)
         dir_path = base / safe_key

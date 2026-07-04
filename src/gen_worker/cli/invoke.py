@@ -2,7 +2,7 @@
 running ``gen-worker serve``.
 
 Address by FUNCTION NAME — the unique routable id declared on
-``@inference.function(name=...)``. The server resolves which class hosts it, so
+its routable name. The server resolves which handler hosts it, so
 there is no ``--class`` / ``--method`` to specify.
 
 ``<payload>`` accepts the three usual forms:
@@ -46,7 +46,7 @@ class _ClientCanceler:
     """Two-stage SIGINT for a request in flight against a warm ``serve``.
 
     1st Ctrl-C: open a FRESH connection and send a ``{"cancel":{request_id}}``
-    control frame, then keep waiting — the server trips ``ctx.cancel()`` for
+    control frame, then keep waiting — the server trips ``ctx._cancel()`` for
     THIS request and the (canceled) response comes back on the original socket;
     the server stays running. 2nd Ctrl-C within 2s: detach hard (exit 130).
     Cancelling the request and killing the worker are deliberately separate
@@ -138,11 +138,11 @@ def add_subparser(sub: argparse._SubParsersAction[Any]) -> None:
     )
     p.add_argument(
         "--config", dest="config_path", default=None,
-        help="Path to endpoint.toml (for schema-aware coercion of ergonomic args).",
+        help="Path to the endpoint's pyproject.toml (for schema-aware coercion of ergonomic args).",
     )
     p.add_argument(
         "--module", dest="module", default=None,
-        help="Python module to import for schema (overrides endpoint.toml `main`).",
+        help="Python module to import for schema (overrides [tool.gen_worker] main).",
     )
     p.add_argument(
         "--socket", dest="socket_path", default=DEFAULT_SOCKET_PATH,

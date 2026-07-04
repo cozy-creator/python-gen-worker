@@ -3,7 +3,7 @@
 You only need a Dockerfile when you want to own the base image, build steps,
 dependency manager, caching strategy, or multi-stage layout. For simple
 Tensorhub endpoints, omit the Dockerfile and set build hints in
-`endpoint.toml`; Tensorhub generates the Dockerfile and satisfies the contract
+pyproject's `[tool.gen_worker]`; Tensorhub generates the Dockerfile and satisfies the contract
 below.
 
 When you do provide a Dockerfile, it is fully yours. Tensorhub does not own this
@@ -25,7 +25,7 @@ You satisfy three contract points; everything else is up to you.
        && python -m gen_worker.discovery > /app/.tensorhub/endpoint.lock
    ```
 
-   This serializes every `@inference` class's `Resources`, bindings, and
+   This serializes every `@endpoint` object's `Resources`, bindings, and
    payload schemas. The control plane reads the lock from the built image.
 
 3. **The entrypoint runs `gen_worker.entrypoint`.**
@@ -69,7 +69,7 @@ dependencies = ["gen-worker>=0.7.5"]
 
 ## When to use `ARG BASE_IMAGE`
 
-Use `ARG BASE_IMAGE` when your `endpoint.toml` profile uses **managed mode**
+Use `ARG BASE_IMAGE` when your build profile uses **managed mode**
 (declares `python` / `torch` / `cuda`) or **explicit mode** (declares
 `base_image`). Tensorhub resolves or accepts the base image and passes it as
 a build arg.
@@ -126,7 +126,7 @@ One source of truth: the base image.
 
 ## Multi-profile builds — one Dockerfile, different args per profile
 
-A single Dockerfile is reused across every profile in `endpoint.toml`.
+A single Dockerfile is reused across every build profile.
 Tensorhub passes the per-profile build args at build time; your Dockerfile
 branches as needed on the args it cares about.
 
@@ -148,7 +148,7 @@ RUN if [ "$ACCEL" = "cuda" ]; then \
     fi
 ```
 
-Add an extra `endpoint.toml` field convention or use the `cuda` field's
+Add an extra build-profile field convention or use the `cuda` field's
 presence as your signal in the build script that drives `docker build`.
 
 ---

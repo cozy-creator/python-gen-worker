@@ -17,7 +17,7 @@ import pytest
 
 import gen_worker.cli as cli
 import gen_worker.cli.run as run_mod
-from gen_worker import RequestContext, inference
+from gen_worker import RequestContext, endpoint
 from gen_worker.cli.args import ArgError, build_payload, looks_like_field_token, primary_field
 
 
@@ -100,12 +100,8 @@ class _EchoOut(msgspec.Struct):
 def _echo_module(name: str = "_argmod") -> None:
     mod = types.ModuleType(name)
 
-    @inference()
+    @endpoint
     class Echo:
-        def setup(self) -> None:
-            pass
-
-        @inference.function(name="echo")
         def echo(self, ctx: RequestContext, data: _Echo) -> _EchoOut:
             return _EchoOut(prompt=data.prompt, steps=data.steps, hires=data.hires)
 

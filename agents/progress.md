@@ -65,27 +65,6 @@ gen_worker has no `clone/`; `import gen_worker` never imports conversion machine
 
 ---
 
-# #368: API v2 — one decorator, slim context, pyproject config
-
-**Completed:** no
-**Status:** OPEN — design in AUDIT.md §4.3, converged independently by the API audit and the consumer audit. Do after #365/#366 so the new surface binds to the new core. Counterpart consumer migration: inference-endpoints #343, training-endpoints #35.
-
-## Tasks
-- [ ] One `@endpoint` decorator: function-first (no class/setup for stateless), class + optional `setup()` for state; `kind=` kwarg for conversion/training/dataset; async-generator = streaming (no `@batched_inference`); `runtime="vllm"` for engine-hosted. Delete the six method-marker spellings (`@invocable` + five `.function` aliases, decorators.py:1287-1341) and the ~300 LOC duplicated `@batched_inference` validation (985-1275).
-- [ ] Bindings: single-positional-ref constructors — `HF(id, *, revision, dtype, subfolder, files)`, `Hub(ref, tag, flavor)`, `Civitai(id, version)`. Slot name = models-dict key or injected param name, never a constructor arg (kills the `Repo("slot","ref")` dual-arity trap, binding.py:134-165). One variant mechanism (`variants={name: (binding, Resources)}`) replacing Case/parametrize + dispatch + `.flavor()`-vs-`.dtype()`. Wire the Literal validation for `dispatch()` (see #361).
-- [ ] `Resources(gpu, vram_gb, compute_capability, libraries)` — and make `Resources(vram_gb=12)` imply gpu (today it silently under-declares, decorators.py:153-169).
-- [ ] RequestContext ≤15 members: `request_id`, `device`, `deadline`/`time_remaining()`, ONE cancellation spelling (`cancelled` property + `raise_if_cancelled()`), `progress()`, `log()`, `save_bytes/file/image/audio/video → typed Asset` (kills the 11-endpoint BytesIO→save_bytes→dict-roundtrip ceremony), `ctx.generator(seed)` (kills 14 copies), `models`. Subclasses add publish/mktemp/dataset via real inheritance — no import-time monkey-patching (request_context/__init__.py:1839-1843).
-- [ ] Worker owns: placement/offload policy around `setup()` (kills 10 `apply_low_vram_config` epilogues), per-pipeline serialization (kills 5 endpoint lock registries), logging config (kills 14 `basicConfig` copies).
-- [ ] First-class server-subprocess runtime: boot/health-wait/abort/shutdown for vLLM + llama-server (today 3 hand-rolled vLLM boots + one 70-line llama-server manager in qwen-gguf; `runtime="vllm"` currently provides nothing — engines/ branch never satisfied).
-- [ ] First-class batch-item delta struct (index/total/item_id/finished/error + binary chunk) — replaces the joycaption→chatterbox→musicgen copy-paste and the magic field-name peeling (`audio_chunk`/`audio_codec`).
-- [ ] `[tool.gen_worker] main = "..."` in pyproject replaces endpoint.toml (post-hard-cut it carries exactly one meaningful string, toml_manifest.py:481-488, yet is mandatory, discover.py:745). Resources live in Python only — delete the toml `[resources]` duplication ("not yet plumbed — known orch bug", chatterbox endpoint.toml:17-22; needs tensorhub #504/#510 to read function resources from the manifest).
-- [ ] CLI: `run` / `serve` / `invoke` / `prefetch`; keep the `field=value` httpie grammar (genuinely good); fold `describe` into `--list`; make `run`'s warm-socket auto-attach (run.py:1194-1200) explicit (`--attach`), since it silently changes semantics and ignores `--device/--offline`.
-
-## Acceptance
-Hello-world ≤ 20 lines; flux.1-dev-class endpoint ≈ 60 lines (today ~200); all 22 inference endpoints portable with only deletions (verified by inference-endpoints #343).
-
----
-
 # #19: Standardize model upload/download transfers on trusted libraries
 
 **Status:** in_progress
@@ -241,6 +220,8 @@ VALIDATION 2026-05-29 (e2e local): incremental cold-boot CONFIRMED at the worker
 
 RECONCILED 2026-07-03 (full-stack audit, see AUDIT.md + agents/progress.md): the authoring surface this trims (@inference/@invocable/parametrize=) is replaced wholesale by API v2 (#368) — do not extend it further. Still valid from this issue: the open quant-config load-test task (GPU-gated). Everything else is landed history.
 
+STATUS 2026-07-03 (Claude, #368 landed): the surface trim is now fully subsumed — #368 shipped the ONE `@endpoint` decorator (shutdown optional, no method markers, variants= replaces parametrize/dispatch, declarative msgspec.Meta bounds compiled into the lock, worker-owned placement/offload). Sections 1-5 + 9(a-e) of this issue are therefore CLOSED here; endpoint-side rollout is inference-endpoints #343. Still open in this section: section 6 (FLUX quant single-file resolver deletion — lives in the FLUX endpoint repos) and the GPU-gated quant-config load test.
+
 ## Theme
 
 The @inference authoring surface pushes repetitive boilerplate onto every endpoint author. One theme: make the declarative path the only path. Wins land in gen-worker (helper + discovery + docs); the inference-endpoint repos are the consumers/validation.
@@ -334,6 +315,8 @@ Removed the 'placement (Resources): warmup-heavy/isolate me (warmup_cost/exclusi
 **Related:** Worker side already done: interrupt_job_cmd → _handle_interrupt_request → ctx.cancel() (worker.py:5881/7363), Local analog: #352, #353
 
 RECONCILED 2026-07-03 (full-stack audit, see AUDIT.md + agents/progress.md): cancel is redefined by protocol v2 (#364): one typed cancel message + single attempt fencing. Do the audit/spec as part of #364/#365, not against the v1 interrupt_job_cmd plumbing.
+
+STATUS 2026-07-03 (Claude, #368 landed): worker-side cancel spelling is final — ONE tenant idiom (`ctx.cancelled` + `ctx.raise_if_cancelled()`), worker-internal `ctx._cancel()` driven by the typed `CancelJob` message (executor.handle_cancel) and by CLI SIGINT/serve interrupt. Remaining tasks here are gen-orchestrator's (user-facing cancel API audit + client-disconnect auto-cancel) — cross-repo, NOT subsumed.
 
 Cross-repo (gen-orchestrator) companion to #352/#353. For "a user cancels a request" to reach tenant code, the orchestrator must expose a user/API-facing cancel that emits `interrupt_job_cmd{request_id}` to the owning worker — which already maps to `ctx.cancel()` (worker.py:5881 → 7363). The worker side is DONE; this issue is the orchestrator side + the unified contract doc.
 

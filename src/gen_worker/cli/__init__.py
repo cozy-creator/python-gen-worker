@@ -53,9 +53,6 @@ def _build_parser() -> argparse.ArgumentParser:
     from . import prefetch as _prefetch_mod
     _prefetch_mod.add_subparser(sub)
 
-    from . import describe as _describe_mod
-    _describe_mod.add_subparser(sub)
-
     return parser
 
 

@@ -1,10 +1,10 @@
-# source-hash bust: 2026-07-03 (#365: add marco_polo_stream async-generator fn for the new worker core)
+# source-hash bust: 2026-07-03 (#368: @endpoint API rewrite)
 import asyncio
 import time
 from typing import AsyncIterator
 
 import msgspec
-from gen_worker import RequestContext, ValidationError, inference, invocable
+from gen_worker import RequestContext, ValidationError, endpoint
 
 
 class MarcoPoloInput(msgspec.Struct):
@@ -15,19 +15,15 @@ class MarcoPoloOutput(msgspec.Struct):
     response: str
 
 
-@inference()
+@endpoint
 class MarcoPolo:
-    def setup(self) -> None:
-        pass
-
-    @invocable(name="marco_polo")
     def marco_polo(self, ctx: RequestContext, data: MarcoPoloInput) -> MarcoPoloOutput:
         """Returns 'polo' when input is 'marco'; otherwise raises so the request fails."""
         # Deterministic minimal handler used for latency tests and for
         # exercising both billing branches: the marco->polo path succeeds
         # (capture), any other input raises ValidationError so the worker
         # reports a non-retryable FAILED job (hold release).
-        ctx.raise_if_canceled()
+        ctx.raise_if_cancelled()
         time.sleep(0.3)  # sustain concurrency for the load test
 
         if str(data.text or "").strip().lower() == "marco":
@@ -35,32 +31,17 @@ class MarcoPolo:
 
         raise ValidationError(f"expected 'marco', got {data.text!r}")
 
-    @invocable(name="marco_polo_slow")
     async def marco_polo_slow(
         self, ctx: RequestContext, data: MarcoPoloInput
     ) -> MarcoPoloOutput:
-        """Same marco->polo semantics as marco_polo, but each call takes ~15s
-        using REAL asyncio I/O waits so a large backlog can be held in-flight
-        while an orchestrator replica is killed (#447 failover-at-scale).
-
-        The work is a loop of ``await asyncio.sleep(...)`` on the worker's shared
-        asyncio loop. asyncio.sleep is a genuine non-blocking wait that RELEASES
-        the GIL and yields the loop — so many concurrent calls overlap on the
-        single loop instead of serializing, which is exactly what lets one worker
-        hold hundreds of these in flight at once. We deliberately avoid a
-        third-party HTTP client (httpx/requests) so the function needs ZERO extra
-        dependencies in the locked tenant image — the wait is the I/O.
-
-        Wall-time is ~15s (100 ticks * 150ms), with a cancel check between ticks
-        so an interrupt during failover is honored promptly.
-        """
-        ctx.raise_if_canceled()
+        """Same marco->polo semantics, but ~15s of REAL asyncio waits so a
+        large backlog can be held in-flight on one worker (#447)."""
+        ctx.raise_if_cancelled()
 
         tick = 0.15
-        ticks = 100  # 100 * 0.15s = 15s
-        for i in range(ticks):
+        for i in range(100):  # 100 * 0.15s = 15s
             if i % 10 == 0:
-                ctx.raise_if_canceled()
+                ctx.raise_if_cancelled()
             await asyncio.sleep(tick)
 
         if str(data.text or "").strip().lower() == "marco":
@@ -68,16 +49,14 @@ class MarcoPolo:
 
         raise ValidationError(f"expected 'marco', got {data.text!r}")
 
-    @invocable(name="marco_polo_stream")
     async def marco_polo_stream(
         self, ctx: RequestContext, data: MarcoPoloInput
     ) -> AsyncIterator[MarcoPoloOutput]:
-        """Streams 'p', 'po', 'pol', 'polo' as four JobProgress chunks."""
+        """Streams 'p', 'po', 'pol', 'polo' as four progress chunks."""
         if str(data.text or "").strip().lower() != "marco":
             raise ValidationError(f"expected 'marco', got {data.text!r}")
         word = "polo"
         for i in range(1, len(word) + 1):
-            ctx.raise_if_canceled()
+            ctx.raise_if_cancelled()
             await asyncio.sleep(0.05)
             yield MarcoPoloOutput(response=word[:i])
-# bust 1780099200

@@ -1,4 +1,4 @@
-"""The ONE decorator walker: decorated classes -> EndpointSpec table.
+"""The ONE decorator walker: ``@endpoint`` objects -> EndpointSpec table.
 
 Shared by the worker runtime (dispatch), build-time discovery (endpoint.lock),
 and the local CLI. Signature inspection lives here and nowhere else.
@@ -15,9 +15,9 @@ from typing import Any, Callable, Dict, List, Optional
 
 import msgspec
 
-from .api.binding import Binding, Dispatch, Repo
-from .api.decorators import Resources
-from .discovery.walk import find_endpoint_classes
+from .api.binding import Binding
+from .api.decorators import ATTR, EndpointDecl, Resources
+from .discovery.walk import find_endpoints
 
 _ITER_ORIGINS = (
     typing.Iterator, typing.Iterable, typing.AsyncIterator, typing.AsyncIterable,
@@ -34,15 +34,19 @@ def _is_struct(t: Any) -> bool:
 
 @dataclass(frozen=True)
 class EndpointSpec:
-    """One externally-routable function: a bound (class, method) plus wire shape."""
+    """One externally-routable function: a handler plus wire shape.
+
+    ``cls`` is None for function-shaped (stateless) endpoints — the worker
+    calls ``method`` directly with no instance/setup.
+    """
 
     name: str                     # routable function name (pre-slug)
-    cls: type
-    attr_name: str                # python attribute name on the class
     method: Callable[..., Any]    # unbound function object
     kind: str                     # inference | training | dataset | conversion
     payload_type: type            # msgspec.Struct
     output_mode: str              # "single" | "stream"
+    cls: Optional[type] = None
+    attr_name: str = ""           # python attribute name on the class
     output_type: Optional[type] = None   # struct returned (single mode)
     delta_type: Optional[type] = None    # struct yielded (stream mode; None if union)
     is_async: bool = False        # coroutine or async generator
@@ -52,34 +56,22 @@ class EndpointSpec:
     resources: Resources = field(default_factory=Resources)
     models: Dict[str, Binding] = field(default_factory=dict)  # slot -> binding
     timeout_ms: Optional[int] = None
-    sub_kind: Optional[str] = None
     runtime: Optional[str] = None
-    label: Optional[str] = None
-    description: Optional[str] = None
-    allowed_shapes: tuple = ()
     module: str = ""              # declaring module
-    walked_module: str = ""       # top-level package the class was found under
+    walked_module: str = ""       # top-level package the object was found under
 
     @property
     def needs_gpu(self) -> bool:
-        r = self.resources
-        return bool(
-            r.accelerator == "cuda"
-            or r.requires_gpu is True
-            or r.min_vram_gb is not None
-            or r.min_compute_capability is not None
-        )
+        return bool(self.resources.gpu)
 
     @property
-    def fixed_models(self) -> Dict[str, Repo]:
-        return {k: b for k, b in self.models.items() if isinstance(b, Repo)}
-
-    @property
-    def dispatch_models(self) -> Dict[str, Dispatch]:
-        return {k: b for k, b in self.models.items() if isinstance(b, Dispatch)}
+    def instance_key(self) -> Any:
+        """Specs sharing this key share one class instance. Variant specs of
+        the same class differ in their bindings and get separate instances."""
+        return (self.cls, tuple(sorted(self.models.items())))
 
 
-def _inspect_return(cls: type, attr: str, ret: Any) -> tuple[str, Optional[type], Optional[type]]:
+def _inspect_return(owner: str, ret: Any) -> tuple[str, Optional[type], Optional[type]]:
     """-> (output_mode, output_type, delta_type)."""
     if _is_struct(ret):
         return "single", ret, None
@@ -89,72 +81,60 @@ def _inspect_return(cls: type, attr: str, ret: Any) -> tuple[str, Optional[type]
         item = args[0] if args else None
         if _is_struct(item):
             return "stream", item, item
-        # Union of signal structs (batched_inference shape): still a stream.
+        # Union of delta structs: still a stream.
         if typing.get_origin(item) in (typing.Union, py_types.UnionType):
             return "stream", None, None
         raise ValueError(
-            f"{cls.__name__}.{attr}: streaming return must be "
+            f"{owner}: streaming return must be "
             f"(Async)Iterator[msgspec.Struct], got {ret!r}"
         )
     raise ValueError(
-        f"{cls.__name__}.{attr}: return type must be msgspec.Struct or "
+        f"{owner}: return type must be msgspec.Struct or "
         f"(Async)Iterator[msgspec.Struct], got {ret!r}"
     )
 
 
-def _spec_for_method(
-    cls: type,
-    ep_spec: Any,
-    attr_name: str,
-    method: Callable[..., Any],
-    fn_name: str,
+def _spec_for_handler(
     *,
-    timeout_ms: Optional[int],
-    label: Optional[str],
-    description: Optional[str],
-    allowed_shapes: tuple,
-    payload_override: Optional[type],
+    fn_name: str,
+    method: Callable[..., Any],
+    decl: EndpointDecl,
+    cls: Optional[type],
+    attr_name: str,
     models: Dict[str, Binding],
     resources: Resources,
     walked_module: str,
 ) -> EndpointSpec:
+    owner = f"{cls.__name__}.{attr_name}" if cls is not None else method.__name__
     hints = typing.get_type_hints(method, include_extras=False)
     sig = inspect.signature(method)
     params = [p for p in sig.parameters.values() if p.name != "self"]
     if len(params) < 2:
         raise ValueError(
-            f"{cls.__name__}.{attr_name}: must accept (self, ctx, payload); "
-            f"got params {[p.name for p in params]}"
+            f"{owner}: must accept (ctx, payload); got params "
+            f"{[p.name for p in params]}"
         )
     ctx_param, payload_param = params[0].name, params[1].name
 
-    if payload_override is not None:
-        if not _is_struct(payload_override):
-            raise ValueError(
-                f"{cls.__name__}.{attr_name}: Case input= must be a msgspec.Struct"
-            )
-        payload_type = payload_override
-    else:
-        payload_type = hints.get(payload_param)
-        if not _is_struct(payload_type):
-            raise ValueError(
-                f"{cls.__name__}.{attr_name}: payload param {payload_param!r} "
-                f"must be annotated with a msgspec.Struct (got {payload_type!r})"
-            )
-
+    payload_type = hints.get(payload_param)
+    if not _is_struct(payload_type):
+        raise ValueError(
+            f"{owner}: payload param {payload_param!r} must be annotated "
+            f"with a msgspec.Struct (got {payload_type!r})"
+        )
     ret = hints.get("return")
     if ret is None:
-        raise ValueError(f"{cls.__name__}.{attr_name}: missing return type annotation")
-    output_mode, output_type, delta_type = _inspect_return(cls, attr_name, ret)
+        raise ValueError(f"{owner}: missing return type annotation")
+    output_mode, output_type, delta_type = _inspect_return(owner, ret)
 
     return EndpointSpec(
         name=fn_name,
-        cls=cls,
-        attr_name=attr_name,
         method=method,
-        kind=str(getattr(ep_spec, "kind", "inference") or "inference"),
+        kind=decl.kind,
         payload_type=payload_type,
         output_mode=output_mode,
+        cls=cls,
+        attr_name=attr_name,
         output_type=output_type,
         delta_type=delta_type,
         is_async=bool(
@@ -164,66 +144,63 @@ def _spec_for_method(
         ctx_param=ctx_param,
         payload_param=payload_param,
         resources=resources,
-        models=models,
-        timeout_ms=timeout_ms,
-        sub_kind=getattr(ep_spec, "sub_kind", None),
-        runtime=getattr(ep_spec, "runtime", None),
-        label=label,
-        description=description,
-        allowed_shapes=allowed_shapes,
-        module=getattr(cls, "__module__", "") or "",
+        models=dict(models),
+        runtime=decl.runtime,
+        module=getattr(cls or method, "__module__", "") or "",
         walked_module=walked_module,
     )
 
 
-def extract_specs(cls: type, *, walked_module: str = "") -> List[EndpointSpec]:
-    """All EndpointSpecs declared by one decorated class (parametrize expanded)."""
-    ep_spec = getattr(cls, "__gen_worker_endpoint_spec__", None)
-    if ep_spec is None:
+def extract_specs(obj: Any, *, walked_module: str = "") -> List[EndpointSpec]:
+    """All EndpointSpecs declared by one decorated object (variants expanded)."""
+    decl: Optional[EndpointDecl] = getattr(obj, ATTR, None)
+    if decl is None:
         return []
-    class_models: Dict[str, Binding] = dict(getattr(ep_spec, "models", {}) or {})
-    class_res: Resources = getattr(ep_spec, "resources", None) or Resources()
-    class_shapes = tuple(getattr(ep_spec, "allowed_shapes", ()) or ())
-    walked = walked_module or (getattr(cls, "__module__", "") or "")
+    walked = walked_module or (getattr(obj, "__module__", "") or "")
 
-    methods = list(getattr(cls, "__gen_worker_function_methods__", []) or [])
-    methods += list(
-        getattr(cls, "__gen_worker_batched_inference_function_methods__", []) or []
+    if decl.is_function:
+        return [_spec_for_handler(
+            fn_name=decl.name or obj.__name__,
+            method=obj,
+            decl=decl,
+            cls=None,
+            attr_name="",
+            models=dict(decl.models),
+            resources=decl.resources,
+            walked_module=walked,
+        )]
+
+    cls = obj
+    handlers: list[tuple[str, Callable[..., Any]]] = list(
+        getattr(cls, "__gen_worker_handlers__", []) or []
     )
     out: List[EndpointSpec] = []
 
-    parametrize = tuple(getattr(ep_spec, "parametrize", ()) or ())
-    if parametrize and methods:
-        attr_name, method, fn_spec = methods[0]
-        for case in parametrize:
-            models = class_models
-            if getattr(case, "model", None) is not None:
-                slot = next(iter(class_models), "model")
-                models = dict(class_models)
-                models[slot] = case.model
-            out.append(_spec_for_method(
-                cls, ep_spec, attr_name, method, str(case.name),
-                timeout_ms=fn_spec.timeout_ms,
-                label=fn_spec.label, description=fn_spec.description,
-                allowed_shapes=tuple(fn_spec.allowed_shapes or ()) or class_shapes,
-                payload_override=getattr(case, "input", None),
-                models=models,
-                resources=case.resources if case.resources is not None else class_res,
+    if decl.variants:
+        attr_name, method = handlers[0]
+        slot = next(iter(decl.models), "model")
+        # Base function (method-named) only when the class declares its own
+        # binding; otherwise the variants fully define the routable set.
+        if decl.models:
+            out.append(_spec_for_handler(
+                fn_name=attr_name, method=method, decl=decl, cls=cls,
+                attr_name=attr_name, models=dict(decl.models),
+                resources=decl.resources, walked_module=walked,
+            ))
+        for variant in decl.variants:
+            out.append(_spec_for_handler(
+                fn_name=variant.name, method=method, decl=decl, cls=cls,
+                attr_name=attr_name, models={slot: variant.binding},
+                resources=variant.resources or decl.resources,
                 walked_module=walked,
             ))
         return out
 
-    for attr_name, method, fn_spec in methods:
-        out.append(_spec_for_method(
-            cls, ep_spec, attr_name, method, str(fn_spec.name or attr_name),
-            timeout_ms=fn_spec.timeout_ms,
-            label=getattr(fn_spec, "label", None),
-            description=getattr(fn_spec, "description", None),
-            allowed_shapes=tuple(getattr(fn_spec, "allowed_shapes", ()) or ()) or class_shapes,
-            payload_override=None,
-            models=class_models,
-            resources=class_res,
-            walked_module=walked,
+    for attr_name, method in handlers:
+        out.append(_spec_for_handler(
+            fn_name=attr_name, method=method, decl=decl, cls=cls,
+            attr_name=attr_name, models=dict(decl.models),
+            resources=decl.resources, walked_module=walked,
         ))
     return out
 
@@ -231,8 +208,9 @@ def extract_specs(cls: type, *, walked_module: str = "") -> List[EndpointSpec]:
 def collect_endpoints(module_names: List[str]) -> List[EndpointSpec]:
     """Walk top-level modules (+ submodules) and return every EndpointSpec."""
     out: List[EndpointSpec] = []
-    for found in find_endpoint_classes(list(module_names)):
-        out.extend(extract_specs(found.cls, walked_module=found.walked_module))
+    for found in find_endpoints(list(module_names)):
+        out.extend(extract_specs(found.obj, walked_module=found.walked_module))
+    _assert_unique_names(out)
     return out
 
 
@@ -241,8 +219,21 @@ def collect_from_namespace(module: Any) -> List[EndpointSpec]:
     out: List[EndpointSpec] = []
     seen: set[int] = set()
     for obj in list(vars(module).values()):
-        if not inspect.isclass(obj) or id(obj) in seen:
+        if not (inspect.isclass(obj) or inspect.isfunction(obj)) or id(obj) in seen:
             continue
         seen.add(id(obj))
         out.extend(extract_specs(obj))
+    _assert_unique_names(out)
     return out
+
+
+def _assert_unique_names(specs: List[EndpointSpec]) -> None:
+    seen: Dict[str, EndpointSpec] = {}
+    for s in specs:
+        prior = seen.get(s.name)
+        if prior is not None and prior.method is not s.method:
+            raise ValueError(
+                f"duplicate routable function name {s.name!r} "
+                f"({prior.module} and {s.module})"
+            )
+        seen[s.name] = s

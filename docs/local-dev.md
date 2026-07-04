@@ -16,20 +16,20 @@ gen-worker run --payload '{"text": "marco"}'
 `gen-worker run` takes **two** inputs. That's the whole interface.
 
 1. **Which function to call** — by class + method name. Both are inferred
-   when the endpoint has exactly one `@inference.function` method.
+   when the endpoint has exactly one routable function (or one named after the package).
 2. **What payload to send** — JSON, inline (`--payload '...'`) or from a
    file (`--payload-file ./fixture.json`). Validated against the function's
    `msgspec.Struct` input type.
 
 Everything else derives from the code:
 
-- Model bindings come from the `@inference(models=…)` decorator argument.
+- Model bindings come from the `@endpoint(models=…)` decorator argument.
 - The payload's `_models` field can override any binding that declared
   `.allow_override(...)`, exactly the way it does in production.
 - Model weights resolve from the local CAS first
   (`$TENSORHUB_CAS_DIR`, default `/tmp/tensorhub-cache/cas`).
 - On cache miss the CLI auto-fetches from the upstream registry
-  (HuggingFace for `HFRepo` bindings; cozy refs require an
+  (HuggingFace for `HF` bindings; cozy refs require an
   orchestrator-warmed cache today — see *Cozy ref cache miss* below).
 
 There is **no** `--models` flag and **no** stub mode. The code declares
@@ -72,7 +72,7 @@ gen-worker run --payload '{"prompt":"x"}'
 gen-worker run --class MyEndpoint --method generate --payload '...'
 
 # `--method` accepts either the Python attribute name or the registered
-# function name (the @inference.function(name=...) value).
+# function name (the method / function name).
 gen-worker run --method marco_polo --payload '{"text":"marco"}'
 ```
 
@@ -121,7 +121,7 @@ the upstream registry. You'll see a stderr line like:
 
 Subsequent invocations reuse the local cache. The cache locations:
 
-- `HFRepo` bindings → `$HF_HOME` (default `~/.cache/huggingface`).
+- `HF` bindings → `$HF_HOME` (default `~/.cache/huggingface`).
 - `Repo` (tensorhub) bindings → `$TENSORHUB_CAS_DIR` (default
   `/tmp/tensorhub-cache/cas`).
 
@@ -139,7 +139,7 @@ gen-worker run --offline --payload '{"prompt":"x"}'
 
 ### Cozy ref cache miss
 
-Cozy / tensorhub refs (`Repo("owner/repo")` — no `hf:` / `civitai:`
+Cozy / tensorhub refs (`Hub("owner/repo")` — no `hf:` / `civitai:`
 prefix) use the worker's CAS at `$TENSORHUB_CAS_DIR`. If the requested
 snapshot isn't there, the CLI exits 3 with a pointer to invoke the
 endpoint via the orchestrator once to populate the cache. This is the
@@ -203,7 +203,6 @@ polo
 ## Worked example — streaming generator
 
 ```python
-@inference.function
 def stream(self, ctx, data: Input) -> Iterator[Delta]:
     for word in data.text.split():
         yield Delta(chunk=word)
@@ -219,7 +218,7 @@ $ gen-worker run --payload '{"text":"alpha beta gamma"}'
 
 ## Worked example — `--module` override
 
-If `endpoint.toml` is missing or you want to invoke a sibling module:
+If `[tool.gen_worker]` is missing or you want to invoke a sibling module:
 
 ```bash
 gen-worker run --module my_pkg.alt_main --payload '{"prompt":"x"}'
@@ -421,5 +420,3 @@ For all three, run the endpoint through the orchestrator instead.
 ## See also
 
 - [endpoint-authoring.md](endpoint-authoring.md) — full decorator + binding reference.
-- [endpoint-toml.md](endpoint-toml.md) — `endpoint.toml` schema.
-- [cookbook-image-diffusion.md](cookbook-image-diffusion.md) and friends — per-modality recipes.

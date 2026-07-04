@@ -142,7 +142,7 @@ class _RequestOutputStream:
     def write(self, data: bytes | bytearray | memoryview) -> int:
         if self._finalized:
             raise RuntimeError("output stream already finalized")
-        if self._ctx.is_canceled():
+        if self._ctx.cancelled:
             self.close()
             raise CanceledError("canceled")
         if isinstance(data, memoryview):
@@ -172,7 +172,7 @@ class _RequestOutputStream:
     def finalize(self) -> Any:
         if self._finalized:
             return self._result
-        if self._ctx.is_canceled():
+        if self._ctx.cancelled:
             self.close()
             raise CanceledError("canceled")
 
@@ -209,7 +209,7 @@ class _RequestOutputStream:
                     )
                 else:
                     if self._create:
-                        raw = self._ctx.save_file_create(self._ref, self._tmp_path)
+                        raw = self._ctx._save_file_create(self._ref, self._tmp_path)
                     else:
                         raw = self._ctx.save_file(self._ref, self._tmp_path)
                 self._result = self._with_stream_mode(raw)
@@ -312,7 +312,7 @@ class _RequestOutputStream:
             payload["error_class"] = error_class
         if extra:
             payload.update(dict(extra))
-        self._ctx.emit("request.upload_progress", payload)
+        self._ctx._emit_event("request.upload_progress", payload)
 
     def _finalize_presigned_upload(self) -> Any:
         """Hash the buffered temp file, then upload via presigned S3 multipart."""
@@ -330,7 +330,7 @@ class _RequestOutputStream:
         base = self._ctx._get_file_api_base_url()
         token = self._ctx._get_worker_capability_token()
         headers: Dict[str, str] = {"Authorization": f"Bearer {token}"}
-        owner = (self._ctx.owner or "").strip()
+        owner = (self._ctx._owner or "").strip()
         if owner:
             headers["X-Cozy-Owner"] = owner
 
@@ -346,7 +346,7 @@ class _RequestOutputStream:
         if self._repo_job_scope is None:
             # Media upload.
             create_payload["ref"] = self._ref
-            job_id = str(self._ctx.job_id or "").strip()
+            job_id = str(self._ctx._job_id or "").strip()
             if job_id:
                 create_payload["job_id"] = job_id
             # Owner is now an explicit URL segment (mirrors /repos/:owner/...,
@@ -387,7 +387,7 @@ class _RequestOutputStream:
             blake3_hex=blake3_hex,
             size_bytes=file_size,
             on_progress=_progress_cb,
-            cancel_check=self._ctx.is_canceled,
+            cancel_check=lambda: self._ctx.cancelled,
             complete_extra=None,
         )
 
@@ -417,7 +417,7 @@ class _RequestOutputStream:
         final_ref = str(meta.get("ref") or self._ref).strip() or self._ref
         asset = Asset(
             ref=final_ref,
-            owner=self._ctx.owner,
+            owner=self._ctx._owner,
             local_path=None,
             mime_type=str(meta.get("mime_type") or "") or None,
             size_bytes=size,

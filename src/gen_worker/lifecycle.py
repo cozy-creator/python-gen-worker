@@ -213,16 +213,18 @@ class Lifecycle:
         individual functions, not the process."""
         self.executor.gate_functions(self.hardware)
 
+        from .api.binding import wire_ref
+
         prefetch_refs: List[str] = []
         for spec in self.executor.specs.values():
             if spec.name in self.executor.unavailable:
                 continue
-            for repo in spec.fixed_models.values():
-                provider = getattr(repo, "provider", "tensorhub")
-                if provider != "tensorhub" and repo.ref not in prefetch_refs:
+            for binding in spec.models.values():
+                ref = wire_ref(binding)
+                if binding.provider != "tensorhub" and ref not in prefetch_refs:
                     # hf/civitai refs need no orchestrator snapshot; tensorhub
                     # refs arrive via ModelOp{DOWNLOAD} after HelloAck (§7).
-                    prefetch_refs.append(repo.ref)
+                    prefetch_refs.append(ref)
 
         if prefetch_refs:
             await self.set_phase(pb.WORKER_PHASE_DOWNLOADING_MODELS)
@@ -237,9 +239,9 @@ class Lifecycle:
             if spec.name in self.executor.unavailable:
                 continue
             fetchable = all(
-                getattr(r, "provider", "tensorhub") != "tensorhub"
-                or self.executor.store.local_path(r.ref) is not None
-                for r in spec.fixed_models.values()
+                b.provider != "tensorhub"
+                or self.executor.store.local_path(wire_ref(b)) is not None
+                for b in spec.models.values()
             )
             if not fetchable:
                 continue  # waits for ModelOp / RunJob snapshots

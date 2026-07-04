@@ -1,9 +1,7 @@
-"""Public SDK surface: decorators, types, errors, and helpers for tenant code."""
+"""Public SDK surface: the @endpoint decorator, bindings, types, and errors."""
 
-from .binding import Binding, CivitaiRepo, Dispatch, HFRepo, ModelScopeRepo, Repo, dispatch
-from .decorators import (
-    Resources,
-)
+from .binding import Binding, Civitai, HF, Hub, ModelScope
+from .decorators import Resources, endpoint
 from .errors import (
     AuthError,
     CanceledError,
@@ -16,8 +14,8 @@ from .errors import (
     ValidationError,
     WorkerError,
 )
-from .payload_constraints import Clamp
 from .streaming import (
+    BatchItemDelta,
     Done,
     Error,
     IncrementalTokenDelta,
@@ -41,13 +39,12 @@ from .types import (
 
 __all__ = [
     "Binding",
-    "CivitaiRepo",
-    "Dispatch",
-    "HFRepo",
-    "ModelScopeRepo",
-    "Repo",
+    "Civitai",
+    "HF",
+    "Hub",
+    "ModelScope",
     "Resources",
-    "dispatch",
+    "endpoint",
     "AuthError",
     "CanceledError",
     "FatalError",
@@ -58,7 +55,7 @@ __all__ = [
     "RetryableError",
     "ValidationError",
     "WorkerError",
-    "Clamp",
+    "BatchItemDelta",
     "Done",
     "Error",
     "IncrementalTokenDelta",

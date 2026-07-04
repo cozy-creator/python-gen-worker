@@ -1,6 +1,8 @@
-"""Runtime engine helpers for BatchedWorker endpoints (#322).
+"""Runtime engine helpers for engine-hosted endpoints.
 
 Submodules:
+  - ``server`` — boot/health-wait/abort/shutdown for server subprocesses
+    (vLLM, llama-server); backs ``@endpoint(runtime=...)``.
   - ``ar_tts`` — model-class registry for autoregressive TTS endpoints
     (Chatterbox, GPT-SoVITS, Bark, MusicGen). Maps a public model class
     name to the vLLM/SGLang architecture + audio-codec decoder hooks

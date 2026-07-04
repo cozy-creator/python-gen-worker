@@ -1,100 +1,70 @@
-"""Binding immutability + wire round-trip — collapsed integration suite (floor 13).
-
-  * chainable modifiers are IMMUTABLE + commutative (original untouched),
-  * provider property per subclass + invalid-ref rejection at construction,
-  * allow_override accepts class/string FQN, dedups, rejects zero-arg.
-
-Also folds the floor-21 typed-payload-error validation path (structured
-size_bytes/max_bytes fields, subclassing ValidationError).
-"""
+"""Binding constructors: single positional ref + kw metadata, immutability,
+wire-ref encoding."""
 
 from __future__ import annotations
 
 import pytest
 
-from gen_worker import CivitaiRepo, HFRepo, Repo
-
-
-# --------------------------------------------------------------------------- #
-# Construction + provider + immutability                                       #
-# --------------------------------------------------------------------------- #
+from gen_worker import HF, Civitai, Hub, ModelScope
+from gen_worker.api.binding import wire_ref
 
 
 def test_construction_provider_and_invalid_ref_rejection() -> None:
-    # provider property per subclass.
-    assert Repo("acme/flux").provider == "tensorhub"
-    assert HFRepo("Qwen/Qwen2.5-1.5B-Instruct").provider == "hf"
-    assert CivitaiRepo("123456").provider == "civitai"
-    # invalid refs rejected at construction.
-    for ctor, arg in [(Repo, ""), (Repo, "   "), (HFRepo, "no-slash")]:
-        with pytest.raises(ValueError):
-            ctor(arg)
-
-
-def test_modifiers_are_immutable_and_commutative() -> None:
-    base = Repo("  acme/flux  ")
-    assert base.ref == "acme/flux"  # ref is stripped
-    flavored = base.flavor("nf4")
-    tagged = flavored.tag("canary")
-
-    # Original untouched at every step; each modifier returns a NEW instance.
-    assert base._flavor == "" and base._tag == "prod"
-    assert flavored._flavor == "nf4" and flavored._tag == "prod"
-    assert flavored is not base and tagged is not flavored
-
-    # Chain order is commutative.
-    a = Repo("acme/flux").flavor("nf4").tag("canary")
-    b = Repo("acme/flux").tag("canary").flavor("nf4")
-    assert (a._flavor, a._tag) == (b._flavor, b._tag) == ("nf4", "canary")
-
-    # Empty modifier args rejected.
-    for bad in ("", "   ", None):
-        with pytest.raises(ValueError):
-            Repo("acme/flux").flavor(bad)  # type: ignore[arg-type]
-
-
-# --------------------------------------------------------------------------- #
-# allow_override                                                               #
-# --------------------------------------------------------------------------- #
-
-
-class _PipeA:
-    pass
-
-
-class _PipeB:
-    pass
-
-
-def test_allow_override_accepts_class_string_dedups_and_rejects_zero_arg() -> None:
-    b = Repo("acme/flux").allow_override(_PipeA, _PipeB)
-    assert b._allow_override is True
-    assert any("_PipeA" in c for c in b._pipeline_classes)
-    assert any("_PipeB" in c for c in b._pipeline_classes)
-
-    fqn = f"{__name__}._PipeA"
-    deduped = Repo("acme/flux").allow_override(_PipeA, fqn)  # same class twice
-    assert deduped._pipeline_classes.count(fqn) == 1
+    assert Hub("owner/repo").provider == "tensorhub"
+    assert HF("owner/repo").provider == "hf"
+    assert Civitai("123456").provider == "civitai"
+    assert ModelScope("owner/repo").provider == "modelscope"
 
     with pytest.raises(ValueError):
-        Repo("acme/flux").allow_override()
+        Hub("")
+    with pytest.raises(ValueError):
+        HF("norepo")  # must be owner/repo
+    with pytest.raises(ValueError):
+        Civitai("")
+    with pytest.raises(ValueError):
+        ModelScope("norepo")
 
 
-# --------------------------------------------------------------------------- #
-# Floor 21: typed payload-size error validation path                           #
-# --------------------------------------------------------------------------- #
+def test_kw_metadata_normalized_and_frozen() -> None:
+    b = HF(" owner/repo ", revision=" main ", dtype=" bf16 ", subfolder=" te ",
+           files=(" a/*.safetensors ", ""))
+    assert b.ref == "owner/repo"
+    assert b.revision == "main"
+    assert b.dtype == "bf16"
+    assert b.subfolder == "te"
+    assert b.files == ("a/*.safetensors",)
+    with pytest.raises(Exception):
+        b.dtype = "fp16"  # frozen
+
+    hub = Hub("o/r", tag="", flavor=" nf4 ")
+    assert hub.tag == "prod"
+    assert hub.flavor == "nf4"
+
+
+def test_bindings_are_hashable_and_equal_by_value() -> None:
+    assert HF("o/r", dtype="bf16") == HF("o/r", dtype="bf16")
+    assert len({HF("o/r"), HF("o/r"), HF("o/r", dtype="bf16")}) == 2
+
+
+def test_wire_ref_encoding() -> None:
+    assert wire_ref(Hub("o/r")) == "o/r"
+    assert wire_ref(Hub("o/r", tag="canary")) == "o/r:canary"
+    assert wire_ref(Hub("o/r", flavor="nf4")) == "o/r#nf4"
+    assert wire_ref(Hub("o/r", tag="canary", flavor="nf4")) == "o/r:canary#nf4"
+    assert wire_ref(HF("o/r")) == "o/r"
+    assert wire_ref(HF("o/r", revision="abc")) == "o/r@abc"
+    # load-time metadata never enters the ref
+    assert wire_ref(HF("o/r", dtype="bf16", subfolder="te")) == "o/r"
+    assert wire_ref(Civitai("123", version="456")) == "123"
 
 
 def test_typed_payload_size_errors_expose_structured_fields() -> None:
     from gen_worker import ValidationError
     from gen_worker.api.errors import InputTooLargeError, OutputTooLargeError
 
-    out = OutputTooLargeError(size_bytes=200, max_bytes=100)
-    assert out.size_bytes == 200 and out.max_bytes == 100
-
-    inp = InputTooLargeError(size_bytes=200, max_bytes=100, source="input file")
-    assert inp.size_bytes == 200 and inp.max_bytes == 100 and inp.source == "input file"
-    assert InputTooLargeError(size_bytes=10, max_bytes=5).source == "input"  # default
-
-    assert issubclass(OutputTooLargeError, ValidationError)
-    assert issubclass(InputTooLargeError, ValidationError)
+    out_err = OutputTooLargeError(size_bytes=10, max_bytes=5)
+    assert isinstance(out_err, ValidationError)
+    assert (out_err.size_bytes, out_err.max_bytes) == (10, 5)
+    in_err = InputTooLargeError(size_bytes=7, max_bytes=3, source="payload")
+    assert isinstance(in_err, ValidationError)
+    assert (in_err.size_bytes, in_err.max_bytes, in_err.source) == (7, 3, "payload")

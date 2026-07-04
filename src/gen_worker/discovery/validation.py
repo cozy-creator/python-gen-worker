@@ -34,11 +34,6 @@ class EndpointLockValidationResult:
     warnings: tuple[str, ...] = ()
 
 
-# #328: archetype-shape requirements. Every class-shape entry must have these
-# keys populated; the migration sweep guarantees this — old function-shape
-# entries (pre-#322) lack class_name, so they're the trip-wire.
-_REQUIRED_CLASS_SHAPE_FIELDS = ("class_name", "archetype", "kind")
-_KNOWN_ARCHETYPES = frozenset(("SerialWorker", "BatchedWorker"))
 _KNOWN_KINDS = frozenset(("inference", "training", "dataset", "conversion"))
 
 
@@ -89,43 +84,16 @@ def validate_endpoint_lock(lock_dict: Dict[str, Any]) -> EndpointLockValidationR
             continue
         fn_label = str(fn.get("name") or fn.get("python_name") or f"functions[{idx}]")
 
-        # Old-shape entries (pre-#322 @inference) lack class_name.
-        # That's the migration trip-wire — fail loud with a pointer to #328.
-        missing = [f for f in _REQUIRED_CLASS_SHAPE_FIELDS if not fn.get(f)]
-        if missing:
-            errors.append(
-                f"functions[{idx}] ({fn_label!r}): missing required class-shape "
-                f"field(s) {missing}. This is an old function-shape entry from "
-                "before the class-shape refactor. Rewrite the endpoint as a "
-                "class with an @inference / @training / @dataset / @conversion "
-                "decorator. Bake-time hard fail to prevent shipping a stale "
-                "endpoint that the worker can't dispatch."
-            )
-            continue
-
-        # Type / value checks for the three required fields.
-        cls_name = str(fn.get("class_name") or "").strip()
-        archetype = str(fn.get("archetype") or "").strip()
         kind = str(fn.get("kind") or "").strip()
-        if not cls_name:
-            errors.append(f"functions[{idx}] ({fn_label!r}): class_name empty")
-            continue
-        if archetype not in _KNOWN_ARCHETYPES:
-            errors.append(
-                f"functions[{idx}] ({fn_label!r}): archetype must be one of "
-                f"{sorted(_KNOWN_ARCHETYPES)}, got {archetype!r}"
-            )
         if kind not in _KNOWN_KINDS:
             errors.append(
                 f"functions[{idx}] ({fn_label!r}): kind must be one of "
                 f"{sorted(_KNOWN_KINDS)}, got {kind!r}"
             )
 
-        # Cross-method slug uniqueness within a class. The orchestrator
-        # routes by ``slugify_name(function_name)``; two methods producing
-        # the same slug means one silently shadows the other at dispatch.
-        # (Discovery's outer check catches GLOBAL collisions across all
-        # classes; this catches the more-likely SAME-class collision.)
+        # Cross-method slug uniqueness within an endpoint group. The
+        # orchestrator routes by ``slugify_name(function_name)``; two handlers
+        # producing the same slug means one silently shadows the other.
         fn_name = str(fn.get("name") or "").strip()
         slug = slugify_name(fn_name)
         if not slug:
@@ -134,25 +102,16 @@ def validate_endpoint_lock(lock_dict: Dict[str, Any]) -> EndpointLockValidationR
                 f"{fn_name!r} produces empty slug"
             )
             continue
+        group = str(fn.get("class_name") or fn.get("module") or "<module>")
         py_name = str(fn.get("python_name") or "").strip()
-        slugs = per_class_slugs.setdefault(cls_name, {})
+        slugs = per_class_slugs.setdefault(group, {})
         prior_py = slugs.get(slug)
         if prior_py is not None and prior_py != py_name:
             errors.append(
-                f"class {cls_name!r}: two @inference.function methods slugify "
-                f"to the same wire route {slug!r}: {prior_py!r} and {py_name!r}. "
-                "Rename one of the methods (or set @inference.function(name=...))."
+                f"{group!r}: two handlers slugify to the same wire route "
+                f"{slug!r}: {prior_py!r} and {py_name!r}. Rename one."
             )
         slugs[slug] = py_name
-
-        # Cross-cutting hook sanity (#322): runtime= only valid on BatchedWorker.
-        runtime = fn.get("runtime")
-        if runtime is not None and archetype != "BatchedWorker":
-            warnings.append(
-                f"functions[{idx}] ({fn_label!r}): runtime={runtime!r} declared "
-                f"on archetype={archetype} — runtime= is only valid on "
-                "BatchedWorker (async class). Field will be ignored at dispatch."
-            )
 
     return EndpointLockValidationResult(
         ok=not errors,
@@ -183,11 +142,7 @@ def validate_endpoint(root: str | Path, *, require_uv_lock: bool = False) -> End
 
     Requirements:
     - `Dockerfile` must exist
-    - `endpoint.toml` must exist (flat schema)
-      - schema_version = 1
-      - name = "..."
-      - main = "pkg.module"
-    - `pyproject.toml` must exist (Python packaging metadata)
+    - `pyproject.toml` must exist with `[tool.gen_worker].main = "pkg.module"`
     - `[project].name` must exist in `pyproject.toml` (normalized for URL-safe endpoint paths)
     - `requirements.txt` must not exist
 
@@ -202,10 +157,6 @@ def validate_endpoint(root: str | Path, *, require_uv_lock: bool = False) -> End
     if not (root_path / "Dockerfile").exists():
         errors.append("missing Dockerfile")
 
-    endpoint_toml = root_path / "endpoint.toml"
-    if not endpoint_toml.exists():
-        errors.append("missing endpoint.toml")
-
     pyproject = root_path / "pyproject.toml"
     if not pyproject.exists():
         errors.append("missing pyproject.toml")
@@ -219,23 +170,8 @@ def validate_endpoint(root: str | Path, *, require_uv_lock: bool = False) -> End
         warnings.append("uv.lock not found (recommended for reproducible builds)")
 
     if tomllib is None:
-        warnings.append("tomllib is unavailable; cannot validate endpoint.toml/pyproject.toml")
+        warnings.append("tomllib is unavailable; cannot validate pyproject.toml")
         return EndpointValidationResult(ok=not errors, errors=tuple(errors), warnings=tuple(warnings))
-
-    # Validate endpoint.toml (flat schema).
-    if endpoint_toml.exists():
-        try:
-            tensorhub_cfg: dict[str, Any] = tomllib.loads(endpoint_toml.read_text(encoding="utf-8"))
-        except Exception as exc:
-            errors.append(f"failed to parse endpoint.toml: {exc}")
-            tensorhub_cfg = {}
-
-        if tensorhub_cfg.get("schema_version") != 1:
-            errors.append("endpoint.toml missing or invalid schema_version (expected schema_version = 1)")
-
-        main = tensorhub_cfg.get("main")
-        if not isinstance(main, str) or main.strip() == "":
-            errors.append("endpoint.toml missing main")
 
     # Validate pyproject.toml.
     if not pyproject.exists():
@@ -246,6 +182,12 @@ def validate_endpoint(root: str | Path, *, require_uv_lock: bool = False) -> End
     except Exception as exc:
         errors.append(f"failed to parse pyproject.toml: {exc}")
         return EndpointValidationResult(ok=False, errors=tuple(errors), warnings=tuple(warnings))
+
+    tool = data.get("tool")
+    gw = tool.get("gen_worker") if isinstance(tool, dict) else None
+    main = gw.get("main") if isinstance(gw, dict) else None
+    if not isinstance(main, str) or main.strip() == "":
+        errors.append("missing [tool.gen_worker].main in pyproject.toml")
 
     project = data.get("project")
     pyproject_name = project.get("name") if isinstance(project, dict) else None

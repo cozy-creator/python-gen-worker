@@ -1,12 +1,6 @@
-"""
-Function discovery module for Cozy workers.
-
-This module auto-discovers all @inference decorated functions in the project
-by scanning .py files and extracting metadata. Run as:
-
-    python -m gen_worker.discovery
-
-Outputs TOML endpoint lock to stdout.
+"""Build-time endpoint discovery: walk the ``[tool.gen_worker].main``
+package, extract every ``@endpoint`` object, and emit the endpoint.lock
+manifest as TOML on stdout. Run as ``python -m gen_worker.discovery``.
 """
 
 import hashlib
@@ -19,7 +13,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import msgspec
 
-from gen_worker.api.binding import Binding, Dispatch, HFRepo, Repo, Variant
+from gen_worker.api.binding import HF, Binding, Civitai, Hub, ModelScope
 from gen_worker.api.types import (
     Asset,
     AudioAsset,
@@ -30,13 +24,9 @@ from gen_worker.api.types import (
     Tensors,
     VideoAsset,
 )
-
-from gen_worker.discovery.toml_manifest import (
-    EndpointToml,
-    load_endpoint_toml,
-)
 from gen_worker.discovery.names import slugify_name
-from gen_worker.discovery.walk import find_endpoint_classes
+from gen_worker.discovery.project import load_project_config
+from gen_worker.discovery.walk import find_endpoints
 
 
 def _type_id(t: type) -> Dict[str, str]:
@@ -282,127 +272,39 @@ def _collect_expected_output_metadata(payload_type: type, output_type: type) -> 
     return out
 
 
-def _binding_slot_name(repo: Repo, fallback: str) -> str:
-    return str(getattr(repo, "slot_name", "") or fallback).strip()
+def _binding_to_manifest(binding: Binding, param_name: str = "") -> Dict[str, Any]:
+    """Emit a ``functions.bindings.<slot>`` block for the manifest.
 
-
-def _binding_to_manifest(binding: Binding, param_annotation: Any, param_name: str = "") -> Dict[str, Any]:
-    """Emit a `functions.bindings.<param>` block for the manifest.
-
-    Wire shape (from `progress.json` issue #9):
-
-    Fixed::
-
-        [functions.bindings.pipeline]
-        kind = "fixed"
-        ref = "owner/repo"
-        flavor = "bf16"
-        tag = "prod"
-        allow_override = false
-        pipeline_classes = ["pkg.mod.PipelineClass"]
-
-    Dispatch::
-
-        [functions.bindings.pipeline]
-        kind = "dispatch"
-        field = "variant"
-        allow_override = false
-        pipeline_classes = ["pkg.mod.PipelineClass"]
-
-        [functions.bindings.pipeline.table.nf4]
-        ref = "owner/repo"
-        flavor = "nf4"
-        tag = "prod"
+    Every binding is a fixed pick; the slot name is the dict key. Keys stay
+    compatible with ``models.download.build_provider_index_from_manifest``
+    (``ref`` / ``provider`` / ``flavor``).
     """
-    # `pipeline_classes` comes from `.allow_override(*classes)` (the explicit
-    # tenant-declared allowlist). When the binding has no override declared,
-    # we still emit the param-annotated class FQN as metadata so the
-    # orchestrator / UI can surface it without parsing the Python signature.
-    declared_classes: List[str] = list(getattr(binding, "_pipeline_classes", ()) or ())
-    if not declared_classes:
-        annotation_class = _annotation_to_fqn(param_annotation)
-        if annotation_class:
-            declared_classes = [annotation_class]
-
-    if isinstance(binding, Repo):
-        out: Dict[str, Any] = {
-            "kind": "fixed",
-            # `provider` distinguishes HFRepo / CivitaiRepo / Repo (tensorhub).
-            # Without it the downstream catalog defaults to "tensorhub" and
-            # silently rewrites the ref through tensorhub's slug normalizer,
-            # so HFRepo("black-forest-labs/FLUX.2-klein-4B") landed as
-            # tensorhub-provider `black-forest-labs/flux.2-klein-4b-base` in
-            # the catalog. Always emit the actual provider.
-            "provider": binding.provider,
-            "slot_name": _binding_slot_name(binding, param_name),
-            "ref": binding.ref,
-            "flavor": binding._flavor,
-            "tag": binding._tag,
-            "allow_override": bool(binding._allow_override),
-            "allow_lora": bool(getattr(binding, "_allow_lora", False)),
-            "pipeline_classes": declared_classes,
-        }
-        # Issue #20 fix 2: HF bindings carry a `dtype` field (replaces the
-        # old #flavor-suffix that leaked into model_id and got dropped by
-        # the loader). Only emitted for HFRepo and only when non-empty.
-        if isinstance(binding, HFRepo) and getattr(binding, "_dtype", ""):
-            out["dtype"] = binding._dtype
-        return out
-    if isinstance(binding, Dispatch):
-        table: Dict[str, Dict[str, str]] = {}
-        dispatch_slot_name = ""
-        for k, repo in binding.table.items():
-            if not dispatch_slot_name:
-                dispatch_slot_name = _binding_slot_name(repo, param_name)
-            entry: Dict[str, str] = {
-                "ref": repo.ref,
-                "tag": repo._tag,
-                # Per-entry provider — a Dispatch table can mix providers
-                # across variants (e.g. fp8 from tensorhub, nf4 from HF).
-                "provider": repo.provider,
-                "slot_name": _binding_slot_name(repo, param_name),
-            }
-            if repo._flavor:
-                entry["flavor"] = repo._flavor
-            # Issue #20 fix 2: HF entries can carry dtype.
-            if isinstance(repo, HFRepo) and getattr(repo, "_dtype", ""):
-                entry["dtype"] = repo._dtype
-            # #337: a SharedBase variant records its shared-component refs + its
-            # per-variant swap-slot refs into the endpoint lock so the full
-            # residency footprint of each selectable model is visible (shared
-            # base loads once + pinned; only the variant slot swaps per model).
-            if isinstance(repo, Variant):
-                entry["variant_kind"] = "shared_base_variant"
-                entry["pipeline_class"] = repo.pipeline_class_fqn
-                entry["shared_components"] = {
-                    name: {
-                        "ref": comp.ref,
-                        "provider": comp.provider,
-                        "subfolder": str(getattr(comp, "_subfolder", "") or ""),
-                        "dtype": str(getattr(comp, "_dtype", "") or ""),
-                    }
-                    for name, comp in dict(repo.shared_components).items()
-                }
-                entry["variant_slots"] = {
-                    name: {
-                        "ref": comp.ref,
-                        "provider": comp.provider,
-                        "subfolder": str(getattr(comp, "_subfolder", "") or ""),
-                        "dtype": str(getattr(comp, "_dtype", "") or ""),
-                    }
-                    for name, comp in dict(repo.variant_slots).items()
-                }
-            table[k] = entry
-        return {
-            "kind": "dispatch",
-            "field": binding.field,
-            "slot_name": dispatch_slot_name or param_name,
-            "table": table,
-            "allow_override": bool(binding._allow_override),
-            "allow_lora": bool(getattr(binding, "_allow_lora", False)),
-            "pipeline_classes": declared_classes,
-        }
-    raise TypeError(f"unknown binding type: {type(binding).__name__}")
+    out: Dict[str, Any] = {
+        "kind": "fixed",
+        "provider": binding.provider,
+        "slot_name": param_name,
+        "ref": binding.ref,
+    }
+    if isinstance(binding, Hub):
+        out["tag"] = binding.tag
+        if binding.flavor:
+            out["flavor"] = binding.flavor
+    elif isinstance(binding, HF):
+        for k in ("revision", "dtype", "subfolder"):
+            v = getattr(binding, k)
+            if v:
+                out[k] = v
+        if binding.files:
+            out["files"] = list(binding.files)
+    elif isinstance(binding, Civitai):
+        if binding.version:
+            out["version"] = binding.version
+    elif isinstance(binding, ModelScope):
+        if binding.revision:
+            out["revision"] = binding.revision
+        if binding.files:
+            out["files"] = list(binding.files)
+    return out
 
 
 def _annotation_to_fqn(ann: Any) -> str:
@@ -423,18 +325,6 @@ def _schema_and_hash(t: type) -> Tuple[Dict[str, Any], str]:
         pass
     raw = json.dumps(schema, separators=(",", ":"), sort_keys=True).encode("utf-8")
     return schema, hashlib.sha256(raw).hexdigest()
-
-
-def _find_endpoint_toml_path(root: Path) -> Path | None:
-    p = root / "endpoint.toml"
-    return p if p.exists() else None
-
-
-def _load_endpoint_manifest_toml(root: Path) -> EndpointToml:
-    p = _find_endpoint_toml_path(root)
-    if p is None:
-        raise ValueError("missing endpoint.toml (required for discovery)")
-    return load_endpoint_toml(p)
 
 
 def _assert_unique_function_names(functions: List[Dict[str, Any]]) -> None:
@@ -467,30 +357,22 @@ def _assert_unique_function_names(functions: List[Dict[str, Any]]) -> None:
         lines.append(f"  {nm!r}: defined {len(fns)}x ({where})")
     raise ValueError(
         "duplicate function name(s) within the endpoint — function names are the "
-        "external routing identifiers and must be unique. Give each method an "
-        "explicit @invocable(name=...):\n" + "\n".join(lines)
+        "external routing identifiers and must be unique. Rename the handler "
+        "method (or a variants= key):\n" + "\n".join(lines)
     )
 
 
 def discover_functions(root: Optional[Path] = None, *, main_module: str | None = None) -> List[Dict[str, Any]]:
-    """
-    Discover all @inference decorated functions in the project.
-
-    Args:
-        root: Project root directory. Defaults to current working directory.
-        main_module: ``endpoint.toml``'s ``main`` pointer (e.g. ``"conversion.main"``).
-            Required. The top-level package (``"conversion"``) is walked via
-            :func:`gen_worker.discovery.walk.find_endpoint_classes` to find
-            class-shape endpoints.
-
-    Returns:
-        List of function metadata dictionaries.
-    """
+    """Discover every @endpoint object under ``main_module``'s top-level
+    package and return the manifest ``functions`` entries."""
     if root is None:
         root = Path.cwd()
     root = root.resolve()
+    if not main_module:
+        raise ValueError(
+            "discover_functions requires main_module ([tool.gen_worker].main)"
+        )
 
-    # Ensure root is in sys.path for imports
     root_str = str(root)
     src_str = str(root / "src")
     if root_str not in sys.path:
@@ -498,108 +380,44 @@ def discover_functions(root: Optional[Path] = None, *, main_module: str | None =
     if (root / "src").exists() and src_str not in sys.path:
         sys.path.insert(0, src_str)
 
+    top_level = main_module.split(".", 1)[0]
+    try:
+        found = find_endpoints([top_level])
+    except Exception as e:
+        raise ValueError(
+            f"failed to walk endpoint package {top_level!r} (derived from "
+            f"[tool.gen_worker] main={main_module!r}): {e}"
+        ) from e
+
     functions: List[Dict[str, Any]] = []
-    imported_modules: Set[str] = set()
-    seen_functions: Set[Tuple[str, str, str]] = set()  # (declared_module, class_name, python_name)
+    seen: Set[Tuple[str, str, str]] = set()
+    for f in found:
+        for entry in _extract_entries(f.obj, f.walked_module):
+            key = (
+                entry.get("declared_module", entry.get("module", "")),
+                entry.get("class_name", ""),
+                entry.get("python_name", ""),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            functions.append(entry)
 
-    def _module_is_in_project(mod: Any) -> bool:
-        """
-        Limit discovery to modules that live under the project root.
-
-        This avoids inspecting third-party modules (e.g. transformers LazyModule),
-        which can trigger expensive/optional imports and break discovery.
-        """
-        mod_file = getattr(mod, "__file__", None)
-        if not mod_file:
-            return False
-        try:
-            p = Path(mod_file).resolve()
-        except Exception:
-            return False
-        try:
-            p.relative_to(root)
-            return True
-        except Exception:
-            return False
-
-    if main_module:
-        # Build-time class-shape discovery now flows through the unified
-        # walker shared with Worker._discover_and_register_functions. The
-        # walker takes top-level package names; we derive the top-level
-        # from main_module (``"conversion.main"`` -> ``"conversion"``) so
-        # the walker's ``walk_packages`` finds every submodule whether or
-        # not __init__.py re-exports it.
-        top_level = main_module.split(".", 1)[0]
-        try:
-            found_classes = find_endpoint_classes([top_level])
-        except Exception as e:
-            raise ValueError(
-                f"failed to walk endpoint package {top_level!r} (derived from "
-                f"endpoint.toml main={main_module!r}): {e}"
-            ) from e
-
-        for found in found_classes:
-            # Per-class entries are attributed to the walked top-level
-            # package name to keep the lockfile ``module`` field stable
-            # across submodule re-exports (matches pre-refactor behavior).
-            module_name = found.walked_module
-            try:
-                class_entries = _extract_class_function_methods(
-                    found.cls, module_name
-                )
-            except Exception as e:
-                print(
-                    f"warning: failed to extract class endpoint {found.qualname}: {e}",
-                    file=sys.stderr,
-                )
-                raise
-            for class_fn in class_entries:
-                key = (
-                    class_fn.get("declared_module", class_fn.get("module", "")),
-                    class_fn.get("class_name", ""),
-                    class_fn.get("python_name", ""),
-                )
-                if key in seen_functions:
-                    continue
-                seen_functions.add(key)
-                functions.append(class_fn)
-
-        _assert_unique_function_names(functions)
-        return functions
-
-    raise ValueError(
-        "discover_functions requires main_module (endpoint.toml `main`); "
-        "class-shape endpoints are discovered by walking that package"
-    )
+    _assert_unique_function_names(functions)
+    return functions
 
 
-def _extract_class_function_methods(
-    cls: type, module_name: str
-) -> List[Dict[str, Any]]:
-    """Manifest entries for a class-shape endpoint.
+def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
+    """Manifest entries for one @endpoint class or function.
 
-    Signature inspection (payload/output types, streaming shape, parametrize
-    fan-out) is delegated to ``gen_worker.registry`` — the one walker shared
-    with the worker runtime and the CLI. This function only adds the
+    Signature inspection lives in ``gen_worker.registry`` — the one walker
+    shared with the worker runtime and the CLI. This adds only the
     manifest-specific enrichment (schemas, moderation, bindings blocks).
     """
     from gen_worker.registry import extract_specs
 
-    spec = getattr(cls, "__gen_worker_endpoint_spec__", None)
-    if spec is None:
-        return []
-    # Parity with the historical manifest: only @<kind>.function/@invocable
-    # methods are baked; @batched_inference methods stay runtime-only.
-    plain_attrs = {
-        attr for attr, _m, _s in getattr(cls, "__gen_worker_function_methods__", []) or []
-    }
-    if not plain_attrs:
-        return []
-
     out: List[Dict[str, Any]] = []
-    for es in extract_specs(cls, walked_module=module_name):
-        if es.attr_name not in plain_attrs:
-            continue
+    for es in extract_specs(obj, walked_module=module_name):
         res_dict: Dict[str, Any] = {}
         try:
             raw = msgspec.to_builtins(es.resources)
@@ -608,7 +426,7 @@ def _extract_class_function_methods(
         except Exception:
             pass
         bindings_block = {
-            key: _binding_to_manifest(binding, None, key)
+            key: _binding_to_manifest(binding, key)
             for key, binding in es.models.items()
         }
 
@@ -617,8 +435,8 @@ def _extract_class_function_methods(
         output_type = es.output_type
         if output_type is None:
             raise ValueError(
-                f"{cls.__name__}.{es.attr_name}: manifest requires a concrete "
-                "msgspec.Struct output/delta type"
+                f"{es.name}: manifest requires a concrete msgspec.Struct "
+                "output/delta type"
             )
         output_schema, output_sha = _schema_and_hash(output_type)
         expected_outputs = _collect_expected_output_metadata(es.payload_type, output_type)
@@ -631,19 +449,16 @@ def _extract_class_function_methods(
         function_name = slugify_name(es.name)
         if not function_name:
             raise ValueError(
-                f"{cls.__name__}.{es.attr_name}: function name cannot be "
-                f"normalized from {es.name!r}"
+                f"{es.name!r}: function name cannot be normalized"
             )
 
         fn: Dict[str, Any] = {
             "name": function_name,
-            "python_name": es.attr_name,
+            "python_name": es.attr_name or es.method.__name__,
             "module": module_name,
-            "declared_module": getattr(cls, "__module__", "") or module_name,
-            "class_name": cls.__name__,
-            "archetype": getattr(cls, "__gen_worker_archetype__", "SerialWorker"),
+            "declared_module": es.module or module_name,
+            "class_name": es.cls.__name__ if es.cls is not None else "",
             "kind": es.kind,
-            "sub_kind": es.sub_kind,
             "runtime": es.runtime,
             "resources": res_dict,
             "bindings": bindings_block,
@@ -658,13 +473,7 @@ def _extract_class_function_methods(
             "output_schema": output_schema,
             "incremental_output": incremental,
             "is_async": es.is_async,
-            "decorator": f"@{es.kind}.function",
-            "label": es.label,
-            "description": es.description,
             "timeout_ms": es.timeout_ms,
-            "allowed_shapes": [list(s) for s in es.allowed_shapes],
-            "batch_window_ms": getattr(spec, "batch_window_ms", None),
-            "max_batch": getattr(spec, "max_batch", None),
         }
         if incremental and es.delta_type is not None:
             fn["delta_type"] = _type_id(es.delta_type)
@@ -688,9 +497,9 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
         root = Path.cwd()
     root = root.resolve()
 
-    tensorhub_manifest = _load_endpoint_manifest_toml(root)
+    cfg = load_project_config(root)
 
-    functions = discover_functions(root, main_module=tensorhub_manifest.main)
+    functions = discover_functions(root, main_module=cfg.main)
 
     seen_fn: Dict[str, str] = {}
     for fn in functions:
@@ -751,7 +560,7 @@ def main() -> None:
         sys.exit(1)
 
     if not manifest.get("functions"):
-        print("warning: no @inference decorated functions found", file=sys.stderr)
+        print("warning: no @endpoint objects found", file=sys.stderr)
 
     sys.stdout.write(msgspec.toml.encode(_strip_none(manifest)).decode("utf-8"))
     if not sys.stdout.isatty():

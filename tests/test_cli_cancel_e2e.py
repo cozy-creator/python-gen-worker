@@ -30,7 +30,7 @@ import gen_worker.cli as cli
 _ENDPOINT_SRC = '''\
 import time
 import msgspec
-from gen_worker import RequestContext, inference
+from gen_worker import RequestContext, endpoint
 
 
 class In(msgspec.Struct):
@@ -41,20 +41,18 @@ class Out(msgspec.Struct):
     response: str
 
 
-@inference()
+@endpoint
 class EP:
     def setup(self) -> None:
         pass
 
-    @inference.function(name="slow")
     def slow(self, ctx: RequestContext, data: In) -> Out:
         # Block cooperatively until canceled — the canonical idiom.
         for _ in range(100000):
-            ctx.raise_if_canceled()
+            ctx.raise_if_cancelled()
             time.sleep(0.02)
         return Out(response="done")
 
-    @inference.function(name="ping")
     def ping(self, ctx: RequestContext, data: In) -> Out:
         return Out(response="pong")
 '''
@@ -65,7 +63,7 @@ def _make_endpoint(tmp_path: Path) -> Path:
     (pkg / "cancel_ep").mkdir(parents=True)
     (pkg / "cancel_ep" / "__init__.py").write_text("")
     (pkg / "cancel_ep" / "main.py").write_text(_ENDPOINT_SRC)
-    (pkg / "endpoint.toml").write_text('schema_version = 1\nmain = "cancel_ep.main"\n')
+    (pkg / "pyproject.toml").write_text('[tool.gen_worker]\nmain = "cancel_ep.main"\n')
     return pkg
 
 
