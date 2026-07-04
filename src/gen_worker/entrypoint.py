@@ -41,6 +41,8 @@ except ImportError as e:
     print("Please ensure the gen_worker package is installed.", file=sys.stderr)
     sys.exit(1)
 
+# Default baked container location; overridden by Settings.endpoint_lock_path
+# (env ENDPOINT_LOCK_PATH) for non-container runs.
 MANIFEST_PATH = Path("/app/.tensorhub/endpoint.lock")
 
 logging.basicConfig(
@@ -91,18 +93,18 @@ def _log_worker_fatal(phase: str, exc: BaseException, *, exit_code: int) -> None
         logger.exception("worker.fatal: %s", exc)
 
 
-def load_manifest() -> Optional[dict]:
+def load_manifest(path: Path = MANIFEST_PATH) -> Optional[dict]:
     """Load the function manifest if it exists (baked in at build time)."""
-    if not MANIFEST_PATH.exists():
+    if not path.exists():
         return None
     try:
-        raw = MANIFEST_PATH.read_text(encoding="utf-8")
+        raw = path.read_text(encoding="utf-8")
         manifest = msgspec.toml.decode(raw)
         if not isinstance(manifest, dict):
             raise ValueError("endpoint.lock must decode to a TOML table")
         return manifest
     except Exception as e:
-        logger.warning("Failed to load manifest from %s: %s", MANIFEST_PATH, e)
+        logger.warning("Failed to load manifest from %s: %s", path, e)
         return None
 
 
@@ -191,14 +193,15 @@ def _run_main() -> int:
             _log_worker_fatal("trainer_runtime", e, exit_code=1)
             return 1
 
-    manifest = load_manifest()
+    manifest_path = Path(settings.endpoint_lock_path or MANIFEST_PATH)
+    manifest = load_manifest(manifest_path)
     user_modules: List[str] = []
     if manifest:
         user_modules = get_modules_from_manifest(manifest)
         _log_startup_phase(
             "manifest_loaded",
             status="ok",
-            manifest_path=str(MANIFEST_PATH),
+            manifest_path=str(manifest_path),
             function_count=len(manifest.get("functions", [])),
             module_count=len(user_modules),
         )
@@ -207,7 +210,7 @@ def _run_main() -> int:
             "manifest_loaded",
             status="error",
             level=logging.ERROR,
-            manifest_path=str(MANIFEST_PATH),
+            manifest_path=str(manifest_path),
             reason="missing_or_invalid_manifest",
         )
 
@@ -232,9 +235,11 @@ def _run_main() -> int:
 
     if not user_modules:
         logger.error(
-            "No user function modules found. A baked manifest at /app/.tensorhub/endpoint.lock is required.\n"
+            "No user function modules found. A baked manifest at %s is required.\n"
             "Your Dockerfile should run discovery at build time:\n"
-            "  RUN mkdir -p /app/.tensorhub && python -m gen_worker.discovery > /app/.tensorhub/endpoint.lock"
+            "  RUN mkdir -p /app/.tensorhub && python -m gen_worker.discovery > /app/.tensorhub/endpoint.lock\n"
+            "(non-container runs: set ENDPOINT_LOCK_PATH to the generated file)",
+            manifest_path,
         )
         return 1
 

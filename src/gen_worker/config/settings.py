@@ -38,6 +38,9 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     # Per-pod worker identity (orchestrator-injected).
     worker_id: str = ""
     worker_mode: Literal["inference", "trainer"] = "inference"
+    # Path to the discovery manifest (endpoint.lock). Default is the baked
+    # container location; non-container runs (e2e, bare-metal dev) override it.
+    endpoint_lock_path: str = "/app/.tensorhub/endpoint.lock"
     worker_jwt: str = ""
 
     # Trainer mode: path to the job spec JSON file the trainer pod was launched
