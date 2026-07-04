@@ -24,3 +24,8 @@ main = "marco_polo.main"
 python_version = "3.12"
 ignore_missing_imports = true
 disallow_untyped_defs = true
+
+# The example tracks the in-repo gen-worker (the @endpoint API it uses is
+# unreleased); published wheels can't run this source.
+[tool.uv.sources]
+gen-worker = { path = "../..", editable = true }

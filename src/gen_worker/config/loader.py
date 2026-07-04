@@ -35,6 +35,7 @@ _ENV_TO_FIELD: Dict[str, str] = {
     "WORKER_ID": "worker_id",
     "WORKER_MODE": "worker_mode",
     "WORKER_JWT": "worker_jwt",
+    "ENDPOINT_LOCK_PATH": "endpoint_lock_path",
     "TRAINER_JOB_SPEC_PATH": "trainer_job_spec_path",
     "RUNPOD_POD_ID": "runpod_pod_id",
     "WORKER_DISCONNECTED_TIMEOUT_S": "worker_disconnected_timeout_s",
