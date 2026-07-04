@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .streaming_primitives import ConversionImplementationError
+from .writer import ConversionImplementationError
 
 
 def convert_safetensors_to_flashpack(

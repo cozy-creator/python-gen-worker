@@ -57,7 +57,7 @@ class Component:
         local to the component (e.g. ``conv_in.weight``), NOT prefixed with
         the component name.
         """
-        from ._tensor_iter import iter_component_tensors
+        from .writer import iter_component_tensors
 
         yield from iter_component_tensors(self._path)
 

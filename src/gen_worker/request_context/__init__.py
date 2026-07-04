@@ -756,7 +756,7 @@ class _PublisherMixin:
 
     @property
     def hf_token(self) -> str:
-        """HuggingFace API token for gen_worker.clone / conversion helpers.
+        """HuggingFace API token for cozy_convert / conversion helpers.
 
         Empty string when unconfigured — helpers fall back to
         unauthenticated calls (public repos work)."""
@@ -1560,8 +1560,10 @@ class ConversionContext(_PublisherMixin, RequestContext):
 
     Carries the producer-contract RPCs needed to publish new repo revisions
     and read/write repo metadata, plus the conversion-helper surface
-    (``mktemp``, ``checkpoint_dir``, ``open_output_writer``,
-    ``copy_unconverted_components``, ``cancelled``).
+    (``mktemp``, ``checkpoint_dir``, ``copy_unconverted_components``,
+    ``cancelled``). The ETL itself (ingest / cast / quant / clone / writers)
+    lives in the ``cozy_convert`` package — this class only carries what the
+    worker API needs.
 
     Inference handlers receive ``RequestContext`` instead — they never need
     these methods.
@@ -1569,12 +1571,10 @@ class ConversionContext(_PublisherMixin, RequestContext):
 
     def __init__(self, *args: Any, source: Any = None, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        # Conversion-wrapper state. ``source`` is the resolved input model
-        # (``gen_worker.conversion.source.Source``) for tenants that operate
-        # on a checkpoint; dataset-generation tenants pass ``source=None``.
+        # ``source`` is the resolved input model handle (a cozy_convert
+        # ``Source``) for tenants that operate on a checkpoint; None otherwise.
         self._source = source
         self._mktemp_root: Optional[Path] = None
-        self._open_writers: list[Any] = []
 
     # ----- producer-contract RPCs -------------------------------------
 
@@ -1614,20 +1614,6 @@ class ConversionContext(_PublisherMixin, RequestContext):
         dir_path = base / safe_key
         dir_path.mkdir(parents=True, exist_ok=True)
         return dir_path
-
-    def open_output_writer(self) -> Any:
-        """Return a fresh ``StreamingWriter`` for one output variant.
-
-        Call once per entry in the tenant's specs list. The returned writer
-        is scoped to a unique subdirectory under ``mktemp()``; tenants don't
-        pick paths themselves.
-        """
-        from ..conversion.writer import StreamingWriter
-
-        out_dir = self.mktemp()
-        w = StreamingWriter(source=self._source, out_dir=out_dir)
-        self._open_writers.append(w)
-        return w
 
     def copy_unconverted_components(
         self,

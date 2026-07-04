@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any, cast
 
-from .streaming_primitives import ConversionImplementationError
+from .writer import ConversionImplementationError
 
 
 class NotImplementedFamilyError(ConversionImplementationError):

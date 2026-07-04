@@ -346,7 +346,7 @@ def _run_cast_inline(
     """bf16/fp16/fp32 streaming dtype cast."""
     import torch
 
-    from .streaming_primitives import streaming_dtype_cast
+    from .writer import streaming_dtype_cast
 
     dtype = _normalize(target_dtype)
     if dtype in {"bf16"}:
@@ -1137,7 +1137,7 @@ def _run_gguf_inline(
     import os
     import subprocess
 
-    from .gguf_utils import (
+    from .gguf_tools import (
         prepare_hf_source_tree_for_gguf,
         resolve_gguf_convert_script,
         run_hf_to_gguf_conversion,
