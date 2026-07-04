@@ -422,3 +422,56 @@ def test_from_scratch_example_uses_publish_contract() -> None:
     assert s.output_mode == "single"
     assert not s.is_async_gen
     assert s.output_type is mod.FromScratchResult
+
+
+def test_manifest_keeps_variant_entries(tmp_pkg: Path) -> None:
+    """variants= rows share (module, class, python_name) with their base
+    function; the manifest dedup must key on the stamped name too."""
+    from gen_worker.discovery.discover import discover_functions
+
+    pkg = tmp_pkg / "ep_variants"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "main.py").write_text(textwrap.dedent("""
+        import msgspec
+        from gen_worker import HF, RequestContext, Resources, endpoint
+
+        class In_(msgspec.Struct):
+            x: str = ""
+
+        class Out_(msgspec.Struct):
+            y: str
+
+        @endpoint(
+            model=HF("o/base", dtype="bf16"),
+            resources=Resources(vram_gb=24),
+            variants={"generate_fp8": (HF("o/base-fp8"), Resources(vram_gb=14))},
+        )
+        class Gen:
+            def setup(self, model: str) -> None:
+                self.model = model
+
+            def generate(self, ctx: RequestContext, data: In_) -> Out_:
+                return Out_(y="ok")
+    """))
+
+    fns = discover_functions(tmp_pkg, main_module="ep_variants.main")
+    assert sorted(f["name"] for f in fns) == ["generate", "generate-fp8"]
+
+
+def test_model_shorthand_skips_server_handle_setup_param() -> None:
+    """runtime= endpoints inject a ServerHandle into setup(); the model=
+    shorthand must resolve the slot from the remaining parameter."""
+    from gen_worker.runtimes.server import ServerHandle
+
+    @endpoint(model=HF("o/llm"), resources=Resources(vram_gb=40), runtime="vllm")
+    class Chat:
+        def setup(self, model: str, server: ServerHandle) -> None:
+            self.base_url = server.base_url
+
+        def complete(self, ctx: RequestContext, data: _In) -> _Out:
+            return _Out(result="")
+
+    (s,) = extract_specs(Chat)
+    assert list(s.models) == ["model"]
+    assert s.models["model"].ref == "o/llm"
