@@ -65,6 +65,40 @@ def test_safetensors_preferred_over_bin() -> None:
     assert "unet/diffusion_pytorch_model.bin" not in sel
 
 
+def test_diffusers_repo_excludes_root_monolithic_checkpoints() -> None:
+    # sd1.5 shape (e2e #105 J4): untagged fp32 root checkpoints coexist with
+    # fp16 component weights. The root single-file distributions are redundant
+    # — picking them pulled 12GB of fp32 where ~2GB of fp16 suffices.
+    files = [
+        "model_index.json",
+        "README.md",
+        "v1-5-pruned.ckpt",
+        "v1-5-pruned.safetensors",
+        "v1-5-pruned-emaonly.ckpt",
+        "v1-5-pruned-emaonly.safetensors",
+        "scheduler/scheduler_config.json",
+        "text_encoder/config.json",
+        "text_encoder/model.safetensors",
+        "text_encoder/model.fp16.safetensors",
+        "unet/config.json",
+        "unet/diffusion_pytorch_model.safetensors",
+        "unet/diffusion_pytorch_model.fp16.safetensors",
+        "unet/diffusion_pytorch_model.non_ema.safetensors",
+        "vae/config.json",
+        "vae/diffusion_pytorch_model.safetensors",
+        "vae/diffusion_pytorch_model.fp16.safetensors",
+    ]
+    sel = select_hf_files(files)
+    assert sel is not None
+    assert "v1-5-pruned.safetensors" not in sel
+    assert "v1-5-pruned-emaonly.safetensors" not in sel
+    assert "v1-5-pruned.ckpt" not in sel
+    assert "unet/diffusion_pytorch_model.fp16.safetensors" in sel
+    assert "vae/diffusion_pytorch_model.fp16.safetensors" in sel
+    assert "text_encoder/model.fp16.safetensors" in sel
+    assert "model_index.json" in sel
+
+
 def test_root_weights_repo_selects_weights_and_sidecars() -> None:
     files = [
         "config.json",

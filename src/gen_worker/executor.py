@@ -80,6 +80,21 @@ def _sanitize(message: str) -> str:
     return out[:1024]
 
 
+def _reserved_repo_info(payload: Any, field_name: str) -> Dict[str, Any]:
+    """``payload.source`` / ``payload.destination`` as a plain dict ({} when
+    absent). Producer payloads carry these reserved-name structs (#376)."""
+    obj = getattr(payload, field_name, None)
+    if obj is None:
+        return {}
+    if isinstance(obj, dict):
+        return dict(obj)
+    try:
+        out = msgspec.to_builtins(obj)
+    except Exception:
+        return {}
+    return out if isinstance(out, dict) else {}
+
+
 def _map_exception(exc: BaseException) -> Tuple[int, str]:
     """-> (JobStatus, safe_message)."""
     if isinstance(exc, (CanceledError, asyncio.CancelledError)):
@@ -177,6 +192,7 @@ class ModelStore:
             on_event=self._on_residency_event, vram_budget_bytes=vram_budget_bytes,
         )
         self._locks: Dict[str, asyncio.Lock] = {}
+        self._bindings: Dict[str, Any] = {}
         self.keep: set[str] = set()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._index = disk_gc.RefIndex(self._cache_dir)
@@ -305,6 +321,12 @@ class ModelStore:
     def _lock(self, ref: str) -> asyncio.Lock:
         return self._locks.setdefault(ref, asyncio.Lock())
 
+    def register_binding(self, ref: str, binding: Any) -> None:
+        """Endpoint-spec binding for ``ref`` — supplies files/provider on
+        download paths that only carry the bare ref (ModelOp, startup
+        prefetch), so ``files=`` selections apply everywhere (#377)."""
+        self._bindings.setdefault(ref, binding)
+
     async def ensure_local(
         self,
         ref: str,
@@ -314,8 +336,11 @@ class ModelStore:
     ) -> Path:
         """Materialize `ref` on disk. Transient failures retry with backoff;
         terminal (4xx-class) failures raise immediately. Emits ModelEvents.
-        ``binding`` (when known) supplies provider + file-selection metadata."""
+        ``binding`` (when known) supplies provider + file-selection metadata;
+        bare-ref callers fall back to the registered endpoint binding."""
         self.bind_loop()
+        if binding is None:
+            binding = self._bindings.get(ref)
         async with self._lock(ref):
             cached = self.residency.local_path(ref)
             if cached is not None and cached.exists():
@@ -434,6 +459,9 @@ class Executor:
         self._send = send
         self._settings = settings
         self.store = store or ModelStore(send)
+        for s in specs:
+            for b in s.models.values():
+                self.store.register_binding(wire_ref(b), b)
         self._gpu_semaphore = asyncio.Semaphore(max(1, gpu_slots))
         # Model loads/promotions serialize so allocator-delta measurements
         # and free-VRAM reads don't cross-contaminate (#369).
@@ -934,6 +962,10 @@ class Executor:
         gpu_index = int(compute.gpu_index) if compute is not None else 0
         timeout_ms = int(run.timeout_ms or 0) or int(spec.timeout_ms or 0)
 
+        producer = spec.kind != "inference"
+        source_info = _reserved_repo_info(payload, "source") if producer else {}
+        destination_info = _reserved_repo_info(payload, "destination") if producer else {}
+
         ctx_cls = _CONTEXT_BY_KIND.get(spec.kind, RequestContext)
         ctx = ctx_cls(
             request_id=run.request_id,
@@ -949,6 +981,8 @@ class Executor:
                 gpu_count=int(compute.gpu_count) if compute is not None else 0,
             ),
             models={b.slot: b.ref for b in run.models},
+            source_info=source_info,
+            destination_info=destination_info,
             execution_hints=(
                 {"output_format": "inline"} if run.output_mode == pb.OUTPUT_MODE_INLINE else {}
             ),
@@ -957,6 +991,8 @@ class Executor:
         job.ctx = ctx
 
         try:
+            if source_info:
+                await self._materialize_source(ctx, source_info, snapshots)
             instance = await self.ensure_setup(spec, snapshots)
             kwargs = await self._handler_kwargs(spec, snapshots)
         except asyncio.CancelledError:
@@ -1016,6 +1052,18 @@ class Executor:
             if acquired:
                 self._gpu_semaphore.release()
             self._maybe_idle()
+
+    async def _materialize_source(
+        self, ctx: Any, info: Dict[str, Any], snapshots: Dict[str, pb.Snapshot]
+    ) -> None:
+        """Reserved-source contract (#376): materialize ``payload.source``
+        locally before the handler runs. Same ModelStore path as model
+        bindings — identical retry/classification and ModelEvent emission."""
+        ref = str(info.get("ref") or "").strip()
+        if not ref:
+            raise ValidationError("payload.source.ref must be a non-empty repo ref")
+        path = await self.store.ensure_local(ref, snapshots.get(ref))
+        ctx._set_source_path(str(path))
 
     async def _handler_kwargs(
         self, spec: EndpointSpec, snapshots: Dict[str, pb.Snapshot]

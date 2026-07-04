@@ -267,8 +267,9 @@ def select_hf_files(
     """Small variant selector: which repo files to download.
 
     - Diffusers-style repos (component dirs): every non-weight file (configs,
-      tokenizers) plus ONE weight set per directory — the requested ``flavor``
-      when present, else bf16 > fp16 > untagged, safetensors preferred.
+      tokenizers) plus ONE weight set per component directory — the requested
+      ``flavor`` when present, else bf16 > fp16 > untagged, safetensors
+      preferred. Root monolithic checkpoints are excluded (redundant).
     - Root-weights repos: the root weight files (same variant rule) + sidecars.
     - Anything else: None (download the whole repo).
     """
@@ -294,6 +295,12 @@ def select_hf_files(
 
     if not diffusers_like and set(weights_by_dir) != {""}:
         return None  # unrecognized layout: full repo
+
+    if diffusers_like and "" in weights_by_dir and len(weights_by_dir) > 1:
+        # Root single-file distributions (sd1.5's v1-5-pruned*.safetensors)
+        # duplicate the component-dir weights — diffusers loads from the
+        # component dirs, so never pull the monolithic root checkpoints.
+        del weights_by_dir[""]
 
     def _pick(group: list[str]) -> list[str]:
         st = [f for f in group if f.lower().endswith(".safetensors")]
