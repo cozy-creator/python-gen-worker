@@ -52,12 +52,15 @@ def probe_hardware() -> Dict[str, Any]:
 
 
 def free_vram_bytes() -> int:
+    """Free VRAM summed across ALL CUDA devices (StateDelta.free_vram_bytes)."""
     try:
         import torch
 
         if torch.cuda.is_available():
-            free_mem, _total = torch.cuda.mem_get_info(0)
-            return int(free_mem)
+            return sum(
+                int(torch.cuda.mem_get_info(i)[0])
+                for i in range(torch.cuda.device_count())
+            )
     except Exception:
         pass
     return 0
@@ -211,6 +214,9 @@ class Lifecycle:
         """Gate functions, prefetch worker-fetchable models with retry/backoff,
         set up endpoints, advance phases. Never raises: failures gate
         individual functions, not the process."""
+        # Disk truth first: after a restart the CAS dir is full while Residency
+        # starts empty — rescan so Hello.models (and disk GC) see reality.
+        self.executor.store.rescan_disk()
         self.executor.gate_functions(self.hardware)
 
         from .api.binding import wire_ref

@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import shutil
 import time
 import typing
 from dataclasses import dataclass, field as dc_field
@@ -29,7 +30,9 @@ from .api.errors import (
 from .api.streaming import BatchItemDelta, Done, Error, IncrementalTokenDelta
 from .api.types import Compute
 from .capability import HardwareUnmetError, InsufficientDiskError
+from .models import disk_gc
 from .models import residency as residency_mod
+from .models.memory import estimate_cuda_resident_gb
 from .models.cache_paths import tensorhub_cas_dir
 from .models.download import ensure_local
 from .models.errors import UrlExpiredError
@@ -57,6 +60,11 @@ _CANCEL_GRACE_S = 5.0
 _STUCK_THREAD_RECYCLE_S = 30.0
 _DOWNLOAD_RETRIES = 3
 _PROGRESS_EVENT_MIN_INTERVAL_S = 5.0
+_GiB = 1024 ** 3
+# Disk headroom preserved beyond a download's known size (#370).
+_DISK_GC_MARGIN_BYTES = 2 * _GiB
+# Refs used within the grace window are not disk-GC candidates.
+_DISK_GC_GRACE_S = 300.0
 
 try:  # torch is optional at import time; the executor works without it.
     import torch
@@ -146,9 +154,10 @@ _TIER_TO_PB = {
 
 
 class ModelStore:
-    """The worker's model seam: ensure-local with retries + the residency map.
-    All tier transitions flow through :class:`~gen_worker.models.residency.
-    Residency`, whose events this store forwards as wire ``ModelEvent``s."""
+    """The worker's model seam: ensure-local with retries, the residency map,
+    and disk retention (#370). All tier transitions flow through
+    :class:`~gen_worker.models.residency.Residency`, whose events this store
+    forwards as wire ``ModelEvent``s."""
 
     def __init__(
         self,
@@ -157,17 +166,40 @@ class ModelStore:
         hf_home: str = "",
         hf_token: str = "",
         cache_dir: Optional[Path] = None,
+        vram_budget_bytes: Optional[int] = None,
+        disk_free_bytes_fn: Optional[Callable[[], int]] = None,
     ) -> None:
         self._emit = emit
         self._hf_home = hf_home or None
         self._hf_token = hf_token or None
         self._cache_dir = cache_dir or tensorhub_cas_dir()
-        self.residency = Residency(on_event=self._on_residency_event)
+        self.residency = Residency(
+            on_event=self._on_residency_event, vram_budget_bytes=vram_budget_bytes,
+        )
         self._locks: Dict[str, asyncio.Lock] = {}
         self.keep: set[str] = set()
         self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._index = disk_gc.RefIndex(self._cache_dir)
+        self._disk_free = disk_free_bytes_fn or self._default_disk_free
+
+    def _default_disk_free(self) -> int:
+        p = Path(self._cache_dir)
+        for candidate in (p, *p.parents):  # cache dir may not exist yet
+            try:
+                return int(shutil.disk_usage(candidate).free)
+            except OSError:
+                continue
+        return 0
 
     # ---- events ------------------------------------------------------------
+
+    def bind_loop(self) -> None:
+        """Capture the running loop so residency events raised from worker
+        threads (demote/promote via to_thread) still reach the wire."""
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
 
     def _on_residency_event(self, ref: str, state: str, vram_bytes: int) -> None:
         pb_state = _RESIDENCY_STATE_TO_PB.get(state)
@@ -201,14 +233,72 @@ class ModelStore:
     def local_path(self, ref: str) -> Optional[Path]:
         return self.residency.local_path(ref)
 
-    def mark_in_vram(self, ref: str, vram_bytes: int, obj: Any = None) -> None:
-        self.residency.track_vram(ref, obj, vram_bytes=int(vram_bytes))
+    # ---- disk retention (#370) ------------------------------------------------
 
-    def mark_in_ram(self, ref: str, obj: Any = None) -> None:
-        self.residency.track_ram(ref, obj)
+    def rescan_disk(self) -> None:
+        """Boot-time truth: re-register still-present downloads from the
+        persisted ref index so Hello.models and GC see what disk holds."""
+        for ref, ent in self._index.entries().items():
+            p = Path(str(ent.get("path") or ""))
+            if p.exists():
+                if self.residency.tier(ref) is None:
+                    self.residency.track_disk(ref, p)
+            else:
+                self._index.remove(ref)
 
-    def mark_unloaded(self, ref: str) -> None:
-        self.residency.release_to_disk(ref)
+    def gc_disk(self, target_free_bytes: int, *, exclude: Tuple[str, ...] = ()) -> None:
+        """Evict LRU disk-tier refs until free disk reaches the target.
+        Non-keep refs go first (grace-honoring, then grace-ignoring); under
+        keep-pressure the escape hatch evicts LRU `keep` refs too (contract §7
+        — EVICTED is emitted so the hub re-downloads when demand returns).
+        In-use / loaded refs are never touched."""
+        for include_keep, honor_grace in (
+            (False, True), (False, False), (True, True), (True, False),
+        ):
+            for ref in self._gc_candidates(include_keep, honor_grace, exclude):
+                if self._disk_free() >= target_free_bytes:
+                    return
+                self._evict_disk_ref(ref)
+
+    def _gc_candidates(
+        self, include_keep: bool, honor_grace: bool, exclude: Tuple[str, ...]
+    ) -> List[str]:
+        now = time.time()
+        out: List[Tuple[float, str]] = []
+        for ref in self.residency.refs_in(residency_mod.Tier.DISK):
+            if ref in exclude or self.residency.in_use(ref):
+                continue
+            if (ref in self.keep) != include_keep:
+                continue
+            last = self._index.last_used(ref)
+            if honor_grace and (now - last) < _DISK_GC_GRACE_S:
+                continue
+            out.append((last, ref))
+        out.sort()
+        return [r for _, r in out]
+
+    def _evict_disk_ref(self, ref: str) -> None:
+        path = self.residency.local_path(ref) or self._index.path(ref)
+        if not self.residency.evict(ref):  # refuses in-use entries; emits EVICTED
+            return
+        if path is not None:
+            disk_gc.delete_ref_bytes(ref, path, self._cache_dir)
+            disk_gc.sweep_orphan_blobs(self._cache_dir)
+        self._index.remove(ref)
+
+    async def _ensure_disk_headroom(self, ref: str, needed_bytes: int) -> None:
+        target = int(needed_bytes) + _DISK_GC_MARGIN_BYTES
+        if self._disk_free() >= target:
+            return
+        await asyncio.to_thread(self.gc_disk, target, exclude=(ref,))
+        free = self._disk_free()
+        if free < target:
+            await self._event(ref, pb.MODEL_STATE_FAILED, error="insufficient_disk")
+            raise InsufficientDiskError(
+                f"need {needed_bytes} bytes for {ref}; {free} free after disk GC",
+                available_bytes=free, required_bytes=needed_bytes,
+                path=str(self._cache_dir),
+            )
 
     # ---- ensure-local ----------------------------------------------------------
 
@@ -225,11 +315,18 @@ class ModelStore:
         """Materialize `ref` on disk. Transient failures retry with backoff;
         terminal (4xx-class) failures raise immediately. Emits ModelEvents.
         ``binding`` (when known) supplies provider + file-selection metadata."""
+        self.bind_loop()
         async with self._lock(ref):
             cached = self.residency.local_path(ref)
             if cached is not None and cached.exists():
+                self._index.touch(ref)
                 return cached
-            self._loop = asyncio.get_running_loop()
+            if snapshot is not None and snapshot.files:
+                # Sizes are known up front for tensorhub snapshots: gate on
+                # disk headroom, GC-ing LRU refs first (#370).
+                await self._ensure_disk_headroom(
+                    ref, sum(int(f.size_bytes) for f in snapshot.files)
+                )
             last_progress = 0.0
 
             def _progress(done: int, total: Optional[int]) -> None:
@@ -263,6 +360,7 @@ class ModelStore:
                         progress=_progress,
                     )
                     self.residency.track_disk(ref, path)
+                    self._index.record(ref, path, disk_gc.tree_bytes(path))
                     return path
                 except Exception as exc:
                     terminal = _is_terminal_download_error(exc) or attempt >= _DOWNLOAD_RETRIES
@@ -337,6 +435,9 @@ class Executor:
         self._settings = settings
         self.store = store or ModelStore(send)
         self._gpu_semaphore = asyncio.Semaphore(max(1, gpu_slots))
+        # Model loads/promotions serialize so allocator-delta measurements
+        # and free-VRAM reads don't cross-contaminate (#369).
+        self._load_lock = asyncio.Lock()
         self._on_state_change = on_state_change or (lambda: None)
         self.file_base_url: str = ""
         self.draining = False
@@ -424,9 +525,11 @@ class Executor:
     async def ensure_setup(self, spec: EndpointSpec, snapshots: Optional[Dict[str, pb.Snapshot]] = None) -> Any:
         if spec.cls is None:
             return None  # function-shaped endpoint: no instance, no setup
+        self.store.bind_loop()
         rec = self._classes[spec.instance_key]
         async with rec.lock:
             if rec.ready:
+                await self._promote_setup_refs(spec)
                 return rec.instance
             setup_slots = self._setup_slots(spec)
             paths: Dict[str, str] = {}
@@ -436,36 +539,105 @@ class Executor:
                 snap = (snapshots or {}).get(ref)
                 path = await self.store.ensure_local(ref, snap, binding=binding)
                 paths[slot] = str(path)
-            instance = spec.cls()
-            setup = getattr(instance, "setup", None)
-            vram_before = self._vram_allocated()
-            if spec.runtime:
-                rec.server = await self._boot_engine_server(spec, paths)
-            if callable(setup):
-                kwargs = await self._injection_kwargs(spec, setup, paths, server=rec.server)
-                if asyncio.iscoroutinefunction(setup):
-                    await setup(**kwargs)
-                else:
-                    await asyncio.to_thread(setup, **kwargs)
-            warmup = getattr(instance, "warmup", None)
-            if callable(warmup):
-                if asyncio.iscoroutinefunction(warmup):
-                    await warmup()
-                else:
-                    await asyncio.to_thread(warmup)
-            # Measured VRAM (allocator delta across the load) — the number the
-            # orchestrator's VRAM packer sees; never an estimate constant.
-            vram_delta = max(0, self._vram_allocated() - vram_before)
-            refs = [wire_ref(spec.models[s]) for s in setup_slots]
-            for ref in refs:
-                if vram_delta > 0:
-                    self.store.mark_in_vram(ref, vram_delta if len(refs) == 1 else 0)
-                else:
-                    self.store.mark_in_ram(ref)
+            # Loads serialize: concurrent setups would cross-contaminate each
+            # other's allocator deltas and place_pipeline's free-VRAM reads.
+            async with self._load_lock:
+                await self._make_room_for(spec, setup_slots)
+                instance = spec.cls()
+                setup = getattr(instance, "setup", None)
+                loaded: Dict[str, Tuple[Any, int]] = {}
+                vram_before = self._vram_allocated()
+                if spec.runtime:
+                    rec.server = await self._boot_engine_server(spec, paths)
+                if callable(setup):
+                    kwargs, loaded = await self._injection_kwargs(
+                        spec, setup, paths, server=rec.server)
+                    if asyncio.iscoroutinefunction(setup):
+                        await setup(**kwargs)
+                    else:
+                        await asyncio.to_thread(setup, **kwargs)
+                warmup = getattr(instance, "warmup", None)
+                if callable(warmup):
+                    if asyncio.iscoroutinefunction(warmup):
+                        await warmup()
+                    else:
+                        await asyncio.to_thread(warmup)
+                vram_delta = max(0, self._vram_allocated() - vram_before)
+                self._register_residency(spec, setup_slots, loaded, vram_delta)
             rec.instance = instance
             rec.ready = True
             self._on_state_change()
             return instance
+
+    def _register_residency(
+        self,
+        spec: EndpointSpec,
+        setup_slots: List[str],
+        loaded: Dict[str, Tuple[Any, int]],
+        total_delta: int,
+    ) -> None:
+        """Honest per-ref residency after a setup (#369). Worker-constructed
+        pipelines carry their own measured allocator delta AND the object
+        (Residency owns it: demote/promote actually move memory). Refs the
+        tenant loaded inside setup() split the residual delta — no object,
+        so their VRAM is only reclaimable by record teardown."""
+        res = self.store.residency
+        per_ref: Dict[str, Tuple[Any, int]] = {}
+        for slot in setup_slots:
+            ref = wire_ref(spec.models[slot])
+            obj, measured = loaded.get(slot, (None, 0))
+            prev_obj, prev_bytes = per_ref.get(ref, (None, 0))
+            per_ref[ref] = (obj or prev_obj, prev_bytes + measured)
+        residual = max(0, total_delta - sum(b for _, b in per_ref.values()))
+        opaque = [r for r, (obj, _) in per_ref.items() if obj is None]
+        share = residual // len(opaque) if opaque else 0
+        for ref, (obj, measured) in per_ref.items():
+            vram = measured + (share if obj is None else 0)
+            if vram > 0:
+                res.track_vram(ref, obj, vram_bytes=vram)
+            elif obj is not None and int(estimate_cuda_resident_gb(obj) * _GiB) > 0:
+                res.track_vram(ref, obj)  # measured via cuda-resident estimate
+            else:
+                res.track_ram(ref, obj)   # CPU-only host / offloaded load
+
+    async def _promote_setup_refs(self, spec: EndpointSpec) -> None:
+        """RunJob/LOAD for a demoted (RAM-tier) instance: swap the pipelines
+        back into VRAM instead of a cold reload (#371)."""
+        res = self.store.residency
+        refs = [wire_ref(spec.models[s]) for s in self._setup_slots(spec)]
+        if any(res.tier(r) is residency_mod.Tier.RAM for r in refs):
+            async with self._load_lock:
+                for ref in refs:
+                    if res.tier(ref) is residency_mod.Tier.RAM:
+                        await asyncio.to_thread(res.promote, ref)
+                        self._on_state_change()
+        for ref in refs:
+            res.touch(ref)
+
+    async def _make_room_for(self, spec: EndpointSpec, setup_slots: List[str]) -> None:
+        """Evict idle LRU pipelines before loading instead of degrading the
+        new load down the offload ladder (#371). Estimate: per-ref vram_hint
+        from a prior load, else the endpoint's declared vram_gb."""
+        res = self.store.residency
+        refs = [wire_ref(spec.models[s]) for s in setup_slots]
+        needed = sum(res.vram_hint(r) for r in refs)
+        if needed <= 0 and spec.resources.vram_gb:
+            needed = int(float(spec.resources.vram_gb) * _GiB)
+        if needed <= 0:
+            return
+        if await asyncio.to_thread(res.make_room, needed):
+            self._on_state_change()
+            return
+        # Movable demotions weren't enough: tear down idle records holding
+        # non-movable LRU victims (tenant-loaded refs).
+        for ref in res.lru_vram_victims():
+            rec = self._record_holding(ref)
+            if rec is None or self._record_in_use(rec):
+                continue
+            await self._vacate_record(rec)
+            if await asyncio.to_thread(res.make_room, needed):
+                break
+        self._on_state_change()
 
     @staticmethod
     def _setup_slots(spec: EndpointSpec) -> List[str]:
@@ -497,13 +669,17 @@ class Executor:
         paths: Dict[str, str],
         *,
         server: Any = None,
-    ) -> Dict[str, Any]:
+    ) -> Tuple[Dict[str, Any], Dict[str, Tuple[Any, int]]]:
         """Typed injection: each slot receives exactly what its ``setup``
         annotation says — a ``str``/``Path`` local path, or a constructed
         pipeline for a class annotation exposing ``from_pretrained`` (built off
         the loop; the binding dtype is honored and the worker applies its
         placement/offload policy to the result). A parameter annotated
-        ``ServerHandle`` receives the booted engine server."""
+        ``ServerHandle`` receives the booted engine server.
+
+        Returns ``(kwargs, loaded)`` where ``loaded`` maps each pipeline slot
+        to ``(pipeline, allocator_delta)`` — the per-ref measurement residency
+        books (#369; caller holds the load lock)."""
         from .runtimes.server import ServerHandle
 
         try:
@@ -511,6 +687,7 @@ class Executor:
         except Exception:
             hints = {}
         kwargs: Dict[str, Any] = {}
+        loaded: Dict[str, Tuple[Any, int]] = {}
         if server is not None:
             for pname, ann in hints.items():
                 if ann is ServerHandle:
@@ -527,16 +704,18 @@ class Executor:
 
                 binding = spec.models.get(slot)
                 dtype = str(getattr(binding, "dtype", "") or "")
+                before = self._vram_allocated()
                 pipe = await asyncio.to_thread(
                     load_from_pretrained, ann, path, dtype=dtype
                 )
                 # Worker-owned placement/offload policy: one decider for the
                 # whole worker; endpoints never write device/offload code.
                 await asyncio.to_thread(place_pipeline, pipe)
+                loaded[slot] = (pipe, max(0, self._vram_allocated() - before))
                 kwargs[slot] = pipe
             else:
                 kwargs[slot] = path
-        return kwargs
+        return kwargs, loaded
 
     @staticmethod
     def _vram_allocated() -> int:
@@ -566,6 +745,7 @@ class Executor:
     # ---- ModelOp -----------------------------------------------------------
 
     async def handle_model_op(self, op: pb.ModelOp) -> None:
+        self.store.bind_loop()
         ref = op.ref
         snap = op.snapshot if op.HasField("snapshot") else None
         try:
@@ -608,30 +788,64 @@ class Executor:
                 return True
         return False
 
-    async def _unload_ref(self, ref: str) -> None:
-        """Demote a ref out of VRAM by tearing down the classes that hold it."""
+    def _record_holding(self, ref: str) -> Optional[_ClassRecord]:
         for rec in self._classes.values():
-            holds = any(
-                ref in (wire_ref(b) for b in s.models.values()) for s in rec.specs
-            )
-            if holds and rec.ready:
-                inst, rec.instance, rec.ready = rec.instance, None, False
-                shutdown = getattr(inst, "shutdown", None)
-                if callable(shutdown):
-                    try:
-                        await asyncio.to_thread(shutdown)
-                    except Exception:
-                        logger.exception("shutdown() during UNLOAD failed")
-                del inst
-                server, rec.server = rec.server, None
-                if server is not None:
-                    await asyncio.to_thread(server.stop)
+            if not rec.ready:
+                continue
+            if any(ref in (wire_ref(b) for b in s.models.values()) for s in rec.specs):
+                return rec
+        return None
+
+    def _record_in_use(self, rec: _ClassRecord) -> bool:
+        for s in rec.specs:
+            for b in s.models.values():
+                ref = wire_ref(b)
+                if self._ref_in_use(ref) or self.store.residency.in_use(ref):
+                    return True
+        return False
+
+    async def _vacate_record(self, rec: _ClassRecord) -> None:
+        """Tear an instance down and book every ref it held back to disk —
+        registry state and instance state move together (#369)."""
+        inst, rec.instance, rec.ready = rec.instance, None, False
+        shutdown = getattr(inst, "shutdown", None)
+        if inst is not None and callable(shutdown):
+            try:
+                if asyncio.iscoroutinefunction(shutdown):
+                    await shutdown()
+                else:
+                    await asyncio.to_thread(shutdown)
+            except Exception:
+                logger.exception("shutdown() during vacate failed")
+        del inst
+        server, rec.server = rec.server, None
+        if server is not None:
+            await asyncio.to_thread(server.stop)
         if torch is not None and torch.cuda.is_available():
             try:
                 await asyncio.to_thread(torch.cuda.empty_cache)
             except Exception:
                 pass
-        self.store.mark_unloaded(ref)
+        for s in rec.specs:
+            for b in s.models.values():
+                self.store.residency.release_to_disk(wire_ref(b))
+        self._on_state_change()
+
+    async def _unload_ref(self, ref: str) -> None:
+        """Hub UNLOAD: free the ref's VRAM. Worker-owned pipelines demote to
+        the warm RAM tier (instance stays ready; the next LOAD/RunJob promotes
+        back in seconds); tenant-loaded refs require record teardown (#371)."""
+        async with self._load_lock:
+            res = self.store.residency
+            if res.tier(ref) is residency_mod.Tier.VRAM:
+                if await asyncio.to_thread(res.demote, ref):
+                    self._on_state_change()
+                    return
+            rec = self._record_holding(ref)
+            if rec is not None:
+                await self._vacate_record(rec)
+            else:
+                res.release_to_disk(ref)
         self._on_state_change()
 
     # ---- job intake --------------------------------------------------------
@@ -749,9 +963,11 @@ class Executor:
             await self._finish(job, pb.JOB_STATUS_CANCELED, safe_message="canceled")
             return
         except Exception as exc:
-            if isinstance(exc, HardwareUnmetError):
+            if isinstance(exc, HardwareUnmetError) and not isinstance(exc, InsufficientDiskError):
                 # Self-disable the function on this worker; lifecycle emits
                 # FnUnavailable and drops it from available_functions.
+                # (Disk pressure is transient — GC frees space — so it only
+                # fails the job RETRYABLE, never disables the function.)
                 axes = exc.axes() if hasattr(exc, "axes") else {}
                 self.unavailable[spec.name] = (
                     getattr(exc, "reason", "hardware_unmet"), _sanitize(str(exc)),

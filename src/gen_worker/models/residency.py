@@ -41,8 +41,8 @@ logger = logging.getLogger(__name__)
 _GiB = 1024 ** 3
 # Free-VRAM slack preserved beyond the requested headroom (activations).
 _VRAM_MARGIN_BYTES = 2 * _GiB
-# Host-RAM floor below which VRAM demotions skip the warm tier and drop
-# straight to disk (don't push the host into swap).
+# Host-RAM floor below which the warm RAM tier is refused (don't push the
+# host into swap); demote() then fails and the owner tears down instead.
 _RAM_FLOOR_GB = 8.0
 
 # Residency event states (mirrors the wire ModelEvent vocabulary).
@@ -72,14 +72,28 @@ class _Entry:
     refcount: int = 0            # live executions / shared holders
     last_used: float = field(default_factory=time.monotonic)
 
+    @property
+    def movable(self) -> bool:
+        """True when the registry can actually move this object between
+        devices (``.to()``); offload-hooked pipelines own their placement."""
+        return (
+            self.obj is not None
+            and callable(getattr(self.obj, "to", None))
+            and not _obj_manages_own_device(self.obj)
+        )
+
 
 def _default_free_vram_bytes() -> int:
+    """Free VRAM summed across ALL CUDA devices (multi-GPU workers spread
+    jobs across cards; a device-0-only probe under-reports)."""
     try:
         import torch
 
         if torch.cuda.is_available():
-            free, _total = torch.cuda.mem_get_info(0)
-            return int(free)
+            return sum(
+                int(torch.cuda.mem_get_info(i)[0])
+                for i in range(torch.cuda.device_count())
+            )
     except Exception:
         pass
     return 0
@@ -166,6 +180,18 @@ class Residency:
             e = self._entries.get(ref)
             return e.vram_bytes if e else 0
 
+    def vram_hint(self, ref: str) -> int:
+        """Last measured VRAM footprint (survives demotion) — the load-size
+        estimate for make_room before a re-load/promotion."""
+        with self._lock:
+            e = self._entries.get(ref)
+            return e.vram_hint if e else 0
+
+    def movable(self, ref: str) -> bool:
+        with self._lock:
+            e = self._entries.get(ref)
+            return bool(e and e.movable)
+
     def refs_in(self, tier: Tier) -> List[str]:
         with self._lock:
             return [r for r, e in self._entries.items() if e.tier is tier]
@@ -239,34 +265,29 @@ class Residency:
         self._emit(ref, IN_VRAM, max(0, measured))
 
     def demote(self, ref: str) -> bool:
-        """VRAM -> RAM warm tier (or straight to disk when host RAM is tight).
-        Refuses pinned / executing entries. Returns True when VRAM was freed."""
+        """VRAM -> RAM warm tier. Only performs transitions it can actually
+        execute: the entry must hold a movable object and host RAM must have
+        headroom — otherwise it refuses (False) and the OWNER of the memory
+        (executor record teardown) must free it and book the result. Never
+        books a state it didn't produce. Refuses pinned / executing entries."""
         with self._lock:
             e = self._entries.get(ref)
             if e is None or e.tier is not Tier.VRAM or e.pinned or e.refcount > 0:
                 return False
-            keep_warm = e.obj is not None and get_available_ram_gb() >= _RAM_FLOOR_GB
+            if not e.movable or get_available_ram_gb() < _RAM_FLOOR_GB:
+                return False
+            self._move(e.obj, "cpu")
+            e.tier = Tier.RAM
             e.vram_bytes = 0
-            if keep_warm:
-                self._move(e.obj, "cpu")
-                e.tier = Tier.RAM
-                state = IN_RAM
-            elif e.path is not None:
-                e.obj = None
-                e.tier = Tier.DISK
-                state = ON_DISK
-            else:
-                del self._entries[ref]
-                state = EVICTED
         flush_memory()
-        self._emit(ref, state)
+        self._emit(ref, IN_RAM)
         return True
 
     def promote(self, ref: str, device: str = "cuda") -> bool:
         """RAM -> VRAM (makes room first). True when resident afterward."""
         with self._lock:
             e = self._entries.get(ref)
-            if e is None or e.obj is None:
+            if e is None or not e.movable:
                 return False
             if e.tier is Tier.VRAM:
                 e.last_used = time.monotonic()
@@ -275,7 +296,7 @@ class Residency:
         self.make_room(hint)
         with self._lock:
             e = self._entries.get(ref)
-            if e is None or e.obj is None:
+            if e is None or not e.movable:
                 return False
             self._move(e.obj, device)
             e.tier = Tier.VRAM
@@ -367,7 +388,8 @@ class Residency:
 
     # ---- pressure -------------------------------------------------------------
 
-    def _lru_vram_victims(self) -> List[str]:
+    def lru_vram_victims(self) -> List[str]:
+        """Evictable VRAM refs, LRU first (pinned/executing excluded)."""
         with self._lock:
             candidates = [
                 e for e in self._entries.values()
@@ -378,13 +400,16 @@ class Residency:
 
     def make_room(self, needed_bytes: int) -> bool:
         """Demote LRU VRAM entries until measured free VRAM covers
-        ``needed_bytes`` + margin. True when the headroom was reached."""
+        ``needed_bytes`` + margin. True when the headroom was reached.
+        Only movable entries are demoted here; when this returns False the
+        caller (executor) tears down non-movable LRU victims itself."""
         target = int(needed_bytes) + _VRAM_MARGIN_BYTES
         if self.free_vram_bytes() >= target:
             return True
-        for ref in self._lru_vram_victims():
-            logger.info("residency: demoting LRU %s for %d bytes headroom", ref, needed_bytes)
-            self.demote(ref)
+        for ref in self.lru_vram_victims():
+            if not self.demote(ref):
+                continue
+            logger.info("residency: demoted LRU %s for %d bytes headroom", ref, needed_bytes)
             if self.free_vram_bytes() >= target:
                 return True
         return self.free_vram_bytes() >= target
