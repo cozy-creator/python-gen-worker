@@ -64,6 +64,19 @@ _CREATE_TIMEOUT_S = 60
 _FINALIZE_RETRY_ATTEMPTS = 5
 _FINALIZE_RETRY_BACKOFF_S = 0.5
 
+# tensorhub's /complete verifies the whole object (streams it back from R2 and
+# hashes it) synchronously and holds a per-upload lock for the duration; for
+# large single files this can run past whatever timeout an intermediary in
+# front of tensorhub enforces (~100-120s observed live), so the CLIENT sees a
+# transient 5xx/timeout on an attempt that is still running server-side. Our
+# own retry then races the first attempt and gets 409 upload_complete_in_progress
+# — a false negative (found live: e2e tracker #110, a ~6.94GB singlefile
+# mirror). Poll on that specific 409 rather than treating it as fatal: once
+# the in-flight attempt finishes, /complete's `sess.Finalized` fast path
+# returns the same 200 success payload to the next poll, no data lost.
+_COMPLETE_IN_PROGRESS_POLL_S = 5.0
+_COMPLETE_IN_PROGRESS_MAX_WAIT_S = 600.0
+
 # Default part size sent by server, but we read it from the response.
 _FALLBACK_PART_SIZE = 64 * 1024 * 1024  # 64 MiB
 
@@ -342,6 +355,75 @@ def presigned_upload_file(
     return PresignedUploadResult(meta=result_meta, dedup=False)
 
 
+def _error_code_of(resp: requests.Response) -> str:
+    """Best-effort extraction of the structured `error.code` field
+    (docs/api-conventions.md: `{"error": {"code": ..., ...}}`); "" if the
+    body isn't that shape."""
+    try:
+        body = resp.json()
+    except ValueError:
+        return ""
+    if not isinstance(body, dict):
+        return ""
+    err = body.get("error")
+    if not isinstance(err, dict):
+        return ""
+    return str(err.get("code") or "")
+
+
+def _poll_until_finalized(
+    *,
+    complete_url: str,
+    complete_headers: Dict[str, str],
+    payload: Dict[str, Any],
+    cancel_check: Optional[Any],
+) -> Dict[str, Any]:
+    """A prior /complete attempt is still finalizing server-side (409
+    upload_complete_in_progress) — tensorhub verifies large objects
+    synchronously and can outlast whatever timeout sits in front of it, so the
+    CLIENT'S view (5xx/timeout) can lag the server's. /complete is idempotent
+    once finalized (`sess.Finalized` fast path returns the same success
+    payload), so re-POST it instead of treating the race as fatal."""
+    deadline = time.monotonic() + _COMPLETE_IN_PROGRESS_MAX_WAIT_S
+    while True:
+        if cancel_check and cancel_check():
+            raise CanceledError("canceled")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ArtifactTransferError(
+                "tensorhub upload finalize: gave up waiting for a concurrent "
+                "completion to finish (upload_complete_in_progress persisted "
+                f"past {_COMPLETE_IN_PROGRESS_MAX_WAIT_S:.0f}s)",
+                provider="tensorhub",
+                phase="complete",
+                retryable=True,
+                status_code=409,
+            )
+        time.sleep(min(_COMPLETE_IN_PROGRESS_POLL_S, remaining))
+        try:
+            resp = requests.post(
+                complete_url, headers=complete_headers, data=json.dumps(payload),
+                timeout=_FINALIZE_TIMEOUT_S,
+            )
+        except requests.RequestException:
+            continue  # transient — keep polling within the deadline
+        code = resp.status_code
+        if code in (401, 403):
+            raise AuthError(f"file save unauthorized ({code})")
+        if 200 <= code < 300:
+            return _parse_json_response(resp, phase="complete")
+        if code == 409 and _error_code_of(resp) == "upload_complete_in_progress":
+            continue  # still racing the first attempt
+        # Any other terminal error: stop polling, surface it normally.
+        raise ArtifactTransferError(
+            f"tensorhub upload finalize failed: {_response_body_sample(resp)}",
+            provider="tensorhub",
+            phase="complete",
+            retryable=code >= 500 or code == 429,
+            status_code=code,
+        )
+
+
 def _complete_upload_session(
     *,
     complete_url: str,
@@ -374,6 +456,13 @@ def _complete_upload_session(
             code = resp.status_code
             if code in (401, 403):
                 raise AuthError(f"file save unauthorized ({code})")
+            if code == 409 and _error_code_of(resp) == "upload_complete_in_progress":
+                return _poll_until_finalized(
+                    complete_url=complete_url,
+                    complete_headers=complete_headers,
+                    payload=payload,
+                    cancel_check=cancel_check,
+                )
             if code >= 500:
                 last_exc = ArtifactTransferError(
                     f"tensorhub upload finalize failed: {_response_body_sample(resp)}",
