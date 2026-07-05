@@ -173,9 +173,46 @@ class HubClient:
     def _upload_one(self, repo_path: str, revision_id: str, entry: Mapping[str, Any],
                     local_path: Path) -> None:
         upload_id = str(entry.get("upload_id") or "").strip()
+        if not upload_id:
+            raise HubPublishError(f"commit upload entry missing upload_id for {entry.get('path')!r}")
+        complete_path = (
+            f"{repo_path}/commits/{urllib.parse.quote(revision_id, safe='')}"
+            f"/uploads/{urllib.parse.quote(upload_id, safe='')}/complete"
+        )
+
+        # SDK transfer-grant path (R2): the server returns a scoped temporary
+        # credential instead of presigned multipart part URLs. Upload the
+        # object directly with the S3 SDK, then complete with the transfer
+        # block (same wire shape gen_worker.presigned_upload uses for media).
+        grant_raw = entry.get("transfer_grant")
+        if isinstance(grant_raw, Mapping):
+            from gen_worker.s3_transfer import S3TransferGrant, upload_file_with_grant
+
+            grant = S3TransferGrant.from_mapping(grant_raw)
+            size_bytes = int(entry.get("size_bytes") or local_path.stat().st_size)
+            result = upload_file_with_grant(
+                file_path=local_path,
+                grant=grant,
+                blake3_hex=str(entry.get("blake3") or ""),
+                size_bytes=size_bytes,
+            )
+            resp = self._post(complete_path, {"transfer": {
+                "mode": "s3_sdk",
+                "bucket": result.bucket,
+                "key": result.key,
+                "size_bytes": result.size_bytes,
+                "blake3": result.blake3,
+                "etag": result.etag,
+            }})
+            if resp.status_code < 200 or resp.status_code >= 300:
+                raise HubPublishError(
+                    f"upload complete failed ({resp.status_code}) for {entry.get('path')!r}: "
+                    f"{resp.text[:500]}")
+            return
+
         part_urls = list(entry.get("part_urls") or [])
         part_size = int(entry.get("part_size") or 0)
-        if not upload_id or not part_urls or part_size <= 0:
+        if not part_urls or part_size <= 0:
             raise HubPublishError(f"commit upload entry missing presign data for {entry.get('path')!r}")
         parts: list[dict[str, Any]] = []
         with open(local_path, "rb") as f:
@@ -192,10 +229,6 @@ class HubClient:
                         f"part PUT failed ({resp.status_code}) for {entry.get('path')!r}")
                 etag = str(resp.headers.get("ETag") or "").strip().strip('"')
                 parts.append({"part_number": i + 1, "etag": etag})
-        complete_path = (
-            f"{repo_path}/commits/{urllib.parse.quote(revision_id, safe='')}"
-            f"/uploads/{urllib.parse.quote(upload_id, safe='')}/complete"
-        )
         resp = self._post(complete_path, {"parts": parts})
         if resp.status_code < 200 or resp.status_code >= 300:
             raise HubPublishError(

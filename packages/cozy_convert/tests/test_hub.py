@@ -55,6 +55,44 @@ def test_commit_uploads_completes_and_finalizes(fake_hub, tmp_path: Path, monkey
     assert st["auth"] == "Bearer cap-token"
 
 
+def test_commit_uses_sdk_transfer_grant_when_offered(fake_hub, tmp_path: Path, monkeypatch) -> None:
+    # R2 path (found live in e2e J7): the server returns a scoped temporary
+    # credential (transfer_grant) instead of presigned multipart part URLs;
+    # the client must SDK-upload and complete with the transfer block.
+    monkeypatch.setattr("time.sleep", lambda *_: None)
+    _FakeHub.state["grant_mode"] = True
+    _FakeHub.state["finalize_calls"] = 1  # finalize 200 immediately
+
+    calls: list[dict] = []
+
+    def _fake_upload(*, file_path, grant, blake3_hex, size_bytes, on_progress=None):
+        from gen_worker.s3_transfer import S3TransferResult
+        calls.append({"file_path": str(file_path), "bucket": grant.bucket,
+                      "key": grant.key, "blake3": blake3_hex, "size": size_bytes})
+        return S3TransferResult(bucket=grant.bucket, key=grant.key,
+                                size_bytes=size_bytes, blake3=blake3_hex, etag="sdk-etag")
+
+    import gen_worker.s3_transfer as s3t
+    monkeypatch.setattr(s3t, "upload_file_with_grant", _fake_upload)
+
+    f = tmp_path / "model.safetensors"
+    f.write_bytes(b"\x02" * 48)
+    result = _client(fake_hub).commit(
+        destination_repo="acme/my-model",
+        files=[CommitFile(path="model.safetensors", local_path=f)],
+    )
+    assert result.uploaded == 1 and result.deduped == 0
+    assert len(calls) == 1
+    assert calls[0]["bucket"] == "repo-cas"
+    assert calls[0]["size"] == 48
+    # No raw part PUTs happened; complete carried the transfer block.
+    assert "put_bytes" not in _FakeHub.state
+    body = _FakeHub.state["complete_bodies"][0]
+    assert body["transfer"]["mode"] == "s3_sdk"
+    assert body["transfer"]["etag"] == "sdk-etag"
+    assert body["transfer"]["blake3"] == blake3_file(f)
+
+
 def test_dedup_skips_put(fake_hub, tmp_path: Path) -> None:
     f = tmp_path / "model.safetensors"
     f.write_bytes(b"\x01" * 32)
