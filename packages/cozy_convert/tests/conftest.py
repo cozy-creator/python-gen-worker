@@ -52,6 +52,22 @@ class _FakeHub(BaseHTTPRequestHandler):
                     continue
                 uid = f"up-{i}"
                 base = f"http://127.0.0.1:{self.server.server_port}"
+                if st.get("grant_mode"):
+                    # R2 SDK-transfer shape: scoped temp credential, no
+                    # multipart part URLs.
+                    uploads.append({
+                        "path": op["path"], "blake3": op["blake3"], "exists": False,
+                        "upload_id": uid,
+                        "size_bytes": int(op["size_bytes"]),
+                        "transfer_grant": {
+                            "endpoint_url": "https://acct.r2.cloudflarestorage.com",
+                            "bucket": "repo-cas",
+                            "key": f"__presigned_staging/v1/{uid}/object",
+                            "access_key_id": "k", "secret_access_key": "s",
+                            "session_token": "t", "region": "auto",
+                        },
+                    })
+                    continue
                 uploads.append({
                     "path": op["path"], "blake3": op["blake3"], "exists": False,
                     "upload_id": uid,
