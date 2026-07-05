@@ -135,6 +135,77 @@ def test_transient_failures_are_retried(fake_hub, tmp_path: Path, monkeypatch) -
     assert list(_FakeHub.state["put_bytes"].values()) == [b"\x02" * 48]
 
 
+def test_complete_polls_through_upload_complete_in_progress_race(
+    fake_hub, tmp_path: Path, monkeypatch,
+) -> None:
+    """Regression for e2e tracker #110: /complete verifies large single
+    files synchronously and can outlast the client's timeout, so a retry can
+    race the still-running first attempt into 409 upload_complete_in_progress.
+    That must be polled through (idempotent once finalized), not treated as
+    a fatal error that aborts the whole commit."""
+    monkeypatch.setattr("time.sleep", lambda *_: None)
+    _FakeHub.state["complete_race_count"] = 2
+    _FakeHub.state["finalize_calls"] = 1  # finalize returns 200 immediately
+
+    f = tmp_path / "model.safetensors"
+    f.write_bytes(b"\x03" * 48)
+    result = _client(fake_hub).commit(
+        destination_repo="acme/my-model",
+        files=[CommitFile(path="model.safetensors", local_path=f)],
+    )
+    assert result.revision_id == "rev-1"
+    assert result.uploaded == 1
+    assert len(_FakeHub.state["complete_race_polls"]) == 2
+    assert list(_FakeHub.state["put_bytes"].values()) == [b"\x03" * 48]
+
+
+def test_complete_polls_through_race_on_sdk_transfer_grant_path(
+    fake_hub, tmp_path: Path, monkeypatch,
+) -> None:
+    """Same race, but on the R2 SDK transfer-grant complete path (the shape
+    actually used by clone-huggingface/clone-civitai mirrors)."""
+    monkeypatch.setattr("time.sleep", lambda *_: None)
+    _FakeHub.state["grant_mode"] = True
+    _FakeHub.state["complete_race_count"] = 1
+    _FakeHub.state["finalize_calls"] = 1
+
+    def _fake_upload(*, file_path, grant, blake3_hex, size_bytes, on_progress=None):
+        from gen_worker.s3_transfer import S3TransferResult
+        return S3TransferResult(bucket=grant.bucket, key=grant.key,
+                                size_bytes=size_bytes, blake3=blake3_hex, etag="sdk-etag")
+
+    import gen_worker.s3_transfer as s3t
+    monkeypatch.setattr(s3t, "upload_file_with_grant", _fake_upload)
+
+    f = tmp_path / "model.safetensors"
+    f.write_bytes(b"\x04" * 48)
+    result = _client(fake_hub).commit(
+        destination_repo="acme/my-model",
+        files=[CommitFile(path="model.safetensors", local_path=f)],
+    )
+    assert result.uploaded == 1
+    assert len(_FakeHub.state["complete_race_polls"]) == 1
+    assert _FakeHub.state["complete_bodies"][0]["transfer"]["etag"] == "sdk-etag"
+
+
+def test_complete_gives_up_after_deadline_if_race_never_resolves(
+    fake_hub, tmp_path: Path, monkeypatch,
+) -> None:
+    """A genuinely stuck server (never finalizes) must still fail eventually
+    rather than polling forever."""
+    monkeypatch.setattr("time.sleep", lambda *_: None)
+    monkeypatch.setattr("cozy_convert.hub._COMPLETE_IN_PROGRESS_MAX_WAIT_S", 0.0)
+    _FakeHub.state["complete_race_count"] = 10_000
+
+    f = tmp_path / "model.safetensors"
+    f.write_bytes(b"\x05" * 48)
+    with pytest.raises(HubPublishError, match="upload complete failed"):
+        _client(fake_hub).commit(
+            destination_repo="acme/my-model",
+            files=[CommitFile(path="model.safetensors", local_path=f)],
+        )
+
+
 def test_files_from_tree_skips_hf_cache_junk(tmp_path: Path) -> None:
     (tmp_path / "config.json").write_text("{}")
     junk = tmp_path / ".cache" / "huggingface" / "download"

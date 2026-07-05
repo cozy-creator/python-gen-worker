@@ -84,6 +84,16 @@ class _FakeHub(BaseHTTPRequestHandler):
                 st["fail_completes"] -= 1
                 self._send(500, {"error": "boom"})
                 return
+            if st.get("complete_race_count", 0) > 0:
+                # Simulates a still-finalizing concurrent attempt (tensorhub
+                # verifies large single files synchronously and can outlast
+                # the client's timeout -- e2e tracker #110): the caller must
+                # poll rather than treat this 409 as fatal.
+                st["complete_race_count"] -= 1
+                st.setdefault("complete_race_polls", []).append(self.path)
+                self._send(409, {"error": {"code": "upload_complete_in_progress",
+                                           "message": "a concurrent completion is in progress"}})
+                return
             st.setdefault("completed", []).append(self.path)
             body = self._read_json()
             st.setdefault("complete_bodies", []).append(body)

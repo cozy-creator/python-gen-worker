@@ -33,6 +33,20 @@ _RETRY_ATTEMPTS = 5
 _RETRY_BASE_DELAY_S = 1.0
 _RETRY_MAX_DELAY_S = 30.0
 
+# tensorhub's /complete verifies the whole object synchronously (streams it
+# back from R2 and hashes it) before responding, holding a per-upload lock
+# for the duration. For large single files this can outlast whatever timeout
+# sits in front of tensorhub -- the client sees a 5xx/timeout on an attempt
+# that is still running server-side, retries, and races the first attempt
+# into 409 upload_complete_in_progress. Found live mirroring a ~6.94GB SDXL
+# checkpoint: the default 120s request timeout expired while the server was
+# still hashing, the retry got 409, and _upload_one raised immediately --
+# aborting the whole commit even though the first attempt was about to
+# succeed (e2e tracker #110).
+_COMPLETE_TIMEOUT_S = 600.0
+_COMPLETE_IN_PROGRESS_POLL_S = 5.0
+_COMPLETE_IN_PROGRESS_MAX_WAIT_S = 600.0
+
 
 class HubPublishError(RuntimeError):
     """Terminal failure talking to tensorhub's commit API."""
@@ -44,6 +58,22 @@ def _retry_after_s(resp: requests.Response) -> Optional[float]:
     except Exception:
         return None
     return min(value, _RETRY_MAX_DELAY_S) if value > 0 else None
+
+
+def _error_code_of(resp: requests.Response) -> str:
+    """Best-effort extraction of the structured `error.code` field
+    (docs/api-conventions.md: `{"error": {"code": ..., ...}}`); "" if the
+    body isn't that shape."""
+    try:
+        body = resp.json() if resp.text else {}
+    except Exception:
+        return ""
+    if not isinstance(body, dict):
+        return ""
+    err = body.get("error")
+    if not isinstance(err, dict):
+        return ""
+    return str(err.get("code") or "")
 
 
 def _send_with_retries(what: str, send: Callable[[], requests.Response]) -> requests.Response:
@@ -170,6 +200,24 @@ class HubClient:
             out = {}
         return out if isinstance(out, dict) else {}
 
+    def _post_complete(self, complete_path: str, payload: dict) -> requests.Response:
+        """POST .../complete with a generous timeout (large single files
+        verify synchronously server-side, see _COMPLETE_TIMEOUT_S), then poll
+        through a 409 upload_complete_in_progress race instead of treating it
+        as fatal: /complete is idempotent once finalized (tensorhub's
+        sess.Finalized fast path returns the same success payload), so
+        re-POSTing catches up to whatever the in-flight attempt decides."""
+        resp = self._post(complete_path, payload, timeout=_COMPLETE_TIMEOUT_S)
+        if not (resp.status_code == 409 and _error_code_of(resp) == "upload_complete_in_progress"):
+            return resp
+        deadline = time.monotonic() + _COMPLETE_IN_PROGRESS_MAX_WAIT_S
+        while resp.status_code == 409 and _error_code_of(resp) == "upload_complete_in_progress":
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(_COMPLETE_IN_PROGRESS_POLL_S)
+            resp = self._post(complete_path, payload, timeout=_COMPLETE_TIMEOUT_S)
+        return resp
+
     def _upload_one(self, repo_path: str, revision_id: str, entry: Mapping[str, Any],
                     local_path: Path) -> None:
         upload_id = str(entry.get("upload_id") or "").strip()
@@ -196,7 +244,7 @@ class HubClient:
                 blake3_hex=str(entry.get("blake3") or ""),
                 size_bytes=size_bytes,
             )
-            resp = self._post(complete_path, {"transfer": {
+            resp = self._post_complete(complete_path, {"transfer": {
                 "mode": "s3_sdk",
                 "bucket": result.bucket,
                 "key": result.key,
@@ -229,7 +277,7 @@ class HubClient:
                         f"part PUT failed ({resp.status_code}) for {entry.get('path')!r}")
                 etag = str(resp.headers.get("ETag") or "").strip().strip('"')
                 parts.append({"part_number": i + 1, "etag": etag})
-        resp = self._post(complete_path, {"parts": parts})
+        resp = self._post_complete(complete_path, {"parts": parts})
         if resp.status_code < 200 or resp.status_code >= 300:
             raise HubPublishError(
                 f"upload complete failed ({resp.status_code}) for {entry.get('path')!r}: "
