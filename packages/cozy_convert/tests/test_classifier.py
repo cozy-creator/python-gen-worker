@@ -52,6 +52,23 @@ def test_diffusers_dtype_preference_fp16() -> None:
     assert "transformer/diffusion_pytorch_model.bf16.safetensors" not in allow
 
 
+def test_diffusers_skips_root_allinone_checkpoints() -> None:
+    # SD1.5 shape: the repo ships all-in-one root checkpoints (12GB) on top
+    # of the component tree — a diffusers-layout ingest must never pull them
+    # (found live in e2e J7: 14.7GB selected instead of 2.75GB, ENOSPC on
+    # the ingest pod).
+    files = _DIFFUSERS + [
+        "v1-5-pruned.safetensors",
+        "v1-5-pruned-emaonly.safetensors",
+    ]
+    c = classify_repo(files, dtype_pref=("fp16",))
+    assert c.strategy == "diffusers"
+    allow = set(c.allow_patterns)
+    assert "v1-5-pruned.safetensors" not in allow
+    assert "v1-5-pruned-emaonly.safetensors" not in allow
+    assert "transformer/diffusion_pytorch_model.fp16.safetensors" in allow
+
+
 def test_transformers_with_sharded_index_and_onnx_excluded() -> None:
     files = [
         "config.json", "generation_config.json", "tokenizer.json",

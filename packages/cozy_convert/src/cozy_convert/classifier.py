@@ -195,6 +195,13 @@ def classify_repo(
             comp = p.split("/", 1)[0] if "/" in p else ""
             by_component.setdefault(comp, []).append(p)
         for comp, group in by_component.items():
+            if not comp:
+                # Root-level safetensors next to model_index.json are
+                # all-in-one duplicate checkpoints of the component tree
+                # (e.g. SD1.5's v1-5-pruned*.safetensors, 12GB on top of a
+                # 2.7GB fp16 component set) — never part of a
+                # diffusers-layout ingest.
+                continue
             comp_weights, comp_dtype = _pick_weight_set(group, dtype_pref)
             d_weights.extend(comp_weights)
             if comp and comp_dtype:
