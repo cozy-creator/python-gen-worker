@@ -67,8 +67,12 @@ class Flux2KleinTurbo:
 
         ctx.raise_if_cancelled()
         generator = torch.Generator(device=self._pipe.device).manual_seed(int(p.seed))
+        # Flux2KleinPipeline.__call__'s FIRST positional parameter is `image`
+        # (it is a text-to-image AND editing pipeline) — prompt must be a
+        # keyword or it lands in the image slot and the pipeline rejects the
+        # call with "Provide either `prompt` or `prompt_embeds`".
         image = self._pipe(
-            p.prompt,
+            prompt=p.prompt,
             num_inference_steps=steps,
             width=p.width,
             height=p.height,
