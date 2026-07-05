@@ -1,0 +1,22 @@
+[project]
+name = "sd15_hub_image"
+version = "1.0.0"
+description = "Stable Diffusion 1.5 served from a tensorhub repo-cas mirror (Hub binding)"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "gen-worker>=0.9.1",
+    "diffusers>=0.31",
+    "transformers>=4.46",
+    "accelerate>=1.0",
+    "msgspec>=0.18",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sd15_hub_image"]
+
+[tool.gen_worker]
+main = "sd15_hub_image.main"
