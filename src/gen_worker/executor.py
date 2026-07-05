@@ -30,6 +30,7 @@ from .api.errors import (
 from .api.streaming import BatchItemDelta, Done, Error, IncrementalTokenDelta
 from .api.types import Compute
 from .capability import HardwareUnmetError, InsufficientDiskError
+from .input_assets import cleanup_input_assets, materialize_input_assets
 from .models import disk_gc
 from .models import residency as residency_mod
 from .models.memory import estimate_cuda_resident_gb
@@ -993,6 +994,9 @@ class Executor:
         try:
             if source_info:
                 await self._materialize_source(ctx, source_info, snapshots)
+            # Typed media inputs: URL-ref Assets (hub-approved remote media)
+            # are downloaded and given a local_path before the handler runs.
+            await asyncio.to_thread(materialize_input_assets, payload, run.request_id)
             instance = await self.ensure_setup(spec, snapshots)
             kwargs = await self._handler_kwargs(spec, snapshots)
         except asyncio.CancelledError:
@@ -1281,6 +1285,7 @@ class Executor:
         if job.finished:
             return
         job.finished = True
+        cleanup_input_assets(job.request_id)
         logger.info("job finished %s attempt=%d status=%s", job.request_id, job.attempt, status)
         if not job.superseded:
             await self._send_result(job.request_id, job.attempt, status, **kw)
