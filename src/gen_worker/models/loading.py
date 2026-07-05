@@ -60,6 +60,39 @@ def detect_diffusers_variant(model_path: Path) -> Optional[str]:
     return None
 
 
+_SAFETENSORS_DTYPE_NAMES = {"BF16": "bf16", "F16": "fp16", "F32": "fp32"}
+_MAX_SAFETENSORS_HEADER_BYTES = 100 << 20
+
+
+def detect_on_disk_dtype(model_path: Path) -> str:
+    """Majority weight dtype across the snapshot's safetensors headers
+    ("bf16" / "fp16" / "fp32", "" when undetectable). Hub bindings carry no
+    dtype and mirrored repos use unsuffixed filenames, so without this a bf16
+    snapshot silently loads via diffusers' fp32 default — 2x the VRAM."""
+    import struct
+
+    counts: Dict[str, int] = {}
+    try:
+        for p in sorted(Path(model_path).rglob("*.safetensors")):
+            with open(p, "rb") as f:
+                raw = f.read(8)
+                if len(raw) < 8:
+                    continue
+                (n,) = struct.unpack("<Q", raw)
+                if n <= 0 or n > _MAX_SAFETENSORS_HEADER_BYTES:
+                    continue
+                header = json.loads(f.read(n))
+            for value in header.values():
+                if isinstance(value, dict) and "dtype" in value:
+                    counts[str(value["dtype"])] = counts.get(str(value["dtype"]), 0) + 1
+    except (OSError, ValueError):
+        return ""
+    if not counts:
+        return ""
+    top = max(counts, key=lambda k: counts[k])
+    return _SAFETENSORS_DTYPE_NAMES.get(top, "")
+
+
 # quant-library -> import-side-effect hooks. torchao registers its tensor
 # subclasses on import; loading a torchao-quantized state_dict before that
 # import fails with ATen/dispatcher errors.
@@ -160,6 +193,12 @@ def load_from_pretrained(
     variant = detect_diffusers_variant(Path(path))
     if variant in ("bf16", "fp16"):
         kwargs["variant"] = variant
+    if "torch_dtype" not in kwargs:
+        # Bindings without an explicit dtype (Hub mirrors): honor the weights'
+        # own precision instead of diffusers' fp32 default.
+        sniffed = detect_on_disk_dtype(Path(path))
+        if sniffed in ("bf16", "fp16"):
+            kwargs["torch_dtype"] = get_torch_dtype(sniffed)
     if not read_on_disk_quant_config(Path(path)):
         qc = synthesize_quantization_config(attrs)
         if qc is not None:
@@ -177,6 +216,7 @@ def load_from_pretrained(
 __all__ = [
     "get_torch_dtype",
     "detect_diffusers_variant",
+    "detect_on_disk_dtype",
     "ensure_quant_library_imported",
     "read_on_disk_quant_config",
     "synthesize_quantization_config",
