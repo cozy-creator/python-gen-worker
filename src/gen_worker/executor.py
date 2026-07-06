@@ -113,7 +113,12 @@ def _map_exception(exc: BaseException) -> Tuple[int, str]:
         return pb.JOB_STATUS_RETRYABLE, "model download url expired"
     if type(exc).__name__ in ("OutOfMemoryError", "CUDAOutOfMemoryError"):
         return pb.JOB_STATUS_RETRYABLE, "out of memory"
-    return pb.JOB_STATUS_FATAL, "internal error"
+    # Unexpected exception: keep it terse but NEVER opaque — "internal error"
+    # made every novel worker-side failure undiagnosable from the hub (pods
+    # ship no logs). Class name + sanitized first line is safe and decisive.
+    detail = _sanitize(str(exc).splitlines()[0] if str(exc) else "")
+    label = type(exc).__name__
+    return pb.JOB_STATUS_FATAL, f"{label}: {detail}"[:512] if detail else label
 
 
 # ---------------------------------------------------------------------------
