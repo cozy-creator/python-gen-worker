@@ -257,9 +257,15 @@ def _select_function(
             f"available:{available}"
         )
     if len(matches) > 1:
-        if not cls_name and not method_name and default_name:
-            from gen_worker.discovery.names import slugify_name
+        from gen_worker.discovery.names import slugify_name
 
+        if method_name:
+            # Variant fan-out: the base fn and every variant share one attr
+            # name. An exact fn_name match wins over the attr-name matches.
+            exact = [m for m in matches if m.fn_name == slugify_name(method_name)]
+            if len(exact) == 1:
+                return exact[0]
+        if not cls_name and not method_name and default_name:
             wanted = slugify_name(default_name)
             defaults = [m for m in matches if m.fn_name == wanted]
             if len(defaults) == 1:
@@ -800,25 +806,27 @@ def _load_injected_model(annotation: Any, local_path: str) -> Any:
     key = (str(annotation), str(local_path))
     if key in _INJECTED_CACHE:
         return _INJECTED_CACHE[key]
-    import torch
+    from gen_worker.models.loading import load_from_pretrained
+
     cls = annotation if isinstance(annotation, type) else None
     if cls is None or not hasattr(cls, "from_pretrained"):
         from diffusers import DiffusionPipeline
         cls = DiffusionPipeline
     # fp16 kernels are CUDA-only for several ops; on a CPU device run use fp32.
     device = (os.getenv("GEN_WORKER_LOCAL_DEVICE") or "").strip().lower()
-    dtype = torch.float32 if device == "cpu" else torch.float16
-    p = Path(local_path)
-    if p.is_dir() and (p / "model_index.json").exists():
-        pipe = cls.from_pretrained(str(p), torch_dtype=dtype)
-    else:
-        single = p if p.is_file() else next(iter(sorted(p.glob("*.safetensors"))), None)
-        if single is None or not hasattr(cls, "from_single_file"):
-            raise _ModelResolutionError(
-                f"cannot materialize injected model slot from {p} "
-                f"(no model_index.json, no single-file checkpoint)"
-            )
-        pipe = cls.from_single_file(str(single), torch_dtype=dtype)
+    # Same loader the production executor uses: handles diffusers-layout dirs,
+    # module-layout dirs (root config.json, e.g. a bare VAE/UNet repo), and
+    # single-file checkpoints.
+    pipe = load_from_pretrained(cls, local_path, dtype="fp32" if device == "cpu" else "fp16")
+    if device != "cpu":
+        # Worker-owned placement (executor parity): endpoints never write
+        # device/offload code, so the cold `run` path must place the loaded
+        # pipeline too — full CUDA residency or the offload ladder as VRAM
+        # allows. Without this the pipeline stays on CPU while ctx.generator()
+        # hands out CUDA generators.
+        from gen_worker.models.memory import place_pipeline
+
+        place_pipeline(pipe)
     _INJECTED_CACHE[key] = pipe
     return pipe
 

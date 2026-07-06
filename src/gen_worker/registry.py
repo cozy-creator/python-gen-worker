@@ -197,9 +197,11 @@ def extract_specs(obj: Any, *, walked_module: str = "") -> List[EndpointSpec]:
                 resources=decl.resources, walked_module=walked,
             ))
         for variant in decl.variants:
+            # Variants swap only the primary slot; shared aux slots (vae,
+            # refiner, extra encoders) are inherited from the class binding.
             out.append(_spec_for_handler(
                 fn_name=variant.name, method=method, decl=decl, cls=cls,
-                attr_name=attr_name, models={slot: variant.binding},
+                attr_name=attr_name, models={**decl.models, slot: variant.binding},
                 resources=variant.resources or decl.resources,
                 walked_module=walked,
             ))

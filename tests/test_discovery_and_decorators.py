@@ -174,6 +174,24 @@ def test_variants_stamp_routable_functions_with_per_variant_overrides() -> None:
     assert len({s.instance_key for s in specs.values()}) == 3
 
 
+def test_variants_inherit_shared_aux_slots() -> None:
+    @endpoint(
+        models={"pipeline": HF("o/base", dtype="fp16"), "vae": HF("o/vae-fix", dtype="fp16")},
+        variants={"gen-alt": HF("o/alt")},
+    )
+    class Gen:
+        def setup(self, pipeline: str, vae: str) -> None: ...
+
+        def generate(self, ctx: RequestContext, data: _In) -> _Out:
+            return _Out(result="")
+
+    specs = {s.name: s for s in extract_specs(Gen)}
+    # The variant swaps only the primary slot; the aux vae slot is inherited.
+    assert specs["gen-alt"].models["pipeline"].ref == "o/alt"
+    assert specs["gen-alt"].models["vae"].ref == "o/vae-fix"
+    assert specs["generate"].models["pipeline"].ref == "o/base"
+
+
 def test_variants_without_class_model_are_the_full_routable_set() -> None:
     @endpoint(variants={
         "small": Hub("o/small"),
