@@ -11,6 +11,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
+from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Mapping, Optional
@@ -182,6 +183,11 @@ class RequestContext:
         # session opens. Empty values are omitted and tensorhub keeps/inherits
         # existing repo values.
         self._repo_spec: Dict[str, str] = {}
+
+        # GPU-slot lease (#382). Set by the executor for GPU jobs; lets
+        # blocking uploads release the GPU slot while they wait on the
+        # network. None for CPU jobs and local (CLI) runs.
+        self._gpu_slot_lease: Optional[Any] = None
 
     @property
     def request_id(self) -> str:
@@ -429,6 +435,29 @@ class RequestContext:
             self._cancel_event.set()
             logger.info("request %s marked for cancellation.", self.request_id)
 
+    @contextmanager
+    def _gpu_slot_yielded(self):
+        """Worker-internal: release the job's GPU slot for the duration of
+        blocking non-GPU I/O (blob upload), re-acquiring before returning to
+        tenant code (#382). No-op when there is no lease (CPU jobs, local
+        runs) or the slot is already yielded (executor freed it post-handler).
+
+        If the job was cancelled while yielded (deadline / CancelJob), the
+        re-acquired slot is released again immediately: the executor's final
+        release already saw ``held == False`` and skipped, so the balance
+        stays exact and the freed slot isn't captured by a dying job.
+        """
+        lease = self._gpu_slot_lease
+        if lease is None or not lease.yield_slot():
+            yield
+            return
+        try:
+            yield
+        finally:
+            lease.reacquire()
+            if self._canceled:
+                lease.yield_slot()
+
     def _emit_event(self, event_type: str, payload: Optional[Dict[str, Any]] = None) -> None:
         """Worker-internal: emit a progress/event payload (best-effort)."""
         if not self._emitter:
@@ -498,8 +527,9 @@ class RequestContext:
             )
 
         stream = self._open_output_stream(ref, create=False, expected_size_bytes=len(data))
-        stream.write(data)
-        out = stream.finalize()
+        with self._gpu_slot_yielded():
+            stream.write(data)
+            out = stream.finalize()
         if isinstance(out, Asset):
             return out
         raise RuntimeError("file save failed (invalid_asset_response)")
@@ -543,7 +573,9 @@ class RequestContext:
             save_kwargs["quality"] = max(1, min(int(quality), 100))
         if pil_format == "WEBP":
             save_kwargs["lossless"] = bool(lossless)
-            save_kwargs["method"] = 6
+            # method=4 (default): method=6 costs ~2.6x the encode CPU for ~4%
+            # smaller files (#382 measurements).
+            save_kwargs["method"] = 4
         img.save(buf, format=pil_format, **save_kwargs)
         return _as_asset(self.save_bytes(ref, buf.getvalue()), ImageAsset)
 

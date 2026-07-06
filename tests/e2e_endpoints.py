@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from pathlib import Path
 from typing import AsyncIterator
@@ -10,6 +11,11 @@ from typing import AsyncIterator
 import msgspec
 
 from gen_worker import Hub, RequestContext, ValidationError, endpoint
+
+# Cross-thread signals for the GPU-slot-yield tests (#382). The fake-scheduler
+# suite runs the worker in-process, so tests coordinate through these directly.
+SLOT_PROBE_STARTED = threading.Event()
+SLOT_PEER_RAN = threading.Event()
 
 
 class EchoIn(msgspec.Struct):
@@ -40,6 +46,19 @@ class E2EEndpoint:
     def sleepy(self, ctx: RequestContext, data: EchoIn) -> EchoOut:
         time.sleep(0.5)
         return EchoOut(response="done")
+
+    def slot_probe(self, ctx: RequestContext, data: EchoIn) -> EchoOut:
+        """Holds the GPU slot, then waits for `slot_peer` INSIDE the yielded
+        window. Only completes if the slot is actually released during
+        uploads — with a held slot the peer can never run and this times out."""
+        SLOT_PROBE_STARTED.set()
+        with ctx._gpu_slot_yielded():
+            ok = SLOT_PEER_RAN.wait(timeout=10.0)
+        return EchoOut(response="overlapped" if ok else "starved")
+
+    def slot_peer(self, ctx: RequestContext, data: EchoIn) -> EchoOut:
+        SLOT_PEER_RAN.set()
+        return EchoOut(response="peer-done")
 
 
 @endpoint(model=Hub("e2e/tiny"))

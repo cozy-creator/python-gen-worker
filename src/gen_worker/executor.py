@@ -12,6 +12,7 @@ import asyncio
 import logging
 import os
 import shutil
+import threading
 import time
 import typing
 from dataclasses import dataclass, field as dc_field
@@ -448,6 +449,50 @@ class _Job:
     finished: bool = False
     superseded: bool = False
     admitted_at: float = dc_field(default_factory=time.monotonic)
+
+
+class _GpuSlotLease:
+    """Thread-safe handle for a job's GPU slot (#382).
+
+    Blob uploads and result sends are network/CPU work; holding the GPU
+    semaphore across them idles the GPU for longer than the model's own
+    compute on turbo image models. The lease lets ``RequestContext`` release
+    the slot from the handler thread while ``save_bytes`` waits on the
+    network (re-acquiring before returning to tenant code), and lets the
+    executor free the slot as soon as ``_execute`` returns — before
+    result-blob upload and result send. Transitions are lock-guarded so a
+    hold is released at most once.
+    """
+
+    __slots__ = ("_sem", "_loop", "_lock", "_held")
+
+    def __init__(self, sem: asyncio.Semaphore, loop: asyncio.AbstractEventLoop) -> None:
+        self._sem = sem
+        self._loop = loop
+        self._lock = threading.Lock()
+        self._held = True
+
+    def yield_slot(self) -> bool:
+        """Release the slot if held (any thread). True iff this call released."""
+        with self._lock:
+            if not self._held:
+                return False
+            self._held = False
+        try:
+            on_loop = asyncio.get_running_loop() is self._loop
+        except RuntimeError:
+            on_loop = False
+        if on_loop:
+            self._sem.release()
+        else:
+            self._loop.call_soon_threadsafe(self._sem.release)
+        return True
+
+    def reacquire(self) -> None:
+        """Blocking re-acquire from a handler thread."""
+        asyncio.run_coroutine_threadsafe(self._sem.acquire(), self._loop).result()
+        with self._lock:
+            self._held = True
 
 
 class Executor:
@@ -1028,12 +1073,13 @@ class Executor:
             return
 
         queue_ms = int((time.monotonic() - job.admitted_at) * 1000)
-        acquired = False
+        lease: Optional[_GpuSlotLease] = None
         started = time.monotonic()
         try:
             if needs_gpu:
                 await self._gpu_semaphore.acquire()
-                acquired = True
+                lease = _GpuSlotLease(self._gpu_semaphore, asyncio.get_running_loop())
+                ctx._gpu_slot_lease = lease
                 if job.ctx.cancelled:
                     raise CanceledError("canceled")
             started = time.monotonic()
@@ -1044,6 +1090,10 @@ class Executor:
                 output = await self._execute(job, spec, instance, ctx, payload, kwargs,
                                              timeout_ms=timeout_ms, gpu_index=gpu_index)
             metrics = self._metrics(queue_ms, started, concurrency_at_start, gpu_index)
+            # Handler GPU work is done — free the slot before result-blob
+            # upload and result send so the next job's compute starts now.
+            if lease is not None:
+                lease.yield_slot()
             if spec.output_mode == "stream":
                 await self._finish(job, pb.JOB_STATUS_OK, metrics=metrics)
             else:
@@ -1061,8 +1111,8 @@ class Executor:
             metrics = self._metrics(queue_ms, started, concurrency_at_start, gpu_index)
             await self._finish(job, status, safe_message=msg, metrics=metrics)
         finally:
-            if acquired:
-                self._gpu_semaphore.release()
+            if lease is not None:
+                lease.yield_slot()
             self._maybe_idle()
 
     async def _materialize_source(
