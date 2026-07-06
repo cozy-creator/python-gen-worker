@@ -757,7 +757,20 @@ def run_setup(instance: Any, resolved_models: Dict[str, str]) -> None:
             f"dict (static bindings are injected into setup; dispatch "
             f"bindings are injected into the handler per-request)."
         )
-    setup_fn(**{k: v for k, v in resolved_models.items() if k in wanted})
+    # Load each claimed slot through the same loader the handler-injection
+    # path uses: a setup(pipeline: StableDiffusionXLPipeline) must receive a
+    # constructed pipeline, not the snapshot path string (production executor
+    # behavior; previously setup received raw paths -> 'str' is not callable).
+    try:
+        hints = typing.get_type_hints(setup_fn)
+    except (TypeError, ValueError, NameError):
+        hints = {}
+    loaded = {
+        k: _load_injected_model(hints.get(k), v)
+        for k, v in resolved_models.items()
+        if k in wanted
+    }
+    setup_fn(**loaded)
 
 
 _INJECTED_CACHE: Dict[Tuple[str, str], Any] = {}
@@ -792,9 +805,12 @@ def _load_injected_model(annotation: Any, local_path: str) -> Any:
     if cls is None or not hasattr(cls, "from_pretrained"):
         from diffusers import DiffusionPipeline
         cls = DiffusionPipeline
+    # fp16 kernels are CUDA-only for several ops; on a CPU device run use fp32.
+    device = (os.getenv("GEN_WORKER_LOCAL_DEVICE") or "").strip().lower()
+    dtype = torch.float32 if device == "cpu" else torch.float16
     p = Path(local_path)
     if p.is_dir() and (p / "model_index.json").exists():
-        pipe = cls.from_pretrained(str(p), torch_dtype=torch.float16)
+        pipe = cls.from_pretrained(str(p), torch_dtype=dtype)
     else:
         single = p if p.is_file() else next(iter(sorted(p.glob("*.safetensors"))), None)
         if single is None or not hasattr(cls, "from_single_file"):
@@ -802,7 +818,7 @@ def _load_injected_model(annotation: Any, local_path: str) -> Any:
                 f"cannot materialize injected model slot from {p} "
                 f"(no model_index.json, no single-file checkpoint)"
             )
-        pipe = cls.from_single_file(str(single), torch_dtype=torch.float16)
+        pipe = cls.from_single_file(str(single), torch_dtype=dtype)
     _INJECTED_CACHE[key] = pipe
     return pipe
 
