@@ -1,5 +1,10 @@
 # Endpoint authoring
 
+API reference for the `@endpoint` surface. For the platform-side narrative —
+quickstart, deploy, pricing, model-binding practice, the DON'Ts — read
+[tensorhub docs/writing-endpoints.md](https://github.com/cozy-creator/tensorhub/blob/master/docs/writing-endpoints.md)
+first.
+
 One decorator: `@endpoint`. A plain function for stateless endpoints; a class
 with an optional `setup()` when you hold state (model weights, an engine).
 
