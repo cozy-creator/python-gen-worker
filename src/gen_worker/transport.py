@@ -206,6 +206,11 @@ class Transport:
         self._consecutive_auth_failures = 0
         self._first_auth_failure_at: Optional[float] = None
         self._connected_at: Optional[float] = None  # set on each HelloAck
+        # Latest hub-pushed worker JWT (TokenRefresh, contract §1 rotation).
+        # Used by the live connection's successor dials: reconnects always
+        # present the newest credential; the boot-time settings token is only
+        # the pre-rotation fallback.
+        self._worker_jwt: Optional[str] = None
 
     # ---- send API --------------------------------------------------------
 
@@ -262,7 +267,7 @@ class Transport:
         return grpc.aio.insecure_channel(target, options=self._channel_options())
 
     def _metadata(self) -> Optional[List[Tuple[str, str]]]:
-        token = (self._settings.worker_jwt or "").strip()
+        token = (self._worker_jwt or self._settings.worker_jwt or "").strip()
         if not token:
             return None
         return [("authorization", f"Bearer {token}")]
@@ -446,7 +451,22 @@ class Transport:
             msg = await stream.read()
             if msg is grpc.aio.EOF:
                 raise ConnectionError("scheduler closed the stream")
-            if msg.WhichOneof("msg") == "hello_ack":
+            which = msg.WhichOneof("msg")
+            if which == "hello_ack":
                 await self._handlers.on_hello_ack(msg.hello_ack)
+                continue
+            if which == "token_refresh":
+                # Kubelet-style rotation (contract §1): swap the stored
+                # credential in place — no reconnect, no re-Hello. A fresh
+                # rotation also clears any stale-token auth strikes.
+                token = (msg.token_refresh.token or "").strip()
+                if token:
+                    self._worker_jwt = token
+                    self._consecutive_auth_failures = 0
+                    self._first_auth_failure_at = None
+                    logger.info(
+                        "worker JWT rotated by hub (exp=%d)",
+                        msg.token_refresh.expires_at_unix,
+                    )
                 continue
             await self._handlers.on_message(msg)

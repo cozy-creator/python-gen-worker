@@ -53,11 +53,12 @@ message WorkerMessage {
 
 message SchedulerMessage {
   oneof msg {
-    HelloAck  hello_ack = 1;
-    RunJob    run_job   = 2;
-    CancelJob cancel_job = 3;
-    ModelOp   model_op  = 4;
-    Drain     drain     = 5;
+    HelloAck     hello_ack     = 1;
+    RunJob       run_job       = 2;
+    CancelJob    cancel_job    = 3;
+    ModelOp      model_op      = 4;
+    Drain        drain         = 5;
+    TokenRefresh token_refresh = 6;
   }
 }
 
@@ -315,4 +316,19 @@ message FnUnavailable {
 // results, close the stream, exit. No reply message; stream close is the ack.
 message Drain {
   int64 deadline_ms = 1; // relative grace budget; worker aborts remaining work at expiry
+}
+
+// ---------------------------------------------------------------------------
+// Credential rotation
+// ---------------------------------------------------------------------------
+
+// Orchestrator -> worker: a renewed worker JWT, pushed at ~80% of the current
+// token's TTL (kubelet-style rotation). The worker replaces its stored
+// credential immediately: the live connection is unaffected (identity is per
+// connection) and every subsequent reconnect dials with the newest pushed
+// token. No reply message. Additive proto3 field: a worker that predates this
+// message ignores it (unknown oneof field) and keeps its boot-time token.
+message TokenRefresh {
+  string token = 1;           // replacement worker JWT
+  int64  expires_at_unix = 2; // exp claim of the replacement (observability)
 }
