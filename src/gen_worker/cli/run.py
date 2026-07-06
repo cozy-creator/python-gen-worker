@@ -802,15 +802,21 @@ def run_setup(instance: Any, resolved_models: Dict[str, str]) -> None:
         hints = typing.get_type_hints(setup_fn)
     except (TypeError, ValueError, NameError):
         hints = {}
+    decl = getattr(type(instance), _ENDPOINT_ATTR, None)
     loaded = {
-        k: _load_injected_model(hints.get(k), v)
+        k: _load_injected_model(hints.get(k), v, decl=decl, slot=k)
         for k, v in resolved_models.items()
         if k in wanted
     }
     setup_fn(**loaded)
+    # Executor parity: warmup() runs once after setup (compile warm-up etc.).
+    warmup_fn = getattr(instance, "warmup", None)
+    if callable(warmup_fn):
+        warmup_fn()
 
 
 _INJECTED_CACHE: Dict[Tuple[str, str], Any] = {}
+_ENDPOINT_ATTR = "__gen_worker_endpoint__"
 
 
 def _build_injected_kwargs(bound_method: Any, resolved_models: Dict[str, str]) -> Dict[str, Any]:
@@ -826,14 +832,20 @@ def _build_injected_kwargs(bound_method: Any, resolved_models: Dict[str, str]) -
         hints = typing.get_type_hints(bound_method)
     except (TypeError, ValueError, NameError):
         return {}
+    owner = getattr(bound_method, "__self__", None)
+    decl = getattr(type(owner), _ENDPOINT_ATTR, None) if owner is not None else None
     kwargs: Dict[str, Any] = {}
     for name in list(sig.parameters)[2:]:  # skip ctx, payload (self already bound)
         if name in resolved_models:
-            kwargs[name] = _load_injected_model(hints.get(name), resolved_models[name])
+            kwargs[name] = _load_injected_model(
+                hints.get(name), resolved_models[name], decl=decl, slot=name
+            )
     return kwargs
 
 
-def _load_injected_model(annotation: Any, local_path: str) -> Any:
+def _load_injected_model(
+    annotation: Any, local_path: str, *, decl: Any = None, slot: str = ""
+) -> Any:
     key = (str(annotation), str(local_path))
     if key in _INJECTED_CACHE:
         return _INJECTED_CACHE[key]
@@ -845,10 +857,14 @@ def _load_injected_model(annotation: Any, local_path: str) -> Any:
         cls = DiffusionPipeline
     # fp16 kernels are CUDA-only for several ops; on a CPU device run use fp32.
     device = (os.getenv("GEN_WORKER_LOCAL_DEVICE") or "").strip().lower()
+    binding = (getattr(decl, "models", None) or {}).get(slot) if decl is not None else None
+    # Executor parity: honor the binding's declared dtype (bf16 endpoints must
+    # not silently load fp16 locally); fall back to the device default.
+    dtype = str(getattr(binding, "dtype", "") or "") or ("fp32" if device == "cpu" else "fp16")
     # Same loader the production executor uses: handles diffusers-layout dirs,
     # module-layout dirs (root config.json, e.g. a bare VAE/UNet repo), and
     # single-file checkpoints.
-    pipe = load_from_pretrained(cls, local_path, dtype="fp32" if device == "cpu" else "fp16")
+    pipe = load_from_pretrained(cls, local_path, dtype=dtype)
     if device != "cpu":
         # Worker-owned placement (executor parity): endpoints never write
         # device/offload code, so the cold `run` path must place the loaded
@@ -858,6 +874,16 @@ def _load_injected_model(annotation: Any, local_path: str) -> Any:
         from gen_worker.models.memory import place_pipeline
 
         place_pipeline(pipe)
+        compile_cfg = getattr(decl, "compile", None) if decl is not None else None
+        if compile_cfg is not None:
+            # Executor parity for #384: seed a verified per-SKU cache artifact
+            # if configured, else stay eager.
+            from gen_worker import compile_cache
+            from gen_worker.api.binding import wire_ref
+
+            compile_cache.enable(
+                pipe, compile_cfg, wire_ref(binding) if binding is not None else ""
+            )
     _INJECTED_CACHE[key] = pipe
     return pipe
 

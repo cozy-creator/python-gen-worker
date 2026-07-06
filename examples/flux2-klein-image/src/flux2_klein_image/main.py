@@ -18,7 +18,7 @@ import msgspec
 import torch
 
 from diffusers import Flux2KleinPipeline
-from gen_worker import HF, RequestContext, Resources, ValidationError, endpoint
+from gen_worker import Compile, HF, RequestContext, Resources, ValidationError, endpoint
 from gen_worker import io as gw_io
 from gen_worker.api.types import ImageAsset
 
@@ -53,10 +53,29 @@ class KleinTurboOutput(msgspec.Struct):
         ),
     ),
     resources=Resources(vram_gb=20),
+    # Opt into torch.compile (#384). Safe by construction: the worker arms
+    # compile ONLY when a verified per-(model, SKU, torch, triton) cache
+    # artifact is seeded (GEN_WORKER_COMPILE_CACHE[_URL]); otherwise eager.
+    compile=Compile(shapes=((768, 768), (1024, 1024))),
 )
 class Flux2KleinTurbo:
     def setup(self, model: Flux2KleinPipeline) -> None:
         self._pipe = model
+
+    def warmup(self) -> None:
+        """When compile is armed, pay the (cache-served) compile cost at boot
+        over the declared shapes so no request ever sees the stall."""
+        info = getattr(self._pipe, "_cozy_compile", None)
+        if not info:
+            return
+        for w, h in info.get("shapes") or ():
+            self._pipe(
+                prompt="warmup",
+                num_inference_steps=1,
+                width=int(w),
+                height=int(h),
+                generator=torch.Generator(device=self._pipe.device).manual_seed(0),
+            )
 
     def generate_turbo(self, ctx: RequestContext, p: KleinTurboInput) -> KleinTurboOutput:
         if not str(p.prompt or "").strip():

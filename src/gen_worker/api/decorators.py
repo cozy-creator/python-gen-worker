@@ -85,6 +85,33 @@ class Variant(msgspec.Struct, frozen=True):
     resources: Resources | None = None
 
 
+class Compile(msgspec.Struct, frozen=True):
+    """Opt-in torch.compile over pre-built per-SKU cache artifacts (#384).
+
+    ``Compile(shapes=((768, 768), (1024, 1024)))`` declares the (width,
+    height) set the compile job warms. Declaring this does NOT force
+    compilation: the worker arms torch.compile only when a verified cache
+    artifact for (model, SKU, torch, triton) is seeded — otherwise it stays
+    eager. See ``gen_worker.compile_cache``.
+    """
+
+    shapes: tuple[tuple[int, int], ...]
+    targets: tuple[str, ...] = ("transformer", "vae.decode")
+
+    def __post_init__(self) -> None:
+        force = msgspec.structs.force_setattr
+        shapes = tuple((int(w), int(h)) for w, h in (tuple(s) for s in self.shapes))
+        if not shapes or any(w <= 0 or h <= 0 for w, h in shapes):
+            raise ValueError(
+                f"Compile.shapes must be positive (w, h) pairs, got {self.shapes!r}"
+            )
+        force(self, "shapes", shapes)
+        targets = tuple(str(t).strip() for t in self.targets if str(t).strip())
+        if not targets:
+            raise ValueError("Compile.targets must not be empty")
+        force(self, "targets", targets)
+
+
 class EndpointDecl(msgspec.Struct, frozen=True, kw_only=True):
     """Metadata attached by ``@endpoint``; read by the registry walker."""
 
@@ -95,6 +122,7 @@ class EndpointDecl(msgspec.Struct, frozen=True, kw_only=True):
     runtime: Optional[str] = None
     name: Optional[str] = None  # function-shaped endpoints only
     is_function: bool = False
+    compile: Optional[Compile] = None
 
 
 ATTR = "__gen_worker_endpoint__"
@@ -335,6 +363,7 @@ def _decorate_class(
     models: dict[str, Binding],
     variants: Optional[Mapping[str, Any]],
     runtime: Optional[str],
+    compile: Optional[Compile] = None,
 ) -> type:
     handlers = _find_handler_methods(cls)
     for attr, member in handlers:
@@ -363,7 +392,7 @@ def _decorate_class(
 
     decl = EndpointDecl(
         kind=kind, resources=resources, models=models,
-        variants=variant_rows, runtime=runtime,
+        variants=variant_rows, runtime=runtime, compile=compile,
     )
     setattr(cls, ATTR, decl)
     setattr(cls, "__gen_worker_handlers__", handlers)
@@ -378,6 +407,7 @@ def _decorate_function(
     models: dict[str, Binding],
     runtime: Optional[str],
     name: Optional[str],
+    compile: Optional[Compile] = None,
 ) -> Callable[..., Any]:
     _validate_handler_shape(fn.__name__, fn, is_method=False)
     _reject_producer_generator(fn.__name__, fn, kind)
@@ -399,6 +429,7 @@ def _decorate_function(
     decl = EndpointDecl(
         kind=kind, resources=resources, models=models,
         runtime=None, name=(name or fn.__name__), is_function=True,
+        compile=compile,
     )
     setattr(fn, ATTR, decl)
     return fn
@@ -414,6 +445,7 @@ def endpoint(
     variants: Optional[Mapping[str, Any]] = None,
     runtime: Optional[str] = None,
     name: Optional[str] = None,
+    compile: Optional[Compile] = None,
 ) -> Any:
     """The one endpoint decorator. See the module docstring for shapes."""
     if kind not in KINDS:
@@ -422,6 +454,10 @@ def endpoint(
     if resources is not None and not isinstance(resources, Resources):
         raise TypeError(
             f"@endpoint resources= must be a Resources, got {type(resources).__name__}"
+        )
+    if compile is not None and not isinstance(compile, Compile):
+        raise TypeError(
+            f"@endpoint compile= must be a Compile, got {type(compile).__name__}"
         )
     model_map = _normalize_models(model, models)
 
@@ -432,7 +468,7 @@ def endpoint(
                                  "class handlers route by method name")
             return _decorate_class(
                 obj, kind=kind, resources=resources_value, models=model_map,
-                variants=variants, runtime=runtime,
+                variants=variants, runtime=runtime, compile=compile,
             )
         if inspect.isfunction(obj):
             if variants:
@@ -442,7 +478,7 @@ def endpoint(
                 )
             return _decorate_function(
                 obj, kind=kind, resources=resources_value, models=dict(model_map),
-                runtime=runtime, name=name,
+                runtime=runtime, name=name, compile=compile,
             )
         raise TypeError(
             f"@endpoint requires a function or class, got {type(obj).__name__}"
@@ -453,4 +489,4 @@ def endpoint(
     return apply
 
 
-__all__ = ["EndpointDecl", "Resources", "Variant", "endpoint"]
+__all__ = ["Compile", "EndpointDecl", "Resources", "Variant", "endpoint"]

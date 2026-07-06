@@ -803,6 +803,16 @@ class Executor:
                 # Worker-owned placement/offload policy: one decider for the
                 # whole worker; endpoints never write device/offload code.
                 await asyncio.to_thread(place_pipeline, pipe)
+                if spec.compile is not None:
+                    # Opt-in torch.compile against a pre-built per-SKU cache
+                    # artifact (#384); no verified artifact => stays eager.
+                    from . import compile_cache
+
+                    await asyncio.to_thread(
+                        compile_cache.enable, pipe, spec.compile,
+                        wire_ref(binding) if binding is not None else "",
+                        self.store._cache_dir,
+                    )
                 loaded[slot] = (pipe, max(0, self._vram_allocated() - before))
                 kwargs[slot] = pipe
             else:

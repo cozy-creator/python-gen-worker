@@ -15,7 +15,7 @@ subclass from ``@endpoint(kind=...)`` before dispatch.
 
 from . import io
 from .api.binding import Civitai, HF, Hub, ModelScope
-from .api.decorators import Resources, endpoint
+from .api.decorators import Compile, Resources, endpoint
 from .api.errors import (
     CanceledError,
     FatalError,
@@ -50,6 +50,7 @@ __all__ = [
     # The decorator + bindings.
     "endpoint",
     "Resources",
+    "Compile",
     "HF",
     "Hub",
     "Civitai",

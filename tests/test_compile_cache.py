@@ -1,0 +1,203 @@
+"""#384: per-SKU torch.compile cache artifacts — key, packaging, safety policy."""
+
+from __future__ import annotations
+
+import io
+import tarfile
+
+import msgspec
+import pytest
+
+from gen_worker import Compile, Resources, endpoint
+from gen_worker import compile_cache as cc
+from gen_worker.registry import collect_from_namespace
+
+
+# ---------------------------------------------------------------------------
+# key
+# ---------------------------------------------------------------------------
+
+
+def test_sku_slug():
+    assert cc.sku_slug("NVIDIA GeForce RTX 4090") == "rtx-4090"
+    assert cc.sku_slug("NVIDIA H100 80GB HBM3") == "h100-80gb-hbm3"
+    assert cc.sku_slug("NVIDIA RTX 5090") == "rtx-5090"
+    assert cc.sku_slug("") == ""
+
+
+def test_flavor_label():
+    assert cc.flavor_label("rtx-4090", "2.9.1+cu128") == "inductor-rtx-4090-torch2.9"
+    assert cc.flavor_label("h100-80gb-hbm3", "2.11.0") == "inductor-h100-80gb-hbm3-torch2.11"
+
+
+def test_verify_mismatches():
+    meta = cc.artifact_metadata(model_ref="owner/model", shapes=[(768, 768)], targets=["transformer"])
+    assert cc.verify(meta, model_ref="owner/model") == ""
+    assert cc.verify(meta, model_ref="") == ""  # consumer without a ref: key-only check
+
+    other = dict(meta, torch="0.0.0")
+    assert "torch" in cc.verify(other, model_ref="owner/model")
+
+    other = dict(meta, sku="not-this-gpu")
+    assert "sku" in cc.verify(other, model_ref="owner/model")
+
+    assert "model_ref" in cc.verify(meta, model_ref="different/model")
+
+    other = dict(meta, format=99)
+    assert "format" in cc.verify(other, model_ref="owner/model")
+
+
+# ---------------------------------------------------------------------------
+# pack / unpack
+# ---------------------------------------------------------------------------
+
+
+def _capture_tree(root):
+    (root / "inductor" / "ab").mkdir(parents=True)
+    (root / "inductor" / "ab" / "graph.py").write_text("code")
+    (root / "inductor" / "stale.lock").write_text("")  # junk: excluded
+    (root / "triton" / "kern").mkdir(parents=True)
+    (root / "triton" / "kern" / "kernel.cubin").write_bytes(b"\x00\x01")
+    return root
+
+
+def test_pack_is_deterministic_and_roundtrips(tmp_path):
+    src = _capture_tree(tmp_path / "cap")
+    meta = cc.artifact_metadata(model_ref="owner/model", shapes=[(768, 768)], targets=["transformer"])
+
+    a = cc.pack(src, tmp_path / "a.tar.gz", meta)
+    b = cc.pack(src, tmp_path / "b.tar.gz", meta)
+    assert a.read_bytes() == b.read_bytes()
+
+    dest = tmp_path / "seed"
+    got = cc.unpack(a, dest)
+    assert got["model_ref"] == "owner/model"
+    assert (dest / "inductor" / "ab" / "graph.py").read_text() == "code"
+    assert (dest / "triton" / "kern" / "kernel.cubin").read_bytes() == b"\x00\x01"
+    assert not (dest / "inductor" / "stale.lock").exists()
+
+    # merge: a second artifact lands next to the first
+    (src / "inductor" / "cd").mkdir()
+    (src / "inductor" / "cd" / "more.py").write_text("x")
+    c = cc.pack(src, tmp_path / "c.tar.gz", meta)
+    cc.unpack(c, dest)
+    assert (dest / "inductor" / "ab" / "graph.py").exists()
+    assert (dest / "inductor" / "cd" / "more.py").exists()
+
+
+def test_unpack_rejects_traversal(tmp_path):
+    evil = tmp_path / "evil.tar.gz"
+    import gzip
+
+    with open(evil, "wb") as raw, gzip.GzipFile(fileobj=raw, mode="wb", mtime=0) as gz:
+        with tarfile.open(fileobj=gz, mode="w") as tar:
+            data = b"{}"
+            ti = tarfile.TarInfo(cc.METADATA_NAME)
+            ti.size = len(data)
+            tar.addfile(ti, io.BytesIO(data))
+            ti = tarfile.TarInfo("inductor/../../escape.py")
+            ti.size = 1
+            tar.addfile(ti, io.BytesIO(b"x"))
+    with pytest.raises(ValueError, match="unsafe"):
+        cc.unpack(evil, tmp_path / "seed")
+
+
+def test_unpack_requires_metadata(tmp_path):
+    bad = tmp_path / "bad.tar.gz"
+    with tarfile.open(bad, mode="w:gz") as tar:
+        ti = tarfile.TarInfo("inductor/x")
+        ti.size = 1
+        tar.addfile(ti, io.BytesIO(b"x"))
+    with pytest.raises(ValueError, match="metadata"):
+        cc.unpack(bad, tmp_path / "seed")
+
+
+def test_capture_env_sets_cache_dirs(tmp_path, monkeypatch):
+    monkeypatch.delenv("TORCHINDUCTOR_CACHE_DIR", raising=False)
+    monkeypatch.delenv("TRITON_CACHE_DIR", raising=False)
+    import os
+
+    cc.capture_env(tmp_path / "cap")
+    assert os.environ["TORCHINDUCTOR_CACHE_DIR"] == str(tmp_path / "cap" / "inductor")
+    assert os.environ["TRITON_CACHE_DIR"] == str(tmp_path / "cap" / "triton")
+
+
+# ---------------------------------------------------------------------------
+# safety policy
+# ---------------------------------------------------------------------------
+
+
+class _FakePipe:
+    pass
+
+
+def test_apply_stays_eager_without_cache(monkeypatch):
+    """No verified artifact and no explicit cold opt-in => untouched pipeline."""
+    monkeypatch.delenv(cc.ENV_ALLOW_COLD, raising=False)
+    pipe = _FakePipe()
+    cfg = Compile(shapes=((768, 768),))
+    assert cc.apply(pipe, cfg, cache_ready=False) is False
+    assert getattr(pipe, "_cozy_compile", None) is None
+
+
+def test_prepare_without_sources_is_none(monkeypatch, tmp_path):
+    monkeypatch.delenv(cc.ENV_CACHE_PATH, raising=False)
+    monkeypatch.delenv(cc.ENV_CACHE_URL, raising=False)
+    assert cc.prepare("owner/model", cache_dir=tmp_path) is None
+
+
+def test_prepare_rejects_key_mismatch(monkeypatch, tmp_path):
+    src = _capture_tree(tmp_path / "cap")
+    meta = cc.artifact_metadata(model_ref="owner/model", shapes=[(768, 768)], targets=["transformer"])
+    meta["torch"] = "0.0.0"  # never matches this runtime
+    art = cc.pack(src, tmp_path / "art.tar.gz", meta)
+    monkeypatch.setenv(cc.ENV_CACHE_PATH, str(art))
+    assert cc.prepare("owner/model", cache_dir=tmp_path / "cache") is None
+
+
+# ---------------------------------------------------------------------------
+# declaration plumbing
+# ---------------------------------------------------------------------------
+
+
+def test_compile_struct_validation():
+    c = Compile(shapes=[[768, 768], (1024, 1024)])
+    assert c.shapes == ((768, 768), (1024, 1024))
+    assert c.targets == ("transformer", "vae.decode")
+    with pytest.raises(ValueError):
+        Compile(shapes=())
+    with pytest.raises(ValueError):
+        Compile(shapes=((0, 768),))
+    with pytest.raises(ValueError):
+        Compile(shapes=((768, 768),), targets=())
+
+
+class In(msgspec.Struct):
+    prompt: str = ""
+
+
+class Out(msgspec.Struct):
+    ok: bool = True
+
+
+def test_endpoint_compile_reaches_spec():
+    import types
+
+    @endpoint(resources=Resources(vram_gb=4), compile=Compile(shapes=((768, 768),)))
+    class Ep:
+        def setup(self) -> None:
+            pass
+
+        def gen(self, ctx, p: In) -> Out:
+            return Out()
+
+    mod = types.SimpleNamespace(Ep=Ep)
+    specs = collect_from_namespace(mod)
+    assert len(specs) == 1
+    assert specs[0].compile is not None
+    assert specs[0].compile.shapes == ((768, 768),)
+
+    with pytest.raises(TypeError, match="compile="):
+        @endpoint(compile="yes")  # type: ignore[arg-type]
+        def bad(ctx, p: In) -> Out:
+            return Out()
