@@ -57,7 +57,11 @@ def _normalize_letters_digits(raw: str) -> str:
 
 def canonical_model_family_from_variant(variant: str) -> str:
     raw = str(variant or "").strip().lower()
-    if raw in {"flux1", "flux2", "flex2", "z_image", "qwen_image"}:
+    if raw == "z_image":
+        return "z-image"
+    if raw == "qwen_image":
+        return "qwen-image"
+    if raw in {"flux1", "flux2", "flex2"}:
         return "flux"
     if raw in {"wan21", "wan22", "wan"}:
         return "wan"
