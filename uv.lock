@@ -386,6 +386,7 @@ dependencies = [
 dev = [
     { name = "accelerate" },
     { name = "bitsandbytes", marker = "sys_platform == 'linux'" },
+    { name = "flashpack" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "ruff" },
@@ -409,6 +410,7 @@ requires-dist = [
     { name = "accelerate", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "bitsandbytes", marker = "sys_platform == 'linux' and extra == 'dev'", specifier = ">=0.45.0" },
     { name = "blake3", specifier = ">=1.0.0" },
+    { name = "flashpack", marker = "extra == 'dev'", specifier = ">=0.2.1" },
     { name = "flashpack", marker = "extra == 'flashpack'", specifier = ">=0.2.1" },
     { name = "gen-worker", editable = "." },
     { name = "gguf", specifier = ">=0.10.0" },

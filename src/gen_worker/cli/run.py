@@ -99,6 +99,15 @@ def add_subparser(sub: argparse._SubParsersAction[Any]) -> None:
         ),
     )
     p.add_argument(
+        "--source-path", dest="source_path", default=None,
+        help=(
+            "Local snapshot directory to use as the reserved `source` "
+            "payload's materialized checkpoint: populates ctx.source_path "
+            "exactly like the production worker does after Hub-resolve, so "
+            "reserved-source producer functions run without a hub."
+        ),
+    )
+    p.add_argument(
         "--pretty", action="store_true",
         help="Pretty-print the stdout result with newlines + 2-space indent.",
     )
@@ -322,6 +331,28 @@ def _apply_field_tokens(
     except ArgError as e:
         raise _UsageError(str(e)) from e
     return json.dumps(merged, separators=(",", ":")).encode("utf-8")
+
+
+def _inject_default_source(
+    raw_bytes: bytes, payload_type: type, source_path: Path,
+) -> bytes:
+    """When ``--source-path`` is given and the payload type declares a
+    reserved ``source`` field the user didn't fill in, synthesize a local ref
+    so decode passes. An explicit ``source`` in the payload is left alone."""
+    try:
+        field_names = {f.name for f in msgspec.structs.fields(payload_type)}
+    except Exception:
+        return raw_bytes
+    if "source" not in field_names:
+        return raw_bytes
+    try:
+        base = json.loads(raw_bytes.decode("utf-8") or "{}") if raw_bytes else {}
+    except json.JSONDecodeError:
+        return raw_bytes
+    if not isinstance(base, dict) or base.get("source"):
+        return raw_bytes
+    base["source"] = {"ref": f"local/{source_path.name}"}
+    return json.dumps(base, separators=(",", ":")).encode("utf-8")
 
 
 def _decode_payload(
@@ -1052,6 +1083,19 @@ def _run_inner(args: argparse.Namespace) -> int:
         raw_bytes, getattr(args, "fields", None), selected.payload_type,
     )
 
+    # Reserved-source contract, local mode: --source-path stands in for the
+    # worker's Hub-resolve + materialize step. If the payload declares a
+    # `source` field and none was provided, synthesize one so validation
+    # passes; ctx.source_path is set on the context below.
+    source_path: Optional[Path] = None
+    if getattr(args, "source_path", None):
+        source_path = Path(args.source_path).expanduser().resolve()
+        if not source_path.exists():
+            raise _UsageError(f"--source-path does not exist: {source_path}")
+        raw_bytes = _inject_default_source(
+            raw_bytes, selected.payload_type, source_path,
+        )
+
     from .local_context import _stderr_emitter
 
     # 4. Build the local context for this kind.
@@ -1059,6 +1103,14 @@ def _run_inner(args: argparse.Namespace) -> int:
         kind=selected.kind,
         allow_publish=bool(args.allow_publish),
     )
+    if source_path is not None:
+        set_source = getattr(ctx, "_set_source_path", None)
+        if not callable(set_source):
+            raise _UsageError(
+                f"--source-path: {selected.kind!r} endpoints have no reserved "
+                "source contract (conversion/dataset/training only)."
+            )
+        set_source(str(source_path))
     # Honor --device by stashing it on the context. (RequestContext doesn't
     # currently expose a `.device` setter; tenants typically read it via
     # torch directly. We surface the override via env so user code can
