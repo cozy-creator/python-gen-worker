@@ -184,6 +184,24 @@ class Source:
             self._tokenizer = AutoTokenizer.from_pretrained(str(self._path))
         return self._tokenizer
 
+    def diffusers_variant(self) -> str | None:
+        """Detect a diffusers ``variant=`` value from files on disk
+        (e.g. ``unet/diffusion_pytorch_model.fp16.safetensors`` → ``"fp16"``).
+        Mirrors gen_worker.models.loading.detect_diffusers_variant — repo-cas
+        mirrors cloned with a dtype preference keep HF's variant suffix."""
+        if self._file_layout != "diffusers":
+            return None
+        candidates = ("bf16", "fp8", "fp16", "int8", "int4")
+        try:
+            for p in self._path.rglob("*.safetensors"):
+                name = p.name.lower()
+                for v in candidates:
+                    if f".{v}." in name or name.endswith(f".{v}.safetensors"):
+                        return v
+        except OSError:
+            return None
+        return None
+
     def as_hf_model(self, **kwargs: Any) -> Any:
         """Auto-dispatch model load.
 
@@ -192,6 +210,9 @@ class Source:
         Override by passing an explicit ``model_cls=SomeClass`` kwarg.
         """
         model_cls = kwargs.pop("model_cls", None)
+        if self._file_layout == "diffusers" and "variant" not in kwargs:
+            if v := self.diffusers_variant():
+                kwargs["variant"] = v
         if model_cls is not None:
             return model_cls.from_pretrained(str(self._path), **kwargs)
         if self._file_layout == "diffusers":

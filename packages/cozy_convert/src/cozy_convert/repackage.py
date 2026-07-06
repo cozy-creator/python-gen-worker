@@ -87,6 +87,9 @@ def _load_component_state_dict(
     - <base>.safetensors.index.json (sharded)
     - <base>.bin.safetensors (common in some HF repos)
     - <base>.bin.safetensors.index.json (rare; but cheap to support)
+    - <base>.<variant>.safetensors and its sharded index (HF dtype-variant
+      downloads keep the suffix — e.g. diffusion_pytorch_model.fp16.safetensors
+      in repo-cas mirrors cloned with a dtype preference)
 
     Optional legacy fallback (unsafe for untrusted repos):
     - <bin_base>.bin
@@ -108,6 +111,14 @@ def _load_component_state_dict(
             return cast(dict[str, Any], _st_load(st_path))
         if st_index.exists():
             return _load_sharded_safetensors(st_index)
+
+        # Dtype-variant names, exact-name misses only.
+        for st in sorted(component_dir.glob(f"{base}.*.safetensors")):
+            return cast(dict[str, Any], _st_load(st))
+        for idx in sorted(component_dir.glob(f"{base}.safetensors.*.index.json")) + sorted(
+            component_dir.glob(f"{base}.*.safetensors.index.json")
+        ):
+            return _load_sharded_safetensors(idx)
 
     if bin_base:
         bin_path = component_dir / f"{bin_base}.bin"
