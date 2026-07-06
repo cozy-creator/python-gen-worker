@@ -23,7 +23,8 @@ import msgspec
 
 import gen_worker.cli as cli
 import gen_worker.cli.run as run_mod
-from gen_worker import RequestContext, endpoint
+from gen_worker import ConversionContext, RequestContext, endpoint
+from gen_worker.api.types import SourceRepo
 
 
 class _In(msgspec.Struct):
@@ -241,3 +242,74 @@ def test_pyproject_tool_gen_worker_main(tmp_path) -> None:
     import pytest as _pytest
     with _pytest.raises(ValueError, match=r"tool\.gen_worker"):
         load_project_config(tmp_path)
+
+
+# --------------------------------------------------------------------------- #
+# --source-path: reserved-source producer functions run locally (te#42)       #
+# --------------------------------------------------------------------------- #
+
+
+class _ConvIn(msgspec.Struct):
+    source: SourceRepo
+
+
+class _ConvOut(msgspec.Struct):
+    source_path: str
+    source_ref: str
+
+
+def _conversion_module(name: str = "_test_conv_src") -> types.ModuleType:
+    mod = types.ModuleType(name)
+
+    @endpoint(kind="conversion")
+    class Conv:
+        def probe_source(self, ctx: ConversionContext, data: _ConvIn) -> _ConvOut:
+            return _ConvOut(
+                source_path=str(ctx.source_path or ""), source_ref=data.source.ref,
+            )
+
+    Conv.__module__ = name
+    mod.Conv = Conv
+    sys.modules[name] = mod
+    return mod
+
+
+def test_run_source_path_materializes_reserved_source(tmp_path, capsys, monkeypatch) -> None:
+    _conversion_module()
+    monkeypatch.setattr(run_mod, "_warm_serve_socket", lambda: None)
+    snap = tmp_path / "snapshot"
+    snap.mkdir()
+
+    # No payload at all: `source` is synthesized from --source-path.
+    assert cli.main(["run", "--module", "_test_conv_src", "--source-path", str(snap)]) == 0
+    last = _last_event(capsys)
+    assert last["value"]["source_path"] == str(snap)
+    assert last["value"]["source_ref"] == "local/snapshot"
+
+    # Explicit payload source is left alone; ctx.source_path still set.
+    assert cli.main([
+        "run", "--module", "_test_conv_src", "--source-path", str(snap),
+        "--payload", json.dumps({"source": {"ref": "acme/sd15-mirror:prod"}}),
+    ]) == 0
+    last = _last_event(capsys)
+    assert last["value"]["source_path"] == str(snap)
+    assert last["value"]["source_ref"] == "acme/sd15-mirror:prod"
+
+
+def test_run_source_path_usage_errors(tmp_path, capsys, monkeypatch) -> None:
+    monkeypatch.setattr(run_mod, "_warm_serve_socket", lambda: None)
+
+    # Nonexistent path -> usage error.
+    _conversion_module()
+    assert cli.main([
+        "run", "--module", "_test_conv_src", "--source-path", str(tmp_path / "missing"),
+    ]) == 2
+
+    # Inference endpoints have no reserved source contract.
+    _marco_module()
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    assert cli.main([
+        "run", "--module", "_test_marco", "--source-path", str(snap),
+        "--payload", json.dumps({"text": "marco"}),
+    ]) == 2

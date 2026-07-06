@@ -33,6 +33,7 @@ dev = [
     "ruff>=0.6.0",
     "torch>=2.11.0",
     "safetensors>=0.7.0",
+    "flashpack>=0.2.1",
     "transformers>=4.50.0",
     "accelerate>=1.0.0",
     "bitsandbytes>=0.45.0; sys_platform == 'linux'",

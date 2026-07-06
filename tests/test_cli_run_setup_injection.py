@@ -94,3 +94,24 @@ def test_select_function_base_fn_wins_exact_match_over_variant_attr_matches():
     assert base.fn_name == "generate"
     variant = cli_run._select_function(candidates, cls_name=None, method_name="generate_alt")
     assert variant.fn_name == "generate-alt"
+
+
+def test_map_exception_redacts_presigned_url_but_keeps_context():
+    # Presigned-URL download failures used to collapse to "internal error";
+    # the message must survive with only the credential material redacted.
+    exc = RuntimeError(
+        "download failed for https://r2.example.com/cas/ab12?"
+        "X-Amz-Credential=AKIAEXAMPLE%2F20260706&X-Amz-Signature=deadbeef123"
+    )
+    status, msg = _map_exception(exc)
+    assert status == pb.JOB_STATUS_FATAL
+    assert msg.startswith("RuntimeError: download failed")
+    assert "r2.example.com" in msg
+    assert "AKIAEXAMPLE" not in msg and "deadbeef123" not in msg
+    assert "[redacted]" in msg
+
+
+def test_map_exception_redacts_bare_signature_param():
+    status, msg = _map_exception(RuntimeError("PUT 403: Signature=abc123 rejected"))
+    assert status == pb.JOB_STATUS_FATAL
+    assert "abc123" not in msg and "rejected" in msg

@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import shutil
 import threading
 import time
@@ -74,11 +75,20 @@ except Exception:  # pragma: no cover
     torch = None  # type: ignore[assignment]
 
 
+# Credential material inside exception messages (auth headers, presigned-URL
+# query params). Redacted in place — replacing the whole message with
+# "internal error" made every download/publish failure undiagnosable from the
+# hub (pods ship no logs; presigned URLs carry X-Amz-* params).
+_REDACTIONS = (
+    re.compile(r"Bearer\s+[^\s\"'&]+"),
+    re.compile(r"(?:X-Amz-[A-Za-z0-9-]+|Signature)=[^&\s\"']*"),
+)
+
+
 def _sanitize(message: str) -> str:
     out = str(message or "").strip()
-    for needle in ("Bearer ", "X-Amz-", "Signature="):
-        if needle in out:
-            return "internal error"
+    for pat in _REDACTIONS:
+        out = pat.sub("[redacted]", out)
     return out[:1024]
 
 
