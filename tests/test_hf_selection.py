@@ -127,3 +127,59 @@ def test_unrecognized_layout_downloads_whole_repo() -> None:
 def test_no_weights_at_all_downloads_whole_repo() -> None:
     assert select_hf_files(["README.md", "config.json"]) is None
     assert select_hf_files([]) is None
+
+
+def test_sharded_single_file_checkpoint_reassembles(tmp_path):
+    """A >5GB single-file checkpoint arrives from the mirror as byte-offset
+    shards + index; the loader must reassemble it for from_single_file."""
+    import json
+    import struct
+
+    from gen_worker.models.loading import _single_file_checkpoint
+
+    def write_st(path, tensors):  # minimal safetensors writer
+        header, blob, off = {}, b"", 0
+        for name, (dtype, shape, data) in tensors.items():
+            header[name] = {"dtype": dtype, "shape": shape, "data_offsets": [off, off + len(data)]}
+            blob += data
+            off += len(data)
+        hb = json.dumps(header, separators=(",", ":")).encode()
+        path.write_bytes(struct.pack("<Q", len(hb)) + hb + blob)
+
+    write_st(tmp_path / "ckpt-00001-of-00002.safetensors",
+             {"alpha": ("F32", [2], b"\x00\x00\x80?\x00\x00\x00@")})  # [1.0, 2.0]
+    write_st(tmp_path / "ckpt-00002-of-00002.safetensors",
+             {"beta": ("F16", [1], b"\x00<")})  # [1.0]
+    (tmp_path / "ckpt.safetensors.index.json").write_text(json.dumps({
+        "metadata": {"total_size": 10},
+        "weight_map": {
+            "alpha": "ckpt-00001-of-00002.safetensors",
+            "beta": "ckpt-00002-of-00002.safetensors",
+        },
+    }))
+
+    merged = _single_file_checkpoint(tmp_path)
+    assert merged is not None and merged.name == "ckpt.safetensors"
+    raw = merged.read_bytes()
+    (n,) = struct.unpack("<Q", raw[:8])
+    header = json.loads(raw[8:8 + n])
+    assert set(header) == {"alpha", "beta"}
+    body = raw[8 + n:]
+    a0, a1 = header["alpha"]["data_offsets"]
+    b0, b1 = header["beta"]["data_offsets"]
+    assert body[a0:a1] == b"\x00\x00\x80?\x00\x00\x00@"
+    assert body[b0:b1] == b"\x00<"
+    assert header["beta"]["dtype"] == "F16"
+    # Idempotent: second call reuses the cached merge.
+    assert _single_file_checkpoint(tmp_path) == merged
+
+
+def test_single_file_checkpoint_plain_and_layouts(tmp_path):
+    from gen_worker.models.loading import _single_file_checkpoint
+
+    single = tmp_path / "model.safetensors"
+    single.write_bytes(b"x")
+    assert _single_file_checkpoint(tmp_path) == single
+    # A pretrained layout is never treated as single-file.
+    (tmp_path / "model_index.json").write_text("{}")
+    assert _single_file_checkpoint(tmp_path) is None
