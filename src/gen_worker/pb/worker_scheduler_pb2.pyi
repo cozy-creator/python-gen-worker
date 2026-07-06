@@ -113,18 +113,20 @@ class WorkerMessage(_message.Message):
     def __init__(self, hello: _Optional[_Union[Hello, _Mapping]] = ..., state_delta: _Optional[_Union[StateDelta, _Mapping]] = ..., job_accepted: _Optional[_Union[JobAccepted, _Mapping]] = ..., job_result: _Optional[_Union[JobResult, _Mapping]] = ..., job_progress: _Optional[_Union[JobProgress, _Mapping]] = ..., model_event: _Optional[_Union[ModelEvent, _Mapping]] = ..., fn_unavailable: _Optional[_Union[FnUnavailable, _Mapping]] = ...) -> None: ...
 
 class SchedulerMessage(_message.Message):
-    __slots__ = ("hello_ack", "run_job", "cancel_job", "model_op", "drain")
+    __slots__ = ("hello_ack", "run_job", "cancel_job", "model_op", "drain", "token_refresh")
     HELLO_ACK_FIELD_NUMBER: _ClassVar[int]
     RUN_JOB_FIELD_NUMBER: _ClassVar[int]
     CANCEL_JOB_FIELD_NUMBER: _ClassVar[int]
     MODEL_OP_FIELD_NUMBER: _ClassVar[int]
     DRAIN_FIELD_NUMBER: _ClassVar[int]
+    TOKEN_REFRESH_FIELD_NUMBER: _ClassVar[int]
     hello_ack: HelloAck
     run_job: RunJob
     cancel_job: CancelJob
     model_op: ModelOp
     drain: Drain
-    def __init__(self, hello_ack: _Optional[_Union[HelloAck, _Mapping]] = ..., run_job: _Optional[_Union[RunJob, _Mapping]] = ..., cancel_job: _Optional[_Union[CancelJob, _Mapping]] = ..., model_op: _Optional[_Union[ModelOp, _Mapping]] = ..., drain: _Optional[_Union[Drain, _Mapping]] = ...) -> None: ...
+    token_refresh: TokenRefresh
+    def __init__(self, hello_ack: _Optional[_Union[HelloAck, _Mapping]] = ..., run_job: _Optional[_Union[RunJob, _Mapping]] = ..., cancel_job: _Optional[_Union[CancelJob, _Mapping]] = ..., model_op: _Optional[_Union[ModelOp, _Mapping]] = ..., drain: _Optional[_Union[Drain, _Mapping]] = ..., token_refresh: _Optional[_Union[TokenRefresh, _Mapping]] = ...) -> None: ...
 
 class Hello(_message.Message):
     __slots__ = ("protocol_version", "worker_id", "release_id", "resources", "state", "models", "in_flight")
@@ -391,3 +393,11 @@ class Drain(_message.Message):
     DEADLINE_MS_FIELD_NUMBER: _ClassVar[int]
     deadline_ms: int
     def __init__(self, deadline_ms: _Optional[int] = ...) -> None: ...
+
+class TokenRefresh(_message.Message):
+    __slots__ = ("token", "expires_at_unix")
+    TOKEN_FIELD_NUMBER: _ClassVar[int]
+    EXPIRES_AT_UNIX_FIELD_NUMBER: _ClassVar[int]
+    token: str
+    expires_at_unix: int
+    def __init__(self, token: _Optional[str] = ..., expires_at_unix: _Optional[int] = ...) -> None: ...

@@ -30,17 +30,43 @@ with `FAILED_PRECONDITION` `protocol_version_mismatch`. W likewise validates
 `HelloAck.protocol_version` and exits with a fatal log on mismatch (a stale
 orchestrator build).
 
+**Hello deadline.** O bounds the wait for the connection-opening `Hello`
+(15s default). An authenticated client that never sends Hello gets
+`DEADLINE_EXCEEDED` `hello_timeout` and the stream is closed.
+
 **Redirect (`not_leader`).** If this replica does not own the worker's release
 partition, O closes the stream with `FAILED_PRECONDITION` and status message
-`not_leader:<host:port>`. W reconnects to that address immediately (no
-backoff), max 3 consecutive redirect hops, then falls back to the configured
-address list with backoff. This gRPC status is the ONLY routing mechanism —
-there is no message-level forwarding or relay.
+`not_leader:<host:port>`. The redirect address is SCHEMELESS: W inherits the
+TLS/plaintext mode of the connection it is currently on (a TLS deployment is
+TLS on every replica — W must never downgrade to plaintext on redirect).
+W reconnects to that address immediately (no backoff), max 3 consecutive
+redirect hops, then falls back to the configured address list with backoff.
+This gRPC status is the ONLY routing mechanism — there is no message-level
+forwarding or relay.
+
+**Duplicate stream.** A second Connect from the same worker_id SUPERSEDES the
+first: O admits the new stream and closes the old one with `ABORTED`
+`worker_stream_superseded`. A half-open zombie connection never blocks a live
+reconnect, and a superseded stream is never an auth failure.
 
 **Reconnect.** On any stream error/close (except Drain-initiated) W reconnects
 with jittered exponential backoff: `delay = rand(0, min(30s, 1s * 2^n))`
 (full jitter), reset after a connection survives 60s. Every reconnect starts
 from scratch: new `Hello` with full snapshots.
+
+**Worker JWT rotation (kubelet model).** The worker JWT is SHORT-lived (4h
+default) and W never handles its expiry: O tracks each connected worker's
+token lifetime (recorded at pod create) and pushes a renewed JWT via
+`TokenRefresh` at ~80% of the TTL, iff the pod is still tracked (active
+admission record) and not draining. W stores the newest pushed token and
+dials every reconnect with it; the live connection is unaffected (identity is
+per connection). O admits the superseded token alongside the current one
+until the old token's own `exp` ends it, so a reconnect racing the push never
+locks a worker out. A worker that misses every rotation (e.g. persistent send
+failures) eventually fails reconnect auth with `UNAUTHENTICATED` and exits
+under the normal strike rules — O's disconnect handling reaps the pod.
+`TokenRefresh` is an additive proto3 field: a worker build that predates it
+ignores the message (unknown oneof member) and keeps its boot-time token.
 
 **In-flight reconcile on Hello.** `Hello.in_flight` lists every job W still
 owns: currently executing PLUS completed-but-result-not-yet-shipped. O
@@ -111,6 +137,15 @@ stream error → W reconnects (§1), O treats the worker as gone: it requeues
 that worker's assigned requests (attempt+1) unless the worker returns and
 re-claims them via `Hello.in_flight` reconcile first. Stream state is the
 worker-liveness authority — there is no heartbeat-timestamp pruner.
+
+**Load balancer requirements.** Any proxy/LB between W and O's gRPC port MUST:
+- forward HTTP/2 PING frames end-to-end (no PING termination at the proxy —
+  keepalive is the ONLY liveness mechanism and must observe the real peer);
+- impose no idle/stream timeout below 30s (the keepalive detection window);
+  long-lived idle bidi streams are the steady state, not an anomaly;
+- not multiplex/round-robin frames of one TCP connection across backends —
+  a Connect stream is pinned to one replica for its lifetime (routing across
+  replicas is the `not_leader` redirect, never the LB).
 
 ---
 
@@ -357,7 +392,22 @@ ship all buffered results, close the stream, exit 0. At deadline expiry W
 aborts remaining jobs (`JobResult{RETRYABLE}`), flushes, exits. O behavior:
 stop dispatching to the worker the moment Drain is sent; the stream close is
 the completion signal (no drain-result message). Jobs that come back
-RETRYABLE are requeued with attempt+1.
+RETRYABLE are requeued with attempt+1. A draining worker's JWT is never
+rotated; revocation happens at pod terminate (a draining worker still needs
+its token to ship results/blob uploads).
+
+### TokenRefresh (O → W)
+Producer: O's rotation sweep (§1 worker JWT rotation), at ~80% of the current
+token's TTL. No reply message.
+
+| field | producer | consumer | semantics |
+|---|---|---|---|
+| `token` | O token mint (same identity, fresh jti/iat/exp) | W stored credential | replaces the worker JWT used for every subsequent reconnect; live connection unaffected |
+| `expires_at_unix` | O | W logs/observability | `exp` claim of the replacement |
+
+W MUST apply it in-place (no reconnect, no re-Hello). Additive proto3 field:
+older workers ignore it (unknown oneof member is skipped by the proto3
+runtime — `WhichOneof` sees nothing) and keep their boot-time token.
 
 ---
 
@@ -404,6 +454,14 @@ from disk while headroom allows; if disk pressure forces it, W emits
 4. O stores the ref as the request's result; the HTTP edge serves it to the
    client via presigned GET/redirect.
 
+**Capability token renewal (#561).** `RunJob.capability_token` is TTL'd per
+workload (inference 1h / conversion 24h / training 7d). A job that outlives
+its token renews over HTTP: `POST {file_base_url}/v1/worker/capability/renew`
+with `authorization: Bearer <worker JWT>` and body `{request_id, attempt,
+capability_token}`. O re-mints the SAME grants with a fresh expiry iff the
+job is still running on that worker and the attempt matches (fencing); the
+old token is accepted up to 5min past its exp (job state is the real authz).
+
 Inline (`output.inline`) is used at or below the threshold — no S3 round trip
 for small results. Media assets produced DURING execution (`ctx.save_image`
 etc.) already upload through the same stack and appear as refs inside the
@@ -432,7 +490,10 @@ Stream-level (gRPC status) errors:
 
 | code | producer | meaning |
 |---|---|---|
-| `UNAUTHENTICATED` | O | bad/missing JWT |
+| `UNAUTHENTICATED` | O | bad/missing/revoked JWT — an actual auth VERDICT, never a transient condition. W may treat repeated occurrences as fatal |
+| `UNAVAILABLE` | O | transient hub-side condition (shared-state store blip, unowned partition window, owner registered without a peer addr) — W retries with backoff |
+| `ABORTED` `worker_stream_superseded` | O | a newer stream from the same worker took over (§1) — the OLD stream sees this; not an error for the worker process |
+| `DEADLINE_EXCEEDED` `hello_timeout` | O | no Hello within the Hello deadline (§1) |
 | `FAILED_PRECONDITION` `not_leader:<addr>` | O | redirect (§1) |
 | `FAILED_PRECONDITION` `protocol_version_mismatch` | O | version gate |
 | `FAILED_PRECONDITION` (other) | O | protocol-order violation (e.g. first message not Hello) |
