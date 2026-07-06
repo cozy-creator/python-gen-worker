@@ -47,7 +47,8 @@ Run it locally, no orchestrator:
 gen-worker run --payload '{"prompt": "hello"}'
 ```
 
-`cozyctl endpoint deploy` (or the platform UI) takes it from here.
+`cozyctl build` / `cozyctl deploy` take it from here — the full path to a
+deployed, billed endpoint is [tensorhub docs/writing-endpoints.md](https://github.com/cozy-creator/tensorhub/blob/master/docs/writing-endpoints.md).
 
 ## Adding a model
 
