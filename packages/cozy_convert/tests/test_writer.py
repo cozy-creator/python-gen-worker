@@ -10,6 +10,7 @@ import torch
 from safetensors.torch import load_file, save_file
 
 from cozy_convert.writer import (
+    MAX_SAFETENSORS_SHARD_BYTES,
     IncrementalSafetensorsWriter,
     materialize_pickle_to_safetensors,
     plan_shards,
@@ -17,6 +18,18 @@ from cozy_convert.writer import (
     streaming_dtype_cast,
     torch_dtype_to_st,
 )
+
+
+def test_max_shard_bytes_stays_clear_of_the_tunnel_timeout() -> None:
+    """Regression guard for e2e tracker #110: tensorhub's per-upload
+    /complete verifies a shard synchronously in one HTTP request, and a
+    consistent ~300s ceiling in front of it (observed live; almost
+    certainly the ngrok tunnel this stack rides on) deterministically
+    kills any shard whose verify time exceeds it -- a 9.8GB shard failed
+    identically on every one of 5 retries. This must stay meaningfully
+    below the old 5GB (HF default) that caused it, not silently drift
+    back up."""
+    assert MAX_SAFETENSORS_SHARD_BYTES <= 2 * 1024 * 1024 * 1024
 
 
 def _make_safetensors(path: Path, tensors: dict[str, torch.Tensor]) -> Path:

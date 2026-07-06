@@ -34,7 +34,20 @@ class ConversionImplementationError(RuntimeError):
     """A conversion primitive can't proceed (bad input, missing dep)."""
 
 
-MAX_SAFETENSORS_SHARD_BYTES: int = 5 * 1024 * 1024 * 1024  # HF default shard size
+MAX_SAFETENSORS_SHARD_BYTES: int = 2 * 1024 * 1024 * 1024
+# Was 5GB (HF's own default shard size) until e2e tracker #110: tensorhub's
+# per-upload /complete verifies the whole shard synchronously (streams it
+# back from R2 and hashes it) in one HTTP request, and something in front of
+# it (observed: a consistent, exact ~300s ceiling, almost certainly the
+# ngrok tunnel this whole cloud stack rides on rather than tensorhub itself)
+# kills that request outright regardless of tensorhub's own generous
+# timeout. Live: a 5.36GB shard sometimes finished in ~200-260s (racy, close
+# to the wall); a 9.8GB shard failed the SAME way on every one of 5 retries
+# (it deterministically needs longer than the wall allows, so retrying
+# doesn't help). 2GB keeps every shard's verify time comfortably clear of
+# that ceiling regardless of R2 throughput variance. cozy_convert.hub's
+# retry/poll resilience (#62/#63) still covers the remaining transient case;
+# this fixes the deterministic one.
 
 _PICKLE_EXTS = (".ckpt", ".pt", ".pth", ".bin")
 
