@@ -818,6 +818,15 @@ def _load_injected_model(annotation: Any, local_path: str) -> Any:
     # module-layout dirs (root config.json, e.g. a bare VAE/UNet repo), and
     # single-file checkpoints.
     pipe = load_from_pretrained(cls, local_path, dtype="fp32" if device == "cpu" else "fp16")
+    if device != "cpu":
+        # Worker-owned placement (executor parity): endpoints never write
+        # device/offload code, so the cold `run` path must place the loaded
+        # pipeline too — full CUDA residency or the offload ladder as VRAM
+        # allows. Without this the pipeline stays on CPU while ctx.generator()
+        # hands out CUDA generators.
+        from gen_worker.models.memory import place_pipeline
+
+        place_pipeline(pipe)
     _INJECTED_CACHE[key] = pipe
     return pipe
 
