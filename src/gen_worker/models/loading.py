@@ -174,6 +174,21 @@ def synthesize_quantization_config(attrs: Optional[Dict[str, str]]) -> Optional[
     return BitsAndBytesConfig(load_in_8bit=True)
 
 
+def _single_file_checkpoint(path: Path) -> Optional[Path]:
+    """A snapshot that is one loose checkpoint rather than a pretrained layout:
+    the path itself when it's a ``.safetensors`` file, or the directory's sole
+    ``*.safetensors`` when no ``model_index.json``/``config.json`` exists
+    (e.g. Illustrious-XL, civitai checkpoints)."""
+    if path.is_file():
+        return path if path.suffix == ".safetensors" else None
+    if not path.is_dir():
+        return None
+    if (path / "model_index.json").exists() or (path / "config.json").exists():
+        return None
+    singles = sorted(p for p in path.glob("*.safetensors") if p.is_file())
+    return singles[0] if len(singles) == 1 else None
+
+
 def load_from_pretrained(
     cls: Any,
     path: str | Path,
@@ -183,8 +198,9 @@ def load_from_pretrained(
 ) -> Any:
     """``cls.from_pretrained(path)`` with the standard trimmings: torch dtype
     from the binding's dtype string, on-disk variant detection, quant-library
-    preload, and quant-config synthesis. Used by the executor to satisfy
-    pipeline-typed ``setup()`` annotations; endpoints may also call it."""
+    preload, and quant-config synthesis; single-file checkpoints route through
+    ``cls.from_single_file``. Used by the executor to satisfy pipeline-typed
+    ``setup()`` annotations; endpoints may also call it."""
     path = str(path)
     ensure_quant_library_imported(attrs)
     kwargs: Dict[str, Any] = {}
@@ -203,6 +219,10 @@ def load_from_pretrained(
         qc = synthesize_quantization_config(attrs)
         if qc is not None:
             kwargs["quantization_config"] = qc
+    single = _single_file_checkpoint(Path(path))
+    if single is not None and callable(getattr(cls, "from_single_file", None)):
+        kwargs.pop("variant", None)
+        return cls.from_single_file(str(single), **kwargs)
     try:
         return cls.from_pretrained(path, **kwargs)
     except (TypeError, ValueError):

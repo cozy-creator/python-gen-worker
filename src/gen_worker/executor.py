@@ -508,7 +508,10 @@ class Executor:
                     f"requires SM {r.compute_capability:.1f}, detected {detected_cc:.1f}",
                     {"detected_sm": f"{detected_cc:.1f}", "required_sm": f"{float(r.compute_capability):.1f}"})
                 continue
-            if r.vram_gb is not None and total_vram_gb and total_vram_gb < float(r.vram_gb):
+            # Compare on the rounded GiB: a "24GB" card reports ~23.99GiB via
+            # mem_get_info (driver/ECC reserve), which must not gate off
+            # functions declaring vram_gb=24.
+            if r.vram_gb is not None and total_vram_gb and round(total_vram_gb) < float(r.vram_gb):
                 self.unavailable[name] = (
                     "insufficient_vram",
                     f"requires {r.vram_gb:.0f}GiB VRAM, detected {total_vram_gb:.0f}GiB",
