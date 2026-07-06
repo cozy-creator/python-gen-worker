@@ -23,7 +23,9 @@
   streaming decorator.
 * ``runtime="vllm"`` boots an engine-hosting server subprocess before setup.
 * ``variants={name: (binding, Resources)}`` stamps one separately-routable,
-  separately-placeable function per variant from a single handler body.
+  separately-placeable function per variant from a single handler body. With
+  ``models={}`` the variant binding swaps the FIRST declared slot; remaining
+  aux slots (e.g. a shared VAE) are inherited by every variant.
 """
 
 from __future__ import annotations
@@ -347,11 +349,8 @@ def _decorate_class(
                 f"@endpoint class {cls.__name__!r}: variants= requires exactly "
                 f"ONE handler method to fan out over (found {len(handlers)})."
             )
-        if len(models) > 1:
-            raise ValueError(
-                f"@endpoint class {cls.__name__!r}: variants= requires a single "
-                f"model slot (found {sorted(models)})."
-            )
+        # Multi-slot classes: variants swap the FIRST declared slot; the
+        # remaining (aux) slots are shared across all variants.
         _validate_variant_literal(
             cls.__name__, handlers[0][1], [v.name for v in variant_rows]
         )
