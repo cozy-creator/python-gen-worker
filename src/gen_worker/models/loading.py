@@ -289,7 +289,12 @@ def load_from_pretrained(
         # own precision instead of diffusers' fp32 default.
         sniffed = detect_on_disk_dtype(Path(path))
         if sniffed in ("bf16", "fp16"):
-            kwargs["torch_dtype"] = get_torch_dtype(sniffed)
+            try:
+                kwargs["torch_dtype"] = get_torch_dtype(sniffed)
+            except ImportError:
+                # torch-less environment (unit tests / CPU tools) — loaders
+                # that actually need torch will fail on their own terms.
+                pass
     if not read_on_disk_quant_config(Path(path)):
         qc = synthesize_quantization_config(attrs)
         if qc is not None:
