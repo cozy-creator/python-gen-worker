@@ -19,20 +19,25 @@ _SINGLEFILE_PIPELINE_CONFIGS: dict[str, tuple[str, ...]] = {
     "StableDiffusionXLPipeline": ("stabilityai/stable-diffusion-xl-base-1.0",),
     "FluxPipeline": ("black-forest-labs/FLUX.1-dev", "black-forest-labs/FLUX.1-schnell"),
     "Flux2Pipeline": ("black-forest-labs/FLUX.2-klein-4B", "black-forest-labs/FLUX.2-klein-9B"),
+    "ZImagePipeline": ("Tongyi-MAI/Z-Image-Turbo", "Tongyi-MAI/Z-Image"),
 }
 
 
 def _normalize_family(family: str | None) -> str:
+    """Collapse canonical family slugs — including fine-tune lineages like
+    sdxl-illustrious / sdxl-pony / flux1-dev — onto the repackage family."""
     raw = str(family or "").strip().lower()
-    if raw in {"sd15", "sd2", "sd1", "sd15_sd2"}:
+    if raw in {"sd1", "sd15_sd2", "stable-diffusion", "sd"} or raw.startswith(("sd1", "sd2")):
         return "sd15_sd2"
-    if raw in {"sdxl"}:
+    if raw == "sdxl" or raw.startswith("sdxl"):
         return "sdxl"
-    if raw in {"flux", "flux1", "flux2", "flex2"}:
+    if raw in {"flux", "flex2"} or raw.startswith(("flux1", "flux2", "flux.")):
         return "flux"
+    if raw.startswith(("z-image", "zimage")):
+        return "zimage"
     if raw in {"auraflow"}:
         return "auraflow"
-    if raw in {"wan", "wan21", "wan22"}:
+    if raw in {"wan"} or raw.startswith(("wan2", "wan-2")):
         return "wan"
     return "unknown"
 
@@ -211,17 +216,38 @@ def _singlefile_attempts_for_family(model_family: str) -> list[tuple[str, str | 
             for cfg in _SINGLEFILE_PIPELINE_CONFIGS.get(cls, ()):
                 add(cls, cfg)
         return attempts
+    if family == "zimage":
+        add("ZImagePipeline")
+        for cfg in _SINGLEFILE_PIPELINE_CONFIGS.get("ZImagePipeline", ()):
+            add("ZImagePipeline", cfg)
+        return attempts
     return attempts
 
 
-def _load_singlefile_pipeline(*, input_path: Path, pipeline_class: str, config: str | None) -> Any:
+def _repackage_torch_dtype(dtype: str | None) -> Any:
+    """Map a requested output dtype onto the torch dtype the single-file
+    pipeline is materialized in. fp16 sources must stay fp16 — loading them
+    bf16 rounds the 10-bit mantissa to 7 bits and the later fp16 cast can't
+    recover it. Non-cast dtypes (quant targets) load bf16."""
+    name = str(dtype or "").strip().lower()
+    torch_mod = _torch()
+    if name in {"fp16", "f16", "float16"}:
+        return torch_mod.float16
+    if name in {"fp32", "f32", "float32"}:
+        return torch_mod.float32
+    return torch_mod.bfloat16
+
+
+def _load_singlefile_pipeline(
+    *, input_path: Path, pipeline_class: str, config: str | None, torch_dtype: Any,
+) -> Any:
     import diffusers
 
     cls = getattr(diffusers, pipeline_class, None)
     if cls is None:
         raise ValueError(f"pipeline_class_unavailable:{pipeline_class}")
 
-    kwargs: dict[str, Any] = {"torch_dtype": _torch().bfloat16}
+    kwargs: dict[str, Any] = {"torch_dtype": torch_dtype}
     if config:
         kwargs["config"] = config
 
@@ -236,7 +262,9 @@ def _load_singlefile_pipeline(*, input_path: Path, pipeline_class: str, config: 
     return fn(cls, str(input_path), **kwargs)
 
 
-def singlefile_to_diffusers(input_path: Path, output_dir: Path, *, model_family: str) -> dict[str, str]:
+def singlefile_to_diffusers(
+    input_path: Path, output_dir: Path, *, model_family: str, output_dtype: str | None = None,
+) -> dict[str, str]:
     family = _normalize_family(model_family)
     attempts = _singlefile_attempts_for_family(family)
     if not attempts:
@@ -252,6 +280,7 @@ def singlefile_to_diffusers(input_path: Path, output_dir: Path, *, model_family:
                 input_path=input_path,
                 pipeline_class=pipeline_class,
                 config=config,
+                torch_dtype=_repackage_torch_dtype(output_dtype),
             )
             pipe.save_pretrained(str(output_dir), safe_serialization=True)
             return {

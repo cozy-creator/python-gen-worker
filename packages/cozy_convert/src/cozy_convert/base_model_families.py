@@ -37,7 +37,7 @@ CANONICAL_FAMILIES: frozenset[str] = frozenset({
     "flux2-dev", "flux.2-klein-4b", "flux.2-klein-9b", "flux2-pro",
     "stable-cascade", "playground-v2", "pixart-alpha", "pixart-sigma",
     "lumina", "kolors", "hunyuan-1", "auraflow",
-    "qwen-image", "z-image",
+    "qwen-image", "z-image", "z-image-turbo", "ernie", "anima",
 
     # Video diffusion
     "svd", "svd-xt", "wan21", "wan22", "ltx-video",
@@ -149,6 +149,19 @@ _CIVITAI_TO_FAMILY: Mapping[str, str] = {
     "SD 3.5 Medium": "sd35-medium",
     "SD 3.5 Large": "sd35-large",
     "SD 3.5 Large Turbo": "sd35-large-turbo",
+    "Flux.2 Klein 9B": "flux.2-klein-9b",
+    "Flux.2 Klein 9B-base": "flux.2-klein-9b",
+    "ZImageTurbo": "z-image-turbo",
+    "ZImageBase": "z-image",
+    "Qwen": "qwen-image",
+    "Ernie": "ernie",
+    "Anima": "anima",
+    "NoobAI": "sdxl-illustrious",
+    "SD 1.5 LCM": "sd15",
+    "SDXL 1.0 LCM": "sdxl",
+    "Wan Video 2.2 I2V-A14B": "wan22",
+    "Wan Video 2.2 T2V-A14B": "wan22",
+    "Wan Video 2.2 TI2V-5B": "wan22",
     "Other": "other",
 }
 

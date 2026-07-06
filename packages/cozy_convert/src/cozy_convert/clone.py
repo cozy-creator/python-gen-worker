@@ -12,6 +12,7 @@ and :func:`run_clone` (keyword-explicit).
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import re
@@ -31,6 +32,9 @@ _PUBLIC_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{0,127}$")
 _PUBLIC_TAG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
 
 _KNOWN_DTYPES = {
+    # "source" = publish the source's own weights untouched (pure mirror);
+    # the flavor's recorded dtype is the detected on-disk dtype.
+    "source",
     "fp32", "fp16", "bf16", "fp8", "fp8:e4m3", "fp8:e5m2", "nvfp4",
     "int8", "int8:awq", "int8:gptq",
     "int4", "int4:wo", "int4:nf4", "int4:fp4", "int4:awq", "int4:gptq",
@@ -42,10 +46,10 @@ _KNOWN_DTYPES = {
 _KNOWN_FILE_LAYOUTS = {"diffusers", "singlefile"}
 _KNOWN_FILE_TYPES = {"safetensors", "flashpack", "gguf"}
 
-_REPACKAGE_FAMILIES = {
-    "stable-diffusion", "sd", "sd15", "sd1", "sd2", "sdxl",
-    "flux", "pixart", "dit", "kandinsky", "playground",
-}
+# Families whose singlefile<->diffusers repackage is implemented, in the
+# repackage module's normalized vocabulary (fine-tune lineages like
+# sdxl-illustrious / flux1-dev / z-image-turbo normalize onto these).
+_REPACKAGE_NORMALIZED_FAMILIES = {"sd15_sd2", "sdxl", "flux", "zimage"}
 
 _WEIGHT_EXTS = (".safetensors",)
 _DEFAULT_QUANT_COMPONENTS = ("transformer", "unet", "text_encoder", "text_encoder_2",
@@ -151,25 +155,34 @@ def _is_weight(path: Path) -> bool:
 
 def _weight_groups(source_dir: Path, layout: str) -> list[tuple[str, Path]]:
     """(component, entry_path) per weight set. entry is the index.json for
-    sharded sets, else the single safetensors file."""
+    sharded sets, else the safetensors file. A singlefile-layout source can
+    still carry several root weight files (civitai bundles ship the
+    diffusion model + text encoder + VAE side by side) — every one is its
+    own group, or a dtype pass would convert only the first and the tree
+    copy would silently drop the rest."""
     groups: list[tuple[str, Path]] = []
 
-    def _entry_for(d: Path) -> Optional[Path]:
+    def _entries_for(d: Path) -> list[Path]:
         idx = sorted(d.glob("*.safetensors.index.json"))
-        if idx:
-            return idx[0]
-        st = sorted(p for p in d.glob("*.safetensors") if p.is_file())
-        return st[0] if st else None
+        sharded_members: set[str] = set()
+        for i in idx:
+            try:
+                weight_map = json.loads(i.read_text("utf-8")).get("weight_map") or {}
+                sharded_members.update(str(v) for v in weight_map.values())
+            except Exception:
+                pass
+        loose = [p for p in sorted(d.glob("*.safetensors"))
+                 if p.is_file() and p.name not in sharded_members]
+        return idx + loose
 
     if layout == "diffusers":
         for entry in sorted(source_dir.iterdir()):
             if entry.is_dir():
-                found = _entry_for(entry)
-                if found is not None:
-                    groups.append((entry.name, found))
+                found = _entries_for(entry)
+                if found:
+                    groups.append((entry.name, found[0]))
     else:
-        found = _entry_for(source_dir)
-        if found is not None:
+        for found in _entries_for(source_dir):
             groups.append(("", found))
     return groups
 
@@ -238,6 +251,24 @@ def build_flavor_tree(
     source_layout = source.layout if source.layout in _KNOWN_FILE_LAYOUTS else "singlefile"
     source_dtype = str(source.attrs.get("dtype") or "").strip().lower()
 
+    # dtype="source": pure mirror — publish the source weights untouched and
+    # record the detected on-disk dtype. Refuses combos that would still
+    # rewrite tensors (layout/container changes) or an undetectable source.
+    if spec.dtype == "source":
+        if spec.file_type != "safetensors":
+            raise ValueError('dtype="source" requires file_type="safetensors"')
+        if spec.file_layout != source_layout:
+            raise ValueError(
+                f'dtype="source" cannot repackage {source_layout}->{spec.file_layout}; '
+                "request an explicit dtype")
+        if not source_dtype:
+            raise ValueError(
+                'dtype="source" needs a detectable on-disk dtype; request an explicit dtype')
+        attrs["dtype"] = source_dtype
+        _copy_non_weights(source_dir, out_dir, skip_components=set())
+        _stage_oversize_safetensors(out_dir)
+        return out_dir, attrs
+
     # GGUF / flashpack: single-artifact containers.
     if spec.file_type == "gguf":
         groups = _weight_groups(source_dir, source_layout)
@@ -264,12 +295,13 @@ def build_flavor_tree(
     work_root = source_dir
     work_layout = source_layout
     if spec.file_layout != source_layout:
+        from .repackage import _normalize_family, diffusers_to_singlefile, singlefile_to_diffusers
+
         family = str(source.model_family or "").strip().lower()
-        if family not in _REPACKAGE_FAMILIES:
+        if _normalize_family(family) not in _REPACKAGE_NORMALIZED_FAMILIES:
             raise ValueError(
                 f"layout repackage {source_layout}->{spec.file_layout} unsupported "
                 f"for model_family={family!r}")
-        from .repackage import diffusers_to_singlefile, singlefile_to_diffusers
 
         repack_dir = out_dir.parent / f"{out_dir.name}.__repack__"
         repack_dir.mkdir(parents=True, exist_ok=True)
@@ -277,7 +309,8 @@ def build_flavor_tree(
             groups = _weight_groups(source_dir, "singlefile")
             if not groups:
                 raise ValueError("no safetensors entry for repackage")
-            singlefile_to_diffusers(groups[0][1], repack_dir, model_family=family)
+            singlefile_to_diffusers(
+                groups[0][1], repack_dir, model_family=family, output_dtype=spec.dtype)
         else:
             diffusers_to_singlefile(source_dir, repack_dir / "model.safetensors",
                                     model_family=family)
@@ -457,6 +490,8 @@ def run_clone(
                         source, spec, flavor_dir,
                         quantize_components=quantize_components,
                     )
+                    # dtype="source" resolves to the detected on-disk dtype.
+                    flavor_label = str(attrs.get("dtype") or spec.dtype)
             except InlineConversionNotPossible as exc:
                 entry: dict[str, Any] = {
                     "spec_label": spec.label, "dtype": spec.dtype,

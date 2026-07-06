@@ -18,6 +18,41 @@ from .layout import detect_huggingface_source_layout
 
 ProgressFn = Callable[[int, Optional[int]], None]
 
+_SAFETENSORS_DTYPE_NAMES = {
+    "F32": "fp32", "F16": "fp16", "BF16": "bf16",
+    "F8_E4M3": "fp8", "F8_E5M2": "fp8:e5m2",
+}
+_MAX_SAFETENSORS_HEADER_BYTES = 100 * 1024 * 1024
+
+
+def _detect_snapshot_dtype(root: Path) -> str:
+    """Majority weight dtype across a snapshot's safetensors headers
+    ('bf16' / 'fp16' / 'fp32' / 'fp8', '' when undetectable). Civitai
+    version metadata is unreliable (fp labels routinely contradict the
+    file bytes), so read the headers."""
+    import struct
+
+    counts: dict[str, int] = {}
+    try:
+        for p in sorted(Path(root).rglob("*.safetensors")):
+            with open(p, "rb") as f:
+                raw = f.read(8)
+                if len(raw) < 8:
+                    continue
+                (n,) = struct.unpack("<Q", raw)
+                if n <= 0 or n > _MAX_SAFETENSORS_HEADER_BYTES:
+                    continue
+                header = json.loads(f.read(n))
+            for value in header.values():
+                if isinstance(value, dict) and "dtype" in value:
+                    counts[str(value["dtype"])] = counts.get(str(value["dtype"]), 0) + 1
+    except (OSError, ValueError):
+        return ""
+    if not counts:
+        return ""
+    top = max(counts, key=lambda k: counts[k])
+    return _SAFETENSORS_DTYPE_NAMES.get(top, "")
+
 
 @dataclass
 class IngestedSource:
@@ -233,6 +268,9 @@ def ingest_civitai(
         "lineage_source": "civitai_baseModel" if base_model_raw else "unknown",
         "file_layout": layout_info.source_layout if layout_info.source_layout != "unknown" else "singlefile",
     }
+    on_disk_dtype = _detect_snapshot_dtype(dest_dir)
+    if on_disk_dtype:
+        attrs["dtype"] = on_disk_dtype
     model_kind = str((payload.get("model") or {}).get("type") or "").strip().lower() \
         if isinstance(payload.get("model"), dict) else ""
     if model_kind in {"lora", "locon", "lycoris", "dora"}:
