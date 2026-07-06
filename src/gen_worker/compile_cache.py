@@ -12,17 +12,24 @@ Policy: cache miss / key mismatch / no artifact => eager, never a boot stall
 or a runtime compile attempt in prod. The compile job itself opts into cold
 compilation with ``GEN_WORKER_COMPILE_ALLOW_COLD=1`` (requires a toolchain).
 
+Artifacts are FAMILY-keyed (settled 2026-07-06): torch.compile caches key on
+the traced graph + shapes, not the weights, so one artifact serves every
+fine-tune of a model family. They live in a system-owned repo per family
+(``_system/family-<family>``), one flavor per (SKU, torch) cell — and they
+are CODE: only the platform's first-party compile job publishes shared ones.
+
 Artifact = deterministic ``.tar.gz``::
 
-    metadata.json      key: sku/torch/triton/cuda, model ref+digest, shapes,
-                       targets, diffusers/transformers versions
+    metadata.json      key: family, sku/torch/triton/cuda, shapes, targets,
+                       diffusers/transformers versions (+ source_ref info)
     inductor/**        TORCHINDUCTOR_CACHE_DIR contents
     triton/**          TRITON_CACHE_DIR contents
 
-Key sensitivity (all exact-match): GPU SKU (autotune choices + cubin arch),
-torch (fx-graph cache key), triton (cubin/launcher cache key), diffusers
-(the traced graph is its code). Model digest is recorded by the producer and
-checked when the consumer knows its own; the model REF always must match.
+Key sensitivity (all exact-match): family (graph identity), GPU SKU
+(autotune choices + cubin arch), torch (fx-graph cache key), triton
+(cubin/launcher cache key), diffusers (the traced graph is its code).
+``source_ref`` records which family member the producer compiled from —
+informational, never part of the match.
 """
 
 from __future__ import annotations
@@ -108,29 +115,43 @@ def flavor_label(sku: str, torch_version: str) -> str:
     return f"inductor-{sku}-torch{short}"
 
 
+def system_repo(family: str) -> str:
+    """The system-owned repo holding one family's compiled-artifact cells."""
+    fam = str(family or "").strip()
+    if not fam:
+        raise ValueError("compile-cache family must be non-empty")
+    return f"_system/family-{fam}"
+
+
 def artifact_metadata(
     *,
-    model_ref: str,
-    model_digest: str = "",
+    family: str,
+    source_ref: str = "",
+    source_digest: str = "",
     shapes: Iterable[Tuple[int, int]] = (),
     targets: Iterable[str] = (),
 ) -> Dict[str, Any]:
     """Producer-side metadata for :func:`pack` (no timestamps: artifacts of
-    identical content must be byte-identical)."""
+    identical content must be byte-identical). ``source_ref``/``source_digest``
+    record the family member compiled from — informational only."""
     return {
         "format": ARTIFACT_FORMAT,
         "kind": "torch-inductor-cache",
         **runtime_key(),
-        "model_ref": str(model_ref or ""),
-        "model_digest": str(model_digest or ""),
+        "family": str(family or ""),
+        "source_ref": str(source_ref or ""),
+        "source_digest": str(source_digest or ""),
         "shapes": [[int(w), int(h)] for w, h in shapes],
         "targets": list(targets),
         "libs": _lib_versions(),
     }
 
 
-def verify(meta: Dict[str, Any], *, model_ref: str = "") -> str:
-    """'' when the artifact matches this runtime, else the mismatch reason."""
+def verify(meta: Dict[str, Any], *, family: str = "") -> str:
+    """'' when the artifact matches this runtime, else the mismatch reason.
+
+    Family is the graph-identity half of the key: checked when both sides
+    declare one (fine-tunes of the same family share caches by design)."""
     if int(meta.get("format") or 0) != ARTIFACT_FORMAT:
         return f"format {meta.get('format')!r} != {ARTIFACT_FORMAT}"
     here = runtime_key()
@@ -142,9 +163,9 @@ def verify(meta: Dict[str, Any], *, model_ref: str = "") -> str:
         want = str((meta.get("libs") or {}).get(lib) or "")
         if want and want != have:
             return f"{lib} {want!r} != runtime {have!r}"
-    want_ref = str(meta.get("model_ref") or "")
-    if model_ref and want_ref and want_ref != model_ref:
-        return f"model_ref {want_ref!r} != {model_ref!r}"
+    want_fam = str(meta.get("family") or "")
+    if family and want_fam and want_fam != family:
+        return f"family {want_fam!r} != {family!r}"
     return ""
 
 
@@ -274,7 +295,7 @@ def _fetch_url(url: str, dest_dir: Path) -> Path:
     return target
 
 
-def prepare(model_ref: str, cache_dir: Optional[Path] = None) -> Optional[Dict[str, Any]]:
+def prepare(family: str, cache_dir: Optional[Path] = None) -> Optional[Dict[str, Any]]:
     """Locate, verify, and seed a compile-cache artifact for this runtime.
 
     Sources, in order: ``GEN_WORKER_COMPILE_CACHE`` (local tar), then
@@ -300,7 +321,7 @@ def prepare(model_ref: str, cache_dir: Optional[Path] = None) -> Optional[Dict[s
             logger.info("compile-cache: no artifact configured; staying eager")
             return None
         meta = unpack(artifact, root)
-        reason = verify(meta, model_ref=model_ref)
+        reason = verify(meta, family=family)
         if reason:
             logger.warning("compile-cache: artifact key mismatch (%s); staying eager", reason)
             return None
@@ -422,10 +443,10 @@ def apply(pipeline: Any, cfg: Any, *, cache_ready: bool, guard: bool = True) -> 
     return True
 
 
-def enable(pipeline: Any, cfg: Any, model_ref: str = "", cache_dir: Optional[Path] = None) -> bool:
+def enable(pipeline: Any, cfg: Any, cache_dir: Optional[Path] = None) -> bool:
     """The one consumer entry point (executor + local CLI): seed a verified
     artifact if one is configured, then arm compile under the safety policy."""
-    meta = prepare(model_ref, cache_dir=cache_dir)
+    meta = prepare(getattr(cfg, "family", "") or "", cache_dir=cache_dir)
     return apply(pipeline, cfg, cache_ready=meta is not None)
 
 
@@ -440,8 +461,9 @@ def build(
     *,
     shapes: Iterable[Tuple[int, int]],
     targets: Iterable[str] = ("transformer", "vae.decode"),
-    model_ref: str = "",
-    model_digest: str = "",
+    family: str = "",
+    source_ref: str = "",
+    source_digest: str = "",
     dtype: str = "bf16",
     steps: int = 2,
     prompt: str = "cache warm-up: a lighthouse on a cliff at dawn, detailed",
@@ -504,7 +526,7 @@ def build(
         )
 
     meta = artifact_metadata(
-        model_ref=model_ref, model_digest=model_digest,
+        family=family, source_ref=source_ref, source_digest=source_digest,
         shapes=cfg.shapes, targets=cfg.targets,
     )
     label = flavor_label(meta["sku"], meta["torch"])
@@ -528,6 +550,7 @@ __all__ = [
     "runtime_key",
     "seed_env",
     "sku_slug",
+    "system_repo",
     "toolchain_present",
     "unpack",
     "verify",

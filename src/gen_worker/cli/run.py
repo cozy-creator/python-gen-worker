@@ -879,11 +879,8 @@ def _load_injected_model(
             # Executor parity for #384: seed a verified per-SKU cache artifact
             # if configured, else stay eager.
             from gen_worker import compile_cache
-            from gen_worker.api.binding import wire_ref
 
-            compile_cache.enable(
-                pipe, compile_cfg, wire_ref(binding) if binding is not None else ""
-            )
+            compile_cache.enable(pipe, compile_cfg)
     _INJECTED_CACHE[key] = pipe
     return pipe
 

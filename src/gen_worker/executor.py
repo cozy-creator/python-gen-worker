@@ -810,7 +810,6 @@ class Executor:
 
                     await asyncio.to_thread(
                         compile_cache.enable, pipe, spec.compile,
-                        wire_ref(binding) if binding is not None else "",
                         self.store._cache_dir,
                     )
                 loaded[slot] = (pipe, max(0, self._vram_allocated() - before))

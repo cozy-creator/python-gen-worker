@@ -88,15 +88,18 @@ class Variant(msgspec.Struct, frozen=True):
 class Compile(msgspec.Struct, frozen=True):
     """Opt-in torch.compile over pre-built per-SKU cache artifacts (#384).
 
-    ``Compile(shapes=((768, 768), (1024, 1024)))`` declares the (width,
-    height) set the compile job warms. Declaring this does NOT force
-    compilation: the worker arms torch.compile only when a verified cache
-    artifact for (model, SKU, torch, triton) is seeded — otherwise it stays
-    eager. See ``gen_worker.compile_cache``.
+    ``Compile(family="flux2-klein-4b", shapes=((768, 768), (1024, 1024)))``
+    names the model FAMILY (caches key on the traced graph, so every
+    fine-tune of a family shares one artifact) and the (width, height) set
+    the compile job warms. Declaring this does NOT force compilation: the
+    worker arms torch.compile only when a verified cache artifact for
+    (family, SKU, torch, triton) is seeded — otherwise it stays eager.
+    See ``gen_worker.compile_cache``.
     """
 
     shapes: tuple[tuple[int, int], ...]
     targets: tuple[str, ...] = ("transformer", "vae.decode")
+    family: str = ""
 
     def __post_init__(self) -> None:
         force = msgspec.structs.force_setattr
@@ -110,6 +113,7 @@ class Compile(msgspec.Struct, frozen=True):
         if not targets:
             raise ValueError("Compile.targets must not be empty")
         force(self, "targets", targets)
+        force(self, "family", str(self.family or "").strip())
 
 
 class EndpointDecl(msgspec.Struct, frozen=True, kw_only=True):

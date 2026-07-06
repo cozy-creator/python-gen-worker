@@ -31,20 +31,26 @@ def test_flavor_label():
 
 
 def test_verify_mismatches():
-    meta = cc.artifact_metadata(model_ref="owner/model", shapes=[(768, 768)], targets=["transformer"])
-    assert cc.verify(meta, model_ref="owner/model") == ""
-    assert cc.verify(meta, model_ref="") == ""  # consumer without a ref: key-only check
+    meta = cc.artifact_metadata(family="sd15", shapes=[(768, 768)], targets=["transformer"])
+    assert cc.verify(meta, family="sd15") == ""
+    assert cc.verify(meta, family="") == ""  # consumer without a family: key-only check
 
     other = dict(meta, torch="0.0.0")
-    assert "torch" in cc.verify(other, model_ref="owner/model")
+    assert "torch" in cc.verify(other, family="sd15")
 
     other = dict(meta, sku="not-this-gpu")
-    assert "sku" in cc.verify(other, model_ref="owner/model")
+    assert "sku" in cc.verify(other, family="sd15")
 
-    assert "model_ref" in cc.verify(meta, model_ref="different/model")
+    assert "family" in cc.verify(meta, family="sdxl")
 
     other = dict(meta, format=99)
-    assert "format" in cc.verify(other, model_ref="owner/model")
+    assert "format" in cc.verify(other, family="sd15")
+
+
+def test_system_repo():
+    assert cc.system_repo("sd15") == "_system/family-sd15"
+    with pytest.raises(ValueError):
+        cc.system_repo("")
 
 
 # ---------------------------------------------------------------------------
@@ -63,7 +69,7 @@ def _capture_tree(root):
 
 def test_pack_is_deterministic_and_roundtrips(tmp_path):
     src = _capture_tree(tmp_path / "cap")
-    meta = cc.artifact_metadata(model_ref="owner/model", shapes=[(768, 768)], targets=["transformer"])
+    meta = cc.artifact_metadata(family="sd15", source_ref="owner/model", shapes=[(768, 768)], targets=["transformer"])
 
     a = cc.pack(src, tmp_path / "a.tar.gz", meta)
     b = cc.pack(src, tmp_path / "b.tar.gz", meta)
@@ -71,7 +77,8 @@ def test_pack_is_deterministic_and_roundtrips(tmp_path):
 
     dest = tmp_path / "seed"
     got = cc.unpack(a, dest)
-    assert got["model_ref"] == "owner/model"
+    assert got["family"] == "sd15"
+    assert got["source_ref"] == "owner/model"
     assert (dest / "inductor" / "ab" / "graph.py").read_text() == "code"
     assert (dest / "triton" / "kern" / "kernel.cubin").read_bytes() == b"\x00\x01"
     assert not (dest / "inductor" / "stale.lock").exists()
@@ -143,16 +150,16 @@ def test_apply_stays_eager_without_cache(monkeypatch):
 def test_prepare_without_sources_is_none(monkeypatch, tmp_path):
     monkeypatch.delenv(cc.ENV_CACHE_PATH, raising=False)
     monkeypatch.delenv(cc.ENV_CACHE_URL, raising=False)
-    assert cc.prepare("owner/model", cache_dir=tmp_path) is None
+    assert cc.prepare("sd15", cache_dir=tmp_path) is None
 
 
 def test_prepare_rejects_key_mismatch(monkeypatch, tmp_path):
     src = _capture_tree(tmp_path / "cap")
-    meta = cc.artifact_metadata(model_ref="owner/model", shapes=[(768, 768)], targets=["transformer"])
+    meta = cc.artifact_metadata(family="sd15", shapes=[(768, 768)], targets=["transformer"])
     meta["torch"] = "0.0.0"  # never matches this runtime
     art = cc.pack(src, tmp_path / "art.tar.gz", meta)
     monkeypatch.setenv(cc.ENV_CACHE_PATH, str(art))
-    assert cc.prepare("owner/model", cache_dir=tmp_path / "cache") is None
+    assert cc.prepare("sd15", cache_dir=tmp_path / "cache") is None
 
 
 # ---------------------------------------------------------------------------
@@ -161,9 +168,10 @@ def test_prepare_rejects_key_mismatch(monkeypatch, tmp_path):
 
 
 def test_compile_struct_validation():
-    c = Compile(shapes=[[768, 768], (1024, 1024)])
+    c = Compile(shapes=[[768, 768], (1024, 1024)], family=" sd15 ")
     assert c.shapes == ((768, 768), (1024, 1024))
     assert c.targets == ("transformer", "vae.decode")
+    assert c.family == "sd15"
     with pytest.raises(ValueError):
         Compile(shapes=())
     with pytest.raises(ValueError):
