@@ -362,12 +362,16 @@ def _guarded(original: Callable[..., Any], compiled: Callable[..., Any], label: 
     return wrapper
 
 
-def apply(pipeline: Any, cfg: Any, *, cache_ready: bool) -> bool:
-    """Wrap ``cfg.targets`` on ``pipeline`` with guarded compiled callables.
+def apply(pipeline: Any, cfg: Any, *, cache_ready: bool, guard: bool = True) -> bool:
+    """Wrap ``cfg.targets`` on ``pipeline`` with compiled callables.
 
     Only compiles when a verified cache artifact was seeded (``cache_ready``)
     or the process explicitly opted into cold compilation AND has a C
     toolchain. Anything else is a logged no-op — eager, never a stall.
+
+    ``guard=True`` (consumer): a failing compiled call permanently unwraps to
+    eager. ``guard=False`` (compile job): failures must raise, a silently
+    eager warm-up would publish an empty artifact as success.
     """
     if getattr(pipeline, _MARKER_ATTR, None) is not None:
         return True
@@ -405,7 +409,7 @@ def apply(pipeline: Any, cfg: Any, *, cache_ready: bool) -> bool:
             if vae is not None:
                 vae.to(memory_format=torch.channels_last)
         compiled = torch.compile(fn, dynamic=False)
-        setattr(owner, attr, _guarded(fn, compiled, target))
+        setattr(owner, attr, _guarded(fn, compiled, target) if guard else compiled)
         applied.append(target)
     if not applied:
         return False
@@ -425,8 +429,92 @@ def enable(pipeline: Any, cfg: Any, model_ref: str = "", cache_dir: Optional[Pat
     return apply(pipeline, cfg, cache_ready=meta is not None)
 
 
+# ---------------------------------------------------------------------------
+# Build (the compile job / conversion producer)
+# ---------------------------------------------------------------------------
+
+
+def build(
+    model_path: str | Path,
+    out_dir: str | Path,
+    *,
+    shapes: Iterable[Tuple[int, int]],
+    targets: Iterable[str] = ("transformer", "vae.decode"),
+    model_ref: str = "",
+    model_digest: str = "",
+    dtype: str = "bf16",
+    steps: int = 2,
+    prompt: str = "cache warm-up: a lighthouse on a cliff at dawn, detailed",
+) -> Tuple[Path, Dict[str, Any], Dict[str, float]]:
+    """Compile a diffusers pipeline over ``shapes`` and package the resulting
+    inductor+triton caches as a per-SKU artifact.
+
+    Runs on the TARGET GPU SKU with a C toolchain present (cold compile).
+    Returns ``(artifact_path, metadata, per-shape warm-up seconds)`` — the
+    first call per shape is the compile cost. Raises on any compile failure
+    or an empty capture; a silently-eager build must never publish.
+    """
+    from .api.decorators import Compile as CompileCfg
+    from .models.loading import load_from_pretrained
+
+    if not toolchain_present():
+        raise RuntimeError(
+            "compile-cache build needs a C toolchain (cc/gcc); run in the "
+            "compile-job image, not a prod worker image"
+        )
+    out_dir = Path(out_dir)
+    capture_root = out_dir / "capture"
+    capture_env(capture_root)
+
+    import torch
+    from diffusers import DiffusionPipeline
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("compile-cache build requires CUDA")
+
+    cfg = CompileCfg(shapes=tuple(shapes), targets=tuple(targets))
+    pipe = load_from_pretrained(DiffusionPipeline, str(model_path), dtype=dtype)
+    pipe.to("cuda")
+    if callable(getattr(pipe, "set_progress_bar_config", None)):
+        pipe.set_progress_bar_config(disable=True)
+    os.environ[ENV_ALLOW_COLD] = "1"
+    if not apply(pipe, cfg, cache_ready=False, guard=False):
+        raise RuntimeError(f"no compile targets resolved on {type(pipe).__name__}")
+
+    timings: Dict[str, float] = {}
+    for w, h in cfg.shapes:
+        torch.cuda.synchronize()
+        t = time.monotonic()
+        pipe(
+            prompt=prompt,
+            num_inference_steps=int(steps),
+            width=int(w),
+            height=int(h),
+            generator=torch.Generator(device="cuda").manual_seed(0),
+        )
+        torch.cuda.synchronize()
+        timings[f"{w}x{h}"] = round(time.monotonic() - t, 2)
+        logger.info("compile-cache build: warmed %dx%d in %.1fs", w, h, timings[f"{w}x{h}"])
+
+    captured = [p for p in (capture_root / "inductor").rglob("*") if p.is_file()]
+    if not captured:
+        raise RuntimeError(
+            "compile warm-up captured nothing under TORCHINDUCTOR_CACHE_DIR — "
+            "was inductor already latched to another dir in this process?"
+        )
+
+    meta = artifact_metadata(
+        model_ref=model_ref, model_digest=model_digest,
+        shapes=cfg.shapes, targets=cfg.targets,
+    )
+    label = flavor_label(meta["sku"], meta["torch"])
+    artifact = pack(capture_root, out_dir / f"{label}.tar.gz", meta)
+    return artifact, meta, timings
+
+
 __all__ = [
     "ARTIFACT_FORMAT",
+    "build",
     "ENV_ALLOW_COLD",
     "ENV_CACHE_PATH",
     "ENV_CACHE_URL",
