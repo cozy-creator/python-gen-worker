@@ -257,9 +257,15 @@ def _select_function(
             f"available:{available}"
         )
     if len(matches) > 1:
-        if not cls_name and not method_name and default_name:
-            from gen_worker.discovery.names import slugify_name
+        from gen_worker.discovery.names import slugify_name
 
+        if method_name:
+            # Variant fan-out: the base fn and every variant share one attr
+            # name. An exact fn_name match wins over the attr-name matches.
+            exact = [m for m in matches if m.fn_name == slugify_name(method_name)]
+            if len(exact) == 1:
+                return exact[0]
+        if not cls_name and not method_name and default_name:
             wanted = slugify_name(default_name)
             defaults = [m for m in matches if m.fn_name == wanted]
             if len(defaults) == 1:

@@ -59,3 +59,38 @@ def test_map_exception_fatal_sanitizes_secrets():
     status, msg = _map_exception(RuntimeError("boom Bearer abc123"))
     assert status == pb.JOB_STATUS_FATAL
     assert "abc123" not in msg and msg.startswith("RuntimeError")
+
+
+def test_select_function_base_fn_wins_exact_match_over_variant_attr_matches():
+    # Base fn + variants share one attr name; --method <base> must select the
+    # base spec instead of erroring ambiguous (ie#348).
+    import types
+
+    import msgspec
+
+    from gen_worker import HF, RequestContext, endpoint
+
+    class _In(msgspec.Struct):
+        prompt: str
+
+    class _Out(msgspec.Struct):
+        result: str
+
+    @endpoint(
+        model=HF("o/base", dtype="fp16"),
+        variants={"generate_alt": HF("o/alt")},
+    )
+    class Gen:
+        def setup(self, pipeline: str) -> None: ...
+
+        def generate(self, ctx: RequestContext, data: _In) -> _Out:
+            return _Out(result="")
+
+    mod = types.SimpleNamespace(Gen=Gen)
+    candidates = cli_run._collect_class_methods(mod)
+    assert len(candidates) == 2
+
+    base = cli_run._select_function(candidates, cls_name=None, method_name="generate")
+    assert base.fn_name == "generate"
+    variant = cli_run._select_function(candidates, cls_name=None, method_name="generate_alt")
+    assert variant.fn_name == "generate-alt"
