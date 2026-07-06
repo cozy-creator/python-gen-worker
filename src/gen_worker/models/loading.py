@@ -280,7 +280,12 @@ def load_from_pretrained(
     ensure_quant_library_imported(attrs)
     kwargs: Dict[str, Any] = {}
     if dtype:
-        kwargs["torch_dtype"] = get_torch_dtype(dtype)
+        try:
+            kwargs["torch_dtype"] = get_torch_dtype(dtype)
+        except ImportError:
+            # torch-less environment (unit tests / CPU tools) — loaders that
+            # actually need torch will fail on their own terms.
+            pass
     variant = detect_diffusers_variant(Path(path))
     if variant in ("bf16", "fp16"):
         kwargs["variant"] = variant
