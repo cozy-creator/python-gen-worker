@@ -379,6 +379,64 @@ def test_gpu_semaphore_serializes_cuda_jobs(scheduler_and_worker) -> None:
     assert elapsed >= 1.0, f"cuda jobs must serialize on 1 gpu slot (took {elapsed:.2f}s)"
 
 
+def test_gpu_slot_yield_lets_peer_run_during_upload_window(scheduler_and_worker) -> None:
+    """#382: a GPU job inside `_gpu_slot_yielded` (the save_bytes upload
+    window) must not starve the next GPU job on the single slot."""
+    import e2e_endpoints as ep
+
+    scheduler, _harness = scheduler_and_worker
+    conn = scheduler.wait_connection(0)
+    conn.wait_for(
+        lambda m: m.WhichOneof("msg") == "state_delta"
+        and m.state_delta.phase == pb.WORKER_PHASE_READY
+    )
+    ep.SLOT_PROBE_STARTED.clear()
+    ep.SLOT_PEER_RAN.clear()
+    cuda = pb.ResolvedCompute(accelerator="cuda", gpu_index=0)
+    conn.send(run_job=pb.RunJob(
+        request_id="r-slot-probe", attempt=1, function_name="slot-probe",
+        input_payload=_msgpack("x"), compute=cuda))
+    assert ep.SLOT_PROBE_STARTED.wait(timeout=10.0), "probe never started"
+    # Probe holds the only GPU slot until it yields for its "upload".
+    conn.send(run_job=pb.RunJob(
+        request_id="r-slot-peer", attempt=1, function_name="slot-peer",
+        input_payload=_msgpack("x"), compute=cuda))
+    res = conn.wait_for(_is_result_for("r-slot-probe")).job_result
+    assert res.status == pb.JOB_STATUS_OK
+    assert _decode_out(res.inline).response == "overlapped"
+    res = conn.wait_for(_is_result_for("r-slot-peer")).job_result
+    assert res.status == pb.JOB_STATUS_OK
+
+
+def test_gpu_slot_survives_cancel_during_yielded_window(scheduler_and_worker) -> None:
+    """#382: cancelling a job while its slot is yielded must not leak or
+    double-release the slot -- a follow-up GPU job still runs."""
+    import e2e_endpoints as ep
+
+    scheduler, _harness = scheduler_and_worker
+    conn = scheduler.wait_connection(0)
+    conn.wait_for(
+        lambda m: m.WhichOneof("msg") == "state_delta"
+        and m.state_delta.phase == pb.WORKER_PHASE_READY
+    )
+    ep.SLOT_PROBE_STARTED.clear()
+    ep.SLOT_PEER_RAN.clear()
+    cuda = pb.ResolvedCompute(accelerator="cuda", gpu_index=0)
+    conn.send(run_job=pb.RunJob(
+        request_id="r-yield-cancel", attempt=1, function_name="slot-probe",
+        input_payload=_msgpack("x"), compute=cuda))
+    assert ep.SLOT_PROBE_STARTED.wait(timeout=10.0)
+    conn.send(cancel_job=pb.CancelJob(request_id="r-yield-cancel", attempt=1))
+    ep.SLOT_PEER_RAN.set()  # unblock the probe's yielded window
+    conn.wait_for(_is_result_for("r-yield-cancel"))
+    # The slot must still be usable afterwards.
+    conn.send(run_job=pb.RunJob(
+        request_id="r-after-cancel", attempt=1, function_name="sleepy",
+        input_payload=_msgpack("x"), compute=cuda))
+    res = conn.wait_for(_is_result_for("r-after-cancel")).job_result
+    assert res.status == pb.JOB_STATUS_OK
+
+
 def test_marco_polo_example_serves_under_the_new_core() -> None:
     """#365 acceptance: examples/marco-polo runs against the fake scheduler."""
     import sys
