@@ -10,6 +10,11 @@ dependencies = [
     "accelerate>=1.0",
     "msgspec>=0.18",
     "pillow>=10",
+    # Qwen2VLProcessor instantiates its VIDEO processor at load time (the 2511
+    # repo ships processor/video_preprocessor_config.json) and
+    # Qwen2VLVideoProcessor hard-imports torchvision: load-time ImportError
+    # without it. Discovery can't catch it -- the module imports clean.
+    "torchvision>=0.24",
 ]
 
 [build-system]
