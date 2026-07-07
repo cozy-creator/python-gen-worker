@@ -14,11 +14,13 @@ This module fixes that with three mechanical changes while preserving the
 Tensorhub upload contract: Tensorhub creates a multipart session and returns
 presigned part URLs; the worker PUTs bytes directly to those URLs.
 
-  1. **Per-part pool isolation.** Each multipart PUT gets its own
-     ``urllib3.PoolManager(maxsize=1, block=False)``; the pool is
-     destroyed after the part completes. A retry on a failed part
-     allocates a fresh pool — guaranteed-new TCP+TLS handshake — so a
-     stale half-closed socket never propagates to the retry.
+  1. **Pool isolation.** Every RETRY attempt allocates a fresh
+     ``urllib3.PoolManager(maxsize=1, block=False)`` — guaranteed-new
+     TCP+TLS handshake — so a stale half-closed socket never propagates
+     to the retry. First attempts within ONE save may share a
+     save-scoped ``PutPool`` (issue #385): keepalive across that save's
+     parts, torn down with the save, never cross-request. See
+     ``PutPool`` for why this scope cannot reproduce the R2 incident.
   2. **Explicit retry classification.** TLS/connection/timeout errors,
      429, and 5xx are retried with exponential backoff + decorrelated
      jitter. 4xx (other than 429) is terminal. The classifier matches
@@ -29,13 +31,12 @@ presigned part URLs; the worker PUTs bytes directly to those URLs.
      stalled.
 
 The control plane (create / complete / abort POSTs to tensorhub) stays
-on ``requests`` because those are small, idempotent JSON calls — the
-TLS-pool pathology is specific to the long-lived multi-GiB S3 PUT
-path.
+on ``requests``, on a per-save ``requests.Session`` owned by
+``presigned_upload.py``.
 
 Public API: ``upload_part_to_presigned_url(url, file_path, offset,
-length)`` -> ``etag``. Caller owns the part-level fan-out
-(``presigned_upload.py``) and the file-level fan-out
+length, pool=None)`` -> ``etag``, plus ``PutPool``. Caller owns the
+part-level fan-out (``presigned_upload.py``) and the file-level fan-out
 (``_concurrent_upload.py``). This module is a pure transport leaf.
 """
 
@@ -129,6 +130,68 @@ class _BoundedFileReader:
         return False
 
 
+class PutPool:
+    """Save-scoped keepalive pool for presigned part PUTs (issue #385).
+
+    Shared by the FIRST attempt of each part PUT within one save, so
+    consecutive parts reuse the R2 TCP+TLS connection instead of paying a
+    fresh handshake each (measured from a pod: fresh-conn PUTs 0.8-5.0s,
+    keepalive 0.6-0.8s). Retry attempts never touch this pool — they get
+    the fresh-per-attempt PoolManager that fixed the R2
+    ``SSLV3_ALERT_BAD_RECORD_MAC`` incident.
+
+    Why this scope cannot reproduce that incident: the 2026-05-16 failure
+    came from a process-global pool whose sockets sat idle across a
+    minutes-long, 64-PUT-in-flight clone until R2's edge half-closed them,
+    and whose retries were handed the same poisoned socket. This pool
+    (a) lives only for the seconds-scale span of one save and is closed
+    with it — never cross-request, (b) idles only for the ms-scale gap
+    between one save's parts, and (c) is cleared on any transport failure,
+    whose retry then runs on a guaranteed-fresh pool. Worst case a stale
+    socket costs one retried attempt — the same recovery path as today.
+
+    Thread-safe (urllib3.PoolManager is); sized for the fixed part fan-out.
+    """
+
+    def __init__(self, maxsize: int = 4) -> None:
+        self._pool = urllib3.PoolManager(
+            num_pools=1,
+            maxsize=maxsize,
+            block=False,
+            retries=False,  # callers own the retry loop
+            timeout=urllib3.Timeout(connect=_CONNECT_TIMEOUT_S, read=_READ_TIMEOUT_S),
+        )
+
+    def put(self, url: str, *, body: Any, length: int) -> Any:
+        # No ``Connection: close`` — keepalive within the save is the point.
+        return self._pool.request(
+            "PUT",
+            url,
+            body=body,
+            headers={"Content-Length": str(length)},
+            preload_content=True,
+            decode_content=False,
+        )
+
+    def discard_connections(self) -> None:
+        """Drop all pooled sockets. Called after any transport failure so a
+        possibly-poisoned connection can never serve another part."""
+        try:
+            self._pool.clear()
+        except Exception:
+            pass
+
+    def close(self) -> None:
+        self.discard_connections()
+
+    def __enter__(self) -> "PutPool":
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+        self.close()
+        return False
+
+
 class TransportError(RuntimeError):
     """Raised when a part upload fails after exhausting retries."""
 
@@ -209,14 +272,16 @@ def upload_part_to_presigned_url(
     length: int,
     max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
     cancel_check: Optional[Any] = None,
+    pool: Optional[PutPool] = None,
 ) -> str:
     """PUT one multipart part to a presigned S3 URL, return the ETag.
 
-    Each attempt allocates its own ``urllib3.PoolManager(maxsize=1)``,
-    issues the PUT, and tears the pool down. Stale-socket reuse — the
-    root cause of the ``SSLV3_ALERT_BAD_RECORD_MAC`` against R2 — is
-    structurally impossible because no connection ever outlives its
-    attempt.
+    With ``pool`` given, the FIRST attempt goes through that save-scoped
+    keepalive pool (issue #385). Every retry attempt — and every attempt
+    when ``pool`` is None — allocates its own ``urllib3.PoolManager
+    (maxsize=1)``, issues the PUT, and tears the pool down, so a stale
+    socket (root cause of the ``SSLV3_ALERT_BAD_RECORD_MAC`` against R2)
+    can never propagate into a retry.
 
     Retries on transport-level failures (TLS, connection reset,
     timeout), 429, and 5xx. Terminal on 4xx (other than 429) and on
@@ -235,43 +300,51 @@ def upload_part_to_presigned_url(
         if cancel_check is not None and cancel_check():
             raise InterruptedError("canceled")
 
-        # Fresh pool per attempt. ``maxsize=1`` keeps the pool's
-        # connection set tiny — there's only one in-flight request, and
-        # ``block=False`` means urllib3 won't queue on it. On context-
-        # manager exit the pool's idle connections are closed, so the
-        # TCP socket is unambiguously released before the next attempt.
+        use_shared_pool = pool is not None and attempt == 1
         try:
             with _BoundedFileReader(file_path, offset, length) as body:
-                with urllib3.PoolManager(
-                    num_pools=1,
-                    maxsize=1,
-                    block=False,
-                    # ssl_context=None  -> use urllib3's default (which uses
-                    # the system's default OpenSSL + CA bundle). No custom
-                    # context: the R2 cert chain is publicly trusted.
-                    retries=False,  # we own the retry loop
-                    timeout=urllib3.Timeout(connect=_CONNECT_TIMEOUT_S, read=_READ_TIMEOUT_S),
-                ) as http:
-                    resp = http.request(
-                        "PUT",
-                        url,
-                        body=body,
-                        headers={
-                            "Content-Length": str(length),
-                            # Force connection teardown after this single
-                            # PUT. Defense in depth — the pool tears down
-                            # anyway, but ``Connection: close`` also tells
-                            # the server-side TLS terminator to not hold
-                            # the socket in its keep-alive table waiting
-                            # for a follow-up request.
-                            "Connection": "close",
-                        },
-                        preload_content=True,
-                        decode_content=False,
-                    )
+                if use_shared_pool:
+                    resp = pool.put(url, body=body, length=length)
+                else:
+                    # Fresh pool per attempt. ``maxsize=1`` keeps the pool's
+                    # connection set tiny — there's only one in-flight request,
+                    # and ``block=False`` means urllib3 won't queue on it. On
+                    # context-manager exit the pool's idle connections are
+                    # closed, so the TCP socket is unambiguously released
+                    # before the next attempt.
+                    with urllib3.PoolManager(
+                        num_pools=1,
+                        maxsize=1,
+                        block=False,
+                        # ssl_context=None  -> use urllib3's default (which uses
+                        # the system's default OpenSSL + CA bundle). No custom
+                        # context: the R2 cert chain is publicly trusted.
+                        retries=False,  # we own the retry loop
+                        timeout=urllib3.Timeout(connect=_CONNECT_TIMEOUT_S, read=_READ_TIMEOUT_S),
+                    ) as http:
+                        resp = http.request(
+                            "PUT",
+                            url,
+                            body=body,
+                            headers={
+                                "Content-Length": str(length),
+                                # Force connection teardown after this single
+                                # PUT. Defense in depth — the pool tears down
+                                # anyway, but ``Connection: close`` also tells
+                                # the server-side TLS terminator to not hold
+                                # the socket in its keep-alive table waiting
+                                # for a follow-up request.
+                                "Connection": "close",
+                            },
+                            preload_content=True,
+                            decode_content=False,
+                        )
         except InterruptedError:
             raise
         except BaseException as exc:
+            if use_shared_pool:
+                # Never let a possibly-poisoned socket serve another part.
+                pool.discard_connections()
             err = _classify_transport_exception(exc)
             last_err = err
             if not err.retryable or attempt >= max_attempts:

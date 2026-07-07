@@ -22,16 +22,22 @@ used at different route prefixes for repo checkpoints
 endpoint source (/api/v1/endpoints/:owner/:endpoint/releases/uploads),
 and user media (/api/v1/media/:owner/uploads).
 
-# HTTP stack (issue #13)
+# HTTP stack (issues #13 / #385)
 
-The control-plane POSTs (create session / abort / complete) go over
-``requests`` — small idempotent JSON calls where the connection-pool
-pathology that bit the data plane doesn't matter.
+Connections are scoped to ONE save (``presigned_upload_file`` call) and
+torn down with it — never shared across saves:
 
-The data-plane multipart PUTs go through ``_upload_transport.upload_part_to_presigned_url``,
-which allocates a fresh ``urllib3.PoolManager`` per attempt to
-structurally prevent the stale-socket reuse that caused
-``SSLV3_ALERT_BAD_RECORD_MAC`` against Cloudflare R2.
+  * control plane (create / complete / abort) — one ``requests.Session``
+    per save, so create -> complete reuses the tensorhub connection
+    instead of paying a fresh TCP+TLS handshake per POST (bare
+    ``requests.post`` builds a new Session per call). Auth headers are
+    passed per-request, so worker JWT rotation never forces a new
+    connection.
+  * data plane (part PUTs) — one ``_upload_transport.PutPool`` per save,
+    shared by first attempts so consecutive parts reuse the R2
+    connection. Retry attempts always get a fresh ``urllib3.PoolManager``
+    — the structural guard against the stale-socket
+    ``SSLV3_ALERT_BAD_RECORD_MAC`` R2 incident (see ``_upload_transport``).
 """
 
 from __future__ import annotations
@@ -51,6 +57,7 @@ from blake3 import blake3
 
 from ._upload_transport import (
     STREAM_CHUNK_BYTES,
+    PutPool,
     TransportError,
     optimal_part_concurrency,
     upload_part_to_presigned_url,
@@ -202,6 +209,40 @@ def presigned_upload_file(
             target_dtype, flavor, produced_by_kind. Tensorhub persists
             these into checkpoint_lineage.
     """
+    # Per-save connection scope (issue #385): one hub Session + one R2 PUT
+    # pool live exactly as long as this save, then close. Never cross-request.
+    with requests.Session() as session, PutPool() as put_pool:
+        return _presigned_upload_file_scoped(
+            file_path=file_path,
+            base_url=base_url,
+            endpoint_path=endpoint_path,
+            headers=headers,
+            create_payload=create_payload,
+            blake3_hex=blake3_hex,
+            size_bytes=size_bytes,
+            on_progress=on_progress,
+            cancel_check=cancel_check,
+            complete_extra=complete_extra,
+            session=session,
+            put_pool=put_pool,
+        )
+
+
+def _presigned_upload_file_scoped(
+    *,
+    file_path: str | Path,
+    base_url: str,
+    endpoint_path: str,
+    headers: Dict[str, str],
+    create_payload: Dict[str, Any],
+    blake3_hex: str,
+    size_bytes: int,
+    on_progress: Optional[Any],
+    cancel_check: Optional[Any],
+    complete_extra: Optional[Dict[str, Any]],
+    session: requests.Session,
+    put_pool: PutPool,
+) -> PresignedUploadResult:
     url = f"{base_url}{endpoint_path}"
 
     # --- Step 1: Create presigned upload session ---
@@ -213,7 +254,7 @@ def presigned_upload_file(
     create_headers["Content-Type"] = "application/json"
 
     try:
-        resp = requests.post(url, headers=create_headers, data=json.dumps(payload), timeout=_CREATE_TIMEOUT_S)
+        resp = session.post(url, headers=create_headers, data=json.dumps(payload), timeout=_CREATE_TIMEOUT_S)
     except requests.RequestException as e:
         raise ArtifactTransferError(
             f"tensorhub upload create request failed: {e}",
@@ -288,6 +329,7 @@ def presigned_upload_file(
             headers=headers,
             payload=complete_payload,
             cancel_check=cancel_check,
+            session=session,
         )
         return PresignedUploadResult(meta=result_meta, dedup=False)
 
@@ -323,12 +365,13 @@ def presigned_upload_file(
             total_parts=total_parts,
             on_progress=on_progress,
             cancel_check=cancel_check,
+            put_pool=put_pool,
         )
     except BaseException:
         # Abort the multipart upload on failure.
         try:
             abort_headers = dict(headers)
-            requests.delete(abort_url, headers=abort_headers, timeout=15)
+            session.delete(abort_url, headers=abort_headers, timeout=15)
         except Exception:
             pass
         raise
@@ -351,6 +394,7 @@ def presigned_upload_file(
         headers=headers,
         payload=complete_payload,
         cancel_check=cancel_check,
+        session=session,
     )
     return PresignedUploadResult(meta=result_meta, dedup=False)
 
@@ -377,6 +421,7 @@ def _poll_until_finalized(
     complete_headers: Dict[str, str],
     payload: Dict[str, Any],
     cancel_check: Optional[Any],
+    session: requests.Session,
 ) -> Dict[str, Any]:
     """A prior /complete attempt is still finalizing server-side (409
     upload_complete_in_progress) — tensorhub verifies large objects
@@ -401,7 +446,7 @@ def _poll_until_finalized(
             )
         time.sleep(min(_COMPLETE_IN_PROGRESS_POLL_S, remaining))
         try:
-            resp = requests.post(
+            resp = session.post(
                 complete_url, headers=complete_headers, data=json.dumps(payload),
                 timeout=_FINALIZE_TIMEOUT_S,
             )
@@ -430,6 +475,7 @@ def _complete_upload_session(
     headers: Dict[str, str],
     payload: Dict[str, Any],
     cancel_check: Optional[Any],
+    session: requests.Session,
 ) -> Dict[str, Any]:
     complete_headers = dict(headers)
     complete_headers["Content-Type"] = "application/json"
@@ -438,7 +484,7 @@ def _complete_upload_session(
         if cancel_check and cancel_check():
             raise CanceledError("canceled")
         try:
-            resp = requests.post(
+            resp = session.post(
                 complete_url,
                 headers=complete_headers,
                 data=json.dumps(payload),
@@ -462,6 +508,7 @@ def _complete_upload_session(
                     complete_headers=complete_headers,
                     payload=payload,
                     cancel_check=cancel_check,
+                    session=session,
                 )
             if code >= 500:
                 last_exc = ArtifactTransferError(
@@ -497,13 +544,15 @@ def _upload_parts_to_s3(
     total_parts: int,
     on_progress: Optional[Any],
     cancel_check: Optional[Any],
+    put_pool: Optional[PutPool] = None,
 ) -> List[Tuple[int, str]]:
     """Upload file parts to S3 using presigned URLs. Returns list of (part_number, etag).
 
     Each part PUT is dispatched through ``_upload_transport`` which
-    owns the per-attempt PoolManager lifecycle, exponential-backoff
-    retry classification, and TLS-pool isolation. This function just
-    fans out across parts and aggregates ETags.
+    owns the pool lifecycle (save-scoped keepalive pool for first
+    attempts, fresh pool per retry), exponential-backoff retry
+    classification, and TLS-pool isolation. This function just fans
+    out across parts and aggregates ETags.
     """
     etags: List[Tuple[int, str]] = []
     file_size = os.path.getsize(file_path)
@@ -521,6 +570,7 @@ def _upload_parts_to_s3(
                     offset=offset,
                     length=length,
                     cancel_check=cancel_check,
+                    pool=put_pool,
                 )
         except InterruptedError as ie:
             raise CanceledError("canceled") from ie
