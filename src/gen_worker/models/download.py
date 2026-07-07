@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
 from .cache_paths import tensorhub_cas_dir
-from .refs import HuggingFaceRef, parse_model_ref
+from .refs import HuggingFaceRef, TensorhubRef, parse_model_ref
 
 logger = logging.getLogger("gen_worker.download")
 
@@ -138,6 +138,24 @@ def build_provider_index_from_manifest(manifest: Optional[Mapping[str, Any]]) ->
 # ---------------------------------------------------------------------------
 
 
+def _snapshot_ref(parsed: Any, raw: str) -> TensorhubRef:
+    """Ref identity for a snapshot download. Snapshot trees are addressed by
+    digest, so for non-tensorhub providers (mirror-first refs) this only names
+    the download in logs."""
+    if parsed.tensorhub is not None:
+        return parsed.tensorhub
+    if parsed.hf is not None:
+        owner, _, repo = parsed.hf.repo_id.partition("/")
+        return TensorhubRef(owner=owner, repo=repo)
+    if parsed.civitai is not None:
+        return TensorhubRef(owner="civitai", repo=parsed.civitai.model_id)
+    if parsed.modelscope is not None:
+        owner, _, repo = parsed.modelscope.repo_id.partition("/")
+        return TensorhubRef(owner=owner, repo=repo)
+    owner, _, repo = raw.partition("/")
+    return TensorhubRef(owner=owner or "unknown", repo=repo or raw)
+
+
 async def ensure_local(
     ref: str,
     *,
@@ -152,28 +170,37 @@ async def ensure_local(
 ) -> Path:
     """Materialize ``ref`` on disk; return its local path.
 
-    ``snapshot`` (tensorhub only) is the orchestrator-resolved manifest — a
-    mapping with ``snapshot_digest`` + ``files``/``entries`` carrying presigned
-    URLs or transfer grants. hf/civitai/modelscope refs need none.
+    ``snapshot`` is the orchestrator-resolved manifest — a mapping with
+    ``snapshot_digest`` + ``files``/``entries`` carrying presigned URLs or
+    transfer grants. The orchestrator is the only resolver: when it ships a
+    snapshot for a ref — including an hf/civitai binding ref resolved through
+    a platform mirror under mirror-first (tensorhub #557) — the snapshot is
+    authoritative and the bytes come from tensorhub-CAS, never the upstream
+    registry. Refs without a snapshot fall back to their provider's direct
+    download (hf/civitai/modelscope) or fail retryably (tensorhub).
     """
     base = Path(cache_dir) if cache_dir is not None else tensorhub_cas_dir()
     prov = provider or lookup_provider_for_ref(ref)
     parsed = parse_model_ref(ref, provider=prov)
 
-    if parsed.provider == "tensorhub" and parsed.tensorhub is not None:
-        if snapshot is None:
-            # Hub-side residency bug (the orchestrator failed to pre-resolve),
-            # not bad client input — RETRYABLE, never a client-visible 400.
-            from ..api.errors import RetryableError
-
-            raise RetryableError(
-                f"tensorhub ref {ref!r} needs an orchestrator-resolved snapshot "
-                "and none was provided"
-            )
+    if snapshot is not None:
         from .cozy_snapshot import ensure_snapshot_async
 
         return await ensure_snapshot_async(
-            base_dir=base, ref=parsed.tensorhub, resolved=snapshot, progress=progress,
+            base_dir=base,
+            ref=_snapshot_ref(parsed, ref),
+            resolved=snapshot,
+            progress=progress,
+        )
+
+    if parsed.provider == "tensorhub" and parsed.tensorhub is not None:
+        # Hub-side residency bug (the orchestrator failed to pre-resolve),
+        # not bad client input — RETRYABLE, never a client-visible 400.
+        from ..api.errors import RetryableError
+
+        raise RetryableError(
+            f"tensorhub ref {ref!r} needs an orchestrator-resolved snapshot "
+            "and none was provided"
         )
 
     if parsed.provider == "hf" and parsed.hf is not None:
