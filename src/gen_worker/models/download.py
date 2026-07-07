@@ -693,7 +693,11 @@ def _civitai_stream_one(
                 h.update(chunk)
                 written += len(chunk)
                 on_bytes(len(chunk))
-    if expected_size and written != expected_size:
+    # civitai's file size often comes from `sizeKB`, a ROUNDED float — the
+    # derived byte count can be off by ±1KB (live: wan i2v 19224728441 vs
+    # actual ...442, e2e #112). Integrity is the sha256 check below; the size
+    # check only catches truncated streams.
+    if expected_size and abs(written - expected_size) > 1024:
         tmp.unlink(missing_ok=True)
         raise ValueError(f"civitai size mismatch for {dst.name}: expected {expected_size}, got {written}")
     if expected_sha256 and h.hexdigest().lower() != expected_sha256:
