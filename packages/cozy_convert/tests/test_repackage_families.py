@@ -249,3 +249,23 @@ def test_missing_component_error_parse() -> None:
     m = _MISSING_COMPONENT_RE.search(msg)
     assert m is not None
     assert (m.group(1), m.group(2)) == ("text_encoder", "Qwen3Model")
+
+
+def test_multi_weight_bundle_detection(tmp_path) -> None:
+    """Anima regression (e2e #112): multi-component civitai bundles (distinct
+    DiT/TE/VAE single-files) must publish with library_name unset — tensorhub
+    finalize rejects them as diffusers/single-file
+    (multiple_files_for_single_file_layout)."""
+    from cozy_convert.ingest import _is_multi_weight_bundle
+
+    d = tmp_path
+    (d / "anima_dit.safetensors").write_bytes(b"x")
+    assert not _is_multi_weight_bundle(d)
+    # one logical model resharded HF-style is NOT a bundle
+    (d / "anima_dit.safetensors").unlink()
+    (d / "big-00001-of-00002.safetensors").write_bytes(b"x")
+    (d / "big-00002-of-00002.safetensors").write_bytes(b"x")
+    assert not _is_multi_weight_bundle(d)
+    # a second distinct component IS a bundle
+    (d / "qwen_image_vae.safetensors").write_bytes(b"x")
+    assert _is_multi_weight_bundle(d)
