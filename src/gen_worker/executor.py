@@ -785,25 +785,31 @@ class Executor:
     async def _fetch_compile_snapshot(
         self, spec: EndpointSpec, snapshots: Optional[Dict[str, pb.Snapshot]]
     ) -> Optional[Path]:
-        """Hub-attached compile-cache snapshot for this endpoint's family
-        (#569 boot-attach, opt-in hub-side). Returns the local artifact path,
-        or None — missing/unusable snapshots mean eager, never an error."""
+        """Hub-attached compiled-artifact snapshot for this endpoint's family
+        (#569 boot-attach, opt-in hub-side): a TRT engine cell (#390,
+        preferred — bigger measured win) or an inductor cache cell. Returns
+        the local artifact path, or None — missing/unusable snapshots mean
+        eager, never an error."""
         if spec.compile is None or not snapshots:
             return None
-        from . import compile_cache
+        from . import compile_cache, trt_engine
 
         family = getattr(spec.compile, "family", "") or ""
-        for ref, snap in snapshots.items():
-            if not compile_cache.is_cache_ref(ref, family):
-                continue
+        candidates = [
+            (ref, snap) for ref, snap in snapshots.items()
+            if trt_engine.is_engine_ref(ref, family)
+        ] + [
+            (ref, snap) for ref, snap in snapshots.items()
+            if compile_cache.is_cache_ref(ref, family)
+        ]
+        for ref, snap in candidates:
             try:
                 local = await self.store.ensure_local(ref, snap)
                 return compile_cache.find_artifact(local)
             except Exception as exc:
                 logger.warning(
-                    "compile-cache snapshot %s unusable (%s); staying eager", ref, exc
+                    "compiled-artifact snapshot %s unusable (%s); trying next/eager", ref, exc
                 )
-                return None
         return None
 
     async def _injection_kwargs(
@@ -859,20 +865,36 @@ class Executor:
                 # whole worker; endpoints never write device/offload code.
                 await asyncio.to_thread(place_pipeline, pipe)
                 if spec.compile is not None:
-                    # Opt-in torch.compile against a pre-built per-SKU cache
-                    # artifact (#384); no verified artifact => stays eager.
-                    # ``compile_artifact`` is a hub-attached snapshot (#569).
-                    from . import compile_cache
-
+                    # Opt-in acceleration against a pre-built per-SKU artifact:
+                    # a TRT engine (#390, refit with this pipeline's weights)
+                    # or an inductor cache (#384). No verified artifact =>
+                    # stays eager. ``compile_artifact`` is hub-attached (#569).
                     await asyncio.to_thread(
-                        compile_cache.enable, pipe, spec.compile,
-                        self.store._cache_dir, compile_artifact,
+                        self._enable_compiled, pipe, spec.compile, compile_artifact,
                     )
                 loaded[slot] = (pipe, max(0, self._vram_allocated() - before))
                 kwargs[slot] = pipe
             else:
                 kwargs[slot] = path
         return kwargs, loaded
+
+    def _enable_compiled(self, pipe: Any, cfg: Any, artifact: Optional[Path]) -> bool:
+        """Arm the best available compiled path for a freshly loaded pipeline:
+        a TRT engine artifact swaps the module (fail-soft), anything else goes
+        through the torch.compile cache policy (which also covers the no-
+        artifact and ALLOW_COLD lanes)."""
+        from . import compile_cache, trt_engine
+
+        if artifact is not None:
+            try:
+                meta = trt_engine.unpack_metadata(Path(artifact))
+            except Exception:
+                meta = None
+            if meta is not None and str(meta.get("kind") or "") == "trt-engine":
+                if trt_engine.enable(pipe, cfg, self.store._cache_dir, artifact):
+                    return True
+                artifact = None  # unusable engine: fall through to eager policy
+        return compile_cache.enable(pipe, cfg, self.store._cache_dir, artifact)
 
     @staticmethod
     def _vram_allocated() -> int:
@@ -940,11 +962,14 @@ class Executor:
                     error=_model_op_error_vocab(exc))))
 
     async def _adopt_compile_cache(self, ref: str, snap: Optional[pb.Snapshot]) -> None:
-        """Hot adoption (th#567): download+verify+seed a compile-cache
-        artifact and re-wrap the already-resident modules in place — weights
-        untouched, no reload, one warmup trace. ANY failure => stay eager and
-        report ``adopt_failed:<reason>``; adoption must never degrade service."""
-        from . import compile_cache
+        """Hot adoption (th#567): download+verify a compiled artifact and
+        re-wrap the already-resident modules in place — weights untouched, no
+        reload, one warmup. Handles BOTH cell kinds on the same rails: an
+        inductor cache (#384: seed dirs + torch.compile) and a TRT engine
+        (#390: deserialize + refit with the resident weights + module swap).
+        ANY failure => stay eager and report ``adopt_failed:<reason>``;
+        adoption must never degrade service."""
+        from . import compile_cache, trt_engine
 
         t0 = time.monotonic()
 
@@ -955,7 +980,8 @@ class Executor:
                 error=f"adopt_failed:{reason}")))
 
         family = compile_cache.family_from_ref(ref)
-        if not family or not compile_cache.is_cache_ref(ref):
+        is_trt = trt_engine.is_engine_ref(ref)
+        if not family or not (is_trt or compile_cache.is_cache_ref(ref)):
             return await fail("bad_ref")
         candidates = [
             s for s in self.specs.values()
@@ -983,17 +1009,18 @@ class Executor:
         artifact = compile_cache.find_artifact(local)
         if artifact is None:
             return await fail("artifact_missing")
-        try:
-            await asyncio.to_thread(
-                compile_cache.seed_artifact, artifact, family, self.store._cache_dir
-            )
-        except compile_cache.AdoptError as exc:
-            return await fail(exc.reason, str(exc))
-        except Exception as exc:
-            return await fail("artifact_invalid", str(exc))
+        if not is_trt:
+            try:
+                await asyncio.to_thread(
+                    compile_cache.seed_artifact, artifact, family, self.store._cache_dir
+                )
+            except compile_cache.AdoptError as exc:
+                return await fail(exc.reason, str(exc))
+            except Exception as exc:
+                return await fail("artifact_invalid", str(exc))
 
         # Re-wrap + warmup under the GPU slot: a job landing mid-adoption
-        # queues on the semaphore instead of racing the trace.
+        # queues on the semaphore instead of racing the trace/refit.
         async with self._gpu_semaphore:
             adopted: List[Tuple[_ClassRecord, EndpointSpec]] = []
             for rec, s in resident.values():
@@ -1002,7 +1029,18 @@ class Executor:
                     obj = self.store.residency.obj(wire_ref(s.models[slot]))
                     if obj is None:
                         continue
-                    if await asyncio.to_thread(
+                    if is_trt:
+                        try:
+                            await asyncio.to_thread(
+                                trt_engine.load_and_wrap, obj, s.compile,
+                                artifact, self.store._cache_dir,
+                            )
+                            applied = True
+                        except compile_cache.AdoptError as exc:
+                            return await fail(exc.reason, str(exc))
+                        except Exception as exc:
+                            return await fail("artifact_invalid", str(exc))
+                    elif await asyncio.to_thread(
                         compile_cache.apply, obj, s.compile, cache_ready=True
                     ):
                         applied = True
