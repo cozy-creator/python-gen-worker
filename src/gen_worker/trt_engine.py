@@ -624,6 +624,14 @@ def build(
     inputs = _export_unet_onnx(pipe, onnx_path, batch=batch, shape=shapes[0])
     timings["onnx_export_s"] = round(time.monotonic() - t0, 1)
 
+    # The builder needs the GPU to itself: tactic timing allocates multi-GB
+    # scratch regions, and a resident fp16 pipeline starves it ("region
+    # allocation failed" tactic skips => worse engines or a failed build).
+    # Everything after export (refit map, self-check) reads CPU tensors.
+    pipe.to("cpu")
+    mod = getattr(pipe, module)
+    torch.cuda.empty_cache()
+
     t0 = time.monotonic()
     trt_logger = trt.Logger(trt.Logger.WARNING)
     builder = trt.Builder(trt_logger)
