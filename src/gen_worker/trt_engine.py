@@ -324,7 +324,9 @@ class TrtModuleRunner:
 
     Holds one execution context; binds torch CUDA tensors by data_ptr
     (zero-copy). Input binding order/names come from the artifact's ``inputs``
-    contract; the single output is returned as a torch tensor.
+    contract; the single output is returned as a torch tensor. Engines carry
+    one optimization profile PER preset shape — the runner selects the
+    profile whose ``sample`` range admits the call's shape.
     """
 
     def __init__(self, engine: Any, meta: Dict[str, Any], device: str = "cuda") -> None:
@@ -337,14 +339,39 @@ class TrtModuleRunner:
         self.context = engine.create_execution_context()
         self._torch = torch
         self._out_name = None
+        self._profile = 0
         for i in range(engine.num_io_tensors):
             name = engine.get_tensor_name(i)
             if engine.get_tensor_mode(name).name == "OUTPUT":
                 self._out_name = name
+        # profile index -> the exact `sample` shape it was built for
+        # (min == opt == max: one static profile per preset shape).
+        self._profile_sample: Dict[Tuple[int, ...], int] = {}
+        try:
+            for p in range(engine.num_optimization_profiles):
+                mn, _opt, _mx = engine.get_tensor_profile_shape("sample", p)
+                self._profile_sample[tuple(mn)] = p
+        except Exception:
+            pass
+
+    def _select_profile(self, sample_shape: Tuple[int, ...]) -> None:
+        idx = self._profile_sample.get(sample_shape)
+        if idx is None and self._profile_sample:
+            raise RuntimeError(
+                f"no optimization profile for sample shape {sample_shape} "
+                f"(built: {sorted(self._profile_sample)})"
+            )
+        if idx is not None and idx != self._profile:
+            stream = self._torch.cuda.current_stream().cuda_stream
+            self.context.set_optimization_profile_async(idx, stream)
+            self._torch.cuda.current_stream().synchronize()
+            self._profile = idx
 
     def __call__(self, feeds: Dict[str, Any]) -> Any:
         torch = self._torch
         ctx = self.context
+        if "sample" in feeds:
+            self._select_profile(tuple(feeds["sample"].shape))
         for name, tensor in feeds.items():
             t = tensor.contiguous()
             feeds[name] = t
