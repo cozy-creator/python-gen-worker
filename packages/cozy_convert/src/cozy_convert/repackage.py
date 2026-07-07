@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
@@ -238,10 +239,38 @@ def _repackage_torch_dtype(dtype: str | None) -> Any:
     return torch_mod.bfloat16
 
 
+# diffusers wraps SingleFileComponentError with a remedy snippet naming both
+# the component and its class: "{name} = {class_name}.from_pretrained('...')".
+_MISSING_COMPONENT_RE = re.compile(r"(\w+) = (\w+)\.from_pretrained\('\.\.\.'\)")
+
+
+def _load_component_from_config_repo(
+    config: str, name: str, class_name: str, torch_dtype: Any
+) -> Any:
+    """Load a pipeline component the checkpoint doesn't carry from the family's
+    config repo. DiT-only fine-tunes (common on civitai for z-image) ship no
+    text-encoder/VAE weights — sourcing them from the base repo is exactly the
+    CAS dedup story: the fine-tune tree stores only its denoiser."""
+    import importlib
+
+    comp_cls = None
+    for lib in ("transformers", "diffusers"):
+        comp_cls = getattr(importlib.import_module(lib), class_name, None)
+        if comp_cls is not None:
+            break
+    if comp_cls is None:
+        raise ConversionImplementationError(f"component_class_unavailable:{class_name}")
+    try:
+        return comp_cls.from_pretrained(config, subfolder=name, torch_dtype=torch_dtype)
+    except TypeError:  # non-torch components (tokenizers etc.) reject torch_dtype
+        return comp_cls.from_pretrained(config, subfolder=name)
+
+
 def _load_singlefile_pipeline(
     *, input_path: Path, pipeline_class: str, config: str | None, torch_dtype: Any,
 ) -> Any:
     import diffusers
+    from diffusers.loaders.single_file import SingleFileComponentError
 
     cls = getattr(diffusers, pipeline_class, None)
     if cls is None:
@@ -252,14 +281,35 @@ def _load_singlefile_pipeline(
         kwargs["config"] = config
 
     if hasattr(cls, "from_single_file"):
-        return cls.from_single_file(str(input_path), **kwargs)
+        loader = cls.from_single_file
+    else:
+        from diffusers.loaders.single_file import FromSingleFileMixin
 
-    from diffusers.loaders.single_file import FromSingleFileMixin
+        fn = getattr(FromSingleFileMixin.from_single_file, "__func__", None)
+        if fn is None:
+            raise ValueError(f"pipeline_not_implemented:{pipeline_class}")
 
-    fn = getattr(FromSingleFileMixin.from_single_file, "__func__", None)
-    if fn is None:
-        raise ValueError(f"pipeline_not_implemented:{pipeline_class}")
-    return fn(cls, str(input_path), **kwargs)
+        def loader(path: str, **kw: Any) -> Any:
+            return fn(cls, path, **kw)
+
+    # Components missing from the checkpoint are pulled from the config repo
+    # (bounded: a pipeline has a handful of components).
+    for _ in range(6):
+        try:
+            return loader(str(input_path), **kwargs)
+        except SingleFileComponentError as exc:
+            if not config:
+                raise
+            m = _MISSING_COMPONENT_RE.search(str(exc))
+            if m is None or m.group(1) in kwargs:
+                raise
+            name, class_name = m.group(1), m.group(2)
+            kwargs[name] = _load_component_from_config_repo(
+                config, name, class_name, torch_dtype
+            )
+    raise ConversionImplementationError(
+        f"singlefile_missing_component_loop:{pipeline_class}:{config}"
+    )
 
 
 def singlefile_to_diffusers(
