@@ -63,22 +63,27 @@ The slot name is the `models={}` key (or, with the single-binding `model=`
 shorthand, the `setup()` parameter name). It is never a constructor argument.
 
 ```python
-HF("owner/repo", revision=..., dtype=..., subfolder=..., files=(...), quantize=...)
-Hub("owner/repo", tag="prod", flavor="", quantize="")   # tensorhub
+HF("owner/repo", revision=..., dtype=..., subfolder=..., files=(...), storage_dtype=...)
+Hub("owner/repo", tag="prod", flavor="", storage_dtype="")   # tensorhub
 Civitai("123456", version="789")             # civitai model id
 ModelScope("owner/repo", revision=..., files=(...))
 ```
 
 `files` are `snapshot_download` allow-patterns for split-checkpoint repos.
 
-`quantize=` selects runtime (load-time) quantization of the denoiser —
-`"int8" | "nf4" | "fp4"` (bitsandbytes) or
-`"int8-torchao" | "int4-torchao" | "fp8-torchao"` (torchao weight-only).
-The loading layer applies it at `from_pretrained` time; endpoint code stays
-quantize-agnostic, `ModelEvent.vram_bytes` reports the measured post-quant
-size, and on CPU-only hosts the method is ignored with a warning. A lower-VRAM
-variant is just a variant binding: `variants={"generate-nf4":
-(HF("org/base", dtype="bf16", quantize="nf4"), Resources(vram_gb=8))}`.
+`storage_dtype="fp8"` keeps denoiser weights in fp8-E4M3 STORAGE with
+per-layer upcast to the compute `dtype` (diffusers layerwise casting) — half
+the denoiser VRAM on any card, no fp8 silicon required. Snapshots whose
+weights are already fp8-stored (an `#fp8` flavor) get the same treatment
+automatically; endpoint code stays precision-agnostic and
+`ModelEvent.vram_bytes` reports the measured resident size. Quantized
+formats are platform-produced stored flavors (`#fp8`, `#nvfp4` on Blackwell)
+— there is no runtime "quantize my model" kwarg. The one exception is the
+env-gated EMERGENCY rung (`GEN_WORKER_EMERGENCY_QUANT=1`, cozy-local): when
+even the downloaded flavor cannot fit free VRAM, the loading layer
+runtime-quantizes the denoiser to 4-bit nf4 with a loud warning (quality
+below platform standards) rather than falling straight to CPU offload.
+Fit ladder: bf16 → `#fp8` → `#nvfp4` (Blackwell) → emergency-nf4 → offload.
 
 ## Variants
 
