@@ -949,11 +949,15 @@ def _serve_inner(args: argparse.Namespace) -> int:
     if getattr(args, "list_functions", False):
         if getattr(args, "json_output", False):
             # Thin alias of `gen-worker run --list`'s functions array — one
-            # shared builder, one shape.
-            from .listing import function_entries
+            # shared builder, one shape (incl. detected caps + fit verdicts).
+            from .listing import detected_capabilities, function_entries
 
+            detected = detected_capabilities()
             sys.stdout.write(
-                json.dumps({"functions": function_entries(candidates)}) + "\n"
+                json.dumps({
+                    "detected": detected,
+                    "functions": function_entries(candidates, detected=detected),
+                }) + "\n"
             )
             sys.stdout.flush()
             return run_mod.EXIT_OK

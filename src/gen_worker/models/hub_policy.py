@@ -71,3 +71,102 @@ def detect_worker_capabilities(*, extra_libs: Optional[List[str]] = None) -> Ten
         torch_version=torch_version,
         installed_libs=installed,
     )
+
+
+# ---------------------------------------------------------------------------
+# Variant auto-selection (#380) — pick the best routable variant for THIS
+# machine from `variants={name: (binding, Resources)}` declarations. Pure
+# logic over (Resources, capabilities, free VRAM); consumer CLIs (cozy) call
+# it through `run --list` / `--variant auto` instead of reimplementing
+# hardware policy in Go.
+# ---------------------------------------------------------------------------
+
+FIT_FITS = "fits"
+FIT_OFFLOAD = "offload"
+FIT_INCOMPATIBLE = "incompatible"
+
+
+@dataclass(frozen=True)
+class VariantChoice:
+    name: str
+    fit: str  # fits | offload
+    reason: str = ""
+
+
+def variant_fit(
+    resources: Any,
+    caps: TensorhubWorkerCapabilities,
+    free_vram_gb: float,
+) -> tuple[str, str]:
+    """Fit verdict for ONE function/variant's ``Resources`` on this machine.
+
+    - ``incompatible``: hard gates unmet (no CUDA GPU, compute_capability
+      above this GPU's SM, required quant libraries not installed).
+    - ``offload``: runnable, but declared vram_gb exceeds free VRAM — the
+      models/memory.py offload ladder carries it (slower).
+    - ``fits``: full-VRAM residency expected.
+    """
+    needs_gpu = bool(getattr(resources, "gpu", False))
+    req_cc = getattr(resources, "compute_capability", None)
+    libs = tuple(getattr(resources, "libraries", ()) or ())
+    if needs_gpu and caps.gpu_sm <= 0:
+        return FIT_INCOMPATIBLE, "no CUDA GPU detected"
+    if req_cc is not None and caps.gpu_sm < int(round(float(req_cc) * 10)):
+        return FIT_INCOMPATIBLE, (
+            f"requires compute capability >= {float(req_cc):g}, "
+            f"GPU is SM{caps.gpu_sm}"
+        )
+    missing = [l for l in libs if l not in (caps.installed_libs or [])]
+    if missing:
+        return FIT_INCOMPATIBLE, f"missing libraries: {', '.join(missing)}"
+    vram = getattr(resources, "vram_gb", None)
+    if vram is None or float(vram) <= float(free_vram_gb):
+        return FIT_FITS, ""
+    return FIT_OFFLOAD, (
+        f"declares {float(vram):g} GB VRAM, {float(free_vram_gb):.1f} GB free"
+    )
+
+
+def select_variant(
+    variants: List[tuple[str, Any]],
+    caps: TensorhubWorkerCapabilities,
+    free_vram_gb: float,
+    *,
+    base: Optional[tuple[str, Any]] = None,
+) -> Optional[VariantChoice]:
+    """Pick the best routable variant.
+
+    ``variants`` is ``[(fn_name, Resources), ...]``; ``base`` is the base
+    binding's row when the class declares one. Policy:
+      1. drop incompatible rows (SM / library gates);
+      2. among variants that FIT free VRAM, prefer the largest declared
+         vram_gb (bigger = higher-quality precision);
+      3. none fit → the base binding + the offload ladder;
+      4. no base → the smallest-VRAM compatible variant, offloaded;
+      5. nothing routable → None.
+    """
+    def _vram(res: Any) -> float:
+        v = getattr(res, "vram_gb", None)
+        return float(v) if v is not None else 0.0
+
+    compat: List[tuple[str, Any, str, str]] = []
+    for name, res in variants:
+        fit, reason = variant_fit(res, caps, free_vram_gb)
+        if fit != FIT_INCOMPATIBLE:
+            compat.append((name, res, fit, reason))
+
+    fitting = [row for row in compat if row[2] == FIT_FITS]
+    if fitting:
+        name, _res, fit, reason = max(fitting, key=lambda r: _vram(r[1]))
+        return VariantChoice(name=name, fit=fit, reason=reason)
+
+    if base is not None:
+        base_name, base_res = base
+        fit, reason = variant_fit(base_res, caps, free_vram_gb)
+        if fit != FIT_INCOMPATIBLE:
+            return VariantChoice(name=base_name, fit=fit, reason=reason)
+
+    if compat:
+        name, _res, fit, reason = min(compat, key=lambda r: _vram(r[1]))
+        return VariantChoice(name=name, fit=fit, reason=reason)
+    return None
