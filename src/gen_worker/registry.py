@@ -16,7 +16,7 @@ from typing import Any, Callable, Dict, List, Optional
 import msgspec
 
 from .api.binding import Binding
-from .api.decorators import ATTR, EndpointDecl, Resources
+from .api.decorators import ATTR, Compile, EndpointDecl, Resources
 from .discovery.names import slugify_name
 from .discovery.walk import find_endpoints
 
@@ -58,6 +58,7 @@ class EndpointSpec:
     models: Dict[str, Binding] = field(default_factory=dict)  # slot -> binding
     timeout_ms: Optional[int] = None
     runtime: Optional[str] = None
+    compile: Optional[Compile] = None  # opt-in torch.compile spec (#384)
     module: str = ""              # declaring module
     walked_module: str = ""       # top-level package the object was found under
 
@@ -155,6 +156,7 @@ def _spec_for_handler(
         resources=resources,
         models=dict(models),
         runtime=decl.runtime,
+        compile=decl.compile,
         module=getattr(cls or method, "__module__", "") or "",
         walked_module=walked_module,
     )
