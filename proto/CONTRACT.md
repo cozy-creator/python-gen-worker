@@ -335,13 +335,28 @@ predicted demand, UNLOAD for headroom).
 
 | field | producer | consumer | semantics |
 |---|---|---|---|
-| `op` | O | W model layer | DOWNLOAD = to disk only; LOAD = promote to VRAM (fetching first if needed); UNLOAD = demote out of VRAM (stays on disk/RAM per cache policy) |
+| `op` | O | W model layer | DOWNLOAD = to disk only; LOAD = promote to VRAM (fetching first if needed); UNLOAD = demote out of VRAM (stays on disk/RAM per cache policy); ADOPT_COMPILE_CACHE = hot-adopt a torch.compile cache (below) |
 | `ref` | O | W | canonical ref |
-| `snapshot` | O resolver | W downloader | required for tensorhub-CAS refs not already local; unset for hf/civitai |
+| `snapshot` | O resolver | W downloader | required for tensorhub-CAS refs not already local; unset for hf/civitai; always set on ADOPT_COMPILE_CACHE |
 
 Every ModelOp is answered by ≥1 `ModelEvent` for the ref (success path emits
 the new state; failure path emits FAILED). W MAY refuse UNLOAD for a model
 serving in-flight jobs: `ModelEvent{FAILED, error:"model_in_use"}`.
+
+**ADOPT_COMPILE_CACHE** (hot adoption, #567): `ref` is a compile-cache flavor
+ref — `_system/family-<f>#inductor-<sku>-torch<maj.min>`. W downloads the
+artifact snapshot, verifies its key (family/SKU/torch/triton/libs) against
+its own runtime, seeds the inductor+triton cache dirs, re-wraps the
+already-VRAM-resident modules of endpoints declaring
+`compile=Compile(family=<f>)` (module re-wrap only — weights are untouched,
+no reload), runs one warmup trace, and answers
+`ModelEvent{ADOPTED, duration_ms}`. ANY failure ⇒ discard, stay eager, answer
+`ModelEvent{FAILED, error:"adopt_failed:<reason>"}` — adoption must never
+degrade service. O policy: send only to job-idle workers (no in-flight jobs),
+at most one worker per release at a time, and only when the artifact's
+version key matches the pod (SKU + torch); W enforces the same checks
+defensively. Workers predating this kind ignore it silently (unknown enum, no
+ModelEvent); O treats the absence of a reply as not-adopted, never an error.
 
 ### ModelEvent (W → O)
 The single model-residency channel. Emitted for ModelOp outcomes AND
@@ -356,12 +371,18 @@ download-event fabric.
 | `vram_bytes` | W measured (allocator delta across load) | O model-size cache → VRAM packing | set with IN_VRAM |
 | `error` | W | O op-failure handling (e.g. OOM ⇒ pick LRU vram model, send UNLOAD then retry LOAD; url_expired ⇒ re-mint snapshot and re-send) + triage log | set with FAILED |
 | `bytes_done`/`bytes_total` | W downloader (emit ≤1 per 5s per ref) | O boot/capacity progress display | set with DOWNLOADING |
+| `duration_ms` | W adopt handler | O adoption bookkeeping + fleet-adoption-latency metric | set with ADOPTED: wall time of download+seed+re-wrap+warmup |
 
 **State machine per (worker, ref):** `DOWNLOADING → ON_DISK → IN_RAM ⇄ IN_VRAM`,
 demotions emit the new lower tier, `EVICTED` = removed from disk (fully gone).
 `FAILED` is not a residency: it reports "the last op failed" via `error`;
 residency stays whatever the last non-FAILED event said. O's baseline is
-`Hello.models`; events mutate it; reconnect re-baselines.
+`Hello.models`; events mutate it; reconnect re-baselines. `ADOPTED` is also
+not a residency tier: it reports one-shot success of ADOPT_COMPILE_CACHE for
+a compile-cache ref (whose bytes independently report DOWNLOADING/ON_DISK
+like any snapshot download). O MUST NOT feed `_system/family-*` compile-cache
+refs into model-failure availability handling: a failed cache ref means
+"stays eager", never "function unavailable".
 
 ### FnUnavailable (W → O)
 Emitted when a hardware-axis gate fails at startup or model-load time
@@ -442,6 +463,17 @@ the ONE prefetch mechanism. W's eviction policy never removes a `keep` ref
 from disk while headroom allows; if disk pressure forces it, W emits
 `ModelEvent{EVICTED}` so O knows to re-download later.
 
+**Compile-cache snapshots (#569).** When a release's endpoint declares
+`compile=Compile(family=...)` and boot-attach is enabled (opt-in; default OFF
+— boot-time attach worsens TTFI, hot adoption is the primary path), O MAY add
+the resolved `_system/family-<f>#inductor-<sku>-torch<maj.min>` snapshot to
+`RunJob.snapshots` keyed by that ref, alongside the model snapshots. W
+recognizes the key by the `_system/family-<f>#inductor-` prefix for the
+declared family, downloads it like any snapshot, and seeds it before pipeline
+load; verification failure ⇒ eager, never an error. The same ref may arrive
+via `ModelOp{DOWNLOAD}` (pre-positioning) or `ModelOp{ADOPT_COMPILE_CACHE}`
+(hot adoption, §4).
+
 ---
 
 ## 8. Blob-ref output flow (results > ~64KB)
@@ -500,7 +532,11 @@ Stream-level (gRPC status) errors:
 
 Model-op errors travel as `ModelEvent{FAILED, error}` with a closed-ish
 vocabulary: `oom`, `model_in_use`, `url_expired`, `digest_mismatch`,
-`insufficient_disk`, `download_failed`, `load_failed`.
+`insufficient_disk`, `download_failed`, `load_failed`, and — for
+ADOPT_COMPILE_CACHE only — `adopt_failed:<reason>` with reason ∈ {`bad_ref`,
+`no_endpoint`, `not_resident`, `model_in_use`, `download`,
+`artifact_missing`, `artifact_invalid`, `key_mismatch`, `no_target`,
+`warmup`}.
 
 ---
 
