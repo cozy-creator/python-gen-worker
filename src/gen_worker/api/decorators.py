@@ -91,7 +91,15 @@ class Compile(msgspec.Struct, frozen=True):
     ``Compile(family="flux2-klein-4b", shapes=((768, 768), (1024, 1024)))``
     names the model FAMILY (caches key on the traced graph, so every
     fine-tune of a family shares one artifact) and the (width, height) set
-    the compile job warms. Declaring this does NOT force compilation: the
+    the compile job warms.
+
+    SHAPES DERIVE FROM THE PAYLOAD PRESET ENUM (ie#345 fleet policy): when
+    the endpoint's payload uses size buckets, ``shapes`` must be exactly
+    that bucket table — one source of truth, 100% cache coverage of legal
+    requests. Endpoints still accepting free width/height use the family's
+    dialect-default shapes until they adopt buckets. CFG is a graph shape
+    too: CFG variants trace batch-2 graphs, distilled variants batch-1 —
+    a variant must never cross the boundary (clamp guidance_scale). Declaring this does NOT force compilation: the
     worker arms torch.compile only when a verified cache artifact for
     (family, SKU, torch, triton) is seeded — otherwise it stays eager.
     See ``gen_worker.compile_cache``.
