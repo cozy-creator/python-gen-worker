@@ -82,6 +82,7 @@ def detect_worker_capabilities(*, extra_libs: Optional[List[str]] = None) -> Ten
 # ---------------------------------------------------------------------------
 
 FIT_FITS = "fits"
+FIT_EMERGENCY = "emergency_quant"
 FIT_OFFLOAD = "offload"
 FIT_INCOMPATIBLE = "incompatible"
 
@@ -89,7 +90,7 @@ FIT_INCOMPATIBLE = "incompatible"
 @dataclass(frozen=True)
 class VariantChoice:
     name: str
-    fit: str  # fits | offload
+    fit: str  # fits | emergency_quant | offload
     reason: str = ""
 
 
@@ -102,6 +103,9 @@ def variant_fit(
 
     - ``incompatible``: hard gates unmet (no CUDA GPU, compute_capability
       above this GPU's SM, required quant libraries not installed).
+    - ``emergency_quant``: does not fit, but the env-gated emergency nf4 rung
+      (th#546 emergency lane; loading layer) is enabled and the 4-bit
+      estimate fits — runs at below-platform quality, loudly.
     - ``offload``: runnable, but declared vram_gb exceeds free VRAM — the
       models/memory.py offload ladder carries it (slower).
     - ``fits``: full-VRAM residency expected.
@@ -116,12 +120,20 @@ def variant_fit(
             f"requires compute capability >= {float(req_cc):g}, "
             f"GPU is SM{caps.gpu_sm}"
         )
-    missing = [l for l in libs if l not in (caps.installed_libs or [])]
+    missing = [lib for lib in libs if lib not in (caps.installed_libs or [])]
     if missing:
         return FIT_INCOMPATIBLE, f"missing libraries: {', '.join(missing)}"
     vram = getattr(resources, "vram_gb", None)
     if vram is None or float(vram) <= float(free_vram_gb):
         return FIT_FITS, ""
+    from .loading import EMERGENCY_FIT_FACTOR, emergency_quant_enabled
+
+    if emergency_quant_enabled() and \
+            float(vram) * EMERGENCY_FIT_FACTOR <= float(free_vram_gb):
+        return FIT_EMERGENCY, (
+            f"runs (emergency quality): {float(vram):g} GB VRAM via 4-bit "
+            f"emergency quantization, {float(free_vram_gb):.1f} GB free"
+        )
     return FIT_OFFLOAD, (
         f"declares {float(vram):g} GB VRAM, {float(free_vram_gb):.1f} GB free"
     )
@@ -141,9 +153,11 @@ def select_variant(
       1. drop incompatible rows (SM / library gates);
       2. among variants that FIT free VRAM, prefer the largest declared
          vram_gb (bigger = higher-quality precision);
-      3. none fit → the base binding + the offload ladder;
-      4. no base → the smallest-VRAM compatible variant, offloaded;
-      5. nothing routable → None.
+      3. none fit → an emergency_quant row if the env-gated nf4 rung applies
+         (runs at below-platform quality, loudly);
+      4. else the base binding + the offload ladder;
+      5. no base → the smallest-VRAM compatible variant, offloaded;
+      6. nothing routable → None.
     """
     def _vram(res: Any) -> float:
         v = getattr(res, "vram_gb", None)
@@ -158,6 +172,14 @@ def select_variant(
     fitting = [row for row in compat if row[2] == FIT_FITS]
     if fitting:
         name, _res, fit, reason = max(fitting, key=lambda r: _vram(r[1]))
+        return VariantChoice(name=name, fit=fit, reason=reason)
+
+    # Emergency rung (th#546): nothing fits, but 4-bit emergency quantization
+    # would — prefer it over the offload ladder (ladder position: after
+    # stored flavors, before CPU offload).
+    emergency = [row for row in compat if row[2] == FIT_EMERGENCY]
+    if emergency:
+        name, _res, fit, reason = max(emergency, key=lambda r: _vram(r[1]))
         return VariantChoice(name=name, fit=fit, reason=reason)
 
     if base is not None:

@@ -60,15 +60,19 @@ def detect_diffusers_variant(model_path: Path) -> Optional[str]:
     return None
 
 
-_SAFETENSORS_DTYPE_NAMES = {"BF16": "bf16", "F16": "fp16", "F32": "fp32"}
+_SAFETENSORS_DTYPE_NAMES = {
+    "BF16": "bf16", "F16": "fp16", "F32": "fp32", "F8_E4M3": "fp8",
+}
 _MAX_SAFETENSORS_HEADER_BYTES = 100 << 20
 
 
 def detect_on_disk_dtype(model_path: Path) -> str:
     """Majority weight dtype across the snapshot's safetensors headers
-    ("bf16" / "fp16" / "fp32", "" when undetectable). Hub bindings carry no
-    dtype and mirrored repos use unsuffixed filenames, so without this a bf16
-    snapshot silently loads via diffusers' fp32 default — 2x the VRAM."""
+    ("bf16" / "fp16" / "fp32" / "fp8", "" when undetectable). Hub bindings
+    carry no dtype and mirrored repos use unsuffixed filenames, so without
+    this a bf16 snapshot silently loads via diffusers' fp32 default — 2x the
+    VRAM. "fp8" marks an fp8-E4M3-stored flavor whose storage precision must
+    be preserved (see :func:`apply_fp8_storage`)."""
     import struct
 
     counts: Dict[str, int] = {}
@@ -174,80 +178,60 @@ def synthesize_quantization_config(attrs: Optional[Dict[str, str]]) -> Optional[
     return BitsAndBytesConfig(load_in_8bit=True)
 
 
-# Default pipeline components a binding-level quantize= applies to: the
-# denoiser dominates VRAM and tolerates weight quantization; text encoders /
-# VAE stay at full precision (quality-safe default). Names absent from a
-# given pipeline are simply never matched by diffusers.
-_QUANTIZE_COMPONENTS: tuple[str, ...] = ("transformer", "unet")
+# Pipeline components fp8 storage applies to: the denoiser dominates VRAM and
+# tolerates fp8-E4M3 weight rounding; text encoders / VAE stay at compute
+# precision (quality-safe default, QUANTIZATION-POLICY.md component policy).
+_FP8_STORAGE_COMPONENTS: tuple[str, ...] = ("transformer", "unet")
 
 
-def _quantize_backend_kwargs(method: str) -> tuple[str, Dict[str, Any]]:
-    """(PipelineQuantizationConfig backend, quant_kwargs) for a quantize method."""
-    import torch
+def apply_fp8_storage(obj: Any, *, compute_dtype: Any = None) -> bool:
+    """fp8-E4M3 weight storage with per-layer upcast to ``compute_dtype``
+    (diffusers layerwise casting) on a pipeline's denoiser — or on ``obj``
+    itself when it is a bare module (th#546 two-format policy).
 
-    if method == "int8":
-        return "bitsandbytes_8bit", {"load_in_8bit": True}
-    if method in ("nf4", "fp4"):
-        return "bitsandbytes_4bit", {
-            "load_in_4bit": True,
-            "bnb_4bit_quant_type": method,
-            "bnb_4bit_compute_dtype": torch.bfloat16,
-            "bnb_4bit_use_double_quant": True,
-        }
-    if method == "int8-torchao":
-        return "torchao", {"quant_type": "int8wo"}
-    if method == "int4-torchao":
-        return "torchao", {"quant_type": "int4wo"}
-    if method == "fp8-torchao":
-        return "torchao", {"quant_type": "float8wo_e4m3"}
-    raise ValueError(f"unknown quantize method {method!r}")
-
-
-def binding_quantization_config(method: str, cls: Any) -> Optional[Any]:
-    """Quantization config for a binding-level ``quantize=`` method (#389).
-
-    Pipeline classes get a diffusers ``PipelineQuantizationConfig`` scoped to
-    the denoiser; bare component classes get the matching component-level
-    config. CPU-only hosts return None with a warning (local-dev fallback —
-    bnb/torchao quantized load requires CUDA)."""
-    if not method:
-        return None
+    This is the universal VRAM-fit mechanism: fp8 bytes resident, bf16/fp16
+    compute, no fp8 silicon required. Also the consumption path for stored
+    ``#fp8`` flavors — their storage precision is preserved instead of being
+    upcast into 2x the VRAM. Returns True when any module was converted;
+    failures degrade to full-precision serving with a warning."""
     try:
         import torch
-
-        if not torch.cuda.is_available():
-            logger.warning(
-                "quantize=%r ignored: CUDA unavailable (CPU dev fallback)", method
-            )
-            return None
     except ImportError:
-        logger.warning("quantize=%r ignored: torch not installed", method)
-        return None
+        logger.warning("storage_dtype=fp8 ignored: torch not installed")
+        return False
+    storage = getattr(torch, "float8_e4m3fn", None)
+    if storage is None:
+        logger.warning("storage_dtype=fp8 ignored: torch lacks float8_e4m3fn")
+        return False
+    if compute_dtype is None:
+        compute_dtype = torch.bfloat16
 
-    backend, kwargs = _quantize_backend_kwargs(method)
-    try:
-        import diffusers
-        from diffusers.quantizers import PipelineQuantizationConfig
-    except ImportError as exc:
-        raise RuntimeError(
-            f"quantize={method!r} requires diffusers with pipeline-level "
-            f"quantization support (PipelineQuantizationConfig): {exc}"
-        ) from exc
+    targets: List[tuple[str, Any]] = []
+    for name in _FP8_STORAGE_COMPONENTS:
+        mod = getattr(obj, name, None)
+        if mod is not None and hasattr(mod, "parameters"):
+            targets.append((name, mod))
+    if not targets and hasattr(obj, "parameters"):
+        targets.append((type(obj).__name__, obj))
 
-    if isinstance(cls, type) and issubclass(cls, diffusers.DiffusionPipeline):
-        return PipelineQuantizationConfig(
-            quant_backend=backend,
-            quant_kwargs=kwargs,
-            components_to_quantize=list(_QUANTIZE_COMPONENTS),
-        )
-    # Bare component (e.g. a transformer/unet class): component-level config.
-    if backend == "torchao":
-        from diffusers.quantizers.quantization_config import TorchAoConfig
+    applied = False
+    for name, mod in targets:
+        try:
+            fn = getattr(mod, "enable_layerwise_casting", None)
+            if callable(fn):
+                fn(storage_dtype=storage, compute_dtype=compute_dtype)
+            else:
+                from diffusers.hooks import apply_layerwise_casting
 
-        return TorchAoConfig(**kwargs)
-    from diffusers.quantizers.quantization_config import BitsAndBytesConfig
-
-    return BitsAndBytesConfig(**kwargs)
+                apply_layerwise_casting(
+                    mod, storage_dtype=storage, compute_dtype=compute_dtype
+                )
+            applied = True
+            logger.info("fp8 storage enabled on %s (compute %s)", name, compute_dtype)
+        except Exception as exc:
+            logger.warning("fp8 storage failed on %s (%s); serving at full precision",
+                           name, exc)
+    return applied
 
 
 def _single_file_checkpoint(path: Path) -> Optional[Path]:
@@ -340,21 +324,126 @@ def _merge_sharded_checkpoint(snapshot_dir: Path, index_path: Path) -> Path:
     return merged
 
 
+# --- Emergency 4-bit rung (th#546 emergency lane) --------------------------
+# Fit ladder: bf16 -> #fp8 flavor -> #nvfp4 (Blackwell) -> EMERGENCY nf4 ->
+# CPU offload. The emergency rung runtime-quantizes the denoiser to bnb nf4 at
+# load when even the downloaded flavor cannot fit free VRAM. LOCAL/fit-
+# emergency only: enabled by env (cozy-local sets it), never a binding kwarg,
+# never scheduled by the production hub.
+EMERGENCY_QUANT_ENV = "GEN_WORKER_EMERGENCY_QUANT"
+# Coarse whole-model resident factor after nf4-quantizing the denoiser
+# (denoiser ~4x smaller; encoders/VAE stay at compute dtype).
+EMERGENCY_FIT_FACTOR = 0.45
+_EMERGENCY_MARGIN_GB = 2.0
+
+
+def emergency_quant_enabled() -> bool:
+    import os
+
+    return os.environ.get(EMERGENCY_QUANT_ENV, "").strip().lower() in ("1", "true", "yes")
+
+
+def snapshot_weight_bytes(model_path: Path) -> int:
+    """Total tensor bytes across the snapshot's safetensors (header-declared
+    data ranges; no tensor reads). 0 when undetectable."""
+    import struct
+
+    total = 0
+    try:
+        for p in sorted(Path(model_path).rglob("*.safetensors")):
+            with open(p, "rb") as f:
+                raw = f.read(8)
+                if len(raw) < 8:
+                    continue
+                (n,) = struct.unpack("<Q", raw)
+                if n <= 0 or n > _MAX_SAFETENSORS_HEADER_BYTES:
+                    continue
+                header = json.loads(f.read(n))
+            for value in header.values():
+                if isinstance(value, dict) and "data_offsets" in value:
+                    s, e = value["data_offsets"]
+                    total += int(e) - int(s)
+    except (OSError, ValueError):
+        return 0
+    return total
+
+
+def emergency_quantization_config(cls: Any) -> Optional[Any]:
+    """Denoiser-scoped bnb-nf4 config for the emergency rung. None (with a
+    warning) when the stack can't do it — the offload ladder then carries it."""
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return None
+        import diffusers
+        from diffusers.quantizers import PipelineQuantizationConfig
+    except ImportError as exc:
+        logger.warning("emergency nf4 unavailable (%s); falling to offload", exc)
+        return None
+    kwargs = {
+        "load_in_4bit": True,
+        "bnb_4bit_quant_type": "nf4",
+        "bnb_4bit_compute_dtype": torch.bfloat16,
+        "bnb_4bit_use_double_quant": True,
+    }
+    if isinstance(cls, type) and issubclass(cls, diffusers.DiffusionPipeline):
+        return PipelineQuantizationConfig(
+            quant_backend="bitsandbytes_4bit",
+            quant_kwargs=kwargs,
+            components_to_quantize=list(_FP8_STORAGE_COMPONENTS),
+        )
+    from diffusers.quantizers.quantization_config import BitsAndBytesConfig
+
+    return BitsAndBytesConfig(**kwargs)
+
+
+def _emergency_rung(cls: Any, path: Path, *, fp8_planned: bool) -> Optional[Any]:
+    """The fit check for the emergency rung: estimated resident bytes (after
+    any planned fp8 storage) still above free VRAM => nf4 config + LOUD
+    warning. None = rung not needed / not possible."""
+    if not emergency_quant_enabled():
+        return None
+    from .memory import get_available_vram_gb
+
+    free_gb = get_available_vram_gb()
+    if free_gb <= 0:
+        return None
+    disk = snapshot_weight_bytes(path)
+    if disk <= 0:
+        return None
+    resident_gb = disk / float(1 << 30)
+    if fp8_planned and detect_on_disk_dtype(path) != "fp8":
+        resident_gb *= 0.5  # bf16/fp16 snapshot halved by fp8 storage
+    if resident_gb <= max(0.0, free_gb - _EMERGENCY_MARGIN_GB):
+        return None
+    qc = emergency_quantization_config(cls)
+    if qc is not None:
+        logger.warning(
+            "EMERGENCY 4-bit quantization engaged for %s (%.1f GB weights, "
+            "%.1f GB free) — quality below platform standards; a larger card "
+            "or Blackwell SKU would serve stored flavors instead.",
+            path, resident_gb, free_gb,
+        )
+    return qc
+
+
 def load_from_pretrained(
     cls: Any,
     path: str | Path,
     *,
     dtype: str = "",
     attrs: Optional[Dict[str, str]] = None,
-    quantize: str = "",
+    storage_dtype: str = "",
 ) -> Any:
     """``cls.from_pretrained(path)`` with the standard trimmings: torch dtype
     from the binding's dtype string, on-disk variant detection, quant-library
     preload, and quant-config synthesis; single-file checkpoints route through
-    ``cls.from_single_file``. ``quantize`` is the binding's runtime
-    quantization method (#389), applied here so endpoint code stays
-    quantize-agnostic. Used by the executor to satisfy pipeline-typed
-    ``setup()`` annotations; endpoints may also call it."""
+    ``cls.from_single_file``. ``storage_dtype="fp8"`` (or an fp8-stored
+    snapshot) keeps denoiser weights in fp8 storage with per-layer upcast to
+    the compute dtype; the emergency nf4 rung engages when even that cannot
+    fit free VRAM (env-gated, cozy-local). Used by the executor to satisfy
+    pipeline-typed ``setup()`` annotations; endpoints may also call it."""
     path = str(path)
     ensure_quant_library_imported(attrs)
     kwargs: Dict[str, Any] = {}
@@ -368,52 +457,46 @@ def load_from_pretrained(
     variant = detect_diffusers_variant(Path(path))
     if variant in ("bf16", "fp16"):
         kwargs["variant"] = variant
+    sniffed = detect_on_disk_dtype(Path(path))
     if "torch_dtype" not in kwargs:
         # Bindings without an explicit dtype (Hub mirrors): honor the weights'
-        # own precision instead of diffusers' fp32 default.
-        sniffed = detect_on_disk_dtype(Path(path))
-        if sniffed in ("bf16", "fp16"):
+        # own precision instead of diffusers' fp32 default. fp8-stored flavors
+        # load at the compute default (bf16) and get their storage precision
+        # restored by apply_fp8_storage below.
+        if sniffed in ("bf16", "fp16", "fp8"):
             try:
-                kwargs["torch_dtype"] = get_torch_dtype(sniffed)
+                kwargs["torch_dtype"] = get_torch_dtype(
+                    "bf16" if sniffed == "fp8" else sniffed
+                )
             except ImportError:
                 # torch-less environment (unit tests / CPU tools) — loaders
                 # that actually need torch will fail on their own terms.
                 pass
-    binding_qc = False
-    if read_on_disk_quant_config(Path(path)):
-        # Already-quantized bytes on disk win — re-quantizing is invalid.
-        if quantize:
-            logger.warning(
-                "quantize=%r ignored: checkpoint already carries a "
-                "quantization_config", quantize,
-            )
-    else:
+    fp8_storage = storage_dtype == "fp8" or sniffed == "fp8"
+    if not read_on_disk_quant_config(Path(path)):
         qc = synthesize_quantization_config(attrs)
-        if qc is not None and quantize:
-            logger.warning(
-                "quantize=%r ignored: checkpoint attrs declare pre-quantized "
-                "weights", quantize,
-            )
-        if qc is None and quantize:
-            qc = binding_quantization_config(quantize, cls)
-            binding_qc = qc is not None
+        if qc is None:
+            qc = _emergency_rung(cls, Path(path), fp8_planned=fp8_storage)
+            if qc is not None:
+                fp8_storage = False  # nf4 supersedes the fp8 rung
         if qc is not None:
             kwargs["quantization_config"] = qc
     single = _single_file_checkpoint(Path(path))
     if single is not None and callable(getattr(cls, "from_single_file", None)):
         kwargs.pop("variant", None)
-        return cls.from_single_file(str(single), **kwargs)
-    try:
-        return cls.from_pretrained(path, **kwargs)
-    except (TypeError, ValueError):
-        # Not every loader takes variant=/quantization_config= (transformers
-        # models, single-file components); retry with the bare essentials.
-        # An explicitly-requested binding quantize is never silently dropped —
-        # if the loader rejects it, the second call's error propagates.
-        kwargs.pop("variant", None)
-        if not binding_qc:
+        pipe = cls.from_single_file(str(single), **kwargs)
+    else:
+        try:
+            pipe = cls.from_pretrained(path, **kwargs)
+        except (TypeError, ValueError):
+            # Not every loader takes variant=/quantization_config= (transformers
+            # models, single-file components); retry with the bare essentials.
+            kwargs.pop("variant", None)
             kwargs.pop("quantization_config", None)
-        return cls.from_pretrained(path, **kwargs)
+            pipe = cls.from_pretrained(path, **kwargs)
+    if fp8_storage and "quantization_config" not in kwargs:
+        apply_fp8_storage(pipe, compute_dtype=kwargs.get("torch_dtype"))
+    return pipe
 
 
 __all__ = [
@@ -423,6 +506,9 @@ __all__ = [
     "ensure_quant_library_imported",
     "read_on_disk_quant_config",
     "synthesize_quantization_config",
-    "binding_quantization_config",
+    "apply_fp8_storage",
+    "emergency_quant_enabled",
+    "emergency_quantization_config",
+    "snapshot_weight_bytes",
     "load_from_pretrained",
 ]
