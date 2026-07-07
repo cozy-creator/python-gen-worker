@@ -63,13 +63,22 @@ The slot name is the `models={}` key (or, with the single-binding `model=`
 shorthand, the `setup()` parameter name). It is never a constructor argument.
 
 ```python
-HF("owner/repo", revision=..., dtype=..., subfolder=..., files=(...))
-Hub("owner/repo", tag="prod", flavor="")     # tensorhub
+HF("owner/repo", revision=..., dtype=..., subfolder=..., files=(...), quantize=...)
+Hub("owner/repo", tag="prod", flavor="", quantize="")   # tensorhub
 Civitai("123456", version="789")             # civitai model id
 ModelScope("owner/repo", revision=..., files=(...))
 ```
 
 `files` are `snapshot_download` allow-patterns for split-checkpoint repos.
+
+`quantize=` selects runtime (load-time) quantization of the denoiser —
+`"int8" | "nf4" | "fp4"` (bitsandbytes) or
+`"int8-torchao" | "int4-torchao" | "fp8-torchao"` (torchao weight-only).
+The loading layer applies it at `from_pretrained` time; endpoint code stays
+quantize-agnostic, `ModelEvent.vram_bytes` reports the measured post-quant
+size, and on CPU-only hosts the method is ignored with a warning. A lower-VRAM
+variant is just a variant binding: `variants={"generate-nf4":
+(HF("org/base", dtype="bf16", quantize="nf4"), Resources(vram_gb=8))}`.
 
 ## Variants
 

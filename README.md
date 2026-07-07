@@ -74,10 +74,12 @@ class Generate:
         return Output(text=ctx.save_image(image).ref)
 ```
 
-Bindings: `HF(id, revision=, dtype=, subfolder=, files=)`,
-`Hub(ref, tag=, flavor=)`, `Civitai(id, version=)`, `ModelScope(id, ...)`.
+Bindings: `HF(id, revision=, dtype=, subfolder=, files=, quantize=)`,
+`Hub(ref, tag=, flavor=, quantize=)`, `Civitai(id, version=)`, `ModelScope(id, ...)`.
 The slot name comes from the `models={}` key or the `setup()` parameter —
-never a constructor argument.
+never a constructor argument. `quantize="int8"|"nf4"|"fp4"|"int8-torchao"|
+"int4-torchao"|"fp8-torchao"` applies runtime quantization to the denoiser at
+load time (ignored with a warning on CPU-only hosts).
 
 Multi-variant endpoints (`bf16`/`fp8`/... checkpoints with different VRAM
 envelopes) declare `variants={name: (binding, Resources)}` — one handler body,

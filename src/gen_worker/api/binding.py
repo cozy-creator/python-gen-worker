@@ -20,20 +20,41 @@ def _clean(s: object) -> str:
     return str(s or "").strip()
 
 
+# Runtime (load-time) quantization methods (th#546 / #389). Applied by the
+# loading layer at from_pretrained time; never a stored artifact, never on the
+# wire ref. bnb: "int8" (LLM.int8), "nf4"/"fp4" (4-bit, bf16 compute).
+# torchao (weight-only): "int8-torchao", "int4-torchao", "fp8-torchao"
+# (fp8 weight storage needs SM >= 8.9 kernels).
+QUANTIZE_METHODS: tuple[str, ...] = (
+    "int8", "nf4", "fp4", "int8-torchao", "int4-torchao", "fp8-torchao",
+)
+
+
+def _clean_quantize(v: object) -> str:
+    q = _clean(v).lower()
+    if q and q not in QUANTIZE_METHODS:
+        raise ValueError(
+            f"unknown quantize method {q!r}; expected one of {QUANTIZE_METHODS}"
+        )
+    return q
+
+
 @dataclass(frozen=True)
 class Hub:
-    """Tensorhub-backed binding: ``Hub("owner/repo", tag=, flavor=)``."""
+    """Tensorhub-backed binding: ``Hub("owner/repo", tag=, flavor=, quantize=)``."""
 
     PROVIDER: ClassVar[str] = "tensorhub"
 
     ref: str
     tag: str = "prod"
     flavor: str = ""
+    quantize: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "ref", _clean(self.ref))
         object.__setattr__(self, "tag", _clean(self.tag) or "prod")
         object.__setattr__(self, "flavor", _clean(self.flavor))
+        object.__setattr__(self, "quantize", _clean_quantize(self.quantize))
         if not self.ref:
             raise ValueError(f"{type(self).__name__} requires a non-empty ref")
 
@@ -44,12 +65,14 @@ class Hub:
 
 @dataclass(frozen=True)
 class HF:
-    """HuggingFace-backed binding: ``HF(id, revision=, dtype=, subfolder=, files=)``.
+    """HuggingFace-backed binding: ``HF(id, revision=, dtype=, subfolder=, files=, quantize=)``.
 
     ``files`` are ``snapshot_download`` ``allow_patterns`` globs — set them to
     fetch only specific files (ComfyUI / split-checkpoint repos with no
     ``model_index.json``). ``dtype`` selects the torch precision at load time
-    (``"bf16"`` / ``"fp16"`` / ``"fp32"``).
+    (``"bf16"`` / ``"fp16"`` / ``"fp32"``). ``quantize`` selects a runtime
+    quantization method applied at load time (see ``QUANTIZE_METHODS``);
+    ignored with a warning on CPU-only hosts.
     """
 
     PROVIDER: ClassVar[str] = "hf"
@@ -59,6 +82,7 @@ class HF:
     dtype: str = ""
     subfolder: str = ""
     files: tuple[str, ...] = ()
+    quantize: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "ref", _clean(self.ref))
@@ -68,6 +92,7 @@ class HF:
         object.__setattr__(
             self, "files", tuple(_clean(p) for p in self.files if _clean(p))
         )
+        object.__setattr__(self, "quantize", _clean_quantize(self.quantize))
         if "/" not in self.ref:
             raise ValueError(f"HF(id=) must be 'owner/repo', got {self.ref!r}")
 
@@ -136,8 +161,8 @@ def wire_ref(binding: Binding) -> str:
     """Canonical ref string for the wire / cache key.
 
     Hub refs carry ``:tag`` (non-prod) and ``#flavor`` suffixes; HF refs
-    carry ``@revision``. Load-time metadata (dtype/subfolder/files) never
-    enters the ref.
+    carry ``@revision``. Load-time metadata (dtype/subfolder/files/quantize)
+    never enters the ref.
     """
     out = binding.ref
     if isinstance(binding, Hub):
@@ -150,4 +175,7 @@ def wire_ref(binding: Binding) -> str:
     return out
 
 
-__all__ = ["Binding", "BINDING_TYPES", "Civitai", "HF", "Hub", "ModelScope", "wire_ref"]
+__all__ = [
+    "Binding", "BINDING_TYPES", "Civitai", "HF", "Hub", "ModelScope",
+    "QUANTIZE_METHODS", "wire_ref",
+]
