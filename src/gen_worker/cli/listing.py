@@ -62,15 +62,55 @@ def _function_input_schema(payload_type: Optional[type]) -> Dict[str, Any]:
     return s
 
 
+def _describe_resources(resources: Any) -> Dict[str, Any]:
+    """JSON-able view of a function's ``Resources`` declaration."""
+    if resources is None:
+        return {}
+    try:
+        d = msgspec.to_builtins(resources)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def detected_capabilities() -> Dict[str, Any]:
+    """This machine's capabilities block (#380): SM, torch/cuda, installed
+    quant libs, free VRAM. Imports torch; loads no model."""
+    from ..models.hub_policy import detect_worker_capabilities
+    from ..models.memory import get_available_vram_gb
+
+    caps = detect_worker_capabilities()
+    out = caps.to_dict()
+    out["free_vram_gb"] = round(get_available_vram_gb(), 2)
+    return out
+
+
 def function_entries(
     candidates: List["_SelectedFunction"],
+    *,
+    detected: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """The stable ``functions`` array, shared by ``run --list`` and
-    ``serve --list-functions --json``."""
+    ``serve --list-functions --json``. With ``detected`` (the
+    ``detected_capabilities()`` block), each entry carries a ``fit`` verdict
+    (``fits | offload | incompatible``) computed from its ``Resources``."""
+    from ..models.hub_policy import TensorhubWorkerCapabilities, variant_fit
+
+    caps: Optional[TensorhubWorkerCapabilities] = None
+    free_gb = 0.0
+    if detected is not None:
+        caps = TensorhubWorkerCapabilities(
+            cuda_version=str(detected.get("cuda_version") or ""),
+            gpu_sm=int(detected.get("gpu_sm") or 0),
+            torch_version=str(detected.get("torch_version") or ""),
+            installed_libs=list(detected.get("installed_libs") or []),
+        )
+        free_gb = float(detected.get("free_vram_gb") or 0.0)
+
     out: List[Dict[str, Any]] = []
     for c in sorted(candidates, key=lambda c: c.fn_name):
         output_type = getattr(c, "output_type", None)
-        out.append({
+        entry: Dict[str, Any] = {
             "name": c.fn_name,
             "class": getattr(c.cls, "__name__", None) if c.cls is not None else None,
             "method": getattr(c, "attr_name", None) or None,
@@ -82,7 +122,20 @@ def function_entries(
                 param: describe_binding(binding)
                 for param, binding in (getattr(c, "bindings", {}) or {}).items()
             },
-        })
+        }
+        resources = getattr(c, "resources", None)
+        res_dict = _describe_resources(resources)
+        if res_dict:
+            entry["resources"] = res_dict
+        variant_of = str(getattr(c, "variant_of", "") or "")
+        if variant_of:
+            entry["variant_of"] = variant_of
+        if caps is not None:
+            fit, reason = variant_fit(resources, caps, free_gb)
+            entry["fit"] = fit
+            if reason:
+                entry["fit_reason"] = reason
+        out.append(entry)
     return out
 
 
@@ -96,14 +149,16 @@ def build_description(
         c.cls.__name__ for c in candidates if c.cls is not None
     })
     kinds = sorted({str(getattr(c, "kind", "") or "") for c in candidates if getattr(c, "kind", "")})
+    detected = detected_capabilities()
     return {
         "protocol_version": PROTOCOL_VERSION,
         "gen_worker_version": gen_worker_version(),
         "capabilities": list(CAPABILITIES),
+        "detected": detected,
         "endpoint": {
             "main_module": main_module,
             "kind": kinds[0] if len(kinds) == 1 else kinds,
             "classes": classes,
         },
-        "functions": function_entries(candidates),
+        "functions": function_entries(candidates, detected=detected),
     }

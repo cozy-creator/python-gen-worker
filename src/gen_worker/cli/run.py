@@ -65,6 +65,15 @@ def add_subparser(sub: argparse._SubParsersAction[Any]) -> None:
         help="Method name to invoke (inferred when only one is registered).",
     )
     p.add_argument(
+        "--variant", dest="variant", default=None,
+        help=(
+            "Pick a declared `variants={}` row by name, or 'auto' to select "
+            "the best variant for this machine (SM/libraries gates, then the "
+            "largest precision that fits free VRAM; falls back to the base "
+            "binding + the offload ladder)."
+        ),
+    )
+    p.add_argument(
         "--payload", dest="payload", default=None,
         help="Inline JSON payload string. Mutually exclusive with --payload-file.",
     )
@@ -185,6 +194,8 @@ class _SelectedFunction:
         output_type: Optional[type],
         is_generator: bool,
         bindings: Dict[str, Any],
+        resources: Any = None,
+        variant_of: str = "",
     ) -> None:
         self.cls = cls
         self.attr_name = attr_name
@@ -195,6 +206,15 @@ class _SelectedFunction:
         self.output_type = output_type
         self.is_generator = is_generator
         self.bindings = bindings
+        self.resources = resources
+        # Non-empty when this function is one row of a `variants={}` fan-out:
+        # the shared python attr name (also the base function's fn_name).
+        self.variant_of = variant_of
+
+
+def _variant_names(cls: Optional[type]) -> set:
+    decl = getattr(cls, _ENDPOINT_ATTR, None) if cls is not None else None
+    return {v.name for v in (getattr(decl, "variants", ()) or ())}
 
 
 def _collect_class_methods(mod: Any) -> List[_SelectedFunction]:
@@ -214,6 +234,8 @@ def _collect_class_methods(mod: Any) -> List[_SelectedFunction]:
             output_type=es.output_type,
             is_generator=es.output_mode == "stream",
             bindings=dict(es.models),
+            resources=es.resources,
+            variant_of=es.attr_name if es.name in _variant_names(es.cls) else "",
         )
         for es in collect_from_namespace(mod)
     ]
@@ -285,6 +307,102 @@ def _select_function(
             f"specify --class and/or --method.\nmatches:{listing}"
         )
     return matches[0]
+
+
+def select_function_with_variant(
+    candidates: List[_SelectedFunction],
+    *,
+    cls_name: Optional[str],
+    method_name: Optional[str],
+    default_name: Optional[str] = None,
+    variant: Optional[str] = None,
+    emit: Optional[Callable[[Dict[str, Any]], None]] = None,
+) -> _SelectedFunction:
+    """``_select_function`` plus ``--variant`` resolution (#380).
+
+    With ``--variant``, the --class/--method filters select a variant GROUP
+    (base + `variants={}` rows sharing one attr name); the variant flag then
+    picks the row — by name, or ``auto`` via ``models.hub_policy``.
+    """
+    if not variant:
+        return _select_function(
+            candidates, cls_name=cls_name, method_name=method_name,
+            default_name=default_name,
+        )
+
+    from gen_worker.discovery.names import slugify_name
+
+    matches = list(candidates)
+    if cls_name:
+        matches = [c for c in matches if c.cls is not None and c.cls.__name__ == cls_name]
+    if method_name:
+        wanted = slugify_name(method_name)
+        matches = [c for c in matches if c.attr_name == method_name or c.fn_name == wanted]
+    groups: Dict[Tuple[Optional[type], str], List[_SelectedFunction]] = {}
+    for c in matches:
+        groups.setdefault((c.cls, c.attr_name), []).append(c)
+    if len(groups) != 1:
+        if len(groups) > 1 and not cls_name and not method_name and default_name:
+            wanted = slugify_name(default_name)
+            keyed = [g for g in groups.values() if any(m.fn_name == wanted or m.attr_name == wanted for m in g)]
+            if len(keyed) == 1:
+                groups = {(keyed[0][0].cls, keyed[0][0].attr_name): keyed[0]}
+        if len(groups) != 1:
+            names = sorted({c.fn_name for c in matches}) or ["(none)"]
+            raise _UsageError(
+                f"--variant needs exactly one function group; filters match "
+                f"{len(groups)} (functions: {', '.join(names)}). "
+                "Narrow with --class/--method."
+            )
+    group = next(iter(groups.values()))
+
+    if variant != "auto":
+        wanted = slugify_name(variant)
+        exact = [m for m in group if m.fn_name == wanted]
+        if len(exact) != 1:
+            avail = sorted(m.fn_name for m in group)
+            raise _UsageError(
+                f"--variant {variant!r} does not name a declared variant; "
+                f"available: {', '.join(avail)}"
+            )
+        return exact[0]
+
+    variant_rows = [m for m in group if m.variant_of]
+    base = next((m for m in group if not m.variant_of), None)
+    if not variant_rows:
+        # No variants declared — `--variant auto` degrades to plain selection.
+        if base is not None:
+            return base
+        raise _UsageError("--variant auto: the selected function has no variants")
+
+    from ..models.hub_policy import detect_worker_capabilities, select_variant
+    from ..models.memory import get_available_vram_gb
+
+    caps = detect_worker_capabilities()
+    free_gb = get_available_vram_gb()
+    choice = select_variant(
+        [(m.fn_name, m.resources) for m in variant_rows],
+        caps,
+        free_gb,
+        base=(base.fn_name, base.resources) if base is not None else None,
+    )
+    if choice is None:
+        raise _ModelResolutionError(
+            f"--variant auto: no variant of {group[0].attr_name!r} is "
+            f"compatible with this machine (SM{caps.gpu_sm}, "
+            f"{free_gb:.1f} GB VRAM free)"
+        )
+    if emit is not None:
+        emit({
+            "kind": "variant.selected",
+            "function": choice.name,
+            "fit": choice.fit,
+            "reason": choice.reason,
+            "gpu_sm": caps.gpu_sm,
+            "free_vram_gb": round(free_gb, 2),
+        })
+    picked = next(m for m in group if m.fn_name == choice.name)
+    return picked
 
 
 # --------------------------------------------------------------------------
@@ -386,6 +504,72 @@ class _ModelResolutionError(Exception):
     """Raised when a model binding cannot be resolved (exit 3)."""
 
 
+def _fetch_tensorhub_snapshot(
+    thref: Any, *, cache_dir: Path, emit: Callable[[Dict[str, Any]], None],
+) -> str:
+    """Resolve a Hub ref via th#560 and download its snapshot into the CAS.
+
+    One re-resolve retry on a presigned-URL expiry mid-download (the same
+    contract the orchestrator honors on ``url_expired``).
+    """
+    import asyncio
+
+    from ..models.cozy_snapshot import ensure_snapshot_async
+    from ..models.errors import UrlExpiredError
+    from ..models.hub_client import HubResolveError, resolve_repo
+
+    canonical = thref.canonical()
+
+    def _resolve() -> Any:
+        try:
+            return resolve_repo(thref)
+        except HubResolveError as e:
+            raise _ModelResolutionError(str(e)) from e
+
+    emit({"kind": "model_fetch.started", "ref": canonical, "provider": "tensorhub"})
+    resolved = _resolve()
+
+    # Already materialized under the resolved digest? No download.
+    snap_dir = cache_dir / "snapshots" / resolved.snapshot_digest
+    if snap_dir.exists():
+        emit({"kind": "model_fetch.completed", "ref": canonical,
+              "provider": "tensorhub", "local_dir": str(snap_dir)})
+        return str(snap_dir)
+
+    last_at = [0.0]
+
+    def _progress(done: int, total: Optional[int]) -> None:
+        now = time.monotonic()
+        if now - last_at[0] < 1.0 and (total is None or done < total):
+            return
+        last_at[0] = now
+        emit({"kind": "model_fetch.progress", "ref": canonical,
+              "provider": "tensorhub", "done_bytes": int(done),
+              "total_bytes": int(total) if total else None})
+
+    async def _download(res: Any) -> Path:
+        return await ensure_snapshot_async(
+            base_dir=cache_dir, ref=thref, resolved=res, progress=_progress,
+        )
+
+    try:
+        try:
+            snap = asyncio.run(_download(resolved))
+        except UrlExpiredError:
+            emit({"kind": "model_fetch.reresolve", "ref": canonical,
+                  "provider": "tensorhub", "reason": "url_expired"})
+            snap = asyncio.run(_download(_resolve()))
+    except _ModelResolutionError:
+        raise
+    except Exception as e:
+        raise _ModelResolutionError(
+            f"failed to download tensorhub snapshot for {canonical}: {e}"
+        ) from e
+    emit({"kind": "model_fetch.completed", "ref": canonical,
+          "provider": "tensorhub", "local_dir": str(snap)})
+    return str(snap)
+
+
 def _resolve_binding_to_ref(*, param_name: str, binding: Any) -> Tuple[str, str]:
     """Return ``(model_ref, provider)`` for one binding."""
     if isinstance(binding, BINDING_TYPES):
@@ -429,7 +613,8 @@ def _resolve_local_path(
         ) from e
 
     if parsed.provider == "tensorhub" and parsed.tensorhub and parsed.tensorhub.digest:
-        digest = parsed.tensorhub.digest
+        # Snapshot dirs are keyed by the bare hex digest (no algo prefix).
+        digest = parsed.tensorhub.digest.split(":", 1)[-1]
         snap_dir = cache_dir / "snapshots" / digest
         if snap_dir.exists():
             return str(snap_dir)
@@ -505,23 +690,20 @@ def _resolve_local_path(
         emit({"kind": "model_fetch.completed", "ref": parsed.modelscope.canonical(), "local_dir": str(local)})
         return str(local)
 
-    # Cozy refs that miss the CAS: not yet wired to tensorhub directly from
-    # the CLI (requires the presigned-manifest fetch that's owned by the
-    # orchestrator in production). Exit 3 with a clear pointer.
+    # Cozy refs that miss the CAS (#379): resolve standalone against
+    # tensorhub's public resolve route (th#560) and feed the shared
+    # cozy_snapshot downloader. TENSORHUB_URL selects the hub; TENSORHUB_TOKEN
+    # (optional) unlocks private repos. Offline stays CAS-only.
     if parsed.provider == "tensorhub" and parsed.tensorhub is not None:
-        digest = parsed.tensorhub.digest or "(unresolved tag)"
         if offline:
             raise _ModelResolutionError(
                 f"--offline: tensorhub ref {parsed.tensorhub.canonical()} not in local "
-                f"CAS ({cache_dir}); warm the cache by running this endpoint "
-                "via the orchestrator at least once (or set TENSORHUB_CAS_DIR "
-                "to a path with the snapshot pre-seeded)."
+                f"CAS ({cache_dir}); warm the cache by running without "
+                "--offline once (or set TENSORHUB_CAS_DIR to a path with the "
+                "snapshot pre-seeded)."
             )
-        raise _ModelResolutionError(
-            f"tensorhub ref {parsed.tensorhub.canonical()} not in local CAS "
-            f"({cache_dir}). gen-worker run cannot fetch cozy refs from "
-            "tensorhub directly yet — invoke this endpoint via the "
-            "orchestrator once to populate the cache, then re-run."
+        return _fetch_tensorhub_snapshot(
+            parsed.tensorhub, cache_dir=cache_dir, emit=emit,
         )
 
     # Civitai refs: download the model-version files directly. Auth (for gated
@@ -1005,9 +1187,10 @@ def _run_via_warm_serve(
         config_path=args.config_path, module=args.module,
     )
     candidates = discover_candidates(mod)
-    selected = _select_function(
+    selected = select_function_with_variant(
         candidates, cls_name=args.cls_name, method_name=args.method_name,
         default_name=getattr(mod, "__name__", "").split(".", 1)[0],
+        variant=getattr(args, "variant", None),
     )
 
     raw_bytes = _apply_field_tokens(
@@ -1092,12 +1275,16 @@ def _run_inner(args: argparse.Namespace) -> int:
     )
 
     # 2. Discover routable functions on every @endpoint object.
+    from .local_context import _stderr_emitter as _emit_stderr
+
     candidates = discover_candidates(mod)
-    selected = _select_function(
+    selected = select_function_with_variant(
         candidates,
         cls_name=args.cls_name,
         method_name=args.method_name,
         default_name=getattr(mod, "__name__", "").split(".", 1)[0],
+        variant=getattr(args, "variant", None),
+        emit=_emit_stderr,
     )
 
     # Ergonomic `field=value` tokens -> payload bytes (coerced via the function's
