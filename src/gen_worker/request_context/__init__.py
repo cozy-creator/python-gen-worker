@@ -630,7 +630,8 @@ class RequestContext:
         format: str = "mp4",
     ) -> VideoAsset:
         """Save an encoded video (bytes or a local file path); returns a
-        typed :class:`VideoAsset`."""
+        typed :class:`VideoAsset` with probed container metadata
+        (duration_s/fps/width/height/has_audio/sample_rate, best-effort)."""
         fmt = str(format or "mp4").strip().lower()
         if ref is None or str(ref).strip() == "":
             ref = f"outputs/{self.request_id}/video.{fmt}"
@@ -639,8 +640,19 @@ class RequestContext:
             if Path(ref).suffix == "":
                 ref += f".{fmt}"
         if isinstance(video, (bytes, bytearray)):
-            return _as_asset(self.save_bytes(ref, bytes(video)), VideoAsset)
-        return _as_asset(self.save_file(ref, video), VideoAsset)
+            asset = _as_asset(self.save_bytes(ref, bytes(video)), VideoAsset)
+        else:
+            asset = _as_asset(self.save_file(ref, video), VideoAsset)
+        try:
+            from ..io import probe_video
+
+            for key, value in probe_video(
+                bytes(video) if isinstance(video, (bytes, bytearray)) else video
+            ).items():
+                setattr(asset, key, value)
+        except Exception:
+            logger.debug("save_video: metadata probe failed", exc_info=True)
+        return asset
 
 
     def save_file(self, ref: str, local_path: str | os.PathLike[str]) -> Asset:

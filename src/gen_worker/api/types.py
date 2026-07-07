@@ -78,7 +78,21 @@ class ImageAsset(MediaAsset):
 
 
 class VideoAsset(MediaAsset):
-    """Reference to video media bytes."""
+    """Reference to video media bytes, plus probed container metadata.
+
+    ``ctx.save_video`` fills the media fields by probing the container
+    (PyAV, best-effort): ``duration_s``/``fps``/``width``/``height`` from the
+    video stream, ``has_audio``/``sample_rate`` from the audio stream. They
+    stay ``None`` when the probe is unavailable. ``duration_s`` is MEDIA
+    seconds (what per_output_second billing should meter), not wall-clock.
+    """
+
+    duration_s: Optional[float] = None
+    fps: Optional[float] = None
+    width: Optional[int] = None
+    height: Optional[int] = None
+    has_audio: Optional[bool] = None
+    sample_rate: Optional[int] = None
 
 
 class AudioAsset(MediaAsset):
@@ -116,6 +130,12 @@ class ExpectedOutput:
     aspect_ratio: str | None = None
     mime_type: str | None = None
     media_type: Literal["image", "video", "audio", "file", "other"] | None = None
+    # Expected MEDIA duration in seconds (video/audio): a literal or an
+    # ``input.<field>`` ref to a payload field already denominated in seconds.
+    # Derived expressions (num_frames / fps) are not supported — frame-based
+    # endpoints leave this unset; settlement uses the probed
+    # ``VideoAsset.duration_s`` instead (tensorhub counterpart th#572).
+    duration_s: int | str | None = None
 
 
 @dataclass(frozen=True)
