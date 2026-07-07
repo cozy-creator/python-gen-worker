@@ -264,7 +264,8 @@ message ModelOp {
   string ref = 2;
   // Presigned snapshot for tensorhub-CAS refs; unset for hf/civitai refs the
   // worker fetches from the upstream provider directly. Set on DOWNLOAD (and
-  // on LOAD when the ref may not be on disk yet).
+  // on LOAD when the ref may not be on disk yet), and always on
+  // ADOPT_COMPILE_CACHE.
   Snapshot snapshot = 3;
 }
 
@@ -273,6 +274,15 @@ enum ModelOpKind {
   MODEL_OP_KIND_DOWNLOAD    = 1; // fetch to disk; do NOT promote to VRAM
   MODEL_OP_KIND_LOAD        = 2; // promote to VRAM (downloading first if needed)
   MODEL_OP_KIND_UNLOAD      = 3; // demote out of VRAM
+  // Hot-adopt a torch.compile cache artifact: ref is a compile-cache flavor
+  // ref (`_system/family-<f>#inductor-<sku>-torch<maj.min>`). The worker
+  // downloads+verifies+seeds the cache, re-wraps the already-resident modules
+  // of endpoints declaring compile family <f>, runs one warmup trace, and
+  // answers ModelEvent{ADOPTED, duration_ms}. ANY failure => stay eager and
+  // answer ModelEvent{FAILED, error:"adopt_failed:<reason>"}. Sent only to
+  // job-idle workers. Workers predating this kind ignore it silently (no
+  // ModelEvent), which the orchestrator treats as not-adopted.
+  MODEL_OP_KIND_ADOPT_COMPILE_CACHE = 4;
 }
 
 // Worker -> orchestrator model residency transition. The single channel for
@@ -282,9 +292,10 @@ message ModelEvent {
   string ref = 1;
   ModelState state = 2;
   int64 vram_bytes = 3;  // measured VRAM footprint; set when state = IN_VRAM
-  string error = 4;      // set when state = FAILED (e.g. "oom", "model_in_use", "url_expired")
+  string error = 4;      // set when state = FAILED (e.g. "oom", "model_in_use", "url_expired", "adopt_failed:<reason>")
   int64 bytes_done = 5;  // download progress; set while state = DOWNLOADING
   int64 bytes_total = 6; // set while state = DOWNLOADING (0 = unknown)
+  int64 duration_ms = 7; // op wall time; set when state = ADOPTED
 }
 
 enum ModelState {
@@ -295,6 +306,7 @@ enum ModelState {
   MODEL_STATE_IN_VRAM     = 4; // hot; ready for inference
   MODEL_STATE_EVICTED     = 5; // removed from disk entirely
   MODEL_STATE_FAILED      = 6; // last op on this ref failed; residency unchanged
+  MODEL_STATE_ADOPTED     = 7; // compile-cache ref adopted in place (not a residency tier)
 }
 
 // ---------------------------------------------------------------------------

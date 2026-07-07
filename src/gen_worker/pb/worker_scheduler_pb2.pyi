@@ -50,6 +50,7 @@ class ModelOpKind(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     MODEL_OP_KIND_DOWNLOAD: _ClassVar[ModelOpKind]
     MODEL_OP_KIND_LOAD: _ClassVar[ModelOpKind]
     MODEL_OP_KIND_UNLOAD: _ClassVar[ModelOpKind]
+    MODEL_OP_KIND_ADOPT_COMPILE_CACHE: _ClassVar[ModelOpKind]
 
 class ModelState(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
@@ -60,6 +61,7 @@ class ModelState(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     MODEL_STATE_IN_VRAM: _ClassVar[ModelState]
     MODEL_STATE_EVICTED: _ClassVar[ModelState]
     MODEL_STATE_FAILED: _ClassVar[ModelState]
+    MODEL_STATE_ADOPTED: _ClassVar[ModelState]
 PROTOCOL_VERSION_UNSPECIFIED: ProtocolVersion
 PROTOCOL_VERSION_CURRENT: ProtocolVersion
 RESIDENCY_TIER_UNSPECIFIED: ResidencyTier
@@ -86,6 +88,7 @@ MODEL_OP_KIND_UNSPECIFIED: ModelOpKind
 MODEL_OP_KIND_DOWNLOAD: ModelOpKind
 MODEL_OP_KIND_LOAD: ModelOpKind
 MODEL_OP_KIND_UNLOAD: ModelOpKind
+MODEL_OP_KIND_ADOPT_COMPILE_CACHE: ModelOpKind
 MODEL_STATE_UNSPECIFIED: ModelState
 MODEL_STATE_DOWNLOADING: ModelState
 MODEL_STATE_ON_DISK: ModelState
@@ -93,6 +96,7 @@ MODEL_STATE_IN_RAM: ModelState
 MODEL_STATE_IN_VRAM: ModelState
 MODEL_STATE_EVICTED: ModelState
 MODEL_STATE_FAILED: ModelState
+MODEL_STATE_ADOPTED: ModelState
 
 class WorkerMessage(_message.Message):
     __slots__ = ("hello", "state_delta", "job_accepted", "job_result", "job_progress", "model_event", "fn_unavailable")
@@ -354,20 +358,22 @@ class ModelOp(_message.Message):
     def __init__(self, op: _Optional[_Union[ModelOpKind, str]] = ..., ref: _Optional[str] = ..., snapshot: _Optional[_Union[Snapshot, _Mapping]] = ...) -> None: ...
 
 class ModelEvent(_message.Message):
-    __slots__ = ("ref", "state", "vram_bytes", "error", "bytes_done", "bytes_total")
+    __slots__ = ("ref", "state", "vram_bytes", "error", "bytes_done", "bytes_total", "duration_ms")
     REF_FIELD_NUMBER: _ClassVar[int]
     STATE_FIELD_NUMBER: _ClassVar[int]
     VRAM_BYTES_FIELD_NUMBER: _ClassVar[int]
     ERROR_FIELD_NUMBER: _ClassVar[int]
     BYTES_DONE_FIELD_NUMBER: _ClassVar[int]
     BYTES_TOTAL_FIELD_NUMBER: _ClassVar[int]
+    DURATION_MS_FIELD_NUMBER: _ClassVar[int]
     ref: str
     state: ModelState
     vram_bytes: int
     error: str
     bytes_done: int
     bytes_total: int
-    def __init__(self, ref: _Optional[str] = ..., state: _Optional[_Union[ModelState, str]] = ..., vram_bytes: _Optional[int] = ..., error: _Optional[str] = ..., bytes_done: _Optional[int] = ..., bytes_total: _Optional[int] = ...) -> None: ...
+    duration_ms: int
+    def __init__(self, ref: _Optional[str] = ..., state: _Optional[_Union[ModelState, str]] = ..., vram_bytes: _Optional[int] = ..., error: _Optional[str] = ..., bytes_done: _Optional[int] = ..., bytes_total: _Optional[int] = ..., duration_ms: _Optional[int] = ...) -> None: ...
 
 class FnUnavailable(_message.Message):
     __slots__ = ("function_name", "reason", "detail", "axes")
