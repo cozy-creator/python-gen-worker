@@ -211,6 +211,27 @@ def test_hub_offline_is_cas_only(monkeypatch, tmp_path):
     assert local == str(snap)
 
 
+def test_hub_offline_reuses_remembered_tag_ref(local_hub, monkeypatch, tmp_path):
+    base, state = local_hub
+    _seed(state, {"w.bin": b"tag-ref-weights"})
+    monkeypatch.setenv("TENSORHUB_URL", base)
+    monkeypatch.setenv("TENSORHUB_CAS_DIR", str(tmp_path))
+    online = run_mod._resolve_local_path(
+        ref="root/tiny:latest", provider="tensorhub", offline=False, emit=lambda e: None,
+    )
+    # Now fully offline (hub unreachable): the tag->digest memory serves it.
+    monkeypatch.setenv("TENSORHUB_URL", "http://127.0.0.1:9")
+    offline = run_mod._resolve_local_path(
+        ref="root/tiny:latest", provider="tensorhub", offline=True, emit=lambda e: None,
+    )
+    assert offline == online
+    # A never-fetched tag still misses with the typed error.
+    with pytest.raises(run_mod._ModelResolutionError, match="--offline"):
+        run_mod._resolve_local_path(
+            ref="root/tiny:other", provider="tensorhub", offline=True, emit=lambda e: None,
+        )
+
+
 def test_hub_no_base_url_is_actionable(monkeypatch, tmp_path):
     monkeypatch.setenv("TENSORHUB_CAS_DIR", str(tmp_path))
     monkeypatch.delenv("TENSORHUB_URL", raising=False)
