@@ -312,18 +312,20 @@ class JobResult(_message.Message):
     def __init__(self, request_id: _Optional[str] = ..., attempt: _Optional[int] = ..., status: _Optional[_Union[JobStatus, str]] = ..., inline: _Optional[bytes] = ..., blob_ref: _Optional[str] = ..., safe_message: _Optional[str] = ..., metrics: _Optional[_Union[JobMetrics, _Mapping]] = ...) -> None: ...
 
 class JobMetrics(_message.Message):
-    __slots__ = ("runtime_ms", "queue_ms", "peak_rss_bytes", "peak_vram_bytes", "concurrency_at_start")
+    __slots__ = ("runtime_ms", "queue_ms", "peak_rss_bytes", "peak_vram_bytes", "concurrency_at_start", "output_media_duration_s")
     RUNTIME_MS_FIELD_NUMBER: _ClassVar[int]
     QUEUE_MS_FIELD_NUMBER: _ClassVar[int]
     PEAK_RSS_BYTES_FIELD_NUMBER: _ClassVar[int]
     PEAK_VRAM_BYTES_FIELD_NUMBER: _ClassVar[int]
     CONCURRENCY_AT_START_FIELD_NUMBER: _ClassVar[int]
+    OUTPUT_MEDIA_DURATION_S_FIELD_NUMBER: _ClassVar[int]
     runtime_ms: int
     queue_ms: int
     peak_rss_bytes: int
     peak_vram_bytes: int
     concurrency_at_start: int
-    def __init__(self, runtime_ms: _Optional[int] = ..., queue_ms: _Optional[int] = ..., peak_rss_bytes: _Optional[int] = ..., peak_vram_bytes: _Optional[int] = ..., concurrency_at_start: _Optional[int] = ...) -> None: ...
+    output_media_duration_s: float
+    def __init__(self, runtime_ms: _Optional[int] = ..., queue_ms: _Optional[int] = ..., peak_rss_bytes: _Optional[int] = ..., peak_vram_bytes: _Optional[int] = ..., concurrency_at_start: _Optional[int] = ..., output_media_duration_s: _Optional[float] = ...) -> None: ...
 
 class JobProgress(_message.Message):
     __slots__ = ("request_id", "attempt", "seq", "data", "content_type")
