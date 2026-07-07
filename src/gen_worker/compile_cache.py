@@ -123,6 +123,27 @@ def system_repo(family: str) -> str:
     return f"_system/family-{fam}"
 
 
+def family_from_ref(ref: str) -> str:
+    """Family encoded in a compile-cache ref
+    (``_system/family-<f>[:tag][@digest][#inductor-...]``); '' when the ref
+    is not a compile-cache ref."""
+    repo = str(ref or "").split("#", 1)[0].split("@", 1)[0].split(":", 1)[0]
+    owner, _, name = repo.partition("/")
+    if owner == "_system" and name.startswith("family-"):
+        return name[len("family-"):]
+    return ""
+
+
+def is_cache_ref(ref: str, family: str = "") -> bool:
+    """True when ``ref`` names an inductor compile-cache cell (optionally of
+    one specific family)."""
+    fam = family_from_ref(ref)
+    if not fam or (family and fam != family):
+        return False
+    flavor = ref.split("#", 1)[1] if "#" in ref else ""
+    return flavor.startswith("inductor-")
+
+
 def artifact_metadata(
     *,
     family: str,
@@ -277,6 +298,41 @@ def toolchain_present() -> bool:
     return any(shutil.which(c) for c in ("cc", "gcc", "g++", "clang"))
 
 
+class AdoptError(RuntimeError):
+    """Classified adoption failure (ModelEvent ``adopt_failed:<reason>``)."""
+
+    def __init__(self, reason: str, detail: str = "") -> None:
+        self.reason = reason
+        super().__init__(detail or reason)
+
+
+def find_artifact(root: Path) -> Optional[Path]:
+    """The compile-cache tarball inside a downloaded snapshot dir (or the
+    file itself)."""
+    root = Path(root)
+    if root.is_file():
+        return root
+    return next(iter(sorted(root.rglob("*.tar.gz"))), None)
+
+
+def seed_artifact(
+    artifact: Path, family: str, cache_dir: Optional[Path] = None
+) -> Dict[str, Any]:
+    """Unpack + verify + seed one artifact for this runtime. Returns its
+    metadata; raises :class:`AdoptError` (never seeds) on any mismatch."""
+    root = (Path(cache_dir) if cache_dir else Path.home() / ".cache" / "gen-worker")
+    root = root / "compile-cache"
+    try:
+        meta = unpack(Path(artifact), root)
+    except Exception as exc:
+        raise AdoptError("artifact_invalid", str(exc)) from exc
+    reason = verify(meta, family=family)
+    if reason:
+        raise AdoptError("key_mismatch", reason)
+    seed_env(root)
+    return meta
+
+
 def _fetch_url(url: str, dest_dir: Path) -> Path:
     dest_dir.mkdir(parents=True, exist_ok=True)
     name = hashlib.sha256(url.encode()).hexdigest()[:16] + ".tar.gz"
@@ -295,22 +351,29 @@ def _fetch_url(url: str, dest_dir: Path) -> Path:
     return target
 
 
-def prepare(family: str, cache_dir: Optional[Path] = None) -> Optional[Dict[str, Any]]:
+def prepare(
+    family: str,
+    cache_dir: Optional[Path] = None,
+    artifact: Optional[Path] = None,
+) -> Optional[Dict[str, Any]]:
     """Locate, verify, and seed a compile-cache artifact for this runtime.
 
-    Sources, in order: ``GEN_WORKER_COMPILE_CACHE`` (local tar), then
+    Sources, in order: explicit ``artifact`` (a hub-attached snapshot, #569),
+    then ``GEN_WORKER_COMPILE_CACHE`` (local tar), then
     ``GEN_WORKER_COMPILE_CACHE_URL``. Returns the artifact metadata on a
     verified hit (cache dirs seeded), else None with the reason logged.
-    Hub-flavor auto-resolution per SKU needs a hub-side resolve path and is
-    tracked separately.
     """
-    artifact: Optional[Path] = None
     local = (os.getenv(ENV_CACHE_PATH) or "").strip()
     url = (os.getenv(ENV_CACHE_URL) or "").strip()
     root = Path(cache_dir) if cache_dir else Path.home() / ".cache" / "gen-worker"
     root = root / "compile-cache"
     try:
-        if local:
+        if artifact is not None:
+            artifact = Path(artifact)
+            if not artifact.exists():
+                logger.warning("compile-cache: attached artifact %s does not exist", artifact)
+                return None
+        elif local:
             artifact = Path(local)
             if not artifact.exists():
                 logger.warning("compile-cache: %s=%s does not exist", ENV_CACHE_PATH, local)
@@ -320,12 +383,7 @@ def prepare(family: str, cache_dir: Optional[Path] = None) -> Optional[Dict[str,
         else:
             logger.info("compile-cache: no artifact configured; staying eager")
             return None
-        meta = unpack(artifact, root)
-        reason = verify(meta, family=family)
-        if reason:
-            logger.warning("compile-cache: artifact key mismatch (%s); staying eager", reason)
-            return None
-        seed_env(root)
+        meta = seed_artifact(artifact, family, cache_dir=cache_dir)
         logger.info(
             "compile-cache: seeded verified artifact (sku=%s torch=%s shapes=%s)",
             meta.get("sku"), meta.get("torch"), meta.get("shapes"),
@@ -443,10 +501,18 @@ def apply(pipeline: Any, cfg: Any, *, cache_ready: bool, guard: bool = True) -> 
     return True
 
 
-def enable(pipeline: Any, cfg: Any, cache_dir: Optional[Path] = None) -> bool:
+def enable(
+    pipeline: Any,
+    cfg: Any,
+    cache_dir: Optional[Path] = None,
+    artifact: Optional[Path] = None,
+) -> bool:
     """The one consumer entry point (executor + local CLI): seed a verified
-    artifact if one is configured, then arm compile under the safety policy."""
-    meta = prepare(getattr(cfg, "family", "") or "", cache_dir=cache_dir)
+    artifact if one is configured or attached, then arm compile under the
+    safety policy."""
+    meta = prepare(
+        getattr(cfg, "family", "") or "", cache_dir=cache_dir, artifact=artifact
+    )
     return apply(pipeline, cfg, cache_ready=meta is not None)
 
 
@@ -536,6 +602,7 @@ def build(
 
 __all__ = [
     "ARTIFACT_FORMAT",
+    "AdoptError",
     "build",
     "ENV_ALLOW_COLD",
     "ENV_CACHE_PATH",
@@ -544,10 +611,14 @@ __all__ = [
     "artifact_metadata",
     "capture_env",
     "enable",
+    "family_from_ref",
+    "find_artifact",
     "flavor_label",
+    "is_cache_ref",
     "pack",
     "prepare",
     "runtime_key",
+    "seed_artifact",
     "seed_env",
     "sku_slug",
     "system_repo",
