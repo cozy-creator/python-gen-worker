@@ -220,7 +220,6 @@ def test_ensure_local_failure_then_retry_succeeds(tmp_path: Path, monkeypatch) -
     "files,raises",
     [
         (["model.safetensors", "config.json"], False),
-        (["model.flashpack"], False),
         (["pytorch_model.bin", "model.safetensors"], False),  # safetensors sibling ok
         (["config.json", "tokenizer.json"], False),           # no weights -> no-op
         (["pytorch_model.bin"], True),

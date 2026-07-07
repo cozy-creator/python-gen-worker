@@ -412,7 +412,6 @@ dependencies = [
 dev = [
     { name = "accelerate" },
     { name = "bitsandbytes", marker = "sys_platform == 'linux'" },
-    { name = "flashpack" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "ruff" },
@@ -421,9 +420,6 @@ dev = [
     { name = "torch", version = "2.12.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
     { name = "transformers" },
     { name = "types-requests" },
-]
-flashpack = [
-    { name = "flashpack" },
 ]
 torch = [
     { name = "safetensors" },
@@ -436,8 +432,6 @@ requires-dist = [
     { name = "accelerate", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "bitsandbytes", marker = "sys_platform == 'linux' and extra == 'dev'", specifier = ">=0.45.0" },
     { name = "blake3", specifier = ">=1.0.0" },
-    { name = "flashpack", marker = "extra == 'dev'", specifier = ">=0.2.1" },
-    { name = "flashpack", marker = "extra == 'flashpack'", specifier = ">=0.2.1" },
     { name = "gen-worker", editable = "." },
     { name = "gguf", specifier = ">=0.10.0" },
     { name = "huggingface-hub", specifier = ">=0.26.0" },
@@ -455,7 +449,7 @@ requires-dist = [
     { name = "transformers", marker = "extra == 'dev'", specifier = ">=4.50.0" },
     { name = "types-requests", marker = "extra == 'dev'", specifier = ">=2.32.0" },
 ]
-provides-extras = ["torch", "flashpack", "dev"]
+provides-extras = ["torch", "dev"]
 
 [[package]]
 name = "cryptography"
@@ -596,22 +590,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/b5/fe/997687a931ab51049acce6fa1f23e8f01216374ea81374ddee763c493db5/filelock-3.29.0.tar.gz", hash = "sha256:69974355e960702e789734cb4871f884ea6fe50bd8404051a3530bc07809cf90", size = 57571, upload-time = "2026-04-19T15:39:10.068Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/81/47/dd9a212ef6e343a6857485ffe25bba537304f1913bdbed446a23f7f592e1/filelock-3.29.0-py3-none-any.whl", hash = "sha256:96f5f6344709aa1572bbf631c640e4ebeeb519e08da902c39a001882f30ac258", size = 39812, upload-time = "2026-04-19T15:39:08.752Z" },
-]
-
-[[package]]
-name = "flashpack"
-version = "0.2.2"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "accelerate" },
-    { name = "click" },
-    { name = "safetensors" },
-    { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
-    { name = "torch", version = "2.12.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/4d/e7/6491940dfd98488380e5fa0bfb186b9c0f1b3bb9e9e24f5df0459873f8e8/flashpack-0.2.2.tar.gz", hash = "sha256:fd90ebb13dca2950169fd4c6576712099cc1775e15d3c385e4fa549f6f3f394d", size = 942481, upload-time = "2026-01-22T21:30:10.143Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/f8/85/86b1279f6039ce6808ec10b17a8871fd9edf4e623a47e5bec68570020082/flashpack-0.2.2-py3-none-any.whl", hash = "sha256:2bebbc4baf2dbabf9a17e967441c9d49065bbf2cca377740748e2ae782861358", size = 42884, upload-time = "2026-01-22T21:30:08.728Z" },
 ]
 
 [[package]]

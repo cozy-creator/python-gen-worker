@@ -129,8 +129,8 @@ class LoadedComponent:
                 )
             target = out_dir / self.name
             target.mkdir(parents=True, exist_ok=True)
-            # safetensors is required (Cozy policy: safetensors or flashpack,
-            # never pickle). torchao's AffineQuantizedTensor and similar
+            # safetensors is required (Cozy policy: safetensors, never
+            # pickle). torchao's AffineQuantizedTensor and similar
             # tensor subclasses aren't directly serializable by safetensors —
             # they wrap raw int_data + scale + zero_point in one Python
             # object. Call `unwrap_tensor_subclass` to flatten the subclasses

@@ -34,13 +34,13 @@ def detect_worker_capabilities(*, extra_libs: Optional[List[str]] = None) -> Ten
 
     This is intentionally conservative: if torch/cuda isn't available, we report
     empty/zero values so Cozy Hub can avoid selecting capability-gated artifacts
-    (e.g. fp8 or flashpack) unless explicitly supported.
+    (e.g. fp8) unless explicitly supported.
     """
     installed: List[str] = []
 
     # Known optional libs that affect artifact compatibility.
     # Keep this hardcoded (no env config), per Cozy design.
-    known = ["flashpack", "bitsandbytes", "torchao", "transformer_engine", "tensorrt"]
+    known = ["bitsandbytes", "torchao", "transformer_engine", "tensorrt"]
     if extra_libs:
         known.extend(extra_libs)
     for name in known:

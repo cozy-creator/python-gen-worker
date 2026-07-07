@@ -52,7 +52,7 @@ class ProducedFlavor(msgspec.Struct):
         or ``int4``. When empty, the library falls back to attributes such
         as ``flavor``.
       - flavors: optional full flavor-label set such as
-        ``["fp8", "flashpack", "aio"]``. ``flavor`` is kept as the primary
+        ``["fp8", "aio"]``. ``flavor`` is kept as the primary
         compatibility label and is included automatically when present.
     """
 
