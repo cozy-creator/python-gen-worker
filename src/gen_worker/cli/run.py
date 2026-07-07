@@ -504,6 +504,16 @@ class _ModelResolutionError(Exception):
     """Raised when a model binding cannot be resolved (exit 3)."""
 
 
+def _hub_ref_map_path(cache_dir: Path, thref: Any) -> Path:
+    """CAS-local memory of tag->snapshot resolutions, so a previously-fetched
+    tag ref keeps working offline: cas/refs/<owner>/<repo>/<tag>[#flavor]."""
+    name = str(thref.tag or "latest")
+    if thref.flavor:
+        name += "#" + str(thref.flavor)
+    safe = "".join(ch if (ch.isalnum() or ch in "._#-") else "_" for ch in name)
+    return cache_dir / "refs" / str(thref.owner) / str(thref.repo) / safe
+
+
 def _fetch_tensorhub_snapshot(
     thref: Any, *, cache_dir: Path, emit: Callable[[Dict[str, Any]], None],
 ) -> str:
@@ -532,6 +542,7 @@ def _fetch_tensorhub_snapshot(
     # Already materialized under the resolved digest? No download.
     snap_dir = cache_dir / "snapshots" / resolved.snapshot_digest
     if snap_dir.exists():
+        _remember_hub_ref(cache_dir, thref, resolved.snapshot_digest)
         emit({"kind": "model_fetch.completed", "ref": canonical,
               "provider": "tensorhub", "local_dir": str(snap_dir)})
         return str(snap_dir)
@@ -565,6 +576,7 @@ def _fetch_tensorhub_snapshot(
         raise _ModelResolutionError(
             f"failed to download tensorhub snapshot for {canonical}: {e}"
         ) from e
+    _remember_hub_ref(cache_dir, thref, resolved.snapshot_digest)
     emit({"kind": "model_fetch.completed", "ref": canonical,
           "provider": "tensorhub", "local_dir": str(snap)})
     return str(snap)
@@ -599,9 +611,8 @@ def _resolve_local_path(
     from ..models.cache_paths import tensorhub_cas_dir
     from ..models.refs import parse_model_ref
 
-    cache_dir = Path(os.getenv("TENSORHUB_CAS_DIR", "")) or tensorhub_cas_dir()
-    if not isinstance(cache_dir, Path):
-        cache_dir = Path(cache_dir)
+    env_cas = (os.getenv("TENSORHUB_CAS_DIR") or "").strip()
+    cache_dir = Path(env_cas) if env_cas else Path(tensorhub_cas_dir())
 
     # Decode the bare ref into typed parts using the explicit provider.
     # No string-prefix sniffing — provider is the source of truth.
@@ -696,6 +707,12 @@ def _resolve_local_path(
     # (optional) unlocks private repos. Offline stays CAS-only.
     if parsed.provider == "tensorhub" and parsed.tensorhub is not None:
         if offline:
+            # Tag refs: a previous online resolve remembered tag->digest.
+            ref_map = _hub_ref_map_path(cache_dir, parsed.tensorhub)
+            if ref_map.exists():
+                snap = cache_dir / "snapshots" / ref_map.read_text().strip()
+                if snap.exists():
+                    return str(snap)
             raise _ModelResolutionError(
                 f"--offline: tensorhub ref {parsed.tensorhub.canonical()} not in local "
                 f"CAS ({cache_dir}); warm the cache by running without "
@@ -769,6 +786,15 @@ def _resolve_local_path(
     raise _ModelResolutionError(
         f"unsupported model ref: {ref!r} (provider={provider!r})"
     )
+
+
+def _remember_hub_ref(cache_dir: Path, thref: Any, digest: str) -> None:
+    try:
+        p = _hub_ref_map_path(cache_dir, thref)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(digest)
+    except OSError:
+        pass
 
 
 def _resolve_models_for_setup(
