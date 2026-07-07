@@ -174,6 +174,82 @@ def synthesize_quantization_config(attrs: Optional[Dict[str, str]]) -> Optional[
     return BitsAndBytesConfig(load_in_8bit=True)
 
 
+# Default pipeline components a binding-level quantize= applies to: the
+# denoiser dominates VRAM and tolerates weight quantization; text encoders /
+# VAE stay at full precision (quality-safe default). Names absent from a
+# given pipeline are simply never matched by diffusers.
+_QUANTIZE_COMPONENTS: tuple[str, ...] = ("transformer", "unet")
+
+
+def _quantize_backend_kwargs(method: str) -> tuple[str, Dict[str, Any]]:
+    """(PipelineQuantizationConfig backend, quant_kwargs) for a quantize method."""
+    import torch
+
+    if method == "int8":
+        return "bitsandbytes_8bit", {"load_in_8bit": True}
+    if method in ("nf4", "fp4"):
+        return "bitsandbytes_4bit", {
+            "load_in_4bit": True,
+            "bnb_4bit_quant_type": method,
+            "bnb_4bit_compute_dtype": torch.bfloat16,
+            "bnb_4bit_use_double_quant": True,
+        }
+    if method == "int8-torchao":
+        return "torchao", {"quant_type": "int8wo"}
+    if method == "int4-torchao":
+        return "torchao", {"quant_type": "int4wo"}
+    if method == "fp8-torchao":
+        return "torchao", {"quant_type": "float8wo_e4m3"}
+    raise ValueError(f"unknown quantize method {method!r}")
+
+
+def binding_quantization_config(method: str, cls: Any) -> Optional[Any]:
+    """Quantization config for a binding-level ``quantize=`` method (#389).
+
+    Pipeline classes get a diffusers ``PipelineQuantizationConfig`` scoped to
+    the denoiser; bare component classes get the matching component-level
+    config. CPU-only hosts return None with a warning (local-dev fallback —
+    bnb/torchao quantized load requires CUDA)."""
+    if not method:
+        return None
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            logger.warning(
+                "quantize=%r ignored: CUDA unavailable (CPU dev fallback)", method
+            )
+            return None
+    except ImportError:
+        logger.warning("quantize=%r ignored: torch not installed", method)
+        return None
+
+    backend, kwargs = _quantize_backend_kwargs(method)
+    try:
+        import diffusers
+        from diffusers.quantizers import PipelineQuantizationConfig
+    except ImportError as exc:
+        raise RuntimeError(
+            f"quantize={method!r} requires diffusers with pipeline-level "
+            f"quantization support (PipelineQuantizationConfig): {exc}"
+        ) from exc
+
+    if isinstance(cls, type) and issubclass(cls, diffusers.DiffusionPipeline):
+        return PipelineQuantizationConfig(
+            quant_backend=backend,
+            quant_kwargs=kwargs,
+            components_to_quantize=list(_QUANTIZE_COMPONENTS),
+        )
+    # Bare component (e.g. a transformer/unet class): component-level config.
+    if backend == "torchao":
+        from diffusers.quantizers.quantization_config import TorchAoConfig
+
+        return TorchAoConfig(**kwargs)
+    from diffusers.quantizers.quantization_config import BitsAndBytesConfig
+
+    return BitsAndBytesConfig(**kwargs)
+
+
 def _single_file_checkpoint(path: Path) -> Optional[Path]:
     """A snapshot that is one loose checkpoint rather than a pretrained layout:
     the path itself when it's a ``.safetensors`` file, or the directory's sole
@@ -270,11 +346,14 @@ def load_from_pretrained(
     *,
     dtype: str = "",
     attrs: Optional[Dict[str, str]] = None,
+    quantize: str = "",
 ) -> Any:
     """``cls.from_pretrained(path)`` with the standard trimmings: torch dtype
     from the binding's dtype string, on-disk variant detection, quant-library
     preload, and quant-config synthesis; single-file checkpoints route through
-    ``cls.from_single_file``. Used by the executor to satisfy pipeline-typed
+    ``cls.from_single_file``. ``quantize`` is the binding's runtime
+    quantization method (#389), applied here so endpoint code stays
+    quantize-agnostic. Used by the executor to satisfy pipeline-typed
     ``setup()`` annotations; endpoints may also call it."""
     path = str(path)
     ensure_quant_library_imported(attrs)
@@ -300,8 +379,24 @@ def load_from_pretrained(
                 # torch-less environment (unit tests / CPU tools) — loaders
                 # that actually need torch will fail on their own terms.
                 pass
-    if not read_on_disk_quant_config(Path(path)):
+    binding_qc = False
+    if read_on_disk_quant_config(Path(path)):
+        # Already-quantized bytes on disk win — re-quantizing is invalid.
+        if quantize:
+            logger.warning(
+                "quantize=%r ignored: checkpoint already carries a "
+                "quantization_config", quantize,
+            )
+    else:
         qc = synthesize_quantization_config(attrs)
+        if qc is not None and quantize:
+            logger.warning(
+                "quantize=%r ignored: checkpoint attrs declare pre-quantized "
+                "weights", quantize,
+            )
+        if qc is None and quantize:
+            qc = binding_quantization_config(quantize, cls)
+            binding_qc = qc is not None
         if qc is not None:
             kwargs["quantization_config"] = qc
     single = _single_file_checkpoint(Path(path))
@@ -313,8 +408,11 @@ def load_from_pretrained(
     except (TypeError, ValueError):
         # Not every loader takes variant=/quantization_config= (transformers
         # models, single-file components); retry with the bare essentials.
+        # An explicitly-requested binding quantize is never silently dropped —
+        # if the loader rejects it, the second call's error propagates.
         kwargs.pop("variant", None)
-        kwargs.pop("quantization_config", None)
+        if not binding_qc:
+            kwargs.pop("quantization_config", None)
         return cls.from_pretrained(path, **kwargs)
 
 
@@ -325,5 +423,6 @@ __all__ = [
     "ensure_quant_library_imported",
     "read_on_disk_quant_config",
     "synthesize_quantization_config",
+    "binding_quantization_config",
     "load_from_pretrained",
 ]

@@ -849,9 +849,10 @@ class Executor:
 
                 binding = spec.models.get(slot)
                 dtype = str(getattr(binding, "dtype", "") or "")
+                quantize = str(getattr(binding, "quantize", "") or "")
                 before = self._vram_allocated()
                 pipe = await asyncio.to_thread(
-                    load_from_pretrained, ann, path, dtype=dtype
+                    load_from_pretrained, ann, path, dtype=dtype, quantize=quantize
                 )
                 # Worker-owned placement/offload policy: one decider for the
                 # whole worker; endpoints never write device/offload code.

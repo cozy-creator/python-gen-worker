@@ -46,6 +46,30 @@ def test_bindings_are_hashable_and_equal_by_value() -> None:
     assert len({HF("o/r"), HF("o/r"), HF("o/r", dtype="bf16")}) == 2
 
 
+def test_quantize_metadata_validated_and_normalized() -> None:
+    from gen_worker.api.binding import QUANTIZE_METHODS
+
+    assert HF("o/r", quantize=" NF4 ").quantize == "nf4"
+    assert Hub("o/r", quantize="int8-torchao").quantize == "int8-torchao"
+    assert HF("o/r").quantize == ""
+    for m in QUANTIZE_METHODS:
+        assert HF("o/r", quantize=m).quantize == m
+    with pytest.raises(ValueError, match="unknown quantize method"):
+        HF("o/r", quantize="q4_k_m")
+    with pytest.raises(ValueError):
+        Hub("o/r", quantize="8bit")
+
+
+def test_quantize_never_enters_wire_ref_but_surfaces_in_manifest() -> None:
+    from gen_worker.cli.listing import describe_binding
+
+    assert wire_ref(HF("o/r", quantize="nf4")) == "o/r"
+    assert wire_ref(Hub("o/r", quantize="int8")) == "o/r"
+    assert describe_binding(HF("o/r", quantize="nf4"))["quantize"] == "nf4"
+    assert describe_binding(Hub("o/r", flavor="bf16", quantize="int8"))["quantize"] == "int8"
+    assert "quantize" not in describe_binding(HF("o/r"))
+
+
 def test_wire_ref_encoding() -> None:
     assert wire_ref(Hub("o/r")) == "o/r"
     assert wire_ref(Hub("o/r", tag="canary")) == "o/r:canary"
