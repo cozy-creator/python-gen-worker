@@ -227,6 +227,30 @@ def ingest_huggingface(
     )
 
 
+_SHARD_NAME_RE = None
+
+
+def _is_multi_weight_bundle(dest_dir: Path) -> bool:
+    """True when a snapshot carries MULTIPLE distinct top-level weight files
+    that are not one HF-convention shard set — e.g. Anima/Ernie civitai
+    bundles shipping DiT + text-encoder + VAE as separate single-files.
+    tensorhub's diffusers/single-file layout contract rightly rejects these
+    (multiple_files_for_single_file_layout, found live e2e #112); they must
+    publish with library_name unset (validator opt-out)."""
+    global _SHARD_NAME_RE
+    import re
+
+    if _SHARD_NAME_RE is None:
+        _SHARD_NAME_RE = re.compile(r"^(.+)-(\d+)-of-(\d+)\.(safetensors|gguf)$")
+    logical: set[tuple[str, str]] = set()
+    for p in dest_dir.iterdir():
+        if not p.is_file() or p.suffix not in {".safetensors", ".gguf"}:
+            continue
+        m = _SHARD_NAME_RE.match(p.name)
+        logical.add((m.group(1), m.group(3)) if m else (p.name, ""))
+    return len(logical) > 1
+
+
 def _resolve_civitai_family(base_family: str, layout_family: str) -> str:
     """Civitai's structured baseModel is authoritative over filename-token
     inference: creator filenames routinely carry other arch names (e.g.
@@ -312,6 +336,12 @@ def ingest_civitai(
         "library_name": "diffusers",
         "model_family": model_family or "",
     }
+    if attrs["runtime_library"] != "diffusers-lora" and _is_multi_weight_bundle(dest_dir):
+        # Multi-component bundle (distinct DiT/TE/VAE files): no library can
+        # load it as one artifact — opt out of the layout contract (an empty
+        # library_name skips finalize-side validation; found live, e2e #112).
+        repo_spec["library_name"] = ""
+        metadata["multi_weight_bundle"] = "true"
     return IngestedSource(
         provider="civitai",
         source_ref=str(version_id),
