@@ -229,3 +229,23 @@ def test_civitai_base_model_beats_filename_tokens() -> None:
     assert _resolve_civitai_family("other", "flux") == "flux"
     assert _resolve_civitai_family("other", "unknown") == "other"
     assert _resolve_civitai_family("", "unknown") == ""
+
+
+def test_missing_component_error_parse() -> None:
+    """moody-pro-mix-zit regression (e2e #112): DiT-only single-file checkpoints
+    must source absent components from the family config repo. The component
+    name+class ride in diffusers' SingleFileComponentError remedy snippet."""
+    from cozy_convert.repackage import _MISSING_COMPONENT_RE
+
+    msg = (
+        "Failed to load Qwen3Model. Weights for this component appear to be "
+        "missing in the checkpoint.\n"
+        "Please load the component before passing it in as an argument to "
+        "`from_single_file`.\n\n"
+        "text_encoder = Qwen3Model.from_pretrained('...')\n"
+        "pipe = ZImagePipeline.from_single_file(<checkpoint path>, "
+        "text_encoder=text_encoder)\n\n"
+    )
+    m = _MISSING_COMPONENT_RE.search(msg)
+    assert m is not None
+    assert (m.group(1), m.group(2)) == ("text_encoder", "Qwen3Model")
