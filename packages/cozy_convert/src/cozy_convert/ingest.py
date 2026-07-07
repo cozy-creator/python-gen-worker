@@ -227,6 +227,21 @@ def ingest_huggingface(
     )
 
 
+def _resolve_civitai_family(base_family: str, layout_family: str) -> str:
+    """Civitai's structured baseModel is authoritative over filename-token
+    inference: creator filenames routinely carry other arch names (e.g.
+    'gonzalomoXLFluxPony_v70PhotoXLDMD.safetensors' is an SDXL 1.0 build
+    whose name poisoned the family to flux and broke the repackage — found
+    live, e2e tracker #112). Filename hints are the fallback."""
+    base_family = str(base_family or "").strip()
+    layout_family = str(layout_family or "").strip()
+    if base_family and base_family != "other":
+        return base_family
+    if layout_family not in ("", "unknown"):
+        return layout_family
+    return base_family
+
+
 def ingest_civitai(
     model_version_id: int,
     dest_dir: Path,
@@ -255,9 +270,8 @@ def ingest_civitai(
         base_family = civitai_to_family(base_model_raw) or ""
     except Exception:
         base_family = ""
-    model_family = str(layout_info.model_family or "").strip()
-    if model_family in ("", "unknown") and base_family:
-        model_family = base_family
+    model_family = _resolve_civitai_family(
+        base_family, str(layout_info.model_family or ""))
 
     model_id = int(payload.get("modelId") or 0)
     air = str(payload.get("air") or "")

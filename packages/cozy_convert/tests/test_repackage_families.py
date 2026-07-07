@@ -208,3 +208,24 @@ def test_detect_snapshot_dtype_ignores_garbage(tmp_path: Path) -> None:
     header = json.dumps({"not_a_tensor": "x"}).encode()
     bogus.write_bytes(struct.pack("<Q", len(header)) + header)
     assert _detect_snapshot_dtype(tmp_path) == ""
+
+
+def test_civitai_base_model_beats_filename_tokens() -> None:
+    """GonzaLomo regression (e2e #112): an SDXL 1.0 checkpoint whose FILENAME
+    contains 'flux' must classify as sdxl via the structured baseModel."""
+    from cozy_convert.layout import (
+        detect_huggingface_source_layout,
+        infer_model_family_variant_from_hint,
+    )
+
+    # The filename alone still reads as flux (that is the hazard)…
+    assert infer_model_family_variant_from_hint(
+        "gonzalomoXLFluxPony_v70PhotoXLDMD.safetensors") in ("flux1", "flux2")
+    # the ingest-level precedence keeps baseModel authoritative.
+    from cozy_convert.ingest import _resolve_civitai_family
+
+    assert _resolve_civitai_family("sdxl", "flux") == "sdxl"
+    assert _resolve_civitai_family("", "flux") == "flux"
+    assert _resolve_civitai_family("other", "flux") == "flux"
+    assert _resolve_civitai_family("other", "unknown") == "other"
+    assert _resolve_civitai_family("", "unknown") == ""
