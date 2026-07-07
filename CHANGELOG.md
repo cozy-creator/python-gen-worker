@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+- **Video output media metadata (#387).** `VideoAsset` gains optional probed
+  container metadata (`duration_s`, `fps`, `width`, `height`, `has_audio`,
+  `sample_rate`); `ctx.save_video` fills it via PyAV (best-effort). New
+  `io.write_video(ctx, ref, frames, fps=, audio=, audio_sample_rate=)`
+  encodes H.264 + AAC-stereo mp4 (PyAV; mirrors diffusers ltx2
+  `export_utils.encode_video`) so video endpoints stop hand-rolling
+  tempfile + `export_to_video` and stop dropping generated audio. New
+  `video` extra (`av` + `numpy`). `ExpectedOutput` gains `duration_s`
+  (literal or `input.<field>` ref, seconds) emitted into the discovery
+  manifest for submit-time planning; media-seconds settlement is th#572.
+
 - **Residency unification + worker-side VRAM juggling + disk GC (#369,
   #370, #371).** The `Residency` registry now owns the executor's pipelines:
   worker-built pipelines register per ref with their own measured allocator

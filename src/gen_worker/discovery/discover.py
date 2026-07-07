@@ -235,6 +235,9 @@ def _collect_expected_output_metadata(payload_type: type, output_type: type) -> 
                 aspect = _expected_output_expr(marker.aspect_ratio, payload_type=payload_type, field=path, key="aspect_ratio")
                 if aspect is not None:
                     item["aspect_ratio"] = aspect
+                duration = _expected_output_expr(marker.duration_s, payload_type=payload_type, field=path, key="duration_s")
+                if duration is not None:
+                    item["duration_s"] = duration
                 mime = (marker.mime_type or "").strip()
                 if mime:
                     item["mime_type"] = mime
