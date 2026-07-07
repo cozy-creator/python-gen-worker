@@ -173,7 +173,7 @@ Static per-boot facts. Never re-sent mid-connection.
 | `vram_total_bytes` | W probe | O placement VRAM budgeting | total VRAM |
 | `gpu_name` | W probe | O placement/tier display | GPU model name |
 | `gpu_sm` | W probe | O placement SM-floor filter | compute capability, e.g. "89" |
-| `installed_libs` | W probe | O placement library filters | e.g. "flashpack", "torchao" |
+| `installed_libs` | W probe | O placement library filters | e.g. "torchao" |
 | `image_digest` | W env | O resource-profile keying + triage | worker image sha256 |
 | `git_commit` | W env | O triage/display | build provenance |
 | `instance_id` | W env | O provider bookkeeping (e.g. runpod pod retire) | cloud instance id; empty for local |

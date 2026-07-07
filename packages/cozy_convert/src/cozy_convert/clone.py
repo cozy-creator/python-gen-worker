@@ -1,6 +1,6 @@
 """Clone: mirror an external checkpoint into Tensorhub, optionally converting.
 
-download → (repackage) → (cast / quant / gguf / flashpack) → ONE finalize:
+download → (repackage) → (cast / quant / gguf) → ONE finalize:
 each requested output flavor becomes one local file tree and one Tensorhub
 commit (``POST /commits`` + part PUTs + finalize). ``overwrite_repo`` maps to
 ``mode="replace"`` — no enumerate-prior-and-delete.
@@ -44,7 +44,7 @@ _KNOWN_DTYPES = {
     "q4_0", "q4_1", "q3_k_m", "q3_k_s", "q2_k",
 }
 _KNOWN_FILE_LAYOUTS = {"diffusers", "singlefile"}
-_KNOWN_FILE_TYPES = {"safetensors", "flashpack", "gguf"}
+_KNOWN_FILE_TYPES = {"safetensors", "gguf"}
 
 # Families whose singlefile<->diffusers repackage is implemented, in the
 # repackage module's normalized vocabulary (fine-tune lineages like
@@ -235,7 +235,7 @@ def build_flavor_tree(
 
     Passthrough (dtype/layout/container match the source) hardlinks the
     snapshot. Otherwise: optional layout repackage, then per-weight-set
-    cast / quant / gguf / flashpack via :mod:`cozy_convert.convert`.
+    cast / quant / gguf via :mod:`cozy_convert.convert`.
 
     Returns ``(tree_root, attrs)``. Raises ``InlineConversionNotPossible``
     for calibrated dtypes.
@@ -269,7 +269,7 @@ def build_flavor_tree(
         _stage_oversize_safetensors(out_dir)
         return out_dir, attrs
 
-    # GGUF / flashpack: single-artifact containers.
+    # GGUF: single-artifact container.
     if spec.file_type == "gguf":
         groups = _weight_groups(source_dir, source_layout)
         if not groups:
@@ -281,16 +281,6 @@ def build_flavor_tree(
         )
         attrs.update(result.attributes)
         return out_dir, attrs
-    if spec.file_type == "flashpack":
-        from .flashpack import convert_safetensors_to_flashpack
-
-        groups = _weight_groups(source_dir, source_layout)
-        if not groups:
-            raise ValueError("no safetensors weights found for flashpack conversion")
-        convert_safetensors_to_flashpack(
-            groups[0][1], out_dir / "model.flashpack", target_dtype="preserve")
-        return out_dir, attrs
-
     # Layout repackage (singlefile <-> diffusers) when requested + supported.
     work_root = source_dir
     work_layout = source_layout

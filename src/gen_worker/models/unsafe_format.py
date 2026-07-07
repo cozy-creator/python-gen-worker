@@ -18,9 +18,9 @@ from pathlib import Path
 from typing import Iterable, Optional
 
 
-# Weight-file extensions we explicitly accept. Both keep the safety
-# property that loading them does not execute arbitrary Python code.
-_SAFE_WEIGHT_EXTS: frozenset[str] = frozenset({".safetensors", ".flashpack"})
+# Weight-file extensions we explicitly accept: loading them does not
+# execute arbitrary Python code.
+_SAFE_WEIGHT_EXTS: frozenset[str] = frozenset({".safetensors"})
 
 # Pickle-bearing weight-file extensions we refuse to load. Loading any of
 # these can execute arbitrary Python code from the snapshot — that's the
@@ -31,7 +31,7 @@ _UNSAFE_WEIGHT_EXTS: frozenset[str] = frozenset({".bin", ".pt", ".ckpt"})
 class UnsafeFileFormat(Exception):
     """Raised when an override download produces a snapshot whose primary
     weight file is a pickle format (.bin / .pt / .ckpt) and there is no
-    safetensors / flashpack sibling.
+    safetensors sibling.
 
     Terminal: this is a property of the snapshot's contents, not of the
     download attempt. Retrying won't change the file extensions.
@@ -53,9 +53,8 @@ def assert_safe_weight_format(snapshot_dir: Path, *, ref: str = "") -> None:
     """Inspect ``snapshot_dir`` for weight files.
 
     Accepts (no-op) when:
-      - the directory contains at least one ``.safetensors`` or
-        ``.flashpack`` file (even if pickle siblings exist — some HF repos
-        ship both for back-compat), or
+      - the directory contains at least one ``.safetensors`` file (even if
+        pickle siblings exist — some HF repos ship both for back-compat), or
       - the directory contains no weight files at all (the snapshot may be
         a metadata-only repo; the downstream loader will produce a more
         specific error).
@@ -97,7 +96,7 @@ def assert_safe_weight_format(snapshot_dir: Path, *, ref: str = "") -> None:
             biggest_size = sz
             biggest = f
     named = (biggest or unsafe_hits[0]).as_posix()
-    detail = f"refusing to load {named}; safetensors/flashpack only"
+    detail = f"refusing to load {named}; safetensors only"
     if ref:
         detail = f"{detail} (override ref={ref!r})"
     raise UnsafeFileFormat(detail)

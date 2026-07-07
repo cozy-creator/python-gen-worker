@@ -84,7 +84,7 @@ message WorkerResources {
   int64  vram_total_bytes = 2; // total VRAM across GPUs
   string gpu_name         = 3; // e.g. "NVIDIA GeForce RTX 4090"
   string gpu_sm           = 4; // compute capability, e.g. "89"
-  repeated string installed_libs = 5; // e.g. "flashpack", "torchao"
+  repeated string installed_libs = 5; // e.g. "torchao"
   string image_digest     = 6; // docker image sha256
   string git_commit       = 7;
   string instance_id      = 8; // cloud provider instance id (e.g. runpod pod id)
