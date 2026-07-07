@@ -631,6 +631,7 @@ class Executor:
                 snap = (snapshots or {}).get(ref)
                 path = await self.store.ensure_local(ref, snap, binding=binding)
                 paths[slot] = str(path)
+            compile_artifact = await self._fetch_compile_snapshot(spec, snapshots)
             # Loads serialize: concurrent setups would cross-contaminate each
             # other's allocator deltas and place_pipeline's free-VRAM reads.
             async with self._load_lock:
@@ -643,7 +644,8 @@ class Executor:
                     rec.server = await self._boot_engine_server(spec, paths)
                 if callable(setup):
                     kwargs, loaded = await self._injection_kwargs(
-                        spec, setup, paths, server=rec.server)
+                        spec, setup, paths, server=rec.server,
+                        compile_artifact=compile_artifact)
                     if asyncio.iscoroutinefunction(setup):
                         await setup(**kwargs)
                     else:
@@ -754,6 +756,30 @@ class Executor:
         proc = factory(model_path)
         return await asyncio.to_thread(proc.start)
 
+    async def _fetch_compile_snapshot(
+        self, spec: EndpointSpec, snapshots: Optional[Dict[str, pb.Snapshot]]
+    ) -> Optional[Path]:
+        """Hub-attached compile-cache snapshot for this endpoint's family
+        (#569 boot-attach, opt-in hub-side). Returns the local artifact path,
+        or None — missing/unusable snapshots mean eager, never an error."""
+        if spec.compile is None or not snapshots:
+            return None
+        from . import compile_cache
+
+        family = getattr(spec.compile, "family", "") or ""
+        for ref, snap in snapshots.items():
+            if not compile_cache.is_cache_ref(ref, family):
+                continue
+            try:
+                local = await self.store.ensure_local(ref, snap)
+                return compile_cache.find_artifact(local)
+            except Exception as exc:
+                logger.warning(
+                    "compile-cache snapshot %s unusable (%s); staying eager", ref, exc
+                )
+                return None
+        return None
+
     async def _injection_kwargs(
         self,
         spec: EndpointSpec,
@@ -761,6 +787,7 @@ class Executor:
         paths: Dict[str, str],
         *,
         server: Any = None,
+        compile_artifact: Optional[Path] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Tuple[Any, int]]]:
         """Typed injection: each slot receives exactly what its ``setup``
         annotation says — a ``str``/``Path`` local path, or a constructed
@@ -806,11 +833,12 @@ class Executor:
                 if spec.compile is not None:
                     # Opt-in torch.compile against a pre-built per-SKU cache
                     # artifact (#384); no verified artifact => stays eager.
+                    # ``compile_artifact`` is a hub-attached snapshot (#569).
                     from . import compile_cache
 
                     await asyncio.to_thread(
                         compile_cache.enable, pipe, spec.compile,
-                        self.store._cache_dir,
+                        self.store._cache_dir, compile_artifact,
                     )
                 loaded[slot] = (pipe, max(0, self._vram_allocated() - before))
                 kwargs[slot] = pipe
@@ -870,6 +898,8 @@ class Executor:
                         ref=ref, state=pb.MODEL_STATE_FAILED, error="model_in_use")))
                     return
                 await self._unload_ref(ref)
+            elif op.op == pb.MODEL_OP_KIND_ADOPT_COMPILE_CACHE:
+                await self._adopt_compile_cache(ref, snap)
         except Exception as exc:
             logger.warning("ModelOp %s on %s failed: %s", op.op, ref, exc)
             # ensure_local already emitted FAILED for download errors; emit for
@@ -880,6 +910,96 @@ class Executor:
                 await self._send(pb.WorkerMessage(model_event=pb.ModelEvent(
                     ref=ref, state=pb.MODEL_STATE_FAILED,
                     error=_model_op_error_vocab(exc))))
+
+    async def _adopt_compile_cache(self, ref: str, snap: Optional[pb.Snapshot]) -> None:
+        """Hot adoption (th#567): download+verify+seed a compile-cache
+        artifact and re-wrap the already-resident modules in place — weights
+        untouched, no reload, one warmup trace. ANY failure => stay eager and
+        report ``adopt_failed:<reason>``; adoption must never degrade service."""
+        from . import compile_cache
+
+        t0 = time.monotonic()
+
+        async def fail(reason: str, detail: str = "") -> None:
+            logger.warning("compile-cache adopt %s failed: %s %s", ref, reason, detail)
+            await self._send(pb.WorkerMessage(model_event=pb.ModelEvent(
+                ref=ref, state=pb.MODEL_STATE_FAILED,
+                error=f"adopt_failed:{reason}")))
+
+        family = compile_cache.family_from_ref(ref)
+        if not family or not compile_cache.is_cache_ref(ref):
+            return await fail("bad_ref")
+        candidates = [
+            s for s in self.specs.values()
+            if s.cls is not None and s.compile is not None
+            and (getattr(s.compile, "family", "") or "") == family
+            and s.name not in self.unavailable
+        ]
+        if not candidates:
+            return await fail("no_endpoint")
+        resident: Dict[int, Tuple[_ClassRecord, EndpointSpec]] = {}
+        for s in candidates:
+            rec = self._classes[s.instance_key]
+            if rec.ready:
+                resident.setdefault(id(rec), (rec, s))
+        if not resident:
+            return await fail("not_resident")
+        if self.in_flight_keys():
+            # The hub schedules adoption idle-only; defensive — never touch
+            # a module while any job is in flight.
+            return await fail("model_in_use")
+        try:
+            local = await self.store.ensure_local(ref, snap)
+        except Exception as exc:
+            return await fail("download", str(exc))
+        artifact = compile_cache.find_artifact(local)
+        if artifact is None:
+            return await fail("artifact_missing")
+        try:
+            await asyncio.to_thread(
+                compile_cache.seed_artifact, artifact, family, self.store._cache_dir
+            )
+        except compile_cache.AdoptError as exc:
+            return await fail(exc.reason, str(exc))
+        except Exception as exc:
+            return await fail("artifact_invalid", str(exc))
+
+        # Re-wrap + warmup under the GPU slot: a job landing mid-adoption
+        # queues on the semaphore instead of racing the trace.
+        async with self._gpu_semaphore:
+            adopted: List[Tuple[_ClassRecord, EndpointSpec]] = []
+            for rec, s in resident.values():
+                applied = False
+                for slot in self._setup_slots(s):
+                    obj = self.store.residency.obj(wire_ref(s.models[slot]))
+                    if obj is None:
+                        continue
+                    if await asyncio.to_thread(
+                        compile_cache.apply, obj, s.compile, cache_ready=True
+                    ):
+                        applied = True
+                if applied:
+                    adopted.append((rec, s))
+            if not adopted:
+                return await fail("no_target")
+            for rec, _s in adopted:
+                warmup = getattr(rec.instance, "warmup", None)
+                if not callable(warmup):
+                    continue  # first request pays the (cache-hit) trace
+                try:
+                    if asyncio.iscoroutinefunction(warmup):
+                        await warmup()
+                    else:
+                        await asyncio.to_thread(warmup)
+                except Exception as exc:
+                    # Compiled targets are guard-wrapped: a failing warmup has
+                    # already unwrapped them to eager — service unaffected.
+                    return await fail("warmup", f"{type(exc).__name__}: {exc}")
+
+        duration_ms = int((time.monotonic() - t0) * 1000)
+        logger.info("compile-cache adopt %s: adopted in %dms", ref, duration_ms)
+        await self._send(pb.WorkerMessage(model_event=pb.ModelEvent(
+            ref=ref, state=pb.MODEL_STATE_ADOPTED, duration_ms=duration_ms)))
 
     def _ref_in_use(self, ref: str) -> bool:
         for job in self.jobs.values():

@@ -482,6 +482,13 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
             fn["delta_type"] = _type_id(es.delta_type)
             fn["delta_schema_sha256"] = delta_sha
             fn["delta_output_schema"] = delta_schema
+        if es.compile is not None:
+            # Hub keys family-cache lookups off this block (th#569).
+            fn["compile"] = {
+                "family": es.compile.family,
+                "shapes": [[int(w), int(h)] for w, h in es.compile.shapes],
+                "targets": list(es.compile.targets),
+            }
         out.append(fn)
 
     return out
