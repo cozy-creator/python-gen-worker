@@ -20,6 +20,14 @@ from gen_worker.presigned_upload import (
 from gen_worker.api.errors import ArtifactTransferError, CanceledError
 
 
+class _FakeSession:
+    """Session double: the poll/complete helpers now take a per-save
+    requests.Session; only .post is used here."""
+
+    def __init__(self, post):
+        self.post = post
+
+
 class _FakeResponse:
     def __init__(self, status_code: int, body: dict | None = None, text: str | None = None):
         self.status_code = status_code
@@ -58,13 +66,13 @@ def test_complete_upload_session_polls_through_upload_complete_in_progress(monke
         calls["n"] += 1
         return resp
 
-    with patch("gen_worker.presigned_upload.requests.post", side_effect=fake_post), \
-         patch("gen_worker.presigned_upload.time.sleep"):
+    with patch("gen_worker.presigned_upload.time.sleep"):
         result = _complete_upload_session(
             complete_url="https://tensorhub.test/complete",
             headers={"Authorization": "Bearer x"},
             payload={"transfer": {"mode": "s3_sdk"}},
             cancel_check=None,
+            session=_FakeSession(fake_post),
         )
     assert result == {"destination_repo": "tensorhub/sdxl-illustrious", "published": []}
     assert calls["n"] == 3
@@ -77,14 +85,14 @@ def test_poll_until_finalized_gives_up_after_deadline(monkeypatch):
         "gen_worker.presigned_upload._COMPLETE_IN_PROGRESS_MAX_WAIT_S", 0.01,
     )
     always_409 = _FakeResponse(409, {"error": {"code": "upload_complete_in_progress"}})
-    with patch("gen_worker.presigned_upload.requests.post", return_value=always_409), \
-         patch("gen_worker.presigned_upload.time.sleep"):
+    with patch("gen_worker.presigned_upload.time.sleep"):
         with pytest.raises(ArtifactTransferError) as exc_info:
             _poll_until_finalized(
                 complete_url="https://tensorhub.test/complete",
                 complete_headers={},
                 payload={},
                 cancel_check=None,
+                session=_FakeSession(lambda *a, **kw: always_409),
             )
     assert exc_info.value.retryable is True
 
@@ -96,6 +104,7 @@ def test_poll_until_finalized_respects_cancel_check():
             complete_headers={},
             payload={},
             cancel_check=lambda: True,
+            session=_FakeSession(lambda *a, **kw: None),
         )
 
 
@@ -103,13 +112,13 @@ def test_complete_upload_session_other_409_is_not_polled():
     """A different 409 (e.g. the session was aborted) is a real terminal
     error, not the in-progress race — must not enter the poll loop."""
     aborted = _FakeResponse(409, {"error": {"code": "upload_session_aborted"}})
-    with patch("gen_worker.presigned_upload.requests.post", return_value=aborted):
-        with pytest.raises(ArtifactTransferError) as exc_info:
-            _complete_upload_session(
-                complete_url="https://tensorhub.test/complete",
-                headers={},
-                payload={},
-                cancel_check=None,
-            )
+    with pytest.raises(ArtifactTransferError) as exc_info:
+        _complete_upload_session(
+            complete_url="https://tensorhub.test/complete",
+            headers={},
+            payload={},
+            cancel_check=None,
+            session=_FakeSession(lambda *a, **kw: aborted),
+        )
     assert exc_info.value.retryable is False
     assert exc_info.value.status_code == 409
