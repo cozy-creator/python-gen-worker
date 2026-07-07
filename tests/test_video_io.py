@@ -94,3 +94,29 @@ def test_expected_output_duration_ref_compiles() -> None:
     assert items == [
         {"field": "video", "type": "video", "count": 1, "duration_s": "input.duration_s", "mime_type": "video/mp4"}
     ]
+
+
+def test_output_media_seconds_sums_nested_video_durations() -> None:
+    import msgspec
+
+    from gen_worker.api.types import AudioAsset, ImageAsset
+    from gen_worker.executor import _output_media_seconds
+
+    class Out(msgspec.Struct):
+        videos: list[VideoAsset]
+        extras: dict
+
+    v1 = VideoAsset(ref="a", duration_s=10.5)
+    v2 = VideoAsset(ref="b", duration_s=2.0)
+    unprobed = VideoAsset(ref="c")  # probe failed: duration_s None
+    out = Out(videos=[v1, unprobed], extras={"more": (v2, ImageAsset(ref="i"), AudioAsset(ref="s"))})
+    assert _output_media_seconds(out) == 12.5
+    assert _output_media_seconds(None) == 0.0
+    assert _output_media_seconds({"images": [ImageAsset(ref="i")]}) == 0.0
+
+
+def test_job_metrics_carries_output_media_duration() -> None:
+    from gen_worker.pb import worker_scheduler_pb2 as pb
+
+    m = pb.JobMetrics(runtime_ms=1000, output_media_duration_s=10.5)
+    assert m.output_media_duration_s == 10.5

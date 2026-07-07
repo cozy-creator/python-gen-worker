@@ -30,7 +30,7 @@ from .api.errors import (
     ValidationError,
 )
 from .api.streaming import BatchItemDelta, Done, Error, IncrementalTokenDelta
-from .api.types import Compute
+from .api.types import Compute, MediaAsset
 from .capability import HardwareUnmetError, InsufficientDiskError
 from .input_assets import cleanup_input_assets, materialize_input_assets
 from .models import disk_gc
@@ -130,6 +130,32 @@ def _map_exception(exc: BaseException) -> Tuple[int, str]:
     detail = _sanitize(str(exc).splitlines()[0] if str(exc) else "")
     label = type(exc).__name__
     return pb.JOB_STATUS_FATAL, f"{label}: {detail}"[:512] if detail else label
+
+
+def _output_media_seconds(output: Any) -> float:
+    """Sum probed MEDIA seconds (e.g. ``VideoAsset.duration_s``) across the
+    job output. Billing source for ``per_output_second`` (th#572)."""
+    total = 0.0
+    seen: set = set()
+    stack = [output]
+    while stack:
+        item = stack.pop()
+        if item is None or isinstance(item, (str, bytes, bytearray, int, float, bool)):
+            continue
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        if isinstance(item, MediaAsset):
+            d = getattr(item, "duration_s", None)
+            if isinstance(d, (int, float)) and d > 0:
+                total += float(d)
+        elif isinstance(item, dict):
+            stack.extend(item.values())
+        elif isinstance(item, (list, tuple, set, frozenset)):
+            stack.extend(item)
+        elif isinstance(item, msgspec.Struct):
+            stack.extend(getattr(item, f, None) for f in item.__struct_fields__)
+    return total
 
 
 # ---------------------------------------------------------------------------
@@ -1228,7 +1254,8 @@ class Executor:
             with self.store.residency.executing(*exec_refs):
                 output = await self._execute(job, spec, instance, ctx, payload, kwargs,
                                              timeout_ms=timeout_ms, gpu_index=gpu_index)
-            metrics = self._metrics(queue_ms, started, concurrency_at_start, gpu_index)
+            metrics = self._metrics(queue_ms, started, concurrency_at_start, gpu_index,
+                                    output=output)
             # Handler GPU work is done — free the slot before result-blob
             # upload and result send so the next job's compute starts now.
             if lease is not None:
@@ -1436,7 +1463,8 @@ class Executor:
             raise RetryableError("output upload failed") from exc
 
     def _metrics(
-        self, queue_ms: int, started: float, concurrency_at_start: int, gpu_index: int
+        self, queue_ms: int, started: float, concurrency_at_start: int, gpu_index: int,
+        output: Any = None,
     ) -> pb.JobMetrics:
         runtime_ms = int((time.monotonic() - started) * 1000)
         peak_rss = 0
@@ -1455,6 +1483,7 @@ class Executor:
         return pb.JobMetrics(
             runtime_ms=runtime_ms, queue_ms=queue_ms, peak_rss_bytes=peak_rss,
             peak_vram_bytes=peak_vram, concurrency_at_start=max(0, concurrency_at_start),
+            output_media_duration_s=_output_media_seconds(output),
         )
 
     async def _send_result(

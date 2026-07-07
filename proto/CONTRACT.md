@@ -296,6 +296,7 @@ those never travel on the wire.
 | `peak_rss_bytes` | W (psutil sample) | O memory profile samples | 0 = unmeasured |
 | `peak_vram_bytes` | W (CUDA peak stats) | O VRAM profile samples | 0 = unmeasured |
 | `concurrency_at_start` | W executor | O observed-parallelism profile | active jobs at admit |
+| `output_media_duration_s` | W executor (sums probed `duration_s` of output media assets) | O `per_output_second` settlement (th#572) | MEDIA seconds, never wall-clock; 0 = unreported ⇒ media-unit settlement fails closed |
 
 ### JobProgress (W → O)
 Streaming output chunks (LLM token deltas, AR-TTS audio, structured partials).
