@@ -53,6 +53,27 @@ def test_publish_flavors_file_and_dir(fake_hub, tmp_path: Path) -> None:
     assert [op["path"] for op in reqs[1]["operations"]] == ["config.json"]
 
 
+def test_publish_flavors_defaults_to_replace(fake_hub, tmp_path: Path) -> None:
+    """th#597 C2 regression (te#44): a producer's flavor export is a complete
+    replacement tree — publish_flavors must default to mode=replace so an
+    #fp8 export can never merge with (and silently carry) the repo's prior
+    fp16 base tree. mode=merge remains available only as an explicit opt-in
+    for deliberate overlay publishes."""
+    _FakeHub.state["finalize_calls"] = 1
+    f = tmp_path / "weights.safetensors"
+    f.write_bytes(b"\x02" * 16)
+    publish_flavors(_Ctx(fake_hub), [ProducedFlavor(path=f, flavor="fp8")], destination_repo="acme/dest")
+    assert _FakeHub.state["commit_requests"][-1]["mode"] == "replace"
+
+    publish_flavors(
+        _Ctx(fake_hub),
+        [ProducedFlavor(path=f, flavor="vae-fix")],
+        destination_repo="acme/dest",
+        mode="merge",
+    )
+    assert _FakeHub.state["commit_requests"][-1]["mode"] == "merge"
+
+
 def test_publish_flavors_destination_falls_back_to_ctx(fake_hub, tmp_path: Path) -> None:
     _FakeHub.state["finalize_calls"] = 1
     f = tmp_path / "weights.safetensors"

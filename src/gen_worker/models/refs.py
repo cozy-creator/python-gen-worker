@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Optional
+
+# th#597 C5: flavor charset [a-z0-9][a-z0-9._-]{0,63} (matches tensorhub's
+# validation.IsValidFlavorToken).
+_TENSORHUB_FLAVOR_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,63}")
 
 
 @dataclass(frozen=True)
@@ -152,13 +157,21 @@ def parse_model_ref(raw: str, *, provider: str = "tensorhub") -> ParsedModelRef:
         if "#" in s:
             s, flavor_part = s.split("#", 1)
             flavor_part = flavor_part.strip()
-            if not flavor_part:
-                raise ValueError("tensorhub ref flavor is empty")
             if "?" in flavor_part:
                 flavor_part = flavor_part.split("?", 1)[0].strip()
-            flavor = flavor_part or None
-            if flavor is None:
+            flavor_part = flavor_part.lower()
+            if not flavor_part:
                 raise ValueError("tensorhub ref flavor is empty")
+            # th#597 C5: ONE flavor token per ref, charset
+            # [a-z0-9][a-z0-9._-]{0,63} — `#a#b` is invalid (cells encode
+            # conjunction inside one token). Shared grammar vectors:
+            # tests/testdata/ref_grammar_vectors.json (byte-identical copy in
+            # tensorhub internal/orchestrator/release/testdata/).
+            if not _TENSORHUB_FLAVOR_RE.fullmatch(flavor_part):
+                raise ValueError(
+                    f"tensorhub ref flavor {flavor_part!r} is not a valid flavor token"
+                )
+            flavor = flavor_part
 
         low = s.lower()
         if "@sha256:" in low:

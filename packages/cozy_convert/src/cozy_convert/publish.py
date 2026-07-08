@@ -37,11 +37,17 @@ def publish_flavors(
     *,
     destination_repo: str = "",
     tags: Iterable[str] | None = None,
-    mode: str = "merge",
+    mode: str = "replace",
     metadata: Mapping[str, Any] | None = None,
 ) -> list[CommitResult]:
     """Publish each ProducedFlavor as one commit. ``destination_repo`` falls
-    back to the reserved-name ``ctx.destination`` payload field."""
+    back to the reserved-name ``ctx.destination`` payload field.
+
+    ``mode`` defaults to ``"replace"`` (th#597 C2): a producer's flavor
+    export is a complete tree by definition — merging with the repo's prior
+    :latest is how te#44 shipped an #fp8 checkpoint carrying 5.2GB of fp16
+    base weights. Pass ``mode="merge"`` explicitly only for deliberate
+    overlay publishes (e.g. a vae swap on top of an existing tree)."""
     dest = str(destination_repo or "").strip()
     if not dest:
         info = getattr(ctx, "destination", None) or {}
