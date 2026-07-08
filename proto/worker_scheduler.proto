@@ -314,6 +314,15 @@ message ModelEvent {
   int64 bytes_done = 5;  // download progress; set while state = DOWNLOADING
   int64 bytes_total = 6; // set while state = DOWNLOADING (0 = unknown)
   int64 duration_ms = 7; // op wall time; set when state = ADOPTED
+  // Adoption observability (gw#391), set when state = ADOPTED for inductor
+  // cells: FX-graph cache hits/misses observed during the adoption warmup and
+  // the warmup wall seconds. A warmup observing ZERO hits never reports
+  // ADOPTED - it rolls back to eager and reports adopt_failed:cache_miss; an
+  // endpoint without warmup() cannot prove the cell and reports
+  // adopt_failed:no_warmup. hits>0 with misses>0 = partial shape coverage.
+  int64 cache_hits = 8;
+  int64 cache_misses = 9;
+  double warmup_s = 10;
 }
 
 enum ModelState {
