@@ -229,8 +229,8 @@ to avoid chatter). Never periodic. O overwrites its copy wholesale.
 | `capability_token` | O token mint (cached per worker+tenant) | W tensorhub HTTP auth (uploads, blob PUT) | per-job scoped credential |
 | `output_mode` | O from `Prefer: bytes=inline\|url` header | W save/output path | INLINE = return small media raw in payload; URL = upload + return refs. UNSPECIFIED = URL |
 | `compute` | O scheduler | W CUDA binding + `ctx.compute` | see below |
-| `models` | O binding resolver (endpoint defaults + `_models` envelope) | W model injection (`ensure_local` + typed path/pipeline) | slot → ref |
-| `snapshots` | O resolver | W download stack | presigned snapshots for tensorhub-CAS refs in `models` that O doesn't know to be on this worker's disk; W ignores entries already local (digest match). hf/civitai refs need no snapshot |
+| `models` | O binding resolver (endpoint defaults + `_models` envelope) | W model injection (`ensure_local` + typed path/pipeline) + per-request LoRA overlays | slot → ref (+ optional `loras`) |
+| `snapshots` | O resolver | W download stack | presigned snapshots for tensorhub-CAS refs in `models` (including LoRA overlay refs) that O doesn't know to be on this worker's disk; W ignores entries already local (digest match). hf/civitai refs need no snapshot |
 
 ### ResolvedCompute (embedded in RunJob)
 
@@ -247,6 +247,21 @@ to avoid chatter). Never periodic. O overwrites its copy wholesale.
 |---|---|---|---|
 | `slot` | O from endpoint manifest | W injection: maps to the endpoint's declared model parameter | slot name |
 | `ref` | O resolver | W `ensure_local` + injection | canonical ref string |
+| `loras` | O `_models` override gate (AllowLora) + BYOM ingest (th#585) | W per-request adapter overlay (gw#393) | LoRA overlays riding this slot's base model; applied as unfused named adapters for the job's duration and removed after. Empty for adapter-free jobs; workers predating the field ignore it |
+
+### LoraOverlay (embedded in ModelBinding.loras)
+
+Re-added deliberately in gw#393: the recut deleted the old
+`ResolvedModelBinding.loras` stack as unreachable (§10); the BYOM pipeline
+(th#585/#586) is now its producer. Overlay refs are ordinary tensorhub-CAS
+refs — external (hf/civitai) LoRAs are mirrored into CAS at ingest and O
+attaches presigned snapshots in `RunJob.snapshots` keyed by the overlay ref,
+exactly like base-model refs. W never fetches user LoRA refs upstream.
+
+| field | producer | consumer | semantics |
+|---|---|---|---|
+| `ref` | O resolver | W `ensure_local` + digest-keyed adapter state-dict cache | canonical tensorhub ref of the adapter snapshot |
+| `weight` | O from `_models[slot].loras[].weight` | W `set_adapters` per-adapter scale | hub validates to [-4, 4]; W mirror-checks and fails INVALID out of range |
 
 ### Snapshot / SnapshotFile (embedded in RunJob.snapshots and ModelOp)
 
@@ -257,6 +272,11 @@ to avoid chatter). Never periodic. O overwrites its copy wholesale.
 | `files[].size_bytes` | O | W disk-headroom check + progress totals | file size |
 | `files[].blake3` | O | W post-download verification (digest-poisoning guard) | content hash |
 | `files[].url` | O presigner | W downloader | presigned GET; expiry ⇒ `ModelEvent{FAILED, error:"url_expired"}` and O re-sends the op with fresh URLs |
+
+Standalone CLIENTS (cozy CLI, `gen-worker prefetch`) pull the SAME shape over
+HTTP instead: `GET /api/v1/repos/:tenant/:name/resolve?tag=&flavor=` (#560 —
+anonymous for public repos, rate limited per client). Workers under an
+orchestrator never call it; their snapshots stay gRPC-pushed.
 
 ### JobAccepted (W → O)
 Sent once per accepted `(request_id, attempt)`, immediately on admit (before
@@ -579,8 +599,10 @@ ADOPT_COMPILE_CACHE only — `adopt_failed:<reason>` with reason ∈ {`bad_ref`,
   clone/conversion leaves the worker package), `required_flavor_refs`
   (bindings carry refs).
 - `ResolvedModelBinding` tag/flavor/provider/source/checkpoint_id/
-  compatibility_*/loras — the ref grammar already encodes selection; the LoRA
-  overlay stack was unreachable; compatibility gating is O-side.
+  compatibility_* — the ref grammar already encodes selection; compatibility
+  gating is O-side. Its `loras` overlay stack was deleted here as unreachable
+  and re-added deliberately as `ModelBinding.loras` once BYOM (gw#393 /
+  th#585) gave it a producer.
 - `WorkerResources.gpu_is_busy` — derivable from O's own assignment map.
 - `DownloadModelCommand.priority` — never read; retention lives in `keep`.
 - `WorkerDrainResult` — stream close is the drain ack.
