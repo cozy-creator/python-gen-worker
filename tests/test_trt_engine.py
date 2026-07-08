@@ -160,6 +160,19 @@ def test_build_refit_map_matches_by_value_and_transpose():
     assert unmatched == ["mystery"]
 
 
+def test_refit_weights_materializes_const_entries():
+    import base64
+
+    arr = np.arange(6, dtype=np.float16).reshape(2, 3)
+    out = te.refit_weights({}, [{
+        "name": "/unet/x/Constant_1_output_0", "key": "", "transform": "const",
+        "dtype": str(arr.dtype), "shape": list(arr.shape),
+        "data_b64": base64.b64encode(arr.tobytes()).decode(),
+    }])
+    assert np.array_equal(out["/unet/x/Constant_1_output_0"], arr)
+    assert out["/unet/x/Constant_1_output_0"].dtype == np.float16
+
+
 def test_refit_weights_applies_transform_and_fails_closed():
     w = np.arange(12, dtype=np.float16).reshape(3, 4)
     sd = {"k": _T(w)}
