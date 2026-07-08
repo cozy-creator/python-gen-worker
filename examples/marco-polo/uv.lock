@@ -232,7 +232,7 @@ wheels = [
 
 [[package]]
 name = "gen-worker"
-version = "0.8.3"
+version = "0.10.0"
 source = { editable = "../../" }
 dependencies = [
     { name = "blake3" },
@@ -250,6 +250,8 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "av", marker = "extra == 'dev'", specifier = ">=12" },
+    { name = "av", marker = "extra == 'video'", specifier = ">=12" },
     { name = "blake3", specifier = ">=1.0.0" },
     { name = "boto3", specifier = ">=1.41.0" },
     { name = "cozy-convert", marker = "extra == 'dev'", editable = "../../packages/cozy_convert" },
@@ -259,6 +261,7 @@ requires-dist = [
     { name = "msgspec", specifier = ">=0.18.6" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10.0" },
     { name = "numpy", marker = "extra == 'audio'", specifier = ">=1.24" },
+    { name = "numpy", marker = "extra == 'video'", specifier = ">=1.24" },
     { name = "pillow", marker = "extra == 'images'", specifier = ">=10.0" },
     { name = "protobuf", specifier = ">=6.30.0" },
     { name = "psutil", specifier = ">=7.0.0" },
@@ -277,7 +280,7 @@ requires-dist = [
     { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0.12.20250915" },
     { name = "types-requests", marker = "extra == 'dev'", specifier = ">=2.32.4.20250913" },
 ]
-provides-extras = ["torch", "vision", "trainer", "images", "audio", "dev"]
+provides-extras = ["torch", "vision", "trainer", "images", "audio", "video", "dev"]
 
 [[package]]
 name = "grpcio"

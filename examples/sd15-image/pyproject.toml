@@ -4,7 +4,7 @@ version = "1.0.0"
 description = "Stable Diffusion 1.5 text-to-image example (real GPU inference)"
 requires-python = ">=3.11,<3.13"
 dependencies = [
-    "gen-worker>=0.8.3",
+    "gen-worker>=0.10.0,<0.11",
     "diffusers>=0.31",
     "transformers>=4.46",
     "accelerate>=1.0",
