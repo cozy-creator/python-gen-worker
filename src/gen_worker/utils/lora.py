@@ -1,24 +1,32 @@
-"""Per-request LoRA adapter overlays (gw#393 BYOM).
+"""Per-request LoRA adapter overlays with adapter residency (gw#393 + gw#399).
 
 ``RunJob.models[].loras`` reaches the executor, which materializes each
-adapter snapshot via the normal ``ensure_local`` path, parses + validates the
-state dict (digest-keyed RAM LRU so repeat requests skip disk + parse), then
-applies the adapters UNFUSED via ``load_lora_weights`` + ``set_adapters``
-around the handler call and unloads them after — the base pipeline is
-restored between requests (anima's hot-toggle pattern).
+adapter snapshot via the normal ``ensure_local`` path and parses + validates
+the state dict (digest-keyed RAM LRU so repeat requests skip disk + parse).
+
+Adapters stay ATTACHED to the resident pipeline (``load_lora_weights`` is the
+expensive step — ~1s at SDXL scale, measured); each request only toggles the
+ACTIVE SET: ``set_adapters(named list)`` + ``enable_lora`` on the way in
+(~50ms), ``disable_lora`` on every exit path (~25ms). Nothing is ever active
+unless the current request named it — zero-leakage by explicit activation.
+Attached-but-inactive adapters are LRU-evicted under count/byte caps and
+dropped when the pipeline demotes out of VRAM (re-attached lazily from the
+AdapterCache on next use).
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
+import os
 import re
 import threading
 import time
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Protocol, Sequence, runtime_checkable
+from typing import Any, Dict, Iterable, List, Optional, Protocol, Sequence, Set, runtime_checkable
 
 from ..api.errors import RefCompatibilitySurprise, ValidationError
 
@@ -32,6 +40,12 @@ MAX_LORAS_PER_REQUEST = 8
 MAX_LORA_FILE_BYTES = 2 * _GiB
 LORA_WEIGHT_BOUND = 4.0
 ADAPTER_CACHE_MAX_BYTES = 1 * _GiB
+
+# Residency caps for adapters left attached to a pipeline between requests.
+MAX_ATTACHED_ADAPTERS = int(os.getenv("GEN_WORKER_ATTACHED_LORA_MAX", "8"))
+MAX_ATTACHED_ADAPTER_BYTES = int(
+    os.getenv("GEN_WORKER_ATTACHED_LORA_MAX_BYTES", str(2 * _GiB))
+)
 
 # LoRA-shaped keys only: kohya (`…lora_down.weight` / `…lora_up.weight` /
 # `….alpha`), peft (`…lora_A.weight` / `…lora_B.weight`, DoRA magnitude), and
@@ -55,13 +69,20 @@ class LoraCapablePipeline(Protocol):
     def unload_lora_weights(self) -> None: ...
 
 
+def adapter_name(cache_key: str) -> str:
+    """Stable diffusers adapter_name for one ``ref@digest`` — identical across
+    requests so a repeat request reuses the already-attached adapter."""
+    return "gw-" + hashlib.sha1(cache_key.encode()).hexdigest()[:12]
+
+
 @dataclass
 class PreparedAdapter:
     """One overlay, materialized and parsed, ready for GPU application."""
 
     slot: str
     ref: str
-    name: str  # unique-per-request diffusers adapter_name
+    cache_key: str  # ref@digest — the AdapterCache / attachment identity
+    name: str       # stable diffusers adapter_name (adapter_name(cache_key))
     weight: float
     state_dict: Dict[str, Any]
     from_cache: bool = False
@@ -204,70 +225,184 @@ class AdapterCache:
 
 
 # ---------------------------------------------------------------------------
-# Apply / unload (GPU side; run off the event loop)
+# Adapter residency: attachments persist on the pipeline; requests toggle the
+# active set (GPU side; run off the event loop)
 # ---------------------------------------------------------------------------
 
 
-def apply_adapters(
-    pipeline: Any, adapters: Sequence[PreparedAdapter], request_id: str = ""
-) -> None:
-    """Load *adapters* onto *pipeline* as named UNFUSED adapters and activate
-    them with their weights. Any failure rolls the pipeline back clean."""
-    if not isinstance(pipeline, LoraCapablePipeline):
-        raise ValidationError(
-            "model slot does not support LoRA adapters "
-            "(pipeline lacks load_lora_weights/set_adapters/unload_lora_weights)"
-        )
-    loaded: List[str] = []
-    t0 = time.monotonic()
-    try:
-        for a in adapters:
+@dataclass
+class _PipeAttachments:
+    """Adapters currently attached to one pipeline object."""
+
+    pipe_id: int  # id(pipe) — detects object replacement after reload
+    attached: "OrderedDict[str, tuple[str, int]]" = field(
+        default_factory=OrderedDict)  # cache_key -> (adapter_name, bytes)
+    active: bool = False  # an activation may be live (crash-leak guard)
+
+    @property
+    def total_bytes(self) -> int:
+        return sum(b for _, b in self.attached.values())
+
+
+class AdapterResidency:
+    """Per-pipeline attachment registry (gw#399), keyed by model ref.
+
+    ``activate`` attaches missing adapters (load_lora_weights — the ~1s step,
+    paid once per adapter per pipeline), toggles the active set, and LRU-evicts
+    attached-but-inactive adapters over the count/byte caps. ``deactivate``
+    disables all adapters (never raises). Thread-safe; all pipeline calls run
+    on the caller's (worker) thread."""
+
+    def __init__(
+        self,
+        max_attached: int = MAX_ATTACHED_ADAPTERS,
+        max_attached_bytes: int = MAX_ATTACHED_ADAPTER_BYTES,
+    ) -> None:
+        self._max = max(1, int(max_attached))
+        self._max_bytes = int(max_attached_bytes)
+        self._pipes: Dict[str, _PipeAttachments] = {}
+        self._lock = threading.RLock()
+
+    def _state(self, ref: str, pipe: Any) -> _PipeAttachments:
+        st = self._pipes.get(ref)
+        if st is None or st.pipe_id != id(pipe):
+            # New or replaced pipeline object: prior attachments died with it.
+            st = _PipeAttachments(pipe_id=id(pipe))
+            self._pipes[ref] = st
+        return st
+
+    def activate(
+        self, ref: str, pipe: Any, adapters: Sequence[PreparedAdapter],
+        request_id: str = "",
+    ) -> None:
+        """Make exactly *adapters* the pipeline's active set. Attach failure
+        rolls back to a fully-deactivated pipeline."""
+        if not isinstance(pipe, LoraCapablePipeline):
+            raise ValidationError(
+                "model slot does not support LoRA adapters "
+                "(pipeline lacks load_lora_weights/set_adapters/unload_lora_weights)"
+            )
+        with self._lock:
+            st = self._state(ref, pipe)
             try:
-                # Shallow copy: diffusers' conversion utilities consume the
-                # dict they're given; the cached entry must stay intact.
-                pipeline.load_lora_weights(dict(a.state_dict), adapter_name=a.name)
-            except (ValidationError, RefCompatibilitySurprise):
+                load_ms = 0
+                attached_now: List[str] = []
+                for a in adapters:
+                    if a.cache_key in st.attached:
+                        st.attached.move_to_end(a.cache_key)
+                        continue
+                    t0 = time.monotonic()
+                    try:
+                        # Shallow copy: diffusers' conversion utilities consume
+                        # the dict; the cached entry must stay intact.
+                        pipe.load_lora_weights(dict(a.state_dict), adapter_name=a.name)
+                    except (ValidationError, RefCompatibilitySurprise):
+                        raise
+                    except Exception as exc:
+                        raise RefCompatibilitySurprise(
+                            f"adapter failed to load onto base pipeline: {exc}",
+                            ref=a.ref, axis="pipeline_load",
+                        ) from exc
+                    load_ms += int((time.monotonic() - t0) * 1000)
+                    st.attached[a.cache_key] = (a.name, state_dict_bytes(a.state_dict))
+                    attached_now.append(a.name)
+                t1 = time.monotonic()
+                pipe.set_adapters(
+                    [a.name for a in adapters],
+                    adapter_weights=[a.weight for a in adapters],
+                )
+                # disable_lora (deactivate) flips a peft-level disable flag
+                # that set_adapters alone does NOT clear — always re-enable.
+                if hasattr(pipe, "enable_lora"):
+                    pipe.enable_lora()
+                set_ms = int((time.monotonic() - t1) * 1000)
+                st.active = True
+                self._evict_over_caps(st, pipe, keep={a.cache_key for a in adapters})
+                logger.info(
+                    "[request_id=%s] lora adapters active: %s (load_ms=%d set_ms=%d "
+                    "attached=%d attached_bytes=%d)",
+                    request_id,
+                    "; ".join(
+                        f"{a.ref}@{a.weight:g} "
+                        f"[{'resident' if a.name not in attached_now else 'attach'}"
+                        f" {'cache' if a.from_cache else 'cold'}"
+                        f" ensure_ms={a.ensure_ms} parse_ms={a.parse_ms}]"
+                        for a in adapters
+                    ),
+                    load_ms, set_ms, len(st.attached), st.total_bytes,
+                )
+            except BaseException:
+                self.deactivate(ref, pipe, request_id=request_id)
                 raise
-            except Exception as exc:
-                raise RefCompatibilitySurprise(
-                    f"adapter failed to load onto base pipeline: {exc}",
-                    ref=a.ref, axis="pipeline_load",
-                ) from exc
-            loaded.append(a.name)
-        load_ms = int((time.monotonic() - t0) * 1000)
-        t1 = time.monotonic()
-        pipeline.set_adapters(
-            [a.name for a in adapters], adapter_weights=[a.weight for a in adapters]
-        )
-        set_ms = int((time.monotonic() - t1) * 1000)
-        logger.info(
-            "[request_id=%s] lora adapters active: %s (load_ms=%d set_ms=%d)",
-            request_id,
-            "; ".join(
-                f"{a.ref}@{a.weight:g} [{'cache' if a.from_cache else 'cold'}"
-                f" ensure_ms={a.ensure_ms} parse_ms={a.parse_ms}]"
-                for a in adapters
-            ),
-            load_ms, set_ms,
-        )
-    except BaseException:
-        if loaded:
-            unload_adapters(pipeline, request_id=request_id)
-        raise
 
+    def deactivate(self, ref: str, pipe: Any, request_id: str = "") -> None:
+        """Nothing active after this call (attachments stay). Never raises."""
+        with self._lock:
+            st = self._pipes.get(ref)
+            if st is None:
+                return
+            if st.pipe_id != id(pipe):
+                self._pipes.pop(ref, None)  # pipeline was replaced; state is stale
+                return
+            t0 = time.monotonic()
+            try:
+                if hasattr(pipe, "disable_lora"):
+                    pipe.disable_lora()
+                else:
+                    pipe.unload_lora_weights()
+                    st.attached.clear()
+                st.active = False
+                logger.info(
+                    "[request_id=%s] lora adapters deactivated (disable_ms=%d attached=%d)",
+                    request_id, int((time.monotonic() - t0) * 1000), len(st.attached),
+                )
+            except Exception:
+                logger.warning(
+                    "[request_id=%s] lora deactivate failed; pipeline may have "
+                    "active adapters", request_id, exc_info=True,
+                )
 
-def unload_adapters(pipeline: Any, request_id: str = "") -> int:
-    """Remove every request-scoped adapter from *pipeline* (guaranteed-clean
-    teardown; never raises). Returns unload wall ms, -1 on failure."""
-    t0 = time.monotonic()
-    try:
-        pipeline.unload_lora_weights()
-    except Exception:
-        logger.warning(
-            "[request_id=%s] unload_lora_weights failed; pipeline may have stale adapters",
-            request_id, exc_info=True,
-        )
-        return -1
-    ms = int((time.monotonic() - t0) * 1000)
-    logger.info("[request_id=%s] lora adapters unloaded (unload_ms=%d)", request_id, ms)
-    return ms
+    def needs_deactivation(self, ref: str) -> bool:
+        """Cheap guard for bare requests: True only when a previous request's
+        activation may still be live on this ref's pipeline."""
+        with self._lock:
+            st = self._pipes.get(ref)
+            return bool(st and st.active)
+
+    def detach(self, ref: str, pipe: Any) -> None:
+        """Drop every attachment from the pipeline (demotion out of VRAM);
+        the AdapterCache re-attaches lazily on next use. Never raises."""
+        with self._lock:
+            st = self._pipes.pop(ref, None)
+            if st is None or not st.attached or st.pipe_id != id(pipe):
+                return
+            try:
+                pipe.unload_lora_weights()
+                logger.info(
+                    "lora attachments dropped on demote: ref=%s adapters=%d",
+                    ref, len(st.attached),
+                )
+            except Exception:
+                logger.warning("lora detach on demote failed for %s", ref, exc_info=True)
+
+    def _evict_over_caps(self, st: _PipeAttachments, pipe: Any, keep: Set[str]) -> None:
+        while len(st.attached) > self._max or (
+            st.total_bytes > self._max_bytes and len(st.attached) > 1
+        ):
+            victim = next((k for k in st.attached if k not in keep), None)
+            if victim is None:
+                return
+            name, _ = st.attached.pop(victim)
+            try:
+                pipe.delete_adapters(name)
+                logger.info("lora attachment evicted (LRU): %s", victim)
+            except Exception:
+                logger.warning("lora eviction failed for %s", victim, exc_info=True)
+
+    def stats(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                ref: {"adapters": len(st.attached), "bytes": st.total_bytes,
+                      "active": st.active}
+                for ref, st in self._pipes.items()
+            }

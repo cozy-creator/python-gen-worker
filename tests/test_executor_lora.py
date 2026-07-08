@@ -1,9 +1,11 @@
-"""gw#393 per-request LoRA overlays: wire -> materialize -> apply -> unload.
+"""gw#393 + gw#399 per-request LoRA overlays with adapter residency.
 
 RunJob ModelBinding.loras reaches the executor; adapter snapshots ride the
 normal ensure_local path; state dicts hit the digest-keyed RAM LRU; adapters
-apply UNFUSED around the handler call and are removed on EVERY exit path
-(OK / handler error / cancel). Validation mirrors the hub gates worker-side.
+stay ATTACHED to the resident pipeline while requests toggle the ACTIVE set
+(explicit activation — nothing active unless the request named it, disabled
+on EVERY exit path). Attachments are LRU-capped and dropped on demotion.
+Validation mirrors the hub gates worker-side.
 """
 
 from __future__ import annotations
@@ -38,26 +40,57 @@ def _fake_state_dict(nbytes: int = 64) -> Dict[str, Any]:
 
 
 class _FakeLoraPipe:
+    """Residency-capable fake: tracks attachments, the active set, and the
+    peft-level enabled flag like a diffusers pipeline."""
+
     def __init__(self, fail_load: bool = False) -> None:
         self.calls: List[Any] = []
+        self.attached: List[str] = []
         self.active: List[str] = []
         self.weights: List[float] = []
+        self.enabled = True
         self.fail_load = fail_load
+        self.fail_disable = False
 
     def load_lora_weights(self, state_dict, adapter_name: str = "") -> None:
         if self.fail_load:
             raise RuntimeError("size mismatch for lora_up.weight")
         self.calls.append(("load", adapter_name))
+        self.attached.append(adapter_name)
 
     def set_adapters(self, names, adapter_weights=None) -> None:
         self.calls.append(("set", tuple(names), tuple(adapter_weights)))
         self.active = list(names)
         self.weights = list(adapter_weights)
 
+    def enable_lora(self) -> None:
+        self.calls.append(("enable",))
+        self.enabled = True
+
+    def disable_lora(self) -> None:
+        if self.fail_disable:
+            raise RuntimeError("disable failed")
+        self.calls.append(("disable",))
+        self.enabled = False
+
+    def delete_adapters(self, name: str) -> None:
+        self.calls.append(("delete", name))
+        self.attached.remove(name)
+
     def unload_lora_weights(self) -> None:
         self.calls.append(("unload",))
+        self.attached = []
         self.active = []
         self.weights = []
+
+    def to(self, device: str) -> "_FakeLoraPipe":
+        self.calls.append(("to", device))
+        return self
+
+    @property
+    def live(self) -> List[str]:
+        """Adapters actually affecting compute right now."""
+        return self.active if self.enabled else []
 
 
 class _In(msgspec.Struct):
@@ -89,7 +122,7 @@ class _Endpoint:
         ]
         pinned = bool(type(self).store and type(self).store.residency.in_use(LORA_A))
         return _Out(
-            active_adapters=len(pipe.active), weights=list(pipe.weights),
+            active_adapters=len(pipe.live), weights=list(pipe.weights),
             lora_meta=meta, adapter_ref_pinned=pinned,
         )
 
@@ -167,7 +200,7 @@ def _ov(ref: str, weight: float = 1.0) -> pb.LoraOverlay:
 # ---------------------------------------------------------------------------
 
 
-def test_adapters_active_during_handler_and_unloaded_after(tmp_path, monkeypatch) -> None:
+def test_adapters_active_during_handler_and_disabled_after(tmp_path, monkeypatch) -> None:
     async def _run() -> None:
         h = _Harness(tmp_path, monkeypatch)
         res = await h.run(loras=[_ov(LORA_A, 0.8), _ov(LORA_B, -0.5)])
@@ -178,8 +211,9 @@ def test_adapters_active_during_handler_and_unloaded_after(tmp_path, monkeypatch
         assert out.adapter_ref_pinned  # executing() covers adapter refs
         assert h.ensured == [LORA_A, LORA_B]
         kinds = [c[0] for c in h.pipe.calls]
-        assert kinds == ["load", "load", "set", "unload"]
-        assert h.pipe.active == []  # clean after the request
+        assert kinds == ["load", "load", "set", "enable", "disable"]
+        assert h.pipe.live == []          # nothing active after the request
+        assert len(h.pipe.attached) == 2  # attachments stay resident
 
     asyncio.run(_run())
 
@@ -205,13 +239,13 @@ def test_no_loras_is_a_no_op(tmp_path, monkeypatch) -> None:
     asyncio.run(_run())
 
 
-def test_unload_runs_when_handler_raises(tmp_path, monkeypatch) -> None:
+def test_deactivate_runs_when_handler_raises(tmp_path, monkeypatch) -> None:
     async def _run() -> None:
         h = _Harness(tmp_path, monkeypatch)
         res = await h.run(loras=[_ov(LORA_A)], payload=_In(fail=True))
         assert res.status == pb.JOB_STATUS_FATAL
-        assert h.pipe.calls[-1] == ("unload",)
-        assert h.pipe.active == []
+        assert h.pipe.calls[-1] == ("disable",)
+        assert h.pipe.live == []
 
     asyncio.run(_run())
 
@@ -233,7 +267,8 @@ def test_failed_adapter_load_rolls_back_and_is_invalid(tmp_path, monkeypatch) ->
         res = await h.run(loras=[_ov(LORA_A), _ov(LORA_B)])
         assert res.status == pb.JOB_STATUS_INVALID
         assert "failed to load onto base pipeline" in res.safe_message
-        assert h.pipe.calls[-1] == ("unload",)
+        assert h.pipe.calls[-1] == ("disable",)  # rollback deactivates
+        assert h.pipe.live == []
 
     asyncio.run(_run())
 
@@ -347,6 +382,137 @@ def test_adapter_cache_lru_byte_cap() -> None:
     cache.put("huge", _fake_state_dict(1000))  # larger than cap -> not cached
     assert cache.get("huge") is None
     assert len(cache) == 1
+
+
+# ---------------------------------------------------------------------------
+# Adapter residency (gw#399): attach once, toggle the active set
+# ---------------------------------------------------------------------------
+
+
+def test_repeat_request_reuses_attachment(tmp_path, monkeypatch) -> None:
+    async def _run() -> None:
+        h = _Harness(tmp_path, monkeypatch)
+        snaps = {LORA_A: "sha256:abc"}
+        await h.run(loras=[_ov(LORA_A, 0.9)], request_id="r1", snapshots=snaps)
+        await h.run(loras=[_ov(LORA_A, 0.9)], request_id="r2", snapshots=snaps)
+        loads = [c for c in h.pipe.calls if c[0] == "load"]
+        sets = [c for c in h.pipe.calls if c[0] == "set"]
+        assert len(loads) == 1  # attached once, reused on repeat
+        assert len(sets) == 2   # every request toggles the active set
+        assert len(h.pipe.attached) == 1
+
+    asyncio.run(_run())
+
+
+def test_weight_change_on_resident_adapter_needs_no_reload(tmp_path, monkeypatch) -> None:
+    async def _run() -> None:
+        h = _Harness(tmp_path, monkeypatch)
+        snaps = {LORA_A: "sha256:abc"}
+        await h.run(loras=[_ov(LORA_A, 0.9)], request_id="r1", snapshots=snaps)
+        res = await h.run(loras=[_ov(LORA_A, 0.4)], request_id="r2", snapshots=snaps)
+        out = msgspec.msgpack.decode(res.inline, type=_Out)
+        assert out.weights == [0.4]
+        assert len([c for c in h.pipe.calls if c[0] == "load"]) == 1
+
+    asyncio.run(_run())
+
+
+def test_interleaved_lora_bare_lora_never_bleeds(tmp_path, monkeypatch) -> None:
+    """The zero-leakage invariant: bare requests between LoRA requests run
+    with NOTHING live, even though attachments stay resident."""
+    async def _run() -> None:
+        h = _Harness(tmp_path, monkeypatch)
+        snaps = {LORA_A: "sha256:abc"}
+
+        res = await h.run(loras=[_ov(LORA_A, 0.9)], request_id="r1", snapshots=snaps)
+        assert msgspec.msgpack.decode(res.inline, type=_Out).active_adapters == 1
+
+        res = await h.run(request_id="r2")  # bare
+        assert msgspec.msgpack.decode(res.inline, type=_Out).active_adapters == 0
+        assert len(h.pipe.attached) == 1  # still attached, just not live
+
+        res = await h.run(loras=[_ov(LORA_A, 0.9)], request_id="r3", snapshots=snaps)
+        assert msgspec.msgpack.decode(res.inline, type=_Out).active_adapters == 1
+
+        res = await h.run(request_id="r4")  # bare again
+        assert msgspec.msgpack.decode(res.inline, type=_Out).active_adapters == 0
+        assert h.pipe.live == []
+
+    asyncio.run(_run())
+
+
+def test_bare_request_recovers_from_failed_deactivation(tmp_path, monkeypatch) -> None:
+    """Crash-leak guard: if a LoRA request's teardown fails, the next bare
+    request on the same pipeline explicitly deactivates before running."""
+    async def _run() -> None:
+        h = _Harness(tmp_path, monkeypatch)
+        snaps = {LORA_A: "sha256:abc"}
+        h.pipe.fail_disable = True
+        await h.run(loras=[_ov(LORA_A, 0.9)], request_id="r1", snapshots=snaps)
+        assert h.pipe.enabled  # teardown failed; adapters still live
+        h.pipe.fail_disable = False
+        res = await h.run(request_id="r2")  # bare request must self-protect
+        assert msgspec.msgpack.decode(res.inline, type=_Out).active_adapters == 0
+        assert not h.pipe.enabled
+
+    asyncio.run(_run())
+
+
+def test_lru_eviction_over_attachment_caps(tmp_path, monkeypatch) -> None:
+    async def _run() -> None:
+        h = _Harness(tmp_path, monkeypatch)
+        h.executor._adapters = lora_util.AdapterResidency(max_attached=2)
+        for i, ref in enumerate([LORA_A, LORA_B, "user1/lora-third"]):
+            await h.run(loras=[_ov(ref)], request_id=f"r{i}",
+                        snapshots={ref: f"sha256:{i}"})
+        assert len(h.pipe.attached) == 2
+        deletes = [c for c in h.pipe.calls if c[0] == "delete"]
+        assert len(deletes) == 1
+        # LRU victim was the first-attached adapter
+        assert deletes[0][1] == lora_util.adapter_name(f"{LORA_A}@sha256:0")
+
+    asyncio.run(_run())
+
+
+def test_demotion_drops_attachments_and_reattaches_lazily(tmp_path, monkeypatch) -> None:
+    async def _run() -> None:
+        h = _Harness(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            "gen_worker.models.residency.get_available_ram_gb", lambda: 999.0)
+        snaps = {LORA_A: "sha256:abc"}
+        ref = wire_ref(h.spec.models["pipeline"])
+        await h.run(loras=[_ov(LORA_A)], request_id="r1", snapshots=snaps)
+        assert len(h.pipe.attached) == 1
+
+        assert h.executor.store.residency.demote(ref)  # VRAM -> RAM
+        assert h.pipe.attached == []  # pre_demote hook dropped attachments
+        assert ("unload",) in h.pipe.calls
+
+        h.executor.store.residency.promote(ref, device="cpu")
+        await h.run(loras=[_ov(LORA_A)], request_id="r2", snapshots=snaps)
+        assert len(h.pipe.attached) == 1  # lazily re-attached
+        assert len([c for c in h.pipe.calls if c[0] == "load"]) == 2
+        # state dict itself still came from the RAM cache (no re-parse)
+        assert h.parsed == [LORA_A]
+
+    asyncio.run(_run())
+
+
+def test_replaced_pipeline_object_resets_attachment_state(tmp_path, monkeypatch) -> None:
+    async def _run() -> None:
+        h = _Harness(tmp_path, monkeypatch)
+        snaps = {LORA_A: "sha256:abc"}
+        ref = wire_ref(h.spec.models["pipeline"])
+        await h.run(loras=[_ov(LORA_A)], request_id="r1", snapshots=snaps)
+
+        new_pipe = _FakeLoraPipe()  # cold reload produced a fresh object
+        _Endpoint.pipe = new_pipe
+        h.executor.store.residency.track_vram(ref, new_pipe, vram_bytes=1)
+        await h.run(loras=[_ov(LORA_A)], request_id="r2", snapshots=snaps)
+        assert len([c for c in new_pipe.calls if c[0] == "load"]) == 1
+        assert len(new_pipe.attached) == 1
+
+    asyncio.run(_run())
 
 
 # ---------------------------------------------------------------------------

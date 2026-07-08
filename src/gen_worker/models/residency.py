@@ -132,6 +132,9 @@ class Residency:
         self._vram_budget = vram_budget_bytes
         self._free_vram_fn = free_vram_bytes_fn
         self._move = move_fn
+        # Called with (ref, obj) before a VRAM->RAM demotion moves the object
+        # (executor wires adapter detach here, gw#399). Must never raise.
+        self.pre_demote: Optional[Callable[[str, Any], None]] = None
         self._entries: Dict[str, _Entry] = {}
         self._lock = threading.RLock()
         self._shared_hits = 0
@@ -276,6 +279,11 @@ class Residency:
                 return False
             if not e.movable or get_available_ram_gb() < _RAM_FLOOR_GB:
                 return False
+            if self.pre_demote is not None:
+                try:
+                    self.pre_demote(ref, e.obj)
+                except Exception:
+                    logger.exception("pre_demote hook failed for %s", ref)
             self._move(e.obj, "cpu")
             e.tier = Tier.RAM
             e.vram_bytes = 0

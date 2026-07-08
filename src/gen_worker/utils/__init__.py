@@ -1,15 +1,13 @@
 from .lora import (
     AdapterCache,
+    AdapterResidency,
     LoraCapablePipeline,
     PreparedAdapter,
-    apply_adapters,
-    unload_adapters,
 )
 
 __all__ = [
     "AdapterCache",
+    "AdapterResidency",
     "LoraCapablePipeline",
     "PreparedAdapter",
-    "apply_adapters",
-    "unload_adapters",
 ]

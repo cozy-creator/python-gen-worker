@@ -20,7 +20,6 @@ from dataclasses import dataclass, field as dc_field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
-import uuid
 
 import msgspec
 
@@ -565,6 +564,10 @@ class Executor:
         self._load_lock = asyncio.Lock()
         # Parsed per-request LoRA state dicts, keyed by ref@digest (gw#393).
         self._adapter_cache = lora_util.AdapterCache()
+        # Adapters attached to resident pipelines; requests toggle the active
+        # set (gw#399). Demotion out of VRAM drops attachments.
+        self._adapters = lora_util.AdapterResidency()
+        self.store.residency.pre_demote = self._adapters.detach
         self._on_state_change = on_state_change or (lambda: None)
         self.file_base_url: str = ""
         self.draining = False
@@ -1412,22 +1415,36 @@ class Executor:
             exec_refs = [wire_ref(b) for b in spec.models.values()]
             adapter_refs = [a.ref for group in adapters.values() for a in group]
             with self.store.residency.executing(*exec_refs, *adapter_refs):
-                lora_pipes: List[Any] = []
+                active: List[Tuple[str, Any]] = []
                 try:
                     for slot, prepared in adapters.items():
                         pipe = self._adapter_target(spec, slot)
+                        ref = wire_ref(spec.models[slot])
                         await asyncio.to_thread(
-                            lora_util.apply_adapters, pipe, prepared, run.request_id
+                            self._adapters.activate, ref, pipe, prepared, run.request_id
                         )
-                        lora_pipes.append(pipe)
+                        active.append((ref, pipe))
+                    # Explicit activation (gw#399): a slot this request names
+                    # no adapters for must run bare even if a previous
+                    # request's teardown failed and left adapters enabled.
+                    for slot in spec.models:
+                        if slot in adapters:
+                            continue
+                        ref = wire_ref(spec.models[slot])
+                        if self._adapters.needs_deactivation(ref):
+                            pipe = self.store.residency.obj(ref)
+                            if pipe is not None:
+                                await asyncio.to_thread(
+                                    self._adapters.deactivate, ref, pipe, run.request_id
+                                )
                     output = await self._execute(job, spec, instance, ctx, payload, kwargs,
                                                  timeout_ms=timeout_ms, gpu_index=gpu_index)
                 finally:
-                    # Request-scoped adapters: guaranteed-clean teardown on
-                    # every exit (OK / cancel / deadline / handler error).
-                    for pipe in lora_pipes:
+                    # Guaranteed-inactive on every exit (OK / cancel /
+                    # deadline / handler error); attachments stay resident.
+                    for ref, pipe in active:
                         await asyncio.to_thread(
-                            lora_util.unload_adapters, pipe, run.request_id
+                            self._adapters.deactivate, ref, pipe, run.request_id
                         )
             metrics = self._metrics(queue_ms, started, concurrency_at_start, gpu_index,
                                     output=output)
@@ -1513,7 +1530,6 @@ class Executor:
                 f"(max {lora_util.MAX_LORAS_PER_REQUEST} per request)"
             )
         out: Dict[str, List[lora_util.PreparedAdapter]] = {}
-        seq = 0
         for slot, loras in overlays:
             if slot not in spec.models:
                 raise ValidationError(f"lora overlay names unknown model slot {slot!r}")
@@ -1540,12 +1556,11 @@ class Executor:
                     self._adapter_cache.put(cache_key, state_dict)
                 parse_ms = int((time.monotonic() - t1) * 1000)
                 prepared.append(lora_util.PreparedAdapter(
-                    slot=slot, ref=ref,
-                    name=f"req{seq}-{uuid.uuid4().hex[:8]}",
+                    slot=slot, ref=ref, cache_key=cache_key,
+                    name=lora_util.adapter_name(cache_key),
                     weight=weight, state_dict=state_dict,
                     from_cache=from_cache, ensure_ms=ensure_ms, parse_ms=parse_ms,
                 ))
-                seq += 1
             out[slot] = prepared
         return out
 
