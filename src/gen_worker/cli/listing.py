@@ -33,6 +33,8 @@ def describe_binding(binding: Any) -> Dict[str, Any]:
             v = getattr(binding, key, "")
             if v:
                 out[key] = v
+        if getattr(binding, "allow_lora", False):
+            out["allow_lora"] = True
         files = tuple(getattr(binding, "files", ()) or ())
         if files:
             out["files"] = list(files)

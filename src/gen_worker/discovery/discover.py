@@ -292,6 +292,8 @@ def _binding_to_manifest(binding: Binding, param_name: str = "") -> Dict[str, An
         out["tag"] = binding.tag
         if binding.flavor:
             out["flavor"] = binding.flavor
+        if binding.allow_lora:
+            out["allow_lora"] = True
     elif isinstance(binding, HF):
         for k in ("revision", "dtype", "subfolder"):
             v = getattr(binding, k)
@@ -299,6 +301,8 @@ def _binding_to_manifest(binding: Binding, param_name: str = "") -> Dict[str, An
                 out[k] = v
         if binding.files:
             out["files"] = list(binding.files)
+        if binding.allow_lora:
+            out["allow_lora"] = True
     elif isinstance(binding, Civitai):
         if binding.version:
             out["version"] = binding.version
@@ -435,6 +439,18 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
             key: _binding_to_manifest(binding, key)
             for key, binding in es.models.items()
         }
+        # allow_lora bindings carry the endpoint's architecture family so the
+        # hub's th#586 gate can police adapter targets (builder rejects
+        # allow_lora without family).
+        compile_family = es.compile.family if es.compile is not None else ""
+        for block in bindings_block.values():
+            if block.get("allow_lora"):
+                if not compile_family:
+                    raise ValueError(
+                        f"{es.name}: allow_lora bindings require "
+                        "Compile(family=...) on the endpoint"
+                    )
+                block["family"] = compile_family
 
         input_schema, input_sha = _schema_and_hash(es.payload_type)
         moderation = _collect_payload_moderation_metadata(es.payload_type)
