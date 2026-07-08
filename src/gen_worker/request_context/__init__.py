@@ -118,6 +118,7 @@ class RequestContext:
         destination_info: Optional[Dict[str, Any]] = None,
         compute: Optional["Compute"] = None,
         models: Optional[Dict[str, Any]] = None,
+        loras: Optional[Dict[str, Any]] = None,
         hf_token: str = "",
     ) -> None:
         self._request_id = str(request_id or "").strip()
@@ -159,6 +160,7 @@ class RequestContext:
         # None-checks.
         self._compute: "Compute" = compute if compute is not None else _default_compute()
         self._models = _copy_context_metadata(models or {})
+        self._loras = _copy_context_metadata(loras or {})
 
         # Upload-session manager (issue #20). Lazy-created on first
         # ctx.save_file / ctx.save_checkpoint / ctx.save_output_stream use.
@@ -202,6 +204,14 @@ class RequestContext:
     def models(self) -> Dict[str, Any]:
         """Resolved model refs for this invocation, keyed by slot name."""
         return _copy_context_metadata(self._models)
+
+    @property
+    def loras(self) -> Dict[str, Any]:
+        """Per-request LoRA overlays riding each model slot (gw#393):
+        slot name -> tuple of ``{"ref", "weight"}``. Empty for adapter-free
+        requests. The worker applies/removes the adapters around the handler
+        call; this surface is read-only metadata."""
+        return _copy_context_metadata(self._loras)
 
     @property
     def device(self) -> "torch.device":

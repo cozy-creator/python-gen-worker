@@ -20,6 +20,8 @@ from dataclasses import dataclass, field as dc_field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
+import uuid
+
 import msgspec
 
 from .api.binding import wire_ref
@@ -48,6 +50,7 @@ from .request_context import (
     RequestContext,
     TrainingContext,
 )
+from .utils import lora as lora_util
 
 _CONTEXT_BY_KIND: Dict[str, type] = {
     "inference": RequestContext,
@@ -560,6 +563,8 @@ class Executor:
         # Model loads/promotions serialize so allocator-delta measurements
         # and free-VRAM reads don't cross-contaminate (#369).
         self._load_lock = asyncio.Lock()
+        # Parsed per-request LoRA state dicts, keyed by ref@digest (gw#393).
+        self._adapter_cache = lora_util.AdapterCache()
         self._on_state_change = on_state_change or (lambda: None)
         self.file_base_url: str = ""
         self.draining = False
@@ -1283,6 +1288,12 @@ class Executor:
                 gpu_count=int(compute.gpu_count) if compute is not None else 0,
             ),
             models={b.slot: b.ref for b in run.models},
+            loras={
+                b.slot: tuple(
+                    {"ref": ov.ref, "weight": float(ov.weight) or 1.0} for ov in b.loras
+                )
+                for b in run.models if b.loras
+            },
             source_info=source_info,
             destination_info=destination_info,
             execution_hints=(
@@ -1300,6 +1311,7 @@ class Executor:
             await asyncio.to_thread(materialize_input_assets, payload, run.request_id)
             instance = await self.ensure_setup(spec, snapshots)
             kwargs = await self._handler_kwargs(spec, snapshots)
+            adapters = await self._prepare_adapters(run, spec, snapshots)
         except asyncio.CancelledError:
             await self._finish(job, pb.JOB_STATUS_CANCELED, safe_message="canceled")
             return
@@ -1331,12 +1343,28 @@ class Executor:
                 if job.ctx.cancelled:
                     raise CanceledError("canceled")
             started = time.monotonic()
-            # Pin-while-executing: the models this job uses are not eviction
-            # candidates for its duration (cross-pipeline eviction safety).
+            # Pin-while-executing: the models (and adapter snapshots) this job
+            # uses are not eviction candidates for its duration.
             exec_refs = [wire_ref(b) for b in spec.models.values()]
-            with self.store.residency.executing(*exec_refs):
-                output = await self._execute(job, spec, instance, ctx, payload, kwargs,
-                                             timeout_ms=timeout_ms, gpu_index=gpu_index)
+            adapter_refs = [a.ref for group in adapters.values() for a in group]
+            with self.store.residency.executing(*exec_refs, *adapter_refs):
+                lora_pipes: List[Any] = []
+                try:
+                    for slot, prepared in adapters.items():
+                        pipe = self._adapter_target(spec, slot)
+                        await asyncio.to_thread(
+                            lora_util.apply_adapters, pipe, prepared, run.request_id
+                        )
+                        lora_pipes.append(pipe)
+                    output = await self._execute(job, spec, instance, ctx, payload, kwargs,
+                                                 timeout_ms=timeout_ms, gpu_index=gpu_index)
+                finally:
+                    # Request-scoped adapters: guaranteed-clean teardown on
+                    # every exit (OK / cancel / deadline / handler error).
+                    for pipe in lora_pipes:
+                        await asyncio.to_thread(
+                            lora_util.unload_adapters, pipe, run.request_id
+                        )
             metrics = self._metrics(queue_ms, started, concurrency_at_start, gpu_index,
                                     output=output)
             # Handler GPU work is done — free the slot before result-blob
@@ -1401,6 +1429,71 @@ class Executor:
             path = await self.store.ensure_local(ref, snapshots.get(ref), binding=binding)
             kwargs[name] = Path(path) if sig.get(name) is Path else str(path)
         return kwargs
+
+    async def _prepare_adapters(
+        self, run: pb.RunJob, spec: EndpointSpec, snapshots: Dict[str, pb.Snapshot]
+    ) -> Dict[str, List[lora_util.PreparedAdapter]]:
+        """Materialize + parse the job's per-slot LoRA overlays (gw#393).
+
+        Downloads ride the normal ensure_local snapshot path (disk GC,
+        ref-index, ModelEvents — so the hub learns adapter download bandwidth
+        like any ref); parsed state dicts hit the digest-keyed RAM LRU.
+        GPU-free: application happens later, under the job's GPU slot."""
+        overlays = [(b.slot, list(b.loras)) for b in run.models if b.loras]
+        if not overlays:
+            return {}
+        total = sum(len(loras) for _, loras in overlays)
+        if total > lora_util.MAX_LORAS_PER_REQUEST:
+            raise ValidationError(
+                f"too many lora adapters: {total} "
+                f"(max {lora_util.MAX_LORAS_PER_REQUEST} per request)"
+            )
+        out: Dict[str, List[lora_util.PreparedAdapter]] = {}
+        seq = 0
+        for slot, loras in overlays:
+            if slot not in spec.models:
+                raise ValidationError(f"lora overlay names unknown model slot {slot!r}")
+            prepared: List[lora_util.PreparedAdapter] = []
+            for overlay in loras:
+                ref = str(overlay.ref or "").strip()
+                if not ref:
+                    raise ValidationError(f"lora overlay on slot {slot!r} has an empty ref")
+                weight = lora_util.validate_overlay_weight(overlay.weight, ref=ref)
+                t0 = time.monotonic()
+                path = await self.store.ensure_local(ref, snapshots.get(ref))
+                ensure_ms = int((time.monotonic() - t0) * 1000)
+                snap = snapshots.get(ref)
+                digest = (snap.digest if snap is not None else "") or path.name
+                cache_key = f"{ref}@{digest}"
+                t1 = time.monotonic()
+                state_dict = self._adapter_cache.get(cache_key)
+                from_cache = state_dict is not None
+                if state_dict is None:
+                    file = lora_util.find_adapter_file(path, ref=ref)
+                    state_dict = await asyncio.to_thread(
+                        lora_util.load_adapter_state_dict, file, ref=ref
+                    )
+                    self._adapter_cache.put(cache_key, state_dict)
+                parse_ms = int((time.monotonic() - t1) * 1000)
+                prepared.append(lora_util.PreparedAdapter(
+                    slot=slot, ref=ref,
+                    name=f"req{seq}-{uuid.uuid4().hex[:8]}",
+                    weight=weight, state_dict=state_dict,
+                    from_cache=from_cache, ensure_ms=ensure_ms, parse_ms=parse_ms,
+                ))
+                seq += 1
+            out[slot] = prepared
+        return out
+
+    def _adapter_target(self, spec: EndpointSpec, slot: str) -> Any:
+        """The worker-managed pipeline object adapters for ``slot`` apply to."""
+        pipe = self.store.residency.obj(wire_ref(spec.models[slot]))
+        if pipe is None:
+            raise ValidationError(
+                f"model slot {slot!r} has no worker-managed pipeline; "
+                "lora overlays require a pipeline-injected setup slot"
+            )
+        return pipe
 
     async def _execute(
         self,
