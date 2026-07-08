@@ -4,7 +4,7 @@ version = "1.0.0"
 description = "FLUX.2-klein-4B turbo text-to-image example (real GPU inference)"
 requires-python = ">=3.11,<3.13"
 dependencies = [
-    "gen-worker>=0.9.1",
+    "gen-worker>=0.10.0,<0.11",
     "diffusers>=0.39.0",
     # diffusers' Flux2Klein text encoder is Qwen3ForCausalLM; transformers 5.0
     # reworked internals that load path depends on (see inference-endpoints
