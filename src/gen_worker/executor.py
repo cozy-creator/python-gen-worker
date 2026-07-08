@@ -386,7 +386,14 @@ class ModelStore:
             binding = self._bindings.get(ref)
         async with self._lock(ref):
             cached = self.residency.local_path(ref)
-            if cached is not None and cached.exists():
+            # A digest-carrying snapshot is authoritative: a cached
+            # materialization of the SAME ref at a DIFFERENT digest is stale
+            # (flavor re-published — e.g. compile-cache digest-change
+            # re-adoption, e2e#117 live find #7) and must not short-circuit.
+            want = ""
+            if snapshot is not None and snapshot.digest:
+                want = snapshot.digest.split(":", 1)[-1].strip().lower()
+            if cached is not None and cached.exists() and (not want or cached.name == want):
                 self._index.touch(ref)
                 return cached
             if snapshot is not None and snapshot.files:
