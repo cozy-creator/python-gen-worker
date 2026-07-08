@@ -214,7 +214,6 @@ def test_civitai_base_model_beats_filename_tokens() -> None:
     """GonzaLomo regression (e2e #112): an SDXL 1.0 checkpoint whose FILENAME
     contains 'flux' must classify as sdxl via the structured baseModel."""
     from cozy_convert.layout import (
-        detect_huggingface_source_layout,
         infer_model_family_variant_from_hint,
     )
 
