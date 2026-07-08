@@ -233,9 +233,6 @@ class Source:
           Only components with weight files are iterated; scheduler/tokenizer
           subdirs are skipped.
         - If ``components`` is passed, only those components are iterated.
-          The library's StreamingWriter auto-passes untouched components on
-          finalize() — the tenant can filter iteration without losing output
-          coverage.
 
         Handles pickle → safetensors conversion and sharded-safetensors via
         .index.json internally. Tenant sees a flat iteration.

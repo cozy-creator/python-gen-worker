@@ -7,9 +7,10 @@ safetensors_io) into one:
   - shard planning (HF 5 GB convention) + index.json emit
   - IncrementalSafetensorsWriter: header first, then tensor bytes — O(1) memory
   - tensor iteration over single/sharded/pickle sources
-  - streaming_dtype_cast: read one tensor, cast, write into its shard
+  - streaming_dtype_cast / streaming_fp8_storage_cast: read one tensor,
+    transform, write into its planned shard (peak RAM ~ largest tensor)
+  - streaming_cast_snapshot / streaming_fp8_snapshot: whole-tree variants
   - shard_safetensors_by_offset: raw byte-range re-shard, zero decode
-  - StreamingWriter: the tenant-facing per-variant output writer
 
 torch/safetensors imports are deferred so importing cozy_convert stays cheap.
 """
@@ -26,8 +27,6 @@ from typing import TYPE_CHECKING, Any, Iterator, Mapping, Optional
 if TYPE_CHECKING:
     import torch
 
-    from .component import Component
-    from .source import Source
 
 
 class ConversionImplementationError(RuntimeError):
@@ -842,139 +841,6 @@ def shard_safetensors_by_offset(
         os.close(fd)
 
 
-# ---------------------------------------------------------------------------
-# StreamingWriter — the tenant-facing per-variant output writer
-# ---------------------------------------------------------------------------
-
-_PASSTHROUGH_FILES = frozenset({
-    "model_index.json", "config.json", "tokenizer.json", "tokenizer_config.json",
-    "special_tokens_map.json", "scheduler_config.json", "preprocessor_config.json",
-    "generation_config.json", "tokenizer.model",
-})
-
-
-class StreamingWriter:
-    """Per-variant output writer for conversion tenants.
-
-    Tenants iterate ``source.iter_tensors()`` and ``write(component, name,
-    tensor)`` each output tensor. ``finalize()`` flushes per-component
-    safetensors (auto-sharded past 5 GB), auto-passes-through untouched
-    components + known config/tokenizer files, and returns the output path.
-    """
-
-    def __init__(self, *, source: "Source", out_dir: Path) -> None:
-        self._source = source
-        self._out_dir = Path(out_dir)
-        self._out_dir.mkdir(parents=True, exist_ok=True)
-        self._by_component: dict[str, dict[str, Any]] = {}
-        self._written_components: set[str] = set()
-        self._explicit_passthrough: set[str] = set()
-        self._finalized = False
-
-    def write(self, component: str, name: str, tensor: "torch.Tensor") -> None:
-        if self._finalized:
-            raise RuntimeError("StreamingWriter.write called after finalize()")
-        self._by_component.setdefault(component, {})[name] = tensor
-        self._written_components.add(component)
-
-    def passthrough(self, component: "Component") -> None:
-        if self._finalized:
-            raise RuntimeError("StreamingWriter.passthrough called after finalize()")
-        self._explicit_passthrough.add(component.name)
-
-    def finalize(self) -> Path:
-        if self._finalized:
-            raise RuntimeError("StreamingWriter.finalize called twice")
-        self._finalized = True
-
-        if self._source.file_layout == "singlefile":
-            written = self._write_safetensors(
-                self._out_dir / "model.safetensors", self._by_component.get("", {}))
-            self._copy_passthrough_files(self._source.path, self._out_dir)
-            if written is None:
-                return self._out_dir
-            return written if written.suffix == ".safetensors" else self._out_dir
-
-        for comp_name, tensors in self._by_component.items():
-            if not comp_name:
-                raise RuntimeError(
-                    "StreamingWriter.write called with empty component on a "
-                    "diffusers source — name the component (unet, vae, transformer, ...)")
-            self._write_component(comp_name, tensors)
-
-        source_components = set(self._source.components.keys())
-        touched = self._written_components | self._explicit_passthrough
-        for comp_name in source_components - touched:
-            src = self._source.components[comp_name].path
-            dst = self._out_dir / comp_name
-            if not dst.exists():
-                shutil.copytree(str(src), str(dst))
-        for entry in self._source.path.iterdir():
-            if entry.is_dir() and entry.name not in source_components:
-                dst = self._out_dir / entry.name
-                if not dst.exists():
-                    shutil.copytree(str(entry), str(dst))
-        self._copy_passthrough_files(self._source.path, self._out_dir)
-        return self._out_dir
-
-    # ---- internals ----
-
-    def _write_component(self, comp_name: str, tensors: dict[str, Any]) -> None:
-        subdir = self._out_dir / comp_name
-        subdir.mkdir(parents=True, exist_ok=True)
-        if comp_name.startswith("text_encoder") or comp_name == "image_encoder":
-            prefix = "model"
-        else:
-            prefix = "diffusion_pytorch_model"
-        self._write_safetensors(subdir, tensors, shard_prefix=prefix)
-        self._copy_passthrough_files(self._source.components[comp_name].path, subdir)
-
-    def _write_safetensors(
-        self, target: Path, tensors: dict[str, Any], *, shard_prefix: str = "model",
-    ) -> Optional[Path]:
-        if not tensors:
-            return None
-        from safetensors.torch import save_file
-
-        def _size(t: Any) -> int:
-            try:
-                return int(t.numel()) * int(t.element_size())
-            except AttributeError:
-                return int(getattr(t, "nbytes"))
-
-        sizes = {name: _size(t) for name, t in tensors.items()}
-        if sum(sizes.values()) <= MAX_SAFETENSORS_SHARD_BYTES:
-            if target.suffix == ".safetensors":
-                out = target
-                out.parent.mkdir(parents=True, exist_ok=True)
-            else:
-                target.mkdir(parents=True, exist_ok=True)
-                out = target / f"{shard_prefix}.safetensors"
-            save_file(tensors, str(out))
-            return out
-
-        shard_dir = target.parent if target.suffix == ".safetensors" else target
-        shard_dir.mkdir(parents=True, exist_ok=True)
-        plan = plan_shards(sizes, shard_prefix=shard_prefix)
-        buckets: dict[str, dict[str, Any]] = {}
-        for name, tensor in tensors.items():
-            buckets.setdefault(plan.weight_map[name], {})[name] = tensor
-        for shard_name, bucket in buckets.items():
-            save_file(bucket, str(shard_dir / shard_name))
-        index_path = shard_dir / f"{shard_prefix}.safetensors.index.json"
-        index_path.write_text(json.dumps(build_index(plan), separators=(",", ":")))
-        return index_path
-
-    def _copy_passthrough_files(self, src_dir: Path, dst_dir: Path) -> None:
-        if not src_dir.is_dir():
-            return
-        for entry in src_dir.iterdir():
-            if entry.is_file() and entry.name in _PASSTHROUGH_FILES:
-                dst = dst_dir / entry.name
-                if not dst.exists():
-                    shutil.copy2(str(entry), str(dst))
-
-
 __all__ = [
     "ConversionImplementationError",
     "MAX_SAFETENSORS_SHARD_BYTES",
@@ -998,5 +864,4 @@ __all__ = [
     "FP8_SKIP_TENSOR_PATTERNS",
     "FP8_DEFAULT_COMPONENTS",
     "shard_safetensors_by_offset",
-    "StreamingWriter",
 ]

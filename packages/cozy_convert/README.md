@@ -5,7 +5,7 @@ Cozy Creator's model ETL, split out of `gen-worker` (issue #367).
 - **Ingest**: HuggingFace (`HfApi.list_repo_files` + classifier + `snapshot_download(allow_patterns=…)`) and Civitai (bounded provider API).
 - **Convert**: streaming dtype cast + fp8-E4M3 storage cast (`#fp8` flavor), bitsandbytes nf4/fp4, GGUF (llama.cpp toolchain), singlefile↔diffusers repackage.
 - **Publish**: one commit call against Tensorhub's HF-shaped `/commits` write API (`mode: merge|replace`).
-- **Tenant SDK**: `Source`, `Component`, `Dataset`, `ProducedFlavor`, `StreamingWriter`, calibration policy — for `@endpoint(kind="conversion")` endpoints.
+- **Tenant SDK**: `Source`, `Component`, `Dataset`, `ProducedFlavor`, streaming cast/fp8 writers, calibration policy — for `@endpoint(kind="conversion")` endpoints.
 
 ## Memory floors per operation (gw#395/#396)
 
