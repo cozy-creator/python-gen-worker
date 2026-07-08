@@ -195,6 +195,9 @@ class Lifecycle:
     async def _emit_unavailable(self) -> None:
         if self.transport is None:
             return
+        # A recovered function leaves executor.unavailable; drop it from the
+        # dedupe set so a later re-failure re-emits.
+        self._emitted_unavailable &= set(self.executor.unavailable)
         for name, (reason, detail, axes) in list(self.executor.unavailable.items()):
             if name in self._emitted_unavailable:
                 continue

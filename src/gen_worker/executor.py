@@ -656,45 +656,81 @@ class Executor:
             if rec.ready:
                 await self._promote_setup_refs(spec)
                 return rec.instance
-            setup_slots = self._setup_slots(spec)
-            paths: Dict[str, str] = {}
-            for slot in setup_slots:
-                binding = spec.models[slot]
-                ref = wire_ref(binding)
-                snap = (snapshots or {}).get(ref)
-                path = await self.store.ensure_local(ref, snap, binding=binding)
-                paths[slot] = str(path)
-            compile_artifact = await self._fetch_compile_snapshot(spec, snapshots)
-            # Loads serialize: concurrent setups would cross-contaminate each
-            # other's allocator deltas and place_pipeline's free-VRAM reads.
-            async with self._load_lock:
-                await self._make_room_for(spec, setup_slots)
-                instance = spec.cls()
-                setup = getattr(instance, "setup", None)
-                loaded: Dict[str, Tuple[Any, int]] = {}
-                vram_before = self._vram_allocated()
-                if spec.runtime:
-                    rec.server = await self._boot_engine_server(spec, paths)
-                if callable(setup):
-                    kwargs, loaded = await self._injection_kwargs(
-                        spec, setup, paths, server=rec.server,
-                        compile_artifact=compile_artifact)
-                    if asyncio.iscoroutinefunction(setup):
-                        await setup(**kwargs)
-                    else:
-                        await asyncio.to_thread(setup, **kwargs)
-                warmup = getattr(instance, "warmup", None)
-                if callable(warmup):
-                    if asyncio.iscoroutinefunction(warmup):
-                        await warmup()
-                    else:
-                        await asyncio.to_thread(warmup)
-                vram_delta = max(0, self._vram_allocated() - vram_before)
-                self._register_residency(spec, setup_slots, loaded, vram_delta)
+            try:
+                instance = await self._setup_locked(spec, rec, snapshots)
+            except Exception as exc:
+                # Honest failure (th#581): a function whose model download /
+                # pipeline setup fails must surface a terminal per-function
+                # error to the hub, not sit in loading_functions forever
+                # while the worker reports READY.
+                self._mark_setup_failed(rec, exc)
+                raise
+            if rec.failed is not None:
+                # Recovery (hub-directed LOAD retry succeeded): lift the
+                # per-function disable; the next StateDelta re-advertises.
+                rec.failed = None
+                for s in rec.specs:
+                    self.unavailable.pop(s.name, None)
             rec.instance = instance
             rec.ready = True
             self._on_state_change()
             return instance
+
+    def _mark_setup_failed(self, rec: _ClassRecord, exc: BaseException) -> None:
+        if isinstance(exc, InsufficientDiskError):
+            return  # transient: disk GC frees space; the next LOAD retries
+        if isinstance(exc, HardwareUnmetError):
+            reason = getattr(exc, "reason", "hardware_unmet")
+            axes = {str(k): str(v) for k, v in (exc.axes() or {}).items()}
+        else:
+            reason, axes = "setup_failed", {}
+        detail = _sanitize(f"{type(exc).__name__}: {exc}")
+        rec.failed = detail
+        for s in rec.specs:
+            self.unavailable[s.name] = (reason, detail, axes)
+        self._on_state_change()
+
+    async def _setup_locked(
+        self, spec: EndpointSpec, rec: _ClassRecord,
+        snapshots: Optional[Dict[str, pb.Snapshot]],
+    ) -> Any:
+        assert spec.cls is not None  # guarded by ensure_setup
+        setup_slots = self._setup_slots(spec)
+        paths: Dict[str, str] = {}
+        for slot in setup_slots:
+            binding = spec.models[slot]
+            ref = wire_ref(binding)
+            snap = (snapshots or {}).get(ref)
+            path = await self.store.ensure_local(ref, snap, binding=binding)
+            paths[slot] = str(path)
+        compile_artifact = await self._fetch_compile_snapshot(spec, snapshots)
+        # Loads serialize: concurrent setups would cross-contaminate each
+        # other's allocator deltas and place_pipeline's free-VRAM reads.
+        async with self._load_lock:
+            await self._make_room_for(spec, setup_slots)
+            instance = spec.cls()
+            setup = getattr(instance, "setup", None)
+            loaded: Dict[str, Tuple[Any, int]] = {}
+            vram_before = self._vram_allocated()
+            if spec.runtime:
+                rec.server = await self._boot_engine_server(spec, paths)
+            if callable(setup):
+                kwargs, loaded = await self._injection_kwargs(
+                    spec, setup, paths, server=rec.server,
+                    compile_artifact=compile_artifact)
+                if asyncio.iscoroutinefunction(setup):
+                    await setup(**kwargs)
+                else:
+                    await asyncio.to_thread(setup, **kwargs)
+            warmup = getattr(instance, "warmup", None)
+            if callable(warmup):
+                if asyncio.iscoroutinefunction(warmup):
+                    await warmup()
+                else:
+                    await asyncio.to_thread(warmup)
+            vram_delta = max(0, self._vram_allocated() - vram_before)
+            self._register_residency(spec, setup_slots, loaded, vram_delta)
+        return instance
 
     def _register_residency(
         self,

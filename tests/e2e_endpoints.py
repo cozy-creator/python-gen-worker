@@ -71,3 +71,23 @@ class ModelBoundEndpoint:
     def model_echo(self, ctx: RequestContext, data: EchoIn) -> EchoOut:
         weights = Path(self.model_path) / "model.safetensors"
         return EchoOut(response=weights.read_text())
+
+
+# Toggled by the setup-failure e2e test: True => BrokenSetupEndpoint.setup
+# raises (the ernie-on-pod shape: import fine, pipeline load fails).
+BREAK_SETUP = threading.Event()
+BREAK_SETUP.set()
+
+
+@endpoint(model=Hub("e2e/broken"))
+class BrokenSetupEndpoint:
+    """Setup raises while BREAK_SETUP is set; a later LOAD retry recovers."""
+
+    def setup(self, model: str) -> None:
+        if BREAK_SETUP.is_set():
+            raise RuntimeError("pipeline exploded: cannot import Ministral3ForCausalLM")
+        self.model_path = model
+
+    def broken_echo(self, ctx: RequestContext, data: EchoIn) -> EchoOut:
+        weights = Path(self.model_path) / "model.safetensors"
+        return EchoOut(response=weights.read_text())

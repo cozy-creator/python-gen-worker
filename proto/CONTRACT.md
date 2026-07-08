@@ -386,8 +386,13 @@ refs into model-failure availability handling: a failed cache ref means
 "stays eager", never "function unavailable".
 
 ### FnUnavailable (W → O)
-Emitted when a hardware-axis gate fails at startup or model-load time
-(one message per function, deduplicated).
+Emitted when a hardware-axis gate fails at startup or model-load time, or
+when a function's model download / pipeline setup fails terminally
+(`reason: setup_failed` — the function is dropped from BOTH
+`available_functions` and `loading_functions` instead of sitting in
+loading forever under a READY phase). One message per function,
+deduplicated. A later hub-directed `ModelOp{LOAD}` retries the setup; on
+success the function reappears in `StateDelta.available_functions`.
 
 | field | producer | consumer | semantics |
 |---|---|---|---|
