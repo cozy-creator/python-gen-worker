@@ -8,7 +8,12 @@ unknown layouts fall back to the whole repo (returns None).
 
 from __future__ import annotations
 
-from gen_worker.models.download import select_hf_files
+from types import SimpleNamespace
+
+import pytest
+
+from gen_worker.models.download import _match_allow_patterns, download_hf, select_hf_files
+from gen_worker.models.refs import HuggingFaceRef
 
 _DIFFUSERS_REPO = [
     "model_index.json",
@@ -127,6 +132,77 @@ def test_unrecognized_layout_downloads_whole_repo() -> None:
 def test_no_weights_at_all_downloads_whole_repo() -> None:
     assert select_hf_files(["README.md", "config.json"]) is None
     assert select_hf_files([]) is None
+
+
+# --- files= subset size guard (ie#355) --------------------------------------
+# A 795KB tokenizer subset of google/t5-v1_1-xxl (~89GB repo) used to trip the
+# 60GB cap: the guard summed the WHOLE repo when explicit patterns were given.
+
+_T5_REPO = {
+    "config.json": 593,
+    "generation_config.json": 147,
+    "pytorch_model.bin": 44_541_587_809,
+    "special_tokens_map.json": 1_786,
+    "spiece.model": 791_656,
+    "tf_model.h5": 44_542_439_224,
+    "tokenizer_config.json": 1_857,
+}
+_T5_SUBSET = ("spiece.model", "tokenizer_config.json", "special_tokens_map.json")
+
+
+def test_match_allow_patterns() -> None:
+    files = list(_T5_REPO) + ["split_files/vae/ae.safetensors"]
+    assert _match_allow_patterns(files, _T5_SUBSET) == set(_T5_SUBSET)
+    assert _match_allow_patterns(files, ("*.json",)) == {
+        "config.json", "generation_config.json", "special_tokens_map.json", "tokenizer_config.json",
+    }
+    # Trailing slash means the whole directory (huggingface_hub semantics).
+    assert _match_allow_patterns(files, ("split_files/",)) == {"split_files/vae/ae.safetensors"}
+    assert _match_allow_patterns(files, ("nope.bin",)) == set()
+
+
+def _stub_hub(monkeypatch, tmp_path, repo=_T5_REPO):
+    """Stub huggingface_hub at the network edge; download_hf's planning runs real."""
+    import huggingface_hub
+
+    calls: dict[str, object] = {}
+
+    class _Api:
+        def __init__(self, token=None):
+            pass
+
+        def list_repo_files(self, **kw):
+            return list(repo)
+
+        def list_repo_tree(self, **kw):
+            return [SimpleNamespace(path=p, size=s) for p, s in repo.items()]
+
+    def _snap(**kw):
+        calls.update(kw)
+        return str(tmp_path)
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", _Api)
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", _snap)
+    return calls
+
+
+def test_explicit_files_subset_sized_by_subset_not_whole_repo(monkeypatch, tmp_path) -> None:
+    calls = _stub_hub(monkeypatch, tmp_path)
+    out = download_hf(HuggingFaceRef(repo_id="google/t5-v1_1-xxl"), allow_patterns=_T5_SUBSET)
+    assert str(out) == str(tmp_path)
+    assert calls["allow_patterns"] == list(_T5_SUBSET)
+
+
+def test_full_repo_over_cap_still_refused(monkeypatch, tmp_path) -> None:
+    _stub_hub(monkeypatch, tmp_path)
+    with pytest.raises(RuntimeError, match="excessively large"):
+        download_hf(HuggingFaceRef(repo_id="google/t5-v1_1-xxl"))
+
+
+def test_files_subset_matching_nothing_is_a_clear_error(monkeypatch, tmp_path) -> None:
+    _stub_hub(monkeypatch, tmp_path)
+    with pytest.raises(ValueError, match="matched nothing"):
+        download_hf(HuggingFaceRef(repo_id="google/t5-v1_1-xxl"), allow_patterns=("spiece.mdoel",))
 
 
 def test_sharded_single_file_checkpoint_reassembles(tmp_path):
