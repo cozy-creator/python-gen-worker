@@ -288,3 +288,41 @@ def test_manifest_carries_compile_block():
         "shapes": [[768, 768], [1024, 1024]],
         "targets": ["transformer", "vae.decode"],
     }
+
+
+# ---------------------------------------------------------------------------
+# ensure_local digest guard (e2e#117 live find #7): a cached materialization
+# of the same ref must NOT short-circuit when the snapshot digest changed
+# (flavor re-published — digest-change re-adoption fetched the stale bytes).
+
+
+def test_ensure_local_redownloads_on_digest_change(tmp_path, monkeypatch):
+    import gen_worker.executor as executor_mod
+
+    async def _noop_send(msg):
+        return None
+
+    async def run():
+        store = executor_mod.ModelStore(_noop_send, cache_dir=tmp_path)
+        old_dir = tmp_path / "snapshots" / "aa11"
+        old_dir.mkdir(parents=True)
+        ref = "_system/family-fam#inductor-rtx-4090-torch2.9"
+        store.residency.track_disk(ref, old_dir)
+
+        new_dir = tmp_path / "snapshots" / "bb22"
+        new_dir.mkdir(parents=True)
+        calls = []
+
+        async def fake_download(r, **kw):
+            calls.append(r)
+            return new_dir
+
+        monkeypatch.setattr(executor_mod, "ensure_local", fake_download)
+        # same digest -> cache hit, no download
+        got = await store.ensure_local(ref, pb.Snapshot(digest="blake3:aa11"))
+        assert got == old_dir and calls == []
+        # digest change -> stale cache bypassed, downloader invoked
+        got = await store.ensure_local(ref, pb.Snapshot(digest="blake3:bb22"))
+        assert got == new_dir and calls == [ref]
+
+    asyncio.run(run())
