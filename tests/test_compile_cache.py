@@ -56,6 +56,22 @@ def test_verify_mismatches():
     assert "gen_worker" in cc.verify(other, family="sd15")
 
 
+def test_mode_drift():
+    class _P:
+        pass
+
+    p = _P()
+    meta = cc.artifact_metadata(family="sd15", shapes=[(768, 768)],
+                                targets=["transformer"], low_vram_mode="off")
+    assert meta["low_vram_mode"] == "off"
+    assert cc.mode_drift({}, p) == ""  # producer recorded no mode: unenforced
+    assert "low_vram_mode" in cc.mode_drift(meta, p)  # unprepped pipeline
+    p._cozy_low_vram_mode = "off"
+    assert cc.mode_drift(meta, p) == ""
+    p._cozy_low_vram_mode = "vae_only"
+    assert "low_vram_mode" in cc.mode_drift(meta, p)
+
+
 def test_counters_helpers():
     stats = cc.inductor_counters()  # torch present in the dev venv
     assert set(stats) >= {"fxgraph_cache_hit", "fxgraph_cache_miss"}

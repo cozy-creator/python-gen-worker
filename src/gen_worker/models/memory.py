@@ -580,8 +580,16 @@ def with_oom_retry(
     raise last_exc
 
 
+def low_vram_mode(pipeline: Any) -> str:
+    """The low-VRAM mode :func:`apply_low_vram_config` prepped this pipeline
+    with ('' when never prepped). Part of the compile-cache graph key (gw#391):
+    the flags are traced into the FX graphs."""
+    return str(getattr(pipeline, _COZY_MODE_ATTR, "") or "")
+
+
 __all__ = [
     "apply_low_vram_config",
+    "low_vram_mode",
     "place_pipeline",
     "with_oom_retry",
     "select_auto_mode",

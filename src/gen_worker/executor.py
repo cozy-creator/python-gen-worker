@@ -1070,9 +1070,10 @@ class Executor:
         artifact = compile_cache.find_artifact(local)
         if artifact is None:
             return await fail("artifact_missing")
+        meta: Dict[str, Any] = {}
         if not is_trt:
             try:
-                await asyncio.to_thread(
+                meta = await asyncio.to_thread(
                     compile_cache.seed_artifact, artifact, family, self.store._cache_dir
                 )
             except compile_cache.AdoptError as exc:
@@ -1103,6 +1104,13 @@ class Executor:
                         except Exception as exc:
                             return await fail("artifact_invalid", str(exc))
                     else:
+                        # Graph-key parity (gw#391): the producer's low-VRAM
+                        # prep mode is traced into the cells — a drifted
+                        # pipeline can only miss, so reject deterministically
+                        # instead of paying a warmup to find out.
+                        drift = compile_cache.mode_drift(meta, obj)
+                        if drift:
+                            return await fail("key_mismatch", drift)
                         # Re-adoption of a re-published cell: drop the previous
                         # wrap + dynamo's in-memory code so warmup re-traces
                         # against the freshly seeded caches (gw#391).
