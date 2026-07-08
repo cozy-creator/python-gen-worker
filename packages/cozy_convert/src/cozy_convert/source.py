@@ -27,7 +27,7 @@ FileLayout = Literal["singlefile", "diffusers"]
 # path covers when the tenant doesn't explicitly opt them out. These are
 # config / tokenizer / scheduler / non-quantizable bits that should travel
 # verbatim into the output snapshot. vae is here because most quant tenants
-# (bnb / torchao) leave the vae bf16; modelopt may override per spec.
+# (bnb) leave the vae bf16; modelopt may override per spec.
 _DEFAULT_PASSTHROUGH_COMPONENTS: frozenset[str] = frozenset({
     "vae", "scheduler",
     "tokenizer", "tokenizer_2", "tokenizer_3",
@@ -233,9 +233,6 @@ class Source:
           Only components with weight files are iterated; scheduler/tokenizer
           subdirs are skipped.
         - If ``components`` is passed, only those components are iterated.
-          The library's StreamingWriter auto-passes untouched components on
-          finalize() — the tenant can filter iteration without losing output
-          coverage.
 
         Handles pickle → safetensors conversion and sharded-safetensors via
         .index.json internally. Tenant sees a flat iteration.
@@ -368,14 +365,14 @@ class Source:
     ) -> Iterator[LoadedComponent]:
         """Yield ``LoadedComponent`` payloads in arrival / discovery order.
 
-        This is the recommended path for quant tenants (bnb / torchao /
+        This is the recommended path for quant tenants (bnb /
         modelopt). It pushes three concerns into the library:
 
           1. **Per-component HF loading.** Each heavy component is loaded
              via ``<Class>.from_pretrained(component_path,
              quantization_config=..., torch_dtype=compute_dtype,
              device_map='auto', offload_folder=offload_folder)``. The
-             quantization_config is what triggers bnb / torchao / modelopt
+             quantization_config is what triggers bnb / modelopt
              to swap weights in-place during load. ``device_map='auto'``
              plus ``offload_folder`` lets accelerate spill to disk when
              VRAM is tight — that's how a 4 GB transformer fits on a 7 GB
@@ -403,8 +400,8 @@ class Source:
             ``controlnet``). Passing an explicit iterable narrows or
             widens.
           quantization_config: HuggingFace quant config object —
-            ``BitsAndBytesConfig``, ``TorchAoConfig``,
-            ``ModeloptQuantizationConfig``, etc. ``None`` skips quant
+            ``BitsAndBytesConfig``, ``ModeloptQuantizationConfig``, etc.
+            ``None`` skips quant
             (then ``quant_only`` becomes a passthrough-on-load filter,
             useful for dtype-cast tenants).
           compute_dtype: torch dtype used as ``torch_dtype`` on the
@@ -472,13 +469,11 @@ class Source:
         in-place (typically via a library-specific streaming-quant call) and
         then invokes ``component.save_to(out_dir)``.
 
-        Use this for libraries that have a documented streaming-quant API,
-        like torchao's ``quantize_(module, config, device='cuda')``, which
+        Use this for libraries with a documented streaming-quant API that
         sends each ``Linear`` to GPU individually rather than staging the
         full bf16 component there. Peak VRAM ≈ size of the largest single
         ``Linear`` plus the accumulating quantized result — not the full
-        component. Lets FLUX-class int8/fp8 conversions complete on 8 GB
-        consumer GPUs.
+        component.
 
         For non-streaming libraries (bnb, modelopt), keep using
         :meth:`iter_hf_components` with a ``quantization_config``.
@@ -687,7 +682,7 @@ def _iter_diffusers_components_streaming(
     Yields ``kind='bf16_cpu'`` for quant-candidate components (loaded on CPU
     in ``compute_dtype``, no ``quantization_config``). Tenant is expected
     to invoke a library-specific in-place quant call (e.g.
-    ``torchao.quantize_(component.module, config, device='cuda')``) before
+    an in-place streaming quant call) before
     ``component.save_to(out_dir)``.
 
     Passthrough and root yields are identical to the non-streaming variant.

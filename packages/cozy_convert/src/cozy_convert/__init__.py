@@ -2,7 +2,7 @@
 
 Tenant SDK (conversion endpoints)::
 
-    from cozy_convert import Source, StreamingWriter, ProducedFlavor, Dataset
+    from cozy_convert import Source, ProducedFlavor, Dataset
 
 Clone / mirror::
 
@@ -32,7 +32,12 @@ from .loaded_component import LoadedComponent
 from .produced import ProducedFlavor
 from .publish import publish_flavors
 from .source import FileLayout, Source
-from .writer import StreamingWriter
+from .writer import (
+    streaming_cast_snapshot,
+    streaming_dtype_cast,
+    streaming_fp8_snapshot,
+    streaming_fp8_storage_cast,
+)
 
 # `cozy_convert.clone` module alias (clone.from_huggingface style).
 from . import clone
@@ -45,7 +50,10 @@ __all__ = [
     "FileLayout",
     "Dataset",
     "ProducedFlavor",
-    "StreamingWriter",
+    "streaming_cast_snapshot",
+    "streaming_dtype_cast",
+    "streaming_fp8_snapshot",
+    "streaming_fp8_storage_cast",
     "CalibrationAction",
     "CalibrationPolicy",
     "resolve_calibration_action",

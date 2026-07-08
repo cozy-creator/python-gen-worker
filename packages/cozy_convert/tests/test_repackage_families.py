@@ -128,7 +128,7 @@ def test_weight_groups_singlefile_multi_entry(tmp_path: Path) -> None:
     """Civitai bundles ship several root weight files (DiT + text encoder +
     VAE); every one must be its own group or a dtype pass drops all but the
     first (latent data loss, found preparing e2e #112)."""
-    from cozy_convert.clone import _weight_groups
+    from cozy_convert.writer import snapshot_weight_groups as _weight_groups
 
     _write_safetensors(tmp_path / "dit.safetensors", "F8_E4M3")
     _write_safetensors(tmp_path / "txt.safetensors", "BF16")
@@ -140,7 +140,7 @@ def test_weight_groups_singlefile_multi_entry(tmp_path: Path) -> None:
 
 
 def test_weight_groups_singlefile_sharded_index_wins(tmp_path: Path) -> None:
-    from cozy_convert.clone import _weight_groups
+    from cozy_convert.writer import snapshot_weight_groups as _weight_groups
 
     _write_safetensors(tmp_path / "model-00001-of-00002.safetensors", "BF16")
     _write_safetensors(tmp_path / "model-00002-of-00002.safetensors", "BF16")

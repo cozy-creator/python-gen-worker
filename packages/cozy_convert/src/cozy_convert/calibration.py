@@ -3,18 +3,17 @@
 Training functions that quantize weights fall into three buckets:
 
 - ``"required"`` — the recipe produces broken-but-not-erroring weights
-  without a calibration forward pass. Example: ``int4_awq``, ``w4a8_awq``.
+  without a calibration forward pass (activation-scale PTQ recipes).
   No dataset → refuse the job up-front (unless the caller explicitly
   opts into a tiny smoke-test pool via ``allow_dummy``).
 
 - ``"beneficial"`` — the recipe works without calibration but quality
-  suffers measurably when skipped. Example: modelopt ``fp8`` / ``int8`` /
-  ``nvfp4`` — activation scales default to per-tensor max without a
-  forward pass. Default behavior is "use calibration"; callers who value
+  suffers measurably when skipped. Example: modelopt ``fp8`` — activation
+  scales default to per-tensor max without a forward pass. Default behavior is "use calibration"; callers who value
   speed over quality can set ``skip_calibration=True`` on their spec.
 
 - ``"unsupported"`` — the recipe is weight-only and never consumes
-  calibration data. Example: torchao ``int4_wo`` / ``int8_wo`` / ``fp8_wo``,
+  calibration data. Example: the fp8-E4M3 storage cast,
   bitsandbytes ``nf4`` / ``fp4``. If the caller passes a dataset it's a
   mistake (wasted generation + wrong expectations about output quality);
   fail loudly rather than silently discard.
@@ -198,7 +197,7 @@ def resolve_calibration_action(
                 f"calibration{label}: scheme is weight-only (policy="
                 f"'unsupported') — a calibration dataset is not used. Drop "
                 f"the calibration dataset, or switch to a calibrated "
-                f"quantization recipe such as int4_awq / w4a8_awq."
+                f"quantization recipe (e.g. nvfp4)."
             )
         return "skip"
 

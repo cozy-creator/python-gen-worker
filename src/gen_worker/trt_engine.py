@@ -37,11 +37,10 @@ import hashlib
 import io
 import json
 import logging
-import os
 import tarfile
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .compile_cache import AdoptError, _clean_tarinfo, family_from_ref, sku_slug
 

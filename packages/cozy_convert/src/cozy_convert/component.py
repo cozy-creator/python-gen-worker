@@ -4,7 +4,7 @@ A diffusers-layout ``Source`` exposes ``components: dict[str, Component]``.
 Each Component is a self-contained HF module directory with its own
 config.json and weight file(s). Tenants can iterate tensors of one specific
 component (``source.components['transformer'].iter_tensors()``) or let the
-library's ``StreamingWriter`` auto-passthrough components the tenant didn't
+library's snapshot writers auto-passthrough components the tenant didn't
 touch.
 """
 

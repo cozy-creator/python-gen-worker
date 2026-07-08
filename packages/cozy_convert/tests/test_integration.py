@@ -144,8 +144,8 @@ def test_calibrated_dtype_refused(tiny_llama, tmp_path: Path) -> None:
     with pytest.raises(InlineConversionNotPossible) as exc:
         run_inline_conversion(
             source_path=tiny_llama.dir / "model.safetensors",
-            out_dir=tmp_path / "awq",
-            target_dtype="int4:awq",
+            out_dir=tmp_path / "nvfp4",
+            target_dtype="nvfp4",
             source_repo_dir=tiny_llama.dir,
         )
     assert exc.value.deferred_requirement is not None

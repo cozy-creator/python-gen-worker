@@ -12,7 +12,6 @@ and :func:`run_clone` (keyword-explicit).
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import os
 import re
@@ -24,7 +23,13 @@ from typing import Any, Iterable, Optional
 
 from .hub import HubClient, files_from_tree
 from .ingest import IngestedSource, ingest_civitai, ingest_huggingface
-from .writer import MAX_SAFETENSORS_SHARD_BYTES, shard_safetensors_by_offset
+from .writer import (
+    FP8_DEFAULT_COMPONENTS,
+    MAX_SAFETENSORS_SHARD_BYTES,
+    copy_non_weight_files,
+    shard_safetensors_by_offset,
+    snapshot_weight_groups,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,10 +40,8 @@ _KNOWN_DTYPES = {
     # "source" = publish the source's own weights untouched (pure mirror);
     # the flavor's recorded dtype is the detected on-disk dtype.
     "source",
-    "fp32", "fp16", "bf16", "fp8", "fp8:e4m3", "fp8:e5m2", "nvfp4",
-    "int8", "int8:awq", "int8:gptq",
-    "int4", "int4:wo", "int4:nf4", "int4:fp4", "int4:awq", "int4:gptq",
-    "nf4", "fp4",
+    "fp32", "fp16", "bf16", "fp8", "nvfp4",
+    "int4", "int4:nf4", "int4:fp4", "nf4", "fp4",
     # GGUF encodings ride the dtype axis with file_type="gguf".
     "f16", "f32", "q8_0", "q6_k", "q5_k_m", "q5_k_s", "q4_k_m", "q4_k_s",
     "q4_0", "q4_1", "q3_k_m", "q3_k_s", "q2_k",
@@ -51,7 +54,6 @@ _KNOWN_FILE_TYPES = {"safetensors", "gguf"}
 # sdxl-illustrious / flux1-dev / z-image-turbo normalize onto these).
 _REPACKAGE_NORMALIZED_FAMILIES = {"sd15_sd2", "sdxl", "flux", "zimage"}
 
-_WEIGHT_EXTS = (".safetensors",)
 _DEFAULT_QUANT_COMPONENTS = ("transformer", "unet", "text_encoder", "text_encoder_2",
                              "text_encoder_3", "image_encoder", "prior", "controlnet")
 _MIN_CONVERT_BYTES = 100 * 1024 * 1024  # leave tiny weights (embeddings) untouched
@@ -114,7 +116,9 @@ def normalize_outputs(values: Iterable[Any] | None, *, layout_hint: str = "diffu
         if item is None:
             continue
         get = (lambda k: item.get(k)) if isinstance(item, dict) else (lambda k: getattr(item, k, None))
-        dtype = str(get("dtype") or "").strip().lower().replace("fp8-e4m3", "fp8:e4m3").replace("fp8-e5m2", "fp8:e5m2")
+        # fp8 spellings collapse onto the flavor name: e4m3 is THE fp8 format.
+        dtype = str(get("dtype") or "").strip().lower()
+        dtype = {"fp8-e4m3": "fp8", "fp8:e4m3": "fp8"}.get(dtype, dtype)
         layout = str(get("file_layout") or "").strip().lower() or layout_hint
         ftype = str(get("file_type") or "").strip().lower() or "safetensors"
         if not dtype:
@@ -138,73 +142,6 @@ def normalize_outputs(values: Iterable[Any] | None, *, layout_hint: str = "diffu
 # ---------------------------------------------------------------------------
 # Flavor tree construction
 # ---------------------------------------------------------------------------
-
-def _link_or_copy(src: Path, dst: Path) -> None:
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    if dst.exists():
-        return
-    try:
-        os.link(src, dst)
-    except OSError:
-        shutil.copy2(src, dst)
-
-
-def _is_weight(path: Path) -> bool:
-    return path.suffix in _WEIGHT_EXTS
-
-
-def _weight_groups(source_dir: Path, layout: str) -> list[tuple[str, Path]]:
-    """(component, entry_path) per weight set. entry is the index.json for
-    sharded sets, else the safetensors file. A singlefile-layout source can
-    still carry several root weight files (civitai bundles ship the
-    diffusion model + text encoder + VAE side by side) — every one is its
-    own group, or a dtype pass would convert only the first and the tree
-    copy would silently drop the rest."""
-    groups: list[tuple[str, Path]] = []
-
-    def _entries_for(d: Path) -> list[Path]:
-        idx = sorted(d.glob("*.safetensors.index.json"))
-        sharded_members: set[str] = set()
-        for i in idx:
-            try:
-                weight_map = json.loads(i.read_text("utf-8")).get("weight_map") or {}
-                sharded_members.update(str(v) for v in weight_map.values())
-            except Exception:
-                pass
-        loose = [p for p in sorted(d.glob("*.safetensors"))
-                 if p.is_file() and p.name not in sharded_members]
-        return idx + loose
-
-    if layout == "diffusers":
-        for entry in sorted(source_dir.iterdir()):
-            if entry.is_dir():
-                found = _entries_for(entry)
-                if found:
-                    groups.append((entry.name, found[0]))
-    else:
-        for found in _entries_for(source_dir):
-            groups.append(("", found))
-    return groups
-
-
-def _copy_non_weights(source_dir: Path, out_dir: Path, *, skip_components: set[str]) -> None:
-    """Hardlink every non-weight file into the flavor tree; weight files and
-    their sharded indexes for converted components are skipped."""
-    for f in sorted(source_dir.rglob("*")):
-        if not f.is_file():
-            continue
-        rel = f.relative_to(source_dir)
-        if rel.parts[:2] == (".cache", "huggingface"):
-            continue  # hf local-dir download metadata, not repo content
-        comp = rel.parts[0] if len(rel.parts) > 1 else ""
-        name = f.name
-        is_weightish = _is_weight(f) or name.endswith(".safetensors.index.json")
-        if is_weightish and (comp in skip_components or ("" in skip_components and comp == "")):
-            continue
-        if name == ".civitai.json":
-            continue
-        _link_or_copy(f, out_dir / rel)
-
 
 def _stage_oversize_safetensors(tree: Path) -> None:
     """Replace any >5 GB safetensors in the tree with HF-convention byte-offset
@@ -265,13 +202,13 @@ def build_flavor_tree(
             raise ValueError(
                 'dtype="source" needs a detectable on-disk dtype; request an explicit dtype')
         attrs["dtype"] = source_dtype
-        _copy_non_weights(source_dir, out_dir, skip_components=set())
+        copy_non_weight_files(source_dir, out_dir, skip_components=set())
         _stage_oversize_safetensors(out_dir)
         return out_dir, attrs
 
     # GGUF: single-artifact container.
     if spec.file_type == "gguf":
-        groups = _weight_groups(source_dir, source_layout)
+        groups = snapshot_weight_groups(source_dir, source_layout)
         if not groups:
             raise ValueError("no safetensors weights found for gguf conversion")
         result = run_inline_conversion(
@@ -296,7 +233,7 @@ def build_flavor_tree(
         repack_dir = out_dir.parent / f"{out_dir.name}.__repack__"
         repack_dir.mkdir(parents=True, exist_ok=True)
         if source_layout == "singlefile":
-            groups = _weight_groups(source_dir, "singlefile")
+            groups = snapshot_weight_groups(source_dir, "singlefile")
             if not groups:
                 raise ValueError("no safetensors entry for repackage")
             singlefile_to_diffusers(
@@ -311,13 +248,25 @@ def build_flavor_tree(
     # Passthrough: dtype already matches (or repackage output is final).
     needs_dtype_pass = spec.dtype != source_dtype or work_root is not source_dir
     if spec.dtype == source_dtype and work_root is source_dir:
-        _copy_non_weights(source_dir, out_dir, skip_components=set())
+        copy_non_weight_files(source_dir, out_dir, skip_components=set())
         _stage_oversize_safetensors(out_dir)
         return out_dir, attrs
 
     # Dtype conversion per weight set.
-    groups = _weight_groups(work_root, work_layout)
-    target_names = set(quantize_components or _DEFAULT_QUANT_COMPONENTS)
+    groups = snapshot_weight_groups(work_root, work_layout)
+    is_fp8 = spec.dtype == "fp8"
+    if is_fp8 and work_layout != "diffusers":
+        raise ValueError(
+            "fp8 storage flavors are component-scoped; request "
+            'file_layout="diffusers" (repackage first for singlefile sources)')
+    if quantize_components:
+        target_names = set(quantize_components)
+    elif is_fp8:
+        # Denoiser-only by default: matches apply_fp8_storage's consumption
+        # scope; TEs join explicitly via the component-wise ladder (gw#392).
+        target_names = set(FP8_DEFAULT_COMPONENTS)
+    else:
+        target_names = set(_DEFAULT_QUANT_COMPONENTS)
     is_quant = spec.dtype not in {"bf16", "fp16", "fp32", "f16", "f32"}
     converted: set[str] = set()
     for comp, entry in groups:
@@ -344,7 +293,7 @@ def build_flavor_tree(
     if needs_dtype_pass and not converted and not groups:
         raise ValueError("no safetensors weights found to convert")
 
-    _copy_non_weights(work_root, out_dir, skip_components=converted)
+    copy_non_weight_files(work_root, out_dir, skip_components=converted)
     _stage_oversize_safetensors(out_dir)
     if work_root is not source_dir:
         shutil.rmtree(work_root, ignore_errors=True)
