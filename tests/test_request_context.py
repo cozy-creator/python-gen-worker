@@ -1,4 +1,4 @@
-"""RequestContext surface: <=15 public members, one cancellation spelling,
+"""RequestContext surface: <=16 public members, one cancellation spelling,
 typed save_* assets, generator(seed), and real subclass inheritance for the
 producer contexts (no import-time setattr)."""
 
@@ -20,7 +20,7 @@ def _ctx(**kw) -> RequestContext:
     return RequestContext(request_id="r1", **kw)
 
 
-def test_public_surface_is_capped_at_15_members() -> None:
+def test_public_surface_is_capped_at_16_members() -> None:
     members = sorted(
         n for n in dir(RequestContext)
         if not n.startswith("_")
@@ -29,10 +29,10 @@ def test_public_surface_is_capped_at_15_members() -> None:
         "request_id", "device", "deadline", "time_remaining",
         "cancelled", "raise_if_cancelled", "progress", "log",
         "save_bytes", "save_file", "save_image", "save_audio", "save_video",
-        "generator", "models",
+        "generator", "models", "loras",
     }
     assert set(members) == expected
-    assert len(members) <= 15
+    assert len(members) <= 16
 
 
 def test_one_cancellation_spelling() -> None:
