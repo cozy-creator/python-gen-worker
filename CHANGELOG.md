@@ -1,6 +1,16 @@
 # Changelog
 
-## Unreleased
+## 0.11.0
+
+- **Per-request LoRA overlays (gw#393).** `ModelBinding.loras` +
+  `LoraOverlay{ref, weight}` on the wire; the executor resolves each overlay
+  ref (ordinary tensorhub-CAS refs, no upstream fetch), applies them as
+  unfused adapters around the handler under the executing() pin, and
+  guarantees unload on every exit path (OK / error / cancel / deadline). A
+  digest-keyed `AdapterCache` (byte-capped RAM LRU of parsed state dicts)
+  makes repeat requests cheap; `ctx.loras` exposes the resolved set
+  read-only. `Hub()`/`HF()` gain `allow_lora=` (endpoint opt-in, requires
+  `Compile(family=)`); `run --list` surfaces the flag (ie#358).
 
 - **Adapter residency: repeat LoRA requests cost ~50ms of machinery, not
   seconds (#399).** LoRA adapters now stay ATTACHED to the resident pipeline
@@ -16,6 +26,56 @@
   `load_lora_weights` re-attach was ~1.6-1.9s/request and unfused adapter
   compute adds ~59ms/denoise-step; residency removes the re-attach entirely
   (activate 23ms / disable 24ms / enable 26ms measured on the 4090).
+
+- **Per-SKU TensorRT engine artifacts on the compile-cache rails (gw#390).**
+  A second producer/consumer cell kind alongside inductor:
+  `trt-<sku>-trt<maj.min>-<precision>` flavors carry a weight-stripped
+  refittable engine + a value-matched refit map — one engine serves every
+  fine-tune of a family, refit from the weights already resident in VRAM.
+  `gen_worker.trt_engine` handles key/verify (full TRT version, plans are
+  version-locked), deterministic pack/unpack, and build (ONNX export ->
+  STRIP_PLAN|REFIT); the executor's boot-attach/hot-adopt dispatch prefers
+  TRT over inductor when both resolve, any refit failure unwraps to eager.
+  `hub_policy` advertises `tensorrt==<version>` in `installed_libs` (th#575).
+
+- **Two-format quantization policy: fp8-E4M3 storage + emergency nf4 (gw#389,
+  th#546).** Runtime `quantize=` on HF/Hub bindings is removed; the platform
+  serves exactly two STORED quantized formats — fp8 E4M3 (universal,
+  per-layer upcast to compute dtype via diffusers layerwise casting) and
+  nvfp4 (Blackwell). `storage_dtype="fp8"` replaces it; `#fp8`-flavored
+  snapshots are detected via safetensors headers and their storage precision
+  preserved instead of upcasting into 2x VRAM. An emergency nf4 rung
+  (`GEN_WORKER_EMERGENCY_QUANT`, cozy-local only) runtime-quantizes the
+  denoiser when even the downloaded flavor can't fit free VRAM, surfaced as
+  `runs (emergency quality)`. Ladder: bf16 -> #fp8 -> #nvfp4 -> emergency-nf4
+  -> offload.
+
+- **Streaming dtype cast + fp8-E4M3 storage cast in cozy_convert (gw#395,
+  gw#396).** `_stream_reencode` casts one tensor at a time (peak anonymous
+  RAM ~ largest single tensor regardless of model size; proven on a 22GiB
+  fp32 fixture under a 4G cgroup — 513MiB peak for bf16, 1281MiB for fp8).
+  `streaming_fp8_storage_cast` produces F8_E4M3-stored weight tensors
+  matching the runtime fp8-storage consumption path; weight-only nvfp4 is
+  deliberately not shipped (te#44 quality verdict was a hard FAIL). Off-policy
+  quant surface (torchao inline paths, awq/gptq, fp8:e5m2/int8) pruned per
+  `QUANTIZATION-POLICY.md`; bnb nf4/fp4 inline kept as the emergency-rung
+  producer. The old buffering `StreamingWriter` is deleted.
+
+- **Flavor-collapse ref-grammar conformance + producer publish mode=replace
+  (#112, th#597).** `parse_model_ref` validates the flavor token against the
+  documented grammar `owner/repo[:tag][@sha256|@blake3:<hex>][#flavor]` (one
+  lowercased token; multi-`#` refs now raise instead of silently parsing as
+  one bogus token) — shared conformance vectors vendored and byte-identical
+  with tensorhub. `publish_flavors` now defaults to `mode=replace` (a
+  producer's flavor export is a complete tree; the old merge default let a
+  `#fp8` export merge with the mirror's fp16 base, the te#44 root cause).
+  `mode=merge` stays as an explicit opt-in for overlay publishes.
+
+- **Flashpack format support removed (gw#388).** Dropped everywhere: the
+  unsafe-format gate is safetensors-only, the hub capability probe no longer
+  advertises flashpack, cozy_convert loses the flashpack converter/extra.
+  Evidence (e2e#114): flashpack loses 3.0x cold / 2.7x warm to plain
+  safetensors and is dormant upstream.
 
 - **Compile-cell adoption: honest cache-hit proof + rekey (#391).** ADOPTED now
   means the seeded inductor cell actually served the warmup trace: the worker
