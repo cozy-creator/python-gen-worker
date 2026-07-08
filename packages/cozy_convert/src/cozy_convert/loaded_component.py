@@ -10,10 +10,7 @@ Each LoadedComponent has been resolved to one of four states:
                        subdir under ``out_dir`` via ``save_pretrained``.
   - ``bf16_cpu``     — loaded into CPU memory in ``torch_dtype``, NOT
                        quantized. Yielded by ``iter_hf_components_streaming``
-                       for tenants that want to drive quantization themselves
-                       (e.g. ``torchao.quantization.quantize_(component.module,
-                       config, device='cuda')``, which streams one Linear at
-                       a time to GPU rather than staging the full bf16 there).
+                       for tenants that drive an in-place transform themselves.
                        After the tenant mutates the module in-place,
                        ``save_to`` writes it the same way as ``quantized``.
   - ``passthrough``  — pure file copy; kind for tokenizer / scheduler / vae /
@@ -41,37 +38,6 @@ from pathlib import Path
 from typing import Any, Literal
 
 
-def _maybe_unwrap_torchao_subclasses(module: Any) -> None:
-    """If `module` contains torchao tensor subclasses (AffineQuantizedTensor,
-    etc.), unwrap them so the underlying raw tensors become safetensors-
-    serializable. No-op if torchao isn't installed or the module has no such
-    subclasses to unwrap.
-
-    torchao 0.15+ ships native safetensors hooks on its new per-config tensor
-    classes (Float8Tensor, Int4TilePackedTo4dTensor, IntxUnpackedToInt8Tensor)
-    so this unwrap is in principle unneeded for those. Kept as a defensive
-    fallback because (1) older AffineQuantizedTensor paths still appear in
-    some torchao Config combinations and (2) the call is a cheap idempotent
-    no-op when the model already serializes natively. Remove only after
-    verifying every Config we ship round-trips through save_pretrained
-    + from_pretrained without the unwrap.
-
-    Called by `LoadedComponent.save_to` for kind in ('quantized', 'bf16_cpu').
-    """
-    try:
-        from torchao.utils import unwrap_tensor_subclass
-    except Exception:
-        return
-    try:
-        unwrap_tensor_subclass(module)
-    except Exception:
-        # If the module doesn't contain torchao subclasses (or torchao raised
-        # for some other reason), swallow — the subsequent save_pretrained
-        # will surface a clear error if the module still has incompatible
-        # tensor types.
-        pass
-
-
 ComponentKind = Literal["quantized", "bf16_cpu", "passthrough", "root"]
 
 
@@ -81,10 +47,10 @@ class LoadedComponent:
     kind: ComponentKind
     # Populated when kind in ("quantized", "bf16_cpu"): the loaded HF module.
     #   - "quantized": already carries quantization state (Linear8bitLt /
-    #     Linear4bit / torchao AffineQuantizedTensor / modelopt fake-quant
-    #     subclasses) from HF's from_pretrained(quantization_config=...).
-    #   - "bf16_cpu": plain bf16 module on CPU; tenant will mutate in-place
-    #     (e.g. torchao.quantize_(module, config, device='cuda')) before save.
+    #     Linear4bit / modelopt fake-quant subclasses) from HF's
+    #     from_pretrained(quantization_config=...).
+    #   - "bf16_cpu": plain bf16 module on CPU; tenant mutates in-place
+    #     before save.
     # save_to calls .save_pretrained on it.
     _module: Any = None
     # Populated when kind == "passthrough": absolute path to the source-side
@@ -129,17 +95,7 @@ class LoadedComponent:
                 )
             target = out_dir / self.name
             target.mkdir(parents=True, exist_ok=True)
-            # safetensors is required (Cozy policy: safetensors, never
-            # pickle). torchao's AffineQuantizedTensor and similar
-            # tensor subclasses aren't directly serializable by safetensors —
-            # they wrap raw int_data + scale + zero_point in one Python
-            # object. Call `unwrap_tensor_subclass` to flatten the subclasses
-            # back into raw state-dict entries that safetensors can write.
-            # No-op for modules without torchao subclasses, and a no-op if
-            # torchao isn't installed. bf16_cpu modules that were quantized
-            # in-place by the tenant (e.g. torchao streaming-quant) carry the
-            # same subclasses, so the unwrap applies to them too.
-            _maybe_unwrap_torchao_subclasses(self._module)
+            # safetensors is required (Cozy policy: safetensors, never pickle).
             self._module.save_pretrained(str(target), safe_serialization=True)
             return
 

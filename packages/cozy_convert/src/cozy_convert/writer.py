@@ -170,14 +170,19 @@ def list_shard_files_from_index(index_path: Path) -> list[Path]:
 # ---------------------------------------------------------------------------
 
 class IncrementalSafetensorsWriter:
-    """Write a safetensors file one tensor at a time (no full dict in memory)."""
+    """Write a safetensors file one tensor at a time (no full dict in memory).
 
-    def __init__(self, output_path: Path) -> None:
+    ``metadata`` (string-valued) is emitted as the header's ``__metadata__``.
+    """
+
+    def __init__(self, output_path: Path, *, metadata: Mapping[str, str] | None = None) -> None:
         self._output_path = Path(output_path)
         self._meta: list[tuple[str, str, list[int]]] = []  # (name, st_dtype, shape)
+        self._metadata = {str(k): str(v) for k, v in (metadata or {}).items()}
         self._header_written = False
         self._fh: Any = None
         self._written: set[str] = set()
+        self._sizes: list[int] = []
 
     def __enter__(self) -> "IncrementalSafetensorsWriter":
         return self
@@ -196,6 +201,10 @@ class IncrementalSafetensorsWriter:
         self._output_path.parent.mkdir(parents=True, exist_ok=True)
         self._fh = open(self._output_path, "wb")
         header: dict[str, Any] = {}
+        if self._metadata:
+            # Sorted for byte-determinism: safe_open().metadata() iterates in
+            # randomized (Rust HashMap) order.
+            header["__metadata__"] = dict(sorted(self._metadata.items()))
         offset = 0
         for name, dtype, shape in self._meta:
             elem = _ST_DTYPE_SIZES.get(dtype)
@@ -206,6 +215,7 @@ class IncrementalSafetensorsWriter:
                 numel *= dim
             size = numel * elem
             header[name] = {"dtype": dtype, "shape": shape, "data_offsets": [offset, offset + size]}
+            self._sizes.append(size)
             offset += size
         blob = json.dumps(header, separators=(",", ":")).encode("utf-8")
         blob += b" " * ((8 - (len(blob) % 8)) % 8)
@@ -213,14 +223,20 @@ class IncrementalSafetensorsWriter:
         self._fh.write(blob)
         self._header_written = True
 
-    def write_tensor(self, name: str, data: bytes) -> None:
+    def write_tensor(self, name: str, data: Any) -> None:
+        """``data`` is any bytes-like buffer (bytes / memoryview / ndarray)."""
         if not self._header_written or self._fh is None:
             raise RuntimeError("write_header() must run before write_tensor()")
-        expected = self._meta[len(self._written)][0]
+        idx = len(self._written)
+        expected = self._meta[idx][0]
         if name != expected:
             raise RuntimeError(f"expected tensor {expected!r}, got {name!r} (write in order)")
         if name in self._written:
             raise RuntimeError(f"tensor {name!r} already written")
+        nbytes = memoryview(data).nbytes
+        if nbytes != self._sizes[idx]:
+            raise RuntimeError(
+                f"tensor {name!r}: got {nbytes} bytes, header declared {self._sizes[idx]}")
         self._fh.write(data)
         self._written.add(name)
 
@@ -230,11 +246,11 @@ class IncrementalSafetensorsWriter:
             self._fh = None
 
 
-def _tensor_to_bytes(t: "torch.Tensor") -> bytes:
-    """Contiguous little-endian raw bytes via one C-level memcpy."""
+def _tensor_to_bytes(t: "torch.Tensor") -> Any:
+    """Contiguous little-endian raw byte buffer (zero-copy numpy view)."""
     import torch
 
-    return t.contiguous().flatten().view(torch.uint8).numpy().tobytes()
+    return t.contiguous().flatten().view(torch.uint8).numpy()
 
 
 # ---------------------------------------------------------------------------
@@ -351,47 +367,53 @@ def iter_source_tensors(
 
 
 # ---------------------------------------------------------------------------
-# Streaming dtype cast — one tensor in memory at a time, direct-to-shard
+# Streaming per-tensor re-encode — one tensor in memory at a time
 # ---------------------------------------------------------------------------
 
-def streaming_dtype_cast(
+_ST_FLOAT_DTYPES: frozenset[str] = frozenset(
+    {"F64", "F32", "F16", "BF16", "F8_E4M3", "F8_E5M2"})
+
+
+def _stream_reencode(
     input_path: Path,
     out_dir: Path,
     *,
-    target_dtype: "torch.dtype",
-    shard_prefix: str = "model",
-    shard_threshold: int = MAX_SAFETENSORS_SHARD_BYTES,
+    out_st_dtype_for: Any,   # (name, src_st_dtype, shape) -> output st dtype
+    transform: Any,          # (name, tensor, out_st_dtype) -> tensor
+    shard_prefix: str,
+    shard_threshold: int,
 ) -> dict[str, Any]:
-    """Cast float tensors to ``target_dtype``, writing directly into N shards.
+    """Two-pass streaming re-encode over safetensors input(s).
 
-    Non-float tensors keep their source dtype. Returns ``output_paths``
-    (list of shard files), ``index_path`` (None for a single shard),
-    ``tensor_count`` / ``converted_count`` / ``shard_sizes``.
+    Pass 1 reads only the shard headers (``get_slice`` — no tensor data) to
+    plan output shards; pass 2 reads one tensor at a time, applies
+    ``transform``, and appends it to its output shard. Peak anonymous memory
+    ≈ the largest single tensor. Source ``__metadata__`` is preserved.
     """
     from safetensors import safe_open
 
     shards_in = _resolve_input_shards(Path(input_path))
-    target_st = torch_dtype_to_st(target_dtype)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Pass 1: metadata walk — output dtype + byte size per tensor.
+    # Pass 1: header-only walk — output dtype + byte size per tensor.
     metas: list[tuple[str, str, list[int], Path]] = []  # name, out_dtype, shape, src_shard
     size_map: dict[str, int] = {}
-    elem_size = _ST_DTYPE_SIZES[target_st]
+    source_metadata: dict[str, str] = {}
     for shard_path in shards_in:
         with safe_open(str(shard_path), framework="pt", device="cpu") as f:
+            md = f.metadata()
+            if md:
+                source_metadata.update({str(k): str(v) for k, v in md.items()})
             for name in f.keys():
-                t = f.get_tensor(name)
-                if t.is_floating_point():
-                    out_dtype = target_st
-                    nbytes = int(t.numel()) * elem_size
-                else:
-                    out_dtype = torch_dtype_to_st(t.dtype)
-                    nbytes = int(t.numel() * t.element_size())
-                metas.append((name, out_dtype, list(t.shape), shard_path))
-                size_map[name] = nbytes
-                del t
+                sl = f.get_slice(name)
+                shape = list(sl.get_shape())
+                out_dtype = str(out_st_dtype_for(name, str(sl.get_dtype()), shape))
+                numel = 1
+                for dim in shape:
+                    numel *= dim
+                metas.append((name, out_dtype, shape, shard_path))
+                size_map[name] = numel * _ST_DTYPE_SIZES[out_dtype]
 
     plan = plan_shards(size_map, max_shard_bytes=shard_threshold, shard_prefix=shard_prefix)
     per_shard: dict[str, list[tuple[str, str, list[int], Path]]] = {n: [] for n in plan.shard_names}
@@ -402,23 +424,37 @@ def streaming_dtype_cast(
 
     tensor_count = 0
     converted = 0
-    for shard_name in plan.shard_names:
-        entries = per_shard[shard_name]
-        with IncrementalSafetensorsWriter(out_dir / shard_name) as w:
-            for name, out_dtype, shape, _src in entries:
-                w.add_tensor_metadata(name, dtype=out_dtype, shape=shape)
-            w.write_header()
-            for name, _out_dtype, _shape, src in entries:
-                with safe_open(str(src), framework="pt", device="cpu") as f:
+    handles: dict[Path, Any] = {}
+    try:
+        for shard_name in plan.shard_names:
+            entries = per_shard[shard_name]
+            with IncrementalSafetensorsWriter(
+                out_dir / shard_name, metadata=source_metadata,
+            ) as w:
+                for name, out_dtype, shape, _src in entries:
+                    w.add_tensor_metadata(name, dtype=out_dtype, shape=shape)
+                w.write_header()
+                for name, out_dtype, _shape, src in entries:
+                    f = handles.get(src)
+                    if f is None:
+                        f = handles[src] = safe_open(str(src), framework="pt", device="cpu")
                     t = f.get_tensor(name)
-                tensor_count += 1
-                if t.is_floating_point():
-                    result = t.to(dtype=target_dtype)
-                    converted += 1
-                else:
-                    result = t
-                w.write_tensor(name, _tensor_to_bytes(result))
-                del t, result
+                    tensor_count += 1
+                    result = transform(name, t, out_dtype)
+                    if result is not t:
+                        converted += 1
+                    if torch_dtype_to_st(result.dtype) != out_dtype:
+                        raise ConversionImplementationError(
+                            f"transform produced {result.dtype} for {name!r}; "
+                            f"planned {out_dtype}")
+                    w.write_tensor(name, _tensor_to_bytes(result))
+                    del t, result
+    finally:
+        for f in handles.values():
+            try:
+                f.__exit__(None, None, None)
+            except Exception:  # noqa: BLE001
+                pass
 
     index_path: Optional[Path] = None
     if len(plan.shard_names) > 1:
@@ -433,7 +469,265 @@ def streaming_dtype_cast(
         "output_paths": [out_dir / n for n in plan.shard_names],
         "index_path": index_path,
         "shard_sizes": dict(plan.shard_sizes),
+        "metadata": dict(source_metadata),
     }
+
+
+def streaming_dtype_cast(
+    input_path: Path,
+    out_dir: Path,
+    *,
+    target_dtype: "torch.dtype",
+    shard_prefix: str = "model",
+    shard_threshold: int = MAX_SAFETENSORS_SHARD_BYTES,
+) -> dict[str, Any]:
+    """Cast float tensors to ``target_dtype``, streaming directly into N shards.
+
+    Non-float tensors keep their source dtype. Returns ``output_paths``
+    (list of shard files), ``index_path`` (None for a single shard),
+    ``tensor_count`` / ``converted_count`` / ``shard_sizes`` / ``metadata``.
+    """
+    target_st = torch_dtype_to_st(target_dtype)
+
+    def out_st_dtype_for(_name: str, src_st: str, _shape: list[int]) -> str:
+        return target_st if src_st in _ST_FLOAT_DTYPES else src_st
+
+    def transform(_name: str, t: "torch.Tensor", _out_st: str) -> "torch.Tensor":
+        if t.is_floating_point() and t.dtype != target_dtype:
+            return t.to(dtype=target_dtype)
+        return t
+
+    return _stream_reencode(
+        Path(input_path), Path(out_dir),
+        out_st_dtype_for=out_st_dtype_for, transform=transform,
+        shard_prefix=shard_prefix, shard_threshold=shard_threshold,
+    )
+
+
+# fp8-E4M3 storage cast (the `#fp8` flavor): matches the consumption side —
+# diffusers layerwise casting (gen_worker.models.loading.apply_fp8_storage)
+# casts only Linear/Conv modules whose qualified name misses the skip
+# patterns, and upcasts them per-layer at compute time. The producer casts
+# strictly LESS than any consumer would: only >=2-D `.weight` tensors whose
+# module path misses the union of diffusers' skip patterns (defaults + every
+# per-class `_skip_layerwise_casting_patterns`). Anything skipped here that a
+# consumer does cast merely stores bigger — never a baked-in quality loss.
+FP8_SKIP_TENSOR_PATTERNS: tuple[str, ...] = (
+    "embed",            # pos_embed / patch_embed(ding|der) / *_embedder / embed_tokens / time_embedding
+    "norm",
+    "pooler",
+    "adaln_single",
+    "final_layer",
+    "quantize",
+    "decoder",
+    "preprocess_conv", "postprocess_conv",
+    r"^proj_in$", r"^proj_out$", r"^proj$",
+)
+
+_FP8_E4M3_MAX = 448.0  # torch float8_e4m3fn cast does NOT saturate; clamp first
+
+
+def fp8_cast_eligible(
+    name: str, src_st_dtype: str, shape: list[int],
+    *, skip_patterns: tuple[str, ...] = FP8_SKIP_TENSOR_PATTERNS,
+) -> bool:
+    """True when a tensor is safe to store as fp8-E4M3 for the ``#fp8`` flavor."""
+    import re
+
+    if src_st_dtype not in {"F64", "F32", "F16", "BF16"}:
+        return False
+    if len(shape) < 2 or not name.endswith(".weight"):
+        return False
+    module_path = name[: -len(".weight")]
+    return not any(re.search(p, module_path) for p in skip_patterns)
+
+
+def streaming_fp8_storage_cast(
+    input_path: Path,
+    out_dir: Path,
+    *,
+    shard_prefix: str = "model",
+    shard_threshold: int = MAX_SAFETENSORS_SHARD_BYTES,
+    skip_patterns: tuple[str, ...] = FP8_SKIP_TENSOR_PATTERNS,
+) -> dict[str, Any]:
+    """Produce the fp8-E4M3 storage flavor of one weight set, streaming.
+
+    Eligible weights are clamped to ±448 and stored as F8_E4M3; everything
+    else keeps its source dtype. Scale-free by design: consumption is
+    diffusers layerwise casting (fp8 bytes resident, bf16/fp16 compute).
+    """
+    import torch
+
+    def out_st_dtype_for(name: str, src_st: str, shape: list[int]) -> str:
+        if fp8_cast_eligible(name, src_st, shape, skip_patterns=skip_patterns):
+            return "F8_E4M3"
+        return src_st
+
+    def transform(_name: str, t: "torch.Tensor", out_st: str) -> "torch.Tensor":
+        if out_st == "F8_E4M3" and t.dtype != torch.float8_e4m3fn:
+            return t.clamp(-_FP8_E4M3_MAX, _FP8_E4M3_MAX).to(torch.float8_e4m3fn)
+        return t
+
+    return _stream_reencode(
+        Path(input_path), Path(out_dir),
+        out_st_dtype_for=out_st_dtype_for, transform=transform,
+        shard_prefix=shard_prefix, shard_threshold=shard_threshold,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Snapshot-level streaming conversion (whole source tree, per weight group)
+# ---------------------------------------------------------------------------
+
+# Components fp8 storage targets by default: the denoiser dominates VRAM and
+# is what apply_fp8_storage consumes (QUANTIZATION-POLICY.md order of
+# sacrifice; TEs join via gw#392's component-wise ladder, explicitly).
+FP8_DEFAULT_COMPONENTS: tuple[str, ...] = ("transformer", "unet")
+
+
+def snapshot_weight_groups(source_dir: Path, layout: str) -> list[tuple[str, Path]]:
+    """(component, entry_path) per weight set. entry is the index.json for
+    sharded sets, else the safetensors file. A singlefile-layout source can
+    still carry several root weight files (civitai bundles ship the
+    diffusion model + text encoder + VAE side by side) — every one is its
+    own group, or a dtype pass would convert only the first and the tree
+    copy would silently drop the rest."""
+    groups: list[tuple[str, Path]] = []
+
+    def _entries_for(d: Path) -> list[Path]:
+        idx = sorted(d.glob("*.safetensors.index.json"))
+        sharded_members: set[str] = set()
+        for i in idx:
+            try:
+                weight_map = json.loads(i.read_text("utf-8")).get("weight_map") or {}
+                sharded_members.update(str(v) for v in weight_map.values())
+            except Exception:
+                pass
+        loose = [p for p in sorted(d.glob("*.safetensors"))
+                 if p.is_file() and p.name not in sharded_members]
+        return idx + loose
+
+    if layout == "diffusers":
+        for entry in sorted(source_dir.iterdir()):
+            if entry.is_dir():
+                found = _entries_for(entry)
+                if found:
+                    groups.append((entry.name, found[0]))
+    else:
+        for found in _entries_for(source_dir):
+            groups.append(("", found))
+    return groups
+
+
+def _link_or_copy(src: Path, dst: Path) -> None:
+    import os
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.exists():
+        return
+    try:
+        os.link(src, dst)
+    except OSError:
+        shutil.copy2(src, dst)
+
+
+def copy_non_weight_files(source_dir: Path, out_dir: Path, *, skip_components: set[str]) -> None:
+    """Hardlink every non-weight file into the output tree; weight files and
+    their sharded indexes for converted components are skipped."""
+    for f in sorted(source_dir.rglob("*")):
+        if not f.is_file():
+            continue
+        rel = f.relative_to(source_dir)
+        if rel.parts[:2] == (".cache", "huggingface"):
+            continue  # hf local-dir download metadata, not repo content
+        comp = rel.parts[0] if len(rel.parts) > 1 else ""
+        name = f.name
+        is_weightish = f.suffix == ".safetensors" or name.endswith(".safetensors.index.json")
+        if is_weightish and (comp in skip_components or ("" in skip_components and comp == "")):
+            continue
+        if name == ".civitai.json":
+            continue
+        _link_or_copy(f, out_dir / rel)
+
+
+def _group_shard_prefix(entry: Path) -> str:
+    stem = entry.name
+    for suffix in (".safetensors.index.json", ".safetensors"):
+        if stem.endswith(suffix):
+            return stem[: -len(suffix)] or "model"
+    return stem or "model"
+
+
+def streaming_cast_snapshot(
+    source_dir: Path,
+    out_dir: Path,
+    *,
+    file_layout: str,
+    target_dtype: "torch.dtype",
+    shard_threshold: int = MAX_SAFETENSORS_SHARD_BYTES,
+) -> dict[str, Any]:
+    """Streaming dtype cast of a whole snapshot: every weight group is cast
+    per-tensor (peak anon RAM ≈ largest tensor); configs/tokenizers hardlink
+    through. Output is a complete loadable tree."""
+    source_dir, out_dir = Path(source_dir), Path(out_dir)
+    groups = snapshot_weight_groups(source_dir, file_layout)
+    if not groups:
+        raise ConversionImplementationError("no safetensors weights found to cast")
+    tensor_count = converted = 0
+    done: set[str] = set()
+    for comp, entry in groups:
+        result = streaming_dtype_cast(
+            entry, (out_dir / comp) if comp else out_dir,
+            target_dtype=target_dtype,
+            shard_prefix=_group_shard_prefix(entry),
+            shard_threshold=shard_threshold,
+        )
+        tensor_count += int(result["tensor_count"])
+        converted += int(result["converted_count"])
+        done.add(comp)
+    copy_non_weight_files(source_dir, out_dir, skip_components=done)
+    return {"tensor_count": tensor_count, "converted_count": converted,
+            "components": sorted(done), "output_dir": out_dir}
+
+
+def streaming_fp8_snapshot(
+    source_dir: Path,
+    out_dir: Path,
+    *,
+    file_layout: str,
+    components: tuple[str, ...] = FP8_DEFAULT_COMPONENTS,
+    shard_threshold: int = MAX_SAFETENSORS_SHARD_BYTES,
+) -> dict[str, Any]:
+    """Produce the ``#fp8`` flavor of a diffusers snapshot, streaming.
+
+    Only ``components`` (default: the denoiser) are fp8-cast; every other
+    component passes through untouched. Refuses singlefile layouts — fp8
+    storage is component-scoped and single-file keyspaces don't name
+    components reliably."""
+    if file_layout != "diffusers":
+        raise ConversionImplementationError(
+            "fp8 storage flavors are produced from diffusers layouts only "
+            "(component-scoped); repackage singlefile sources first")
+    source_dir, out_dir = Path(source_dir), Path(out_dir)
+    groups = [(c, e) for c, e in snapshot_weight_groups(source_dir, "diffusers")
+              if c in set(components)]
+    if not groups:
+        raise ConversionImplementationError(
+            f"no fp8-castable components found (looked for {sorted(components)})")
+    tensor_count = converted = 0
+    done: set[str] = set()
+    for comp, entry in groups:
+        result = streaming_fp8_storage_cast(
+            entry, out_dir / comp,
+            shard_prefix=_group_shard_prefix(entry),
+            shard_threshold=shard_threshold,
+        )
+        tensor_count += int(result["tensor_count"])
+        converted += int(result["converted_count"])
+        done.add(comp)
+    copy_non_weight_files(source_dir, out_dir, skip_components=done)
+    return {"tensor_count": tensor_count, "converted_count": converted,
+            "components": sorted(done), "output_dir": out_dir}
 
 
 # ---------------------------------------------------------------------------
@@ -695,6 +989,14 @@ __all__ = [
     "iter_component_tensors",
     "iter_source_tensors",
     "streaming_dtype_cast",
+    "streaming_fp8_storage_cast",
+    "streaming_cast_snapshot",
+    "streaming_fp8_snapshot",
+    "snapshot_weight_groups",
+    "copy_non_weight_files",
+    "fp8_cast_eligible",
+    "FP8_SKIP_TENSOR_PATTERNS",
+    "FP8_DEFAULT_COMPONENTS",
     "shard_safetensors_by_offset",
     "StreamingWriter",
 ]
