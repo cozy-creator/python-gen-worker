@@ -32,6 +32,7 @@ unwraps to the eager module.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import io
 import json
@@ -278,6 +279,15 @@ def refit_weights(state_dict: Dict[str, Any], entries: Iterable[Dict[str, str]])
 
     out: Dict[str, Any] = {}
     for e in entries:
+        if e.get("transform") == "const":
+            # Graph constant baked at build time (ONNX Constant-node output
+            # or non-weight initializer): fine-tune-invariant, carried in
+            # the map itself — no state_dict counterpart exists.
+            arr = np.frombuffer(
+                base64.b64decode(e["data_b64"]), dtype=np.dtype(e["dtype"])
+            ).reshape(e["shape"])
+            out[e["name"]] = np.ascontiguousarray(arr)
+            continue
         t = state_dict.get(e["key"])
         if t is None:
             raise AdoptError("refit_missing_key", e["key"])
@@ -564,6 +574,24 @@ def _export_unet_onnx(pipe: Any, onnx_path: Path, *, batch: int, shape: Tuple[in
     return [{"name": n} for n in _SDXL_UNET_INPUTS]
 
 
+def _onnx_constant_outputs(onnx_path: Path) -> Dict[str, Any]:
+    """Constant-node output name -> numpy value. TRT counts folded Constant
+    outputs among a stripped engine's refittable weights; their values live
+    in the graph, not the state_dict."""
+    import onnx
+    from onnx import numpy_helper
+
+    model = onnx.load(str(onnx_path), load_external_data=True)
+    out: Dict[str, Any] = {}
+    for node in model.graph.node:
+        if node.op_type != "Constant" or not node.output:
+            continue
+        for attr in node.attribute:
+            if attr.name == "value":
+                out[node.output[0]] = numpy_helper.to_array(attr.t)
+    return out
+
+
 def _onnx_initializers(onnx_path: Path) -> Dict[str, Any]:
     import onnx
     from onnx import numpy_helper
@@ -683,10 +711,34 @@ def build(
     mapped = {e["name"] for e in entries}
     missing = sorted(needed - mapped)
     if missing:
-        raise RuntimeError(
-            f"refit map incomplete: {len(missing)}/{len(needed)} engine weights unmapped "
-            f"(e.g. {missing[:5]}); unmatched initializers={len(unmatched)}"
-        )
+        # Engine weights with no state_dict counterpart: ONNX Constant-node
+        # outputs and non-weight initializers (shape vectors, norm epsilons,
+        # sinusoidal tables). Fine-tune-invariant — bake their VALUES into
+        # the map as const entries (gw#390 pilot find: 693/2281 on SDXL UNet).
+        const_src = _onnx_initializers(onnx_path)
+        const_src.update(_onnx_constant_outputs(onnx_path))
+        still: List[str] = []
+        baked = 0
+        import numpy as _np
+
+        for name in missing:
+            arr = const_src.get(name)
+            if arr is None:
+                still.append(name)
+                continue
+            arr = _np.ascontiguousarray(arr)
+            entries.append({
+                "name": name, "key": "", "transform": "const",
+                "dtype": str(arr.dtype), "shape": list(arr.shape),
+                "data_b64": base64.b64encode(arr.tobytes()).decode(),
+            })
+            baked += 1
+        if still:
+            raise RuntimeError(
+                f"refit map incomplete: {len(still)}/{len(needed)} engine weights unmapped "
+                f"(e.g. {still[:5]}); unmatched initializers={len(unmatched)}, baked const={baked}"
+            )
+        logger.info("refit map: %d state_dict entries + %d baked constants", len(entries) - baked, baked)
     entries = [e for e in entries if e["name"] in needed]
     (work / REFIT_MAP_NAME).write_text(json.dumps(entries, sort_keys=True, indent=0))
     timings["refit_map_s"] = round(time.monotonic() - t0, 1)
