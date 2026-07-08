@@ -729,10 +729,23 @@ class Executor:
                     await asyncio.to_thread(setup, **kwargs)
             warmup = getattr(instance, "warmup", None)
             if callable(warmup):
+                from . import compile_cache
+
+                counters_before = compile_cache.inductor_counters()
+                warm_t0 = time.monotonic()
                 if asyncio.iscoroutinefunction(warmup):
                     await warmup()
                 else:
                     await asyncio.to_thread(warmup)
+                if spec.compile is not None:
+                    stats = compile_cache.counters_delta(
+                        counters_before, compile_cache.inductor_counters())
+                    logger.info(
+                        "compile-cache warmup %s: fxgraph hits=%d misses=%d "
+                        "in %.1fs", spec.name,
+                        stats.get("fxgraph_cache_hit", 0),
+                        stats.get("fxgraph_cache_miss", 0),
+                        time.monotonic() - warm_t0)
             vram_delta = max(0, self._vram_allocated() - vram_before)
             self._register_residency(spec, setup_slots, loaded, vram_delta)
         return instance
@@ -1071,6 +1084,7 @@ class Executor:
         # queues on the semaphore instead of racing the trace/refit.
         async with self._gpu_semaphore:
             adopted: List[Tuple[_ClassRecord, EndpointSpec]] = []
+            wrapped_objs: List[Any] = []
             for rec, s in resident.values():
                 applied = False
                 for slot in self._setup_slots(s):
@@ -1088,32 +1102,74 @@ class Executor:
                             return await fail(exc.reason, str(exc))
                         except Exception as exc:
                             return await fail("artifact_invalid", str(exc))
-                    elif await asyncio.to_thread(
-                        compile_cache.apply, obj, s.compile, cache_ready=True
-                    ):
-                        applied = True
+                    else:
+                        # Re-adoption of a re-published cell: drop the previous
+                        # wrap + dynamo's in-memory code so warmup re-traces
+                        # against the freshly seeded caches (gw#391).
+                        compile_cache.unwrap(obj)
+                        if await asyncio.to_thread(
+                            compile_cache.apply, obj, s.compile, cache_ready=True
+                        ):
+                            applied = True
+                            wrapped_objs.append(obj)
                 if applied:
                     adopted.append((rec, s))
             if not adopted:
                 return await fail("no_target")
+
+            async def rollback() -> None:
+                for obj in wrapped_objs:
+                    compile_cache.unwrap(obj)
+
+            counters_before = compile_cache.inductor_counters()
+            warm_t0 = time.monotonic()
+            warmed = 0
             for rec, _s in adopted:
                 warmup = getattr(rec.instance, "warmup", None)
                 if not callable(warmup):
-                    continue  # first request pays the (cache-hit) trace
+                    continue
                 try:
                     if asyncio.iscoroutinefunction(warmup):
                         await warmup()
                     else:
                         await asyncio.to_thread(warmup)
+                    warmed += 1
                 except Exception as exc:
-                    # Compiled targets are guard-wrapped: a failing warmup has
-                    # already unwrapped them to eager — service unaffected.
+                    await rollback()
                     return await fail("warmup", f"{type(exc).__name__}: {exc}")
+            warmup_s = round(time.monotonic() - warm_t0, 3)
+            stats = compile_cache.counters_delta(
+                counters_before, compile_cache.inductor_counters())
+            hits = stats.get("fxgraph_cache_hit", 0)
+            misses = stats.get("fxgraph_cache_miss", 0)
+
+            if not is_trt:
+                # Honest failure mode (gw#391): ADOPTED must mean the seeded
+                # cell actually served the trace. No warmup = unprovable;
+                # zero hits = silently eager. Both roll back to true eager.
+                if not warmed:
+                    await rollback()
+                    return await fail(
+                        "no_warmup",
+                        "no adopted endpoint defines warmup(); cache hits unprovable")
+                if hits <= 0:
+                    await rollback()
+                    return await fail("cache_miss", (
+                        f"warmup observed 0 fxgraph cache hits "
+                        f"(misses={misses}, warmup={warmup_s}s) — cell useless "
+                        f"on this runtime, serving eager"))
 
         duration_ms = int((time.monotonic() - t0) * 1000)
-        logger.info("compile-cache adopt %s: adopted in %dms", ref, duration_ms)
+        logger.info(
+            "compile-cache adopt %s: adopted in %dms (fxgraph hits=%d misses=%d, "
+            "warmup %.1fs)", ref, duration_ms, hits, misses, warmup_s)
+        if misses:
+            logger.warning(
+                "compile-cache adopt %s: %d fxgraph misses during warmup — "
+                "cell covers the declared shapes only partially", ref, misses)
         await self._send(pb.WorkerMessage(model_event=pb.ModelEvent(
-            ref=ref, state=pb.MODEL_STATE_ADOPTED, duration_ms=duration_ms)))
+            ref=ref, state=pb.MODEL_STATE_ADOPTED, duration_ms=duration_ms,
+            cache_hits=hits, cache_misses=misses, warmup_s=warmup_s)))
 
     def _ref_in_use(self, ref: str) -> bool:
         for job in self.jobs.values():

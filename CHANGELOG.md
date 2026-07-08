@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Compile-cell adoption: honest cache-hit proof + rekey (#391).** ADOPTED now
+  means the seeded inductor cell actually served the warmup trace: the worker
+  reports FX-graph `cache_hits`/`cache_misses` + `warmup_s` in the ADOPTED
+  ModelEvent, and a warmup observing zero hits rolls back to eager with
+  `adopt_failed:cache_miss` (no `warmup()` = `adopt_failed:no_warmup`).
+  Artifact key gains the producer gen-worker version and the low-VRAM prep
+  mode the producer traced under (format 2 — pre-391 cells are refused, and a
+  pipeline prepped in a different mode is rejected `key_mismatch` before any
+  warmup); `build()` prepares the pipeline through the consumer's exact path
+  (`place_pipeline`) so producer and consumer trace identical graphs; seeding
+  mid-process clears inductor's latched path caches.
+
 - **Video output media metadata (#387).** `VideoAsset` gains optional probed
   container metadata (`duration_s`, `fps`, `width`, `height`, `has_audio`,
   `sample_rate`); `ctx.save_video` fills it via PyAV (best-effort). New

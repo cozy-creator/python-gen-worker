@@ -46,6 +46,50 @@ def test_verify_mismatches():
     other = dict(meta, format=99)
     assert "format" in cc.verify(other, family="sd15")
 
+    # gw#391: producer gen-worker version is part of the key — a cell built
+    # by other gen-worker code must never be adopted (graph drift => FX miss).
+    assert meta["gen_worker"] == cc.gen_worker_version() != ""
+    other = dict(meta, gen_worker="0.9.2-not-this")
+    assert "gen_worker" in cc.verify(other, family="sd15")
+    other = dict(meta)
+    del other["gen_worker"]
+    assert "gen_worker" in cc.verify(other, family="sd15")
+
+
+def test_counters_helpers():
+    stats = cc.inductor_counters()  # torch present in the dev venv
+    assert set(stats) >= {"fxgraph_cache_hit", "fxgraph_cache_miss"}
+    delta = cc.counters_delta(
+        {"fxgraph_cache_hit": 2, "fxgraph_cache_miss": 1},
+        {"fxgraph_cache_hit": 5, "fxgraph_cache_miss": 1},
+    )
+    assert delta == {"fxgraph_cache_hit": 3, "fxgraph_cache_miss": 0}
+
+
+def test_unwrap_restores_eager():
+    class _Mod:
+        def forward(self, x):  # pragma: no cover
+            return x
+
+    class _Pipe2:
+        def __init__(self):
+            self.transformer = _Mod()
+
+    pipe = _Pipe2()
+    original = pipe.transformer.forward
+    # simulate an armed pipeline the way apply() records it
+    pipe._cozy_compile = {
+        "targets": ["transformer"],
+        "shapes": [(768, 768)],
+        "cache": True,
+        "originals": [(pipe.transformer, "forward", original)],
+    }
+    pipe.transformer.forward = lambda x: x  # the "compiled" wrap
+    assert cc.unwrap(pipe) is True
+    assert pipe.transformer.forward == original
+    assert getattr(pipe, "_cozy_compile", None) is None
+    assert cc.unwrap(pipe) is False  # idempotent
+
 
 def test_system_repo():
     assert cc.system_repo("sd15") == "_system/family-sd15"

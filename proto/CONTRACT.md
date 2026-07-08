@@ -366,14 +366,18 @@ serving in-flight jobs: `ModelEvent{FAILED, error:"model_in_use"}`.
 
 **ADOPT_COMPILE_CACHE** (hot adoption, #567): `ref` is a compile-cache flavor
 ref — `_system/family-<f>#inductor-<sku>-torch<maj.min>`. W downloads the
-artifact snapshot, verifies its key (family/SKU/torch/triton/libs) against
+artifact snapshot, verifies its key (family/SKU/torch/triton/libs/producer gen-worker version, gw#391) against
 its own runtime, seeds the inductor+triton cache dirs, re-wraps the
 already-VRAM-resident modules of endpoints declaring
 `compile=Compile(family=<f>)` (module re-wrap only — weights are untouched,
 no reload), runs one warmup trace, and answers
-`ModelEvent{ADOPTED, duration_ms}`. ANY failure ⇒ discard, stay eager, answer
-`ModelEvent{FAILED, error:"adopt_failed:<reason>"}` — adoption must never
-degrade service. O policy: send only to job-idle workers (no in-flight jobs),
+`ModelEvent{ADOPTED, duration_ms, cache_hits, cache_misses, warmup_s}`. The
+warmup is the proof (gw#391): inductor cells report ADOPTED only when the
+warmup observed ≥1 FX-graph cache hit — zero hits rolls the wrap back to
+eager and answers `adopt_failed:cache_miss`; an endpoint without `warmup()`
+answers `adopt_failed:no_warmup` (unprovable). ANY failure ⇒ discard, stay
+eager, answer `ModelEvent{FAILED, error:"adopt_failed:<reason>"}` — adoption
+must never degrade service, and ADOPTED must never mean silently-eager. O policy: send only to job-idle workers (no in-flight jobs),
 at most one worker per release at a time, and only when the artifact's
 version key matches the pod (SKU + torch); W enforces the same checks
 defensively. Workers predating this kind ignore it silently (unknown enum, no
@@ -393,6 +397,8 @@ download-event fabric.
 | `error` | W | O op-failure handling (e.g. OOM ⇒ pick LRU vram model, send UNLOAD then retry LOAD; url_expired ⇒ re-mint snapshot and re-send) + triage log | set with FAILED |
 | `bytes_done`/`bytes_total` | W downloader (emit ≤1 per 5s per ref) | O boot/capacity progress display | set with DOWNLOADING |
 | `duration_ms` | W adopt handler | O adoption bookkeeping + fleet-adoption-latency metric | set with ADOPTED: wall time of download+seed+re-wrap+warmup |
+| `cache_hits`/`cache_misses` | W adopt handler (inductor FX-graph cache counter delta across the warmup) | O adoption observability: hits ≥ 1 on every ADOPTED; misses > 0 = partial shape coverage | set with ADOPTED (gw#391) |
+| `warmup_s` | W adopt handler | O adoption bookkeeping | set with ADOPTED: warmup wall seconds |
 
 **State machine per (worker, ref):** `DOWNLOADING → ON_DISK → IN_RAM ⇄ IN_VRAM`,
 demotions emit the new lower tier, `EVICTED` = removed from disk (fully gone).
@@ -562,7 +568,7 @@ vocabulary: `oom`, `model_in_use`, `url_expired`, `digest_mismatch`,
 ADOPT_COMPILE_CACHE only — `adopt_failed:<reason>` with reason ∈ {`bad_ref`,
 `no_endpoint`, `not_resident`, `model_in_use`, `download`,
 `artifact_missing`, `artifact_invalid`, `key_mismatch`, `no_target`,
-`warmup`}.
+`warmup`, `no_warmup`, `cache_miss`}.
 
 ---
 

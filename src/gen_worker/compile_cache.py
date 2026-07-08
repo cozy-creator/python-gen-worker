@@ -27,9 +27,12 @@ Artifact = deterministic ``.tar.gz``::
 
 Key sensitivity (all exact-match): family (graph identity), GPU SKU
 (autotune choices + cubin arch), torch (fx-graph cache key), triton
-(cubin/launcher cache key), diffusers (the traced graph is its code).
-``source_ref`` records which family member the producer compiled from —
-informational, never part of the match.
+(cubin/launcher cache key), diffusers (the traced graph is its code), and
+gen-worker itself (gw#391: the worker's load/wrap code shapes the traced
+graph — a cell produced by a different gen-worker can pass every other key
+yet miss inductor's FX-graph cache at trace time, serving eager while
+reporting adopted). ``source_ref`` records which family member the producer
+compiled from — informational, never part of the match.
 """
 
 from __future__ import annotations
@@ -55,7 +58,9 @@ ENV_CACHE_URL = "GEN_WORKER_COMPILE_CACHE_URL"    # http(s) URL to the artifact
 ENV_ALLOW_COLD = "GEN_WORKER_COMPILE_ALLOW_COLD"  # compile without an artifact (needs cc)
 
 METADATA_NAME = "metadata.json"
-ARTIFACT_FORMAT = 1
+# 2 (gw#391): key gained the producer gen-worker version; format-1 cells
+# (gw#384 era) demonstrably miss the FX-graph cache on current code.
+ARTIFACT_FORMAT = 2
 _MARKER_ATTR = "_cozy_compile"
 _JUNK_SUFFIXES = (".lock", ".tmp", ".pid")
 
@@ -106,6 +111,15 @@ def _lib_versions() -> Dict[str, str]:
         except Exception:
             pass
     return out
+
+
+def gen_worker_version() -> str:
+    try:
+        from importlib.metadata import version
+
+        return str(version("gen-worker"))
+    except Exception:
+        return ""
 
 
 def flavor_label(sku: str, torch_version: str) -> str:
@@ -159,6 +173,7 @@ def artifact_metadata(
         "format": ARTIFACT_FORMAT,
         "kind": "torch-inductor-cache",
         **runtime_key(),
+        "gen_worker": gen_worker_version(),
         "family": str(family or ""),
         "source_ref": str(source_ref or ""),
         "source_digest": str(source_digest or ""),
@@ -180,6 +195,11 @@ def verify(meta: Dict[str, Any], *, family: str = "") -> str:
         want, have = str(meta.get(field) or ""), here[field]
         if want != have:
             return f"{field} {want!r} != runtime {have!r}"
+    want_gw, have_gw = str(meta.get("gen_worker") or ""), gen_worker_version()
+    if want_gw != have_gw:
+        # gw#391: the producer's gen-worker shapes the traced graph; a version
+        # drift means the FX-graph cache keys may no longer match.
+        return f"gen_worker {want_gw!r} != runtime {have_gw!r}"
     for lib, have in _lib_versions().items():
         want = str((meta.get("libs") or {}).get(lib) or "")
         if want and want != have:
@@ -280,18 +300,56 @@ def unpack(artifact: Path, dest_root: Path) -> Dict[str, Any]:
 
 
 def capture_env(root: Path) -> Path:
-    """Point inductor+triton at fresh dirs under ``root`` for a compile job.
-    Must run before this process first touches torch.compile / triton."""
+    """Point inductor+triton at the dirs under ``root`` (producer capture and
+    consumer seeding share this contract). Safe mid-process: latched inductor
+    path caches are cleared so a hot adoption's re-seed actually takes effect
+    (gw#391 — the worker has been serving eager long before seeding)."""
     root = Path(root)
     for sub, env in (("inductor", "TORCHINDUCTOR_CACHE_DIR"), ("triton", "TRITON_CACHE_DIR")):
         d = root / sub
         d.mkdir(parents=True, exist_ok=True)
         os.environ[env] = str(d)
+    _reset_inductor_latch()
     return root
+
+
+def _reset_inductor_latch() -> None:
+    """Clear inductor's in-memory caches that may have latched the previous
+    cache-dir paths (torch's own ``temporary_cache_dir`` does the same)."""
+    import sys
+
+    if "torch" not in sys.modules:
+        return
+    try:
+        from torch._inductor.utils import clear_caches
+
+        clear_caches()
+    except Exception:
+        logger.debug("compile-cache: inductor latch reset unavailable", exc_info=True)
 
 
 # seeding reuses the same env contract
 seed_env = capture_env
+
+
+def inductor_counters() -> Dict[str, int]:
+    """This process's inductor FX-graph cache counters (monotonic). The delta
+    across a warmup is the honest adopted-vs-silently-eager signal (gw#391):
+    zero hits means the seeded cell never served the trace."""
+    try:
+        from torch._dynamo.utils import counters
+
+        c = counters["inductor"]
+        return {
+            k: int(c.get(k, 0))
+            for k in ("fxgraph_cache_hit", "fxgraph_cache_miss", "fxgraph_cache_bypass")
+        }
+    except Exception:
+        return {}
+
+
+def counters_delta(before: Dict[str, int], after: Dict[str, int]) -> Dict[str, int]:
+    return {k: int(after.get(k, 0)) - int(before.get(k, 0)) for k in after}
 
 
 def toolchain_present() -> bool:
@@ -474,6 +532,7 @@ def apply(pipeline: Any, cfg: Any, *, cache_ready: bool, guard: bool = True) -> 
             return False
 
     applied: list[str] = []
+    originals: list[Tuple[Any, str, Callable[..., Any]]] = []
     for target in cfg.targets:
         resolved = _resolve_target(pipeline, target)
         if resolved is None:
@@ -490,14 +549,42 @@ def apply(pipeline: Any, cfg: Any, *, cache_ready: bool, guard: bool = True) -> 
         compiled = torch.compile(fn, dynamic=False)
         setattr(owner, attr, _guarded(fn, compiled, target) if guard else compiled)
         applied.append(target)
+        originals.append((owner, attr, fn))
     if not applied:
         return False
     setattr(pipeline, _MARKER_ATTR, {
         "targets": applied,
         "shapes": [tuple(s) for s in cfg.shapes],
         "cache": bool(cache_ready),
+        "originals": originals,
     })
     logger.info("compile-cache: torch.compile armed for %s (cache=%s)", applied, cache_ready)
+    return True
+
+
+def unwrap(pipeline: Any) -> bool:
+    """Restore the eager callables :func:`apply` wrapped and drop dynamo's
+    in-memory compiled code so a later :func:`apply` re-traces against the
+    then-seeded caches. Used on adoption rollback (zero cache hits => back to
+    true eager, gw#391) and before re-adoption of a re-published cell."""
+    marker = getattr(pipeline, _MARKER_ATTR, None)
+    if marker is None:
+        return False
+    for owner, attr, fn in marker.get("originals") or ():
+        try:
+            setattr(owner, attr, fn)
+        except Exception:
+            logger.warning("compile-cache: could not restore eager %s.%s", type(owner).__name__, attr)
+    try:
+        delattr(pipeline, _MARKER_ATTR)
+    except AttributeError:
+        setattr(pipeline, _MARKER_ATTR, None)
+    try:
+        import torch._dynamo
+
+        torch._dynamo.reset()
+    except Exception:
+        pass
     return True
 
 
@@ -544,6 +631,7 @@ def build(
     """
     from .api.decorators import Compile as CompileCfg
     from .models.loading import load_from_pretrained
+    from .models.memory import place_pipeline
 
     if not toolchain_present():
         raise RuntimeError(
@@ -562,7 +650,13 @@ def build(
 
     cfg = CompileCfg(shapes=tuple(shapes), targets=tuple(targets))
     pipe = load_from_pretrained(DiffusionPipeline, str(model_path), dtype=dtype)
-    pipe.to("cuda")
+    # Producer/consumer graph parity (gw#391): the worker prepares pipelines
+    # with place_pipeline (placement + vae/attention low-VRAM flags), and
+    # those flags are traced INTO the graphs — the FX-graph cache key. A cell
+    # built from a differently-prepared pipeline misses at request time, so
+    # the producer must come through the exact same prep. Run on a pod with
+    # the same free-VRAM class as the target workers.
+    place_pipeline(pipe)
     if callable(getattr(pipe, "set_progress_bar_config", None)):
         pipe.set_progress_bar_config(disable=True)
     os.environ[ENV_ALLOW_COLD] = "1"
@@ -610,10 +704,13 @@ __all__ = [
     "apply",
     "artifact_metadata",
     "capture_env",
+    "counters_delta",
     "enable",
     "family_from_ref",
     "find_artifact",
     "flavor_label",
+    "gen_worker_version",
+    "inductor_counters",
     "is_cache_ref",
     "pack",
     "prepare",
@@ -624,5 +721,6 @@ __all__ = [
     "system_repo",
     "toolchain_present",
     "unpack",
+    "unwrap",
     "verify",
 ]

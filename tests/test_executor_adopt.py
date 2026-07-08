@@ -124,6 +124,19 @@ def test_family_from_ref_and_is_cache_ref():
 # ---------------------------------------------------------------------------
 
 
+def _fake_counters(monkeypatch, *, hits=3, misses=1):
+    """Simulate inductor counters advancing across the adoption warmup."""
+    state = {"n": 0}
+
+    def counters():
+        state["n"] += 1
+        if state["n"] == 1:  # before-warmup snapshot
+            return {"fxgraph_cache_hit": 10, "fxgraph_cache_miss": 5}
+        return {"fxgraph_cache_hit": 10 + hits, "fxgraph_cache_miss": 5 + misses}
+
+    monkeypatch.setattr(cc, "inductor_counters", counters)
+
+
 def test_adopt_success_rewraps_warms_and_reports(tmp_path, monkeypatch):
     _artifact(tmp_path)
     spec = _spec()
@@ -137,16 +150,70 @@ def test_adopt_success_rewraps_warms_and_reports(tmp_path, monkeypatch):
         return True
 
     monkeypatch.setattr(cc, "apply", _fake_apply)
+    _fake_counters(monkeypatch, hits=3, misses=1)
     _adopt(ex)
 
     adopted = _events(sent, pb.MODEL_STATE_ADOPTED)
     assert len(adopted) == 1
     assert adopted[0].ref == CACHE_REF
     assert adopted[0].duration_ms >= 0
+    assert adopted[0].cache_hits == 3
+    assert adopted[0].cache_misses == 1
+    assert adopted[0].warmup_s >= 0
     assert not _events(sent, pb.MODEL_STATE_FAILED)
     assert len(applied) == 1 and applied[0][2] is True
     assert isinstance(applied[0][0], _Pipe)
     assert _Endpoint.warmups == 1
+
+
+def test_adopt_zero_cache_hits_rolls_back_and_fails(tmp_path, monkeypatch):
+    """gw#391 honest failure mode: ADOPTED-while-silently-eager is impossible.
+    A warmup observing zero fxgraph hits unwraps back to eager and reports
+    adopt_failed:cache_miss."""
+    _artifact(tmp_path)
+    spec = _spec()
+    ex, sent = _wire_executor(spec, tmp_path)
+    monkeypatch.setattr(cc, "apply", lambda *a, **k: True)
+    _fake_counters(monkeypatch, hits=0, misses=2)
+    unwrapped: list = []
+    monkeypatch.setattr(cc, "unwrap", lambda obj: unwrapped.append(obj))
+
+    _adopt(ex)
+    failed = _events(sent, pb.MODEL_STATE_FAILED)
+    assert failed and failed[-1].error == "adopt_failed:cache_miss"
+    assert not _events(sent, pb.MODEL_STATE_ADOPTED)
+    assert any(isinstance(o, _Pipe) for o in unwrapped)  # rollback ran
+
+
+def test_adopt_without_warmup_is_unprovable(tmp_path, monkeypatch):
+    """An endpoint without warmup() cannot prove the cell hits — the honest
+    answer is adopt_failed:no_warmup, never a blind ADOPTED."""
+
+    class _NoWarmupEndpoint:
+        def setup(self, pipeline: str) -> None:  # pragma: no cover
+            pass
+
+        def run(self, ctx, payload: _In) -> _Out:  # pragma: no cover
+            return _Out()
+
+    _artifact(tmp_path)
+    spec = EndpointSpec(
+        name="ep", method=_NoWarmupEndpoint.run, kind="inference",
+        payload_type=_In, output_mode="single", cls=_NoWarmupEndpoint,
+        attr_name="run", models={"pipeline": Hub("acme/klein-finetune")},
+        compile=Compile(shapes=((768, 768),), family=FAMILY),
+    )
+    ex, sent = _wire_executor(spec, tmp_path)
+    rec = ex._classes[spec.instance_key]
+    rec.instance = _NoWarmupEndpoint()
+    rec.ready = True
+    monkeypatch.setattr(cc, "apply", lambda *a, **k: True)
+    _fake_counters(monkeypatch, hits=5, misses=0)  # counters moved elsewhere: still unprovable
+
+    _adopt(ex)
+    failed = _events(sent, pb.MODEL_STATE_FAILED)
+    assert failed and failed[-1].error == "adopt_failed:no_warmup"
+    assert not _events(sent, pb.MODEL_STATE_ADOPTED)
 
 
 def test_adopt_failed_warmup_reports_reason(tmp_path, monkeypatch):
