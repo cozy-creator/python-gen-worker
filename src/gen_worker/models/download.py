@@ -353,6 +353,15 @@ def select_hf_files(
     return selected
 
 
+def _match_allow_patterns(repo_files: Sequence[str], patterns: Sequence[str]) -> set[str]:
+    """Repo files matched by ``patterns`` — huggingface_hub semantics
+    (fnmatch; a trailing ``/`` means the whole directory)."""
+    from fnmatch import fnmatch
+
+    pats = [p + "*" if p.endswith("/") else p for p in patterns]
+    return {f for f in repo_files if any(fnmatch(f, p) for p in pats)}
+
+
 def _hf_stall_timeout_s() -> float:
     raw = os.environ.get("COZY_HF_DOWNLOAD_STALL_TIMEOUT_S", "").strip()
     if raw:
@@ -516,7 +525,14 @@ def download_hf(
 
     selected: Optional[set[str]]
     if allow_patterns:
-        selected = None
+        # Size-guard the MATCHED subset, not the whole repo (ie#355: a 795KB
+        # tokenizer files= subset of google/t5-v1_1-xxl tripped the 60GB cap).
+        # Same fnmatch semantics as huggingface_hub.filter_repo_objects.
+        selected = _match_allow_patterns(repo_files, allow_patterns)
+        if not selected:
+            raise ValueError(
+                f"files= patterns matched nothing in {repo_id}: {list(allow_patterns)!r}"
+            )
         kwargs["allow_patterns"] = list(allow_patterns)
     else:
         selected = select_hf_files(repo_files, flavor=ref.flavor)
