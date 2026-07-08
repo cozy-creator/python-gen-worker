@@ -258,12 +258,22 @@ class ResolvedCompute(_message.Message):
     def __init__(self, accelerator: _Optional[str] = ..., gpu_index: _Optional[int] = ..., gpu_count: _Optional[int] = ..., vram_gb: _Optional[int] = ...) -> None: ...
 
 class ModelBinding(_message.Message):
-    __slots__ = ("slot", "ref")
+    __slots__ = ("slot", "ref", "loras")
     SLOT_FIELD_NUMBER: _ClassVar[int]
     REF_FIELD_NUMBER: _ClassVar[int]
+    LORAS_FIELD_NUMBER: _ClassVar[int]
     slot: str
     ref: str
-    def __init__(self, slot: _Optional[str] = ..., ref: _Optional[str] = ...) -> None: ...
+    loras: _containers.RepeatedCompositeFieldContainer[LoraOverlay]
+    def __init__(self, slot: _Optional[str] = ..., ref: _Optional[str] = ..., loras: _Optional[_Iterable[_Union[LoraOverlay, _Mapping]]] = ...) -> None: ...
+
+class LoraOverlay(_message.Message):
+    __slots__ = ("ref", "weight")
+    REF_FIELD_NUMBER: _ClassVar[int]
+    WEIGHT_FIELD_NUMBER: _ClassVar[int]
+    ref: str
+    weight: float
+    def __init__(self, ref: _Optional[str] = ..., weight: _Optional[float] = ...) -> None: ...
 
 class Snapshot(_message.Message):
     __slots__ = ("digest", "files")
