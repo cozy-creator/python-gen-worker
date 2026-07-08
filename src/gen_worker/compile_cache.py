@@ -631,6 +631,7 @@ def build(
     """
     from .api.decorators import Compile as CompileCfg
     from .models.loading import load_from_pretrained
+    from .models.memory import place_pipeline
 
     if not toolchain_present():
         raise RuntimeError(
@@ -649,7 +650,13 @@ def build(
 
     cfg = CompileCfg(shapes=tuple(shapes), targets=tuple(targets))
     pipe = load_from_pretrained(DiffusionPipeline, str(model_path), dtype=dtype)
-    pipe.to("cuda")
+    # Producer/consumer graph parity (gw#391): the worker prepares pipelines
+    # with place_pipeline (placement + vae/attention low-VRAM flags), and
+    # those flags are traced INTO the graphs — the FX-graph cache key. A cell
+    # built from a differently-prepared pipeline misses at request time, so
+    # the producer must come through the exact same prep. Run on a pod with
+    # the same free-VRAM class as the target workers.
+    place_pipeline(pipe)
     if callable(getattr(pipe, "set_progress_bar_config", None)):
         pipe.set_progress_bar_config(disable=True)
     os.environ[ENV_ALLOW_COLD] = "1"
