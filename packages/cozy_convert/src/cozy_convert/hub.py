@@ -45,7 +45,45 @@ _RETRY_MAX_DELAY_S = 30.0
 # succeed (e2e tracker #110).
 _COMPLETE_TIMEOUT_S = 600.0
 _COMPLETE_IN_PROGRESS_POLL_S = 5.0
-_COMPLETE_IN_PROGRESS_MAX_WAIT_S = 600.0
+
+# A severed /complete connection is NOT fatal either: middleboxes on the
+# worker->hub path (NAT idle eviction, tunnel circuit caps) kill the idle
+# ~5-minute verify of multi-GB shards, so the client sees a network error
+# while the server may finish (sess.Finalized fast path answers the re-POST)
+# or may have aborted (a re-POST restarts the verify). Re-POST patiently —
+# each attempt can legitimately take a full verify. Found live twice on the
+# flux2-klein-4b clone (te#44 J9 runs 7+8: RemoteDisconnected at ~4m50s).
+_COMPLETE_NETWORK_RETRY_DELAY_S = 15.0
+_COMPLETE_NETWORK_MAX_WAIT_S = 1800.0
+
+_SESSION: Optional[requests.Session] = None
+
+
+def _http_session() -> requests.Session:
+    """Shared session with TCP keepalives so NAT/conntrack middleboxes don't
+    evict the idle flow while the server verifies (no response bytes for
+    minutes)."""
+    import socket
+
+    global _SESSION
+    if _SESSION is not None:
+        return _SESSION
+    socket_options = [(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)]
+    for name, value in (("TCP_KEEPIDLE", 60), ("TCP_KEEPINTVL", 30), ("TCP_KEEPCNT", 20)):
+        if hasattr(socket, name):
+            socket_options.append((socket.IPPROTO_TCP, getattr(socket, name), value))
+
+    class _KeepaliveAdapter(requests.adapters.HTTPAdapter):
+        def init_poolmanager(self, *args: Any, **kwargs: Any) -> None:
+            kwargs["socket_options"] = socket_options
+            super().init_poolmanager(*args, **kwargs)
+
+    session = requests.Session()
+    adapter = _KeepaliveAdapter()
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    _SESSION = session
+    return session
 
 
 class HubPublishError(RuntimeError):
@@ -185,7 +223,7 @@ class HubClient:
         )
 
     def _post(self, path: str, payload: Optional[dict] = None, *, timeout: float | None = None) -> requests.Response:
-        return _send_with_retries(f"POST {path}", lambda: requests.post(
+        return _send_with_retries(f"POST {path}", lambda: _http_session().post(
             f"{self.base_url}{path}",
             headers=self._headers(),
             data=json.dumps(payload) if payload is not None else None,
@@ -206,17 +244,26 @@ class HubClient:
         through a 409 upload_complete_in_progress race instead of treating it
         as fatal: /complete is idempotent once finalized (tensorhub's
         sess.Finalized fast path returns the same success payload), so
-        re-POSTing catches up to whatever the in-flight attempt decides."""
-        resp = self._post(complete_path, payload, timeout=_COMPLETE_TIMEOUT_S)
-        if not (resp.status_code == 409 and _error_code_of(resp) == "upload_complete_in_progress"):
+        re-POSTing catches up to whatever the in-flight attempt decides.
+        Network-severed attempts get the same treatment on a longer clock
+        (_COMPLETE_NETWORK_MAX_WAIT_S): each re-POST may re-run a full
+        multi-minute verify, so give it room instead of failing the commit."""
+        deadline = time.monotonic() + _COMPLETE_NETWORK_MAX_WAIT_S
+        while True:
+            try:
+                resp = self._post(complete_path, payload, timeout=_COMPLETE_TIMEOUT_S)
+            except HubPublishError:
+                if time.monotonic() >= deadline:
+                    raise
+                logger.warning("POST %s network-severed; re-POSTing (idempotent complete)", complete_path)
+                time.sleep(_COMPLETE_NETWORK_RETRY_DELAY_S)
+                continue
+            if resp.status_code == 409 and _error_code_of(resp) == "upload_complete_in_progress":
+                if time.monotonic() >= deadline:
+                    return resp
+                time.sleep(_COMPLETE_IN_PROGRESS_POLL_S)
+                continue
             return resp
-        deadline = time.monotonic() + _COMPLETE_IN_PROGRESS_MAX_WAIT_S
-        while resp.status_code == 409 and _error_code_of(resp) == "upload_complete_in_progress":
-            if time.monotonic() >= deadline:
-                break
-            time.sleep(_COMPLETE_IN_PROGRESS_POLL_S)
-            resp = self._post(complete_path, payload, timeout=_COMPLETE_TIMEOUT_S)
-        return resp
 
     def _upload_one(self, repo_path: str, revision_id: str, entry: Mapping[str, Any],
                     local_path: Path) -> None:
@@ -269,7 +316,7 @@ class HubClient:
                 if not buf and i > 0:
                     break
                 def _put(u: str = url, b: bytes = buf) -> requests.Response:
-                    return requests.put(u, data=b, timeout=self.timeout_s * 5)
+                    return _http_session().put(u, data=b, timeout=self.timeout_s * 5)
 
                 resp = _send_with_retries(f"part PUT {entry.get('path')!r} #{i + 1}", _put)
                 if resp.status_code < 200 or resp.status_code >= 300:
@@ -394,7 +441,7 @@ class HubClient:
         except Exception:
             # Abort the revision so tensorhub can GC the staging bytes.
             try:
-                requests.delete(
+                _http_session().delete(
                     f"{self.base_url}{repo_path}/commits/{urllib.parse.quote(revision_id, safe='')}",
                     headers=self._headers(), timeout=30,
                 )
