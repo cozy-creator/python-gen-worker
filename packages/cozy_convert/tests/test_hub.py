@@ -37,6 +37,8 @@ def test_commit_uploads_completes_and_finalizes(fake_hub, tmp_path: Path, monkey
         auto_create_external_parent=True,
     )
     assert result.revision_id == "rev-1"
+    # THE queryable id: minted at finalize from the snapshot manifest.
+    assert result.checkpoint_id == "blake3:abc"
     assert result.uploaded == 2 and result.deduped == 0
 
     st = _FakeHub.state
