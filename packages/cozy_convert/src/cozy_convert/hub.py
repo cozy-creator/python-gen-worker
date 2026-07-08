@@ -176,6 +176,10 @@ class CommitResult:
     uploaded: int
     deduped: int
     total_bytes: int
+    # Content-addressed checkpoint id minted at finalize (tensorhub derives it
+    # from the snapshot manifest); THE id for tree/lineage queries. The
+    # revision_id above is the upload-session id, not queryable post-finalize.
+    checkpoint_id: str = ""
     response: dict[str, Any] = field(default_factory=dict)
 
 
@@ -455,6 +459,7 @@ class HubClient:
             uploaded=uploaded,
             deduped=deduped,
             total_bytes=sum(f.size_bytes for f in resolved),
+            checkpoint_id=str(final.get("checkpoint_id") or "").strip(),
             response=final,
         )
 
