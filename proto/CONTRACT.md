@@ -247,7 +247,7 @@ to avoid chatter). Never periodic. O overwrites its copy wholesale.
 |---|---|---|---|
 | `slot` | O from endpoint manifest | W injection: maps to the endpoint's declared model parameter | slot name |
 | `ref` | O resolver | W `ensure_local` + injection | canonical ref string |
-| `loras` | O `_models` override gate (AllowLora) + BYOM ingest (th#585) | W per-request adapter overlay (gw#393) | LoRA overlays riding this slot's base model; applied as unfused named adapters for the job's duration and removed after. Empty for adapter-free jobs; workers predating the field ignore it |
+| `loras` | O `_models` override gate (AllowLora) + BYOM ingest (th#585) | W per-request adapter overlay (gw#393) + adapter residency (gw#399) | LoRA overlays riding this slot's base model; attached as unfused named adapters that stay resident on the pipeline, ACTIVE only for jobs that name them (explicit activation — adapter-free jobs always run with adapters disabled). Purely W-side: O never routes on adapter residency. Empty for adapter-free jobs; workers predating the field ignore it |
 
 ### LoraOverlay (embedded in ModelBinding.loras)
 

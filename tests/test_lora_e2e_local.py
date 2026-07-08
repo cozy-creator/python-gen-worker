@@ -1,11 +1,13 @@
-"""gw#393 local end-to-end: REAL diffusers pipeline on CPU, real safetensors
-LoRA file, full executor RunJob path (wire -> ensure_local -> parse/validate ->
-load_lora_weights/set_adapters -> handler -> unload).
+"""gw#393 + gw#399 local end-to-end: REAL diffusers pipeline on CPU, real
+safetensors LoRA file, full executor RunJob path (wire -> ensure_local ->
+parse/validate -> attach/activate -> handler -> deactivate).
 
 Proves, with pixel equality:
-  1. an applied adapter changes the output deterministically,
-  2. unload restores the baseline exactly (pipeline byte-clean per request),
-  3. a repeat request serves the parsed state dict from the RAM cache.
+  1. an active adapter changes the output deterministically,
+  2. deactivation restores the baseline exactly — interleaved lora/bare/lora
+     requests on one worker never bleed (adapter residency, gw#399),
+  3. a repeat request reuses the ATTACHED adapter (no load_lora_weights) and
+     serves the parsed state dict from the RAM cache.
 
 Requires torch + diffusers (+ transformers/peft); skipped otherwise. Run:
   uv run --extra dev pytest tests/test_lora_e2e_local.py  (in a torch venv)
@@ -144,24 +146,40 @@ class _Harness:
         return msgspec.msgpack.decode(res.inline, type=_Out).checksum
 
 
-def test_adapter_changes_output_and_unload_restores_baseline(tmp_path, tiny_pipe) -> None:
+def test_interleaved_lora_bare_lora_never_bleeds(tmp_path, tiny_pipe) -> None:
     async def _run() -> None:
         h = _Harness(tmp_path, tiny_pipe)
+        loads: List[str] = []
+        real_load = tiny_pipe.load_lora_weights
 
-        baseline = await h.run("r-base-1")
-        with_lora = await h.run("r-lora-1", lora_weight=1.0)
-        after = await h.run("r-base-2")
-        repeat = await h.run("r-lora-2", lora_weight=1.0)
+        def _counting_load(sd, adapter_name="", **kw):
+            loads.append(adapter_name)
+            return real_load(sd, adapter_name=adapter_name, **kw)
 
-        assert with_lora != baseline, "adapter had no visual effect"
-        assert after == baseline, "unload did not restore the baseline pipeline"
-        assert repeat == with_lora, "adapter application is not deterministic"
-        # Repeat adapter request came from the RAM cache (no re-parse).
-        assert h.executor._adapter_cache.hits == 1
-        assert h.executor._adapter_cache.misses == 1
+        tiny_pipe.load_lora_weights = _counting_load
+        try:
+            baseline = await h.run("r-base-1")
+            with_lora = await h.run("r-lora-1", lora_weight=1.0)
+            after = await h.run("r-base-2")
+            repeat = await h.run("r-lora-2", lora_weight=1.0)
+            after2 = await h.run("r-base-3")
 
-        half = await h.run("r-lora-3", lora_weight=0.5)
-        assert half not in (baseline, with_lora), "weight scaling had no effect"
+            assert with_lora != baseline, "adapter had no visual effect"
+            assert after == baseline, "bare request after LoRA did not match baseline"
+            assert repeat == with_lora, "adapter application is not deterministic"
+            assert after2 == baseline, "second bare request bled adapter state"
+            # Residency: attached once, reused on repeat (no second attach).
+            assert len(loads) == 1, f"expected one attach, saw {loads}"
+            # Repeat adapter request came from the RAM cache (no re-parse).
+            assert h.executor._adapter_cache.hits == 1
+            assert h.executor._adapter_cache.misses == 1
+
+            half = await h.run("r-lora-3", lora_weight=0.5)
+            assert half not in (baseline, with_lora), "weight scaling had no effect"
+            assert len(loads) == 1, "weight change must not re-attach"
+        finally:
+            tiny_pipe.load_lora_weights = real_load
+            tiny_pipe.unload_lora_weights()
 
     asyncio.run(_run())
 

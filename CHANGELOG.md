@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **Adapter residency: repeat LoRA requests cost ~50ms of machinery, not
+  seconds (#399).** LoRA adapters now stay ATTACHED to the resident pipeline
+  (stable `ref@digest`-derived adapter names); each request only toggles the
+  ACTIVE set — `set_adapters` + `enable_lora` in, `disable_lora` out on every
+  exit path. Zero-leakage becomes explicit activation: adapter-free requests
+  run with adapters disabled (and self-protect against a crashed teardown).
+  Attached-but-inactive adapters are LRU-evicted under count/byte caps
+  (`GEN_WORKER_ATTACHED_LORA_MAX`, `GEN_WORKER_ATTACHED_LORA_MAX_BYTES`);
+  demotion out of VRAM drops attachments (new `Residency.pre_demote` hook),
+  re-attached lazily from the AdapterCache on next use. Forensics for the
+  ie#358 pilot's +5.7s repeat delta (4090, SDXL, the pilot's own 171MB LoRA):
+  `load_lora_weights` re-attach was ~1.6-1.9s/request and unfused adapter
+  compute adds ~59ms/denoise-step; residency removes the re-attach entirely
+  (activate 23ms / disable 24ms / enable 26ms measured on the 4090).
+
 - **Compile-cell adoption: honest cache-hit proof + rekey (#391).** ADOPTED now
   means the seeded inductor cell actually served the warmup trace: the worker
   reports FX-graph `cache_hits`/`cache_misses` + `warmup_s` in the ADOPTED
