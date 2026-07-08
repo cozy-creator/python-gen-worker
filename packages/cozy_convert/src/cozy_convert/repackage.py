@@ -340,7 +340,10 @@ def singlefile_to_diffusers(
             }
         except Exception as exc:  # noqa: BLE001
             cfg = f" config={config}" if config else ""
-            errors.append(f"{pipeline_class}{cfg}: {exc}")
+            # single-line: the worker fatal path keeps only the first line,
+            # which hid 5 of 6 attempt errors (e2e #112 flux diagnosis).
+            flat = str(exc).replace("\n", " | ")
+            errors.append(f"{pipeline_class}{cfg}: {flat}")
             continue
 
     raise ConversionImplementationError(
