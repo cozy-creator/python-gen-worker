@@ -366,8 +366,10 @@ serving in-flight jobs: `ModelEvent{FAILED, error:"model_in_use"}`.
 
 **ADOPT_COMPILE_CACHE** (hot adoption, #567): `ref` is a compile-cache flavor
 ref — `_system/family-<f>#inductor-<sku>-torch<maj.min>`. W downloads the
-artifact snapshot, verifies its key (family/SKU/torch/triton/libs/producer gen-worker version, gw#391) against
-its own runtime, seeds the inductor+triton cache dirs, re-wraps the
+artifact snapshot, verifies its key (family/SKU/torch/triton/libs/producer
+gen-worker version + low-VRAM prep mode, gw#391 — the prep flags are traced
+into the graphs) against its own runtime and resident pipelines, seeds the
+inductor+triton cache dirs, re-wraps the
 already-VRAM-resident modules of endpoints declaring
 `compile=Compile(family=<f>)` (module re-wrap only — weights are untouched,
 no reload), runs one warmup trace, and answers

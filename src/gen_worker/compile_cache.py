@@ -28,10 +28,11 @@ Artifact = deterministic ``.tar.gz``::
 Key sensitivity (all exact-match): family (graph identity), GPU SKU
 (autotune choices + cubin arch), torch (fx-graph cache key), triton
 (cubin/launcher cache key), diffusers (the traced graph is its code), and
-gen-worker itself (gw#391: the worker's load/wrap code shapes the traced
-graph — a cell produced by a different gen-worker can pass every other key
-yet miss inductor's FX-graph cache at trace time, serving eager while
-reporting adopted). ``source_ref`` records which family member the producer
+gen-worker itself plus the producer's low-VRAM prep mode (gw#391: the
+worker's load/wrap/placement code shapes the traced graph — a cell produced
+by a different gen-worker, or traced under different low-VRAM flags, can
+pass every other key yet miss inductor's FX-graph cache at trace time,
+serving eager while reporting adopted). ``source_ref`` records which family member the producer
 compiled from — informational, never part of the match.
 """
 
@@ -165,10 +166,14 @@ def artifact_metadata(
     source_digest: str = "",
     shapes: Iterable[Tuple[int, int]] = (),
     targets: Iterable[str] = (),
+    low_vram_mode: str = "",
 ) -> Dict[str, Any]:
     """Producer-side metadata for :func:`pack` (no timestamps: artifacts of
     identical content must be byte-identical). ``source_ref``/``source_digest``
-    record the family member compiled from — informational only."""
+    record the family member compiled from — informational only.
+    ``low_vram_mode`` is the prep mode the producer pipeline was traced under
+    (gw#391): its flags are traced into the graphs, so a consumer prepped in a
+    different mode must reject the cell."""
     return {
         "format": ARTIFACT_FORMAT,
         "kind": "torch-inductor-cache",
@@ -179,6 +184,7 @@ def artifact_metadata(
         "source_digest": str(source_digest or ""),
         "shapes": [[int(w), int(h)] for w, h in shapes],
         "targets": list(targets),
+        "low_vram_mode": str(low_vram_mode or ""),
         "libs": _lib_versions(),
     }
 
@@ -391,6 +397,23 @@ def seed_artifact(
     return meta
 
 
+def mode_drift(meta: Dict[str, Any], pipeline: Any) -> str:
+    """'' when the producer's low-VRAM prep mode matches this pipeline's, else
+    the mismatch (gw#391). The prep flags (VAE tiling/slicing, attention
+    slicing, offload hooks) are traced into the FX graphs, so a mode drift is
+    a guaranteed cache miss. Enforced only when the producer recorded one —
+    the check is per-pipeline, so it lives outside :func:`verify`."""
+    want = str(meta.get("low_vram_mode") or "")
+    if not want:
+        return ""
+    from .models.memory import low_vram_mode
+
+    have = low_vram_mode(pipeline)
+    if want != have:
+        return f"low_vram_mode {want!r} != pipeline {have!r}"
+    return ""
+
+
 def _fetch_url(url: str, dest_dir: Path) -> Path:
     dest_dir.mkdir(parents=True, exist_ok=True)
     name = hashlib.sha256(url.encode()).hexdigest()[:16] + ".tar.gz"
@@ -600,6 +623,11 @@ def enable(
     meta = prepare(
         getattr(cfg, "family", "") or "", cache_dir=cache_dir, artifact=artifact
     )
+    if meta is not None:
+        drift = mode_drift(meta, pipeline)
+        if drift:
+            logger.warning("compile-cache: %s; staying eager", drift)
+            meta = None
     return apply(pipeline, cfg, cache_ready=meta is not None)
 
 
@@ -654,9 +682,10 @@ def build(
     # with place_pipeline (placement + vae/attention low-VRAM flags), and
     # those flags are traced INTO the graphs — the FX-graph cache key. A cell
     # built from a differently-prepared pipeline misses at request time, so
-    # the producer must come through the exact same prep. Run on a pod with
-    # the same free-VRAM class as the target workers.
-    place_pipeline(pipe)
+    # the producer must come through the exact same prep, and the mode it
+    # traced under travels in the metadata for adopt-time parity checks. Run
+    # on a pod with the same free-VRAM class as the target workers.
+    placed = place_pipeline(pipe)
     if callable(getattr(pipe, "set_progress_bar_config", None)):
         pipe.set_progress_bar_config(disable=True)
     os.environ[ENV_ALLOW_COLD] = "1"
@@ -688,6 +717,7 @@ def build(
     meta = artifact_metadata(
         family=family, source_ref=source_ref, source_digest=source_digest,
         shapes=cfg.shapes, targets=cfg.targets,
+        low_vram_mode=str(placed.get("mode") or ""),
     )
     label = flavor_label(meta["sku"], meta["torch"])
     artifact = pack(capture_root, out_dir / f"{label}.tar.gz", meta)
@@ -712,6 +742,7 @@ __all__ = [
     "gen_worker_version",
     "inductor_counters",
     "is_cache_ref",
+    "mode_drift",
     "pack",
     "prepare",
     "runtime_key",

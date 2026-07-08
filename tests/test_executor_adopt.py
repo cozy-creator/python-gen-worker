@@ -185,6 +185,24 @@ def test_adopt_zero_cache_hits_rolls_back_and_fails(tmp_path, monkeypatch):
     assert any(isinstance(o, _Pipe) for o in unwrapped)  # rollback ran
 
 
+def test_adopt_prep_mode_drift_is_key_mismatch(tmp_path, monkeypatch):
+    """A cell traced under a different low-VRAM prep mode can only miss —
+    rejected deterministically before any warmup (gw#391 parity)."""
+    from gen_worker.models.memory import _COZY_MODE_ATTR
+
+    _artifact(tmp_path, low_vram_mode="off")
+    spec = _spec()
+    ex, sent = _wire_executor(spec, tmp_path)
+    obj = ex.store.residency.obj(wire_ref(spec.models["pipeline"]))
+    setattr(obj, _COZY_MODE_ATTR, "vae_only")
+    monkeypatch.setattr(cc, "apply", lambda *a, **k: pytest.fail("must not re-wrap"))
+
+    _adopt(ex)
+    failed = _events(sent, pb.MODEL_STATE_FAILED)
+    assert failed and failed[-1].error == "adopt_failed:key_mismatch"
+    assert not _events(sent, pb.MODEL_STATE_ADOPTED)
+
+
 def test_adopt_without_warmup_is_unprovable(tmp_path, monkeypatch):
     """An endpoint without warmup() cannot prove the cell hits — the honest
     answer is adopt_failed:no_warmup, never a blind ADOPTED."""
@@ -214,6 +232,25 @@ def test_adopt_without_warmup_is_unprovable(tmp_path, monkeypatch):
     failed = _events(sent, pb.MODEL_STATE_FAILED)
     assert failed and failed[-1].error == "adopt_failed:no_warmup"
     assert not _events(sent, pb.MODEL_STATE_ADOPTED)
+
+
+def test_adopt_prep_mode_drift_rejected(tmp_path, monkeypatch):
+    """gw#391: the producer's low-VRAM prep mode is part of the graph key — a
+    pipeline prepped under a different mode can only miss, so adoption rejects
+    it deterministically (key_mismatch) before any wrap or warmup."""
+    _artifact(tmp_path, low_vram_mode="off")
+    spec = _spec()
+    ex, sent = _wire_executor(spec, tmp_path)
+    obj = ex.store.residency.obj(wire_ref(spec.models["pipeline"]))
+    obj._cozy_low_vram_mode = "vae_only"
+    applied: list = []
+    monkeypatch.setattr(cc, "apply", lambda *a, **k: applied.append(1) or True)
+
+    _adopt(ex)
+    failed = _events(sent, pb.MODEL_STATE_FAILED)
+    assert failed and failed[-1].error == "adopt_failed:key_mismatch"
+    assert not _events(sent, pb.MODEL_STATE_ADOPTED)
+    assert not applied  # rejected before the wrap
 
 
 def test_adopt_failed_warmup_reports_reason(tmp_path, monkeypatch):
