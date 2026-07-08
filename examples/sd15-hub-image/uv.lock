@@ -365,7 +365,7 @@ wheels = [
 
 [[package]]
 name = "gen-worker"
-version = "0.10.0"
+version = "0.11.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "blake3" },
@@ -380,9 +380,9 @@ dependencies = [
     { name = "requests" },
     { name = "tomli-w" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/42/cf/9a8ddbb0c30ec2f240753db748d78998a085c91e68e3eca86184a0eeb882/gen_worker-0.10.0.tar.gz", hash = "sha256:c6f33222d9b676510b769d568b16bfd1af29532417323b784ce6190d01220a2c", size = 254011, upload-time = "2026-07-08T06:51:14.656Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/3a/bb/eeb2dbba69eb11290e6eb5777dcfa48b98a4947bf8446d92ca57b2f78340/gen_worker-0.11.0.tar.gz", hash = "sha256:8deb48ea8e8b2968f0b8998e3638a15ef90a4909cacf1c4107a77bdc9dcf50ee", size = 254018, upload-time = "2026-07-08T23:39:15.305Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/9e/47/98db157607ba17d4da93be3b92edc286d56af5d0888fb5fa71112ae708fa/gen_worker-0.10.0-py3-none-any.whl", hash = "sha256:e90edf9c0a409bfd693317202a699d7338d31f90ceda8c60b6229250ae20df45", size = 292529, upload-time = "2026-07-08T06:51:16.4Z" },
+    { url = "https://files.pythonhosted.org/packages/b8/cf/cd14318e3f7ad268637fdd345d6b2ab051dc65288068948e032c8e5d0020/gen_worker-0.11.0-py3-none-any.whl", hash = "sha256:4fc1a3aa124748aab0f06b06bc4d49d55bc62d31e65274830450b2a04452e943", size = 292528, upload-time = "2026-07-08T23:39:12.556Z" },
 ]
 
 [[package]]
@@ -1100,7 +1100,7 @@ dependencies = [
 requires-dist = [
     { name = "accelerate", specifier = ">=1.0" },
     { name = "diffusers", specifier = ">=0.31" },
-    { name = "gen-worker", specifier = ">=0.10.0,<0.11" },
+    { name = "gen-worker", specifier = ">=0.11.0,<0.12" },
     { name = "msgspec", specifier = ">=0.18" },
     { name = "transformers", specifier = ">=4.46" },
 ]
