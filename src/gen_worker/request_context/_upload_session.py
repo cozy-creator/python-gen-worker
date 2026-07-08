@@ -219,7 +219,6 @@ class _UploadSessionManager:
                 "library_name",
                 "model_family",
                 "class_name",
-                "adapter_for_checkpoint_group",
                 "adapter_for_family",
             ):
                 val = str(repo_spec.get(key) or "").strip()

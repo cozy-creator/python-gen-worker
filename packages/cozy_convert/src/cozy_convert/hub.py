@@ -410,7 +410,7 @@ class HubClient:
             body["lineage"] = list(lineage)
             body["auto_create_external_parent"] = bool(auto_create_external_parent)
         for key in ("kind", "library_name", "model_family", "class_name",
-                    "adapter_for_checkpoint_group", "adapter_for_family"):
+                    "adapter_for_family"):
             val = str((repo_spec or {}).get(key) or "").strip()
             if val:
                 body[key] = val

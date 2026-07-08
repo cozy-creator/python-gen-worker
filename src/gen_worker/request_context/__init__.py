@@ -839,7 +839,6 @@ class _PublisherMixin:
         library_name: str = "",
         model_family: str = "",
         class_name: str = "",
-        adapter_for_checkpoint_group: str = "",
         adapter_for_family: str = "",
     ) -> None:
         """Set destination repo fields for upload sessions opened from this ctx.
@@ -852,7 +851,6 @@ class _PublisherMixin:
             "library_name": library_name,
             "model_family": model_family,
             "class_name": class_name,
-            "adapter_for_checkpoint_group": adapter_for_checkpoint_group,
             "adapter_for_family": adapter_for_family,
         }
         self._repo_spec = {
