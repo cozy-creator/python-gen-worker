@@ -493,3 +493,46 @@ def test_model_shorthand_skips_server_handle_setup_param() -> None:
     (s,) = extract_specs(Chat)
     assert list(s.models) == ["model"]
     assert s.models["model"].ref == "o/llm"
+
+
+# --------------------------------------------------------------------------- #
+# 8. allow_lora bindings (ie#358)                                               #
+# --------------------------------------------------------------------------- #
+
+
+def test_allow_lora_binding_emits_flag_and_family() -> None:
+    from gen_worker import Compile, Hub
+    from gen_worker.discovery.discover import _extract_entries
+
+    @endpoint(
+        model=Hub("cozy/sdxl-base", allow_lora=True),
+        resources=Resources(vram_gb=12),
+        compile=Compile(family="sdxl", shapes=((1024, 1024),)),
+    )
+    class Gen:
+        def setup(self, model: str) -> None:
+            self.model = model
+
+        def generate(self, ctx: RequestContext, data: _In) -> _Out:
+            return _Out(result="")
+
+    (entry,) = _extract_entries(Gen, "testmod")
+    (block,) = entry["bindings"].values()
+    assert block["allow_lora"] is True
+    assert block["family"] == "sdxl"
+
+
+def test_allow_lora_without_compile_family_raises() -> None:
+    from gen_worker import Hub
+    from gen_worker.discovery.discover import _extract_entries
+
+    @endpoint(model=Hub("cozy/sdxl-base", allow_lora=True), resources=Resources(vram_gb=12))
+    class Gen:
+        def setup(self, model: str) -> None:
+            self.model = model
+
+        def generate(self, ctx: RequestContext, data: _In) -> _Out:
+            return _Out(result="")
+
+    with pytest.raises(ValueError, match="allow_lora"):
+        _extract_entries(Gen, "testmod")

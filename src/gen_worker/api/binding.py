@@ -39,7 +39,13 @@ def _clean_storage_dtype(v: object) -> str:
 
 @dataclass(frozen=True)
 class Hub:
-    """Tensorhub-backed binding: ``Hub("owner/repo", tag=, flavor=, storage_dtype=)``."""
+    """Tensorhub-backed binding: ``Hub("owner/repo", tag=, flavor=, storage_dtype=, allow_lora=)``.
+
+    ``allow_lora=True`` opts the slot into per-request LoRA overlays
+    (``_models.<slot>.loras``, ie#358) — the endpoint must also declare
+    ``Compile(family=...)`` so the hub's architecture gate can police
+    adapter targets.
+    """
 
     PROVIDER: ClassVar[str] = "tensorhub"
 
@@ -47,12 +53,14 @@ class Hub:
     tag: str = "prod"
     flavor: str = ""
     storage_dtype: str = ""
+    allow_lora: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "ref", _clean(self.ref))
         object.__setattr__(self, "tag", _clean(self.tag) or "prod")
         object.__setattr__(self, "flavor", _clean(self.flavor))
         object.__setattr__(self, "storage_dtype", _clean_storage_dtype(self.storage_dtype))
+        object.__setattr__(self, "allow_lora", bool(self.allow_lora))
         if not self.ref:
             raise ValueError(f"{type(self).__name__} requires a non-empty ref")
 
@@ -81,6 +89,7 @@ class HF:
     subfolder: str = ""
     files: tuple[str, ...] = ()
     storage_dtype: str = ""
+    allow_lora: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "ref", _clean(self.ref))
@@ -91,6 +100,7 @@ class HF:
             self, "files", tuple(_clean(p) for p in self.files if _clean(p))
         )
         object.__setattr__(self, "storage_dtype", _clean_storage_dtype(self.storage_dtype))
+        object.__setattr__(self, "allow_lora", bool(self.allow_lora))
         if "/" not in self.ref:
             raise ValueError(f"HF(id=) must be 'owner/repo', got {self.ref!r}")
 
