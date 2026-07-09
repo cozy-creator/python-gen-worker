@@ -213,8 +213,14 @@ class _SelectedFunction:
 
 
 def _variant_names(cls: Optional[type]) -> set:
+    """Declared variant names in their ROUTED (slugified) form — the registry
+    slugifies fn_name, so raw declaration names ("generate_fp8") never match
+    es.name ("generate-fp8") and every variant row would lose its variant_of
+    marker (--variant auto then silently ran the base binding; gw#415 live)."""
+    from gen_worker.discovery.names import slugify_name
+
     decl = getattr(cls, _ENDPOINT_ATTR, None) if cls is not None else None
-    return {v.name for v in (getattr(decl, "variants", ()) or ())}
+    return {slugify_name(v.name) for v in (getattr(decl, "variants", ()) or ())}
 
 
 def _collect_class_methods(mod: Any) -> List[_SelectedFunction]:
