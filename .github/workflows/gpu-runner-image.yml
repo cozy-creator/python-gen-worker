@@ -1,0 +1,40 @@
+name: GPU Runner Image
+
+on:
+  push:
+    paths:
+      - ".github/gpu-runner/**"
+      - ".github/workflows/gpu-runner-image.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute tags
+        id: tags
+        run: |
+          tags="ghcr.io/${GITHUB_REPOSITORY_OWNER}/gw-gpu-runner:${GITHUB_SHA}"
+          if [ "$GITHUB_REF" = "refs/heads/master" ]; then
+            tags="$tags,ghcr.io/${GITHUB_REPOSITORY_OWNER}/gw-gpu-runner:latest"
+          fi
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .github/gpu-runner
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: org.opencontainers.image.source=https://github.com/${{ github.repository }}
