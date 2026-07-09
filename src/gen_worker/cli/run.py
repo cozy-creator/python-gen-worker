@@ -378,13 +378,19 @@ def select_function_with_variant(
     from ..models.hub_policy import detect_worker_capabilities, select_variant
     from ..models.memory import get_available_vram_gb
 
+    def _primary_binding(c: "_SelectedFunction") -> Any:
+        return next(iter((c.bindings or {}).values()), None)
+
     caps = detect_worker_capabilities()
     free_gb = get_available_vram_gb()
     choice = select_variant(
-        [(m.fn_name, m.resources) for m in variant_rows],
+        [(m.fn_name, m.resources, _primary_binding(m)) for m in variant_rows],
         caps,
         free_gb,
-        base=(base.fn_name, base.resources) if base is not None else None,
+        base=(
+            (base.fn_name, base.resources, _primary_binding(base))
+            if base is not None else None
+        ),
     )
     if choice is None:
         raise _ModelResolutionError(

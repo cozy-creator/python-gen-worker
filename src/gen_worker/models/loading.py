@@ -492,6 +492,16 @@ def load_from_pretrained(
     fit free VRAM (automatic on CUDA hosts). Used by the executor to satisfy
     pipeline-typed ``setup()`` annotations; endpoints may also call it."""
     path = str(path)
+    # SVDQuant/nunchaku 4-bit flavors (gw#415): self-describing snapshots take
+    # the svdq lane — a nunchaku transformer swapped into the standard
+    # pipeline. Detection precedes every other rung; failures are typed
+    # (SvdqStackError / SvdqHardwareError / SvdqSnapshotError), never a
+    # mid-denoise crash.
+    from .svdq import detect_svdq_artifact, load_svdq_pipeline
+
+    svdq_art = detect_svdq_artifact(Path(path))
+    if svdq_art is not None and callable(getattr(cls, "from_pretrained", None)):
+        return load_svdq_pipeline(cls, Path(path), svdq_art)
     ensure_quant_library_imported(attrs)
     kwargs: Dict[str, Any] = {}
     if dtype:
