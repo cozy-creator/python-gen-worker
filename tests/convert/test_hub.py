@@ -31,10 +31,9 @@ def test_commit_uploads_completes_and_finalizes(fake_hub, tmp_path: Path, monkey
         dtype="bf16",
         file_layout="diffusers",
         file_type="safetensors",
-        lineage=[{"parent_repo": "external-sources/upstream",
-                  "parent_checkpoint_id": "hf:org/name",
-                  "relationship_kind": "import"}],
-        auto_create_external_parent=True,
+        provenance={"upstream_revision": "abc123",
+                    "quantization_method": "",  # empty values are dropped
+                    "step_number": 0},
     )
     assert result.revision_id == "rev-1"
     # THE queryable id: minted at finalize from the snapshot manifest.
@@ -46,7 +45,10 @@ def test_commit_uploads_completes_and_finalizes(fake_hub, tmp_path: Path, monkey
     assert req["mode"] == "replace"
     assert req["tags"] == [{"tag": "prod"}]
     assert req["flavor"] == "bf16"
-    assert req["auto_create_external_parent"] is True
+    # th#606: only non-empty worker-addable provenance fields are sent;
+    # the old worker-declared lineage contract is gone.
+    assert req["provenance"] == {"upstream_revision": "abc123"}
+    assert "lineage" not in req and "auto_create_external_parent" not in req
     ops = {op["path"]: op for op in req["operations"]}
     assert set(ops) == {"config.json", "sub/weights.safetensors"}
     assert ops["config.json"]["blake3"] == blake3_file(tmp_path / "config.json")

@@ -372,13 +372,11 @@ def run_clone(
                 hf_token=effective_hf_token,
                 progress=_dl_progress,
             )
-            lineage_parent = f"hf:{source.source_ref}"
         elif provider == "civitai":
             source = ingest_civitai(
                 int(civitai_model_version_id or 0), workdir / "source",
                 civitai_api_key=civitai_api_key, progress=_dl_progress,
             )
-            lineage_parent = f"civitai:{source.source_ref}"
         else:
             raise ValueError(f"unsupported clone provider: {provider!r}")
 
@@ -387,11 +385,10 @@ def run_clone(
 
         hubclient = HubClient.from_ctx(ctx)
         result = CloneResult(destination_repo=destination, metadata=dict(source.metadata))
-        lineage = [{
-            "parent_repo": "external-sources/upstream",
-            "parent_checkpoint_id": lineage_parent,
-            "relationship_kind": "import",
-        }]
+        # th#606: upstream identity (upstream_ref + derivation_op=import) is
+        # orchestrator-derived and rides the capability token; the worker only
+        # ADDS the revision it actually resolved during download.
+        provenance = {"upstream_revision": str(source.source_revision or "")}
         mode = "replace" if overwrite_repo else "merge"
 
         # Non-diffusers-class sources publish as-is; extra output specs that
@@ -481,9 +478,8 @@ def run_clone(
                 file_type=str(attrs.get("file_type") or spec.file_type),
                 message=f"clone {provider}:{source.source_ref}@{source.source_revision}",
                 metadata=metadata,
-                lineage=lineage,
+                provenance=provenance,
                 repo_spec=source.repo_spec,
-                auto_create_external_parent=True,
             )
             result.published.append({
                 "flavor": flavor_label,
