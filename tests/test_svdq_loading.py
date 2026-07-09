@@ -409,3 +409,24 @@ def test_build_svdq_flavor_tree_rejects_plain_file(tmp_path: Path) -> None:
     _write_plain_safetensors(plain)
     with pytest.raises(ValueError, match="not a nunchaku"):
         build_svdq_flavor_tree(base, plain, tmp_path / "out")
+
+
+def test_variant_names_are_slugified() -> None:
+    """--variant auto regression (found live in the gw#415 acceptance): the
+    registry routes variants under slugified names, so the variant_of marker
+    must compare slugs, not raw declaration names."""
+    from gen_worker import HF, endpoint
+    from gen_worker.cli.run import _variant_names
+
+    @endpoint(
+        model=HF("acme/base", dtype="bf16"),
+        variants={"generate_svdq_fp4": HF("acme/base-svdq")},
+    )
+    class _Ep:
+        def setup(self, pipeline: str) -> None:
+            pass
+
+        def generate(self, ctx, payload: dict) -> dict:  # type: ignore[no-untyped-def]
+            return {}
+
+    assert _variant_names(_Ep) == {"generate-svdq-fp4"}
