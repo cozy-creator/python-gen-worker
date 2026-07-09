@@ -114,9 +114,9 @@ def variant_fit(
 
     - ``incompatible``: hard gates unmet (no CUDA GPU, compute_capability
       above this GPU's SM, required quant libraries not installed).
-    - ``emergency_quant``: does not fit, but the env-gated emergency nf4 rung
-      (th#546 emergency lane; loading layer) is enabled and the 4-bit
-      estimate fits — runs at below-platform quality, loudly.
+    - ``emergency_quant``: does not fit, but the emergency nf4 rung (th#546
+      emergency lane; loading layer, automatic on CUDA hosts) applies and
+      the 4-bit estimate fits — runs at below-platform quality, loudly.
     - ``offload``: runnable, but declared vram_gb exceeds free VRAM — the
       models/memory.py offload ladder carries it (slower).
     - ``fits``: full-VRAM residency expected.
@@ -137,9 +137,11 @@ def variant_fit(
     vram = getattr(resources, "vram_gb", None)
     if vram is None or float(vram) <= float(free_vram_gb):
         return FIT_FITS, ""
-    from .loading import EMERGENCY_FIT_FACTOR, emergency_quant_enabled
+    from .loading import EMERGENCY_FIT_FACTOR
 
-    if emergency_quant_enabled() and \
+    # Emergency rung is automatic on CUDA hosts (gw#420) — a pure function of
+    # the declared capabilities, so verdicts don't depend on the probing host.
+    if caps.gpu_sm > 0 and \
             float(vram) * EMERGENCY_FIT_FACTOR <= float(free_vram_gb):
         return FIT_EMERGENCY, (
             f"runs (emergency quality): {float(vram):g} GB VRAM via 4-bit "
@@ -164,7 +166,7 @@ def select_variant(
       1. drop incompatible rows (SM / library gates);
       2. among variants that FIT free VRAM, prefer the largest declared
          vram_gb (bigger = higher-quality precision);
-      3. none fit → an emergency_quant row if the env-gated nf4 rung applies
+      3. none fit → an emergency_quant row if the nf4 rung applies
          (runs at below-platform quality, loudly);
       4. else the base binding + the offload ladder;
       5. no base → the smallest-VRAM compatible variant, offloaded;

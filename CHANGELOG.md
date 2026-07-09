@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- **gw#416**: CLI `run`/`serve` str/`Path`-typed setup slots now receive the
+  snapshot PATH (executor parity) instead of a loaded `DiffusionPipeline`.
+- **gw#417**: fixed the CUDA-host promote livelock — object-less RAM ledger
+  entries (str-slot/opaque setups) are exempt from promote-or-die, so RunJob
+  no longer retries forever on `promotion ... failed`. Residency tests now run
+  against real tiny diffusers pipelines (no fake pipes); they need CUDA and
+  skip cleanly without it.
+- **gw#420**: emergency nf4 quantization is AUTOMATIC on CUDA hosts — the
+  `GEN_WORKER_EMERGENCY_QUANT` env gate is deleted (loud warning stays);
+  `variant_fit`/`select_variant` arm the rung from declared capabilities.
+  `bitsandbytes` ships with the `[torch]` extra so the rung works out of the
+  box.
+
 ## 0.12.0
 
 - **`gen_worker.convert`: the cozy-convert workspace package folded into

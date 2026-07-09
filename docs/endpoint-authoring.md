@@ -79,7 +79,7 @@ automatically; endpoint code stays precision-agnostic and
 `ModelEvent.vram_bytes` reports the measured resident size. Quantized
 formats are platform-produced stored flavors (`#fp8`, `#nvfp4` on Blackwell)
 — there is no runtime "quantize my model" kwarg. The one exception is the
-env-gated EMERGENCY rung (`GEN_WORKER_EMERGENCY_QUANT=1`, cozy-local): when
+EMERGENCY rung (automatic on CUDA hosts): when
 even the downloaded flavor cannot fit free VRAM, the loading layer
 runtime-quantizes the denoiser to 4-bit nf4 with a loud warning (quality
 below platform standards) rather than falling straight to CPU offload.

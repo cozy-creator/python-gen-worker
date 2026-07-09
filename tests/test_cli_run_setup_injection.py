@@ -30,6 +30,27 @@ def test_run_setup_loads_annotated_slot(tmp_path, monkeypatch):
     assert seen["pipeline"].loaded_from == str(tmp_path)
 
 
+def test_run_setup_str_slot_receives_snapshot_path(tmp_path, monkeypatch):
+    # gw#416: a str-typed slot gets the snapshot PATH (executor contract) —
+    # never a loaded DiffusionPipeline.
+    from pathlib import Path
+
+    (tmp_path / "model_index.json").write_text("{}")
+    seen = {}
+
+    class EP:
+        def setup(self, pipeline: str, aux: Path) -> None:
+            seen["pipeline"] = pipeline
+            seen["aux"] = aux
+
+    monkeypatch.setattr(cli_run, "_INJECTED_CACHE", {})
+    cli_run.run_setup(EP(), {"pipeline": str(tmp_path), "aux": str(tmp_path)})
+    assert seen["pipeline"] == str(tmp_path)
+    assert isinstance(seen["pipeline"], str)
+    assert seen["aux"] == Path(tmp_path)
+    assert isinstance(seen["aux"], Path)
+
+
 def test_run_setup_loads_module_layout_slot(tmp_path, monkeypatch):
     # Module-layout repo (root config.json, no model_index.json): e.g. a bare
     # AutoencoderKL repo like madebyollin/sdxl-vae-fp16-fix. Must route through
