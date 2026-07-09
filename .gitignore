@@ -29,3 +29,4 @@ src/gen_worker/pb/**/*.pyo
 .mock-files*
 # CodeGraph index (local, regenerated)
 .codegraph/
+.runtime/
