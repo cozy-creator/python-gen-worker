@@ -83,20 +83,71 @@ def cuda_allocated_bytes(device_index: Optional[int] = None) -> int:
     return 0
 
 
-def _iter_components(pipeline: Any) -> List[Any]:
-    comps: List[Any] = []
+def _named_components(pipeline: Any) -> List[tuple[str, Any]]:
+    out: List[tuple[str, Any]] = []
     raw = getattr(pipeline, "components", None)
     if isinstance(raw, dict):
-        comps.extend(raw.values())
+        out.extend(raw.items())
     else:
         for attr in ("unet", "transformer", "vae", "text_encoder",
                      "text_encoder_2", "text_encoder_3"):
             v = getattr(pipeline, attr, None)
             if v is not None:
-                comps.append(v)
-    if not comps and hasattr(pipeline, "parameters"):
-        comps.append(pipeline)  # bare nn.Module
-    return comps
+                out.append((attr, v))
+    if not out and hasattr(pipeline, "parameters"):
+        out.append(("", pipeline))  # bare nn.Module
+    return out
+
+
+def _iter_components(pipeline: Any) -> List[Any]:
+    return [c for _, c in _named_components(pipeline)]
+
+
+def device_mismatches(obj: Any, device: str) -> List[tuple[str, str, str]]:
+    """Every parameter/buffer of ``obj``'s module components that is NOT on
+    ``device``'s device type, as ``(component, tensor, actual_device)``.
+
+    The paranoid post-move walk (gw#409): a pipeline ``.to()`` that raises or
+    skips mid-way leaves a mixed-device pipeline that fatals mid-denoise
+    ("Expected all tensors to be on the same device"); this surfaces the miss
+    at move time instead. [] without torch / for tensor-less objects."""
+    try:
+        import torch
+
+        target = torch.device(device).type
+    except Exception:
+        return []
+    out: List[tuple[str, str, str]] = []
+    for cname, comp in _named_components(obj):
+        if comp is None or not hasattr(comp, "named_parameters"):
+            continue
+        try:
+            named = list(comp.named_parameters())
+            if hasattr(comp, "named_buffers"):
+                named.extend(comp.named_buffers())
+        except Exception:
+            continue
+        for tname, t in named:
+            if isinstance(t, torch.Tensor) and t.device.type != target:
+                out.append((cname, tname, str(t.device)))
+    return out
+
+
+def repair_device_placement(obj: Any, device: str) -> List[tuple[str, str, str]]:
+    """Targeted ``.to(device)`` on each component holding off-device tensors,
+    then re-walk. Returns the remaining mismatches ([] = fully repaired)."""
+    missed = device_mismatches(obj, device)
+    if not missed:
+        return []
+    bad = {c for c, _, _ in missed}
+    for cname, comp in _named_components(obj):
+        if cname not in bad:
+            continue
+        try:
+            comp.to(device)
+        except Exception as exc:
+            _LOG.warning("device repair: %s.to(%s) failed: %s", cname or "obj", device, exc)
+    return device_mismatches(obj, device)
 
 
 def _sum_tensor_bytes(objs: Iterable[Any], *, cuda_only: bool) -> int:
@@ -593,6 +644,8 @@ __all__ = [
     "place_pipeline",
     "with_oom_retry",
     "select_auto_mode",
+    "device_mismatches",
+    "repair_device_placement",
     "estimate_pipeline_size_gb",
     "estimate_cuda_resident_gb",
     "cuda_allocated_bytes",

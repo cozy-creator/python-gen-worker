@@ -789,12 +789,20 @@ class Executor:
         back into VRAM instead of a cold reload (#371)."""
         res = self.store.residency
         refs = [wire_ref(spec.models[s]) for s in self._setup_slots(spec)]
+        cuda_host = torch is not None and torch.cuda.is_available()
         if any(res.tier(r) is residency_mod.Tier.RAM for r in refs):
             async with self._load_lock:
                 for ref in refs:
                     if res.tier(ref) is residency_mod.Tier.RAM:
-                        await asyncio.to_thread(res.promote, ref)
+                        ok = await asyncio.to_thread(res.promote, ref)
                         self._on_state_change()
+                        if not ok and cuda_host and res.tier(ref) is residency_mod.Tier.RAM:
+                            # Promote refused/rolled back (gw#409): fail the
+                            # job RETRYABLE at promote time — never hand a
+                            # handler a pipeline that fatals mid-denoise.
+                            raise RetryableError(
+                                f"promotion of {ref} to VRAM failed; retrying"
+                            )
         for ref in refs:
             res.touch(ref)
 
@@ -1321,6 +1329,16 @@ class Executor:
     # ---- job execution -----------------------------------------------------
 
     async def _run_job(self, job: _Job, run: pb.RunJob) -> None:
+        spec = job.spec
+        assert spec is not None
+        # Pin this job's model refs for its WHOLE lifetime (gw#409): the gap
+        # between ensure_setup's promote and the execution-time pin let a
+        # concurrent job's make_room demote a just-promoted pipeline. Refs
+        # without entries yet are no-ops; the inner pin still covers adapters.
+        with self.store.residency.executing(*(wire_ref(b) for b in spec.models.values())):
+            await self._run_job_pinned(job, run)
+
+    async def _run_job_pinned(self, job: _Job, run: pb.RunJob) -> None:
         spec = job.spec
         assert spec is not None
         concurrency_at_start = len(self.in_flight_keys()) - 1
