@@ -49,12 +49,27 @@ async def _noop_send(msg) -> None:  # pragma: no cover
 
 
 RTX_4090_TOTAL_BYTES = 25_757_220_864  # 23.99 GiB — what mem_get_info reports
+H100_PCIE_TOTAL_BYTES = 85_045_411_840  # 79.20 GiB — 80GB card minus driver/ECC reserve
 
 
 def test_gate_rounds_detected_gib_up_to_declared_24() -> None:
     ex = Executor([_spec("fits-24", 24.0)], _noop_send)
     ex.gate_functions({"gpu_count": 1, "gpu_total_mem": RTX_4090_TOTAL_BYTES, "gpu_sm": "89"})
     assert "fits-24" not in ex.unavailable
+
+
+def test_gate_tolerates_80gb_card_reserve() -> None:
+    """H100 PCIe reports ~79.2GiB; must not gate off vram_gb=80 (e2e#118 L1)."""
+    ex = Executor([_spec("fits-80", 80.0)], _noop_send)
+    ex.gate_functions({"gpu_count": 1, "gpu_total_mem": H100_PCIE_TOTAL_BYTES, "gpu_sm": "90"})
+    assert "fits-80" not in ex.unavailable
+
+
+def test_gate_still_blocks_next_class_down() -> None:
+    """A 48GB card is NOT an 80GB card — tolerance must stay narrow."""
+    ex = Executor([_spec("needs-80", 80.0)], _noop_send)
+    ex.gate_functions({"gpu_count": 1, "gpu_total_mem": 48 * 1024**3, "gpu_sm": "89"})
+    assert ex.unavailable["needs-80"][0] == "insufficient_vram"
 
 
 def test_gate_still_blocks_genuinely_bigger_requirements() -> None:

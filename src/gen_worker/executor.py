@@ -609,10 +609,13 @@ class Executor:
                     f"requires SM {r.compute_capability:.1f}, detected {detected_cc:.1f}",
                     {"detected_sm": f"{detected_cc:.1f}", "required_sm": f"{float(r.compute_capability):.1f}"})
                 continue
-            # Compare on the rounded GiB: a "24GB" card reports ~23.99GiB via
-            # mem_get_info (driver/ECC reserve), which must not gate off
-            # functions declaring vram_gb=24.
-            if r.vram_gb is not None and total_vram_gb and round(total_vram_gb) < float(r.vram_gb):
+            # Declared vram_gb names a card class, not a byte budget: the
+            # driver/ECC reserve mem_get_info subtracts scales with card size
+            # (~0.01GiB on a 24GB RTX 4090, ~0.9GiB on an 80GB H100 PCIe —
+            # "detected 79GiB" must not gate off vram_gb=80, e2e#118 L1).
+            # Accept when detected VRAM is within 2% of the declaration.
+            if r.vram_gb is not None and total_vram_gb \
+                    and total_vram_gb < float(r.vram_gb) * 0.98:
                 self.unavailable[name] = (
                     "insufficient_vram",
                     f"requires {r.vram_gb:.0f}GiB VRAM, detected {total_vram_gb:.0f}GiB",
