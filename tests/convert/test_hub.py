@@ -265,3 +265,35 @@ def test_complete_network_severed_raises_after_deadline(monkeypatch) -> None:
     monkeypatch.setattr(client, "_post", _post)
     with pytest.raises(HubPublishError, match="network"):
         client._post_complete("/complete", {})
+
+
+def test_commit_default_flavor_rides_tags_and_top_level(fake_hub, tmp_path: Path) -> None:
+    # gw#419: the primary clone output must be able to claim the bare
+    # selector row — tensorhub (th#597 C1) only writes flavor='' for an
+    # explicit-flavor publish when default_flavor names it.
+    _FakeHub.state["finalize_calls"] = 1
+    f = tmp_path / "model.safetensors"
+    f.write_bytes(b"\x03" * 16)
+    _client(fake_hub).commit(
+        destination_repo="acme/my-model",
+        files=[CommitFile(path="model.safetensors", local_path=f)],
+        tags=["prod"],
+        flavor="fp16",
+        default_flavor="fp16",
+        dtype="fp16",
+    )
+    body = _FakeHub.state["commit_request"]
+    assert body["flavor"] == "fp16"
+    assert body["default_flavor"] == "fp16"
+    assert body["tags"] == [{"tag": "prod", "default_flavor": "fp16"}]
+
+
+def test_clone_primary_output_claims_bare_selector() -> None:
+    # gw#419 regression guard at the clone layer: the i==0 commit passes
+    # default_flavor=<label>; secondary outputs stay explicit-flavor-only.
+    import inspect
+
+    from gen_worker.convert import clone as clone_mod
+
+    src = inspect.getsource(clone_mod)
+    assert 'default_flavor=flavor_label if i == 0 else ""' in src
