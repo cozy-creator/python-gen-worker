@@ -476,12 +476,15 @@ class HubClient:
             raise
 
         final = self._finalize(repo_path, revision_id)
+        # tensorhub nests the minted id under `checkpoint.checkpoint_id`
+        # (repo_publish.go); tolerate a flat key for older shapes.
+        ckpt = final.get("checkpoint") if isinstance(final.get("checkpoint"), dict) else {}
         return CommitResult(
             revision_id=revision_id,
             uploaded=uploaded,
             deduped=deduped,
             total_bytes=sum(f.size_bytes for f in resolved),
-            checkpoint_id=str(final.get("checkpoint_id") or "").strip(),
+            checkpoint_id=str(ckpt.get("checkpoint_id") or final.get("checkpoint_id") or "").strip(),
             response=final,
         )
 

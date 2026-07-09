@@ -148,7 +148,10 @@ class _FakeHub(BaseHTTPRequestHandler):
             if n == 1:
                 self._send(202, {"status": "running"})  # first call -> poll
             else:
-                self._send(200, {"ok": True, "checkpoint_id": "blake3:abc"})
+                # Real shape (repo_publish.go): the minted id is nested under
+                # `checkpoint` — the flat key was fake-hub drift (gw#413 class).
+                self._send(200, {"ok": True,
+                                 "checkpoint": {"checkpoint_id": "blake3:abc"}})
             return
         self._send(404, {"error": "not_found"})
 
