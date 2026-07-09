@@ -1,0 +1,157 @@
+name: GPU CI
+
+# Ephemeral RunPod 4090 lane (gw#421). Security model: see .github/gpu-runner/README.md.
+# Triggers are deliberately narrow — never bare `pull_request`, never `pull_request_target`.
+on:
+  schedule:
+    - cron: "17 9 * * *" # nightly
+  push:
+    branches: [master]
+  pull_request:
+    types: [labeled] # runs only when a maintainer applies the `gpu` label
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gpu-ci-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  POD_NAME: gw-gpu-ci-${{ github.run_id }}
+
+jobs:
+  bootstrap:
+    name: Boot ephemeral 4090 runner
+    # Label-gated for PRs; same-repo branches only (fork PRs never reach the runner
+    # and never see secrets — maintainers push the branch to this repo instead).
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.label.name == 'gpu' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Mint single-use runner registration token
+        id: mint
+        env:
+          GH_ADMIN_TOKEN: ${{ secrets.GH_RUNNER_ADMIN_TOKEN }}
+        run: |
+          tok=$(curl -sf -X POST \
+            -H "Authorization: Bearer $GH_ADMIN_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runners/registration-token" \
+            | jq -er .token)
+          echo "::add-mask::$tok"
+          echo "token=$tok" >> "$GITHUB_OUTPUT"
+
+      - name: Create RunPod pod (on-demand RTX 4090)
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+          RUNNER_TOKEN: ${{ steps.mint.outputs.token }}
+        run: |
+          # The pod env carries ONLY the single-use registration token — never the RunPod API key.
+          body=$(jq -n \
+            --arg name "$POD_NAME" \
+            --arg image "ghcr.io/${GITHUB_REPOSITORY_OWNER}/gw-gpu-runner:latest" \
+            --arg repo_url "https://github.com/${GITHUB_REPOSITORY}" \
+            --arg token "$RUNNER_TOKEN" \
+            '{
+              name: $name,
+              imageName: $image,
+              gpuTypeIds: ["NVIDIA GeForce RTX 4090"],
+              gpuCount: 1,
+              cloudType: "COMMUNITY",
+              interruptible: false,
+              allowedCudaVersions: ["12.8", "12.9", "13.0"],
+              containerDiskInGb: 60,
+              volumeInGb: 0,
+              ports: [],
+              env: {
+                REPO_URL: $repo_url,
+                RUNNER_TOKEN: $token,
+                RUNNER_NAME: $name,
+                RUNNER_LABELS: "gpu-4090",
+                TTL_MINUTES: "45"
+              }
+            }')
+          pod=$(curl -sf -X POST "https://rest.runpod.io/v1/pods" \
+            -H "Authorization: Bearer $RUNPOD_API_KEY" \
+            -H "Content-Type: application/json" \
+            -d "$body")
+          echo "created pod $(echo "$pod" | jq -r .id) at \$$(echo "$pod" | jq -r .costPerHr)/hr"
+
+      - name: Wait for runner to come online
+        env:
+          GH_ADMIN_TOKEN: ${{ secrets.GH_RUNNER_ADMIN_TOKEN }}
+        run: |
+          for i in $(seq 1 60); do
+            status=$(curl -sf \
+              -H "Authorization: Bearer $GH_ADMIN_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/runners" \
+              | jq -r --arg n "$POD_NAME" '.runners[] | select(.name == $n) | .status')
+            [ "$status" = "online" ] && { echo "runner online"; exit 0; }
+            echo "waiting for runner ($i/60, status=${status:-absent})..."
+            sleep 10
+          done
+          echo "runner never came online; sweep will terminate the pod" >&2
+          exit 1
+
+  test:
+    name: torch suite on 4090
+    needs: bootstrap
+    runs-on: [self-hosted, gpu-4090]
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: GPU sanity
+        run: nvidia-smi
+
+      - name: Sync deps (cu128 lock)
+        run: uv sync --extra dev --extra torch --extra images
+
+      - name: Run tests
+        run: uv run --extra dev --extra torch --extra images pytest tests/ -q --junitxml=gpu-junit.xml
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-test-results
+          path: gpu-junit.xml
+          if-no-files-found: ignore
+
+  sweep:
+    name: Terminate pod
+    needs: [bootstrap, test]
+    if: always() && needs.bootstrap.result != 'skipped'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Terminate this run's pod (+ stale gw-gpu-ci leaks)
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+        run: |
+          list() {
+            curl -sf -H "Authorization: Bearer $RUNPOD_API_KEY" "https://rest.runpod.io/v1/pods"
+          }
+          # This run's pod by exact name, plus any gw-gpu-ci-* pod older than 2h
+          # (leaked by a cancelled/stuck run). Never touches other pods.
+          # createdAt is Go-format ("2026-07-09 22:16:07.641 +0000 UTC"); prefix compare works.
+          cutoff=$(date -u -d '2 hours ago' '+%Y-%m-%d %H:%M:%S')
+          ids=$(list | jq -r --arg n "$POD_NAME" --arg cutoff "$cutoff" \
+            '.[] | select(.name == $n or ((.name | test("^gw-gpu-ci-[0-9]+$")) and .createdAt < $cutoff)) | .id')
+          for id in $ids; do
+            echo "terminating pod $id"
+            curl -sf -X DELETE "https://rest.runpod.io/v1/pods/$id" || true
+          done
+          sleep 5
+          leftover=$(list | jq -r --arg n "$POD_NAME" '.[] | select(.name == $n) | .id')
+          if [ -n "$leftover" ]; then
+            echo "pod(s) still present after DELETE: $leftover" >&2
+            exit 1
+          fi
+          echo "sweep clean"
