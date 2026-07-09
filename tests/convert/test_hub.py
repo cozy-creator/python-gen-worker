@@ -50,9 +50,12 @@ def test_commit_uploads_completes_and_finalizes(fake_hub, tmp_path: Path, monkey
     ops = {op["path"]: op for op in req["operations"]}
     assert set(ops) == {"config.json", "sub/weights.safetensors"}
     assert ops["config.json"]["blake3"] == blake3_file(tmp_path / "config.json")
-    # Bytes actually PUT + parts echoed on complete.
+    # Bytes actually PUT + parts echoed on complete (the shared engine passes
+    # the R2 ETag header through verbatim, quotes included).
     assert len(st["put_bytes"]) == 2
-    assert st["complete_bodies"][0]["parts"][0] == {"part_number": 1, "etag": "etag-1"}
+    first_part = st["complete_bodies"][0]["parts"][0]
+    assert first_part["part_number"] == 1
+    assert first_part["etag"].strip('"') == "etag-1"
     assert st["finalize_calls"] == 2  # 202 then 200
     assert st["auth"] == "Bearer cap-token"
 
@@ -196,12 +199,12 @@ def test_complete_gives_up_after_deadline_if_race_never_resolves(
     """A genuinely stuck server (never finalizes) must still fail eventually
     rather than polling forever."""
     monkeypatch.setattr("time.sleep", lambda *_: None)
-    monkeypatch.setattr("gen_worker.convert.hub._COMPLETE_NETWORK_MAX_WAIT_S", 0.0)
+    monkeypatch.setattr("gen_worker.presigned_upload._COMPLETE_IN_PROGRESS_MAX_WAIT_S", 0.0)
     _FakeHub.state["complete_race_count"] = 10_000
 
     f = tmp_path / "model.safetensors"
     f.write_bytes(b"\x05" * 48)
-    with pytest.raises(HubPublishError, match="upload complete failed"):
+    with pytest.raises(HubPublishError, match="upload failed"):
         _client(fake_hub).commit(
             destination_repo="acme/my-model",
             files=[CommitFile(path="model.safetensors", local_path=f)],
@@ -219,47 +222,3 @@ def test_files_from_tree_skips_hf_cache_junk(tmp_path: Path) -> None:
 
     paths = [f.path for f in files_from_tree(tmp_path)]
     assert paths == [".gitignore", "config.json"]
-
-
-def test_complete_repost_through_network_severed_attempts(monkeypatch) -> None:
-    """te#44 J9 runs 7+8: the idle multi-minute /complete verify gets severed
-    by middleboxes; the client must re-POST (idempotent) instead of failing
-    the commit after the quick generic retries are exhausted."""
-    from gen_worker.convert.hub import HubClient, HubPublishError
-
-    monkeypatch.setattr("time.sleep", lambda *_: None)
-    client = HubClient(base_url="http://hub", token="t", owner="acme")
-    calls = {"n": 0}
-
-    class _OK:
-        status_code = 200
-        text = "{}"
-
-        @staticmethod
-        def json():
-            return {}
-
-    def _post(path, payload=None, *, timeout=None):
-        calls["n"] += 1
-        if calls["n"] <= 2:
-            raise HubPublishError(f"POST {path} failed (network): severed")
-        return _OK()
-
-    monkeypatch.setattr(client, "_post", _post)
-    resp = client._post_complete("/complete", {})
-    assert resp.status_code == 200 and calls["n"] == 3
-
-
-def test_complete_network_severed_raises_after_deadline(monkeypatch) -> None:
-    from gen_worker.convert.hub import HubClient, HubPublishError
-
-    monkeypatch.setattr("time.sleep", lambda *_: None)
-    monkeypatch.setattr("gen_worker.convert.hub._COMPLETE_NETWORK_MAX_WAIT_S", 0.0)
-    client = HubClient(base_url="http://hub", token="t", owner="acme")
-
-    def _post(path, payload=None, *, timeout=None):
-        raise HubPublishError("POST /complete failed (network): severed")
-
-    monkeypatch.setattr(client, "_post", _post)
-    with pytest.raises(HubPublishError, match="network"):
-        client._post_complete("/complete", {})

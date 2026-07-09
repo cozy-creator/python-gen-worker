@@ -84,6 +84,15 @@ _FINALIZE_RETRY_BACKOFF_S = 0.5
 _COMPLETE_IN_PROGRESS_POLL_S = 5.0
 _COMPLETE_IN_PROGRESS_MAX_WAIT_S = 600.0
 
+# A severed /complete connection is NOT fatal either (te#44 J9): middleboxes
+# on the worker->hub path (NAT idle eviction, tunnel circuit caps) kill the
+# idle multi-minute verify of multi-GB objects, so the client sees a network
+# error while the server may finish (`sess.Finalized` fast path answers the
+# re-POST) or may have aborted (a re-POST restarts the verify). Re-POST
+# patiently on a deadline — each attempt can legitimately take a full verify.
+_COMPLETE_NETWORK_RETRY_DELAY_S = 15.0
+_COMPLETE_NETWORK_MAX_WAIT_S = 1800.0
+
 # Default part size sent by server, but we read it from the response.
 _FALLBACK_PART_SIZE = 64 * 1024 * 1024  # 64 MiB
 
@@ -100,6 +109,7 @@ __all__ = [
     "PresignedUploadResult",
     "blake3_hash_file",
     "presigned_upload_file",
+    "upload_entry_and_complete",
 ]
 
 
@@ -298,10 +308,72 @@ def _presigned_upload_file_scoped(
             retryable=False,
         )
 
-    transfer_grant = parsed.get("transfer_grant") or parsed.get("s3_transfer_grant")
+    if _is_tensorhub_model_weight_upload(endpoint_path) and not isinstance(
+        parsed.get("transfer_grant") or parsed.get("s3_transfer_grant"), dict
+    ):
+        raise ArtifactTransferError(
+            "tensorhub model upload response missing transfer_grant",
+            provider="tensorhub",
+            phase="create",
+            retryable=False,
+        )
+
+    result_meta = upload_entry_and_complete(
+        file_path=file_path,
+        entry=parsed,
+        complete_url=f"{url}/{upload_id}/complete",
+        abort_url=f"{url}/{upload_id}",
+        headers=headers,
+        session=session,
+        blake3_hex=blake3_hex,
+        size_bytes=size_bytes,
+        put_pool=put_pool,
+        on_progress=on_progress,
+        cancel_check=cancel_check,
+        complete_extra=complete_extra,
+    )
+    return PresignedUploadResult(meta=result_meta, dedup=False)
+
+
+def upload_entry_and_complete(
+    *,
+    file_path: str | Path,
+    entry: Dict[str, Any],
+    complete_url: str,
+    headers: Dict[str, str],
+    session: requests.Session,
+    blake3_hex: str = "",
+    size_bytes: int = 0,
+    put_pool: Optional[PutPool] = None,
+    on_progress: Optional[Any] = None,
+    cancel_check: Optional[Any] = None,
+    complete_extra: Optional[Dict[str, Any]] = None,
+    abort_url: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Move one local file's bytes into tensorhub staging for an
+    already-created upload entry, then patiently POST ``complete_url``.
+
+    THE per-file hub upload engine — every gen-worker byte-mover rides it:
+    media/user-file upload sessions (``presigned_upload_file``), job-scoped
+    repo-CAS checkpoint streams (``ctx.save_checkpoint``), and ``/commits``
+    publishes (``gen_worker.convert.hub.HubClient``). ``entry`` is the
+    server's upload descriptor: ``transfer_grant`` (R2 SDK transfer) or
+    ``part_urls`` + ``part_size`` (presigned multipart). Carries the full
+    /complete armor: 409 upload_complete_in_progress poll (e2e #110) and
+    network-severed re-POST patience (te#44 J9).
+
+    ``abort_url``: DELETEd (best-effort) when the multipart PUT phase fails,
+    so the server can GC staged parts. Grant-path and /complete failures never
+    abort — the object may already be fully staged server-side.
+    """
+    transfer_grant = entry.get("transfer_grant") or entry.get("s3_transfer_grant")
     if isinstance(transfer_grant, dict):
         from .s3_transfer import S3TransferGrant, upload_file_with_grant
 
+        if not size_bytes:
+            size_bytes = int(entry.get("size_bytes") or os.path.getsize(file_path))
+        if not blake3_hex:
+            blake3_hex = str(entry.get("blake3") or "")
         grant = S3TransferGrant.from_mapping(transfer_grant)
         sdk_result = upload_file_with_grant(
             file_path=file_path,
@@ -324,38 +396,24 @@ def _presigned_upload_file_scoped(
             for k, v in complete_extra.items():
                 if v is not None and k != "transfer":
                     complete_payload[k] = v
-        result_meta = _complete_upload_session(
-            complete_url=f"{url}/{upload_id}/complete",
+        return _complete_upload_session(
+            complete_url=complete_url,
             headers=headers,
             payload=complete_payload,
             cancel_check=cancel_check,
             session=session,
         )
-        return PresignedUploadResult(meta=result_meta, dedup=False)
 
-    if _is_tensorhub_model_weight_upload(endpoint_path):
-        raise ArtifactTransferError(
-            "tensorhub model upload response missing transfer_grant",
-            provider="tensorhub",
-            phase="create",
-            retryable=False,
-        )
-
-    part_urls: List[str] = parsed.get("part_urls") or []
-    part_size: int = int(parsed.get("part_size") or _FALLBACK_PART_SIZE)
-    total_parts: int = int(parsed.get("total_parts") or len(part_urls))
-
+    part_urls: List[str] = list(entry.get("part_urls") or [])
+    part_size: int = int(entry.get("part_size") or _FALLBACK_PART_SIZE)
+    total_parts: int = int(entry.get("total_parts") or len(part_urls))
     if not part_urls or total_parts == 0:
         raise ArtifactTransferError(
-            "tensorhub upload create response missing part URLs",
+            "tensorhub upload entry missing transfer_grant/part URLs",
             provider="tensorhub",
             phase="create",
             retryable=False,
         )
-
-    # --- Step 2: Upload parts to S3 ---
-    session_id = upload_id
-    abort_url = f"{url}/{session_id}"
 
     try:
         etags = _upload_parts_to_s3(
@@ -368,17 +426,15 @@ def _presigned_upload_file_scoped(
             put_pool=put_pool,
         )
     except BaseException:
-        # Abort the multipart upload on failure.
-        try:
-            abort_headers = dict(headers)
-            session.delete(abort_url, headers=abort_headers, timeout=15)
-        except Exception:
-            pass
+        # Abort the multipart upload on failure so staged parts get GC'd.
+        if abort_url:
+            try:
+                session.delete(abort_url, headers=dict(headers), timeout=15)
+            except Exception:
+                pass
         raise
 
-    # --- Step 3: Complete ---
-    complete_url = f"{url}/{session_id}/complete"
-    complete_payload: Dict[str, Any] = {
+    complete_payload = {
         "parts": [{"part_number": pn, "etag": et} for pn, et in etags],
     }
     if complete_extra:
@@ -389,14 +445,13 @@ def _presigned_upload_file_scoped(
             if k == "parts":
                 continue
             complete_payload[k] = v
-    result_meta = _complete_upload_session(
+    return _complete_upload_session(
         complete_url=complete_url,
         headers=headers,
         payload=complete_payload,
         cancel_check=cancel_check,
         session=session,
     )
-    return PresignedUploadResult(meta=result_meta, dedup=False)
 
 
 def _error_code_of(resp: requests.Response) -> str:
@@ -479,8 +534,9 @@ def _complete_upload_session(
 ) -> Dict[str, Any]:
     complete_headers = dict(headers)
     complete_headers["Content-Type"] = "application/json"
-    last_exc: Optional[BaseException] = None
-    for attempt in range(1, _FINALIZE_RETRY_ATTEMPTS + 1):
+    network_deadline = time.monotonic() + _COMPLETE_NETWORK_MAX_WAIT_S
+    server_errors = 0
+    while True:
         if cancel_check and cancel_check():
             raise CanceledError("canceled")
         try:
@@ -491,49 +547,52 @@ def _complete_upload_session(
                 timeout=_FINALIZE_TIMEOUT_S,
             )
         except requests.RequestException as e:
-            last_exc = ArtifactTransferError(
-                f"tensorhub upload finalize request failed: {e}",
-                provider="tensorhub",
-                phase="complete",
-                retryable=True,
-                cause_type=type(e).__name__,
+            # Severed /complete (te#44 J9): idempotent once finalized — re-POST
+            # patiently on the long deadline (each attempt can re-run a full
+            # multi-minute verify) instead of failing the save/commit.
+            if time.monotonic() >= network_deadline:
+                raise ArtifactTransferError(
+                    f"tensorhub upload finalize request failed: {e}",
+                    provider="tensorhub",
+                    phase="complete",
+                    retryable=True,
+                    cause_type=type(e).__name__,
+                ) from e
+            logger.warning("POST %s network-severed; re-POSTing (idempotent complete)", complete_url)
+            time.sleep(_COMPLETE_NETWORK_RETRY_DELAY_S)
+            continue
+        code = resp.status_code
+        if code in (401, 403):
+            raise AuthError(f"file save unauthorized ({code})")
+        if code == 409 and _error_code_of(resp) == "upload_complete_in_progress":
+            return _poll_until_finalized(
+                complete_url=complete_url,
+                complete_headers=complete_headers,
+                payload=payload,
+                cancel_check=cancel_check,
+                session=session,
             )
-        else:
-            code = resp.status_code
-            if code in (401, 403):
-                raise AuthError(f"file save unauthorized ({code})")
-            if code == 409 and _error_code_of(resp) == "upload_complete_in_progress":
-                return _poll_until_finalized(
-                    complete_url=complete_url,
-                    complete_headers=complete_headers,
-                    payload=payload,
-                    cancel_check=cancel_check,
-                    session=session,
-                )
-            if code >= 500:
-                last_exc = ArtifactTransferError(
+        if code >= 500:
+            server_errors += 1
+            if server_errors >= _FINALIZE_RETRY_ATTEMPTS:
+                raise ArtifactTransferError(
                     f"tensorhub upload finalize failed: {_response_body_sample(resp)}",
                     provider="tensorhub",
                     phase="complete",
                     retryable=True,
                     status_code=code,
                 )
-            elif code < 200 or code >= 300:
-                raise ArtifactTransferError(
-                    f"tensorhub upload finalize failed: {_response_body_sample(resp)}",
-                    provider="tensorhub",
-                    phase="complete",
-                    retryable=code == 429,
-                    status_code=code,
-                )
-            else:
-                return _parse_json_response(resp, phase="complete")
-        if attempt < _FINALIZE_RETRY_ATTEMPTS:
             time.sleep(_FINALIZE_RETRY_BACKOFF_S)
-
-    if last_exc:
-        raise last_exc
-    raise ArtifactTransferError("tensorhub upload failed", provider="tensorhub", retryable=False)
+            continue
+        if code < 200 or code >= 300:
+            raise ArtifactTransferError(
+                f"tensorhub upload finalize failed: {_response_body_sample(resp)}",
+                provider="tensorhub",
+                phase="complete",
+                retryable=code == 429,
+                status_code=code,
+            )
+        return _parse_json_response(resp, phase="complete")
 
 
 def _upload_parts_to_s3(

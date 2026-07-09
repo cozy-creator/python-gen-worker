@@ -122,3 +122,48 @@ def test_complete_upload_session_other_409_is_not_polled():
         )
     assert exc_info.value.retryable is False
     assert exc_info.value.status_code == 409
+
+def test_complete_upload_session_reposts_through_network_severed_attempts():
+    """te#44 J9 runs 7+8: the idle multi-minute /complete verify gets severed
+    by middleboxes; the client must re-POST (idempotent once finalized) on the
+    long network deadline instead of failing the save/commit after a handful
+    of quick generic retries."""
+    import requests
+
+    calls = {"n": 0}
+
+    def fake_post(*_a, **_kw):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            raise requests.ConnectionError("severed mid-verify")
+        return _FakeResponse(200, {"ok": True})
+
+    with patch("gen_worker.presigned_upload.time.sleep"):
+        result = _complete_upload_session(
+            complete_url="https://tensorhub.test/complete",
+            headers={},
+            payload={"parts": []},
+            cancel_check=None,
+            session=_FakeSession(fake_post),
+        )
+    assert result == {"ok": True}
+    assert calls["n"] == 3
+
+
+def test_complete_upload_session_network_severed_raises_after_deadline(monkeypatch):
+    import requests
+
+    monkeypatch.setattr("gen_worker.presigned_upload._COMPLETE_NETWORK_MAX_WAIT_S", 0.0)
+
+    def fake_post(*_a, **_kw):
+        raise requests.ConnectionError("severed")
+
+    with patch("gen_worker.presigned_upload.time.sleep"):
+        with pytest.raises(ArtifactTransferError, match="finalize request failed"):
+            _complete_upload_session(
+                complete_url="https://tensorhub.test/complete",
+                headers={},
+                payload={"parts": []},
+                cancel_check=None,
+                session=_FakeSession(fake_post),
+            )

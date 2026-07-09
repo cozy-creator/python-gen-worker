@@ -9,9 +9,12 @@ The write API is HF `create_commit`-shaped:
   → {revision_id, uploads: [{path, exists, upload_id, part_urls, part_size,
                              complete_url, ...}]}
 
-Then per non-dedup'd upload: PUT the parts, POST …/uploads/{id}/complete
-with the ETags, and finally POST …/commits/{revision_id}/finalize (no body;
-202 → poll). One commit == one checkpoint == one flavor.
+Then per non-dedup'd upload: move the bytes (R2 SDK grant or presigned
+multipart parts) and POST …/uploads/{id}/complete — both via the shared
+per-file engine ``gen_worker.presigned_upload.upload_entry_and_complete``
+(one implementation of the e2e#110 409-poll + te#44 J9 network-severed
+/complete armor) — and finally POST …/commits/{revision_id}/finalize
+(no body; 202 → poll). One commit == one checkpoint == one flavor.
 """
 
 from __future__ import annotations
@@ -27,34 +30,18 @@ from typing import Any, Callable, Mapping, Optional
 
 import requests
 
+from gen_worker.api.errors import ArtifactTransferError, AuthError
+
+# ONE blake3-file implementation library-wide (multithreaded, issue #269) and
+# ONE per-file upload engine (grant-or-parts + patient /complete).
+from gen_worker.presigned_upload import blake3_hash_file as blake3_file
+from gen_worker.presigned_upload import upload_entry_and_complete
+
 logger = logging.getLogger(__name__)
 
 _RETRY_ATTEMPTS = 5
 _RETRY_BASE_DELAY_S = 1.0
 _RETRY_MAX_DELAY_S = 30.0
-
-# tensorhub's /complete verifies the whole object synchronously (streams it
-# back from R2 and hashes it) before responding, holding a per-upload lock
-# for the duration. For large single files this can outlast whatever timeout
-# sits in front of tensorhub -- the client sees a 5xx/timeout on an attempt
-# that is still running server-side, retries, and races the first attempt
-# into 409 upload_complete_in_progress. Found live mirroring a ~6.94GB SDXL
-# checkpoint: the default 120s request timeout expired while the server was
-# still hashing, the retry got 409, and _upload_one raised immediately --
-# aborting the whole commit even though the first attempt was about to
-# succeed (e2e tracker #110).
-_COMPLETE_TIMEOUT_S = 600.0
-_COMPLETE_IN_PROGRESS_POLL_S = 5.0
-
-# A severed /complete connection is NOT fatal either: middleboxes on the
-# worker->hub path (NAT idle eviction, tunnel circuit caps) kill the idle
-# ~5-minute verify of multi-GB shards, so the client sees a network error
-# while the server may finish (sess.Finalized fast path answers the re-POST)
-# or may have aborted (a re-POST restarts the verify). Re-POST patiently —
-# each attempt can legitimately take a full verify. Found live twice on the
-# flux2-klein-4b clone (te#44 J9 runs 7+8: RemoteDisconnected at ~4m50s).
-_COMPLETE_NETWORK_RETRY_DELAY_S = 15.0
-_COMPLETE_NETWORK_MAX_WAIT_S = 1800.0
 
 _SESSION: Optional[requests.Session] = None
 
@@ -98,22 +85,6 @@ def _retry_after_s(resp: requests.Response) -> Optional[float]:
     return min(value, _RETRY_MAX_DELAY_S) if value > 0 else None
 
 
-def _error_code_of(resp: requests.Response) -> str:
-    """Best-effort extraction of the structured `error.code` field
-    (docs/api-conventions.md: `{"error": {"code": ..., ...}}`); "" if the
-    body isn't that shape."""
-    try:
-        body = resp.json() if resp.text else {}
-    except Exception:
-        return ""
-    if not isinstance(body, dict):
-        return ""
-    err = body.get("error")
-    if not isinstance(err, dict):
-        return ""
-    return str(err.get("code") or "")
-
-
 def _send_with_retries(what: str, send: Callable[[], requests.Response]) -> requests.Response:
     """Bounded retries on network errors, 429, and 5xx (honors Retry-After).
 
@@ -138,19 +109,6 @@ def _send_with_retries(what: str, send: Callable[[], requests.Response]) -> requ
         time.sleep(delay + random.uniform(0, delay * 0.1))
         delay = min(delay * 2, _RETRY_MAX_DELAY_S)
     raise HubPublishError(f"{what} failed after {_RETRY_ATTEMPTS} attempts")
-
-
-def blake3_file(path: Path, *, chunk: int = 8 * 1024 * 1024) -> str:
-    from blake3 import blake3
-
-    h = blake3()
-    with open(path, "rb") as f:
-        while True:
-            buf = f.read(chunk)
-            if not buf:
-                break
-            h.update(buf)
-    return h.hexdigest()
 
 
 @dataclass
@@ -242,33 +200,6 @@ class HubClient:
             out = {}
         return out if isinstance(out, dict) else {}
 
-    def _post_complete(self, complete_path: str, payload: dict) -> requests.Response:
-        """POST .../complete with a generous timeout (large single files
-        verify synchronously server-side, see _COMPLETE_TIMEOUT_S), then poll
-        through a 409 upload_complete_in_progress race instead of treating it
-        as fatal: /complete is idempotent once finalized (tensorhub's
-        sess.Finalized fast path returns the same success payload), so
-        re-POSTing catches up to whatever the in-flight attempt decides.
-        Network-severed attempts get the same treatment on a longer clock
-        (_COMPLETE_NETWORK_MAX_WAIT_S): each re-POST may re-run a full
-        multi-minute verify, so give it room instead of failing the commit."""
-        deadline = time.monotonic() + _COMPLETE_NETWORK_MAX_WAIT_S
-        while True:
-            try:
-                resp = self._post(complete_path, payload, timeout=_COMPLETE_TIMEOUT_S)
-            except HubPublishError:
-                if time.monotonic() >= deadline:
-                    raise
-                logger.warning("POST %s network-severed; re-POSTing (idempotent complete)", complete_path)
-                time.sleep(_COMPLETE_NETWORK_RETRY_DELAY_S)
-                continue
-            if resp.status_code == 409 and _error_code_of(resp) == "upload_complete_in_progress":
-                if time.monotonic() >= deadline:
-                    return resp
-                time.sleep(_COMPLETE_IN_PROGRESS_POLL_S)
-                continue
-            return resp
-
     def _upload_one(self, repo_path: str, revision_id: str, entry: Mapping[str, Any],
                     local_path: Path) -> None:
         upload_id = str(entry.get("upload_id") or "").strip()
@@ -278,61 +209,21 @@ class HubClient:
             f"{repo_path}/commits/{urllib.parse.quote(revision_id, safe='')}"
             f"/uploads/{urllib.parse.quote(upload_id, safe='')}/complete"
         )
-
-        # SDK transfer-grant path (R2): the server returns a scoped temporary
-        # credential instead of presigned multipart part URLs. Upload the
-        # object directly with the S3 SDK, then complete with the transfer
-        # block (same wire shape gen_worker.presigned_upload uses for media).
-        grant_raw = entry.get("transfer_grant")
-        if isinstance(grant_raw, Mapping):
-            from gen_worker.s3_transfer import S3TransferGrant, upload_file_with_grant
-
-            grant = S3TransferGrant.from_mapping(grant_raw)
-            size_bytes = int(entry.get("size_bytes") or local_path.stat().st_size)
-            result = upload_file_with_grant(
+        # Byte movement + patient /complete ride the shared per-file engine
+        # (grant-or-parts dispatch, e2e#110 409-poll, te#44 J9 network
+        # patience, hardened PutPool part transport). The keepalive session
+        # protects the long idle server-side verify (NAT/conntrack eviction).
+        try:
+            upload_entry_and_complete(
                 file_path=local_path,
-                grant=grant,
-                blake3_hex=str(entry.get("blake3") or ""),
-                size_bytes=size_bytes,
+                entry=dict(entry),
+                complete_url=f"{self.base_url}{complete_path}",
+                headers=self._headers(),
+                session=_http_session(),
             )
-            resp = self._post_complete(complete_path, {"transfer": {
-                "mode": "s3_sdk",
-                "bucket": result.bucket,
-                "key": result.key,
-                "size_bytes": result.size_bytes,
-                "blake3": result.blake3,
-                "etag": result.etag,
-            }})
-            if resp.status_code < 200 or resp.status_code >= 300:
-                raise HubPublishError(
-                    f"upload complete failed ({resp.status_code}) for {entry.get('path')!r}: "
-                    f"{resp.text[:500]}")
-            return
-
-        part_urls = list(entry.get("part_urls") or [])
-        part_size = int(entry.get("part_size") or 0)
-        if not part_urls or part_size <= 0:
-            raise HubPublishError(f"commit upload entry missing presign data for {entry.get('path')!r}")
-        parts: list[dict[str, Any]] = []
-        with open(local_path, "rb") as f:
-            for i, url in enumerate(part_urls):
-                buf = f.read(part_size)
-                if not buf and i > 0:
-                    break
-                def _put(u: str = url, b: bytes = buf) -> requests.Response:
-                    return _http_session().put(u, data=b, timeout=self.timeout_s * 5)
-
-                resp = _send_with_retries(f"part PUT {entry.get('path')!r} #{i + 1}", _put)
-                if resp.status_code < 200 or resp.status_code >= 300:
-                    raise HubPublishError(
-                        f"part PUT failed ({resp.status_code}) for {entry.get('path')!r}")
-                etag = str(resp.headers.get("ETag") or "").strip().strip('"')
-                parts.append({"part_number": i + 1, "etag": etag})
-        resp = self._post_complete(complete_path, {"parts": parts})
-        if resp.status_code < 200 or resp.status_code >= 300:
+        except (ArtifactTransferError, AuthError) as exc:
             raise HubPublishError(
-                f"upload complete failed ({resp.status_code}) for {entry.get('path')!r}: "
-                f"{resp.text[:500]}")
+                f"upload failed for {entry.get('path')!r}: {exc}") from exc
 
     def _finalize(self, repo_path: str, revision_id: str, *, poll_timeout_s: float = 1800.0) -> dict[str, Any]:
         path = f"{repo_path}/commits/{urllib.parse.quote(revision_id, safe='')}/finalize"

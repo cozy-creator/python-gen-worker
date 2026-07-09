@@ -515,9 +515,9 @@ class ModelStore:
         manifest-less trees (hf/civitai) get the structural safetensors check
         (header parses + every declared tensor byte present). Returns
         ``(ok, bad_digests)`` — the digests name blobs to quarantine."""
-        from .models.cozy_cas import _blake3_file
         from .models.cozy_snapshot import _is_part_file, _is_parts_manifest, _norm_rel_path
         from .models.loading import safetensors_file_valid
+        from .presigned_upload import blake3_hash_file
 
         p = Path(path)
         bad: List[str] = []
@@ -538,7 +538,7 @@ class ModelStore:
                         raise ValueError("missing")
                     if f.size_bytes and dst.stat().st_size != int(f.size_bytes):
                         raise ValueError("size mismatch")
-                    if digest and _blake3_file(dst).lower() != digest:
+                    if digest and blake3_hash_file(dst).lower() != digest:
                         raise ValueError("blake3 mismatch")
                 except (OSError, ValueError) as exc:
                     logger.warning("snapshot file %s/%s corrupt: %s", p.name, f.path, exc)

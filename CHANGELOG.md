@@ -15,6 +15,15 @@
   torch-free (import-graph guard now covers `gen_worker.convert`). Docs:
   `docs/convert.md`.
 
+- **ONE per-file hub upload engine.** `HubClient` (`/commits` publishes) and
+  the worker save paths (`ctx.save_file` / `save_checkpoint` /
+  `open_checkpoint_stream`) now move bytes through the same
+  `presigned_upload.upload_entry_and_complete` (grant-or-parts dispatch,
+  hardened PutPool part transport, e2e#110 409-poll). The te#44 J9
+  network-severed /complete re-POST patience — previously convert-only — now
+  protects the worker save paths too. blake3 file hashing collapsed to the
+  one multithreaded `blake3_hash_file` (was 3 copies).
+
 ## 0.11.2
 
 - Republish: the 0.11.0 and 0.11.1 PyPI wheels were both built from a stale local checkout (19 commits behind master, mixed-commit tree) and lack `allow_lora`, `LoraOverlay`, and `inductor_counters`. No code changes vs 0.11.1 master; version bump only, publish from clean `origin/master` HEAD.

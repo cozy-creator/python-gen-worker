@@ -9,9 +9,9 @@ from pathlib import Path
 from typing import Callable, Dict, Optional
 
 import requests
-from blake3 import blake3
 
 from ..capability import InsufficientDiskError
+from ..presigned_upload import blake3_hash_file
 from .errors import UrlExpiredError
 
 _log = logging.getLogger(__name__)
@@ -117,7 +117,7 @@ def _download_one_file_sync(
             if expected_size and dst.stat().st_size != expected_size:
                 raise ValueError("size mismatch")
             if expected_blake3:
-                got = _blake3_file(dst)
+                got = blake3_hash_file(dst, chunk_size=_DOWNLOAD_CHUNK_BYTES)
                 if got.lower() != expected_blake3.lower():
                     raise ValueError("blake3 mismatch")
             log.info("download_cached path=%s size=%s", dst.name, _human_size(dst.stat().st_size))
@@ -140,7 +140,7 @@ def _download_one_file_sync(
 
     # Partial file already complete? Validate and finalize.
     if offset and expected_size and offset == expected_size:
-        got = _blake3_file(tmp)
+        got = blake3_hash_file(tmp, chunk_size=_DOWNLOAD_CHUNK_BYTES)
         if expected_blake3 and got.lower() != expected_blake3.lower():
             log.warning("partial_corrupt path=%s (blake3 mismatch, restarting)", dst.name)
             tmp.unlink(missing_ok=True)
@@ -210,7 +210,7 @@ def _download_one_file_sync(
         raise ValueError(f"size mismatch (expected {expected_size}, got {actual_size})")
 
     if expected_blake3:
-        got = _blake3_file(tmp)
+        got = blake3_hash_file(tmp, chunk_size=_DOWNLOAD_CHUNK_BYTES)
         if got.lower() != expected_blake3.lower():
             log.error("download_blake3_mismatch path=%s expected=%s got=%s",
                       dst.name, expected_blake3[:16], got[:16])
@@ -260,14 +260,3 @@ def fsync_dir(path: Path) -> None:
         os.close(fd)
 
 
-def _blake3_file(path: Path, chunk_size: int = _DOWNLOAD_CHUNK_BYTES) -> str:
-    # Fan BLAKE3 across cores via AUTO threading (issue #269). Used on
-    # download-verify path; same throughput win as the upload-side hash.
-    h = blake3(max_threads=blake3.AUTO)
-    with open(path, "rb") as f:
-        while True:
-            b = f.read(chunk_size)
-            if not b:
-                break
-            h.update(b)
-    return h.hexdigest()
