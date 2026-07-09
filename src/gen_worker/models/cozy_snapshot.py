@@ -258,6 +258,10 @@ class CozySnapshotDownloader:
                 shutil.rmtree(tmp, ignore_errors=True)
                 if not snap_dir.exists():
                     raise
+            else:
+                from .cozy_cas import fsync_dir
+
+                fsync_dir(snaps_root)  # persist the rename itself (gw#408)
 
     # ------------------------------------------------------------------
     # Blob download (deduplicated, parallel)
@@ -327,11 +331,11 @@ class CozySnapshotDownloader:
             digest = f.blake3.strip().lower()
             dst = _blob_path(blobs_root, digest)
             dst.parent.mkdir(parents=True, exist_ok=True)
-            if dst.exists():
+            if self._blob_usable(dst, f):
                 _log.info("blob_cached path=%s digest=%s", f.path, digest[:16])
                 return
             async with sem:
-                if dst.exists():
+                if self._blob_usable(dst, f):
                     return
                 _log.info("blob_download_start path=%s size=%s digest=%s",
                           f.path, f.size_bytes, digest[:16])
@@ -359,6 +363,26 @@ class CozySnapshotDownloader:
                 _log.info("blob_download_done path=%s digest=%s", f.path, digest[:16])
 
         await asyncio.gather(*(_dl(f) for f in unique))
+
+    @staticmethod
+    def _blob_usable(dst: Path, f: WorkerResolvedRepoFile) -> bool:
+        """A cached blob is only reusable at the manifest's size (gw#408): a
+        truncated blob from a pre-durability build must be re-downloaded, not
+        silently rebuilt into every future snapshot."""
+        try:
+            if not dst.exists():
+                return False
+            expected = int(f.size_bytes or 0)
+            if expected and dst.stat().st_size != expected:
+                _log.warning(
+                    "blob_corrupt path=%s digest=%s size=%d expected=%d; re-downloading",
+                    f.path, f.blake3[:16], dst.stat().st_size, expected,
+                )
+                dst.unlink(missing_ok=True)
+                return False
+            return True
+        except OSError:
+            return False
 
     @staticmethod
     def _check_disk_headroom(blobs_root: Path, missing_bytes: int) -> None:
@@ -419,6 +443,8 @@ class CozySnapshotDownloader:
                     with open(part_blob, "rb") as in_f:
                         shutil.copyfileobj(in_f, out_f)
                     total_written += part_size
+                out_f.flush()
+                os.fsync(out_f.fileno())  # durable before the snapshot rename (gw#408)
 
             _log.info("reassemble_done file=%s total_size=%s", original_path, total_written)
 
@@ -439,6 +465,21 @@ class CozySnapshotDownloader:
             src = _blob_path(blobs_root, f.blake3)
             _try_hardlink_or_copy(src, dst)
 
+
+
+def delete_blobs(base_dir: Path, digests: Any) -> None:
+    """Remove specific CAS blobs (quarantine of digest-mismatched content,
+    gw#408) so a re-materialization re-downloads them instead of re-linking
+    the same corrupt bytes."""
+    blobs_root = Path(base_dir) / "blobs"
+    for raw in digests or ():
+        digest = _strip_blake3_prefix(str(raw or "")).strip().lower()
+        if len(digest) < 4:
+            continue
+        try:
+            _blob_path(blobs_root, digest).unlink(missing_ok=True)
+        except OSError:
+            continue
 
 
 # ---------------------------------------------------------------------------

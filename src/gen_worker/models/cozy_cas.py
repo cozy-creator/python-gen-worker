@@ -217,9 +217,47 @@ def _download_one_file_sync(
             tmp.unlink(missing_ok=True)
             raise ValueError("blake3 mismatch")
 
-    # Atomic finalize.
+    # Durable atomic finalize (gw#408): rename is only atomic in the
+    # NAMESPACE — a pod hard-kill after the rename but before writeback
+    # persisted a complete-looking blob with truncated/zero data pages,
+    # which then poisoned every snapshot built from it. fsync data before
+    # the rename and the directory entry after.
+    fsync_file(tmp)
     tmp.replace(dst)
+    fsync_dir(dst.parent)
     log.info("download_done path=%s size=%s", dst.name, _human_size(actual_size))
+
+
+def fsync_file(path: Path) -> None:
+    """Force a file's data to stable storage (read-only fd works on Linux)."""
+    import os
+
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def fsync_dir(path: Path) -> None:
+    """Persist a directory entry (the rename itself) to stable storage."""
+    import os
+
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 def _blake3_file(path: Path, chunk_size: int = _DOWNLOAD_CHUNK_BYTES) -> str:

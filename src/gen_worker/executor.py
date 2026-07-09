@@ -187,6 +187,27 @@ def _model_op_error_vocab(exc: BaseException) -> str:
     return "load_failed"
 
 
+def _is_corrupt_load_error(exc: BaseException) -> bool:
+    """Errors a truncated/corrupt snapshot produces at weights-load time
+    (gw#408). Broad on purpose: the digest re-verify gate downstream
+    separates real corruption from code bugs — a verified-clean tree
+    re-raises the original error instead of quarantining."""
+    import errno as _errno
+    import struct as _struct
+
+    if isinstance(exc, OSError):
+        # e.g. "Unable to load weights from checkpoint file" (raised as
+        # OSError by transformers/diffusers), FileNotFoundError from a
+        # half-built tree. Resource exhaustion is not corruption.
+        return getattr(exc, "errno", None) not in (_errno.ENOSPC, _errno.ENOMEM)
+    if isinstance(exc, _struct.error):
+        return True
+    return type(exc).__name__ in (
+        "SafetensorError", "HeaderTooLarge", "MetadataIncompleteBuffer",
+        "UnpicklingError", "JSONDecodeError",
+    )
+
+
 def _is_terminal_download_error(exc: BaseException) -> bool:
     if isinstance(exc, (UrlExpiredError, InsufficientDiskError)):
         return True
@@ -242,6 +263,10 @@ class ModelStore:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._index = disk_gc.RefIndex(self._cache_dir)
         self._disk_free = disk_free_bytes_fn or self._default_disk_free
+        # Refs whose on-disk snapshot passed integrity verification THIS boot
+        # (gw#408): a cached snapshot is re-verified on first use per process
+        # so pod-churn corruption can never be trusted forever.
+        self._verified: set[str] = set()
 
     def _default_disk_free(self) -> int:
         p = Path(self._cache_dir)
@@ -396,8 +421,29 @@ class ModelStore:
             if snapshot is not None and snapshot.digest:
                 want = snapshot.digest.split(":", 1)[-1].strip().lower()
             if cached is not None and cached.exists() and (not want or cached.name == want):
-                self._index.touch(ref)
-                return cached
+                if ref in self._verified:
+                    self._index.touch(ref)
+                    return cached
+                # First use this boot: verify before trusting (gw#408). A
+                # pod-churn-truncated snapshot used to fatal every load until
+                # a manual delete; now it is quarantined + re-materialized.
+                ok, bad = await asyncio.to_thread(
+                    self._verify_snapshot_tree, cached, snapshot
+                )
+                if ok:
+                    self._verified.add(ref)
+                    self._index.touch(ref)
+                    return cached
+                logger.error(
+                    "snapshot for %s failed first-use verification "
+                    "(%d bad files); quarantining and re-materializing",
+                    ref, len(bad),
+                )
+                # Quarantine emits EVICTED; the re-download below emits
+                # DOWNLOADING/ON_DISK (or FAILED on a terminal error) — the
+                # hub sees the true story, not a spurious FAILED.
+                await asyncio.to_thread(self._quarantine_snapshot, ref, cached, bad)
+                # fall through to a fresh download below
             if snapshot is not None and snapshot.files:
                 # Sizes are known up front for tensorhub snapshots: gate on
                 # disk headroom, GC-ing LRU refs first (#370).
@@ -441,6 +487,8 @@ class ModelStore:
                     # multi-GB directory walks on the event loop).
                     size = await asyncio.to_thread(disk_gc.tree_bytes, path)
                     self._index.record(ref, path, size)
+                    # Fresh downloads were digest-verified by the downloader.
+                    self._verified.add(ref)
                     return path
                 except Exception as exc:
                     terminal = _is_terminal_download_error(exc) or attempt >= _DOWNLOAD_RETRIES
@@ -453,6 +501,95 @@ class ModelStore:
                     await asyncio.sleep(delay)
                     delay *= 4
             raise RuntimeError("unreachable")
+
+    # ---- snapshot integrity (gw#408) -------------------------------------------
+
+    def _verify_snapshot_tree(
+        self, path: Path, snapshot: Optional[pb.Snapshot]
+    ) -> Tuple[bool, List[str]]:
+        """Integrity of a materialized snapshot (worker thread; blocking IO).
+
+        With a resolved manifest every regular file is checked against its
+        declared size AND blake3 digest; files the manifest cannot cover
+        (reassembled chunked originals, merged single-file checkpoints) plus
+        manifest-less trees (hf/civitai) get the structural safetensors check
+        (header parses + every declared tensor byte present). Returns
+        ``(ok, bad_digests)`` — the digests name blobs to quarantine."""
+        from .models.cozy_cas import _blake3_file
+        from .models.cozy_snapshot import _is_part_file, _is_parts_manifest, _norm_rel_path
+        from .models.loading import safetensors_file_valid
+
+        p = Path(path)
+        bad: List[str] = []
+        covered: set[Path] = set()
+        files = list(snapshot.files) if snapshot is not None else []
+        if files and p.is_dir():
+            for f in files:
+                if _is_parts_manifest(f.path) or _is_part_file(f.path):
+                    continue  # not materialized: parts live only in blobs/
+                try:
+                    dst = p / _norm_rel_path(f.path)
+                except ValueError:
+                    continue
+                covered.add(dst)
+                digest = (f.blake3 or "").strip().lower()
+                try:
+                    if not dst.exists():
+                        raise ValueError("missing")
+                    if f.size_bytes and dst.stat().st_size != int(f.size_bytes):
+                        raise ValueError("size mismatch")
+                    if digest and _blake3_file(dst).lower() != digest:
+                        raise ValueError("blake3 mismatch")
+                except (OSError, ValueError) as exc:
+                    logger.warning("snapshot file %s/%s corrupt: %s", p.name, f.path, exc)
+                    bad.append(digest or f.path)
+        try:
+            candidates = [p] if p.is_file() else sorted(p.rglob("*.safetensors"))
+        except OSError:
+            candidates = []
+        for st in candidates:
+            if st in covered or st.suffix != ".safetensors":
+                continue
+            if not safetensors_file_valid(st):
+                logger.warning("snapshot file %s structurally invalid (truncated?)", st)
+                bad.append(str(st.relative_to(p)) if st != p else st.name)
+        return (not bad, bad)
+
+    def _quarantine_snapshot(self, ref: str, path: Path, bad: List[str]) -> None:
+        """Evict + delete a corrupt materialization AND the corrupt blobs it
+        was built from, so re-materialization re-downloads instead of
+        re-linking the same bad bytes. Emits EVICTED via residency."""
+        from .models.cozy_snapshot import delete_blobs
+
+        self._verified.discard(ref)
+        self.residency.evict(ref, force=True)
+        disk_gc.delete_ref_bytes(ref, Path(path), self._cache_dir)
+        delete_blobs(self._cache_dir, [d for d in bad if "/" not in d and "." not in d])
+        disk_gc.sweep_orphan_blobs(self._cache_dir)
+        self._index.remove(ref)
+
+    async def refetch_corrupt(
+        self, ref: str, snapshot: Optional[pb.Snapshot] = None, *, binding: Any = None
+    ) -> Optional[Path]:
+        """Load-failure path (gw#408): a weights load failed with a
+        corruption-shaped error — digest-verify the snapshot. A clean tree
+        returns None (the failure is NOT corruption; caller re-raises); a
+        dirty tree is quarantined and re-materialized, returning the fresh
+        path for exactly one load retry."""
+        path = self.residency.local_path(ref) or self._index.path(ref)
+        if path is None:
+            return None
+        async with self._lock(ref):
+            ok, bad = await asyncio.to_thread(self._verify_snapshot_tree, Path(path), snapshot)
+            if ok:
+                self._verified.add(ref)
+                return None
+            logger.error(
+                "load failure traced to corrupt snapshot for %s (%d bad files); "
+                "quarantining and re-materializing", ref, len(bad),
+            )
+            await asyncio.to_thread(self._quarantine_snapshot, ref, Path(path), bad)
+        return await self.ensure_local(ref, snapshot, binding=binding)
 
     @staticmethod
     def _error_vocab(exc: BaseException) -> str:
@@ -731,7 +868,7 @@ class Executor:
             if callable(setup):
                 kwargs, loaded = await self._injection_kwargs(
                     spec, setup, paths, server=rec.server,
-                    compile_artifact=compile_artifact)
+                    compile_artifact=compile_artifact, snapshots=snapshots)
                 if asyncio.iscoroutinefunction(setup):
                     await setup(**kwargs)
                 else:
@@ -922,6 +1059,7 @@ class Executor:
         *,
         server: Any = None,
         compile_artifact: Optional[Path] = None,
+        snapshots: Optional[Dict[str, pb.Snapshot]] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Tuple[Any, int]]]:
         """Typed injection: each slot receives exactly what its ``setup``
         annotation says — a ``str``/``Path`` local path, or a constructed
@@ -959,10 +1097,34 @@ class Executor:
                 dtype = str(getattr(binding, "dtype", "") or "")
                 storage_dtype = str(getattr(binding, "storage_dtype", "") or "")
                 before = self._vram_allocated()
-                pipe = await asyncio.to_thread(
-                    load_from_pretrained, ann, path, dtype=dtype,
-                    storage_dtype=storage_dtype,
-                )
+                try:
+                    pipe = await asyncio.to_thread(
+                        load_from_pretrained, ann, path, dtype=dtype,
+                        storage_dtype=storage_dtype,
+                    )
+                except Exception as exc:
+                    # Corruption-shaped load failure (gw#408): digest-verify
+                    # the snapshot; quarantine + re-materialize + retry ONCE
+                    # when corruption is confirmed, re-raise otherwise.
+                    fresh: Optional[Path] = None
+                    if binding is not None and _is_corrupt_load_error(exc):
+                        ref = wire_ref(binding)
+                        fresh = await self.store.refetch_corrupt(
+                            ref, (snapshots or {}).get(ref), binding=binding
+                        )
+                    if fresh is None:
+                        raise
+                    logger.warning(
+                        "weights load for slot %r failed on a corrupt snapshot "
+                        "(%s: %s); retrying once after re-materialization",
+                        slot, type(exc).__name__, exc,
+                    )
+                    path = str(fresh)
+                    paths[slot] = path
+                    pipe = await asyncio.to_thread(
+                        load_from_pretrained, ann, path, dtype=dtype,
+                        storage_dtype=storage_dtype,
+                    )
                 # Worker-owned placement/offload policy: one decider for the
                 # whole worker; endpoints never write device/offload code.
                 await asyncio.to_thread(place_pipeline, pipe)
