@@ -66,6 +66,38 @@ _SAFETENSORS_DTYPE_NAMES = {
 _MAX_SAFETENSORS_HEADER_BYTES = 100 << 20
 
 
+def safetensors_file_valid(path: Path) -> bool:
+    """Cheap structural integrity check for one ``.safetensors`` file: the
+    header must parse and the file must contain every declared tensor byte.
+    Catches truncation (pod-churn-interrupted writes, gw#408) without hashing;
+    zero-page corruption inside tensor data needs the digest check instead."""
+    import struct
+
+    try:
+        p = Path(path)
+        size = p.stat().st_size
+        with open(p, "rb") as f:
+            raw = f.read(8)
+            if len(raw) < 8:
+                return False
+            (n,) = struct.unpack("<Q", raw)
+            if n <= 0 or n > _MAX_SAFETENSORS_HEADER_BYTES or 8 + n > size:
+                return False
+            header = json.loads(f.read(n))
+        if not isinstance(header, dict):
+            return False
+        data_end = 0
+        for key, value in header.items():
+            if key == "__metadata__":
+                continue
+            if not isinstance(value, dict) or "data_offsets" not in value:
+                return False
+            data_end = max(data_end, int(value["data_offsets"][1]))
+        return size >= 8 + n + data_end
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
 def detect_on_disk_dtype(model_path: Path) -> str:
     """Majority weight dtype across the snapshot's safetensors headers
     ("bf16" / "fp16" / "fp32" / "fp8", "" when undetectable). Hub bindings
@@ -274,7 +306,16 @@ def _merge_sharded_checkpoint(snapshot_dir: Path, index_path: Path) -> Path:
 
     merged = snapshot_dir / index_path.name[: -len(".index.json")]
     if merged.exists():
-        return merged
+        if safetensors_file_valid(merged):
+            return merged
+        # A pod kill mid-writeback can persist a truncated merged file that
+        # was then trusted forever — every load fataled with "Unable to load
+        # weights from checkpoint file" until manual delete (gw#408).
+        logger.warning(
+            "cached merged checkpoint %s is structurally invalid (truncated?); re-merging",
+            merged.name,
+        )
+        merged.unlink(missing_ok=True)
     with open(index_path) as f:
         index = json.load(f)
     weight_map: Dict[str, str] = index.get("weight_map") or {}
@@ -318,6 +359,10 @@ def _merge_sharded_checkpoint(snapshot_dir: Path, index_path: Path) -> Path:
                         raise ValueError(f"short read in {shard_path}")
                     out.write(buf)
                     remaining -= len(buf)
+        out.flush()
+        import os
+
+        os.fsync(out.fileno())  # durable before rename (gw#408)
     tmp.rename(merged)
     logger.info("reassembled sharded single-file checkpoint: %s (%d shards, %d tensors, %d bytes)",
                 merged.name, len(shard_names), len(entries), offset)
@@ -503,6 +548,7 @@ __all__ = [
     "get_torch_dtype",
     "detect_diffusers_variant",
     "detect_on_disk_dtype",
+    "safetensors_file_valid",
     "ensure_quant_library_imported",
     "read_on_disk_quant_config",
     "synthesize_quantization_config",

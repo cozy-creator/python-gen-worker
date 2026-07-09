@@ -172,7 +172,13 @@ def download_file_with_grant(
             phase="sdk_download",
             retryable=False,
         )
+    # Durable atomic finalize (gw#408): see cozy_cas — data must hit stable
+    # storage before the rename, or a pod hard-kill persists a truncated blob.
+    from .models.cozy_cas import fsync_dir, fsync_file
+
+    fsync_file(tmp)
     os.replace(tmp, dest)
+    fsync_dir(dest.parent)
     return S3TransferResult(bucket=grant.bucket, key=grant.key, size_bytes=size, blake3=digest)
 
 
