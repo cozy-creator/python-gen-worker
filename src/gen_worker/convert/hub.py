@@ -5,7 +5,7 @@ The write API is HF `create_commit`-shaped:
   POST /api/v1/repos/{tenant}/{name}/commits
       {operations: [{type:"add", path, blake3, size_bytes}, ...],
        tags: [{tag, default_flavor?}], mode: "merge"|"replace",
-       flavor/dtype/file_layout/file_type, metadata, lineage, repo spec}
+       flavor/dtype/file_layout/file_type, metadata, provenance, repo spec}
   → {revision_id, uploads: [{path, exists, upload_id, part_urls, part_size,
                              complete_url, ...}]}
 
@@ -368,9 +368,8 @@ class HubClient:
         file_type: str = "",
         message: str = "",
         metadata: Mapping[str, Any] | None = None,
-        lineage: list[dict[str, Any]] | None = None,
+        provenance: Mapping[str, Any] | None = None,
         repo_spec: Mapping[str, str] | None = None,
-        auto_create_external_parent: bool = False,
         progress: Any = None,
     ) -> CommitResult:
         """Publish one checkpoint: one POST /commits, PUT the parts, finalize.
@@ -406,9 +405,13 @@ class HubClient:
             body["flavors"] = list(flavors)
         if metadata:
             body["metadata"] = dict(metadata)
-        if lineage:
-            body["lineage"] = list(lineage)
-            body["auto_create_external_parent"] = bool(auto_create_external_parent)
+        if provenance:
+            # th#606: WORKER-ADDABLE stamp fields only (step_number,
+            # epoch_number, quantization_method, quantization_library,
+            # upstream_revision). Parents / derivation_op / upstream_ref are
+            # orchestrator-derived (signed into the capability token) — the
+            # server 400s any attempt to send them from here.
+            body["provenance"] = {k: v for k, v in dict(provenance).items() if v}
         for key in ("kind", "library_name", "model_family", "class_name",
                     "adapter_for_family"):
             val = str((repo_spec or {}).get(key) or "").strip()

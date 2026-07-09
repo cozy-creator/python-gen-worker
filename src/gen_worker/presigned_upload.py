@@ -204,10 +204,11 @@ def presigned_upload_file(
         on_progress: Optional callback(parts_done, total_parts, bytes_uploaded).
         cancel_check: Optional callable that returns True if canceled.
         complete_extra: Optional extra fields merged into the /complete POST
-            body (after the `parts` array). Used by repo-cas uploads to carry
-            lineage metadata — step_number, epoch_number, output_kind,
-            target_dtype, flavor, produced_by_kind. Tensorhub persists
-            these into checkpoint_lineage.
+            body (after the `parts` array). NOTE (gw#401/th#606): tensorhub's
+            per-file /complete is parts-only and does NOT persist lineage
+            metadata; step/epoch/quant identity reach the catalog via the
+            commit body's `provenance` object (worker-addable stamp fields),
+            not through this seam.
     """
     # Per-save connection scope (issue #385): one hub Session + one R2 PUT
     # pool live exactly as long as this save, then close. Never cross-request.

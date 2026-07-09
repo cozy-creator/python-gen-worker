@@ -60,6 +60,15 @@ def publish_flavors(
     for flavor in flavors:
         attrs = {str(k): str(v) for k, v in (flavor.attributes or {}).items()}
         label = str(flavor.flavor or attrs.get("flavor") or attrs.get("dtype") or "").strip()
+        # th#606: worker-addable provenance stamp fields. Producers declare
+        # quant identity in the flavor attribute bag; it rides the commit's
+        # `provenance` object onto the checkpoint's node stamp (parents /
+        # derivation_op come from the orchestrator's token claim, never here).
+        provenance = {
+            k: attrs[k]
+            for k in ("quantization_method", "quantization_library")
+            if attrs.get(k)
+        }
         results.append(client.commit(
             destination_repo=dest,
             files=_flavor_files(flavor),
@@ -71,6 +80,7 @@ def publish_flavors(
             file_layout=attrs.get("file_layout", ""),
             file_type=attrs.get("file_type", ""),
             metadata={**(dict(metadata) if metadata else {}), **attrs},
+            provenance=provenance,
         ))
     return results
 
