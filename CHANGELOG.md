@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.11.2
+
+- Republish: the 0.11.0 and 0.11.1 PyPI wheels were both built from a stale local checkout (19 commits behind master, mixed-commit tree) and lack `allow_lora`, `LoraOverlay`, and `inductor_counters`. No code changes vs 0.11.1 master; version bump only, publish from clean `origin/master` HEAD.
+- gitignore `.runtime/`.
+
 ## 0.11.1
 
 - **Republish from HEAD.** The 0.11.0 PyPI wheel was stale (missing
