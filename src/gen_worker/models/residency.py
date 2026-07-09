@@ -31,9 +31,12 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from .memory import (
+    device_mismatches,
     estimate_cuda_resident_gb,
+    estimate_pipeline_size_gb,
     flush_memory,
     get_available_ram_gb,
+    repair_device_placement,
 )
 
 logger = logging.getLogger(__name__)
@@ -107,14 +110,14 @@ def _obj_manages_own_device(obj: Any) -> bool:
 
 
 def _move_obj(obj: Any, device: str) -> None:
+    """Whole-object ``.to(device)``. Raises on failure — the caller
+    (:meth:`Residency._move_verified`) owns rollback; swallowing a mid-move
+    CUDA OOM here used to book a half-moved pipeline as resident (gw#409)."""
     if obj is None or _obj_manages_own_device(obj):
         return
-    try:
-        to = getattr(obj, "to", None)
-        if callable(to):
-            to(device)
-    except Exception as exc:
-        logger.warning("residency: .to(%s) failed: %s", device, exc)
+    to = getattr(obj, "to", None)
+    if callable(to):
+        to(device)
 
 
 class Residency:
@@ -284,29 +287,107 @@ class Residency:
                     self.pre_demote(ref, e.obj)
                 except Exception:
                     logger.exception("pre_demote hook failed for %s", ref)
-            self._move(e.obj, "cpu")
+            if not self._move_verified(e.obj, "cpu", ref=ref):
+                return False  # entry stays VRAM; object restored to cuda
             e.tier = Tier.RAM
             e.vram_bytes = 0
         flush_memory()
         self._emit(ref, IN_RAM)
         return True
 
+    def _move_verified(self, obj: Any, device: str, *, ref: str = "") -> bool:
+        """Move + paranoid completeness walk (gw#409): after ``.to(device)``,
+        every module parameter/buffer must actually be on ``device`` — a move
+        that raised (mid-move CUDA OOM) or skipped tensors gets one targeted
+        repair pass, and an unrepairable object is rolled back to the other
+        side. Residency NEVER books a mixed-device pipeline: mixed devices
+        fatal mid-denoise ("Expected all tensors to be on the same device")."""
+        restore = "cpu" if device != "cpu" else "cuda"
+        try:
+            self._move(obj, device)
+            missed = device_mismatches(obj, device)
+            if missed:
+                logger.warning(
+                    "residency: .to(%s) on %s left %d tensors behind (e.g. %s); repairing",
+                    device, ref or type(obj).__name__, len(missed), missed[:3],
+                )
+                missed = repair_device_placement(obj, device)
+            if not missed:
+                return True
+            logger.error(
+                "residency: move of %s to %s incomplete after repair (%s); rolling back",
+                ref or type(obj).__name__, device, missed[:5],
+            )
+        except Exception as exc:
+            logger.error(
+                "residency: .to(%s) failed for %s: %s; rolling back",
+                device, ref or type(obj).__name__, exc,
+            )
+        try:
+            self._move(obj, restore)
+            left = repair_device_placement(obj, restore)
+            if left:
+                logger.critical(
+                    "residency: rollback of %s to %s ALSO incomplete (%s) — "
+                    "object is mixed-device and unusable",
+                    ref or type(obj).__name__, restore, left[:5],
+                )
+        except Exception:
+            logger.exception("residency: rollback .to(%s) failed for %s", restore, ref)
+        flush_memory()
+        return False
+
     def promote(self, ref: str, device: str = "cuda") -> bool:
-        """RAM -> VRAM (makes room first). True when resident afterward."""
+        """RAM -> VRAM (makes room first). True when resident afterward —
+        i.e. every tensor verified on ``device``; a failed/partial move is
+        rolled back to CPU and refused instead of booked (gw#409)."""
         with self._lock:
             e = self._entries.get(ref)
             if e is None or not e.movable:
                 return False
-            if e.tier is Tier.VRAM:
-                e.last_used = time.monotonic()
-                return True
             hint = e.vram_hint
+            obj = e.obj
+            already_vram = e.tier is Tier.VRAM
+            if already_vram:
+                e.last_used = time.monotonic()
+        if already_vram:
+            # Paranoid fast path: a VRAM-booked entry must actually be device-
+            # complete (a crashed rollback / out-of-band .to() must not serve
+            # a mixed-device pipeline). The clean-case walk is tensor metadata
+            # only — no data movement.
+            missed = device_mismatches(obj, device)
+            if not missed:
+                return True
+            logger.warning(
+                "residency: VRAM-tier %s holds %d off-device tensors (e.g. %s); repairing",
+                ref, len(missed), missed[:3],
+            )
+            if not repair_device_placement(obj, device):
+                return True
+            # Unrepairable: book the truth (RAM) and refuse.
+            with self._lock:
+                e = self._entries.get(ref)
+                if e is None:
+                    return False
+                if not self._move_verified(e.obj, "cpu", ref=ref):
+                    logger.critical("residency: %s stuck mixed-device", ref)
+                e.tier = Tier.RAM
+                e.vram_bytes = 0
+            flush_memory()
+            self._emit(ref, IN_RAM)
+            return False
+        if hint <= 0:
+            # Never-measured entry: estimate from weights so make_room asks
+            # for real headroom instead of 0 (a 0-byte ask promoted 6.9GB
+            # pipelines into ~2GB free and OOMed mid-move, gw#409).
+            hint = int(estimate_pipeline_size_gb(obj) * _GiB)
         self.make_room(hint)
         with self._lock:
             e = self._entries.get(ref)
             if e is None or not e.movable:
                 return False
-            self._move(e.obj, device)
+            if not self._move_verified(e.obj, device, ref=ref):
+                return False  # entry stays RAM; object restored to cpu
             e.tier = Tier.VRAM
             e.vram_bytes = int(estimate_cuda_resident_gb(e.obj) * _GiB) or hint
             e.vram_hint = max(e.vram_hint, e.vram_bytes)
