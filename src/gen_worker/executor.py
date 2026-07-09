@@ -949,6 +949,26 @@ class Executor:
         for ref in refs:
             res.touch(ref)
 
+    @staticmethod
+    def _worker_loaded_slots(spec: EndpointSpec) -> set:
+        """Setup slots the WORKER materializes in host RAM (class-typed
+        annotations loaded via ``from_pretrained``). str/Path slots and
+        engine runtimes (vllm/llama-server) stream weights themselves and
+        must not be counted against the host-RAM admission gate."""
+        if spec.cls is None or spec.runtime:
+            return set()
+        setup = getattr(spec.cls, "setup", None)
+        if setup is None:
+            return set()
+        try:
+            hints = typing.get_type_hints(setup)
+        except Exception:
+            return set()
+        return {
+            name for name, ann in hints.items()
+            if isinstance(ann, type) and callable(getattr(ann, "from_pretrained", None))
+        }
+
     async def _ensure_host_ram_for(self, spec: EndpointSpec, paths: Dict[str, str]) -> None:
         """Load-size-aware host-RAM admission (gw#407). ``from_pretrained``
         stages the full weight set in host RAM before placement; loading into
@@ -956,12 +976,17 @@ class Executor:
         process — including gRPC keepalive acks — so the hub disconnects and
         requeues in a livelock (J17: 16 SDXL variants on a 31GB host). Free
         warm RAM-tier LRU pipelines first; when even that cannot cover the
-        incoming bytes plus the floor, fail RETRYABLE instead of thrashing."""
-        if not paths:
+        incoming bytes plus the floor, fail RETRYABLE instead of thrashing.
+
+        Only worker-loaded (pipeline-typed) slots count: tenant-owned and
+        engine-runtime slots do not stage full weight sets in host RAM."""
+        slots = self._worker_loaded_slots(spec)
+        if not paths or not slots:
             return
         incoming = 0
-        for p in paths.values():
-            incoming += await asyncio.to_thread(disk_gc.tree_bytes, Path(p))
+        for slot, p in paths.items():
+            if slot in slots:
+                incoming += await asyncio.to_thread(disk_gc.tree_bytes, Path(p))
         if incoming <= 0:
             return
         if await asyncio.to_thread(self.store.residency.make_room_ram, incoming):

@@ -235,6 +235,32 @@ def test_setup_frees_warm_tier_before_refusing(tmp_path: Path, monkeypatch) -> N
     asyncio.run(_run())
 
 
+def test_gate_ignores_tenant_owned_slots(tmp_path: Path, monkeypatch) -> None:
+    """str/Path-typed slots (tenant-owned loads, engine runtimes) must not be
+    counted: a 26GiB vllm model on a 32GiB host is NOT a from_pretrained
+    host-RAM staging load and must not be refused by the gate."""
+    from gen_worker.models import disk_gc
+
+    class Endpoint:
+        def setup(self, model: str) -> None:
+            self.model = model
+
+        def run(self, ctx, payload: _In):  # pragma: no cover
+            return payload
+
+    spec = _spec("ep", Endpoint, {"model": HF("acme/huge-llm")})
+    monkeypatch.setattr(disk_gc, "tree_bytes", lambda p: 26 * _GiB)
+    monkeypatch.setattr(residency_mod, "get_total_ram_gb", lambda: 32.0)
+    monkeypatch.setattr(residency_mod, "get_available_ram_gb", lambda: 28.0)
+
+    async def _run() -> None:
+        ex = _executor([spec], tmp_path)
+        inst = await ex.ensure_setup(spec)  # gate skipped -> loads fine
+        assert inst.model  # slot injected as the local path
+
+    asyncio.run(_run())
+
+
 # --------------------------------------------------------------------------- #
 # Loop-stall watchdog: stall episodes are visible in worker logs
 # --------------------------------------------------------------------------- #
