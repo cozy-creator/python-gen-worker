@@ -36,7 +36,7 @@ from .capability import HardwareUnmetError, InsufficientDiskError
 from .input_assets import cleanup_input_assets, materialize_input_assets
 from .models import disk_gc
 from .models import residency as residency_mod
-from .models.memory import estimate_cuda_resident_gb
+from .models.memory import estimate_cuda_resident_gb, get_available_ram_gb
 from .models.cache_paths import tensorhub_cas_dir
 from .models.download import ensure_local
 from .models.errors import UrlExpiredError
@@ -437,7 +437,10 @@ class ModelStore:
                         progress=_progress,
                     )
                     self.residency.track_disk(ref, path)
-                    self._index.record(ref, path, disk_gc.tree_bytes(path))
+                    # tree_bytes stats every file — off-loop (gw#407: no
+                    # multi-GB directory walks on the event loop).
+                    size = await asyncio.to_thread(disk_gc.tree_bytes, path)
+                    self._index.record(ref, path, size)
                     return path
                 except Exception as exc:
                     terminal = _is_terminal_download_error(exc) or attempt >= _DOWNLOAD_RETRIES
@@ -685,8 +688,10 @@ class Executor:
             return instance
 
     def _mark_setup_failed(self, rec: _ClassRecord, exc: BaseException) -> None:
-        if isinstance(exc, InsufficientDiskError):
-            return  # transient: disk GC frees space; the next LOAD retries
+        if isinstance(exc, (InsufficientDiskError, RetryableError)):
+            # Transient pressure (disk GC frees space / warm-tier RAM drains):
+            # fail the op RETRYABLE, never disable the function.
+            return
         if isinstance(exc, HardwareUnmetError):
             reason = getattr(exc, "reason", "hardware_unmet")
             axes = {str(k): str(v) for k, v in (exc.axes() or {}).items()}
@@ -715,6 +720,7 @@ class Executor:
         # Loads serialize: concurrent setups would cross-contaminate each
         # other's allocator deltas and place_pipeline's free-VRAM reads.
         async with self._load_lock:
+            await self._ensure_host_ram_for(spec, paths)
             await self._make_room_for(spec, setup_slots)
             instance = spec.cls()
             setup = getattr(instance, "setup", None)
@@ -805,6 +811,30 @@ class Executor:
                             )
         for ref in refs:
             res.touch(ref)
+
+    async def _ensure_host_ram_for(self, spec: EndpointSpec, paths: Dict[str, str]) -> None:
+        """Load-size-aware host-RAM admission (gw#407). ``from_pretrained``
+        stages the full weight set in host RAM before placement; loading into
+        a nearly-full host pushes it into reclaim-thrash that stalls the whole
+        process — including gRPC keepalive acks — so the hub disconnects and
+        requeues in a livelock (J17: 16 SDXL variants on a 31GB host). Free
+        warm RAM-tier LRU pipelines first; when even that cannot cover the
+        incoming bytes plus the floor, fail RETRYABLE instead of thrashing."""
+        if not paths:
+            return
+        incoming = 0
+        for p in paths.values():
+            incoming += await asyncio.to_thread(disk_gc.tree_bytes, Path(p))
+        if incoming <= 0:
+            return
+        if await asyncio.to_thread(self.store.residency.make_room_ram, incoming):
+            return
+        avail = get_available_ram_gb()
+        raise RetryableError(
+            f"insufficient host RAM to load {spec.name}: "
+            f"~{incoming / _GiB:.1f}GiB incoming, {avail:.1f}GiB available "
+            "after releasing the warm tier"
+        )
 
     async def _make_room_for(self, spec: EndpointSpec, setup_slots: List[str]) -> None:
         """Evict idle LRU pipelines before loading instead of degrading the

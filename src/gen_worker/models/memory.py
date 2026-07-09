@@ -70,6 +70,16 @@ def get_available_ram_gb() -> float:
         return 0.0
 
 
+def get_total_ram_gb() -> float:
+    """Total system RAM (adaptive RAM-floor input). 0.0 if psutil missing."""
+    try:
+        import psutil
+
+        return float(psutil.virtual_memory().total) / float(1024**3)
+    except Exception:
+        return 0.0
+
+
 def cuda_allocated_bytes(device_index: Optional[int] = None) -> int:
     """``torch.cuda.memory_allocated`` (0 without CUDA). Deltas across a load
     are the measured VRAM footprint reported in ModelEvent.vram_bytes."""
@@ -651,5 +661,6 @@ __all__ = [
     "cuda_allocated_bytes",
     "get_available_vram_gb",
     "get_available_ram_gb",
+    "get_total_ram_gb",
     "flush_memory",
 ]
