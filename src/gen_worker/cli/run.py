@@ -1060,6 +1060,10 @@ def _load_injected_model(
     from gen_worker.models.loading import load_from_pretrained
 
     cls = annotation if isinstance(annotation, type) else None
+    if cls is not None and issubclass(cls, (str, os.PathLike)):
+        # Executor parity (gw#416): a str/Path-typed slot receives the
+        # snapshot PATH — the endpoint loads itself.
+        return local_path if cls is str else Path(local_path)
     if cls is None or not hasattr(cls, "from_pretrained"):
         from diffusers import DiffusionPipeline
         cls = DiffusionPipeline

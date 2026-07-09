@@ -313,13 +313,19 @@ def test_vram_ladder_picks_largest_fitting():
 
 
 def test_base_fallback_below_every_floor():
-    # 8 GB free: nothing fits -> base binding + offload ladder.
+    # 8 GB free: nothing fits resident, but fp8's 4-bit estimate (14 * 0.45
+    # = 6.3) does -> the automatic emergency rung (gw#420) outranks offload.
     choice = select_variant(
         _FLUX_VARIANTS, _CAPS_4070, 8.0, base=("flux", Resources(vram_gb=24)),
     )
+    assert choice.name == "flux-fp8" and choice.fit == "emergency_quant"
+    # 5 GB free: even 4-bit estimates too big -> base binding + offload ladder.
+    choice = select_variant(
+        _FLUX_VARIANTS, _CAPS_4070, 5.0, base=("flux", Resources(vram_gb=24)),
+    )
     assert choice.name == "flux" and choice.fit == "offload"
     # No base declared -> smallest compatible variant, offloaded.
-    choice = select_variant(_FLUX_VARIANTS, _CAPS_4070, 8.0)
+    choice = select_variant(_FLUX_VARIANTS, _CAPS_4070, 5.0)
     assert choice.name == "flux-fp8" and choice.fit == "offload"
 
 
@@ -390,7 +396,8 @@ def test_listing_carries_fit_and_variant_of(monkeypatch):
     assert doc["detected"]["free_vram_gb"] == 16.0
     by_name = {f["name"]: f for f in doc["functions"]}
     assert set(by_name) == {"generate", "gen-fp8", "gen-nvfp4"}
-    assert by_name["generate"]["fit"] == "offload"          # 24 GB > 16 free
+    # 24 GB > 16 free, but 24 * 0.45 fits -> automatic emergency rung (gw#420)
+    assert by_name["generate"]["fit"] == "emergency_quant"
     assert "variant_of" not in by_name["generate"]
     assert by_name["gen-fp8"]["fit"] == "fits"
     assert by_name["gen-fp8"]["variant_of"] == "generate"
@@ -410,6 +417,7 @@ def test_variant_auto_picks_fp8_on_sm89(monkeypatch):
 
 
 def test_variant_auto_base_fallback_below_floor(monkeypatch):
+    # 8 GB free: gen-fp8's 4-bit estimate fits -> emergency rung (gw#420).
     _patched_hw(monkeypatch, sm=89, free_gb=8.0)
     mod = _variant_module()
     candidates = run_mod.discover_candidates(mod)
@@ -417,7 +425,14 @@ def test_variant_auto_base_fallback_below_floor(monkeypatch):
         candidates, cls_name=None, method_name="generate",
         default_name=None, variant="auto",
     )
-    assert picked.fn_name == "generate"  # base + offload ladder
+    assert picked.fn_name == "gen-fp8"
+    # 5 GB free: no 4-bit estimate fits -> base + offload ladder.
+    _patched_hw(monkeypatch, sm=89, free_gb=5.0)
+    picked = run_mod.select_function_with_variant(
+        candidates, cls_name=None, method_name="generate",
+        default_name=None, variant="auto",
+    )
+    assert picked.fn_name == "generate"
 
 
 def test_variant_by_name_and_unknown(monkeypatch):

@@ -166,7 +166,7 @@ def test_no_storage_dtype_means_no_casting(tmp_path: Path) -> None:
 
 @pytest.fixture
 def emergency_on(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("GEN_WORKER_EMERGENCY_QUANT", "1")
+    """A CUDA host with 10GB free — the rung is automatic there (gw#420)."""
     import torch
 
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
@@ -179,10 +179,13 @@ def test_snapshot_weight_bytes_reads_headers(tmp_path: Path) -> None:
     assert snapshot_weight_bytes(_snapshot(tmp_path, "BF16", 4096)) == 4096
 
 
-def test_emergency_env_gate(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("GEN_WORKER_EMERGENCY_QUANT", raising=False)
+def test_emergency_always_on_cuda_hosts(monkeypatch: pytest.MonkeyPatch) -> None:
+    # gw#420: no env flag — the rung is armed iff the host has CUDA.
+    import torch
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     assert emergency_quant_enabled() is False
-    monkeypatch.setenv("GEN_WORKER_EMERGENCY_QUANT", "true")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     assert emergency_quant_enabled() is True
 
 
@@ -220,10 +223,12 @@ def test_emergency_rung_counts_planned_fp8_halving(
     assert len(pipe.transformer.casting_calls) == 1
 
 
-def test_emergency_rung_stays_out_without_env(
+def test_emergency_rung_stays_out_without_cuda(
     fake_diffusers: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    monkeypatch.delenv("GEN_WORKER_EMERGENCY_QUANT", raising=False)
+    import torch
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     snap = _snapshot(tmp_path, "F8_E4M3", 27 << 30)
     _Pipe.calls = []
     load_from_pretrained(_Pipe, snap)
@@ -236,7 +241,8 @@ def test_emergency_rung_stays_out_without_env(
 # --------------------------------------------------------------------------
 
 
-def test_variant_fit_emergency_verdict(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_variant_fit_emergency_verdict() -> None:
+    # gw#420: the rung is automatic on CUDA hosts — no flag anywhere.
     from gen_worker.api import Resources
     from gen_worker.models.hub_policy import (
         FIT_EMERGENCY,
@@ -249,27 +255,20 @@ def test_variant_fit_emergency_verdict(monkeypatch: pytest.MonkeyPatch) -> None:
         cuda_version="12.8", gpu_sm=89, torch_version="2.11", installed_libs=[])
     res = Resources(vram_gb=34)  # klein-9b-class on a 24GB card, 20 free
 
-    monkeypatch.delenv("GEN_WORKER_EMERGENCY_QUANT", raising=False)
-    assert variant_fit(res, caps, 20.0)[0] == FIT_OFFLOAD
-
-    monkeypatch.setenv("GEN_WORKER_EMERGENCY_QUANT", "1")
     fit, reason = variant_fit(res, caps, 20.0)
     assert fit == FIT_EMERGENCY
     assert "emergency quality" in reason
-    # 4-bit estimate still too big -> offload even with the env set
+    # 4-bit estimate still too big -> offload even on a CUDA host
     assert variant_fit(Resources(vram_gb=60), caps, 20.0)[0] == FIT_OFFLOAD
 
 
-def test_select_variant_prefers_emergency_over_offload(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_select_variant_prefers_emergency_over_offload() -> None:
     from gen_worker.api import Resources
     from gen_worker.models.hub_policy import (
         TensorhubWorkerCapabilities,
         select_variant,
     )
 
-    monkeypatch.setenv("GEN_WORKER_EMERGENCY_QUANT", "1")
     caps = TensorhubWorkerCapabilities(
         cuda_version="12.8", gpu_sm=89, torch_version="2.11", installed_libs=[])
     choice = select_variant(

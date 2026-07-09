@@ -51,6 +51,8 @@ gen-worker = "gen_worker.cli:main"
 torch = [
     "torch>=2.11.0",
     "safetensors>=0.7.0",
+    # Emergency nf4 fit rung (gw#420) — automatic on CUDA hosts, needs bnb.
+    "bitsandbytes>=0.45.0; sys_platform == 'linux' or sys_platform == 'win32'",
 ]
 vision = [
     "torchvision>=0.26.0",
@@ -71,7 +73,12 @@ video = [
 ]
 dev = [
     "av>=12",
+    # Real tiny-pipeline residency tests (gw#417) build local diffusers pipes;
+    # transformers+accelerate activate the bnb nf4 convert integration test.
+    "accelerate>=1.0",
+    "diffusers>=0.36.0",
     "grpcio-tools>=1.80.0",
+    "transformers>=4.55",
     "mypy>=1.10.0",
     "ruff>=0.6.0",
     "pytest>=9.0.0",

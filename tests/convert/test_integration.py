@@ -128,8 +128,9 @@ def test_repackage_direction_diffusers_to_singlefile(tiny_sdxl, tmp_path: Path) 
 
 
 @pytest.mark.skipif(
-    importlib.util.find_spec("bitsandbytes") is None,
-    reason="bitsandbytes not installed",
+    any(importlib.util.find_spec(m) is None
+        for m in ("bitsandbytes", "transformers", "accelerate")),
+    reason="bitsandbytes/transformers/accelerate not installed",
 )
 def test_quant_direction_nf4(tiny_llama, tmp_path: Path) -> None:
     from gen_worker.convert.convert import run_inline_conversion

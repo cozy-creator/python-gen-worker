@@ -939,10 +939,15 @@ class Executor:
                     if res.tier(ref) is residency_mod.Tier.RAM:
                         ok = await asyncio.to_thread(res.promote, ref)
                         self._on_state_change()
-                        if not ok and cuda_host and res.tier(ref) is residency_mod.Tier.RAM:
+                        if (not ok and cuda_host
+                                and res.tier(ref) is residency_mod.Tier.RAM
+                                and res.movable(ref)):
                             # Promote refused/rolled back (gw#409): fail the
                             # job RETRYABLE at promote time — never hand a
                             # handler a pipeline that fatals mid-denoise.
+                            # Non-movable entries (object-less ledger refs,
+                            # offload-hooked pipelines) can never promote —
+                            # promote-or-die on them livelocks (gw#417).
                             raise RetryableError(
                                 f"promotion of {ref} to VRAM failed; retrying"
                             )

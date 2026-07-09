@@ -372,10 +372,9 @@ def _merge_sharded_checkpoint(snapshot_dir: Path, index_path: Path) -> Path:
 # --- Emergency 4-bit rung (th#546 emergency lane) --------------------------
 # Fit ladder: bf16 -> #fp8 flavor -> #nvfp4 (Blackwell) -> EMERGENCY nf4 ->
 # CPU offload. The emergency rung runtime-quantizes the denoiser to bnb nf4 at
-# load when even the downloaded flavor cannot fit free VRAM. LOCAL/fit-
-# emergency only: enabled by env (cozy-local sets it), never a binding kwarg,
-# never scheduled by the production hub.
-EMERGENCY_QUANT_ENV = "GEN_WORKER_EMERGENCY_QUANT"
+# load when even the downloaded flavor cannot fit free VRAM. Always armed on
+# CUDA hosts (gw#420: fitting is the runtime's job, not a flag); the platform
+# never reaches it because its scheduler places by declared Resources.
 # Coarse whole-model resident factor after nf4-quantizing the denoiser
 # (denoiser ~4x smaller; encoders/VAE stay at compute dtype).
 EMERGENCY_FIT_FACTOR = 0.45
@@ -383,9 +382,12 @@ _EMERGENCY_MARGIN_GB = 2.0
 
 
 def emergency_quant_enabled() -> bool:
-    import os
+    try:
+        import torch
 
-    return os.environ.get(EMERGENCY_QUANT_ENV, "").strip().lower() in ("1", "true", "yes")
+        return bool(torch.cuda.is_available())
+    except ImportError:
+        return False
 
 
 def snapshot_weight_bytes(model_path: Path) -> int:
@@ -487,7 +489,7 @@ def load_from_pretrained(
     ``cls.from_single_file``. ``storage_dtype="fp8"`` (or an fp8-stored
     snapshot) keeps denoiser weights in fp8 storage with per-layer upcast to
     the compute dtype; the emergency nf4 rung engages when even that cannot
-    fit free VRAM (env-gated, cozy-local). Used by the executor to satisfy
+    fit free VRAM (automatic on CUDA hosts). Used by the executor to satisfy
     pipeline-typed ``setup()`` annotations; endpoints may also call it."""
     path = str(path)
     ensure_quant_library_imported(attrs)
