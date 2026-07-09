@@ -90,6 +90,12 @@ class HubPublishError(RuntimeError):
     """Terminal failure talking to tensorhub's commit API."""
 
 
+class BankedBlobGoneError(HubPublishError):
+    """A commit referenced a banked CAS blob (no local bytes) that the hub
+    no longer has — the bank lied (GC race). Callers fall back to a full
+    download (th#592 download-skip is fail-open)."""
+
+
 def _retry_after_s(resp: requests.Response) -> Optional[float]:
     try:
         value = float(str(resp.headers.get("Retry-After") or "").strip())
@@ -155,14 +161,23 @@ def blake3_file(path: Path, *, chunk: int = 8 * 1024 * 1024) -> str:
 
 @dataclass
 class CommitFile:
-    """One file to add: repo path + local bytes."""
+    """One file to add: repo path + local bytes.
+
+    ``local_path=None`` is a *by-reference* add (th#592 download-skip):
+    blake3 + size_bytes are pre-known from the bank and the blob must
+    already exist in CAS — there are no bytes to upload."""
 
     path: str
-    local_path: Path
+    local_path: Optional[Path] = None
     size_bytes: int = 0
     blake3: str = ""
 
     def resolve(self) -> "CommitFile":
+        if self.local_path is None:
+            if not self.blake3:
+                raise HubPublishError(
+                    f"by-reference commit file {self.path!r} needs a blake3")
+            return self
         if not self.size_bytes:
             self.size_bytes = int(Path(self.local_path).stat().st_size)
         if not self.blake3:
@@ -441,6 +456,10 @@ class HubClient:
                 f = by_path.get(str(entry.get("path") or ""))
                 if f is None:
                     raise HubPublishError(f"server returned unknown upload path {entry.get('path')!r}")
+                if f.local_path is None:
+                    raise BankedBlobGoneError(
+                        f"banked blob for {f.path!r} is gone from CAS "
+                        f"(blake3 {f.blake3[:12]}…) — no local bytes to upload")
                 self._upload_one(repo_path, revision_id, entry, Path(f.local_path))
                 uploaded += 1
                 if callable(progress):
@@ -457,14 +476,54 @@ class HubClient:
             raise
 
         final = self._finalize(repo_path, revision_id)
+        # tensorhub nests the minted id under `checkpoint.checkpoint_id`
+        # (repo_publish.go); tolerate a flat key for older shapes.
+        ckpt = final.get("checkpoint") if isinstance(final.get("checkpoint"), dict) else {}
         return CommitResult(
             revision_id=revision_id,
             uploaded=uploaded,
             deduped=deduped,
             total_bytes=sum(f.size_bytes for f in resolved),
-            checkpoint_id=str(final.get("checkpoint_id") or "").strip(),
+            checkpoint_id=str(ckpt.get("checkpoint_id") or final.get("checkpoint_id") or "").strip(),
             response=final,
         )
+
+    def lookup_clone_manifests(
+        self, destination_repo: str, keys: list[str],
+    ) -> dict[str, dict[str, Any]]:
+        """th#592 download-skip: batch bank lookup. Returns key -> result
+        ({found, ready, payload?}); raises HubPublishError on failure —
+        callers treat that as a miss (fail-open)."""
+        if not keys:
+            return {}
+        repo_path = self._repo_path(destination_repo)
+        resp = self._post(f"{repo_path}/clone-manifests/lookup", {"keys": list(keys)})
+        if resp.status_code < 200 or resp.status_code >= 300:
+            raise HubPublishError(
+                f"clone-manifest lookup failed ({resp.status_code}): {resp.text[:300]}")
+        out: dict[str, dict[str, Any]] = {}
+        for r in self._json(resp).get("results") or []:
+            if isinstance(r, dict) and r.get("key"):
+                out[str(r["key"])] = r
+        return out
+
+    def record_clone_manifests(
+        self, destination_repo: str, manifests: list[dict[str, Any]],
+    ) -> dict[str, str]:
+        """th#592 download-skip: record published manifests under their bank
+        keys ([{key, payload}]). Returns key -> status."""
+        if not manifests:
+            return {}
+        repo_path = self._repo_path(destination_repo)
+        resp = self._post(f"{repo_path}/clone-manifests", {"manifests": list(manifests)})
+        if resp.status_code < 200 or resp.status_code >= 300:
+            raise HubPublishError(
+                f"clone-manifest record failed ({resp.status_code}): {resp.text[:300]}")
+        return {
+            str(r.get("key")): str(r.get("status") or "")
+            for r in self._json(resp).get("results") or []
+            if isinstance(r, dict)
+        }
 
 
 def files_from_tree(tree: Path, *, prefix: str = "") -> list[CommitFile]:
@@ -488,6 +547,7 @@ def files_from_tree(tree: Path, *, prefix: str = "") -> list[CommitFile]:
 
 
 __all__ = [
+    "BankedBlobGoneError",
     "HubClient",
     "HubPublishError",
     "CommitFile",

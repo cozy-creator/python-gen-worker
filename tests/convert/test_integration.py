@@ -43,6 +43,30 @@ def tiny_sdxl(tmp_path_factory) -> object:
     return ingest_huggingface(_TINY_SDXL, tmp_path_factory.mktemp("sdxl"))
 
 
+def test_plan_huggingface_pre_download_identity(tmp_path: Path) -> None:
+    """th#592 download-skip: the plan derives a complete per-file content
+    identity (lfs sha256 / git blob oid) from metadata alone, its bank key is
+    stable across calls, and feeding the plan into ingest_huggingface yields
+    the same selection the un-planned ingest makes."""
+    from gen_worker.convert.bank import flavor_bank_key
+    from gen_worker.convert.ingest import ingest_huggingface as ingest, plan_huggingface
+
+    plan = plan_huggingface(_TINY_SDXL)
+    files = plan.bank_files()
+    assert files, "every selected file must carry a provider content id"
+    assert all(cid.startswith(("sha256:", "git:")) for _, _, cid in files)
+    assert {p for p, _, _ in files} == set(plan.classification.allow_patterns)
+
+    key1 = flavor_bank_key(plan, "bf16-diffusers-safetensors", layout_hint="diffusers")
+    key2 = flavor_bank_key(plan_huggingface(_TINY_SDXL), "bf16-diffusers-safetensors",
+                           layout_hint="diffusers")
+    assert key1 and key1 == key2, "bank key must be reproducible from metadata"
+
+    src = ingest(_TINY_SDXL, tmp_path / "planned", plan=plan)
+    assert src.source_revision == plan.revision
+    assert (src.dir / "model_index.json").is_file()
+
+
 def test_ingest_transformers_selects_safetensors_not_onnx(tiny_llama) -> None:
     src = tiny_llama
     assert src.classification.strategy == "transformers"

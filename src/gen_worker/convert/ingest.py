@@ -92,13 +92,16 @@ def _hf_classification_inputs(
     repo_id: str,
     revision: str | None,
     hf_token: str | None,
-) -> tuple[list[str], dict[str, int], dict[str, Any]]:
-    """One list_repo_tree walk: paths, sizes, and small side signals."""
+) -> tuple[list[str], dict[str, int], dict[str, Any], dict[str, str]]:
+    """One list_repo_tree walk: paths, sizes, small side signals, and the
+    provider's per-file content ids (lfs sha256 / git blob oid) — the
+    latter feed the th#592 download-skip bank key."""
     from huggingface_hub import HfApi
 
     api = HfApi(token=(hf_token or None))
     paths: list[str] = []
     sizes: dict[str, int] = {}
+    content_ids: dict[str, str] = {}
     for entry in api.list_repo_tree(repo_id, revision=revision, recursive=True):
         path = str(getattr(entry, "path", "") or "")
         size = getattr(entry, "size", None)
@@ -106,6 +109,17 @@ def _hf_classification_inputs(
             continue  # skip directory rows
         paths.append(path)
         sizes[path] = int(size or 0)
+        lfs = getattr(entry, "lfs", None)
+        sha = ""
+        if lfs is not None:
+            sha = str(getattr(lfs, "sha256", "") or "").strip().lower()
+            if not sha and isinstance(lfs, dict):
+                sha = str(lfs.get("sha256") or lfs.get("oid") or "").strip().lower()
+        blob_id = str(getattr(entry, "blob_id", "") or "").strip()
+        if sha:
+            content_ids[path] = f"sha256:{sha}"
+        elif blob_id:
+            content_ids[path] = f"git:{blob_id}"
 
     side: dict[str, Any] = {}
     if "config.json" in paths:
@@ -140,7 +154,140 @@ def _hf_classification_inputs(
             side["readme_tags"] = [str(t) for t in tags]
         except Exception:
             pass
-    return paths, sizes, side
+    return paths, sizes, side, content_ids
+
+
+@dataclass
+class HFSourcePlan:
+    """Pre-download identity of one HF clone source (metadata calls only).
+
+    Feeds the th#592 download-skip: ``content_ids`` carries the provider's
+    own per-file content hashes (lfs.oid sha256 for LFS files, git blob oid
+    for small files), so a bank key derives without downloading a byte.
+    """
+
+    repo_id: str
+    revision: str                      # resolved commit sha
+    paths: list[str]
+    sizes: dict[str, int]
+    side: dict[str, Any]
+    classification: RepoClassification
+    content_ids: dict[str, str]        # path -> "sha256:<hex>" | "git:<oid>"
+
+    @property
+    def provider(self) -> str:
+        return "huggingface"
+
+    @property
+    def source_ref(self) -> str:
+        return self.repo_id
+
+    def bank_files(self) -> list[tuple[str, int, str]]:
+        """(path, size, content_id) for every file the clone would download.
+        Empty when any selected file lacks a content id (no safe key)."""
+        out: list[tuple[str, int, str]] = []
+        for p in self.classification.allow_patterns:
+            cid = self.content_ids.get(p, "")
+            if not cid:
+                return []
+            out.append((p, int(self.sizes.get(p, 0)), cid))
+        return sorted(out)
+
+    def bank_extra(self) -> dict[str, str]:
+        attrs = {str(k): str(v) for k, v in (self.classification.attrs or {}).items()}
+        return {
+            "strategy": str(self.classification.strategy),
+            "attrs": json.dumps(attrs, sort_keys=True, separators=(",", ":")),
+        }
+
+
+@dataclass
+class CivitaiSourcePlan:
+    """Pre-download identity of one civitai model version (one API call)."""
+
+    version_id: int
+    payload: dict[str, Any]
+    files: list[dict[str, Any]]        # download.{name,size_bytes,sha256,...}
+    revision: str                      # same manifest hash ingest_civitai mints
+
+    @property
+    def provider(self) -> str:
+        return "civitai"
+
+    @property
+    def source_ref(self) -> str:
+        return str(self.version_id)
+
+    def bank_files(self) -> list[tuple[str, int, str]]:
+        out: list[tuple[str, int, str]] = []
+        for f in self.files:
+            sha = str(f.get("sha256") or "").strip().lower()
+            if not sha:
+                return []
+            out.append((str(f.get("name")), int(f.get("size_bytes") or 0), f"sha256:{sha}"))
+        return sorted(out)
+
+    def bank_extra(self) -> dict[str, str]:
+        model = self.payload.get("model") if isinstance(self.payload.get("model"), dict) else {}
+        return {
+            "base_model": str(self.payload.get("baseModel") or ""),
+            "model_type": str((model or {}).get("type") or ""),
+        }
+
+
+def _civitai_manifest_revision(file_names: list[str]) -> str:
+    """The clone-side civitai 'revision': a hash over the downloaded file
+    listing (civitai has no commit sha). MUST stay identical between
+    plan_civitai and ingest_civitai so bank hits match full-clone runs."""
+    import hashlib
+
+    manifest = json.dumps(
+        [{"name": n} for n in sorted(file_names)], sort_keys=True, separators=(",", ":"))
+    return "sha256:" + hashlib.sha256(manifest.encode("utf-8")).hexdigest()
+
+
+def plan_huggingface(
+    source_ref: str,
+    *,
+    revision: str | None = None,
+    dtype_preference: list[str] | None = None,
+    gguf_quant: str | None = None,
+    hf_token: str | None = None,
+) -> HFSourcePlan:
+    """Resolve + classify one HF repo from metadata alone (no weight bytes)."""
+    repo_id, sha = resolve_hf_identity(source_ref, revision=revision, hf_token=hf_token)
+    rev = sha or (str(revision).strip() if revision else None)
+    paths, sizes, side, content_ids = _hf_classification_inputs(repo_id, rev, hf_token)
+    classification = classify_repo(
+        paths,
+        sizes=sizes,
+        config_json=side.get("config_json"),
+        safetensors_metadata=side.get("safetensors_metadata"),
+        readme_tags=side.get("readme_tags") or (),
+        dtype_pref=tuple(dtype_preference or ("bf16", "fp16", "fp32")),
+        gguf_quant=gguf_quant,
+    )
+    return HFSourcePlan(
+        repo_id=repo_id, revision=sha, paths=paths, sizes=sizes, side=side,
+        classification=classification, content_ids=content_ids,
+    )
+
+
+def plan_civitai(model_version_id: int, *, civitai_api_key: str | None = None) -> CivitaiSourcePlan:
+    """Fetch one civitai model version's metadata (no downloads)."""
+    from gen_worker.models.download import _civitai_select_files, fetch_civitai_model_version
+
+    version_id = int(model_version_id or 0)
+    if version_id <= 0:
+        raise ValueError("civitai_model_version_id is required")
+    payload = fetch_civitai_model_version(version_id, api_key=(civitai_api_key or ""))
+    files = _civitai_select_files(payload)
+    return CivitaiSourcePlan(
+        version_id=version_id,
+        payload=payload,
+        files=files,
+        revision=_civitai_manifest_revision([str(f.get("name")) for f in files]),
+    )
 
 
 def ingest_huggingface(
@@ -152,22 +299,22 @@ def ingest_huggingface(
     gguf_quant: str | None = None,
     hf_token: str | None = None,
     progress: ProgressFn | None = None,
+    plan: HFSourcePlan | None = None,
 ) -> IngestedSource:
-    """Classify + selectively download one HF repo into ``dest_dir``."""
+    """Classify + selectively download one HF repo into ``dest_dir``.
+
+    ``plan`` (from :func:`plan_huggingface`) skips re-doing the metadata
+    calls when the caller already planned this source."""
     from huggingface_hub import snapshot_download
 
-    repo_id, sha = resolve_hf_identity(source_ref, revision=revision, hf_token=hf_token)
+    if plan is None:
+        plan = plan_huggingface(
+            source_ref, revision=revision, dtype_preference=dtype_preference,
+            gguf_quant=gguf_quant, hf_token=hf_token)
+    repo_id, sha = plan.repo_id, plan.revision
     rev = sha or (str(revision).strip() if revision else None)
-    paths, sizes, side = _hf_classification_inputs(repo_id, rev, hf_token)
-    classification = classify_repo(
-        paths,
-        sizes=sizes,
-        config_json=side.get("config_json"),
-        safetensors_metadata=side.get("safetensors_metadata"),
-        readme_tags=side.get("readme_tags") or (),
-        dtype_pref=tuple(dtype_preference or ("bf16", "fp16", "fp32")),
-        gguf_quant=gguf_quant,
-    )
+    paths, sizes = plan.paths, plan.sizes
+    classification = plan.classification
 
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -326,11 +473,7 @@ def ingest_civitai(
         "model_family_variant": str(layout_info.model_family_variant),
         "source_file_count": str(len(files)),
     }
-    manifest = json.dumps(
-        [{"name": n} for n in files], sort_keys=True, separators=(",", ":"))
-    import hashlib
-
-    revision = "sha256:" + hashlib.sha256(manifest.encode("utf-8")).hexdigest()
+    revision = _civitai_manifest_revision(files)
     repo_spec = {
         "kind": "adapter" if attrs["runtime_library"] == "diffusers-lora" else "model",
         "library_name": "diffusers",
@@ -357,8 +500,12 @@ def ingest_civitai(
 
 
 __all__ = [
+    "CivitaiSourcePlan",
+    "HFSourcePlan",
     "IngestedSource",
-    "ingest_huggingface",
     "ingest_civitai",
+    "ingest_huggingface",
+    "plan_civitai",
+    "plan_huggingface",
     "resolve_hf_identity",
 ]
