@@ -76,11 +76,24 @@ jobs:
                 TTL_MINUTES: "45"
               }
             }')
-          pod=$(curl -sf -X POST "https://rest.runpod.io/v1/pods" \
-            -H "Authorization: Bearer $RUNPOD_API_KEY" \
-            -H "Content-Type: application/json" \
-            -d "$body")
-          echo "created pod $(echo "$pod" | jq -r .id) at \$$(echo "$pod" | jq -r .costPerHr)/hr"
+          # Capacity misses return 500 ("machine does not have the resources") —
+          # retry across cloud types instead of dying on the first attempt.
+          pod=""
+          for attempt in 1 2 3; do
+            for cloud in COMMUNITY SECURE; do
+              try=$(echo "$body" | jq --arg c "$cloud" '.cloudType = $c')
+              resp=$(curl -s -w '\n%{http_code}' -X POST "https://rest.runpod.io/v1/pods" \
+                -H "Authorization: Bearer $RUNPOD_API_KEY" \
+                -H "Content-Type: application/json" \
+                -d "$try")
+              code=${resp##*$'\n'}; json=${resp%$'\n'*}
+              if [ "$code" = "200" ] || [ "$code" = "201" ]; then pod="$json"; break 2; fi
+              echo "create attempt $attempt ($cloud) -> HTTP $code: $(echo "$json" | jq -r '.error // .' 2>/dev/null | head -c 200)"
+              sleep 20
+            done
+          done
+          [ -n "$pod" ] || { echo "::error::no 4090 capacity after 6 attempts (COMMUNITY+SECURE x3)"; exit 1; }
+          echo "created pod $(echo "$pod" | jq -r .id) at \$$(echo "$pod" | jq -r .costPerHr)/hr ($(echo "$pod" | jq -r .machine.location // empty))"
 
       - name: Wait for runner to come online
         env:
