@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.11.1
+
+- **Republish from HEAD.** The 0.11.0 PyPI wheel was stale (missing
+  `allow_lora` gw#393/ie#358, compile-honesty gw#391); no code changes vs
+  HEAD, version bump only to supersede the stale 0.11.0 wheel.
+
 ## 0.11.0
 
 - **Per-request LoRA overlays (gw#393).** `ModelBinding.loras` +
