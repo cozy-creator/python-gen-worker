@@ -8,6 +8,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+import threading
+import time
 from typing import Any, Dict, List, Optional
 
 from .config import Settings
@@ -20,6 +22,61 @@ from .transport import FatalTransportError, Transport
 logger = logging.getLogger(__name__)
 
 _SIGNAL_DRAIN_DEADLINE_MS = 30_000
+
+
+class _LoopStallWatchdog:
+    """Forensics for gw#407: a host in RAM reclaim-thrash stalls the whole
+    process — the event loop AND the gRPC C threads that answer h2 keepalive
+    pings — and the hub reaps the worker as dead within ~30s. This thread
+    pings the loop and logs LOUDLY (with available host RAM) when the ping
+    isn't serviced within ``warn_after_s``, so the stall episode is visible
+    in worker logs instead of only as a hub-side disconnect."""
+
+    def __init__(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        *,
+        interval_s: float = 5.0,
+        warn_after_s: float = 10.0,
+    ) -> None:
+        self._loop = loop
+        self._interval = interval_s
+        self._warn_after = warn_after_s
+        self._stop = threading.Event()
+        self._thread = threading.Thread(
+            target=self._run, name="loop-stall-watchdog", daemon=True
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval):
+            ping = threading.Event()
+            t0 = time.monotonic()
+            try:
+                self._loop.call_soon_threadsafe(ping.set)
+            except RuntimeError:
+                return  # loop closed
+            while not ping.wait(self._warn_after):
+                if self._stop.is_set() or self._loop.is_closed():
+                    return
+                lag = time.monotonic() - t0
+                avail_gb = 0.0
+                try:
+                    from .models.memory import get_available_ram_gb
+
+                    avail_gb = get_available_ram_gb()
+                except Exception:
+                    pass
+                logger.warning(
+                    "event loop stalled for %.1fs (available host RAM %.1fGiB) — "
+                    "host under memory/IO pressure; hub keepalive may lapse (gw#407)",
+                    lag, avail_gb,
+                )
 
 
 class Worker:
@@ -92,6 +149,8 @@ class Worker:
             except (NotImplementedError, RuntimeError):
                 pass
 
+        watchdog = _LoopStallWatchdog(loop)
+        watchdog.start()
         startup = asyncio.create_task(self.lifecycle.startup(), name="startup")
         transport_task = asyncio.create_task(self.transport.run(), name="transport")
         try:
@@ -100,6 +159,7 @@ class Worker:
             logger.error("worker exiting: %s", exc)
             return 1
         finally:
+            watchdog.stop()
             startup.cancel()
             await asyncio.gather(startup, return_exceptions=True)
         if self.lifecycle.drained.is_set():

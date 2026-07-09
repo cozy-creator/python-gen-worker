@@ -36,6 +36,7 @@ from .memory import (
     estimate_pipeline_size_gb,
     flush_memory,
     get_available_ram_gb,
+    get_total_ram_gb,
     repair_device_placement,
 )
 
@@ -45,8 +46,19 @@ _GiB = 1024 ** 3
 # Free-VRAM slack preserved beyond the requested headroom (activations).
 _VRAM_MARGIN_BYTES = 2 * _GiB
 # Host-RAM floor below which the warm RAM tier is refused (don't push the
-# host into swap); demote() then fails and the owner tears down instead.
+# host into reclaim-thrash: a thrashing host stalls the whole process incl.
+# gRPC keepalive acks -> hub disconnect livelock, gw#407); demote() then
+# fails and the owner tears down instead. Small hosts use an adaptive floor
+# (a fraction of total RAM) so dev boxes are not gated out entirely.
 _RAM_FLOOR_GB = 8.0
+_RAM_FLOOR_FRACTION = 0.2
+
+
+def _effective_ram_floor_gb() -> float:
+    total = get_total_ram_gb()
+    if total <= 0:
+        return _RAM_FLOOR_GB
+    return min(_RAM_FLOOR_GB, max(1.0, total * _RAM_FLOOR_FRACTION))
 
 # Residency event states (mirrors the wire ModelEvent vocabulary).
 ON_DISK = "on_disk"
@@ -280,7 +292,20 @@ class Residency:
             e = self._entries.get(ref)
             if e is None or e.tier is not Tier.VRAM or e.pinned or e.refcount > 0:
                 return False
-            if not e.movable or get_available_ram_gb() < _RAM_FLOOR_GB:
+            if not e.movable:
+                return False
+            # Size-aware RAM floor (gw#407): demoting a pipeline of size X
+            # eats ~X host RAM — landing it must still leave the floor, or
+            # the host thrashes into the keepalive-stall livelock.
+            need_gb = float(e.vram_hint or e.vram_bytes) / _GiB
+            if need_gb <= 0.0:
+                need_gb = estimate_pipeline_size_gb(e.obj)
+            if get_available_ram_gb() - need_gb < _effective_ram_floor_gb():
+                logger.info(
+                    "residency: refusing VRAM->RAM demote of %s (~%.1fGiB into "
+                    "%.1fGiB available; floor %.1fGiB)",
+                    ref, need_gb, get_available_ram_gb(), _effective_ram_floor_gb(),
+                )
                 return False
             if self.pre_demote is not None:
                 try:
@@ -502,6 +527,43 @@ class Residency:
             if self.free_vram_bytes() >= target:
                 return True
         return self.free_vram_bytes() >= target
+
+    def lru_ram_victims(self) -> List[str]:
+        """Droppable warm RAM-tier refs, LRU first (pinned/executing excluded)."""
+        with self._lock:
+            candidates = [
+                e for e in self._entries.values()
+                if e.tier is Tier.RAM and e.obj is not None
+                and not e.pinned and e.refcount <= 0
+            ]
+            candidates.sort(key=lambda e: e.last_used)
+            return [e.ref for e in candidates]
+
+    def make_room_ram(self, needed_bytes: int) -> bool:
+        """Host-RAM admission for an incoming load of ``needed_bytes`` (gw#407):
+        release warm RAM-tier LRU entries to disk until available host RAM
+        covers the load plus the RAM floor. False means even an empty warm
+        tier cannot make the load safe — the caller must refuse the load
+        (RETRYABLE) instead of thrashing the host into the keepalive-stall
+        livelock (J17: 16 SDXL variants on a 31GB host)."""
+        floor_bytes = int(_effective_ram_floor_gb() * _GiB)
+        target = int(needed_bytes) + floor_bytes
+
+        def _avail() -> int:
+            return int(get_available_ram_gb() * _GiB)
+
+        if _avail() >= target:
+            return True
+        for ref in self.lru_ram_victims():
+            if not self.release_to_disk(ref):
+                continue
+            logger.info(
+                "residency: released warm %s to disk for %d bytes of host-RAM headroom",
+                ref, needed_bytes,
+            )
+            if _avail() >= target:
+                return True
+        return _avail() >= target
 
     # ---- shared components (#335, folded in) -----------------------------------
 

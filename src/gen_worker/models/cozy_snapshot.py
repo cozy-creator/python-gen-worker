@@ -209,26 +209,13 @@ class CozySnapshotDownloader:
         try:
             _log.info("snapshot_build_start digest=%s files=%d", res.snapshot_digest[:16], len(res.files))
             await self._ensure_blobs(blobs_root, res.files, progress=progress)
-
-            tmp = snaps_root / f"{res.snapshot_digest}.building"
-            if tmp.exists():
-                shutil.rmtree(tmp)
-            tmp.mkdir(parents=True, exist_ok=True)
-
-            self._reassemble_chunked(blobs_root, tmp, res.files)
-            self._materialize_regular(blobs_root, tmp, res.files)
-
-            # Atomic rename; handle race with concurrent builder.
-            if snap_dir.exists():
-                shutil.rmtree(tmp, ignore_errors=True)
-            else:
-                try:
-                    tmp.rename(snap_dir)
-                except OSError:
-                    shutil.rmtree(tmp, ignore_errors=True)
-                    if not snap_dir.exists():
-                        raise
-
+            # Materialization copies/concatenates multi-GB trees — strictly
+            # off the event loop (gw#407: a loop blocked for the duration of
+            # a snapshot build cannot answer the hub; under page-cache
+            # pressure that IO takes minutes).
+            await asyncio.to_thread(
+                self._materialize_snapshot, blobs_root, snaps_root, snap_dir, res
+            )
             _log.info("snapshot_build_done digest=%s", res.snapshot_digest[:16])
             return snap_dir
         except BaseException as exc:
@@ -243,6 +230,34 @@ class CozySnapshotDownloader:
                 if _SNAP_ENTRIES.get(res.snapshot_digest) is entry:
                     del _SNAP_ENTRIES[res.snapshot_digest]
             entry.event.set()
+
+    def _materialize_snapshot(
+        self,
+        blobs_root: Path,
+        snaps_root: Path,
+        snap_dir: Path,
+        res: WorkerResolvedRepo,
+    ) -> None:
+        """Blocking build phase (worker thread): reassemble + hardlink into a
+        ``.building`` dir, then atomically rename into place."""
+        tmp = snaps_root / f"{res.snapshot_digest}.building"
+        if tmp.exists():
+            shutil.rmtree(tmp)
+        tmp.mkdir(parents=True, exist_ok=True)
+
+        self._reassemble_chunked(blobs_root, tmp, res.files)
+        self._materialize_regular(blobs_root, tmp, res.files)
+
+        # Atomic rename; handle race with concurrent builder.
+        if snap_dir.exists():
+            shutil.rmtree(tmp, ignore_errors=True)
+        else:
+            try:
+                tmp.rename(snap_dir)
+            except OSError:
+                shutil.rmtree(tmp, ignore_errors=True)
+                if not snap_dir.exists():
+                    raise
 
     # ------------------------------------------------------------------
     # Blob download (deduplicated, parallel)
