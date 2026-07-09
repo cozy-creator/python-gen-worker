@@ -20,12 +20,12 @@ import shutil
 from pathlib import Path
 
 import pytest
-import torch
+torch = pytest.importorskip("torch")
 from safetensors.torch import load_file
 
-from cozy_convert.clone import OutputSpec, build_flavor_tree
-from cozy_convert.ingest import ingest_huggingface
-from cozy_convert.writer import streaming_dtype_cast
+from gen_worker.convert.clone import OutputSpec, build_flavor_tree
+from gen_worker.convert.ingest import ingest_huggingface
+from gen_worker.convert.writer import streaming_dtype_cast
 
 _TINY_LLAMA = "hf-internal-testing/tiny-random-LlamaForCausalLM"
 _TINY_SDXL = "hf-internal-testing/tiny-sdxl-pipe"
@@ -92,7 +92,7 @@ def test_flavor_tree_cast_diffusers(tiny_sdxl, tmp_path: Path) -> None:
 
 
 def test_repackage_direction_diffusers_to_singlefile(tiny_sdxl, tmp_path: Path) -> None:
-    from cozy_convert.repackage import diffusers_to_singlefile
+    from gen_worker.convert.repackage import diffusers_to_singlefile
 
     out = tmp_path / "model.safetensors"
     diffusers_to_singlefile(tiny_sdxl.dir, out, model_family="sdxl")
@@ -108,7 +108,7 @@ def test_repackage_direction_diffusers_to_singlefile(tiny_sdxl, tmp_path: Path) 
     reason="bitsandbytes not installed",
 )
 def test_quant_direction_nf4(tiny_llama, tmp_path: Path) -> None:
-    from cozy_convert.convert import run_inline_conversion
+    from gen_worker.convert.convert import run_inline_conversion
 
     result = run_inline_conversion(
         source_path=tiny_llama.dir / "model.safetensors",
@@ -126,7 +126,7 @@ def test_quant_direction_nf4(tiny_llama, tmp_path: Path) -> None:
     reason="llama.cpp toolchain (convert_hf_to_gguf.py) not on PATH",
 )
 def test_gguf_direction(tiny_llama, tmp_path: Path) -> None:
-    from cozy_convert.convert import run_inline_conversion
+    from gen_worker.convert.convert import run_inline_conversion
 
     result = run_inline_conversion(
         source_path=tiny_llama.dir / "model.safetensors",
@@ -139,7 +139,7 @@ def test_gguf_direction(tiny_llama, tmp_path: Path) -> None:
 
 
 def test_calibrated_dtype_refused(tiny_llama, tmp_path: Path) -> None:
-    from cozy_convert.convert import InlineConversionNotPossible, run_inline_conversion
+    from gen_worker.convert.convert import InlineConversionNotPossible, run_inline_conversion
 
     with pytest.raises(InlineConversionNotPossible) as exc:
         run_inline_conversion(

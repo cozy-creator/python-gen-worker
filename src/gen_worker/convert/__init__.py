@@ -1,16 +1,16 @@
-"""cozy_convert — Cozy Creator's model ETL (split out of gen_worker, #367).
+"""gen_worker.convert — Cozy Creator's model ETL (hub ingest, dtype cast / quant, repackage, publish).
 
 Tenant SDK (conversion endpoints)::
 
-    from cozy_convert import Source, ProducedFlavor, Dataset
+    from gen_worker.convert import Source, ProducedFlavor, Dataset
 
 Clone / mirror::
 
-    from cozy_convert import clone
+    from gen_worker.convert import clone
     result = clone.from_huggingface(ctx, payload)
 
 Heavy deps (torch/safetensors) are imported lazily by the modules that need
-them; ``import cozy_convert`` stays cheap.
+them; ``import gen_worker.convert`` stays cheap.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ from .writer import (
     streaming_fp8_storage_cast,
 )
 
-# `cozy_convert.clone` module alias (clone.from_huggingface style).
+# `gen_worker.convert.clone` module alias (clone.from_huggingface style).
 from . import clone
 
 __all__ = [

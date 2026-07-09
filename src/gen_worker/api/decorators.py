@@ -16,7 +16,7 @@
 
 * ``kind="conversion" | "training" | "dataset"`` selects the context subclass.
   Producer kinds publish explicitly — write files locally, call
-  ``cozy_convert.publish_flavors(ctx, flavors)`` (one Tensorhub commit per
+  ``gen_worker.convert.publish_flavors(ctx, flavors)`` (one Tensorhub commit per
   ``ProducedFlavor``), and return a result struct. Generator handlers are
   rejected for producer kinds: nothing is ever published by yielding.
 * An async-generator handler streams (inference only); there is no separate
@@ -169,7 +169,7 @@ def _reject_producer_generator(owner: str, fn: Callable[..., Any], kind: str) ->
         raise TypeError(
             f"@endpoint(kind={kind!r}): {owner} must not be a generator. "
             "Producer endpoints write files locally, publish explicitly "
-            "(cozy_convert.publish_flavors(ctx, flavors)), and return a "
+            "(gen_worker.convert.publish_flavors(ctx, flavors)), and return a "
             "result struct; streaming generators are inference-only."
         )
 

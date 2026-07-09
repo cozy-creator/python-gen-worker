@@ -11,11 +11,11 @@ from pathlib import Path
 
 import pytest
 
-from cozy_convert import ProducedFlavor, publish_flavors
-from cozy_convert.clone import run_clone
-from cozy_convert.ingest import IngestedSource
+from gen_worker.convert import ProducedFlavor, publish_flavors
+from gen_worker.convert.clone import run_clone
+from gen_worker.convert.ingest import IngestedSource
 
-from conftest import _FakeHub
+from fake_hub import _FakeHub
 
 
 class _Ctx:
@@ -129,7 +129,7 @@ def _install_fake_ingest(monkeypatch, *, fail_first: bool = False) -> dict:
         (junk / ".gitignore").write_text("*")
         return _fake_source(dest_dir)
 
-    monkeypatch.setattr("cozy_convert.clone.ingest_huggingface", fake_ingest)
+    monkeypatch.setattr("gen_worker.convert.clone.ingest_huggingface", fake_ingest)
     return calls
 
 
@@ -187,7 +187,7 @@ def test_run_clone_publishing_nothing_is_an_error(
         Path(dest_dir).mkdir(parents=True, exist_ok=True)
         return _fake_source(Path(dest_dir))
 
-    monkeypatch.setattr("cozy_convert.clone.ingest_huggingface", empty_ingest)
+    monkeypatch.setattr("gen_worker.convert.clone.ingest_huggingface", empty_ingest)
     with pytest.raises(RuntimeError, match="no publishable flavor"):
         run_clone(
             _Ctx(fake_hub), provider="huggingface", source_ref="org/tiny",

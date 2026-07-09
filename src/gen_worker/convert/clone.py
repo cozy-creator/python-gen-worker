@@ -172,7 +172,7 @@ def build_flavor_tree(
 
     Passthrough (dtype/layout/container match the source) hardlinks the
     snapshot. Otherwise: optional layout repackage, then per-weight-set
-    cast / quant / gguf via :mod:`cozy_convert.convert`.
+    cast / quant / gguf via :mod:`gen_worker.convert.convert`.
 
     Returns ``(tree_root, attrs)``. Raises ``InlineConversionNotPossible``
     for calibrated dtypes.
@@ -308,9 +308,9 @@ def _clone_workdir(provider: str, source_key: str, destination: str) -> Path:
     """Persistent workdir keyed by (provider, source, destination): a failed
     clone keeps its downloaded snapshot so a retry resumes instead of
     re-downloading. Deleted on success. Base dir: ``$COZY_CONVERT_WORKDIR``
-    or ``<tmp>/cozy-convert``."""
+    or ``<tmp>/gen-worker-convert``."""
     base = Path(os.environ.get("COZY_CONVERT_WORKDIR", "").strip()
-                or Path(tempfile.gettempdir()) / "cozy-convert")
+                or Path(tempfile.gettempdir()) / "gen-worker-convert")
     digest = hashlib.sha256(
         f"{provider}|{source_key}|{destination}".encode("utf-8")).hexdigest()[:16]
     workdir = base / f"clone-{digest}"

@@ -3,7 +3,7 @@
 An `@endpoint(kind="conversion")` that publishes an **orphan checkpoint** — a brand-new set of weights with no source repo, no parent lineage.
 
 ## What it demonstrates
-- **The producer publish contract**: write files locally, call `cozy_convert.publish_flavors(ctx, flavors)` — one Tensorhub commit per `ProducedFlavor` — and return a result struct. Nothing publishes implicitly; generator handlers are rejected for producer kinds.
+- **The producer publish contract**: write files locally, call `gen_worker.convert.publish_flavors(ctx, flavors)` — one Tensorhub commit per `ProducedFlavor` — and return a result struct. Nothing publishes implicitly; generator handlers are rejected for producer kinds.
 - Tenant code never touches tensorhub's upload API directly — `publish_flavors` owns hashing, presigned part PUTs, dedup, and finalize.
 
 ## When to copy it

@@ -1,10 +1,10 @@
-"""Unit tests for the small HF repo classifier (cozy_convert.classifier)."""
+"""Unit tests for the small HF repo classifier (gen_worker.convert.classifier)."""
 
 from __future__ import annotations
 
 import pytest
 
-from cozy_convert.classifier import RepoRefusal, classify_repo
+from gen_worker.convert.classifier import RepoRefusal, classify_repo
 
 _DIFFUSERS = [
     "model_index.json",

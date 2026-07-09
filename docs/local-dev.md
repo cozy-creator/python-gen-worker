@@ -173,7 +173,7 @@ The `.gen-worker-run/` directory is throwaway. Add it to `.gitignore` /
 
 ## Conversion / dataset endpoints
 
-Checkpoint publishing goes through `cozy_convert.publish_flavors(ctx,
+Checkpoint publishing goes through `gen_worker.convert.publish_flavors(ctx,
 flavors)`, which talks to tensorhub directly using the worker capability
 token — with no token configured (plain local runs) it fails loudly
 instead of pretending to publish. `ConversionContext.materialize_blob`

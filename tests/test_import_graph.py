@@ -1,5 +1,7 @@
 """Import-graph guard (#367): ``import gen_worker`` must never pull in the
-conversion ETL (cozy_convert), torch, or any leftover clone/conversion module.
+conversion ETL (gen_worker.convert), torch, or any leftover clone/conversion
+module. gen_worker.convert is an opt-in submodule — imported explicitly, never
+as a side effect of ``import gen_worker``.
 
 Runs in a subprocess so this test observes a cold import, not whatever the
 rest of the suite already loaded.
@@ -18,8 +20,8 @@ mods = sorted(sys.modules)
 print(json.dumps(mods))
 """
 
-_FORBIDDEN_EXACT = {"torch", "cozy_convert", "safetensors", "transformers", "diffusers"}
-_FORBIDDEN_SUBSTR = ("gen_worker.conversion", "gen_worker.clone", "cozy_convert.")
+_FORBIDDEN_EXACT = {"torch", "safetensors", "transformers", "diffusers", "gguf"}
+_FORBIDDEN_SUBSTR = ("gen_worker.convert", "gen_worker.clone")
 
 
 def test_import_gen_worker_is_torch_free_and_conversion_free() -> None:

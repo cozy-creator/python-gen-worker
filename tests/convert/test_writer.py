@@ -1,4 +1,4 @@
-"""Unit tests for the ONE streaming shard writer (cozy_convert.writer)."""
+"""Unit tests for the ONE streaming shard writer (gen_worker.convert.writer)."""
 
 from __future__ import annotations
 
@@ -6,10 +6,10 @@ import json
 from pathlib import Path
 
 import pytest
-import torch
+torch = pytest.importorskip("torch")
 from safetensors.torch import load_file, save_file
 
-from cozy_convert.writer import (
+from gen_worker.convert.writer import (
     MAX_SAFETENSORS_SHARD_BYTES,
     IncrementalSafetensorsWriter,
     materialize_pickle_to_safetensors,

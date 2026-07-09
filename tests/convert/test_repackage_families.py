@@ -9,11 +9,13 @@ from pathlib import Path
 
 import pytest
 
-from cozy_convert.base_model_families import civitai_to_family
-from cozy_convert.clone import _REPACKAGE_NORMALIZED_FAMILIES
-from cozy_convert.ingest import _detect_snapshot_dtype
-from cozy_convert.layout import canonical_model_family_from_variant
-from cozy_convert.repackage import (
+pytest.importorskip("torch")
+
+from gen_worker.convert.base_model_families import civitai_to_family
+from gen_worker.convert.clone import _REPACKAGE_NORMALIZED_FAMILIES
+from gen_worker.convert.ingest import _detect_snapshot_dtype
+from gen_worker.convert.layout import canonical_model_family_from_variant
+from gen_worker.convert.repackage import (
     _normalize_family,
     _repackage_torch_dtype,
     _singlefile_attempts_for_family,
@@ -128,7 +130,7 @@ def test_weight_groups_singlefile_multi_entry(tmp_path: Path) -> None:
     """Civitai bundles ship several root weight files (DiT + text encoder +
     VAE); every one must be its own group or a dtype pass drops all but the
     first (latent data loss, found preparing e2e #112)."""
-    from cozy_convert.writer import snapshot_weight_groups as _weight_groups
+    from gen_worker.convert.writer import snapshot_weight_groups as _weight_groups
 
     _write_safetensors(tmp_path / "dit.safetensors", "F8_E4M3")
     _write_safetensors(tmp_path / "txt.safetensors", "BF16")
@@ -140,7 +142,7 @@ def test_weight_groups_singlefile_multi_entry(tmp_path: Path) -> None:
 
 
 def test_weight_groups_singlefile_sharded_index_wins(tmp_path: Path) -> None:
-    from cozy_convert.writer import snapshot_weight_groups as _weight_groups
+    from gen_worker.convert.writer import snapshot_weight_groups as _weight_groups
 
     _write_safetensors(tmp_path / "model-00001-of-00002.safetensors", "BF16")
     _write_safetensors(tmp_path / "model-00002-of-00002.safetensors", "BF16")
@@ -157,8 +159,8 @@ def test_weight_groups_singlefile_sharded_index_wins(tmp_path: Path) -> None:
 def test_build_flavor_tree_source_dtype_passthrough(tmp_path: Path) -> None:
     """dtype='source' publishes every source file untouched and records the
     detected on-disk dtype (mixed-dtype bundles keep their majority label)."""
-    from cozy_convert.clone import OutputSpec, build_flavor_tree
-    from cozy_convert.ingest import IngestedSource
+    from gen_worker.convert.clone import OutputSpec, build_flavor_tree
+    from gen_worker.convert.ingest import IngestedSource
 
     src = tmp_path / "src"
     src.mkdir()
@@ -183,8 +185,8 @@ def test_build_flavor_tree_source_dtype_passthrough(tmp_path: Path) -> None:
 
 
 def test_build_flavor_tree_source_dtype_refuses_repackage(tmp_path: Path) -> None:
-    from cozy_convert.clone import OutputSpec, build_flavor_tree
-    from cozy_convert.ingest import IngestedSource
+    from gen_worker.convert.clone import OutputSpec, build_flavor_tree
+    from gen_worker.convert.ingest import IngestedSource
 
     src = tmp_path / "src"
     src.mkdir()
@@ -213,7 +215,7 @@ def test_detect_snapshot_dtype_ignores_garbage(tmp_path: Path) -> None:
 def test_civitai_base_model_beats_filename_tokens() -> None:
     """GonzaLomo regression (e2e #112): an SDXL 1.0 checkpoint whose FILENAME
     contains 'flux' must classify as sdxl via the structured baseModel."""
-    from cozy_convert.layout import (
+    from gen_worker.convert.layout import (
         infer_model_family_variant_from_hint,
     )
 
@@ -221,7 +223,7 @@ def test_civitai_base_model_beats_filename_tokens() -> None:
     assert infer_model_family_variant_from_hint(
         "gonzalomoXLFluxPony_v70PhotoXLDMD.safetensors") in ("flux1", "flux2")
     # the ingest-level precedence keeps baseModel authoritative.
-    from cozy_convert.ingest import _resolve_civitai_family
+    from gen_worker.convert.ingest import _resolve_civitai_family
 
     assert _resolve_civitai_family("sdxl", "flux") == "sdxl"
     assert _resolve_civitai_family("", "flux") == "flux"
@@ -234,7 +236,7 @@ def test_missing_component_error_parse() -> None:
     """moody-pro-mix-zit regression (e2e #112): DiT-only single-file checkpoints
     must source absent components from the family config repo. The component
     name+class ride in diffusers' SingleFileComponentError remedy snippet."""
-    from cozy_convert.repackage import _MISSING_COMPONENT_RE
+    from gen_worker.convert.repackage import _MISSING_COMPONENT_RE
 
     msg = (
         "Failed to load Qwen3Model. Weights for this component appear to be "
@@ -255,7 +257,7 @@ def test_multi_weight_bundle_detection(tmp_path) -> None:
     DiT/TE/VAE single-files) must publish with library_name unset — tensorhub
     finalize rejects them as diffusers/single-file
     (multiple_files_for_single_file_layout)."""
-    from cozy_convert.ingest import _is_multi_weight_bundle
+    from gen_worker.convert.ingest import _is_multi_weight_bundle
 
     d = tmp_path
     (d / "anima_dit.safetensors").write_bytes(b"x")

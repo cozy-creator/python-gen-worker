@@ -8,11 +8,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-import torch
+torch = pytest.importorskip("torch")
 from safetensors.torch import save_file
 
-from cozy_convert.repackage import _load_component_state_dict
-from cozy_convert.source import Source
+from gen_worker.convert.repackage import _load_component_state_dict
+from gen_worker.convert.source import Source
 
 
 def _tensors() -> dict[str, torch.Tensor]:

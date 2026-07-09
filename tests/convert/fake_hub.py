@@ -3,13 +3,10 @@
 from __future__ import annotations
 
 import json
-import threading
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 from typing import Any
 
-import pytest
-
-from cozy_convert.hub import HubClient
+from gen_worker.convert.hub import HubClient
 
 
 class _FakeHub(BaseHTTPRequestHandler):
@@ -124,16 +121,6 @@ class _FakeHub(BaseHTTPRequestHandler):
         self.send_header("ETag", '"etag-1"')
         self.send_header("Content-Length", "0")
         self.end_headers()
-
-
-@pytest.fixture()
-def fake_hub():
-    _FakeHub.state = {"existing_blobs": set()}
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _FakeHub)
-    t = threading.Thread(target=server.serve_forever, daemon=True)
-    t.start()
-    yield server
-    server.shutdown()
 
 
 def _client(server) -> HubClient:

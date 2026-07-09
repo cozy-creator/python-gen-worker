@@ -12,7 +12,7 @@ local-mode equivalents:
   set (no tensorhub upload).
 - ``materialize_blob`` on ConversionContext falls back to the local CAS
   unless ``--allow-publish`` delegates to the real implementation.
-  (Checkpoint publishing goes through ``cozy_convert.publish_flavors``,
+  (Checkpoint publishing goes through ``gen_worker.convert.publish_flavors``,
   which talks to tensorhub directly and fails loudly without credentials.)
 - ``_canceled`` is toggled by the installed SIGINT handler in ``run.py``.
 

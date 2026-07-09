@@ -103,7 +103,7 @@ def test_producer_contexts_are_real_subclasses() -> None:
         assert hasattr(ctx, "save_checkpoint")
         assert hasattr(ctx, "set_repo_spec")
         assert hasattr(ctx, "hf_token")
-        # checkpoint publishing is cozy_convert.publish_flavors, not a ctx RPC
+        # checkpoint publishing is gen_worker.convert.publish_flavors, not a ctx RPC
         assert not hasattr(ctx, "publish_repo_revision")
     assert hasattr(ConversionContext(request_id="r1"), "mktemp")
     assert hasattr(DatasetContext(request_id="r1"), "resolve_dataset")

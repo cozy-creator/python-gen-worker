@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.12.0
+
+- **`gen_worker.convert`: the cozy-convert workspace package folded into
+  gen-worker proper.** The model ETL (HF/Civitai ingest, streaming dtype
+  cast / fp8 storage cast, bnb + GGUF quant, singlefile↔diffusers repackage,
+  Tensorhub `/commits` publish) is now a standard part of the library:
+  `from gen_worker.convert import publish_flavors, ProducedFlavor, Source`.
+  `packages/cozy_convert` is deleted; there is no separate `cozy-convert`
+  distribution and the staged (never-published) cozy-convert 0.1.0 PyPI
+  release is obsolete — publishing gen-worker 0.12.0 supersedes it. New core
+  dependency: `gguf>=0.10.0` (small, pure-python). torch/safetensors remain
+  optional (`gen-worker[torch]`); `import gen_worker` stays convert-free and
+  torch-free (import-graph guard now covers `gen_worker.convert`). Docs:
+  `docs/convert.md`.
+
 ## 0.11.2
 
 - Republish: the 0.11.0 and 0.11.1 PyPI wheels were both built from a stale local checkout (19 commits behind master, mixed-commit tree) and lack `allow_lora`, `LoraOverlay`, and `inductor_counters`. No code changes vs 0.11.1 master; version bump only, publish from clean `origin/master` HEAD.

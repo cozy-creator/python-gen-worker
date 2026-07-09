@@ -125,7 +125,7 @@ subclass the handler receives: `ConversionContext` adds `save_checkpoint` /
 repo-metadata RPCs.
 
 Producer endpoints publish **explicitly**: write files locally, call
-`cozy_convert.publish_flavors(ctx, flavors)` — one Tensorhub commit per
+`gen_worker.convert.publish_flavors(ctx, flavors)` — one Tensorhub commit per
 `ProducedFlavor` (path = file or directory) — and return a result struct:
 
 ```python
