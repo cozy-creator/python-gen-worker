@@ -21,8 +21,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-from .hub import HubClient, files_from_tree
-from .ingest import IngestedSource, ingest_civitai, ingest_huggingface
+from .bank import build_bank_payload, flavor_bank_key
+from .hub import CommitFile, HubClient, HubPublishError, files_from_tree
+from .ingest import (
+    IngestedSource,
+    ingest_civitai,
+    ingest_huggingface,
+    plan_civitai,
+    plan_huggingface,
+)
 from .writer import (
     FP8_DEFAULT_COMPONENTS,
     MAX_SAFETENSORS_SHARD_BYTES,
@@ -301,6 +308,123 @@ def build_flavor_tree(
 
 
 # ---------------------------------------------------------------------------
+# th#592 download-skip: publish from banked manifests (zero bytes downloaded)
+# ---------------------------------------------------------------------------
+
+def _publish_from_bank(
+    hubclient: HubClient,
+    *,
+    plan: Any,
+    provider: str,
+    specs: list[OutputSpec],
+    bank_keys: dict[str, str],
+    destination: str,
+    tags: list[str],
+    mode: str,
+    progress: Any,
+) -> Optional[CloneResult]:
+    """Try to publish EVERY requested flavor from the hub's banked manifests
+    (commit-by-CAS-reference; no local bytes). Returns None on any miss or
+    error — the caller falls through to the full download path (fail-open).
+    All-or-nothing on purpose: the download is shared across specs, so one
+    miss means downloading anyway."""
+    if not bank_keys or any(not k for k in bank_keys.values()):
+        return None
+    try:
+        lookup = hubclient.lookup_clone_manifests(
+            destination, sorted(set(bank_keys.values())))
+    except Exception as exc:  # noqa: BLE001 — fail-open
+        logger.warning("download-skip bank lookup failed (fail-open, full clone): %s", exc)
+        return None
+
+    payloads: dict[str, dict[str, Any]] = {}
+    for spec in specs:
+        r = lookup.get(bank_keys[spec.label]) or {}
+        payload = r.get("payload")
+        if not r.get("ready") or not isinstance(payload, dict) or not payload.get("files"):
+            logger.info(
+                "download-skip bank miss for %s:%s spec=%s (found=%s ready=%s)",
+                provider, plan.source_ref, spec.label,
+                bool(r.get("found")), bool(r.get("ready")))
+            return None
+        payloads[spec.label] = payload
+
+    source_bytes = sum(size for _, size, _ in plan.bank_files())
+    revision = str(getattr(plan, "revision", "") or "")
+    provenance = {"upstream_revision": revision}
+    result = CloneResult(destination_repo=destination)
+    try:
+        for i, spec in enumerate(specs):
+            payload = payloads[spec.label]
+            files = [
+                CommitFile(
+                    path=str(f.get("path") or ""),
+                    local_path=None,
+                    size_bytes=int(f.get("size_bytes") or 0),
+                    blake3=str(f.get("blake3") or ""),
+                )
+                for f in payload["files"]
+            ]
+            metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+            metadata = dict(metadata)
+            metadata["download_skip"] = "bank"
+            if callable(progress):
+                progress(0.1 + 0.85 * (i / max(1, len(specs))),
+                         f"clone.publish.{spec.label}")
+            commit = hubclient.commit(
+                destination_repo=destination,
+                files=files,
+                tags=tags,
+                mode=mode if i == 0 else "merge",
+                flavor=str(payload.get("flavor") or spec.dtype),
+                dtype=str(payload.get("dtype") or spec.dtype),
+                file_layout=str(payload.get("file_layout") or spec.file_layout),
+                file_type=str(payload.get("file_type") or spec.file_type),
+                message=(
+                    f"clone {provider}:{plan.source_ref}"
+                    f"@{revision or payload.get('source_revision') or ''}"
+                ),
+                metadata=metadata,
+                provenance=provenance,
+                repo_spec={k: str(v) for k, v in dict(payload.get("repo_spec") or {}).items()},
+            )
+            result.published.append({
+                "flavor": str(payload.get("flavor") or spec.dtype),
+                "spec_label": spec.label,
+                "revision_id": commit.revision_id,
+                "uploaded": commit.uploaded,
+                "deduped": commit.deduped,
+                "total_bytes": commit.total_bytes,
+                "banked": True,
+            })
+    except HubPublishError as exc:
+        # Includes BankedBlobGoneError (CAS GC'd a blob between lookup and
+        # commit). Never fatal: the full clone re-creates everything.
+        logger.warning(
+            "download-skip bank publish failed (%s); falling back to full clone", exc)
+        return None
+
+    first = payloads[specs[0].label]
+    if isinstance(first.get("metadata"), dict):
+        result.metadata.update({
+            str(k): str(v) for k, v in first["metadata"].items() if isinstance(v, str)
+        })
+    result.metadata["destination_repo"] = destination
+    result.metadata["published_count"] = str(len(result.published))
+    result.metadata["download_skip"] = "bank"
+    result.metadata["source_bytes_downloaded"] = "0"
+    result.metadata["source_bytes_avoided"] = str(source_bytes)
+    logger.info(
+        "download-skip engaged: %s:%s -> %s published %d spec(s) by CAS reference; "
+        "%d source files (%.2f GB) NOT downloaded",
+        provider, plan.source_ref, destination, len(result.published),
+        len(plan.bank_files()), source_bytes / 1e9)
+    if callable(progress):
+        progress(1.0, "clone.completed")
+    return result
+
+
+# ---------------------------------------------------------------------------
 # run_clone — ingest, convert, ONE finalize path
 # ---------------------------------------------------------------------------
 
@@ -357,9 +481,65 @@ def run_clone(
     workdir = _clone_workdir(provider, source_key, destination)
     succeeded = False
     try:
+        if provider not in {"huggingface", "civitai"}:
+            raise ValueError(f"unsupported clone provider: {provider!r}")
+
+        hubclient = HubClient.from_ctx(ctx)
+        mode = "replace" if overwrite_repo else "merge"
+
+        # th#592 download-skip: derive the source's identity from provider
+        # metadata alone (no bytes), then try to publish every requested
+        # flavor from the hub's banked manifests. Any miss/error falls
+        # through to the full clone below (fail-open).
+        _progress(0.02, "clone.plan")
+        plan = None
+        try:
+            if provider == "huggingface":
+                plan = plan_huggingface(
+                    source_ref,
+                    revision=source_revision,
+                    dtype_preference=source_dtype_preference,
+                    gguf_quant=gguf_quant,
+                    hf_token=effective_hf_token,
+                )
+            else:
+                plan = plan_civitai(
+                    int(civitai_model_version_id or 0),
+                    civitai_api_key=civitai_api_key,
+                )
+        except Exception as exc:
+            logger.warning(
+                "clone source plan failed (download-skip disabled for this run): %s", exc)
+
+        bank_keys: dict[str, str] = {}
+        if plan is not None:
+            for spec in specs:
+                bank_keys[spec.label] = flavor_bank_key(
+                    plan, spec.label,
+                    layout_hint=layout_hint,
+                    quantize_components=quantize_components,
+                    gguf_quant=gguf_quant,
+                )
+            banked = _publish_from_bank(
+                hubclient,
+                plan=plan,
+                provider=provider,
+                specs=specs,
+                bank_keys=bank_keys,
+                destination=destination,
+                tags=tags,
+                mode=mode,
+                progress=_progress,
+            )
+            if banked is not None:
+                succeeded = True
+                return banked
+
         _progress(0.05, "clone.ingest")
+        dl_bytes = {"done": 0}
 
         def _dl_progress(done: int, total: Optional[int]) -> None:
+            dl_bytes["done"] = max(dl_bytes["done"], int(done or 0))
             if total:
                 _progress(0.05 + 0.45 * min(1.0, done / total), "clone.download")
 
@@ -371,25 +551,23 @@ def run_clone(
                 gguf_quant=gguf_quant,
                 hf_token=effective_hf_token,
                 progress=_dl_progress,
+                plan=plan,
             )
-        elif provider == "civitai":
+        else:
             source = ingest_civitai(
                 int(civitai_model_version_id or 0), workdir / "source",
                 civitai_api_key=civitai_api_key, progress=_dl_progress,
             )
-        else:
-            raise ValueError(f"unsupported clone provider: {provider!r}")
 
         _progress(0.5, "clone.convert")
         from .convert import InlineConversionNotPossible
 
-        hubclient = HubClient.from_ctx(ctx)
         result = CloneResult(destination_repo=destination, metadata=dict(source.metadata))
         # th#606: upstream identity (upstream_ref + derivation_op=import) is
         # orchestrator-derived and rides the capability token; the worker only
         # ADDS the revision it actually resolved during download.
         provenance = {"upstream_revision": str(source.source_revision or "")}
-        mode = "replace" if overwrite_repo else "merge"
+        bank_records: list[dict[str, Any]] = []
 
         # Non-diffusers-class sources publish as-is; extra output specs that
         # would need conversion are refused per-flavor, not per-job.
@@ -490,6 +668,39 @@ def run_clone(
                 "total_bytes": commit.total_bytes,
             })
 
+            # th#592: bank this flavor's published manifest for future
+            # download-skips. HF repackaged flavors are excluded — their
+            # output depends on model_family detected from DOWNLOADED bytes,
+            # which the pre-download bank key cannot see. (Civitai family
+            # comes from the version API's baseModel: pre-download, in-key.)
+            key = bank_keys.get(spec.label, "")
+            hf_repackaged = provider == "huggingface" and bool(attrs.get("repackage_toolchain"))
+            if key and not hf_repackaged:
+                bank_records.append({
+                    "key": key,
+                    "payload": build_bank_payload(
+                        files=[
+                            {"path": f.path, "blake3": f.blake3, "size_bytes": f.size_bytes}
+                            for f in files
+                        ],
+                        flavor=flavor_label,
+                        dtype=str(attrs.get("dtype") or spec.dtype),
+                        file_layout=str(attrs.get("file_layout") or spec.file_layout),
+                        file_type=str(attrs.get("file_type") or spec.file_type),
+                        metadata=metadata,
+                        repo_spec=source.repo_spec,
+                        source_revision=source.source_revision,
+                    ),
+                })
+
+        if bank_records:
+            try:
+                statuses = hubclient.record_clone_manifests(destination, bank_records)
+                logger.info("download-skip bank recorded %d manifest(s): %s",
+                            len(bank_records), statuses)
+            except Exception as exc:  # noqa: BLE001 — banking is best-effort
+                logger.warning("download-skip bank record failed (non-fatal): %s", exc)
+
         if not result.published:
             reasons = "; ".join(
                 str(f.get("reason") or "") for f in result.failed_flavors
@@ -498,6 +709,7 @@ def run_clone(
 
         result.metadata["destination_repo"] = destination
         result.metadata["published_count"] = str(len(result.published))
+        result.metadata["source_bytes_downloaded"] = str(dl_bytes["done"])
         if result.failed_flavors:
             result.metadata["failed_flavor_count"] = str(len(result.failed_flavors))
         _progress(1.0, "clone.completed")

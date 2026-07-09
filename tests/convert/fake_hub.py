@@ -31,6 +31,46 @@ class _FakeHub(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         st = _FakeHub.state
+        if self.path.endswith("/clone-manifests/lookup"):
+            # th#592 download-skip bank lookup. `ready` mirrors tensorhub:
+            # every manifest blob must still be in CAS.
+            if st.get("fail_bank_lookups", 0) > 0:
+                st["fail_bank_lookups"] -= 1
+                self._send(503, {"error": "unavailable"})
+                return
+            req = self._read_json()
+            st.setdefault("bank_lookups", []).append(req)
+            manifests = st.setdefault("bank_manifests", {})
+            blobs = st.setdefault("cas_blobs", set())
+            results = []
+            for key in req.get("keys") or []:
+                payload = manifests.get(key)
+                if payload is None:
+                    results.append({"key": key, "found": False, "ready": False})
+                    continue
+                ready = all(f["blake3"] in blobs for f in payload.get("files") or [])
+                entry = {"key": key, "found": True, "ready": ready}
+                if ready:
+                    entry["payload"] = payload
+                results.append(entry)
+            self._send(200, {"results": results})
+            return
+        if self.path.endswith("/clone-manifests"):
+            # th#592 bank record: refuse manifests whose blobs aren't in CAS.
+            req = self._read_json()
+            st.setdefault("bank_records", []).append(req)
+            manifests = st.setdefault("bank_manifests", {})
+            blobs = st.setdefault("cas_blobs", set())
+            results = []
+            for m in req.get("manifests") or []:
+                key, payload = m.get("key"), m.get("payload") or {}
+                if any(f["blake3"] not in blobs for f in payload.get("files") or []):
+                    results.append({"key": key, "status": "missing_blobs"})
+                    continue
+                manifests[key] = payload
+                results.append({"key": key, "status": "recorded"})
+            self._send(200, {"results": results})
+            return
         if self.path.endswith("/commits"):
             if st.get("fail_commit_posts", 0) > 0:
                 st["fail_commit_posts"] -= 1
@@ -41,10 +81,12 @@ class _FakeHub(BaseHTTPRequestHandler):
             st.setdefault("commit_requests", []).append(req)
             st["auth"] = self.headers.get("Authorization", "")
             uploads = []
+            cas = st.setdefault("cas_blobs", set())
             for i, op in enumerate(req.get("operations", [])):
                 if op["type"] != "add":
                     continue
-                if op["blake3"] in st.get("existing_blobs", set()):
+                in_cas = op["blake3"] in st.get("existing_blobs", set()) | cas
+                if in_cas and op["blake3"] not in st.get("commit_pretend_missing", set()):
                     uploads.append({"path": op["path"], "blake3": op["blake3"], "exists": True})
                     continue
                 uid = f"up-{i}"
@@ -72,6 +114,10 @@ class _FakeHub(BaseHTTPRequestHandler):
                     "part_size": max(int(op["size_bytes"]), 1),
                     "total_parts": 1,
                 })
+            # Uploaded blobs land in the fake CAS (tests simulating GC or
+            # missing blobs mutate state["cas_blobs"] directly).
+            cas.update(op["blake3"] for op in req.get("operations", [])
+                       if op["type"] == "add")
             self._send(201, {"revision_id": "rev-1", "uploads": uploads,
                              "deletions": [], "copies": [], "tags": req.get("tags") or [],
                              "mode": req.get("mode") or "merge"})
