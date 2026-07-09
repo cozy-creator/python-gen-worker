@@ -268,7 +268,7 @@ def test_complete_network_severed_raises_after_deadline(monkeypatch) -> None:
 
 
 def test_commit_default_flavor_rides_tags_and_top_level(fake_hub, tmp_path: Path) -> None:
-    # gw#418: the primary clone output must be able to claim the bare
+    # gw#419: the primary clone output must be able to claim the bare
     # selector row — tensorhub (th#597 C1) only writes flavor='' for an
     # explicit-flavor publish when default_flavor names it.
     _FakeHub.state["finalize_calls"] = 1
@@ -289,7 +289,7 @@ def test_commit_default_flavor_rides_tags_and_top_level(fake_hub, tmp_path: Path
 
 
 def test_clone_primary_output_claims_bare_selector() -> None:
-    # gw#418 regression guard at the clone layer: the i==0 commit passes
+    # gw#419 regression guard at the clone layer: the i==0 commit passes
     # default_flavor=<label>; secondary outputs stay explicit-flavor-only.
     import inspect
 
