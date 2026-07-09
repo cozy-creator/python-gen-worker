@@ -652,6 +652,11 @@ def run_clone(
                 tags=tags,
                 mode=mode if i == 0 else "merge",
                 flavor=flavor_label,
+                # gw#418: the PRIMARY output also owns the bare selector row —
+                # tensorhub (th#597 C1) never moves flavor='' for an
+                # explicit-flavor publish unless default_flavor names it, and
+                # every serve/convert flow references mirrors bare (repo:tag).
+                default_flavor=flavor_label if i == 0 else "",
                 dtype=str(attrs.get("dtype") or spec.dtype),
                 file_layout=str(attrs.get("file_layout") or spec.file_layout),
                 file_type=str(attrs.get("file_type") or spec.file_type),
