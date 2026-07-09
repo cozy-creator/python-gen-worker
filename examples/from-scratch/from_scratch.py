@@ -2,7 +2,7 @@
 random weights and publishes them as an orphan checkpoint (no parent lineage).
 
 The publish contract: a conversion handler writes files locally, calls
-``cozy_convert.publish_flavors(ctx, flavors)`` — one Tensorhub commit per
+``gen_worker.convert.publish_flavors(ctx, flavors)`` — one Tensorhub commit per
 ``ProducedFlavor`` — and returns a result struct. Nothing publishes
 implicitly; generator handlers are rejected for producer kinds.
 """
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import msgspec
 
-from cozy_convert import ProducedFlavor, publish_flavors
+from gen_worker.convert import ProducedFlavor, publish_flavors
 from gen_worker import ConversionContext, endpoint
 
 

@@ -1,6 +1,6 @@
 """Hub-API ingest: materialize a source model snapshot locally.
 
-HuggingFace: ``HfApi.list_repo_files`` → :mod:`cozy_convert.classifier` →
+HuggingFace: ``HfApi.list_repo_files`` → :mod:`gen_worker.convert.classifier` →
 ``snapshot_download(allow_patterns=...)``. Civitai: the provider-bounded
 fetch from ``gen_worker.models.download`` plus clone-side metadata
 (baseModel lineage, kohya hints). No arbitrary-URL sources.

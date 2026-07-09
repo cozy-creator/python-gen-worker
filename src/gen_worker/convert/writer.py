@@ -12,7 +12,7 @@ safetensors_io) into one:
   - streaming_cast_snapshot / streaming_fp8_snapshot: whole-tree variants
   - shard_safetensors_by_offset: raw byte-range re-shard, zero decode
 
-torch/safetensors imports are deferred so importing cozy_convert stays cheap.
+torch/safetensors imports are deferred so importing gen_worker.convert stays cheap.
 """
 
 from __future__ import annotations
@@ -44,7 +44,7 @@ MAX_SAFETENSORS_SHARD_BYTES: int = 2 * 1024 * 1024 * 1024
 # to the wall); a 9.8GB shard failed the SAME way on every one of 5 retries
 # (it deterministically needs longer than the wall allows, so retrying
 # doesn't help). 2GB keeps every shard's verify time comfortably clear of
-# that ceiling regardless of R2 throughput variance. cozy_convert.hub's
+# that ceiling regardless of R2 throughput variance. gen_worker.convert.hub's
 # retry/poll resilience (#62/#63) still covers the remaining transient case;
 # this fixes the deterministic one.
 
@@ -613,8 +613,8 @@ def snapshot_weight_groups(source_dir: Path, layout: str) -> list[tuple[str, Pat
                 if found:
                     groups.append((entry.name, found[0]))
     else:
-        for found in _entries_for(source_dir):
-            groups.append(("", found))
+        for entry_path in _entries_for(source_dir):
+            groups.append(("", entry_path))
     return groups
 
 

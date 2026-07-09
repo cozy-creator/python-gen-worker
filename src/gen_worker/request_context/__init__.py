@@ -786,7 +786,7 @@ class RequestContext:
 # ConversionContext / DatasetContext / TrainingContext share `_PublisherMixin`
 # for the producer-contract HTTP helpers (repo metadata read/write, blob
 # fetch + materialization by digest). Checkpoint publishing is NOT here:
-# producer endpoints call cozy_convert.publish_flavors (the /commits path).
+# producer endpoints call gen_worker.convert.publish_flavors (the /commits path).
 # ---------------------------------------------------------------------------
 
 
@@ -802,7 +802,7 @@ class _PublisherMixin:
 
     @property
     def hf_token(self) -> str:
-        """HuggingFace API token for cozy_convert / conversion helpers.
+        """HuggingFace API token for gen_worker.convert / conversion helpers.
 
         Empty string when unconfigured — helpers fall back to
         unauthenticated calls (public repos work)."""
@@ -1157,7 +1157,7 @@ class ConversionContext(_PublisherMixin, RequestContext):
     and read/write repo metadata, plus the conversion-helper surface
     (``mktemp``, ``checkpoint_dir``, ``copy_unconverted_components``,
     ``cancelled``). The ETL itself (ingest / cast / quant / clone / writers)
-    lives in the ``cozy_convert`` package — this class only carries what the
+    lives in the ``gen_worker.convert`` module — this class only carries what the
     worker API needs.
 
     Inference handlers receive ``RequestContext`` instead — they never need
@@ -1166,7 +1166,7 @@ class ConversionContext(_PublisherMixin, RequestContext):
 
     def __init__(self, *args: Any, source: Any = None, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        # ``source`` is the resolved input model handle (a cozy_convert
+        # ``source`` is the resolved input model handle (a gen_worker.convert
         # ``Source``) for tenants that operate on a checkpoint; None otherwise.
         self._source = source
         self._mktemp_root: Optional[Path] = None

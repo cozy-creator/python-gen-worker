@@ -48,19 +48,19 @@ def _read_json(path: Path) -> dict[str, Any]:
 
 
 def _torch() -> Any:
-    import torch  # type: ignore
+    import torch
 
     return torch
 
 
 def _st_load(path: Path) -> dict[str, Any]:
-    from safetensors.torch import load_file as st_load_file  # type: ignore
+    from safetensors.torch import load_file as st_load_file
 
     return cast(dict[str, Any], st_load_file(str(path), device="cpu"))
 
 
 def _st_save(state_dict: dict[str, Any], output_path: Path) -> None:
-    from safetensors.torch import save_file as st_save_file  # type: ignore
+    from safetensors.torch import save_file as st_save_file
 
     st_save_file(state_dict, str(output_path))
 
@@ -75,7 +75,7 @@ def _load_sharded_safetensors(index_json: Path) -> dict[str, torch.Tensor]:
     out: dict[str, torch.Tensor] = {}
     for name in shard_names:
         shard_path = index_json.parent / name
-        out.update(cast(dict[str, Any], _st_load(shard_path)))
+        out.update(_st_load(shard_path))
     return out
 
 
@@ -107,20 +107,20 @@ def _load_component_state_dict(
         st_path = component_dir / f"{base}.safetensors"
         st_index = component_dir / f"{base}.safetensors.index.json"
         if st_path.exists():
-            return cast(dict[str, Any], _st_load(st_path))
+            return _st_load(st_path)
         if st_index.exists():
             return _load_sharded_safetensors(st_index)
 
         st_path = component_dir / f"{base}.bin.safetensors"
         st_index = component_dir / f"{base}.bin.safetensors.index.json"
         if st_path.exists():
-            return cast(dict[str, Any], _st_load(st_path))
+            return _st_load(st_path)
         if st_index.exists():
             return _load_sharded_safetensors(st_index)
 
         # Dtype-variant names, exact-name misses only.
         for st in sorted(component_dir.glob(f"{base}.*.safetensors")):
-            return cast(dict[str, Any], _st_load(st))
+            return _st_load(st)
         for idx in sorted(component_dir.glob(f"{base}.safetensors.*.index.json")) + sorted(
             component_dir.glob(f"{base}.*.safetensors.index.json")
         ):

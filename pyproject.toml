@@ -1,6 +1,6 @@
 [project]
 name = "gen-worker"
-version = "0.11.2"
+version = "0.12.0"
 description = "A library used to build custom functions in Cozy Creator's serverless function platform."
 readme = "README.md"
 license = "MIT"
@@ -30,6 +30,8 @@ dependencies = [
     "pyyaml>=6.0.0",
     "blake3>=1.0.0",
     "huggingface-hub>=0.26.0",
+    # gen_worker.convert (GGUF quantization tooling; small, pure-python)
+    "gguf>=0.10.0",
     # endpoint.lock is TOML; msgspec.toml.encode needs tomli-w at bake time.
     "tomli-w>=1.0.0",
 ]
@@ -69,7 +71,6 @@ video = [
 ]
 dev = [
     "av>=12",
-    "cozy-convert",
     "grpcio-tools>=1.80.0",
     "mypy>=1.10.0",
     "ruff>=0.6.0",
@@ -109,6 +110,12 @@ ignore_errors = true
 module = ["gen_worker.trainer.*"]
 ignore_errors = true
 
+# Modules moved verbatim from the old gen_worker.conversion carry that
+# package's untyped-defs exemption (was cozy_convert's [tool.mypy] config).
+[[tool.mypy.overrides]]
+module = ["gen_worker.convert.*"]
+disallow_untyped_defs = false
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
@@ -132,6 +139,7 @@ ignore = ["E402"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["integration: network tests against real tiny HF models"]
 # Prefer the working-tree source so a bare `pytest` never tests a stale wheel.
 # The supported command is still `uv run --extra dev pytest` (pytest is a dev
 # extra); tests/conftest.py hard-fails if gen_worker resolves outside src/.
@@ -142,16 +150,12 @@ pythonpath = ["src"]
 # resolves torch from PyPI (a CPU or default-CUDA build) and may differ. Tenant
 # images built by Tensorhub pin their own torch/CUDA build; this pin only fixes
 # the local dev + CI environment.
-[tool.uv.workspace]
-members = ["packages/cozy_convert"]
-
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [tool.uv.sources]
-cozy-convert = { workspace = true }
 torch = [
   { index = "pytorch-cu128", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]

@@ -11,9 +11,9 @@ from pathlib import Path
 
 import pytest
 
-from cozy_convert.hub import CommitFile, HubPublishError, blake3_file, files_from_tree
+from gen_worker.convert.hub import CommitFile, HubPublishError, blake3_file, files_from_tree
 
-from conftest import _FakeHub, _client
+from fake_hub import _FakeHub, _client
 
 
 def test_commit_uploads_completes_and_finalizes(fake_hub, tmp_path: Path, monkeypatch) -> None:
@@ -196,7 +196,7 @@ def test_complete_gives_up_after_deadline_if_race_never_resolves(
     """A genuinely stuck server (never finalizes) must still fail eventually
     rather than polling forever."""
     monkeypatch.setattr("time.sleep", lambda *_: None)
-    monkeypatch.setattr("cozy_convert.hub._COMPLETE_NETWORK_MAX_WAIT_S", 0.0)
+    monkeypatch.setattr("gen_worker.convert.hub._COMPLETE_NETWORK_MAX_WAIT_S", 0.0)
     _FakeHub.state["complete_race_count"] = 10_000
 
     f = tmp_path / "model.safetensors"
@@ -225,7 +225,7 @@ def test_complete_repost_through_network_severed_attempts(monkeypatch) -> None:
     """te#44 J9 runs 7+8: the idle multi-minute /complete verify gets severed
     by middleboxes; the client must re-POST (idempotent) instead of failing
     the commit after the quick generic retries are exhausted."""
-    from cozy_convert.hub import HubClient, HubPublishError
+    from gen_worker.convert.hub import HubClient, HubPublishError
 
     monkeypatch.setattr("time.sleep", lambda *_: None)
     client = HubClient(base_url="http://hub", token="t", owner="acme")
@@ -251,10 +251,10 @@ def test_complete_repost_through_network_severed_attempts(monkeypatch) -> None:
 
 
 def test_complete_network_severed_raises_after_deadline(monkeypatch) -> None:
-    from cozy_convert.hub import HubClient, HubPublishError
+    from gen_worker.convert.hub import HubClient, HubPublishError
 
     monkeypatch.setattr("time.sleep", lambda *_: None)
-    monkeypatch.setattr("cozy_convert.hub._COMPLETE_NETWORK_MAX_WAIT_S", 0.0)
+    monkeypatch.setattr("gen_worker.convert.hub._COMPLETE_NETWORK_MAX_WAIT_S", 0.0)
     client = HubClient(base_url="http://hub", token="t", owner="acme")
 
     def _post(path, payload=None, *, timeout=None):

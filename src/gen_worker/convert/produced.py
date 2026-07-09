@@ -2,7 +2,7 @@
 
 A producer endpoint builds ``list[ProducedFlavor]`` — one entry per flavor
 the job produces into the destination checkpoint — and calls
-``cozy_convert.publish_flavors(ctx, flavors)``. The library uploads each
+``gen_worker.convert.publish_flavors(ctx, flavors)``. The library uploads each
 flavor's ``path`` (file OR directory) as one Tensorhub commit and attaches
 the declared ``attributes`` to the commit payload.
 

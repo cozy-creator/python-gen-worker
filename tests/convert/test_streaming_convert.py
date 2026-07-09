@@ -15,11 +15,11 @@ import time
 from pathlib import Path
 
 import pytest
-import torch
+torch = pytest.importorskip("torch")
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-from cozy_convert.writer import (
+from gen_worker.convert.writer import (
     fp8_cast_eligible,
     plan_shards,
     streaming_cast_snapshot,
@@ -283,7 +283,7 @@ def test_streaming_fp8_snapshot_denoiser_only(tmp_path: Path) -> None:
 
 
 def test_streaming_fp8_snapshot_refuses_singlefile(tmp_path: Path) -> None:
-    from cozy_convert.writer import ConversionImplementationError
+    from gen_worker.convert.writer import ConversionImplementationError
 
     (tmp_path / "src").mkdir()
     save_file({"w": torch.randn(4, 4)}, str(tmp_path / "src" / "model.safetensors"))
@@ -292,7 +292,7 @@ def test_streaming_fp8_snapshot_refuses_singlefile(tmp_path: Path) -> None:
 
 
 def test_clone_normalizes_fp8_spellings() -> None:
-    from cozy_convert.clone import normalize_outputs
+    from gen_worker.convert.clone import normalize_outputs
 
     specs = normalize_outputs([
         {"dtype": "fp8:e4m3"}, {"dtype": "fp8-e4m3"}, {"dtype": "fp8"},
@@ -301,7 +301,7 @@ def test_clone_normalizes_fp8_spellings() -> None:
 
 
 def test_inline_conversion_fp8_route(tmp_path: Path) -> None:
-    from cozy_convert.convert import run_inline_conversion
+    from gen_worker.convert.convert import run_inline_conversion
 
     src = tmp_path / "model.safetensors"
     save_file({"blocks.0.attn.to_q.weight": torch.randn(64, 64)}, str(src))

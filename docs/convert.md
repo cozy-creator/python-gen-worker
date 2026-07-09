@@ -1,6 +1,6 @@
-# cozy-convert
+# gen_worker.convert
 
-Cozy Creator's model ETL, split out of `gen-worker` (issue #367).
+Cozy Creator's model ETL: hub ingest (HF + Civitai), dtype cast / quantization, repackage, and Tensorhub publish.
 
 - **Ingest**: HuggingFace (`HfApi.list_repo_files` + classifier + `snapshot_download(allow_patterns=…)`) and Civitai (bounded provider API).
 - **Convert**: streaming dtype cast + fp8-E4M3 storage cast (`#fp8` flavor), bitsandbytes nf4/fp4, GGUF (llama.cpp toolchain), singlefile↔diffusers repackage.
@@ -24,9 +24,7 @@ Casts and fp8 flavor production run on the standard 32 GB CPU class regardless o
 only repackage/GGUF of huge models still needs RAM sized to the model.
 
 ```python
-from cozy_convert import clone_huggingface
+from gen_worker.convert import clone
 
-result = clone_huggingface(ctx, payload)   # download → convert → one commit per flavor
+result = clone.from_huggingface(ctx, payload)   # download → convert → one commit per flavor
 ```
-
-Lives in the `python-gen-worker` uv workspace; depends on `gen-worker` (contexts, identity), never the other way around.
