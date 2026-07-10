@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.13.8 (2026-07-10)
+
+- **th#683 P3: complete the serve-time adaptive-fit ladder + structured degradation events.** `plan_serve` now walks `bf16 -> fp8 -> nvfp4 -> runtime nf4 4-bit -> CPU/disk offload -> CPU-only`, picking the highest-quality lever that fits the actual card. Stored fp8/nvfp4 flavors are HW-gated (fp8 -> SM89 Ada/Hopper, nvfp4 -> SM100 Blackwell); a runtime fp8-E4M3 storage rung needs no fp8 silicon. Never refuses on the recommended-VRAM hint. New `FnDegraded` event (`{function, wanted, ran, reason, est_latency_multiplier, recommended_vram_gb}`) rides the orchestrator transport (cozy-local emits nothing; the honest-guidance advisory is the terminal surface).
+- **th#697 P1: precision-class + placement model; publish-time placement stamping.**
+
+
 ## 0.13.7 (2026-07-10)
 
 - **gw#459: `TrainingMetric` validation fields.** `val_loss`, `best_step`, and
