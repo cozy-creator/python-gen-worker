@@ -1229,7 +1229,7 @@ class _PublisherMixin:
             self._dataset_paths = d
         return d
 
-    def resolve_dataset(self, ref: str) -> str:
+    def resolve_dataset(self, ref: str, *, budget_s: Optional[float] = None) -> str:
         """Materialize a dataset by bare dataset-id or ``owner/name`` ref;
         return the local root.
 
@@ -1243,13 +1243,16 @@ class _PublisherMixin:
            ``GET /api/v1/datasets?tenant=<owner>`` → the row's ``dataset_id``.
         2. ``GET /api/v1/datasets/:id/materialize?format=parquet&include_urls=true``
            → HF-datasets columnar parquet shards (image bytes embedded) with
-           presigned URLs, sizes and blake3 checksums.
+           presigned URLs, sizes and blake3 checksums. A 202 (async snapshot
+           build, th#691) is polled until ready within ``budget_s`` (default
+           30 min, ≥ the hub's 20-min build budget); a typed
+           ``snapshot_build_failed`` raises ``SnapshotBuildFailedError``.
         3. Stream each shard to disk (bounded memory), digest-verified, with
            bounded retries. Entries lacking a presigned URL fall back to the
            repo-CAS by-digest reader.
 
         Raises ``RuntimeError`` when the dataset isn't found, the manifest is
-        empty, or any download exhausts its retries.
+        empty, the poll budget runs out, or any download exhausts its retries.
         """
         from ._datasets import (
             download_entries,
@@ -1274,7 +1277,12 @@ class _PublisherMixin:
             if not dataset_id:
                 raise RuntimeError("resolve_dataset: empty ref")
             cache_key = ("by-id", dataset_id)
-        snapshot_id, entries = fetch_materialize_manifest(base, token, dataset_id)
+        fetch_kwargs: Dict[str, Any] = {"cancelled": lambda: self.cancelled}
+        if budget_s is not None:
+            fetch_kwargs["budget_s"] = budget_s
+        snapshot_id, entries = fetch_materialize_manifest(
+            base, token, dataset_id, **fetch_kwargs,
+        )
 
         cache_root = Path(tempfile.gettempdir()) / "gen_worker_datasets"
         target_root = cache_root.joinpath(*cache_key) / (snapshot_id or dataset_id)

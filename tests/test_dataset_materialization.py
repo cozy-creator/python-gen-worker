@@ -21,7 +21,7 @@ import blake3
 import msgspec
 import pytest
 
-from gen_worker.api.errors import AuthError
+from gen_worker.api.errors import AuthError, SnapshotBuildFailedError
 from gen_worker.api.types import DatasetRef
 from gen_worker.executor import Executor
 from gen_worker.pb import worker_scheduler_pb2 as pb
@@ -68,6 +68,11 @@ class _FakeHub:
         self.shard_requests = 0
         self.list_requests = 0
         self.seen_auth: List[str] = []
+        # DATASET-V2 async snapshot contract (th#691 / gw#457).
+        self.materialize_202s = 0  # 202 {building} responses before the 200
+        self.build_failed = False  # 503 typed snapshot_build_failed
+        self.materialize_requests = 0
+        self.seen_wait: List[str] = []
         # Rows the list endpoint knows + ids materialize serves. th#641
         # production refs are bare UUIDs the list endpoint never saw.
         self.known_ids = {"ds-1", _DATASET_UUID}
@@ -105,6 +110,17 @@ class _FakeHub:
                     ds_id = parts[3]
                     if ds_id not in outer.known_ids:
                         self._status(404)
+                        return
+                    outer.materialize_requests += 1
+                    q = urllib.parse.parse_qs(parsed.query)
+                    outer.seen_wait.append(q.get("wait", [""])[0])
+                    if outer.build_failed:
+                        self._json({"error": "snapshot_build_failed",
+                                    "error_code": "encode_error"}, status=503)
+                        return
+                    if outer.materialize_requests <= outer.materialize_202s:
+                        self._json({"status": "building", "state_version": 7,
+                                    "retry_after": 0.01}, status=202)
                         return
                     digest = outer.shard_digest
                     if outer.lie_about_digest:
@@ -145,9 +161,9 @@ class _FakeHub:
                 self.send_header("Content-Length", "0")
                 self.end_headers()
 
-            def _json(self, payload: Dict) -> None:
+            def _json(self, payload: Dict, status: int = 200) -> None:
                 body = json.dumps(payload).encode()
-                self.send_response(200)
+                self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -174,6 +190,8 @@ def hub():
 @pytest.fixture(autouse=True)
 def _fast_retries(monkeypatch):
     monkeypatch.setattr(datasets_mod, "_DOWNLOAD_BACKOFF_S", 0.01)
+    monkeypatch.setattr(datasets_mod, "_POLL_BACKOFF_START_S", 0.01)
+    monkeypatch.setattr(datasets_mod, "_POLL_BACKOFF_CAP_S", 0.02)
 
 
 def _ctx(hub: _FakeHub) -> TrainingContext:
@@ -262,6 +280,49 @@ def test_grant_scoped_token_cannot_use_owner_name_refs(hub) -> None:
     )
     with pytest.raises(AuthError):
         ctx.resolve_dataset("acme/faces")
+
+
+# ---- DATASET-V2 async snapshot contract (th#691 / gw#457) ------------------
+
+
+def test_resolve_dataset_rides_202_until_ready(hub) -> None:
+    """202 {building, retry_after} twice, then 200 → manifest resolves; the
+    worker sent the ?wait long-poll hint on every attempt."""
+    hub.materialize_202s = 2
+    ctx = _ctx(hub)
+    root = Path(ctx.resolve_dataset("acme/faces"))
+    _assert_snapshot(root, hub)
+    assert hub.materialize_requests == 3
+    assert all(w == "30" for w in hub.seen_wait)
+
+
+def test_snapshot_build_failed_is_typed(hub) -> None:
+    hub.build_failed = True
+    ctx = _ctx(hub)
+    with pytest.raises(SnapshotBuildFailedError, match="encode_error") as ei:
+        ctx.resolve_dataset("acme/faces")
+    assert ei.value.error_code == "encode_error"
+    assert hub.materialize_requests == 1  # no retry loop on a typed failure
+    assert "acme/faces" not in ctx.dataset_paths
+
+
+def test_materialize_budget_exhaustion(hub) -> None:
+    hub.materialize_202s = 10**9  # never ready
+    ctx = _ctx(hub)
+    with pytest.raises(RuntimeError, match="budget exhausted"):
+        ctx.resolve_dataset("acme/faces", budget_s=0.05)
+    assert hub.materialize_requests >= 1
+
+
+def test_executor_rides_202_window(hub) -> None:
+    """The executor pre-materialization path (gw#425) survives a live 202
+    window — same helper, same polling."""
+    hub.materialize_202s = 2
+    res = _run_training_job(hub, _TrainIn(datasets=[DatasetRef(ref="acme/faces")]))
+    assert res.status == pb.JOB_STATUS_OK, res.safe_message
+    out = msgspec.msgpack.decode(res.inline, type=_TrainOut)
+    assert out.shard_exists
+    assert hub.materialize_requests == 3
 
 
 # ---- executor: payload.datasets materialized before the handler runs -------

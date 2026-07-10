@@ -2,8 +2,9 @@
 
 Free functions used by ``_PublisherMixin.resolve_dataset``: look up a dataset
 row by (tenant, name), fetch its parquet materialize manifest (presigned shard
-URLs, th#642 wire format), and stream each shard to disk with digest
-verification + bounded retries.
+URLs, th#642 wire format) — polling 202 until the async snapshot build is
+ready (DATASET-V2 contract, gw#457) — and stream each shard to disk with
+digest verification + bounded retries.
 """
 from __future__ import annotations
 
@@ -13,13 +14,22 @@ import urllib.parse
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from ..api.errors import AuthError
+from ..api.errors import AuthError, SnapshotBuildFailedError
 
 logger = logging.getLogger(__name__)
 
 _DOWNLOAD_RETRIES = 3
 _DOWNLOAD_BACKOFF_S = 1.0
 _CHUNK_BYTES = 1024 * 1024
+
+# DATASET-V2 202 contract (th#691): the hub's snapshot build budget is 20 min;
+# the worker waits it out with headroom (training pods can afford minutes).
+_MATERIALIZE_BUDGET_S = 30.0 * 60.0
+_MATERIALIZE_WAIT_HINT_S = 30  # ?wait long-poll hint (server caps ~30s)
+_POLL_BACKOFF_START_S = 1.0
+_POLL_BACKOFF_CAP_S = 30.0
+_POLL_SLEEP_MAX_S = 60.0  # sanity cap even on a huge server retry_after
+_CANCEL_POLL_SLICE_S = 0.5
 
 
 def lookup_dataset_id(base: str, token: str, tenant: str, name: str) -> str:
@@ -47,36 +57,153 @@ def lookup_dataset_id(base: str, token: str, tenant: str, name: str) -> str:
     raise RuntimeError(f"dataset not found for tenant={tenant} name={name}")
 
 
+def _check_cancelled(cancelled: Optional[Callable[[], bool]]) -> None:
+    if cancelled is not None and cancelled():
+        raise RuntimeError("dataset materialization cancelled")
+
+
+def _sleep_cancellable(seconds: float, cancelled: Optional[Callable[[], bool]]) -> None:
+    """Sleep in small slices so a cancel lands promptly mid-poll."""
+    deadline = time.monotonic() + max(0.0, seconds)
+    while True:
+        _check_cancelled(cancelled)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(remaining, _CANCEL_POLL_SLICE_S))
+
+
+def _retry_after_s(resp: Any, data: Dict[str, Any]) -> float:
+    """Server-suggested wait from the 202 body's retry_after (seconds),
+    falling back to the Retry-After header; 0 when absent/garbage."""
+    for raw in (data.get("retry_after"), resp.headers.get("Retry-After")):
+        if raw is None:
+            continue
+        try:
+            val = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if val > 0:
+            return val
+    return 0.0
+
+
+def _snapshot_build_failed(resp: Any) -> Optional[SnapshotBuildFailedError]:
+    """Typed snapshot_build_failed from a non-2xx body, else None."""
+    body = resp.text or ""
+    if "snapshot_build_failed" not in body:
+        return None
+    error_code = ""
+    try:
+        data = resp.json()
+        if isinstance(data, dict):
+            error_code = str(data.get("error_code") or "")
+    except Exception:
+        pass
+    detail = f": {error_code}" if error_code else ""
+    return SnapshotBuildFailedError(
+        f"dataset snapshot build failed hub-side{detail} "
+        f"(http {resp.status_code}); a new materialize request re-enqueues the build",
+        error_code=error_code,
+    )
+
+
 def fetch_materialize_manifest(
-    base: str, token: str, dataset_id: str
+    base: str,
+    token: str,
+    dataset_id: str,
+    *,
+    budget_s: float = _MATERIALIZE_BUDGET_S,
+    cancelled: Optional[Callable[[], bool]] = None,
 ) -> Tuple[str, List[Dict[str, Any]]]:
     """GET /datasets/:id/materialize?format=parquet&include_urls=true.
 
     Authorizes by dataset id + read_dataset grant (or tenant read perm).
     Returns (snapshot_id, entries); entries carry
     {path, url?, size_bytes?, checksum?, inline_text?, blob_digest?}.
+
+    DATASET-V2 async contract (th#691 / gw#457): the hub may answer
+    202 ``{status: building, state_version, retry_after}`` while the snapshot
+    builds in the background. We long-poll (``?wait=``, ignored by pre-v2
+    hubs) and retry with backoff — honoring ``retry_after`` — until ready or
+    ``budget_s`` runs out. A typed ``snapshot_build_failed`` raises
+    ``SnapshotBuildFailedError``; transient transport/5xx errors retry within
+    the same budget (hub restart mid-build).
     """
     import requests
 
     url = (
         f"{base}/api/v1/datasets/{urllib.parse.quote(dataset_id, safe='')}"
         "/materialize?format=parquet&include_urls=true"
+        f"&wait={_MATERIALIZE_WAIT_HINT_S}"
     )
     headers = {"Authorization": f"Bearer {token}"}
-    resp = requests.get(url, headers=headers, timeout=120)
-    if resp.status_code in (401, 403):
-        raise AuthError(f"dataset materialize unauthorized ({resp.status_code})")
-    if resp.status_code < 200 or resp.status_code >= 300:
-        raise RuntimeError(
-            f"dataset materialize failed ({resp.status_code}): {resp.text[:256]}"
-        )
-    data = resp.json() if resp.text else {}
-    entries = data.get("entries") or []
-    if not isinstance(entries, list) or not entries:
-        raise RuntimeError(
-            f"dataset materialize returned no entries for dataset_id={dataset_id}"
-        )
-    return str(data.get("snapshot_id") or ""), entries
+    deadline = time.monotonic() + max(0.0, budget_s)
+    backoff = _POLL_BACKOFF_START_S
+
+    def _wait_or_budget_exhausted(sleep_s: float, why: str) -> None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError(
+                f"dataset materialize budget exhausted after {budget_s:.0f}s "
+                f"for dataset_id={dataset_id} (last state: {why})"
+            )
+        _sleep_cancellable(min(sleep_s, _POLL_SLEEP_MAX_S, remaining), cancelled)
+
+    while True:
+        _check_cancelled(cancelled)
+        try:
+            resp = requests.get(url, headers=headers, timeout=120)
+        except requests.RequestException as exc:
+            logger.warning(
+                "dataset %s materialize request failed (%s); retrying", dataset_id, exc,
+            )
+            _wait_or_budget_exhausted(backoff, f"transport error: {exc}")
+            backoff = min(backoff * 2.0, _POLL_BACKOFF_CAP_S)
+            continue
+
+        if resp.status_code in (401, 403):
+            raise AuthError(f"dataset materialize unauthorized ({resp.status_code})")
+
+        if resp.status_code == 202:
+            try:
+                data = resp.json() if resp.text else {}
+            except ValueError:
+                data = {}
+            if not isinstance(data, dict):
+                data = {}
+            retry_after = _retry_after_s(resp, data)
+            sleep_s = retry_after if retry_after > 0 else backoff
+            logger.info(
+                "dataset %s snapshot building (state_version=%s); polling again in %.1fs",
+                dataset_id, data.get("state_version"), min(sleep_s, _POLL_SLEEP_MAX_S),
+            )
+            _wait_or_budget_exhausted(sleep_s, "202 building")
+            backoff = min(backoff * 2.0, _POLL_BACKOFF_CAP_S)
+            continue
+
+        if resp.status_code < 200 or resp.status_code >= 300:
+            failed = _snapshot_build_failed(resp)
+            if failed is not None:
+                raise failed
+            if resp.status_code in (502, 503, 504):
+                logger.warning(
+                    "dataset %s materialize got %d; retrying", dataset_id, resp.status_code,
+                )
+                _wait_or_budget_exhausted(backoff, f"http {resp.status_code}")
+                backoff = min(backoff * 2.0, _POLL_BACKOFF_CAP_S)
+                continue
+            raise RuntimeError(
+                f"dataset materialize failed ({resp.status_code}): {resp.text[:256]}"
+            )
+
+        data = resp.json() if resp.text else {}
+        entries = data.get("entries") or []
+        if not isinstance(entries, list) or not entries:
+            raise RuntimeError(
+                f"dataset materialize returned no entries for dataset_id={dataset_id}"
+            )
+        return str(data.get("snapshot_id") or ""), entries
 
 
 def _expected_digest(entry: Dict[str, Any]) -> str:

@@ -26,6 +26,14 @@ class AuthError(WorkerError):
     """Authentication/authorization failure; do not retry (token expired or invalid)."""
 
 
+class SnapshotBuildFailedError(WorkerError):
+    """Dataset snapshot build failed hub-side (typed ``snapshot_build_failed``)."""
+
+    def __init__(self, message: str, *, error_code: str = "") -> None:
+        self.error_code = str(error_code or "")
+        super().__init__(message)
+
+
 class ArtifactTransferError(WorkerError):
     """Model/artifact upload or download failed in a provider transfer path."""
 

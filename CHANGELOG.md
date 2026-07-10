@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.13.5 (2026-07-10)
+
+- **gw#457: `resolve_dataset` rides the DATASET-V2 async snapshot contract
+  (th#691).** `GET /datasets/:id/materialize` may now answer
+  `202 {status: building, state_version, retry_after}` while the snapshot
+  builds in the background; `fetch_materialize_manifest` polls until ready —
+  long-polling via `?wait=30` (ignored by pre-v2 hubs), honoring `retry_after`
+  with capped exponential backoff, within an overall budget (default 30 min,
+  ≥ the hub's 20-min build budget; `resolve_dataset(..., budget_s=)` to
+  override) and respecting job cancellation mid-poll. A typed
+  `snapshot_build_failed` raises the new `SnapshotBuildFailedError`
+  (`gen_worker.api.errors`, carries `error_code`) instead of a generic
+  non-2xx RuntimeError; transient transport errors and bare 502/503/504
+  retry within the same budget (hub restart mid-build). The executor's
+  `payload.datasets` pre-materialization path (gw#425) goes through the same
+  helper, so training jobs survive a live 202 window. Backward-compatible:
+  today's hub never returns 202. Per-shard download retries unchanged.
+
 ## 0.13.4 (2026-07-10)
 
 - **th#683 P3: serve-time adaptive fit — the worker never refuses on the VRAM

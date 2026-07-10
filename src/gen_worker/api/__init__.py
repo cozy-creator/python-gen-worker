@@ -11,6 +11,7 @@ from .errors import (
     RefCompatibilitySurprise,
     ResourceError,
     RetryableError,
+    SnapshotBuildFailedError,
     ValidationError,
     WorkerError,
 )
@@ -53,6 +54,7 @@ __all__ = [
     "RefCompatibilitySurprise",
     "ResourceError",
     "RetryableError",
+    "SnapshotBuildFailedError",
     "ValidationError",
     "WorkerError",
     "BatchItemDelta",
