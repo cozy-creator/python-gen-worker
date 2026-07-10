@@ -99,14 +99,15 @@ class _RequestOutputStream:
         self._last_progress_uploaded = 0
         self._session_id: Optional[str] = None
         self._uploader_meta: Dict[str, Any] = {}
-        # Route all output streams (checkpoint AND asset) through the
-        # repo-CAS upload session when the job carries a destination_repo
-        # scope. Without this, clone/conversion jobs splay their non-tensor
-        # auxiliary files (README, config.json, etc.) onto /api/v1/media/:owner/uploads,
-        # which the worker cap-token does not authorize.
-        # Inference jobs have no destination_repo, so scope stays None and
-        # the media route remains the default for those.
-        self._repo_job_scope = self._ctx._repo_job_upload_scope()
+        # Split routing by artifact kind (gw#453): checkpoint streams ride
+        # the repo-CAS upload session when the job carries a destination_repo
+        # scope (job-bound create_checkpoint grant, multi-GB per-file caps);
+        # asset streams (sample images, media outputs) always ride the media
+        # route — that's what the upload_media grant authorizes and caps.
+        # Inference jobs have no destination_repo, so scope stays None.
+        self._repo_job_scope = (
+            self._ctx._repo_job_upload_scope() if self._kind == "checkpoint" else None
+        )
         self._finalized = False
         self._result: Any = None
 
