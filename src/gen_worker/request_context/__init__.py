@@ -486,6 +486,27 @@ class RequestContext:
             payload["stage"] = stage
         self._emit_event("request.progress", payload)
 
+    def _emit_checkpoint_saved(
+        self,
+        ref: str,
+        *,
+        step_number: Optional[int] = None,
+        epoch_number: Optional[int] = None,
+        output_kind: Optional[str] = None,
+        size_bytes: Optional[int] = None,
+    ) -> None:
+        """Emit a checkpoint-saved event (best-effort; rides JobProgress)."""
+        payload: Dict[str, Any] = {"ref": ref}
+        if step_number is not None:
+            payload["step_number"] = int(step_number)
+        if epoch_number is not None:
+            payload["epoch_number"] = int(epoch_number)
+        if output_kind:
+            payload["output_kind"] = str(output_kind)
+        if size_bytes is not None:
+            payload["size_bytes"] = int(size_bytes)
+        self._emit_event("request.checkpoint", payload)
+
     def log(self, message: str, level: str = "info") -> None:
         self._emit_event("request.log", {"message": message, "level": level})
 
@@ -937,10 +958,18 @@ class _PublisherMixin:
                         stream.write(chunk)
                 out = stream.finalize()
                 if isinstance(out, Tensors):
+                    self._emit_checkpoint_saved(
+                        ref, step_number=step_number, epoch_number=epoch_number,
+                        output_kind=output_kind, size_bytes=size,
+                    )
                     return out
                 raise RuntimeError("file save failed (invalid_tensors_response)")
 
             asset = self.save_file(ref, src)
+        self._emit_checkpoint_saved(
+            ref, step_number=step_number, epoch_number=epoch_number,
+            output_kind=output_kind, size_bytes=size,
+        )
         return Tensors(
             ref=asset.ref,
             owner=asset.owner,
@@ -990,10 +1019,18 @@ class _PublisherMixin:
             stream.write(payload)
             out = stream.finalize()
             if isinstance(out, Tensors):
+                self._emit_checkpoint_saved(
+                    ref, step_number=step_number, epoch_number=epoch_number,
+                    output_kind=output_kind, size_bytes=len(payload),
+                )
                 return out
             raise RuntimeError("file save failed (invalid_tensors_response)")
 
         asset = self.save_bytes(ref, payload)
+        self._emit_checkpoint_saved(
+            ref, step_number=step_number, epoch_number=epoch_number,
+            output_kind=output_kind, size_bytes=len(payload),
+        )
         return Tensors(
             ref=asset.ref,
             owner=asset.owner,
@@ -1177,11 +1214,17 @@ class _PublisherMixin:
         return d
 
     def resolve_dataset(self, ref: str) -> str:
-        """Materialize a dataset by ``owner/name`` ref; return the local root.
+        """Materialize a dataset by bare dataset-id or ``owner/name`` ref;
+        return the local root.
 
-        Flow (th#642 wire format):
+        Production refs are bare dataset UUIDs (th#641: the hub rewrites
+        ``payload.datasets[].ref`` at submit and mints the ``read_dataset``
+        grant by UUID; a grant-scoped token can't list) — those hit
+        materialize directly. ``owner/name`` refs stay for local/dev via the
+        ``?tenant=`` list lookup. Flow (th#642 wire format):
 
-        1. ``GET /api/v1/datasets?owner=<owner>`` → the row's ``dataset_id``.
+        1. Slash-less ref → dataset_id verbatim; otherwise
+           ``GET /api/v1/datasets?tenant=<owner>`` → the row's ``dataset_id``.
         2. ``GET /api/v1/datasets/:id/materialize?format=parquet&include_urls=true``
            → HF-datasets columnar parquet shards (image bytes embedded) with
            presigned URLs, sizes and blake3 checksums.
@@ -1201,17 +1244,24 @@ class _PublisherMixin:
         cached = self.dataset_paths.get(ref)
         if cached:
             return cached
-        owner, name = _parse_owner_repo(ref)
         base = (self._file_api_base_url or "").strip().rstrip("/")
         if not base:
             raise RuntimeError(f"resolve_dataset({ref!r}): no file_api_base_url")
         token = self._get_worker_capability_token()
 
-        dataset_id = lookup_dataset_id(base, token, owner, name)
-        snapshot_id, entries = fetch_materialize_manifest(base, token, owner, dataset_id)
+        if "/" in ref:
+            owner, name = _parse_owner_repo(ref)
+            dataset_id = lookup_dataset_id(base, token, owner, name)
+            cache_key = (owner, name)
+        else:
+            dataset_id = ref.strip()
+            if not dataset_id:
+                raise RuntimeError("resolve_dataset: empty ref")
+            cache_key = ("by-id", dataset_id)
+        snapshot_id, entries = fetch_materialize_manifest(base, token, dataset_id)
 
         cache_root = Path(tempfile.gettempdir()) / "gen_worker_datasets"
-        target_root = cache_root / owner / name / (snapshot_id or dataset_id)
+        target_root = cache_root.joinpath(*cache_key) / (snapshot_id or dataset_id)
         target_root.mkdir(parents=True, exist_ok=True)
         download_entries(
             entries, target_root,
@@ -1384,11 +1434,11 @@ class DatasetContext(_PublisherMixin, RequestContext):
         if snapshot_manifest:
             features_payload["__cozy_snapshot_manifest__"] = snapshot_manifest
 
-        # Step 1: look up any existing dataset by (owner, name). tensorhub
-        # currently lists by owner and filters client-side; this is O(N)
-        # but N is small (typically <100 datasets per org in practice).
+        # Step 1: look up any existing dataset by (tenant, name). tensorhub
+        # lists by ?tenant= and we filter client-side; this is O(N) but N is
+        # small (typically <100 datasets per org in practice).
         list_url = (
-            f"{base}/api/v1/datasets?owner={urllib.parse.quote(owner, safe='')}"
+            f"{base}/api/v1/datasets?tenant={urllib.parse.quote(owner, safe='')}"
         )
         list_resp = requests.get(list_url, headers=headers, timeout=30)
         existing_id = ""
@@ -1406,7 +1456,7 @@ class DatasetContext(_PublisherMixin, RequestContext):
             # Step 2a: create.
             create_url = f"{base}/api/v1/datasets"
             create_body = {
-                "owner": owner,
+                "tenant": owner,
                 "name": name,
                 "visibility": visibility,
                 "schema": features_payload,
