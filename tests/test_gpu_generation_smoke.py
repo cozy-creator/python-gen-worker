@@ -179,8 +179,10 @@ def test_flux2_klein_turbo_generates_real_image(tmp_path: Path) -> None:
     # NATIVE-PARAMS RULE: prompt + fixed seed only; native resolution and the
     # distilled step count. Turbo ignores guidance.
     t0 = time.monotonic()
+    # prompt must be a keyword: __call__'s first positional is the edit-
+    # conditioning image.
     image = pipe(
-        PROMPT,
+        prompt=PROMPT,
         num_inference_steps=STEPS,
         generator=torch.Generator("cpu").manual_seed(SEED),
     ).images[0]
