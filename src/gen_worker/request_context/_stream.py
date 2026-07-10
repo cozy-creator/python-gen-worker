@@ -329,9 +329,6 @@ class _RequestOutputStream:
         base = self._ctx._get_file_api_base_url()
         token = self._ctx._get_worker_capability_token()
         headers: Dict[str, str] = {"Authorization": f"Bearer {token}"}
-        owner = (self._ctx._owner or "").strip()
-        if owner:
-            headers["X-Cozy-Owner"] = owner
 
         # Build endpoint and create payload.
         create_payload: Dict[str, Any] = {}
@@ -343,25 +340,32 @@ class _RequestOutputStream:
             create_payload["content_type"] = content_type
 
         if self._repo_job_scope is None:
-            # Media upload.
+            # Media upload. The URL owner segment MUST be the owner the
+            # capability token's upload_media grant is bound to (the token's
+            # `tenant` claim: the canonical invoking-org uuid). The
+            # dispatch-stamped ctx.owner can be a slug or a destination-repo
+            # owner resolving to a DIFFERENT org — tensorhub then finds no
+            # matching grant and 403s (J19 run34 sample images). Inference
+            # outputs work exactly because URL owner == token-bound owner.
             create_payload["ref"] = self._ref
             job_id = str(self._ctx._job_id or "").strip()
             if job_id:
                 create_payload["job_id"] = job_id
-            # Owner is now an explicit URL segment (mirrors /repos/:owner/...,
-            # /endpoints/:owner/..., /datasets/:owner/...). The capability
-            # token still carries owner binding; tensorhub enforces the URL
-            # owner matches the token-bound owner on each request.
+            owner = self._ctx._media_upload_owner()
             if not owner:
                 raise RuntimeError(
                     "file save failed (missing owner): media uploads require ctx.owner"
                 )
+            headers["X-Cozy-Owner"] = owner
             owner_seg = urllib.parse.quote(owner, safe="")
             endpoint_path = f"/api/v1/media/{owner_seg}/uploads"
         else:
             # Repo-CAS upload — issue #20 session-scoped URL shape. The
             # session is opened lazily by the ctx-level manager on first use
             # and cached so subsequent uploads to the same repo reuse it.
+            owner = (self._ctx._owner or "").strip()
+            if owner:
+                headers["X-Cozy-Owner"] = owner
             repo_owner, repo, _job_id = self._repo_job_scope
             create_payload["path"] = self._ref
             revision_id = self._ctx._checkpoint_revision_id(repo_owner, repo)

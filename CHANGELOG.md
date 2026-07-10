@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.13.2 (2026-07-10)
+
+- **gw#451: media uploads target the capability-token-bound owner.**
+  `/api/v1/media/:owner/uploads` is authorized by the token's `upload_media`
+  grant, which is bound to the canonical invoking-org uuid in the token's
+  `tenant` claim. The URL owner segment (and `X-Cozy-Owner`) now come from
+  that claim instead of the dispatch-stamped `ctx.owner`, which can be a slug
+  or a destination-repo owner resolving to a DIFFERENT org. Live failure:
+  J19 run34 trained 500/500 steps, then `TrainingContext.save_image` 403'd on
+  `/api/v1/media/tensorhub/uploads` (slug) while the grant was bound to the
+  invoker-org uuid; inference outputs only worked because their dispatch
+  already stamped the uuid. Dev/local paths without a JWT keep `ctx.owner`.
+
 ## 0.13.1 (2026-07-10)
 
 - **gw#442: clone workdir flock — concurrent duplicate clones serialize.**
