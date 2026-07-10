@@ -1,0 +1,203 @@
+{
+  "_comment": "th#697 shared precision-ladder conformance vectors. This file is vendored BYTE-IDENTICALLY in tensorhub (internal/orchestrator/precision/testdata/) and python-gen-worker (tests/testdata/) — the Go resolver and gen_worker.models.ladder.resolve must produce identical outcomes for every vector; any spec change edits BOTH copies. Spec: walk [best admitted 4-bit svdq flavor (fp4>int4, rank desc)] -> [fp8 stored > fp8 cast-at-load (est = fp8_cast_vram_gb else 0.75*base_size_gb)] -> [bf16 base]; each rung gated by quality floor (bf16=3 > fp8=2 > 4bit=1; ''=any), placement SM admission (checkpoint metadata placement block wins, else flavor-token defaults: svdq-fp4 sm 120/121, svdq-int4 sm 75-89, engines nunchaku; fp8/base universal), required engines within libs, and est_vram_gb <= free_vram_gb. local=true appends emergency-nf4 (quality_floor must be '', est 0.45*base, artifact = stored fp8 if admitted else base, cast=nf4) then offload (first arch/engine-eligible rung ignoring fit, requires allow_offload). No rung -> refusal no_runnable_precision; gpu_sm<=0 -> refusal no_cuda_gpu. nvfp4-class flavors are never diffusers rungs (TRT lane).",
+  "vectors": [
+    {
+      "name": "blackwell-5090-svdq-fp4-present",
+      "gpu_sm": 120, "free_vram_gb": 31.0, "libs": ["nunchaku"],
+      "model": {"base_size_gb": 12.2, "flavors": {"svdq-fp4-r128": {"size_gb": 3.9}, "svdq-int4-r128": {"size_gb": 3.9}, "fp8": {"size_gb": 6.2}}},
+      "expect": {"flavor": "svdq-fp4-r128", "cast": "", "mode": "native"}
+    },
+    {
+      "name": "blackwell-prefers-higher-rank",
+      "gpu_sm": 121, "free_vram_gb": 31.0, "libs": ["nunchaku"],
+      "model": {"base_size_gb": 12.2, "flavors": {"svdq-fp4-r32": {"size_gb": 3.5}, "svdq-fp4-r128": {"size_gb": 3.9}}},
+      "expect": {"flavor": "svdq-fp4-r128", "cast": "", "mode": "native"}
+    },
+    {
+      "name": "blackwell-int4-not-admitted-falls-to-fp8-stored",
+      "gpu_sm": 120, "free_vram_gb": 31.0, "libs": ["nunchaku"],
+      "model": {"base_size_gb": 12.2, "flavors": {"svdq-int4-r128": {"size_gb": 3.9}, "fp8": {"size_gb": 6.2}}},
+      "expect": {"flavor": "fp8", "cast": "", "mode": "native"}
+    },
+    {
+      "name": "blackwell-no-nunchaku-lib-falls-to-fp8",
+      "gpu_sm": 120, "free_vram_gb": 31.0, "libs": [],
+      "model": {"base_size_gb": 12.2, "flavors": {"svdq-fp4-r128": {"size_gb": 3.9}, "fp8": {"size_gb": 6.2}}},
+      "expect": {"flavor": "fp8", "cast": "", "mode": "native"}
+    },
+    {
+      "name": "b200-sm100-svdq-never-fp8-stored",
+      "gpu_sm": 100, "free_vram_gb": 170.0, "libs": ["nunchaku"],
+      "model": {"base_size_gb": 12.2, "flavors": {"svdq-fp4-r128": {"size_gb": 3.9}, "fp8": {"size_gb": 6.2}}},
+      "expect": {"flavor": "fp8", "cast": "", "mode": "native"}
+    },
+    {
+      "name": "hopper-h100-fp8-stored",
+      "gpu_sm": 90, "free_vram_gb": 78.0, "libs": [],
+      "model": {"base_size_gb": 12.2, "flavors": {"fp8": {"size_gb": 6.2}}},
+      "expect": {"flavor": "fp8", "cast": "", "mode": "native"}
+    },
+    {
+      "name": "hopper-h100-fp8-cast-when-no-artifact",
+      "gpu_sm": 90, "free_vram_gb": 78.0, "libs": [],
+      "model": {"base_size_gb": 12.2, "flavors": {}},
+      "expect": {"flavor": "", "cast": "fp8", "mode": "native"}
+    },
+    {
+      "name": "hopper-svdq-not-admitted-sm90",
+      "gpu_sm": 90, "free_vram_gb": 78.0, "libs": ["nunchaku"],
+      "model": {"base_size_gb": 12.2, "flavors": {"svdq-int4-r128": {"size_gb": 3.9}, "svdq-fp4-r128": {"size_gb": 3.9}}},
+      "expect": {"flavor": "", "cast": "fp8", "mode": "native"}
+    },
+    {
+      "name": "ada-4090-svdq-int4-present",
+      "gpu_sm": 89, "free_vram_gb": 23.0, "libs": ["nunchaku"],
+      "model": {"base_size_gb": 12.2, "flavors": {"svdq-int4-r128": {"size_gb": 3.9}, "fp8": {"size_gb": 6.2}}},
+      "expect": {"flavor": "svdq-int4-r128", "cast": "", "mode": "native"}
+    },
+    {
+      "name": "ada-4090-fp4-not-admitted-int4-absent",
+      "gpu_sm": 89, "free_vram_gb": 23.0, "libs": ["nunchaku"],
+      "model": {"base_size_gb": 12.2, "flavors": {"svdq-fp4-r128": {"size_gb": 3.9}}},
+      "expect": {"flavor": "", "cast": "fp8", "mode": "native"}
+    },
+    {
+      "name": "ampere-3090-svdq-int4-admitted",
+      "gpu_sm": 86, "free_vram_gb": 23.0, "libs": ["nunchaku"],
+      "model": {"base_size_gb": 12.2, "flavors": {"svdq-int4-r32": {"size_gb": 3.5}}},
+      "expect": {"flavor": "svdq-int4-r32", "cast": "", "mode": "native"}
+    },
+    {
+      "name": "old-card-sm70-fp8-cast",
+      "gpu_sm": 70, "free_vram_gb": 30.0, "libs": ["nunchaku"],
+      "model": {"base_size_gb": 12.2, "flavors": {"svdq-int4-r128": {"size_gb": 3.9}}},
+      "expect": {"flavor": "", "cast": "fp8", "mode": "native"}
+    },
+    {
+      "name": "quality-floor-bf16-pins-base",
+      "gpu_sm": 120, "free_vram_gb": 31.0, "libs": ["nunchaku"], "quality_floor": "bf16",
+      "model": {"base_size_gb": 12.2, "flavors": {"svdq-fp4-r128": {"size_gb": 3.9}, "fp8": {"size_gb": 6.2}}},
+      "expect": {"flavor": "", "cast": "", "mode": "native"}
+    },
+    {
+      "name": "quality-floor-fp8-excludes-4bit",
+      "gpu_sm": 89, "free_vram_gb": 23.0, "libs": ["nunchaku"], "quality_floor": "fp8",
+      "model": {"base_size_gb": 12.2, "flavors": {"svdq-int4-r128": {"size_gb": 3.9}, "fp8": {"size_gb": 6.2}}},
+      "expect": {"flavor": "fp8", "cast": "", "mode": "native"}
+    },
+    {
+      "name": "quality-floor-bf16-unfittable-refuses",
+      "gpu_sm": 89, "free_vram_gb": 23.0, "libs": [], "quality_floor": "bf16",
+      "model": {"base_size_gb": 32.3, "flavors": {"fp8": {"size_gb": 16.2}}},
+      "expect": {"refusal": "no_runnable_precision"}
+    },
+    {
+      "name": "fit-bf16-too-big-fp8-cast-fits",
+      "gpu_sm": 90, "free_vram_gb": 40.0, "libs": [],
+      "model": {"base_size_gb": 58.0, "fp8_cast_vram_gb": 39.0, "flavors": {}},
+      "expect": {"flavor": "", "cast": "fp8", "mode": "native"}
+    },
+    {
+      "name": "fit-cast-factor-default-applies",
+      "gpu_sm": 90, "free_vram_gb": 10.0, "libs": [],
+      "model": {"base_size_gb": 12.0, "flavors": {}},
+      "expect": {"flavor": "", "cast": "fp8", "mode": "native"}
+    },
+    {
+      "name": "fit-nothing-fits-hub-refuses",
+      "gpu_sm": 89, "free_vram_gb": 8.0, "libs": [],
+      "model": {"base_size_gb": 32.3, "flavors": {"fp8": {"size_gb": 16.2}}},
+      "expect": {"refusal": "no_runnable_precision"}
+    },
+    {
+      "name": "local-emergency-nf4-downloads-stored-fp8",
+      "gpu_sm": 89, "free_vram_gb": 15.0, "libs": [], "local": true,
+      "model": {"base_size_gb": 32.3, "fp8_cast_vram_gb": 24.0, "flavors": {"fp8": {"size_gb": 16.2}}},
+      "expect": {"flavor": "fp8", "cast": "nf4", "mode": "emergency"}
+    },
+    {
+      "name": "local-emergency-nf4-from-base-when-no-fp8",
+      "gpu_sm": 89, "free_vram_gb": 15.0, "libs": [], "local": true,
+      "model": {"base_size_gb": 32.3, "flavors": {}},
+      "expect": {"flavor": "", "cast": "nf4", "mode": "emergency"}
+    },
+    {
+      "name": "local-emergency-respects-quality-floor",
+      "gpu_sm": 89, "free_vram_gb": 15.0, "libs": [], "local": true, "quality_floor": "fp8",
+      "model": {"base_size_gb": 32.3, "fp8_cast_vram_gb": 24.0, "flavors": {"fp8": {"size_gb": 16.2}}},
+      "expect": {"flavor": "fp8", "cast": "", "mode": "offload"}
+    },
+    {
+      "name": "local-offload-when-even-nf4-does-not-fit",
+      "gpu_sm": 89, "free_vram_gb": 6.0, "libs": [], "local": true,
+      "model": {"base_size_gb": 32.3, "flavors": {"fp8": {"size_gb": 16.2}}},
+      "expect": {"flavor": "fp8", "cast": "", "mode": "offload"}
+    },
+    {
+      "name": "local-offload-forbidden-refuses",
+      "gpu_sm": 89, "free_vram_gb": 6.0, "libs": [], "local": true, "allow_offload": false, "quality_floor": "fp8",
+      "model": {"base_size_gb": 32.3, "flavors": {"fp8": {"size_gb": 16.2}}},
+      "expect": {"refusal": "no_runnable_precision"}
+    },
+    {
+      "name": "local-offload-picks-preference-order-head",
+      "gpu_sm": 120, "free_vram_gb": 2.0, "libs": ["nunchaku"], "local": true, "quality_floor": "fp8",
+      "model": {"base_size_gb": 12.2, "flavors": {"svdq-fp4-r128": {"size_gb": 3.9}, "fp8": {"size_gb": 6.2}}},
+      "expect": {"flavor": "fp8", "cast": "", "mode": "offload"}
+    },
+    {
+      "name": "metadata-placement-overrides-token-defaults",
+      "gpu_sm": 90, "free_vram_gb": 78.0, "libs": ["nunchaku"],
+      "model": {"base_size_gb": 12.2, "flavors": {"svdq-int4-r128": {"size_gb": 3.9, "placement": {"precision_class": "svdq-int4", "sm_allowed": [89, 90], "engines": ["nunchaku"]}}}},
+      "expect": {"flavor": "svdq-int4-r128", "cast": "", "mode": "native"}
+    },
+    {
+      "name": "metadata-placement-engines-gate",
+      "gpu_sm": 89, "free_vram_gb": 23.0, "libs": [],
+      "model": {"base_size_gb": 12.2, "flavors": {"svdq-int4-r128": {"size_gb": 3.9, "placement": {"precision_class": "svdq-int4", "sm_allowed": [89], "engines": ["nunchaku"]}}}},
+      "expect": {"flavor": "", "cast": "fp8", "mode": "native"}
+    },
+    {
+      "name": "nvfp4-flavor-is-never-a-diffusers-rung",
+      "gpu_sm": 120, "free_vram_gb": 31.0, "libs": ["nunchaku", "tensorrt"],
+      "model": {"base_size_gb": 12.2, "flavors": {"nvfp4": {"size_gb": 3.4}}},
+      "expect": {"flavor": "", "cast": "fp8", "mode": "native"}
+    },
+    {
+      "name": "unknown-flavor-tokens-ignored",
+      "gpu_sm": 90, "free_vram_gb": 78.0, "libs": [],
+      "model": {"base_size_gb": 12.2, "flavors": {"trt-rtx-4090-trt10.16-fp16": {"size_gb": 6.0}, "vae-fix": {"size_gb": 0.2}}},
+      "expect": {"flavor": "", "cast": "fp8", "mode": "native"}
+    },
+    {
+      "name": "no-base-no-fp8-artifact-svdq-only-model",
+      "gpu_sm": 89, "free_vram_gb": 23.0, "libs": ["nunchaku"],
+      "model": {"base_size_gb": 0, "flavors": {"svdq-int4-r128": {"size_gb": 3.9}}},
+      "expect": {"flavor": "svdq-int4-r128", "cast": "", "mode": "native"}
+    },
+    {
+      "name": "no-base-hopper-nothing-runnable",
+      "gpu_sm": 90, "free_vram_gb": 78.0, "libs": ["nunchaku"],
+      "model": {"base_size_gb": 0, "flavors": {"svdq-int4-r128": {"size_gb": 3.9}}},
+      "expect": {"refusal": "no_runnable_precision"}
+    },
+    {
+      "name": "no-gpu-refuses",
+      "gpu_sm": 0, "free_vram_gb": 0, "libs": [],
+      "model": {"base_size_gb": 12.2, "flavors": {"fp8": {"size_gb": 6.2}}},
+      "expect": {"refusal": "no_cuda_gpu"}
+    },
+    {
+      "name": "stored-fp8-preferred-over-cast",
+      "gpu_sm": 89, "free_vram_gb": 23.0, "libs": [],
+      "model": {"base_size_gb": 12.2, "flavors": {"fp8": {"size_gb": 6.2}}},
+      "expect": {"flavor": "fp8", "cast": "", "mode": "native"}
+    },
+    {
+      "name": "higher-rank-wins-among-int4",
+      "gpu_sm": 89, "free_vram_gb": 23.0, "libs": ["nunchaku"],
+      "model": {"base_size_gb": 12.2, "flavors": {"svdq-int4-r32": {"size_gb": 3.5}, "svdq-int4-r128": {"size_gb": 3.9}}},
+      "expect": {"flavor": "svdq-int4-r128", "cast": "", "mode": "native"}
+    }
+  ]
+}
