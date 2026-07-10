@@ -1547,6 +1547,11 @@ class TrainingMetric(msgspec.Struct, frozen=True, kw_only=True):
     lr: Optional[float] = None
     it_s: Optional[float] = None
     eta_s: Optional[float] = None
+    #: pgw#459 validation fields: periodic val loss, step of the best val so
+    #: far, and a short trainer hint (e.g. "val rising; consider best_step").
+    val_loss: Optional[float] = None
+    best_step: Optional[int] = None
+    advice: Optional[str] = None
 
 
 class TrainingContext(_PublisherMixin, RequestContext):
@@ -1577,17 +1582,26 @@ class TrainingContext(_PublisherMixin, RequestContext):
         lr: Optional[float] = None,
         it_s: Optional[float] = None,
         eta_s: Optional[float] = None,
+        val_loss: Optional[float] = None,
+        best_step: Optional[int] = None,
+        advice: Optional[str] = None,
     ) -> None:
         """Emit a typed ``request.training_metric`` event (throttled).
 
         Keep ``ctx.progress`` for human-readable stage text; this is the
-        machine channel a UI charts (loss curve, it/s, ETA).
+        machine channel a UI charts (loss curve, it/s, ETA). Events carrying
+        ``val_loss`` bypass the throttle like first/last (pgw#459) — val
+        points are sparse and every one must reach the hub.
         """
         now = time.monotonic()
         last = self._last_metric_monotonic
         is_first = last is None
         is_last = total > 0 and step >= total
-        if not is_first and not is_last and (now - last) < self.metric_min_interval_s:
+        has_val = val_loss is not None
+        if (
+            not is_first and not is_last and not has_val
+            and (now - last) < self.metric_min_interval_s
+        ):
             return
         self._last_metric_monotonic = now
         metric = TrainingMetric(
@@ -1597,6 +1611,9 @@ class TrainingContext(_PublisherMixin, RequestContext):
             lr=None if lr is None else float(lr),
             it_s=None if it_s is None else float(it_s),
             eta_s=None if eta_s is None else float(eta_s),
+            val_loss=None if val_loss is None else float(val_loss),
+            best_step=None if best_step is None else int(best_step),
+            advice=advice if advice is None else str(advice),
         )
         payload = {k: v for k, v in msgspec.to_builtins(metric).items() if v is not None}
         self._emit_event("request.training_metric", payload)
