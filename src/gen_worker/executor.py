@@ -745,6 +745,11 @@ class Executor:
         for s in specs:
             for b in s.models.values():
                 self.store.register_binding(wire_ref(b), b)
+        # th#697: declared (pre-resolution) model bindings per spec, so hub
+        # precision resolutions apply full-replace against the AUTHORED refs.
+        self._declared_models: Dict[str, Dict[str, Any]] = {
+            s.name: dict(s.models) for s in specs
+        }
         self._gpu_semaphore = asyncio.Semaphore(max(1, gpu_slots))
         # Model loads/promotions serialize so allocator-delta measurements
         # and free-VRAM reads don't cross-contaminate (#369).
@@ -780,6 +785,64 @@ class Executor:
         # th#683 P3: how each serveable function will run on the actual card
         # (native / emergency / offload / cpu) + honest-guidance advisory.
         self.serve_plans: Dict[str, "ServePlan"] = {}
+
+    # ---- precision resolutions (th#697) -----------------------------------
+
+    def apply_model_resolutions(self, resolutions: Dict[str, Tuple[str, str]]) -> None:
+        """Rebind model slots to the hub's precision-ladder picks.
+
+        ``resolutions`` maps a DECLARED wire ref to ``(resolved_ref, cast)``
+        (HelloAck full-replace semantics: refs absent from the map revert to
+        their authored bindings). Rebinding folds the resolved flavor into
+        the binding and stamps ``cast`` as ``storage_dtype``, so every
+        downstream consumer — wire_ref residency keys, downloads, setup,
+        loading — follows the pick with no per-call-site changes. Already-
+        loaded pipelines are not reloaded; picks apply to future setups.
+        """
+        import dataclasses
+
+        from .models.refs import parse_model_ref
+
+        changed = False
+        for spec in self.specs.values():
+            declared = self._declared_models.get(spec.name)
+            if not declared:
+                continue
+            for slot, base_binding in declared.items():
+                base_ref = wire_ref(base_binding)
+                pick = resolutions.get(base_ref)
+                new_binding = base_binding
+                if pick is not None:
+                    resolved_ref, cast = pick
+                    try:
+                        rebound = base_binding
+                        if resolved_ref and resolved_ref != base_ref:
+                            flavor = parse_model_ref(resolved_ref).tensorhub.flavor
+                            rebound = dataclasses.replace(rebound, flavor=flavor)
+                        if cast:
+                            rebound = dataclasses.replace(rebound, storage_dtype=cast)
+                        if resolved_ref and wire_ref(rebound) != resolved_ref:
+                            logger.warning(
+                                "precision resolution %s -> %s does not round-trip "
+                                "through the binding (got %s); keeping declared ref",
+                                base_ref, resolved_ref, wire_ref(rebound))
+                        else:
+                            new_binding = rebound
+                    except (ValueError, TypeError, AttributeError) as exc:
+                        logger.warning(
+                            "precision resolution %s -> %r rejected: %s",
+                            base_ref, pick, exc)
+                if spec.models.get(slot) is not new_binding:
+                    spec.models[slot] = new_binding
+                    self.store.register_binding(wire_ref(new_binding), new_binding)
+                    changed = True
+                    if new_binding is not base_binding:
+                        logger.info(
+                            "precision resolution applied: %s %s/%s -> %s (cast=%s)",
+                            spec.name, slot, base_ref, wire_ref(new_binding),
+                            getattr(new_binding, "storage_dtype", ""))
+        if changed:
+            self._on_state_change()
 
     # ---- availability ----------------------------------------------------
 
