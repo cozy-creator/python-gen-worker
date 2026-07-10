@@ -115,6 +115,21 @@ message HelloAck {
   ProtocolVersion protocol_version = 1; // orchestrator's version, for symmetric validation
   string file_base_url = 2;  // tensorhub base URL for capability-token HTTP calls (uploads, blob refs)
   repeated string keep = 3;  // refs the worker's disk eviction must protect
+  // th#697 precision ladder: per-model flavor resolutions for THIS worker's
+  // card. The worker applies each entry to bindings whose wire ref equals
+  // `ref` (a bare declared ref): download/load `resolved_ref` and apply the
+  // `cast` transform at load. Full-replace with the ack. Additive: old
+  // workers ignore it and load their declared bindings.
+  repeated ModelResolution resolutions = 4;
+}
+
+// One precision-ladder resolution (th#697): declared bare ref -> the concrete
+// flavored ref (and/or load-time cast) the orchestrator picked for the
+// worker's card.
+message ModelResolution {
+  string ref          = 1; // declared bare ref (canonical grammar, no #flavor)
+  string resolved_ref = 2; // concrete ref to download + load (may carry #flavor)
+  string cast         = 3; // load-time transform: "" | "fp8"
 }
 
 // Worker -> orchestrator dynamic state. FULL-REPLACE snapshot of every field,

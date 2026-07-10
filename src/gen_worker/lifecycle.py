@@ -143,6 +143,11 @@ class Lifecycle:
         # Full-replace config: file base URL + disk-retention keep set.
         self.executor.file_base_url = ack.file_base_url or ""
         self.executor.store.keep = set(ack.keep)
+        # th#697: apply the hub's precision-ladder picks for THIS card
+        # (full-replace: refs absent from the map revert to declared).
+        self.executor.apply_model_resolutions({
+            r.ref: (r.resolved_ref, r.cast) for r in ack.resolutions
+        })
         # New connection: per-worker fn disables/degradations were wiped by
         # Hello; re-emit any that still hold, then re-baseline dynamic state.
         self._emitted_unavailable.clear()

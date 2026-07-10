@@ -809,13 +809,62 @@ def _remember_hub_ref(cache_dir: Path, thref: Any, digest: str) -> None:
         pass
 
 
+def _apply_local_precision_ladder(
+    bindings: Dict[str, Any],
+    *,
+    offline: bool,
+    emit: Callable[[Dict[str, Any]], None],
+) -> Dict[str, Any]:
+    """th#697 cozy-local ladder walk: rebind bare tensorhub bindings to this
+    card's best native rung (stored flavor / fp8 cast). Fail-open: offline
+    runs, resolver failures, refusals, and pinned bindings keep the authored
+    refs. Opt out with GEN_WORKER_NO_PRECISION_LADDER=1."""
+    if offline or os.getenv("GEN_WORKER_NO_PRECISION_LADDER", "").strip() == "1":
+        return bindings
+    try:
+        from ..models.hub_client import resolve_repo
+        from ..models.hub_policy import detect_worker_capabilities
+        from ..models.ladder import resolve_local_bindings
+        from ..models.memory import get_available_vram_gb
+
+        caps = detect_worker_capabilities()
+        if caps.gpu_sm <= 0:
+            return bindings
+        rebound = resolve_local_bindings(
+            bindings,
+            caps=caps,
+            free_vram_gb=get_available_vram_gb(),
+            resolver=resolve_repo,
+        )
+    except Exception as exc:  # never block a local run on ladder machinery
+        emit({"kind": "precision.ladder_skipped", "reason": str(exc)})
+        return bindings
+    for name in bindings:
+        if rebound.get(name) is not bindings[name]:
+            b = rebound[name]
+            emit({
+                "kind": "precision.resolved",
+                "param": name,
+                "flavor": str(getattr(b, "flavor", "") or ""),
+                "cast": str(getattr(b, "storage_dtype", "") or ""),
+            })
+    return rebound
+
+
 def _resolve_models_for_setup(
     *,
     bindings: Dict[str, Any],
     offline: bool,
     emit: Callable[[Dict[str, Any]], None],
 ) -> Dict[str, str]:
-    """Resolve every binding in ``bindings`` to a local path / loader string."""
+    """Resolve every binding in ``bindings`` to a local path / loader string.
+
+    Returns ``{param: path}``; the (possibly ladder-rebound, th#697) binding
+    map is left on ``_resolve_models_for_setup.last_bindings`` for the
+    injection loader to read load-time attrs (storage_dtype) from.
+    """
+    bindings = _apply_local_precision_ladder(bindings, offline=offline, emit=emit)
+    _resolve_models_for_setup.last_bindings = bindings  # type: ignore[attr-defined]
     out: Dict[str, str] = {}
     for param_name, binding in bindings.items():
         ref, provider = _resolve_binding_to_ref(param_name=param_name, binding=binding)
@@ -1082,13 +1131,21 @@ def _load_injected_model(
     # fp16 kernels are CUDA-only for several ops; on a CPU device run use fp32.
     device = (os.getenv("GEN_WORKER_LOCAL_DEVICE") or "").strip().lower()
     binding = (getattr(decl, "models", None) or {}).get(slot) if decl is not None else None
+    # th#697: prefer the ladder-rebound binding (carries the resolved
+    # storage_dtype cast) over the declared one.
+    rebound = getattr(_resolve_models_for_setup, "last_bindings", None)
+    if isinstance(rebound, dict) and slot in rebound:
+        binding = rebound[slot]
     # Executor parity: honor the binding's declared dtype (bf16 endpoints must
     # not silently load fp16 locally); fall back to the device default.
     dtype = str(getattr(binding, "dtype", "") or "") or ("fp32" if device == "cpu" else "fp16")
     # Same loader the production executor uses: handles diffusers-layout dirs,
     # module-layout dirs (root config.json, e.g. a bare VAE/UNet repo), and
     # single-file checkpoints.
-    pipe = load_from_pretrained(cls, local_path, dtype=dtype)
+    pipe = load_from_pretrained(
+        cls, local_path, dtype=dtype,
+        storage_dtype=str(getattr(binding, "storage_dtype", "") or ""),
+    )
     if device != "cpu":
         # Worker-owned placement (executor parity): endpoints never write
         # device/offload code, so the cold `run` path must place the loaded

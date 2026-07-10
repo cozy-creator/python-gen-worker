@@ -191,14 +191,26 @@ class InFlightJob(_message.Message):
     def __init__(self, request_id: _Optional[str] = ..., attempt: _Optional[int] = ...) -> None: ...
 
 class HelloAck(_message.Message):
-    __slots__ = ("protocol_version", "file_base_url", "keep")
+    __slots__ = ("protocol_version", "file_base_url", "keep", "resolutions")
     PROTOCOL_VERSION_FIELD_NUMBER: _ClassVar[int]
     FILE_BASE_URL_FIELD_NUMBER: _ClassVar[int]
     KEEP_FIELD_NUMBER: _ClassVar[int]
+    RESOLUTIONS_FIELD_NUMBER: _ClassVar[int]
     protocol_version: ProtocolVersion
     file_base_url: str
     keep: _containers.RepeatedScalarFieldContainer[str]
-    def __init__(self, protocol_version: _Optional[_Union[ProtocolVersion, str]] = ..., file_base_url: _Optional[str] = ..., keep: _Optional[_Iterable[str]] = ...) -> None: ...
+    resolutions: _containers.RepeatedCompositeFieldContainer[ModelResolution]
+    def __init__(self, protocol_version: _Optional[_Union[ProtocolVersion, str]] = ..., file_base_url: _Optional[str] = ..., keep: _Optional[_Iterable[str]] = ..., resolutions: _Optional[_Iterable[_Union[ModelResolution, _Mapping]]] = ...) -> None: ...
+
+class ModelResolution(_message.Message):
+    __slots__ = ("ref", "resolved_ref", "cast")
+    REF_FIELD_NUMBER: _ClassVar[int]
+    RESOLVED_REF_FIELD_NUMBER: _ClassVar[int]
+    CAST_FIELD_NUMBER: _ClassVar[int]
+    ref: str
+    resolved_ref: str
+    cast: str
+    def __init__(self, ref: _Optional[str] = ..., resolved_ref: _Optional[str] = ..., cast: _Optional[str] = ...) -> None: ...
 
 class StateDelta(_message.Message):
     __slots__ = ("phase", "available_functions", "loading_functions", "free_vram_bytes")

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, List, Optional
 
 from .refs import TensorhubRef
@@ -25,9 +25,22 @@ class WorkerResolvedRepoFile:
 
 
 @dataclass(frozen=True)
+class WorkerResolvedFlavor:
+    """One (tag, flavor) selector row of the resolved tag (th#697)."""
+
+    flavor: str
+    size_bytes: int
+    placement: Optional[dict[str, Any]] = None
+
+
+@dataclass(frozen=True)
 class WorkerResolvedRepo:
     snapshot_digest: str
     files: List[WorkerResolvedRepoFile]
+    # th#697: total checkpoint size + the tag's sibling flavor rows — the
+    # local precision ladder's candidate set. Empty on older hubs.
+    size_bytes: int = 0
+    sibling_flavors: List[WorkerResolvedFlavor] = field(default_factory=list)
 
 
 class HubResolveError(RuntimeError):
@@ -130,4 +143,18 @@ def resolve_repo(
         raise HubResolveError(
             f"tensorhub resolve for {ref.canonical()}: empty snapshot manifest"
         )
-    return WorkerResolvedRepo(snapshot_digest=digest, files=files)
+    siblings: List[WorkerResolvedFlavor] = []
+    for row in body.get("sibling_flavors") or []:
+        if not isinstance(row, dict):
+            continue
+        placement = row.get("placement")
+        siblings.append(WorkerResolvedFlavor(
+            flavor=str(row.get("flavor") or "").strip(),
+            size_bytes=int(row.get("size_bytes") or 0),
+            placement=placement if isinstance(placement, dict) else None,
+        ))
+    return WorkerResolvedRepo(
+        snapshot_digest=digest, files=files,
+        size_bytes=int(body.get("size_bytes") or 0),
+        sibling_flavors=siblings,
+    )

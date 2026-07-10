@@ -15,11 +15,14 @@ spec; this module is the classification + placement half both sides share.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Optional
 
 from .svdq import SVDQ_FP4_SMS, SVDQ_INT4_SMS
+
+logger = logging.getLogger(__name__)
 
 CLASS_BASE = "base"  # bare bf16/fp16/fp32 row — runs anywhere a card fits it
 CLASS_FP8 = "fp8"  # fp8-E4M3 storage; universal (bf16-upcast path needs no fp8 silicon)
@@ -279,6 +282,93 @@ def resolve(
     return Resolution(refusal=REFUSE_NO_RUNG)
 
 
+# ---------------------------------------------------------------------------
+# Local (no-orchestrator) resolution — cozy-local's half of th#697. The hub
+# path delivers picks via HelloAck; this walks the SAME ladder against the
+# hub catalog's sibling-flavor rows and rebinds bare tensorhub bindings to
+# the best NATIVE rung. Emergency-nf4 / offload stay the loading layer's
+# fit machinery (gw#389) — a refusal here just keeps the declared binding.
+# ---------------------------------------------------------------------------
+
+
+def ladder_model_from_resolved(rr: Any) -> LadderModel:
+    """Build a LadderModel from a hub_client.WorkerResolvedRepo."""
+    rows = []
+    for sib in getattr(rr, "sibling_flavors", None) or ():
+        token = str(getattr(sib, "flavor", "") or "").strip()
+        if not token:
+            continue
+        rows.append(FlavorRow(
+            token=token,
+            size_gb=float(getattr(sib, "size_bytes", 0) or 0) / 1e9,
+            placement=placement_from_metadata(getattr(sib, "placement", None)),
+        ))
+    return LadderModel(
+        base_size_gb=float(getattr(rr, "size_bytes", 0) or 0) / 1e9,
+        flavors=tuple(rows),
+    )
+
+
+def resolve_local_bindings(
+    bindings: Mapping[str, Any],
+    *,
+    caps: Any,
+    free_vram_gb: float,
+    resolver: Any,
+    quality_floor: str = "",
+) -> dict[str, Any]:
+    """Rebind bare tensorhub bindings to this card's best native rung.
+
+    ``resolver(thref) -> WorkerResolvedRepo`` (hub_client.resolve_repo shape).
+    Only bindings with no author-pinned flavor/storage_dtype/digest are
+    laddered; any failure keeps the declared binding (fail-open — the
+    loading layer's fit ladder still applies at load time).
+    """
+    import dataclasses
+
+    from .refs import parse_model_ref
+
+    out: dict[str, Any] = {}
+    for name, binding in bindings.items():
+        out[name] = binding
+        if getattr(binding, "provider", "") != "tensorhub":
+            continue
+        if getattr(binding, "flavor", "") or getattr(binding, "storage_dtype", ""):
+            continue  # author override — never laddered
+        try:
+            from ..api.binding import wire_ref
+
+            base_ref = wire_ref(binding)
+            thref = parse_model_ref(base_ref).tensorhub
+            if thref is None or thref.digest:
+                continue
+            model = ladder_model_from_resolved(resolver(thref))
+        except Exception as exc:  # resolver/network failures fail open
+            logger.debug("local ladder: resolve of %s failed (%s); keeping declared", name, exc)
+            continue
+        res = resolve(
+            model,
+            gpu_sm=int(getattr(caps, "gpu_sm", 0) or 0),
+            free_vram_gb=free_vram_gb,
+            libs=tuple(getattr(caps, "installed_libs", ()) or ()),
+            quality_floor=quality_floor,
+        )
+        if res.refusal or (not res.flavor and not res.cast):
+            continue
+        rebound = binding
+        if res.flavor:
+            rebound = dataclasses.replace(rebound, flavor=res.flavor)
+        if res.cast:
+            rebound = dataclasses.replace(rebound, storage_dtype=res.cast)
+        logger.info(
+            "local precision ladder: %s %s -> flavor=%s cast=%s (sm%d, %.1f GB free)",
+            name, base_ref, res.flavor or "-", res.cast or "-",
+            int(getattr(caps, "gpu_sm", 0) or 0), free_vram_gb,
+        )
+        out[name] = rebound
+    return out
+
+
 __all__ = [
     "CAST_FP8_VRAM_FACTOR",
     "CLASS_BASE",
@@ -297,6 +387,8 @@ __all__ = [
     "REFUSE_NO_RUNG",
     "Resolution",
     "classify_flavor_token",
+    "ladder_model_from_resolved",
+    "resolve_local_bindings",
     "default_placement",
     "placement_for_flavor",
     "placement_from_metadata",
