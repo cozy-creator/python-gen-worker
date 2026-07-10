@@ -193,3 +193,49 @@ def test_run_clone_publishing_nothing_is_an_error(
             _Ctx(fake_hub), provider="huggingface", source_ref="org/tiny",
             destination_repo="acme/dest",
         )
+
+
+def test_publish_flavors_stamps_placement(fake_hub, tmp_path: Path) -> None:
+    """th#697 P1: recognized quant flavors carry a structured `placement`
+    block in commit metadata (arch requirements the SKU-aware ladder reads
+    back); base/unknown flavors stay unstamped; explicit placement_* attrs
+    override the token-derived defaults and never leak as flat keys."""
+    _FakeHub.state["finalize_calls"] = 1
+    f = tmp_path / "weights.safetensors"
+    f.write_bytes(b"\x03" * 16)
+
+    publish_flavors(
+        _Ctx(fake_hub),
+        [
+            ProducedFlavor(
+                path=f,
+                flavor="svdq-int4-r128",
+                attributes={"quantization_method": "svdquant",
+                            "quantization_library": "nunchaku"},
+            ),
+            ProducedFlavor(path=f, flavor="fp8"),
+            ProducedFlavor(path=f, flavor="bf16"),
+            ProducedFlavor(path=f, flavor="vae-fix"),
+            ProducedFlavor(
+                path=f,
+                flavor="fp8",
+                attributes={"placement_sm_min": "89", "placement_engines": "transformer_engine"},
+            ),
+        ],
+        destination_repo="acme/dest",
+    )
+    reqs = _FakeHub.state["commit_requests"][-5:]
+    assert reqs[0]["metadata"]["placement"] == {
+        "precision_class": "svdq-int4",
+        "sm_allowed": [75, 80, 86, 89],
+        "engines": ["nunchaku"],
+    }
+    assert reqs[1]["metadata"]["placement"] == {"precision_class": "fp8"}
+    assert "placement" not in (reqs[2].get("metadata") or {})
+    assert "placement" not in (reqs[3].get("metadata") or {})
+    assert reqs[4]["metadata"]["placement"] == {
+        "precision_class": "fp8",
+        "sm_min": 89,
+        "engines": ["transformer_engine"],
+    }
+    assert "placement_sm_min" not in reqs[4]["metadata"]
