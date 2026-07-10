@@ -133,11 +133,26 @@ def function_entries(
         if variant_of:
             entry["variant_of"] = variant_of
         if caps is not None:
+            from ..models.serve_fit import plan_serve
+
             primary = next(iter((getattr(c, "bindings", {}) or {}).values()), None)
             fit, reason = variant_fit(resources, caps, free_gb, binding=primary)
             entry["fit"] = fit
             if reason:
                 entry["fit_reason"] = reason
+            # th#683 P3 honest-guidance: how it will actually run on this card +
+            # the realistic latency trade + the ideal hardware.
+            plan = plan_serve(resources, caps, free_gb, binding=primary)
+            entry["serveable"] = plan.serveable
+            entry["run_mode"] = plan.run_mode
+            if plan.est_latency_multiplier and plan.est_latency_multiplier != 1.0:
+                entry["est_latency_multiplier"] = round(plan.est_latency_multiplier, 2)
+            if plan.recommended_vram_gb:
+                entry["recommended_vram_gb"] = plan.recommended_vram_gb
+            if plan.warning:
+                entry["advisory"] = plan.warning
+            elif plan.reason and not plan.serveable:
+                entry["advisory"] = plan.reason
         out.append(entry)
     return out
 

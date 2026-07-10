@@ -61,10 +61,57 @@ def test_gate_accepts_card_of_exactly_recommended_size() -> None:
     assert "fits-24" not in ex.unavailable
 
 
-def test_gate_still_blocks_genuinely_bigger_requirements() -> None:
+def test_gate_serves_bigger_model_via_emergency_quant() -> None:
+    """th#683 P3: a model bigger than the card is NOT refused on the hint — it
+    serves via the emergency 4-bit rung (on-GPU, below-platform quality),
+    regardless of the CPU-offload veto (emergency is not CPU-touching)."""
     ex = Executor([_spec("needs-32", 32.0)], _noop_send)
     ex.gate_functions({"gpu_count": 1, "gpu_total_mem": RTX_4090_TOTAL_BYTES, "gpu_sm": "89"})
-    assert ex.unavailable["needs-32"][0] == "insufficient_vram"
+    assert "needs-32" not in ex.unavailable
+    plan = ex.serve_plans["needs-32"]
+    assert plan.serveable and plan.degraded
+    assert plan.run_mode == "emergency_quant"
+    assert plan.warning  # honest-guidance surfaced
+
+
+def test_gate_offload_only_model_forbidden_here(monkeypatch) -> None:
+    """A model so large even 4-bit won't fit needs CPU/disk offload. On a box
+    that forbids CPU-touching placement it is unserveable HERE (belongs on the
+    GPU lane) — with a distinct reason, never a silent 'too big'."""
+    monkeypatch.setenv("GEN_WORKER_FORBID_CPU_OFFLOAD", "1")
+    ex = Executor([_spec("huge", 64.0)], _noop_send)
+    ex.gate_functions({"gpu_count": 1, "gpu_total_mem": RTX_4090_TOTAL_BYTES, "gpu_sm": "89"})
+    assert ex.unavailable["huge"][0] == "offload_forbidden"
+
+
+def test_gate_offload_only_model_serves_when_allowed(monkeypatch) -> None:
+    """The same too-large model serves via CPU/disk offload when offload is
+    allowed (the production/GPU-lane case): fit over speed, never refused."""
+    monkeypatch.delenv("GEN_WORKER_FORBID_CPU_OFFLOAD", raising=False)
+    ex = Executor([_spec("huge", 64.0)], _noop_send)
+    ex.gate_functions({"gpu_count": 1, "gpu_total_mem": RTX_4090_TOTAL_BYTES, "gpu_sm": "89"})
+    assert "huge" not in ex.unavailable
+    plan = ex.serve_plans["huge"]
+    assert plan.serveable and plan.run_mode == "offload"
+    assert plan.est_latency_multiplier > 1.0 and plan.warning
+
+
+def test_gate_cpu_only_fallback_when_no_gpu(monkeypatch) -> None:
+    """th#683 P3 CPU-only ultimate fallback: with no GPU, a GPU function is
+    offered on CPU (very slow) behind a warning when allowed, and refused with
+    a distinct reason only when CPU inference is forbidden here."""
+    monkeypatch.delenv("GEN_WORKER_FORBID_CPU_OFFLOAD", raising=False)
+    ex = Executor([_spec("needs-24", 24.0)], _noop_send)
+    ex.gate_functions({"gpu_count": 0, "gpu_total_mem": 0, "gpu_sm": ""})
+    assert "needs-24" not in ex.unavailable
+    plan = ex.serve_plans["needs-24"]
+    assert plan.serveable and plan.run_mode == "cpu"
+    assert plan.est_latency_multiplier >= 10.0 and plan.warning
+
+    monkeypatch.setenv("GEN_WORKER_FORBID_CPU_OFFLOAD", "1")
+    ex2 = Executor([_spec("needs-24", 24.0)], _noop_send)
+    ex2.gate_functions({"gpu_count": 0, "gpu_total_mem": 0, "gpu_sm": ""})
+    assert ex2.unavailable["needs-24"][0] == "cuda_unavailable"
 
 
 def test_variant_fit_counts_recommended_size_card_as_fitting() -> None:
