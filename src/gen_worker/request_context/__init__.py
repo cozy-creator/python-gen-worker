@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import msgspec
 import os
 import base64
 import re
@@ -1527,6 +1528,19 @@ class DatasetContext(_PublisherMixin, RequestContext):
             "existed": True,
         }
 
+class TrainingMetric(msgspec.Struct, frozen=True, kw_only=True):
+    """Typed per-step training metric (pgw#450), payload of a
+    ``request.training_metric`` event. tensorhub downsample-persists these
+    as ``job.training.metric`` request_events rows (th#681)."""
+
+    step: int
+    total: int
+    loss: float
+    lr: Optional[float] = None
+    it_s: Optional[float] = None
+    eta_s: Optional[float] = None
+
+
 class TrainingContext(_PublisherMixin, RequestContext):
     """RequestContext for ``@endpoint(kind="training")`` endpoints.
 
@@ -1539,3 +1553,42 @@ class TrainingContext(_PublisherMixin, RequestContext):
     Delegated trainers (subprocess ai-toolkit and friends) run through
     ``gen_worker.subproc.run_process`` with ``ctx=self`` for cancellation.
     """
+
+    #: Min seconds between emitted metric events; first and last (step>=total)
+    #: always emit. Trainers call every step, the throttle keeps the wire sane.
+    metric_min_interval_s: float = 5.0
+
+    _last_metric_monotonic: Optional[float] = None
+
+    def training_metric(
+        self,
+        *,
+        step: int,
+        total: int,
+        loss: float,
+        lr: Optional[float] = None,
+        it_s: Optional[float] = None,
+        eta_s: Optional[float] = None,
+    ) -> None:
+        """Emit a typed ``request.training_metric`` event (throttled).
+
+        Keep ``ctx.progress`` for human-readable stage text; this is the
+        machine channel a UI charts (loss curve, it/s, ETA).
+        """
+        now = time.monotonic()
+        last = self._last_metric_monotonic
+        is_first = last is None
+        is_last = total > 0 and step >= total
+        if not is_first and not is_last and (now - last) < self.metric_min_interval_s:
+            return
+        self._last_metric_monotonic = now
+        metric = TrainingMetric(
+            step=int(step),
+            total=int(total),
+            loss=float(loss),
+            lr=None if lr is None else float(lr),
+            it_s=None if it_s is None else float(it_s),
+            eta_s=None if eta_s is None else float(eta_s),
+        )
+        payload = {k: v for k, v in msgspec.to_builtins(metric).items() if v is not None}
+        self._emit_event("request.training_metric", payload)

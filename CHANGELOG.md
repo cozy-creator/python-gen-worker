@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.13.3 (2026-07-10)
+
+- **gw#450: `TrainingContext.training_metric` — typed step/loss/lr/it_s/eta
+  channel.** Emits a `request.training_metric` event (msgspec `TrainingMetric`
+  payload: `{step, total, loss, lr?, it_s?, eta_s?}`, None fields omitted) over
+  the ctx emitter / JobProgress envelope from gw#438, so tensorhub can
+  downsample-persist a chartable series (th#681). Built-in min-interval
+  throttle (`metric_min_interval_s`, default 5s); the first and the final
+  (`step >= total`) metric always emit. `ctx.progress` stays the
+  human-readable stage-text channel.
+
 ## 0.13.2 (2026-07-10)
 
 - **gw#452: media uploads target the capability-token-bound owner.**

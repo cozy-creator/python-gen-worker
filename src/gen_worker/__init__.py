@@ -43,6 +43,7 @@ from .request_context import (
     DatasetContext,
     RequestContext,
     TrainingContext,
+    TrainingMetric,
 )
 from .subproc import run_process
 
@@ -61,6 +62,7 @@ __all__ = [
     "ConversionContext",
     "DatasetContext",
     "TrainingContext",
+    "TrainingMetric",
     # Delegated-trainer subprocess primitive.
     "run_process",
     # Errors.
