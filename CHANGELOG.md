@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.13.4 (2026-07-10)
 
 - **th#683 P3: serve-time adaptive fit — the worker never refuses on the VRAM
   hint.** New `models/serve_fit.plan_serve` decides, per (already
@@ -19,6 +19,12 @@
   `run_mode`, `est_latency_multiplier`, `recommended_vram_gb`, and an
   `advisory` string. Added `memory.cpu_offload_forbidden()` (non-raising
   predicate).
+
+- **ie#455: log functions stuck waiting on hub `ModelOp{DOWNLOAD}` snapshots.**
+  `startup()` now WARNs, naming each function still in `loading_functions` and
+  the repo refs it awaits, instead of silently advertising `fns=[]`. Surfaces
+  the empty-`keep` serve deadlock (a release registered without model
+  `bindings`) that previously produced a silent, GPU-independent hang.
 
 ## 0.13.3 (2026-07-10)
 
