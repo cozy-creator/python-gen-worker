@@ -81,6 +81,8 @@ dev = [
     "grpcio-tools>=1.80.0",
     "transformers>=4.55",
     "mypy>=1.10.0",
+    # Real-parquet dataset-materialization tests (gw#425).
+    "pyarrow>=17.0.0",
     "ruff>=0.6.0",
     "pytest>=9.0.0",
     "types-PyYAML>=6.0.12.20250915",

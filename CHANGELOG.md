@@ -2,6 +2,20 @@
 
 ## 0.12.3
 
+- **gw#425: TrainingContext v1 — delegated trainers.** `resolve_dataset` is
+  rewritten against the tensorhub datasets materialize route (th#642 wire
+  format): presigned parquet shards stream to disk (bounded memory),
+  blake3-verified, retried; it lives on `_PublisherMixin` together with new
+  `dataset_paths` and `checkpoint_dir`, so Conversion/Dataset/TrainingContext
+  all share the producer surface. The executor materializes
+  `payload.datasets` (DatasetRef) before the handler runs, mirroring the
+  reserved-source contract. New `gen_worker.subproc.run_process` runs a
+  delegated trainer subprocess (line-streaming callback, ctx-cancellation →
+  SIGTERM process group → SIGKILL). Per-job capability tokens renew in the
+  background at ~80% TTL via `POST /v1/worker/capability/renew` (client half
+  of tensorhub #561), presenting the transport's rotated worker JWT. Bugfix:
+  dataset list/create responses read `dataset_id` (previously `id`, which
+  never matched).
 - **gw#424**: the standalone trainer runtime is deleted — `src/gen_worker/trainer/`,
   the `WORKER_MODE=trainer` entrypoint branch, `WORKER_MODE`/`TRAINER_JOB_SPEC_PATH`
   settings, and `examples/training-smoke` are gone. Training runs as
