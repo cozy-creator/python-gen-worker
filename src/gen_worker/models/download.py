@@ -503,6 +503,10 @@ def download_hf(
             "huggingface_hub is required for hf model refs; install gen-worker with the HF extra."
         ) from e
 
+    from ..net import install_hf_http_timeouts
+
+    install_hf_http_timeouts()  # gw#456: no HF socket may wait forever
+
     repo_id = (ref.repo_id or "").strip()
     if not repo_id:
         raise ValueError("empty hf repo_id")
@@ -599,6 +603,18 @@ def download_hf(
 _CIVITAI_API = "https://civitai.com/api/v1"
 _CIVITAI_AUTH_HOSTS = {"civitai.com", "www.civitai.com", "api.civitai.com"}
 _CIVITAI_CHUNK = 4 * 1024 * 1024
+_CIVITAI_JSON_TIMEOUT = (30.0, 120.0)    # (connect, read) seconds
+_CIVITAI_STREAM_TIMEOUT = (60.0, 180.0)  # read timeout doubles as stall bound
+
+
+def _civitai_attempts() -> int:
+    raw = os.environ.get("COZY_CIVITAI_DOWNLOAD_ATTEMPTS", "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return 3
 
 
 def parse_civitai_version_id(raw: str) -> int:
@@ -624,7 +640,7 @@ def _civitai_get_json(url: str, api_key: str = "") -> dict[str, Any]:
     headers: Dict[str, str] = {}
     if api_key and urlparse(url).hostname in _CIVITAI_AUTH_HOSTS:
         headers["Authorization"] = f"Bearer {api_key}"
-    resp = requests.get(url, headers=headers, timeout=(30, 120))
+    resp = requests.get(url, headers=headers, timeout=_CIVITAI_JSON_TIMEOUT)
     if resp.status_code in (401, 403):
         raise ValueError("civitai_access_denied")
     if resp.status_code == 404:
@@ -695,7 +711,7 @@ def _civitai_stream_one(
     tmp = dst.with_suffix(dst.suffix + ".part")
     h = hashlib.sha256()
     written = 0
-    with requests.get(url, headers=headers, stream=True, timeout=(60, 180)) as resp:
+    with requests.get(url, headers=headers, stream=True, timeout=_CIVITAI_STREAM_TIMEOUT) as resp:
         if resp.status_code in (401, 403):
             raise ValueError("civitai_access_denied")
         if resp.status_code == 404:
@@ -755,6 +771,8 @@ def download_civitai(
             except Exception:
                 pass
 
+    import requests
+
     local_paths: list[Path] = []
     for f in files:
         dst = out_dir / f["name"]
@@ -762,13 +780,28 @@ def download_civitai(
         if dst.exists() and (not f["size_bytes"] or dst.stat().st_size == f["size_bytes"]):
             done += f["size_bytes"]
             continue
-        _civitai_stream_one(
-            f["url"], dst,
-            api_key=api_key,
-            expected_size=f["size_bytes"],
-            expected_sha256=f["sha256"],
-            on_bytes=_on_bytes,
-        )
+        attempts = _civitai_attempts()
+        file_start = done
+        for attempt in range(1, attempts + 1):
+            try:
+                _civitai_stream_one(
+                    f["url"], dst,
+                    api_key=api_key,
+                    expected_size=f["size_bytes"],
+                    expected_sha256=f["sha256"],
+                    on_bytes=_on_bytes,
+                )
+                break
+            except (requests.RequestException, OSError) as exc:
+                done = file_start  # rewind progress from the failed partial
+                if attempt >= attempts:
+                    raise RuntimeError(
+                        f"civitai download of {f['name']} failed after "
+                        f"{attempts} attempt(s): {type(exc).__name__}: {exc}") from exc
+                logger.warning(
+                    "civitai download %s attempt %d/%d failed (%s: %s); retrying",
+                    f["name"], attempt, attempts, type(exc).__name__, exc)
+                time.sleep(min(10.0, 2.0 * attempt))
     manifest_path.write_text(json.dumps(
         {"model_version_id": int(version_id),
          "files": [{"name": f["name"], "size_bytes": f["size_bytes"], "sha256": f["sha256"]} for f in files]},
