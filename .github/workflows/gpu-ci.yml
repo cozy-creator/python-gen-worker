@@ -137,6 +137,28 @@ jobs:
           path: gpu-junit.xml
           if-no-files-found: ignore
 
+      # Real image-generation smoke: FLUX.2-klein-4B turbo (ungated, ~16GB)
+      # through load_from_pretrained + place_pipeline, tripwire-gated.
+      # diffusers/transformers are endpoint deps, not gen-worker deps — installed
+      # into the synced venv (torch stays the cu128 lock build; pins mirror the
+      # klein endpoint); --no-sync keeps uv run from pruning them.
+      - name: Image-generation smoke (FLUX.2-klein-4B turbo)
+        env:
+          GEN_WORKER_GPU_SMOKE: "1"
+          GEN_WORKER_SMOKE_OUT: ${{ github.workspace }}/smoke-out
+        run: |
+          uv pip install "diffusers>=0.38,<0.40" "transformers>=4.57,<5" \
+            accelerate sentencepiece numpy
+          uv run --no-sync pytest tests/test_gpu_generation_smoke.py -q -rs -s
+
+      - name: Upload generated image
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-image
+          path: smoke-out/
+          if-no-files-found: ignore
+
   sweep:
     name: Terminate pod
     needs: [bootstrap, test]
