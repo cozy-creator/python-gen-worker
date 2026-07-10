@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.13.13 (2026-07-10)
+
+- **gw#464 follow-up: checkpoint-key translation works on transformers 4.x.**
+  `te_fp8_castable_keys` now falls back to the 4.x class-attr
+  `_checkpoint_conversion_mapping` (regex `re.sub` chain, the
+  `from_pretrained` mechanism of that line) when the 5.x
+  `conversion_mapping`/`core_model_loading` modules are absent — the
+  conversion fleet image locks transformers 4.57. Verified against the
+  real LTX-2.3 Gemma3 TE metadata: 498/498 loader-castable weights match
+  their stored (old-layout) key names.
+
 ## 0.13.12 (2026-07-10)
 
 - **gw#464: storage-side fp8 for text encoders — `streaming_fp8_snapshot(te_components=...)`.**
