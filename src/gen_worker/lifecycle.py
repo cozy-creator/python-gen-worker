@@ -244,20 +244,36 @@ class Lifecycle:
                     logger.error("startup prefetch of %s failed terminally: %s", ref, exc)
 
         await self.set_phase(pb.WORKER_PHASE_LOADING_PIPELINES)
+        awaiting_hub: Dict[str, List[str]] = {}
         for spec in list(self.executor.specs.values()):
             if spec.name in self.executor.unavailable:
                 continue
-            fetchable = all(
-                b.provider != "tensorhub"
-                or self.executor.store.local_path(wire_ref(b)) is not None
-                for b in spec.models.values()
-            )
-            if not fetchable:
-                continue  # waits for ModelOp / RunJob snapshots
+            missing = sorted({
+                wire_ref(b) for b in spec.models.values()
+                if b.provider == "tensorhub"
+                and self.executor.store.local_path(wire_ref(b)) is None
+            })
+            if missing:
+                # Waits for ModelOp / RunJob snapshots (§7). This wait is
+                # UNBOUNDED and hub-driven: if the release was registered
+                # without bindings the hub's keep set is empty, no
+                # ModelOp{DOWNLOAD} ever arrives, and the function sits in
+                # loading_functions forever (ie#455 z-image fns=[]) — so say
+                # so loudly instead of dropping the function in silence.
+                awaiting_hub[spec.name] = missing
+                continue
             try:
                 await self.executor.ensure_setup(spec)
             except Exception as exc:
                 logger.error("startup setup of %s failed: %s", spec.name, exc)
+        if awaiting_hub:
+            logger.warning(
+                "functions waiting on hub-supplied snapshots (ModelOp{DOWNLOAD}, "
+                "contract §7) and NOT yet servable: %s — if these never arrive, "
+                "check that the release was registered WITH function bindings "
+                "for these refs (hub keep set must not be empty)",
+                "; ".join(f"{fn} <- {', '.join(refs)}" for fn, refs in sorted(awaiting_hub.items())),
+            )
 
         await self.set_phase(pb.WORKER_PHASE_READY)
 
