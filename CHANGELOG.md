@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+- **th#683 P3: serve-time adaptive fit — the worker never refuses on the VRAM
+  hint.** New `models/serve_fit.plan_serve` decides, per (already
+  flavor-resolved) function, HOW it runs on the actual card: native ->
+  emergency 4-bit -> CPU/disk offload -> CPU-only, choosing the highest-quality
+  lever that fits. `gate_functions` now consults it instead of hard-refusing on
+  `insufficient_vram`/`cuda_unavailable`: a model bigger than the card serves
+  via emergency-quant or offload (fit over speed, the primary lever at the low
+  end), and a GPU function with no GPU falls back to CPU-only — all behind loud
+  honest-guidance warnings (realistic latency multiplier + the ideal card),
+  never a silent refusal. A function is unserveable only on a genuine
+  incompatibility (compute capability / missing quant library) or when the sole
+  lever here is a CPU-touching placement this box forbids
+  (`GEN_WORKER_FORBID_CPU_OFFLOAD=1` — those runs belong on the GPU lane).
+  `run --list` / `serve --list-functions --json` now carry `serveable`,
+  `run_mode`, `est_latency_multiplier`, `recommended_vram_gb`, and an
+  `advisory` string. Added `memory.cpu_offload_forbidden()` (non-raising
+  predicate).
+
 ## 0.13.3 (2026-07-10)
 
 - **gw#450: `TrainingContext.training_metric` — typed step/loss/lr/it_s/eta

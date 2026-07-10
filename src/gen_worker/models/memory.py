@@ -62,13 +62,22 @@ def effective_vram_requirement_gb(recommended_gb: float) -> float:
 _CPU_OFFLOAD_MODES = ("model_offload", "group_offload", "sequential")
 
 
+def cpu_offload_forbidden() -> bool:
+    """True when GEN_WORKER_FORBID_CPU_OFFLOAD=1 vetoes any CPU-touching
+    placement. Non-raising predicate for the serve-time fit planner (th#683 P3):
+    on a box with this set, offload/CPU rungs are not available fallbacks, so a
+    function that can only run via offload/CPU is not serveable HERE (it serves
+    on the GPU lane / the right rented card in prod)."""
+    return os.environ.get("GEN_WORKER_FORBID_CPU_OFFLOAD") == "1"
+
+
 def _forbid_cpu_inference(detail: str) -> None:
     """Raise when GEN_WORKER_FORBID_CPU_OFFLOAD=1 vetoes a CPU-touching placement.
 
     Set on dev machines so agents/tests can't silently melt the box with
     CPU-offloaded inference; real-model runs belong on the GPU CI lane.
     """
-    if os.environ.get("GEN_WORKER_FORBID_CPU_OFFLOAD") == "1":
+    if cpu_offload_forbidden():
         raise RuntimeError(
             f"GEN_WORKER_FORBID_CPU_OFFLOAD=1: refusing {detail}. "
             "Real-model inference that does not fit in free VRAM must run on "
@@ -700,6 +709,7 @@ __all__ = [
     "get_available_vram_gb",
     "GPU_VRAM_OVERHEAD_GB",
     "effective_vram_requirement_gb",
+    "cpu_offload_forbidden",
     "get_available_ram_gb",
     "get_total_ram_gb",
     "flush_memory",

@@ -38,7 +38,6 @@ from .input_assets import cleanup_input_assets, materialize_input_assets
 from .models import disk_gc
 from .models import residency as residency_mod
 from .models.memory import (
-    effective_vram_requirement_gb,
     estimate_cuda_resident_gb,
     get_available_ram_gb,
 )
@@ -48,6 +47,9 @@ from .models.errors import UrlExpiredError
 from .models.residency import Residency
 from .pb import worker_scheduler_pb2 as pb
 from .registry import EndpointSpec
+
+if typing.TYPE_CHECKING:
+    from .models.serve_fit import ServePlan
 from .request_context import (
     ConversionContext,
     DatasetContext,
@@ -744,42 +746,48 @@ class Executor:
             rec.specs.append(s)
         # Hardware-gate failures: fn name -> (reason, detail, axes).
         self.unavailable: Dict[str, Tuple[str, str, Dict[str, str]]] = {}
+        # th#683 P3: how each serveable function will run on the actual card
+        # (native / emergency / offload / cpu) + honest-guidance advisory.
+        self.serve_plans: Dict[str, "ServePlan"] = {}
 
     # ---- availability ----------------------------------------------------
 
     def gate_functions(self, gpu_info: Dict[str, Any]) -> None:
-        """Run hardware gates; populate self.unavailable."""
-        gpu_count = int(gpu_info.get("gpu_count") or 0)
+        """Run hardware gates; populate self.unavailable + self.serve_plans.
+
+        th#683 P3 — the worker NEVER hard-refuses a function on the
+        recommended-VRAM hint. Genuine incompatibilities (compute capability /
+        missing quant library) still gate a function off; everything else is an
+        ADAPTIVE FIT: the function serves by the best available means (native ->
+        emergency 4-bit -> CPU/disk offload -> CPU-only) and records an honest
+        advisory. A function is only unserveable when the sole way to run it
+        here is a CPU-touching placement this box forbids
+        (GEN_WORKER_FORBID_CPU_OFFLOAD=1 — those runs belong on the GPU lane).
+        """
+        from .models.hub_policy import TensorhubWorkerCapabilities
+        from .models.serve_fit import RUN_CPU, RUN_OFFLOAD, plan_serve
+
         total_vram_gb = float(gpu_info.get("gpu_total_mem") or 0) / (1024 ** 3)
+        free_vram_gb = float(gpu_info.get("gpu_free_mem") or gpu_info.get("gpu_total_mem") or 0) / (1024 ** 3)
         detected_sm = str(gpu_info.get("gpu_sm") or "")
         detected_cc = (float(detected_sm) / 10.0) if detected_sm.isdigit() else None
         libs = {str(x) for x in (gpu_info.get("installed_libs") or [])}
+        caps = TensorhubWorkerCapabilities(
+            cuda_version=str(gpu_info.get("cuda_version") or ""),
+            gpu_sm=int(detected_sm) if detected_sm.isdigit() else 0,
+            torch_version=str(gpu_info.get("torch_version") or ""),
+            installed_libs=list(libs),
+        )
         for name, spec in self.specs.items():
             r = spec.resources
-            if spec.needs_gpu and gpu_count <= 0:
-                self.unavailable[name] = (
-                    "cuda_unavailable", "function requires CUDA but no GPU detected",
-                    {"gpu_count": str(gpu_count)})
-                continue
+            # Genuine hard incompatibilities keep their explicit reason codes —
+            # no lever (offload/cpu/quant) makes them run on this silicon.
             if r.compute_capability is not None and detected_cc is not None \
                     and detected_cc < float(r.compute_capability):
                 self.unavailable[name] = (
                     "compute_capability_unmet",
                     f"requires SM {r.compute_capability:.1f}, detected {detected_cc:.1f}",
                     {"detected_sm": f"{detected_cc:.1f}", "required_sm": f"{float(r.compute_capability):.1f}"})
-                continue
-            # vram_gb is a recommended card size (total VRAM of the smallest
-            # card the author targets), never a free-bytes requirement: a
-            # "24GB" card reports ~23.99GiB total / ~23.6GiB free. Compare
-            # against the total minus the fixed driver/framebuffer/CUDA-context
-            # reserve (GPU_VRAM_OVERHEAD_GB) so vram_gb=24 serves on a 24GB card.
-            if r.vram_gb is not None and total_vram_gb \
-                    and total_vram_gb < effective_vram_requirement_gb(r.vram_gb):
-                self.unavailable[name] = (
-                    "insufficient_vram",
-                    f"recommends a {r.vram_gb:.0f}GiB card, detected {total_vram_gb:.0f}GiB",
-                    {"required_vram_gb": f"{float(r.vram_gb):.0f}",
-                     "detected_vram_gb": f"{total_vram_gb:.0f}"})
                 continue
             missing = [lib for lib in (r.libraries or ()) if lib not in libs]
             if missing:
@@ -789,6 +797,27 @@ class Executor:
                 self.unavailable[name] = (
                     "missing_cuda_library", f"missing required libraries: {', '.join(missing)}",
                     {"missing": ",".join(missing)})
+                continue
+
+            # Adaptive serve-time fit for the VRAM / GPU-presence dimension.
+            plan = plan_serve(r, caps, free_vram_gb)
+            self.serve_plans[name] = plan
+            if not plan.serveable:
+                if plan.run_mode == RUN_CPU:
+                    code = "cuda_unavailable"
+                elif plan.run_mode == RUN_OFFLOAD:
+                    code = "offload_forbidden"
+                else:
+                    code = "insufficient_vram"
+                self.unavailable[name] = (
+                    code, plan.reason,
+                    {"detected_vram_gb": f"{total_vram_gb:.0f}",
+                     "recommended_vram_gb": (f"{r.vram_gb:.0f}" if r.vram_gb else "")})
+                continue
+            if plan.degraded:
+                logger.warning(
+                    "serving %s in degraded mode=%s (~%.1fx latency): %s",
+                    name, plan.run_mode, plan.est_latency_multiplier, plan.warning)
 
     def available_functions(self) -> List[str]:
         out = []
