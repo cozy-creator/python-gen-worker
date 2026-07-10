@@ -37,7 +37,11 @@ from .capability import HardwareUnmetError, InsufficientDiskError
 from .input_assets import cleanup_input_assets, materialize_input_assets
 from .models import disk_gc
 from .models import residency as residency_mod
-from .models.memory import estimate_cuda_resident_gb, get_available_ram_gb
+from .models.memory import (
+    effective_vram_requirement_gb,
+    estimate_cuda_resident_gb,
+    get_available_ram_gb,
+)
 from .models.cache_paths import tensorhub_cas_dir
 from .models.download import ensure_local
 from .models.errors import UrlExpiredError
@@ -764,13 +768,16 @@ class Executor:
                     f"requires SM {r.compute_capability:.1f}, detected {detected_cc:.1f}",
                     {"detected_sm": f"{detected_cc:.1f}", "required_sm": f"{float(r.compute_capability):.1f}"})
                 continue
-            # Compare on the rounded GiB: a "24GB" card reports ~23.99GiB via
-            # mem_get_info (driver/ECC reserve), which must not gate off
-            # functions declaring vram_gb=24.
-            if r.vram_gb is not None and total_vram_gb and round(total_vram_gb) < float(r.vram_gb):
+            # vram_gb is a recommended card size (total VRAM of the smallest
+            # card the author targets), never a free-bytes requirement: a
+            # "24GB" card reports ~23.99GiB total / ~23.6GiB free. Compare
+            # against the total minus the fixed driver/framebuffer/CUDA-context
+            # reserve (GPU_VRAM_OVERHEAD_GB) so vram_gb=24 serves on a 24GB card.
+            if r.vram_gb is not None and total_vram_gb \
+                    and total_vram_gb < effective_vram_requirement_gb(r.vram_gb):
                 self.unavailable[name] = (
                     "insufficient_vram",
-                    f"requires {r.vram_gb:.0f}GiB VRAM, detected {total_vram_gb:.0f}GiB",
+                    f"recommends a {r.vram_gb:.0f}GiB card, detected {total_vram_gb:.0f}GiB",
                     {"required_vram_gb": f"{float(r.vram_gb):.0f}",
                      "detected_vram_gb": f"{total_vram_gb:.0f}"})
                 continue

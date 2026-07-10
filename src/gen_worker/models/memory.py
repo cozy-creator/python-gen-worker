@@ -41,6 +41,23 @@ _DEFAULT_OFF_HEADROOM_GB = 8.0
 # Sentinel attribute set on pipelines to make apply_low_vram_config idempotent.
 _COZY_MODE_ATTR = "_cozy_low_vram_mode"
 
+# Authors declare ``Resources(vram_gb=X)`` as the TOTAL VRAM of the smallest
+# card they target ("runs on a 24 GB card") — a placement recommendation, not
+# measurable free bytes. The platform reserves this much for the fixed
+# driver/framebuffer/CUDA-context overhead when comparing the recommendation
+# against probed VRAM, so vram_gb=24 serves on a 24 GB card (~23.6 GB free).
+GPU_VRAM_OVERHEAD_GB = 1.0
+
+
+def effective_vram_requirement_gb(recommended_gb: float) -> float:
+    """The probed-VRAM floor implied by a ``vram_gb`` recommendation.
+
+    Single definition of "usable VRAM" for every gate/fit comparison:
+    compare probed total or free GB against THIS, never against the raw
+    recommendation.
+    """
+    return max(0.0, float(recommended_gb) - GPU_VRAM_OVERHEAD_GB)
+
 # Modes that spill model weights to system RAM and run parts of inference on CPU.
 _CPU_OFFLOAD_MODES = ("model_offload", "group_offload", "sequential")
 
@@ -681,6 +698,8 @@ __all__ = [
     "estimate_cuda_resident_gb",
     "cuda_allocated_bytes",
     "get_available_vram_gb",
+    "GPU_VRAM_OVERHEAD_GB",
+    "effective_vram_requirement_gb",
     "get_available_ram_gb",
     "get_total_ram_gb",
     "flush_memory",

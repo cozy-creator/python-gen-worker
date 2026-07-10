@@ -307,8 +307,9 @@ def test_vram_ladder_picks_largest_fitting():
     # 30 GB free: prefer the largest precision that fits.
     choice = select_variant(_FLUX_VARIANTS, _CAPS_4070, 30.0)
     assert choice.name == "flux-bf16"
-    # SM100 with 13 GB free: nvfp4 unlocked and the only fit.
-    choice = select_variant(_FLUX_VARIANTS, _CAPS_B200, 13.0)
+    # SM100 with 12.5 GB free: nvfp4 (12 GB card rec) unlocked and the only
+    # fit — fp8's 14 GB-card recommendation implies a >=13 GB free floor.
+    choice = select_variant(_FLUX_VARIANTS, _CAPS_B200, 12.5)
     assert choice.name == "flux-nvfp4"
 
 

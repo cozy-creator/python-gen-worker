@@ -74,6 +74,11 @@ class Generate:
         return Output(text=ctx.save_image(image).ref)
 ```
 
+`Resources(vram_gb=N)` recommends a card size — the total VRAM of the smallest
+card the function targets, not free bytes. It's an optional placement hint: the
+platform reserves ~1 GB for driver/framebuffer/CUDA-context overhead, so
+`vram_gb=24` serves on any 24 GB card.
+
 Bindings: `HF(id, revision=, dtype=, subfolder=, files=, storage_dtype=)`,
 `Hub(ref, tag=, flavor=, storage_dtype=)`, `Civitai(id, version=)`, `ModelScope(id, ...)`.
 The slot name comes from the `models={}` key or the `setup()` parameter —

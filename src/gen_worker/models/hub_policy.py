@@ -138,8 +138,9 @@ def variant_fit(
     - ``emergency_quant``: does not fit, but the emergency nf4 rung (th#546
       emergency lane; loading layer, automatic on CUDA hosts) applies and
       the 4-bit estimate fits — runs at below-platform quality, loudly.
-    - ``offload``: runnable, but declared vram_gb exceeds free VRAM — the
-      models/memory.py offload ladder carries it (slower).
+    - ``offload``: runnable, but the recommended card size (vram_gb minus the
+      fixed GPU reserve) exceeds free VRAM — the models/memory.py offload
+      ladder carries it (slower).
     - ``fits``: full-VRAM residency expected.
     """
     needs_gpu = bool(getattr(resources, "gpu", False))
@@ -176,7 +177,12 @@ def variant_fit(
         if reason is not None:
             return FIT_INCOMPATIBLE, reason
     vram = getattr(resources, "vram_gb", None)
-    if vram is None or float(vram) <= float(free_vram_gb):
+    # vram_gb recommends a card SIZE (total VRAM), so an idle card of exactly
+    # that size counts as fitting: subtract the fixed driver/framebuffer/CUDA
+    # reserve before comparing against measured free VRAM.
+    from .memory import effective_vram_requirement_gb
+
+    if vram is None or effective_vram_requirement_gb(vram) <= float(free_vram_gb):
         if svdq_kind == "fp4":
             return FIT_SVDQ_FP4, "svdq-fp4 stored flavor (Blackwell 4-bit rung)"
         if svdq_kind == "int4":
