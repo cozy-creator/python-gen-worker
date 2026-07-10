@@ -141,18 +141,21 @@ def degraded_log_line(
 
 def cpu_offload_forbidden() -> bool:
     """True when GEN_WORKER_FORBID_CPU_OFFLOAD=1 vetoes any CPU-touching
-    placement. Non-raising predicate for the serve-time fit planner (th#683 P3):
-    on a box with this set, offload/CPU rungs are not available fallbacks, so a
-    function that can only run via offload/CPU is not serveable HERE (it serves
-    on the GPU lane / the right rented card in prod)."""
+    placement or demotion. Non-raising predicate for runtime callers (the
+    executor's OOM-demotion path, gw#463). Deliberately NOT consulted by
+    serve planning (Paul's ruling 2026-07-10: needing offload is never a
+    serveability refusal)."""
     return os.environ.get("GEN_WORKER_FORBID_CPU_OFFLOAD") == "1"
 
 
 def _forbid_cpu_inference(detail: str) -> None:
     """Raise when GEN_WORKER_FORBID_CPU_OFFLOAD=1 vetoes a CPU-touching placement.
 
-    Set on dev machines so agents/tests can't silently melt the box with
-    CPU-offloaded inference; real-model runs belong on the GPU CI lane.
+    Operator kill-switch for dev machines so agents/tests can't silently melt
+    the box with CPU-offloaded real-model inference; those runs belong on the
+    GPU CI lane. Fires only at actual pipeline-placement time, i.e. only when
+    real weights are about to touch the CPU on a box whose operator explicitly
+    forbade that. Unset everywhere in production.
     """
     if cpu_offload_forbidden():
         raise RuntimeError(
@@ -837,6 +840,7 @@ __all__ = [
     "next_offload_rung",
     "deeper_offload_mode",
     "is_cuda_oom",
+    "cpu_offload_forbidden",
     "degraded_log_line",
     "OFFLOAD_LADDER",
     "with_oom_retry",
@@ -849,7 +853,6 @@ __all__ = [
     "get_available_vram_gb",
     "GPU_VRAM_OVERHEAD_GB",
     "effective_vram_requirement_gb",
-    "cpu_offload_forbidden",
     "get_available_ram_gb",
     "get_total_ram_gb",
     "flush_memory",

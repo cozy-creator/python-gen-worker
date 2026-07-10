@@ -429,9 +429,7 @@ def test_plan_serve_offload_rung_unchanged_by_reactive_path() -> None:
 
     caps = TensorhubWorkerCapabilities(
         cuda_version="12.4", gpu_sm=89, torch_version="2.8", installed_libs=[])
-    plan = plan_serve(Resources(vram_gb=12.0), caps, 8.0,
-                      forbid_cpu_offload=False)
+    plan = plan_serve(Resources(vram_gb=12.0), caps, 8.0)
     assert plan.serveable and plan.run_mode == "fp8_storage"  # quant first
-    huge = plan_serve(Resources(vram_gb=100.0), caps, 8.0,
-                      forbid_cpu_offload=False)
+    huge = plan_serve(Resources(vram_gb=100.0), caps, 8.0)
     assert huge.serveable and huge.run_mode == RUN_OFFLOAD  # offload is last

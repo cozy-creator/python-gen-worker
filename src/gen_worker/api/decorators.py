@@ -58,12 +58,22 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
 
     ``Resources(vram_gb=12)`` implies ``gpu=True`` — declaring VRAM without a
     GPU is a contradiction, not an under-declaration.
+
+    ``vram_gb`` is never a hard gate by itself: a smaller card still serves
+    the function through the runtime fit ladder (fp8 storage / emergency
+    4-bit / CPU offload / CPU-only), degraded but running. Set
+    ``strict_vram=True`` only for bindings that cannot tolerate CPU-resident
+    weights (a compiled fixed-shape graph, a TensorRT engine) — the worker
+    then refuses the CPU-touching rungs (offload / cpu) outright instead of
+    serving slowly. The on-GPU rungs (fp8 storage, emergency 4-bit) remain
+    available under ``strict_vram``.
     """
 
     gpu: bool = False
     vram_gb: float | None = None
     compute_capability: float | None = None
     libraries: tuple[str, ...] = ()
+    strict_vram: bool = False
 
     def __post_init__(self) -> None:
         force = msgspec.structs.force_setattr

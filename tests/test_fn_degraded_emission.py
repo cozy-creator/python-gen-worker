@@ -31,7 +31,7 @@ class _Out(msgspec.Struct):
     y: str
 
 
-def _spec(name: str, vram_gb: float) -> EndpointSpec:
+def _spec(name: str, vram_gb: float, *, strict_vram: bool = False) -> EndpointSpec:
     class Endpoint:
         def setup(self, model: str) -> None:  # pragma: no cover
             pass
@@ -43,7 +43,7 @@ def _spec(name: str, vram_gb: float) -> EndpointSpec:
         name=name, method=Endpoint.run, kind="inference",
         payload_type=_In, output_mode="single", cls=Endpoint,
         attr_name="run", models={"model": HF("acme/tiny")},
-        resources=Resources(vram_gb=vram_gb),
+        resources=Resources(vram_gb=vram_gb, strict_vram=strict_vram),
     )
 
 
@@ -108,12 +108,12 @@ def test_degraded_function_emits_structured_event() -> None:
     asyncio.run(_go())
 
 
-def test_unavailable_functions_do_not_emit_degraded(monkeypatch) -> None:
+def test_unavailable_functions_do_not_emit_degraded() -> None:
     async def _go() -> None:
-        monkeypatch.setenv("GEN_WORKER_FORBID_CPU_OFFLOAD", "1")
-        # 100 GB model: even 4-bit doesn't fit the 8 GB card -> offload-only,
-        # which this box forbids -> unavailable, NOT degraded.
-        ex = Executor([_spec("huge", 100.0)], _noop_send)
+        # 100 GB model with strict_vram: even 4-bit doesn't fit the 8 GB card
+        # -> offload-only, which the AUTHOR opted out of (strict_vram) ->
+        # unavailable, NOT degraded.
+        ex = Executor([_spec("huge", 100.0, strict_vram=True)], _noop_send)
         ex.gate_functions(_SMALL_CARD)
         assert "huge" in ex.unavailable
         lc = Lifecycle(_settings(), ex)
