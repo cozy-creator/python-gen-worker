@@ -496,16 +496,15 @@ def download_hf(
     """Blocking HF snapshot download (call via ``ensure_local`` /
     ``asyncio.to_thread``). Transfer, cache, resume and locking are
     huggingface_hub's; this only plans the file selection."""
+    from ..net import hf
+
     try:
-        from huggingface_hub import HfApi, snapshot_download
+        hub = hf()  # gw#456: no HF socket may wait forever
     except Exception as e:  # pragma: no cover
         raise RuntimeError(
             "huggingface_hub is required for hf model refs; install gen-worker with the HF extra."
         ) from e
-
-    from ..net import install_hf_http_timeouts
-
-    install_hf_http_timeouts()  # gw#456: no HF socket may wait forever
+    HfApi, snapshot_download = hub.HfApi, hub.snapshot_download
 
     repo_id = (ref.repo_id or "").strip()
     if not repo_id:

@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from ..net import install_hf_http_timeouts
+from ..net import hf, install_hf_http_timeouts
 from .classifier import RepoClassification, classify_repo
 from .layout import detect_huggingface_source_layout
 
@@ -102,12 +102,10 @@ def resolve_hf_identity(
     hf_token: str | None = None,
 ) -> tuple[str, str]:
     """Resolve (repo_id, commit_sha) via the HF hub API."""
-    from huggingface_hub import HfApi
-
     repo_id = str(source_ref or "").strip()
     if repo_id.count("/") != 1:
         raise ValueError(f"huggingface source ref must be org/name, got {source_ref!r}")
-    info = HfApi(token=(hf_token or None)).repo_info(
+    info = hf().HfApi(token=(hf_token or None)).repo_info(
         repo_id, revision=(str(revision).strip() or None) if revision else None)
     return repo_id, str(getattr(info, "sha", "") or "")
 
@@ -120,9 +118,7 @@ def _hf_classification_inputs(
     """One list_repo_tree walk: paths, sizes, small side signals, and the
     provider's per-file content ids (lfs sha256 / git blob oid) — the
     latter feed the th#592 download-skip bank key."""
-    from huggingface_hub import HfApi
-
-    api = HfApi(token=(hf_token or None))
+    api = hf().HfApi(token=(hf_token or None))
     paths: list[str] = []
     sizes: dict[str, int] = {}
     content_ids: dict[str, str] = {}
@@ -148,10 +144,8 @@ def _hf_classification_inputs(
     side: dict[str, Any] = {}
     if "config.json" in paths:
         try:
-            from huggingface_hub import hf_hub_download
-
-            local = hf_hub_download(repo_id, "config.json", revision=revision,
-                                    token=(hf_token or None))
+            local = hf().hf_hub_download(repo_id, "config.json", revision=revision,
+                                         token=(hf_token or None))
             side["config_json"] = json.loads(Path(local).read_text(encoding="utf-8"))
         except Exception:
             side["config_json"] = None
@@ -160,9 +154,7 @@ def _hf_classification_inputs(
     if root_st and "model_index.json" not in paths and "adapter_config.json" not in paths:
         # LoRA sniff — remote safetensors __metadata__ via the hub API.
         try:
-            from huggingface_hub import get_safetensors_metadata
-
-            st_md = get_safetensors_metadata(repo_id, revision=revision, token=(hf_token or None))
+            st_md = hf().get_safetensors_metadata(repo_id, revision=revision, token=(hf_token or None))
             for fmeta in (getattr(st_md, "files_metadata", None) or {}).values():
                 md = getattr(fmeta, "metadata", None)
                 if md:
@@ -171,9 +163,7 @@ def _hf_classification_inputs(
         except Exception:
             pass
         try:
-            from huggingface_hub import ModelCard
-
-            card = ModelCard.load(repo_id, token=(hf_token or None))
+            card = hf().ModelCard.load(repo_id, token=(hf_token or None))
             tags = getattr(card.data, "tags", None) or []
             side["readme_tags"] = [str(t) for t in tags]
         except Exception:
@@ -330,7 +320,7 @@ def _snapshot_download_with_retries(
     progress and aborts no-progress downloads, and transient network failures
     retry (hf_hub resumes ``.incomplete`` files via Range). Exhausted retries
     raise :class:`CloneDownloadError`."""
-    from huggingface_hub import snapshot_download
+    snapshot_download = hf().snapshot_download
     from huggingface_hub.errors import (
         EntryNotFoundError,
         GatedRepoError,

@@ -33,6 +33,12 @@ jobs:
         continue-on-error: true  # Lint debt (mostly worker.py, being rewritten) — visible in logs, doesn't block CI.
         run: uv run ruff check src/gen_worker
 
+      # GATING (no continue-on-error): a bare HTTP call site is the gw#456
+      # forever-hang reintroduced. hf_hub network use goes through
+      # gen_worker.net.hf(); every httpx/requests call carries a timeout.
+      - name: HTTP timeout guard (gw#467)
+        run: uv run python scripts/lint_http_timeouts.py
+
       - name: Run tests
         run: uv run pytest tests/ -v
 

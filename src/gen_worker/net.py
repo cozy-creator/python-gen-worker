@@ -99,9 +99,23 @@ def _install_requests_backend() -> None:
     configure_http_backend(backend_factory=_TimeoutSession)
 
 
+def hf() -> Any:
+    """THE sanctioned huggingface_hub accessor (gw#467): installs the timeout
+    floor, then returns the module. Every network entry point (HfApi,
+    snapshot_download, hf_hub_download, ...) must be reached through here —
+    the CI guard (scripts/lint_http_timeouts.py) rejects direct imports
+    anywhere else in src/, so the floor is structurally unskippable.
+    Non-network imports (huggingface_hub.errors / .constants) stay direct."""
+    install_hf_http_timeouts()
+    import huggingface_hub
+
+    return huggingface_hub
+
+
 __all__ = [
     "CONNECT_TIMEOUT_ENV",
     "READ_TIMEOUT_ENV",
+    "hf",
     "http_timeouts",
     "install_hf_http_timeouts",
 ]

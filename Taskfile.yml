@@ -35,6 +35,8 @@ tasks:
         ignore_error: true
       - cmd: uv run --extra dev ruff check src/gen_worker
         ignore_error: true
+      # Hard gate (matches CI): gw#467 HTTP timeout guard.
+      - cmd: uv run python scripts/lint_http_timeouts.py
 
   test:
     desc: Run tests
