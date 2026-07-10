@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.13.1 (2026-07-10)
+
+- **gw#441: clone workdir flock — concurrent duplicate clones serialize.**
+  Two clones of the same (provider, source, destination) share the resumable
+  workdir; hf_hub's local-dir download unlinks + re-fetches files the peer
+  clone is mid-reading, so the leading clone's convert phase failed with
+  `FileNotFoundError` on a shard `snapshot_download` had just written (live:
+  e2e J19, crash-recovery re-queue put the same Qwen-Image-Edit-2511 clone on
+  one worker twice). `run_clone` now holds an exclusive flock
+  (`.clone-<digest>.lock`) for its whole lifetime; a duplicate blocks, then
+  (with th#592 banking) publishes by CAS reference without downloading.
+
 ## 0.13.0 (2026-07-09)
 
 - **Breaking (gw#424): the standalone trainer runtime is deleted** —
