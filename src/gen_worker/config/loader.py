@@ -34,10 +34,8 @@ _ENV_TO_FIELD: Dict[str, str] = {
     "ORCHESTRATOR_PUBLIC_ADDR": "orchestrator_public_addr",
     "GRPC_CA_BUNDLE": "grpc_ca_bundle",
     "WORKER_ID": "worker_id",
-    "WORKER_MODE": "worker_mode",
     "WORKER_JWT": "worker_jwt",
     "ENDPOINT_LOCK_PATH": "endpoint_lock_path",
-    "TRAINER_JOB_SPEC_PATH": "trainer_job_spec_path",
     "RUNPOD_POD_ID": "runpod_pod_id",
     "WORKER_DISCONNECTED_TIMEOUT_S": "worker_disconnected_timeout_s",
 }
@@ -173,8 +171,7 @@ def load_settings(**init_kwargs: Any) -> Settings:
     later layers overwrite earlier ones. Then hands the merged dict to
     `msgspec.convert(..., strict=False)` which performs lossless string→typed
     coercion (env vars arrive as strings; numeric / bool fields get parsed)
-    while still rejecting non-fitting values (e.g. `WORKER_MODE=garbage` is
-    not a member of the Literal so it still raises).
+    while still rejecting non-fitting values.
     """
     merged: Dict[str, Any] = {}
     merged.update(_load_yaml())

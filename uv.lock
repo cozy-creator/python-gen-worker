@@ -584,6 +584,9 @@ audio = [
     { name = "numpy" },
     { name = "soundfile" },
 ]
+datasets = [
+    { name = "pyarrow" },
+]
 dev = [
     { name = "accelerate" },
     { name = "av" },
@@ -604,9 +607,6 @@ torch = [
     { name = "safetensors" },
     { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
     { name = "torch", version = "2.12.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
-]
-trainer = [
-    { name = "pyarrow" },
 ]
 video = [
     { name = "av" },
@@ -637,7 +637,7 @@ requires-dist = [
     { name = "pillow", marker = "extra == 'images'", specifier = ">=10.0" },
     { name = "protobuf", specifier = ">=6.30.0" },
     { name = "psutil", specifier = ">=7.0.0" },
-    { name = "pyarrow", marker = "extra == 'trainer'", specifier = ">=17.0.0" },
+    { name = "pyarrow", marker = "extra == 'datasets'", specifier = ">=17.0.0" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.8.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.0" },
     { name = "pyyaml", specifier = ">=6.0.0" },
@@ -653,7 +653,7 @@ requires-dist = [
     { name = "types-pyyaml", marker = "extra == 'dev'", specifier = ">=6.0.12.20250915" },
     { name = "types-requests", marker = "extra == 'dev'", specifier = ">=2.32.4.20250913" },
 ]
-provides-extras = ["torch", "vision", "trainer", "images", "audio", "video", "dev"]
+provides-extras = ["torch", "vision", "datasets", "images", "audio", "video", "dev"]
 
 [[package]]
 name = "gguf"

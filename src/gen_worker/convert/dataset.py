@@ -1,8 +1,7 @@
-"""Dataset — library-constructed handle to a materialized dataset snapshot.
+"""Dataset — handle to a dataset snapshot on local disk.
 
-Parallels Source but for datasets. Constructed from ``payload.datasets[i]``
-entries by the library before invoking the tenant function. Tenants access
-via the reserved ``datasets: list[Dataset]`` parameter.
+Parallels Source but for datasets. Constructed from a local snapshot path
+(e.g. one returned by ``ctx.resolve_dataset``).
 
 Used by calibration-based quant (GPTQ/AWQ/modelopt-ptq-static), pruning with
 gradient scoring, distillation (both teacher/student training loops), and
@@ -10,8 +9,8 @@ fine-tuning (LoRA / full-parameter / continued pretraining).
 
 ## Supported artifact shapes
 
-Three shapes are recognized. All three live on local disk after the library
-has materialized the ``DatasetRef`` — tenants see a unified interface.
+Three shapes are recognized; all three live on local disk — tenants see a
+unified interface.
 
 ### 1. HF-datasets layout (``load_from_disk``-compatible)
 
@@ -64,10 +63,7 @@ if TYPE_CHECKING:
 
 
 class Dataset:
-    """Handle to a materialized dataset snapshot.
-
-    Constructed by the library from ``payload.datasets[i]`` (a ``DatasetRef``)
-    + the resolved dataset-variant snapshot on local disk.
+    """Handle to a dataset snapshot on local disk.
 
     Public surface:
       ref, split, attributes, path   -- simple accessors

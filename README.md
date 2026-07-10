@@ -99,9 +99,8 @@ Full reference: [docs/endpoint-authoring.md](docs/endpoint-authoring.md).
 - Value types: `Asset`, `ImageAsset`, `AudioAsset`, `VideoAsset`
 - I/O codecs: `gen_worker.io`
 
-Training lives in `gen_worker.trainer`. The conversion ETL (hub ingest,
-dtype cast / quant, clone, Tensorhub publish) is `gen_worker.convert`
-(see [docs/convert.md](docs/convert.md)).
+The conversion ETL (hub ingest, dtype cast / quant, clone, Tensorhub
+publish) is `gen_worker.convert` (see [docs/convert.md](docs/convert.md)).
 
 ## Local development
 
@@ -141,4 +140,3 @@ hard-fails if `gen_worker` resolves outside `src/`).
 ## Examples
 
 - `examples/marco-polo/` — minimal inference endpoint (sync, async, streaming)
-- `examples/training-smoke/` — minimal trainer

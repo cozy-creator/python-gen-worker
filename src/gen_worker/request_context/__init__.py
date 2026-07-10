@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 
 # Helpers, constants, and JWT/SSRF utilities live in _helpers.py. They are
 # re-exported here so existing `from gen_worker.request_context import _foo`
-# call sites (worker.py, trainer/runtime.py, tests) keep working.
+# call sites (worker.py, tests) keep working.
 from ._helpers import (
     _HINT_KEYS_DESTINATION_REPO,
     _HINT_KEYS_EXECUTION_KIND,
@@ -1424,8 +1424,7 @@ class DatasetContext(_PublisherMixin, RequestContext):
         actually uploaded the bytes.
 
         Raises ``RuntimeError`` when the dataset isn't found, the manifest
-        is missing, or any download fails. Callers in `_build_datasets`
-        upgrade the error to a helpful message.
+        is missing, or any download fails.
         """
         import requests
         owner, name = _parse_owner_repo(ref)

@@ -182,17 +182,6 @@ def _run_main() -> int:
         logger.exception("Failed to load worker settings: %s", e)
         _log_worker_fatal("settings_load", e, exit_code=1)
         return 1
-    if settings.worker_mode == "trainer":
-        _log_startup_phase("trainer_mode_selected", status="ok", worker_mode=settings.worker_mode)
-        try:
-            from .trainer.runtime import run_training_runtime
-
-            return int(run_training_runtime(settings))
-        except Exception as e:
-            logger.exception("Trainer runtime failed unexpectedly: %s", e)
-            _log_worker_fatal("trainer_runtime", e, exit_code=1)
-            return 1
-
     manifest_path = Path(settings.endpoint_lock_path or MANIFEST_PATH)
     manifest = load_manifest(manifest_path)
     user_modules: List[str] = []
