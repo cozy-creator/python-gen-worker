@@ -212,3 +212,102 @@ def test_flux2_klein_turbo_generates_real_image(tmp_path: Path) -> None:
     )
     assert not math.isnan(verdict.metrics["entropy"])
     assert verdict.ok, f"generated image tripped the quality gate: {verdict.failures} [{metrics}]"
+
+
+# ---------------------------------------------------------------------------
+# fp8-vs-bf16 quality comparison (grounds Paul's "prefer fp8" default).
+#
+# We run fp8 storage wherever we can because it is smaller AND (on SM>=89)
+# faster — BUT "fp8 quality ~= bf16" is an assumption that must be VERIFIED,
+# not assumed. This test generates the SAME prompt at the SAME seed twice —
+# once bf16, once with fp8-E4M3 denoiser storage (load path storage_dtype=
+# "fp8", the exact apply_fp8_storage lever the ladder selects) — on a real
+# card and asserts the fp8 output is (a) not garbage and (b) perceptually
+# close to bf16. If fp8 ever degrades a model, this fails and the "prefer
+# fp8" default is caught before it ships.
+#
+# Needs the GPU lane to execute (real inference + ~16GB weights): guarded by
+# GEN_WORKER_GPU_SMOKE=1 and skipped on the CPU-forbidding dev box.
+
+
+def _ssim(img_a, img_b) -> float:
+    """Global single-scale SSIM on luma in [0,1] (numpy-only, no skimage).
+    Coarse but sufficient here: same-seed fp8-vs-bf16 outputs are near
+    structurally identical, so a real fp8 regression (garbage / a
+    substantially different image) collapses this well below the gate."""
+    import numpy as np
+
+    def _luma(img):
+        rgb = np.asarray(img.convert("RGB"), dtype=np.float64) / 255.0
+        return 0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2]
+
+    x, y = _luma(img_a), _luma(img_b)
+    if x.shape != y.shape:
+        return 0.0
+    mx, my = x.mean(), y.mean()
+    vx, vy = x.var(), y.var()
+    cov = ((x - mx) * (y - my)).mean()
+    c1, c2 = 0.01**2, 0.03**2
+    return float(((2 * mx * my + c1) * (2 * cov + c2))
+                 / ((mx * mx + my * my + c1) * (vx + vy + c2)))
+
+
+# Acceptance gate. Same seed => fp8 and bf16 should be near-identical; in
+# practice global SSIM lands >0.95. 0.88 tolerates fp8-E4M3 rounding while
+# still catching a genuine quality regression. Calibrate on the GPU lane and
+# tighten as real numbers land (like the tripwire thresholds above).
+FP8_BF16_MIN_SSIM = 0.88
+
+
+def _generate(cls, snapshot, torch, *, storage_dtype: str):
+    from gen_worker.models.loading import load_from_pretrained
+    from gen_worker.models.memory import place_pipeline
+
+    pipe = load_from_pretrained(cls, snapshot, dtype="bf16", storage_dtype=storage_dtype)
+    place_pipeline(pipe)
+    return pipe(
+        prompt=PROMPT,
+        num_inference_steps=STEPS,
+        generator=torch.Generator("cpu").manual_seed(SEED),
+    ).images[0]
+
+
+def test_fp8_quality_matches_bf16_same_seed(tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA device required")
+    pytest.importorskip("numpy")
+    diffusers = pytest.importorskip("diffusers")
+    from huggingface_hub import snapshot_download
+
+    snapshot = snapshot_download(REPO_ID, allow_patterns=ALLOW_PATTERNS)
+    cls = diffusers.Flux2KleinPipeline
+
+    img_bf16 = _generate(cls, snapshot, torch, storage_dtype="")
+    img_fp8 = _generate(cls, snapshot, torch, storage_dtype="fp8")
+
+    out_dir = Path(os.environ.get("GEN_WORKER_SMOKE_OUT", tmp_path))
+    out_dir.mkdir(parents=True, exist_ok=True)
+    img_bf16.save(out_dir / "flux2-klein-bf16.png")
+    img_fp8.save(out_dir / "flux2-klein-fp8.png")
+
+    v_bf16, v_fp8 = check_image(img_bf16), check_image(img_fp8)
+    ssim = _ssim(img_bf16, img_fp8)
+    print(
+        f"\nfp8-vs-bf16: ssim={ssim:.4f} (gate {FP8_BF16_MIN_SSIM}) "
+        f"bf16_tripwire={'PASS' if v_bf16.ok else 'FAIL'} "
+        f"fp8_tripwire={'PASS' if v_fp8.ok else 'FAIL'}\n"
+        f"  bf16 entropy={v_bf16.metrics['entropy']:.3f} "
+        f"luma_std={v_bf16.metrics['luma_std']:.2f}\n"
+        f"  fp8  entropy={v_fp8.metrics['entropy']:.3f} "
+        f"luma_std={v_fp8.metrics['luma_std']:.2f}"
+    )
+
+    # Both must be real images (fp8 must not silently produce garbage).
+    assert v_bf16.ok, f"bf16 baseline tripped the quality gate: {v_bf16.failures}"
+    assert v_fp8.ok, f"fp8 output tripped the quality gate: {v_fp8.failures}"
+    # fp8 must be perceptually close to the bf16 baseline at the same seed.
+    assert ssim >= FP8_BF16_MIN_SSIM, (
+        f"fp8 diverged from bf16: SSIM {ssim:.4f} < {FP8_BF16_MIN_SSIM} — fp8 "
+        "quality is NOT comparable to bf16 for this model; do not prefer fp8 here"
+    )

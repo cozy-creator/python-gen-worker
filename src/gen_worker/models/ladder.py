@@ -127,15 +127,27 @@ def placement_from_metadata(meta: Mapping[str, Any] | None) -> Optional[Placemen
 # byte-identical tests/testdata/precision_ladder_vectors.json. Any semantic
 # change edits the vector file in BOTH repos.
 #
-# Preference per arch class (Paul's th#697 ruling): best admitted 4-bit svdq
-# flavor (fp4 > int4, rank desc) > fp8 (stored artifact > cast-at-load) >
-# bf16 base. Rung gates: quality floor, placement SM admission, engines
-# within installed libs, est VRAM <= free. local=True appends emergency-nf4
-# then CPU-offload (the hub never schedules those).
+# Preference per arch class (Paul's fp8 ruling): best admitted 4-bit svdq
+# flavor (fp4 > int4, rank desc) first, then SM-aware fp8/bf16 ordering:
+#   SM >= 89 (Ada/Hopper/Blackwell, fp8 tensor cores): fp8 (stored artifact >
+#     cast-at-load) > bf16 base — fp8 is faster AND smaller there.
+#   SM < 89 (no fp8 compute; storage upcasts to bf16 at the same speed):
+#     bf16 base > fp8 — fp8 stays a FIT FALLBACK when bf16 won't fit
+#     (compact storage still halves resident weights on any card).
+# fp8 is NEVER a refusal: storage is universal (loading.apply_fp8_storage —
+# fp8 bytes resident, per-layer bf16 upcast, no fp8 silicon required).
+# Rung gates: quality floor, placement SM admission, engines within installed
+# libs, est VRAM <= free. local=True appends emergency-nf4 then CPU-offload
+# (the hub never schedules those).
 # ---------------------------------------------------------------------------
 
+# Native fp8 tensor-core compute exists on SM >= 89 (sm_89 Ada, sm_90 Hopper,
+# sm_100+/120 Blackwell). Below that, fp8 storage still SERVES (bf16-upcast
+# path) — this floor gates only the fp8-over-bf16 PREFERENCE, never admission.
+FP8_COMPUTE_MIN_SM = 89
+
 CAST_FP8_VRAM_FACTOR = 0.75  # pipeline-level est, gw#389 measured 62-76%
-EMERGENCY_NF4_VRAM_FACTOR = 0.45  # matches loading.EMERGENCY_FIT_FACTOR
+EMERGENCY_NF4_VRAM_FACTOR = 0.45  # nf4 denoiser, encoders/VAE at compute dtype
 
 MODE_NATIVE = "native"
 MODE_EMERGENCY = "emergency"
@@ -230,20 +242,26 @@ def _rungs(
     model: LadderModel, gpu_sm: int, libs: frozenset[str], quality_floor: str
 ) -> list[tuple[str, str, float]]:
     """Eligible native rungs in preference order (ignoring VRAM fit):
-    (flavor, cast, est_vram_gb)."""
+    (flavor, cast, est_vram_gb). fp8 vs bf16 order is SM-aware: fp8 first on
+    fp8-compute silicon (SM>=89, faster AND smaller), bf16 first below it
+    (fp8 upcasts there — same speed, so fp8 is only the fit fallback)."""
     out: list[tuple[str, str, float]] = []
     if _quality_ok(CLASS_SVDQ_FP4, quality_floor):
         for row in _four_bit_candidates(model, gpu_sm, libs):
             out.append((row.token, "", row.size_gb))
+    fp8_rung: Optional[tuple[str, str, float]] = None
     if _quality_ok(CLASS_FP8, quality_floor):
         stored = _stored_fp8(model, gpu_sm, libs)
         if stored is not None:
-            out.append((stored.token, "", stored.size_gb))
+            fp8_rung = (stored.token, "", stored.size_gb)
         elif model.base_size_gb > 0:
             est = model.fp8_cast_vram_gb or CAST_FP8_VRAM_FACTOR * model.base_size_gb
-            out.append(("", "fp8", est))
+            fp8_rung = ("", "fp8", est)
+    base_rung: Optional[tuple[str, str, float]] = None
     if model.base_size_gb > 0 and _quality_ok(CLASS_BASE, quality_floor):
-        out.append(("", "", model.base_size_gb))
+        base_rung = ("", "", model.base_size_gb)
+    pair = (fp8_rung, base_rung) if gpu_sm >= FP8_COMPUTE_MIN_SM else (base_rung, fp8_rung)
+    out.extend(r for r in pair if r is not None)
     return out
 
 
@@ -371,6 +389,7 @@ def resolve_local_bindings(
 
 __all__ = [
     "CAST_FP8_VRAM_FACTOR",
+    "FP8_COMPUTE_MIN_SM",
     "CLASS_BASE",
     "CLASS_FP8",
     "CLASS_NVFP4",

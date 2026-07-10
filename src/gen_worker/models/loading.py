@@ -11,6 +11,8 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .ladder import EMERGENCY_NF4_VRAM_FACTOR
+
 logger = logging.getLogger(__name__)
 
 _DTYPE_MAP = {
@@ -530,12 +532,16 @@ def _merge_sharded_checkpoint(snapshot_dir: Path, index_path: Path) -> Path:
 # platform never reaches it because its scheduler places by declared
 # Resources.
 # Coarse whole-model resident factor after nf4-quantizing the denoiser
-# (denoiser ~4x smaller; encoders/VAE stay at compute dtype).
-EMERGENCY_FIT_FACTOR = 0.45
-# Coarse resident factor vs the declared card size after fp8-E4M3 storage of
-# the denoiser (weights ~halve; encoders/VAE + activations stay bf16). Used
-# by the fit PLANNER (hub_policy.variant_fit); the load path measures the
-# snapshot's actual bytes instead.
+# (denoiser ~4x smaller; encoders/VAE stay at compute dtype). Single-sourced
+# from the shared ladder spec (ladder.EMERGENCY_NF4_VRAM_FACTOR) so the
+# runtime rung and the Go/Py ladder never drift.
+EMERGENCY_FIT_FACTOR = EMERGENCY_NF4_VRAM_FACTOR
+# Resident factor after fp8-E4M3 storage of the denoiser, expressed against
+# the declared CARD SIZE (resources.vram_gb) — a DIFFERENT base than the
+# ladder's CAST_FP8_VRAM_FACTOR (0.75), which is against raw WEIGHT BYTES
+# (base_size_gb). They estimate the same physical fp8-resident VRAM but the
+# denominators differ (card size includes activation/framework headroom over
+# raw weights), so the numbers legitimately differ and must NOT be equated.
 FP8_STORAGE_FIT_FACTOR = 0.55
 _EMERGENCY_MARGIN_GB = 2.0
 

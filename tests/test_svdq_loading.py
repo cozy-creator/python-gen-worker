@@ -15,7 +15,7 @@ import pytest
 
 from gen_worker import Hub, Resources
 from gen_worker.models.hub_policy import (
-    FIT_FITS,
+    FIT_FP8,
     FIT_INCOMPATIBLE,
     FIT_SVDQ_FP4,
     FIT_SVDQ_INT4,
@@ -287,8 +287,10 @@ def test_select_variant_falls_back_when_pin_fails(
     )
     choice = select_variant(_rows(), _caps(120), 30.0)
     assert choice is not None
-    assert choice.name == "generate_turbo_bf16"
-    assert choice.fit == FIT_FITS
+    # svdq-fp4 drops on the broken pin; on Blackwell (fp8-compute) the stored
+    # fp8 row then outranks bf16 (Paul's fp8-preferred ruling).
+    assert choice.name == "generate_turbo_fp8"
+    assert choice.fit == FIT_FP8
 
 
 def test_select_variant_int4_is_fit_rung_not_speed_rung(stack_ok: None) -> None:
@@ -312,7 +314,9 @@ def test_select_variant_int4_is_fit_rung_not_speed_rung(stack_ok: None) -> None:
 def test_select_variant_non_blackwell_ignores_fp4_row(stack_ok: None) -> None:
     choice = select_variant(_rows(), _caps(89), 30.0)
     assert choice is not None
-    assert choice.name == "generate_turbo_bf16"
+    # fp4 is Blackwell-only and dropped on SM89; the stored fp8 row wins over
+    # bf16 because SM89 (Ada) has fp8 tensor cores (fp8-preferred).
+    assert choice.name == "generate_turbo_fp8"
 
 
 # --------------------------------------------------------------------------
