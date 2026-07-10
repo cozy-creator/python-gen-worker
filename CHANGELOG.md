@@ -2,6 +2,22 @@
 
 ## 0.13.5 (2026-07-10)
 
+- **gw#456: clone downloads can no longer hang forever.** huggingface_hub's
+  default HTTP client has no timeout (and `HfApi.repo_info` passes an explicit
+  `timeout=None`), so one stalled connection wedged clone-huggingface jobs —
+  and the tensorhub demand rows dedup-joined to them — indefinitely (observed
+  live: CLOSE-WAIT sockets, empty workdirs, frozen progress). New
+  `gen_worker/net.py` installs a process-wide timeout floor via
+  `set_client_factory` (`COZY_HTTP_CONNECT_TIMEOUT_S`=15,
+  `COZY_HTTP_READ_TIMEOUT_S`=60; explicit numeric timeouts win; the read
+  timeout doubles as the per-socket stall detector; requests fallback for
+  hub 0.x). Clone ingest now runs `snapshot_download` under the gw#379 stall
+  watchdog — real byte progress during clone downloads — with bounded
+  resumable retries (`COZY_CLONE_DOWNLOAD_ATTEMPTS`=3; hf_hub Range-resumes
+  `.incomplete` files), raising typed `CloneDownloadError` when exhausted.
+  Civitai files get a bounded per-file retry (`COZY_CIVITAI_DOWNLOAD_ATTEMPTS`=3).
+  Tensorhub-side demand-row TTL sweep is th#694.
+
 - **gw#457: `resolve_dataset` rides the DATASET-V2 async snapshot contract
   (th#691).** `GET /datasets/:id/materialize` may now answer
   `202 {status: building, state_version, retry_after}` while the snapshot
