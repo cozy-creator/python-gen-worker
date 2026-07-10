@@ -383,7 +383,12 @@ def test_peak_anon_rss_below_2x_largest_tensor(tmp_path: Path, op: str) -> None:
         else:
             streaming_fp8_storage_cast(index, tmp_path / "out")
     delta_kb = sampler.peak - baseline
-    limit_kb = (2 * largest) // 1024
+    # 2x largest is the theoretical floor (source + converted tensor coexist);
+    # glibc/torch allocators retain freed chunks in RSS between iterations, so
+    # real peaks run 70-110MB against a 96MB floor (flaked on 3 CI pods at
+    # 93.9-105.6MB). 3x keeps the regression unmissable: materializing the
+    # whole state dict lands at ~410MB in this fixture.
+    limit_kb = (3 * largest) // 1024
     assert delta_kb < limit_kb, (
-        f"{op}: peak anon RSS delta {delta_kb} KB >= 2x largest tensor "
+        f"{op}: peak anon RSS delta {delta_kb} KB >= 3x largest tensor "
         f"({limit_kb} KB) — streaming bound broken")
