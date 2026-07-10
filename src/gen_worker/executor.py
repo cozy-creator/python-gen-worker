@@ -631,6 +631,7 @@ class _Job:
     ctx: Optional[RequestContext] = None
     task: Optional[asyncio.Task] = None
     exec_task: Optional[asyncio.Task] = None
+    renew_task: Optional[asyncio.Task] = None
     finished: bool = False
     superseded: bool = False
     admitted_at: float = dc_field(default_factory=time.monotonic)
@@ -710,6 +711,11 @@ class Executor:
         self.store.residency.pre_demote = self._adapters.detach
         self._on_state_change = on_state_change or (lambda: None)
         self.file_base_url: str = ""
+        # Current worker JWT for hub HTTP calls (capability renewal). Worker
+        # wiring points this at the transport's rotated credential.
+        self.worker_jwt_provider: Callable[[], str] = (
+            lambda: str(getattr(settings, "worker_jwt", "") or "").strip()
+        )
         self.draining = False
         self.jobs: Dict[Tuple[str, int], _Job] = {}
         self._idle = asyncio.Event()
@@ -1609,10 +1615,26 @@ class Executor:
             hf_token=getattr(self._settings, "hf_token", "") or "",
         )
         job.ctx = ctx
+        if run.capability_token and self.file_base_url:
+            from .capability_renewal import renew_capability_while_running
+
+            job.renew_task = asyncio.create_task(
+                renew_capability_while_running(
+                    file_base_url=self.file_base_url,
+                    request_id=run.request_id,
+                    attempt=run.attempt,
+                    get_worker_jwt=self.worker_jwt_provider,
+                    get_token=lambda: ctx._worker_capability_token or "",
+                    set_token=lambda t: setattr(ctx, "_worker_capability_token", t),
+                ),
+                name=f"cap-renew-{run.request_id}",
+            )
 
         try:
             if source_info:
                 await self._materialize_source(ctx, source_info, snapshots)
+            if producer:
+                await self._materialize_datasets(ctx, payload)
             # Typed media inputs: URL-ref Assets (hub-approved remote media)
             # are downloaded and given a local_path before the handler runs.
             await asyncio.to_thread(materialize_input_assets, payload, run.request_id)
@@ -1724,6 +1746,25 @@ class Executor:
             raise ValidationError("payload.source.ref must be a non-empty repo ref")
         path = await self.store.ensure_local(ref, snapshots.get(ref))
         ctx._set_source_path(str(path))
+
+    async def _materialize_datasets(self, ctx: Any, payload: Any) -> None:
+        """Reserved-datasets contract (gw#425): materialize every
+        ``payload.datasets`` entry (DatasetRef) into a local parquet snapshot
+        before the handler runs. Paths land in ``ctx.dataset_paths``."""
+        datasets = getattr(payload, "datasets", None)
+        if not datasets:
+            return
+        resolve = getattr(ctx, "resolve_dataset", None)
+        if not callable(resolve):
+            raise ValidationError(
+                "payload.datasets requires a producer-kind endpoint "
+                "(conversion/dataset/training)"
+            )
+        for entry in datasets:
+            ref = str(getattr(entry, "ref", "") or "").strip()
+            if not ref:
+                raise ValidationError("payload.datasets entries need a non-empty ref")
+            await asyncio.to_thread(resolve, ref)
 
     async def _handler_kwargs(
         self, spec: EndpointSpec, snapshots: Dict[str, pb.Snapshot]
@@ -2006,6 +2047,9 @@ class Executor:
         if job.finished:
             return
         job.finished = True
+        if job.renew_task is not None:
+            job.renew_task.cancel()
+            job.renew_task = None
         cleanup_input_assets(job.request_id)
         logger.info("job finished %s attempt=%d status=%s", job.request_id, job.attempt, status)
         if not job.superseded:

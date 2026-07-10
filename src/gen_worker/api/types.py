@@ -237,9 +237,10 @@ class DestinationRepo(msgspec.Struct):
 class DatasetRef(msgspec.Struct):
     """Reserved-name dataset descriptor for transform-kind job payloads.
 
-    Each entry in ``payload.datasets`` materializes into a :class:`Dataset`
-    object the tenant function receives. Used by calibration-based quant,
-    pruning with gradient scoring, distillation, and fine-tuning.
+    The executor materializes each ``payload.datasets`` entry into a local
+    parquet snapshot before the handler runs (``ctx.dataset_paths[ref]`` /
+    ``ctx.resolve_dataset``). Used by calibration-based quant, pruning with
+    gradient scoring, distillation, and fine-tuning.
 
     Capability-token scope: orchestrator adds each dataset's repo_id to the
     token's ``reads`` claim alongside the primary source.
@@ -250,7 +251,7 @@ class DatasetRef(msgspec.Struct):
       - attributes: subset-containment selector against the dataset checkpoint's
         attributes map (tensorhub #229).
       - split: "train" | "validation" | "test" | "calibration" | ... — the
-        dataset split the tenant wants. Library materializes only this split.
+        dataset split the tenant wants.
     """
 
     ref: str

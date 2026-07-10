@@ -221,6 +221,11 @@ class Transport:
     def connected(self) -> bool:
         return self._connected.is_set()
 
+    @property
+    def current_worker_jwt(self) -> str:
+        """Newest worker credential: hub-rotated token, else the boot token."""
+        return (self._worker_jwt or self._settings.worker_jwt or "").strip()
+
     async def wait_connected(self, timeout: Optional[float] = None) -> bool:
         try:
             await asyncio.wait_for(self._connected.wait(), timeout)

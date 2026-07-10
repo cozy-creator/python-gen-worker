@@ -1148,6 +1148,79 @@ class _PublisherMixin:
         self._download_blob_by_digest(digest, dest_path)
         return dest_path
 
+    def checkpoint_dir(self, *, key: str) -> Path:
+        """Return a PERSISTENT scratch dir keyed by (job_id, key).
+
+        Survives worker restart — intended for trainer ``output_dir`` so
+        ``resume_from_checkpoint`` can pick up where a preempted job left off.
+        """
+        job_id = self._job_id or self.request_id or "x"
+        base = Path(tempfile.gettempdir()) / "txform-persistent" / str(job_id)
+        safe_key = "".join(c if c.isalnum() or c in "-_" else "_" for c in key)
+        dir_path = base / safe_key
+        dir_path.mkdir(parents=True, exist_ok=True)
+        return dir_path
+
+    # ----- dataset materialization ------------------------------------
+
+    @property
+    def dataset_paths(self) -> Dict[str, str]:
+        """Local snapshot roots of resolved datasets, keyed by ref.
+
+        Populated by ``resolve_dataset`` (the executor calls it for every
+        ``payload.datasets`` entry before the handler runs).
+        """
+        d = getattr(self, "_dataset_paths", None)
+        if d is None:
+            d = {}
+            self._dataset_paths = d
+        return d
+
+    def resolve_dataset(self, ref: str) -> str:
+        """Materialize a dataset by ``owner/name`` ref; return the local root.
+
+        Flow (th#642 wire format):
+
+        1. ``GET /api/v1/datasets?owner=<owner>`` → the row's ``dataset_id``.
+        2. ``GET /api/v1/datasets/:id/materialize?format=parquet&include_urls=true``
+           → HF-datasets columnar parquet shards (image bytes embedded) with
+           presigned URLs, sizes and blake3 checksums.
+        3. Stream each shard to disk (bounded memory), digest-verified, with
+           bounded retries. Entries lacking a presigned URL fall back to the
+           repo-CAS by-digest reader.
+
+        Raises ``RuntimeError`` when the dataset isn't found, the manifest is
+        empty, or any download exhausts its retries.
+        """
+        from ._datasets import (
+            download_entries,
+            fetch_materialize_manifest,
+            lookup_dataset_id,
+        )
+
+        cached = self.dataset_paths.get(ref)
+        if cached:
+            return cached
+        owner, name = _parse_owner_repo(ref)
+        base = (self._file_api_base_url or "").strip().rstrip("/")
+        if not base:
+            raise RuntimeError(f"resolve_dataset({ref!r}): no file_api_base_url")
+        token = self._get_worker_capability_token()
+
+        dataset_id = lookup_dataset_id(base, token, owner, name)
+        snapshot_id, entries = fetch_materialize_manifest(base, token, owner, dataset_id)
+
+        cache_root = Path(tempfile.gettempdir()) / "gen_worker_datasets"
+        target_root = cache_root / owner / name / (snapshot_id or dataset_id)
+        target_root.mkdir(parents=True, exist_ok=True)
+        download_entries(
+            entries, target_root,
+            fetch_blob=self._download_blob_by_digest,
+            cancelled=lambda: self.cancelled,
+        )
+        self.dataset_paths[ref] = str(target_root)
+        return str(target_root)
+
 
 class ConversionContext(_PublisherMixin, RequestContext):
     """RequestContext for ``@conversion(sub_kind="format-conversion")``
@@ -1196,20 +1269,6 @@ class ConversionContext(_PublisherMixin, RequestContext):
             )
         return Path(tempfile.mkdtemp(dir=str(self._mktemp_root)))
 
-    def checkpoint_dir(self, *, key: str) -> Path:
-        """Return a PERSISTENT scratch dir keyed by (job_id, key).
-
-        Survives worker restart — intended for transformers.Trainer.output_dir
-        so ``resume_from_checkpoint=True`` can pick up where a preempted job
-        left off.
-        """
-        job_id = self._job_id or self.request_id or "x"
-        base = Path(tempfile.gettempdir()) / "txform-persistent" / str(job_id)
-        safe_key = "".join(c if c.isalnum() or c in "-_" else "_" for c in key)
-        dir_path = base / safe_key
-        dir_path.mkdir(parents=True, exist_ok=True)
-        return dir_path
-
     def copy_unconverted_components(
         self,
         source: Any,
@@ -1237,10 +1296,10 @@ class ConversionContext(_PublisherMixin, RequestContext):
 
 
 class DatasetContext(_PublisherMixin, RequestContext):
-    """RequestContext for dataset-producing endpoints
-    (``@dataset``).
+    """RequestContext for dataset-producing endpoints (``@dataset``).
 
-    Adds ``publish_dataset_revision`` + ``resolve_dataset``.
+    Adds ``publish_dataset_revision``; ``resolve_dataset`` comes from
+    ``_PublisherMixin``.
     """
 
     def publish_dataset_revision(
@@ -1338,7 +1397,7 @@ class DatasetContext(_PublisherMixin, RequestContext):
                 items = list_resp.json().get("items") or []
                 for it in items:
                     if str(it.get("name") or "").lower() == name.lower():
-                        existing_id = str(it.get("id") or "")
+                        existing_id = str(it.get("dataset_id") or "")
                         break
             except Exception:
                 pass
@@ -1365,7 +1424,7 @@ class DatasetContext(_PublisherMixin, RequestContext):
                     f"dataset create failed ({resp.status_code}): {resp.text[:256]}"
                 )
             data = resp.json() if resp.text else {}
-            dataset_id = str(data.get("id") or "")
+            dataset_id = str(data.get("dataset_id") or "")
             return {
                 "ok": True,
                 "dataset_id": dataset_id,
@@ -1403,98 +1462,15 @@ class DatasetContext(_PublisherMixin, RequestContext):
             "existed": True,
         }
 
-    def resolve_dataset(self, ref: str) -> str:
-        """Download a dataset by ref into local cache; return the root path.
-
-        Paired with ``publish_dataset_revision``. Flow:
-
-        1. Parse ``ref`` (``owner/name``).
-        2. ``GET /api/v1/datasets?owner=<owner>`` → find the dataset row by name.
-        3. Read the embedded ``__cozy_snapshot_manifest__`` in features_json
-           (set by ``publish_dataset_revision``) to get the list of
-           ``{path, digest, size_bytes}`` entries.
-        4. For each entry: resolve the blob digest via the repo-CAS download
-           machinery (since ``_finalize_dataset_variants`` routed bytes there),
-           write into a local cache dir at ``<cache>/datasets/<owner>/<name>/<rel_path>``.
-        5. Return the cache dir.
-
-        The full "download via tensorhub's dataset_blobs + dataset CAS"
-        flow is more work on the server side (tasks #45.2/.3); for now we
-        reuse the repo-CAS path because that's where the publish tenants
-        actually uploaded the bytes.
-
-        Raises ``RuntimeError`` when the dataset isn't found, the manifest
-        is missing, or any download fails.
-        """
-        import requests
-        owner, name = _parse_owner_repo(ref)
-        base = (self._file_api_base_url or "").strip().rstrip("/")
-        if not base:
-            raise RuntimeError(f"resolve_dataset({ref!r}): no file_api_base_url")
-        token = self._get_worker_capability_token()
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "X-Cozy-Owner": owner,
-        }
-
-        # Step 1-2: look up the row.
-        list_url = f"{base}/api/v1/datasets?owner={urllib.parse.quote(owner, safe='')}"
-        list_resp = requests.get(list_url, headers=headers, timeout=30)
-        if list_resp.status_code in (401, 403):
-            raise AuthError(f"dataset lookup unauthorized ({list_resp.status_code})")
-        if list_resp.status_code < 200 or list_resp.status_code >= 300:
-            raise RuntimeError(f"dataset lookup failed ({list_resp.status_code}): {list_resp.text[:256]}")
-        items = list_resp.json().get("items") or []
-        row: Optional[Dict[str, Any]] = None
-        for it in items:
-            if str(it.get("name") or "").lower() == name.lower():
-                row = it
-                break
-        if row is None:
-            raise RuntimeError(f"resolve_dataset({ref!r}): dataset not found for owner={owner} name={name}")
-
-        # Step 3: parse embedded snapshot_manifest.
-        features = row.get("features") or row.get("schema") or {}
-        if not isinstance(features, dict):
-            features = {}
-        manifest = features.get("__cozy_snapshot_manifest__") or []
-        if not isinstance(manifest, list) or not manifest:
-            raise RuntimeError(
-                f"resolve_dataset({ref!r}): no __cozy_snapshot_manifest__ in features_json. "
-                f"Dataset exists but wasn't published via publish_dataset_revision."
-            )
-
-        # Step 4: write each blob to a stable cache path. Use the sha-based
-        # cache layout so identical content across datasets dedupes.
-        import tempfile
-        cache_root = Path(tempfile.gettempdir()) / "gen_worker_datasets"
-        target_root = cache_root / owner / name
-        target_root.mkdir(parents=True, exist_ok=True)
-
-        for entry in manifest:
-            if not isinstance(entry, dict):
-                continue
-            rel_path = str(entry.get("path") or "").strip()
-            digest = str(entry.get("digest") or "").strip()
-            if not rel_path or not digest:
-                continue
-            dest_file = target_root / rel_path
-            dest_file.parent.mkdir(parents=True, exist_ok=True)
-            if dest_file.exists() and dest_file.stat().st_size > 0:
-                continue  # already cached
-            # Download via the existing blob-fetch path (repo-CAS digest).
-            self._download_blob_by_digest(digest, dest_file)
-
-        return str(target_root)
-
-
 class TrainingContext(_PublisherMixin, RequestContext):
-    """RequestContext for trainer-class endpoints (transformers.Trainer +
-    friends).
+    """RequestContext for ``@endpoint(kind="training")`` endpoints.
 
-    Repo-metadata RPCs come from ``_PublisherMixin``.
+    From ``_PublisherMixin``: repo-metadata RPCs, ``resolve_dataset`` /
+    ``dataset_paths`` (the executor materializes ``payload.datasets`` before
+    the handler runs) and ``checkpoint_dir`` (persistent resume scratch).
     ``save_checkpoint`` lives on the base ``RequestContext`` (gated by
-    ``_require_repo_job_scope_for_tensors``) because the internal upload
-    paths in ``conversion/dispatch.py`` and ``worker.py`` call it via
-    ``getattr`` regardless of which subclass the request used.
+    ``_require_repo_job_scope_for_tensors``) because internal upload paths
+    call it via ``getattr`` regardless of which subclass the request used.
+    Delegated trainers (subprocess ai-toolkit and friends) run through
+    ``gen_worker.subproc.run_process`` with ``ctx=self`` for cancellation.
     """

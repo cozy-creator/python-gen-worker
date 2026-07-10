@@ -124,6 +124,9 @@ class Worker:
             backoff_cap_s=backoff_cap_s,
         )
         self.lifecycle.transport = self.transport
+        # Capability renewal presents the freshest worker JWT (contract §1
+        # rotation), not the boot-time settings token.
+        self.executor.worker_jwt_provider = lambda: self.transport.current_worker_jwt
 
     async def _send(self, msg: pb.WorkerMessage) -> None:
         await self.transport.send(msg)

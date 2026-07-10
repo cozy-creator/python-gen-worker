@@ -106,9 +106,14 @@ def test_producer_contexts_are_real_subclasses() -> None:
         # checkpoint publishing is gen_worker.convert.publish_flavors, not a ctx RPC
         assert not hasattr(ctx, "publish_repo_revision")
     assert hasattr(ConversionContext(request_id="r1"), "mktemp")
-    assert hasattr(DatasetContext(request_id="r1"), "resolve_dataset")
+    # gw#425: producer-shared dataset + resume surface (mixin-level).
+    for cls in (ConversionContext, DatasetContext, TrainingContext):
+        ctx = cls(request_id="r1")
+        assert hasattr(ctx, "resolve_dataset")
+        assert hasattr(ctx, "checkpoint_dir")
+        assert ctx.dataset_paths == {}
     base = RequestContext(request_id="r1")
-    for producer_only in ("save_checkpoint", "mktemp"):
+    for producer_only in ("save_checkpoint", "mktemp", "resolve_dataset", "checkpoint_dir"):
         assert not hasattr(base, producer_only)
 
 
