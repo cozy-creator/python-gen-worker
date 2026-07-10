@@ -9,14 +9,38 @@ fetch from ``gen_worker.models.download`` plus clone-side metadata
 from __future__ import annotations
 
 import json
+import logging
+import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from ..net import install_hf_http_timeouts
 from .classifier import RepoClassification, classify_repo
 from .layout import detect_huggingface_source_layout
 
+logger = logging.getLogger(__name__)
+
 ProgressFn = Callable[[int, Optional[int]], None]
+
+
+class CloneDownloadError(RuntimeError):
+    """Source download failed after bounded retries (gw#456) — the clone job
+    fails cleanly instead of hanging."""
+
+
+_DOWNLOAD_ATTEMPTS_ENV = "COZY_CLONE_DOWNLOAD_ATTEMPTS"
+
+
+def _download_attempts() -> int:
+    raw = os.environ.get(_DOWNLOAD_ATTEMPTS_ENV, "").strip()
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            pass
+    return 3
 
 _SAFETENSORS_DTYPE_NAMES = {
     "F32": "fp32", "F16": "fp16", "BF16": "bf16",
@@ -255,6 +279,7 @@ def plan_huggingface(
     hf_token: str | None = None,
 ) -> HFSourcePlan:
     """Resolve + classify one HF repo from metadata alone (no weight bytes)."""
+    install_hf_http_timeouts()
     repo_id, sha = resolve_hf_identity(source_ref, revision=revision, hf_token=hf_token)
     rev = sha or (str(revision).strip() if revision else None)
     paths, sizes, side, content_ids = _hf_classification_inputs(repo_id, rev, hf_token)
@@ -290,6 +315,72 @@ def plan_civitai(model_version_id: int, *, civitai_api_key: str | None = None) -
     )
 
 
+def _snapshot_download_with_retries(
+    repo_id: str,
+    revision: str | None,
+    dest_dir: Path,
+    *,
+    allow_patterns: list[str],
+    hf_token: str | None,
+    progress: ProgressFn | None,
+    total_hint: Optional[int],
+) -> None:
+    """Bounded, resumable ``snapshot_download`` (gw#456): every socket has a
+    timeout floor (:mod:`gen_worker.net`), the stall watchdog reports byte
+    progress and aborts no-progress downloads, and transient network failures
+    retry (hf_hub resumes ``.incomplete`` files via Range). Exhausted retries
+    raise :class:`CloneDownloadError`."""
+    from huggingface_hub import snapshot_download
+    from huggingface_hub.errors import (
+        EntryNotFoundError,
+        GatedRepoError,
+        RepositoryNotFoundError,
+        RevisionNotFoundError,
+    )
+
+    from gen_worker.models.download import (
+        _hf_stall_timeout_s,
+        _hf_wallclock_max_s,
+        _run_with_stall_watchdog,
+    )
+
+    attempts = _download_attempts()
+    last: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            _run_with_stall_watchdog(
+                lambda: snapshot_download(
+                    repo_id,
+                    revision=revision,
+                    local_dir=str(dest_dir),
+                    allow_patterns=allow_patterns,
+                    token=(hf_token or None),
+                ),
+                label=f"clone {repo_id}@{revision or 'main'}",
+                progress_root=dest_dir,
+                progress_callback=progress,
+                total_hint=total_hint,
+                stall_timeout=_hf_stall_timeout_s(),
+                wall_clock_max=_hf_wallclock_max_s(),
+            )
+            return
+        except (GatedRepoError, RepositoryNotFoundError, RevisionNotFoundError,
+                EntryNotFoundError, ValueError, TypeError):
+            raise  # permanent — retrying cannot help
+        except Exception as exc:
+            # Transport errors: httpx exceptions, HfHubHTTPError (5xx/429),
+            # raw socket OSErrors, DownloadStalledError — all bounded-retried.
+            last = exc
+            if attempt < attempts:
+                logger.warning(
+                    "clone download %s attempt %d/%d failed (%s: %s); retrying (resumable)",
+                    repo_id, attempt, attempts, type(exc).__name__, exc)
+                time.sleep(min(10.0, 2.0 * attempt))
+    raise CloneDownloadError(
+        f"clone download of {repo_id} failed after {attempts} attempt(s): "
+        f"{type(last).__name__}: {last}") from last
+
+
 def ingest_huggingface(
     source_ref: str,
     dest_dir: Path,
@@ -305,8 +396,7 @@ def ingest_huggingface(
 
     ``plan`` (from :func:`plan_huggingface`) skips re-doing the metadata
     calls when the caller already planned this source."""
-    from huggingface_hub import snapshot_download
-
+    install_hf_http_timeouts()
     if plan is None:
         plan = plan_huggingface(
             source_ref, revision=revision, dtype_preference=dtype_preference,
@@ -321,12 +411,12 @@ def ingest_huggingface(
     selected_bytes = sum(int(sizes.get(p, 0)) for p in classification.allow_patterns)
     if progress is not None:
         progress(0, selected_bytes or None)
-    snapshot_download(
-        repo_id,
-        revision=rev,
-        local_dir=str(dest_dir),
+    _snapshot_download_with_retries(
+        repo_id, rev, dest_dir,
         allow_patterns=list(classification.allow_patterns),
-        token=(hf_token or None),
+        hf_token=hf_token,
+        progress=progress,
+        total_hint=selected_bytes or None,
     )
     if progress is not None:
         progress(selected_bytes, selected_bytes or None)
@@ -501,6 +591,7 @@ def ingest_civitai(
 
 __all__ = [
     "CivitaiSourcePlan",
+    "CloneDownloadError",
     "HFSourcePlan",
     "IngestedSource",
     "ingest_civitai",
