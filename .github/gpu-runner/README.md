@@ -13,7 +13,11 @@ one-shot self-hosted runner.
    the image built from this directory, waits until the runner shows `online`.
 2. **test** (`runs-on: [self-hosted, gpu-4090]`): checkout, `uv sync --extra dev --extra
    torch --extra images` (torch comes from the cu128 lock index, never default PyPI),
-   pytest, junit artifact.
+   pytest, junit artifact. Then the generation smoke: FLUX.2-klein-4B turbo (ungated,
+   ~16GB) through `load_from_pretrained` + `place_pipeline`, one seeded 4-step 1024²
+   image, gated by a python port of the e2e image-garbage tripwire
+   (`tests/test_gpu_generation_smoke.py`, `GEN_WORKER_GPU_SMOKE=1`); the PNG uploads
+   as the `smoke-image` artifact for eyeballing.
 3. **sweep** (`always()`): terminates pods named exactly `gw-gpu-ci-<run_id>`, plus any
    `gw-gpu-ci-*` pod older than 2h (leak guard). Never touches other pods.
 
