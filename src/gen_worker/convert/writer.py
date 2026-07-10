@@ -692,38 +692,131 @@ def streaming_cast_snapshot(
             "components": sorted(done), "output_dir": out_dir}
 
 
+# Text-encoder components the ``fp8+te`` rung casts (must mirror
+# gen_worker.models.loading._FP8_TEXT_ENCODER_COMPONENTS — drift guard in
+# tests/test_fp8_te_writer.py; not imported here to keep this module's
+# import cheap).
+FP8_TE_COMPONENTS: tuple[str, ...] = (
+    "text_encoder", "text_encoder_2", "text_encoder_3",
+)
+
+
+def te_fp8_castable_keys(component_dir: Path) -> frozenset[str]:
+    """State-dict keys the ``fp8+te`` LOADER casts for a transformers text
+    encoder — derived by meta-instantiating the checkpoint's architecture
+    and running the SAME block-window selection the runtime applies
+    (:func:`gen_worker.models.loading._fp8_block_windows`, gw#460). Using
+    the loader's own graph walk is the zero-drift contract: the stored
+    artifact is byte-identical to what cast-at-load would produce.
+
+    Block-window rules (gw#460): castable = Linear/conv WEIGHTS inside the
+    children of top-level ``nn.ModuleList`` containers, excluding params
+    shared with modules outside a block (tied lm_head / embeddings).
+    Embeddings, norms, biases, poolers stay at source precision."""
+    import torch
+    import transformers
+
+    from gen_worker.models.loading import (
+        _fp8_block_windows,
+        _fp8_block_windows_whole,
+    )
+
+    component_dir = Path(component_dir)
+    cfg = transformers.AutoConfig.from_pretrained(str(component_dir))
+    archs = list(getattr(cfg, "architectures", None) or [])
+    cls = getattr(transformers, archs[0], None) if archs else None
+    if cls is None:
+        raise ConversionImplementationError(
+            f"cannot resolve transformers architecture for {component_dir} "
+            f"(architectures={archs})")
+    with torch.device("meta"):
+        model = cls(cfg)
+    windows = _fp8_block_windows(model) or _fp8_block_windows_whole(model)
+    if not windows:
+        raise ConversionImplementationError(
+            f"no fp8-castable weights in {component_dir} ({archs[0]})")
+    castable = {id(p) for _, _, params in windows for p in params}
+    return frozenset(
+        n for n, p in model.named_parameters() if id(p) in castable)
+
+
+def streaming_fp8_te_cast(
+    input_path: Path,
+    out_dir: Path,
+    *,
+    castable_keys: frozenset[str],
+    shard_prefix: str = "model",
+    shard_threshold: int = MAX_SAFETENSORS_SHARD_BYTES,
+) -> dict[str, Any]:
+    """fp8-E4M3 storage cast of one transformers weight set: exactly the
+    ``castable_keys`` (the loader's block-window weight set) become
+    F8_E4M3 (clamp ±448 first — torch's cast does not saturate); every
+    other tensor keeps its source dtype byte-identically."""
+    import torch
+
+    def out_st_dtype_for(name: str, src_st: str, shape: list[int]) -> str:
+        if name in castable_keys and src_st in {"F64", "F32", "F16", "BF16"}:
+            return "F8_E4M3"
+        return src_st
+
+    def transform(_name: str, t: "torch.Tensor", out_st: str) -> "torch.Tensor":
+        if out_st == "F8_E4M3" and t.dtype != torch.float8_e4m3fn:
+            return t.clamp(-_FP8_E4M3_MAX, _FP8_E4M3_MAX).to(torch.float8_e4m3fn)
+        return t
+
+    return _stream_reencode(
+        Path(input_path), Path(out_dir),
+        out_st_dtype_for=out_st_dtype_for, transform=transform,
+        shard_prefix=shard_prefix, shard_threshold=shard_threshold,
+    )
+
+
 def streaming_fp8_snapshot(
     source_dir: Path,
     out_dir: Path,
     *,
     file_layout: str,
     components: tuple[str, ...] = FP8_DEFAULT_COMPONENTS,
+    te_components: tuple[str, ...] = (),
     shard_threshold: int = MAX_SAFETENSORS_SHARD_BYTES,
 ) -> dict[str, Any]:
     """Produce the ``#fp8`` flavor of a diffusers snapshot, streaming.
 
-    Only ``components`` (default: the denoiser) are fp8-cast; every other
-    component passes through untouched. Refuses singlefile layouts — fp8
-    storage is component-scoped and single-file keyspaces don't name
-    components reliably."""
+    ``components`` (default: the denoiser) get the name-pattern fp8 cast;
+    ``te_components`` (the ``fp8+te`` rung, gw#460 — pass
+    :data:`FP8_TE_COMPONENTS`) get the transformers block-window cast whose
+    eligible set is derived from the loader itself. Every other component
+    passes through untouched. Refuses singlefile layouts — fp8 storage is
+    component-scoped and single-file keyspaces don't name components
+    reliably."""
     if file_layout != "diffusers":
         raise ConversionImplementationError(
             "fp8 storage flavors are produced from diffusers layouts only "
             "(component-scoped); repackage singlefile sources first")
     source_dir, out_dir = Path(source_dir), Path(out_dir)
+    denoiser_set, te_set = set(components), set(te_components)
     groups = [(c, e) for c, e in snapshot_weight_groups(source_dir, "diffusers")
-              if c in set(components)]
+              if c in denoiser_set | te_set]
     if not groups:
         raise ConversionImplementationError(
-            f"no fp8-castable components found (looked for {sorted(components)})")
+            f"no fp8-castable components found "
+            f"(looked for {sorted(denoiser_set | te_set)})")
     tensor_count = converted = 0
     done: set[str] = set()
     for comp, entry in groups:
-        result = streaming_fp8_storage_cast(
-            entry, out_dir / comp,
-            shard_prefix=_group_shard_prefix(entry),
-            shard_threshold=shard_threshold,
-        )
+        if comp in te_set:
+            result = streaming_fp8_te_cast(
+                entry, out_dir / comp,
+                castable_keys=te_fp8_castable_keys(source_dir / comp),
+                shard_prefix=_group_shard_prefix(entry),
+                shard_threshold=shard_threshold,
+            )
+        else:
+            result = streaming_fp8_storage_cast(
+                entry, out_dir / comp,
+                shard_prefix=_group_shard_prefix(entry),
+                shard_threshold=shard_threshold,
+            )
         tensor_count += int(result["tensor_count"])
         converted += int(result["converted_count"])
         done.add(comp)
@@ -866,5 +959,8 @@ __all__ = [
     "fp8_cast_eligible",
     "FP8_SKIP_TENSOR_PATTERNS",
     "FP8_DEFAULT_COMPONENTS",
+    "FP8_TE_COMPONENTS",
+    "te_fp8_castable_keys",
+    "streaming_fp8_te_cast",
     "shard_safetensors_by_offset",
 ]

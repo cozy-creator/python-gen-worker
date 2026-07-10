@@ -34,10 +34,13 @@ from .publish import publish_flavors
 from .source import FileLayout, Source
 from .svdq import build_svdq_flavor_tree, fetch_svdq_checkpoint, svdq_flavor_label
 from .writer import (
+    FP8_TE_COMPONENTS,
     streaming_cast_snapshot,
     streaming_dtype_cast,
     streaming_fp8_snapshot,
     streaming_fp8_storage_cast,
+    streaming_fp8_te_cast,
+    te_fp8_castable_keys,
 )
 
 # `gen_worker.convert.clone` module alias (clone.from_huggingface style).
@@ -58,6 +61,9 @@ __all__ = [
     "streaming_dtype_cast",
     "streaming_fp8_snapshot",
     "streaming_fp8_storage_cast",
+    "streaming_fp8_te_cast",
+    "te_fp8_castable_keys",
+    "FP8_TE_COMPONENTS",
     "CalibrationAction",
     "CalibrationPolicy",
     "resolve_calibration_action",

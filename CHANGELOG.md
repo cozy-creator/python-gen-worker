@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.13.12 (2026-07-10)
+
+- **gw#464: storage-side fp8 for text encoders — `streaming_fp8_snapshot(te_components=...)`.**
+  The gw#460 loader casts transformers TEs with block-window weight-only
+  rules; the writer can now produce the same cast as a STORED flavor with
+  zero drift: `te_fp8_castable_keys()` meta-instantiates the component's
+  architecture from its config, runs the loader's own
+  `_fp8_block_windows` walk, and maps the checkpoint's stored key names
+  onto the graph with transformers' own load-path renaming (old-layout
+  Gemma3 `language_model.model.*` resolves exactly like `from_pretrained`;
+  zero matches is a hard error, never a silent no-op). New
+  `streaming_fp8_te_cast()`, `FP8_TE_COMPONENTS` (drift-guarded against
+  the loader constant). Embeddings/norms/biases/tied lm_head pass through
+  at source precision.
+
 ## 0.13.11 (2026-07-10)
 
 - **gw#463: CUDA OOM never fatals — degraded mode is the fit-ladder's formal
