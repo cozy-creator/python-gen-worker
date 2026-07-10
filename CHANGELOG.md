@@ -2,7 +2,7 @@
 
 ## 0.13.2 (2026-07-10)
 
-- **gw#451: media uploads target the capability-token-bound owner.**
+- **gw#452: media uploads target the capability-token-bound owner.**
   `/api/v1/media/:owner/uploads` is authorized by the token's `upload_media`
   grant, which is bound to the canonical invoking-org uuid in the token's
   `tenant` claim. The URL owner segment (and `X-Cozy-Owner`) now come from
