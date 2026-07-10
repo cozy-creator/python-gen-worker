@@ -701,13 +701,64 @@ FP8_TE_COMPONENTS: tuple[str, ...] = (
 )
 
 
+def _component_stored_tensor_names(component_dir: Path) -> frozenset[str]:
+    """Tensor names as stored in the component's safetensors file(s)."""
+    names: set[str] = set()
+    idx = sorted(component_dir.glob("*.safetensors.index.json"))
+    if idx:
+        payload = json.loads(idx[0].read_text(encoding="utf-8"))
+        names.update(str(k) for k in (payload.get("weight_map") or {}))
+        return frozenset(names)
+    for f in sorted(component_dir.glob("*.safetensors")):
+        with open(f, "rb") as fh:
+            header_len = struct.unpack("<Q", fh.read(8))[0]
+            header = json.loads(fh.read(header_len))
+        names.update(k for k in header if k != "__metadata__")
+    return frozenset(names)
+
+
+def _loader_key_translator(model: Any) -> Any:
+    """Checkpoint-key -> module-graph-key translation using transformers' OWN
+    load-path machinery (WeightRenaming rules + base-model-prefix
+    reconciliation) — the same code ``from_pretrained`` runs, so old-layout
+    checkpoints (e.g. Gemma3 ``language_model.model.*`` vs the 4.52+
+    ``model.language_model.*`` graph) resolve exactly like the loader."""
+    try:
+        from transformers.conversion_mapping import get_model_conversion_mapping
+        from transformers.core_model_loading import (
+            WeightRenaming,
+            rename_source_key,
+        )
+    except ImportError:  # older transformers: keys match the graph directly
+        return lambda k: k
+    try:
+        transforms = get_model_conversion_mapping(model)
+    except Exception:  # noqa: BLE001
+        transforms = []
+    renamings = [t for t in transforms if isinstance(t, WeightRenaming)]
+    converters = [t for t in transforms if not isinstance(t, WeightRenaming)]
+    meta_sd = model.state_dict()
+    prefix = getattr(model, "base_model_prefix", None)
+
+    def translate(key: str) -> str:
+        try:
+            renamed, _ = rename_source_key(key, renamings, converters, prefix, meta_sd)
+            return renamed
+        except Exception:  # noqa: BLE001
+            return key
+
+    return translate
+
+
 def te_fp8_castable_keys(component_dir: Path) -> frozenset[str]:
-    """State-dict keys the ``fp8+te`` LOADER casts for a transformers text
-    encoder — derived by meta-instantiating the checkpoint's architecture
-    and running the SAME block-window selection the runtime applies
-    (:func:`gen_worker.models.loading._fp8_block_windows`, gw#460). Using
-    the loader's own graph walk is the zero-drift contract: the stored
-    artifact is byte-identical to what cast-at-load would produce.
+    """STORED tensor names the ``fp8+te`` LOADER casts for a transformers
+    text encoder — derived by meta-instantiating the checkpoint's
+    architecture and running the SAME block-window selection the runtime
+    applies (:func:`gen_worker.models.loading._fp8_block_windows`, gw#460),
+    then mapping the component's stored key names onto the module graph with
+    transformers' own checkpoint-conversion machinery. Using the loader's
+    graph walk + the loader's key translation is the zero-drift contract:
+    the stored artifact is byte-identical to what cast-at-load produces.
 
     Block-window rules (gw#460): castable = Linear/conv WEIGHTS inside the
     children of top-level ``nn.ModuleList`` containers, excluding params
@@ -736,8 +787,21 @@ def te_fp8_castable_keys(component_dir: Path) -> frozenset[str]:
         raise ConversionImplementationError(
             f"no fp8-castable weights in {component_dir} ({archs[0]})")
     castable = {id(p) for _, _, params in windows for p in params}
-    return frozenset(
-        n for n, p in model.named_parameters() if id(p) in castable)
+    graph_keys = {
+        n for n, p in model.named_parameters() if id(p) in castable}
+
+    stored = _component_stored_tensor_names(component_dir)
+    if not stored:
+        raise ConversionImplementationError(
+            f"no safetensors tensor names found in {component_dir}")
+    translate = _loader_key_translator(model)
+    matched = frozenset(k for k in stored if translate(k) in graph_keys)
+    if not matched:
+        raise ConversionImplementationError(
+            f"fp8+te key translation matched nothing in {component_dir} "
+            f"({archs[0]}: {len(graph_keys)} castable graph keys, "
+            f"{len(stored)} stored keys) — layout drift vs the loader")
+    return matched
 
 
 def streaming_fp8_te_cast(
