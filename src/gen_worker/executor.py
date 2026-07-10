@@ -757,14 +757,15 @@ class Executor:
 
         th#683 P3 — the worker NEVER hard-refuses a function on the
         recommended-VRAM hint. Genuine incompatibilities (compute capability /
-        missing quant library) still gate a function off; everything else is an
-        ADAPTIVE FIT: the function serves by the best available means (native ->
+        missing quant library / a stored flavor outside its SM window) still
+        gate a function off; everything else is an ADAPTIVE FIT: the function
+        serves by the best available means (native -> runtime fp8 storage ->
         emergency 4-bit -> CPU/disk offload -> CPU-only) and records an honest
         advisory. A function is only unserveable when the sole way to run it
         here is a CPU-touching placement this box forbids
         (GEN_WORKER_FORBID_CPU_OFFLOAD=1 — those runs belong on the GPU lane).
         """
-        from .models.hub_policy import TensorhubWorkerCapabilities
+        from .models.hub_policy import FIT_INCOMPATIBLE, TensorhubWorkerCapabilities
         from .models.serve_fit import RUN_CPU, RUN_OFFLOAD, plan_serve
 
         total_vram_gb = float(gpu_info.get("gpu_total_mem") or 0) / (1024 ** 3)
@@ -799,14 +800,21 @@ class Executor:
                     {"missing": ",".join(missing)})
                 continue
 
-            # Adaptive serve-time fit for the VRAM / GPU-presence dimension.
-            plan = plan_serve(r, caps, free_vram_gb)
+            # Adaptive serve-time fit for the VRAM / GPU-presence / stored-
+            # flavor dimensions. The primary binding carries the flavor token
+            # (#fp8 / #nvfp4 / #svdq-*) whose SM window variant_fit gates.
+            primary = next(iter(spec.models.values()), None)
+            plan = plan_serve(r, caps, free_vram_gb, binding=primary)
             self.serve_plans[name] = plan
             if not plan.serveable:
                 if plan.run_mode == RUN_CPU:
                     code = "cuda_unavailable"
                 elif plan.run_mode == RUN_OFFLOAD:
                     code = "offload_forbidden"
+                elif plan.fit == FIT_INCOMPATIBLE:
+                    # A stored flavor outside its hardware window (fp8 /
+                    # nvfp4 / svdq SM gates, quant stack pins).
+                    code = "compute_capability_unmet"
                 else:
                     code = "insufficient_vram"
                 self.unavailable[name] = (

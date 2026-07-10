@@ -99,7 +99,7 @@ MODEL_STATE_FAILED: ModelState
 MODEL_STATE_ADOPTED: ModelState
 
 class WorkerMessage(_message.Message):
-    __slots__ = ("hello", "state_delta", "job_accepted", "job_result", "job_progress", "model_event", "fn_unavailable")
+    __slots__ = ("hello", "state_delta", "job_accepted", "job_result", "job_progress", "model_event", "fn_unavailable", "fn_degraded")
     HELLO_FIELD_NUMBER: _ClassVar[int]
     STATE_DELTA_FIELD_NUMBER: _ClassVar[int]
     JOB_ACCEPTED_FIELD_NUMBER: _ClassVar[int]
@@ -107,6 +107,7 @@ class WorkerMessage(_message.Message):
     JOB_PROGRESS_FIELD_NUMBER: _ClassVar[int]
     MODEL_EVENT_FIELD_NUMBER: _ClassVar[int]
     FN_UNAVAILABLE_FIELD_NUMBER: _ClassVar[int]
+    FN_DEGRADED_FIELD_NUMBER: _ClassVar[int]
     hello: Hello
     state_delta: StateDelta
     job_accepted: JobAccepted
@@ -114,7 +115,8 @@ class WorkerMessage(_message.Message):
     job_progress: JobProgress
     model_event: ModelEvent
     fn_unavailable: FnUnavailable
-    def __init__(self, hello: _Optional[_Union[Hello, _Mapping]] = ..., state_delta: _Optional[_Union[StateDelta, _Mapping]] = ..., job_accepted: _Optional[_Union[JobAccepted, _Mapping]] = ..., job_result: _Optional[_Union[JobResult, _Mapping]] = ..., job_progress: _Optional[_Union[JobProgress, _Mapping]] = ..., model_event: _Optional[_Union[ModelEvent, _Mapping]] = ..., fn_unavailable: _Optional[_Union[FnUnavailable, _Mapping]] = ...) -> None: ...
+    fn_degraded: FnDegraded
+    def __init__(self, hello: _Optional[_Union[Hello, _Mapping]] = ..., state_delta: _Optional[_Union[StateDelta, _Mapping]] = ..., job_accepted: _Optional[_Union[JobAccepted, _Mapping]] = ..., job_result: _Optional[_Union[JobResult, _Mapping]] = ..., job_progress: _Optional[_Union[JobProgress, _Mapping]] = ..., model_event: _Optional[_Union[ModelEvent, _Mapping]] = ..., fn_unavailable: _Optional[_Union[FnUnavailable, _Mapping]] = ..., fn_degraded: _Optional[_Union[FnDegraded, _Mapping]] = ...) -> None: ...
 
 class SchedulerMessage(_message.Message):
     __slots__ = ("hello_ack", "run_job", "cancel_job", "model_op", "drain", "token_refresh")
@@ -411,6 +413,22 @@ class FnUnavailable(_message.Message):
     detail: str
     axes: _containers.ScalarMap[str, str]
     def __init__(self, function_name: _Optional[str] = ..., reason: _Optional[str] = ..., detail: _Optional[str] = ..., axes: _Optional[_Mapping[str, str]] = ...) -> None: ...
+
+class FnDegraded(_message.Message):
+    __slots__ = ("function_name", "wanted", "ran", "reason", "est_latency_multiplier", "recommended_vram_gb")
+    FUNCTION_NAME_FIELD_NUMBER: _ClassVar[int]
+    WANTED_FIELD_NUMBER: _ClassVar[int]
+    RAN_FIELD_NUMBER: _ClassVar[int]
+    REASON_FIELD_NUMBER: _ClassVar[int]
+    EST_LATENCY_MULTIPLIER_FIELD_NUMBER: _ClassVar[int]
+    RECOMMENDED_VRAM_GB_FIELD_NUMBER: _ClassVar[int]
+    function_name: str
+    wanted: str
+    ran: str
+    reason: str
+    est_latency_multiplier: float
+    recommended_vram_gb: float
+    def __init__(self, function_name: _Optional[str] = ..., wanted: _Optional[str] = ..., ran: _Optional[str] = ..., reason: _Optional[str] = ..., est_latency_multiplier: _Optional[float] = ..., recommended_vram_gb: _Optional[float] = ...) -> None: ...
 
 class Drain(_message.Message):
     __slots__ = ("deadline_ms",)

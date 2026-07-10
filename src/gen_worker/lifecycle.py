@@ -1,7 +1,7 @@
 """Connection lifecycle: Hello/HelloAck + in_flight reconcile, edge-triggered
-StateDelta full-replace snapshots, FnUnavailable emission, startup phases, and
-a drain that actually drains (stop admitting -> finish in-flight -> ship
-results -> close stream -> exit 0).
+StateDelta full-replace snapshots, FnUnavailable + FnDegraded emission,
+startup phases, and a drain that actually drains (stop admitting -> finish
+in-flight -> ship results -> close stream -> exit 0).
 """
 
 from __future__ import annotations
@@ -91,6 +91,7 @@ class Lifecycle:
         self.drained = asyncio.Event()  # set when drain completed -> exit 0
         self._last_delta: Optional[bytes] = None
         self._emitted_unavailable: set[str] = set()
+        self._emitted_degraded: set[str] = set()
         self._drain_task: Optional[asyncio.Task] = None
 
     # ---- snapshots -----------------------------------------------------------
@@ -142,11 +143,12 @@ class Lifecycle:
         # Full-replace config: file base URL + disk-retention keep set.
         self.executor.file_base_url = ack.file_base_url or ""
         self.executor.store.keep = set(ack.keep)
-        # New connection: per-worker fn disables were wiped by Hello; re-emit
-        # any that still hold, then re-baseline dynamic state.
+        # New connection: per-worker fn disables/degradations were wiped by
+        # Hello; re-emit any that still hold, then re-baseline dynamic state.
         self._emitted_unavailable.clear()
-        self._last_delta = None
+        self._emitted_degraded.clear()
         await self._emit_unavailable()
+        self._last_delta = None
         await self.maybe_send_state_delta()
 
     async def on_message(self, msg: pb.SchedulerMessage) -> None:
@@ -170,6 +172,7 @@ class Lifecycle:
     async def on_disconnect(self) -> None:
         self._last_delta = None
         self._emitted_unavailable.clear()
+        self._emitted_degraded.clear()
 
     # ---- state emission --------------------------------------------------------
 
@@ -191,6 +194,7 @@ class Lifecycle:
         self._last_delta = raw
         await self.transport.send(pb.WorkerMessage(state_delta=delta))
         await self._emit_unavailable()
+        await self._emit_degraded()
 
     async def _emit_unavailable(self) -> None:
         if self.transport is None:
@@ -204,6 +208,30 @@ class Lifecycle:
             self._emitted_unavailable.add(name)
             await self.transport.send(pb.WorkerMessage(fn_unavailable=pb.FnUnavailable(
                 function_name=name, reason=reason, detail=detail, axes=axes)))
+
+    async def _emit_degraded(self) -> None:
+        """th#683 P3: per served function running degraded, tell the
+        orchestrator STRUCTURALLY (FnDegraded, not just a log line) so
+        placement learns "this release degraded on this card — it wants a
+        bigger one". Emitting rides the orchestrator transport, so cozy-local
+        (no orchestrator) never sends it — there the honest-guidance advisory
+        on the terminal is the surface."""
+        if self.transport is None:
+            return
+        for name, plan in sorted(self.executor.serve_plans.items()):
+            if not plan.degraded or name in self.executor.unavailable:
+                continue
+            if name in self._emitted_degraded:
+                continue
+            self._emitted_degraded.add(name)
+            await self.transport.send(pb.WorkerMessage(fn_degraded=pb.FnDegraded(
+                function_name=name,
+                wanted=plan.wanted,
+                ran=plan.ran or plan.run_mode,
+                reason=plan.warning,
+                est_latency_multiplier=float(plan.est_latency_multiplier),
+                recommended_vram_gb=float(plan.recommended_vram_gb or 0.0),
+            )))
 
     async def set_phase(self, phase: int) -> None:
         if phase == self.phase:

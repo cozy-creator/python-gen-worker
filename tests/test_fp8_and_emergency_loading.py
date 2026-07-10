@@ -223,6 +223,41 @@ def test_emergency_rung_counts_planned_fp8_halving(
     assert len(pipe.transformer.casting_calls) == 1
 
 
+def test_fp8_storage_rung_engages_before_nf4(
+    fake_diffusers: Any, emergency_on: None, tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """th#683 adaptive fit: a 14GB bf16 snapshot on a 10GB-free card doesn't
+    fit as stored, but halved by fp8-E4M3 storage (~7GB) it does — the fp8
+    rung engages INSTEAD of dropping straight to nf4."""
+    snap = _snapshot(tmp_path, "BF16", 14 << 30)
+    _Pipe.calls = []
+    with caplog.at_level("WARNING"):
+        pipe = load_from_pretrained(_Pipe, snap, dtype="bf16")
+    (kwargs,) = _Pipe.calls
+    assert "quantization_config" not in kwargs
+    ((storage, _compute),) = pipe.transformer.casting_calls
+    import torch
+
+    assert storage is torch.float8_e4m3fn
+    assert "fp8-E4M3 emergency weight storage engaged" in caplog.text
+
+
+def test_nf4_rung_engages_when_even_fp8_estimate_cannot_fit(
+    fake_diffusers: Any, emergency_on: None, tmp_path: Path,
+) -> None:
+    """A 20GB bf16 snapshot on a 10GB-free card: halved (~10GB) still exceeds
+    the 8GB budget -> the nf4 emergency rung, not fp8 storage."""
+    snap = _snapshot(tmp_path, "BF16", 20 << 30)
+    _Pipe.calls = []
+    pipe = load_from_pretrained(_Pipe, snap, dtype="bf16")
+    (kwargs,) = _Pipe.calls
+    qc = kwargs["quantization_config"]
+    assert isinstance(qc, _FakePipelineQuantizationConfig)
+    assert qc.quant_kwargs["bnb_4bit_quant_type"] == "nf4"
+    assert pipe.transformer.casting_calls == []
+
+
 def test_emergency_rung_stays_out_without_cuda(
     fake_diffusers: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
@@ -241,11 +276,12 @@ def test_emergency_rung_stays_out_without_cuda(
 # --------------------------------------------------------------------------
 
 
-def test_variant_fit_emergency_verdict() -> None:
-    # gw#420: the rung is automatic on CUDA hosts — no flag anywhere.
+def test_variant_fit_runtime_rung_verdicts() -> None:
+    # gw#420: the rungs are automatic on CUDA hosts — no flag anywhere.
     from gen_worker.api import Resources
     from gen_worker.models.hub_policy import (
         FIT_EMERGENCY,
+        FIT_EMERGENCY_FP8,
         FIT_OFFLOAD,
         TensorhubWorkerCapabilities,
         variant_fit,
@@ -255,14 +291,19 @@ def test_variant_fit_emergency_verdict() -> None:
         cuda_version="12.8", gpu_sm=89, torch_version="2.11", installed_libs=[])
     res = Resources(vram_gb=34)  # klein-9b-class on a 24GB card, 20 free
 
+    # 34*0.55=18.7 <= 20 -> the fp8-storage rung outranks nf4 (th#683).
     fit, reason = variant_fit(res, caps, 20.0)
+    assert fit == FIT_EMERGENCY_FP8
+    assert "fp8" in reason
+    # 40*0.55=22 > 20 but 40*0.45=18 <= 20 -> the nf4 emergency rung.
+    fit, reason = variant_fit(Resources(vram_gb=40), caps, 20.0)
     assert fit == FIT_EMERGENCY
     assert "emergency quality" in reason
     # 4-bit estimate still too big -> offload even on a CUDA host
     assert variant_fit(Resources(vram_gb=60), caps, 20.0)[0] == FIT_OFFLOAD
 
 
-def test_select_variant_prefers_emergency_over_offload() -> None:
+def test_select_variant_prefers_runtime_quant_over_offload() -> None:
     from gen_worker.api import Resources
     from gen_worker.models.hub_policy import (
         TensorhubWorkerCapabilities,
@@ -277,4 +318,4 @@ def test_select_variant_prefers_emergency_over_offload() -> None:
     )
     assert choice is not None
     assert choice.name == "generate"
-    assert choice.fit == "emergency_quant"
+    assert choice.fit == "emergency_fp8"
