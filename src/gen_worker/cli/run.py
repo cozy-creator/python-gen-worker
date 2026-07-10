@@ -213,8 +213,14 @@ class _SelectedFunction:
 
 
 def _variant_names(cls: Optional[type]) -> set:
+    """Declared variant names in their ROUTED (slugified) form — the registry
+    slugifies fn_name, so raw declaration names ("generate_fp8") never match
+    es.name ("generate-fp8") and every variant row would lose its variant_of
+    marker (--variant auto then silently ran the base binding; gw#415 live)."""
+    from gen_worker.discovery.names import slugify_name
+
     decl = getattr(cls, _ENDPOINT_ATTR, None) if cls is not None else None
-    return {v.name for v in (getattr(decl, "variants", ()) or ())}
+    return {slugify_name(v.name) for v in (getattr(decl, "variants", ()) or ())}
 
 
 def _collect_class_methods(mod: Any) -> List[_SelectedFunction]:
@@ -378,13 +384,19 @@ def select_function_with_variant(
     from ..models.hub_policy import detect_worker_capabilities, select_variant
     from ..models.memory import get_available_vram_gb
 
+    def _primary_binding(c: "_SelectedFunction") -> Any:
+        return next(iter((c.bindings or {}).values()), None)
+
     caps = detect_worker_capabilities()
     free_gb = get_available_vram_gb()
     choice = select_variant(
-        [(m.fn_name, m.resources) for m in variant_rows],
+        [(m.fn_name, m.resources, _primary_binding(m)) for m in variant_rows],
         caps,
         free_gb,
-        base=(base.fn_name, base.resources) if base is not None else None,
+        base=(
+            (base.fn_name, base.resources, _primary_binding(base))
+            if base is not None else None
+        ),
     )
     if choice is None:
         raise _ModelResolutionError(

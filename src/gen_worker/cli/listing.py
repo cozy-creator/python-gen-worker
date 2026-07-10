@@ -133,7 +133,8 @@ def function_entries(
         if variant_of:
             entry["variant_of"] = variant_of
         if caps is not None:
-            fit, reason = variant_fit(resources, caps, free_gb)
+            primary = next(iter((getattr(c, "bindings", {}) or {}).values()), None)
+            fit, reason = variant_fit(resources, caps, free_gb, binding=primary)
             entry["fit"] = fit
             if reason:
                 entry["fit_reason"] = reason

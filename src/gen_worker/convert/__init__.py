@@ -32,6 +32,7 @@ from .loaded_component import LoadedComponent
 from .produced import ProducedFlavor
 from .publish import publish_flavors
 from .source import FileLayout, Source
+from .svdq import build_svdq_flavor_tree, fetch_svdq_checkpoint, svdq_flavor_label
 from .writer import (
     streaming_cast_snapshot,
     streaming_dtype_cast,
@@ -43,6 +44,9 @@ from .writer import (
 from . import clone
 
 __all__ = [
+    "build_svdq_flavor_tree",
+    "fetch_svdq_checkpoint",
+    "svdq_flavor_label",
     # Tenant SDK
     "Source",
     "Component",

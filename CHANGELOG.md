@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.12.3
+
+- **SVDQuant/nunchaku 4-bit loader mode (gw#415).** A `#svdq-fp4-rN` /
+  `#svdq-int4-rN` flavor (diffusers tree whose denoiser dir holds one
+  nunchaku single-file checkpoint) is detected from safetensors
+  `__metadata__` and served by swapping the nunchaku transformer into the
+  standard pipeline (`gen_worker.models.svdq`). Hard (nunchaku, diffusers,
+  torch/cu) pin matrix with typed `SvdqStackError` at selection AND load —
+  nunchaku 1.2.x requires diffusers>=0.36,<0.37 (gw#405 live crash on
+  0.38/0.39). New fit verdicts `svdq_fp4` / `svdq_int4`: on sm_120/121 a
+  fitting svdq-fp4 row outranks everything (faster AND smaller than
+  fp8-storage, measured); svdq-int4 (sm_75–89) is a fit rung ahead of
+  emergency-nf4 only. `variant_fit`/`select_variant` are binding-aware;
+  worker capabilities now probe `nunchaku` + `deepcompressor`.
+  Convert side: `gen_worker.convert.build_svdq_flavor_tree` /
+  `fetch_svdq_checkpoint` build the flavor shape for the mirror + produce
+  lanes (>5GB artifacts refused: sharding would strip nunchaku metadata).
+
 ## 0.12.2 (2026-07-09)
 
 - fix: CLI str/Path model-slot injection passes the snapshot path instead of loading a pipeline (gw#416)
@@ -7,21 +25,6 @@
 - feat: emergency nf4 quantization is always-on for CUDA hosts (env flag removed); bitsandbytes added to the [torch] extra (gw#420)
 - residency tests rewritten against real tiny pipelines (no fake pipes)
 - note: 0.12.1 on PyPI was published from a pre-fix tree (gw#427) — use 0.12.2
-
-## Unreleased
-
-- **gw#416**: CLI `run`/`serve` str/`Path`-typed setup slots now receive the
-  snapshot PATH (executor parity) instead of a loaded `DiffusionPipeline`.
-- **gw#417**: fixed the CUDA-host promote livelock — object-less RAM ledger
-  entries (str-slot/opaque setups) are exempt from promote-or-die, so RunJob
-  no longer retries forever on `promotion ... failed`. Residency tests now run
-  against real tiny diffusers pipelines (no fake pipes); they need CUDA and
-  skip cleanly without it.
-- **gw#420**: emergency nf4 quantization is AUTOMATIC on CUDA hosts — the
-  `GEN_WORKER_EMERGENCY_QUANT` env gate is deleted (loud warning stays);
-  `variant_fit`/`select_variant` arm the rung from declared capabilities.
-  `bitsandbytes` ships with the `[torch]` extra so the rung works out of the
-  box.
 
 ## 0.12.0
 

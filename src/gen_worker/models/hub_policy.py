@@ -40,7 +40,8 @@ def detect_worker_capabilities(*, extra_libs: Optional[List[str]] = None) -> Ten
 
     # Known optional libs that affect artifact compatibility.
     # Keep this hardcoded (no env config), per Cozy design.
-    known = ["bitsandbytes", "torchao", "transformer_engine", "tensorrt"]
+    known = ["bitsandbytes", "torchao", "transformer_engine", "tensorrt",
+             "nunchaku", "deepcompressor"]
     if extra_libs:
         known.extend(extra_libs)
     for name in known:
@@ -93,9 +94,22 @@ def detect_worker_capabilities(*, extra_libs: Optional[List[str]] = None) -> Ten
 # ---------------------------------------------------------------------------
 
 FIT_FITS = "fits"
+FIT_SVDQ_FP4 = "svdq_fp4"
+FIT_SVDQ_INT4 = "svdq_int4"
 FIT_EMERGENCY = "emergency_quant"
 FIT_OFFLOAD = "offload"
 FIT_INCOMPATIBLE = "incompatible"
+
+
+def svdq_flavor_kind(binding: Any) -> str:
+    """"fp4" / "int4" / "" — is this binding an svdq stored-flavor row?
+    The flavor token is the selector (th#597): ``svdq-fp4-*`` / ``svdq-int4-*``."""
+    flavor = str(getattr(binding, "flavor", "") or "").strip().lower()
+    if flavor.startswith("svdq-fp4"):
+        return "fp4"
+    if flavor.startswith("svdq-int4"):
+        return "int4"
+    return ""
 
 
 @dataclass(frozen=True)
@@ -109,11 +123,18 @@ def variant_fit(
     resources: Any,
     caps: TensorhubWorkerCapabilities,
     free_vram_gb: float,
+    *,
+    binding: Any = None,
 ) -> tuple[str, str]:
     """Fit verdict for ONE function/variant's ``Resources`` on this machine.
 
     - ``incompatible``: hard gates unmet (no CUDA GPU, compute_capability
-      above this GPU's SM, required quant libraries not installed).
+      above this GPU's SM, required quant libraries not installed, or an
+      svdq row whose SM window / nunchaku-diffusers pin matrix fails).
+    - ``svdq_fp4`` / ``svdq_int4``: the binding is a stored SVDQuant flavor
+      (gw#415) and every gate passes — on Blackwell, svdq_fp4 OUTRANKS every
+      other fitting row (faster AND smaller, QUANTIZATION-POLICY fit ladder);
+      svdq_int4 is a fit rung ahead of emergency-nf4 only.
     - ``emergency_quant``: does not fit, but the emergency nf4 rung (th#546
       emergency lane; loading layer, automatic on CUDA hosts) applies and
       the 4-bit estimate fits — runs at below-platform quality, loudly.
@@ -134,8 +155,32 @@ def variant_fit(
     missing = [lib for lib in libs if lib not in (caps.installed_libs or [])]
     if missing:
         return FIT_INCOMPATIBLE, f"missing libraries: {', '.join(missing)}"
+    svdq_kind = svdq_flavor_kind(binding)
+    if svdq_kind:
+        from .svdq import (
+            SVDQ_FP4_SMS,
+            SVDQ_INT4_SMS,
+            svdq_precision_for_sm,
+            svdq_stack_reason,
+        )
+
+        window = SVDQ_FP4_SMS if svdq_kind == "fp4" else SVDQ_INT4_SMS
+        if caps.gpu_sm not in window:
+            runs = svdq_precision_for_sm(caps.gpu_sm)
+            return FIT_INCOMPATIBLE, (
+                f"svdq-{svdq_kind} kernels need SM in "
+                f"{'/'.join(str(x) for x in window)}; GPU is SM{caps.gpu_sm}"
+                + (f" (runs svdq-{runs})" if runs and runs != svdq_kind else "")
+            )
+        reason = svdq_stack_reason()
+        if reason is not None:
+            return FIT_INCOMPATIBLE, reason
     vram = getattr(resources, "vram_gb", None)
     if vram is None or float(vram) <= float(free_vram_gb):
+        if svdq_kind == "fp4":
+            return FIT_SVDQ_FP4, "svdq-fp4 stored flavor (Blackwell 4-bit rung)"
+        if svdq_kind == "int4":
+            return FIT_SVDQ_INT4, "svdq-int4 stored flavor (4-bit fit rung)"
         return FIT_FITS, ""
     from .loading import EMERGENCY_FIT_FACTOR
 
@@ -153,51 +198,62 @@ def variant_fit(
 
 
 def select_variant(
-    variants: List[tuple[str, Any]],
+    variants: List[tuple],
     caps: TensorhubWorkerCapabilities,
     free_vram_gb: float,
     *,
-    base: Optional[tuple[str, Any]] = None,
+    base: Optional[tuple] = None,
 ) -> Optional[VariantChoice]:
     """Pick the best routable variant.
 
-    ``variants`` is ``[(fn_name, Resources), ...]``; ``base`` is the base
-    binding's row when the class declares one. Policy:
-      1. drop incompatible rows (SM / library gates);
-      2. among variants that FIT free VRAM, prefer the largest declared
+    ``variants`` rows are ``(fn_name, Resources)`` or
+    ``(fn_name, Resources, binding)``; ``base`` is the base binding's row when
+    the class declares one. Policy (QUANTIZATION-POLICY fit ladder):
+      1. drop incompatible rows (SM / library / svdq pin-matrix gates);
+      2. a fitting svdq_fp4 row wins outright — on Blackwell the SVDQuant
+         flavor beats fp8/bf16 on BOTH latency and VRAM (gw#405 measured);
+      3. among plain rows that FIT free VRAM, prefer the largest declared
          vram_gb (bigger = higher-quality precision);
-      3. none fit → an emergency_quant row if the nf4 rung applies
+      4. a fitting svdq_int4 row (4-bit fit rung: nothing bigger fits);
+      5. an emergency_quant row if the nf4 rung applies
          (runs at below-platform quality, loudly);
-      4. else the base binding + the offload ladder;
-      5. no base → the smallest-VRAM compatible variant, offloaded;
-      6. nothing routable → None.
+      6. else the base binding + the offload ladder;
+      7. no base → the smallest-VRAM compatible variant, offloaded;
+      8. nothing routable → None.
     """
     def _vram(res: Any) -> float:
         v = getattr(res, "vram_gb", None)
         return float(v) if v is not None else 0.0
 
     compat: List[tuple[str, Any, str, str]] = []
-    for name, res in variants:
-        fit, reason = variant_fit(res, caps, free_vram_gb)
+    for row in variants:
+        name, res = row[0], row[1]
+        row_binding = row[2] if len(row) > 2 else None
+        fit, reason = variant_fit(res, caps, free_vram_gb, binding=row_binding)
         if fit != FIT_INCOMPATIBLE:
             compat.append((name, res, fit, reason))
 
-    fitting = [row for row in compat if row[2] == FIT_FITS]
-    if fitting:
-        name, _res, fit, reason = max(fitting, key=lambda r: _vram(r[1]))
-        return VariantChoice(name=name, fit=fit, reason=reason)
+    for rung in (FIT_SVDQ_FP4, FIT_FITS):
+        fitting = [row for row in compat if row[2] == rung]
+        if fitting:
+            name, _res, fit, reason = max(fitting, key=lambda r: _vram(r[1]))
+            return VariantChoice(name=name, fit=fit, reason=reason)
 
+    # svdq_int4 (gw#415): a stored 4-bit flavor that fits when nothing
+    # full-precision does — ahead of the emergency runtime-quant rung.
     # Emergency rung (th#546): nothing fits, but 4-bit emergency quantization
     # would — prefer it over the offload ladder (ladder position: after
     # stored flavors, before CPU offload).
-    emergency = [row for row in compat if row[2] == FIT_EMERGENCY]
-    if emergency:
-        name, _res, fit, reason = max(emergency, key=lambda r: _vram(r[1]))
-        return VariantChoice(name=name, fit=fit, reason=reason)
+    for rung in (FIT_SVDQ_INT4, FIT_EMERGENCY):
+        rows = [row for row in compat if row[2] == rung]
+        if rows:
+            name, _res, fit, reason = max(rows, key=lambda r: _vram(r[1]))
+            return VariantChoice(name=name, fit=fit, reason=reason)
 
     if base is not None:
-        base_name, base_res = base
-        fit, reason = variant_fit(base_res, caps, free_vram_gb)
+        base_name, base_res = base[0], base[1]
+        base_binding = base[2] if len(base) > 2 else None
+        fit, reason = variant_fit(base_res, caps, free_vram_gb, binding=base_binding)
         if fit != FIT_INCOMPATIBLE:
             return VariantChoice(name=base_name, fit=fit, reason=reason)
 

@@ -625,7 +625,10 @@ def _link_or_copy(src: Path, dst: Path) -> None:
     if dst.exists():
         return
     try:
-        os.link(src, dst)
+        # Resolve first: HF-cache snapshots are relative-symlink farms and a
+        # hardlink to the SYMLINK breaks the moment the tree is moved
+        # (gw#415 live: model_index.json -> ../../blobs/... dangling).
+        os.link(src.resolve(), dst)
     except OSError:
         shutil.copy2(src, dst)
 
