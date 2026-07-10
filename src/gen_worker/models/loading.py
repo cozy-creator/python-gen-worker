@@ -214,12 +214,163 @@ def synthesize_quantization_config(attrs: Optional[Dict[str, str]]) -> Optional[
 # tolerates fp8-E4M3 weight rounding; text encoders / VAE stay at compute
 # precision (quality-safe default, QUANTIZATION-POLICY.md component policy).
 _FP8_STORAGE_COMPONENTS: tuple[str, ...] = ("transformer", "unet")
+# The "+te" rung (component fit-ladder rung 2): the pipeline's text encoders.
+_FP8_TEXT_ENCODER_COMPONENTS: tuple[str, ...] = (
+    "text_encoder", "text_encoder_2", "text_encoder_3",
+)
+
+class _Fp8WeightWindow:
+    """Weight-only fp8 storage for one transformer block: the block's
+    Linear/conv WEIGHTS live in fp8 at rest; a forward-pre hook upcasts them
+    to the compute dtype for the whole block forward and a forward hook
+    recasts after. Everything else in the block (norms, embeddings, biases,
+    raw parameters) never leaves compute precision.
+
+    Block-window (not per-leaf-layer) granularity is what makes this safe for
+    transformers models, which — unlike diffusers denoisers — read weight
+    dtype and touch weights OUTSIDE the owning leaf's forward (gw#460):
+    Gemma3's embed-scale multiply runs on the embedding output, and T5's
+    ``T5DenseActDense`` casts ACTIVATIONS to ``self.wo.weight.dtype`` before
+    calling ``wo``, so a leaf-hooked (diffusers-style) ``wo`` still poisons
+    the stream with fp8. Inside a block window every dtype read sees the
+    compute dtype. Transient cost: one block resident at compute dtype."""
+
+    def __init__(self, params: List[Any], storage: Any, compute: Any) -> None:
+        self._params = params
+        self._storage = storage
+        self._compute = compute
+
+    def install(self, block: Any) -> None:
+        for p in self._params:
+            p.data = p.data.to(self._storage)
+        block.register_forward_pre_hook(self._pre)
+        block.register_forward_hook(self._post)
+
+    def _pre(self, module: Any, args: Any) -> None:
+        for p in self._params:
+            p.data = p.data.to(self._compute)
+
+    def _post(self, module: Any, args: Any, output: Any) -> None:
+        for p in self._params:
+            p.data = p.data.to(self._storage)
 
 
-def apply_fp8_storage(obj: Any, *, compute_dtype: Any = None) -> bool:
+def _fp8_block_windows(mod: Any) -> List[tuple[str, Any, List[Any]]]:
+    """(name, block, castable params) per repeated transformer block: the
+    children of top-level ``nn.ModuleList`` containers (``model.layers``,
+    ``encoder.block``, vision-tower layers, ...). Castable = Linear/conv
+    weights not shared with any module outside a block (tied lm_head /
+    embedding weights stay at compute dtype). Parameters outside blocks —
+    embeddings, final norms, poolers, lm_head — are never cast."""
+    import torch.nn as nn
+
+    castable_types = (
+        nn.Linear, nn.Conv1d, nn.Conv2d, nn.Conv3d,
+        nn.ConvTranspose1d, nn.ConvTranspose2d, nn.ConvTranspose3d,
+    )
+    list_names = [n for n, m in mod.named_modules() if isinstance(m, nn.ModuleList)]
+    top = [n for n in list_names
+           if not any(n != o and n.startswith(o + ".") for o in list_names)]
+
+    blocks: List[tuple[str, Any]] = []
+    seen_blocks: set[int] = set()
+    for name in top:
+        ml = mod.get_submodule(name)
+        for i, block in enumerate(ml):
+            if id(block) in seen_blocks:  # ALBERT-style shared blocks
+                continue
+            seen_blocks.add(id(block))
+            blocks.append((f"{name}.{i}", block))
+
+    # Any parameter reachable outside the blocks must keep compute dtype —
+    # a weight cast through a block but read elsewhere is the gw#460 break.
+    block_param_owners: Dict[int, int] = {}
+    for _, block in blocks:
+        for p in block.parameters():
+            block_param_owners[id(p)] = block_param_owners.get(id(p), 0) + 1
+    outside: set[int] = set()
+    for p in mod.parameters():
+        if id(p) not in block_param_owners:
+            outside.add(id(p))
+    for name, m in mod.named_modules():
+        in_block = any(name == bn or name.startswith(bn + ".") for bn, _ in blocks)
+        if not in_block:
+            outside.update(id(p) for p in m.parameters(recurse=False))
+
+    windows: List[tuple[str, Any, List[Any]]] = []
+    for name, block in blocks:
+        params: List[Any] = []
+        seen: set[int] = set()
+        for m in block.modules():
+            if not isinstance(m, castable_types):
+                continue
+            w = getattr(m, "weight", None)
+            if w is None or id(w) in seen or id(w) in outside:
+                continue
+            if not w.is_floating_point():
+                continue
+            seen.add(id(w))
+            params.append(w)
+        if params:
+            windows.append((name, block, params))
+    return windows
+
+
+def _apply_transformers_fp8(mod: Any, storage: Any, compute_dtype: Any) -> None:
+    """Weight-only fp8 storage for a transformers module (Gemma3/T5/CLIP-class
+    text encoders) via per-block :class:`_Fp8WeightWindow` hooks. Falls back
+    to a single whole-module window when no repeated blocks are found."""
+    windows = _fp8_block_windows(mod)
+    if not windows:
+        # No ModuleList blocks: one whole-module window (correct, but the
+        # transient upcast is the full module).
+        all_windows = _fp8_block_windows_whole(mod)
+        if not all_windows:
+            raise ValueError("no fp8-castable weights found")
+        windows = all_windows
+    total = 0
+    for _name, block, params in windows:
+        _Fp8WeightWindow(params, storage, compute_dtype).install(block)
+        total += len(params)
+    logger.info("fp8 weight windows installed: %d blocks, %d weights",
+                len(windows), total)
+
+
+def _fp8_block_windows_whole(mod: Any) -> List[tuple[str, Any, List[Any]]]:
+    import torch.nn as nn
+
+    castable_types = (
+        nn.Linear, nn.Conv1d, nn.Conv2d, nn.Conv3d,
+        nn.ConvTranspose1d, nn.ConvTranspose2d, nn.ConvTranspose3d,
+    )
+    params: List[Any] = []
+    seen: set[int] = set()
+    shared_out: set[int] = set()
+    for m in mod.modules():
+        if not isinstance(m, castable_types):
+            shared_out.update(id(p) for p in m.parameters(recurse=False))
+    for m in mod.modules():
+        if not isinstance(m, castable_types):
+            continue
+        w = getattr(m, "weight", None)
+        if w is None or id(w) in seen or id(w) in shared_out:
+            continue
+        if not w.is_floating_point():
+            continue
+        seen.add(id(w))
+        params.append(w)
+    if not params:
+        return []
+    return [(type(mod).__name__, mod, params)]
+
+
+def apply_fp8_storage(obj: Any, *, compute_dtype: Any = None,
+                      text_encoders: bool = False) -> bool:
     """fp8-E4M3 weight storage with per-layer upcast to ``compute_dtype``
     (diffusers layerwise casting) on a pipeline's denoiser — or on ``obj``
     itself when it is a bare module (th#546 two-format policy).
+    ``text_encoders=True`` (the ``storage_dtype="fp8+te"`` rung) extends the
+    cast to the pipeline's text encoders via the transformers-aware path.
 
     This is the universal VRAM-fit mechanism: fp8 bytes resident, bf16/fp16
     compute, no fp8 silicon required. Also the consumption path for stored
@@ -238,8 +389,11 @@ def apply_fp8_storage(obj: Any, *, compute_dtype: Any = None) -> bool:
     if compute_dtype is None:
         compute_dtype = torch.bfloat16
 
+    components = _FP8_STORAGE_COMPONENTS
+    if text_encoders:
+        components += _FP8_TEXT_ENCODER_COMPONENTS
     targets: List[tuple[str, Any]] = []
-    for name in _FP8_STORAGE_COMPONENTS:
+    for name in components:
         mod = getattr(obj, name, None)
         if mod is not None and hasattr(mod, "parameters"):
             targets.append((name, mod))
@@ -251,13 +405,10 @@ def apply_fp8_storage(obj: Any, *, compute_dtype: Any = None) -> bool:
         try:
             fn = getattr(mod, "enable_layerwise_casting", None)
             if callable(fn):
+                # diffusers ModelMixin — honors the model's own skip patterns.
                 fn(storage_dtype=storage, compute_dtype=compute_dtype)
             else:
-                from diffusers.hooks import apply_layerwise_casting
-
-                apply_layerwise_casting(
-                    mod, storage_dtype=storage, compute_dtype=compute_dtype
-                )
+                _apply_transformers_fp8(mod, storage, compute_dtype)
             applied = True
             logger.info("fp8 storage enabled on %s (compute %s)", name, compute_dtype)
         except Exception as exc:
@@ -528,10 +679,12 @@ def load_from_pretrained(
     preload, and quant-config synthesis; single-file checkpoints route through
     ``cls.from_single_file``. ``storage_dtype="fp8"`` (or an fp8-stored
     snapshot) keeps denoiser weights in fp8 storage with per-layer upcast to
-    the compute dtype; when the snapshot cannot fit free VRAM as stored, the
-    adaptive fit ladder engages runtime fp8-E4M3 storage first, then the
-    emergency nf4 rung (automatic on CUDA hosts). Used by the executor to satisfy
-    pipeline-typed ``setup()`` annotations; endpoints may also call it."""
+    the compute dtype; ``"fp8+te"`` extends that to the pipeline's text
+    encoders (transformers-aware, gw#460). When the snapshot cannot fit free
+    VRAM as stored, the adaptive fit ladder engages runtime fp8-E4M3 storage
+    first, then the emergency nf4 rung (automatic on CUDA hosts). Used by the
+    executor to satisfy pipeline-typed ``setup()`` annotations; endpoints may
+    also call it."""
     path = str(path)
     # SVDQuant/nunchaku 4-bit flavors (gw#415): self-describing snapshots take
     # the svdq lane — a nunchaku transformer swapped into the standard
@@ -570,7 +723,8 @@ def load_from_pretrained(
                 # torch-less environment (unit tests / CPU tools) — loaders
                 # that actually need torch will fail on their own terms.
                 pass
-    fp8_storage = storage_dtype == "fp8" or sniffed == "fp8"
+    fp8_storage = storage_dtype in ("fp8", "fp8+te") or sniffed == "fp8"
+    fp8_text_encoders = storage_dtype == "fp8+te"
     if not read_on_disk_quant_config(Path(path)):
         qc = synthesize_quantization_config(attrs)
         if qc is None:
@@ -596,7 +750,8 @@ def load_from_pretrained(
             kwargs.pop("quantization_config", None)
             pipe = cls.from_pretrained(path, **kwargs)
     if fp8_storage and "quantization_config" not in kwargs:
-        apply_fp8_storage(pipe, compute_dtype=kwargs.get("torch_dtype"))
+        apply_fp8_storage(pipe, compute_dtype=kwargs.get("torch_dtype"),
+                          text_encoders=fp8_text_encoders)
     return pipe
 
 

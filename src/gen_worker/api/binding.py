@@ -25,7 +25,10 @@ def _clean(s: object) -> str:
 # (diffusers layerwise casting) — the universal VRAM-fit mechanism; works on
 # cards without fp8 units. Applied by the loading layer; also auto-applied
 # when the snapshot itself stores fp8 (an `#fp8` flavor artifact).
-STORAGE_DTYPES: tuple[str, ...] = ("fp8",)
+# "fp8+te" additionally casts the pipeline's text encoders via the
+# transformers-aware path (linear weights fp8; embeddings/norms/tied weights
+# stay at compute dtype — component fit-ladder rung 2, gw#460).
+STORAGE_DTYPES: tuple[str, ...] = ("fp8", "fp8+te")
 
 
 def _clean_storage_dtype(v: object) -> str:
