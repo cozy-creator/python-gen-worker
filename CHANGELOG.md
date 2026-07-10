@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.13.7 (2026-07-10)
+
+- **gw#459: `TrainingMetric` validation fields.** `val_loss`, `best_step`, and
+  `advice` (all optional, omitted when None) join the typed
+  `request.training_metric` payload, and `TrainingContext.training_metric`
+  accepts them. Any event carrying `val_loss` bypasses the 5s min-interval
+  throttle like first/last — val points are sparse and every one must reach
+  the hub. Counterpart: tensorhub th#696 (val series + recommended checkpoint
+  in the training-metrics API).
+
 ## 0.13.6 (2026-07-10)
 
 - **gw#456: clone downloads can no longer hang forever.** huggingface_hub's
