@@ -1,7 +1,13 @@
 # Changelog
 
-## 0.12.3
+## 0.13.0 (2026-07-09)
 
+- **Breaking (gw#424): the standalone trainer runtime is deleted** —
+  `src/gen_worker/trainer/`, the `WORKER_MODE=trainer` entrypoint branch,
+  `WORKER_MODE`/`TRAINER_JOB_SPEC_PATH` settings, and `examples/training-smoke`
+  are gone. Training runs as `@endpoint(kind="training")` through the normal
+  executor. The `[trainer]` extra is renamed `[datasets]` (pyarrow, used by
+  `gen_worker.convert.dataset`).
 - **gw#425: TrainingContext v1 — delegated trainers.** `resolve_dataset` is
   rewritten against the tensorhub datasets materialize route (th#642 wire
   format): presigned parquet shards stream to disk (bounded memory),
@@ -16,11 +22,20 @@
   of tensorhub #561), presenting the transport's rotated worker JWT. Bugfix:
   dataset list/create responses read `dataset_id` (previously `id`, which
   never matched).
-- **gw#424**: the standalone trainer runtime is deleted — `src/gen_worker/trainer/`,
-  the `WORKER_MODE=trainer` entrypoint branch, `WORKER_MODE`/`TRAINER_JOB_SPEC_PATH`
-  settings, and `examples/training-smoke` are gone. Training runs as
-  `@endpoint(kind="training")` through the normal executor. The `[trainer]`
-  extra is renamed `[datasets]` (pyarrow, used by `gen_worker.convert.dataset`).
+- **gw#438: UUID dataset refs + progress emitter everywhere.** Slash-less
+  dataset refs (bare UUIDs, the production form after th#641) hit
+  `GET /datasets/:id/materialize` directly; `owner/name` refs keep working
+  for local/dev (list param fixed to `?tenant=`). The executor now wires a
+  progress emitter into every orchestrated context kind, so `ctx.progress` /
+  `ctx.log` ride the JobProgress stream into the hub's SSE output; checkpoint
+  saves emit `request.checkpoint` events (step_number, output_kind, size).
+- feat: `GEN_WORKER_FORBID_CPU_OFFLOAD` veto — refuses CPU-touching inference
+  placements (no CUDA, or offload spilling weights to system RAM) on dev boxes.
+- note: the gw#424/gw#425 entries above briefly sat under 0.12.3 in this file;
+  the published 0.12.3 wheel (tagged at gw#415) does not contain them.
+
+## 0.12.3
+
 - **SVDQuant/nunchaku 4-bit loader mode (gw#415).** A `#svdq-fp4-rN` /
   `#svdq-int4-rN` flavor (diffusers tree whose denoiser dir holds one
   nunchaku single-file checkpoint) is detected from safetensors
