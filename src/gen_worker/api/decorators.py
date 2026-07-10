@@ -46,16 +46,26 @@ RESERVED_METHODS = frozenset({"setup", "warmup", "shutdown"})
 
 class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     """Hardware envelope for one function: ``Resources(gpu, vram_gb,
-    compute_capability, libraries)``.
+    compute_capability, libraries, strict_vram)``.
 
     ``Resources(vram_gb=12)`` implies ``gpu=True`` — declaring VRAM without a
     GPU is a contradiction, not an under-declaration.
+
+    ``vram_gb`` is the model's declared footprint, not a hard residency
+    requirement: a card smaller than ``vram_gb`` is still servable through
+    the worker's offload ladder (``models/memory.py`` — CPU offload trades
+    speed for fit) or a quantized/emergency rung (``models/hub_policy.py``).
+    Boot-time gating (``Executor.gate_functions``) only declines a function
+    for VRAM when ``strict_vram=True`` — set it for bindings that truly
+    cannot tolerate CPU-resident weights (e.g. a fixed-shape ``Compile``d
+    graph or a TensorRT engine) and must have ``vram_gb`` resident as-is.
     """
 
     gpu: bool = False
     vram_gb: float | None = None
     compute_capability: float | None = None
     libraries: tuple[str, ...] = ()
+    strict_vram: bool = False
 
     def __post_init__(self) -> None:
         force = msgspec.structs.force_setattr

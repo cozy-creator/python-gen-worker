@@ -5,6 +5,12 @@ reserve); the availability gate must not disable functions declaring
 ``Resources(vram_gb=24)`` on exactly the card they target. Single-file repos
 (Illustrious-XL, civitai checkpoints) have no ``model_index.json`` and must
 route through ``cls.from_single_file``.
+
+VRAM gating (Paul's ruling, gw commit reverting GEN_WORKER_FORBID_CPU_OFFLOAD):
+CPU offload is a legitimate fit path (models/memory.py ladder), not a failure
+mode, so a declared ``vram_gb`` larger than the card must NOT disable a
+function by default — only ``strict_vram=True`` (bindings that cannot
+tolerate CPU-resident weights, e.g. compiled/TRT graphs) still gates on VRAM.
 """
 
 from __future__ import annotations
@@ -28,7 +34,7 @@ class _Out(msgspec.Struct):
     y: str
 
 
-def _spec(name: str, vram_gb: float) -> EndpointSpec:
+def _spec(name: str, vram_gb: float, *, strict_vram: bool = False) -> EndpointSpec:
     class Endpoint:
         def setup(self, model: str) -> None:  # pragma: no cover
             pass
@@ -40,7 +46,7 @@ def _spec(name: str, vram_gb: float) -> EndpointSpec:
         name=name, method=Endpoint.run, kind="inference",
         payload_type=_In, output_mode="single", cls=Endpoint,
         attr_name="run", models={"model": HF("acme/tiny")},
-        resources=Resources(vram_gb=vram_gb),
+        resources=Resources(vram_gb=vram_gb, strict_vram=strict_vram),
     )
 
 
@@ -49,6 +55,7 @@ async def _noop_send(msg) -> None:  # pragma: no cover
 
 
 RTX_4090_TOTAL_BYTES = 25_757_220_864  # 23.99 GiB — what mem_get_info reports
+CARD_8GB_TOTAL_BYTES = 8_589_934_592  # 8.0 GiB
 
 
 def test_gate_rounds_detected_gib_up_to_declared_24() -> None:
@@ -57,10 +64,29 @@ def test_gate_rounds_detected_gib_up_to_declared_24() -> None:
     assert "fits-24" not in ex.unavailable
 
 
-def test_gate_still_blocks_genuinely_bigger_requirements() -> None:
+def test_gate_advertises_oversized_model_as_offload_servable() -> None:
+    """A declared vram_gb bigger than the card is NOT a decline by default —
+    the offload/quant fit-ladder (models/memory.py, models/hub_policy.py)
+    serves it, just slower. Only strict_vram opts out of that fallback."""
     ex = Executor([_spec("needs-32", 32.0)], _noop_send)
     ex.gate_functions({"gpu_count": 1, "gpu_total_mem": RTX_4090_TOTAL_BYTES, "gpu_sm": "89"})
-    assert ex.unavailable["needs-32"][0] == "insufficient_vram"
+    assert "needs-32" not in ex.unavailable
+
+
+def test_gate_advertises_big_model_on_8gb_card_via_offload() -> None:
+    """cozy-local's core small-card scenario: an 8GB card legitimately serves
+    a vram_gb=20 model through quantized/offload rungs — must be advertised."""
+    ex = Executor([_spec("big-model", 20.0)], _noop_send)
+    ex.gate_functions({"gpu_count": 1, "gpu_total_mem": CARD_8GB_TOTAL_BYTES, "gpu_sm": "89"})
+    assert "big-model" not in ex.unavailable
+
+
+def test_gate_blocks_strict_vram_oversized_model() -> None:
+    """strict_vram=True means no offload/quant fallback (e.g. a compiled
+    fixed-shape graph or TRT engine) — genuinely unservable on a small card."""
+    ex = Executor([_spec("needs-32-strict", 32.0, strict_vram=True)], _noop_send)
+    ex.gate_functions({"gpu_count": 1, "gpu_total_mem": RTX_4090_TOTAL_BYTES, "gpu_sm": "89"})
+    assert ex.unavailable["needs-32-strict"][0] == "insufficient_vram"
 
 
 def test_single_file_checkpoint_detection(tmp_path: Path) -> None:

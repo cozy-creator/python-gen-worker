@@ -758,10 +758,20 @@ class Executor:
             # Compare on the rounded GiB: a "24GB" card reports ~23.99GiB via
             # mem_get_info (driver/ECC reserve), which must not gate off
             # functions declaring vram_gb=24.
-            if r.vram_gb is not None and total_vram_gb and round(total_vram_gb) < float(r.vram_gb):
+            #
+            # A card smaller than vram_gb is still servable through the
+            # offload ladder (models/memory.py) or a quantized/emergency rung
+            # (models/hub_policy.py) — CPU offload is a legitimate fit path,
+            # not a failure. Only decline for VRAM when the binding opts out
+            # of that fallback (``strict_vram=True``): it needs vram_gb
+            # resident as-is (e.g. a compiled fixed-shape graph or TRT
+            # engine) and no rung of the ladder can serve it on this card.
+            if r.vram_gb is not None and r.strict_vram and total_vram_gb \
+                    and round(total_vram_gb) < float(r.vram_gb):
                 self.unavailable[name] = (
                     "insufficient_vram",
-                    f"requires {r.vram_gb:.0f}GiB VRAM, detected {total_vram_gb:.0f}GiB",
+                    f"requires {r.vram_gb:.0f}GiB VRAM resident (strict_vram), "
+                    f"detected {total_vram_gb:.0f}GiB",
                     {"required_vram_gb": f"{float(r.vram_gb):.0f}",
                      "detected_vram_gb": f"{total_vram_gb:.0f}"})
                 continue

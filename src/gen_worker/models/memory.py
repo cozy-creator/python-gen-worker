@@ -41,23 +41,6 @@ _DEFAULT_OFF_HEADROOM_GB = 8.0
 # Sentinel attribute set on pipelines to make apply_low_vram_config idempotent.
 _COZY_MODE_ATTR = "_cozy_low_vram_mode"
 
-# Modes that spill model weights to system RAM and run parts of inference on CPU.
-_CPU_OFFLOAD_MODES = ("model_offload", "group_offload", "sequential")
-
-
-def _forbid_cpu_inference(detail: str) -> None:
-    """Raise when GEN_WORKER_FORBID_CPU_OFFLOAD=1 vetoes a CPU-touching placement.
-
-    Set on dev machines so agents/tests can't silently melt the box with
-    CPU-offloaded inference; real-model runs belong on the GPU CI lane.
-    """
-    if os.environ.get("GEN_WORKER_FORBID_CPU_OFFLOAD") == "1":
-        raise RuntimeError(
-            f"GEN_WORKER_FORBID_CPU_OFFLOAD=1: refusing {detail}. "
-            "Real-model inference that does not fit in free VRAM must run on "
-            "the GPU CI lane, not this machine."
-        )
-
 
 # ---------------------------------------------------------------------------
 # Probes
@@ -434,10 +417,8 @@ def place_pipeline(pipeline: Any, *, logger: Optional[logging.Logger] = None) ->
         import torch
 
         if not torch.cuda.is_available():
-            _forbid_cpu_inference("CPU-only inference (no CUDA available)")
             return {"mode": "cpu"}
     except Exception:
-        _forbid_cpu_inference("CPU-only inference (torch/CUDA unavailable)")
         return {"mode": "cpu"}
     mode = select_auto_mode(pipeline=pipeline)
     if mode in ("off", "vae_only") and callable(getattr(pipeline, "to", None)):
@@ -476,8 +457,6 @@ def apply_low_vram_config(
             pipeline=pipeline, model_size_gb=model_size_gb, peak_vram_gb=peak_vram_gb,
         )
         log.info("low_vram: auto-selected mode=%s", effective_mode)
-    if effective_mode in _CPU_OFFLOAD_MODES:
-        _forbid_cpu_inference(f"CPU-offloaded inference (mode={effective_mode})")
 
     applied: Dict[str, Any] = {
         "mode": effective_mode,

@@ -116,6 +116,14 @@ Resources(gpu=True, vram_gb=24, compute_capability=8.0, libraries=("nunchaku",))
 
 `vram_gb=`/`compute_capability=` imply `gpu=True`.
 
+`vram_gb` is a declared footprint, not a hard residency requirement: a
+smaller card still advertises the function and serves it through the
+worker's offload ladder (CPU offload) or a quantized/emergency rung — slower,
+not unavailable. Set `strict_vram=True` only for bindings that cannot
+tolerate CPU-resident weights (a compiled fixed-shape graph, a TensorRT
+engine); the worker then declines the function outright on cards smaller
+than `vram_gb`.
+
 ## Kinds
 
 `@endpoint(kind="conversion" | "training" | "dataset")` selects the context
