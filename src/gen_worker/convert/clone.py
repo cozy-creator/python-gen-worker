@@ -11,6 +11,7 @@ and :func:`run_clone` (keyword-explicit).
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import logging
 import os
@@ -443,6 +444,22 @@ def _clone_workdir(provider: str, source_key: str, destination: str) -> Path:
     return workdir
 
 
+def _acquire_workdir_lock(workdir: Path) -> int:
+    """Exclusive flock serializing clones that share one keyed workdir.
+    Concurrent duplicates (crash-recovery re-queues of the same clone)
+    otherwise corrupt the shared snapshot: hf_hub's local-dir download
+    unlinks + re-fetches files the peer clone is mid-reading."""
+    lock_path = workdir.parent / f".{workdir.name}.lock"
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        logger.info(
+            "workdir %s held by a concurrent clone of the same source; waiting", workdir)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
 def run_clone(
     ctx: Any,
     *,
@@ -480,6 +497,7 @@ def run_clone(
     if source_revision:
         source_key = f"{source_key}@{source_revision}"
     workdir = _clone_workdir(provider, source_key, destination)
+    lock_fd = _acquire_workdir_lock(workdir)
     succeeded = False
     try:
         if provider not in {"huggingface", "civitai"}:
@@ -727,6 +745,7 @@ def run_clone(
             shutil.rmtree(workdir, ignore_errors=True)
         else:
             logger.warning("clone failed; workdir retained for resume: %s", workdir)
+        os.close(lock_fd)  # releases the flock
 
 
 def from_huggingface(ctx: Any, payload: Any, *, hf_token: str | None = None) -> CloneResult:
