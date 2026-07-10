@@ -2,7 +2,7 @@
 
 ## 0.13.1 (2026-07-10)
 
-- **gw#441: clone workdir flock — concurrent duplicate clones serialize.**
+- **gw#442: clone workdir flock — concurrent duplicate clones serialize.**
   Two clones of the same (provider, source, destination) share the resumable
   workdir; hf_hub's local-dir download unlinks + re-fetches files the peer
   clone is mid-reading, so the leading clone's convert phase failed with

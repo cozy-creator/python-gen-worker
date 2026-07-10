@@ -1,4 +1,4 @@
-"""Concurrent duplicate clones must serialize on the keyed workdir (gw#441).
+"""Concurrent duplicate clones must serialize on the keyed workdir (gw#442).
 
 Live failure (e2e J19): a crash-recovery re-queue put two clones of the same
 (provider, source, destination) on one worker concurrently. Both shared
