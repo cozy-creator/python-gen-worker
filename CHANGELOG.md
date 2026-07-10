@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.12.2 (2026-07-09)
+
+- fix: CLI str/Path model-slot injection passes the snapshot path instead of loading a pipeline (gw#416)
+- fix: promote-or-die exempts object-less RAM ledger entries — no more retry livelock on CUDA hosts (gw#417)
+- feat: emergency nf4 quantization is always-on for CUDA hosts (env flag removed); bitsandbytes added to the [torch] extra (gw#420)
+- residency tests rewritten against real tiny pipelines (no fake pipes)
+- note: 0.12.1 on PyPI was published from a pre-fix tree (gw#427) — use 0.12.2
+
 ## Unreleased
 
 - **gw#416**: CLI `run`/`serve` str/`Path`-typed setup slots now receive the
