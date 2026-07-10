@@ -48,6 +48,14 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     """Hardware envelope for one function: ``Resources(gpu, vram_gb,
     compute_capability, libraries)``.
 
+    ``vram_gb`` is the recommended minimum CARD size: the total VRAM (GB) of
+    the smallest card the function targets — ``vram_gb=24`` means "runs on a
+    24 GB card". It is an optional placement hint (the orchestrator may use
+    it to pick a GPU SKU), not a free-memory requirement: the platform
+    reserves ~1 GB (``GPU_VRAM_OVERHEAD_GB``) for driver/framebuffer/CUDA
+    context, so ``vram_gb=24`` serves on a 24 GB card even though only
+    ~23.6 GB is free.
+
     ``Resources(vram_gb=12)`` implies ``gpu=True`` — declaring VRAM without a
     GPU is a contradiction, not an under-declaration.
     """
