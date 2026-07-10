@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.13.5 (2026-07-10)
+## 0.13.6 (2026-07-10)
 
 - **gw#456: clone downloads can no longer hang forever.** huggingface_hub's
   default HTTP client has no timeout (and `HfApi.repo_info` passes an explicit
@@ -17,6 +17,8 @@
   `.incomplete` files), raising typed `CloneDownloadError` when exhausted.
   Civitai files get a bounded per-file retry (`COZY_CIVITAI_DOWNLOAD_ATTEMPTS`=3).
   Tensorhub-side demand-row TTL sweep is th#694.
+
+## 0.13.5 (2026-07-10)
 
 - **gw#457: `resolve_dataset` rides the DATASET-V2 async snapshot contract
   (th#691).** `GET /datasets/:id/materialize` may now answer
