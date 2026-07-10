@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.13.11 (2026-07-10)
+
+- **gw#463: CUDA OOM never fatals — degraded mode is the fit-ladder's formal
+  terminal rung, plan-time AND reactive.** One unified ladder: `plan_serve`'s
+  offload verdict now drives `place_pipeline`'s starting placement (a plan
+  that already says "can't fit resident" never pays the doomed resident
+  attempt — ie#369 measured 9-28 min for 70 GB models), and a runtime CUDA
+  OOM is a ladder *transition*, not a failure. Two core catch-sites:
+  (a) setup/load — an OOM inside placement flushes and demotes one offload
+  rung (`model_offload -> group_offload -> sequential`) and retries;
+  (b) mid-inference — the executor flushes the CUDA cache, demotes the
+  function's resident pipelines one rung, and retries the request ONCE in
+  degraded mode; the job only fails (RETRYABLE `out of memory`, never FATAL)
+  if degraded also fails. Demotions are sticky per model until reload and
+  learned in-process (`Executor.degraded_floor`), so subsequent loads start
+  at the learned rung. Every transition logs
+  `DEGRADED_MODE=engaged fn=... model=... phase=... rung=a->b needed_gb=..
+  free_gb=..`, updates the ServePlan, emits a per-request `ctx.log` event,
+  and re-emits `FnDegraded` with `ran="offload:<mode>"` (lifecycle dedupe is
+  now per-rung; the emit passes also run on unchanged StateDelta bytes —
+  previously a plan change without a delta change was never reported).
+  Allocator-flavored `RuntimeError`s ("CUDA error: out of memory",
+  CUBLAS/CUDNN alloc failures) now classify as OOM (`is_cuda_oom`) instead of
+  falling through to FATAL. `GEN_WORKER_FORBID_CPU_OFFLOAD=1` still vetoes
+  every CPU-touching demotion (dev-box guard). Generalizes ltx-video-2.3's
+  bespoke OOM fallback (ie PR #22) into the worker core.
+
 ## 0.13.10 (2026-07-10)
 
 - **gw#462: conversion worker hardening — disk preflight, scratch hygiene,

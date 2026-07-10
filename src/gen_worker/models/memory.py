@@ -61,6 +61,83 @@ def effective_vram_requirement_gb(recommended_gb: float) -> float:
 # Modes that spill model weights to system RAM and run parts of inference on CPU.
 _CPU_OFFLOAD_MODES = ("model_offload", "group_offload", "sequential")
 
+# The reactive (degraded-mode) half of the fit ladder, shallowest first
+# (gw#463). A CUDA OOM — at load OR mid-inference — demotes a pipeline one
+# rung at a time; the terminal rung is sequential offload.
+OFFLOAD_LADDER: tuple[str, ...] = _CPU_OFFLOAD_MODES
+
+
+def next_offload_rung(mode: Optional[str]) -> Optional[str]:
+    """The next rung down the offload ladder from ``mode``.
+
+    Resident modes (''/off/vae_only/auto) fall to model_offload; each offload
+    mode falls to the next deeper one; None when already terminal.
+    """
+    cur = str(mode or "")
+    if cur not in OFFLOAD_LADDER:
+        return OFFLOAD_LADDER[0]
+    idx = OFFLOAD_LADDER.index(cur) + 1
+    return OFFLOAD_LADDER[idx] if idx < len(OFFLOAD_LADDER) else None
+
+
+def deeper_offload_mode(a: Optional[str], b: Optional[str]) -> str:
+    """The more-degraded of two placement modes ('' / non-ladder = shallowest)."""
+    def rank(m: Optional[str]) -> int:
+        m = str(m or "")
+        return OFFLOAD_LADDER.index(m) + 1 if m in OFFLOAD_LADDER else 0
+    a_s, b_s = str(a or ""), str(b or "")
+    return a_s if rank(a_s) >= rank(b_s) else b_s
+
+
+def is_cuda_oom(exc: Optional[BaseException]) -> bool:
+    """CUDA allocator exhaustion in any of its shapes: torch.cuda.OutOfMemoryError
+    (class name match — no torch import needed) plus the allocator's RuntimeError
+    flavors ("CUDA error: out of memory", CUBLAS/CUDNN alloc failures)."""
+    if exc is None:
+        return False
+    if type(exc).__name__ in ("OutOfMemoryError", "CUDAOutOfMemoryError"):
+        return True
+    if isinstance(exc, RuntimeError):
+        text = str(exc).lower()
+        return (
+            "out of memory" in text
+            or "cuda oom" in text
+            or "cublas_status_alloc_failed" in text
+            or "cudnn_status_alloc_failed" in text
+        )
+    return False
+
+
+def degraded_log_line(
+    *,
+    event: str,
+    fn: str = "",
+    model: str = "",
+    phase: str = "",
+    from_rung: str = "",
+    to_rung: str = "",
+    needed_gb: float = 0.0,
+    free_gb: float = 0.0,
+    detail: str = "",
+) -> str:
+    """The ONE degraded-mode log format (gw#463; quality bar: ie#369's ltx
+    DEGRADED_MODE lines). event: planned | engaged | serving."""
+    parts = [f"DEGRADED_MODE={event}"]
+    if fn:
+        parts.append(f"fn={fn}")
+    if model:
+        parts.append(f"model={model}")
+    if phase:
+        parts.append(f"phase={phase}")
+    if from_rung or to_rung:
+        parts.append(f"rung={from_rung or '?'}->{to_rung or '?'}")
+    if needed_gb > 0:
+        parts.append(f"needed_gb={needed_gb:.1f}")
+    if free_gb > 0:
+        parts.append(f"free_gb={free_gb:.1f}")
+    line = " ".join(parts)
+    return f"{line}: {detail}" if detail else line
+
 
 def cpu_offload_forbidden() -> bool:
     """True when GEN_WORKER_FORBID_CPU_OFFLOAD=1 vetoes any CPU-touching
@@ -447,13 +524,27 @@ def _apply_group_offload(
     return any_applied
 
 
-def place_pipeline(pipeline: Any, *, logger: Optional[logging.Logger] = None) -> Dict[str, Any]:
+def place_pipeline(
+    pipeline: Any,
+    *,
+    logger: Optional[logging.Logger] = None,
+    mode: Mode = "auto",
+    ref: str = "",
+) -> Dict[str, Any]:
     """Worker-owned placement + offload policy for a freshly-loaded pipeline.
 
-    Runs the one low-VRAM decider against free VRAM: plenty of headroom puts
-    the whole pipeline on CUDA; tighter budgets step down the offload ladder.
-    Endpoints never write device/offload code — the worker calls this around
-    ``setup()`` injection. No-op without CUDA.
+    ``mode="auto"`` runs the one low-VRAM decider against free VRAM: plenty of
+    headroom puts the whole pipeline on CUDA; tighter budgets step down the
+    offload ladder. Callers with plan-time knowledge (a ServePlan offload
+    verdict, a learned degraded floor) pass ``mode`` explicitly so a doomed
+    fully-resident attempt is never paid (ie#369). Endpoints never write
+    device/offload code — the worker calls this around ``setup()`` injection.
+    No-op without CUDA.
+
+    A CUDA OOM during placement is a ladder transition, not a failure
+    (gw#463): flush, demote one offload rung, retry — down to sequential.
+    The result dict carries ``oom_demotions``/``requested_mode`` when that
+    happened so the caller can record + report the degradation.
     """
     log = logger or _LOG
     try:
@@ -465,13 +556,56 @@ def place_pipeline(pipeline: Any, *, logger: Optional[logging.Logger] = None) ->
     except Exception:
         _forbid_cpu_inference("CPU-only inference (torch/CUDA unavailable)")
         return {"mode": "cpu"}
-    mode = select_auto_mode(pipeline=pipeline)
-    if mode in ("off", "vae_only") and callable(getattr(pipeline, "to", None)):
+    effective = select_auto_mode(pipeline=pipeline) if mode == "auto" else mode
+    requested = effective
+    demotions = 0
+    while True:
         try:
-            pipeline.to("cuda")
-        except Exception as exc:
-            log.warning("place_pipeline: .to('cuda') failed: %s", exc)
-    return apply_low_vram_config(pipeline, mode=mode, logger=log)
+            if effective in ("off", "vae_only") and callable(getattr(pipeline, "to", None)):
+                try:
+                    pipeline.to("cuda")
+                except BaseException as exc:
+                    if is_cuda_oom(exc):
+                        raise
+                    log.warning("place_pipeline: .to('cuda') failed: %s", exc)
+            applied = apply_low_vram_config(pipeline, mode=effective, logger=log)
+            if demotions:
+                applied["oom_demotions"] = demotions
+                applied["requested_mode"] = requested
+            return applied
+        except BaseException as exc:
+            if not is_cuda_oom(exc):
+                raise
+            nxt = next_offload_rung(effective)
+            if nxt is None:
+                raise
+            flush_memory()
+            log.warning(degraded_log_line(
+                event="engaged", model=ref, phase="load",
+                from_rung=effective, to_rung=nxt,
+                needed_gb=estimate_pipeline_size_gb(pipeline),
+                free_gb=get_available_vram_gb(),
+                detail=f"CUDA OOM during placement ({type(exc).__name__}); retrying offloaded",
+            ))
+            demotions += 1
+            effective = nxt
+
+
+def demote_pipeline(pipeline: Any, *, logger: Optional[logging.Logger] = None) -> Optional[str]:
+    """Runtime ladder transition (gw#463): move an already-placed pipeline one
+    offload rung deeper after a mid-inference CUDA OOM. Returns the new mode,
+    or None when already terminal (sequential). Sticky: the applied mode is
+    recorded on the pipeline, so it stays degraded until reload."""
+    log = logger or _LOG
+    nxt = next_offload_rung(low_vram_mode(pipeline))
+    if nxt is None:
+        return None
+    try:
+        delattr(pipeline, _COZY_MODE_ATTR)
+    except AttributeError:
+        pass
+    apply_low_vram_config(pipeline, mode=nxt, logger=log)
+    return nxt
 
 
 def apply_low_vram_config(
@@ -699,6 +833,12 @@ __all__ = [
     "apply_low_vram_config",
     "low_vram_mode",
     "place_pipeline",
+    "demote_pipeline",
+    "next_offload_rung",
+    "deeper_offload_mode",
+    "is_cuda_oom",
+    "degraded_log_line",
+    "OFFLOAD_LADDER",
     "with_oom_retry",
     "select_auto_mode",
     "device_mismatches",
