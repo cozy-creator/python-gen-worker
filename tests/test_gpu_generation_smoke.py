@@ -27,10 +27,17 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.skipif(
-    os.environ.get("GEN_WORKER_GPU_SMOKE") != "1",
-    reason="generation smoke runs only with GEN_WORKER_GPU_SMOKE=1 (~16GB download)",
-)
+pytestmark = [
+    pytest.mark.skipif(
+        os.environ.get("GEN_WORKER_GPU_SMOKE") != "1",
+        reason="generation smoke runs only with GEN_WORKER_GPU_SMOKE=1 (~16GB download)",
+    ),
+    # Machine-level veto: wins even when GEN_WORKER_GPU_SMOKE=1 is set.
+    pytest.mark.skipif(
+        os.environ.get("GEN_WORKER_FORBID_CPU_OFFLOAD") == "1",
+        reason="real inference is forbidden on this machine (GPU CI lane only)",
+    ),
+]
 
 # Turbo (step-distilled) klein — verified ungated (anonymous download OK).
 REPO_ID = "black-forest-labs/FLUX.2-klein-4B"
