@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.13.9 (2026-07-10)
+
+- **gw#453: training contexts arm repo-CAS checkpoint routing.** The executor
+  now populates producer contexts with `kind`, `destination_repo` (reserved
+  `payload.destination.ref` struct or flat `payload.destination_repo` scalar)
+  and the cap token's `job_id` claim, so `ctx.save_checkpoint` /
+  `open_checkpoint_stream` on `kind=training` jobs ride the job-bound repo-CAS
+  checkpoint route (multi-GB per-file grant) instead of silently falling back
+  to the media route (256 MiB/file cap — J19 run41 trained 500/500 steps then
+  died `file_too_large` publishing the final LoRA). Output-stream routing is
+  now split by artifact kind: checkpoint streams -> repo-CAS when the
+  destination scope is armed; asset streams (sample images, media outputs)
+  always -> media route under the `upload_media` grant. A training
+  `save_checkpoint` with no destination scope now fails loudly instead of
+  riding media.
+
 ## 0.13.8 (2026-07-10)
 
 - **th#683 P3: complete the serve-time adaptive-fit ladder + structured degradation events.** `plan_serve` now walks `bf16 -> fp8 -> nvfp4 -> runtime nf4 4-bit -> CPU/disk offload -> CPU-only`, picking the highest-quality lever that fits the actual card. Stored fp8/nvfp4 flavors are HW-gated (fp8 -> SM89 Ada/Hopper, nvfp4 -> SM100 Blackwell); a runtime fp8-E4M3 storage rung needs no fp8 silicon. Never refuses on the recommended-VRAM hint. New `FnDegraded` event (`{function, wanted, ran, reason, est_latency_multiplier, recommended_vram_gb}`) rides the orchestrator transport (cozy-local emits nothing; the honest-guidance advisory is the terminal surface).

@@ -56,6 +56,7 @@ from .request_context import (
     RequestContext,
     TrainingContext,
 )
+from .request_context._helpers import _decode_unverified_jwt_claims
 from .utils import lora as lora_util
 
 _CONTEXT_BY_KIND: Dict[str, type] = {
@@ -118,6 +119,36 @@ def _reserved_repo_info(payload: Any, field_name: str) -> Dict[str, Any]:
     except Exception:
         return {}
     return out if isinstance(out, dict) else {}
+
+
+def _producer_destination_repo(payload: Any, destination_info: Dict[str, Any]) -> str:
+    """Bare ``owner/repo`` the producer publishes into, or "".
+
+    The reserved struct (``payload.destination.ref``) wins; the flat
+    ``payload.destination_repo`` scalar is the wire form gen-orchestrator
+    dispatches. Tag/flavor/checkpoint selectors are stripped.
+    """
+    ref = str(destination_info.get("ref") or destination_info.get("repo") or "").strip()
+    if not ref:
+        ref = str(getattr(payload, "destination_repo", "") or "").strip()
+    for sep in (":", "@", "#"):
+        ref = ref.split(sep, 1)[0]
+    return ref.strip().strip("/")
+
+
+def _capability_job_id(token: str) -> Optional[str]:
+    """job_id claim from the worker capability token ("" claims → None).
+
+    Repo-CAS checkpoint sessions are job-bound: tensorhub requires the
+    session's job_id to equal the cap token's job_id claim (gw#453).
+    """
+    raw = str(token or "").strip()
+    if not raw:
+        return None
+    try:
+        return str(_decode_unverified_jwt_claims(raw).get("job_id") or "").strip() or None
+    except Exception:
+        return None
 
 
 def _map_exception(exc: BaseException) -> Tuple[int, str]:
@@ -1639,9 +1670,25 @@ class Executor:
         source_info = _reserved_repo_info(payload, "source") if producer else {}
         destination_info = _reserved_repo_info(payload, "destination") if producer else {}
 
+        # gw#453: arm repo-CAS checkpoint routing for producer jobs. Without
+        # kind/destination_repo/job_id the ctx's _repo_job_upload_scope() is
+        # None and save_checkpoint silently rides the media route (256 MiB
+        # cap) instead of the job-bound checkpoint grant.
+        execution_hints: Dict[str, Any] = {}
+        if run.output_mode == pb.OUTPUT_MODE_INLINE:
+            execution_hints["output_format"] = "inline"
+        job_id: Optional[str] = None
+        if producer:
+            execution_hints["kind"] = spec.kind
+            dest_repo = _producer_destination_repo(payload, destination_info)
+            if dest_repo:
+                execution_hints["destination_repo"] = dest_repo
+            job_id = _capability_job_id(run.capability_token)
+
         ctx_cls = _CONTEXT_BY_KIND.get(spec.kind, RequestContext)
         ctx = ctx_cls(
             request_id=run.request_id,
+            job_id=job_id,
             emitter=self._make_ctx_emitter(job),
             owner=run.tenant or None,
             invoker_id=run.invoker_id or None,
@@ -1663,9 +1710,7 @@ class Executor:
             },
             source_info=source_info,
             destination_info=destination_info,
-            execution_hints=(
-                {"output_format": "inline"} if run.output_mode == pb.OUTPUT_MODE_INLINE else {}
-            ),
+            execution_hints=execution_hints,
             hf_token=getattr(self._settings, "hf_token", "") or "",
         )
         job.ctx = ctx
