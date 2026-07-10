@@ -317,6 +317,21 @@ class RequestContext:
             return self._worker_capability_token
         return _require_worker_capability_token()
 
+    def _media_upload_owner(self) -> str:
+        """Owner segment for /api/v1/media/:owner/uploads calls.
+
+        The capability token's `tenant` claim is the canonical org uuid its
+        upload_media grant is bound to — the only owner tensorhub authorizes
+        media writes for. Falls back to ctx.owner for dev/local paths where
+        the token is absent or not a JWT.
+        """
+        token = self._worker_capability_token or ""
+        if token:
+            claim = str(_decode_unverified_jwt_claims(token).get("tenant") or "").strip()
+            if claim:
+                return claim
+        return (self._owner or "").strip()
+
     def _resolve_local_output_path(self, ref: str) -> Optional[str]:
         """
         Dev-only local output backend.
