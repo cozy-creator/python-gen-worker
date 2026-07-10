@@ -91,7 +91,9 @@ class Lifecycle:
         self.drained = asyncio.Event()  # set when drain completed -> exit 0
         self._last_delta: Optional[bytes] = None
         self._emitted_unavailable: set[str] = set()
-        self._emitted_degraded: set[str] = set()
+        # fn name -> the "ran" rung last reported. Keyed on the rung (not
+        # mere membership) so a runtime ladder demotion (gw#463) re-emits.
+        self._emitted_degraded: dict[str, str] = {}
         self._drain_task: Optional[asyncio.Task] = None
 
     # ---- snapshots -----------------------------------------------------------
@@ -194,10 +196,11 @@ class Lifecycle:
             return
         delta = self._state_delta()
         raw = delta.SerializeToString(deterministic=True)
-        if raw == self._last_delta:
-            return
-        self._last_delta = raw
-        await self.transport.send(pb.WorkerMessage(state_delta=delta))
+        if raw != self._last_delta:
+            self._last_delta = raw
+            await self.transport.send(pb.WorkerMessage(state_delta=delta))
+        # Deduped internally; must run even on an unchanged delta — a runtime
+        # ladder demotion (gw#463) changes the ServePlan, not the delta bytes.
         await self._emit_unavailable()
         await self._emit_degraded()
 
@@ -226,13 +229,14 @@ class Lifecycle:
         for name, plan in sorted(self.executor.serve_plans.items()):
             if not plan.degraded or name in self.executor.unavailable:
                 continue
-            if name in self._emitted_degraded:
+            ran = plan.ran or plan.run_mode
+            if self._emitted_degraded.get(name) == ran:
                 continue
-            self._emitted_degraded.add(name)
+            self._emitted_degraded[name] = ran
             await self.transport.send(pb.WorkerMessage(fn_degraded=pb.FnDegraded(
                 function_name=name,
                 wanted=plan.wanted,
-                ran=plan.ran or plan.run_mode,
+                ran=ran,
                 reason=plan.warning,
                 est_latency_multiplier=float(plan.est_latency_multiplier),
                 recommended_vram_gb=float(plan.recommended_vram_gb or 0.0),

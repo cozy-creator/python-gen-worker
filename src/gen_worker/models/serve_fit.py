@@ -40,7 +40,7 @@ STRUCTURALLY to the orchestrator (FnDegraded) as a placement signal.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Optional
 
 from .hub_policy import (
@@ -211,6 +211,31 @@ def plan_serve(
         recommended_vram_gb=recommended,
         wanted=wanted,
         ran=run_mode,
+    )
+
+
+def demoted(
+    plan: Optional[ServePlan],
+    *,
+    detail: str,
+    placement_mode: str = "",
+) -> ServePlan:
+    """The reactive ladder transition (gw#463): a runtime CUDA OOM demoted this
+    function to the offload rung. Produces the updated ServePlan so plan-time
+    and reactive degradation share one vocabulary, warning, and FnDegraded
+    shape. ``placement_mode`` (model_offload/group_offload/sequential) rides
+    ``ran`` as ``offload:<mode>`` so each deeper sub-rung re-reports."""
+    base = plan if plan is not None else ServePlan(
+        serveable=True, run_mode=RUN_NATIVE, fit="", wanted="bf16", ran="bf16",
+    )
+    ran = f"{RUN_OFFLOAD}:{placement_mode}" if placement_mode else RUN_OFFLOAD
+    return replace(
+        base,
+        serveable=True,
+        run_mode=RUN_OFFLOAD,
+        warning=detail,
+        est_latency_multiplier=_LATENCY_MULTIPLIER[RUN_OFFLOAD],
+        ran=ran,
     )
 
 
