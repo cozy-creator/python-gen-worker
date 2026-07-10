@@ -124,6 +124,7 @@ jobs:
         run: nvidia-smi
 
       - name: Sync deps (cu128 lock)
+        id: sync
         run: uv sync --extra dev --extra torch --extra images
 
       - name: Run tests
@@ -142,7 +143,10 @@ jobs:
       # diffusers/transformers are endpoint deps, not gen-worker deps — installed
       # into the synced venv (torch stays the cu128 lock build; pins mirror the
       # klein endpoint); --no-sync keeps uv run from pruning them.
+      # Independent signal: runs whenever deps synced, even if the suite failed
+      # (a flaky unit test must not hide "does the product make pictures").
       - name: Image-generation smoke (FLUX.2-klein-4B turbo)
+        if: ${{ !cancelled() && steps.sync.outcome == 'success' }}
         env:
           GEN_WORKER_GPU_SMOKE: "1"
           GEN_WORKER_SMOKE_OUT: ${{ github.workspace }}/smoke-out
