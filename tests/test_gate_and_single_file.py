@@ -61,17 +61,29 @@ def test_gate_accepts_card_of_exactly_recommended_size() -> None:
     assert "fits-24" not in ex.unavailable
 
 
-def test_gate_serves_bigger_model_via_emergency_quant() -> None:
+def test_gate_serves_bigger_model_via_runtime_quant_rungs() -> None:
     """th#683 P3: a model bigger than the card is NOT refused on the hint — it
-    serves via the emergency 4-bit rung (on-GPU, below-platform quality),
-    regardless of the CPU-offload veto (emergency is not CPU-touching)."""
+    serves via the runtime quant rungs (on-GPU: fp8-E4M3 storage when the
+    halved estimate fits, else the emergency 4-bit rung), regardless of the
+    CPU-offload veto (neither is CPU-touching)."""
+    # 32 GB on a 24 GB card: 32*0.55=17.6 fits ~24 free -> fp8 storage rung.
     ex = Executor([_spec("needs-32", 32.0)], _noop_send)
     ex.gate_functions({"gpu_count": 1, "gpu_total_mem": RTX_4090_TOTAL_BYTES, "gpu_sm": "89"})
     assert "needs-32" not in ex.unavailable
     plan = ex.serve_plans["needs-32"]
     assert plan.serveable and plan.degraded
-    assert plan.run_mode == "emergency_quant"
+    assert plan.run_mode == "fp8_storage"
     assert plan.warning  # honest-guidance surfaced
+
+    # 48 GB on the same card: 48*0.55=26.4 doesn't fit but 48*0.45=21.6
+    # does -> the emergency 4-bit rung.
+    ex = Executor([_spec("needs-48", 48.0)], _noop_send)
+    ex.gate_functions({"gpu_count": 1, "gpu_total_mem": RTX_4090_TOTAL_BYTES, "gpu_sm": "89"})
+    assert "needs-48" not in ex.unavailable
+    plan = ex.serve_plans["needs-48"]
+    assert plan.serveable and plan.degraded
+    assert plan.run_mode == "emergency_quant"
+    assert plan.warning
 
 
 def test_gate_offload_only_model_forbidden_here(monkeypatch) -> None:

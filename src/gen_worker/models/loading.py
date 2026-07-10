@@ -369,15 +369,23 @@ def _merge_sharded_checkpoint(snapshot_dir: Path, index_path: Path) -> Path:
     return merged
 
 
-# --- Emergency 4-bit rung (th#546 emergency lane) --------------------------
-# Fit ladder: bf16 -> #fp8 flavor -> #nvfp4 (Blackwell) -> EMERGENCY nf4 ->
-# CPU offload. The emergency rung runtime-quantizes the denoiser to bnb nf4 at
-# load when even the downloaded flavor cannot fit free VRAM. Always armed on
-# CUDA hosts (gw#420: fitting is the runtime's job, not a flag); the platform
-# never reaches it because its scheduler places by declared Resources.
+# --- Runtime fit rungs (th#546 emergency lane + th#683 fp8 storage) --------
+# Fit ladder: bf16 -> #fp8 flavor -> #nvfp4 (Blackwell) -> runtime fp8-E4M3
+# storage -> EMERGENCY nf4 -> CPU offload. When even the downloaded flavor
+# cannot fit free VRAM, the load path first tries fp8-E4M3 weight storage
+# (apply_fp8_storage: fp8 bytes resident, bf16 compute — quality ~= a stored
+# #fp8 flavor), then runtime-quantizes the denoiser to bnb nf4. Always armed
+# on CUDA hosts (gw#420: fitting is the runtime's job, not a flag); the
+# platform never reaches it because its scheduler places by declared
+# Resources.
 # Coarse whole-model resident factor after nf4-quantizing the denoiser
 # (denoiser ~4x smaller; encoders/VAE stay at compute dtype).
 EMERGENCY_FIT_FACTOR = 0.45
+# Coarse resident factor vs the declared card size after fp8-E4M3 storage of
+# the denoiser (weights ~halve; encoders/VAE + activations stay bf16). Used
+# by the fit PLANNER (hub_policy.variant_fit); the load path measures the
+# snapshot's actual bytes instead.
+FP8_STORAGE_FIT_FACTOR = 0.55
 _EMERGENCY_MARGIN_GB = 2.0
 
 
@@ -386,6 +394,18 @@ def emergency_quant_enabled() -> bool:
         import torch
 
         return bool(torch.cuda.is_available())
+    except ImportError:
+        return False
+
+
+def runtime_fp8_storage_supported() -> bool:
+    """The runtime fp8-E4M3 storage rung needs a CUDA host and a torch that
+    ships the float8_e4m3fn dtype — no fp8 silicon required (per-layer upcast
+    compute; see apply_fp8_storage)."""
+    try:
+        import torch
+
+        return bool(torch.cuda.is_available()) and hasattr(torch, "float8_e4m3fn")
     except ImportError:
         return False
 
@@ -445,25 +465,45 @@ def emergency_quantization_config(cls: Any) -> Optional[Any]:
     return BitsAndBytesConfig(**kwargs)
 
 
-def _emergency_rung(cls: Any, path: Path, *, fp8_planned: bool) -> Optional[Any]:
-    """The fit check for the emergency rung: estimated resident bytes (after
-    any planned fp8 storage) still above free VRAM => nf4 config + LOUD
-    warning. None = rung not needed / not possible."""
+def _adaptive_fit_rung(
+    cls: Any, path: Path, *, fp8_planned: bool
+) -> tuple[str, Optional[Any]]:
+    """Serve-time fit ladder at load (th#683 P3): when the snapshot's
+    estimated resident bytes (after any planned fp8 storage) exceed free
+    VRAM, engage the cheapest-quality-loss runtime lever that fits:
+    fp8-E4M3 storage first (bf16/fp16 weights ~halve, quality ~= a stored
+    #fp8 flavor), then the nf4 emergency rung. Returns ``(mode, config)``:
+    ``("", None)`` fits as planned; ``("fp8", None)`` engage fp8 storage;
+    ``("nf4", qc)`` emergency-quantize (qc None when the stack can't — the
+    offload ladder then carries it)."""
     if not emergency_quant_enabled():
-        return None
+        return "", None
     from .memory import get_available_vram_gb
 
     free_gb = get_available_vram_gb()
     if free_gb <= 0:
-        return None
+        return "", None
     disk = snapshot_weight_bytes(path)
     if disk <= 0:
-        return None
+        return "", None
     resident_gb = disk / float(1 << 30)
     if fp8_planned and detect_on_disk_dtype(path) != "fp8":
         resident_gb *= 0.5  # bf16/fp16 snapshot halved by fp8 storage
-    if resident_gb <= max(0.0, free_gb - _EMERGENCY_MARGIN_GB):
-        return None
+    budget_gb = max(0.0, free_gb - _EMERGENCY_MARGIN_GB)
+    if resident_gb <= budget_gb:
+        return "", None
+    # fp8-storage rung: only for un-quantized bf16/fp16 snapshots (an already
+    # quantized flavor can't be halved again) when the halved estimate fits.
+    if not fp8_planned and detect_on_disk_dtype(path) in ("bf16", "fp16") \
+            and runtime_fp8_storage_supported() \
+            and resident_gb * 0.5 <= budget_gb:
+        logger.warning(
+            "fp8-E4M3 emergency weight storage engaged for %s (%.1f GB "
+            "weights, %.1f GB free) — near-native quality; a stored #fp8 "
+            "flavor of this model would serve natively here.",
+            path, resident_gb, free_gb,
+        )
+        return "fp8", None
     qc = emergency_quantization_config(cls)
     if qc is not None:
         logger.warning(
@@ -472,7 +512,7 @@ def _emergency_rung(cls: Any, path: Path, *, fp8_planned: bool) -> Optional[Any]
             "or Blackwell SKU would serve stored flavors instead.",
             path, resident_gb, free_gb,
         )
-    return qc
+    return "nf4", qc
 
 
 def load_from_pretrained(
@@ -488,8 +528,9 @@ def load_from_pretrained(
     preload, and quant-config synthesis; single-file checkpoints route through
     ``cls.from_single_file``. ``storage_dtype="fp8"`` (or an fp8-stored
     snapshot) keeps denoiser weights in fp8 storage with per-layer upcast to
-    the compute dtype; the emergency nf4 rung engages when even that cannot
-    fit free VRAM (automatic on CUDA hosts). Used by the executor to satisfy
+    the compute dtype; when the snapshot cannot fit free VRAM as stored, the
+    adaptive fit ladder engages runtime fp8-E4M3 storage first, then the
+    emergency nf4 rung (automatic on CUDA hosts). Used by the executor to satisfy
     pipeline-typed ``setup()`` annotations; endpoints may also call it."""
     path = str(path)
     # SVDQuant/nunchaku 4-bit flavors (gw#415): self-describing snapshots take
@@ -533,8 +574,11 @@ def load_from_pretrained(
     if not read_on_disk_quant_config(Path(path)):
         qc = synthesize_quantization_config(attrs)
         if qc is None:
-            qc = _emergency_rung(cls, Path(path), fp8_planned=fp8_storage)
-            if qc is not None:
+            mode, eqc = _adaptive_fit_rung(cls, Path(path), fp8_planned=fp8_storage)
+            if mode == "fp8":
+                fp8_storage = True  # runtime fp8-E4M3 storage rung (th#683)
+            elif eqc is not None:
+                qc = eqc
                 fp8_storage = False  # nf4 supersedes the fp8 rung
         if qc is not None:
             kwargs["quantization_config"] = qc
@@ -566,6 +610,7 @@ __all__ = [
     "synthesize_quantization_config",
     "apply_fp8_storage",
     "emergency_quant_enabled",
+    "runtime_fp8_storage_supported",
     "emergency_quantization_config",
     "snapshot_weight_bytes",
     "load_from_pretrained",

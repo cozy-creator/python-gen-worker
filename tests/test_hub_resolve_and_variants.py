@@ -314,12 +314,13 @@ def test_vram_ladder_picks_largest_fitting():
 
 
 def test_base_fallback_below_every_floor():
-    # 8 GB free: nothing fits resident, but fp8's 4-bit estimate (14 * 0.45
-    # = 6.3) does -> the automatic emergency rung (gw#420) outranks offload.
+    # 8 GB free: nothing fits resident, but fp8's runtime fp8-storage
+    # estimate (14 * 0.55 = 7.7) does -> the automatic runtime rungs
+    # (gw#420 / th#683) outrank offload.
     choice = select_variant(
         _FLUX_VARIANTS, _CAPS_4070, 8.0, base=("flux", Resources(vram_gb=24)),
     )
-    assert choice.name == "flux-fp8" and choice.fit == "emergency_quant"
+    assert choice.name == "flux-fp8" and choice.fit == "emergency_fp8"
     # 5 GB free: even 4-bit estimates too big -> base binding + offload ladder.
     choice = select_variant(
         _FLUX_VARIANTS, _CAPS_4070, 5.0, base=("flux", Resources(vram_gb=24)),
@@ -397,8 +398,8 @@ def test_listing_carries_fit_and_variant_of(monkeypatch):
     assert doc["detected"]["free_vram_gb"] == 16.0
     by_name = {f["name"]: f for f in doc["functions"]}
     assert set(by_name) == {"generate", "gen-fp8", "gen-nvfp4"}
-    # 24 GB > 16 free, but 24 * 0.45 fits -> automatic emergency rung (gw#420)
-    assert by_name["generate"]["fit"] == "emergency_quant"
+    # 24 GB > 16 free, but 24 * 0.55 fits -> automatic fp8-storage rung (th#683)
+    assert by_name["generate"]["fit"] == "emergency_fp8"
     assert "variant_of" not in by_name["generate"]
     assert by_name["gen-fp8"]["fit"] == "fits"
     assert by_name["gen-fp8"]["variant_of"] == "generate"

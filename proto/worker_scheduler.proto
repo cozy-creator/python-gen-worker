@@ -48,6 +48,7 @@ message WorkerMessage {
     JobProgress   job_progress   = 5;
     ModelEvent    model_event    = 6;
     FnUnavailable fn_unavailable = 7;
+    FnDegraded    fn_degraded    = 8;
   }
 }
 
@@ -351,6 +352,21 @@ message FnUnavailable {
   string reason = 2;
   string detail = 3; // human-readable elaboration for the admin availability view
   map<string, string> axes = 4; // e.g. {detected_sm: "8.9", required_sm: "10.0"}
+}
+
+// Worker -> orchestrator: this worker DOES serve function_name, but degraded —
+// not at the release's native quality/speed on this card (th#683 P3 serve-time
+// adaptive fit). Emitted once per connection per degraded function after
+// hardware gating; re-emitted on reconnect. Observational placement signal:
+// "this release degraded on this card, it wants a bigger one". Additive
+// proto3 oneof field: older orchestrators ignore it silently.
+message FnDegraded {
+  string function_name = 1;
+  string wanted = 2; // what the function declares (stored flavor, or "bf16")
+  string ran = 3;    // how it actually runs: fp8_storage | emergency_quant | offload | cpu
+  string reason = 4; // honest-guidance detail, incl. a better-flavor hint when one exists
+  double est_latency_multiplier = 5; // realistic slowdown vs a native run
+  double recommended_vram_gb = 6;    // ideal card size for a native run; 0 = unknown
 }
 
 // Orchestrator -> worker: stop accepting work, finish in-flight jobs, ship
