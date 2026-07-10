@@ -173,3 +173,40 @@ def test_training_metric_unthrottled_payload_shape() -> None:
         "lr": 2e-5, "it_s": 1.7, "eta_s": 57.1,
     }
     assert all(e["request_id"] == "r1" for e in metrics)
+
+
+def test_training_metric_val_fields_flow() -> None:
+    """pgw#459: val_loss/best_step/advice ride the typed payload; absent
+    when not passed (never null)."""
+    captured: List[Dict] = []
+    ctx = TrainingContext(request_id="r1", emitter=captured.append)
+    ctx.metric_min_interval_s = 0.0
+    ctx.training_metric(step=1, total=100, loss=0.9)
+    ctx.training_metric(step=50, total=100, loss=0.4,
+                        val_loss=0.45, best_step=50,
+                        advice="val improving")
+    metrics = [e for e in captured if e["type"] == "request.training_metric"]
+    assert len(metrics) == 2
+    plain, val = metrics[0]["payload"], metrics[1]["payload"]
+    assert "val_loss" not in plain and "best_step" not in plain and "advice" not in plain
+    assert val == {
+        "step": 50, "total": 100, "loss": 0.4,
+        "val_loss": 0.45, "best_step": 50, "advice": "val improving",
+    }
+
+
+def test_training_metric_val_bypasses_throttle() -> None:
+    """pgw#459: a mid-run metric carrying val_loss always emits, even inside
+    the min-interval window; plain mid-run metrics still throttle."""
+    captured: List[Dict] = []
+    ctx = TrainingContext(request_id="r1", emitter=captured.append)
+    # Default 5s throttle; all calls land within the same window.
+    ctx.training_metric(step=1, total=100, loss=1.0)          # first: emits
+    ctx.training_metric(step=2, total=100, loss=0.9)          # throttled
+    ctx.training_metric(step=3, total=100, loss=0.8,
+                        val_loss=0.85, best_step=3)           # val: bypasses
+    ctx.training_metric(step=4, total=100, loss=0.7)          # throttled
+    ctx.training_metric(step=100, total=100, loss=0.1)        # last: emits
+    steps = [e["payload"]["step"] for e in captured
+             if e["type"] == "request.training_metric"]
+    assert steps == [1, 3, 100]
