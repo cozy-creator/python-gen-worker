@@ -15,18 +15,26 @@ import threading
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 import blake3
 import msgspec
 import pytest
 
+from gen_worker.api.errors import AuthError
 from gen_worker.api.types import DatasetRef
 from gen_worker.executor import Executor
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import EndpointSpec
 from gen_worker.request_context import TrainingContext
 from gen_worker.request_context import _datasets as datasets_mod
+
+# th#641 production shape: the hub rewrites payload.datasets[].ref to the
+# dataset UUID at submit and mints the read_dataset grant by UUID.
+_DATASET_UUID = "0b6e0c33-8f5e-4a8e-9d0f-2f6f19e1c9aa"
+# A capability token carrying ONLY a read_dataset grant — can materialize by
+# id, cannot list.
+_GRANT_TOKEN = "cap-tok-read-grant"
 
 
 def _tiny_parquet_bytes() -> bytes:
@@ -58,7 +66,11 @@ class _FakeHub:
         self.fail_first_n_shard_gets = 0
         self.lie_about_digest = False
         self.shard_requests = 0
+        self.list_requests = 0
         self.seen_auth: List[str] = []
+        # Rows the list endpoint knows + ids materialize serves. th#641
+        # production refs are bare UUIDs the list endpoint never saw.
+        self.known_ids = {"ds-1", _DATASET_UUID}
 
         outer = self
 
@@ -68,18 +80,37 @@ class _FakeHub:
 
             def do_GET(self) -> None:  # noqa: N802
                 parsed = urllib.parse.urlparse(self.path)
-                outer.seen_auth.append(self.headers.get("Authorization") or "")
+                auth = self.headers.get("Authorization") or ""
+                outer.seen_auth.append(auth)
+                parts = parsed.path.strip("/").split("/")
                 if parsed.path == "/api/v1/datasets":
+                    outer.list_requests += 1
+                    # Grant-scoped read_dataset capability tokens cannot list
+                    # (tensorhub resolveTargetTenant requires create_dataset).
+                    if auth == f"Bearer {_GRANT_TOKEN}":
+                        self._status(403)
+                        return
+                    # The hub reads ?tenant= — ?owner= is silently ignored
+                    # there, which here is a hard failure.
+                    q = urllib.parse.parse_qs(parsed.query)
+                    if q.get("tenant", [""])[0] != "acme":
+                        self._status(400)
+                        return
                     self._json({"items": [
                         {"dataset_id": "ds-1", "tenant": "acme", "name": "faces"},
                         {"dataset_id": "ds-2", "tenant": "acme", "name": "other"},
                     ]})
-                elif parsed.path == "/api/v1/datasets/ds-1/materialize":
+                elif (len(parts) == 5 and parts[:3] == ["api", "v1", "datasets"]
+                      and parts[4] == "materialize"):
+                    ds_id = parts[3]
+                    if ds_id not in outer.known_ids:
+                        self._status(404)
+                        return
                     digest = outer.shard_digest
                     if outer.lie_about_digest:
                         digest = "blake3:" + "0" * 64
                     self._json({
-                        "dataset_id": "ds-1",
+                        "dataset_id": ds_id,
                         "format": "parquet_ref",
                         "snapshot_id": outer.snapshot_id,
                         "entries": [
@@ -108,6 +139,11 @@ class _FakeHub:
                 else:
                     self.send_response(404)
                     self.end_headers()
+
+            def _status(self, code: int) -> None:
+                self.send_response(code)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
 
             def _json(self, payload: Dict) -> None:
                 body = json.dumps(payload).encode()
@@ -197,6 +233,37 @@ def test_resolve_dataset_unknown_name(hub) -> None:
         ctx.resolve_dataset("acme/nope")
 
 
+def test_resolve_dataset_uuid_ref_skips_list(hub) -> None:
+    """th#641 production path: bare UUID ref + grant-scoped token → straight
+    to materialize; the list endpoint (403 for this token) is never touched."""
+    ctx = TrainingContext(
+        request_id="r1",
+        file_api_base_url=hub.base,
+        worker_capability_token=_GRANT_TOKEN,
+    )
+    root = Path(ctx.resolve_dataset(_DATASET_UUID))
+    _assert_snapshot(root, hub)
+    assert ctx.dataset_paths[_DATASET_UUID] == str(root)
+    assert hub.list_requests == 0
+    assert f"Bearer {_GRANT_TOKEN}" in hub.seen_auth
+    # Cache hit on second resolve.
+    n = hub.shard_requests
+    assert ctx.resolve_dataset(_DATASET_UUID) == str(root)
+    assert hub.shard_requests == n
+
+
+def test_grant_scoped_token_cannot_use_owner_name_refs(hub) -> None:
+    """owner/name refs need the list endpoint, which read-only grant tokens
+    can't call — AuthError, not a silent wrong answer."""
+    ctx = TrainingContext(
+        request_id="r1",
+        file_api_base_url=hub.base,
+        worker_capability_token=_GRANT_TOKEN,
+    )
+    with pytest.raises(AuthError):
+        ctx.resolve_dataset("acme/faces")
+
+
 # ---- executor: payload.datasets materialized before the handler runs -------
 
 
@@ -219,7 +286,7 @@ def _train(ctx, payload: _TrainIn) -> _TrainOut:
     )
 
 
-def _run_training_job(hub: _FakeHub, payload: _TrainIn) -> pb.JobResult:
+def _run_training_job(hub: _FakeHub, payload: _TrainIn, *, token: str = "cap-tok") -> pb.JobResult:
     async def _go() -> pb.JobResult:
         sent: List[pb.WorkerMessage] = []
 
@@ -234,7 +301,7 @@ def _run_training_job(hub: _FakeHub, payload: _TrainIn) -> pb.JobResult:
         ex.file_base_url = hub.base
         await ex.handle_run_job(pb.RunJob(
             request_id="r1", attempt=1, function_name="train-lora",
-            capability_token="cap-tok",
+            capability_token=token,
             input_payload=msgspec.msgpack.encode(payload)))
         job = ex.jobs[("r1", 1)]
         assert job.task is not None
@@ -259,3 +326,16 @@ def test_executor_dataset_failure_is_job_failure(hub) -> None:
     hub.lie_about_digest = True
     res = _run_training_job(hub, _TrainIn(datasets=[DatasetRef(ref="acme/faces")]))
     assert res.status != pb.JOB_STATUS_OK
+
+
+def test_executor_materializes_uuid_payload_datasets(hub) -> None:
+    """The gw#425 pre-materialization path must accept th#641's rewritten
+    UUID refs with a grant-scoped token — the production shape."""
+    res = _run_training_job(
+        hub, _TrainIn(datasets=[DatasetRef(ref=_DATASET_UUID)]), token=_GRANT_TOKEN,
+    )
+    assert res.status == pb.JOB_STATUS_OK, res.safe_message
+    out = msgspec.msgpack.decode(res.inline, type=_TrainOut)
+    assert _DATASET_UUID in out.dataset_paths
+    assert out.shard_exists
+    assert hub.list_requests == 0

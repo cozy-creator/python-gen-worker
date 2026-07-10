@@ -9,6 +9,7 @@ asyncio loop; sync tenant code runs in threads via asyncio.to_thread.
 from __future__ import annotations
 
 import asyncio
+import itertools
 import logging
 import os
 import re
@@ -61,6 +62,10 @@ _CONTEXT_BY_KIND: Dict[str, type] = {
 logger = logging.getLogger(__name__)
 
 INLINE_RESULT_MAX_BYTES = 64 * 1024
+# ctx.progress/log/checkpoint events ride the JobProgress stream; the hub fans
+# them to /v1/requests/:id/events SSE as output.delta envelopes whose
+# payload.delta carries this JSON verbatim (th#640).
+EVENT_CONTENT_TYPE = "application/x-request-event+json"
 _CANCEL_GRACE_S = 5.0
 _STUCK_THREAD_RECYCLE_S = 30.0
 _DOWNLOAD_RETRIES = 3
@@ -635,6 +640,10 @@ class _Job:
     finished: bool = False
     superseded: bool = False
     admitted_at: float = dc_field(default_factory=time.monotonic)
+    # One JobProgress seq space per job, shared by stream chunks and ctx
+    # events so interleaved sends stay monotonic. itertools.count.__next__
+    # is atomic under the GIL — safe from handler threads.
+    seq: "itertools.count[int]" = dc_field(default_factory=lambda: itertools.count(1))
 
 
 class _GpuSlotLease:
@@ -1589,6 +1598,7 @@ class Executor:
         ctx_cls = _CONTEXT_BY_KIND.get(spec.kind, RequestContext)
         ctx = ctx_cls(
             request_id=run.request_id,
+            emitter=self._make_ctx_emitter(job),
             owner=run.tenant or None,
             invoker_id=run.invoker_id or None,
             timeout_ms=timeout_ms or None,
@@ -1941,16 +1951,41 @@ class Executor:
             request_id=job.request_id, attempt=job.attempt, seq=seq,
             data=data, content_type=content_type)))
 
+    def _make_ctx_emitter(self, job: _Job) -> Callable[[Dict[str, Any]], None]:
+        """RequestContext emitter: ctx.progress/log/checkpoint events →
+        JobProgress on the worker stream (best-effort, droppable by contract).
+        Callable from any thread (handler thread, run_process reader)."""
+        loop = asyncio.get_running_loop()
+
+        async def _send_event(data: bytes) -> None:
+            try:
+                await self._emit_progress(job, next(job.seq), data, EVENT_CONTENT_TYPE)
+            except Exception:
+                logger.debug("ctx event send failed for %s", job.request_id, exc_info=True)
+
+        def _emit(event: Dict[str, Any]) -> None:
+            if job.finished:
+                return
+            try:
+                data = msgspec.json.encode(event)
+            except Exception:
+                logger.debug("unencodable ctx event dropped for %s", job.request_id)
+                return
+            try:
+                asyncio.run_coroutine_threadsafe(_send_event(data), loop)
+            except RuntimeError:
+                pass  # loop closed — worker shutting down
+
+        return _emit
+
     async def _pump_async_gen(self, job: _Job, agen: Any) -> None:
-        seq = 0
         async for item in agen:
             if job.ctx is not None:
                 job.ctx.raise_if_cancelled()
             enc = self._encode_chunk(item)
             if enc is None:
                 break
-            seq += 1
-            await self._emit_progress(job, seq, enc[0], enc[1])
+            await self._emit_progress(job, next(job.seq), enc[0], enc[1])
 
     def _pump_sync_gen(
         self,
@@ -1965,16 +2000,14 @@ class Executor:
                 torch.cuda.set_device(gpu_index)
             except Exception:
                 pass
-        seq = 0
         for item in bound(**call_kwargs):
             if job.ctx is not None:
                 job.ctx.raise_if_cancelled()
             enc = self._encode_chunk(item)
             if enc is None:
                 break
-            seq += 1
             fut = asyncio.run_coroutine_threadsafe(
-                self._emit_progress(job, seq, enc[0], enc[1]), loop
+                self._emit_progress(job, next(job.seq), enc[0], enc[1]), loop
             )
             fut.result()  # backpressure: block the producer on queue overflow
 

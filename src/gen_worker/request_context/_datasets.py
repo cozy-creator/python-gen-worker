@@ -1,7 +1,7 @@
 """Dataset snapshot materialization against the tensorhub datasets API.
 
 Free functions used by ``_PublisherMixin.resolve_dataset``: look up a dataset
-row by (owner, name), fetch its parquet materialize manifest (presigned shard
+row by (tenant, name), fetch its parquet materialize manifest (presigned shard
 URLs, th#642 wire format), and stream each shard to disk with digest
 verification + bounded retries.
 """
@@ -22,12 +22,17 @@ _DOWNLOAD_BACKOFF_S = 1.0
 _CHUNK_BYTES = 1024 * 1024
 
 
-def lookup_dataset_id(base: str, token: str, owner: str, name: str) -> str:
-    """GET /api/v1/datasets?owner= → dataset_id of the row named ``name``."""
+def lookup_dataset_id(base: str, token: str, tenant: str, name: str) -> str:
+    """GET /api/v1/datasets?tenant= → dataset_id of the row named ``name``.
+
+    Only used for owner/name refs (local/dev). Production refs arrive as bare
+    dataset UUIDs and skip the lookup — a grant-scoped read_dataset capability
+    token cannot list datasets at all.
+    """
     import requests
 
-    url = f"{base}/api/v1/datasets?owner={urllib.parse.quote(owner, safe='')}"
-    headers = {"Authorization": f"Bearer {token}", "X-Cozy-Owner": owner}
+    url = f"{base}/api/v1/datasets?tenant={urllib.parse.quote(tenant, safe='')}"
+    headers = {"Authorization": f"Bearer {token}"}
     resp = requests.get(url, headers=headers, timeout=30)
     if resp.status_code in (401, 403):
         raise AuthError(f"dataset lookup unauthorized ({resp.status_code})")
@@ -39,14 +44,15 @@ def lookup_dataset_id(base: str, token: str, owner: str, name: str) -> str:
             dataset_id = str(it.get("dataset_id") or "")
             if dataset_id:
                 return dataset_id
-    raise RuntimeError(f"dataset not found for owner={owner} name={name}")
+    raise RuntimeError(f"dataset not found for tenant={tenant} name={name}")
 
 
 def fetch_materialize_manifest(
-    base: str, token: str, owner: str, dataset_id: str
+    base: str, token: str, dataset_id: str
 ) -> Tuple[str, List[Dict[str, Any]]]:
     """GET /datasets/:id/materialize?format=parquet&include_urls=true.
 
+    Authorizes by dataset id + read_dataset grant (or tenant read perm).
     Returns (snapshot_id, entries); entries carry
     {path, url?, size_bytes?, checksum?, inline_text?, blob_digest?}.
     """
@@ -56,7 +62,7 @@ def fetch_materialize_manifest(
         f"{base}/api/v1/datasets/{urllib.parse.quote(dataset_id, safe='')}"
         "/materialize?format=parquet&include_urls=true"
     )
-    headers = {"Authorization": f"Bearer {token}", "X-Cozy-Owner": owner}
+    headers = {"Authorization": f"Bearer {token}"}
     resp = requests.get(url, headers=headers, timeout=120)
     if resp.status_code in (401, 403):
         raise AuthError(f"dataset materialize unauthorized ({resp.status_code})")
