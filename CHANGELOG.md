@@ -2,6 +2,11 @@
 
 ## 0.12.3
 
+- **gw#424**: the standalone trainer runtime is deleted — `src/gen_worker/trainer/`,
+  the `WORKER_MODE=trainer` entrypoint branch, `WORKER_MODE`/`TRAINER_JOB_SPEC_PATH`
+  settings, and `examples/training-smoke` are gone. Training runs as
+  `@endpoint(kind="training")` through the normal executor. The `[trainer]`
+  extra is renamed `[datasets]` (pyarrow, used by `gen_worker.convert.dataset`).
 - **SVDQuant/nunchaku 4-bit loader mode (gw#415).** A `#svdq-fp4-rN` /
   `#svdq-int4-rN` flavor (diffusers tree whose denoiser dir holds one
   nunchaku single-file checkpoint) is detected from safetensors

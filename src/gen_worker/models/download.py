@@ -242,7 +242,7 @@ async def ensure_local(
 
 
 def ensure_local_sync(ref: str, **kwargs: Any) -> Path:
-    """Blocking wrapper for sync callers (CLI, trainer runtime)."""
+    """Blocking wrapper for sync callers (CLI)."""
     try:
         asyncio.get_running_loop()
     except RuntimeError:
