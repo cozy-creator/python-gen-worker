@@ -33,6 +33,16 @@ _RETRY_ATTEMPTS = 5
 _RETRY_BASE_DELAY_S = 1.0
 _RETRY_MAX_DELAY_S = 30.0
 
+# Connect timeout split from read (mirrors gen_worker._upload_transport and
+# the gw#456 download-side floor): a dead host fails in seconds instead of
+# consuming the whole read budget.
+_CONNECT_TIMEOUT_S = 15.0
+
+# gw#462: bounded re-uploads of ONE file whose staged bytes the hub lost
+# (409 staging_object_missing from /complete, th#699). Each attempt re-opens
+# the upload via POST .../commits/<rev>/uploads and re-PUTs just that file.
+_REUPLOAD_ATTEMPTS = 2
+
 # tensorhub's /complete verifies the whole object synchronously (streams it
 # back from R2 and hashes it) before responding, holding a per-upload lock
 # for the duration. For large single files this can outlast whatever timeout
@@ -94,6 +104,12 @@ class BankedBlobGoneError(HubPublishError):
     """A commit referenced a banked CAS blob (no local bytes) that the hub
     no longer has — the bank lied (GC race). Callers fall back to a full
     download (th#592 download-skip is fail-open)."""
+
+
+class _StagingLostError(HubPublishError):
+    """/complete reported 409 staging_object_missing: the staged bytes are
+    gone server-side and retrying complete can never succeed. Internal —
+    _upload_one converts it into a re-open + re-upload of just that file."""
 
 
 def _retry_after_s(resp: requests.Response) -> Optional[float]:
@@ -246,7 +262,7 @@ class HubClient:
             f"{self.base_url}{path}",
             headers=self._headers(),
             data=json.dumps(payload) if payload is not None else None,
-            timeout=timeout or self.timeout_s,
+            timeout=(_CONNECT_TIMEOUT_S, timeout or self.timeout_s),
         ))
 
     @staticmethod
@@ -284,8 +300,43 @@ class HubClient:
                 continue
             return resp
 
+    def _reopen_upload(self, repo_path: str, revision_id: str, path: str) -> dict[str, Any]:
+        """Mint a fresh presigned upload for one stashed add whose staged
+        bytes were lost (th#699). Returns the same entry shape as the
+        create-commit `uploads` array (may be a dedup hit: `exists: true`)."""
+        resp = self._post(
+            f"{repo_path}/commits/{urllib.parse.quote(revision_id, safe='')}/uploads",
+            {"path": path},
+        )
+        if resp.status_code < 200 or resp.status_code >= 300:
+            raise HubPublishError(
+                f"upload re-open failed ({resp.status_code}) for {path!r}: {resp.text[:500]}")
+        return self._json(resp)
+
     def _upload_one(self, repo_path: str, revision_id: str, entry: Mapping[str, Any],
                     local_path: Path) -> None:
+        """Upload one file, surviving server-side staging loss: on
+        409 staging_object_missing from /complete, re-open the upload and
+        re-send just this file (bounded — the rest of the commit is unaffected)."""
+        path = str(entry.get("path") or "")
+        for attempt in range(_REUPLOAD_ATTEMPTS + 1):
+            try:
+                self._upload_entry_once(repo_path, revision_id, entry, local_path)
+                return
+            except _StagingLostError as exc:
+                if attempt == _REUPLOAD_ATTEMPTS:
+                    raise HubPublishError(
+                        f"upload for {path!r} failed: staged bytes lost server-side "
+                        f"{attempt + 1} time(s) (last: {exc})") from exc
+                logger.warning(
+                    "staged bytes for %r lost server-side; re-opening upload "
+                    "(re-upload %d/%d)", path, attempt + 1, _REUPLOAD_ATTEMPTS)
+                entry = self._reopen_upload(repo_path, revision_id, path)
+                if entry.get("exists"):
+                    return  # landed in CAS meanwhile — server recorded the dedup
+
+    def _upload_entry_once(self, repo_path: str, revision_id: str, entry: Mapping[str, Any],
+                           local_path: Path) -> None:
         upload_id = str(entry.get("upload_id") or "").strip()
         if not upload_id:
             raise HubPublishError(f"commit upload entry missing upload_id for {entry.get('path')!r}")
@@ -318,10 +369,7 @@ class HubClient:
                 "blake3": result.blake3,
                 "etag": result.etag,
             }})
-            if resp.status_code < 200 or resp.status_code >= 300:
-                raise HubPublishError(
-                    f"upload complete failed ({resp.status_code}) for {entry.get('path')!r}: "
-                    f"{resp.text[:500]}")
+            self._check_complete(resp, str(entry.get("path") or ""))
             return
 
         part_urls = list(entry.get("part_urls") or [])
@@ -335,19 +383,30 @@ class HubClient:
                 if not buf and i > 0:
                     break
                 def _put(u: str = url, b: bytes = buf) -> requests.Response:
-                    return _http_session().put(u, data=b, timeout=self.timeout_s * 5)
+                    return _http_session().put(
+                        u, data=b, timeout=(_CONNECT_TIMEOUT_S, self.timeout_s * 5))
 
                 resp = _send_with_retries(f"part PUT {entry.get('path')!r} #{i + 1}", _put)
                 if resp.status_code < 200 or resp.status_code >= 300:
                     raise HubPublishError(
-                        f"part PUT failed ({resp.status_code}) for {entry.get('path')!r}")
+                        f"part PUT failed ({resp.status_code}) for {entry.get('path')!r} "
+                        f"part #{i + 1} after {_RETRY_ATTEMPTS} attempts")
                 etag = str(resp.headers.get("ETag") or "").strip().strip('"')
                 parts.append({"part_number": i + 1, "etag": etag})
         resp = self._post_complete(complete_path, {"parts": parts})
-        if resp.status_code < 200 or resp.status_code >= 300:
-            raise HubPublishError(
-                f"upload complete failed ({resp.status_code}) for {entry.get('path')!r}: "
-                f"{resp.text[:500]}")
+        self._check_complete(resp, str(entry.get("path") or ""))
+
+    @staticmethod
+    def _check_complete(resp: requests.Response, path_label: str) -> None:
+        if 200 <= resp.status_code < 300:
+            return
+        if resp.status_code == 409 and _error_code_of(resp) == "staging_object_missing":
+            raise _StagingLostError(
+                f"staged bytes for {path_label!r} are gone server-side "
+                f"(409 staging_object_missing)")
+        raise HubPublishError(
+            f"upload complete failed ({resp.status_code}) for {path_label!r} "
+            f"after {_RETRY_ATTEMPTS} attempts: {resp.text[:500]}")
 
     def _finalize(self, repo_path: str, revision_id: str, *, poll_timeout_s: float = 1800.0) -> dict[str, Any]:
         path = f"{repo_path}/commits/{urllib.parse.quote(revision_id, safe='')}/finalize"

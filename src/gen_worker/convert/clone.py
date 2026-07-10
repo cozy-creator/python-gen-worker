@@ -19,6 +19,7 @@ import os
 import re
 import shutil
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
@@ -493,11 +494,83 @@ def _publish_from_bank(
 # run_clone — ingest, convert, ONE finalize path
 # ---------------------------------------------------------------------------
 
+class CloneDiskSpaceError(RuntimeError):
+    """Preflight found too little free disk for the clone — fail fast and
+    actionably instead of ENOSPC minutes into a 40GB download (gw#462)."""
+
+
+# Free space required = source_bytes x headroom: the source snapshot and each
+# converted flavor tree (+ repack temp) coexist on disk during publish.
+_DISK_HEADROOM_DEFAULT = 2.5
+_DISK_MARGIN_BYTES = 2 * 1024**3
+
+
+def _preflight_disk(workdir: Path, plan: Any) -> None:
+    """Fail fast when the disk cannot fit the clone. The source plan knows
+    every selected file's size before a byte is downloaded (HF list_repo_tree
+    / civitai version API); no plan (metadata fetch failed) skips the check
+    (fail-open — the download surfaces its own error)."""
+    if plan is None:
+        return
+    try:
+        source_bytes = sum(int(size) for _, size, _ in plan.bank_files())
+    except Exception:  # noqa: BLE001 — preflight is best-effort on odd plans
+        return
+    if source_bytes <= 0:
+        return
+    headroom = float(os.environ.get("COZY_CONVERT_DISK_HEADROOM", "") or _DISK_HEADROOM_DEFAULT)
+    required = int(source_bytes * headroom) + _DISK_MARGIN_BYTES
+    free = shutil.disk_usage(workdir).free
+    if free < required:
+        gib = float(1024**3)
+        raise CloneDiskSpaceError(
+            f"not enough disk for clone: need ~{required / gib:.1f} GiB free "
+            f"(source {source_bytes / gib:.1f} GiB x {headroom:g} headroom "
+            f"+ {_DISK_MARGIN_BYTES / gib:.0f} GiB margin), have {free / gib:.1f} GiB "
+            f"at {workdir}")
+
+
+def _sweep_stale_workdirs(base: Path, *, keep: Optional[Path] = None) -> None:
+    """Remove clone scratch left by crashed predecessors: dirs whose flock is
+    free and that have been idle past COZY_CONVERT_SCRATCH_TTL_S (default 1h).
+    A long-running conversion worker otherwise accumulates each crashed job's
+    scratch until any disk fills (gw#462)."""
+    try:
+        entries = sorted(base.glob("clone-*"))
+    except OSError:
+        return
+    ttl_s = float(os.environ.get("COZY_CONVERT_SCRATCH_TTL_S", "") or 3600.0)
+    now = time.time()
+    for d in entries:
+        if not d.is_dir() or (keep is not None and d == keep):
+            continue
+        try:
+            if now - d.stat().st_mtime < ttl_s:
+                continue
+        except OSError:
+            continue
+        lock_path = base / f".{d.name}.lock"
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+        except OSError:
+            continue
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                continue  # a live clone holds this workdir
+            shutil.rmtree(d, ignore_errors=True)
+            logger.info("swept stale clone scratch: %s", d)
+        finally:
+            os.close(fd)
+
+
 def _clone_workdir(provider: str, source_key: str, destination: str) -> Path:
-    """Persistent workdir keyed by (provider, source, destination): a failed
-    clone keeps its downloaded snapshot so a retry resumes instead of
-    re-downloading. Deleted on success. Base dir: ``$COZY_CONVERT_WORKDIR``
-    or ``<tmp>/gen-worker-convert``."""
+    """Workdir keyed by (provider, source, destination) so concurrent
+    duplicates of the same clone serialize on one flock. Removed after every
+    job — success or failure (COZY_CONVERT_RETAIN_WORKDIR=1 keeps a failed
+    job's scratch for debugging). Base dir: ``$COZY_CONVERT_WORKDIR`` or
+    ``<tmp>/gen-worker-convert``."""
     base = Path(os.environ.get("COZY_CONVERT_WORKDIR", "").strip()
                 or Path(tempfile.gettempdir()) / "gen-worker-convert")
     digest = hashlib.sha256(
@@ -560,6 +633,7 @@ def run_clone(
     if source_revision:
         source_key = f"{source_key}@{source_revision}"
     workdir = _clone_workdir(provider, source_key, destination)
+    _sweep_stale_workdirs(workdir.parent, keep=workdir)
     lock_fd = _acquire_workdir_lock(workdir)
     succeeded = False
     try:
@@ -616,6 +690,10 @@ def run_clone(
             if banked is not None:
                 succeeded = True
                 return banked
+
+        # gw#462: the plan already knows every selected file's size — fail
+        # fast on an undersized disk instead of ENOSPC mid-download.
+        _preflight_disk(workdir, plan)
 
         _progress(0.05, "clone.ingest")
         dl_bytes = {"done": 0}
@@ -804,10 +882,18 @@ def run_clone(
         succeeded = True
         return result
     finally:
-        if succeeded:
+        # gw#462: a long-running worker must not leak scratch — the workdir
+        # goes after EVERY job. Cross-run resume lives in the publish bank
+        # (th#592) + CAS dedup, not in retained local bytes.
+        retain = os.environ.get("COZY_CONVERT_RETAIN_WORKDIR", "").strip() == "1"
+        if succeeded or not retain:
             shutil.rmtree(workdir, ignore_errors=True)
+            if not succeeded:
+                logger.warning(
+                    "clone failed; workdir %s removed "
+                    "(COZY_CONVERT_RETAIN_WORKDIR=1 keeps it for debugging)", workdir)
         else:
-            logger.warning("clone failed; workdir retained for resume: %s", workdir)
+            logger.warning("clone failed; workdir retained: %s", workdir)
         os.close(lock_fd)  # releases the flock
 
 

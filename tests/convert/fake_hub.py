@@ -107,12 +107,15 @@ class _FakeHub(BaseHTTPRequestHandler):
                         },
                     })
                     continue
+                st.setdefault("upload_paths", {})[uid] = op["path"]
+                total_parts = int(st.get("force_parts") or 1)
+                part_size = max(1, -(-int(op["size_bytes"]) // total_parts))  # ceil div
                 uploads.append({
                     "path": op["path"], "blake3": op["blake3"], "exists": False,
                     "upload_id": uid,
-                    "part_urls": [f"{base}/put/{uid}/1"],
-                    "part_size": max(int(op["size_bytes"]), 1),
-                    "total_parts": 1,
+                    "part_urls": [f"{base}/put/{uid}/{k}" for k in range(1, total_parts + 1)],
+                    "part_size": part_size,
+                    "total_parts": total_parts,
                 })
             # Uploaded blobs land in the fake CAS (tests simulating GC or
             # missing blobs mutate state["cas_blobs"] directly).
@@ -122,10 +125,47 @@ class _FakeHub(BaseHTTPRequestHandler):
                              "deletions": [], "copies": [], "tags": req.get("tags") or [],
                              "mode": req.get("mode") or "merge"})
             return
+        if "/commits/" in self.path and self.path.endswith("/uploads"):
+            # th#699 re-open: fresh presigned upload for one stashed add whose
+            # staged bytes were lost (mirrors handleReopenRepoCommitUpload).
+            req = self._read_json()
+            path_label = str(req.get("path") or "")
+            n = st.get("reopen_count", 0) + 1
+            st["reopen_count"] = n
+            st.setdefault("reopens", []).append(path_label)
+            if st.get("reopen_dedup"):
+                # The blob landed in CAS between the loss and the re-open:
+                # the server records the dedup and no bytes move.
+                self._send(201, {"path": path_label, "exists": True})
+                return
+            uid = f"re-{n}"
+            st.setdefault("upload_paths", {})[uid] = path_label
+            size = 1
+            for op in (st.get("commit_request") or {}).get("operations", []):
+                if op.get("path") == path_label:
+                    size = max(int(op.get("size_bytes") or 1), 1)
+            base = f"http://127.0.0.1:{self.server.server_port}"
+            self._send(201, {
+                "path": path_label, "exists": False, "upload_id": uid,
+                "part_urls": [f"{base}/put/{uid}/1"], "part_size": size,
+                "total_parts": 1,
+            })
+            return
         if "/uploads/" in self.path and self.path.endswith("/complete"):
             if st.get("fail_completes", 0) > 0:
                 st["fail_completes"] -= 1
                 self._send(500, {"error": "boom"})
+                return
+            uid = self.path.rsplit("/uploads/", 1)[1].split("/")[0]
+            path_label = st.get("upload_paths", {}).get(uid, "")
+            misses = st.get("staging_missing") or {}
+            if misses.get(path_label, 0) > 0:
+                # th#699: the staged bytes vanished server-side; retrying this
+                # complete can never succeed — the client must re-open.
+                misses[path_label] -= 1
+                st.setdefault("staging_missing_hits", []).append(uid)
+                self._send(409, {"error": {"code": "staging_object_missing",
+                                           "message": "verify: get staging object: NoSuchKey"}})
                 return
             if st.get("complete_race_count", 0) > 0:
                 # Simulates a still-finalizing concurrent attempt (tensorhub
@@ -145,6 +185,10 @@ class _FakeHub(BaseHTTPRequestHandler):
         if self.path.endswith("/finalize"):
             n = st.get("finalize_calls", 0) + 1
             st["finalize_calls"] = n
+            if st.get("fail_finalizes", 0) > 0:
+                st["fail_finalizes"] -= 1
+                self._send(503, {"error": {"code": "service_unavailable"}})
+                return
             if n == 1:
                 self._send(202, {"status": "running"})  # first call -> poll
             else:
@@ -159,8 +203,14 @@ class _FakeHub(BaseHTTPRequestHandler):
         n = int(self.headers.get("Content-Length") or 0)
         data = self.rfile.read(n) if n else b""
         st = _FakeHub.state
-        if st.get("fail_puts", 0) > 0:
-            st["fail_puts"] -= 1
+        counts = st.setdefault("put_counts", {})
+        counts[self.path] = counts.get(self.path, 0) + 1
+        fail_paths = st.get("fail_put_paths") or {}
+        if st.get("fail_puts", 0) > 0 or fail_paths.get(self.path, 0) > 0:
+            if fail_paths.get(self.path, 0) > 0:
+                fail_paths[self.path] -= 1
+            else:
+                st["fail_puts"] -= 1
             self.send_response(500)
             self.send_header("Content-Length", "0")
             self.end_headers()

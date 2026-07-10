@@ -152,11 +152,16 @@ def test_run_clone_publishes_clean_tree_and_removes_workdir(
     assert list((tmp_path / "work").glob("clone-*")) == []
 
 
-def test_run_clone_failure_retains_workdir_for_resume(
+def test_run_clone_failure_cleans_workdir_then_retry_succeeds(
     fake_hub, tmp_path: Path, monkeypatch
 ) -> None:
+    # gw#462 flipped the old retain-on-failure default: a long-running
+    # conversion worker must not leak each failed job's scratch (the disk IS
+    # the scarce resource). Cross-run resume lives in the publish bank + CAS
+    # dedup, not in retained local bytes.
     _FakeHub.state["finalize_calls"] = 1
     monkeypatch.setenv("COZY_CONVERT_WORKDIR", str(tmp_path / "work"))
+    monkeypatch.delenv("COZY_CONVERT_RETAIN_WORKDIR", raising=False)
     calls = _install_fake_ingest(monkeypatch, fail_first=True)
 
     with pytest.raises(RuntimeError, match="network died"):
@@ -164,11 +169,9 @@ def test_run_clone_failure_retains_workdir_for_resume(
             _Ctx(fake_hub), provider="huggingface", source_ref="org/tiny",
             destination_repo="acme/dest",
         )
-    kept = list((tmp_path / "work").glob("clone-*"))
-    assert len(kept) == 1
-    assert (kept[0] / "source" / "partial.bin").exists()
+    assert list((tmp_path / "work").glob("clone-*")) == []
 
-    # retry lands in the SAME keyed workdir and succeeds; workdir removed
+    # retry re-creates the keyed workdir and succeeds; workdir removed again
     result = run_clone(
         _Ctx(fake_hub), provider="huggingface", source_ref="org/tiny",
         destination_repo="acme/dest",

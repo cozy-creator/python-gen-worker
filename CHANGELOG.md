@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.13.10 (2026-07-10)
+
+- **gw#462: conversion worker hardening — disk preflight, scratch hygiene,
+  publish resume.** Two live J24 ingest killers fixed. (1) Disk: `run_clone`
+  preflights free space against the source plan's known file sizes
+  (`COZY_CONVERT_DISK_HEADROOM`=2.5 + 2 GiB margin) and raises typed
+  `CloneDiskSpaceError` ("need ~X GiB free, have Y GiB") before any download,
+  instead of ENOSPC mid-stream; the workdir is removed after EVERY job —
+  success and failure (`COZY_CONVERT_RETAIN_WORKDIR=1` keeps a failed job's
+  scratch for debugging) — and each run sweeps stale scratch left by crashed
+  predecessors (flock-free + idle past `COZY_CONVERT_SCRATCH_TTL_S`=1h).
+  (2) Publish: a `409 staging_object_missing` from `/complete` (th#699: the
+  hub lost the staged bytes; retrying complete can never succeed) now
+  re-opens that ONE file's upload (`POST .../commits/<rev>/uploads`) and
+  re-sends just it, bounded at 2 re-uploads, instead of fataling the whole
+  job at the last shard. Part PUTs and hub POSTs split connect (15s) from
+  read timeouts (gw#456 parity on the upload side); publish errors name the
+  file, attempt count, and last status. Counterpart: tensorhub th#699
+  (staging retained on transient verify failures + the re-open endpoint).
+
 ## 0.13.9 (2026-07-10)
 
 - **gw#453: training contexts arm repo-CAS checkpoint routing.** The executor
@@ -20,7 +40,6 @@
 
 - **th#683 P3: complete the serve-time adaptive-fit ladder + structured degradation events.** `plan_serve` now walks `bf16 -> fp8 -> nvfp4 -> runtime nf4 4-bit -> CPU/disk offload -> CPU-only`, picking the highest-quality lever that fits the actual card. Stored fp8/nvfp4 flavors are HW-gated (fp8 -> SM89 Ada/Hopper, nvfp4 -> SM100 Blackwell); a runtime fp8-E4M3 storage rung needs no fp8 silicon. Never refuses on the recommended-VRAM hint. New `FnDegraded` event (`{function, wanted, ran, reason, est_latency_multiplier, recommended_vram_gb}`) rides the orchestrator transport (cozy-local emits nothing; the honest-guidance advisory is the terminal surface).
 - **th#697 P1: precision-class + placement model; publish-time placement stamping.**
-
 
 ## 0.13.7 (2026-07-10)
 
