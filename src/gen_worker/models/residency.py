@@ -478,18 +478,6 @@ class Residency:
 
     # ---- protection ----------------------------------------------------------
 
-    def pin(self, ref: str) -> None:
-        with self._lock:
-            e = self._entries.get(ref)
-            if e:
-                e.pinned = True
-
-    def unpin(self, ref: str) -> None:
-        with self._lock:
-            e = self._entries.get(ref)
-            if e:
-                e.pinned = False
-
     @contextmanager
     def executing(self, *refs: str) -> Iterator[None]:
         """Pin-while-executing: entries named here are not eviction candidates

@@ -15,56 +15,11 @@ import logging
 import re
 import socket
 import urllib.parse
-import urllib.request
 from typing import Any, Dict, Optional
 
 from ..api.errors import OutputTooLargeError
-from ..models.refs import parse_model_ref
 
 logger = logging.getLogger(__name__)
-
-
-# Canonical hint-key names + back-compat aliases. Callers read via
-# `_resolve_hint_first_string` so the alias fallbacks can be removed in one
-# place once gen-orchestrator stops emitting the legacy names.
-# Migration recipe:
-#   1. gen-orchestrator emits canonical key alongside each alias for one release
-#      (so a mixed fleet of workers/orchestrators keeps working during rollout).
-#   2. Flip this list to contain only the canonical key (first element).
-#   3. Stop emitting aliases in gen-orchestrator.
-_HINT_KEYS_DESTINATION_REPO: tuple[str, ...] = ("destination_repo", "repo", "output_repo")
-_HINT_KEYS_JOB_ID:           tuple[str, ...] = ("job_id", "conversion_job_id", "training_job_id")
-_HINT_KEYS_EXECUTION_KIND:   tuple[str, ...] = ("kind", "execution_kind")
-
-
-def _resolve_hint_first_string(
-    *sources: Dict[str, Any],
-    keys: tuple[str, ...],
-    fallback: Any = "",
-) -> str:
-    """Return the first non-empty string value found by scanning `keys` across
-    each source dict in order.
-
-    Designed to replace multi-option fallback ladders like
-    `hints.get("destination_repo") or hints.get("repo") or spec.get("destination_repo") …`
-    with a single call. Sources are scanned in the order given; each source is
-    checked for every key in `keys` before moving to the next source. Returns
-    `fallback` (trimmed to string) if nothing matches.
-
-    Callers that only need a single dict can pass it as the only positional:
-    `_resolve_hint_first_string(hints, keys=_HINT_KEYS_JOB_ID)`.
-    """
-    for src in sources:
-        if not src:
-            continue
-        for k in keys:
-            v = src.get(k)
-            if v is None:
-                continue
-            s = str(v).strip()
-            if s:
-                return s
-    return str(fallback or "").strip()
 
 
 _PUBLIC_TAG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,62}$")
@@ -75,30 +30,6 @@ _FILE_API_STREAM_CHUNK_TIMEOUT_S = 120
 _FILE_API_STREAM_FINALIZE_TIMEOUT_S = 600
 _FILE_API_STREAM_REPLAY_TIMEOUT_S = 600
 _FILE_API_STREAM_ABORT_TIMEOUT_S = 15
-
-
-def _http_request(
-    method: str,
-    url: str,
-    token: str,
-    owner: Optional[str] = None,
-    body: Optional[bytes] = None,
-    content_type: Optional[str] = None,
-) -> urllib.request.Request:
-    req = urllib.request.Request(url, data=body, method=method)
-    req.add_header("Authorization", f"Bearer {token}")
-    owner = (owner or "").strip()
-    if owner:
-        req.add_header("X-Cozy-Owner", owner)
-    if content_type:
-        req.add_header("Content-Type", content_type)
-    return req
-
-
-def _encode_ref_for_url(ref: str) -> str:
-    ref = ref.strip().lstrip("/")
-    parts = [urllib.parse.quote(p, safe="") for p in ref.split("/") if p]
-    return "/".join(parts)
 
 
 def _infer_mime_type(ref: str, head: bytes) -> str:
@@ -183,10 +114,6 @@ def _decode_unverified_jwt_claims(token: str) -> Dict[str, Any]:
     return {}
 
 
-def _normalize_repo_name(value: str) -> str:
-    return str(value or "").strip().strip("/").lower()
-
-
 def _enforce_output_file_size_limit(size_bytes: int) -> None:
     size = int(size_bytes)
     if size < 0:
@@ -232,34 +159,6 @@ def _url_is_blocked(url_str: str) -> bool:
         if _is_private_ip_str(ip_str):
             return True
     return False
-
-
-def _canonicalize_model_ref_string(raw: str) -> str:
-    """
-    Best-effort normalization of Cozy/HF model ref strings for allowlisting and caching identity.
-
-    If the string doesn't parse as a phase-1 model ref, return it unchanged.
-
-    Issue #17: consult the per-worker provider index (set as a contextvar
-    by the worker before invoking the model manager) so HF / civitai refs
-    are decoded with the correct provider. Refs not in the index default
-    to ``"tensorhub"`` — matching the wire-format contract.
-    """
-    s = (raw or "").strip()
-    if not s:
-        return s
-    try:
-        from ..models.download import lookup_provider_for_ref
-
-        provider = lookup_provider_for_ref(s)
-        parsed = parse_model_ref(s, provider=provider)
-        if parsed.provider == "tensorhub" and parsed.tensorhub is not None:
-            return parsed.tensorhub.canonical()
-        if parsed.provider == "hf" and parsed.hf is not None:
-            return parsed.hf.canonical()
-        return s
-    except Exception:
-        return s
 
 
 def _sha256_file(path: str) -> str:

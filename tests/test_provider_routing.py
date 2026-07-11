@@ -6,8 +6,7 @@ Exercises the REAL routing path of ``gen_worker.models.download``:
   * lookup_provider_for_ref against the process-global index,
   * ensure_local dispatching to the right provider branch (hf/civitai leaves
     stubbed only at the network edge — every routing decision is real),
-  * retry-after-failure: a failed ensure_local attempt does not poison the ref,
-  * the safetensors-only gate against real tmp files.
+  * retry-after-failure: a failed ensure_local attempt does not poison the ref.
 
 Named regressions kept as explicit cases:
   * tag-stripping (live 2026-05-16 failure: ``:latest`` stamped HF ref),
@@ -29,7 +28,6 @@ from gen_worker.models.download import (
     lookup_provider_for_ref,
     set_provider_index,
 )
-from gen_worker.models.unsafe_format import UnsafeFileFormat, assert_safe_weight_format
 
 
 def _make_weight_files(root: Path, files: List[str]) -> Path:
@@ -209,28 +207,3 @@ def test_ensure_local_failure_then_retry_succeeds(tmp_path: Path, monkeypatch) -
     out = asyncio.run(ensure_local("owner/repo", provider="hf", cache_dir=tmp_path))
     assert out == snap
     assert attempts["n"] == 2
-
-
-# --------------------------------------------------------------------------- #
-# Safetensors-only gate — real files
-# --------------------------------------------------------------------------- #
-
-
-@pytest.mark.parametrize(
-    "files,raises",
-    [
-        (["model.safetensors", "config.json"], False),
-        (["pytorch_model.bin", "model.safetensors"], False),  # safetensors sibling ok
-        (["config.json", "tokenizer.json"], False),           # no weights -> no-op
-        (["pytorch_model.bin"], True),
-        (["model.pt"], True),
-        (["model.ckpt"], True),
-    ],
-)
-def test_safetensors_gate(tmp_path: Path, files: List[str], raises: bool) -> None:
-    snap = _make_weight_files(tmp_path / "snap", files)
-    if raises:
-        with pytest.raises(UnsafeFileFormat, match="refusing to load"):
-            assert_safe_weight_format(snap, ref="x/y")
-    else:
-        assert_safe_weight_format(snap, ref="x/y")

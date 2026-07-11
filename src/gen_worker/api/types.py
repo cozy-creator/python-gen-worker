@@ -293,9 +293,5 @@ class Compute(msgspec.Struct, frozen=True):
     """
 
     accelerator: str = ""
-    min_compute_capability: str = ""
     vram_gb: int = 0
     gpu_count: int = 0
-    gpu_tier: Optional[str] = None
-    cpu_cores: int = 0
-    disk_gb: int = 0

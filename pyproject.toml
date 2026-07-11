@@ -1,6 +1,6 @@
 [project]
 name = "gen-worker"
-version = "0.13.29"
+version = "0.13.30"
 description = "A library used to build custom functions in Cozy Creator's serverless function platform."
 readme = "README.md"
 license = "MIT"
@@ -23,7 +23,6 @@ dependencies = [
     "grpcio>=1.80.0",
     "msgspec>=0.18.6",
     "protobuf>=6.30.0",
-    "PyJWT[crypto]>=2.8.0",
     "requests>=2.32.0",
     "boto3>=1.41.0",
     "psutil>=7.0.0",
@@ -112,10 +111,6 @@ disallow_untyped_defs = true
 module = ["gen_worker.pb.*"]
 ignore_errors = true
 
-[[tool.mypy.overrides]]
-module = ["gen_worker.testing.*"]
-ignore_errors = true
-
 # Modules moved verbatim from the old gen_worker.conversion carry that
 # package's untyped-defs exemption (was cozy_convert's [tool.mypy] config).
 [[tool.mypy.overrides]]
@@ -125,12 +120,9 @@ disallow_untyped_defs = false
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-# Generated + legacy modules are lint-exempt (mirrors the mypy overrides above):
-# pb/ is generated; testing/ carries its own debt. Ruff is enforced
-# on the actively-maintained core.
+# Generated modules are lint-exempt (mirrors the mypy overrides above).
 extend-exclude = [
     "src/gen_worker/pb",
-    "src/gen_worker/testing",
 ]
 
 [tool.ruff.lint]

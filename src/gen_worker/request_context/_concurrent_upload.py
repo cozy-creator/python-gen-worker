@@ -179,36 +179,3 @@ def budget_gate_from_capability_jwt(token: str) -> BudgetGate:
         max_bytes_per_file=_int_claim("max_bytes_per_file"),
     )
 
-T = TypeVar("T")
-R = TypeVar("R")
-
-
-def parallel_map_uploads(
-    items: Sequence[T],
-    upload_fn: Callable[[T], R],
-    *,
-    label: str = "upload",
-) -> List[R]:
-    """Run ``upload_fn`` over ``items`` with bounded concurrency, preserving order.
-
-    Each callable owns one file end-to-end (hash → presigned create →
-    multipart PUT → /complete). The pool uses a small fixed fan-out so it
-    cannot multiply with the per-file multipart pool into an R2 retry storm.
-
-    Results are returned in the SAME order as ``items``. If any worker
-    raises, the exception is re-raised after in-flight uploads finish.
-
-    The S3 multipart PUTs inside each upload already run their own
-    inner part-level thread pool; this fan-out is at the FILE level on
-    top of that.
-    """
-    n = len(items)
-    if n == 0:
-        return []
-    if n == 1:
-        return [upload_fn(it) for it in items]
-
-    max_workers = optimal_file_concurrency(n)
-    logger.debug("%s_concurrent_upload_start items=%d workers=%d", label, n, max_workers)
-    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix=f"gw-{label}") as pool:
-        return list(pool.map(upload_fn, items))

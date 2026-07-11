@@ -939,15 +939,6 @@ class _SigintHandler:
 # Result encoding
 # --------------------------------------------------------------------------
 
-def _encode_struct(value: Any) -> bytes:
-    """Encode a msgspec.Struct (or anything msgspec can serialize) to JSON."""
-    try:
-        return msgspec.json.encode(value)
-    except Exception:
-        # Last-resort: stdlib json on a builtins shape.
-        return json.dumps(msgspec.to_builtins(value), default=str).encode("utf-8")
-
-
 def _write_stdout_event(event_kind: str, value: Any, *, pretty: bool) -> None:
     """Emit one ``{"event": <kind>, "value": ...}`` line on stdout."""
     body: Dict[str, Any] = {"event": event_kind}

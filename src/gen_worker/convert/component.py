@@ -61,17 +61,4 @@ class Component:
 
         yield from iter_component_tensors(self._path)
 
-    def as_hf_module(self, **kwargs: Any) -> Any:
-        """Load this component as its HF class.
-
-        Dispatches on ``config['_class_name']`` or ``config['class_name']`` —
-        e.g. ``UNet2DConditionModel``, ``AutoencoderKL``, ``CLIPTextModel``.
-        Falls back to generic loading via transformers.AutoModel when no
-        diffusers class is matched.
-        """
-        from ._hf_load import load_component_module
-
-        return load_component_module(self._path, self.config, **kwargs)
-
-
 __all__ = ["Component"]
