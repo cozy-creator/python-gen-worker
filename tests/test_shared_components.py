@@ -1,5 +1,6 @@
-"""Shared-component identity + single-count VRAM accounting (#335, now folded
-into the models-layer Residency manager, #366).
+"""Shared-component identity + single-count VRAM accounting (#335/#366),
+re-keyed by CONTENT (gw#479): identity = the component's file digest set +
+load-affecting facts. ref/revision are labels, not identity.
 
 Validates sharing + refcount + accounting with lightweight REAL objects: a fake
 "pipeline" is a plain object carrying a ``.components`` dict, exercising the
@@ -10,15 +11,19 @@ from __future__ import annotations
 
 import pytest
 
-from gen_worker import HF, Civitai, Hub
+from gen_worker import HF, Hub
 from gen_worker.models import (
     LoadedComponentKey,
     Residency,
     Tier,
     build_function_owned_pipeline,
+    content_set_digest,
 )
 
 _GiB = 1024 ** 3
+
+_FILES_A = {"model-00001.safetensors": "b3" + "a" * 62, "config.json": "b3" + "c" * 62}
+_FILES_B = {"model-00001.safetensors": "b3" + "d" * 62, "config.json": "b3" + "c" * 62}
 
 
 # --------------------------------------------------------------------------- #
@@ -57,61 +62,72 @@ def _residency_100gb() -> Residency:
     return Residency(vram_budget_bytes=100 * _GiB)
 
 
+def _key(files=None, **kw) -> LoadedComponentKey:
+    return LoadedComponentKey.for_component(
+        content_digest=content_set_digest(files if files is not None else _FILES_A),
+        **kw,
+    )
+
+
 # --------------------------------------------------------------------------- #
-# LoadedComponentKey canonicalization                                           #
+# Content-keyed canonicalization (gw#479)                                       #
 # --------------------------------------------------------------------------- #
 
 
-def test_identical_bindings_produce_equal_keys() -> None:
-    a = HF("bfl/flux.2-klein-4b", dtype="bf16")
-    b = HF("bfl/flux.2-klein-4b", dtype="bf16")
-    ka = LoadedComponentKey.from_binding(a, device_id=0, component_set="pkg.Flux2KleinPipeline")
-    kb = LoadedComponentKey.from_binding(b, device_id=0, component_set="pkg.Flux2KleinPipeline")
+def test_byte_identical_components_share_across_refs() -> None:
+    """THE gw#479 property: two different Hub refs whose component files are
+    byte-identical (same blake3 set) produce EQUAL keys — one loaded copy."""
+    a = Hub("tensorhub/qwen-image")
+    b = Hub("tensorhub/qwen-image-edit-2511")
+    ka = _key(component="text_encoder", binding=a)
+    kb = _key(component="text_encoder", binding=b)
     assert ka == kb
     assert ka.cache_id() == kb.cache_id()
+    # The readable label differs but is non-identity (compare=False).
+    assert ka.label != kb.label
 
 
-@pytest.mark.parametrize(
-    "mutate",
-    [
-        lambda b: HF(b.ref, dtype="fp16"),
-        lambda b: HF(b.ref, dtype=b.dtype, revision="deadbeef"),
-        lambda b: HF(b.ref, dtype=b.dtype, subfolder="text_encoder"),
-    ],
-)
-def test_binding_attribute_differences_do_not_share(mutate) -> None:
-    base = HF("bfl/flux.2-klein-4b", dtype="bf16")
-    k_base = LoadedComponentKey.from_binding(base, device_id=0, component_set="P")
-    k_other = LoadedComponentKey.from_binding(mutate(base), device_id=0, component_set="P")
-    assert k_base != k_other
-    assert k_base.cache_id() != k_other.cache_id()
-
-
-def test_device_dtype_quant_component_set_differences_do_not_share() -> None:
-    b = HF("bfl/flux.2-klein-4b", dtype="bf16")
-    k0 = LoadedComponentKey.from_binding(b, device_id=0, component_set="P")
-    assert k0 != LoadedComponentKey.from_binding(b, device_id=1, component_set="P")
-    assert k0 != LoadedComponentKey.from_binding(b, device_id=0, component_set="Q")
-    assert k0 != LoadedComponentKey.from_binding(
-        b, device_id=0, component_set="P", quantization="fp8"
-    )
-    assert LoadedComponentKey.from_binding(
-        b, device_id=0, component_set="P", quantization="fp8", quant_config={"a": 1}
-    ) != LoadedComponentKey.from_binding(
-        b, device_id=0, component_set="P", quantization="fp8", quant_config={"a": 2}
-    )
-    assert LoadedComponentKey.from_binding(Hub("o/r"), device_id=0) != LoadedComponentKey.from_binding(
-        Civitai("123"), device_id=0
+def test_content_difference_does_not_share() -> None:
+    b = Hub("o/r")
+    assert _key(_FILES_A, component="text_encoder", binding=b) != _key(
+        _FILES_B, component="text_encoder", binding=b
     )
 
 
-def test_unpinned_revision_falls_back_to_snapshot_digest() -> None:
-    b = HF("bfl/flux.2-klein-4b")  # no explicit revision
-    same = LoadedComponentKey.from_binding(b, snapshot_digest="/cache/snap-A")
-    same2 = LoadedComponentKey.from_binding(b, snapshot_digest="/cache/snap-A")
-    diff = LoadedComponentKey.from_binding(b, snapshot_digest="/cache/snap-B")
-    assert same == same2
-    assert same != diff
+def test_content_set_digest_is_order_invariant_and_path_sensitive() -> None:
+    reordered = dict(reversed(list(_FILES_A.items())))
+    assert content_set_digest(_FILES_A) == content_set_digest(reordered)
+    moved = {"sub/" + p: d for p, d in _FILES_A.items()}
+    assert content_set_digest(_FILES_A) != content_set_digest(moved)
+    assert content_set_digest({}) == ""
+
+
+def test_load_fact_differences_do_not_share() -> None:
+    k0 = _key(component="text_encoder", dtype="bf16")
+    assert k0 != _key(component="text_encoder", dtype="fp16")
+    assert k0 != _key(component="text_encoder", dtype="bf16", device_id=1)
+    assert k0 != _key(component="vae", dtype="bf16")
+    assert k0 != _key(component="text_encoder", dtype="bf16", quantization="fp8")
+    assert _key(
+        component="text_encoder", quantization="fp8", quant_config={"a": 1}
+    ) != _key(component="text_encoder", quantization="fp8", quant_config={"a": 2})
+    assert k0 != _key(component="text_encoder", dtype="bf16", placement="offload")
+
+
+def test_binding_dtype_and_storage_dtype_enter_identity() -> None:
+    bf16 = HF("o/r", dtype="bf16")
+    fp16 = HF("o/r", dtype="fp16")
+    assert _key(component="te", binding=bf16) != _key(component="te", binding=fp16)
+    fp8 = Hub("o/r", flavor="fp8", storage_dtype="fp8+te")
+    bare = Hub("o/r")
+    assert _key(component="te", binding=fp8) != _key(component="te", binding=bare)
+
+
+def test_ref_is_not_identity() -> None:
+    """Same bytes + same facts under different providers/refs: SHARED."""
+    assert _key(component="te", binding=HF("mirror-one/repo", dtype="bf16")) == _key(
+        component="te", binding=HF("mirror-two/other", dtype="bf16")
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -121,7 +137,7 @@ def test_unpinned_revision_falls_back_to_snapshot_digest() -> None:
 
 def test_identical_components_are_shared_one_instance_refcount_two() -> None:
     res = _residency_100gb()
-    key = LoadedComponentKey(ref="bfl/flux.2-klein-4b", dtype="bf16", component_set="P")
+    key = _key(component="P", dtype="bf16", label="bfl/flux.2-klein-4b/P")
 
     base = _new_base()
     loads = {"n": 0}
@@ -143,7 +159,7 @@ def test_identical_components_are_shared_one_instance_refcount_two() -> None:
 
 def test_shared_vram_counted_once() -> None:
     res = _residency_100gb()
-    key = LoadedComponentKey(ref="bfl/flux.2-klein-4b", dtype="bf16", component_set="P")
+    key = _key(component="P", dtype="bf16")
     base = _new_base()
 
     before = res.free_vram_bytes()
@@ -160,7 +176,7 @@ def test_shared_vram_counted_once() -> None:
 
 def test_shared_component_not_evicted_while_referenced() -> None:
     res = _residency_100gb()
-    key = LoadedComponentKey(ref="shared/base", dtype="bf16", component_set="P")
+    key = _key(component="P", dtype="bf16", label="shared/base")
     base = _new_base()
     res.acquire_shared(key, lambda: base, vram_bytes=20 * _GiB)
     res.acquire_shared(key, lambda: base, vram_bytes=20 * _GiB)  # refcount 2
@@ -179,7 +195,7 @@ def test_shared_component_not_evicted_while_referenced() -> None:
 
 def test_releasing_all_refs_makes_entry_evictable() -> None:
     res = _residency_100gb()
-    key = LoadedComponentKey(ref="shared/base", dtype="bf16", component_set="P")
+    key = _key(component="P", dtype="bf16", label="shared/base")
     base = _new_base()
     res.acquire_shared(key, lambda: base, vram_bytes=20 * _GiB)
     res.acquire_shared(key, lambda: base, vram_bytes=20 * _GiB)
@@ -197,8 +213,8 @@ def test_releasing_all_refs_makes_entry_evictable() -> None:
 
 def test_drain_skips_referenced_then_force_clears_all() -> None:
     res = _residency_100gb()
-    held = LoadedComponentKey(ref="a/held", component_set="P")
-    free = LoadedComponentKey(ref="b/free", component_set="P")
+    held = _key(_FILES_A, component="P", label="a/held")
+    free = _key(_FILES_B, component="P", label="b/free")
     res.acquire_shared(held, _new_base, vram_bytes=5 * _GiB)   # refcount 1
     res.acquire_shared(free, _new_base, vram_bytes=5 * _GiB)
     res.release_shared(free)                                    # refcount 0
@@ -218,11 +234,9 @@ def test_drain_skips_referenced_then_force_clears_all() -> None:
 
 
 def test_lora_and_override_bindings_isolate_from_clean_base() -> None:
-    base = HF("bfl/flux.2-klein-4b", dtype="bf16")
-
-    k_clean = LoadedComponentKey.from_binding(base, component_set="P")
-    k_lora = LoadedComponentKey.from_binding(base, component_set="P", adapter_id="lora:set-7")
-    k_override = LoadedComponentKey.from_binding(base, component_set="P", adapter_id="override:Pipe")
+    k_clean = _key(component="P", dtype="bf16")
+    k_lora = _key(component="P", dtype="bf16", adapter_id="lora:set-7")
+    k_override = _key(component="P", dtype="bf16", adapter_id="override:Pipe")
 
     assert k_clean != k_lora
     assert k_clean != k_override
@@ -231,9 +245,8 @@ def test_lora_and_override_bindings_isolate_from_clean_base() -> None:
 
 
 def test_adapter_identity_separates_two_lora_overlays() -> None:
-    b = HF("bfl/flux.2-klein-4b", dtype="bf16")
-    k1 = LoadedComponentKey.from_binding(b, component_set="P", adapter_id="lora:A")
-    k2 = LoadedComponentKey.from_binding(b, component_set="P", adapter_id="lora:B")
+    k1 = _key(component="P", adapter_id="lora:A")
+    k2 = _key(component="P", adapter_id="lora:B")
     assert k1 != k2
 
 

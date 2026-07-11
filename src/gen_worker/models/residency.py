@@ -67,7 +67,7 @@ IN_RAM = "in_ram"
 IN_VRAM = "in_vram"
 EVICTED = "evicted"
 
-EventFn = Callable[[str, str, int], None]  # (ref, state, vram_bytes)
+EventFn = Callable[[str, str, int, int], None]  # (ref, state, vram_bytes, duration_ms)
 
 
 class Tier(str, Enum):
@@ -87,6 +87,11 @@ class _Entry:
     pinned: bool = False
     refcount: int = 0            # live executions / shared holders
     last_used: float = field(default_factory=time.monotonic)
+    # Swap telemetry (gw#479): tier-transition counts + last durations.
+    promote_count: int = 0
+    demote_count: int = 0
+    last_promote_ms: int = 0
+    last_demote_ms: int = 0
 
     @property
     def movable(self) -> bool:
@@ -159,11 +164,11 @@ class Residency:
 
     # ---- events -------------------------------------------------------------
 
-    def _emit(self, ref: str, state: str, vram_bytes: int = 0) -> None:
+    def _emit(self, ref: str, state: str, vram_bytes: int = 0, duration_ms: int = 0) -> None:
         if self._on_event is None:
             return
         try:
-            self._on_event(ref, state, int(vram_bytes))
+            self._on_event(ref, state, int(vram_bytes), int(duration_ms))
         except Exception:
             logger.exception("residency event callback failed for %s", ref)
 
@@ -309,6 +314,7 @@ class Residency:
                     ref, need_gb, get_available_ram_gb(), _effective_ram_floor_gb(),
                 )
                 return False
+            t0 = time.monotonic()
             if self.pre_demote is not None:
                 try:
                     self.pre_demote(ref, e.obj)
@@ -318,8 +324,11 @@ class Residency:
                 return False  # entry stays VRAM; object restored to cuda
             e.tier = Tier.RAM
             e.vram_bytes = 0
+            e.demote_count += 1
+            e.last_demote_ms = int((time.monotonic() - t0) * 1000)
+            duration_ms = e.last_demote_ms
         flush_memory()
-        self._emit(ref, IN_RAM)
+        self._emit(ref, IN_RAM, duration_ms=duration_ms)
         return True
 
     def _move_verified(self, obj: Any, device: str, *, ref: str = "") -> bool:
@@ -408,6 +417,7 @@ class Residency:
             # for real headroom instead of 0 (a 0-byte ask promoted 6.9GB
             # pipelines into ~2GB free and OOMed mid-move, gw#409).
             hint = int(estimate_pipeline_size_gb(obj) * _GiB)
+        t0 = time.monotonic()  # swap wall incl. the make_room demote (gw#479)
         self.make_room(hint)
         with self._lock:
             e = self._entries.get(ref)
@@ -419,8 +429,11 @@ class Residency:
             e.vram_bytes = int(estimate_cuda_resident_gb(e.obj) * _GiB) or hint
             e.vram_hint = max(e.vram_hint, e.vram_bytes)
             e.last_used = time.monotonic()
+            e.promote_count += 1
+            e.last_promote_ms = int((time.monotonic() - t0) * 1000)
             measured = e.vram_bytes
-        self._emit(ref, IN_VRAM, measured)
+            duration_ms = e.last_promote_ms
+        self._emit(ref, IN_VRAM, measured, duration_ms=duration_ms)
         return True
 
     def release_to_disk(self, ref: str) -> bool:
@@ -639,6 +652,21 @@ class Residency:
                 ],
             }
 
+    def transition_stats(self) -> Dict[str, Dict[str, int]]:
+        """Per-ref swap telemetry (gw#479): promote/demote counts + last wall
+        durations for every entry that has ever transitioned."""
+        with self._lock:
+            return {
+                e.ref: {
+                    "promotes": e.promote_count,
+                    "demotes": e.demote_count,
+                    "last_promote_ms": e.last_promote_ms,
+                    "last_demote_ms": e.last_demote_ms,
+                }
+                for e in self._entries.values()
+                if e.promote_count or e.demote_count
+            }
+
     def drain_shared(self, *, force: bool = False) -> int:
         """Evict shared entries with refcount 0 (or everything when ``force``)."""
         with self._lock:
@@ -672,66 +700,82 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
+def content_set_digest(files: Any) -> str:
+    """Digest of a component's sorted ``(relative_path, blake3)`` pairs — the
+    CONTENT identity of the file set (gw#479). Content-addressed = immutable:
+    a tag moving to new bytes changes file digests, hence this digest."""
+    rows = sorted(f"{str(p)}\x1f{str(d)}" for p, d in dict(files).items())
+    if not rows:
+        return ""
+    return hashlib.sha256("\n".join(rows).encode("utf-8")).hexdigest()[:32]
+
+
 @dataclass(frozen=True)
 class LoadedComponentKey:
-    """Canonical identity of a loadable immutable component set. Two bindings
-    share one loaded entry IFF every field is equal — the fields cover every
-    dimension that would make the loaded bytes unshareable (provider/ref,
-    revision/snapshot, dtype, quant scheme+config, GPU index, placement mode,
-    subfolder, component-set/pipeline-class identity, adapter overlays)."""
+    """Canonical identity of a loadable immutable component set, keyed by
+    CONTENT (gw#479). Two bindings share one loaded entry IFF the bytes and
+    every load-affecting fact are equal: the file-set content digest plus
+    dtype, quant scheme+config, GPU index, placement mode, component name and
+    adapter overlays. ref/revision are NOT identity — byte-identical
+    components mirrored under different refs share one in-memory copy; the
+    readable ref survives only in the ``label`` (cache_id display)."""
 
-    provider: str = "tensorhub"
-    ref: str = ""
-    revision: str = ""
+    content_digest: str = ""      # content_set_digest of the component's files
     dtype: str = ""
-    quantization: str = ""
+    quantization: str = ""        # quant scheme / storage_dtype
     quant_config_digest: str = ""
     device_id: int = 0
     placement: str = "full"
-    subfolder: str = ""
-    component_set: str = ""
+    component_set: str = ""       # component name (e.g. "text_encoder")
     adapter_id: str = ""
+    label: str = field(default="", compare=False)  # readable, non-identity
 
     @classmethod
-    def from_binding(
+    def for_component(
         cls,
-        binding: Any,
         *,
-        device_id: int = 0,
-        placement: str = "full",
-        component_set: str = "",
-        snapshot_digest: str = "",
+        content_digest: str,
+        component: str = "",
+        binding: Any = None,
+        dtype: str = "",
         quantization: str = "",
         quant_config: Any = None,
+        device_id: int = 0,
+        placement: str = "full",
         adapter_id: str = "",
+        label: str = "",
     ) -> "LoadedComponentKey":
-        provider = str(getattr(binding, "provider", "tensorhub") or "tensorhub").strip()
-        ref = str(getattr(binding, "ref", "") or "").strip()
-        dtype = str(getattr(binding, "dtype", "") or "").strip().lower()
-        revision = str(getattr(binding, "revision", "") or "").strip() or str(snapshot_digest or "").strip()
-        subfolder = str(getattr(binding, "subfolder", "") or "").strip()
+        """Key for one component of a bound snapshot: content digest + the
+        binding's load-affecting facts (dtype, storage_dtype)."""
+        if binding is not None:
+            dtype = dtype or str(getattr(binding, "dtype", "") or "")
+            quantization = quantization or str(getattr(binding, "storage_dtype", "") or "")
+            if not label:
+                ref = str(getattr(binding, "ref", "") or "")
+                label = f"{ref}/{component}" if ref else component
         return cls(
-            provider=provider,
-            ref=ref,
-            revision=revision,
-            dtype=dtype,
+            content_digest=str(content_digest or "").strip(),
+            dtype=str(dtype or "").strip().lower(),
             quantization=str(quantization or "").strip().lower(),
             quant_config_digest=_digest(quant_config),
             device_id=int(device_id),
             placement=str(placement or "full").strip() or "full",
-            subfolder=subfolder,
-            component_set=str(component_set or "").strip(),
+            component_set=str(component or "").strip(),
             adapter_id=str(adapter_id or "").strip(),
+            label=str(label or component or "").strip(),
         )
 
     def cache_id(self) -> str:
         fields = (
-            self.provider, self.ref, self.revision, self.dtype,
-            self.quantization, self.quant_config_digest, str(self.device_id),
-            self.placement, self.subfolder, self.component_set, self.adapter_id,
+            self.content_digest, self.dtype, self.quantization,
+            self.quant_config_digest, str(self.device_id), self.placement,
+            self.component_set, self.adapter_id,
         )
         digest = hashlib.sha256("\x1f".join(fields).encode("utf-8")).hexdigest()[:16]
-        readable = (self.ref or "?").replace("/", "--")[:48]
+        # Readable part comes from IDENTITY fields only: equal keys MUST map
+        # to one cache entry even when their ref labels differ (that is the
+        # entire point of content keying).
+        readable = (self.component_set or "?").replace("/", "--")[:48]
         return f"shared::{readable}::dev{self.device_id}::{digest}"
 
 
@@ -761,5 +805,6 @@ __all__ = [
     "Tier",
     "LoadedComponentKey",
     "build_function_owned_pipeline",
+    "content_set_digest",
     "ON_DISK", "IN_RAM", "IN_VRAM", "EVICTED",
 ]

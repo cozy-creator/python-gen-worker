@@ -171,6 +171,11 @@ class EndpointDecl(msgspec.Struct, frozen=True, kw_only=True):
     name: Optional[str] = None  # function-shaped endpoints only
     is_function: bool = False
     compile: Optional[Compile] = None
+    # Payload-driven slot routing (gw#479): ``route(payload) -> slot names``
+    # the request actually needs. The executor promotes/pins only those
+    # slots, so multi-lane classes (two transformers over one shared
+    # encoder) swap the idle lane instead of thrashing both per request.
+    route: Optional[Callable[[Any], Sequence[str]]] = None
 
 
 ATTR = "__gen_worker_endpoint__"
@@ -412,6 +417,7 @@ def _decorate_class(
     variants: Optional[Mapping[str, Any]],
     runtime: Optional[str],
     compile: Optional[Compile] = None,
+    route: Optional[Callable[[Any], Sequence[str]]] = None,
 ) -> type:
     handlers = _find_handler_methods(cls)
     for attr, member in handlers:
@@ -437,10 +443,21 @@ def _decorate_class(
             f"@endpoint class {cls.__name__!r}: runtime must be 'vllm' or "
             f"'llama-server', got {runtime!r}"
         )
+    if route is not None:
+        if not callable(route):
+            raise TypeError(
+                f"@endpoint class {cls.__name__!r}: route= must be callable "
+                f"(payload -> model slot names), got {type(route).__name__}"
+            )
+        if len(models) < 2:
+            raise ValueError(
+                f"@endpoint class {cls.__name__!r}: route= needs 2+ model "
+                f"slots to route between (declared {sorted(models) or 'none'})"
+            )
 
     decl = EndpointDecl(
         kind=kind, resources=resources, models=models,
-        variants=variant_rows, runtime=runtime, compile=compile,
+        variants=variant_rows, runtime=runtime, compile=compile, route=route,
     )
     setattr(cls, ATTR, decl)
     setattr(cls, "__gen_worker_handlers__", handlers)
@@ -494,6 +511,7 @@ def endpoint(
     runtime: Optional[str] = None,
     name: Optional[str] = None,
     compile: Optional[Compile] = None,
+    route: Optional[Callable[[Any], Sequence[str]]] = None,
 ) -> Any:
     """The one endpoint decorator. See the module docstring for shapes."""
     if kind not in KINDS:
@@ -516,13 +534,18 @@ def endpoint(
                                  "class handlers route by method name")
             return _decorate_class(
                 obj, kind=kind, resources=resources_value, models=model_map,
-                variants=variants, runtime=runtime, compile=compile,
+                variants=variants, runtime=runtime, compile=compile, route=route,
             )
         if inspect.isfunction(obj):
             if variants:
                 raise ValueError(
                     f"@endpoint function {obj.__name__!r}: variants= requires a "
                     "class (each variant needs its own setup state)."
+                )
+            if route is not None:
+                raise ValueError(
+                    f"@endpoint function {obj.__name__!r}: route= requires a "
+                    "class with setup() (slot routing selects among loaded lanes)."
                 )
             return _decorate_function(
                 obj, kind=kind, resources=resources_value, models=dict(model_map),

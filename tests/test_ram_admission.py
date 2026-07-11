@@ -33,7 +33,7 @@ _GiB = 1024 ** 3
 def _res(events: list | None = None, budget_gb: int = 24) -> Residency:
     ev = events if events is not None else []
     return Residency(
-        on_event=lambda ref, state, vb: ev.append((ref, state, vb)),
+        on_event=lambda ref, state, vb, dur=0: ev.append((ref, state, vb)),
         vram_budget_bytes=budget_gb * _GiB,
     )
 

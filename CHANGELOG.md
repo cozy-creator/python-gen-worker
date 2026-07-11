@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.13.25 (2026-07-11)
+
+- **gw#479: content-keyed shared components + transformer lanes.**
+  `LoadedComponentKey` identity is now the component's CONTENT — the sorted
+  blake3 digest set of its files (`content_set_digest`) plus load facts
+  (dtype, quant/storage_dtype + config digest, device, placement, component
+  name, adapter overlay). ref/revision drop out of identity (readable label
+  only), so byte-identical components mirrored under different Hub refs
+  share ONE in-memory copy. Executor: class records binding 2+ pipeline
+  slots get lane loading — the shared set loads once via `acquire_shared`
+  (VRAM counted once, refcount-held), later slots inject the same module
+  objects into `from_pretrained` and load only exclusive weights; each
+  lane's residency entry is its exclusive module set, so the existing
+  make_room/LRU ladder swaps ONLY the transformer (dual-resident when the
+  budget admits, swap-mode otherwise). New `@endpoint(route=)`:
+  `route(payload) -> slot names` makes per-request promote/pin selective —
+  swap-mode lanes never thrash both transformers. Telemetry: promote/demote
+  are timed + counted per entry (`Residency.transition_stats()`); wire
+  `ModelEvent.duration_ms` now carries swap walls; lanes appear as distinct
+  refs in `Hello.models`. `apply_fp8_storage` is idempotent per module
+  (shared injected modules are never double-hooked).
+  `load_from_pretrained(components=)` forwards preloaded modules. Offload
+  placement and sharing are mutually exclusive (guarded, monolithic
+  fallback). Sharing engages only when wire snapshots carry digests and
+  keys collide; single-slot records are byte-for-byte unchanged.
+
 ## 0.13.23 (2026-07-11)
 
 - **th#721: adaptive RAM tier — host-RAM probes are cgroup-aware.**

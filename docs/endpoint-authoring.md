@@ -108,6 +108,29 @@ is stamped only when the class declares `model=`/`models=`. If your payload
 echoes the variant in a `variant` field, type it `Literal[...]` — members are
 validated against the declared variants at import time.
 
+## Lanes: multi-model classes with input routing (gw#479)
+
+A class binding 2+ pipeline slots whose snapshots share byte-identical
+components (content-keyed by the files' blake3 digests) loads the shared set
+ONCE; each slot's exclusive weights (its transformer) are an independent
+residency entry the worker LRU-swaps under VRAM pressure. Declare `route=`
+so only the lane a request needs is promoted/pinned:
+
+```python
+def _route(p: In) -> tuple[str, ...]:
+    return ("edit",) if p.images else ("t2i",)
+
+@endpoint(models={"t2i": Hub("org/base"), "edit": Hub("org/edit")}, route=_route)
+class Generate:
+    def setup(self, t2i: QwenImagePipeline, edit: QwenImageEditPlusPipeline): ...
+    def generate(self, ctx, p: In) -> Out: ...  # picks self.t2i / self.edit
+```
+
+The handler must only touch the lane(s) `route` named — the idle lane may be
+warm in host RAM. This mechanism COMPENSATES for split-vendor base+edit
+releases (Qwen, HiDream, Wan t2v/i2v); unified models (one transformer doing
+t2i + edit) need no lanes — bind one model and skip `route=`.
+
 ## Resources
 
 ```python

@@ -392,13 +392,19 @@ class ModelStore:
         except RuntimeError:
             pass
 
-    def _on_residency_event(self, ref: str, state: str, vram_bytes: int) -> None:
+    def _on_residency_event(
+        self, ref: str, state: str, vram_bytes: int, duration_ms: int = 0
+    ) -> None:
         pb_state = _RESIDENCY_STATE_TO_PB.get(state)
         if pb_state is None:
             return
         kw: Dict[str, Any] = {}
         if state == residency_mod.IN_VRAM:
             kw["vram_bytes"] = int(vram_bytes)
+        if duration_ms > 0:
+            # Swap telemetry (gw#479): promote/demote wall time rides the
+            # existing ModelEvent.duration_ms field.
+            kw["duration_ms"] = int(duration_ms)
         coro = self._event(ref, pb_state, **kw)
         try:
             loop = asyncio.get_running_loop()
@@ -428,6 +434,45 @@ class ModelStore:
         """A digest-carrying snapshot for ``ref`` was seen this connection
         (gw#465): snapshot-less ops for it can still materialize the bytes."""
         return ref in self._snapshots
+
+    def component_digests(self, ref: str) -> Dict[str, str]:
+        """Per-component content identity of ``ref``'s snapshot (gw#479):
+        ``{top_level_subfolder: content_set_digest}`` derived from the wire
+        snapshot's per-file blake3 digests. Root-level files group under
+        ``""`` (never shared — model_index.json etc. differ per repo).
+        Empty when no digest-carrying snapshot was seen — content-keyed
+        sharing then stays off; the loader never hashes snapshots itself."""
+        snap = self._snapshots.get(ref)
+        if snap is None:
+            return {}
+        groups: Dict[str, Dict[str, str]] = {}
+        for f in snap.files:
+            rel = str(f.path).strip().lstrip("/")
+            if not rel or not f.blake3:
+                continue
+            comp, _, rest = rel.partition("/")
+            if not rest:
+                comp, rest = "", rel
+            groups.setdefault(comp, {})[rest] = str(f.blake3)
+        return {c: residency_mod.content_set_digest(files)
+                for c, files in groups.items()}
+
+    def component_sizes(self, ref: str) -> Dict[str, int]:
+        """Per-top-level-subfolder byte totals of ``ref``'s snapshot (gw#479):
+        the make_room estimate for loading a subset of components."""
+        snap = self._snapshots.get(ref)
+        if snap is None:
+            return {}
+        sizes: Dict[str, int] = {}
+        for f in snap.files:
+            rel = str(f.path).strip().lstrip("/")
+            if not rel:
+                continue
+            comp, _, rest = rel.partition("/")
+            if not rest:
+                comp = ""
+            sizes[comp] = sizes.get(comp, 0) + int(f.size_bytes)
+        return sizes
 
     # ---- disk retention (#370) ------------------------------------------------
 
@@ -755,6 +800,29 @@ class _ClassRecord:
     ready: bool = False
     failed: Optional[str] = None
     lock: asyncio.Lock = dc_field(default_factory=asyncio.Lock)
+    # Content-keyed shared components this record holds (gw#479): released
+    # (refcount--) at vacate so the entries become LRU/drain candidates.
+    shared_keys: List[Any] = dc_field(default_factory=list)
+
+
+def _shared_loader_must_hit() -> Any:
+    """acquire_shared loader for peeked keys (gw#479): the object was seen in
+    the cache under the load lock, so a miss here is a bookkeeping bug."""
+    raise RuntimeError("shared component vanished between peek and acquire")
+
+
+@dataclass
+class _InjectionResult:
+    """What one setup injection produced (gw#479): the setup kwargs, the
+    per-slot residency objects+bytes, which slots were lane-registered
+    inline, the shared keys this record now holds, and the VRAM booked on
+    shared:: entries (counted once, excluded from per-slot residuals)."""
+
+    kwargs: Dict[str, Any]
+    loaded: Dict[str, Tuple[Any, int]]
+    lane_slots: set = dc_field(default_factory=set)
+    shared_keys: List[Any] = dc_field(default_factory=list)
+    shared_bytes: int = 0
 
 
 @dataclass
@@ -1113,14 +1181,19 @@ class Executor:
 
     # ---- setup -------------------------------------------------------------
 
-    async def ensure_setup(self, spec: EndpointSpec, snapshots: Optional[Dict[str, pb.Snapshot]] = None) -> Any:
+    async def ensure_setup(
+        self,
+        spec: EndpointSpec,
+        snapshots: Optional[Dict[str, pb.Snapshot]] = None,
+        promote_slots: Optional[List[str]] = None,
+    ) -> Any:
         if spec.cls is None:
             return None  # function-shaped endpoint: no instance, no setup
         self.store.bind_loop()
         rec = self._classes[spec.instance_key]
         async with rec.lock:
             if rec.ready:
-                await self._promote_setup_refs(spec)
+                await self._promote_setup_refs(spec, promote_slots)
                 return rec.instance
             try:
                 instance = await self._setup_locked(spec, rec, snapshots)
@@ -1180,18 +1253,19 @@ class Executor:
             await self._make_room_for(spec, setup_slots)
             instance = spec.cls()
             setup = getattr(instance, "setup", None)
-            loaded: Dict[str, Tuple[Any, int]] = {}
+            inj = _InjectionResult(kwargs={}, loaded={})
             vram_before = self._vram_allocated()
             if spec.runtime:
                 rec.server = await self._boot_engine_server(spec, paths)
             if callable(setup):
-                kwargs, loaded = await self._injection_kwargs(
+                inj = await self._injection_kwargs(
                     spec, setup, paths, server=rec.server,
                     compile_artifact=compile_artifact, snapshots=snapshots)
+                rec.shared_keys.extend(inj.shared_keys)
                 if asyncio.iscoroutinefunction(setup):
-                    await setup(**kwargs)
+                    await setup(**inj.kwargs)
                 else:
-                    await asyncio.to_thread(setup, **kwargs)
+                    await asyncio.to_thread(setup, **inj.kwargs)
             warmup = getattr(instance, "warmup", None)
             if callable(warmup):
                 from . import compile_cache
@@ -1212,7 +1286,9 @@ class Executor:
                         stats.get("fxgraph_cache_miss", 0),
                         time.monotonic() - warm_t0)
             vram_delta = max(0, self._vram_allocated() - vram_before)
-            self._register_residency(spec, setup_slots, loaded, vram_delta)
+            self._register_residency(
+                spec, setup_slots, inj.loaded, vram_delta,
+                lane_slots=inj.lane_slots, shared_bytes=inj.shared_bytes)
         return instance
 
     def _register_residency(
@@ -1221,20 +1297,31 @@ class Executor:
         setup_slots: List[str],
         loaded: Dict[str, Tuple[Any, int]],
         total_delta: int,
+        *,
+        lane_slots: Optional[set] = None,
+        shared_bytes: int = 0,
     ) -> None:
         """Honest per-ref residency after a setup (#369). Worker-constructed
         pipelines carry their own measured allocator delta AND the object
         (Residency owns it: demote/promote actually move memory). Refs the
         tenant loaded inside setup() split the residual delta — no object,
-        so their VRAM is only reclaimable by record teardown."""
+        so their VRAM is only reclaimable by record teardown. Lane slots
+        (gw#479) were registered inline during injection — their bytes and
+        the shared-entry bytes still reduce the residual, but re-tracking
+        them here would clobber a mid-setup demotion."""
         res = self.store.residency
+        lanes = lane_slots or set()
         per_ref: Dict[str, Tuple[Any, int]] = {}
         for slot in setup_slots:
+            if slot in lanes:
+                continue
             ref = wire_ref(spec.models[slot])
             obj, measured = loaded.get(slot, (None, 0))
             prev_obj, prev_bytes = per_ref.get(ref, (None, 0))
             per_ref[ref] = (obj or prev_obj, prev_bytes + measured)
-        residual = max(0, total_delta - sum(b for _, b in per_ref.values()))
+        lane_bytes = sum(loaded[s][1] for s in lanes if s in loaded)
+        residual = max(0, total_delta - sum(b for _, b in per_ref.values())
+                       - lane_bytes - max(0, int(shared_bytes)))
         opaque = [r for r, (obj, _) in per_ref.items() if obj is None]
         share = residual // len(opaque) if opaque else 0
         for ref, (obj, measured) in per_ref.items():
@@ -1246,11 +1333,18 @@ class Executor:
             else:
                 res.track_ram(ref, obj)   # CPU-only host / offloaded load
 
-    async def _promote_setup_refs(self, spec: EndpointSpec) -> None:
+    async def _promote_setup_refs(
+        self, spec: EndpointSpec, slots: Optional[List[str]] = None
+    ) -> None:
         """RunJob/LOAD for a demoted (RAM-tier) instance: swap the pipelines
-        back into VRAM instead of a cold reload (#371)."""
+        back into VRAM instead of a cold reload (#371). ``slots`` narrows the
+        promote to the lanes a routed request needs (gw#479) — promoting an
+        idle lane would thrash swap-mode records on every request."""
         res = self.store.residency
-        refs = [wire_ref(spec.models[s]) for s in self._setup_slots(spec)]
+        setup_slots = self._setup_slots(spec)
+        if slots is not None:
+            setup_slots = [s for s in setup_slots if s in slots]
+        refs = [wire_ref(spec.models[s]) for s in setup_slots]
         cuda_host = torch is not None and torch.cuda.is_available()
         if any(res.tier(r) is residency_mod.Tier.RAM for r in refs):
             async with self._load_lock:
@@ -1418,6 +1512,65 @@ class Executor:
                 )
         return None
 
+    def _component_share_plan(
+        self, spec: EndpointSpec, paths: Dict[str, str], hints: Dict[str, Any]
+    ) -> Optional[Dict[str, Dict[str, Any]]]:
+        """Content-keyed shared-component plan for a multi-lane record
+        (gw#479): ``{slot: {component: LoadedComponentKey}}`` restricted to
+        components whose CONTENT key appears under 2+ pipeline slots. None
+        when the record has <2 pipeline slots, digests are unavailable, or
+        nothing is byte-identical — loading then stays monolithic."""
+        pipe_slots = [
+            s for s in paths
+            if isinstance(hints.get(s), type)
+            and callable(getattr(hints[s], "from_pretrained", None))
+        ]
+        if len(pipe_slots) < 2:
+            return None
+        keys: Dict[str, Dict[str, Any]] = {}
+        for slot in pipe_slots:
+            binding = spec.models.get(slot)
+            if binding is None:
+                return None
+            ref = wire_ref(binding)
+            digests = self.store.component_digests(ref)
+            keys[slot] = {
+                comp: residency_mod.LoadedComponentKey.for_component(
+                    content_digest=digest, component=comp, binding=binding,
+                    label=f"{ref}/{comp}",
+                )
+                for comp, digest in digests.items() if comp
+            }
+        counts: Dict[Any, int] = {}
+        for slot_keys in keys.values():
+            for k in slot_keys.values():
+                counts[k] = counts.get(k, 0) + 1
+        plan = {
+            slot: {c: k for c, k in slot_keys.items() if counts[k] >= 2}
+            for slot, slot_keys in keys.items()
+        }
+        if not any(plan.values()):
+            return None
+        shared = sorted({c for m in plan.values() for c in m})
+        logger.info(
+            "content-keyed lanes for %s: shared components %s across %d slots",
+            spec.name, shared, len(pipe_slots),
+        )
+        return plan
+
+    @staticmethod
+    def _model_index_components(path: str) -> set:
+        """Component names the snapshot's model_index.json declares — the
+        only names safe to pass as preloaded modules to from_pretrained."""
+        try:
+            import json
+
+            with open(Path(path) / "model_index.json", "r", encoding="utf-8") as f:
+                index = json.load(f)
+            return {k for k in index if not k.startswith("_")}
+        except Exception:
+            return set()
+
     async def _injection_kwargs(
         self,
         spec: EndpointSpec,
@@ -1427,7 +1580,7 @@ class Executor:
         server: Any = None,
         compile_artifact: Optional[Path] = None,
         snapshots: Optional[Dict[str, pb.Snapshot]] = None,
-    ) -> Tuple[Dict[str, Any], Dict[str, Tuple[Any, int]]]:
+    ) -> "_InjectionResult":
         """Typed injection: each slot receives exactly what its ``setup``
         annotation says — a ``str``/``Path`` local path, or a constructed
         pipeline for a class annotation exposing ``from_pretrained`` (built off
@@ -1435,9 +1588,14 @@ class Executor:
         placement/offload policy to the result). A parameter annotated
         ``ServerHandle`` receives the booted engine server.
 
-        Returns ``(kwargs, loaded)`` where ``loaded`` maps each pipeline slot
-        to ``(pipeline, allocator_delta)`` — the per-ref measurement residency
-        books (#369; caller holds the load lock)."""
+        Multi-lane records (gw#479): when 2+ pipeline slots carry
+        byte-identical components (content keys), the first lane loads them
+        and registers them in the shared cache; later lanes inject the very
+        same module objects into ``from_pretrained`` and load only their
+        exclusive weights. Each lane's residency entry is then the exclusive
+        module set — LRU swap moves ONLY the transformer, never the shared
+        encoder. Lane slots are residency-registered inline (per slot) so
+        make_room can demote lane N-1 while lane N loads."""
         from .runtimes.server import ServerHandle
 
         try:
@@ -1446,6 +1604,8 @@ class Executor:
             hints = {}
         kwargs: Dict[str, Any] = {}
         loaded: Dict[str, Tuple[Any, int]] = {}
+        result = _InjectionResult(kwargs=kwargs, loaded=loaded)
+        share_plan = self._component_share_plan(spec, paths, hints)
         if server is not None:
             for pname, ann in hints.items():
                 if ann is ServerHandle:
@@ -1463,35 +1623,6 @@ class Executor:
                 binding = spec.models.get(slot)
                 dtype = str(getattr(binding, "dtype", "") or "")
                 storage_dtype = str(getattr(binding, "storage_dtype", "") or "")
-                before = self._vram_allocated()
-                try:
-                    pipe = await asyncio.to_thread(
-                        load_from_pretrained, ann, path, dtype=dtype,
-                        storage_dtype=storage_dtype,
-                    )
-                except Exception as exc:
-                    # Corruption-shaped load failure (gw#408): digest-verify
-                    # the snapshot; quarantine + re-materialize + retry ONCE
-                    # when corruption is confirmed, re-raise otherwise.
-                    fresh: Optional[Path] = None
-                    if binding is not None and _is_corrupt_load_error(exc):
-                        ref = wire_ref(binding)
-                        fresh = await self.store.refetch_corrupt(
-                            ref, (snapshots or {}).get(ref), binding=binding
-                        )
-                    if fresh is None:
-                        raise
-                    logger.warning(
-                        "weights load for slot %r failed on a corrupt snapshot "
-                        "(%s: %s); retrying once after re-materialization",
-                        slot, type(exc).__name__, exc,
-                    )
-                    path = str(fresh)
-                    paths[slot] = path
-                    pipe = await asyncio.to_thread(
-                        load_from_pretrained, ann, path, dtype=dtype,
-                        storage_dtype=storage_dtype,
-                    )
                 # Worker-owned placement/offload policy: one decider for the
                 # whole worker; endpoints never write device/offload code.
                 # Plan-time offload verdicts and the learned degraded floor
@@ -1508,6 +1639,63 @@ class Executor:
                 floor = self.degraded_floor.get(ref, "")
                 if floor:
                     mode = deeper_offload_mode("" if mode == "auto" else mode, floor)
+                slot_share = dict((share_plan or {}).get(slot) or {})
+                if slot_share and mode != "auto":
+                    # Offload hooks on a shared module would poison sibling
+                    # lanes; a planned-offload record loads monolithically.
+                    logger.warning(
+                        "content-keyed sharing disabled for %s slot %s: "
+                        "placement mode %s", spec.name, slot, mode)
+                    slot_share = {}
+                res = self.store.residency
+                injected: Dict[str, Any] = {}
+                if slot_share:
+                    valid = self._model_index_components(path)
+                    for comp, key in list(slot_share.items()):
+                        if comp not in valid:
+                            del slot_share[comp]
+                            continue
+                        if res.shared_obj(key) is not None:
+                            injected[comp] = res.acquire_shared(
+                                key, _shared_loader_must_hit)
+                            result.shared_keys.append(key)
+                    # Exclusive-weights headroom BEFORE the load: demote idle
+                    # LRU lanes now so placement never has to walk the
+                    # offload ladder mid-lane (dual-resident when the budget
+                    # admits, swap-mode otherwise — existing make_room path).
+                    sizes = self.store.component_sizes(ref)
+                    excl_bytes = sum(
+                        b for comp, b in sizes.items() if comp not in injected)
+                    if excl_bytes > 0:
+                        await asyncio.to_thread(res.make_room, excl_bytes)
+                before = self._vram_allocated()
+                try:
+                    pipe = await asyncio.to_thread(
+                        load_from_pretrained, ann, path, dtype=dtype,
+                        storage_dtype=storage_dtype, components=injected,
+                    )
+                except Exception as exc:
+                    # Corruption-shaped load failure (gw#408): digest-verify
+                    # the snapshot; quarantine + re-materialize + retry ONCE
+                    # when corruption is confirmed, re-raise otherwise.
+                    fresh: Optional[Path] = None
+                    if binding is not None and _is_corrupt_load_error(exc):
+                        fresh = await self.store.refetch_corrupt(
+                            ref, (snapshots or {}).get(ref), binding=binding
+                        )
+                    if fresh is None:
+                        raise
+                    logger.warning(
+                        "weights load for slot %r failed on a corrupt snapshot "
+                        "(%s: %s); retrying once after re-materialization",
+                        slot, type(exc).__name__, exc,
+                    )
+                    path = str(fresh)
+                    paths[slot] = path
+                    pipe = await asyncio.to_thread(
+                        load_from_pretrained, ann, path, dtype=dtype,
+                        storage_dtype=storage_dtype, components=injected,
+                    )
                 placed = await asyncio.to_thread(place_pipeline, pipe, mode=mode, ref=ref)
                 if placed.get("oom_demotions"):
                     self._record_demotion(
@@ -1517,6 +1705,11 @@ class Executor:
                         needed_gb=estimate_pipeline_size_gb(pipe),
                         detail="CUDA OOM at load; pipeline placed offloaded",
                     )
+                if slot_share and str(placed.get("mode") or "") not in ("", "off", "cpu"):
+                    raise RetryableError(
+                        f"lane {slot!r} of {spec.name} placed "
+                        f"{placed.get('mode')!r}: shared-component lanes "
+                        "require resident placement; retrying")
                 if spec.compile is not None:
                     # Opt-in acceleration against a pre-built per-SKU artifact:
                     # a TRT engine (#390, refit with this pipeline's weights)
@@ -1525,11 +1718,71 @@ class Executor:
                     await asyncio.to_thread(
                         self._enable_compiled, pipe, spec.compile, compile_artifact,
                     )
-                loaded[slot] = (pipe, max(0, self._vram_allocated() - before))
+                delta = max(0, self._vram_allocated() - before)
+                if slot_share:
+                    lane_obj, lane_bytes = self._register_lane(
+                        slot, ref, pipe, slot_share, injected, delta, result)
+                    loaded[slot] = (lane_obj, lane_bytes)
+                    result.lane_slots.add(slot)
+                else:
+                    loaded[slot] = (pipe, delta)
                 kwargs[slot] = pipe
             else:
                 kwargs[slot] = path
-        return kwargs, loaded
+        return result
+
+    def _register_lane(
+        self,
+        slot: str,
+        ref: str,
+        pipe: Any,
+        slot_share: Dict[str, Any],
+        injected: Dict[str, Any],
+        delta: int,
+        result: "_InjectionResult",
+    ) -> Tuple[Any, int]:
+        """Book one lane's residency (gw#479): freshly loaded shared
+        components go into the content-keyed cache (VRAM counted once, held
+        by refcount); the lane's own entry is its EXCLUSIVE module set, so
+        LRU demote/promote swaps only lane-owned weights (the transformer),
+        never the shared encoder."""
+        import torch.nn as nn
+
+        res = self.store.residency
+        fresh_bytes = 0
+        for comp, key in slot_share.items():
+            if comp in injected:
+                continue
+            module = getattr(pipe, comp, None)
+            if module is None:
+                continue
+            measured = 0
+            if isinstance(module, nn.Module):
+                measured = int(estimate_cuda_resident_gb(module) * _GiB)
+            res.acquire_shared(key, lambda m=module: m, vram_bytes=measured)
+            result.shared_keys.append(key)
+            fresh_bytes += measured
+        comps = getattr(pipe, "components", None) or {}
+        exclusive = {
+            name: m for name, m in comps.items()
+            if isinstance(m, nn.Module) and name not in slot_share
+        }
+        lane_obj: Any = nn.ModuleDict(exclusive) if exclusive else pipe
+        lane_bytes = max(0, delta - fresh_bytes)
+        result.shared_bytes += fresh_bytes
+        logger.info(
+            "lane %s (%s): exclusive %s (%.2f GiB), shared %s (%.2f GiB %s)",
+            slot, ref, sorted(exclusive) or ["<none>"], lane_bytes / _GiB,
+            sorted(slot_share), fresh_bytes / _GiB,
+            "fresh" if fresh_bytes else "reused",
+        )
+        if lane_bytes > 0:
+            res.track_vram(ref, lane_obj, vram_bytes=lane_bytes)
+        elif int(estimate_cuda_resident_gb(lane_obj) * _GiB) > 0:
+            res.track_vram(ref, lane_obj)
+        else:
+            res.track_ram(ref, lane_obj)
+        return lane_obj, lane_bytes
 
     def _enable_compiled(self, pipe: Any, cfg: Any, artifact: Optional[Path]) -> bool:
         """Arm the best available compiled path for a freshly loaded pipeline:
@@ -1851,6 +2104,13 @@ class Executor:
         for s in rec.specs:
             for b in s.models.values():
                 self.store.residency.release_to_disk(wire_ref(b))
+        if rec.shared_keys:
+            # Drop this record's holds on content-keyed shared components
+            # (gw#479); entries no other record references get evicted.
+            for key in rec.shared_keys:
+                self.store.residency.release_shared(key)
+            rec.shared_keys.clear()
+            self.store.residency.drain_shared()
         self._on_state_change()
 
     async def _unload_ref(self, ref: str) -> None:
@@ -1940,25 +2200,52 @@ class Executor:
 
     # ---- job execution -----------------------------------------------------
 
+    def _routed_slots(self, spec: EndpointSpec, payload: Any) -> List[str]:
+        """Model slots this request needs (gw#479). Classes without route=
+        use every declared slot (single-lane behavior, unchanged)."""
+        if spec.route is None or spec.cls is None:
+            return list(spec.models)
+        try:
+            routed = [str(s) for s in spec.route(payload)]
+        except Exception as exc:
+            raise ValidationError(
+                f"route() for {spec.name} failed: {exc}") from exc
+        unknown = [s for s in routed if s not in spec.models]
+        if unknown or not routed:
+            raise ValidationError(
+                f"route() for {spec.name} returned {routed!r}; declared model "
+                f"slots are {sorted(spec.models)}")
+        return routed
+
     async def _run_job(self, job: _Job, run: pb.RunJob) -> None:
         spec = job.spec
         assert spec is not None
-        # Pin this job's model refs for its WHOLE lifetime (gw#409): the gap
-        # between ensure_setup's promote and the execution-time pin let a
-        # concurrent job's make_room demote a just-promoted pipeline. Refs
-        # without entries yet are no-ops; the inner pin still covers adapters.
-        with self.store.residency.executing(*(wire_ref(b) for b in spec.models.values())):
-            await self._run_job_pinned(job, run)
-
-    async def _run_job_pinned(self, job: _Job, run: pb.RunJob) -> None:
-        spec = job.spec
-        assert spec is not None
-        concurrency_at_start = len(self.in_flight_keys()) - 1
+        # Decode BEFORE pinning: payload-driven routing (gw#479) decides which
+        # lanes this job pins/promotes — pinning an idle lane would block the
+        # make_room swap that promoting the routed lane needs.
         try:
             payload = msgspec.msgpack.decode(run.input_payload, type=spec.payload_type)
         except (msgspec.ValidationError, msgspec.DecodeError) as exc:
             await self._finish(job, pb.JOB_STATUS_INVALID, safe_message=_sanitize(str(exc)))
             return
+        try:
+            routed = self._routed_slots(spec, payload)
+        except ValidationError as exc:
+            await self._finish(job, pb.JOB_STATUS_INVALID, safe_message=_sanitize(str(exc)))
+            return
+        # Pin this job's model refs for its WHOLE lifetime (gw#409): the gap
+        # between ensure_setup's promote and the execution-time pin let a
+        # concurrent job's make_room demote a just-promoted pipeline. Refs
+        # without entries yet are no-ops; the inner pin still covers adapters.
+        with self.store.residency.executing(*(wire_ref(spec.models[s]) for s in routed)):
+            await self._run_job_pinned(job, run, payload, routed)
+
+    async def _run_job_pinned(
+        self, job: _Job, run: pb.RunJob, payload: Any, routed: List[str]
+    ) -> None:
+        spec = job.spec
+        assert spec is not None
+        concurrency_at_start = len(self.in_flight_keys()) - 1
 
         snapshots = dict(run.snapshots) if run.snapshots else {}
         compute = run.compute if run.HasField("compute") else None
@@ -2037,7 +2324,7 @@ class Executor:
             # Typed media inputs: URL-ref Assets (hub-approved remote media)
             # are downloaded and given a local_path before the handler runs.
             await asyncio.to_thread(materialize_input_assets, payload, run.request_id)
-            instance = await self.ensure_setup(spec, snapshots)
+            instance = await self.ensure_setup(spec, snapshots, promote_slots=routed)
             kwargs = await self._handler_kwargs(spec, snapshots)
             adapters = await self._prepare_adapters(run, spec, snapshots)
         except asyncio.CancelledError:
@@ -2072,8 +2359,9 @@ class Executor:
                     raise CanceledError("canceled")
             started = time.monotonic()
             # Pin-while-executing: the models (and adapter snapshots) this job
-            # uses are not eviction candidates for its duration.
-            exec_refs = [wire_ref(b) for b in spec.models.values()]
+            # uses are not eviction candidates for its duration. Routed lanes
+            # only (gw#479): an idle lane must stay demotable.
+            exec_refs = [wire_ref(spec.models[s]) for s in routed]
             adapter_refs = [a.ref for group in adapters.values() for a in group]
             with self.store.residency.executing(*exec_refs, *adapter_refs):
                 active: List[Tuple[str, Any]] = []
