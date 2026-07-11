@@ -166,3 +166,32 @@ def test_too_large_refused() -> None:
             sizes={"transformer/x.safetensors": 200 * 1024 * 1024 * 1024},
         )
     assert exc.value.reason == "too_large"
+
+
+def test_hf_multi_weight_bundle_opts_out_of_layout_contract(tmp_path, monkeypatch) -> None:
+    """chatterbox regression (ie#368): HF multi-component single-file repos
+    (t3/s3gen/ve) must publish with library_name unset, mirroring the civitai
+    branch (e2e #112) — tensorhub finalize rejects diffusers/single-file
+    manifests carrying multiple distinct weights."""
+    from pathlib import Path
+
+    from gen_worker.convert import ingest as ing
+    from gen_worker.convert.classifier import classify_repo
+
+    paths = ["t3_cfg.safetensors", "s3gen.safetensors", "ve.safetensors", "tokenizer.json"]
+    sizes = {p: 2 * 1024**3 for p in paths if p.endswith(".safetensors")}
+    classification = classify_repo(paths, sizes=sizes)
+    assert classification.strategy == "aio_singlefile"
+    plan = ing.HFSourcePlan(
+        repo_id="ResembleAI/chatterbox", revision="deadbeef", paths=paths,
+        sizes=sizes, side={}, classification=classification, content_ids={})
+
+    def fake_dl(repo_id, rev, dest, *, allow_patterns, **kw):
+        for p in allow_patterns:
+            (Path(dest) / p).write_bytes(b"x")
+
+    monkeypatch.setattr(ing, "_snapshot_download_with_retries", fake_dl)
+    monkeypatch.setattr(ing, "install_hf_http_timeouts", lambda: None)
+    src = ing.ingest_huggingface("ResembleAI/chatterbox", tmp_path / "d", plan=plan)
+    assert src.repo_spec["library_name"] == ""
+    assert src.metadata["multi_weight_bundle"] == "true"
