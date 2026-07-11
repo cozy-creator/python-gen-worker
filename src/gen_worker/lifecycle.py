@@ -242,7 +242,7 @@ class Lifecycle:
                 recommended_vram_gb=float(plan.recommended_vram_gb or 0.0),
             )))
 
-    async def set_phase(self, phase: int) -> None:
+    async def set_phase(self, phase: "pb.WorkerPhase") -> None:
         if phase == self.phase:
             return
         self.phase = phase
