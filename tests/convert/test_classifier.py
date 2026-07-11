@@ -195,3 +195,32 @@ def test_hf_multi_weight_bundle_opts_out_of_layout_contract(tmp_path, monkeypatc
     src = ing.ingest_huggingface("ResembleAI/chatterbox", tmp_path / "d", plan=plan)
     assert src.repo_spec["library_name"] == ""
     assert src.metadata["multi_weight_bundle"] == "true"
+
+
+def test_gguf_multiquant_repo_size_gate_on_selected_set() -> None:
+    """gw#483: the too_large gate applies to the SELECTED quant, not the
+    whole multi-quant repo (unsloth repos total 100s of GB; one quant ~18GB)."""
+    gib = 1024 * 1024 * 1024
+    files = [f"m-{q}.gguf" for q in (
+        "Q2_K", "Q3_K_M", "Q4_K_M", "Q5_K_M", "Q6_K", "Q8_0",
+        "UD-Q4_K_XL", "UD-Q8_K_XL",
+    )] + ["mmproj-F16.gguf", "README.md"]
+    sizes = {p: 20 * gib for p in files if p.endswith(".gguf")}
+    c = classify_repo(files, sizes=sizes, gguf_quant="UD-Q4_K_XL")
+    assert c.strategy == "gguf"
+    assert [p for p in c.allow_patterns if p.endswith(".gguf")] == ["m-UD-Q4_K_XL.gguf"]
+    # 20GiB selected << 160GiB repo total: must NOT refuse.
+    assert c.attrs["dtype"] == "gguf:ud-q4_k_xl"
+
+    # A single selected gguf above the threshold still refuses.
+    with pytest.raises(RepoRefusal) as exc:
+        classify_repo(
+            ["huge-Q8_0.gguf"], sizes={"huge-Q8_0.gguf": 200 * gib})
+    assert exc.value.reason == "too_large"
+
+
+def test_gguf_ud_and_iquant_tokens_labeled() -> None:
+    c = classify_repo(["Qwen3.6-27B-UD-Q4_K_XL.gguf"])
+    assert c.attrs["dtype"] == "gguf:ud-q4_k_xl"
+    c2 = classify_repo(["model-IQ4_XS.gguf"])
+    assert c2.attrs["dtype"] == "gguf:iq4_xs"
