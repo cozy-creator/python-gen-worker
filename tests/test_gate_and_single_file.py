@@ -31,7 +31,7 @@ class _Out(msgspec.Struct):
     y: str
 
 
-def _spec(name: str, vram_gb: float) -> EndpointSpec:
+def _spec(name: str, vram_gb: float, *, strict_vram: bool = False) -> EndpointSpec:
     class Endpoint:
         def setup(self, model: str) -> None:  # pragma: no cover
             pass
@@ -43,7 +43,7 @@ def _spec(name: str, vram_gb: float) -> EndpointSpec:
         name=name, method=Endpoint.run, kind="inference",
         payload_type=_In, output_mode="single", cls=Endpoint,
         attr_name="run", models={"model": HF("acme/tiny")},
-        resources=Resources(vram_gb=vram_gb),
+        resources=Resources(vram_gb=vram_gb, strict_vram=strict_vram),
     )
 
 
@@ -64,8 +64,7 @@ def test_gate_accepts_card_of_exactly_recommended_size() -> None:
 def test_gate_serves_bigger_model_via_runtime_quant_rungs() -> None:
     """th#683 P3: a model bigger than the card is NOT refused on the hint — it
     serves via the runtime quant rungs (on-GPU: fp8-E4M3 storage when the
-    halved estimate fits, else the emergency 4-bit rung), regardless of the
-    CPU-offload veto (neither is CPU-touching)."""
+    halved estimate fits, else the emergency 4-bit rung)."""
     # 32 GB on a 24 GB card: 32*0.55=17.6 fits ~24 free -> fp8 storage rung.
     ex = Executor([_spec("needs-32", 32.0)], _noop_send)
     ex.gate_functions({"gpu_count": 1, "gpu_total_mem": RTX_4090_TOTAL_BYTES, "gpu_sm": "89"})
@@ -86,20 +85,11 @@ def test_gate_serves_bigger_model_via_runtime_quant_rungs() -> None:
     assert plan.warning
 
 
-def test_gate_offload_only_model_forbidden_here(monkeypatch) -> None:
-    """A model so large even 4-bit won't fit needs CPU/disk offload. On a box
-    that forbids CPU-touching placement it is unserveable HERE (belongs on the
-    GPU lane) — with a distinct reason, never a silent 'too big'."""
-    monkeypatch.setenv("GEN_WORKER_FORBID_CPU_OFFLOAD", "1")
-    ex = Executor([_spec("huge", 64.0)], _noop_send)
-    ex.gate_functions({"gpu_count": 1, "gpu_total_mem": RTX_4090_TOTAL_BYTES, "gpu_sm": "89"})
-    assert ex.unavailable["huge"][0] == "offload_forbidden"
-
-
-def test_gate_offload_only_model_serves_when_allowed(monkeypatch) -> None:
-    """The same too-large model serves via CPU/disk offload when offload is
-    allowed (the production/GPU-lane case): fit over speed, never refused."""
-    monkeypatch.delenv("GEN_WORKER_FORBID_CPU_OFFLOAD", raising=False)
+def test_gate_offload_only_model_serves_by_default() -> None:
+    """Paul's ruling 2026-07-10: a model so large even 4-bit won't fit needs
+    CPU/disk offload — and it SERVES (degraded) by default. No env/box veto
+    marks it unserveable; the FnDegraded signal lets the orchestrator move it
+    to a bigger card."""
     ex = Executor([_spec("huge", 64.0)], _noop_send)
     ex.gate_functions({"gpu_count": 1, "gpu_total_mem": RTX_4090_TOTAL_BYTES, "gpu_sm": "89"})
     assert "huge" not in ex.unavailable
@@ -108,11 +98,18 @@ def test_gate_offload_only_model_serves_when_allowed(monkeypatch) -> None:
     assert plan.est_latency_multiplier > 1.0 and plan.warning
 
 
-def test_gate_cpu_only_fallback_when_no_gpu(monkeypatch) -> None:
+def test_gate_offload_only_model_refused_under_strict_vram() -> None:
+    """The author opt-out: strict_vram=True refuses rather than serving via
+    the CPU-touching offload rung — reported as an insufficient_vram gate."""
+    ex = Executor([_spec("huge", 64.0, strict_vram=True)], _noop_send)
+    ex.gate_functions({"gpu_count": 1, "gpu_total_mem": RTX_4090_TOTAL_BYTES, "gpu_sm": "89"})
+    assert ex.unavailable["huge"][0] == "insufficient_vram"
+
+
+def test_gate_cpu_only_fallback_when_no_gpu() -> None:
     """th#683 P3 CPU-only ultimate fallback: with no GPU, a GPU function is
-    offered on CPU (very slow) behind a warning when allowed, and refused with
-    a distinct reason only when CPU inference is forbidden here."""
-    monkeypatch.delenv("GEN_WORKER_FORBID_CPU_OFFLOAD", raising=False)
+    offered on CPU (very slow) behind a warning by default, and refused with a
+    distinct reason only when the author opts out via strict_vram."""
     ex = Executor([_spec("needs-24", 24.0)], _noop_send)
     ex.gate_functions({"gpu_count": 0, "gpu_total_mem": 0, "gpu_sm": ""})
     assert "needs-24" not in ex.unavailable
@@ -120,8 +117,7 @@ def test_gate_cpu_only_fallback_when_no_gpu(monkeypatch) -> None:
     assert plan.serveable and plan.run_mode == "cpu"
     assert plan.est_latency_multiplier >= 10.0 and plan.warning
 
-    monkeypatch.setenv("GEN_WORKER_FORBID_CPU_OFFLOAD", "1")
-    ex2 = Executor([_spec("needs-24", 24.0)], _noop_send)
+    ex2 = Executor([_spec("needs-24", 24.0, strict_vram=True)], _noop_send)
     ex2.gate_functions({"gpu_count": 0, "gpu_total_mem": 0, "gpu_sm": ""})
     assert ex2.unavailable["needs-24"][0] == "cuda_unavailable"
 

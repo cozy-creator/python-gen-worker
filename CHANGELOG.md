@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.13.14 (2026-07-10)
+
+- **Remove the CPU-offload serveability veto — a worker runs DEGRADED, never
+  refuses (Paul's ruling 2026-07-10).** `plan_serve`/`gate_functions` no
+  longer consult `GEN_WORKER_FORBID_CPU_OFFLOAD` to mark a function
+  unserveable: a function that only fits via CPU/disk offload (or CPU-only)
+  now SERVES degraded and reports `FnDegraded`, instead of gating off with
+  `offload_forbidden`/`cuda_unavailable`. Gen workers don't offload because
+  we want them to — they do it out of necessity; better to run degraded than
+  not run at all. The orchestrator hears every degraded serve and owns moving
+  the release to a bigger card (tensorhub th#208 → active reschedule).
+  - `Resources(strict_vram=True)` is the sole opt-out (salvaged from gw#139):
+    an AUTHOR who would rather refuse than serve slowly (compiled fixed-shape
+    graphs, TensorRT engines). It skips only the CPU-touching rungs
+    (offload / cpu); the on-GPU runtime rungs (fp8 storage, emergency 4-bit)
+    still serve.
+  - **Box protection preserved.** `GEN_WORKER_FORBID_CPU_OFFLOAD=1` still
+    raises at actual pipeline PLACEMENT time (`memory.place_pipeline` /
+    `apply_low_vram_config`) — the dev-box kill-switch that stops a
+    directly-invoked local worker from melting this shared box with real
+    CPU-offloaded inference. Its meaning narrows from "refuse to serve" to
+    "refuse to actually place real weights on CPU". The orchestrated path is
+    covered by tensorhub's th#657 local-provider capability gate.
+  - Supersedes gw#139 (veto-removal). Complements the merged gw#463
+    (0.13.11, reactive OOM demotion): the plan-time veto is gone AND a
+    runtime CUDA OOM still demotes down the same ladder.
+
 ## 0.13.13 (2026-07-10)
 
 - **gw#464 follow-up: checkpoint-key translation works on transformers 4.x.**

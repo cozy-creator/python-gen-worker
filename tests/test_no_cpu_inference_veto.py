@@ -1,4 +1,13 @@
-"""GEN_WORKER_FORBID_CPU_OFFLOAD=1 vetoes any placement that touches the CPU."""
+"""GEN_WORKER_FORBID_CPU_OFFLOAD=1 is the dev-box kill-switch: it raises at
+actual pipeline PLACEMENT time when real weights are about to touch the CPU.
+
+Post Paul's ruling (2026-07-10) it no longer affects SERVE PLANNING — a worker
+never refuses to advertise a function just because it would need offload (it
+runs degraded and reports FnDegraded). This last-resort guard stays only to
+protect a directly-invoked local worker on this shared box from melting it
+with real CPU-offloaded inference; the orchestrated path is covered by the
+th#657 capability gate. Unset everywhere in production.
+"""
 
 from __future__ import annotations
 

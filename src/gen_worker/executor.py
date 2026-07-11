@@ -868,9 +868,13 @@ class Executor:
         gate a function off; everything else is an ADAPTIVE FIT: the function
         serves by the best available means (native -> runtime fp8 storage ->
         emergency 4-bit -> CPU/disk offload -> CPU-only) and records an honest
-        advisory. A function is only unserveable when the sole way to run it
-        here is a CPU-touching placement this box forbids
-        (GEN_WORKER_FORBID_CPU_OFFLOAD=1 — those runs belong on the GPU lane).
+        advisory. Needing offload/CPU is NEVER a refusal (Paul's ruling
+        2026-07-10: gen workers offload out of necessity, not preference —
+        better to run degraded than not run). The only opt-out is the
+        author's own ``Resources(strict_vram=True)`` for bindings that
+        cannot tolerate CPU-resident weights. Every degraded serve is
+        reported structurally (FnDegraded) so the orchestrator can move the
+        release to a bigger card.
         """
         from .models.hub_policy import FIT_INCOMPATIBLE, TensorhubWorkerCapabilities
         from .models.serve_fit import RUN_CPU, RUN_OFFLOAD, plan_serve
@@ -914,10 +918,11 @@ class Executor:
             plan = plan_serve(r, caps, free_vram_gb, binding=primary)
             self.serve_plans[name] = plan
             if not plan.serveable:
-                if plan.run_mode == RUN_CPU:
-                    code = "cuda_unavailable"
-                elif plan.run_mode == RUN_OFFLOAD:
-                    code = "offload_forbidden"
+                if plan.run_mode in (RUN_CPU, RUN_OFFLOAD):
+                    # The author's strict_vram opt-out of the CPU-touching
+                    # rungs: on a GPU-less host that reads as no-CUDA, on a
+                    # too-small card as a VRAM shortfall.
+                    code = "cuda_unavailable" if plan.run_mode == RUN_CPU else "insufficient_vram"
                 elif plan.fit == FIT_INCOMPATIBLE:
                     # A stored flavor outside its hardware window (fp8 /
                     # nvfp4 / svdq SM gates, quant stack pins).

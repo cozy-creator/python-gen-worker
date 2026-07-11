@@ -19,9 +19,14 @@ means and is HONEST about the trade. The full ladder, best-first:
 
 A function is UNSERVEABLE only when a genuine incompatibility bars it (compute
 capability / required quant library / a stored flavor outside its SM window)
-OR the only way to run it here is a CPU-touching placement that this box
-forbids (GEN_WORKER_FORBID_CPU_OFFLOAD=1 — those runs belong on the GPU lane /
-the right rented card). It is never refused on hardware inadequacy alone.
+OR the author opted out of the CPU-touching rungs with
+``Resources(strict_vram=True)`` (a binding that cannot tolerate CPU-resident
+weights — compiled fixed-shape graphs, TRT engines — and would rather refuse
+than serve slowly). It is never refused on hardware inadequacy alone: gen
+workers don't offload to CPU because we want them to, they do it out of
+necessity — better to run degraded than not run at all (Paul's ruling,
+2026-07-10). The orchestrator hears about every degraded serve (FnDegraded)
+and owns moving the workload to a bigger card.
 
 Selection ACROSS stored flavors stays upstream: the registry pre-expands
 ``variants={}`` into separate routable per-flavor functions, this planner
@@ -55,7 +60,6 @@ from .hub_policy import (
     TensorhubWorkerCapabilities,
     variant_fit,
 )
-from .memory import cpu_offload_forbidden
 
 # Run modes, cheapest(fastest)-first. Mirrors the profiling.RunMode vocabulary
 # on the hub side so the two speak the same language.
@@ -113,34 +117,30 @@ def plan_serve(
     free_vram_gb: float,
     *,
     binding: Any = None,
-    forbid_cpu_offload: Optional[bool] = None,
 ) -> ServePlan:
     """Decide how one function serves on the actual card. Never refuses on the
-    recommended-VRAM hint alone.
-
-    ``forbid_cpu_offload`` defaults to the live env predicate; pass explicitly
-    in tests.
+    recommended-VRAM hint alone; ``Resources(strict_vram=True)`` is the sole
+    author opt-out of the CPU-touching rungs (offload / cpu).
     """
-    if forbid_cpu_offload is None:
-        forbid_cpu_offload = cpu_offload_forbidden()
-
     recommended = getattr(resources, "vram_gb", None)
     needs_gpu = bool(getattr(resources, "gpu", False))
+    strict_vram = bool(getattr(resources, "strict_vram", False))
     wanted = _wanted(binding)
 
     verdict, detail = variant_fit(resources, caps, free_vram_gb, binding=binding)
 
-    # No CUDA GPU present. variant_fit calls this incompatible; P3 turns it into
-    # a CPU-only rung (offered behind the forbid guard + a loud warning).
+    # No CUDA GPU present. variant_fit calls this incompatible; P3 turns it
+    # into a CPU-only rung (behind a loud warning) unless the author opted
+    # out of CPU-resident weights entirely.
     if verdict == FIT_INCOMPATIBLE and needs_gpu and caps.gpu_sm <= 0:
-        if forbid_cpu_offload:
+        if strict_vram:
             return ServePlan(
                 serveable=False,
                 run_mode=RUN_CPU,
                 fit=FIT_INCOMPATIBLE,
                 reason=(
-                    "no GPU and CPU inference is forbidden here "
-                    "(GEN_WORKER_FORBID_CPU_OFFLOAD=1); run on a GPU host"
+                    "no GPU here and the author requires full VRAM residency "
+                    "(strict_vram=True); run on a GPU host"
                 ),
                 recommended_vram_gb=recommended,
                 wanted=wanted,
@@ -190,14 +190,15 @@ def plan_serve(
         run_mode = RUN_EMERGENCY
     else:
         run_mode = RUN_OFFLOAD
-    if run_mode == RUN_OFFLOAD and forbid_cpu_offload:
+    if run_mode == RUN_OFFLOAD and strict_vram:
         return ServePlan(
             serveable=False,
             run_mode=RUN_OFFLOAD,
             fit=verdict,
             reason=(
-                "only runs via CPU/disk offload here, which is forbidden "
-                "(GEN_WORKER_FORBID_CPU_OFFLOAD=1); run on a larger card / GPU lane"
+                "only runs via CPU/disk offload here and the author requires "
+                "full VRAM residency (strict_vram=True); run on a card with "
+                + (f"~{recommended:.0f} GB" if recommended else "more VRAM")
             ),
             recommended_vram_gb=recommended,
             wanted=wanted,
