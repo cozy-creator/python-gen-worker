@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
+
+from ..config import get_settings
 
 
 TENSORHUB_CACHE_DIR = "/tmp/tensorhub-cache"
@@ -16,8 +17,8 @@ def tensorhub_cache_dir() -> Path:
     (weights survive reboots) instead of ``/tmp``. Falls back to the ``/tmp``
     default when unset, preserving existing worker/orchestrator behavior.
     """
-    env = os.environ.get("TENSORHUB_CACHE_DIR")
-    if env and env.strip():
+    env = get_settings().tensorhub_cache_dir.strip()
+    if env:
         return Path(env).expanduser()
     return Path(TENSORHUB_CACHE_DIR)
 

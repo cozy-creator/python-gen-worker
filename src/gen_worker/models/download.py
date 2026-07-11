@@ -25,14 +25,13 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
+from ..config import get_settings
 from .cache_paths import tensorhub_cas_dir
 from .refs import HuggingFaceRef, TensorhubRef, parse_model_ref
 
 logger = logging.getLogger("gen_worker.download")
 
 ProgressFn = Callable[[int, Optional[int]], None]
-
-_DEFAULT_MAX_REPO_BYTES = 60_000_000_000  # COZY_HF_MAX_REPO_BYTES overrides
 
 # ---------------------------------------------------------------------------
 # Provider index: bare ref string -> provider. Built once at boot from the
@@ -220,7 +219,7 @@ async def ensure_local(
             download_civitai,
             version_id,
             base / "civitai" / str(version_id),
-            api_key=civitai_api_key or os.getenv("CIVITAI_API_KEY", "") or os.getenv("CIVITAI_TOKEN", ""),
+            api_key=civitai_api_key or get_settings().civitai_api_key,
             progress=progress,
         )
 
@@ -364,23 +363,11 @@ def _match_allow_patterns(repo_files: Sequence[str], patterns: Sequence[str]) ->
 
 
 def _hf_stall_timeout_s() -> float:
-    raw = os.environ.get("COZY_HF_DOWNLOAD_STALL_TIMEOUT_S", "").strip()
-    if raw:
-        try:
-            return max(0.0, float(raw))
-        except ValueError:
-            pass
-    return 180.0
+    return max(0.0, get_settings().hf_download_stall_timeout_s)
 
 
 def _hf_wallclock_max_s() -> float:
-    raw = os.environ.get("COZY_HF_DOWNLOAD_MAX_SECONDS", "").strip()
-    if raw:
-        try:
-            return max(0.0, float(raw))
-        except ValueError:
-            pass
-    return 0.0
+    return max(0.0, get_settings().hf_download_max_seconds)
 
 
 class DownloadStalledError(RuntimeError):
@@ -554,10 +541,7 @@ def download_hf(
         }
         wanted = selected if selected is not None else set(repo_files)
         total_hint = sum(sizes.get(p, 0) for p in wanted)
-        try:
-            cap = int(os.getenv("COZY_HF_MAX_REPO_BYTES", "").strip() or _DEFAULT_MAX_REPO_BYTES)
-        except ValueError:
-            cap = _DEFAULT_MAX_REPO_BYTES
+        cap = get_settings().hf_max_repo_bytes
         if cap > 0 and total_hint > cap:
             raise RuntimeError(
                 f"refusing an excessively large Hugging Face selection for {repo_id}: "

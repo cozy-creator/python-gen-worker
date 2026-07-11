@@ -117,8 +117,8 @@ class Lifecycle:
             gpu_name=str(hw.get("gpu_name") or ""),
             gpu_sm=str(hw.get("gpu_sm") or ""),
             installed_libs=[str(x) for x in (hw.get("installed_libs") or [])],
-            image_digest=os.environ.get("WORKER_IMAGE_DIGEST", ""),
-            git_commit=os.environ.get("WORKER_GIT_COMMIT", ""),
+            image_digest=self._settings.worker_image_digest,
+            git_commit=self._settings.worker_git_commit,
             instance_id=self._settings.runpod_pod_id or "",
         )
 

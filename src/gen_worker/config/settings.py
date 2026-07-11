@@ -55,3 +55,36 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     # shutdown-coordination protocol. Default 600s = 10 min. gen-orchestrator
     # issue #317.
     worker_disconnected_timeout_s: int = 600
+
+    # Provenance stamped into WorkerResources by the image build / launcher.
+    worker_image_digest: str = ""  # WORKER_IMAGE_DIGEST
+    worker_git_commit: str = ""    # WORKER_GIT_COMMIT
+
+    # tensorhub access for standalone clients (run/serve/prefetch). Production
+    # workers get orchestrator-resolved manifests and never dial these.
+    tensorhub_url: str = ""        # TENSORHUB_URL
+    tensorhub_token: str = ""      # TENSORHUB_TOKEN
+    # CAS/cache roots. cache_dir moves the whole tensorhub cache off /tmp
+    # (cozy local persists weights across reboots); cas_dir points standalone
+    # resolve at an explicit CAS root.
+    tensorhub_cache_dir: str = ""  # TENSORHUB_CACHE_DIR
+    tensorhub_cas_dir: str = ""    # TENSORHUB_CAS_DIR
+
+    # Civitai provider credential (CIVITAI_API_KEY, alias CIVITAI_TOKEN).
+    civitai_api_key: str = ""
+
+    # HF snapshot-download guards (#379): stall window (no byte progress),
+    # optional wall-clock cap (0 = off), and the accidental-huge-repo cap
+    # (0 = off).
+    hf_download_stall_timeout_s: float = 180.0  # COZY_HF_DOWNLOAD_STALL_TIMEOUT_S
+    hf_download_max_seconds: float = 0.0        # COZY_HF_DOWNLOAD_MAX_SECONDS
+    hf_max_repo_bytes: int = 60_000_000_000     # COZY_HF_MAX_REPO_BYTES
+
+    # Residency caps for LoRA adapters left attached between requests.
+    attached_lora_max: int = 8                       # GEN_WORKER_ATTACHED_LORA_MAX
+    attached_lora_max_bytes: int = 2 * 1024**3       # GEN_WORKER_ATTACHED_LORA_MAX_BYTES
+
+    # torch.compile cache artifact sources (gw#384) + cold-compile opt-in.
+    compile_cache_path: str = ""    # GEN_WORKER_COMPILE_CACHE
+    compile_cache_url: str = ""     # GEN_WORKER_COMPILE_CACHE_URL
+    compile_allow_cold: bool = False  # GEN_WORKER_COMPILE_ALLOW_COLD

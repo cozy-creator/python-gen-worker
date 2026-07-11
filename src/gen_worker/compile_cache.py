@@ -52,6 +52,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
+from .config import get_settings
+
 logger = logging.getLogger(__name__)
 
 ENV_CACHE_PATH = "GEN_WORKER_COMPILE_CACHE"       # local artifact (tar) or seeded dir
@@ -451,8 +453,9 @@ def prepare(
     ``GEN_WORKER_COMPILE_CACHE_URL``. Returns the artifact metadata on a
     verified hit (cache dirs seeded), else None with the reason logged.
     """
-    local = (os.getenv(ENV_CACHE_PATH) or "").strip()
-    url = (os.getenv(ENV_CACHE_URL) or "").strip()
+    settings = get_settings()
+    local = settings.compile_cache_path.strip()
+    url = settings.compile_cache_url.strip()
     root = Path(cache_dir) if cache_dir else Path.home() / ".cache" / "gen-worker"
     root = root / "compile-cache"
     try:
@@ -558,12 +561,20 @@ def _guarded_regional(mod: Any, original: Callable[..., Any], label: str) -> Cal
     return wrapper
 
 
-def apply(pipeline: Any, cfg: Any, *, cache_ready: bool, guard: bool = True) -> bool:
+def apply(
+    pipeline: Any,
+    cfg: Any,
+    *,
+    cache_ready: bool,
+    guard: bool = True,
+    allow_cold: Optional[bool] = None,
+) -> bool:
     """Wrap ``cfg.targets`` on ``pipeline`` with compiled callables.
 
     Only compiles when a verified cache artifact was seeded (``cache_ready``)
     or the process explicitly opted into cold compilation AND has a C
-    toolchain. Anything else is a logged no-op — eager, never a stall.
+    toolchain (``allow_cold``; defaults to the GEN_WORKER_COMPILE_ALLOW_COLD
+    setting). Anything else is a logged no-op — eager, never a stall.
 
     ``guard=True`` (consumer): a failing compiled call permanently unwraps to
     eager. ``guard=False`` (compile job): failures must raise, a silently
@@ -579,7 +590,8 @@ def apply(pipeline: Any, cfg: Any, *, cache_ready: bool, guard: bool = True) -> 
         logger.info("compile-cache: no CUDA; staying eager")
         return False
     if not cache_ready:
-        allow_cold = (os.getenv(ENV_ALLOW_COLD) or "").strip().lower() in ("1", "true", "yes")
+        if allow_cold is None:
+            allow_cold = get_settings().compile_allow_cold
         if not allow_cold:
             logger.info("compile-cache: no verified cache artifact; staying eager")
             return False
@@ -825,8 +837,10 @@ def build(
     placed = place_pipeline(pipe)
     if callable(getattr(pipe, "set_progress_bar_config", None)):
         pipe.set_progress_bar_config(disable=True)
+    # Child processes (inductor compile workers) inherit the opt-in; this
+    # process opts in explicitly via the `allow_cold` param.
     os.environ[ENV_ALLOW_COLD] = "1"
-    if not apply(pipe, cfg, cache_ready=False, guard=False):
+    if not apply(pipe, cfg, cache_ready=False, guard=False, allow_cold=True):
         raise RuntimeError(f"no compile targets resolved on {type(pipe).__name__}")
 
     timings: Dict[str, float] = {}
