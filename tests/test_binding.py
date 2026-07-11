@@ -37,7 +37,7 @@ def test_kw_metadata_normalized_and_frozen() -> None:
         b.dtype = "fp16"  # frozen
 
     hub = Hub("o/r", tag="", flavor=" nf4 ")
-    assert hub.tag == "prod"
+    assert hub.tag == "latest"  # the grammar default (gw#492)
     assert hub.flavor == "nf4"
 
 

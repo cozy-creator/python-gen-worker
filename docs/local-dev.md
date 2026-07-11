@@ -101,7 +101,7 @@ gen-worker run --payload '{
 # Structured form.
 gen-worker run --payload '{
   "prompt": "x",
-  "_models": {"pipe": {"ref": "other/repo", "tag": "prod", "flavor": "bf16"}}
+  "_models": {"pipe": {"ref": "other/repo", "tag": "latest", "flavor": "bf16"}}
 }'
 ```
 

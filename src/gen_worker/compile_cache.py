@@ -140,24 +140,34 @@ def system_repo(family: str) -> str:
     return f"_system/family-{fam}"
 
 
+def parse_cell_ref(ref: str) -> Tuple[str, str]:
+    """(family, flavor) from a system cell ref
+    (``_system/family-<f>[:tag][@digest][#<flavor>]``) via the ONE ref
+    grammar (gw#492); ('', '') when the ref is not a system-family ref."""
+    from .models.refs import parse_model_ref
+
+    try:
+        parsed = parse_model_ref(str(ref or ""))
+    except ValueError:
+        return "", ""
+    th = parsed.tensorhub
+    if th is None or th.owner != "_system" or not th.repo.startswith("family-"):
+        return "", ""
+    return th.repo[len("family-"):], th.flavor or ""
+
+
 def family_from_ref(ref: str) -> str:
-    """Family encoded in a compile-cache ref
-    (``_system/family-<f>[:tag][@digest][#inductor-...]``); '' when the ref
-    is not a compile-cache ref."""
-    repo = str(ref or "").split("#", 1)[0].split("@", 1)[0].split(":", 1)[0]
-    owner, _, name = repo.partition("/")
-    if owner == "_system" and name.startswith("family-"):
-        return name[len("family-"):]
-    return ""
+    """Family encoded in a compile-cache ref; '' when the ref is not a
+    system-family cell ref."""
+    return parse_cell_ref(ref)[0]
 
 
 def is_cache_ref(ref: str, family: str = "") -> bool:
     """True when ``ref`` names an inductor compile-cache cell (optionally of
     one specific family)."""
-    fam = family_from_ref(ref)
+    fam, flavor = parse_cell_ref(ref)
     if not fam or (family and fam != family):
         return False
-    flavor = ref.split("#", 1)[1] if "#" in ref else ""
     return flavor.startswith("inductor-")
 
 
@@ -886,6 +896,7 @@ __all__ = [
     "counters_delta",
     "enable",
     "family_from_ref",
+    "parse_cell_ref",
     "find_artifact",
     "flavor_label",
     "gen_worker_version",

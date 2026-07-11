@@ -64,7 +64,7 @@ shorthand, the `setup()` parameter name). It is never a constructor argument.
 
 ```python
 HF("owner/repo", revision=..., dtype=..., subfolder=..., files=(...), storage_dtype=...)
-Hub("owner/repo", tag="prod", flavor="", storage_dtype="")   # tensorhub
+Hub("owner/repo", tag="latest", flavor="", storage_dtype="")  # tensorhub
 Civitai("123456", version="789")             # civitai model id
 ModelScope("owner/repo", revision=..., files=(...))
 ```

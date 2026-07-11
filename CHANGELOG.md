@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.14.1 (2026-07-11)
+
+- **gw#492: ONE ref normal form.** `gen_worker.models.refs` is now the single
+  formatter/parser surface for model-ref strings. Normal form = minimal
+  grammar string: `:latest` (the grammar default) elided, every other tag —
+  including `prod` — stamped verbatim. New: `format_model_ref`,
+  `normalize_model_ref`, `fold_ref` (grammar-correct twin of tensorhub's
+  `ModelRefWithTagFlavor`), `flavor_token` (the ONE gw#488 colon-hygiene
+  site), `WireRef` NewType. `Hub` default tag is `latest` (was `prod`, which
+  silently resolved as latest — an explicit `tag="prod"` now addresses a real
+  prod tag); discovery elides the default tag at the manifest boundary so
+  hub-minted keep/routing refs stay byte-equal to worker wire refs.
+  `Hub(x)` and `Hub(x, tag="latest")` are now ONE residency/GC identity.
+  Deleted: `download._binding_canonical_ref`, the provider-index tag-strip
+  hack (index re-keyed: exact normal form + repo-identity fallback),
+  hand-rolled cell-ref parsing in compile_cache/trt_engine (now
+  `parse_cell_ref` via `parse_model_ref`), 3 inline `.replace(":", "-")`
+  copies. Shared grammar vectors gain `canonical` normal-form fields +
+  `:latest`/`:prod` vectors (tensorhub copy sync = filed follow-up).
+  Grep-guard `tests/test_ref_normal_form.py` rejects new ad-hoc grammar
+  sites; round-trip vector test pins `format(parse(s))`.
+
 ## 0.13.25 (2026-07-11)
 
 - **gw#479: content-keyed shared components + transformer lanes.**

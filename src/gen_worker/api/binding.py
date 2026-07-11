@@ -53,14 +53,14 @@ class Hub:
     PROVIDER: ClassVar[str] = "tensorhub"
 
     ref: str
-    tag: str = "prod"
+    tag: str = "latest"
     flavor: str = ""
     storage_dtype: str = ""
     allow_lora: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "ref", _clean(self.ref))
-        object.__setattr__(self, "tag", _clean(self.tag) or "prod")
+        object.__setattr__(self, "tag", _clean(self.tag) or "latest")
         object.__setattr__(self, "flavor", _clean(self.flavor))
         object.__setattr__(self, "storage_dtype", _clean_storage_dtype(self.storage_dtype))
         object.__setattr__(self, "allow_lora", bool(self.allow_lora))
@@ -169,21 +169,22 @@ BINDING_TYPES: tuple[type, ...] = (Hub, HF, Civitai, ModelScope)
 
 
 def wire_ref(binding: Binding) -> str:
-    """Canonical ref string for the wire / cache key.
+    """Normal-form ref string for the wire / cache key — delegates to the ONE
+    grammar module (``gen_worker.models.refs``, gw#492).
 
-    Hub refs carry ``:tag`` (non-prod) and ``#flavor`` suffixes; HF refs
-    carry ``@revision``. Load-time metadata (dtype/subfolder/files/
-    storage_dtype) never enters the ref.
+    Hub refs carry ``:tag`` (elided when ``latest``, the grammar default) and
+    ``#flavor`` suffixes; HF refs carry ``@revision``. Load-time metadata
+    (dtype/subfolder/files/storage_dtype) never enters the ref.
     """
-    out = binding.ref
+    from ..models.refs import HuggingFaceRef, fold_ref
+
     if isinstance(binding, Hub):
-        if binding.tag and binding.tag != "prod":
-            out = f"{out}:{binding.tag}"
-        if binding.flavor:
-            out = f"{out}#{binding.flavor}"
-    elif isinstance(binding, HF) and binding.revision:
-        out = f"{out}@{binding.revision}"
-    return out
+        # The default tag never overrides one embedded in ``ref``.
+        tag = binding.tag if binding.tag != "latest" else ""
+        return fold_ref(binding.ref, tag=tag, flavor=binding.flavor)
+    if isinstance(binding, HF):
+        return HuggingFaceRef(binding.ref, binding.revision or None).canonical()
+    return binding.ref
 
 
 __all__ = [

@@ -280,7 +280,11 @@ def _binding_to_manifest(binding: Binding, param_name: str = "") -> Dict[str, An
         "ref": binding.ref,
     }
     if isinstance(binding, Hub):
-        out["tag"] = binding.tag
+        # Normal form (gw#492): the default tag ('latest') is elided at the
+        # manifest boundary so hub-minted keep/routing refs stay byte-equal
+        # to worker-minted wire refs (Go folds a non-empty tag verbatim).
+        if binding.tag and binding.tag != "latest":
+            out["tag"] = binding.tag
         if binding.flavor:
             out["flavor"] = binding.flavor
         if binding.allow_lora:
