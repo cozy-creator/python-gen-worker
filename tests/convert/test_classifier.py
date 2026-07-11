@@ -198,7 +198,7 @@ def test_hf_multi_weight_bundle_opts_out_of_layout_contract(tmp_path, monkeypatc
 
 
 def test_gguf_multiquant_repo_size_gate_on_selected_set() -> None:
-    """gw#480: the too_large gate applies to the SELECTED quant, not the
+    """gw#483: the too_large gate applies to the SELECTED quant, not the
     whole multi-quant repo (unsloth repos total 100s of GB; one quant ~18GB)."""
     gib = 1024 * 1024 * 1024
     files = [f"m-{q}.gguf" for q in (
