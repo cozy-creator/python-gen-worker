@@ -729,8 +729,21 @@ def _loader_key_translator(model: Any) -> Any:
             WeightRenaming,
             rename_source_key,
         )
-    except ImportError:  # older transformers: keys match the graph directly
-        return lambda k: k
+    except ImportError:
+        # transformers 4.x: the mapping is a class attr of regex->replacement
+        # pairs, applied by from_pretrained via re.sub in order.
+        import re as _re
+
+        mapping = getattr(type(model), "_checkpoint_conversion_mapping", None)
+        if not mapping:
+            return lambda k: k
+
+        def translate_4x(key: str) -> str:
+            for pat, repl in mapping.items():
+                key = _re.sub(pat, repl, key)
+            return key
+
+        return translate_4x
     try:
         transforms = get_model_conversion_mapping(model)
     except Exception:  # noqa: BLE001
