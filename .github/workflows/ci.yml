@@ -39,6 +39,16 @@ jobs:
       - name: HTTP timeout guard (gw#467)
         run: uv run python scripts/lint_http_timeouts.py
 
+      # Pinned CPU build so the gw#402 llama.cpp runtime tests exercise the
+      # real llama-server codepath (tests skip when the binary is absent).
+      - name: Install llama-server (pinned, CPU)
+        run: |
+          curl -sSL --retry 3 -o /tmp/llama.tgz \
+            https://github.com/ggml-org/llama.cpp/releases/download/b9964/llama-b9964-bin-ubuntu-x64.tar.gz
+          tar xzf /tmp/llama.tgz -C "$HOME"
+          echo "$HOME/llama-b9964" >> "$GITHUB_PATH"
+          echo "LD_LIBRARY_PATH=$HOME/llama-b9964" >> "$GITHUB_ENV"
+
       - name: Run tests
         run: uv run pytest tests/ -v
 
