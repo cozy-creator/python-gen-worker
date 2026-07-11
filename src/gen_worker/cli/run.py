@@ -648,8 +648,8 @@ def _resolve_local_path(
             # Best-effort: check the HF cache (huggingface_hub manages this
             # itself; a cache hit returns a path, miss raises).
             try:
-                from huggingface_hub import snapshot_download as _hf_snap
-                p = _hf_snap(
+                from ..net import hf
+                p = hf().snapshot_download(
                     repo_id=parsed.hf.repo_id,
                     revision=parsed.hf.revision,
                     local_files_only=True,

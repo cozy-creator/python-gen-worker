@@ -119,11 +119,11 @@ def fetch_svdq_checkpoint(
     hf_token: Optional[str] = None,
 ) -> Path:
     """Download ONE nunchaku checkpoint file from an HF repo (mirror lane)."""
-    from huggingface_hub import hf_hub_download
+    from ..net import hf
 
     dest_dir = Path(dest_dir)
     dest_dir.mkdir(parents=True, exist_ok=True)
-    local = hf_hub_download(
+    local = hf().hf_hub_download(
         repo_id=repo_id,
         filename=filename,
         revision=revision,
