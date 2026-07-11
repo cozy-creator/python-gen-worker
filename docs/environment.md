@@ -72,5 +72,6 @@ this page covers the worker itself.
 - `COZY_CONVERT_WORKDIR` / `_DISK_HEADROOM` / `_SCRATCH_TTL_S` /
   `_RETAIN_WORKDIR` — convert-job scratch knobs set by the invoking harness
   (`convert/clone.py`).
-- `GEN_WORKER_FORBID_CPU_OFFLOAD` — live CPU-placement veto; removal owned
-  by PR #139 (drop from the allowlist with it).
+- `GEN_WORKER_FORBID_CPU_OFFLOAD` — dev-box kill-switch: raises at real
+  pipeline placement time if weights would land on CPU (per-machine fact;
+  kept deliberately after gw#139's veto-removal was superseded).
