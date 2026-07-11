@@ -524,10 +524,9 @@ def test_compile_block_emits_video_shapes_and_storage_dtype() -> None:
             return _Out(result="")
 
     (entry,) = _extract_entries(Gen, "testmod")
-    (fn,) = entry["functions"]
-    assert fn["compile"]["shapes"] == [[960, 544, 241], [1920, 1088, 241], [1280, 704, 121]]
-    assert fn["compile"]["storage_dtype"] == "fp8"
-    assert fn["compile"]["targets"] == ["transformer"]
+    assert entry["compile"]["shapes"] == [[960, 544, 241], [1920, 1088, 241], [1280, 704, 121]]
+    assert entry["compile"]["storage_dtype"] == "fp8"
+    assert entry["compile"]["targets"] == ["transformer"]
 
 
 def test_compile_block_omits_storage_dtype_for_bf16_bindings() -> None:
@@ -547,8 +546,7 @@ def test_compile_block_omits_storage_dtype_for_bf16_bindings() -> None:
             return _Out(result="")
 
     (entry,) = _extract_entries(Gen, "testmod")
-    (fn,) = entry["functions"]
-    assert "storage_dtype" not in fn["compile"]
+    assert "storage_dtype" not in entry["compile"]
 
 
 def test_allow_lora_binding_emits_flag_and_family() -> None:
