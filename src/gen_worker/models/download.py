@@ -20,6 +20,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -645,31 +646,83 @@ def fetch_civitai_model_version(version_id: int, *, api_key: str = "") -> dict[s
     return _civitai_get_json(f"{_CIVITAI_API}/model-versions/{int(version_id)}", api_key)
 
 
-def _civitai_select_files(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Downloadable safetensors files of a model version, primary first."""
-    out: list[dict[str, Any]] = []
+def _civitai_file_entry(raw: Mapping[str, Any]) -> dict[str, Any]:
+    size = raw.get("sizeBytes")
+    if not isinstance(size, int) or size <= 0:
+        kb = raw.get("sizeKB")
+        size = int(float(kb) * 1024) if isinstance(kb, (int, float)) and kb > 0 else 0
+    hashes = raw.get("hashes") if isinstance(raw.get("hashes"), Mapping) else {}
+    meta = raw.get("metadata") if isinstance(raw.get("metadata"), Mapping) else {}
+    return {
+        "id": int(raw.get("id") or 0),
+        "name": Path(str(raw.get("name") or "").strip()).name,
+        "url": str(raw.get("downloadUrl") or raw.get("download_url") or "").strip(),
+        "size_bytes": int(size),
+        "sha256": str((hashes or {}).get("SHA256") or "").strip().lower(),
+        "primary": bool(raw.get("primary")),
+        "quant_type": str((meta or {}).get("quantType") or "").strip().lower(),
+    }
+
+
+# Servable-first gguf quant preference (mirrors gen_worker.convert.classifier
+# _GGUF_QUANT_PREFERENCE; duplicated to avoid a models→convert import cycle).
+_CIVITAI_GGUF_QUANT_PREFERENCE = (
+    "q8_0", "q6_k", "q5_k_m", "q5_k_s", "q4_k_m", "q4_k_s", "q4_0",
+    "q3_k_m", "q3_k_s", "q2_k", "f16", "bf16", "f32",
+)
+
+_CIVITAI_GGUF_QTYPE_RE = re.compile(r"(?:ud-)?(?:i?q\d[0-9a-z_]*|bf16|f16|f32)")
+
+
+def _civitai_gguf_quant_of(f: Mapping[str, Any]) -> str:
+    if f.get("quant_type"):
+        return str(f["quant_type"]).lower()
+    m = _CIVITAI_GGUF_QTYPE_RE.search(str(f.get("name") or "").lower())
+    return m.group(0) if m else ""
+
+
+def _civitai_select_files(
+    payload: Mapping[str, Any], *, gguf_quant: str | None = None,
+) -> list[dict[str, Any]]:
+    """Downloadable weight files of a model version, primary first.
+
+    Safetensors files win when present (unchanged behavior). GGUF-only
+    versions (th#611: klein/qwen fine-tunes published only as quants)
+    select exactly ONE gguf — civitai reuses a single filename across
+    quantType variants, so downloading several would collide on disk:
+    ``gguf_quant`` picks it explicitly, else the preference order applies.
+    """
+    st: list[dict[str, Any]] = []
+    gg: list[dict[str, Any]] = []
     for raw in payload.get("files") or []:
         if not isinstance(raw, Mapping):
             continue
-        name = str(raw.get("name") or "").strip()
-        url = str(raw.get("downloadUrl") or raw.get("download_url") or "").strip()
-        if not url or not name.lower().endswith(".safetensors"):
+        entry = _civitai_file_entry(raw)
+        if not entry["url"] or not entry["name"]:
             continue
-        size = raw.get("sizeBytes")
-        if not isinstance(size, int) or size <= 0:
-            kb = raw.get("sizeKB")
-            size = int(float(kb) * 1024) if isinstance(kb, (int, float)) and kb > 0 else 0
-        hashes = raw.get("hashes") if isinstance(raw.get("hashes"), Mapping) else {}
-        out.append({
-            "id": int(raw.get("id") or 0),
-            "name": Path(name).name,
-            "url": url,
-            "size_bytes": int(size),
-            "sha256": str((hashes or {}).get("SHA256") or "").strip().lower(),
-            "primary": bool(raw.get("primary")),
-        })
-    out.sort(key=lambda f: (0 if f["primary"] else 1, f["id"], f["name"]))
-    return out
+        lower = entry["name"].lower()
+        if lower.endswith(".safetensors"):
+            st.append(entry)
+        elif lower.endswith(".gguf"):
+            gg.append(entry)
+    if st:
+        st.sort(key=lambda f: (0 if f["primary"] else 1, f["id"], f["name"]))
+        return st
+    if not gg:
+        return []
+    gg.sort(key=lambda f: (f["id"], f["name"]))
+    if gguf_quant:
+        want = str(gguf_quant).strip().lower()
+        picked = [f for f in gg if want in (_civitai_gguf_quant_of(f) or "")
+                  or want in f["name"].lower()]
+        if not picked:
+            raise ValueError(f"civitai_gguf_quant_not_found: {want}")
+        return picked[:1]
+    for q in _CIVITAI_GGUF_QUANT_PREFERENCE:
+        picked = [f for f in gg if _civitai_gguf_quant_of(f) == q]
+        if picked:
+            return picked[:1]
+    return gg[:1]
 
 
 def _civitai_stream_one(
@@ -729,13 +782,14 @@ def download_civitai(
     *,
     api_key: str = "",
     progress: Optional[ProgressFn] = None,
+    gguf_quant: str | None = None,
 ) -> Path:
     """Blocking civitai model-version fetch (call via ``ensure_local`` /
-    ``asyncio.to_thread``). Downloads the version's safetensors files with
+    ``asyncio.to_thread``). Downloads the version's weight files with
     size + sha256 validation. Returns the single artifact path when the
     version has exactly one file, else the directory."""
     payload = fetch_civitai_model_version(version_id, api_key=api_key)
-    files = _civitai_select_files(payload)
+    files = _civitai_select_files(payload, gguf_quant=gguf_quant)
     if not files:
         raise ValueError("civitai_no_supported_files")
 

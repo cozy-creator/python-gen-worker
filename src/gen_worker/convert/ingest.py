@@ -288,7 +288,10 @@ def plan_huggingface(
     )
 
 
-def plan_civitai(model_version_id: int, *, civitai_api_key: str | None = None) -> CivitaiSourcePlan:
+def plan_civitai(
+    model_version_id: int, *, civitai_api_key: str | None = None,
+    gguf_quant: str | None = None,
+) -> CivitaiSourcePlan:
     """Fetch one civitai model version's metadata (no downloads)."""
     from gen_worker.models.download import _civitai_select_files, fetch_civitai_model_version
 
@@ -296,7 +299,7 @@ def plan_civitai(model_version_id: int, *, civitai_api_key: str | None = None) -
     if version_id <= 0:
         raise ValueError("civitai_model_version_id is required")
     payload = fetch_civitai_model_version(version_id, api_key=(civitai_api_key or ""))
-    files = _civitai_select_files(payload)
+    files = _civitai_select_files(payload, gguf_quant=gguf_quant)
     return CivitaiSourcePlan(
         version_id=version_id,
         payload=payload,
@@ -514,6 +517,7 @@ def ingest_civitai(
     *,
     civitai_api_key: str | None = None,
     progress: ProgressFn | None = None,
+    gguf_quant: str | None = None,
 ) -> IngestedSource:
     """Fetch one civitai model version into ``dest_dir`` (bounded provider API)."""
     from gen_worker.models.download import download_civitai, fetch_civitai_model_version
@@ -524,7 +528,8 @@ def ingest_civitai(
     payload = fetch_civitai_model_version(version_id, api_key=(civitai_api_key or ""))
 
     dest_dir = Path(dest_dir)
-    download_civitai(version_id, dest_dir, api_key=(civitai_api_key or ""), progress=progress)
+    download_civitai(version_id, dest_dir, api_key=(civitai_api_key or ""),
+                     progress=progress, gguf_quant=gguf_quant)
 
     files = sorted(p.name for p in dest_dir.iterdir() if p.is_file() and p.name != ".civitai.json")
     layout_info = detect_huggingface_source_layout(repo_dir=dest_dir, files=files)

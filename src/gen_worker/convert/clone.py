@@ -673,6 +673,7 @@ def run_clone(
                 plan = plan_civitai(
                     int(civitai_model_version_id or 0),
                     civitai_api_key=civitai_api_key,
+                    gguf_quant=gguf_quant,
                 )
         except Exception as exc:
             logger.warning(
@@ -728,6 +729,7 @@ def run_clone(
             source = ingest_civitai(
                 int(civitai_model_version_id or 0), workdir / "source",
                 civitai_api_key=civitai_api_key, progress=_dl_progress,
+                gguf_quant=gguf_quant,
             )
 
         _progress(0.5, "clone.convert")
@@ -946,6 +948,7 @@ def from_civitai(ctx: Any, payload: Any, *, civitai_api_key: str | None = None) 
         outputs=getattr(payload, "outputs", None),
         quantize_components=getattr(payload, "quantize_components", None),
         overwrite_repo=bool(getattr(payload, "overwrite_repo", False)),
+        gguf_quant=getattr(payload, "gguf_quant", None),
         civitai_api_key=civitai_api_key,
     )
 
