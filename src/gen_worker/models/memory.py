@@ -456,6 +456,41 @@ def _apply_vae_and_attention(pipeline: Any, applied: Dict[str, bool]) -> None:
         applied["attention_slicing"] = True
 
 
+def _dtype_fragile_vae(pipeline: Any) -> Optional[Any]:
+    """The pipeline's VAE when ``config.force_upcast`` is set (SDXL family).
+    Such a VAE mutates dtype at decode time (``upcast_vae`` -> fp32 -> back);
+    hook-managed weights miss the runtime cast and decode fatals with
+    Half/float mismatches (gw#441/gw#469). It must stay resident on the
+    execution device — never hook-managed by any offload rung."""
+    vae = getattr(pipeline, "vae", None)
+    if vae is None or not hasattr(vae, "parameters"):
+        return None
+    if bool(getattr(getattr(vae, "config", None), "force_upcast", False)):
+        return vae
+    return None
+
+
+def _pin_fragile_vae(pipeline: Any, applied: Dict[str, bool], log: logging.Logger) -> None:
+    """Keep a force_upcast VAE out of the diffusers CPU-offload hooks.
+    ``_exclude_from_cpu_offload`` is honored by BOTH the model and sequential
+    rungs, which move excluded components to the execution device
+    themselves."""
+    if _dtype_fragile_vae(pipeline) is None:
+        return
+    excl = list(getattr(pipeline, "_exclude_from_cpu_offload", None) or [])
+    if "vae" not in excl:
+        excl.append("vae")
+    try:
+        pipeline._exclude_from_cpu_offload = excl
+    except Exception:
+        return
+    applied["vae_resident"] = True
+    log.info(
+        "low_vram: force_upcast vae stays resident (excluded from offload "
+        "hooks — dtype-safety, gw#441/gw#469)"
+    )
+
+
 def _apply_group_offload(
     pipeline: Any,
     applied: Dict[str, bool],
@@ -478,10 +513,29 @@ def _apply_group_offload(
     if offload_to_disk_path:
         kwargs["offload_to_disk_path"] = offload_to_disk_path
 
+    fragile_vae = _dtype_fragile_vae(pipeline)
+
+    def _keep_vae_resident() -> None:
+        if fragile_vae is None:
+            return
+        try:
+            fragile_vae.to("cuda")
+        except Exception as exc:
+            _LOG.warning("low_vram: resident vae move failed: %s", exc)
+        applied["vae_resident"] = True
+        _LOG.info(
+            "low_vram: force_upcast vae stays resident under group offload "
+            "(dtype-safety, gw#441/gw#469)"
+        )
+
     fn = getattr(pipeline, "enable_group_offload", None)
     if callable(fn):
         try:
-            fn(**kwargs)
+            if fragile_vae is not None:
+                fn(**kwargs, exclude_modules=["vae"])
+            else:
+                fn(**kwargs)
+            _keep_vae_resident()
             applied["group_offload"] = True
             if offload_to_disk_path:
                 applied["disk_offload_path"] = True
@@ -498,6 +552,8 @@ def _apply_group_offload(
     for attr in ("transformer", "unet", "vae", "text_encoder", "text_encoder_2"):
         mod = getattr(pipeline, attr, None)
         if mod is None:
+            continue
+        if attr == "vae" and fragile_vae is not None:
             continue
         mod_fn = getattr(mod, "enable_group_offload", None)
         if callable(mod_fn):
@@ -521,6 +577,7 @@ def _apply_group_offload(
                 _LOG.debug("low_vram: apply_group_offloading(%s) failed: %s", attr, exc)
 
     if any_applied:
+        _keep_vae_resident()
         applied["group_offload"] = True
         if offload_to_disk_path:
             applied["disk_offload_path"] = True
@@ -686,6 +743,7 @@ def apply_low_vram_config(
             )
 
     if effective_mode == "model_offload":
+        _pin_fragile_vae(pipeline, applied, log)
         ok = _call_if_present(pipeline, "enable_model_cpu_offload")
         if not ok:
             try:
@@ -705,6 +763,7 @@ def apply_low_vram_config(
             effective_mode = "sequential"
 
     if effective_mode == "sequential":
+        _pin_fragile_vae(pipeline, applied, log)
         _move_pipeline_to_cpu(pipeline)
         flush_memory()
         ok = _call_if_present(pipeline, "enable_sequential_cpu_offload")

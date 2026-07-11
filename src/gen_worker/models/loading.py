@@ -592,9 +592,31 @@ def snapshot_weight_bytes(model_path: Path) -> int:
     return total
 
 
+def bitsandbytes_available() -> bool:
+    """Importability gate for the bnb-nf4 rung (gw#469): the quant config
+    constructs fine without bitsandbytes and the load then dies deep in
+    ``validate_environment`` (PackageNotFoundError -> setup_failed). An
+    unavailable rung must be SKIPPED, never attempted."""
+    import importlib.util
+    import sys
+
+    if "bitsandbytes" in sys.modules:
+        return True
+    try:
+        return importlib.util.find_spec("bitsandbytes") is not None
+    except (ImportError, ValueError):
+        return False
+
+
 def emergency_quantization_config(cls: Any) -> Optional[Any]:
     """Denoiser-scoped bnb-nf4 config for the emergency rung. None (with a
     warning) when the stack can't do it — the offload ladder then carries it."""
+    if not bitsandbytes_available():
+        logger.warning(
+            "emergency nf4 unavailable (bitsandbytes not installed in this "
+            "image); skipping the quantized rung — the offload ladder carries it"
+        )
+        return None
     try:
         import torch
 
@@ -771,6 +793,7 @@ __all__ = [
     "synthesize_quantization_config",
     "apply_fp8_storage",
     "emergency_quant_enabled",
+    "bitsandbytes_available",
     "runtime_fp8_storage_supported",
     "emergency_quantization_config",
     "snapshot_weight_bytes",

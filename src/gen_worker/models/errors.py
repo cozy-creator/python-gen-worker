@@ -12,4 +12,11 @@ class UrlExpiredError(RuntimeError):
         self.status_code = int(status_code)
 
 
-__all__ = ["UrlExpiredError"]
+class MissingSnapshotError(RuntimeError):
+    """A tensorhub-CAS ref cannot be materialized: no orchestrator-resolved
+    snapshot was provided, cached, or previously seen (gw#465). Deterministic
+    local condition — never retried worker-side; the orchestrator re-mints and
+    re-sends DOWNLOAD on ``ModelEvent{FAILED, error:"missing_snapshot"}``."""
+
+
+__all__ = ["UrlExpiredError", "MissingSnapshotError"]

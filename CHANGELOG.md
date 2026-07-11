@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.13.16 (2026-07-10)
+
+- **gw#465: boot-prefetch model-op batches no longer fail systematically.**
+  Three worker-side fixes for the paired `download_failed` (variant) +
+  `load_failed` (companion vae) signature seen on every J23 GPU worker:
+  - `ModelOp{LOAD}` no longer cascades: a LOAD for a shared companion ref
+    (one vae bound to every variant of a family) satisfied by a READY
+    instance just touches/promotes it — it never cold-sets-up sibling
+    variant specs. A cold LOAD sets up exactly ONE spec whose every slot is
+    materializable.
+  - The store remembers every digest-carrying snapshot per ref, so
+    snapshot-less ops (LOAD, companion-slot setups) can materialize refs the
+    hub already resolved. Stale URLs self-heal via the url_expired re-mint.
+  - A tensorhub ref with no snapshot anywhere is a deterministic local miss:
+    typed `MissingSnapshotError`, failed FAST (no DOWNLOADING ghost event, no
+    1s+4s retry burn — the observed ~5s failure) with its own contract
+    vocabulary `missing_snapshot` instead of a phantom `download_failed`;
+    the hub re-mints and re-sends DOWNLOAD (tensorhub-side handler), and the
+    function is never disabled by it.
+- **gw#469: unavailable ladder rungs are skipped, and no rung renders with
+  broken dtype.**
+  - The emergency bnb-nf4 rung is gated on bitsandbytes importability: absent
+    from the endpoint image -> the rung is SKIPPED with a logged reason (the
+    offload ladder carries the load), never attempted into a
+    `PackageNotFoundError` setup_failed.
+  - A `force_upcast` VAE (SDXL family) is never hook-managed by any offload
+    rung (gw#441): group offload excludes it (`exclude_modules`), the
+    model/sequential rungs exclude it via diffusers'
+    `_exclude_from_cpu_offload`; it stays resident on the execution device so
+    the pipeline's own upcast dance works — no more Half/float decode fatals.
+
 ## 0.13.15 (2026-07-10)
 
 - **fp8: SM-aware ladder ordering + remove the pre-Ada fp8 refuse-bug.**
