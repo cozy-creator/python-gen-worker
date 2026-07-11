@@ -37,6 +37,7 @@ from .memory import (
     flush_memory,
     get_available_ram_gb,
     get_total_ram_gb,
+    log_ram_budget_once,
     repair_device_placement,
 )
 
@@ -154,6 +155,7 @@ class Residency:
         self._lock = threading.RLock()
         self._shared_hits = 0
         self._shared_misses = 0
+        log_ram_budget_once(floor_gb=_effective_ram_floor_gb())
 
     # ---- events -------------------------------------------------------------
 

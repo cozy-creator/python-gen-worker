@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.13.23 (2026-07-11)
+
+- **th#721: adaptive RAM tier — host-RAM probes are cgroup-aware.**
+  `get_total_ram_gb` / `get_available_ram_gb` now return
+  min(/proc/meminfo, cgroup memory limit) via `probe_host_ram()` (cgroup v2
+  `memory.max` walked root→self, v1 `memory.limit_in_bytes` fallback).
+  RunPod containers see their real 31GB cgroup cap instead of the host's
+  62GB meminfo, so warm-tier admission (`make_room_ram`, size-aware demote
+  floor) spills pipelines to disk instead of the kernel SIGKILLing at the
+  ceiling (tensorhub ie#357, wan-2.2 VAE decode). A one-time `RAM_BUDGET=`
+  boot line names the derived budget, its source (cgroup vs meminfo), and
+  the floor.
+- **th#721: `memory_gb` removed from `ctx.compute`.** Host RAM is not
+  provider-selectable; the endpoint adapts to the RAM the pod delivers.
+
 ## 0.13.21 (2026-07-11)
 
 - **gw#468: env-gate sweep — every ambient worker knob reads through the typed
