@@ -86,8 +86,8 @@ def test_hf_ref_without_snapshot_stays_provider_direct(tmp_path: Path, monkeypat
     assert out == sentinel
 
 
-def test_tensorhub_ref_without_snapshot_is_retryable(tmp_path: Path) -> None:
-    from gen_worker.api.errors import RetryableError
+def test_tensorhub_ref_without_snapshot_is_missing_snapshot(tmp_path: Path) -> None:
+    from gen_worker.models.errors import MissingSnapshotError
 
-    with pytest.raises(RetryableError):
+    with pytest.raises(MissingSnapshotError):
         asyncio.run(ensure_local("acme/checkpoint", provider="tensorhub", cache_dir=tmp_path))

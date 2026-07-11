@@ -194,11 +194,12 @@ async def ensure_local(
         )
 
     if parsed.provider == "tensorhub" and parsed.tensorhub is not None:
-        # Hub-side residency bug (the orchestrator failed to pre-resolve),
-        # not bad client input — RETRYABLE, never a client-visible 400.
-        from ..api.errors import RetryableError
+        # The worker cannot resolve tensorhub-CAS refs itself (gw#465):
+        # typed + terminal so callers fail fast with "missing_snapshot"
+        # instead of burning retries on a deterministic local condition.
+        from .errors import MissingSnapshotError
 
-        raise RetryableError(
+        raise MissingSnapshotError(
             f"tensorhub ref {ref!r} needs an orchestrator-resolved snapshot "
             "and none was provided"
         )

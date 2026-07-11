@@ -49,8 +49,8 @@ from .models.memory import (
     is_cuda_oom,
 )
 from .models.cache_paths import tensorhub_cas_dir
-from .models.download import ensure_local
-from .models.errors import UrlExpiredError
+from .models.download import ensure_local, lookup_provider_for_ref
+from .models.errors import MissingSnapshotError, UrlExpiredError
 from .models.residency import Residency
 from .pb import worker_scheduler_pb2 as pb
 from .registry import EndpointSpec
@@ -232,6 +232,8 @@ def _model_op_error_vocab(exc: BaseException) -> str:
     """Contract §9 ModelEvent.error vocabulary for LOAD/UNLOAD failures."""
     if is_cuda_oom(exc):
         return "oom"
+    if isinstance(exc, MissingSnapshotError):
+        return "missing_snapshot"
     text = str(exc).lower()
     if "out of memory" in text or "cuda oom" in text:
         return "oom"
@@ -260,7 +262,7 @@ def _is_corrupt_load_error(exc: BaseException) -> bool:
 
 
 def _is_terminal_download_error(exc: BaseException) -> bool:
-    if isinstance(exc, (UrlExpiredError, InsufficientDiskError)):
+    if isinstance(exc, (UrlExpiredError, InsufficientDiskError, MissingSnapshotError)):
         return True
     status = getattr(exc, "status_code", None)
     if not isinstance(status, int):
@@ -318,6 +320,12 @@ class ModelStore:
         # (gw#408): a cached snapshot is re-verified on first use per process
         # so pod-churn corruption can never be trusted forever.
         self._verified: set[str] = set()
+        # Last digest-carrying snapshot seen per ref (gw#465): ModelOp{LOAD}
+        # and companion-slot setups arrive snapshot-less; without memory of
+        # the hub's earlier DOWNLOAD snapshot they cannot materialize
+        # tensorhub refs. Stale URLs self-heal: they fail url_expired and the
+        # hub re-mints.
+        self._snapshots: Dict[str, pb.Snapshot] = {}
 
     def _default_disk_free(self) -> int:
         p = Path(self._cache_dir)
@@ -369,6 +377,11 @@ class ModelStore:
 
     def local_path(self, ref: str) -> Optional[Path]:
         return self.residency.local_path(ref)
+
+    def has_snapshot(self, ref: str) -> bool:
+        """A digest-carrying snapshot for ``ref`` was seen this connection
+        (gw#465): snapshot-less ops for it can still materialize the bytes."""
+        return ref in self._snapshots
 
     # ---- disk retention (#370) ------------------------------------------------
 
@@ -462,6 +475,10 @@ class ModelStore:
         self.bind_loop()
         if binding is None:
             binding = self._bindings.get(ref)
+        if snapshot is not None and snapshot.digest and snapshot.files:
+            self._snapshots[ref] = snapshot
+        elif snapshot is None:
+            snapshot = self._snapshots.get(ref)
         async with self._lock(ref):
             cached = self.residency.local_path(ref)
             # A digest-carrying snapshot is authoritative: a cached
@@ -501,6 +518,24 @@ class ModelStore:
                 await self._ensure_disk_headroom(
                     ref, sum(int(f.size_bytes) for f in snapshot.files)
                 )
+            if snapshot is None or not snapshot.digest:
+                # Confident classification only (binding / boot provider
+                # index) — unknown refs still flow to the download layer's
+                # dispatch, which raises the same typed error terminally.
+                prov = (getattr(binding, "provider", None)
+                        or lookup_provider_for_ref(ref, default=""))
+                if prov == "tensorhub":
+                    # Deterministic local condition (gw#465): the worker
+                    # cannot resolve tensorhub-CAS refs itself. Fail fast
+                    # (no DOWNLOADING event, no retry burn) with its own
+                    # vocabulary so the hub re-mints instead of counting a
+                    # phantom download_failed.
+                    await self._event(ref, pb.MODEL_STATE_FAILED,
+                                      error="missing_snapshot")
+                    raise MissingSnapshotError(
+                        f"tensorhub ref {ref!r} needs an orchestrator-resolved "
+                        "snapshot and none was provided or previously seen"
+                    )
             last_progress = 0.0
 
             def _progress(done: int, total: Optional[int]) -> None:
@@ -644,6 +679,8 @@ class ModelStore:
 
     @staticmethod
     def _error_vocab(exc: BaseException) -> str:
+        if isinstance(exc, MissingSnapshotError):
+            return "missing_snapshot"
         if isinstance(exc, UrlExpiredError):
             return "url_expired"
         if isinstance(exc, InsufficientDiskError):
@@ -1030,9 +1067,10 @@ class Executor:
             return instance
 
     def _mark_setup_failed(self, rec: _ClassRecord, exc: BaseException) -> None:
-        if isinstance(exc, (InsufficientDiskError, RetryableError)):
-            # Transient pressure (disk GC frees space / warm-tier RAM drains):
-            # fail the op RETRYABLE, never disable the function.
+        if isinstance(exc, (InsufficientDiskError, RetryableError, MissingSnapshotError)):
+            # Transient pressure (disk GC frees space / warm-tier RAM drains /
+            # the hub re-mints a snapshot): fail the op RETRYABLE, never
+            # disable the function.
             return
         if isinstance(exc, HardwareUnmetError):
             reason = getattr(exc, "reason", "hardware_unmet")
@@ -1232,6 +1270,24 @@ class Executor:
             if await asyncio.to_thread(res.make_room, needed):
                 break
         self._on_state_change()
+
+    def _missing_slot_refs(
+        self, spec: EndpointSpec, snapshots: Optional[Dict[str, pb.Snapshot]]
+    ) -> set:
+        """Tensorhub setup-slot refs of ``spec`` the worker cannot materialize
+        right now: not on disk, no snapshot in this op, none remembered
+        (gw#465). Non-tensorhub slots self-fetch and never block."""
+        missing: set = set()
+        for slot in self._setup_slots(spec):
+            binding = spec.models[slot]
+            if getattr(binding, "provider", "tensorhub") != "tensorhub":
+                continue
+            r = wire_ref(binding)
+            if (self.store.local_path(r) is None
+                    and not (snapshots and r in snapshots)
+                    and not self.store.has_snapshot(r)):
+                missing.add(r)
+        return missing
 
     @staticmethod
     def _setup_slots(spec: EndpointSpec) -> List[str]:
@@ -1453,16 +1509,47 @@ class Executor:
                 await self.store.ensure_local(ref, snap)
             elif op.op == pb.MODEL_OP_KIND_LOAD:
                 await self.store.ensure_local(ref, snap)
-                loaded = False
                 snapshots = {ref: snap} if snap is not None else None
-                for spec in self.specs.values():
-                    if ref in (wire_ref(b) for b in spec.models.values()):
-                        await self.ensure_setup(spec, snapshots)
-                        loaded = True
-                if not loaded:
+                specs = [s for s in self.specs.values()
+                         if ref in (wire_ref(b) for b in s.models.values())]
+                if not specs:
                     # No endpoint binds this ref; nothing owns a VRAM load for it.
                     await self._send(pb.WorkerMessage(model_event=pb.ModelEvent(
                         ref=ref, state=pb.MODEL_STATE_FAILED, error="load_failed")))
+                    return
+                ready = [s for s in specs if self._classes[s.instance_key].ready]
+                if ready:
+                    # A resident instance already owns the ref: promote/touch it.
+                    # Never cold-set-up the OTHER specs sharing the ref — a
+                    # shared companion (one vae bound to every variant of a
+                    # family) would cascade one LOAD into loading every sibling
+                    # checkpoint (gw#465).
+                    for s in ready:
+                        await self.ensure_setup(s, snapshots)
+                else:
+                    target = next(
+                        (s for s in specs
+                         if not self._missing_slot_refs(s, snapshots)), None)
+                    if target is None:
+                        # Every candidate needs a sibling slot the worker cannot
+                        # materialize. Name the blockers so the hub re-mints and
+                        # re-sends DOWNLOAD for them, and fail THIS op with the
+                        # same vocabulary — never a phantom download_failed.
+                        blockers: set = set()
+                        for s in specs:
+                            blockers |= self._missing_slot_refs(s, snapshots)
+                        for m in sorted(blockers):
+                            logger.warning(
+                                "ModelOp LOAD %s deferred: sibling slot %s has "
+                                "no snapshot; reporting missing_snapshot", ref, m)
+                            await self._send(pb.WorkerMessage(model_event=pb.ModelEvent(
+                                ref=m, state=pb.MODEL_STATE_FAILED,
+                                error="missing_snapshot")))
+                        await self._send(pb.WorkerMessage(model_event=pb.ModelEvent(
+                            ref=ref, state=pb.MODEL_STATE_FAILED,
+                            error="missing_snapshot")))
+                        return
+                    await self.ensure_setup(target, snapshots)
             elif op.op == pb.MODEL_OP_KIND_UNLOAD:
                 if self._ref_in_use(ref):
                     await self._send(pb.WorkerMessage(model_event=pb.ModelEvent(

@@ -78,6 +78,8 @@ def fake_diffusers(monkeypatch: pytest.MonkeyPatch) -> types.ModuleType:
     monkeypatch.setitem(sys.modules, "diffusers", root)
     monkeypatch.setitem(sys.modules, "diffusers.quantizers", quantizers)
     monkeypatch.setitem(sys.modules, "diffusers.quantizers.quantization_config", qc_mod)
+    # the nf4 rung is gated on bitsandbytes availability (gw#469)
+    monkeypatch.setitem(sys.modules, "bitsandbytes", types.ModuleType("bitsandbytes"))
     return root
 
 
@@ -256,6 +258,29 @@ def test_nf4_rung_engages_when_even_fp8_estimate_cannot_fit(
     assert isinstance(qc, _FakePipelineQuantizationConfig)
     assert qc.quant_kwargs["bnb_4bit_quant_type"] == "nf4"
     assert pipe.transformer.casting_calls == []
+
+
+def test_nf4_rung_skipped_without_bitsandbytes(
+    fake_diffusers: Any, emergency_on: None, tmp_path: Path,
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """gw#469: bitsandbytes absent from the endpoint image — the nf4 rung is
+    SKIPPED with a logged reason (the offload ladder carries the load), never
+    attempted into a PackageNotFoundError setup_failed."""
+    import importlib.util
+    import sys
+
+    monkeypatch.delitem(sys.modules, "bitsandbytes", raising=False)
+    monkeypatch.setattr(importlib.util, "find_spec",
+                        lambda name, *a, **k: None if name == "bitsandbytes"
+                        else importlib.util._bootstrap._find_spec(name, None))
+    snap = _snapshot(tmp_path, "BF16", 20 << 30)  # nf4 territory (fp8 can't fit)
+    _Pipe.calls = []
+    with caplog.at_level("WARNING"):
+        load_from_pretrained(_Pipe, snap, dtype="bf16")
+    (kwargs,) = _Pipe.calls
+    assert "quantization_config" not in kwargs, "unavailable rung was attempted"
+    assert "bitsandbytes not installed" in caplog.text
 
 
 def test_emergency_rung_stays_out_without_cuda(
