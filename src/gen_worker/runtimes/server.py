@@ -150,33 +150,115 @@ def vllm_server(
     )
 
 
+class DegradingBoot:
+    """Try candidate server commands in order; first healthy one wins.
+
+    The llama.cpp fit ladder rides this: planned ``-ngl``, then half, then
+    CPU-only — a VRAM-tight boot degrades instead of crashing.
+    """
+
+    def __init__(self, candidates: Sequence[ServerProcess]) -> None:
+        if not candidates:
+            raise ValueError("DegradingBoot needs at least one candidate")
+        self.candidates = list(candidates)
+
+    def start(self) -> ServerHandle:
+        last: Optional[ServerBootError] = None
+        for proc in self.candidates:
+            try:
+                return proc.start()
+            except ServerBootError as exc:
+                last = exc
+                logger.warning("engine boot failed (%s); trying degraded rung", exc)
+        assert last is not None
+        raise last
+
+
+_NGL_FLAGS = {"-ngl", "--n-gpu-layers", "--gpu-layers"}
+_CTX_FLAGS = {"-c", "--ctx-size"}
+
+
 def llama_server(
-    gguf_path: str,
+    model_source: str,
     *,
     port: Optional[int] = None,
     extra_args: Sequence[str] = (),
     boot_timeout_s: float = _DEFAULT_BOOT_TIMEOUT_S,
-) -> ServerProcess:
-    """``llama-server -m <gguf>`` with the built-in /health endpoint."""
-    p = port or free_port()
-    return ServerProcess(
-        ["llama-server", "-m", gguf_path, "--host", "127.0.0.1",
-         "--port", str(p), *extra_args],
-        health_url=f"http://127.0.0.1:{p}/health",
-        base_url=f"http://127.0.0.1:{p}",
-        boot_timeout_s=boot_timeout_s,
-    )
+    vram_budget_gb: Optional[float] = None,
+    n_ctx: Optional[int] = None,
+):
+    """``llama-server -m <gguf>`` with the built-in /health endpoint.
+
+    ``model_source`` may be the ``.gguf`` file or a snapshot dir (the
+    Hub()-injected path) — dirs resolve to their single GGUF model. Unless
+    the caller pins ``-ngl``/``-c`` in ``extra_args``, ``-ngl`` and context
+    are sized to the free-VRAM budget (gw#402) and the boot degrades
+    through fewer GPU layers rather than failing.
+    """
+    from .llama import plan_for, resolve_gguf
+
+    gguf_path = str(resolve_gguf(model_source))
+    args = [str(a) for a in extra_args]
+
+    def _proc(fit_args: Sequence[str]) -> ServerProcess:
+        p = port or free_port()
+        return ServerProcess(
+            ["llama-server", "-m", gguf_path, "--host", "127.0.0.1",
+             "--port", str(p), *fit_args, *args],
+            health_url=f"http://127.0.0.1:{p}/health",
+            base_url=f"http://127.0.0.1:{p}",
+            boot_timeout_s=boot_timeout_s,
+        )
+
+    if any(a in _NGL_FLAGS for a in args):
+        return _proc(())
+    plan = plan_for(gguf_path, vram_budget_gb=vram_budget_gb, n_ctx=n_ctx)
+    if plan is None:
+        return _proc(())
+    ctx_args = [] if any(a in _CTX_FLAGS for a in args) else ["-c", str(plan.n_ctx)]
+    rungs = [plan.n_gpu_layers]
+    if plan.n_gpu_layers > 1:
+        rungs.append(plan.n_gpu_layers // 2)
+    if plan.n_gpu_layers > 0:
+        rungs.append(0)
+    candidates = [_proc(["-ngl", str(n), *ctx_args]) for n in rungs]
+    return candidates[0] if len(candidates) == 1 else DegradingBoot(candidates)
+
+
+def process_vram_bytes(pid: int) -> int:
+    """Measured VRAM of one process via nvidia-smi. 0 when unavailable —
+    engine subprocesses are invisible to torch's allocator, so residency
+    accounting for server runtimes books this number instead."""
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-compute-apps=pid,used_memory",
+             "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10, check=True,
+        ).stdout
+    except Exception:
+        return 0
+    total = 0
+    for line in out.splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) >= 2 and parts[0].isdigit() and int(parts[0]) == pid:
+            try:
+                total += int(parts[1]) * 1024 * 1024
+            except ValueError:
+                pass
+    return total
 
 
 RUNTIME_FACTORIES = {"vllm": vllm_server, "llama-server": llama_server}
 
 
 __all__ = [
+    "DegradingBoot",
     "RUNTIME_FACTORIES",
     "ServerBootError",
     "ServerHandle",
     "ServerProcess",
     "free_port",
     "llama_server",
+    "process_vram_bytes",
     "vllm_server",
 ]

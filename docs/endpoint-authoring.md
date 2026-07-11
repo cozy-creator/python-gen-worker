@@ -183,6 +183,15 @@ For multi-item binary streams yield `gen_worker.BatchItemDelta(index=,
 total=, item_id=, finished=, error=, chunk=, content_type=)` — no ad-hoc
 field names.
 
+Live deltas are droppable; the completed request keeps a terminal record:
+the worker folds every yielded delta into a `StreamResult` (`text`,
+per-`item_id` `texts`, batch `items`, `usage`) and serializes it as the
+request's output, so a client that never attached to the stream still
+retrieves the result. Token endpoints should yield one
+`gen_worker.TokenUsage(prompt_tokens=, completion_tokens=,
+tokens_per_second=)` at the end of the stream — billing reads it from the
+terminal `StreamResult.usage`.
+
 ## Engine-hosted runtimes
 
 `@endpoint(runtime="vllm")` (or `"llama-server"`) makes the worker boot the
@@ -200,6 +209,38 @@ class Chat:
 ```
 
 The worker aborts the boot on failure and stops the server at teardown.
+
+### llama.cpp / GGUF
+
+For `runtime="llama-server"` the bound snapshot may be the `.gguf` file or
+a dir holding exactly one GGUF model (split shards count as one; several
+quants fail closed — pin the flavor). Unless `-ngl`/`-c` are pinned in
+`extra_args`, the worker reads the GGUF header and sizes `-ngl` + context
+to the free-VRAM budget, degrading through fewer GPU layers (down to
+CPU-only) instead of failing the boot. The serve image provides the
+`llama-server` binary (native-build image class); gen-worker adds no
+Python binding dependency.
+
+`gen_worker.runtimes.llama` has the streaming client half —
+`chat_deltas(server, messages, ...)` / `completion_deltas(server, prompt,
+...)` are sync generators yielding `IncrementalTokenDelta` then one
+`TokenUsage`, so a handler is one `yield from`:
+
+```python
+from gen_worker.runtimes.llama import chat_deltas
+from gen_worker.runtimes.server import ServerHandle
+
+@endpoint(model=Hub("org/llm-gguf"), resources=Resources(vram_gb=24),
+          runtime="llama-server")
+class Chat:
+    def setup(self, model: str, server: ServerHandle) -> None:
+        self.server = server
+
+    def chat(self, ctx, p: ChatIn) -> Iterator[IncrementalTokenDelta]:
+        yield from chat_deltas(self.server, p.messages,
+                               max_tokens=p.max_tokens,
+                               cancelled=lambda: ctx.cancelled)
+```
 
 ## RequestContext
 

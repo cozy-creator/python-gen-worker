@@ -31,7 +31,14 @@ from .api.errors import (
     RetryableError,
     ValidationError,
 )
-from .api.streaming import BatchItemDelta, Done, Error, IncrementalTokenDelta
+from .api.streaming import (
+    BatchItemDelta,
+    Done,
+    Error,
+    IncrementalTokenDelta,
+    StreamAccumulator,
+    StreamResult,
+)
 from .api.types import Compute, MediaAsset
 from .capability import HardwareUnmetError, InsufficientDiskError
 from .input_assets import cleanup_input_assets, materialize_input_assets
@@ -209,52 +216,6 @@ def _output_media_seconds(output: Any) -> float:
         elif isinstance(item, msgspec.Struct):
             stack.extend(getattr(item, f, None) for f in item.__struct_fields__)
     return total
-
-
-class _StreamAccumulator:
-    """gw#475: collect stream deltas into the terminal output.
-
-    ``IncrementalTokenDelta`` texts concatenate into ``{"text": ...}``;
-    ``BatchItemDelta`` chunks accumulate per (item_id, index) and each
-    finished item lands in ``{"items": [...]}`` (text/* content decoded to
-    str so the JSON surfaces stay lossless). Other yielded structs are
-    stream-only, as before.
-    """
-
-    def __init__(self) -> None:
-        self._text: List[str] = []
-        self._items: List[Dict[str, Any]] = []
-        self._chunks: Dict[Tuple[Optional[str], int], bytearray] = {}
-
-    def add(self, item: Any) -> None:
-        if isinstance(item, IncrementalTokenDelta):
-            if item.text:
-                self._text.append(item.text)
-            return
-        if isinstance(item, BatchItemDelta):
-            key = (item.item_id, item.index)
-            buf = self._chunks.setdefault(key, bytearray())
-            buf += item.chunk
-            if item.finished or item.error:
-                content: Any = bytes(buf)
-                if item.content_type.startswith("text/"):
-                    content = content.decode("utf-8", errors="replace")
-                self._items.append({
-                    "index": item.index,
-                    "item_id": item.item_id,
-                    "content_type": item.content_type,
-                    "content": content,
-                    "error": item.error,
-                })
-                self._chunks.pop(key, None)
-
-    def result(self) -> Optional[Dict[str, Any]]:
-        out: Dict[str, Any] = {}
-        if self._text:
-            out["text"] = "".join(self._text)
-        if self._items:
-            out["items"] = self._items
-        return out or None
 
 
 # ---------------------------------------------------------------------------
@@ -1286,6 +1247,14 @@ class Executor:
                         stats.get("fxgraph_cache_miss", 0),
                         time.monotonic() - warm_t0)
             vram_delta = max(0, self._vram_allocated() - vram_before)
+            if rec.server is not None:
+                # Engine subprocess VRAM is invisible to torch's allocator;
+                # book the measured per-PID footprint so the LRU ledger is
+                # honest and eviction (record teardown -> server.stop) works.
+                from .runtimes.server import process_vram_bytes
+
+                vram_delta += await asyncio.to_thread(
+                    process_vram_bytes, rec.server.process.pid)
             self._register_residency(
                 spec, setup_slots, inj.loaded, vram_delta,
                 lane_slots=inj.lane_slots, shared_bytes=inj.shared_bytes)
@@ -2413,7 +2382,7 @@ class Executor:
             if spec.output_mode == "stream":
                 # gw#475: live deltas are droppable by contract (in-memory
                 # ProgressHub only) — the terminal JobResult carries the
-                # accumulated stream output so completed requests stay
+                # accumulated StreamResult so completed requests stay
                 # retrievable after the live stream ends.
                 inline: Optional[bytes] = None
                 blob_ref: Optional[str] = None
@@ -2703,7 +2672,7 @@ class Executor:
     # ---- streaming ---------------------------------------------------------
 
     def _encode_chunk(self, item: Any) -> Optional[Tuple[bytes, str]]:
-        # NOTE: keep in sync with _StreamAccumulator.add (gw#475).
+        # NOTE: keep in sync with api.streaming.StreamAccumulator.add (gw#475).
         if isinstance(item, Done):
             return None
         if isinstance(item, Error):
@@ -2747,8 +2716,10 @@ class Executor:
 
         return _emit
 
-    async def _pump_async_gen(self, job: _Job, agen: Any) -> Optional[Dict[str, Any]]:
-        acc = _StreamAccumulator()
+    async def _pump_async_gen(self, job: _Job, agen: Any) -> Optional[StreamResult]:
+        """Pump a streaming handler; returns the terminal StreamResult
+        (gw#475: live deltas are droppable, the aggregate is the record)."""
+        acc = StreamAccumulator()
         async for item in agen:
             if job.ctx is not None:
                 job.ctx.raise_if_cancelled()
@@ -2766,13 +2737,13 @@ class Executor:
         call_kwargs: Dict[str, Any],
         gpu_index: int,
         loop: asyncio.AbstractEventLoop,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Optional[StreamResult]:
         if torch is not None and torch.cuda.is_available():
             try:
                 torch.cuda.set_device(gpu_index)
             except Exception:
                 pass
-        acc = _StreamAccumulator()
+        acc = StreamAccumulator()
         for item in bound(**call_kwargs):
             if job.ctx is not None:
                 job.ctx.raise_if_cancelled()

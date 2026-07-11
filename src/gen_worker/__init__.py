@@ -27,6 +27,9 @@ from .api.streaming import (
     Done,
     Error,
     IncrementalTokenDelta,
+    StreamItem,
+    StreamResult,
+    TokenUsage,
     iter_transformers_text_deltas,
 )
 from .api.types import (
@@ -75,6 +78,9 @@ __all__ = [
     "Done",
     "Error",
     "IncrementalTokenDelta",
+    "StreamItem",
+    "StreamResult",
+    "TokenUsage",
     "iter_transformers_text_deltas",
     # Payload + media helpers.
     "Asset",

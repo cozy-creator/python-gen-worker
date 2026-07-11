@@ -47,6 +47,19 @@ class BatchItemDelta(msgspec.Struct, frozen=True, kw_only=True):
     content_type: str = "application/octet-stream"
 
 
+class TokenUsage(msgspec.Struct, frozen=True, kw_only=True):
+    """Terminal usage signal for token-streaming endpoints.
+
+    Yield one at the end of the stream; the executor folds it into the
+    terminal :class:`StreamResult` (billing reads it there) and forwards it
+    live as a JSON chunk.
+    """
+
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    tokens_per_second: float = 0.0
+
+
 class Done(msgspec.Struct, frozen=True, kw_only=True):
     """End-of-stream marker. Yield exactly one Done() to terminate cleanly.
 
@@ -67,8 +80,122 @@ class Error(msgspec.Struct, frozen=True, kw_only=True):
 
 
 # Tuple form for runtime ``isinstance`` checks in the dispatcher.
-_SIGNAL_TYPES: tuple[type, ...] = (IncrementalTokenDelta, BatchItemDelta, Done, Error)
-TokenStreamSignal = Union[IncrementalTokenDelta, BatchItemDelta, Done, Error]
+_SIGNAL_TYPES: tuple[type, ...] = (
+    IncrementalTokenDelta, BatchItemDelta, TokenUsage, Done, Error,
+)
+TokenStreamSignal = Union[IncrementalTokenDelta, BatchItemDelta, TokenUsage, Done, Error]
+
+
+# ============================================================================
+# Terminal stream output (gw#475): live deltas are droppable by contract, so
+# the executor folds them into a StreamResult and serializes it as the
+# completed request's authoritative output.
+# ============================================================================
+
+
+class StreamItem(msgspec.Struct, frozen=True, kw_only=True):
+    """One accumulated batch item in the terminal output.
+
+    ``content`` is ``str`` for ``text/*`` items (lossless through the JSON
+    SSE/webhook decode surfaces), raw ``bytes`` otherwise.
+    """
+
+    item_id: str | None = None
+    index: int = 0
+    # str for text/*, bytes otherwise (msgspec typed decode can't take a
+    # str|bytes union; msgpack distinguishes them on the wire regardless).
+    content: Any = b""
+    content_type: str = "application/octet-stream"
+    error: str = ""
+
+
+class StreamResult(msgspec.Struct, frozen=True, kw_only=True, omit_defaults=True):
+    """Terminal output of a stream-mode request.
+
+    ``text`` is the concatenated token stream (default item); ``texts``
+    holds per-``item_id`` streams when multiplexed; ``items`` the finished
+    batch items; ``usage`` the endpoint's TokenUsage signal. ``truncated``
+    marks content dropped past the accumulation cap (metadata is always
+    kept). Empty fields are omitted on the wire — a plain token stream
+    encodes as exactly ``{"text": ...}``.
+    """
+
+    text: str = ""
+    texts: dict[str, str] = {}
+    items: list[StreamItem] = []
+    usage: TokenUsage | None = None
+    truncated: bool = False
+
+
+# Binary/batch content past this cap is dropped from the terminal record
+# (item metadata survives); token text is never dropped in practice.
+_ACCUM_MAX_BYTES = 64 * 1024 * 1024
+
+
+class StreamAccumulator:
+    """Folds yielded stream signals into the terminal StreamResult."""
+
+    def __init__(self, max_bytes: int = _ACCUM_MAX_BYTES) -> None:
+        self._max = max_bytes
+        self._size = 0
+        self._texts: dict[str, list[str]] = {}
+        self._items: dict[tuple[str | None, int], dict[str, Any]] = {}
+        self._finished: list[StreamItem] = []
+        self._usage: TokenUsage | None = None
+        self._truncated = False
+
+    def add(self, item: Any) -> None:
+        if isinstance(item, IncrementalTokenDelta):
+            if self._book(len(item.text)):
+                self._texts.setdefault(item.item_id or "", []).append(item.text)
+        elif isinstance(item, BatchItemDelta):
+            key = (item.item_id, item.index)
+            rec = self._items.get(key)
+            if rec is None:
+                rec = {"chunks": [], "content_type": item.content_type, "error": ""}
+                self._items[key] = rec
+            if item.chunk and self._book(len(item.chunk)):
+                rec["chunks"].append(item.chunk)
+            if item.content_type != "application/octet-stream":
+                rec["content_type"] = item.content_type
+            if item.error:
+                rec["error"] = item.error
+            if item.finished or item.error:
+                # Only finished/errored items reach the terminal record.
+                content: Union[str, bytes] = b"".join(rec["chunks"])
+                if rec["content_type"].startswith("text/"):
+                    content = content.decode("utf-8", errors="replace")
+                self._finished.append(StreamItem(
+                    item_id=key[0], index=key[1], content=content,
+                    content_type=rec["content_type"], error=rec["error"],
+                ))
+                self._items.pop(key, None)
+        elif isinstance(item, TokenUsage):
+            self._usage = item
+
+    def _book(self, n: int) -> bool:
+        if self._size + n > self._max:
+            self._truncated = True
+            return False
+        self._size += n
+        return True
+
+    def result(self) -> StreamResult | None:
+        """The terminal record, or None when nothing accumulated (an empty
+        stream keeps an output-less OK result)."""
+        texts = {k: "".join(v) for k, v in self._texts.items()}
+        text = texts.pop("", "")
+        if not text and len(texts) == 1:
+            text = next(iter(texts.values()))
+        if not (text or texts or self._finished or self._usage or self._truncated):
+            return None
+        return StreamResult(
+            text=text,
+            texts=texts,
+            items=list(self._finished),
+            usage=self._usage,
+            truncated=self._truncated,
+        )
 
 
 def iter_transformers_text_deltas(

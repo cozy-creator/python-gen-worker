@@ -20,7 +20,10 @@ from .streaming import (
     Done,
     Error,
     IncrementalTokenDelta,
+    StreamItem,
+    StreamResult,
     TokenStreamSignal,
+    TokenUsage,
     iter_transformers_text_deltas,
 )
 from .types import (
@@ -61,7 +64,10 @@ __all__ = [
     "Done",
     "Error",
     "IncrementalTokenDelta",
+    "StreamItem",
+    "StreamResult",
     "TokenStreamSignal",
+    "TokenUsage",
     "iter_transformers_text_deltas",
     "Asset",
     "AudioAsset",
