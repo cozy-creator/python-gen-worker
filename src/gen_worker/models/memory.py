@@ -20,9 +20,14 @@ from __future__ import annotations
 import gc
 import logging
 import os
+from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, TypeVar
 
+import msgspec
+
 _LOG = logging.getLogger(__name__)
+
+_GIB = 1024 ** 3
 
 Mode = str  # "auto" | "off" | "vae_only" | "model_offload" | "group_offload" | "sequential"
 
@@ -184,23 +189,171 @@ def get_available_vram_gb(device_index: int = 0) -> float:
 
 
 def get_available_ram_gb() -> float:
-    """Available system RAM (for disk-offload decisions). 0.0 if psutil missing."""
-    try:
-        import psutil
-
-        return float(psutil.virtual_memory().available) / float(1024**3)
-    except Exception:
-        return 0.0
+    """Effective available host RAM: min(meminfo available, cgroup headroom)."""
+    return probe_host_ram().available_gb
 
 
 def get_total_ram_gb() -> float:
-    """Total system RAM (adaptive RAM-floor input). 0.0 if psutil missing."""
+    """Effective total host RAM: min(meminfo total, cgroup limit)."""
+    return probe_host_ram().total_gb
+
+
+# ---------------------------------------------------------------------------
+# Cgroup-aware host-RAM probes (th#721): RunPod GPU pods land on lottery-RAM
+# hosts and the container is cgroup-limited below /proc/meminfo — psutil alone
+# over-reports and the kernel SIGKILLs at the cgroup ceiling.
+# ---------------------------------------------------------------------------
+
+_CGROUP_ROOT = Path("/sys/fs/cgroup")
+_PROC_SELF_CGROUP = Path("/proc/self/cgroup")
+# v1 "unlimited" sentinel territory (kernel reports ~0x7ffffffffffff000).
+_CGROUP_UNLIMITED = 1 << 60
+
+
+class HostRam(msgspec.Struct, frozen=True, kw_only=True):
+    """Effective host-RAM view: meminfo capped by the cgroup memory limit."""
+
+    total_gb: float
+    available_gb: float
+    meminfo_total_gb: float
+    meminfo_available_gb: float
+    cgroup_limit_gb: Optional[float]  # None = no cgroup cap
+    source: str  # "cgroup" | "meminfo"
+
+
+def _read_cgroup_int(path: Path) -> Optional[int]:
+    """Parse a cgroup memory file; None for missing / 'max' / v1 sentinel."""
+    try:
+        raw = path.read_text().strip()
+    except OSError:
+        return None
+    if raw == "max":
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if 0 <= value < _CGROUP_UNLIMITED else None
+
+
+def _v2_cgroup_nodes(root: Path, proc_self_cgroup: Path) -> List[Path]:
+    """Cgroup-v2 dirs from root down to this process's own cgroup."""
+    rel = ""
+    try:
+        for line in proc_self_cgroup.read_text().splitlines():
+            if line.startswith("0::"):
+                rel = line[3:].strip().strip("/")
+                break
+    except OSError:
+        pass
+    nodes = [root]
+    node = root
+    for part in Path(rel).parts:
+        node = node / part
+        nodes.append(node)
+    return nodes
+
+
+def cgroup_memory_limit_bytes(
+    root: Path = _CGROUP_ROOT,
+    proc_self_cgroup: Path = _PROC_SELF_CGROUP,
+) -> Optional[int]:
+    """Effective cgroup memory limit for this process; None when uncapped.
+
+    v2: tightest ``memory.max`` on the root->self chain (covers both private
+    and host cgroup namespaces); v1 fallback: ``memory/memory.limit_in_bytes``.
+    """
+    limits = [
+        v for node in _v2_cgroup_nodes(root, proc_self_cgroup)
+        if (v := _read_cgroup_int(node / "memory.max")) is not None
+    ]
+    if limits:
+        return min(limits)
+    return _read_cgroup_int(root / "memory" / "memory.limit_in_bytes")
+
+
+def cgroup_memory_current_bytes(
+    root: Path = _CGROUP_ROOT,
+    proc_self_cgroup: Path = _PROC_SELF_CGROUP,
+) -> Optional[int]:
+    """Current cgroup memory usage; reads the deepest available counter."""
+    for node in reversed(_v2_cgroup_nodes(root, proc_self_cgroup)):
+        v = _read_cgroup_int(node / "memory.current")
+        if v is not None:
+            return v
+    return _read_cgroup_int(root / "memory" / "memory.usage_in_bytes")
+
+
+def probe_host_ram(
+    *,
+    root: Path = _CGROUP_ROOT,
+    proc_self_cgroup: Path = _PROC_SELF_CGROUP,
+) -> HostRam:
+    """One truthful host-RAM snapshot: psutil meminfo min'd with the cgroup cap."""
+    meminfo_total = meminfo_available = 0.0
     try:
         import psutil
 
-        return float(psutil.virtual_memory().total) / float(1024**3)
+        vm = psutil.virtual_memory()
+        meminfo_total = float(vm.total) / float(_GIB)
+        meminfo_available = float(vm.available) / float(_GIB)
     except Exception:
-        return 0.0
+        pass
+    limit = cgroup_memory_limit_bytes(root, proc_self_cgroup)
+    if limit is None:
+        return HostRam(
+            total_gb=meminfo_total,
+            available_gb=meminfo_available,
+            meminfo_total_gb=meminfo_total,
+            meminfo_available_gb=meminfo_available,
+            cgroup_limit_gb=None,
+            source="meminfo",
+        )
+    limit_gb = float(limit) / float(_GIB)
+    current = cgroup_memory_current_bytes(root, proc_self_cgroup)
+    cg_avail_gb = max(0.0, float(limit - (current or 0)) / float(_GIB))
+    total = min(meminfo_total, limit_gb) if meminfo_total > 0 else limit_gb
+    avail = min(meminfo_available, cg_avail_gb) if meminfo_available > 0 else cg_avail_gb
+    constrained = meminfo_total <= 0 or limit_gb < meminfo_total
+    return HostRam(
+        total_gb=total,
+        available_gb=avail,
+        meminfo_total_gb=meminfo_total,
+        meminfo_available_gb=meminfo_available,
+        cgroup_limit_gb=limit_gb,
+        source="cgroup" if constrained else "meminfo",
+    )
+
+
+_ram_budget_logged = False
+
+
+def log_ram_budget_once(*, floor_gb: float) -> None:
+    """One prominent boot line naming the derived warm-RAM-tier budget and its
+    source (cgroup cap vs /proc/meminfo) — DEGRADED_MODE-style greppability."""
+    global _ram_budget_logged
+    if _ram_budget_logged:
+        return
+    _ram_budget_logged = True
+    ram = probe_host_ram()
+    budget = max(0.0, ram.total_gb - floor_gb)
+    parts = [
+        f"RAM_BUDGET={budget:.1f}GiB",
+        f"source={ram.source}",
+        f"total_gb={ram.total_gb:.1f}",
+        f"floor_gb={floor_gb:.1f}",
+    ]
+    if ram.cgroup_limit_gb is not None:
+        parts.append(f"cgroup_limit_gb={ram.cgroup_limit_gb:.1f}")
+    if ram.source == "cgroup":
+        parts.append(f"meminfo_total_gb={ram.meminfo_total_gb:.1f}")
+        _LOG.warning(
+            "%s: container RAM capped below host /proc/meminfo; warm RAM tier "
+            "sized to the cgroup limit (excess pipelines spill to disk)",
+            " ".join(parts),
+        )
+        return
+    _LOG.info(" ".join(parts))
 
 
 def cuda_allocated_bytes(device_index: Optional[int] = None) -> int:

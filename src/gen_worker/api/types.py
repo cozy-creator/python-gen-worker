@@ -297,6 +297,5 @@ class Compute(msgspec.Struct, frozen=True):
     vram_gb: int = 0
     gpu_count: int = 0
     gpu_tier: Optional[str] = None
-    memory_gb: int = 0
     cpu_cores: int = 0
     disk_gb: int = 0
