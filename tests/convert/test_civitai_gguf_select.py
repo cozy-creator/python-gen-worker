@@ -71,3 +71,18 @@ def test_gguf_quant_not_found_raises():
 
 def test_no_weights_empty():
     assert _civitai_select_files({"files": [_f("notes.zip", id=1)]}) == []
+
+
+def test_gguf_quant_from_download_url():
+    # Real civitai shape (Fascium mv3006357): one filename for all quants,
+    # no metadata.quantType; the non-primary file's URL carries it.
+    files = _civitai_select_files({"files": [
+        {"id": 1, "name": "m.gguf", "sizeKB": 6331446,
+         "downloadUrl": "https://civitai.com/api/download/models/3006357",
+         "metadata": {"format": "GGUF"}},
+        {"id": 2, "name": "m.gguf", "sizeKB": 9514038,
+         "downloadUrl": "https://civitai.com/api/download/models/3006357?type=Model&format=GGUF&quantType=Q8_0",
+         "metadata": {"format": "GGUF"}},
+    ]}, gguf_quant="q8_0")
+    assert len(files) == 1
+    assert files[0]["id"] == 2

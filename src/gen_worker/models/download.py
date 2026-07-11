@@ -25,6 +25,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence
+from urllib.parse import parse_qs, urlparse
 
 from ..config import get_settings
 from .cache_paths import tensorhub_cas_dir
@@ -677,6 +678,13 @@ _CIVITAI_GGUF_QTYPE_RE = re.compile(r"(?:ud-)?(?:i?q\d[0-9a-z_]*|bf16|f16|f32)")
 def _civitai_gguf_quant_of(f: Mapping[str, Any]) -> str:
     if f.get("quant_type"):
         return str(f["quant_type"]).lower()
+    # The model-versions API omits metadata.quantType; the per-file
+    # downloadUrl carries it as a query param (the version's PRIMARY file
+    # gets a bare default URL instead — quant unknowable pre-download).
+    url = str(f.get("url") or "")
+    q = parse_qs(urlparse(url).query).get("quantType", [""])[0]
+    if q:
+        return q.strip().lower()
     m = _CIVITAI_GGUF_QTYPE_RE.search(str(f.get("name") or "").lower())
     return m.group(0) if m else ""
 
