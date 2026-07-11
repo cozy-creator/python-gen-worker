@@ -165,7 +165,7 @@ def _capability_job_id(token: str) -> Optional[str]:
         return None
 
 
-def _map_exception(exc: BaseException) -> Tuple[int, str]:
+def _map_exception(exc: BaseException) -> Tuple["pb.JobStatus", str]:
     """-> (JobStatus, safe_message)."""
     if isinstance(exc, (CanceledError, asyncio.CancelledError)):
         return pb.JOB_STATUS_CANCELED, "canceled"
@@ -377,7 +377,7 @@ class ModelStore:
             return
         loop.create_task(coro)
 
-    async def _event(self, ref: str, state: int, **kw: Any) -> None:
+    async def _event(self, ref: str, state: "pb.ModelState", **kw: Any) -> None:
         await self._emit(pb.WorkerMessage(model_event=pb.ModelEvent(ref=ref, state=state, **kw)))
 
     # ---- residency facade ----------------------------------------------------
@@ -944,8 +944,13 @@ class Executor:
                     try:
                         rebound = base_binding
                         if resolved_ref and resolved_ref != base_ref:
-                            flavor = parse_model_ref(resolved_ref).tensorhub.flavor
-                            rebound = dataclasses.replace(rebound, flavor=flavor)
+                            parsed = parse_model_ref(resolved_ref)
+                            if parsed.tensorhub is None:
+                                raise ValueError(
+                                    f"resolution {resolved_ref!r} is not a "
+                                    "tensorhub ref")
+                            rebound = dataclasses.replace(
+                                rebound, flavor=parsed.tensorhub.flavor)
                         if cast:
                             rebound = dataclasses.replace(rebound, storage_dtype=cast)
                         if resolved_ref and wire_ref(rebound) != resolved_ref:
@@ -2887,7 +2892,7 @@ class Executor:
         self,
         request_id: str,
         attempt: int,
-        status: int,
+        status: "pb.JobStatus",
         *,
         inline: Optional[bytes] = None,
         blob_ref: Optional[str] = None,
@@ -2904,7 +2909,7 @@ class Executor:
             result.metrics.CopyFrom(metrics)
         await self._send(pb.WorkerMessage(job_result=result))
 
-    async def _finish(self, job: _Job, status: int, **kw: Any) -> None:
+    async def _finish(self, job: _Job, status: "pb.JobStatus", **kw: Any) -> None:
         if job.finished:
             return
         job.finished = True
