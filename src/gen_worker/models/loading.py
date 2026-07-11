@@ -5,7 +5,6 @@ synthesis. There is no PipelineLoader — callers own ``from_pretrained``.
 
 from __future__ import annotations
 
-import importlib
 import json
 import logging
 from pathlib import Path
@@ -46,7 +45,7 @@ def get_torch_dtype(dtype_str: Optional[str]) -> Any:
 def detect_diffusers_variant(model_path: Path) -> Optional[str]:
     """Detect a diffusers ``variant=`` value from files on disk (e.g.
     ``unet/diffusion_pytorch_model.fp16.safetensors`` -> ``"fp16"``)."""
-    candidates = ("bf16", "fp8", "fp16", "int8", "int4")
+    candidates = ("bf16", "fp8", "fp16")
     try:
         for p in Path(model_path).rglob("*"):
             if not p.is_file():
@@ -131,30 +130,6 @@ def detect_on_disk_dtype(model_path: Path) -> str:
     return _SAFETENSORS_DTYPE_NAMES.get(top, "")
 
 
-# quant-library -> import-side-effect hooks. torchao registers its tensor
-# subclasses on import; loading a torchao-quantized state_dict before that
-# import fails with ATen/dispatcher errors.
-_QUANT_LIBRARY_IMPORT_HOOKS: Dict[str, str] = {
-    "torchao": "torchao",
-}
-
-
-def ensure_quant_library_imported(attrs: Optional[Dict[str, str]]) -> None:
-    """Best-effort preload of the quant library whose tensor subclasses must be
-    registered before the weights are touched. No-op when not applicable."""
-    if not attrs:
-        return
-    lib = str(attrs.get("quant_library") or "").strip().lower()
-    mod = _QUANT_LIBRARY_IMPORT_HOOKS.get(lib)
-    if not mod:
-        return
-    try:
-        importlib.import_module(mod)
-        logger.info("pre-imported %s for tensor-subclass registration", mod)
-    except ImportError as exc:
-        logger.warning("failed to pre-import %s: %s", mod, exc)
-
-
 def read_on_disk_quant_config(model_path: Path) -> bool:
     """True when model_index.json / component config.json on disk carries a
     ``quantization_config`` block (diffusers auto-picks it up)."""
@@ -182,8 +157,7 @@ def read_on_disk_quant_config(model_path: Path) -> bool:
 def synthesize_quantization_config(attrs: Optional[Dict[str, str]]) -> Optional[Any]:
     """Build a BitsAndBytesConfig from resolved checkpoint attrs when the
     on-disk config doesn't already carry one. Returns None when the attrs
-    don't indicate a library that needs a synthesized config (torchao restores
-    via import side-effect; see :func:`ensure_quant_library_imported`)."""
+    don't indicate a library that needs a synthesized config."""
     if not attrs:
         return None
     lib = str(attrs.get("quant_library") or "").strip().lower()
@@ -191,7 +165,7 @@ def synthesize_quantization_config(attrs: Optional[Dict[str, str]]) -> Optional[
         return None
     recipe = str(attrs.get("quant_recipe") or "").strip().lower()
     scheme = recipe.split(":", 1)[-1] if ":" in recipe else recipe
-    if scheme not in ("nf4", "fp4", "int8"):
+    if scheme not in ("nf4", "fp4"):
         return None
     try:
         import torch
@@ -202,14 +176,12 @@ def synthesize_quantization_config(attrs: Optional[Dict[str, str]]) -> Optional[
     compute_dtype_name = str(attrs.get("quant_compute_dtype") or "bfloat16").strip().lower()
     compute_dtype = getattr(torch, compute_dtype_name, torch.bfloat16)
     double_quant = str(attrs.get("quant_double_quant") or "true").strip().lower() in ("1", "true", "yes")
-    if scheme in ("nf4", "fp4"):
-        return BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type=scheme,
-            bnb_4bit_compute_dtype=compute_dtype,
-            bnb_4bit_use_double_quant=double_quant,
-        )
-    return BitsAndBytesConfig(load_in_8bit=True)
+    return BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type=scheme,
+        bnb_4bit_compute_dtype=compute_dtype,
+        bnb_4bit_use_double_quant=double_quant,
+    )
 
 
 # Pipeline components fp8 storage applies to: the denoiser dominates VRAM and
@@ -736,7 +708,6 @@ def load_from_pretrained(
         if components:
             logger.warning("preloaded components ignored on the svdq lane")
         return load_svdq_pipeline(cls, Path(path), svdq_art)
-    ensure_quant_library_imported(attrs)
     kwargs: Dict[str, Any] = {}
     if components:
         kwargs.update(components)
@@ -810,7 +781,6 @@ __all__ = [
     "detect_diffusers_variant",
     "detect_on_disk_dtype",
     "safetensors_file_valid",
-    "ensure_quant_library_imported",
     "read_on_disk_quant_config",
     "synthesize_quantization_config",
     "apply_fp8_storage",

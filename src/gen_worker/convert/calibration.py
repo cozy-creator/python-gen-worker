@@ -18,14 +18,9 @@ Training functions that quantize weights fall into three buckets:
   mistake (wasted generation + wrong expectations about output quality);
   fail loudly rather than silently discard.
 
-Tenants declare policy as a ``{scheme: CalibrationPolicy}`` dict passed
-to ``@conversion(calibration=...)``. At runtime, the tenant calls
-``resolve_calibration_action(policy, ...)`` once per spec entry to decide
-whether to calibrate, skip, or run dummy (or raise on invalid combos).
-
-The metadata is ALSO introspectable — discovery bakes it into
-``endpoint.lock`` so the orchestrator / UI can tell callers "this function
-at scheme=X needs a calibration dataset" before minting capability tokens.
+At runtime, the tenant calls ``resolve_calibration_action(policy, ...)``
+once per spec entry to decide whether to calibrate, skip, or run dummy
+(or raise on invalid combos).
 
 The worker library only decides whether calibration is required, optional, or
 unsupported for a requested scheme; callers own how datasets are selected.
@@ -49,56 +44,6 @@ CalibrationAction = Literal["calibrate", "skip", "dummy"]
   tests / CI; production submits never reach this branch because callers
   don't set ``allow_dummy=True``.
 """
-
-
-def validate_policy_map(fn_name: str, policy_map) -> dict[str, CalibrationPolicy]:
-    """Validate a tenant-supplied calibration policy.
-
-    Accepts either:
-      - a single policy string (e.g. ``"unsupported"``) — applies to every
-        scheme this function handles. Stored as ``{"*": <policy>}``.
-      - a ``{scheme: policy}`` dict for per-scheme differences.
-
-    Raises TypeError when any value isn't one of ``VALID_POLICIES``.
-    """
-    if isinstance(policy_map, str):
-        if policy_map not in VALID_POLICIES:
-            raise TypeError(
-                f"{fn_name}: @conversion calibration={policy_map!r} "
-                f"is not valid. Use one of {sorted(VALID_POLICIES)}."
-            )
-        return {"*": policy_map}  # type: ignore[dict-item]
-    if not isinstance(policy_map, dict):
-        raise TypeError(
-            f"{fn_name}: @conversion calibration= must be a string or "
-            f"dict[scheme_name, policy]; got {type(policy_map).__name__}"
-        )
-    for scheme, policy in policy_map.items():
-        if not isinstance(scheme, str) or not scheme:
-            raise TypeError(
-                f"{fn_name}: @conversion calibration= keys must be "
-                f"non-empty strings; got {scheme!r}"
-            )
-        if policy not in VALID_POLICIES:
-            raise TypeError(
-                f"{fn_name}: @conversion calibration[{scheme!r}]="
-                f"{policy!r} is not valid. Use one of {sorted(VALID_POLICIES)}."
-            )
-    return dict(policy_map)
-
-
-def lookup_policy(
-    policy_map: dict[str, CalibrationPolicy], scheme: str
-) -> CalibrationPolicy | None:
-    """Resolve the calibration policy for ``scheme``. Falls back to the
-    ``"*"`` wildcard entry when no scheme-specific policy is registered.
-    Returns ``None`` when nothing matches.
-    """
-    if scheme in policy_map:
-        return policy_map[scheme]
-    if "*" in policy_map:
-        return policy_map["*"]
-    return None
 
 
 def resolve_calibration_action(
@@ -209,5 +154,4 @@ __all__ = [
     "CalibrationPolicy",
     "VALID_POLICIES",
     "resolve_calibration_action",
-    "validate_policy_map",
 ]

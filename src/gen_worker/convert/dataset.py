@@ -260,31 +260,16 @@ class Dataset:
         columns on eval sets are skipped automatically — calibration
         reads only the text it needs.
 
-        Fallback: if the snapshot is in the legacy shape from the
-        rolled-back #41 format (``prompts.jsonl`` at the root), iterate
-        that directly. Kept for forward-compat on any dataset that might
-        still be in flight.
-
-        Raises ``FileNotFoundError`` if neither shape is present —
+        Raises ``FileNotFoundError`` if no parquet shards are present —
         callers should guard with ``is_prompt_corpus() or is_eval_set()``.
         """
         shards = self.parquet_shards()
-        if shards:
-            yield from _iter_parquet_prompt_columns(shards)
-            return
-        legacy = self._path / "prompts.jsonl"
-        if legacy.exists():
-            with open(legacy) as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    yield json.loads(line)
-            return
-        raise FileNotFoundError(
-            f"dataset {self._ref!r} has no prompts — expected parquet "
-            f"shards under {self._path}/data/ or legacy prompts.jsonl"
-        )
+        if not shards:
+            raise FileNotFoundError(
+                f"dataset {self._ref!r} has no prompts — expected parquet "
+                f"shards under {self._path}/data/"
+            )
+        yield from _iter_parquet_prompt_columns(shards)
 
     def iter_rows(self) -> Iterator[dict]:
         """Yield ALL rows (including image columns on eval sets).
@@ -298,8 +283,7 @@ class Dataset:
         """
         shards = self.parquet_shards()
         if not shards:
-            # Fall back to iter_prompts for legacy jsonl.
-            yield from self.iter_prompts()
+            yield from self.iter_prompts()  # raises FileNotFoundError
             return
         import pyarrow.parquet as pq
         for shard in shards:
@@ -307,59 +291,22 @@ class Dataset:
             for row in table.to_pylist():
                 yield row
 
-    # ---- legacy aliases ------------------------------------------
-
-    def manifest(self) -> dict:
-        """Back-compat alias: parsed ``dataset_info.json`` or legacy
-        ``manifest.json`` at ``path``, whichever exists.
-
-        ``dataset_info.json`` is the canonical name; ``manifest()`` now
-        returns the same dict as ``dataset_info()``. Kept as an alias for
-        older callers.
-        """
-        return self.dataset_info()
-
-    def is_calibration_dataset(self) -> bool:
-        """Deprecated alias for ``is_prompt_corpus()``.
-
-        New code should use ``is_prompt_corpus()``.
-        """
-        return self.is_prompt_corpus()
-
 
 def _load_dataset_info(path: Path) -> dict | None:
-    """Read ``dataset_info.json`` at ``path``, falling back to
-    ``manifest.json`` (legacy #41 shape) with field normalization.
+    """Read ``dataset_info.json`` at ``path``.
 
-    Returns ``None`` when neither file exists or either is unparseable —
-    the caller treats that as "not a prompt-corpus / eval-set artifact."
+    Returns ``None`` when the file doesn't exist or is unparseable — the
+    caller treats that as "not a prompt-corpus / eval-set artifact."
     """
     info_path = path / "dataset_info.json"
-    if info_path.exists():
-        try:
-            with open(info_path) as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                return data
-        except json.JSONDecodeError:
-            return None
-
-    # Legacy shape: manifest.json with kind=calibration_dataset. Normalize
-    # the kind to the current vocabulary so downstream branching still fires.
-    legacy = path / "manifest.json"
-    if legacy.exists():
-        try:
-            with open(legacy) as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                kind = str(data.get("kind") or "")
-                if kind == "calibration_dataset":
-                    data = dict(data)
-                    data["kind"] = "prompt_corpus"
-                return data
-        except json.JSONDecodeError:
-            return None
-    return None
+    if not info_path.exists():
+        return None
+    try:
+        with open(info_path) as f:
+            data = json.load(f)
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def _iter_parquet_prompt_columns(shards: list[Path]) -> Iterator[dict]:

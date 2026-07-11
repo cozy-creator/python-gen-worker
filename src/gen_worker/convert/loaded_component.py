@@ -1,6 +1,6 @@
-"""LoadedComponent — opaque payload yielded by Source.iter_hf_components* methods.
+"""LoadedComponent — opaque payload yielded by Source.iter_hf_components.
 
-Each LoadedComponent has been resolved to one of four states:
+Each LoadedComponent has been resolved to one of three states:
 
   - ``quantized``    — already loaded into memory via HF's
                        ``from_pretrained(quantization_config=...)`` (so the
@@ -8,11 +8,6 @@ Each LoadedComponent has been resolved to one of four states:
                        cuda / cpu / disk per ``device_map='auto'`` +
                        ``offload_folder``). ``save_to`` writes the component
                        subdir under ``out_dir`` via ``save_pretrained``.
-  - ``bf16_cpu``     — loaded into CPU memory in ``torch_dtype``, NOT
-                       quantized. Yielded by ``iter_hf_components_streaming``
-                       for tenants that drive an in-place transform themselves.
-                       After the tenant mutates the module in-place,
-                       ``save_to`` writes it the same way as ``quantized``.
   - ``passthrough``  — pure file copy; kind for tokenizer / scheduler / vae /
                        feature_extractor / safety_checker etc. Tenant doesn't
                        quantize these and the library doesn't load them; the
@@ -25,8 +20,7 @@ Each LoadedComponent has been resolved to one of four states:
                        directly (not into a subdir).
 
 Tenants don't construct LoadedComponent — the library does. Tenants observe
-``.name`` and ``.kind`` for logging / spec metadata, optionally reach into
-``.module`` for streaming-quant or other in-place transforms, then call
+``.name`` and ``.kind`` for logging / spec metadata, then call
 ``component.save_to(out_dir)`` and move on.
 """
 
@@ -38,19 +32,16 @@ from pathlib import Path
 from typing import Any, Literal
 
 
-ComponentKind = Literal["quantized", "bf16_cpu", "passthrough", "root"]
+ComponentKind = Literal["quantized", "passthrough", "root"]
 
 
 @dataclass
 class LoadedComponent:
     name: str
     kind: ComponentKind
-    # Populated when kind in ("quantized", "bf16_cpu"): the loaded HF module.
-    #   - "quantized": already carries quantization state (Linear8bitLt /
-    #     Linear4bit / modelopt fake-quant subclasses) from HF's
-    #     from_pretrained(quantization_config=...).
-    #   - "bf16_cpu": plain bf16 module on CPU; tenant mutates in-place
-    #     before save.
+    # Populated when kind == "quantized": the loaded HF module, already
+    # carrying quantization state (Linear8bitLt / Linear4bit / modelopt
+    # fake-quant subclasses) from HF's from_pretrained(quantization_config=...).
     # save_to calls .save_pretrained on it.
     _module: Any = None
     # Populated when kind == "passthrough": absolute path to the source-side
@@ -65,16 +56,15 @@ class LoadedComponent:
 
     @property
     def module(self) -> Any:
-        """The loaded HF module for kind in ('quantized', 'bf16_cpu').
+        """The loaded HF module for kind == 'quantized'.
 
-        Streaming-quant tenants use this to invoke library-specific
-        in-place transforms before ``save_to``. Raises if accessed on a
-        kind that doesn't carry a module (``passthrough`` / ``root``).
+        Raises if accessed on a kind that doesn't carry a module
+        (``passthrough`` / ``root``).
         """
-        if self.kind not in ("quantized", "bf16_cpu"):
+        if self.kind != "quantized":
             raise AttributeError(
                 f"LoadedComponent({self.name}): .module is only valid for "
-                f"kind in ('quantized', 'bf16_cpu'), got kind={self.kind!r}"
+                f"kind 'quantized', got kind={self.kind!r}"
             )
         if self._module is None:
             raise RuntimeError(
@@ -87,7 +77,7 @@ class LoadedComponent:
         out_dir = Path(out_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        if self.kind in ("quantized", "bf16_cpu"):
+        if self.kind == "quantized":
             if self._module is None:
                 raise RuntimeError(
                     f"LoadedComponent({self.name}): kind={self.kind} but no "
