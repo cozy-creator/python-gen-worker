@@ -14,7 +14,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 from ..net import hf, install_hf_http_timeouts
 from .classifier import RepoClassification, classify_repo
@@ -464,6 +464,24 @@ def ingest_huggingface(
 _SHARD_NAME_RE = None
 
 
+def _is_multi_weight_names(names: Iterable[str]) -> bool:
+    """Pure-name core of :func:`_is_multi_weight_bundle`: True when the
+    TOP-LEVEL weight file names form more than one logical weight set
+    (HF-convention shards collapse into one). Callers pass basenames only."""
+    global _SHARD_NAME_RE
+    import re
+
+    if _SHARD_NAME_RE is None:
+        _SHARD_NAME_RE = re.compile(r"^(.+)-(\d+)-of-(\d+)\.(safetensors|gguf)$")
+    logical: set[tuple[str, str]] = set()
+    for name in names:
+        if not (name.endswith(".safetensors") or name.endswith(".gguf")):
+            continue
+        m = _SHARD_NAME_RE.match(name)
+        logical.add((m.group(1), m.group(3)) if m else (name, ""))
+    return len(logical) > 1
+
+
 def _is_multi_weight_bundle(dest_dir: Path) -> bool:
     """True when a snapshot carries MULTIPLE distinct top-level weight files
     that are not one HF-convention shard set — e.g. Anima/Ernie civitai
@@ -471,18 +489,8 @@ def _is_multi_weight_bundle(dest_dir: Path) -> bool:
     tensorhub's diffusers/single-file layout contract rightly rejects these
     (multiple_files_for_single_file_layout, found live e2e #112); they must
     publish with library_name unset (validator opt-out)."""
-    global _SHARD_NAME_RE
-    import re
-
-    if _SHARD_NAME_RE is None:
-        _SHARD_NAME_RE = re.compile(r"^(.+)-(\d+)-of-(\d+)\.(safetensors|gguf)$")
-    logical: set[tuple[str, str]] = set()
-    for p in dest_dir.iterdir():
-        if not p.is_file() or p.suffix not in {".safetensors", ".gguf"}:
-            continue
-        m = _SHARD_NAME_RE.match(p.name)
-        logical.add((m.group(1), m.group(3)) if m else (p.name, ""))
-    return len(logical) > 1
+    return _is_multi_weight_names(
+        p.name for p in dest_dir.iterdir() if p.is_file())
 
 
 def _resolve_civitai_family(base_family: str, layout_family: str) -> str:
