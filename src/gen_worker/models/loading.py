@@ -792,8 +792,16 @@ def load_from_pretrained(
             kwargs.pop("quantization_config", None)
             pipe = cls.from_pretrained(path, **kwargs)
     if fp8_storage and "quantization_config" not in kwargs:
-        apply_fp8_storage(pipe, compute_dtype=kwargs.get("torch_dtype"),
-                          text_encoders=fp8_text_encoders)
+        applied = apply_fp8_storage(pipe, compute_dtype=kwargs.get("torch_dtype"),
+                                    text_encoders=fp8_text_encoders)
+        # th#737: make the outcome observable — a cast that silently no-ops
+        # (denoiser-less pipeline) must surface as a structural degradation
+        # upstream, not vanish into a log line.
+        try:
+            pipe._cozy_fp8_storage_requested = True
+            pipe._cozy_fp8_storage_ok = bool(applied)
+        except Exception:
+            pass
     return pipe
 
 

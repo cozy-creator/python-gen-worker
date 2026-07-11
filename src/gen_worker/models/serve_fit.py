@@ -102,8 +102,14 @@ class ServePlan:
 
     @property
     def degraded(self) -> bool:
-        """True when it runs, but not natively (slower and/or lower quality)."""
-        return self.serveable and self.run_mode != RUN_NATIVE
+        """True when it runs, but not as planned: non-native placement,
+        or (th#737) a precision pick that could not be applied
+        (``ran`` != ``wanted``, e.g. a dropped fp8 cast serving bf16)."""
+        if not self.serveable:
+            return False
+        if self.run_mode != RUN_NATIVE:
+            return True
+        return bool(self.wanted) and bool(self.ran) and self.ran != self.wanted
 
 
 def _wanted(binding: Any) -> str:
@@ -237,6 +243,29 @@ def demoted(
         warning=detail,
         est_latency_multiplier=_LATENCY_MULTIPLIER[RUN_OFFLOAD],
         ran=ran,
+    )
+
+
+def cast_dropped(
+    plan: Optional[ServePlan],
+    *,
+    wanted: str,
+    detail: str,
+) -> ServePlan:
+    """th#737: a resolved cast (``storage_dtype``) could not be applied —
+    the pipeline has no denoiser/cast surface (latent upsamplers, VAE-only
+    repos). The function still runs natively at base precision, but the
+    recipe budgeted the cast's VRAM: report it structurally (FnDegraded
+    wanted=fp8 ran=bf16), never as a silent bf16 fallback."""
+    base = plan if plan is not None else ServePlan(
+        serveable=True, run_mode=RUN_NATIVE, fit="", wanted="", ran="",
+    )
+    return replace(
+        base,
+        serveable=True,
+        wanted=(wanted or base.wanted or "fp8"),
+        ran="bf16",
+        warning=detail,
     )
 
 

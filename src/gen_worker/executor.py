@@ -1115,6 +1115,22 @@ class Executor:
             self.serve_plans.get(spec.name), detail=line, placement_mode=to_rung)
         self._on_state_change()
 
+    def _record_cast_drop(self, spec: EndpointSpec, *, ref: str,
+                          wanted: str, detail: str) -> None:
+        """th#737: a resolved cast (storage_dtype) cannot apply — the
+        pipeline has no denoiser/cast surface. Serve at base precision but
+        surface it STRUCTURALLY (FnDegraded wanted=fp8 ran=bf16 via the
+        state-delta path), never as a silent log-line fallback: the recipe
+        budgeted the cast's VRAM headroom."""
+        from .models.serve_fit import cast_dropped
+
+        logger.warning(
+            "CAST_DROPPED fn=%s model=%s wanted=%s ran=bf16 detail=%s",
+            spec.name, ref, wanted or "fp8", detail)
+        self.serve_plans[spec.name] = cast_dropped(
+            self.serve_plans.get(spec.name), wanted=wanted, detail=detail)
+        self._on_state_change()
+
     def available_functions(self) -> List[str]:
         out = []
         for name, spec in self.specs.items():
@@ -1637,6 +1653,23 @@ class Executor:
                         b for comp, b in sizes.items() if comp not in injected)
                     if excl_bytes > 0:
                         await asyncio.to_thread(res.make_room, excl_bytes)
+                # th#737: a cast directive on a denoiser-less diffusers
+                # tree is a load-time no-op that would silently serve bf16.
+                # Gate it up front when the snapshot's model_index proves
+                # there is no cast surface (unknown layouts pass through;
+                # the post-load outcome check below is the backstop).
+                if storage_dtype in ("fp8", "fp8+te"):
+                    comps = self._model_index_components(path)
+                    if comps and not ({"transformer", "unet"} & comps):
+                        self._record_cast_drop(
+                            spec, ref=ref, wanted="fp8",
+                            detail=(
+                                f"cast {storage_dtype!r} dropped for slot "
+                                f"{slot!r}: pipeline has no denoiser/cast "
+                                f"surface (components: {sorted(comps)}); "
+                                "serving at base precision"),
+                        )
+                        storage_dtype = ""
                 before = self._vram_allocated()
                 try:
                     pipe = await asyncio.to_thread(
@@ -1664,6 +1697,18 @@ class Executor:
                     pipe = await asyncio.to_thread(
                         load_from_pretrained, ann, path, dtype=dtype,
                         storage_dtype=storage_dtype, components=injected,
+                    )
+                if getattr(pipe, "_cozy_fp8_storage_requested", False) and not getattr(
+                        pipe, "_cozy_fp8_storage_ok", True):
+                    # th#737 backstop: the cast was attempted at load and
+                    # failed on every target — structural report, not a
+                    # silent bf16 fallback.
+                    self._record_cast_drop(
+                        spec, ref=ref, wanted="fp8",
+                        detail=(
+                            f"fp8 storage failed on every component of slot "
+                            f"{slot!r} ({type(pipe).__name__}); serving at "
+                            "base precision"),
                     )
                 placed = await asyncio.to_thread(place_pipeline, pipe, mode=mode, ref=ref)
                 if placed.get("oom_demotions"):

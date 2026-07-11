@@ -138,7 +138,10 @@ def placement_from_metadata(meta: Mapping[str, Any] | None) -> Optional[Placemen
 # fp8 bytes resident, per-layer bf16 upcast, no fp8 silicon required).
 # Rung gates: quality floor, placement SM admission, engines within installed
 # libs, est VRAM <= free. local=True appends emergency-nf4 then CPU-offload
-# (the hub never schedules those).
+# (the hub never schedules those). th#737: cast rungs (fp8 cast-at-load,
+# emergency nf4) additionally require model.castable — False for a diffusers
+# tree whose model_index has no transformer/unet component (latent
+# upsamplers): casting those is a load-time no-op that silently serves bf16.
 # ---------------------------------------------------------------------------
 
 # Native fp8 tensor-core compute exists on SM >= 89 (sm_89 Ada, sm_90 Hopper,
@@ -179,6 +182,11 @@ class LadderModel:
     base_size_gb: float = 0.0  # 0 = no bare/base row
     fp8_cast_vram_gb: float = 0.0  # 0 = use CAST_FP8_VRAM_FACTOR * base
     flavors: tuple[FlavorRow, ...] = ()
+    # th#737: whether the base pipeline has a denoiser/cast surface. False
+    # (a diffusers tree whose model_index has no transformer/unet component,
+    # e.g. latent upsamplers) removes ALL cast rungs (fp8 cast-at-load,
+    # emergency nf4); stored flavors and the bf16 base are unaffected.
+    castable: bool = True
 
 
 @dataclass(frozen=True)
@@ -254,7 +262,7 @@ def _rungs(
         stored = _stored_fp8(model, gpu_sm, libs)
         if stored is not None:
             fp8_rung = (stored.token, "", stored.size_gb)
-        elif model.base_size_gb > 0:
+        elif model.base_size_gb > 0 and model.castable:
             est = model.fp8_cast_vram_gb or CAST_FP8_VRAM_FACTOR * model.base_size_gb
             fp8_rung = ("", "fp8", est)
     base_rung: Optional[tuple[str, str, float]] = None
@@ -285,7 +293,7 @@ def resolve(
         if est <= free_vram_gb:
             return Resolution(flavor=flavor, cast=cast, mode=MODE_NATIVE)
     if local:
-        if quality_floor == "" and model.base_size_gb > 0:
+        if quality_floor == "" and model.base_size_gb > 0 and model.castable:
             est = EMERGENCY_NF4_VRAM_FACTOR * model.base_size_gb
             if est <= free_vram_gb:
                 stored = _stored_fp8(model, gpu_sm, lib_set)
