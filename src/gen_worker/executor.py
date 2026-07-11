@@ -854,10 +854,12 @@ class Executor:
         from .models.refs import parse_model_ref
 
         changed = False
+        rehomed: List[Tuple[Any, EndpointSpec]] = []
         for spec in self.specs.values():
             declared = self._declared_models.get(spec.name)
             if not declared:
                 continue
+            key_before = spec.instance_key
             for slot, base_binding in declared.items():
                 base_ref = wire_ref(base_binding)
                 pick = resolutions.get(base_ref)
@@ -891,6 +893,34 @@ class Executor:
                             "precision resolution applied: %s %s/%s -> %s (cast=%s)",
                             spec.name, slot, base_ref, wire_ref(new_binding),
                             getattr(new_binding, "storage_dtype", ""))
+            if spec.cls is not None and spec.instance_key != key_before:
+                rehomed.append((key_before, spec))
+        # spec.instance_key is a live property over spec.models — a rebind
+        # above MOVES the spec's key, so the self._classes instance-group
+        # record must move with it. Leaving it under the stale key makes
+        # every later lookup (state delta, setup, readiness) a KeyError that
+        # crash-loops the hello handler (found live: ie#382 dozen lane, the
+        # sm90 cast=fp8 pick on a bf16 upsampler killed every worker stream
+        # ~1s after HelloAck, churning H100 pods at 60s intervals).
+        for old_key, spec in rehomed:
+            rec = self._classes.get(old_key)
+            if rec is not None and spec in rec.specs:
+                rec.specs.remove(spec)
+            new_key = spec.instance_key
+            target = self._classes.get(new_key)
+            if target is None:
+                if rec is not None and not rec.specs:
+                    # whole group moved (the common case): carry the record —
+                    # and any live instance — to the new key.
+                    self._classes.pop(old_key, None)
+                    target = rec
+                else:
+                    target = _ClassRecord(cls=spec.cls)
+                self._classes[new_key] = target
+            if spec not in target.specs:
+                target.specs.append(spec)
+            if rec is not None and not rec.specs and self._classes.get(old_key) is rec:
+                self._classes.pop(old_key, None)
         if changed:
             self._on_state_change()
 
