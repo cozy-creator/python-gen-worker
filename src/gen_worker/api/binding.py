@@ -187,7 +187,57 @@ def wire_ref(binding: Binding) -> str:
     return binding.ref
 
 
+def rebind_pick(
+    binding: Binding,
+    *,
+    resolved_ref: str = "",
+    flavor: "str | None" = None,
+    cast: str = "",
+) -> Binding:
+    """THE fold of a precision pick into a binding (gw#494) — the hub
+    HelloAck path (``resolved_ref`` + ``cast``) and the local-ladder path
+    (``flavor`` + ``cast``) share this one implementation.
+
+    ``resolved_ref`` is authoritative when given: its flavor (possibly none)
+    replaces the binding's. ``flavor=None`` leaves the binding's flavor
+    untouched. Raises ``ValueError`` when the pick cannot round-trip through
+    ``wire_ref`` — a pick the rebound binding cannot re-mint would split the
+    slot into two residency identities (the th#736 mechanic).
+    """
+    import dataclasses
+
+    from ..models.refs import fold_ref, normalize_model_ref, parse_model_ref
+
+    if resolved_ref:
+        parsed = parse_model_ref(resolved_ref)
+        if parsed.tensorhub is None:
+            raise ValueError(f"resolution {resolved_ref!r} is not a tensorhub ref")
+        flavor = parsed.tensorhub.flavor or ""
+    rebound = binding
+    try:
+        if flavor is not None and flavor != getattr(binding, "flavor", ""):
+            rebound = dataclasses.replace(rebound, flavor=flavor)
+        if cast:
+            rebound = dataclasses.replace(rebound, storage_dtype=cast)
+    except TypeError as exc:
+        # e.g. folding a flavor into an HF/Civitai binding that has no
+        # flavor axis — same rejection channel as a round-trip failure.
+        raise ValueError(f"pick does not fit binding {binding!r}: {exc}") from exc
+    if resolved_ref:
+        expected = normalize_model_ref(resolved_ref)
+    elif flavor:
+        expected = fold_ref(wire_ref(binding), flavor=flavor)
+    else:
+        expected = None
+    if expected is not None and wire_ref(rebound) != expected:
+        raise ValueError(
+            f"pick {expected!r} does not round-trip through the binding "
+            f"(got {wire_ref(rebound)!r})"
+        )
+    return rebound
+
+
 __all__ = [
     "Binding", "BINDING_TYPES", "Civitai", "HF", "Hub", "ModelScope",
-    "STORAGE_DTYPES", "wire_ref",
+    "STORAGE_DTYPES", "rebind_pick", "wire_ref",
 ]

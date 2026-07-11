@@ -764,6 +764,14 @@ class _ClassRecord:
     # Content-keyed shared components this record holds (gw#479): released
     # (refcount--) at vacate so the entries become LRU/drain candidates.
     shared_keys: List[Any] = dc_field(default_factory=list)
+    # gw#494: the wire refs this record's instance BOOKED at load time —
+    # teardown releases exactly these (never a re-derivation from the
+    # possibly-rebound spec.models), so booking and clearing are provably
+    # the same key space.
+    held_refs: List[str] = dc_field(default_factory=list)
+    # gw#494: a resolution re-pick moved the specs' bindings away from
+    # held_refs; the instance serves the OLD pick and must be vacated.
+    stale: bool = False
 
 
 def _shared_loader_must_hit() -> Any:
@@ -903,6 +911,12 @@ class Executor:
             rec.specs.append(s)
         # Hardware-gate failures: fn name -> (reason, detail, axes).
         self.unavailable: Dict[str, Tuple[str, str, Dict[str, str]]] = {}
+        # gw#494: entries in `unavailable` that gate_functions owns — cleared
+        # and re-derived on every (re-)gate so gating is idempotent; setup
+        # failures (owned by _mark_setup_failed) survive re-gates.
+        self._gate_owned: set = set()
+        # Last hardware probe, so resolutions can re-run the gates.
+        self._last_gpu_info: Optional[Dict[str, Any]] = None
         # th#683 P3: how each serveable function will run on the actual card
         # (native / emergency / offload / cpu) + honest-guidance advisory.
         self.serve_plans: Dict[str, "ServePlan"] = {}
@@ -919,14 +933,18 @@ class Executor:
         ``resolutions`` maps a DECLARED wire ref to ``(resolved_ref, cast)``
         (HelloAck full-replace semantics: refs absent from the map revert to
         their authored bindings). Rebinding folds the resolved flavor into
-        the binding and stamps ``cast`` as ``storage_dtype``, so every
+        the binding via :func:`rebind_pick` (THE single fold, shared with the
+        local ladder) and stamps ``cast`` as ``storage_dtype``, so every
         downstream consumer — wire_ref residency keys, downloads, setup,
-        loading — follows the pick with no per-call-site changes. Already-
-        loaded pipelines are not reloaded; picks apply to future setups.
-        """
-        import dataclasses
+        loading — follows the pick with no per-call-site changes.
 
-        from .models.refs import parse_model_ref
+        Application is TRANSACTIONAL (gw#494): a ready instance whose loaded
+        refs no longer match its (re)bound refs is marked stale and vacated —
+        its residency bookings under the OLD resolved refs are released and
+        the next setup/LOAD loads the new pick — and the hardware gates +
+        serve plans re-run against the rebound bindings.
+        """
+        from .api.binding import rebind_pick
 
         changed = False
         rehomed: List[Tuple[Any, EndpointSpec]] = []
@@ -942,28 +960,16 @@ class Executor:
                 if pick is not None:
                     resolved_ref, cast = pick
                     try:
-                        rebound = base_binding
-                        if resolved_ref and resolved_ref != base_ref:
-                            parsed = parse_model_ref(resolved_ref)
-                            if parsed.tensorhub is None:
-                                raise ValueError(
-                                    f"resolution {resolved_ref!r} is not a "
-                                    "tensorhub ref")
-                            rebound = dataclasses.replace(
-                                rebound, flavor=parsed.tensorhub.flavor)
-                        if cast:
-                            rebound = dataclasses.replace(rebound, storage_dtype=cast)
-                        if resolved_ref and wire_ref(rebound) != resolved_ref:
-                            logger.warning(
-                                "precision resolution %s -> %s does not round-trip "
-                                "through the binding (got %s); keeping declared ref",
-                                base_ref, resolved_ref, wire_ref(rebound))
-                        else:
-                            new_binding = rebound
+                        new_binding = rebind_pick(
+                            base_binding,
+                            resolved_ref=(
+                                resolved_ref if resolved_ref != base_ref else ""),
+                            cast=cast)
                     except (ValueError, TypeError, AttributeError) as exc:
                         logger.warning(
                             "precision resolution %s -> %r rejected: %s",
                             base_ref, pick, exc)
+                        new_binding = base_binding
                 if spec.models.get(slot) is not new_binding:
                     spec.models[slot] = new_binding
                     self.store.register_binding(wire_ref(new_binding), new_binding)
@@ -1002,7 +1008,51 @@ class Executor:
             if rec is not None and not rec.specs and self._classes.get(old_key) is rec:
                 self._classes.pop(old_key, None)
         if changed:
+            # gw#494: transactional application — (1) a ready instance whose
+            # loaded refs diverged from the rebound refs is stale: vacate it
+            # so nothing stays booked under the old resolved refs (pins,
+            # promotes, adapters and UNLOAD all key off the CURRENT wire
+            # refs; a divergent record orphans its VRAM forever).
+            stale: List[_ClassRecord] = []
+            seen: set = set()
+            for rec in self._classes.values():
+                if id(rec) in seen:
+                    continue
+                seen.add(id(rec))
+                if not rec.ready or not rec.held_refs:
+                    continue
+                wanted = {wire_ref(b) for s in rec.specs for b in s.models.values()}
+                if set(rec.held_refs) != wanted:
+                    rec.stale = True
+                    stale.append(rec)
+            if stale:
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None  # sync context: ensure_setup vacates on next touch
+                if loop is not None:
+                    for rec in stale:
+                        loop.create_task(self._revalidate_record(rec))
+            # (2) gates + serve plans re-run against the rebound bindings
+            # (idempotent; also settles the startup()-vs-HelloAck order race).
+            if self._last_gpu_info is not None:
+                self.gate_functions(self._last_gpu_info)
             self._on_state_change()
+
+    async def _revalidate_record(self, rec: "_ClassRecord") -> None:
+        """Vacate a stale instance (gw#494): its pipelines were loaded for a
+        superseded pick, so release the residency bookings under the OLD
+        resolved refs; the next setup/LOAD loads the current pick. Records
+        with jobs in flight are left for ``ensure_setup`` to vacate on the
+        next touch."""
+        async with rec.lock:
+            if not rec.ready or not rec.stale:
+                return
+            async with self._load_lock:
+                if self._record_in_use(rec):
+                    return
+                await self._vacate_record(rec)
+        self._on_state_change()
 
     # ---- availability ----------------------------------------------------
 
@@ -1026,6 +1076,14 @@ class Executor:
         from .models.hub_policy import FIT_INCOMPATIBLE, TensorhubWorkerCapabilities
         from .models.serve_fit import RUN_CPU, RUN_OFFLOAD, plan_serve
 
+        # Idempotent re-gate (gw#494): drop only the marks THIS gate made
+        # last time; setup failures and other owners survive. Remember the
+        # probe so apply_model_resolutions can re-run us.
+        self._last_gpu_info = dict(gpu_info)
+        for fn in self._gate_owned:
+            self.unavailable.pop(fn, None)
+        self._gate_owned = set()
+
         total_vram_gb = float(gpu_info.get("gpu_total_mem") or 0) / (1024 ** 3)
         free_vram_gb = float(gpu_info.get("gpu_free_mem") or gpu_info.get("gpu_total_mem") or 0) / (1024 ** 3)
         detected_sm = str(gpu_info.get("gpu_sm") or "")
@@ -1047,6 +1105,7 @@ class Executor:
                     "compute_capability_unmet",
                     f"requires SM {r.compute_capability:.1f}, detected {detected_cc:.1f}",
                     {"detected_sm": f"{detected_cc:.1f}", "required_sm": f"{float(r.compute_capability):.1f}"})
+                self._gate_owned.add(name)
                 continue
             missing = [lib for lib in (r.libraries or ()) if lib not in libs]
             if missing:
@@ -1056,6 +1115,7 @@ class Executor:
                 self.unavailable[name] = (
                     "missing_cuda_library", f"missing required libraries: {', '.join(missing)}",
                     {"missing": ",".join(missing)})
+                self._gate_owned.add(name)
                 continue
 
             # Adaptive serve-time fit for the VRAM / GPU-presence / stored-
@@ -1080,6 +1140,7 @@ class Executor:
                     code, plan.reason,
                     {"detected_vram_gb": f"{total_vram_gb:.0f}",
                      "recommended_vram_gb": (f"{r.vram_gb:.0f}" if r.vram_gb else "")})
+                self._gate_owned.add(name)
                 continue
             if plan.degraded:
                 logger.warning(degraded_log_line(
@@ -1190,6 +1251,12 @@ class Executor:
         self.store.bind_loop()
         rec = self._classes[spec.instance_key]
         async with rec.lock:
+            if rec.ready and rec.stale:
+                # gw#494: the instance was loaded for a superseded pick —
+                # vacate (releasing its OLD-ref bookings) and set up fresh
+                # with the current bindings.
+                async with self._load_lock:
+                    await self._vacate_record(rec)
             if rec.ready:
                 await self._promote_setup_refs(spec, promote_slots)
                 return rec.instance
@@ -1236,10 +1303,17 @@ class Executor:
     ) -> Any:
         assert spec.cls is not None  # guarded by ensure_setup
         setup_slots = self._setup_slots(spec)
+        # gw#494: residency keys for this setup are derived ONCE, here, in
+        # resolved space; downloads, booking and the record's held_refs all
+        # use these exact strings (a HelloAck rebind during an await below
+        # cannot split download/booking/teardown identities).
+        slot_refs: Dict[str, str] = {
+            slot: wire_ref(spec.models[slot]) for slot in setup_slots
+        }
         paths: Dict[str, str] = {}
         for slot in setup_slots:
             binding = spec.models[slot]
-            ref = wire_ref(binding)
+            ref = slot_refs[slot]
             snap = (snapshots or {}).get(ref)
             path = await self.store.ensure_local(ref, snap, binding=binding)
             paths[slot] = str(path)
@@ -1294,7 +1368,10 @@ class Executor:
                     process_vram_bytes, rec.server.process.pid)
             self._register_residency(
                 spec, setup_slots, inj.loaded, vram_delta,
-                lane_slots=inj.lane_slots, shared_bytes=inj.shared_bytes)
+                lane_slots=inj.lane_slots, shared_bytes=inj.shared_bytes,
+                slot_refs=slot_refs)
+            rec.held_refs = sorted(set(slot_refs.values()))
+            rec.stale = False
         return instance
 
     def _register_residency(
@@ -1306,6 +1383,7 @@ class Executor:
         *,
         lane_slots: Optional[set] = None,
         shared_bytes: int = 0,
+        slot_refs: Optional[Dict[str, str]] = None,
     ) -> None:
         """Honest per-ref residency after a setup (#369). Worker-constructed
         pipelines carry their own measured allocator delta AND the object
@@ -1317,11 +1395,14 @@ class Executor:
         them here would clobber a mid-setup demotion."""
         res = self.store.residency
         lanes = lane_slots or set()
+        refs = slot_refs or {}
         per_ref: Dict[str, Tuple[Any, int]] = {}
         for slot in setup_slots:
             if slot in lanes:
                 continue
-            ref = wire_ref(spec.models[slot])
+            # gw#494: book under the SAME key the setup derived (never a
+            # fresh wire_ref over possibly-rebound spec.models).
+            ref = refs.get(slot) or wire_ref(spec.models[slot])
             obj, measured = loaded.get(slot, (None, 0))
             prev_obj, prev_bytes = per_ref.get(ref, (None, 0))
             per_ref[ref] = (obj or prev_obj, prev_bytes + measured)
@@ -2115,20 +2196,34 @@ class Executor:
                 return True
         return False
 
+    def _record_refs(self, rec: _ClassRecord) -> List[str]:
+        """The wire refs a record's instance holds: the load-time booking
+        keys when stamped (gw#494), else the current binding derivation
+        (records that never completed a setup)."""
+        if rec.held_refs:
+            return list(rec.held_refs)
+        return [wire_ref(b) for s in rec.specs for b in s.models.values()]
+
     def _record_holding(self, ref: str) -> Optional[_ClassRecord]:
         for rec in self._classes.values():
             if not rec.ready:
                 continue
-            if any(ref in (wire_ref(b) for b in s.models.values()) for s in rec.specs):
+            if ref in self._record_refs(rec):
                 return rec
         return None
 
     def _record_in_use(self, rec: _ClassRecord) -> bool:
-        for s in rec.specs:
-            for b in s.models.values():
-                ref = wire_ref(b)
-                if self._ref_in_use(ref) or self.store.residency.in_use(ref):
-                    return True
+        # A job on a rebound spec no longer references the record's held
+        # refs — membership of the job's spec in this record is the honest
+        # "instance in use" signal (gw#494).
+        for job in self.jobs.values():
+            if job.finished or job.superseded or job.spec is None:
+                continue
+            if job.spec in rec.specs:
+                return True
+        for ref in self._record_refs(rec):
+            if self._ref_in_use(ref) or self.store.residency.in_use(ref):
+                return True
         return False
 
     async def _vacate_record(self, rec: _ClassRecord) -> None:
@@ -2153,9 +2248,13 @@ class Executor:
                 await asyncio.to_thread(torch.cuda.empty_cache)
             except Exception:
                 pass
-        for s in rec.specs:
-            for b in s.models.values():
-                self.store.residency.release_to_disk(wire_ref(b))
+        # gw#494: release exactly what the instance BOOKED (held_refs) —
+        # re-deriving from spec.models would release the wrong keys after a
+        # resolution rebind, leaving the old entries' VRAM booked forever.
+        for ref in self._record_refs(rec):
+            self.store.residency.release_to_disk(ref)
+        rec.held_refs = []
+        rec.stale = False
         if rec.shared_keys:
             # Drop this record's holds on content-keyed shared components
             # (gw#479); entries no other record references get evicted.

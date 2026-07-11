@@ -350,8 +350,6 @@ def resolve_local_bindings(
     laddered; any failure keeps the declared binding (fail-open — the
     loading layer's fit ladder still applies at load time).
     """
-    import dataclasses
-
     from .refs import parse_model_ref
 
     out: dict[str, Any] = {}
@@ -381,11 +379,19 @@ def resolve_local_bindings(
         )
         if res.refusal or (not res.flavor and not res.cast):
             continue
-        rebound = binding
-        if res.flavor:
-            rebound = dataclasses.replace(rebound, flavor=res.flavor)
-        if res.cast:
-            rebound = dataclasses.replace(rebound, storage_dtype=res.cast)
+        # gw#494: THE single pick-fold (shared with the hub HelloAck path),
+        # round-trip guard included — a pick the rebound binding can't
+        # re-mint would split residency identities.
+        from ..api.binding import rebind_pick
+
+        try:
+            rebound = rebind_pick(
+                binding, flavor=res.flavor or None, cast=res.cast)
+        except (ValueError, TypeError) as exc:
+            logger.warning(
+                "local ladder: pick for %s rejected (%s); keeping declared",
+                name, exc)
+            continue
         logger.info(
             "local precision ladder: %s %s -> flavor=%s cast=%s (sm%d, %.1f GB free)",
             name, base_ref, res.flavor or "-", res.cast or "-",
