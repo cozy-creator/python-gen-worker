@@ -168,6 +168,7 @@ def artifact_metadata(
     targets: Iterable[str] = (),
     low_vram_mode: str = "",
     storage_dtype: str = "",
+    compile_mode: str = "whole",
 ) -> Dict[str, Any]:
     """Producer-side metadata for :func:`pack` (no timestamps: artifacts of
     identical content must be byte-identical). ``source_ref``/``source_digest``
@@ -190,6 +191,7 @@ def artifact_metadata(
         "targets": list(targets),
         "low_vram_mode": str(low_vram_mode or ""),
         "storage_dtype": str(storage_dtype or ""),
+        "compile_mode": str(compile_mode or "whole"),
         "libs": _lib_versions(),
     }
 
@@ -527,6 +529,35 @@ def _guarded(original: Callable[..., Any], compiled: Callable[..., Any], label: 
     return wrapper
 
 
+def _clear_regional(mod: Any) -> None:
+    """Undo nn.Module.compile() on every submodule (regional rollback)."""
+    for m in mod.modules():
+        if getattr(m, "_compiled_call_impl", None) is not None:
+            m._compiled_call_impl = None
+
+
+def _guarded_regional(mod: Any, original: Callable[..., Any], label: str) -> Callable[..., Any]:
+    """Regional analogue of :func:`_guarded`: blocks are compiled in place,
+    so eager fallback must first CLEAR the block compilations, then retry."""
+    state = {"failed": False}
+
+    @functools.wraps(original)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        if not state["failed"]:
+            try:
+                return original(*args, **kwargs)
+            except Exception as exc:  # noqa: BLE001 — any compile failure => eager
+                state["failed"] = True
+                logger.warning(
+                    "compile-cache: regional-compiled %s failed (%s: %s); eager "
+                    "for the rest of this process", label, type(exc).__name__, exc,
+                )
+                _clear_regional(mod)
+        return original(*args, **kwargs)
+
+    return wrapper
+
+
 def apply(pipeline: Any, cfg: Any, *, cache_ready: bool, guard: bool = True) -> bool:
     """Wrap ``cfg.targets`` on ``pipeline`` with compiled callables.
 
@@ -575,14 +606,35 @@ def apply(pipeline: Any, cfg: Any, *, cache_ready: bool, guard: bool = True) -> 
     except Exception:
         logger.debug("compile-cache: could not raise recompile limit", exc_info=True)
 
+    regional = bool(getattr(cfg, "regional", False))
     applied: list[str] = []
     originals: list[Tuple[Any, str, Callable[..., Any]]] = []
+    regional_mods: list[Any] = []
     for target in cfg.targets:
         resolved = _resolve_target(pipeline, target)
         if resolved is None:
             logger.debug("compile-cache: pipeline has no target %r; skipping", target)
             continue
         owner, attr, fn = resolved
+        if (
+            regional
+            and attr == "forward"
+            and callable(getattr(owner, "compile_repeated_blocks", None))
+        ):
+            # Per-block graphs (ie#381): bounded memory under fp8 layerwise
+            # casting + much cheaper cold compile. Blocks are compiled in
+            # place; the guard wrapper clears them on the first failure.
+            owner.compile_repeated_blocks(dynamic=False)
+            if guard:
+                setattr(owner, attr, _guarded_regional(owner, fn, target))
+                originals.append((owner, attr, fn))
+            regional_mods.append(owner)
+            applied.append(target)
+            continue
+        if regional:
+            logger.info(
+                "compile-cache: %r has no compile_repeated_blocks; "
+                "whole-forward compile for it", target)
         if target.startswith("vae"):
             # channels_last + compiled decode is the measured win combo (#382);
             # memory format changes strides, so it is part of the cache key —
@@ -601,8 +653,11 @@ def apply(pipeline: Any, cfg: Any, *, cache_ready: bool, guard: bool = True) -> 
         "shapes": [tuple(s) for s in cfg.shapes],
         "cache": bool(cache_ready),
         "originals": originals,
+        "regional_mods": regional_mods,
     })
-    logger.info("compile-cache: torch.compile armed for %s (cache=%s)", applied, cache_ready)
+    logger.info(
+        "compile-cache: torch.compile armed for %s (cache=%s regional=%s)",
+        applied, cache_ready, regional)
     return True
 
 
@@ -619,6 +674,11 @@ def unwrap(pipeline: Any) -> bool:
             setattr(owner, attr, fn)
         except Exception:
             logger.warning("compile-cache: could not restore eager %s.%s", type(owner).__name__, attr)
+    for mod in marker.get("regional_mods") or ():
+        try:
+            _clear_regional(mod)
+        except Exception:
+            logger.warning("compile-cache: could not clear regional compile on %s", type(mod).__name__)
     try:
         delattr(pipeline, _MARKER_ATTR)
     except AttributeError:
@@ -648,6 +708,14 @@ def enable(
         drift = mode_drift(meta, pipeline)
         if drift:
             logger.warning("compile-cache: %s; staying eager", drift)
+            meta = None
+    if meta is not None:
+        want = "regional" if getattr(cfg, "regional", False) else "whole"
+        have = str(meta.get("compile_mode") or "whole")
+        if have != want:
+            logger.warning(
+                "compile-cache: cell compile_mode %r != declared %r; staying "
+                "eager (graphs would miss)", have, want)
             meta = None
     return apply(pipeline, cfg, cache_ready=meta is not None)
 
@@ -707,6 +775,7 @@ def build(
     source_digest: str = "",
     dtype: str = "bf16",
     storage_dtype: str = "",
+    regional: bool = False,
     steps: int = 2,
     prompt: str = "cache warm-up: a lighthouse on a cliff at dawn, detailed",
 ) -> Tuple[Path, Dict[str, Any], Dict[str, float]]:
@@ -742,7 +811,7 @@ def build(
     if not torch.cuda.is_available():
         raise RuntimeError("compile-cache build requires CUDA")
 
-    cfg = CompileCfg(shapes=tuple(shapes), targets=tuple(targets))
+    cfg = CompileCfg(shapes=tuple(shapes), targets=tuple(targets), regional=bool(regional))
     pipe = load_from_pretrained(
         DiffusionPipeline, str(model_path), dtype=dtype,
         storage_dtype=storage_dtype)
@@ -783,6 +852,7 @@ def build(
         shapes=cfg.shapes, targets=cfg.targets,
         low_vram_mode=str(placed.get("mode") or ""),
         storage_dtype=storage_dtype,
+        compile_mode="regional" if regional else "whole",
     )
     label = flavor_label(meta["sku"], meta["torch"])
     artifact = pack(capture_root, out_dir / f"{label}.tar.gz", meta)

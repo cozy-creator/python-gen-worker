@@ -107,6 +107,75 @@ def test_unwrap_restores_eager():
     assert cc.unwrap(pipe) is False  # idempotent
 
 
+def test_regional_clear_and_guard():
+    """ie#381 regional mode: blocks are compiled in place (nn.Module.compile
+    sets _compiled_call_impl); rollback must CLEAR them, and the guard's
+    first failure does so before retrying eager."""
+
+    class _Block:
+        _compiled_call_impl = None
+
+    class _Mod:
+        def __init__(self):
+            self.b1, self.b2 = _Block(), _Block()
+
+        def modules(self):
+            return [self, self.b1, self.b2]
+
+        def forward(self, x):
+            if getattr(self.b1, "_compiled_call_impl", None) is not None:
+                raise RuntimeError("compiled block exploded")
+            return x + 1
+
+    mod = _Mod()
+    mod.b1._compiled_call_impl = object()  # "compiled"
+    mod.b2._compiled_call_impl = object()
+    guarded = cc._guarded_regional(mod, mod.forward, "transformer")
+    assert guarded(1) == 2  # failure -> cleared -> eager retry succeeds
+    assert mod.b1._compiled_call_impl is None
+    assert mod.b2._compiled_call_impl is None
+    assert guarded(2) == 3  # stays eager
+
+
+def test_unwrap_clears_regional_mods():
+    class _Block:
+        _compiled_call_impl = object()
+
+    class _Mod:
+        def __init__(self):
+            self.block = _Block()
+
+        def modules(self):
+            return [self, self.block]
+
+    class _Pipe3:
+        pass
+
+    pipe = _Pipe3()
+    mod = _Mod()
+    pipe._cozy_compile = {
+        "targets": ["transformer"], "shapes": [(960, 544, 241)],
+        "cache": True, "originals": [], "regional_mods": [mod],
+    }
+    assert cc.unwrap(pipe) is True
+    assert mod.block._compiled_call_impl is None
+
+
+def test_artifact_metadata_records_compile_mode():
+    meta = cc.artifact_metadata(family="ltx-2.3", shapes=[(960, 544, 241)],
+                                targets=["transformer"], compile_mode="regional")
+    assert meta["compile_mode"] == "regional"
+    default = cc.artifact_metadata(family="sd15", shapes=[(768, 768)], targets=["transformer"])
+    assert default["compile_mode"] == "whole"
+
+
+def test_compile_struct_regional_flag():
+    c = Compile(shapes=((960, 544, 241),), targets=("transformer",),
+                family="ltx-2.3", regional=True)
+    assert c.regional is True
+    assert Compile(shapes=((768, 768),)).regional is False
+
+
 def test_system_repo():
     assert cc.system_repo("sd15") == "_system/family-sd15"
     with pytest.raises(ValueError):

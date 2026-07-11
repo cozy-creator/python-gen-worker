@@ -517,6 +517,8 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
             storage = str(getattr(primary, "storage_dtype", "") or "")
             if storage:
                 fn["compile"]["storage_dtype"] = storage
+            if getattr(es.compile, "regional", False):
+                fn["compile"]["regional"] = True
         out.append(fn)
 
     return out

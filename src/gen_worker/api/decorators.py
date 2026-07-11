@@ -130,6 +130,15 @@ class Compile(msgspec.Struct, frozen=True):
     shapes: tuple[tuple[int, ...], ...]
     targets: tuple[str, ...] = ("transformer", "vae.decode")
     family: str = ""
+    # Regional compilation (diffusers compile_repeated_blocks): compile the
+    # target's repeated transformer blocks instead of the whole forward.
+    # REQUIRED for big fp8 layerwise-cast models (ie#381, measured on LTX
+    # 22B/H100): whole-graph inductor planning co-materializes per-layer
+    # bf16 upcast buffers and OOMs at the largest shapes; per-block graphs
+    # bound that to one block. Also much faster cold compile (one block
+    # graph per shape, reused across blocks). Cells record the mode — a
+    # mode drift consumer stays eager (cache would miss anyway).
+    regional: bool = False
 
     def __post_init__(self) -> None:
         force = msgspec.structs.force_setattr
