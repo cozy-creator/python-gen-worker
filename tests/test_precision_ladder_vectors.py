@@ -37,6 +37,7 @@ def _model(spec: dict) -> LadderModel:
         base_size_gb=float(spec.get("base_size_gb", 0.0)),
         fp8_cast_vram_gb=float(spec.get("fp8_cast_vram_gb", 0.0)),
         flavors=rows,
+        castable=bool(spec.get("castable", True)),
     )
 
 
