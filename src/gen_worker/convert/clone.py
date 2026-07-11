@@ -777,6 +777,10 @@ def run_clone(
                     )
                     # dtype="source" resolves to the detected on-disk dtype.
                     flavor_label = str(attrs.get("dtype") or spec.dtype)
+                # Hub flavor tokens are [a-z0-9][a-z0-9._-]{0,63}: the gguf
+                # dtype-axis label ("gguf:q4_k_m") publishes as "gguf-q4_k_m"
+                # (the th#611 flavor convention).
+                flavor_label = flavor_label.replace(":", "-")
             except InlineConversionNotPossible as exc:
                 entry: dict[str, Any] = {
                     "spec_label": spec.label, "dtype": spec.dtype,

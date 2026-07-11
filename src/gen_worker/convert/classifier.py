@@ -42,6 +42,10 @@ _GGUF_QUANT_PREFERENCE = (
     "q3_k_m", "q3_k_s", "q2_k", "f16", "bf16", "f32",
 )
 
+# Full quant token in a gguf FILENAME, incl. unsloth-dynamic ("UD-Q4_K_XL")
+# and i-quant ("IQ4_XS") forms the preference list doesn't name.
+_GGUF_QTYPE_RE = re.compile(r"(?:ud-)?(?:i?q\d[0-9a-z_]*|bf16|f16|f32)")
+
 
 class RepoRefusal(RuntimeError):
     """The repo can't be ingested. ``reason`` is a stable machine token:
@@ -147,10 +151,6 @@ def classify_repo(
     root = _root(paths)
     root_set = {p.lower() for p in root}
 
-    total = sum(int(sizes.get(p, 0)) for p in paths)
-    if total > _SIZE_REFUSE_BYTES:
-        raise RepoRefusal("too_large", files_seen=paths, detail=f"{total} bytes")
-
     configs = [
         p for p in paths
         if _ext(p) in {".json", ".txt", ".model", ".jinja", ".yaml", ".yml"}
@@ -162,6 +162,13 @@ def classify_repo(
     def _finish(strategy: str, library: str, weights: list[str], indexes: list[str],
                 attrs: dict[str, str], reason: str) -> RepoClassification:
         allow = sorted(set(weights) | set(indexes) | set(configs) | set(always))
+        # Size gate on the SELECTED set, not the whole repo: only
+        # allow_patterns are downloaded, and multi-quant GGUF repos
+        # legitimately total 100s of GB while one quant is ~18GB.
+        selected = sum(int(sizes.get(p, 0)) for p in allow)
+        if selected > _SIZE_REFUSE_BYTES:
+            raise RepoRefusal("too_large", files_seen=paths,
+                              detail=f"{selected} bytes selected")
         return RepoClassification(
             strategy=strategy, runtime_library=library, allow_patterns=allow,
             attrs=attrs, detection_reason=reason,
@@ -247,11 +254,12 @@ def classify_repo(
     gguf_files = [p for p in root if p.lower().endswith(".gguf")]
     if gguf_files:
         def _quant_of(p: str) -> str:
-            base = p.lower()
+            base = p.rsplit("/", 1)[-1].lower()
             for q in _GGUF_QUANT_PREFERENCE:
                 if q in base:
                     return q
-            return ""
+            m = _GGUF_QTYPE_RE.search(base)
+            return m.group(0) if m else ""
         gguf_pick: Optional[str] = None
         if gguf_quant:
             want = str(gguf_quant).strip().lower()

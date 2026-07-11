@@ -211,6 +211,52 @@ def _output_media_seconds(output: Any) -> float:
     return total
 
 
+class _StreamAccumulator:
+    """gw#475: collect stream deltas into the terminal output.
+
+    ``IncrementalTokenDelta`` texts concatenate into ``{"text": ...}``;
+    ``BatchItemDelta`` chunks accumulate per (item_id, index) and each
+    finished item lands in ``{"items": [...]}`` (text/* content decoded to
+    str so the JSON surfaces stay lossless). Other yielded structs are
+    stream-only, as before.
+    """
+
+    def __init__(self) -> None:
+        self._text: List[str] = []
+        self._items: List[Dict[str, Any]] = []
+        self._chunks: Dict[Tuple[Optional[str], int], bytearray] = {}
+
+    def add(self, item: Any) -> None:
+        if isinstance(item, IncrementalTokenDelta):
+            if item.text:
+                self._text.append(item.text)
+            return
+        if isinstance(item, BatchItemDelta):
+            key = (item.item_id, item.index)
+            buf = self._chunks.setdefault(key, bytearray())
+            buf += item.chunk
+            if item.finished or item.error:
+                content: Any = bytes(buf)
+                if item.content_type.startswith("text/"):
+                    content = content.decode("utf-8", errors="replace")
+                self._items.append({
+                    "index": item.index,
+                    "item_id": item.item_id,
+                    "content_type": item.content_type,
+                    "content": content,
+                    "error": item.error,
+                })
+                self._chunks.pop(key, None)
+
+    def result(self) -> Optional[Dict[str, Any]]:
+        out: Dict[str, Any] = {}
+        if self._text:
+            out["text"] = "".join(self._text)
+        if self._items:
+            out["items"] = self._items
+        return out or None
+
+
 # ---------------------------------------------------------------------------
 # Model seam: models.download (ensure-local) + models.residency (tier map),
 # with ModelEvent emission. Single-loop, per-ref asyncio locks — no
@@ -2077,7 +2123,16 @@ class Executor:
             if lease is not None:
                 lease.yield_slot()
             if spec.output_mode == "stream":
-                await self._finish(job, pb.JOB_STATUS_OK, metrics=metrics)
+                # gw#475: live deltas are droppable by contract (in-memory
+                # ProgressHub only) — the terminal JobResult carries the
+                # accumulated stream output so completed requests stay
+                # retrievable after the live stream ends.
+                inline: Optional[bytes] = None
+                blob_ref: Optional[str] = None
+                if output is not None:
+                    inline, blob_ref = await self._serialize_output(ctx, run, output)
+                await self._finish(job, pb.JOB_STATUS_OK, inline=inline, blob_ref=blob_ref,
+                                   metrics=metrics)
             else:
                 inline, blob_ref = await self._serialize_output(ctx, run, output)
                 await self._finish(job, pb.JOB_STATUS_OK, inline=inline, blob_ref=blob_ref,
@@ -2360,6 +2415,7 @@ class Executor:
     # ---- streaming ---------------------------------------------------------
 
     def _encode_chunk(self, item: Any) -> Optional[Tuple[bytes, str]]:
+        # NOTE: keep in sync with _StreamAccumulator.add (gw#475).
         if isinstance(item, Done):
             return None
         if isinstance(item, Error):
@@ -2403,14 +2459,17 @@ class Executor:
 
         return _emit
 
-    async def _pump_async_gen(self, job: _Job, agen: Any) -> None:
+    async def _pump_async_gen(self, job: _Job, agen: Any) -> Optional[Dict[str, Any]]:
+        acc = _StreamAccumulator()
         async for item in agen:
             if job.ctx is not None:
                 job.ctx.raise_if_cancelled()
             enc = self._encode_chunk(item)
             if enc is None:
                 break
+            acc.add(item)
             await self._emit_progress(job, next(job.seq), enc[0], enc[1])
+        return acc.result()
 
     def _pump_sync_gen(
         self,
@@ -2419,22 +2478,25 @@ class Executor:
         call_kwargs: Dict[str, Any],
         gpu_index: int,
         loop: asyncio.AbstractEventLoop,
-    ) -> None:
+    ) -> Optional[Dict[str, Any]]:
         if torch is not None and torch.cuda.is_available():
             try:
                 torch.cuda.set_device(gpu_index)
             except Exception:
                 pass
+        acc = _StreamAccumulator()
         for item in bound(**call_kwargs):
             if job.ctx is not None:
                 job.ctx.raise_if_cancelled()
             enc = self._encode_chunk(item)
             if enc is None:
                 break
+            acc.add(item)
             fut = asyncio.run_coroutine_threadsafe(
                 self._emit_progress(job, next(job.seq), enc[0], enc[1]), loop
             )
             fut.result()  # backpressure: block the producer on queue overflow
+        return acc.result()
 
     # ---- results -----------------------------------------------------------
 
