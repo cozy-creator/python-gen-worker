@@ -99,9 +99,9 @@ class _RequestOutputStream:
         self._last_progress_uploaded = 0
         self._session_id: Optional[str] = None
         self._uploader_meta: Dict[str, Any] = {}
-        # Split routing by artifact kind (gw#453): checkpoint streams ride
-        # the repo-CAS upload session when the job carries a destination_repo
-        # scope (job-bound create_checkpoint grant, multi-GB per-file caps);
+        # Split routing by artifact kind (gw#453): checkpoint streams publish
+        # via the /commits API when the job carries a destination_repo scope
+        # (job-bound create_checkpoint grant, multi-GB per-file caps);
         # asset streams (sample images, media outputs) always ride the media
         # route — that's what the upload_media grant authorizes and caps.
         # Inference jobs have no destination_repo, so scope stays None.
@@ -185,7 +185,16 @@ class _RequestOutputStream:
         try:
             if self._stream_remote:
                 finalize_t0 = time.monotonic()
-                self._result = self._finalize_presigned_upload()
+                try:
+                    if self._repo_job_scope is not None:
+                        self._result = self._finalize_checkpoint_commit()
+                    else:
+                        self._result = self._finalize_presigned_upload()
+                except CanceledError:
+                    raise
+                except Exception as exc:
+                    self._emit_upload_failed(exc)
+                    raise
                 self._finalized = True
                 self._maybe_emit_progress(
                     stage="stream_finalized",
@@ -314,8 +323,100 @@ class _RequestOutputStream:
             payload.update(dict(extra))
         self._ctx._emit_event("request.upload_progress", payload)
 
+    def _emit_upload_failed(self, exc: Exception) -> None:
+        """Typed upload-failure report (gw#471): the phantom-route breakage
+        was invisible for a dozen runs because failures only hit worker logs.
+        Emitted BEFORE the exception propagates; non-fatal callers (sample
+        harvest) emit-and-continue, fatal paths emit-then-raise."""
+        payload: Dict[str, Any] = {
+            "code": "artifact_upload_failed",
+            "kind": "checkpoint" if self._kind == "checkpoint" else "sample",
+            "ref": self._ref,
+            "error": str(exc)[:500],
+            "attempt": 1,
+        }
+        if self._lineage_step_number is not None:
+            payload["step_number"] = int(self._lineage_step_number)
+        self._ctx._emit_event("request.warning", payload)
+
+    def _finalize_checkpoint_commit(self) -> Tensors:
+        """Publish the buffered checkpoint file as ONE tensorhub commit.
+
+        gw#471: the hub's write API is commit-only (th#514/#515) — operations
+        are declared up front with blake3 + size, then presigned parts are
+        PUT and the revision finalized. The blake3 is already rolled during
+        write(), so the temp file commits directly through the same client
+        conversion's publish_flavors uses daily (gen_worker.convert.hub).
+        One save_checkpoint == one commit == one finalized repo revision;
+        the repo is auto-created server-side under the job's create_repo
+        grant on first publish."""
+        from ..convert.hub import CommitFile, HubClient
+
+        assert self._tmp_path is not None
+        assert self._repo_job_scope is not None
+        file_size = os.path.getsize(self._tmp_path)
+        if file_size <= 0:
+            raise RuntimeError("file save failed (empty file)")
+        blake3_hex = self._blake3_hasher.hexdigest()
+
+        repo_owner, repo, _job_id = self._repo_job_scope
+        ctx = self._ctx
+        client = HubClient(
+            base_url=ctx._get_file_api_base_url(),
+            token=ctx._get_worker_capability_token(),
+            owner=(ctx._owner or "").strip(),
+        )
+        # Worker-addable provenance stamp fields only (th#606).
+        provenance: Dict[str, Any] = {}
+        if self._lineage_step_number and self._lineage_step_number > 0:
+            provenance["step_number"] = int(self._lineage_step_number)
+        if self._lineage_epoch_number and self._lineage_epoch_number > 0:
+            provenance["epoch_number"] = int(self._lineage_epoch_number)
+
+        def _part_progress(parts_done: int, total_parts: int, bytes_up: int) -> None:
+            with self._progress_lock:
+                self._bytes_uploaded = bytes_up
+                self._chunks_uploaded = parts_done
+            self._maybe_emit_progress(stage="stream_upload")
+
+        result = client.commit(
+            destination_repo=f"{repo_owner}/{repo}",
+            files=[CommitFile(
+                path=self._ref,
+                local_path=Path(self._tmp_path),
+                size_bytes=int(file_size),
+                blake3=blake3_hex,
+            )],
+            mode="merge",
+            message=f"checkpoint {self._ref}",
+            provenance=provenance,
+            repo_spec=dict(ctx._repo_spec),
+            part_progress=_part_progress,
+        )
+        self._uploader_meta = {"revision_id": result.revision_id, "checkpoint_id": result.checkpoint_id}
+        with self._progress_lock:
+            self._bytes_uploaded = int(file_size)
+
+        final = result.response if isinstance(result.response, dict) else {}
+        ckpt = final.get("checkpoint") if isinstance(final.get("checkpoint"), dict) else {}
+        fmt = str(self._format or "").strip() or _infer_tensors_format(self._ref)
+        return Tensors(
+            ref=self._ref,
+            owner=ctx._owner,
+            local_path=None,
+            format=fmt,
+            size_bytes=int(file_size),
+            sha256=self._sha.hexdigest(),
+            blake3=blake3_hex,
+            blob_digest=f"blake3:{blake3_hex}",
+            snapshot_digest=str(ckpt.get("snapshot_digest") or "").strip() or None,
+            stream_mode=self.stream_mode,
+        )
+
     def _finalize_presigned_upload(self) -> Any:
-        """Hash the buffered temp file, then upload via presigned S3 multipart."""
+        """Hash the buffered temp file, then upload to the MEDIA route via
+        presigned S3 multipart. Checkpoint saves with a repo-job scope go
+        through `_finalize_checkpoint_commit` instead (gw#453 routing)."""
         from ..presigned_upload import presigned_upload_file
 
         assert self._tmp_path is not None
@@ -340,41 +441,25 @@ class _RequestOutputStream:
         if content_type and content_type != "application/octet-stream":
             create_payload["content_type"] = content_type
 
-        if self._repo_job_scope is None:
-            # Media upload. The URL owner segment MUST be the owner the
-            # capability token's upload_media grant is bound to (the token's
-            # `tenant` claim: the canonical invoking-org uuid). The
-            # dispatch-stamped ctx.owner can be a slug or a destination-repo
-            # owner resolving to a DIFFERENT org — tensorhub then finds no
-            # matching grant and 403s (J19 run34 sample images). Inference
-            # outputs work exactly because URL owner == token-bound owner.
-            create_payload["ref"] = self._ref
-            job_id = str(self._ctx._job_id or "").strip()
-            if job_id:
-                create_payload["job_id"] = job_id
-            owner = self._ctx._media_upload_owner()
-            if not owner:
-                raise RuntimeError(
-                    "file save failed (missing owner): media uploads require ctx.owner"
-                )
-            headers["X-Cozy-Owner"] = owner
-            owner_seg = urllib.parse.quote(owner, safe="")
-            endpoint_path = f"/api/v1/media/{owner_seg}/uploads"
-        else:
-            # Repo-CAS upload — issue #20 session-scoped URL shape. The
-            # session is opened lazily by the ctx-level manager on first use
-            # and cached so subsequent uploads to the same repo reuse it.
-            owner = (self._ctx._owner or "").strip()
-            if owner:
-                headers["X-Cozy-Owner"] = owner
-            repo_owner, repo, _job_id = self._repo_job_scope
-            create_payload["path"] = self._ref
-            revision_id = self._ctx._checkpoint_revision_id(repo_owner, repo)
-            endpoint_path = (
-                f"/api/v1/repos/{urllib.parse.quote(repo_owner, safe='')}/"
-                f"{urllib.parse.quote(repo, safe='')}/revisions/"
-                f"{urllib.parse.quote(revision_id, safe='')}/uploads"
+        # Media upload. The URL owner segment MUST be the owner the
+        # capability token's upload_media grant is bound to (the token's
+        # `tenant` claim: the canonical invoking-org uuid). The
+        # dispatch-stamped ctx.owner can be a slug or a destination-repo
+        # owner resolving to a DIFFERENT org — tensorhub then finds no
+        # matching grant and 403s (J19 run34 sample images). Inference
+        # outputs work exactly because URL owner == token-bound owner.
+        create_payload["ref"] = self._ref
+        job_id = str(self._ctx._job_id or "").strip()
+        if job_id:
+            create_payload["job_id"] = job_id
+        owner = self._ctx._media_upload_owner()
+        if not owner:
+            raise RuntimeError(
+                "file save failed (missing owner): media uploads require ctx.owner"
             )
+        headers["X-Cozy-Owner"] = owner
+        owner_seg = urllib.parse.quote(owner, safe="")
+        endpoint_path = f"/api/v1/media/{owner_seg}/uploads"
 
         def _progress_cb(parts_done: int, total_parts: int, bytes_up: int) -> None:
             with self._progress_lock:

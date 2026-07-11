@@ -314,14 +314,16 @@ class HubClient:
         return self._json(resp)
 
     def _upload_one(self, repo_path: str, revision_id: str, entry: Mapping[str, Any],
-                    local_path: Path) -> None:
+                    local_path: Path,
+                    part_progress: Optional[Callable[[int, int, int], None]] = None) -> None:
         """Upload one file, surviving server-side staging loss: on
         409 staging_object_missing from /complete, re-open the upload and
         re-send just this file (bounded — the rest of the commit is unaffected)."""
         path = str(entry.get("path") or "")
         for attempt in range(_REUPLOAD_ATTEMPTS + 1):
             try:
-                self._upload_entry_once(repo_path, revision_id, entry, local_path)
+                self._upload_entry_once(repo_path, revision_id, entry, local_path,
+                                        part_progress=part_progress)
                 return
             except _StagingLostError as exc:
                 if attempt == _REUPLOAD_ATTEMPTS:
@@ -336,7 +338,8 @@ class HubClient:
                     return  # landed in CAS meanwhile — server recorded the dedup
 
     def _upload_entry_once(self, repo_path: str, revision_id: str, entry: Mapping[str, Any],
-                           local_path: Path) -> None:
+                           local_path: Path,
+                           part_progress: Optional[Callable[[int, int, int], None]] = None) -> None:
         upload_id = str(entry.get("upload_id") or "").strip()
         if not upload_id:
             raise HubPublishError(f"commit upload entry missing upload_id for {entry.get('path')!r}")
@@ -370,6 +373,8 @@ class HubClient:
                 "etag": result.etag,
             }})
             self._check_complete(resp, str(entry.get("path") or ""))
+            if part_progress is not None:
+                part_progress(1, 1, int(size_bytes))
             return
 
         part_urls = list(entry.get("part_urls") or [])
@@ -377,6 +382,7 @@ class HubClient:
         if not part_urls or part_size <= 0:
             raise HubPublishError(f"commit upload entry missing presign data for {entry.get('path')!r}")
         parts: list[dict[str, Any]] = []
+        bytes_up = 0
         with open(local_path, "rb") as f:
             for i, url in enumerate(part_urls):
                 buf = f.read(part_size)
@@ -393,6 +399,9 @@ class HubClient:
                         f"part #{i + 1} after {_RETRY_ATTEMPTS} attempts")
                 etag = str(resp.headers.get("ETag") or "").strip().strip('"')
                 parts.append({"part_number": i + 1, "etag": etag})
+                bytes_up += len(buf)
+                if part_progress is not None:
+                    part_progress(len(parts), len(part_urls), bytes_up)
         resp = self._post_complete(complete_path, {"parts": parts})
         self._check_complete(resp, str(entry.get("path") or ""))
 
@@ -445,6 +454,7 @@ class HubClient:
         provenance: Mapping[str, Any] | None = None,
         repo_spec: Mapping[str, str] | None = None,
         progress: Any = None,
+        part_progress: Optional[Callable[[int, int, int], None]] = None,
     ) -> CommitResult:
         """Publish one checkpoint: one POST /commits, PUT the parts, finalize.
 
@@ -519,7 +529,8 @@ class HubClient:
                     raise BankedBlobGoneError(
                         f"banked blob for {f.path!r} is gone from CAS "
                         f"(blake3 {f.blake3[:12]}…) — no local bytes to upload")
-                self._upload_one(repo_path, revision_id, entry, Path(f.local_path))
+                self._upload_one(repo_path, revision_id, entry, Path(f.local_path),
+                                 part_progress=part_progress)
                 uploaded += 1
                 if callable(progress):
                     progress(uploaded + deduped, total)

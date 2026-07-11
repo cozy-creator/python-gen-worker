@@ -16,11 +16,12 @@ capability token or a user JWT. The orchestrator is NOT in the upload path:
 clients talk directly to tensorhub, and bytes go straight to R2/S3.
 
 This is the standard tensorhub upload client. The same control-plane shape is
-used at different route prefixes for repo checkpoints
-(/api/v1/repos/:owner/:repo/revisions/:revision_id/uploads), datasets
+used at different route prefixes for datasets
 (/api/v1/datasets/:dataset_id/upload-sessions/:session_id/uploads),
 endpoint source (/api/v1/endpoints/:owner/:endpoint/releases/uploads),
-and user media (/api/v1/media/:owner/uploads).
+and user media (/api/v1/media/:owner/uploads). Repo checkpoints do NOT use
+this client anymore — they publish via the /commits API (gw#471,
+gen_worker.convert.hub).
 
 # HTTP stack (issues #13 / #385)
 

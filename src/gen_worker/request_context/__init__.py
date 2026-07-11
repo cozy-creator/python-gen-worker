@@ -163,17 +163,6 @@ class RequestContext:
         self._models = _copy_context_metadata(models or {})
         self._loras = _copy_context_metadata(loras or {})
 
-        # Upload-session manager (issue #20). Lazy-created on first
-        # ctx.save_file / ctx.save_checkpoint / ctx.save_output_stream use.
-        # Tenant-invisible; library-internal machinery for the session
-        # lifecycle (open → per-file uploads → finalize).
-        self._upload_sessions = None  # type: Optional["_UploadSessionManager"]
-        # Guards lazy-init of `_upload_sessions`. Per-file upload threads
-        # can race on the first save_* call when the manager hasn't been
-        # instantiated yet.
-        # The manager itself is already thread-safe internally.
-        self._upload_sessions_lock = threading.Lock()
-
         # Capability-budget gate (issue #269 back-pressure). Lazy-built from
         # the worker_capability_token's max_total_bytes + max_bytes_per_file
         # claims on first upload. The pool's per-file fan-out can over-commit
@@ -182,9 +171,10 @@ class RequestContext:
         self._upload_budget_gate = None  # type: Optional["BudgetGate"]
         self._upload_budget_gate_lock = threading.Lock()
 
-        # Repo fields declared by the ingest pipeline before the first upload
-        # session opens. Empty values are omitted and tensorhub keeps/inherits
-        # existing repo values.
+        # Repo fields declared by the ingest pipeline before the first
+        # checkpoint commit. Sent in the /commits body so tensorhub can
+        # auto-create the destination repo; empty values are omitted and
+        # tensorhub keeps/inherits existing repo values.
         self._repo_spec: Dict[str, str] = {}
 
         # GPU-slot lease (#382). Set by the executor for GPU jobs; lets
@@ -255,63 +245,6 @@ class RequestContext:
                     token = self._get_worker_capability_token() or ""
                     self._upload_budget_gate = budget_gate_from_capability_jwt(token)
         return self._upload_budget_gate
-
-    def _upload_session_manager(self):
-        """Lazy-instantiate the upload session manager for this request.
-
-        Library-internal (issue #20). Tenants don't touch this — they use
-        ctx.save_file / save_checkpoint / save_output_stream / save_checkpoint_release
-        which route through the manager implicitly.
-        """
-        # Double-checked locking so concurrent save_* threads (issue
-        # #269) don't each materialize a manager and lose session
-        # caching to each other.
-        if self._upload_sessions is None:
-            with self._upload_sessions_lock:
-                if self._upload_sessions is None:
-                    from ._upload_session import _UploadSessionManager
-                    base = self._get_file_api_base_url()
-
-                    def _hdrs() -> Dict[str, str]:
-                        token = self._get_worker_capability_token()
-                        h: Dict[str, str] = {"Authorization": f"Bearer {token}"}
-                        if self._owner:
-                            h["X-Cozy-Owner"] = self._owner
-                        return h
-
-                    def _repo_spec_provider() -> Dict[str, str]:
-                        return dict(self._repo_spec)
-
-                    self._upload_sessions = _UploadSessionManager(
-                        base_url=base,
-                        headers_provider=_hdrs,
-                        job_id=self._job_id,
-                        repo_spec_provider=_repo_spec_provider,
-                    )
-        return self._upload_sessions
-
-    def _checkpoint_revision_id(self, repo_owner: str, repo_name: str) -> str:
-        """Return the revision_id for a checkpoint upload session on this
-        destination repo, opening it lazily on first call. Cached per ctx —
-        subsequent uploads to the same repo reuse the session.
-
-        Tensorhub still calls the open-session token `session_id` over the
-        wire; we surface it locally as `revision_id` because the resource
-        it materializes is one repo revision. The two names refer to the
-        same opaque value."""
-        mgr = self._upload_session_manager()
-        return mgr.session_id_for(
-            "checkpoint",
-            {"repo_owner": repo_owner, "repo_name": repo_name},
-        )
-
-    def _close_upload_sessions(self, *, abort_open: bool = True) -> None:
-        """Called at request end (by worker.py). Aborts any still-open
-        sessions — a finalize call removes the session from the cache so
-        this is a no-op for successfully-finalized requests."""
-        if self._upload_sessions is not None:
-            self._upload_sessions.close_all(abort_open=abort_open)
-            self._upload_sessions = None
 
     def _get_worker_capability_token(self) -> str:
         if self._worker_capability_token:
@@ -878,10 +811,11 @@ class _PublisherMixin:
         class_name: str = "",
         adapter_for_family: str = "",
     ) -> None:
-        """Set destination repo fields for upload sessions opened from this ctx.
+        """Set destination repo fields for checkpoint commits from this ctx.
 
-        Must be called before the first save_checkpoint / save_file call for
-        the destination repo (the fields are sent when the session opens).
+        Must be called before the first save_checkpoint call for the
+        destination repo (the fields ride each /commits body so tensorhub
+        can auto-create the repo with the right spec).
         """
         spec = {
             "kind": kind,
@@ -940,15 +874,9 @@ class _PublisherMixin:
         _enforce_output_file_size_limit(size)
         fmt = str(format or "").strip() or _infer_tensors_format(ref or local_path)
 
-        # Job-scoped writes go through the repo-CAS upload-session stream so
-        # the returned Tensors carries a blake3 digest + blob_digest + the
-        # session tracks completed_files for the finalize manifest. (Earlier
-        # media-route fallback was a workaround for tensorhub's
-        # `handleOpenUploadSession` rejecting cap-token callers — that server
-        # bug is fixed now; media-route is no longer needed, and it also
-        # broke `_build_snapshot_manifest` because save_file returns an Asset
-        # without blake3 and the clone pipeline's manifest builder requires a
-        # blake3 digest per entry.)
+        # Job-scoped writes publish through the /commits stream (gw#471) so
+        # the returned Tensors carries a blake3 digest + blob_digest and each
+        # save materializes one finalized repo revision.
         # Reserve aggregate-bytes budget (issue #269 back-pressure). Held
         # across either branch (streaming or save_file fallthrough). Save_file
         # is reentrancy-aware so its inner reserve() is a no-op.
@@ -1018,8 +946,8 @@ class _PublisherMixin:
         self._require_repo_job_scope_for_tensors(ref)
         fmt = str(format or "").strip() or _infer_tensors_format(ref)
 
-        # Job-scoped writes go through the repo-CAS upload-session stream;
-        # see save_checkpoint for the rationale.
+        # Job-scoped writes publish through the /commits stream; see
+        # save_checkpoint for the rationale.
         if self._repo_job_upload_scope() is not None and self._should_stream_output_to_file_api(ref):
             stream = self.open_checkpoint_stream(
                 ref,
