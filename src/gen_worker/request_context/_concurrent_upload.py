@@ -25,8 +25,6 @@ from __future__ import annotations
 
 import logging
 import threading
-from concurrent.futures import ThreadPoolExecutor
-from typing import Sequence, Callable, List, TypeVar
 
 logger = logging.getLogger(__name__)
 

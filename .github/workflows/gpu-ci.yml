@@ -123,7 +123,7 @@ jobs:
       - name: GPU sanity
         run: nvidia-smi
 
-      - name: Sync deps (cu128 lock)
+      - name: Sync deps (cu129 lock)
         id: sync
         run: uv sync --extra dev --extra torch --extra images
 
@@ -141,7 +141,7 @@ jobs:
       # Real image-generation smoke: FLUX.2-klein-4B turbo (ungated, ~16GB)
       # through load_from_pretrained + place_pipeline, tripwire-gated.
       # diffusers/transformers are endpoint deps, not gen-worker deps — installed
-      # into the synced venv (torch stays the cu128 lock build; pins mirror the
+      # into the synced venv (torch stays the cu129 lock build; pins mirror the
       # klein endpoint); --no-sync keeps uv run from pruning them.
       # Independent signal: runs whenever deps synced, even if the suite failed
       # (a flaky unit test must not hide "does the product make pictures").
@@ -151,7 +151,7 @@ jobs:
           GEN_WORKER_GPU_SMOKE: "1"
           GEN_WORKER_SMOKE_OUT: ${{ github.workspace }}/smoke-out
         run: |
-          uv pip install "diffusers>=0.38,<0.40" "transformers>=4.57,<5" \
+          uv pip install "diffusers>=0.39,<0.40" "transformers>=5.13,<6" \
             accelerate sentencepiece numpy
           uv run --no-sync pytest tests/test_gpu_generation_smoke.py -q -rs -s
 
