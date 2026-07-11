@@ -240,6 +240,37 @@ def test_compile_struct_validation():
         Compile(shapes=((768, 768),), targets=())
 
 
+def test_compile_struct_video_shapes():
+    """(w, h, frames) rows — video graphs key on the frame axis (ie#381)."""
+    c = Compile(
+        family="ltx-2.3",
+        shapes=[[1280, 704, 121], (960, 544, 241), (1920, 1088, 241)],
+        targets=("transformer",),
+    )
+    assert c.shapes == ((1280, 704, 121), (960, 544, 241), (1920, 1088, 241))
+    # mixed image + video rows are fine (one endpoint, two modality functions)
+    m = Compile(shapes=((768, 768), (1280, 704, 121)))
+    assert m.shapes == ((768, 768), (1280, 704, 121))
+    with pytest.raises(ValueError):
+        Compile(shapes=((1280, 704, 0),))
+    with pytest.raises(ValueError):
+        Compile(shapes=((1280,),))
+    with pytest.raises(ValueError):
+        Compile(shapes=((1280, 704, 121, 24),))
+
+
+def test_artifact_metadata_video_shapes_and_storage_dtype():
+    meta = cc.artifact_metadata(
+        family="ltx-2.3",
+        shapes=[(1280, 704, 121), (1920, 1088, 241)],
+        targets=["transformer"],
+        storage_dtype="fp8",
+    )
+    assert meta["shapes"] == [[1280, 704, 121], [1920, 1088, 241]]
+    assert meta["storage_dtype"] == "fp8"
+    assert cc.verify(meta, family="ltx-2.3") == ""
+
+
 class In(msgspec.Struct):
     prompt: str = ""
 

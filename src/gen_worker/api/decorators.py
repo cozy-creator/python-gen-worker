@@ -108,8 +108,12 @@ class Compile(msgspec.Struct, frozen=True):
 
     ``Compile(family="flux2-klein-4b", shapes=((768, 768), (1024, 1024)))``
     names the model FAMILY (caches key on the traced graph, so every
-    fine-tune of a family shares one artifact) and the (width, height) set
-    the compile job warms.
+    fine-tune of a family shares one artifact) and the shape set the compile
+    job warms. A shape row is ``(width, height)`` for image models or
+    ``(width, height, frames)`` for video models (ie#381): video DiT graphs
+    key on the token count, which includes the frame axis, so every
+    (resolution, duration) preset pair is its own graph. Two-stage presets
+    contribute BOTH their base and refined resolutions as rows.
 
     SHAPES DERIVE FROM THE PAYLOAD PRESET ENUM (ie#345 fleet policy): when
     the endpoint's payload uses size buckets, ``shapes`` must be exactly
@@ -123,16 +127,21 @@ class Compile(msgspec.Struct, frozen=True):
     See ``gen_worker.compile_cache``.
     """
 
-    shapes: tuple[tuple[int, int], ...]
+    shapes: tuple[tuple[int, ...], ...]
     targets: tuple[str, ...] = ("transformer", "vae.decode")
     family: str = ""
 
     def __post_init__(self) -> None:
         force = msgspec.structs.force_setattr
-        shapes = tuple((int(w), int(h)) for w, h in (tuple(s) for s in self.shapes))
-        if not shapes or any(w <= 0 or h <= 0 for w, h in shapes):
+        shapes = tuple(tuple(int(v) for v in s) for s in self.shapes)
+        if (
+            not shapes
+            or any(len(s) not in (2, 3) for s in shapes)
+            or any(v <= 0 for s in shapes for v in s)
+        ):
             raise ValueError(
-                f"Compile.shapes must be positive (w, h) pairs, got {self.shapes!r}"
+                "Compile.shapes must be positive (w, h) or (w, h, frames) "
+                f"rows, got {self.shapes!r}"
             )
         force(self, "shapes", shapes)
         targets = tuple(str(t).strip() for t in self.targets if str(t).strip())
