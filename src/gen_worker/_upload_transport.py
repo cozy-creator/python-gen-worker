@@ -47,7 +47,7 @@ import random
 import socket
 import ssl
 import time
-from typing import Any, Optional
+from typing import IO, Any, Optional, cast
 
 import urllib3
 from urllib3.exceptions import HTTPError, MaxRetryError, ProtocolError, SSLError, TimeoutError as Urllib3TimeoutError
@@ -325,7 +325,9 @@ def upload_part_to_presigned_url(
                         resp = http.request(
                             "PUT",
                             url,
-                            body=body,
+                            # urllib3 accepts any object with read() (duck
+                            # file); its 2.7+ stubs only name IO[Any].
+                            body=cast("IO[bytes]", body),
                             headers={
                                 "Content-Length": str(length),
                                 # Force connection teardown after this single

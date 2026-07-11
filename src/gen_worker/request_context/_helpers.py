@@ -15,7 +15,7 @@ import logging
 import re
 import socket
 import urllib.parse
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from ..api.errors import OutputTooLargeError
 
