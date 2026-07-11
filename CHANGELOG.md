@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.13.19 (2026-07-10)
+
+- **gw#471: checkpoint saves publish via tensorhub's real `/commits` API.**
+  `ctx.save_checkpoint` / `save_checkpoint_bytes` / `open_checkpoint_stream`
+  spoke a phantom `POST /repos/:o/:r/revisions` open-session dialect that
+  tensorhub deleted in th#514/#515 (2026-07-03) — every checkpoint save since
+  image 0.3.6 died with `upload_session_open failed (404)` (J19 run43), and
+  mid-run checkpoint events vanished. The stream finalize now publishes each
+  checkpoint as ONE commit through `gen_worker.convert.hub.HubClient` (the
+  same client conversion's publish_flavors uses daily): create commit with
+  the add operation (blake3 rolled during write) → part PUTs / transfer
+  grant → complete → finalize. Each save materializes a real finalized repo
+  revision (the old session path never finalized at all). The destination
+  repo auto-creates server-side under the job's create_repo grant;
+  `set_repo_spec` fields ride the commit body. `_upload_session.py` and the
+  ctx session-manager wiring are deleted. `HubClient.commit` grew an optional
+  `part_progress` callback so byte-level upload progress events keep flowing.
+- **gw#471 scope-add: upload failures are REPORTED, not just logged.**
+  Checkpoint and media stream-upload failures emit a typed
+  `request.warning` event `{code: artifact_upload_failed, kind:
+  checkpoint|sample, ref, step_number?, error(≤500), attempt}` through the
+  ctx emitter before the exception propagates — the phantom-route breakage
+  was invisible for a dozen runs.
+- The gw#453 route test's stand-in hub now serves ONLY tensorhub's real
+  route table and 404s everything else (it previously accepted any path —
+  which is how the phantom dialect slipped through), asserting the full
+  commit sequence for a >256MiB checkpoint plus repo-absent first-publish.
+
 ## 0.13.16 (2026-07-10)
 
 - **gw#465: boot-prefetch model-op batches no longer fail systematically.**
