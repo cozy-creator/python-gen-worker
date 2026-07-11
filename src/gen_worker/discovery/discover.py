@@ -37,15 +37,6 @@ def _type_id(t: type) -> Dict[str, str]:
     }
 
 
-def _type_qualname(t: type) -> str:
-    """Get fully qualified name for a type."""
-    mod = getattr(t, "__module__", "")
-    qn = getattr(t, "__qualname__", getattr(t, "__name__", ""))
-    if mod and qn:
-        return f"{mod}.{qn}"
-    return repr(t)
-
-
 def _is_msgspec_struct(t: Any) -> bool:
     """Check if type is a msgspec.Struct subclass."""
     try:
@@ -312,13 +303,6 @@ def _binding_to_manifest(binding: Binding, param_name: str = "") -> Dict[str, An
         if binding.files:
             out["files"] = list(binding.files)
     return out
-
-
-def _annotation_to_fqn(ann: Any) -> str:
-    """Return a plain `module.qualname` for a parameter annotation, or ''."""
-    if isinstance(ann, type):
-        return f"{ann.__module__}.{ann.__qualname__}"
-    return ""
 
 
 def _schema_and_hash(t: type) -> Tuple[Dict[str, Any], str]:

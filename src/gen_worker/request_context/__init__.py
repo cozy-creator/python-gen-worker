@@ -63,28 +63,20 @@ logger = logging.getLogger(__name__)
 # re-exported here so existing `from gen_worker.request_context import _foo`
 # call sites (worker.py, tests) keep working.
 from ._helpers import (
-    _HINT_KEYS_DESTINATION_REPO,
-    _HINT_KEYS_EXECUTION_KIND,
-    _HINT_KEYS_JOB_ID,
     _MAX_OUTPUT_FILE_BYTES,
     _FILE_API_HTTP_TIMEOUT_S,
     _FILE_API_STREAM_ABORT_TIMEOUT_S,
     _FILE_API_STREAM_CHUNK_TIMEOUT_S,
     _FILE_API_STREAM_FINALIZE_TIMEOUT_S,
     _FILE_API_STREAM_REPLAY_TIMEOUT_S,
-    _canonicalize_model_ref_string,
     _decode_unverified_jwt_claims,
-    _encode_ref_for_url,
     _enforce_output_file_size_limit,
-    _http_request,
     _infer_mime_type,
     _infer_tensors_format,
     _is_private_ip_str,
     _normalize_output_ref,
-    _normalize_repo_name,
     _parse_owner_repo,
     _require_worker_capability_token,
-    _resolve_hint_first_string,
     _sha256_file,
     _url_is_blocked,
 )
@@ -105,9 +97,7 @@ class RequestContext:
         timeout_ms: Optional[int] = None,
         file_api_base_url: Optional[str] = None,
         worker_capability_token: Optional[str] = None,
-        materialized_input_urls: Optional[Dict[str, str]] = None,
         local_output_dir: Optional[str] = None,
-        resolved_repos_by_id: Optional[Dict[str, Any]] = None,
         required_models: Optional[List[str]] = None,
         execution_hints: Optional[Dict[str, Any]] = None,
         parent_request_id: Optional[str] = None,
@@ -130,9 +120,7 @@ class RequestContext:
         self._file_api_base_url = (file_api_base_url or "").strip() or None
         self._worker_capability_token = (worker_capability_token or "").strip() or None
         self._hf_token = (hf_token or "").strip()
-        self._materialized_input_urls = dict(materialized_input_urls or {})
         self._local_output_dir = (local_output_dir or "").strip() or None
-        self._resolved_repos_by_id = resolved_repos_by_id
         self._required_models = list(required_models or [])
         self._execution_hints = dict(execution_hints or {})
         self._parent_request_id = str(parent_request_id or "").strip() or None
@@ -302,15 +290,6 @@ class RequestContext:
             return False
         return True
 
-    def _materialized_input_url_for_ref(self, ref: str) -> Optional[str]:
-        raw = (ref or "").strip().lstrip("/")
-        if not raw:
-            return None
-        out = str(self._materialized_input_urls.get(raw) or "").strip()
-        if out:
-            return out
-        return None
-
     def _repo_job_upload_scope(self) -> Optional[tuple[str, str, str]]:
         """Return (owner, repo, job_id) for repo-CAS uploads, or None.
 
@@ -325,10 +304,10 @@ class RequestContext:
         # Previously gated on kind=="training", which broke publish for
         # @inference clone jobs that still emit checkpoints.
         hints = dict(self._execution_hints or {})
-        destination_repo = _resolve_hint_first_string(hints, keys=_HINT_KEYS_DESTINATION_REPO)
+        destination_repo = str(hints.get("destination_repo") or "").strip()
         if destination_repo == "":
             return None
-        job_id = _resolve_hint_first_string(hints, keys=_HINT_KEYS_JOB_ID, fallback=self._job_id)
+        job_id = str(hints.get("job_id") or "").strip() or str(self._job_id or "").strip()
         if job_id == "":
             return None
         try:

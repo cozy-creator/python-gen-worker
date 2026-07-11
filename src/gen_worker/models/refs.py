@@ -211,23 +211,3 @@ def parse_model_ref(raw: str, *, provider: str = "tensorhub") -> ParsedModelRef:
 
     raise ValueError(f"unsupported model ref provider: {provider!r}")
 
-
-def canonical_id(ref: str, provider: str = "tensorhub", *, tag: str = "prod", flavor: str = "") -> str:
-    """Canonical in-process identity for a (provider, ref, tag, flavor) tuple.
-
-    Used as the key in cross-process maps like ``resolved_repos_by_id``.
-    Tensorhub (default provider) refs render as bare. Non-tensorhub
-    providers render with a single-colon prefix so two providers' refs
-    can coexist in the same map without collision.
-    """
-    base = ref.strip()
-    if not base:
-        return ""
-    out = base
-    if tag and tag != "prod":
-        out = f"{out}:{tag}"
-    if flavor:
-        out = f"{out}#{flavor}"
-    if provider and provider != "tensorhub":
-        out = f"{provider}:{out}"
-    return out

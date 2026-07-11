@@ -111,7 +111,7 @@ def test_make_room_ram_skips_pinned_and_executing(tmp_path: Path, monkeypatch) -
     monkeypatch.setattr(residency_mod, "get_available_ram_gb", lambda: 2.0)
     res = _res()
     res.track_ram("m/pinned", _Pipe(), path=tmp_path)
-    res.pin("m/pinned")
+    res._entries["m/pinned"].pinned = True
     res.track_ram("m/busy", _Pipe(), path=tmp_path)
     with res.executing("m/busy"):
         assert res.make_room_ram(6 * _GiB) is False

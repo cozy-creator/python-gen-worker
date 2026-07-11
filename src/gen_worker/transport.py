@@ -135,20 +135,6 @@ class SendQueue:
             self._pending_results.pop((r.request_id, r.attempt), None)
             self._cond.notify_all()  # wake wait_empty (drain flush)
 
-    async def drop_result(self, request_id: str, attempt: int) -> None:
-        """Reconcile told us this attempt is stale — stop retrying its result."""
-        async with self._cond:
-            self._pending_results.pop((request_id, attempt), None)
-            self._cond.notify_all()
-            for i, (kind, m) in enumerate(list(self._items)):
-                if (
-                    kind == _RESULT
-                    and m.job_result.request_id == request_id
-                    and m.job_result.attempt == attempt
-                ):
-                    del self._items[i]
-                    break
-
     async def reset_for_reconnect(self) -> None:
         """Drop buffered progress/events; requeue every unshipped result."""
         async with self._cond:
