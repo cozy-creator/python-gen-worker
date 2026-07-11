@@ -144,3 +144,31 @@ def test_resolve_local_bindings_never_touches_pinned_or_failing() -> None:
         {"c": bare}, caps=_caps(89), free_vram_gb=23.0, resolver=_boom,
     )
     assert out["c"] is bare
+
+
+def test_apply_model_resolutions_rehomes_the_instance_group() -> None:
+    """spec.instance_key is a live property over spec.models — a precision
+    rebind moves it, and the executor's instance-group record must move too.
+    Regression (found live, ie#382): the stale key made every later
+    self._classes[spec.instance_key] a KeyError, crash-looping the hello
+    handler ~1s after HelloAck and churning H100 pods on 60s reap cycles."""
+    ex = _executor()
+    spec = ex.specs["generate"]
+    key_declared = spec.instance_key
+    assert key_declared in ex._classes
+    rec = ex._classes[key_declared]
+
+    ex.apply_model_resolutions({"acme/z-image": ("acme/z-image", "fp8")})
+    key_cast = spec.instance_key
+    assert key_cast != key_declared
+    # the SAME record (with any live instance) now lives under the new key
+    assert ex._classes[key_cast] is rec
+    assert key_declared not in ex._classes
+    assert spec in rec.specs
+
+    # full-replace back to the authored binding re-homes it again
+    ex.apply_model_resolutions({})
+    assert spec.instance_key == key_declared
+    assert ex._classes[key_declared] is rec
+    assert key_cast not in ex._classes
+    assert rec.specs == [spec]
