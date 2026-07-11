@@ -15,6 +15,7 @@ from .download import (
 from .refs import HuggingFaceRef, ParsedModelRef, TensorhubRef, parse_model_ref
 from .residency import (
     LoadedComponentKey,
+    content_set_digest,
     Residency,
     Tier,
     build_function_owned_pipeline,
@@ -36,5 +37,6 @@ __all__ = [
     "Residency",
     "Tier",
     "LoadedComponentKey",
+    "content_set_digest",
     "build_function_owned_pipeline",
 ]

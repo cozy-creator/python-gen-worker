@@ -25,7 +25,7 @@ def _plenty_of_ram(monkeypatch):
 
 def _res(events: list, budget_gb: int = 24) -> Residency:
     return Residency(
-        on_event=lambda ref, state, vb: events.append((ref, state, vb)),
+        on_event=lambda ref, state, vb, dur=0: events.append((ref, state, vb)),
         vram_budget_bytes=budget_gb * _GiB,
     )
 

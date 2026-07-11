@@ -59,6 +59,9 @@ class EndpointSpec:
     timeout_ms: Optional[int] = None
     runtime: Optional[str] = None
     compile: Optional[Compile] = None  # opt-in torch.compile spec (#384)
+    # Payload-driven slot routing (gw#479): promotes/pins only the slots a
+    # request needs; None = every slot (single-lane classes, functions).
+    route: Optional[Callable[[Any], Any]] = None
     module: str = ""              # declaring module
     walked_module: str = ""       # top-level package the object was found under
 
@@ -157,6 +160,7 @@ def _spec_for_handler(
         models=dict(models),
         runtime=decl.runtime,
         compile=decl.compile,
+        route=decl.route,
         module=getattr(cls or method, "__module__", "") or "",
         walked_module=walked_module,
     )

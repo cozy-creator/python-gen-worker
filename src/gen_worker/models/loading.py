@@ -404,6 +404,11 @@ def apply_fp8_storage(obj: Any, *, compute_dtype: Any = None,
 
     applied = False
     for name, mod in targets:
+        if getattr(mod, "_cozy_fp8_storage_applied", False):
+            # Idempotence (gw#479): a content-shared module injected into a
+            # sibling lane is already armed; double hooks would double-cast.
+            applied = True
+            continue
         try:
             fn = getattr(mod, "enable_layerwise_casting", None)
             if callable(fn):
@@ -411,6 +416,7 @@ def apply_fp8_storage(obj: Any, *, compute_dtype: Any = None,
                 fn(storage_dtype=storage, compute_dtype=compute_dtype)
             else:
                 _apply_transformers_fp8(mod, storage, compute_dtype)
+            mod._cozy_fp8_storage_applied = True
             applied = True
             logger.info("fp8 storage enabled on %s (compute %s)", name, compute_dtype)
         except Exception as exc:
@@ -701,6 +707,7 @@ def load_from_pretrained(
     dtype: str = "",
     attrs: Optional[Dict[str, str]] = None,
     storage_dtype: str = "",
+    components: Optional[Dict[str, Any]] = None,
 ) -> Any:
     """``cls.from_pretrained(path)`` with the standard trimmings: torch dtype
     from the binding's dtype string, on-disk variant detection, quant-library
@@ -710,7 +717,10 @@ def load_from_pretrained(
     the compute dtype; ``"fp8+te"`` extends that to the pipeline's text
     encoders (transformers-aware, gw#460). When the snapshot cannot fit free
     VRAM as stored, the adaptive fit ladder engages runtime fp8-E4M3 storage
-    first, then the emergency nf4 rung (automatic on CUDA hosts). Used by the
+    first, then the emergency nf4 rung (automatic on CUDA hosts).
+    ``components`` are PRELOADED module objects (content-keyed shared
+    components, gw#479) forwarded to ``from_pretrained`` — diffusers skips
+    loading those from disk and wires the given objects in. Used by the
     executor to satisfy pipeline-typed ``setup()`` annotations; endpoints may
     also call it."""
     path = str(path)
@@ -723,9 +733,13 @@ def load_from_pretrained(
 
     svdq_art = detect_svdq_artifact(Path(path))
     if svdq_art is not None and callable(getattr(cls, "from_pretrained", None)):
+        if components:
+            logger.warning("preloaded components ignored on the svdq lane")
         return load_svdq_pipeline(cls, Path(path), svdq_art)
     ensure_quant_library_imported(attrs)
     kwargs: Dict[str, Any] = {}
+    if components:
+        kwargs.update(components)
     if dtype:
         try:
             kwargs["torch_dtype"] = get_torch_dtype(dtype)
