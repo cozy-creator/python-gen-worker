@@ -65,6 +65,17 @@ def test_progress_and_log_emit_events() -> None:
     assert events[0]["payload"] == {"progress": 0.5, "stage": "denoise"}
 
 
+def test_progress_carries_optional_step_and_total() -> None:
+    events = []
+    ctx = RequestContext(request_id="r1", emitter=events.append)
+    ctx.progress(0.25, "denoise", step=5, total=20)
+    ctx.progress(0.9)  # step/total omitted -> keys absent, not null
+    assert events[0]["payload"] == {
+        "progress": 0.25, "stage": "denoise", "step": 5, "total": 20,
+    }
+    assert events[1]["payload"] == {"progress": 0.9}
+
+
 def test_save_bytes_and_typed_image_asset(tmp_path) -> None:
     ctx = RequestContext(request_id="r1", local_output_dir=str(tmp_path))
     asset = ctx.save_bytes("out/a.bin", b"hello")

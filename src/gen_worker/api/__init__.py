@@ -15,6 +15,7 @@ from .errors import (
     ValidationError,
     WorkerError,
 )
+from .progress import diffusers_step_callback
 from .streaming import (
     BatchItemDelta,
     Done,
@@ -49,6 +50,7 @@ __all__ = [
     "ModelScope",
     "Resources",
     "endpoint",
+    "diffusers_step_callback",
     "AuthError",
     "CanceledError",
     "FatalError",
