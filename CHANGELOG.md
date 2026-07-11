@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.13.15 (2026-07-10)
+
+- **fp8: SM-aware ladder ordering + remove the pre-Ada fp8 refuse-bug.**
+  Stored `#fp8` flavors upcast to bf16 at compute (fp8-E4M3 bytes resident,
+  per-layer bf16 upcast — no fp8 silicon required), so they serve on ANY CUDA
+  card; the old `FP8_FLAVOR_MIN_SM=89` refusal is deleted. Preference is now
+  SM-conditional: SM>=89 (Ada/Hopper/Blackwell) prefers fp8 over bf16 (faster
+  AND smaller); SM<89 prefers bf16-if-it-fits with fp8 as a fit fallback.
+  nvfp4 stays SM-gated (genuine Blackwell-native format, no upcast path).
+  - Single-sourced constants: `loading.EMERGENCY_FIT_FACTOR` derives from
+    `ladder.EMERGENCY_NF4_VRAM_FACTOR`; the private `FP8_FLAVOR_MIN_SM` is gone.
+  - SM-conditional ordering encoded in the shared Go/Py conformance vectors
+    (byte-identical with tensorhub).
+  - GPU smoke lane: bf16-vs-fp8 same prompt+seed generation asserts
+    SSIM >= 0.88 (gated by `GEN_WORKER_GPU_SMOKE`; skips on CPU).
+
 ## 0.13.14 (2026-07-10)
 
 - **Remove the CPU-offload serveability veto — a worker runs DEGRADED, never

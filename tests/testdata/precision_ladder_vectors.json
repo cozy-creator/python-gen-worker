@@ -1,5 +1,5 @@
 {
-  "_comment": "th#697 shared precision-ladder conformance vectors. This file is vendored BYTE-IDENTICALLY in tensorhub (internal/orchestrator/precision/testdata/) and python-gen-worker (tests/testdata/) — the Go resolver and gen_worker.models.ladder.resolve must produce identical outcomes for every vector; any spec change edits BOTH copies. Spec: walk [best admitted 4-bit svdq flavor (fp4>int4, rank desc)] -> [fp8 stored > fp8 cast-at-load (est = fp8_cast_vram_gb else 0.75*base_size_gb)] -> [bf16 base]; each rung gated by quality floor (bf16=3 > fp8=2 > 4bit=1; ''=any), placement SM admission (checkpoint metadata placement block wins, else flavor-token defaults: svdq-fp4 sm 120/121, svdq-int4 sm 75-89, engines nunchaku; fp8/base universal), required engines within libs, and est_vram_gb <= free_vram_gb. local=true appends emergency-nf4 (quality_floor must be '', est 0.45*base, artifact = stored fp8 if admitted else base, cast=nf4) then offload (first arch/engine-eligible rung ignoring fit, requires allow_offload). No rung -> refusal no_runnable_precision; gpu_sm<=0 -> refusal no_cuda_gpu. nvfp4-class flavors are never diffusers rungs (TRT lane).",
+  "_comment": "th#697 shared precision-ladder conformance vectors. This file is vendored BYTE-IDENTICALLY in tensorhub (internal/orchestrator/precision/testdata/) and python-gen-worker (tests/testdata/) — the Go resolver and gen_worker.models.ladder.resolve must produce identical outcomes for every vector; any spec change edits BOTH copies. Spec: walk [best admitted 4-bit svdq flavor (fp4>int4, rank desc)] then an SM-CONDITIONAL fp8/bf16 pair (Paul's fp8 ruling): on fp8-compute silicon (gpu_sm>=89: Ada/Hopper/Blackwell) [fp8 stored > fp8 cast-at-load] BEFORE [bf16 base] (fp8 tensor cores => faster AND smaller); below it (gpu_sm<89) [bf16 base] BEFORE [fp8 stored > fp8 cast-at-load] (fp8 storage upcasts to bf16 there — same speed, so fp8 is only a FIT FALLBACK when bf16 won't fit). fp8 cast est = fp8_cast_vram_gb else 0.75*base_size_gb. fp8 is NEVER SM-refused (storage is universal). Each rung gated by quality floor (bf16=3 > fp8=2 > 4bit=1; ''=any), placement SM admission (checkpoint metadata placement block wins, else flavor-token defaults: svdq-fp4 sm 120/121, svdq-int4 sm 75-89, engines nunchaku; fp8/base universal), required engines within libs, and est_vram_gb <= free_vram_gb. local=true appends emergency-nf4 (quality_floor must be '', est 0.45*base, artifact = stored fp8 if admitted else base, cast=nf4) then offload (first arch/engine-eligible rung ignoring fit, requires allow_offload). No rung -> refusal no_runnable_precision; gpu_sm<=0 -> refusal no_cuda_gpu. nvfp4-class flavors are never diffusers rungs (TRT lane).",
   "vectors": [
     {
       "name": "blackwell-5090-svdq-fp4-present",
@@ -68,9 +68,39 @@
       "expect": {"flavor": "svdq-int4-r32", "cast": "", "mode": "native"}
     },
     {
-      "name": "old-card-sm70-fp8-cast",
+      "name": "old-card-sm70-bf16-preferred-when-it-fits",
       "gpu_sm": 70, "free_vram_gb": 30.0, "libs": ["nunchaku"],
       "model": {"base_size_gb": 12.2, "flavors": {"svdq-int4-r128": {"size_gb": 3.9}}},
+      "expect": {"flavor": "", "cast": "", "mode": "native"}
+    },
+    {
+      "name": "old-card-sm70-fp8-cast-fallback-when-bf16-too-big",
+      "gpu_sm": 70, "free_vram_gb": 30.0, "libs": [],
+      "model": {"base_size_gb": 32.3, "flavors": {}},
+      "expect": {"flavor": "", "cast": "fp8", "mode": "native"}
+    },
+    {
+      "name": "sub-sm89-bf16-preferred-over-stored-fp8",
+      "gpu_sm": 86, "free_vram_gb": 23.0, "libs": [],
+      "model": {"base_size_gb": 12.2, "flavors": {"fp8": {"size_gb": 6.2}}},
+      "expect": {"flavor": "", "cast": "", "mode": "native"}
+    },
+    {
+      "name": "sub-sm89-stored-fp8-fallback-when-bf16-too-big",
+      "gpu_sm": 86, "free_vram_gb": 23.0, "libs": [],
+      "model": {"base_size_gb": 32.3, "flavors": {"fp8": {"size_gb": 16.2}}},
+      "expect": {"flavor": "fp8", "cast": "", "mode": "native"}
+    },
+    {
+      "name": "sm89-stored-fp8-preferred-over-fitting-bf16",
+      "gpu_sm": 89, "free_vram_gb": 23.0, "libs": [],
+      "model": {"base_size_gb": 12.2, "flavors": {"fp8": {"size_gb": 6.2}}},
+      "expect": {"flavor": "fp8", "cast": "", "mode": "native"}
+    },
+    {
+      "name": "sm90-fp8-cast-preferred-over-fitting-bf16",
+      "gpu_sm": 90, "free_vram_gb": 78.0, "libs": [],
+      "model": {"base_size_gb": 12.2, "flavors": {}},
       "expect": {"flavor": "", "cast": "fp8", "mode": "native"}
     },
     {

@@ -103,11 +103,14 @@ FIT_EMERGENCY = "emergency_quant"
 FIT_OFFLOAD = "offload"
 FIT_INCOMPATIBLE = "incompatible"
 
-# Stored-flavor hardware windows (th#683 fit ladder), same SM-gating pattern
-# as the svdq rows: a flavor only serves on silicon whose kernels/format
-# support it. fp8 flavors are an Ada-and-newer rung (sm_89 Ada, sm_90 Hopper,
-# sm_100+ Blackwell); nvfp4 tensor-core kernels exist on Blackwell only.
-FP8_FLAVOR_MIN_SM = 89
+# Stored-flavor hardware windows. nvfp4 is a genuine native-compute format:
+# its tensor-core kernels exist on Blackwell only, so an nvfp4 stored flavor
+# on older silicon is a hard refusal. fp8 is DIFFERENT — fp8-E4M3 storage
+# upcasts per-layer to bf16 at compute (loading.apply_fp8_storage: fp8 bytes
+# resident, no fp8 silicon required), so a stored #fp8 flavor SERVES on ANY
+# CUDA card and is never refused on SM. Whether fp8 is PREFERRED over bf16 is
+# the SM-conditional question (ladder.FP8_COMPUTE_MIN_SM): fp8 tensor cores
+# on SM>=89 make it faster+smaller, below that it merely halves storage.
 NVFP4_FLAVOR_MIN_SM = 100
 
 
@@ -154,11 +157,13 @@ def variant_fit(
     - ``incompatible``: hard gates unmet (no CUDA GPU, compute_capability
       above this GPU's SM, required quant libraries not installed, an svdq
       row whose SM window / nunchaku-diffusers pin matrix fails, or an
-      fp8/nvfp4 stored-flavor row outside its SM window).
-    - ``fp8`` / ``nvfp4``: the binding is a stored quantized flavor whose
-      hardware window passes (fp8: Ada/Hopper+, nvfp4: Blackwell) and it
-      fits free VRAM — native runs on their silicon, ranked below a fitting
-      full-precision row (bf16 > fp8 > nvfp4 quality order).
+      nvfp4 stored-flavor row below Blackwell). A stored #fp8 flavor is
+      NEVER incompatible on SM — its storage upcasts to bf16 at compute.
+    - ``fp8`` / ``nvfp4``: the binding is a stored quantized flavor and it
+      fits free VRAM — nvfp4 is Blackwell-native; fp8 serves on ANY card
+      (bf16-upcast). Ranking is SM-aware: on fp8-compute silicon (SM>=89)
+      fp8 outranks bf16 (faster+smaller); below it fp8 is a fit fallback
+      only (bf16 preferred when it fits).
     - ``svdq_fp4`` / ``svdq_int4``: the binding is a stored SVDQuant flavor
       (gw#415) and every gate passes — on Blackwell, svdq_fp4 OUTRANKS every
       other fitting row (faster AND smaller, QUANTIZATION-POLICY fit ladder);
@@ -209,11 +214,10 @@ def variant_fit(
         if reason is not None:
             return FIT_INCOMPATIBLE, reason
     quant_kind = quant_flavor_kind(binding)
-    if quant_kind == "fp8" and caps.gpu_sm < FP8_FLAVOR_MIN_SM:
-        return FIT_INCOMPATIBLE, (
-            f"fp8 stored flavor needs SM >= {FP8_FLAVOR_MIN_SM} (Ada/Hopper+); "
-            f"GPU is SM{caps.gpu_sm}"
-        )
+    # fp8 has NO SM refusal — a stored #fp8 flavor upcasts to bf16 at compute
+    # and serves on any CUDA card (the refuse-bug fix: the hub could place
+    # #fp8 on an older card the worker then refused). nvfp4 stays gated: it is
+    # a genuine Blackwell-native tensor-core format with no upcast path here.
     if quant_kind == "nvfp4" and caps.gpu_sm < NVFP4_FLAVOR_MIN_SM:
         return FIT_INCOMPATIBLE, (
             f"nvfp4 stored flavor needs Blackwell (SM >= {NVFP4_FLAVOR_MIN_SM}); "
@@ -231,7 +235,7 @@ def variant_fit(
         if svdq_kind == "int4":
             return FIT_SVDQ_INT4, "svdq-int4 stored flavor (4-bit fit rung)"
         if quant_kind == "fp8":
-            return FIT_FP8, "fp8 stored flavor (Ada/Hopper+ rung)"
+            return FIT_FP8, "fp8 stored flavor (universal; bf16-upcast below SM89)"
         if quant_kind == "nvfp4":
             return FIT_NVFP4, "nvfp4 stored flavor (Blackwell rung)"
         return FIT_FITS, ""
@@ -270,24 +274,27 @@ def select_variant(
 
     ``variants`` rows are ``(fn_name, Resources)`` or
     ``(fn_name, Resources, binding)``; ``base`` is the base binding's row when
-    the class declares one. Policy (QUANTIZATION-POLICY fit ladder,
-    bf16 -> fp8 -> nvfp4 -> 4-bit over the HW-compatible fitting set):
-      1. drop incompatible rows (SM / library / svdq pin-matrix / fp8-nvfp4
-         SM-window gates);
+    the class declares one. Policy — SM-aware (the shared-ladder ordering,
+    ``FP8_COMPUTE_MIN_SM``):
+      1. drop incompatible rows (SM / library / svdq pin-matrix / nvfp4
+         Blackwell gate; fp8 is never dropped on SM);
       2. a fitting svdq_fp4 row wins outright — on Blackwell the SVDQuant
          flavor beats fp8/bf16 on BOTH latency and VRAM (gw#405 measured);
-      3. among plain rows that FIT free VRAM, prefer the largest declared
-         vram_gb (bigger = higher-quality precision);
-      4. a fitting stored fp8 row (Ada/Hopper+), then a fitting stored
-         nvfp4 row (Blackwell);
-      5. a fitting svdq_int4 row (4-bit fit rung: nothing bigger fits);
-      6. an emergency_fp8 row (runtime fp8-E4M3 storage), then an
+      3. fp8-vs-bf16 over the fitting set is SM-conditional (Paul's ruling
+         "run fp8 wherever we can"): on fp8-compute silicon (SM>=89) a
+         fitting stored fp8 row outranks bf16 (faster+smaller); below SM89
+         bf16-if-it-fits wins and fp8 is only a fit fallback. Within each
+         rung prefer the largest declared vram_gb; nvfp4 (Blackwell) trails;
+      4. a fitting svdq_int4 row (4-bit fit rung: nothing bigger fits);
+      5. an emergency_fp8 row (runtime fp8-E4M3 storage), then an
          emergency_quant row if the nf4 rung applies
          (runs at below-platform quality, loudly);
-      7. else the base binding + the offload ladder;
-      8. no base → the smallest-VRAM compatible variant, offloaded;
-      9. nothing routable → None.
+      6. else the base binding + the offload ladder;
+      7. no base → the smallest-VRAM compatible variant, offloaded;
+      8. nothing routable → None.
     """
+    from .ladder import FP8_COMPUTE_MIN_SM
+
     def _vram(res: Any) -> float:
         v = getattr(res, "vram_gb", None)
         return float(v) if v is not None else 0.0
@@ -300,7 +307,12 @@ def select_variant(
         if fit != FIT_INCOMPATIBLE:
             compat.append((name, res, fit, reason))
 
-    for rung in (FIT_SVDQ_FP4, FIT_FITS, FIT_FP8, FIT_NVFP4):
+    # SM>=89: fp8 tensor cores → prefer fp8 over bf16. Below: bf16-if-fits first.
+    if caps.gpu_sm >= FP8_COMPUTE_MIN_SM:
+        native_order = (FIT_SVDQ_FP4, FIT_FP8, FIT_FITS, FIT_NVFP4)
+    else:
+        native_order = (FIT_SVDQ_FP4, FIT_FITS, FIT_FP8, FIT_NVFP4)
+    for rung in native_order:
         fitting = [row for row in compat if row[2] == rung]
         if fitting:
             name, _res, fit, reason = max(fitting, key=lambda r: _vram(r[1]))
