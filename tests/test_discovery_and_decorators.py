@@ -500,6 +500,57 @@ def test_model_shorthand_skips_server_handle_setup_param() -> None:
 # --------------------------------------------------------------------------- #
 
 
+def test_compile_block_emits_video_shapes_and_storage_dtype() -> None:
+    """ie#381: the lock's compile block carries (w, h, frames) rows verbatim
+    and the primary binding's weight-storage lane, so the hub's cell producer
+    builds from an identically-loaded (fp8) pipeline."""
+    from gen_worker import Compile, Hub
+    from gen_worker.discovery.discover import _extract_entries
+
+    @endpoint(
+        model=Hub("tensorhub/ltx-2.3-distilled", storage_dtype="fp8"),
+        resources=Resources(vram_gb=78),
+        compile=Compile(
+            family="ltx-2.3",
+            shapes=((960, 544, 241), (1920, 1088, 241), (1280, 704, 121)),
+            targets=("transformer",),
+        ),
+    )
+    class Gen:
+        def setup(self, model: str) -> None:
+            self.model = model
+
+        def generate(self, ctx: RequestContext, data: _In) -> _Out:
+            return _Out(result="")
+
+    (entry,) = _extract_entries(Gen, "testmod")
+    (fn,) = entry["functions"]
+    assert fn["compile"]["shapes"] == [[960, 544, 241], [1920, 1088, 241], [1280, 704, 121]]
+    assert fn["compile"]["storage_dtype"] == "fp8"
+    assert fn["compile"]["targets"] == ["transformer"]
+
+
+def test_compile_block_omits_storage_dtype_for_bf16_bindings() -> None:
+    from gen_worker import Compile, Hub
+    from gen_worker.discovery.discover import _extract_entries
+
+    @endpoint(
+        model=Hub("cozy/sdxl-base"),
+        resources=Resources(vram_gb=12),
+        compile=Compile(family="sdxl", shapes=((1024, 1024),)),
+    )
+    class Gen:
+        def setup(self, model: str) -> None:
+            self.model = model
+
+        def generate(self, ctx: RequestContext, data: _In) -> _Out:
+            return _Out(result="")
+
+    (entry,) = _extract_entries(Gen, "testmod")
+    (fn,) = entry["functions"]
+    assert "storage_dtype" not in fn["compile"]
+
+
 def test_allow_lora_binding_emits_flag_and_family() -> None:
     from gen_worker import Compile, Hub
     from gen_worker.discovery.discover import _extract_entries

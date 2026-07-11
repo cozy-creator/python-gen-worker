@@ -508,6 +508,15 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
                 "shapes": [[int(v) for v in s] for s in es.compile.shapes],
                 "targets": list(es.compile.targets),
             }
+            # ie#381: the primary binding's weight-storage lane (gw#389 fp8
+            # layerwise casting) rides along so the hub's cell producer
+            # builds from an identically-loaded pipeline — the cast hooks
+            # are traced INTO the FX graphs; a bf16-built cell for an
+            # fp8-served model misses on every request.
+            primary = next(iter(es.models.values()), None)
+            storage = str(getattr(primary, "storage_dtype", "") or "")
+            if storage:
+                fn["compile"]["storage_dtype"] = storage
         out.append(fn)
 
     return out
