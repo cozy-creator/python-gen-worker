@@ -86,3 +86,30 @@ def test_gguf_quant_from_download_url():
     ]}, gguf_quant="q8_0")
     assert len(files) == 1
     assert files[0]["id"] == 2
+
+
+def test_ingest_civitai_gguf_classification(tmp_path, monkeypatch):
+    """gguf-only civitai trees classify strategy=gguf (as-is publish)."""
+    import struct
+    from gen_worker.convert import ingest as ing
+
+    # Minimal real gguf header: magic/v3, 0 tensors, 1 KV (general.file_type=17).
+    buf = b"GGUF" + struct.pack("<IQQ", 3, 0, 1)
+    key = b"general.file_type"
+    buf += struct.pack("<Q", len(key)) + key + struct.pack("<I", 4) + struct.pack("<I", 17)
+    (tmp_path / "model.gguf").write_bytes(buf)
+
+    monkeypatch.setattr(
+        "gen_worker.models.download.fetch_civitai_model_version",
+        lambda vid, api_key="": {"baseModel": "Flux.2 Klein 9B", "modelId": 1,
+                                 "model": {"type": "Checkpoint"}},
+    )
+    monkeypatch.setattr(
+        "gen_worker.models.download.download_civitai",
+        lambda vid, dest, api_key="", progress=None, gguf_quant=None: dest,
+    )
+    src = ing.ingest_civitai(123, tmp_path, civitai_api_key="", gguf_quant="q5_k_m")
+    assert src.classification is not None
+    assert src.classification.strategy == "gguf"
+    assert src.attrs["dtype"] == "gguf:q5_k_m"
+    assert src.attrs["file_type"] == "gguf"

@@ -511,6 +511,23 @@ def _resolve_civitai_family(base_family: str, layout_family: str) -> str:
     return base_family
 
 
+def _local_gguf_quant(path: Path) -> str:
+    """Quant token ("q5_k_m") from a local gguf header's general.file_type."""
+    try:
+        from gguf import GGUFReader
+        from gguf.constants import LlamaFileType
+
+        reader = GGUFReader(str(path), "r")
+        field = reader.fields.get("general.file_type")
+        if field is None:
+            return ""
+        ft = int(field.contents())
+        name = LlamaFileType(ft).name
+        return name.removeprefix("MOSTLY_").lower()
+    except Exception:
+        return ""
+
+
 def ingest_civitai(
     model_version_id: int,
     dest_dir: Path,
@@ -560,6 +577,26 @@ def ingest_civitai(
         if isinstance(payload.get("model"), dict) else ""
     if model_kind in {"lora", "locon", "lycoris", "dora"}:
         attrs["runtime_library"] = "diffusers-lora"
+
+    # th#611: gguf-only civitai versions publish AS-IS (single unshardable
+    # artifact; the hub classifies family + flavor from the header). Without
+    # a classification the clone falls into the safetensors repackage path
+    # and dies with "no safetensors entry for repackage".
+    classification: RepoClassification | None = None
+    gguf_names = [f for f in files if f.lower().endswith(".gguf")]
+    st_names = [f for f in files if f.lower().endswith(".safetensors")]
+    if gguf_names and not st_names:
+        quant = _local_gguf_quant(dest_dir / gguf_names[0])
+        attrs["dtype"] = f"gguf:{quant}" if quant else "gguf"
+        attrs["file_type"] = "gguf"
+        attrs["file_layout"] = "singlefile"
+        classification = RepoClassification(
+            strategy="gguf",
+            runtime_library="diffusers-single-file",
+            allow_patterns=list(files),
+            attrs=dict(attrs),
+            detection_reason=f"civitai gguf-only version ({len(gguf_names)} gguf)",
+        )
     metadata = {
         "source_provider": "civitai",
         "source_repo": str(version_id),
@@ -596,6 +633,7 @@ def ingest_civitai(
         attrs=attrs,
         metadata=metadata,
         repo_spec=repo_spec,
+        classification=classification,
     )
 
 
