@@ -9,8 +9,10 @@ ENV DEBIAN_FRONTEND=noninteractive \
     RUNNER_ALLOW_RUNASROOT=1 \
     UV_PYTHON_INSTALL_DIR=/opt/uv/python
 
+# gcc/libc6-dev: triton >=3.7 JIT-compiles launcher stubs at runtime and
+# needs a host C compiler (same reason the conversion image ships gcc).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl git jq tar \
+        ca-certificates curl git jq tar gcc libc6-dev \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
@@ -23,7 +25,7 @@ RUN mkdir /runner && cd /runner \
     && rm -rf /var/lib/apt/lists/*
 
 # Bake the interpreter so job-time `uv sync` only resolves wheels.
-RUN uv python install 3.11
+RUN uv python install 3.12
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

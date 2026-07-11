@@ -125,7 +125,20 @@ jobs:
 
       - name: Sync deps (cu129 lock)
         id: sync
-        run: uv sync --extra dev --extra torch --extra images
+        # Pin the interpreter to the fleet floor: without this, a runner whose
+        # baked python predates requires-python makes uv download the newest
+        # CPython (3.14 incident, gw#502).
+        run: uv sync --python 3.12 --extra dev --extra torch --extra images
+
+      # triton >=3.7 JIT-compiles launcher stubs at runtime and needs a host
+      # C compiler. Baked into the runner image; the apt fallback covers pods
+      # booted from a pre-gcc image (rebuild races this same push).
+      - name: Ensure C compiler (triton JIT)
+        run: |
+          command -v cc >/dev/null 2>&1 || {
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends gcc libc6-dev
+          }
 
       - name: Run tests
         run: uv run --extra dev --extra torch --extra images pytest tests/ -q --junitxml=gpu-junit.xml
