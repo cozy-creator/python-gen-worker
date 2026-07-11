@@ -164,16 +164,20 @@ def artifact_metadata(
     family: str,
     source_ref: str = "",
     source_digest: str = "",
-    shapes: Iterable[Tuple[int, int]] = (),
+    shapes: Iterable[Tuple[int, ...]] = (),
     targets: Iterable[str] = (),
     low_vram_mode: str = "",
+    storage_dtype: str = "",
 ) -> Dict[str, Any]:
     """Producer-side metadata for :func:`pack` (no timestamps: artifacts of
     identical content must be byte-identical). ``source_ref``/``source_digest``
     record the family member compiled from — informational only.
     ``low_vram_mode`` is the prep mode the producer pipeline was traced under
     (gw#391): its flags are traced into the graphs, so a consumer prepped in a
-    different mode must reject the cell."""
+    different mode must reject the cell. ``storage_dtype`` records the weight
+    storage the graphs were traced under (fp8 layerwise-cast hooks are traced
+    INTO the graphs — ie#381); informational, a drift is a cache miss, never
+    an error. Shape rows are (w, h) or (w, h, frames) — see ``Compile``."""
     return {
         "format": ARTIFACT_FORMAT,
         "kind": "torch-inductor-cache",
@@ -182,9 +186,10 @@ def artifact_metadata(
         "family": str(family or ""),
         "source_ref": str(source_ref or ""),
         "source_digest": str(source_digest or ""),
-        "shapes": [[int(w), int(h)] for w, h in shapes],
+        "shapes": [[int(v) for v in s] for s in shapes],
         "targets": list(targets),
         "low_vram_mode": str(low_vram_mode or ""),
+        "storage_dtype": str(storage_dtype or ""),
         "libs": _lib_versions(),
     }
 
@@ -554,6 +559,22 @@ def apply(pipeline: Any, cfg: Any, *, cache_ready: bool, guard: bool = True) -> 
             )
             return False
 
+    # Dynamo's per-code-object recompile limit defaults to 8; a preset table
+    # bigger than that (LTX: 12 video graphs, ie#381) would silently fall
+    # back to eager for every shape past the limit. Size it to the declared
+    # shape set — never lower an operator-raised value.
+    try:
+        import torch._dynamo
+
+        want = len(tuple(cfg.shapes)) + 8
+        torch._dynamo.config.cache_size_limit = max(
+            int(torch._dynamo.config.cache_size_limit), want)
+        if hasattr(torch._dynamo.config, "recompile_limit"):
+            torch._dynamo.config.recompile_limit = max(
+                int(torch._dynamo.config.recompile_limit), want)
+    except Exception:
+        logger.debug("compile-cache: could not raise recompile limit", exc_info=True)
+
     applied: list[str] = []
     originals: list[Tuple[Any, str, Callable[..., Any]]] = []
     for target in cfg.targets:
@@ -636,21 +657,66 @@ def enable(
 # ---------------------------------------------------------------------------
 
 
+def _warm_call(
+    pipe: Any,
+    shape: Tuple[int, ...],
+    *,
+    steps: int,
+    prompt: str,
+    decode: bool,
+) -> None:
+    """One warm-up call for ``shape``. (w, h) is the classic image call;
+    (w, h, frames) is a video call (ie#381): the DiT graph keys on the token
+    count only, so a plain single-pipeline call traces the same graph the
+    serving path (including a two-stage refine, whose latents arrive from an
+    upsampler of identical shape) will look up. Video calls force the
+    batch-1 no-CFG serving regime (CFG is a graph shape — ``Compile``) and
+    skip decode unless a vae target is declared."""
+    import inspect
+
+    import torch
+
+    kwargs: Dict[str, Any] = dict(
+        prompt=prompt,
+        num_inference_steps=int(steps),
+        width=int(shape[0]),
+        height=int(shape[1]),
+        generator=torch.Generator(device="cuda").manual_seed(0),
+    )
+    if len(shape) == 3:
+        params = inspect.signature(type(pipe).__call__).parameters
+        kwargs["num_frames"] = int(shape[2])
+        kwargs["output_type"] = "np" if decode else "latent"
+        if "frame_rate" in params:
+            kwargs["frame_rate"] = 24.0
+        if "guidance_scale" in params:
+            kwargs["guidance_scale"] = 1.0
+        if "audio_guidance_scale" in params:
+            kwargs["audio_guidance_scale"] = 1.0
+    pipe(**kwargs)
+
+
 def build(
     model_path: str | Path,
     out_dir: str | Path,
     *,
-    shapes: Iterable[Tuple[int, int]],
+    shapes: Iterable[Tuple[int, ...]],
     targets: Iterable[str] = ("transformer", "vae.decode"),
     family: str = "",
     source_ref: str = "",
     source_digest: str = "",
     dtype: str = "bf16",
+    storage_dtype: str = "",
     steps: int = 2,
     prompt: str = "cache warm-up: a lighthouse on a cliff at dawn, detailed",
 ) -> Tuple[Path, Dict[str, Any], Dict[str, float]]:
     """Compile a diffusers pipeline over ``shapes`` and package the resulting
     inductor+triton caches as a per-SKU artifact.
+
+    ``storage_dtype`` mirrors the serving binding's weight-storage lane
+    (gw#389 fp8 layerwise casting): the cast hooks are traced INTO the FX
+    graphs, so a cell for an fp8-served model must be built from an
+    fp8-loaded pipeline or every request misses the cache (ie#381).
 
     Runs on the TARGET GPU SKU with a C toolchain present (cold compile).
     Returns ``(artifact_path, metadata, per-shape warm-up seconds)`` — the
@@ -677,7 +743,9 @@ def build(
         raise RuntimeError("compile-cache build requires CUDA")
 
     cfg = CompileCfg(shapes=tuple(shapes), targets=tuple(targets))
-    pipe = load_from_pretrained(DiffusionPipeline, str(model_path), dtype=dtype)
+    pipe = load_from_pretrained(
+        DiffusionPipeline, str(model_path), dtype=dtype,
+        storage_dtype=storage_dtype)
     # Producer/consumer graph parity (gw#391): the worker prepares pipelines
     # with place_pipeline (placement + vae/attention low-VRAM flags), and
     # those flags are traced INTO the graphs — the FX-graph cache key. A cell
@@ -693,19 +761,15 @@ def build(
         raise RuntimeError(f"no compile targets resolved on {type(pipe).__name__}")
 
     timings: Dict[str, float] = {}
-    for w, h in cfg.shapes:
+    decode = any(t.startswith("vae") for t in cfg.targets)
+    for shape in cfg.shapes:
         torch.cuda.synchronize()
         t = time.monotonic()
-        pipe(
-            prompt=prompt,
-            num_inference_steps=int(steps),
-            width=int(w),
-            height=int(h),
-            generator=torch.Generator(device="cuda").manual_seed(0),
-        )
+        _warm_call(pipe, shape, steps=int(steps), prompt=prompt, decode=decode)
         torch.cuda.synchronize()
-        timings[f"{w}x{h}"] = round(time.monotonic() - t, 2)
-        logger.info("compile-cache build: warmed %dx%d in %.1fs", w, h, timings[f"{w}x{h}"])
+        key = "x".join(str(v) for v in shape)
+        timings[key] = round(time.monotonic() - t, 2)
+        logger.info("compile-cache build: warmed %s in %.1fs", key, timings[key])
 
     captured = [p for p in (capture_root / "inductor").rglob("*") if p.is_file()]
     if not captured:
@@ -718,6 +782,7 @@ def build(
         family=family, source_ref=source_ref, source_digest=source_digest,
         shapes=cfg.shapes, targets=cfg.targets,
         low_vram_mode=str(placed.get("mode") or ""),
+        storage_dtype=storage_dtype,
     )
     label = flavor_label(meta["sku"], meta["torch"])
     artifact = pack(capture_root, out_dir / f"{label}.tar.gz", meta)

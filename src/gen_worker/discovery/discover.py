@@ -505,7 +505,7 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
             # Hub keys family-cache lookups off this block (th#569).
             fn["compile"] = {
                 "family": es.compile.family,
-                "shapes": [[int(w), int(h)] for w, h in es.compile.shapes],
+                "shapes": [[int(v) for v in s] for s in es.compile.shapes],
                 "targets": list(es.compile.targets),
             }
         out.append(fn)
