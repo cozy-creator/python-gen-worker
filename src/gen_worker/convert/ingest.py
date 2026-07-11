@@ -439,6 +439,13 @@ def ingest_huggingface(
         "selected_bytes": str(selected_bytes),
         "source_file_count": str(len(paths)),
     }
+    if library == "diffusers-single-file" and _is_multi_weight_bundle(dest_dir):
+        # Multi-component bundle (distinct component single-files, e.g.
+        # chatterbox t3/s3gen/ve): no library loads it as one artifact —
+        # opt out of the layout contract exactly like the civitai branch
+        # (empty library_name skips finalize-side validation; e2e #112).
+        repo_spec["library_name"] = ""
+        metadata["multi_weight_bundle"] = "true"
     return IngestedSource(
         provider="huggingface",
         source_ref=repo_id,

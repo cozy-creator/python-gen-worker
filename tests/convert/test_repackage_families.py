@@ -270,3 +270,4 @@ def test_multi_weight_bundle_detection(tmp_path) -> None:
     # a second distinct component IS a bundle
     (d / "qwen_image_vae.safetensors").write_bytes(b"x")
     assert _is_multi_weight_bundle(d)
+
