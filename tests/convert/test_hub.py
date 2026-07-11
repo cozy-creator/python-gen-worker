@@ -297,3 +297,28 @@ def test_clone_primary_output_claims_bare_selector() -> None:
 
     src = inspect.getsource(clone_mod)
     assert 'default_flavor=flavor_label if i == 0 else ""' in src
+
+
+def test_commit_sanitizes_colon_dtype_and_flavor_tokens(fake_hub, tmp_path: Path) -> None:
+    # gw#488: tensorhub derives a flavor row from the commit DTYPE
+    # (derivePublishFlavors) and validates every token against
+    # [a-z0-9][a-z0-9._-]{0,63} — the internal dtype-axis colon forms
+    # ("gguf:ud-q4_k_xl") must publish as "-" forms or every GGUF clone
+    # 400s at finalize (invalid_flavor; hit live, e2e J32 run 10).
+    _FakeHub.state["finalize_calls"] = 1
+    f = tmp_path / "model.gguf"
+    f.write_bytes(b"\x04" * 16)
+    _client(fake_hub).commit(
+        destination_repo="acme/my-gguf",
+        files=[CommitFile(path="model.gguf", local_path=f)],
+        tags=["prod"],
+        flavor="gguf:ud-q4_k_xl",
+        default_flavor="gguf:ud-q4_k_xl",
+        dtype="gguf:ud-q4_k_xl",
+        file_type="gguf",
+    )
+    body = _FakeHub.state["commit_request"]
+    assert body["flavor"] == "gguf-ud-q4_k_xl"
+    assert body["default_flavor"] == "gguf-ud-q4_k_xl"
+    assert body["dtype"] == "gguf-ud-q4_k_xl"
+    assert body["tags"] == [{"tag": "prod", "default_flavor": "gguf-ud-q4_k_xl"}]

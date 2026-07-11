@@ -475,18 +475,28 @@ class HubClient:
             "mode": mode,
         }
         if tags:
+            df = default_flavor.replace(":", "-")
             body["tags"] = [
-                {"tag": t, **({"default_flavor": default_flavor} if default_flavor else {})}
+                {"tag": t, **({"default_flavor": df} if df else {})}
                 for t in tags
             ]
+        # Wire-boundary token hygiene (gw#488): tensorhub derives a flavor
+        # row from the DTYPE (derivePublishFlavors) and validates every
+        # token against [a-z0-9][a-z0-9._-]{0,63} — the internal dtype-axis
+        # colon forms ("gguf:q4_k_m", "int8:awq") publish as "-" forms.
+        def _token(v: str) -> str:
+            return v.replace(":", "-")
+
         for key, val in (
-            ("message", message), ("flavor", flavor), ("default_flavor", default_flavor),
-            ("dtype", dtype), ("file_layout", file_layout), ("file_type", file_type),
+            ("message", message), ("flavor", _token(flavor)),
+            ("default_flavor", _token(default_flavor)),
+            ("dtype", _token(dtype)), ("file_layout", file_layout),
+            ("file_type", file_type),
         ):
             if val:
                 body[key] = val
         if flavors:
-            body["flavors"] = list(flavors)
+            body["flavors"] = [_token(f) for f in flavors]
         if metadata:
             body["metadata"] = dict(metadata)
         if provenance:
