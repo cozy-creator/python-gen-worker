@@ -32,7 +32,7 @@ from typing import Any, Dict, List, Optional
 
 import msgspec
 
-from .config import load_settings
+from .config import get_settings
 from .models.cache_paths import tensorhub_cas_dir
 try:
     from .worker import Worker
@@ -177,7 +177,7 @@ def _preflight_cache_dirs() -> Dict[str, str]:
 def _run_main() -> int:
     _log_startup_phase("boot", status="starting")
     try:
-        settings = load_settings()
+        settings = get_settings()
     except Exception as e:
         logger.exception("Failed to load worker settings: %s", e)
         _log_worker_fatal("settings_load", e, exit_code=1)

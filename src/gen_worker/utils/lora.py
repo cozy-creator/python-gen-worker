@@ -19,7 +19,6 @@ from __future__ import annotations
 import hashlib
 import logging
 import math
-import os
 import re
 import threading
 import time
@@ -29,6 +28,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Protocol, Sequence, Set, runtime_checkable
 
 from ..api.errors import RefCompatibilitySurprise, ValidationError
+from ..config import get_settings
 
 logger = logging.getLogger(__name__)
 
@@ -41,11 +41,10 @@ MAX_LORA_FILE_BYTES = 2 * _GiB
 LORA_WEIGHT_BOUND = 4.0
 ADAPTER_CACHE_MAX_BYTES = 1 * _GiB
 
-# Residency caps for adapters left attached to a pipeline between requests.
-MAX_ATTACHED_ADAPTERS = int(os.getenv("GEN_WORKER_ATTACHED_LORA_MAX", "8"))
-MAX_ATTACHED_ADAPTER_BYTES = int(
-    os.getenv("GEN_WORKER_ATTACHED_LORA_MAX_BYTES", str(2 * _GiB))
-)
+# Residency caps for adapters left attached to a pipeline between requests
+# (GEN_WORKER_ATTACHED_LORA_MAX / GEN_WORKER_ATTACHED_LORA_MAX_BYTES).
+MAX_ATTACHED_ADAPTERS = get_settings().attached_lora_max
+MAX_ATTACHED_ADAPTER_BYTES = get_settings().attached_lora_max_bytes
 
 # LoRA-shaped keys only: kohya (`…lora_down.weight` / `…lora_up.weight` /
 # `….alpha`), peft (`…lora_A.weight` / `…lora_B.weight`, DoRA magnitude), and

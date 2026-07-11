@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from typing import Any, List, Optional
 
+from ..config import get_settings
 from .refs import TensorhubRef
 
 
@@ -57,7 +57,7 @@ class HubAuthError(HubResolveError):
 
 
 def hub_base_url(base_url: Optional[str] = None) -> str:
-    return (base_url or os.getenv("TENSORHUB_URL") or "").strip().rstrip("/")
+    return (base_url or get_settings().tensorhub_url).strip().rstrip("/")
 
 
 def resolve_repo(
@@ -80,7 +80,7 @@ def resolve_repo(
         raise HubResolveError(
             "no tensorhub base URL: set TENSORHUB_URL (e.g. https://tensorhub.com)"
         )
-    tok = (token or os.getenv("TENSORHUB_TOKEN") or "").strip()
+    tok = (token or get_settings().tensorhub_token).strip()
     headers = {"Authorization": f"Bearer {tok}"} if tok else {}
     params: dict[str, str] = {}
     if ref.digest:

@@ -28,6 +28,7 @@ import msgspec
 
 from ..api.binding import BINDING_TYPES, wire_ref
 from ..api.errors import CanceledError
+from ..config import get_settings
 from .local_context import build_local_context
 
 
@@ -623,7 +624,7 @@ def _resolve_local_path(
     from ..models.cache_paths import tensorhub_cas_dir
     from ..models.refs import parse_model_ref
 
-    env_cas = (os.getenv("TENSORHUB_CAS_DIR") or "").strip()
+    env_cas = get_settings().tensorhub_cas_dir.strip()
     cache_dir = Path(env_cas) if env_cas else Path(tensorhub_cas_dir())
 
     # Decode the bare ref into typed parts using the explicit provider.
@@ -653,8 +654,8 @@ def _resolve_local_path(
                     repo_id=parsed.hf.repo_id,
                     revision=parsed.hf.revision,
                     local_files_only=True,
-                    cache_dir=os.getenv("HF_HOME") or None,
-                    token=os.getenv("HF_TOKEN") or os.getenv("HUGGING_FACE_HUB_TOKEN") or None,
+                    cache_dir=get_settings().hf_home or None,
+                    token=get_settings().hf_token or None,
                     allow_patterns=list(allow_patterns) or None,
                 )
                 return str(p)
@@ -671,8 +672,8 @@ def _resolve_local_path(
 
             local_dir = download_hf(
                 parsed.hf,
-                hf_home=os.getenv("HF_HOME") or None,
-                hf_token=os.getenv("HF_TOKEN") or os.getenv("HUGGING_FACE_HUB_TOKEN") or None,
+                hf_home=get_settings().hf_home or None,
+                hf_token=get_settings().hf_token or None,
                 allow_patterns=tuple(allow_patterns),
             )
         except Exception as e:
@@ -748,7 +749,7 @@ def _resolve_local_path(
             fetch_civitai_model,
             parse_civitai_version_id,
         )
-        api_key = os.getenv("CIVITAI_API_KEY", "") or os.getenv("CIVITAI_TOKEN", "")
+        api_key = get_settings().civitai_api_key
 
         if civitai_version_id:
             # Explicit version pin via Civitai(version="<id>"). The pinned id

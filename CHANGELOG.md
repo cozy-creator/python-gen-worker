@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.13.21 (2026-07-11)
+
+- **gw#468: env-gate sweep — every ambient worker knob reads through the typed
+  `Settings` loader.** New fields (same env names): `TENSORHUB_URL/_TOKEN/
+  _CACHE_DIR/_CAS_DIR`, `CIVITAI_API_KEY` (alias `CIVITAI_TOKEN`),
+  `COZY_HF_DOWNLOAD_STALL_TIMEOUT_S/_MAX_SECONDS`, `COZY_HF_MAX_REPO_BYTES`,
+  `GEN_WORKER_ATTACHED_LORA_MAX/_MAX_BYTES`, `GEN_WORKER_COMPILE_CACHE/
+  _CACHE_URL/_ALLOW_COLD`, `WORKER_IMAGE_DIGEST`, `WORKER_GIT_COMMIT`;
+  `HUGGING_FACE_HUB_TOKEN` resolves as an `HF_TOKEN` alias. Loader gains a
+  cached `get_settings()` accessor, alias resolution (primary env wins when
+  non-empty), and forgiving source coercion (empty values fall back to struct
+  defaults; bools accept `1/true/yes`). `compile_cache.apply()` takes an
+  explicit `allow_cold` for the producer path (env self-set kept for spawned
+  compile workers). Guard test `tests/test_env_surface.py` fails on any raw
+  `os.getenv`/`os.environ` outside `config/` not on the plumbing allowlist;
+  survivors documented in `docs/environment.md`.
 ## 0.13.19 (2026-07-10)
 
 - **gw#471: checkpoint saves publish via tensorhub's real `/commits` API.**

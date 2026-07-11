@@ -28,3 +28,17 @@ if _REPO_SRC not in _LOCATION.parents:
     )
 
 
+import pytest  # noqa: E402
+
+from gen_worker.config.loader import get_settings  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _fresh_settings_cache():
+    """`get_settings()` caches process-wide; tests monkeypatch env vars, so
+    every test starts (and ends) with a cleared cache."""
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+

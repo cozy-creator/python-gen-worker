@@ -14,6 +14,7 @@ env name and one .env / yaml / secret key — see the table below.
 """
 from __future__ import annotations
 
+import functools
 import os
 from pathlib import Path
 from typing import Any, Dict, Iterable
@@ -38,9 +39,40 @@ _ENV_TO_FIELD: Dict[str, str] = {
     "ENDPOINT_LOCK_PATH": "endpoint_lock_path",
     "RUNPOD_POD_ID": "runpod_pod_id",
     "WORKER_DISCONNECTED_TIMEOUT_S": "worker_disconnected_timeout_s",
+    "WORKER_IMAGE_DIGEST": "worker_image_digest",
+    "WORKER_GIT_COMMIT": "worker_git_commit",
+    "TENSORHUB_URL": "tensorhub_url",
+    "TENSORHUB_TOKEN": "tensorhub_token",
+    "TENSORHUB_CACHE_DIR": "tensorhub_cache_dir",
+    "TENSORHUB_CAS_DIR": "tensorhub_cas_dir",
+    "CIVITAI_API_KEY": "civitai_api_key",
+    "COZY_HF_DOWNLOAD_STALL_TIMEOUT_S": "hf_download_stall_timeout_s",
+    "COZY_HF_DOWNLOAD_MAX_SECONDS": "hf_download_max_seconds",
+    "COZY_HF_MAX_REPO_BYTES": "hf_max_repo_bytes",
+    "GEN_WORKER_ATTACHED_LORA_MAX": "attached_lora_max",
+    "GEN_WORKER_ATTACHED_LORA_MAX_BYTES": "attached_lora_max_bytes",
+    "GEN_WORKER_COMPILE_CACHE": "compile_cache_path",
+    "GEN_WORKER_COMPILE_CACHE_URL": "compile_cache_url",
+    "GEN_WORKER_COMPILE_ALLOW_COLD": "compile_allow_cold",
+}
+
+# Secondary env names for a field, consulted only when the primary name is
+# unset or empty (mirrors the historical `os.getenv(A) or os.getenv(B)`).
+_ENV_ALIASES: Dict[str, str] = {
+    "CIVITAI_TOKEN": "civitai_api_key",
+    "HUGGING_FACE_HUB_TOKEN": "hf_token",
 }
 
 _FIELD_NAMES = frozenset(_ENV_TO_FIELD.values())
+
+# Field-type metadata for source-value normalization: sources deliver strings;
+# non-str fields get stripped, empty values fall back to the struct default
+# (an exported-but-empty env var must not crash startup), and bool fields use
+# the worker's historical truthy set rather than msgspec's stricter parse.
+_FIELD_TYPES: Dict[str, type] = {
+    f.name: f.type for f in msgspec.structs.fields(Settings) if isinstance(f.type, type)
+}
+_TRUTHY = ("1", "true", "yes")
 
 _YAML_CANDIDATE_PATHS = (
     "/etc/gen-worker/config.yaml",
@@ -69,6 +101,12 @@ def _load_env() -> Dict[str, str]:
     """Read every Settings-relevant env var that's actually set."""
     out: Dict[str, str] = {}
     for env_name, field in _ENV_TO_FIELD.items():
+        val = os.environ.get(env_name)
+        if val is not None:
+            out[field] = val
+    for env_name, field in _ENV_ALIASES.items():
+        if out.get(field):
+            continue  # primary name wins when non-empty
         val = os.environ.get(env_name)
         if val is not None:
             out[field] = val
@@ -164,6 +202,21 @@ def _normalize_init_kwargs(init_kwargs: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in init_kwargs.items() if k in _FIELD_NAMES}
 
 
+def _normalize_values(merged: Dict[str, Any]) -> Dict[str, Any]:
+    """Prepare source strings for msgspec.convert per `_FIELD_TYPES`."""
+    out: Dict[str, Any] = {}
+    for field, val in merged.items():
+        ftype = _FIELD_TYPES.get(field, str)
+        if ftype is not str and isinstance(val, str):
+            val = val.strip()
+            if not val:
+                continue  # empty => struct default
+            if ftype is bool:
+                val = val.lower() in _TRUTHY
+        out[field] = val
+    return out
+
+
 def load_settings(**init_kwargs: Any) -> Settings:
     """Build a fresh `Settings`. Call once at startup.
 
@@ -179,4 +232,13 @@ def load_settings(**init_kwargs: Any) -> Settings:
     merged.update(_load_dotenv())
     merged.update(_load_env())
     merged.update(_normalize_init_kwargs(init_kwargs))
-    return msgspec.convert(merged, Settings, strict=False)
+    return msgspec.convert(_normalize_values(merged), Settings, strict=False)
+
+
+@functools.lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    """Process-wide cached `Settings` for call sites that aren't handed the
+    startup instance (standalone CLI paths, module-level constants). Same
+    sources, loaded lazily on first use. Tests clear via the autouse
+    `_fresh_settings_cache` fixture (`get_settings.cache_clear()`)."""
+    return load_settings()
