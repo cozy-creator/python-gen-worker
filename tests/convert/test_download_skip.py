@@ -321,3 +321,36 @@ def test_hf_repackaged_flavor_never_banked(fake_hub, tmp_path, monkeypatch) -> N
                   destination_repo="acme/dst")
     assert r.published
     assert "bank_records" not in _FakeHub.state
+
+
+def test_publish_from_bank_strips_stale_bundle_library_name(fake_hub) -> None:
+    """gw#477 bank leg: a banked repo_spec frozen before the multi-weight
+    opt-out carries library_name="diffusers"; the bank publish must strip it
+    from the commit (multiple top-level weights can never satisfy the
+    diffusers/single-file layout contract — chatterbox, J30 run 4)."""
+    plan = _Plan([("t3_cfg.safetensors", 100, "sha256:" + "a" * 64)])
+    key = flavor_bank_key(plan, _SPEC.label, layout_hint="diffusers")
+    payload = build_bank_payload(
+        files=[
+            {"path": "t3_cfg.safetensors", "blake3": "1" * 64, "size_bytes": 100},
+            {"path": "s3gen.safetensors", "blake3": "2" * 64, "size_bytes": 100},
+            {"path": "ve.safetensors", "blake3": "3" * 64, "size_bytes": 10},
+            {"path": "tokenizer.json", "blake3": "4" * 64, "size_bytes": 5},
+        ],
+        flavor="bf16", dtype="bf16", file_layout="singlefile", file_type="safetensors",
+        metadata={"source_provider": "huggingface", "source_repo": "ResembleAI/chatterbox"},
+        repo_spec={"kind": "model", "library_name": "diffusers"},
+        source_revision="deadbeef",
+    )
+    st = _FakeHub.state
+    st.setdefault("bank_manifests", {})[key] = payload
+    st.setdefault("cas_blobs", set()).update({"1" * 64, "2" * 64, "3" * 64, "4" * 64})
+
+    result = clone_mod._publish_from_bank(_client(fake_hub), **_bank_args(plan))
+    assert result is not None
+    req = _FakeHub.state["commit_request"]
+    # Empty library_name is dropped by the hub client marshaling — the commit
+    # must NOT carry the stale "diffusers".
+    assert "library_name" not in req
+    assert req["kind"] == "model"
+    assert req["metadata"]["multi_weight_bundle"] == "true"

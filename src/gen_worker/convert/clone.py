@@ -28,6 +28,7 @@ from .bank import build_bank_payload, flavor_bank_key
 from .hub import CommitFile, HubClient, HubPublishError, files_from_tree
 from .ingest import (
     IngestedSource,
+    _is_multi_weight_names,
     ingest_civitai,
     ingest_huggingface,
     plan_civitai,
@@ -433,6 +434,16 @@ def _publish_from_bank(
             metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
             metadata = dict(metadata)
             metadata["download_skip"] = "bank"
+            # Banked repo_specs are frozen at bank time and can carry a stale
+            # pre-gw#477 library_name="diffusers" for multi-weight bundles —
+            # recompute the opt-out from the banked file names so a bank-path
+            # publish never (re)creates a repo the layout contract rejects.
+            repo_spec = {k: str(v) for k, v in dict(payload.get("repo_spec") or {}).items()}
+            if repo_spec.get("library_name") == "diffusers" and _is_multi_weight_names(
+                    str(f.get("path") or "") for f in payload["files"]
+                    if "/" not in str(f.get("path") or "")):
+                repo_spec["library_name"] = ""
+                metadata["multi_weight_bundle"] = "true"
             if callable(progress):
                 progress(0.1 + 0.85 * (i / max(1, len(specs))),
                          f"clone.publish.{spec.label}")
@@ -451,7 +462,7 @@ def _publish_from_bank(
                 ),
                 metadata=metadata,
                 provenance=provenance,
-                repo_spec={k: str(v) for k, v in dict(payload.get("repo_spec") or {}).items()},
+                repo_spec=repo_spec,
             )
             result.published.append({
                 "flavor": str(payload.get("flavor") or spec.dtype),
