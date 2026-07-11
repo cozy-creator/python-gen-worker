@@ -503,7 +503,7 @@ wheels = [
 
 [[package]]
 name = "gen-worker"
-version = "0.13.30"
+version = "0.13.31"
 source = { editable = "." }
 dependencies = [
     { name = "blake3" },

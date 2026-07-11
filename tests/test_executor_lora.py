@@ -468,8 +468,10 @@ def test_lru_eviction_over_attachment_caps(tmp_path, monkeypatch) -> None:
         assert len(h.pipe.attached) == 2
         deletes = [c for c in h.pipe.calls if c[0] == "delete"]
         assert len(deletes) == 1
-        # LRU victim was the first-attached adapter
-        assert deletes[0][1] == lora_util.adapter_name(f"{LORA_A}@sha256:0")
+        # LRU victim was the first-attached adapter. Cache keys carry the
+        # bare-hex digest spelling (gw#491: algo prefix stripped so one
+        # adapter never mints two identities).
+        assert deletes[0][1] == lora_util.adapter_name(f"{LORA_A}@0")
 
     asyncio.run(_run())
 

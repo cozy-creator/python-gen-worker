@@ -738,15 +738,18 @@ def load_from_pretrained(
                 pass
     fp8_storage = storage_dtype in ("fp8", "fp8+te") or sniffed == "fp8"
     fp8_text_encoders = storage_dtype == "fp8+te"
+    adaptive_rung = ""  # gw#491: load-time rung engagement, stamped on the pipe
     if not read_on_disk_quant_config(Path(path)):
         qc = synthesize_quantization_config(attrs)
         if qc is None:
             mode, eqc = _adaptive_fit_rung(cls, Path(path), fp8_planned=fp8_storage)
             if mode == "fp8":
                 fp8_storage = True  # runtime fp8-E4M3 storage rung (th#683)
+                adaptive_rung = "fp8"
             elif eqc is not None:
                 qc = eqc
                 fp8_storage = False  # nf4 supersedes the fp8 rung
+                adaptive_rung = "nf4"
         if qc is not None:
             kwargs["quantization_config"] = qc
     single = _single_file_checkpoint(Path(path))
@@ -771,6 +774,13 @@ def load_from_pretrained(
         try:
             pipe._cozy_fp8_storage_requested = True
             pipe._cozy_fp8_storage_ok = bool(applied)
+        except Exception:
+            pass
+    if adaptive_rung:
+        # gw#491: a silently-engaged emergency rung is the th#736 bug class —
+        # the executor reconciles this stamp into ServePlan.ran / FnDegraded.
+        try:
+            pipe._cozy_adaptive_rung = adaptive_rung
         except Exception:
             pass
     return pipe

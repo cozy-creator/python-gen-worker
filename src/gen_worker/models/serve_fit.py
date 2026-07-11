@@ -113,8 +113,15 @@ class ServePlan:
 
 
 def _wanted(binding: Any) -> str:
+    """The precision the (post-resolution) binding plans to run: its stored
+    flavor, else its cast directive (storage_dtype — a hub pick folds in as
+    one, gw#491), else base bf16. Counting the cast here makes a SUCCESSFUL
+    cast visible (wanted=fp8 ran=fp8) instead of masquerading as bf16."""
     flavor = str(getattr(binding, "flavor", "") or "").strip().lower()
-    return flavor or "bf16"
+    if flavor:
+        return flavor
+    storage = str(getattr(binding, "storage_dtype", "") or "").strip().lower()
+    return storage or "bf16"
 
 
 def plan_serve(
@@ -251,12 +258,14 @@ def cast_dropped(
     *,
     wanted: str,
     detail: str,
+    ran: str = "bf16",
 ) -> ServePlan:
     """th#737: a resolved cast (``storage_dtype``) could not be applied —
     the pipeline has no denoiser/cast surface (latent upsamplers, VAE-only
-    repos). The function still runs natively at base precision, but the
-    recipe budgeted the cast's VRAM: report it structurally (FnDegraded
-    wanted=fp8 ran=bf16), never as a silent bf16 fallback."""
+    repos). The function still runs natively at base precision (``ran``,
+    default bf16), but the recipe budgeted the cast's VRAM: report it
+    structurally (FnDegraded wanted=fp8 ran=bf16), never as a silent
+    fallback."""
     base = plan if plan is not None else ServePlan(
         serveable=True, run_mode=RUN_NATIVE, fit="", wanted="", ran="",
     )
@@ -264,8 +273,33 @@ def cast_dropped(
         base,
         serveable=True,
         wanted=(wanted or base.wanted or "fp8"),
-        ran="bf16",
+        ran=(ran or "bf16"),
         warning=detail,
+    )
+
+
+def load_rung_engaged(
+    plan: Optional[ServePlan],
+    *,
+    rung: str,
+    detail: str,
+) -> ServePlan:
+    """gw#491: the load-time adaptive fit ladder engaged an emergency rung
+    (runtime fp8 storage or nf4) because free VRAM at load was tighter than
+    gate-time planning assumed. Same ServePlan/FnDegraded shape as the
+    plan-time emergency rungs — a 4-bit pipeline must never report
+    RUN_NATIVE wanted==ran."""
+    run_mode = RUN_FP8_STORAGE if rung == "fp8" else RUN_EMERGENCY
+    base = plan if plan is not None else ServePlan(
+        serveable=True, run_mode=RUN_NATIVE, fit="", wanted="bf16", ran="bf16",
+    )
+    return replace(
+        base,
+        serveable=True,
+        run_mode=run_mode,
+        warning=detail,
+        est_latency_multiplier=_LATENCY_MULTIPLIER[run_mode],
+        ran=run_mode,
     )
 
 

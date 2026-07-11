@@ -1115,8 +1115,23 @@ class Executor:
             self.serve_plans.get(spec.name), detail=line, placement_mode=to_rung)
         self._on_state_change()
 
+    def _record_adaptive_rung(self, spec: EndpointSpec, *, ref: str,
+                              rung: str, detail: str) -> None:
+        """gw#491: the load-time adaptive fit ladder engaged an emergency
+        rung (runtime fp8 storage / nf4). Surface it exactly like the
+        plan-time rungs — updated ServePlan + FnDegraded via the state-delta
+        path — never as a log-line-only fallback."""
+        from .models.serve_fit import load_rung_engaged
+
+        logger.warning(
+            "LOAD_RUNG_ENGAGED fn=%s model=%s rung=%s detail=%s",
+            spec.name, ref, rung, detail)
+        self.serve_plans[spec.name] = load_rung_engaged(
+            self.serve_plans.get(spec.name), rung=rung, detail=detail)
+        self._on_state_change()
+
     def _record_cast_drop(self, spec: EndpointSpec, *, ref: str,
-                          wanted: str, detail: str) -> None:
+                          wanted: str, detail: str, ran: str = "bf16") -> None:
         """th#737: a resolved cast (storage_dtype) cannot apply — the
         pipeline has no denoiser/cast surface. Serve at base precision but
         surface it STRUCTURALLY (FnDegraded wanted=fp8 ran=bf16 via the
@@ -1125,10 +1140,11 @@ class Executor:
         from .models.serve_fit import cast_dropped
 
         logger.warning(
-            "CAST_DROPPED fn=%s model=%s wanted=%s ran=bf16 detail=%s",
-            spec.name, ref, wanted or "fp8", detail)
+            "CAST_DROPPED fn=%s model=%s wanted=%s ran=%s detail=%s",
+            spec.name, ref, wanted or "fp8", ran or "bf16", detail)
         self.serve_plans[spec.name] = cast_dropped(
-            self.serve_plans.get(spec.name), wanted=wanted, detail=detail)
+            self.serve_plans.get(spec.name), wanted=wanted, detail=detail,
+            ran=ran)
         self._on_state_change()
 
     def available_functions(self) -> List[str]:
@@ -1662,7 +1678,8 @@ class Executor:
                     comps = self._model_index_components(path)
                     if comps and not ({"transformer", "unet"} & comps):
                         self._record_cast_drop(
-                            spec, ref=ref, wanted="fp8",
+                            spec, ref=ref, wanted=storage_dtype,
+                            ran=(dtype or "bf16"),
                             detail=(
                                 f"cast {storage_dtype!r} dropped for slot "
                                 f"{slot!r}: pipeline has no denoiser/cast "
@@ -1698,13 +1715,29 @@ class Executor:
                         load_from_pretrained, ann, path, dtype=dtype,
                         storage_dtype=storage_dtype, components=injected,
                     )
-                if getattr(pipe, "_cozy_fp8_storage_requested", False) and not getattr(
-                        pipe, "_cozy_fp8_storage_ok", True):
-                    # th#737 backstop: the cast was attempted at load and
-                    # failed on every target — structural report, not a
-                    # silent bf16 fallback.
+                rung = str(getattr(pipe, "_cozy_adaptive_rung", "") or "")
+                cast_failed = getattr(
+                    pipe, "_cozy_fp8_storage_requested", False
+                ) and not getattr(pipe, "_cozy_fp8_storage_ok", True)
+                if rung == "nf4" or (rung == "fp8" and not cast_failed):
+                    # gw#491: the loader engaged an emergency rung because
+                    # free VRAM at load was tighter than gate-time planning
+                    # assumed — reconcile it into ServePlan/FnDegraded.
+                    self._record_adaptive_rung(
+                        spec, ref=ref, rung=rung,
+                        detail=(
+                            f"adaptive fit rung {rung!r} engaged at load for "
+                            f"slot {slot!r} ({type(pipe).__name__}); free "
+                            "VRAM below the stored-precision footprint"),
+                    )
+                elif cast_failed and not rung:
+                    # th#737 backstop: the RESOLUTION cast was attempted at
+                    # load and failed on every target — structural report,
+                    # not a silent bf16 fallback. (A failed adaptive fp8 is
+                    # not a plan deviation: the plan was base precision.)
                     self._record_cast_drop(
-                        spec, ref=ref, wanted="fp8",
+                        spec, ref=ref, wanted=(storage_dtype or "fp8"),
+                        ran=(dtype or "bf16"),
                         detail=(
                             f"fp8 storage failed on every component of slot "
                             f"{slot!r} ({type(pipe).__name__}); serving at "
@@ -2543,7 +2576,11 @@ class Executor:
                 path = await self.store.ensure_local(ref, snapshots.get(ref))
                 ensure_ms = int((time.monotonic() - t0) * 1000)
                 snap = snapshots.get(ref)
+                # gw#491: normalize to the bare-hex spelling — snap.digest may
+                # carry an algo prefix ("blake3:<hex>") while path.name is the
+                # bare hex; one adapter must never mint two cache identities.
                 digest = (snap.digest if snap is not None else "") or path.name
+                digest = digest.split(":", 1)[-1].strip().lower()
                 cache_key = f"{ref}@{digest}"
                 t1 = time.monotonic()
                 state_dict = self._adapter_cache.get(cache_key)
