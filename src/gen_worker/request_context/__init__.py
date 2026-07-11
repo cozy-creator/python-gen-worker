@@ -429,10 +429,27 @@ class RequestContext:
             "timestamp": time.time(),
         })
 
-    def progress(self, progress: float, stage: Optional[str] = None) -> None:
+    def progress(
+        self,
+        progress: float,
+        stage: Optional[str] = None,
+        *,
+        step: Optional[int] = None,
+        total: Optional[int] = None,
+    ) -> None:
+        """Report request progress (best-effort, rides ``request.progress``).
+
+        ``progress`` is a 0..1 fraction; ``step``/``total`` carry the exact
+        step counter when known (e.g. denoise step 5 of 20) so UIs can render
+        "5 / 20" instead of a bare percentage.
+        """
         payload: Dict[str, Any] = {"progress": progress}
         if stage is not None:
             payload["stage"] = stage
+        if step is not None:
+            payload["step"] = int(step)
+        if total is not None:
+            payload["total"] = int(total)
         self._emit_event("request.progress", payload)
 
     def _emit_checkpoint_saved(

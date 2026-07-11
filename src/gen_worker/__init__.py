@@ -22,6 +22,7 @@ from .api.errors import (
     RetryableError,
     ValidationError,
 )
+from .api.progress import diffusers_step_callback
 from .api.streaming import (
     BatchItemDelta,
     Done,
@@ -66,6 +67,8 @@ __all__ = [
     "DatasetContext",
     "TrainingContext",
     "TrainingMetric",
+    # Per-step progress helper for diffusers pipelines.
+    "diffusers_step_callback",
     # Delegated-trainer subprocess primitive.
     "run_process",
     # Errors.
