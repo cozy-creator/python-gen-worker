@@ -41,7 +41,6 @@ from .api.types import (
     StringEnum,
     VideoAsset,
 )
-from .diagnostics import emit_diagnostic_log
 from .request_context import (
     ConversionContext,
     DatasetContext,
@@ -92,6 +91,5 @@ __all__ = [
     "ImageAsset",
     "StringEnum",
     "VideoAsset",
-    "emit_diagnostic_log",
     "io",
 ]
