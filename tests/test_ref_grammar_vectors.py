@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from gen_worker.models.refs import parse_model_ref
+from gen_worker.models.refs import normalize_model_ref, parse_model_ref
 
 _VECTORS = json.loads(
     (Path(__file__).parent / "testdata" / "ref_grammar_vectors.json").read_text()
@@ -31,3 +31,18 @@ def test_ref_grammar_vector(vec: dict) -> None:
     assert th.tag == vec["tag"]
     assert (th.digest or "") == vec["digest"]
     assert (th.flavor or "") == vec["flavor"]
+
+
+@pytest.mark.parametrize(
+    "vec",
+    [v for v in _VECTORS if not v.get("error")],
+    ids=[v["ref"] for v in _VECTORS if not v.get("error")],
+)
+def test_ref_normal_form_vector(vec: dict) -> None:
+    """gw#492: format(parse(ref)) mints the ratified normal form; the
+    normal form is a fixpoint (normalize is idempotent) and parses back to
+    the same value."""
+    canonical = normalize_model_ref(vec["ref"])
+    assert canonical == vec["canonical"]
+    assert normalize_model_ref(canonical) == canonical
+    assert parse_model_ref(canonical) == parse_model_ref(vec["ref"])

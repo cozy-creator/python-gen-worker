@@ -29,66 +29,81 @@ from urllib.parse import parse_qs, urlparse
 
 from ..config import get_settings
 from .cache_paths import tensorhub_cas_dir
-from .refs import HuggingFaceRef, TensorhubRef, parse_model_ref
+from .refs import HuggingFaceRef, TensorhubRef, fold_ref, parse_model_ref
 
 logger = logging.getLogger("gen_worker.download")
 
 ProgressFn = Callable[[int, Optional[int]], None]
 
 # ---------------------------------------------------------------------------
-# Provider index: bare ref string -> provider. Built once at boot from the
+# Provider index: normal-form ref -> provider. Built once at boot from the
 # endpoint.lock manifest (the wire carries bare refs without a provider field).
+#
+# ONE keying function (gw#492) normalizes both index keys and lookups —
+# replacing the old raw/stripped/tag-removed fallback chain and its
+# `_binding_canonical_ref` twin. Keys are flavor-granular (a dispatch table
+# may bind two providers to one repo name via different flavors) with a
+# repo-identity fallback so hub-minted picks of NEW flavors (`#svdq-int4`)
+# still route to their repo's provider.
 # ---------------------------------------------------------------------------
 
 _provider_by_ref: Mapping[str, str] = {}
 
 
+def _provider_index_keys(ref: str) -> tuple[str, str]:
+    """THE keying function for the provider index: ``(exact, base)`` where
+    ``exact`` is the ref's normal form without digest/revision (they never
+    appear on manifest binding entries) and ``base`` is the repo identity
+    (``owner/repo``). Tries the tensorhub grammar first, then the HF form
+    (which allows a non-digest ``@revision``); refs outside both key as
+    their stripped raw string (e.g. civitai numeric ids)."""
+    s = str(ref or "").strip()
+    if not s:
+        return "", ""
+    try:
+        parsed = parse_model_ref(s)
+    except ValueError:
+        try:
+            parsed = parse_model_ref(s, provider="hf")
+        except ValueError:
+            return s, s
+    if parsed.tensorhub is not None:
+        th = parsed.tensorhub
+        exact = TensorhubRef(owner=th.owner, repo=th.repo, tag=th.tag,
+                             digest=None, flavor=th.flavor).canonical()
+        return exact, th.repo_id()
+    assert parsed.hf is not None
+    hf = parsed.hf
+    exact = HuggingFaceRef(repo_id=hf.repo_id, revision=None,
+                           flavor=hf.flavor).canonical()
+    return exact, hf.repo_id
+
+
 def set_provider_index(mapping: Optional[Mapping[str, str]]) -> None:
     global _provider_by_ref
-    _provider_by_ref = dict(mapping or {})
+    index: dict[str, str] = {}
+    for k, v in (mapping or {}).items():
+        exact, base = _provider_index_keys(k)
+        if not exact:
+            continue
+        index.setdefault(exact, v)
+        index.setdefault(base, v)
+    _provider_by_ref = index
 
 
 def lookup_provider_for_ref(ref: str, *, default: str = "tensorhub") -> str:
-    """Provider tag for ``ref`` from the index, trying (1) the raw ref,
-    (2) stripped, (3) with the ``:tag`` segment removed (runtime payloads may
-    stamp ``:latest`` on HF refs; index keys are bare)."""
+    """Provider tag for ``ref`` from the index: exact normal-form match,
+    then the repo-identity fallback."""
     if not ref:
         return default
     mapping = _provider_by_ref
     if not mapping:
         return default
-    if ref in mapping:
-        return mapping[ref]
-    stripped = ref.strip()
-    if stripped and stripped != ref and stripped in mapping:
-        return mapping[stripped]
-    base = stripped or ref
-    if "/" in base:
-        slash = base.rfind("/")
-        head, tail = base[:slash], base[slash:]
-        colon = tail.find(":")
-        if colon >= 0:
-            hash_idx = tail.find("#")
-            no_tag = head + tail[:colon] + (tail[hash_idx:] if hash_idx >= 0 else "")
-            if no_tag != base and no_tag in mapping:
-                return mapping[no_tag]
-    return default
-
-
-def _binding_canonical_ref(entry: Mapping[str, Any]) -> str:
-    ref = str(entry.get("ref") or "").strip()
-    if not ref:
-        return ""
-    provider = str(entry.get("provider") or "").strip() or "tensorhub"
-    flavor = str(entry.get("flavor") or "").strip()
-    tag = str(entry.get("tag") or "").strip()
-    if provider == "tensorhub":
-        out = ref if ("@" in ref or ":" in ref) else f"{ref}:{tag or 'latest'}"
-    else:
-        out = ref
-    if flavor and "#" not in out:
-        out = f"{out}#{flavor}"
-    return out
+    exact, base = _provider_index_keys(ref)
+    hit = mapping.get(exact)
+    if hit is None:
+        hit = mapping.get(base)
+    return hit if hit is not None else default
 
 
 def _collect_binding_entries(bindings: Any) -> list[dict[str, Any]]:
@@ -109,7 +124,11 @@ def _collect_binding_entries(bindings: Any) -> list[dict[str, Any]]:
 
 
 def build_provider_index_from_manifest(manifest: Optional[Mapping[str, Any]]) -> dict[str, str]:
-    """{bare_ref_string: provider} from a loaded endpoint.lock manifest."""
+    """{normal_form_ref: provider} from a loaded endpoint.lock manifest.
+
+    Entry ``tag``/``flavor`` side-channel fields fold into the ref via the
+    ONE grammar module before keying; ``set_provider_index`` adds the
+    repo-identity fallback keys."""
     index: dict[str, str] = {}
     if not isinstance(manifest, Mapping):
         return index
@@ -120,17 +139,22 @@ def build_provider_index_from_manifest(manifest: Optional[Mapping[str, Any]]) ->
         if not isinstance(fn, dict):
             continue
         for entry in _collect_binding_entries(fn.get("bindings")):
-            ref_key = _binding_canonical_ref(entry)
-            if not ref_key:
+            ref = str(entry.get("ref") or "").strip()
+            if not ref:
                 continue
             provider = str(entry.get("provider") or "").strip() or "tensorhub"
-            index.setdefault(ref_key, provider)
-            ref_bare = str(entry.get("ref") or "").strip()
-            flavor = str(entry.get("flavor") or "").strip()
-            if ref_bare:
-                if flavor:
-                    index.setdefault(f"{ref_bare}#{flavor}", provider)
-                index.setdefault(ref_bare, provider)
+            try:
+                key = str(fold_ref(
+                    ref,
+                    tag=str(entry.get("tag") or ""),
+                    flavor=str(entry.get("flavor") or ""),
+                    provider=provider
+                    if provider in ("tensorhub", "hf", "civitai", "modelscope")
+                    else "tensorhub",
+                ))
+            except ValueError:
+                key = ref
+            index.setdefault(key, provider)
     return index
 
 

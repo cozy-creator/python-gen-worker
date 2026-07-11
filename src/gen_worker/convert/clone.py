@@ -80,7 +80,9 @@ class OutputSpec:
 
     @property
     def label(self) -> str:
-        return f"{self.dtype}-{self.file_layout}-{self.file_type}".replace(":", "-")
+        from gen_worker.models.refs import flavor_token
+
+        return flavor_token(f"{self.dtype}-{self.file_layout}-{self.file_type}")
 
 
 @dataclass
@@ -782,7 +784,9 @@ def run_clone(
                 # Hub flavor tokens are [a-z0-9][a-z0-9._-]{0,63}: the gguf
                 # dtype-axis label ("gguf:q4_k_m") publishes as "gguf-q4_k_m"
                 # (the th#611 flavor convention).
-                flavor_label = flavor_label.replace(":", "-")
+                from gen_worker.models.refs import flavor_token
+
+                flavor_label = flavor_token(flavor_label)
             except InlineConversionNotPossible as exc:
                 entry: dict[str, Any] = {
                     "spec_label": spec.label, "dtype": spec.dtype,

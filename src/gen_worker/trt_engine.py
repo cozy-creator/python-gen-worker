@@ -42,7 +42,7 @@ import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from .compile_cache import AdoptError, _clean_tarinfo, family_from_ref, sku_slug
+from .compile_cache import AdoptError, _clean_tarinfo, parse_cell_ref, sku_slug
 
 logger = logging.getLogger(__name__)
 
@@ -99,10 +99,9 @@ def flavor_label(sku: str, version: str, precision: str) -> str:
 
 def is_engine_ref(ref: str, family: str = "") -> bool:
     """True when ``ref`` names a TRT engine cell (optionally of one family)."""
-    fam = family_from_ref(ref)
+    fam, flavor = parse_cell_ref(ref)
     if not fam or (family and fam != family):
         return False
-    flavor = ref.split("#", 1)[1] if "#" in ref else ""
     return flavor.startswith("trt-")
 
 

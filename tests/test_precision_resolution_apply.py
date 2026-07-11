@@ -33,7 +33,7 @@ def _spec() -> EndpointSpec:
     return EndpointSpec(
         name="generate", method=_Fake.generate, kind="inference",
         payload_type=_In, output_mode="single", cls=_Fake,
-        models={"pipeline": Hub("acme/z-image", tag="prod")},
+        models={"pipeline": Hub("acme/z-image")},
         resources=Resources(gpu=True),
     )
 
@@ -107,7 +107,7 @@ def _resolved_repo() -> WorkerResolvedRepo:
 
 
 def test_resolve_local_bindings_picks_stored_flavor() -> None:
-    bindings = {"pipeline": Hub("acme/z-image", tag="prod")}
+    bindings = {"pipeline": Hub("acme/z-image")}
     out = resolve_local_bindings(
         bindings, caps=_caps(89, ("nunchaku",)), free_vram_gb=23.0,
         resolver=lambda thref: _resolved_repo(),
@@ -116,7 +116,7 @@ def test_resolve_local_bindings_picks_stored_flavor() -> None:
 
 
 def test_resolve_local_bindings_cast_rung_on_hopper() -> None:
-    bindings = {"pipeline": Hub("acme/z-image", tag="prod")}
+    bindings = {"pipeline": Hub("acme/z-image")}
     out = resolve_local_bindings(
         bindings, caps=_caps(90), free_vram_gb=78.0,
         resolver=lambda thref: _resolved_repo(),

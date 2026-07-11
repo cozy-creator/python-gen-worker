@@ -12,7 +12,17 @@ from .download import (
     lookup_provider_for_ref,
     set_provider_index,
 )
-from .refs import HuggingFaceRef, ParsedModelRef, TensorhubRef, parse_model_ref
+from .refs import (
+    HuggingFaceRef,
+    ParsedModelRef,
+    TensorhubRef,
+    WireRef,
+    flavor_token,
+    fold_ref,
+    format_model_ref,
+    normalize_model_ref,
+    parse_model_ref,
+)
 from .residency import (
     LoadedComponentKey,
     content_set_digest,
@@ -33,7 +43,12 @@ __all__ = [
     "TensorhubRef",
     "HuggingFaceRef",
     "ParsedModelRef",
+    "WireRef",
     "parse_model_ref",
+    "format_model_ref",
+    "normalize_model_ref",
+    "fold_ref",
+    "flavor_token",
     "Residency",
     "Tier",
     "LoadedComponentKey",
