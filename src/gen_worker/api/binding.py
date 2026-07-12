@@ -84,22 +84,26 @@ class ModelRef(msgspec.Struct, frozen=True):
     allow_lora: bool = False
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "path", _clean(self.path))
-        object.__setattr__(self, "tag", _clean(self.tag))
-        object.__setattr__(self, "flavor", _clean(self.flavor))
-        object.__setattr__(self, "revision", _clean(self.revision))
-        object.__setattr__(self, "subfolder", _clean(self.subfolder))
-        object.__setattr__(self, "dtype", _clean(self.dtype))
-        object.__setattr__(self, "version", _clean(self.version))
-        object.__setattr__(
-            self, "files", tuple(_clean(p) for p in self.files if _clean(p))
-        )
-        object.__setattr__(self, "storage_dtype", _clean_storage_dtype(self.storage_dtype))
-        object.__setattr__(self, "allow_lora", bool(self.allow_lora))
+        # msgspec.structs.force_setattr, NOT object.__setattr__: the latter
+        # raises "can't apply this __setattr__" on frozen msgspec Structs
+        # under CPython 3.12 (every serve image) while passing on 3.13 (dev
+        # venvs + CI) — J24M run16 shipped an image whose endpoint import
+        # died at decoration and discovery found no functions.
+        force = msgspec.structs.force_setattr
+        force(self, "path", _clean(self.path))
+        force(self, "tag", _clean(self.tag))
+        force(self, "flavor", _clean(self.flavor))
+        force(self, "revision", _clean(self.revision))
+        force(self, "subfolder", _clean(self.subfolder))
+        force(self, "dtype", _clean(self.dtype))
+        force(self, "version", _clean(self.version))
+        force(self, "files", tuple(_clean(p) for p in self.files if _clean(p)))
+        force(self, "storage_dtype", _clean_storage_dtype(self.storage_dtype))
+        force(self, "allow_lora", bool(self.allow_lora))
 
         if self.source == "tensorhub":
             if not self.tag:
-                object.__setattr__(self, "tag", "latest")
+                msgspec.structs.force_setattr(self, "tag", "latest")
             if not self.path:
                 raise ValueError("Hub requires a non-empty ref")
         elif self.source == "huggingface":

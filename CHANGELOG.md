@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.14.10 (2026-07-12)
+
+- **pgw#511 hotfix: ModelRef.__post_init__ uses force_setattr.**
+  `object.__setattr__` on a frozen msgspec Struct raises "can't apply this
+  __setattr__" under CPython 3.12 (every serve image) while passing on 3.13
+  (dev venvs + CI) — any endpoint import died at decoration time and
+  discovery advertised NOTHING (J24M run16 image build gate caught it).
+  `msgspec.structs.force_setattr` is the repo convention (Resources,
+  Compile) and works on both.
+
+
 ## 0.14.9 (2026-07-12)
 
 - **gw#479: canonical config digests prune sub-config keys duplicating the
