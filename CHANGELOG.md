@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.17.1 (2026-07-12)
+
+- **gw#516: hub-visible finalize.** `StateDelta.finalizing_jobs` (field 5)
+  counts jobs past the decode→finalize handoff — GPU slot terminally
+  released, encode/upload tail still running, `JobResult` unshipped — so the
+  hub's drain/retire/idle logic can treat GPU-idle ≠ work-idle.
+  `JobMetrics.slot_held_ms` (11) + `finalize_wall_ms` (12) split
+  `runtime_ms` into slot occupancy vs the slotless finalize tail (the
+  FINALIZE_OVERLAP log line is now corroborating evidence, not the only
+  one). Tensorhub counterpart consumes all three (tensorhub PR #299).
+
+
 ## 0.17.0 (2026-07-12)
 
 - **th#714: C2PA Content Credentials on generated media (EU AI Act Art. 50).**

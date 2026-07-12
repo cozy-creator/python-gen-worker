@@ -180,6 +180,10 @@ class RequestContext:
         # blocking uploads release the GPU slot while they wait on the
         # network. None for CPU jobs and local (CLI) runs.
         self._gpu_slot_lease: Optional[Any] = None
+        # gw#516: executor callback fired on the TERMINAL slot release at the
+        # decode->finalize handoff, so the worker's finalizing-job count (and
+        # the hub's StateDelta view of it) tracks the encode/upload tail.
+        self._on_finalize_release: Optional[Callable[[], None]] = None
 
     @property
     def request_id(self) -> str:
@@ -424,6 +428,13 @@ class RequestContext:
             logger.info(
                 "request %s: GPU slot released for finalize; encode/upload "
                 "overlaps the next request's compute", self.request_id)
+            notify = self._on_finalize_release
+            if notify is not None:
+                try:
+                    notify()
+                except Exception:
+                    logger.exception(
+                        "finalize-release notification failed (non-fatal)")
 
     def _emit_event(self, event_type: str, payload: Optional[Dict[str, Any]] = None) -> None:
         """Worker-internal: emit a progress/event payload (best-effort)."""
