@@ -247,6 +247,28 @@ def test_canonical_config_prunes_parent_duplicated_subconfig_keys(tmp_path) -> N
     assert da and da == db
     assert dc != da
 
+    # MIRROR case (live pod evidence): 4.53 serialized the ids in the
+    # sub-config ONLY, 4.57 at the parent ONLY — same values, different
+    # level. Child-only scalars hoist to the parent, so both canonicalize
+    # identically; a CONFLICTING child value still separates.
+    d, e, f = tmp_path / "d", tmp_path / "e", tmp_path / "f"
+    for x in (d, e, f):
+        x.mkdir()
+    child_only = {"model_type": "qwen2_5_vl",
+                  "text_config": {"hidden_size": 8, "vision_start_token_id": 151652}}
+    parent_only = {"model_type": "qwen2_5_vl", "vision_start_token_id": 151652,
+                   "text_config": {"hidden_size": 8}}
+    conflict = {"model_type": "qwen2_5_vl", "vision_start_token_id": 151652,
+                "text_config": {"hidden_size": 8, "vision_start_token_id": 99}}
+    (d / "cfg.json").write_text(json.dumps(child_only))
+    (e / "cfg.json").write_text(json.dumps(parent_only))
+    (f / "cfg.json").write_text(json.dumps(conflict))
+    dd = canonical_json_digest(d / "cfg.json")
+    de = canonical_json_digest(e / "cfg.json")
+    df = canonical_json_digest(f / "cfg.json")
+    assert dd and dd == de
+    assert df != dd
+
 
 def test_share_plan_survives_config_provenance_noise(tmp_path, lane_repos) -> None:
     """Repo B's vae config rewritten by a 'newer library' (provenance stamp +

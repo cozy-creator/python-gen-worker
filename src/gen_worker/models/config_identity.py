@@ -50,17 +50,29 @@ def _normalize(value: Any) -> Any:
             if k == "torch_dtype":
                 k = "dtype"
             out[k] = _normalize(v)
-        # Prune sub-dict keys that duplicate the parent's same-named scalar:
-        # save-era redundancy, not content (qwen live evidence: transformers
-        # 4.53 wrote vision_start/end_token_id into BOTH the top-level VL
-        # config and text_config; 4.57 writes them only at top — the
-        # materialized top-level values are identical either way).
-        for k, v in out.items():
-            if isinstance(v, dict):
-                out[k] = {
-                    kk: vv for kk, vv in v.items()
-                    if isinstance(vv, (dict, list)) or kk not in out or out[kk] != vv
-                }
+        # Composite-config scalar dedupe (qwen live evidence): transformers
+        # mirrors token-id scalars between a composite VL config and its
+        # sub-configs, and WHERE they serialize moved across versions — 4.53
+        # wrote them in text_config (sometimes both), 4.57 at top level
+        # only. Same materialized values, different paths. Canonical form:
+        # a child scalar duplicating the parent drops; a child-only scalar
+        # HOISTS to the parent; a child value CONFLICTING with the parent
+        # stays put (real content, keys must separate).
+        for k in sorted((k for k, v in out.items() if isinstance(v, dict)), key=str):
+            child = out[k]
+            kept = {}
+            for kk, vv in child.items():
+                if isinstance(vv, (dict, list)):
+                    kept[kk] = vv
+                elif kk in out and not isinstance(out[kk], (dict, list)):
+                    if out[kk] == vv:
+                        continue      # duplicate of parent
+                    kept[kk] = vv     # conflict: keep both sides
+                elif kk in out:
+                    kept[kk] = vv     # parent holds a container under this name
+                else:
+                    out[kk] = vv      # hoist child-only scalar to the parent
+            out[k] = kept
         return out
     if isinstance(value, list):
         return [_normalize(v) for v in value]
