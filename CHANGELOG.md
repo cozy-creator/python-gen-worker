@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.17.2 (2026-07-12)
+
+- **pgw#519: `model.choices[].binding` was missing the `family` stamp.**
+  `_collect_model_placement_key` (discovery/discover.py) emitted each
+  ModelChoice pick's binding without the `family` that top-level `bindings`
+  blocks get from `Compile(family=...)` — tensorhub's th#586 architecture
+  gate rejects `allow_lora=true` bindings lacking a family, so builder-path
+  deploys of ModelChoice endpoints (sdxl) hard-failed. The stamping logic
+  is now one shared helper (`_stamp_lora_family`) applied identically to
+  both the top-level `bindings` block and every `choices[].binding` row —
+  an allow_lora choice binding with no declared `Compile(family=...)` now
+  raises at discovery time instead of silently shipping unstamped.
+
 ## 0.17.1 (2026-07-12)
 
 - **gw#516: hub-visible finalize.** `StateDelta.finalizing_jobs` (field 5)

@@ -309,6 +309,23 @@ def _binding_to_manifest(binding: Binding, param_name: str = "") -> Dict[str, An
     return out
 
 
+def _stamp_lora_family(binding_manifest: Dict[str, Any], compile_family: str, context: str) -> None:
+    """Stamp an ``allow_lora`` binding manifest with the endpoint's
+    ``Compile(family=...)`` so tensorhub's th#586 architecture gate can
+    police adapter targets (the builder rejects ``allow_lora`` bindings
+    lacking a family). Shared by top-level ``bindings`` blocks and
+    ``model.choices[].binding`` rows (pgw#519) so both surfaces stamp
+    identically."""
+    if not binding_manifest.get("allow_lora"):
+        return
+    if not compile_family:
+        raise ValueError(
+            f"{context}: allow_lora bindings require "
+            "Compile(family=...) on the endpoint"
+        )
+    binding_manifest["family"] = compile_family
+
+
 def _model_choice_in(ann: Any) -> Tuple[Optional[type], bool]:
     """Inspect a payload field annotation for a curated ``ModelChoice`` set.
 
@@ -340,7 +357,7 @@ def _model_choice_in(ann: Any) -> Tuple[Optional[type], bool]:
 
 
 def _collect_model_placement_key(
-    payload_type: type, models: Dict[str, Any]
+    payload_type: type, models: Dict[str, Any], compile_family: str = "", name: str = ""
 ) -> Optional[Dict[str, Any]]:
     """The handler's checkpoint placement key (pgw#509), or ``None``.
 
@@ -350,7 +367,13 @@ def _collect_model_placement_key(
     ``hot``/``price`` hints — plus whether the field accepts BYOM and which
     ``models=`` slot the pick swaps into. This is the SDK->tensorhub contract
     (th#761): the scheduler warm-pools per ``choices[].binding`` ref; the
-    catalog/UI renders ``choices[].defaults``."""
+    catalog/UI renders ``choices[].defaults``.
+
+    ``compile_family`` mirrors the endpoint's ``Compile(family=...)`` onto
+    each ``allow_lora`` choice binding via :func:`_stamp_lora_family` —
+    identically to how top-level ``bindings`` blocks are stamped (pgw#519):
+    tensorhub's th#586 gate rejects ``allow_lora`` choice bindings lacking a
+    family just like it does top-level ones."""
     try:
         hints = typing.get_type_hints(payload_type)
     except Exception:
@@ -379,9 +402,17 @@ def _collect_model_placement_key(
     slot = next(iter(models), "")
     choices: List[Dict[str, Any]] = []
     for row in choice_enum.rows():  # type: ignore[attr-defined]
+        binding_manifest = _binding_to_manifest(row.ref, slot)
+        _stamp_lora_family(
+            binding_manifest,
+            compile_family,
+            f"{name}: {payload_type.__name__}.{field_name} choice {row.id!r}"
+            if name
+            else f"{payload_type.__name__}.{field_name} choice {row.id!r}",
+        )
         entry: Dict[str, Any] = {
             "id": row.id,
-            "binding": _binding_to_manifest(row.ref, slot),
+            "binding": binding_manifest,
             "defaults": msgspec.to_builtins(row.defaults),
         }
         if row.hot:
@@ -520,20 +551,17 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
         }
         # allow_lora bindings carry the endpoint's architecture family so the
         # hub's th#586 gate can police adapter targets (builder rejects
-        # allow_lora without family).
+        # allow_lora without family). pgw#519: the same stamp applies to
+        # model.choices[].binding rows, not just top-level bindings.
         compile_family = es.compile.family if es.compile is not None else ""
-        for block in bindings_block.values():
-            if block.get("allow_lora"):
-                if not compile_family:
-                    raise ValueError(
-                        f"{es.name}: allow_lora bindings require "
-                        "Compile(family=...) on the endpoint"
-                    )
-                block["family"] = compile_family
+        for key, block in bindings_block.items():
+            _stamp_lora_family(block, compile_family, f"{es.name} binding {key!r}")
 
         input_schema, input_sha = _schema_and_hash(es.payload_type)
         moderation = _collect_payload_moderation_metadata(es.payload_type)
-        model_key = _collect_model_placement_key(es.payload_type, es.models)
+        model_key = _collect_model_placement_key(
+            es.payload_type, es.models, compile_family, es.name
+        )
         output_type = es.output_type
         if output_type is None:
             raise ValueError(
