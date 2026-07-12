@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.16.0 (2026-07-12)
+
+- **pgw#514: dead-surface + protocol-drift sweep (BREAKING, hard cut).**
+  Every deletion grep-verified zero-caller across gen-worker,
+  inference-endpoints, and training-endpoints post-0.15.0.
+  - Dead code: `base_model_families` trimmed to `civitai_to_family` (the
+    only mapping with a caller); dead exports `worker_local_model_cache_dir_default`,
+    `ensure_local_sync`, `build_function_owned_pipeline`, `InputTooLargeError`,
+    `TokenStreamSignal`/`_SIGNAL_TYPES`, `PositivePrompt`/`NegativePrompt`;
+    six dead `RequestContext.__init__` params (`required_models`,
+    `parent_request_id`, `child_request_id`, `item_id`, `item_index`,
+    `item_span`) + the dead `hints["job_id"]` branch; `Executor.__init__`'s
+    `on_state_change` kwarg (worker.py assigns the attribute directly);
+    stale docstrings (streaming `Done`, `checkpoint_dir` "survives worker
+    restart" — it is pod-local /tmp, `Worker._handle_job_request` references,
+    ar_tts `sglang_runner` field).
+  - Dead config: Settings fields with no producer deleted — `grpc_ca_bundle`
+    (its lone transport.py consumer now always uses system roots),
+    `worker_git_commit`, the `COZY_HF_*` trio and `attached_lora_max*`
+    (now fixed module constants), the `GEN_WORKER_COMPILE_*` trio (now raw
+    env reads in `compile_cache.py`), the `HUGGING_FACE_HUB_TOKEN` alias.
+    `worker_image_digest` kept with a TODO (tensorhub may start stamping
+    it). The false "no module reads os.environ" Settings docstring now
+    describes the real library-standalone raw-read exceptions.
+  - Protocol: bare `ValueError` now maps **FATAL**, not INVALID (P9) —
+    typed `ValidationError` + msgspec decode errors keep INVALID;
+    `ensure_local`'s unsupported-ref raise is now typed. `_sanitize`
+    additionally redacts absolute filesystem paths from client-visible
+    messages (P8; URLs and `owner/repo` refs survive). Deadline expiry
+    proto comment fixed to match reality (FATAL, not CANCELED — P6);
+    `insufficient_disk` removed from the FnUnavailable reason vocabulary
+    (it is transient, RETRYABLE-only — P10). Worker stopped populating
+    `ModelEvent.cache_hits/cache_misses/warmup_s` and
+    `WorkerResources.git_commit` (zero Go readers — P3/P4); the proto
+    fields stay pending a coordinated tensorhub trim.
+
 ## 0.15.2 (2026-07-12)
 
 - **th#763: cold tensorhub refs block-and-serve instead of fataling the
@@ -39,6 +75,7 @@
   child scalar duplicating the parent drops; child-only scalar hoists to
   the parent; a CONFLICTING child value keeps both sides (keys separate).
   Verified equal inside the serve image on the two real fp8 TE configs.
+## 0.15.0 (2026-07-12)
 
 
 ## 0.14.14 (2026-07-12)

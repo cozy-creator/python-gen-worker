@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import IO, Annotated, Literal, Optional
+from typing import IO, Literal, Optional
 
 import msgspec
 
@@ -149,10 +149,6 @@ class PromptRole:
     def __post_init__(self) -> None:
         if self.role not in ("positive", "negative"):
             raise ValueError("PromptRole.role must be 'positive' or 'negative'")
-
-
-PositivePrompt = Annotated[str, PromptRole("positive")]
-NegativePrompt = Annotated[str, PromptRole("negative")]
 
 
 class Tensors(msgspec.Struct):

@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, Mapping, Optional, Sequence
 from urllib.parse import parse_qs, urlparse
 
+from ..api.errors import ValidationError
 from ..config import get_settings
 from .cache_paths import tensorhub_cas_dir
 from .refs import HuggingFaceRef, TensorhubRef, fold_ref, parse_model_ref
@@ -267,30 +268,9 @@ async def ensure_local(
 
         return Path(await asyncio.to_thread(_ms_download))
 
-    raise ValueError(f"unsupported model ref {ref!r} (provider={prov!r})")
-
-
-def ensure_local_sync(ref: str, **kwargs: Any) -> Path:
-    """Blocking wrapper for sync callers (CLI)."""
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(ensure_local(ref, **kwargs))
-    # Called from inside a running loop's thread: run in a fresh thread/loop.
-    out: dict[str, Any] = {}
-
-    def _runner() -> None:
-        try:
-            out["v"] = asyncio.run(ensure_local(ref, **kwargs))
-        except BaseException as e:  # noqa: BLE001
-            out["e"] = e
-
-    t = threading.Thread(target=_runner, daemon=True)
-    t.start()
-    t.join()
-    if "e" in out:
-        raise out["e"]
-    return out["v"]
+    # Typed so the executor classifies it INVALID (bad input, never retry) —
+    # a bare ValueError maps FATAL since pgw#514/P9.
+    raise ValidationError(f"unsupported model ref {ref!r} (provider={prov!r})")
 
 
 # ---------------------------------------------------------------------------
@@ -391,12 +371,14 @@ def _match_allow_patterns(repo_files: Sequence[str], patterns: Sequence[str]) ->
     return {f for f in repo_files if any(fnmatch(f, p) for p in pats)}
 
 
-def _hf_stall_timeout_s() -> float:
-    return max(0.0, get_settings().hf_download_stall_timeout_s)
-
-
-def _hf_wallclock_max_s() -> float:
-    return max(0.0, get_settings().hf_download_max_seconds)
+# HF snapshot-download guards (#379): stall window (no byte progress), wall-
+# clock cap (0 = off), and the accidental-huge-repo cap (0 = off). No
+# deployment has ever overridden these (pgw#514 dead-config sweep found zero
+# producers for the env vars that used to back them), so they're fixed
+# constants rather than Settings fields.
+_HF_DOWNLOAD_STALL_TIMEOUT_S = 180.0
+_HF_DOWNLOAD_MAX_SECONDS = 0.0
+_HF_MAX_REPO_BYTES = 60_000_000_000
 
 
 class DownloadStalledError(RuntimeError):
@@ -570,11 +552,10 @@ def download_hf(
         }
         wanted = selected if selected is not None else set(repo_files)
         total_hint = sum(sizes.get(p, 0) for p in wanted)
-        cap = get_settings().hf_max_repo_bytes
-        if cap > 0 and total_hint > cap:
+        if _HF_MAX_REPO_BYTES > 0 and total_hint > _HF_MAX_REPO_BYTES:
             raise RuntimeError(
                 f"refusing an excessively large Hugging Face selection for {repo_id}: "
-                f"{total_hint} bytes (limit {cap}; raise COZY_HF_MAX_REPO_BYTES to override)"
+                f"{total_hint} bytes (limit {_HF_MAX_REPO_BYTES})"
             )
     except RuntimeError:
         raise
@@ -597,8 +578,8 @@ def download_hf(
         progress_root=progress_root,
         progress_callback=progress,
         total_hint=total_hint,
-        stall_timeout=_hf_stall_timeout_s(),
-        wall_clock_max=_hf_wallclock_max_s(),
+        stall_timeout=_HF_DOWNLOAD_STALL_TIMEOUT_S,
+        wall_clock_max=_HF_DOWNLOAD_MAX_SECONDS,
     )
     if progress is not None:
         try:
@@ -890,7 +871,6 @@ def download_civitai(
 
 __all__ = [
     "ensure_local",
-    "ensure_local_sync",
     "download_hf",
     "download_civitai",
     "select_hf_files",

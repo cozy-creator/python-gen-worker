@@ -111,12 +111,19 @@ except Exception:  # pragma: no cover
 
 
 # Credential material inside exception messages (auth headers, presigned-URL
-# query params). Redacted in place — replacing the whole message with
+# query params) and worker-filesystem paths (pgw#514/P8: a FileNotFoundError
+# ships "ExcClass: first-line" to the client — absolute paths leak pod
+# internals). Redacted in place — replacing the whole message with
 # "internal error" made every download/publish failure undiagnosable from the
 # hub (pods ship no logs; presigned URLs carry X-Amz-* params).
 _REDACTIONS = (
     re.compile(r"Bearer\s+[^\s\"'&]+"),
     re.compile(r"(?:X-Amz-[A-Za-z0-9-]+|Signature)=[^&\s\"']*"),
+    # Absolute unix filesystem paths (/tmp/..., /app/..., /home/...): require
+    # two segments so bare "/" and owner/repo-style refs survive, and no
+    # scheme/word directly before the slash so URL paths inside https://...
+    # stay intact. Pods are linux-only; no Windows drive-path variant.
+    re.compile(r"(?<![\w:/])/(?:[\w.@+-]+/)+[\w.@+-]*"),
 )
 
 
@@ -176,7 +183,12 @@ def _map_exception(exc: BaseException) -> Tuple["pb.JobStatus", str]:
     """-> (JobStatus, safe_message)."""
     if isinstance(exc, (CanceledError, asyncio.CancelledError)):
         return pb.JOB_STATUS_CANCELED, "canceled"
-    if isinstance(exc, (ValidationError, msgspec.ValidationError, msgspec.DecodeError, ValueError)):
+    # INVALID (400, never retried) is reserved for typed validation errors and
+    # msgspec payload decode failures. A BARE ValueError is NOT invalid input
+    # (pgw#514/P9): PIL/numpy/tenant code raise ValueError for internal bugs,
+    # and mapping those to INVALID blamed the client and suppressed retries —
+    # they fall through to FATAL (class name + sanitized detail) below.
+    if isinstance(exc, (ValidationError, msgspec.ValidationError, msgspec.DecodeError)):
         return pb.JOB_STATUS_INVALID, _sanitize(str(exc) or "invalid input")
     if isinstance(exc, RetryableError):
         return pb.JOB_STATUS_RETRYABLE, _sanitize(str(exc) or "retryable error")
@@ -961,7 +973,6 @@ class Executor:
         settings: Any = None,
         store: Optional[ModelStore] = None,
         gpu_slots: int = 1,
-        on_state_change: Optional[Callable[[], None]] = None,
     ) -> None:
         self.specs: Dict[str, EndpointSpec] = {s.name: s for s in specs}
         self._send = send
@@ -985,7 +996,9 @@ class Executor:
         # set (gw#399). Demotion out of VRAM drops attachments.
         self._adapters = lora_util.AdapterResidency()
         self.store.residency.pre_demote = self._adapters.detach
-        self._on_state_change = on_state_change or (lambda: None)
+        # Real wiring is worker.py assigning this attribute directly
+        # (Executor is constructed before Lifecycle exists).
+        self._on_state_change: Callable[[], None] = lambda: None
         self.file_base_url: str = ""
         # Current worker JWT for hub HTTP calls (capability renewal). Worker
         # wiring points this at the transport's rotated credential.
@@ -2292,9 +2305,11 @@ class Executor:
             logger.warning(
                 "compile-cache adopt %s: %d fxgraph misses during warmup — "
                 "cell covers the declared shapes only partially", ref, misses)
+        # cache_hits/cache_misses/warmup_s computed above (hits/misses/
+        # warmup_s) but intentionally NOT sent — the orchestrator has no
+        # reader for them (pgw#514/P3; see the proto field comments).
         await self._send(pb.WorkerMessage(model_event=pb.ModelEvent(
-            ref=ref, state=pb.MODEL_STATE_ADOPTED, duration_ms=duration_ms,
-            cache_hits=hits, cache_misses=misses, warmup_s=warmup_s)))
+            ref=ref, state=pb.MODEL_STATE_ADOPTED, duration_ms=duration_ms)))
 
     def _ref_in_use(self, ref: str) -> bool:
         for job in self.jobs.values():

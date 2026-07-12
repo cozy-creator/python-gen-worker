@@ -75,11 +75,8 @@ def test_wire_ref_encoding() -> None:
 
 def test_typed_payload_size_errors_expose_structured_fields() -> None:
     from gen_worker import ValidationError
-    from gen_worker.api.errors import InputTooLargeError, OutputTooLargeError
+    from gen_worker.api.errors import OutputTooLargeError
 
     out_err = OutputTooLargeError(size_bytes=10, max_bytes=5)
     assert isinstance(out_err, ValidationError)
     assert (out_err.size_bytes, out_err.max_bytes) == (10, 5)
-    in_err = InputTooLargeError(size_bytes=7, max_bytes=3, source="payload")
-    assert isinstance(in_err, ValidationError)
-    assert (in_err.size_bytes, in_err.max_bytes, in_err.source) == (7, 3, "payload")

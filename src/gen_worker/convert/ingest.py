@@ -332,8 +332,8 @@ def _snapshot_download_with_retries(
     )
 
     from gen_worker.models.download import (
-        _hf_stall_timeout_s,
-        _hf_wallclock_max_s,
+        _HF_DOWNLOAD_MAX_SECONDS,
+        _HF_DOWNLOAD_STALL_TIMEOUT_S,
         _run_with_stall_watchdog,
     )
 
@@ -353,8 +353,8 @@ def _snapshot_download_with_retries(
                 progress_root=dest_dir,
                 progress_callback=progress,
                 total_hint=total_hint,
-                stall_timeout=_hf_stall_timeout_s(),
-                wall_clock_max=_hf_wallclock_max_s(),
+                stall_timeout=_HF_DOWNLOAD_STALL_TIMEOUT_S,
+                wall_clock_max=_HF_DOWNLOAD_MAX_SECONDS,
             )
             return
         except (GatedRepoError, RepositoryNotFoundError, RevisionNotFoundError,

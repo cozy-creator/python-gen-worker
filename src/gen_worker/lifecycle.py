@@ -118,7 +118,10 @@ class Lifecycle:
             gpu_sm=str(hw.get("gpu_sm") or ""),
             installed_libs=[str(x) for x in (hw.get("installed_libs") or [])],
             image_digest=self._settings.worker_image_digest,
-            git_commit=self._settings.worker_git_commit,
+            # git_commit intentionally unpopulated (pgw#514/P4): no launcher
+            # ever set WORKER_GIT_COMMIT and Go never read WorkerResources
+            # .git_commit — dead on both ends. Field stays on the wire
+            # (deleting it needs a coordinated tensorhub proto update).
             instance_id=self._settings.runpod_pod_id or "",
         )
 

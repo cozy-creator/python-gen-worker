@@ -55,7 +55,7 @@ from ..api.types import (
 
 
 def _default_compute() -> Compute:
-    """Sentinel Compute used when the orchestrator didn't attach resolved_compute.
+    """Sentinel Compute used when the orchestrator didn't attach RunJob.compute.
 
     Tenants can safely read ``ctx.compute.vram_gb`` etc. without None-checks;
     zero / empty values are the "not specified" signal.
@@ -121,13 +121,7 @@ class RequestContext:
         file_api_base_url: Optional[str] = None,
         worker_capability_token: Optional[str] = None,
         local_output_dir: Optional[str] = None,
-        required_models: Optional[List[str]] = None,
         execution_hints: Optional[Dict[str, Any]] = None,
-        parent_request_id: Optional[str] = None,
-        child_request_id: Optional[str] = None,
-        item_id: Optional[str] = None,
-        item_index: Optional[int] = None,
-        item_span: Optional[Dict[str, int]] = None,
         source_info: Optional[Dict[str, Any]] = None,
         destination_info: Optional[Dict[str, Any]] = None,
         compute: Optional["Compute"] = None,
@@ -144,13 +138,7 @@ class RequestContext:
         self._worker_capability_token = (worker_capability_token or "").strip() or None
         self._hf_token = (hf_token or "").strip()
         self._local_output_dir = (local_output_dir or "").strip() or None
-        self._required_models = list(required_models or [])
         self._execution_hints = dict(execution_hints or {})
-        self._parent_request_id = str(parent_request_id or "").strip() or None
-        self._child_request_id = str(child_request_id or "").strip() or None
-        self._item_id = str(item_id or "").strip() or None
-        self._item_index = int(item_index) if item_index is not None else None
-        self._item_span = dict(item_span or {})
         self._started_at = time.time()
         self._deadline: Optional[float] = None
         if timeout_ms is not None and timeout_ms > 0:
@@ -159,17 +147,17 @@ class RequestContext:
         self._cancel_event = threading.Event()
         self._emitter = emitter
         self._cached_repo_job_scope: Optional[tuple[str, str, str]] = None
-        # Reserved-name conversion/training contract attributes. Populated by
-        # Worker._handle_job_request before invoking tenant code when the
-        # endpoint is kind=conversion|training and the payload declares the
-        # reserved `source`/`destination` struct fields.
+        # Reserved-name producer contract attributes. Populated by the
+        # executor's ctx construction (executor.py::_run_job_pinned) before
+        # invoking tenant code when the endpoint is a producer kind and the
+        # payload declares the reserved `source`/`destination` struct fields.
         self._source_info = dict(source_info or {})
         self._destination_info = dict(destination_info or {})
         self._source_path: Optional[str] = None
-        # Resolved hardware for this invocation (tensorhub #232). Populated by
-        # Worker._handle_job_request from JobExecutionRequest.resolved_compute.
-        # Sentinel defaults when unset — tenants can safely read fields without
-        # None-checks.
+        # Resolved hardware for this invocation (tensorhub #232). Populated
+        # by the executor from RunJob.compute (proto ResolvedCompute).
+        # Sentinel defaults when unset — tenants can safely read fields
+        # without None-checks.
         self._compute: "Compute" = compute if compute is not None else _default_compute()
         self._models = _copy_context_metadata(models or {})
         self._loras = _copy_context_metadata(loras or {})
@@ -330,7 +318,7 @@ class RequestContext:
         destination_repo = str(hints.get("destination_repo") or "").strip()
         if destination_repo == "":
             return None
-        job_id = str(hints.get("job_id") or "").strip() or str(self._job_id or "").strip()
+        job_id = str(self._job_id or "").strip()
         if job_id == "":
             return None
         try:
@@ -1201,10 +1189,13 @@ class _PublisherMixin:
         return dest_path
 
     def checkpoint_dir(self, *, key: str) -> Path:
-        """Return a PERSISTENT scratch dir keyed by (job_id, key).
+        """Return a scratch dir keyed by (job_id, key), for trainer
+        ``output_dir`` / ``resume_from_checkpoint`` use.
 
-        Survives worker restart — intended for trainer ``output_dir`` so
-        ``resume_from_checkpoint`` can pick up where a preempted job left off.
+        NOTE: lives under ``tempfile.gettempdir()`` — pod-local ``/tmp``, not
+        durable storage. It survives a THREAD/process restart within the
+        same pod but is gone on pod churn/eviction (design gap tracked
+        separately; this docstring describes reality, not the aspiration).
         """
         job_id = self._job_id or self.request_id or "x"
         base = Path(tempfile.gettempdir()) / "txform-persistent" / str(job_id)
@@ -1558,7 +1549,8 @@ class TrainingContext(_PublisherMixin, RequestContext):
 
     From ``_PublisherMixin``: repo-metadata RPCs, ``resolve_dataset`` /
     ``dataset_paths`` (the executor materializes ``payload.datasets`` before
-    the handler runs) and ``checkpoint_dir`` (persistent resume scratch).
+    the handler runs) and ``checkpoint_dir`` (pod-local scratch keyed by
+    job — see its docstring for the durability caveat).
     ``save_checkpoint`` lives on the base ``RequestContext`` (gated by
     ``_require_repo_job_scope_for_tensors``) because internal upload paths
     call it via ``getattr`` regardless of which subclass the request used.
