@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.14.6 (2026-07-11)
+
+- **gw#479: per-digest inflight lock in the content-addressed blob store.**
+  Two refs materializing concurrently share blobs (split-vendor lanes: 9.7GB
+  of byte-identical encoder shards) — both tasks streamed into the SAME
+  `.part` file, interleaved writes failed size/blake3 verification 3x, and
+  the second ref died `download_failed` on every attempt (J24M runs 10-12,
+  three A100 pods, ~2.5min in, while every blob verified byte-perfect in
+  R2). The first task now downloads under a process-wide per-digest
+  asyncio lock; siblings await it, re-check usability, and reuse the
+  finished blob. Regression: concurrent two-ref materialization downloads
+  a shared blob exactly once (fails without the lock).
+- Releases the merged-but-unreleased th#757 forensics change:
+  `download_failed` ModelEvents carry the sanitized root cause.
+
+
 ## 0.14.4 (2026-07-11)
 
 - **th#757 (worker side): terminal download failures carry the root cause.**

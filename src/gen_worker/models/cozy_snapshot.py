@@ -19,6 +19,23 @@ from ..s3_transfer import S3TransferGrant, download_file_with_grant
 
 _log = logging.getLogger("gen_worker.download")
 
+# Per-digest inflight downloads (gw#479 multi-lane fallout, th#757 forensics):
+# two refs materializing concurrently SHARE blobs in the content-addressed
+# store (split-vendor lanes: 9.7GB of identical encoder shards). Without a
+# per-digest lock both tasks streamed into the SAME .part file, interleaved
+# writes failed size/blake3 verification 3x, and the second ref died with
+# download_failed on every attempt (J24M runs 10-12, three pods, ~2.5min in —
+# while every blob verified byte-perfect in R2). First task downloads; the
+# second awaits the lock, re-checks usability, and reuses the finished blob.
+_INFLIGHT_BLOB_LOCKS: dict[str, "asyncio.Lock"] = {}
+_INFLIGHT_BLOB_LOCKS_CAP = 8192
+
+
+def _inflight_blob_lock(digest: str) -> "asyncio.Lock":
+    if len(_INFLIGHT_BLOB_LOCKS) > _INFLIGHT_BLOB_LOCKS_CAP:
+        _INFLIGHT_BLOB_LOCKS.clear()  # bounded memory; races just re-lock
+    return _INFLIGHT_BLOB_LOCKS.setdefault(digest, asyncio.Lock())
+
 ProgressFn = Callable[[int, Optional[int]], None]
 
 # Free space that must remain after downloading the missing blobs.
@@ -314,6 +331,14 @@ class CozySnapshotDownloader:
             if self._blob_usable(dst, f):
                 _log.info("blob_cached path=%s digest=%s", f.path, digest[:16])
                 return
+            async with _inflight_blob_lock(digest):
+                if self._blob_usable(dst, f):
+                    _log.info("blob_shared_inflight path=%s digest=%s (sibling ref downloaded it)",
+                              f.path, digest[:16])
+                    return
+                await _dl_locked(f, digest, dst)
+
+        async def _dl_locked(f: WorkerResolvedRepoFile, digest: str, dst: Path) -> None:
             async with sem:
                 if self._blob_usable(dst, f):
                     return
