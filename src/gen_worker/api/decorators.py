@@ -47,7 +47,7 @@ RESERVED_METHODS = frozenset({"setup", "warmup", "shutdown"})
 
 class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     """Hardware envelope for one function: ``Resources(gpu, vram_gb,
-    compute_capability, libraries)``.
+    compute_capability, libraries, ram_gb, vcpus)``.
 
     ``vram_gb`` is the recommended minimum CARD size: the total VRAM (GB) of
     the smallest card the function targets — ``vram_gb=24`` means "runs on a
@@ -68,6 +68,12 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     then refuses the CPU-touching rungs (offload / cpu) outright instead of
     serving slowly. The on-GPU rungs (fp8 storage, emergency 4-bit) remain
     available under ``strict_vram``.
+
+    ``ram_gb`` / ``vcpus`` (gw#490) declare the HOST-side ask: minimum host
+    RAM (GB) and vCPU count the pod must be created with. Video-class
+    endpoints need both (pinned TE park + CPU-heavy encode); the hub maps
+    them to provider pod-creation minimums (th#740) and destroys
+    under-allocated pods at create. Host asks do not imply ``gpu=True``.
     """
 
     gpu: bool = False
@@ -75,6 +81,8 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     compute_capability: float | None = None
     libraries: tuple[str, ...] = ()
     strict_vram: bool = False
+    ram_gb: float | None = None
+    vcpus: int | None = None
 
     def __post_init__(self) -> None:
         force = msgspec.structs.force_setattr
@@ -94,6 +102,16 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
             ))
         if self.vram_gb is not None or self.compute_capability is not None:
             force(self, "gpu", True)
+        if self.ram_gb is not None:
+            r = float(self.ram_gb)
+            if r <= 0:
+                raise ValueError(f"ram_gb must be positive, got {r}")
+            force(self, "ram_gb", r)
+        if self.vcpus is not None:
+            n = int(self.vcpus)
+            if n <= 0:
+                raise ValueError(f"vcpus must be positive, got {n}")
+            force(self, "vcpus", n)
 
 
 class Compile(msgspec.Struct, frozen=True):
