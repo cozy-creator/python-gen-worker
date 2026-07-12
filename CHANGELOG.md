@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.17.0 (2026-07-12)
+
+- **th#714: C2PA Content Credentials on generated media (EU AI Act Art. 50).**
+  New `gen_worker.content_credentials`: every media asset saved through
+  `RequestContext.save_bytes` / `save_file` (and therefore `save_image` /
+  `save_audio` / `save_video` / `io.write_image` / `io.write_video`) gets a
+  signed C2PA manifest — `c2pa.created` action with digitalSourceType
+  `trainedAlgorithmicMedia`, generator name/version, model refs, and a
+  request-id **hash** (no user PII). Issuer identity comes from the platform
+  signing cert. Signing is ON iff `GEN_WORKER_C2PA_CERT_PATH` +
+  `GEN_WORKER_C2PA_KEY_PATH` are set (PEM chain + PKCS#8 key, new Settings
+  fields incl. `GEN_WORKER_C2PA_ALG` / `GEN_WORKER_C2PA_TA_URL`);
+  unconfigured no-ops with a loud startup warning; configured-but-broken
+  fails worker startup; a per-request sign failure fails the request rather
+  than shipping an unlabeled asset. Non-media payloads (JSON, checkpoints,
+  tensors) pass through untouched via content sniffing. New `signing` extra
+  (c2pa-python, the official CAI c2pa-rs binding); sign+verify round-trip
+  tests (png/webp/jpeg/mp4) run in CI against an openssl-generated test cert.
+
+
 ## 0.16.0 (2026-07-12)
 
 - **pgw#514: dead-surface + protocol-drift sweep (BREAKING, hard cut).**

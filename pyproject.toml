@@ -1,6 +1,6 @@
 [project]
 name = "gen-worker"
-version = "0.16.0"
+version = "0.17.0"
 description = "A library used to build custom functions in Cozy Creator's serverless function platform."
 readme = "README.md"
 license = "MIT"
@@ -72,8 +72,14 @@ video = [
     "av>=12",
     "numpy>=1.24",
 ]
+signing = [
+    # C2PA Content Credentials (th#714) — official CAI binding over c2pa-rs.
+    "c2pa-python>=0.36",
+]
 dev = [
     "av>=12",
+    "c2pa-python>=0.36",
+    "Pillow>=10.0",
     # Real tiny-pipeline residency tests (gw#417) build local diffusers pipes;
     # transformers+accelerate activate the bnb nf4 convert integration test.
     "accelerate>=1.9",
