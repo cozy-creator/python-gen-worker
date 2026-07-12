@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.14.3 (2026-07-11)
+
+- **gw#479 follow-up: canonical JSON-config digests in content keys.** Live
+  qwen fp8 casts proved split-vendor pairs ship byte-identical component
+  weights whose tiny JSON sidecars differ only in save-era serialization
+  (provenance stamps `_name_or_path`/`transformers_version`/
+  `_diffusers_version`, explicit class defaults vs omitted, nulls,
+  transformers 4.56 `torch_dtype`->`dtype` rename) — all-file content keys
+  never shared. `ModelStore.component_digests(ref, local_path=)` now hashes
+  small (<=256KB) JSON sidecars CANONICALLY from the local snapshot
+  (`models/config_identity.py`): structural normalization for all configs,
+  plus AutoConfig `to_diff_dict()` default-folding for transformers
+  `config.json`. Weights keep manifest blake3 (never hashed from disk);
+  parse failures fall back to raw digests (conservative no-share). Keys are
+  process-local, so folding through the installed transformers version is
+  safe by construction.
+
 ## 0.14.2 (2026-07-11)
 
 - **gw#494: transactional HelloAck re-resolution — residency re-keys, gates
