@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.14.2 (2026-07-11)
+
+- **gw#494: transactional HelloAck re-resolution — residency re-keys, gates
+  re-run.** The literal th#736 mechanic worker-side is closed. ONE pick-fold:
+  `rebind_pick` (api/binding.py) is shared by the hub HelloAck path and the
+  local ladder (`resolve_local_bindings`) — both now carry the round-trip
+  guard. Residency booking and clearing are provably same-space: `_setup_locked`
+  derives its wire refs ONCE, books under them, and stamps them as the class
+  record's `held_refs`; `_vacate_record` / `_record_holding` / `_record_in_use`
+  operate on `held_refs`, never a re-derivation over possibly-rebound
+  `spec.models`. A resolution re-pick marks divergent ready records stale and
+  vacates them (async revalidate task + vacate-on-next-setup), releasing the
+  OLD resolved refs' VRAM — no orphaned bookings, pins/promotes/LoRA targets
+  hit the live entry after reload. `gate_functions` is idempotent (gate-owned
+  unavailable marks cleared on re-gate; setup failures survive), remembers the
+  probe, and re-runs inside `apply_model_resolutions` — closing the
+  startup-vs-HelloAck gate race. Regression: `tests/test_resolution_rekey_gw494.py`
+  (resolve→book→re-resolve→clear leaves zero orphans; revert-to-declared;
+  HF-pick rejection; re-gate idempotence; single-fold contract).
+
 ## 0.14.1 (2026-07-11)
 
 - **gw#492: ONE ref normal form.** `gen_worker.models.refs` is now the single
