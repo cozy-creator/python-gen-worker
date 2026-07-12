@@ -26,10 +26,8 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev
 
-      - name: Type check
-        continue-on-error: true  # Type debt in clone/conversion/etc — see follow-up; visible in logs, doesn't block publish.
-        run: uv run mypy src/gen_worker
-
+      # mypy already gates ci.yml on every push/PR to master (gw#497); tags are
+      # cut from master after CI passes, so re-running it here is redundant.
       - name: Run tests
         run: uv run pytest tests/ -v
 
