@@ -697,6 +697,7 @@ def _apply_group_offload(
             _LOG.debug("low_vram: pipeline.enable_group_offload failed: %s", exc)
 
     any_applied = False
+    apply_group_offloading: Any = None
     try:
         from diffusers.hooks import apply_group_offloading
     except Exception:

@@ -67,7 +67,7 @@ def read_image(asset: Asset, mode: str = "RGB") -> Any:
             "gen_worker.io.read_image requires Pillow. "
             "Install with `pip install gen-worker[images]`."
         ) from e
-    img = Image.open(_local_path(asset))
+    img: "Image.Image" = Image.open(_local_path(asset))
     if mode and img.mode != mode:
         img = img.convert(mode)
     return img
@@ -103,7 +103,7 @@ def read_audio(
         try:
             from math import gcd
 
-            from scipy.signal import resample_poly  # type: ignore
+            from scipy.signal import resample_poly
 
             g = gcd(int(sr), int(target_sample_rate))
             data = resample_poly(

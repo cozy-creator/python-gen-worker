@@ -433,7 +433,8 @@ def _publish_from_bank(
                 )
                 for f in payload["files"]
             ]
-            metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
+            metadata_raw = payload.get("metadata")
+            metadata = dict(metadata_raw) if isinstance(metadata_raw, dict) else {}
             metadata = dict(metadata)
             metadata["download_skip"] = "bank"
             # Banked repo_specs are frozen at bank time and can carry a stale
@@ -661,7 +662,7 @@ def run_clone(
         # flavor from the hub's banked manifests. Any miss/error falls
         # through to the full clone below (fail-open).
         _progress(0.02, "clone.plan")
-        plan = None
+        plan: Any = None
         try:
             if provider == "huggingface":
                 plan = plan_huggingface(

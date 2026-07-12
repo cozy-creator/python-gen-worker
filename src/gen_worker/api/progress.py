@@ -50,9 +50,8 @@ def diffusers_step_callback(
         ctx.raise_if_cancelled()
         step = int(step_index) + 1  # fires after the step ends -> 1-based count
         now = time.monotonic()
-        is_first = last_emit is None
         is_last = total > 0 and step >= total
-        if is_first or is_last or (now - last_emit) >= min_interval_s:
+        if last_emit is None or is_last or (now - last_emit) >= min_interval_s:
             last_emit = now
             fraction = min(step / total, 1.0) if total > 0 else 0.0
             ctx.progress(fraction, stage, step=step, total=total)

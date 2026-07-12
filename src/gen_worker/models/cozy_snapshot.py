@@ -71,18 +71,6 @@ def _is_parts_manifest(path: str) -> bool:
     return path.endswith(".parts.json")
 
 
-def _field(obj: Any, *keys: str) -> Any:
-    """Read a field from dict or object, trying keys in order."""
-    for k in keys:
-        if isinstance(obj, dict):
-            v = obj.get(k)
-        else:
-            v = getattr(obj, k, None)
-        if v is not None:
-            return v
-    return None
-
-
 def _try_hardlink_or_copy(src: Path, dst: Path) -> None:
     if dst.exists():
         dst.unlink()
@@ -100,36 +88,31 @@ def _try_hardlink_or_copy(src: Path, dst: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Coerce orchestrator wire format -> internal type
+# Validate the typed resolved manifest (gw#497: WorkerResolvedRepo is THE
+# shape — each wire boundary parses into it; no dict-or-object duck typing).
 # ---------------------------------------------------------------------------
 
-def _coerce_resolved_model(ref: TensorhubRef, resolved: Any) -> WorkerResolvedRepo:
-    """Accept both wire spellings: .entries[] (blake3:-prefixed digests) and .files[]."""
-    snapshot_digest = str(_field(resolved, "snapshot_digest", "snapshotDigest") or "").strip()
+def _validate_resolved(ref: TensorhubRef, resolved: WorkerResolvedRepo) -> WorkerResolvedRepo:
+    """Normalize digest prefixes and reject unusable manifests."""
+    snapshot_digest = (resolved.snapshot_digest or "").strip()
     if not snapshot_digest:
         raise ValueError("resolved model missing snapshot_digest")
     snapshot_digest = _strip_blake3_prefix(snapshot_digest) or snapshot_digest
 
-    files_raw = list(_field(resolved, "entries", "files") or [])
     files: List[WorkerResolvedRepoFile] = []
-    for ent in files_raw:
-        path = str(_field(ent, "path") or "").strip()
+    for f in resolved.files:
+        path = (f.path or "").strip()
         if not path:
             continue
-        blake3_hex = str(_field(ent, "blake3", "BLAKE3") or "").strip().lower()
-        if not blake3_hex:
-            blake3_hex = _strip_blake3_prefix(str(_field(ent, "digest") or ""))
-        url = str(_field(ent, "url") or "").strip() or None
-        transfer_grant = _field(ent, "transfer_grant", "s3_transfer_grant")
-        if not isinstance(transfer_grant, dict):
-            transfer_grant = None
-        size_bytes = int(_field(ent, "size_bytes") or 0)
+        blake3_hex = _strip_blake3_prefix((f.blake3 or "").strip().lower())
+        url = (f.url or "").strip() or None
+        transfer_grant = f.transfer_grant if isinstance(f.transfer_grant, dict) else None
         if not blake3_hex or (not url and transfer_grant is None):
             raise ValueError(f"resolved model file missing blake3/transfer: {path}")
         files.append(
             WorkerResolvedRepoFile(
                 path=path,
-                size_bytes=size_bytes,
+                size_bytes=int(f.size_bytes or 0),
                 blake3=blake3_hex,
                 url=url,
                 transfer_grant=transfer_grant,
@@ -139,10 +122,7 @@ def _coerce_resolved_model(ref: TensorhubRef, resolved: Any) -> WorkerResolvedRe
     if not files:
         raise ValueError("resolved model has empty files list")
 
-    return WorkerResolvedRepo(
-        snapshot_digest=snapshot_digest,
-        files=files,
-    )
+    return WorkerResolvedRepo(snapshot_digest=snapshot_digest, files=files)
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +145,7 @@ class CozySnapshotDownloader:
         base_dir: Path,
         ref: TensorhubRef,
         *,
-        resolved: Any,
+        resolved: Optional[WorkerResolvedRepo],
         progress: Optional[ProgressFn] = None,
     ) -> Path:
         blobs_root = base_dir / "blobs"
@@ -179,7 +159,7 @@ class CozySnapshotDownloader:
             raise RuntimeError(
                 "cozy snapshot requires orchestrator-resolved URLs (resolved=None)"
             )
-        res = _coerce_resolved_model(ref, resolved)
+        res = _validate_resolved(ref, resolved)
 
         snap_dir = snaps_root / res.snapshot_digest
         if snap_dir.exists():
@@ -490,7 +470,7 @@ async def ensure_snapshot_async(
     *,
     base_dir: Path,
     ref: TensorhubRef,
-    resolved: Any,
+    resolved: Optional[WorkerResolvedRepo],
     progress: Optional[ProgressFn] = None,
 ) -> Path:
     dl = CozySnapshotDownloader()

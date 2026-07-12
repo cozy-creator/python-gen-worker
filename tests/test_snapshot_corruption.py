@@ -257,11 +257,14 @@ def test_truncated_cached_blob_is_redownloaded_at_build(tmp_path: Path, monkeypa
     from gen_worker.models.cozy_snapshot import ensure_snapshot_async
     from gen_worker.models.refs import TensorhubRef
 
-    resolved = {
-        "snapshot_digest": "55" * 32,
-        "files": [{"path": "model.safetensors", "size_bytes": len(content),
-                   "blake3": digest, "url": "http://example.invalid/blob"}],
-    }
+    from gen_worker.models.hub_client import WorkerResolvedRepo, WorkerResolvedRepoFile
+
+    resolved = WorkerResolvedRepo(
+        snapshot_digest="55" * 32,
+        files=[WorkerResolvedRepoFile(
+            path="model.safetensors", size_bytes=len(content),
+            blake3=digest, url="http://example.invalid/blob")],
+    )
     out = asyncio.run(ensure_snapshot_async(
         base_dir=tmp_path, ref=TensorhubRef(owner="e2e", repo="tiny"),
         resolved=resolved,

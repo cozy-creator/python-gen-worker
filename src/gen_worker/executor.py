@@ -63,6 +63,7 @@ from .pb import worker_scheduler_pb2 as pb
 from .registry import EndpointSpec
 
 if typing.TYPE_CHECKING:
+    from .models.hub_client import WorkerResolvedRepo
     from .models.serve_fit import ServePlan
 from .request_context import (
     ConversionContext,
@@ -225,14 +226,24 @@ def _output_media_seconds(output: Any) -> float:
 # ---------------------------------------------------------------------------
 
 
-def _snapshot_to_resolved(snap: pb.Snapshot) -> Dict[str, Any]:
-    return {
-        "snapshot_digest": snap.digest,
-        "files": [
-            {"path": f.path, "size_bytes": f.size_bytes, "blake3": f.blake3, "url": f.url}
+def _snapshot_to_resolved(snap: pb.Snapshot) -> "WorkerResolvedRepo":
+    """pb.Snapshot -> the typed resolved-manifest struct (gw#497): the ONE
+    wire-boundary conversion; everything downstream (ensure_local,
+    ensure_snapshot_async) is typed — no dict laundering."""
+    from .models.hub_client import WorkerResolvedRepo, WorkerResolvedRepoFile
+
+    return WorkerResolvedRepo(
+        snapshot_digest=snap.digest,
+        files=[
+            WorkerResolvedRepoFile(
+                path=f.path,
+                size_bytes=int(f.size_bytes),
+                blake3=f.blake3,
+                url=f.url or None,
+            )
             for f in snap.files
         ],
-    }
+    )
 
 
 def _model_op_error_vocab(exc: BaseException) -> str:
@@ -1002,6 +1013,7 @@ class Executor:
         # sm90 cast=fp8 pick on a bf16 upsampler killed every worker stream
         # ~1s after HelloAck, churning H100 pods at 60s intervals).
         for old_key, spec in rehomed:
+            assert spec.cls is not None  # only cls-specs are rehomed
             rec = self._classes.get(old_key)
             if rec is not None and spec in rec.specs:
                 rec.specs.remove(spec)
@@ -1573,7 +1585,8 @@ class Executor:
         """Boot the runtime="vllm"/"llama-server" subprocess and health-wait."""
         from .runtimes.server import RUNTIME_FACTORIES
 
-        factory = RUNTIME_FACTORIES[spec.runtime]  # validated at decoration
+        assert spec.runtime  # validated at decoration
+        factory = RUNTIME_FACTORIES[spec.runtime]
         if not paths:
             raise ValidationError(
                 f"runtime={spec.runtime!r} on {spec.name!r} requires a model binding"
@@ -1905,7 +1918,10 @@ class Executor:
             measured = 0
             if isinstance(module, nn.Module):
                 measured = int(estimate_cuda_resident_gb(module) * _GiB)
-            res.acquire_shared(key, lambda m=module: m, vram_bytes=measured)
+            def _hold(m: Any = module) -> Any:
+                return m
+
+            res.acquire_shared(key, _hold, vram_bytes=measured)
             result.shared_keys.append(key)
             fresh_bytes += measured
         comps = getattr(pipe, "components", None) or {}
@@ -2388,7 +2404,7 @@ class Executor:
         # lanes this job pins/promotes — pinning an idle lane would block the
         # make_room swap that promoting the routed lane needs.
         try:
-            payload = msgspec.msgpack.decode(run.input_payload, type=spec.payload_type)
+            payload: Any = msgspec.msgpack.decode(run.input_payload, type=spec.payload_type)
         except (msgspec.ValidationError, msgspec.DecodeError) as exc:
             await self._finish(job, pb.JOB_STATUS_INVALID, safe_message=_sanitize(str(exc)))
             return

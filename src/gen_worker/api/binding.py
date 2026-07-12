@@ -13,7 +13,7 @@ single ``model=`` binding, the ``setup()``/handler parameter name).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import ClassVar, Union
+from typing import Any, ClassVar, Union
 
 
 def _clean(s: object) -> str:
@@ -213,7 +213,7 @@ def rebind_pick(
         if parsed.tensorhub is None:
             raise ValueError(f"resolution {resolved_ref!r} is not a tensorhub ref")
         flavor = parsed.tensorhub.flavor or ""
-    rebound = binding
+    rebound: Any = binding
     try:
         if flavor is not None and flavor != getattr(binding, "flavor", ""):
             rebound = dataclasses.replace(rebound, flavor=flavor)

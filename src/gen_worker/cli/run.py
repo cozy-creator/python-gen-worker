@@ -186,7 +186,7 @@ class _SelectedFunction:
     def __init__(
         self,
         *,
-        cls: type,
+        cls: Optional[type],
         attr_name: str,
         method: Callable[..., Any],
         fn_name: str,
@@ -493,7 +493,7 @@ def _decode_payload(
     any post-decode Clamp constraints exactly the way the live worker does.
     """
     try:
-        decoded = msgspec.json.decode(payload_bytes, type=payload_type)
+        decoded: Any = msgspec.json.decode(payload_bytes, type=payload_type)
     except msgspec.ValidationError as e:
         # msgspec.ValidationError already carries field path + expected type;
         # re-raise as a usage error so the cli sets exit 2.
@@ -892,7 +892,7 @@ class _SigintHandler:
     def __init__(self, ctx: Any) -> None:
         self._ctx = ctx
         self._last_at: float = 0.0
-        self._prev_handler: signal.Handlers | Callable[[int, types.FrameType | None], Any] = signal.SIG_DFL
+        self._prev_handler: Any = signal.SIG_DFL
         self._installed = False
 
     def install(self) -> None:

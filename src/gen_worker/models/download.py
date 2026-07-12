@@ -24,12 +24,15 @@ import re
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, Mapping, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Dict, Mapping, Optional, Sequence
 from urllib.parse import parse_qs, urlparse
 
 from ..config import get_settings
 from .cache_paths import tensorhub_cas_dir
 from .refs import HuggingFaceRef, TensorhubRef, fold_ref, parse_model_ref
+
+if TYPE_CHECKING:
+    from .hub_client import WorkerResolvedRepo
 
 logger = logging.getLogger("gen_worker.download")
 
@@ -185,7 +188,7 @@ async def ensure_local(
     ref: str,
     *,
     provider: Optional[str] = None,
-    snapshot: Any = None,
+    snapshot: Optional["WorkerResolvedRepo"] = None,
     cache_dir: Optional[Path] = None,
     hf_home: Optional[str] = None,
     hf_token: Optional[str] = None,
@@ -195,9 +198,9 @@ async def ensure_local(
 ) -> Path:
     """Materialize ``ref`` on disk; return its local path.
 
-    ``snapshot`` is the orchestrator-resolved manifest — a mapping with
-    ``snapshot_digest`` + ``files``/``entries`` carrying presigned URLs or
-    transfer grants. The orchestrator is the only resolver: when it ships a
+    ``snapshot`` is the orchestrator-resolved manifest (the typed
+    ``WorkerResolvedRepo``, gw#497) carrying presigned URLs or transfer
+    grants. The orchestrator is the only resolver: when it ships a
     snapshot for a ref — including an hf/civitai binding ref resolved through
     a platform mirror under mirror-first (tensorhub #557) — the snapshot is
     authoritative and the bytes come from tensorhub-CAS, never the upstream

@@ -749,7 +749,7 @@ def _loader_key_translator(model: Any) -> Any:
     except Exception:  # noqa: BLE001
         transforms = []
     renamings = [t for t in transforms if isinstance(t, WeightRenaming)]
-    converters = [t for t in transforms if not isinstance(t, WeightRenaming)]
+    converters: "list[Any]" = [t for t in transforms if not isinstance(t, WeightRenaming)]
     meta_sd = model.state_dict()
     prefix = getattr(model, "base_model_prefix", None)
 

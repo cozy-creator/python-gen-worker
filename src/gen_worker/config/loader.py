@@ -176,7 +176,7 @@ def _load_yaml(paths: Iterable[str] | None = None) -> Dict[str, str]:
         if not p.is_file():
             continue
         try:
-            import yaml  # type: ignore[import-untyped]
+            import yaml
 
             data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
         except Exception:

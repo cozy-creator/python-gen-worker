@@ -235,7 +235,7 @@ def _fingerprint(data: bytes, shape: Tuple[int, ...]) -> str:
 
 def build_refit_map(
     initializers: Dict[str, Any], state_dict: Dict[str, Any]
-) -> Tuple[List[Dict[str, str]], List[str]]:
+) -> Tuple[List[Dict[str, Any]], List[str]]:
     """Match ONNX initializer names to torch state_dict keys by exact value
     (export renames + occasionally transposes weights; names are NOT a
     contract, bytes are). Returns ``(map_entries, unmatched_initializers)``
@@ -256,7 +256,7 @@ def build_refit_map(
             at = np.ascontiguousarray(arr.T)
             by_value_t.setdefault(_fingerprint(at.tobytes(), at.shape), key)
 
-    entries: List[Dict[str, str]] = []
+    entries: List[Dict[str, Any]] = []
     unmatched: List[str] = []
     for name, arr in initializers.items():
         arr = np.ascontiguousarray(arr)
@@ -270,7 +270,7 @@ def build_refit_map(
     return entries, unmatched
 
 
-def refit_weights(state_dict: Dict[str, Any], entries: Iterable[Dict[str, str]]) -> Dict[str, Any]:
+def refit_weights(state_dict: Dict[str, Any], entries: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
     """Materialize ``{engine weight name: numpy array}`` from a state_dict
     through a refit map (applying recorded transforms)."""
     import numpy as np
@@ -283,7 +283,7 @@ def refit_weights(state_dict: Dict[str, Any], entries: Iterable[Dict[str, str]])
             # the map itself — no state_dict counterpart exists.
             arr = np.frombuffer(
                 base64.b64decode(e["data_b64"]), dtype=np.dtype(e["dtype"])
-            ).reshape(e["shape"])
+            ).reshape([int(x) for x in e["shape"]])
             out[e["name"]] = np.ascontiguousarray(arr)
             continue
         t = state_dict.get(e["key"])
@@ -301,7 +301,7 @@ def refit_weights(state_dict: Dict[str, Any], entries: Iterable[Dict[str, str]])
 # ---------------------------------------------------------------------------
 
 
-def _load_engine(plan_path: Path):
+def _load_engine(plan_path: Path) -> Any:
     import tensorrt as trt
 
     trt_logger = trt.Logger(trt.Logger.WARNING)
@@ -513,7 +513,7 @@ def load_and_wrap(
 
     t0 = time.monotonic()
     engine = _load_engine(root / ENGINE_NAME)
-    entries = json.loads((root / REFIT_MAP_NAME).read_text())
+    entries: list[dict[str, Any]] = json.loads((root / REFIT_MAP_NAME).read_text())
     weights = refit_weights(dict(module.state_dict()), entries)
     _refit_engine(engine, weights)
     runner = TrtModuleRunner(engine, meta, device=str(getattr(module, "device", "cuda")))
@@ -550,7 +550,7 @@ def _export_unet_onnx(pipe: Any, onnx_path: Path, *, batch: int, shape: Tuple[in
             super().__init__()
             self.unet = unet
 
-        def forward(self, sample, timestep, encoder_hidden_states, text_embeds, time_ids):
+        def forward(self, sample: Any, timestep: Any, encoder_hidden_states: Any, text_embeds: Any, time_ids: Any) -> Any:
             return self.unet(
                 sample, timestep, encoder_hidden_states=encoder_hidden_states,
                 added_cond_kwargs={"text_embeds": text_embeds, "time_ids": time_ids},
