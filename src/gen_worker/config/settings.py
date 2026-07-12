@@ -84,3 +84,12 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
 
     # Civitai provider credential (CIVITAI_API_KEY, alias CIVITAI_TOKEN).
     civitai_api_key: str = ""
+
+    # C2PA Content Credentials signing (th#714, EU AI Act Art. 50).
+    # Signing is ON iff cert_path is set: every generated media asset gets a
+    # signed provenance manifest at save time (content_credentials.py).
+    # cert_path = PEM chain (leaf first), key_path = PKCS#8 PEM private key.
+    c2pa_cert_path: str = ""  # GEN_WORKER_C2PA_CERT_PATH
+    c2pa_key_path: str = ""   # GEN_WORKER_C2PA_KEY_PATH
+    c2pa_alg: str = "es256"   # GEN_WORKER_C2PA_ALG (COSE alg matching the cert key)
+    c2pa_ta_url: str = ""     # GEN_WORKER_C2PA_TA_URL (optional RFC3161 TSA)

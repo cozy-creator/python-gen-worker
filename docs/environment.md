@@ -44,6 +44,23 @@ this page covers the worker itself.
 | `TENSORHUB_URL` | `tensorhub_url` | standalone-CLI resolve base URL |
 | `TENSORHUB_CACHE_DIR` / `TENSORHUB_CAS_DIR` | `tensorhub_cache_dir` / `tensorhub_cas_dir` | move cache/CAS off `/tmp` (cozy local persistence); `CAS_DIR` also isolates the `cli/run.py` standalone CLI in tests |
 
+## C2PA Content Credentials (Settings fields, th#714)
+
+Every generated media asset (png/jpeg/webp/gif, mp4/mov, wav/mp3/flac/m4a)
+gets a signed C2PA provenance manifest at `ctx.save_bytes`/`save_file` time --
+the EU AI Act Art. 50 machine-readable AI-marking. ON iff the cert is
+configured; unconfigured logs a loud startup warning and no-ops;
+configured-but-broken refuses to start.
+
+| Env | Field | Notes |
+|---|---|---|
+| `GEN_WORKER_C2PA_CERT_PATH` | `c2pa_cert_path` | PEM signing-cert chain, leaf first (the ON switch) |
+| `GEN_WORKER_C2PA_KEY_PATH` | `c2pa_key_path` | PKCS#8 PEM private key for the leaf |
+| `GEN_WORKER_C2PA_ALG` | `c2pa_alg` | COSE alg matching the cert key (default `es256`) |
+| `GEN_WORKER_C2PA_TA_URL` | `c2pa_ta_url` | optional RFC3161 timestamp-authority URL |
+
+Needs the `signing` extra (`pip install gen-worker[signing]`, c2pa-python).
+
 ## Removed in the pgw#514 dead-config sweep
 
 These used to be Settings fields backed by env vars. No deployment

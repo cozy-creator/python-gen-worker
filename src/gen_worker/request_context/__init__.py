@@ -484,6 +484,33 @@ class RequestContext:
     def log(self, message: str, level: str = "info") -> None:
         self._emit_event("request.log", {"message": message, "level": level})
 
+    def _c2pa_manifest_kwargs(self) -> Dict[str, Any]:
+        model_refs = [str(v) for v in (self._models or {}).values()]
+        model_refs += [
+            str(ov.get("ref", ""))
+            for overlays in (self._loras or {}).values()
+            for ov in overlays
+        ]
+        return {"request_id": self._request_id, "models": model_refs}
+
+    def _c2pa_sign_bytes(self, ref: str, data: bytes) -> bytes:
+        """C2PA-sign media payloads at the finalize seam (th#714).
+
+        Returns ``data`` unchanged when signing is unconfigured or the
+        payload is not a signable media format; raises when signing is
+        configured but fails (an unlabeled asset must not ship silently).
+        """
+        from .. import content_credentials
+
+        return content_credentials.sign_media_bytes(data, ref=ref, **self._c2pa_manifest_kwargs())
+
+    def _c2pa_sign_file(self, ref: str, src: str) -> Optional[str]:
+        """File variant of :meth:`_c2pa_sign_bytes` — returns a signed temp
+        path (caller unlinks) or None when signing doesn't apply."""
+        from .. import content_credentials
+
+        return content_credentials.sign_media_file(src, ref=ref, **self._c2pa_manifest_kwargs())
+
     # Inline-bytes threshold: when the client requested
     # `Prefer: bytes=inline` AND the payload is at or below this many
     # bytes, skip the tensorhub upload and return the bytes directly
@@ -495,8 +522,9 @@ class RequestContext:
         if not isinstance(data, (bytes, bytearray)):
             raise TypeError("save_bytes expects bytes")
         data = bytes(data)
-        _enforce_output_file_size_limit(len(data))
         ref = _normalize_output_ref(ref)
+        data = self._c2pa_sign_bytes(ref, data)
+        _enforce_output_file_size_limit(len(data))
 
         local_path = self._resolve_local_output_path(ref)
         if local_path:
@@ -669,6 +697,21 @@ class RequestContext:
         if not os.path.exists(src):
             raise FileNotFoundError(src)
 
+        # C2PA signing (th#714): media files upload as a signed temp copy;
+        # the caller's file is never mutated. No-op unless signing is
+        # configured and the file is a signable media format.
+        signed_tmp = self._c2pa_sign_file(ref, src)
+        if signed_tmp is not None:
+            try:
+                return self._save_file_inner(ref, signed_tmp)
+            finally:
+                try:
+                    os.unlink(signed_tmp)
+                except OSError:
+                    pass
+        return self._save_file_inner(ref, src)
+
+    def _save_file_inner(self, ref: str, src: str) -> Asset:
         size = int(os.path.getsize(src))
         _enforce_output_file_size_limit(size)
 
