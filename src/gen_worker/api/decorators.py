@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import inspect
 import typing
-from typing import Any, Callable, Literal, Mapping, Optional, Sequence, TypeVar
+from typing import Any, Callable, Literal, Mapping, Optional, Sequence, TypeVar, overload
 
 import msgspec
 
@@ -498,6 +498,25 @@ def _decorate_function(
     )
     setattr(fn, ATTR, decl)
     return fn
+
+
+@overload
+def endpoint(target: T) -> T: ...  # bare @endpoint on a class/function
+
+
+@overload
+def endpoint(
+    *,
+    kind: str = ...,
+    model: Optional[Binding] = ...,
+    models: Optional[Mapping[str, Binding]] = ...,
+    resources: Optional[Resources] = ...,
+    variants: Optional[Mapping[str, Any]] = ...,
+    runtime: Optional[str] = ...,
+    name: Optional[str] = ...,
+    compile: Optional[Compile] = ...,
+    route: Optional[Callable[[Any], Sequence[str]]] = ...,
+) -> Callable[[T], T]: ...  # configured @endpoint(...) form
 
 
 def endpoint(

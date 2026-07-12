@@ -15,12 +15,33 @@ import urllib.parse
 from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Literal, Mapping, Optional
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Literal,
+    Mapping,
+    Optional,
+    Tuple,
+    TypedDict,
+)
 
 if TYPE_CHECKING:  # heavy deps stay import-time-free; methods import lazily
+    import numpy as np
     import torch
+    from PIL import Image
 
     from ._concurrent_upload import BudgetGate
+
+
+class LoraOverlay(TypedDict):
+    """One per-request LoRA overlay riding a model slot (gw#393)."""
+
+    ref: str
+    weight: float
 
 from ..api.errors import AuthError
 from ..api.types import (
@@ -182,12 +203,12 @@ class RequestContext:
         return self._deadline
 
     @property
-    def models(self) -> Dict[str, Any]:
+    def models(self) -> Dict[str, str]:
         """Resolved model refs for this invocation, keyed by slot name."""
         return _copy_context_metadata(self._models)
 
     @property
-    def loras(self) -> Dict[str, Any]:
+    def loras(self) -> Dict[str, Tuple[LoraOverlay, ...]]:
         """Per-request LoRA overlays riding each model slot (gw#393):
         slot name -> tuple of ``{"ref", "weight"}``. Empty for adapter-free
         requests. The worker applies/removes the adapters around the handler
@@ -514,7 +535,7 @@ class RequestContext:
 
     def save_image(
         self,
-        image: Any,
+        image: "Image.Image",
         ref: Optional[str] = None,
         *,
         format: str = "webp",
@@ -559,7 +580,7 @@ class RequestContext:
 
     def save_audio(
         self,
-        audio: Any,
+        audio: "np.ndarray[Any, Any] | torch.Tensor | bytes",
         ref: Optional[str] = None,
         *,
         sample_rate: int = 44100,
@@ -589,7 +610,7 @@ class RequestContext:
                 raise ValidationError(
                     "save_audio needs the audio extra: pip install 'gen-worker[audio]'"
                 ) from exc
-            arr = audio
+            arr: Any = audio
             if hasattr(arr, "detach"):
                 arr = arr.detach().cpu().numpy()
             arr = np.asarray(arr)
