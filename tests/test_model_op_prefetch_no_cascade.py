@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional
 import msgspec
 import pytest
 
-from gen_worker.api.binding import Hub
+from gen_worker.api.binding import Hub, ModelRef
 from gen_worker.executor import Executor
 from gen_worker.models.errors import MissingSnapshotError
 from gen_worker.pb import worker_scheduler_pb2 as pb
@@ -39,7 +39,7 @@ VARIANT_A = Hub("acme/variant-a")
 VARIANT_B = Hub("acme/variant-b")
 
 
-def _spec(name: str, checkpoint: Hub, calls: List[str]) -> EndpointSpec:
+def _spec(name: str, checkpoint: ModelRef, calls: List[str]) -> EndpointSpec:
     class Endpoint:
         def setup(self, model: str, vae: str) -> None:
             calls.append(name)

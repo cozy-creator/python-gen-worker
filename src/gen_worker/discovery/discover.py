@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import msgspec
 
-from gen_worker.api.binding import HF, Binding, Civitai, Hub, ModelScope
+from gen_worker.api.binding import Binding
 from gen_worker.api.types import (
     Asset,
     AudioAsset,
@@ -279,7 +279,7 @@ def _binding_to_manifest(binding: Binding, param_name: str = "") -> Dict[str, An
         "slot_name": param_name,
         "ref": binding.ref,
     }
-    if isinstance(binding, Hub):
+    if binding.source == "tensorhub":
         # Normal form (gw#492): the default tag ('latest') is elided at the
         # manifest boundary so hub-minted keep/routing refs stay byte-equal
         # to worker-minted wire refs (Go folds a non-empty tag verbatim).
@@ -289,7 +289,7 @@ def _binding_to_manifest(binding: Binding, param_name: str = "") -> Dict[str, An
             out["flavor"] = binding.flavor
         if binding.allow_lora:
             out["allow_lora"] = True
-    elif isinstance(binding, HF):
+    elif binding.source == "huggingface":
         for k in ("revision", "dtype", "subfolder"):
             v = getattr(binding, k)
             if v:
@@ -298,10 +298,10 @@ def _binding_to_manifest(binding: Binding, param_name: str = "") -> Dict[str, An
             out["files"] = list(binding.files)
         if binding.allow_lora:
             out["allow_lora"] = True
-    elif isinstance(binding, Civitai):
+    elif binding.source == "civitai":
         if binding.version:
             out["version"] = binding.version
-    elif isinstance(binding, ModelScope):
+    elif binding.source == "modelscope":
         if binding.revision:
             out["revision"] = binding.revision
         if binding.files:

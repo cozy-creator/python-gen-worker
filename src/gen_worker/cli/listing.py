@@ -21,11 +21,11 @@ if TYPE_CHECKING:
 
 def describe_binding(binding: Any) -> Dict[str, Any]:
     """Introspect one model binding into a JSON-able dict (no model load)."""
-    from ..api.binding import Civitai, HF, Hub, ModelScope
+    from ..api.binding import ModelRef
 
-    if isinstance(binding, (Hub, HF, Civitai, ModelScope)):
+    if isinstance(binding, ModelRef):
         out: Dict[str, Any] = {
-            "type": type(binding).__name__,
+            "type": binding.source,
             "provider": binding.provider,
             "ref": binding.ref,
         }

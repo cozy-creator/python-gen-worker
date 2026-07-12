@@ -14,7 +14,7 @@ subclass from ``@endpoint(kind=...)`` before dispatch.
 """
 
 from . import io
-from .api.binding import Civitai, HF, Hub, ModelScope
+from .api.binding import Civitai, HF, Hub, ModelRef, ModelScope
 from .api.decorators import Compile, Resources, endpoint
 from .api.errors import (
     CanceledError,
@@ -59,6 +59,7 @@ __all__ = [
     "HF",
     "Hub",
     "Civitai",
+    "ModelRef",
     "ModelScope",
     # Context types.
     "RequestContext",
