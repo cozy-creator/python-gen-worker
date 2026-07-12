@@ -1536,14 +1536,21 @@ class Executor:
         incoming bytes plus the floor, fail RETRYABLE instead of thrashing.
 
         Only worker-loaded (pipeline-typed) slots count: tenant-owned and
-        engine-runtime slots do not stage full weight sets in host RAM."""
+        engine-runtime slots do not stage full weight sets in host RAM.
+
+        Multi-slot setups stage SEQUENTIALLY under the load lock — each
+        slot's weights move to VRAM (freeing host RAM) before the next slot
+        loads — so the honest staging requirement is the LARGEST slot, not
+        the sum (gw#479 live: two 28GiB fp8 lanes were refused as "56.2GiB
+        incoming" on a 61GiB host that stages at most 28GiB at once)."""
         slots = self._worker_loaded_slots(spec)
         if not paths or not slots:
             return
         incoming = 0
         for slot, p in paths.items():
             if slot in slots:
-                incoming += await asyncio.to_thread(disk_gc.tree_bytes, Path(p))
+                slot_bytes = await asyncio.to_thread(disk_gc.tree_bytes, Path(p))
+                incoming = max(incoming, slot_bytes)
         if incoming <= 0:
             return
         if await asyncio.to_thread(self.store.residency.make_room_ram, incoming):
