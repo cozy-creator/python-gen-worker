@@ -12,8 +12,8 @@ pip install gen-worker[torch]   # for PyTorch inference/training
 pip install gen-worker          # plain Python (e.g. API-proxy endpoints)
 ```
 
-Optional extras: `[images]` for image I/O, `[audio]` for audio I/O,
-`[trainer]` for trainer-class endpoints.
+Optional extras: `[images]` / `[audio]` / `[video]` for media I/O,
+`[vision]` for torchvision, `[datasets]` for parquet shard reads.
 
 ## Hello world
 
@@ -98,7 +98,9 @@ Full reference: [docs/endpoint-authoring.md](docs/endpoint-authoring.md).
 
 ## Public surface
 
-- The decorator + bindings: `endpoint`, `Resources`, `HF`, `Hub`, `Civitai`, `ModelScope`
+- The decorator + bindings: `endpoint`, `Resources`, `Compile`, `HF`, `Hub`,
+  `Civitai`, `ModelScope`, `ModelRef`
+- Model selection: `Model`, `ModelChoice`, `ModelDefaults`
 - Contexts: `RequestContext` (≤15 members), `ConversionContext`,
   `DatasetContext`, `TrainingContext`
 - Errors: `ValidationError`, `RetryableError`, `CanceledError`, `FatalError`
