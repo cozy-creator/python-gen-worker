@@ -1,6 +1,17 @@
 # Changelog
 
-## 0.14.12 (2026-07-12)
+## 0.14.13 (2026-07-12)
+
+- **ie#468 rung 2: `apply_block_window_offload` — block-window weight offload
+  to pinned host RAM.** The gw#460 windows in reverse: per-block weights rest
+  in (pinned) host RAM and stream to the device only for that block's
+  forward; params outside the windows move to the device. Composes with fp8
+  storage windows (fp8 bytes over PCIe, on-device upcast). Guaranteed-
+  completion degraded rung for VRAM-constrained cards — quality-preserving,
+  known-slow, never a production mode. PRECEDENCE: the
+  `GEN_WORKER_FORBID_CPU_OFFLOAD=1` operator veto wins over degraded mode —
+  the call raises before parking any weight (same rule as the gw#463
+  OOM-demotion path). Plus `block_offload_active()` probe.
 
 - **gw#476 fix: NVENC probe respected the encoder's minimum dimensions.**
   The boot probe encoded a 64x64 frame — below H.264 NVENC's minimum
@@ -11,6 +22,8 @@
   `StreamingVideoEncoder` opens the codec context eagerly inside `_open()`
   so hardware refusals that FFmpeg defers to the first `encode()` hit the
   per-encode x264 fallback instead of failing the request mid-encode.
+
+## 0.14.12 (2026-07-12)
 
 ## 0.14.11 (2026-07-12)
 

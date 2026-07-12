@@ -397,6 +397,151 @@ def apply_fp8_storage(obj: Any, *, compute_dtype: Any = None,
     return applied
 
 
+class _BlockOffloadWindow:
+    """Degraded-mode rung 2 (ie#468): one transformer block's weights REST in
+    host RAM (pinned when possible) and stream to the execution device only
+    for that block's forward. The pre-hook is PREPENDED so the H2D copy runs
+    before any fp8 upcast window (gw#460) on the same block — composed order:
+    host fp8 bytes -> device fp8 -> device compute dtype. The post-hook
+    rebinds ``.data`` to the pristine host copy (weights are read-only at
+    inference; no copy-back), so whatever dtype games other hooks played in
+    between are discarded. ``always_call`` keeps the rebind on exceptions —
+    a mid-block CUDA OOM must not leave the window resident."""
+
+    def __init__(self, params: List[Any], hosts: List[Any], device: Any) -> None:
+        self._params = params
+        self._hosts = hosts
+        self._device = device
+
+    def install(self, block: Any) -> None:
+        block.register_forward_pre_hook(self._pre, prepend=True)
+        block.register_forward_hook(self._post, always_call=True)
+
+    def _pre(self, module: Any, args: Any) -> None:
+        for p, h in zip(self._params, self._hosts):
+            p.data = h.to(self._device, non_blocking=True)
+
+    def _post(self, module: Any, args: Any, output: Any = None) -> None:
+        for p, h in zip(self._params, self._hosts):
+            p.data = h
+
+
+# Components block-window offload targets on a pipeline object (the VRAM
+# dominators); callers pass their own set for model-specific choices (e.g.
+# ltx adds "connectors" and "text_encoder").
+_BLOCK_OFFLOAD_COMPONENTS: tuple[str, ...] = ("transformer", "unet")
+
+
+def apply_block_window_offload(
+    obj: Any,
+    *,
+    components: tuple[str, ...] = _BLOCK_OFFLOAD_COMPONENTS,
+    device: Any = None,
+) -> bool:
+    """Park a module's per-block weights in pinned host RAM and stream each
+    block to ``device`` for its forward only — the gw#460 block windows in
+    reverse (degraded-mode rung 2, ie#468). Quality-preserving but slow
+    (whole-model PCIe traffic per forward); a guaranteed-completion last
+    resort for VRAM-constrained cards, never a production serving mode.
+
+    ``obj`` is a pipeline (named ``components`` are offloaded) or a bare
+    module. Parameters outside the discovered block windows — embeddings,
+    final norms, projections — are moved TO ``device`` (they must be
+    resident; the gw#460 outside-a-block dtype/device hazard applies to
+    device placement too). Composes with fp8 storage windows: fp8 bytes
+    stream over PCIe (half the traffic), upcast happens on-device.
+
+    PRECEDENCE: ``GEN_WORKER_FORBID_CPU_OFFLOAD=1`` VETOES this rung — the
+    operator kill-switch wins over degraded mode, raising instead of parking
+    weights (same precedence as the executor's OOM-demotion path, gw#463).
+
+    Returns True when any module was armed. Idempotent per module."""
+    from .memory import _forbid_cpu_inference
+
+    _forbid_cpu_inference(
+        "block-window host-RAM weight offload (degraded rung 2, ie#468)"
+    )
+    try:
+        import torch
+    except ImportError:
+        logger.warning("block-window offload ignored: torch not installed")
+        return False
+    if device is None:
+        if not torch.cuda.is_available():
+            logger.warning("block-window offload ignored: no CUDA device")
+            return False
+        device = "cuda"
+
+    targets: List[tuple[str, Any]] = []
+    for name in components:
+        mod = getattr(obj, name, None)
+        if mod is not None and hasattr(mod, "parameters"):
+            targets.append((name, mod))
+    if not targets and hasattr(obj, "parameters"):
+        targets.append((type(obj).__name__, obj))
+
+    applied = False
+    for name, mod in targets:
+        if getattr(mod, "_cozy_block_offload_applied", False):
+            applied = True
+            continue
+        windows = _fp8_block_windows(mod) or _fp8_block_windows_whole(mod)
+        if not windows:
+            logger.warning("block-window offload: no weight windows in %s", name)
+            continue
+        pin = True
+        parked_ids: set[int] = set()
+        parked_bytes = 0
+        for _bname, block, params in windows:
+            hosts: List[Any] = []
+            for p in params:
+                host = None
+                if pin:
+                    try:
+                        host = torch.empty_like(p.data, device="cpu", pin_memory=True)
+                    except RuntimeError as exc:
+                        pin = False
+                        logger.warning(
+                            "block-window offload: pinned host alloc failed (%s); "
+                            "falling back to pageable staging (slower)", exc,
+                        )
+                if host is None:
+                    host = torch.empty_like(p.data, device="cpu")
+                host.copy_(p.data)
+                p.data = host
+                hosts.append(host)
+                parked_ids.add(id(p))
+                parked_bytes += host.numel() * host.element_size()
+            _BlockOffloadWindow(params, hosts, device).install(block)
+        # Everything OUTSIDE the windows must be resident on the device.
+        for p in mod.parameters():
+            if id(p) not in parked_ids and p.device != torch.device(device):
+                p.data = p.data.to(device)
+        for b in mod.buffers():
+            if b.device != torch.device(device):
+                b.data = b.data.to(device)
+        mod._cozy_block_offload_applied = True
+        applied = True
+        logger.warning(
+            "DEGRADED_MODE=engaged model=%s phase=load rung=resident->block_offload: "
+            "%d blocks / %.1f GiB parked in %s host RAM, streaming per forward",
+            name, len(windows), parked_bytes / float(1 << 30),
+            "pinned" if pin else "pageable",
+        )
+    return applied
+
+
+def block_offload_active(obj: Any) -> bool:
+    """True when :func:`apply_block_window_offload` armed ``obj`` or any of
+    its standard components."""
+    if getattr(obj, "_cozy_block_offload_applied", False):
+        return True
+    return any(
+        getattr(getattr(obj, name, None), "_cozy_block_offload_applied", False)
+        for name in _BLOCK_OFFLOAD_COMPONENTS
+    )
+
+
 def _single_file_checkpoint(path: Path) -> Optional[Path]:
     """A snapshot that is one loose checkpoint rather than a pretrained layout:
     the path itself when it's a ``.safetensors`` file, or the directory's sole
@@ -794,6 +939,8 @@ __all__ = [
     "read_on_disk_quant_config",
     "synthesize_quantization_config",
     "apply_fp8_storage",
+    "apply_block_window_offload",
+    "block_offload_active",
     "emergency_quant_enabled",
     "bitsandbytes_available",
     "runtime_fp8_storage_supported",
