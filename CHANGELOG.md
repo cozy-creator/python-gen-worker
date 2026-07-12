@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.14.12 (2026-07-12)
+
+- **gw#476 fix: NVENC probe respected the encoder's minimum dimensions.**
+  The boot probe encoded a 64x64 frame — below H.264 NVENC's minimum
+  (145x49) — so genuinely NVENC-capable cards failed the probe with
+  "Frame Dimension less than the minimum supported value" (measured live on
+  an L4; the GeForce-in-SECURE-tenancy "OpenEncodeSessionEx: unsupported
+  device" refusal is real and unaffected). Probe now encodes 256x256, and
+  `StreamingVideoEncoder` opens the codec context eagerly inside `_open()`
+  so hardware refusals that FFmpeg defers to the first `encode()` hit the
+  per-encode x264 fallback instead of failing the request mid-encode.
+
 ## 0.14.11 (2026-07-12)
 
 - **gw#476: fast video encode path — NVENC when the silicon has it, streaming

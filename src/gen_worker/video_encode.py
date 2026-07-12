@@ -66,7 +66,14 @@ def _x264() -> EncoderChoice:
 def _probe_nvenc() -> bool:
     """One tiny real encode. Codec presence in the PyAV build is not enough:
     opening h264_nvenc needs the driver's libnvidia-encode AND a card whose
-    silicon has the encoder block (absent on H100/A100/B200)."""
+    silicon has the encoder block (absent on H100/A100/B200) AND a tenancy
+    whose driver grants encode sessions (RunPod SECURE 4090/5090 refuse with
+    "OpenEncodeSessionEx failed: unsupported device"; the L4 grants them).
+
+    Probe frame is 256x256: NVENC enforces minimum encode dimensions
+    (H.264 min is 145x49) — a 64x64 probe fails "Frame Dimension less than
+    the minimum supported value" on GENUINELY capable cards (measured live
+    on an L4, gw#476)."""
     import io as _io
 
     try:
@@ -79,11 +86,11 @@ def _probe_nvenc() -> bool:
         packets = 0
         with av.open(buf, mode="w", format="mp4") as container:
             stream: Any = container.add_stream("h264_nvenc", rate=8, options=dict(NVENC_OPTIONS))
-            stream.width = 64
-            stream.height = 64
+            stream.width = 256
+            stream.height = 256
             stream.pix_fmt = "yuv420p"
             frame = av.VideoFrame.from_ndarray(
-                np.zeros((64, 64, 3), dtype=np.uint8), format="rgb24"
+                np.zeros((256, 256, 3), dtype=np.uint8), format="rgb24"
             )
             for packet in stream.encode(frame):
                 container.mux(packet)
@@ -262,6 +269,12 @@ class StreamingVideoEncoder:
         stream.width = width
         stream.height = height
         stream.pix_fmt = "yuv420p"
+        # Open the codec NOW instead of lazily at the first encode() so a
+        # hardware refusal (NVENC session limit / dimension gate — observed
+        # live as "InitializeEncoder failed" only at first encode, gw#476)
+        # lands in _open()'s per-encode fallback instead of failing the
+        # request mid-encode.
+        stream.codec_context.open(strict=False)
         return stream
 
     def add(self, frames: Any) -> int:
