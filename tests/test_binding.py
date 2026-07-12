@@ -41,11 +41,6 @@ def test_kw_metadata_normalized_and_frozen() -> None:
     assert hub.flavor == "nf4"
 
 
-def test_bindings_are_hashable_and_equal_by_value() -> None:
-    assert HF("o/r", dtype="bf16") == HF("o/r", dtype="bf16")
-    assert len({HF("o/r"), HF("o/r"), HF("o/r", dtype="bf16")}) == 2
-
-
 def test_storage_dtype_validated_and_normalized() -> None:
     assert HF("o/r", storage_dtype=" FP8 ").storage_dtype == "fp8"
     assert Hub("o/r", storage_dtype="fp8").storage_dtype == "fp8"

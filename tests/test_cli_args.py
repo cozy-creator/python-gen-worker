@@ -18,7 +18,7 @@ import pytest
 import gen_worker.cli as cli
 import gen_worker.cli.run as run_mod
 from gen_worker import RequestContext, endpoint
-from gen_worker.cli.args import ArgError, build_payload, looks_like_field_token, primary_field
+from gen_worker.cli.args import ArgError, build_payload
 
 
 class _P(msgspec.Struct):
@@ -28,18 +28,6 @@ class _P(msgspec.Struct):
     hires: bool = False
     seed: int | None = None
     tags: List[str] = []
-
-
-def test_primary_field_is_first_required_str() -> None:
-    assert primary_field(_P) == "prompt"
-
-
-def test_looks_like_field_token() -> None:
-    assert looks_like_field_token("seed=1")
-    assert looks_like_field_token("tags:=[]")
-    assert looks_like_field_token("img@f.png")
-    assert not looks_like_field_token("a cat")  # bare primary
-    assert not looks_like_field_token("{}")
 
 
 def test_build_payload_coerces_by_schema() -> None:

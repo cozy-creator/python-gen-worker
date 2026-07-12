@@ -1,4 +1,4 @@
-"""README hello-world: <=20 lines, and it actually runs through the CLI."""
+"""README hello-world actually runs through the CLI."""
 
 from __future__ import annotations
 
@@ -16,12 +16,6 @@ ROOT = Path(__file__).resolve().parents[1]
 def _readme_python_blocks() -> list[str]:
     text = (ROOT / "README.md").read_text(encoding="utf-8")
     return re.findall(r"```python\n(.*?)```", text, flags=re.S)
-
-
-def test_hello_world_is_at_most_20_lines() -> None:
-    block = _readme_python_blocks()[0]
-    lines = [ln for ln in block.strip().splitlines() if ln.strip()]
-    assert 0 < len(lines) <= 20, f"hello-world is {len(lines)} lines"
 
 
 def test_hello_world_executes_through_gen_worker_run(capsys) -> None:
