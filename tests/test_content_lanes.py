@@ -188,6 +188,70 @@ def test_share_plan_only_covers_byte_identical_components(tmp_path, lane_repos) 
     assert ex._component_share_plan(spec2, paths, hints) is None
 
 
+def test_canonical_config_digest_folds_save_era_noise(tmp_path) -> None:
+    """gw#479 live lesson (qwen fp8 casts): byte-identical weights, configs
+    differing only in save-era serialization must share; real field changes
+    must not."""
+    import json
+
+    from gen_worker.models.config_identity import canonical_json_digest
+
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir(), b.mkdir()
+
+    base = {"act_fn": "silu", "torch_dtype": "float32", "sample_size": 32,
+            "_diffusers_version": "0.34.0.dev0", "latents_mean": None}
+    saved_by_newer = {"act_fn": "silu", "dtype": "float32", "sample_size": 32,
+                      "_diffusers_version": "0.36.0.dev0"}
+    (a / "cfg.json").write_text(json.dumps(base))
+    (b / "cfg.json").write_text(json.dumps(saved_by_newer, indent=2))
+    da, db = canonical_json_digest(a / "cfg.json"), canonical_json_digest(b / "cfg.json")
+    assert da and da == db                       # provenance/null/dtype-rename fold
+
+    real_change = dict(saved_by_newer, sample_size=64)
+    (b / "cfg2.json").write_text(json.dumps(real_change))
+    assert canonical_json_digest(b / "cfg2.json") != da   # real field differs
+
+    # transformers config.json: explicit class defaults fold out via AutoConfig.
+    gpt_a = {"model_type": "gpt2", "n_layer": 2, "n_head": 2, "n_embd": 8}
+    gpt_b = {"model_type": "gpt2", "n_layer": 2, "n_head": 2, "n_embd": 8,
+             "resid_pdrop": 0.1, "_name_or_path": "/scratch/x",
+             "transformers_version": "4.53.1"}  # resid_pdrop 0.1 IS the default
+    (a / "config.json").write_text(json.dumps(gpt_a))
+    (b / "config.json").write_text(json.dumps(gpt_b))
+    ca, cb = canonical_json_digest(a / "config.json"), canonical_json_digest(b / "config.json")
+    assert ca and ca == cb
+
+
+def test_share_plan_survives_config_provenance_noise(tmp_path, lane_repos) -> None:
+    """Repo B's vae config rewritten by a 'newer library' (provenance stamp +
+    reindented + explicit null): the vae must STILL share."""
+    import json
+    import shutil
+
+    src_a, src_b = lane_repos["a"], lane_repos["b"]
+    a = tmp_path / "repo-a"
+    b = tmp_path / "repo-b"
+    shutil.copytree(src_a, a)
+    shutil.copytree(src_b, b)
+    cfg_path = b / "vae" / "config.json"
+    cfg = json.loads(cfg_path.read_text())
+    cfg["_diffusers_version"] = "9.99.9"
+    cfg["latents_mean"] = None
+    cfg_path.write_text(json.dumps(cfg, indent=4, sort_keys=True))
+
+    repos = {"acme/a": a, "acme/b": b}
+    spec = _lane_spec(_Lanes, {"a": HF("acme/a"), "b": HF("acme/b")})
+    ex = _executor([spec], tmp_path / "cache", 4 * _GiB, [], repos)
+    hints = {"a": TinyLanePipe, "b": TinyLanePipe}
+    paths = {"a": str(a), "b": str(b)}
+    plan = ex._component_share_plan(spec, paths, hints)
+    assert plan is not None
+    assert "vae" in plan["a"] and "vae" in plan["b"]     # canonical digests folded the noise
+    assert plan["a"]["vae"] == plan["b"]["vae"]
+    assert "unet" not in plan["a"]                        # weights still gate
+
+
 def test_routed_slots_validation(tmp_path, lane_repos) -> None:
     repos = {"acme/a": lane_repos["a"], "acme/b": lane_repos["b"]}
     spec = _lane_spec(

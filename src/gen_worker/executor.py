@@ -396,13 +396,19 @@ class ModelStore:
         (gw#465): snapshot-less ops for it can still materialize the bytes."""
         return ref in self._snapshots
 
-    def component_digests(self, ref: str) -> Dict[str, str]:
+    def component_digests(self, ref: str, local_path: Optional[Path] = None) -> Dict[str, str]:
         """Per-component content identity of ``ref``'s snapshot (gw#479):
-        ``{top_level_subfolder: content_set_digest}`` derived from the wire
-        snapshot's per-file blake3 digests. Root-level files group under
-        ``""`` (never shared — model_index.json etc. differ per repo).
-        Empty when no digest-carrying snapshot was seen — content-keyed
-        sharing then stays off; the loader never hashes snapshots itself."""
+        ``{top_level_subfolder: content_set_digest}``. Weight/data files use
+        the wire snapshot's per-file blake3; small JSON sidecars use
+        CANONICAL digests read from ``local_path`` (save-era serialization —
+        provenance stamps, explicit defaults, torch_dtype/dtype vocabulary —
+        must not break sharing of byte-identical weights; see
+        models/config_identity.py). Root-level files group under ``""``
+        (never shared — model_index.json etc. differ per repo). Empty when
+        no digest-carrying snapshot was seen — sharing stays off; weights
+        are never hashed from disk."""
+        from .models.config_identity import CANONICAL_JSON_MAX_BYTES, canonical_json_digest
+
         snap = self._snapshots.get(ref)
         if snap is None:
             return {}
@@ -414,7 +420,14 @@ class ModelStore:
             comp, _, rest = rel.partition("/")
             if not rest:
                 comp, rest = "", rel
-            groups.setdefault(comp, {})[rest] = str(f.blake3)
+            digest = str(f.blake3)
+            if (local_path is not None and comp
+                    and rest.endswith(".json")
+                    and int(f.size_bytes) <= CANONICAL_JSON_MAX_BYTES):
+                canonical = canonical_json_digest(Path(local_path) / rel)
+                if canonical:
+                    digest = canonical
+            groups.setdefault(comp, {})[rest] = digest
         return {c: residency_mod.content_set_digest(files)
                 for c, files in groups.items()}
 
@@ -1620,7 +1633,7 @@ class Executor:
             if binding is None:
                 return None
             ref = wire_ref(binding)
-            digests = self.store.component_digests(ref)
+            digests = self.store.component_digests(ref, local_path=Path(paths[slot]))
             keys[slot] = {
                 comp: residency_mod.LoadedComponentKey.for_component(
                     content_digest=digest, component=comp, binding=binding,
