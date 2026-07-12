@@ -93,6 +93,11 @@ _CANCEL_GRACE_S = 5.0
 _STUCK_THREAD_RECYCLE_S = 30.0
 _DOWNLOAD_RETRIES = 3
 _PROGRESS_EVENT_MIN_INTERVAL_S = 5.0
+# th#763: how long a cold tensorhub ref waits for the hub's re-minted
+# snapshot after reporting missing_snapshot. The FAILED event triggers an
+# immediate hub-side re-mint (resolve + DOWNLOAD push), so arrival is
+# seconds; the bound only caps a hub that never answers.
+_MISSING_SNAPSHOT_WAIT_S = 60.0
 _GiB = 1024 ** 3
 # Disk headroom preserved beyond a download's known size (#370).
 _DISK_GC_MARGIN_BYTES = 2 * _GiB
@@ -182,6 +187,11 @@ def _map_exception(exc: BaseException) -> Tuple["pb.JobStatus", str]:
     if isinstance(exc, UrlExpiredError):
         # Hub-side URL staleness, not a client problem — retry re-mints URLs.
         return pb.JOB_STATUS_RETRYABLE, "model download url expired"
+    if isinstance(exc, MissingSnapshotError):
+        # A cold worker mid-resolution must never fatal a user request
+        # (th#763): the missing_snapshot ModelEvent makes the hub re-mint,
+        # so a retry (here or on a warmer worker) succeeds.
+        return pb.JOB_STATUS_RETRYABLE, "model snapshot not resolved yet"
     if is_cuda_oom(exc):
         # Never FATAL (gw#463): a bigger/idler card can serve this. The
         # degraded-mode retry already ran by the time this maps.
@@ -360,6 +370,9 @@ class ModelStore:
         # tensorhub refs. Stale URLs self-heal: they fail url_expired and the
         # hub re-mints.
         self._snapshots: Dict[str, pb.Snapshot] = {}
+        # Cold-ref waiters (th#763): ensure_local blocks here until the
+        # hub's re-minted DOWNLOAD banks a snapshot for the ref.
+        self._snapshot_waiters: Dict[str, asyncio.Event] = {}
 
     def _default_disk_free(self) -> int:
         p = Path(self._cache_dir)
@@ -553,6 +566,38 @@ class ModelStore:
         prefetch), so ``files=`` selections apply everywhere (#377)."""
         self._bindings.setdefault(ref, binding)
 
+    async def _await_hub_snapshot(self, ref: str) -> pb.Snapshot:
+        """Cold tensorhub ref with no orchestrator-resolved snapshot: emit
+        ``missing_snapshot`` (the hub re-mints a DOWNLOAD op with fresh
+        URLs on seeing it — connect_worker handleModelFailure) and block
+        until that snapshot is banked (th#763). The bank site runs OUTSIDE
+        the per-ref lock this coroutine holds, so the re-minted DOWNLOAD's
+        ensure_local wakes us and then queues behind the lock. Raises
+        :class:`MissingSnapshotError` when nothing arrives in
+        ``_MISSING_SNAPSHOT_WAIT_S``."""
+        waiter = self._snapshot_waiters.get(ref)
+        if waiter is None:
+            waiter = self._snapshot_waiters[ref] = asyncio.Event()
+        await self._event(ref, pb.MODEL_STATE_FAILED, error="missing_snapshot")
+        logger.info("no snapshot for %s; waiting up to %.0fs for the hub re-mint",
+                    ref, _MISSING_SNAPSHOT_WAIT_S)
+        try:
+            await asyncio.wait_for(waiter.wait(), _MISSING_SNAPSHOT_WAIT_S)
+        except asyncio.TimeoutError:
+            raise MissingSnapshotError(
+                f"tensorhub ref {ref!r} needs an orchestrator-resolved "
+                f"snapshot; none arrived within {_MISSING_SNAPSHOT_WAIT_S:.0f}s "
+                "of reporting missing_snapshot"
+            ) from None
+        finally:
+            self._snapshot_waiters.pop(ref, None)
+        snapshot = self._snapshots.get(ref)
+        if snapshot is None or not snapshot.digest:
+            raise MissingSnapshotError(
+                f"tensorhub ref {ref!r} woke without a digest-carrying snapshot"
+            )
+        return snapshot
+
     async def ensure_local(
         self,
         ref: str,
@@ -569,6 +614,9 @@ class ModelStore:
             binding = self._bindings.get(ref)
         if snapshot is not None and snapshot.digest and snapshot.files:
             self._snapshots[ref] = snapshot
+            waiter = self._snapshot_waiters.get(ref)
+            if waiter is not None:
+                waiter.set()
         elif snapshot is None:
             snapshot = self._snapshots.get(ref)
         async with self._lock(ref):
@@ -604,12 +652,6 @@ class ModelStore:
                 # hub sees the true story, not a spurious FAILED.
                 await asyncio.to_thread(self._quarantine_snapshot, ref, cached, bad)
                 # fall through to a fresh download below
-            if snapshot is not None and snapshot.files:
-                # Sizes are known up front for tensorhub snapshots: gate on
-                # disk headroom, GC-ing LRU refs first (#370).
-                await self._ensure_disk_headroom(
-                    ref, sum(int(f.size_bytes) for f in snapshot.files)
-                )
             if snapshot is None or not snapshot.digest:
                 # Confident classification only (binding / boot provider
                 # index) — unknown refs still flow to the download layer's
@@ -617,17 +659,20 @@ class ModelStore:
                 prov = (getattr(binding, "provider", None)
                         or lookup_provider_for_ref(ref, default=""))
                 if prov == "tensorhub":
-                    # Deterministic local condition (gw#465): the worker
-                    # cannot resolve tensorhub-CAS refs itself. Fail fast
-                    # (no DOWNLOADING event, no retry burn) with its own
-                    # vocabulary so the hub re-mints instead of counting a
-                    # phantom download_failed.
-                    await self._event(ref, pb.MODEL_STATE_FAILED,
-                                      error="missing_snapshot")
-                    raise MissingSnapshotError(
-                        f"tensorhub ref {ref!r} needs an orchestrator-resolved "
-                        "snapshot and none was provided or previously seen"
-                    )
+                    # The worker cannot resolve tensorhub-CAS refs itself
+                    # (gw#465). Report missing_snapshot — the hub's re-mint
+                    # trigger — then BLOCK until the re-minted DOWNLOAD
+                    # banks a snapshot (th#763: a user request must never
+                    # be the sacrificial cache warmer). No DOWNLOADING
+                    # event, no retry burn; a hub that never answers raises
+                    # the typed error (mapped RETRYABLE, never FATAL).
+                    snapshot = await self._await_hub_snapshot(ref)
+            if snapshot is not None and snapshot.files:
+                # Sizes are known up front for tensorhub snapshots: gate on
+                # disk headroom, GC-ing LRU refs first (#370).
+                await self._ensure_disk_headroom(
+                    ref, sum(int(f.size_bytes) for f in snapshot.files)
+                )
             last_progress = 0.0
 
             def _progress(done: int, total: Optional[int]) -> None:

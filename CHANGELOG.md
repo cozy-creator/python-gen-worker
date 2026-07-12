@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.15.2 (2026-07-12)
+
+- **th#763: cold tensorhub refs block-and-serve instead of fataling the
+  first request.** A snapshot-less tensorhub ref in `ModelStore.ensure_local`
+  now emits `missing_snapshot` (the hub's re-mint trigger) and BLOCKS up to
+  60s for the re-minted DOWNLOAD to bank a snapshot, then downloads and
+  serves — the first user request per unseen ref completes instead of dying
+  as the sacrificial cache warmer. When nothing arrives, the typed
+  `MissingSnapshotError` now maps to `JOB_STATUS_RETRYABLE` (was FATAL via
+  the catch-all): a cold worker mid-resolution never fatals a user request.
+  Root cause of the ie#383 fatals is hub-side (tensorhub th#754 fold drift:
+  ':prod' elided hub-side while gw#492 workers stamp it — fixed in the
+  paired tensorhub PR); this half makes any residual spelling/race miss
+  self-heal in place.
+
 ## 0.15.1 (2026-07-12)
 
 - **gw#479: canonical config digests hoist child-only scalars to the
