@@ -103,7 +103,7 @@ class ModelRef(msgspec.Struct, frozen=True):
 
         if self.source == "tensorhub":
             if not self.tag:
-                object.__setattr__(self, "tag", "latest")
+                msgspec.structs.force_setattr(self, "tag", "latest")
             if not self.path:
                 raise ValueError("Hub requires a non-empty ref")
         elif self.source == "huggingface":
