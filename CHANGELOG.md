@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.14.4 (2026-07-11)
+
+- **th#757 (worker side): terminal download failures carry the root cause.**
+  The generic `download_failed` ModelEvent now appends the sanitized
+  exception (`download_failed: <Type>: <detail>`, 200 chars) — serve pods
+  are often unreachable (no SSH/logs), making the hub log the only forensic
+  surface; J24M run11's starved request was undiagnosable without it. The
+  exact-match vocab strings the hub switches on (`url_expired`,
+  `missing_snapshot`, `insufficient_disk`, `digest_mismatch`) are unchanged.
+
+
 ## 0.14.5 (2026-07-11)
 
 - **gw#504: media-output wire contract pinned — save_image on ANY job kind

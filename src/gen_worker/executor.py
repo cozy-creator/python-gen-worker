@@ -655,8 +655,14 @@ class ModelStore:
                 except Exception as exc:
                     terminal = _is_terminal_download_error(exc) or attempt >= _DOWNLOAD_RETRIES
                     if terminal:
-                        await self._event(ref, pb.MODEL_STATE_FAILED,
-                                          error=self._error_vocab(exc))
+                        vocab = self._error_vocab(exc)
+                        if vocab == "download_failed":
+                            # th#757: the generic bucket must carry the root
+                            # cause — pods are often unreachable and the hub
+                            # log is the only forensic surface (J24M run11:
+                            # a starved request was undiagnosable hub-side).
+                            vocab = f"download_failed: {_sanitize(f'{type(exc).__name__}: {exc}')[:200]}"
+                        await self._event(ref, pb.MODEL_STATE_FAILED, error=vocab)
                         raise
                     logger.warning("download of %s failed (attempt %d): %s; retrying in %.1fs",
                                    ref, attempt, exc, delay)
