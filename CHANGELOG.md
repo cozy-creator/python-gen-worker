@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.14.11 (2026-07-12)
+
+- **gw#476: fast video encode path — NVENC when the silicon has it, streaming
+  encode, fast presets.** New `gen_worker.video_encode`: the mp4 backend is
+  probed ONCE per process (one tiny real encode — codec presence in the PyAV
+  wheel is not enough; H100/A100/B200 ship without the NVENC block) and
+  `h264_nvenc` (p4/vbr/cq19) is used when present, else libx264 at
+  `veryfast`/CRF 18 instead of the archival default (medium/CRF 23, 5-10x the
+  encode CPU for invisible gains on short generated clips). Override with
+  `GEN_WORKER_VIDEO_ENCODER=auto|nvenc|x264`. `StreamingVideoEncoder` feeds
+  frames to the encoder in chunks as they are produced, and
+  `gen_worker.io.write_video` now accepts an iterator/generator of frame
+  chunks (VAE framewise-decode seam) so long/4K clips never rebuffer a second
+  raw array. Motivation: B200 gauntlet measured one 10s@1080p clip at 179.6s
+  x264 encode vs 118s GPU compute; a 5s@4K probe spent ~25min encoding while
+  the GPU idle-billed.
+- **gw#516 (core): terminal GPU-slot release at the decode->finalize
+  handoff.** `write_video` releases the request's GPU slot as soon as frames
+  are on the host — the CPU encode + upload tail overlaps the NEXT request's
+  denoise instead of idling the GPU. Unlike the gw#382 yield window there is
+  no reacquire, so a finishing request never blocks behind its successor's
+  denoise just to return; the executor's post-handler release no-ops (lease
+  transitions are once-only) and drain/cancel/failure attribution are
+  unchanged because the job stays in the handler until finalize completes.
+  Buffered encodes take a bounded finalize permit BEFORE the release
+  (`GEN_WORKER_VIDEO_ENCODE_CONCURRENCY`, default 2) so back-pressure holds
+  the slot rather than stacking raw-frame buffers in host RAM. The executor
+  logs `FINALIZE_OVERLAP` with slot-held vs handler-wall ms (overlap evidence
+  until JobMetrics grows a slot-held field).
+
 ## 0.14.10 (2026-07-12)
 
 - **pgw#511 hotfix: ModelRef.__post_init__ uses force_setattr.**
@@ -9,7 +39,6 @@
   discovery advertised NOTHING (J24M run16 image build gate caught it).
   `msgspec.structs.force_setattr` is the repo convention (Resources,
   Compile) and works on both.
-
 
 ## 0.14.9 (2026-07-12)
 

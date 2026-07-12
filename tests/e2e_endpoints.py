@@ -16,6 +16,8 @@ from gen_worker import Hub, RequestContext, ValidationError, endpoint
 # suite runs the worker in-process, so tests coordinate through these directly.
 SLOT_PROBE_STARTED = threading.Event()
 SLOT_PEER_RAN = threading.Event()
+FINALIZE_PROBE_STARTED = threading.Event()
+FINALIZE_PEER_RAN = threading.Event()
 
 
 class EchoIn(msgspec.Struct):
@@ -58,6 +60,21 @@ class E2EEndpoint:
 
     def slot_peer(self, ctx: RequestContext, data: EchoIn) -> EchoOut:
         SLOT_PEER_RAN.set()
+        return EchoOut(response="peer-done")
+
+    def finalize_probe(self, ctx: RequestContext, data: EchoIn) -> EchoOut:
+        """gw#476/gw#516: terminally releases its GPU slot at the decode->
+        finalize handoff, then finishes its "encode" only after the peer's
+        compute ran. Unlike `slot_probe` there is NO reacquire — the request
+        must complete without ever waiting on the slot again. With a held
+        slot the peer can never run and this reports "starved"."""
+        FINALIZE_PROBE_STARTED.set()
+        ctx._release_gpu_slot_for_finalize()
+        ok = FINALIZE_PEER_RAN.wait(timeout=10.0)  # the "encode tail"
+        return EchoOut(response="overlapped" if ok else "starved")
+
+    def finalize_peer(self, ctx: RequestContext, data: EchoIn) -> EchoOut:
+        FINALIZE_PEER_RAN.set()
         return EchoOut(response="peer-done")
 
 
