@@ -22,17 +22,18 @@
 * An async-generator handler streams (inference only); there is no separate
   streaming decorator.
 * ``runtime="vllm"`` boots an engine-hosting server subprocess before setup.
-* ``variants={name: (binding, Resources)}`` stamps one separately-routable,
-  separately-placeable function per variant from a single handler body. With
-  ``models={}`` the variant binding swaps the FIRST declared slot; remaining
-  aux slots (e.g. a shared VAE) are inherited by every variant.
+
+Checkpoint SELECTION is a runtime payload argument, not a build-time fan-out:
+a handler whose payload declares a field typed with a ``ModelChoice`` subclass
+picks, per request, which curated checkpoint runs against the resident base
+(pgw#509 — ``gen_worker.api.model``). Divergent WIRE contracts are separate
+methods; only weight-sharing forces one class.
 """
 
 from __future__ import annotations
 
 import inspect
-import typing
-from typing import Any, Callable, Literal, Mapping, Optional, Sequence, TypeVar, overload
+from typing import Any, Callable, Mapping, Optional, TypeVar, overload
 
 import msgspec
 
@@ -93,14 +94,6 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
             ))
         if self.vram_gb is not None or self.compute_capability is not None:
             force(self, "gpu", True)
-
-
-class Variant(msgspec.Struct, frozen=True):
-    """One resolved ``variants={}`` row: binding + optional Resources override."""
-
-    name: str
-    binding: Any
-    resources: Resources | None = None
 
 
 class Compile(msgspec.Struct, frozen=True):
@@ -166,16 +159,10 @@ class EndpointDecl(msgspec.Struct, frozen=True, kw_only=True):
     kind: str = "inference"
     resources: Resources = msgspec.field(default_factory=Resources)
     models: Mapping[str, Binding] = msgspec.field(default_factory=dict)
-    variants: tuple[Variant, ...] = ()
     runtime: Optional[str] = None
     name: Optional[str] = None  # function-shaped endpoints only
     is_function: bool = False
     compile: Optional[Compile] = None
-    # Payload-driven slot routing (gw#479): ``route(payload) -> slot names``
-    # the request actually needs. The executor promotes/pins only those
-    # slots, so multi-lane classes (two transformers over one shared
-    # encoder) swap the idle lane instead of thrashing both per request.
-    route: Optional[Callable[[Any], Sequence[str]]] = None
 
 
 ATTR = "__gen_worker_endpoint__"
@@ -241,74 +228,6 @@ def _normalize_models(
             )
         out[k] = b
     return out
-
-
-def _normalize_variants(
-    variants: Optional[Mapping[str, Any]], default_resources: Resources
-) -> tuple[Variant, ...]:
-    if not variants:
-        return ()
-    rows: list[Variant] = []
-    seen: set[str] = set()
-    for raw_name, value in variants.items():
-        name = str(raw_name or "").strip()
-        if not name:
-            raise ValueError("@endpoint variants: empty variant name")
-        if name in seen:
-            raise ValueError(f"@endpoint variants: duplicate name {name!r}")
-        seen.add(name)
-        res: Resources | None = None
-        if isinstance(value, tuple):
-            if len(value) != 2 or not isinstance(value[1], Resources):
-                raise TypeError(
-                    f"@endpoint variants[{name!r}] must be a binding or "
-                    "(binding, Resources) pair"
-                )
-            binding, res = value
-        else:
-            binding = value
-        if not isinstance(binding, BINDING_TYPES):
-            raise TypeError(
-                f"@endpoint variants[{name!r}]: expected a HF/Hub/Civitai/"
-                f"ModelScope binding, got {type(binding).__name__}"
-            )
-        rows.append(Variant(name=name, binding=binding, resources=res or default_resources))
-    return tuple(rows)
-
-
-def _literal_members(t: Any) -> Optional[tuple[Any, ...]]:
-    if typing.get_origin(t) is Literal:
-        return tuple(typing.get_args(t))
-    return None
-
-
-def _validate_variant_literal(cls_name: str, method: Callable[..., Any], names: Sequence[str]) -> None:
-    """If the handler payload declares a ``variant`` field, it must be a
-    ``Literal[...]`` whose members are a subset of the declared variant names
-    (build-time validation of the discriminator, carried over from the old
-    dispatch() Literal check)."""
-    try:
-        hints = typing.get_type_hints(method)
-        params = _handler_params(method, is_method=True)
-        payload_type = hints.get(params[1].name)
-        field_hints = typing.get_type_hints(payload_type)
-    except Exception:
-        return
-    field_type = field_hints.get("variant")
-    if field_type is None:
-        return
-    members = _literal_members(field_type)
-    if members is None:
-        raise ValueError(
-            f"@endpoint class {cls_name!r}: payload field 'variant' must be "
-            f"Literal[...]-typed so variant names are validated (got {field_type!r})."
-        )
-    unknown = sorted({str(m) for m in members} - set(names))
-    if unknown:
-        raise ValueError(
-            f"@endpoint class {cls_name!r}: payload 'variant' Literal member(s) "
-            f"{unknown} match no declared variant (variants: {sorted(names)})."
-        )
 
 
 def _find_handler_methods(cls: type) -> list[tuple[str, Callable[..., Any]]]:
@@ -414,10 +333,8 @@ def _decorate_class(
     kind: str,
     resources: Resources,
     models: dict[str, Binding],
-    variants: Optional[Mapping[str, Any]],
     runtime: Optional[str],
     compile: Optional[Compile] = None,
-    route: Optional[Callable[[Any], Sequence[str]]] = None,
 ) -> type:
     handlers = _find_handler_methods(cls)
     for attr, member in handlers:
@@ -425,39 +342,15 @@ def _decorate_class(
     models = _resolve_single_slot(cls, models, handlers)
     _validate_class_models(cls, models)
 
-    variant_rows = _normalize_variants(variants, resources)
-    if variant_rows:
-        if len(handlers) != 1:
-            raise ValueError(
-                f"@endpoint class {cls.__name__!r}: variants= requires exactly "
-                f"ONE handler method to fan out over (found {len(handlers)})."
-            )
-        # Multi-slot classes: variants swap the FIRST declared slot; the
-        # remaining (aux) slots are shared across all variants.
-        _validate_variant_literal(
-            cls.__name__, handlers[0][1], [v.name for v in variant_rows]
-        )
-
     if runtime is not None and runtime not in ("vllm", "llama-server"):
         raise ValueError(
             f"@endpoint class {cls.__name__!r}: runtime must be 'vllm' or "
             f"'llama-server', got {runtime!r}"
         )
-    if route is not None:
-        if not callable(route):
-            raise TypeError(
-                f"@endpoint class {cls.__name__!r}: route= must be callable "
-                f"(payload -> model slot names), got {type(route).__name__}"
-            )
-        if len(models) < 2:
-            raise ValueError(
-                f"@endpoint class {cls.__name__!r}: route= needs 2+ model "
-                f"slots to route between (declared {sorted(models) or 'none'})"
-            )
 
     decl = EndpointDecl(
         kind=kind, resources=resources, models=models,
-        variants=variant_rows, runtime=runtime, compile=compile, route=route,
+        runtime=runtime, compile=compile,
     )
     setattr(cls, ATTR, decl)
     setattr(cls, "__gen_worker_handlers__", handlers)
@@ -511,11 +404,9 @@ def endpoint(
     model: Optional[Binding] = ...,
     models: Optional[Mapping[str, Binding]] = ...,
     resources: Optional[Resources] = ...,
-    variants: Optional[Mapping[str, Any]] = ...,
     runtime: Optional[str] = ...,
     name: Optional[str] = ...,
     compile: Optional[Compile] = ...,
-    route: Optional[Callable[[Any], Sequence[str]]] = ...,
 ) -> Callable[[T], T]: ...  # configured @endpoint(...) form
 
 
@@ -526,11 +417,9 @@ def endpoint(
     model: Optional[Binding] = None,
     models: Optional[Mapping[str, Binding]] = None,
     resources: Optional[Resources] = None,
-    variants: Optional[Mapping[str, Any]] = None,
     runtime: Optional[str] = None,
     name: Optional[str] = None,
     compile: Optional[Compile] = None,
-    route: Optional[Callable[[Any], Sequence[str]]] = None,
 ) -> Any:
     """The one endpoint decorator. See the module docstring for shapes."""
     if kind not in KINDS:
@@ -553,19 +442,9 @@ def endpoint(
                                  "class handlers route by method name")
             return _decorate_class(
                 obj, kind=kind, resources=resources_value, models=model_map,
-                variants=variants, runtime=runtime, compile=compile, route=route,
+                runtime=runtime, compile=compile,
             )
         if inspect.isfunction(obj):
-            if variants:
-                raise ValueError(
-                    f"@endpoint function {obj.__name__!r}: variants= requires a "
-                    "class (each variant needs its own setup state)."
-                )
-            if route is not None:
-                raise ValueError(
-                    f"@endpoint function {obj.__name__!r}: route= requires a "
-                    "class with setup() (slot routing selects among loaded lanes)."
-                )
             return _decorate_function(
                 obj, kind=kind, resources=resources_value, models=dict(model_map),
                 runtime=runtime, name=name, compile=compile,
@@ -579,4 +458,4 @@ def endpoint(
     return apply
 
 
-__all__ = ["Compile", "EndpointDecl", "Resources", "Variant", "endpoint"]
+__all__ = ["Compile", "EndpointDecl", "Resources", "endpoint"]

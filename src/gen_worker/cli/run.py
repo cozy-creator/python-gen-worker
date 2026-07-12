@@ -213,17 +213,6 @@ class _SelectedFunction:
         self.variant_of = variant_of
 
 
-def _variant_names(cls: Optional[type]) -> set:
-    """Declared variant names in their ROUTED (slugified) form — the registry
-    slugifies fn_name, so raw declaration names ("generate_fp8") never match
-    es.name ("generate-fp8") and every variant row would lose its variant_of
-    marker (--variant auto then silently ran the base binding; gw#415 live)."""
-    from gen_worker.discovery.names import slugify_name
-
-    decl = getattr(cls, _ENDPOINT_ATTR, None) if cls is not None else None
-    return {slugify_name(v.name) for v in (getattr(decl, "variants", ()) or ())}
-
-
 def _collect_class_methods(mod: Any) -> List[_SelectedFunction]:
     """Collect every routable function on every @endpoint object in a module
     namespace. Delegates signature inspection to ``gen_worker.registry`` — the
@@ -242,7 +231,6 @@ def _collect_class_methods(mod: Any) -> List[_SelectedFunction]:
             is_generator=es.output_mode == "stream",
             bindings=dict(es.models),
             resources=es.resources,
-            variant_of=es.attr_name if es.name in _variant_names(es.cls) else "",
         )
         for es in collect_from_namespace(mod)
     ]

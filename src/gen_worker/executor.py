@@ -2414,39 +2414,15 @@ class Executor:
 
     # ---- job execution -----------------------------------------------------
 
-    def _routed_slots(self, spec: EndpointSpec, payload: Any) -> List[str]:
-        """Model slots this request needs (gw#479). Classes without route=
-        use every declared slot (single-lane behavior, unchanged)."""
-        if spec.route is None or spec.cls is None:
-            return list(spec.models)
-        try:
-            routed = [str(s) for s in spec.route(payload)]
-        except Exception as exc:
-            raise ValidationError(
-                f"route() for {spec.name} failed: {exc}") from exc
-        unknown = [s for s in routed if s not in spec.models]
-        if unknown or not routed:
-            raise ValidationError(
-                f"route() for {spec.name} returned {routed!r}; declared model "
-                f"slots are {sorted(spec.models)}")
-        return routed
-
     async def _run_job(self, job: _Job, run: pb.RunJob) -> None:
         spec = job.spec
         assert spec is not None
-        # Decode BEFORE pinning: payload-driven routing (gw#479) decides which
-        # lanes this job pins/promotes — pinning an idle lane would block the
-        # make_room swap that promoting the routed lane needs.
         try:
             payload: Any = msgspec.msgpack.decode(run.input_payload, type=spec.payload_type)
         except (msgspec.ValidationError, msgspec.DecodeError) as exc:
             await self._finish(job, pb.JOB_STATUS_INVALID, safe_message=_sanitize(str(exc)))
             return
-        try:
-            routed = self._routed_slots(spec, payload)
-        except ValidationError as exc:
-            await self._finish(job, pb.JOB_STATUS_INVALID, safe_message=_sanitize(str(exc)))
-            return
+        routed = list(spec.models)
         # Pin this job's model refs for its WHOLE lifetime (gw#409): the gap
         # between ensure_setup's promote and the execution-time pin let a
         # concurrent job's make_room demote a just-promoted pipeline. Refs

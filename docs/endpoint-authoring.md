@@ -85,51 +85,73 @@ runtime-quantizes the denoiser to 4-bit nf4 with a loud warning (quality
 below platform standards) rather than falling straight to CPU offload.
 Fit ladder: bf16 → `#fp8` → `#nvfp4` (Blackwell) → emergency-nf4 → offload.
 
-## Variants
+## Model selection: `model=` is a payload argument (pgw#509)
 
-One handler body, N separately-placeable routable functions:
+Checkpoint selection is a runtime PAYLOAD FIELD, not a build-time fan-out. A
+handler whose payload declares a field typed with a `ModelChoice` subclass
+picks, per request, which curated checkpoint runs against the resident base.
+16 near-identical fine-tunes = ONE `generate(model=)`, not 16 functions.
+
+Declare the curated set as DATA — one row per checkpoint carrying its
+`ModelRef` binding + typed per-model defaults:
 
 ```python
-@endpoint(
-    model=HF("org/base", dtype="bf16"),
-    resources=Resources(vram_gb=24),
-    variants={
-        "generate-fp8": (HF("org/base-fp8"), Resources(vram_gb=14)),
-    },
-)
-class Generate:
-    def setup(self, model: FluxPipeline): self.model = model
-    def generate(self, ctx, p: In) -> Out: ...
+class SdxlDefaults(ModelDefaults, frozen=True):
+    scheduler: Literal["euler_a", "dpmpp_2m_karras"]
+    steps: int
+    guidance: float
+
+class SdxlModel(ModelChoice[SdxlDefaults], enum.Enum):
+    WAI  = Model("wai-illustrious",     Hub("tensorhub/wai-illustrious"), SdxlDefaults("euler_a", 28, 6.0), hot=True)
+    PONY = Model("cyberrealistic-pony", Hub("tensorhub/cyberrealistic-pony"), SdxlDefaults("dpmpp_2m_karras", 30, 5.0))
+
+class TextToImage(msgspec.Struct):
+    prompt: str
+    model: SdxlModel = SdxlModel.WAI          # curated-only
+
+@endpoint(models={"pipeline": Hub("tensorhub/wai-illustrious"), "vae": Hub("tensorhub/sdxl-vae")})
+class SDXLFamily:
+    def setup(self, pipeline, vae): ...
+    def generate(self, ctx, p: TextToImage) -> ImageOutput:
+        d = p.model.defaults                  # typed SdxlDefaults — no ctx.models sniffing
+        ...
 ```
 
-Each variant key is a routable function name with its own binding and
-`Resources` (falls back to the class values). The base method-named function
-is stamped only when the class declares `model=`/`models=`. If your payload
-echoes the variant in a `variant` field, type it `Literal[...]` — members are
-validated against the declared variants at import time.
+On the wire a pick is its id string (`"wai-illustrious"`); the JSON schema is
+a closed `enum` (the curated allowlist). Defaults are manifest-exported so the
+catalog/UI can render `steps: 28` before submit. Discovery emits the whole set
+(each choice's binding + defaults + `hot`/`price` hints) for the scheduler to
+warm-pool per checkpoint.
 
-## Lanes: multi-model classes with input routing (gw#479)
+**BYOM is the field TYPE.** `model: SdxlModel` is curated-only; `model:
+SdxlModel | ModelRef` additionally accepts an arbitrary client-supplied
+`ModelRef` (bring-your-own-model). No `@byom` decorator, no `sources=` —
+architecture compatibility is derived from the pipeline the endpoint's
+`models=` loads. Per-method policy falls out of method=contract: a `generate`
+method can be BYOM-open while a `generate_turbo` method (fixed distillation
+LoRA) stays curated.
+
+Divergent WIRE contracts are separate METHODS, not `Optional` fields; only
+weight-sharing forces one class. A distilled turbo that shares the base is a
+`generate_turbo` method on the same class (shares the resident base); a
+standalone distilled checkpoint is a separate class/endpoint.
+
+## Lanes: multi-model classes with shared components (gw#479)
 
 A class binding 2+ pipeline slots whose snapshots share byte-identical
 components (content-keyed by the files' blake3 digests) loads the shared set
 ONCE; each slot's exclusive weights (its transformer) are an independent
-residency entry the worker LRU-swaps under VRAM pressure. Declare `route=`
-so only the lane a request needs is promoted/pinned:
+residency entry the worker LRU-swaps under VRAM pressure:
 
 ```python
-def _route(p: In) -> tuple[str, ...]:
-    return ("edit",) if p.images else ("t2i",)
-
-@endpoint(models={"t2i": Hub("org/base"), "edit": Hub("org/edit")}, route=_route)
+@endpoint(models={"t2i": Hub("org/base"), "edit": Hub("org/edit")})
 class Generate:
     def setup(self, t2i: QwenImagePipeline, edit: QwenImageEditPlusPipeline): ...
     def generate(self, ctx, p: In) -> Out: ...  # picks self.t2i / self.edit
 ```
 
-The handler must only touch the lane(s) `route` named — the idle lane may be
-warm in host RAM. This mechanism COMPENSATES for split-vendor base+edit
-releases (Qwen, HiDream, Wan t2v/i2v); unified models (one transformer doing
-t2i + edit) need no lanes — bind one model and skip `route=`.
+This COMPENSATES for split-vendor base+edit releases (Qwen, HiDream, Wan
+t2v/i2v); unified models (one transformer doing t2i + edit) bind one model.
 
 ## Resources
 

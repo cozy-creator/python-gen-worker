@@ -5,8 +5,9 @@ HTTP server speaking tensorhub's public resolve route (th#560) and downloads
 blobs into the blake3 CAS via the shared cozy_snapshot path — no mocks on the
 unit under test, only a stdlib HTTP server standing in for the hub + R2.
 
-#380: ``select_variant`` policy (SM/library gates, VRAM ladder, base
-fallback), listing fit verdicts, and ``--variant auto`` selection.
+#380: ``select_variant`` policy — the serve-time flavor-fit ladder
+(SM/library gates, VRAM ladder, base fallback). This is the precision-flavor
+ladder (th#546/th#683), unrelated to the removed ``variants=`` decorator.
 """
 
 from __future__ import annotations
@@ -14,19 +15,15 @@ from __future__ import annotations
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
-import msgspec
 import pytest
 from blake3 import blake3
 
 import gen_worker.cli.run as run_mod
-from gen_worker import RequestContext, endpoint
-from gen_worker.api.binding import HF
 from gen_worker.api.decorators import Resources
 from gen_worker.models.hub_client import (
     HubRepoNotFoundError,
-    HubResolveError,
     resolve_repo,
 )
 from gen_worker.models.hub_policy import (
@@ -336,117 +333,3 @@ def test_cpu_box_has_no_routable_gpu_variant():
     fit, _ = variant_fit(Resources(), _CAPS_CPU, 0.0)
     assert fit == "fits"  # CPU-only endpoints still fit
 
-
-# ---------------------------------------------------------------------------
-# #380 CLI surfaces: listing fit verdicts + --variant auto selection
-# ---------------------------------------------------------------------------
-
-class _VIn(msgspec.Struct):
-    prompt: str = ""
-
-
-class _VOut(msgspec.Struct):
-    ok: bool
-
-
-def _variant_module():
-    import types
-
-    mod = types.ModuleType("_test_variants")
-
-    @endpoint(
-        kind="inference",
-        resources=Resources(vram_gb=24),
-        models={"pipeline": HF("org/base")},
-        variants={
-            "gen-fp8": (HF("org/base-fp8"), Resources(vram_gb=14)),
-            "gen-nvfp4": (HF("org/base-nvfp4"), Resources(vram_gb=12, compute_capability=10.0)),
-        },
-    )
-    class Gen:
-        def setup(self, pipeline: object) -> None:
-            pass
-
-        def generate(self, ctx: RequestContext, payload: _VIn) -> _VOut:
-            return _VOut(ok=True)
-
-    mod.Gen = Gen
-    return mod
-
-
-def _patched_hw(monkeypatch, *, sm: int, free_gb: float, libs=()):  # helpers
-    import gen_worker.models.hub_policy as hp
-    import gen_worker.models.memory as mem
-
-    caps = TensorhubWorkerCapabilities(
-        cuda_version="12.8" if sm else "", gpu_sm=sm,
-        torch_version="2.11", installed_libs=list(libs),
-    )
-    monkeypatch.setattr(hp, "detect_worker_capabilities", lambda **_k: caps)
-    monkeypatch.setattr(mem, "get_available_vram_gb", lambda *a, **k: free_gb)
-
-
-def test_listing_carries_fit_and_variant_of(monkeypatch):
-    from gen_worker.cli.listing import build_description
-
-    _patched_hw(monkeypatch, sm=89, free_gb=16.0)
-    mod = _variant_module()
-    candidates = run_mod.discover_candidates(mod)
-    doc = build_description(main_module="_test_variants", candidates=candidates)
-
-    assert doc["detected"]["gpu_sm"] == 89
-    assert doc["detected"]["free_vram_gb"] == 16.0
-    by_name = {f["name"]: f for f in doc["functions"]}
-    assert set(by_name) == {"generate", "gen-fp8", "gen-nvfp4"}
-    # 24 GB > 16 free, but 24 * 0.55 fits -> automatic fp8-storage rung (th#683)
-    assert by_name["generate"]["fit"] == "emergency_fp8"
-    assert "variant_of" not in by_name["generate"]
-    assert by_name["gen-fp8"]["fit"] == "fits"
-    assert by_name["gen-fp8"]["variant_of"] == "generate"
-    assert by_name["gen-nvfp4"]["fit"] == "incompatible"
-    assert by_name["gen-nvfp4"]["resources"]["vram_gb"] == 12.0
-
-
-def test_variant_auto_picks_fp8_on_sm89(monkeypatch):
-    _patched_hw(monkeypatch, sm=89, free_gb=16.0)
-    mod = _variant_module()
-    candidates = run_mod.discover_candidates(mod)
-    picked = run_mod.select_function_with_variant(
-        candidates, cls_name=None, method_name="generate",
-        default_name=None, variant="auto",
-    )
-    assert picked.fn_name == "gen-fp8"
-
-
-def test_variant_auto_base_fallback_below_floor(monkeypatch):
-    # 8 GB free: gen-fp8's 4-bit estimate fits -> emergency rung (gw#420).
-    _patched_hw(monkeypatch, sm=89, free_gb=8.0)
-    mod = _variant_module()
-    candidates = run_mod.discover_candidates(mod)
-    picked = run_mod.select_function_with_variant(
-        candidates, cls_name=None, method_name="generate",
-        default_name=None, variant="auto",
-    )
-    assert picked.fn_name == "gen-fp8"
-    # 5 GB free: no 4-bit estimate fits -> base + offload ladder.
-    _patched_hw(monkeypatch, sm=89, free_gb=5.0)
-    picked = run_mod.select_function_with_variant(
-        candidates, cls_name=None, method_name="generate",
-        default_name=None, variant="auto",
-    )
-    assert picked.fn_name == "generate"
-
-
-def test_variant_by_name_and_unknown(monkeypatch):
-    mod = _variant_module()
-    candidates = run_mod.discover_candidates(mod)
-    picked = run_mod.select_function_with_variant(
-        candidates, cls_name=None, method_name="generate",
-        default_name=None, variant="gen-fp8",
-    )
-    assert picked.fn_name == "gen-fp8"
-    with pytest.raises(run_mod._UsageError, match="available"):
-        run_mod.select_function_with_variant(
-            candidates, cls_name=None, method_name="generate",
-            default_name=None, variant="nope",
-        )

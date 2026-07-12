@@ -309,6 +309,97 @@ def _binding_to_manifest(binding: Binding, param_name: str = "") -> Dict[str, An
     return out
 
 
+def _model_choice_in(ann: Any) -> Tuple[Optional[type], bool]:
+    """Inspect a payload field annotation for a curated ``ModelChoice`` set.
+
+    Returns ``(choice_enum, accepts_byom)``: the ``ModelChoice`` subclass the
+    field is typed with (or ``None``), and whether the field ALSO accepts an
+    arbitrary client-supplied :class:`ModelRef` (``ModelChoice | ModelRef`` =
+    BYOM-open). ``Optional[...]`` (a ``None`` union member) does not imply
+    BYOM."""
+    from gen_worker.api.binding import ModelRef
+    from gen_worker.api.model import is_model_choice
+
+    origin = typing.get_origin(ann)
+    if origin in (typing.Union, py_types.UnionType):
+        args = typing.get_args(ann)
+    else:
+        args = (ann,)
+    choice: Optional[type] = None
+    byom = False
+    for arg in args:
+        if is_model_choice(arg):
+            if choice is not None and choice is not arg:
+                raise ValueError(
+                    "a payload field may reference only one ModelChoice set"
+                )
+            choice = arg
+        elif arg is ModelRef:
+            byom = True
+    return choice, byom
+
+
+def _collect_model_placement_key(
+    payload_type: type, models: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    """The handler's checkpoint placement key (pgw#509), or ``None``.
+
+    Scans the payload's top-level fields for one typed with a ``ModelChoice``
+    subclass and emits the curated set — each choice's structured
+    :class:`ModelRef` binding, typed per-model defaults, and optional
+    ``hot``/``price`` hints — plus whether the field accepts BYOM and which
+    ``models=`` slot the pick swaps into. This is the SDK->tensorhub contract
+    (th#761): the scheduler warm-pools per ``choices[].binding`` ref; the
+    catalog/UI renders ``choices[].defaults``."""
+    try:
+        hints = typing.get_type_hints(payload_type)
+    except Exception:
+        hints = getattr(payload_type, "__annotations__", {}) or {}
+
+    field_name: Optional[str] = None
+    choice_enum: Optional[type] = None
+    byom = False
+    for name in getattr(payload_type, "__struct_fields__", ()) or ():
+        if name not in hints:
+            continue
+        found, field_byom = _model_choice_in(hints[name])
+        if found is None:
+            continue
+        if choice_enum is not None:
+            raise ValueError(
+                f"{payload_type.__name__}: multiple ModelChoice fields "
+                f"({field_name!r}, {name!r}); a handler has one placement key"
+            )
+        field_name, choice_enum, byom = name, found, field_byom
+
+    if choice_enum is None or field_name is None:
+        return None
+
+    # The pick swaps the primary (first-declared) model slot.
+    slot = next(iter(models), "")
+    choices: List[Dict[str, Any]] = []
+    for row in choice_enum.rows():  # type: ignore[attr-defined]
+        entry: Dict[str, Any] = {
+            "id": row.id,
+            "binding": _binding_to_manifest(row.ref, slot),
+            "defaults": msgspec.to_builtins(row.defaults),
+        }
+        if row.hot:
+            entry["hot"] = True
+        if row.price is not None:
+            entry["price"] = row.price
+        choices.append(entry)
+    if not choices:
+        raise ValueError(
+            f"{payload_type.__name__}.{field_name}: ModelChoice "
+            f"{choice_enum.__name__} declares no models"
+        )
+    block: Dict[str, Any] = {"field": field_name, "byom": byom, "choices": choices}
+    if slot:
+        block["slot"] = slot
+    return block
+
+
 def _schema_and_hash(t: type) -> Tuple[Dict[str, Any], str]:
     """Generate JSON schema and SHA256 hash for a msgspec type."""
     schema = msgspec.json.schema(t)
@@ -353,7 +444,7 @@ def _assert_unique_function_names(functions: List[Dict[str, Any]]) -> None:
     raise ValueError(
         "duplicate function name(s) within the endpoint — function names are the "
         "external routing identifiers and must be unique. Rename the handler "
-        "method (or a variants= key):\n" + "\n".join(lines)
+        "method:\n" + "\n".join(lines)
     )
 
 
@@ -388,8 +479,8 @@ def discover_functions(root: Optional[Path] = None, *, main_module: str | None =
     seen: Set[Tuple[str, str, str, str]] = set()
     for f in found:
         for entry in _extract_entries(f.obj, f.walked_module):
-            # name is part of the key: variants= share (module, class,
-            # python_name) with their base function but stamp distinct names.
+            # (module, class, python_name, name) dedups objects re-found under
+            # multiple walked packages; name is one handler per method now.
             key = (
                 entry.get("declared_module", entry.get("module", "")),
                 entry.get("class_name", ""),
@@ -442,6 +533,7 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
 
         input_schema, input_sha = _schema_and_hash(es.payload_type)
         moderation = _collect_payload_moderation_metadata(es.payload_type)
+        model_key = _collect_model_placement_key(es.payload_type, es.models)
         output_type = es.output_type
         if output_type is None:
             raise ValueError(
@@ -485,6 +577,8 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
             "is_async": es.is_async,
             "timeout_ms": es.timeout_ms,
         }
+        if model_key is not None:
+            fn["model"] = model_key
         if incremental and es.delta_type is not None:
             fn["delta_type"] = _type_id(es.delta_type)
             fn["delta_schema_sha256"] = delta_sha

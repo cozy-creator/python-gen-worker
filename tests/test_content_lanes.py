@@ -25,7 +25,6 @@ from diffusers import AutoencoderKL, DDPMScheduler, DiffusionPipeline, UNet2DMod
 
 from gen_worker.api.binding import HF
 from gen_worker.api.decorators import Resources
-from gen_worker.api.errors import ValidationError
 from gen_worker.executor import Executor, ModelStore
 from gen_worker.models.cozy_cas import _blake3_file
 from gen_worker.models.residency import Tier
@@ -113,15 +112,11 @@ class _In(msgspec.Struct):
     x: str
 
 
-def _route(payload: "_In"):
-    return ("a",) if payload.x == "a" else ("b",)
-
-
-def _lane_spec(cls: type, models: dict, route=None) -> EndpointSpec:
+def _lane_spec(cls: type, models: dict) -> EndpointSpec:
     return EndpointSpec(
         name="lanes", method=cls.run, kind="inference", payload_type=_In,
         output_mode="single", cls=cls, attr_name="run", models=models,
-        resources=Resources(), route=route,
+        resources=Resources(),
     )
 
 
@@ -282,48 +277,8 @@ def test_share_plan_survives_config_provenance_noise(tmp_path, lane_repos) -> No
     assert "unet" not in plan["a"]                        # weights still gate
 
 
-def test_routed_slots_validation(tmp_path, lane_repos) -> None:
-    repos = {"acme/a": lane_repos["a"], "acme/b": lane_repos["b"]}
-    spec = _lane_spec(
-        _Lanes, {"a": HF("acme/a"), "b": HF("acme/b")}, route=_route)
-    ex = _executor([spec], tmp_path, 4 * _GiB, [], repos)
-
-    assert ex._routed_slots(spec, _In(x="a")) == ["a"]
-    assert ex._routed_slots(spec, _In(x="edit")) == ["b"]
-
-    bad = _lane_spec(
-        _Lanes, {"a": HF("acme/a"), "b": HF("acme/b")},
-        route=lambda p: ("nope",))
-    with pytest.raises(ValidationError):
-        ex._routed_slots(bad, _In(x="a"))
-    empty = _lane_spec(
-        _Lanes, {"a": HF("acme/a"), "b": HF("acme/b")}, route=lambda p: ())
-    with pytest.raises(ValidationError):
-        ex._routed_slots(empty, _In(x="a"))
-    # No route= -> every slot (unchanged single-lane behavior).
-    plain = _lane_spec(_Lanes, {"a": HF("acme/a"), "b": HF("acme/b")})
-    assert ex._routed_slots(plain, _In(x="a")) == ["a", "b"]
-
-
-def test_route_decorator_validation() -> None:
-    from gen_worker import Hub, endpoint
-
-    with pytest.raises(ValueError):
-        @endpoint(model=Hub("o/r"), route=lambda p: ("m",))
-        class OneSlot:
-            def setup(self, m: str) -> None: ...
-            def run(self, ctx, payload: _In) -> _In: ...
-
-    @endpoint(models={"a": Hub("o/a"), "b": Hub("o/b")}, route=_route)
-    class TwoSlots:
-        def setup(self, a: str, b: str) -> None: ...
-        def run(self, ctx, payload: _In) -> _In: ...
-
-    assert TwoSlots.__gen_worker_endpoint__.route is _route
-
-
 # --------------------------------------------------------------------------- #
-# Real loads: sharing, accounting, lane swap (CUDA)
+# Real loads: sharing, accounting, lane swap (CUDA)                             #
 # --------------------------------------------------------------------------- #
 
 
@@ -331,8 +286,7 @@ def test_route_decorator_validation() -> None:
 def test_lanes_share_one_vae_instance_and_count_it_once(tmp_path, lane_repos) -> None:
     sent: list = []
     repos = {"acme/a": lane_repos["a"], "acme/b": lane_repos["b"]}
-    spec = _lane_spec(
-        _Lanes, {"a": HF("acme/a"), "b": HF("acme/b")}, route=_route)
+    spec = _lane_spec(_Lanes, {"a": HF("acme/a"), "b": HF("acme/b")})
 
     async def _run() -> None:
         ex = _executor([spec], tmp_path, 4 * _GiB, sent, repos)
@@ -373,7 +327,7 @@ def test_lane_swap_moves_only_the_exclusive_module(tmp_path, lane_repos) -> None
     sent: list = []
     repos = {"acme/a": lane_repos["a"], "acme/b": lane_repos["b"]}
     spec = _lane_spec(
-        _Lanes, {"a": HF("acme/a"), "b": HF("acme/b")}, route=_route)
+        _Lanes, {"a": HF("acme/a"), "b": HF("acme/b")})
 
     def _dev(module) -> str:
         return next(module.parameters()).device.type
@@ -440,7 +394,7 @@ def test_vacate_releases_shared_holds(tmp_path, lane_repos) -> None:
     sent: list = []
     repos = {"acme/a": lane_repos["a"], "acme/b": lane_repos["b"]}
     spec = _lane_spec(
-        _Lanes, {"a": HF("acme/a"), "b": HF("acme/b")}, route=_route)
+        _Lanes, {"a": HF("acme/a"), "b": HF("acme/b")})
 
     async def _run() -> None:
         ex = _executor([spec], tmp_path, 4 * _GiB, sent, repos)
