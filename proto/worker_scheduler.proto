@@ -87,6 +87,10 @@ message WorkerResources {
   string gpu_sm           = 4; // compute capability, e.g. "89"
   repeated string installed_libs = 5; // e.g. "torchao"
   string image_digest     = 6; // docker image sha256
+  // Currently unpopulated (pgw#514/P4): no launcher sets WORKER_GIT_COMMIT
+  // and no Go reader consumes this field. Kept for a future coordinated fill
+  // (image_digest has the same "no producer yet" gap but a plausible one —
+  // see gen-worker Settings.worker_image_digest).
   string git_commit       = 7;
   string instance_id      = 8; // cloud provider instance id (e.g. runpod pod id)
 }
@@ -251,7 +255,10 @@ enum JobStatus {
   JOB_STATUS_INVALID     = 2; // bad input; never retry
   JOB_STATUS_RETRYABLE   = 3; // transient; orchestrator may requeue (bumping attempt)
   JOB_STATUS_FATAL       = 4; // permanent execution failure; do not retry
-  JOB_STATUS_CANCELED    = 5; // terminal ack of CancelJob (or local deadline abort)
+  JOB_STATUS_CANCELED    = 5; // terminal ack of CancelJob (NOT deadline abort — a
+                               // deadline expiry sends FATAL, safe_message:"deadline
+                               // exceeded"; see executor.py's _DeadlineExceeded handler
+                               // and CONTRACT.md's status table)
 }
 
 // The one metrics vehicle. Worker-observed values only; the orchestrator
@@ -343,12 +350,14 @@ message ModelEvent {
   int64 bytes_done = 5;  // download progress; set while state = DOWNLOADING
   int64 bytes_total = 6; // set while state = DOWNLOADING (0 = unknown)
   int64 duration_ms = 7; // op wall time; set when state = ADOPTED
-  // Adoption observability (gw#391), set when state = ADOPTED for inductor
+  // Adoption observability (gw#391), intended for state = ADOPTED on inductor
   // cells: FX-graph cache hits/misses observed during the adoption warmup and
-  // the warmup wall seconds. A warmup observing ZERO hits never reports
-  // ADOPTED - it rolls back to eager and reports adopt_failed:cache_miss; an
-  // endpoint without warmup() cannot prove the cell and reports
-  // adopt_failed:no_warmup. hits>0 with misses>0 = partial shape coverage.
+  // the warmup wall seconds. hits>0 with misses>0 would mean partial shape
+  // coverage. NOT currently populated by gen-worker (pgw#514/P3): the
+  // orchestrator has no reader for these three fields, so the worker stopped
+  // writing them rather than ship values nothing consumes. Re-populate
+  // (executor.py's compile-cache adopt path already computes hits/misses/
+  // warmup_s locally) if/when the orchestrator grows a reader.
   int64 cache_hits = 8;
   int64 cache_misses = 9;
   double warmup_s = 10;
@@ -376,7 +385,11 @@ enum ModelState {
 message FnUnavailable {
   string function_name = 1;
   // reason vocabulary: compute_capability_unmet, insufficient_vram,
-  // missing_cuda_library, insufficient_disk, cuda_unavailable, setup_failed.
+  // missing_cuda_library, cuda_unavailable, setup_failed. (NOT
+  // insufficient_disk — disk pressure is treated as transient and only ever
+  // fails the job RETRYABLE; it never disables the function. See gen-worker
+  // executor.py Executor._mark_setup_failed / the setup/injection except
+  // branch, both of which explicitly exclude InsufficientDiskError here.)
   string reason = 2;
   string detail = 3; // human-readable elaboration for the admin availability view
   map<string, string> axes = 4; // e.g. {detected_sm: "8.9", required_sm: "10.0"}

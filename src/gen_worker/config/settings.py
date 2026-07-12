@@ -1,9 +1,17 @@
 """Worker `Settings` struct — the canonical typed config for the worker process.
 
 Loaded exactly once at `entrypoint._run_main()` via `load_settings()`, then
-passed by reference to every consumer. No module in `gen_worker` reads
-`os.environ` or `os.getenv` directly — if a value isn't on Settings, add a
-field here.
+passed by reference to every consumer. Orchestrator-injected pod config and
+anything an operator needs to override at deploy time belongs here.
+
+NOT everything reads through Settings: a handful of modules that also work
+as standalone libraries/CLIs outside a full worker bring-up (`net.py`,
+`convert/ingest.py`, `convert/clone.py`, `cli/run.py`, `compile_cache.py`)
+read a few env vars directly with their own defaults — those are
+self-contained and tested independently of the Settings loader (e.g.
+`COZY_HTTP_*_TIMEOUT_S`, `COZY_CONVERT_*`, `GEN_WORKER_FORBID_CPU_OFFLOAD`,
+`GEN_WORKER_COMPILE_*`). New pod-launch config should still go on Settings;
+a raw read is the exception for library-standalone knobs, not the norm.
 
 Built on msgspec.Struct (already a worker dep) instead of pydantic-settings to
 avoid pulling in pydantic. The source-loader layering (env → .env → secrets dir
@@ -32,9 +40,6 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     # Single shared value across the cluster — the router resolves us to the
     # per-release lease owner. gen-orchestrator issue #317.
     orchestrator_public_addr: str = ""
-    # Optional PEM CA bundle for the orchestrator gRPC TLS connection.
-    # Empty = system roots.
-    grpc_ca_bundle: str = ""
 
     # Per-pod worker identity (orchestrator-injected).
     worker_id: str = ""
@@ -57,34 +62,25 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     worker_disconnected_timeout_s: int = 600
 
     # Provenance stamped into WorkerResources by the image build / launcher.
+    # TODO(pgw#514/P4): nothing produces WORKER_IMAGE_DIGEST today (verified
+    # against gen-orchestrator/tensorhub/e2e — no launcher sets it), so this
+    # is always "" in production and the Go scaling-profile key that reads
+    # it (profiles.go) always sees an empty digest. Kept because tensorhub
+    # may start stamping it at pod-launch time; drop if that never lands.
     worker_image_digest: str = ""  # WORKER_IMAGE_DIGEST
-    worker_git_commit: str = ""    # WORKER_GIT_COMMIT
 
     # tensorhub access for standalone clients (run/serve/prefetch). Production
     # workers get orchestrator-resolved manifests and never dial these.
     tensorhub_url: str = ""        # TENSORHUB_URL
     tensorhub_token: str = ""      # TENSORHUB_TOKEN
     # CAS/cache roots. cache_dir moves the whole tensorhub cache off /tmp
-    # (cozy local persists weights across reboots); cas_dir points standalone
-    # resolve at an explicit CAS root.
+    # (cozy local persists weights across reboots); cas_dir points the
+    # standalone CLI (`gen-worker run`) at an explicit CAS root — also the
+    # test-isolation knob for tests/test_hub_resolve_and_variants.py,
+    # tests/test_run_civitai.py, tests/test_cli_run.py (real consumer:
+    # cli/run.py._resolve_local_path, part of the pgw#515 fork).
     tensorhub_cache_dir: str = ""  # TENSORHUB_CACHE_DIR
     tensorhub_cas_dir: str = ""    # TENSORHUB_CAS_DIR
 
     # Civitai provider credential (CIVITAI_API_KEY, alias CIVITAI_TOKEN).
     civitai_api_key: str = ""
-
-    # HF snapshot-download guards (#379): stall window (no byte progress),
-    # optional wall-clock cap (0 = off), and the accidental-huge-repo cap
-    # (0 = off).
-    hf_download_stall_timeout_s: float = 180.0  # COZY_HF_DOWNLOAD_STALL_TIMEOUT_S
-    hf_download_max_seconds: float = 0.0        # COZY_HF_DOWNLOAD_MAX_SECONDS
-    hf_max_repo_bytes: int = 60_000_000_000     # COZY_HF_MAX_REPO_BYTES
-
-    # Residency caps for LoRA adapters left attached between requests.
-    attached_lora_max: int = 8                       # GEN_WORKER_ATTACHED_LORA_MAX
-    attached_lora_max_bytes: int = 2 * 1024**3       # GEN_WORKER_ATTACHED_LORA_MAX_BYTES
-
-    # torch.compile cache artifact sources (gw#384) + cold-compile opt-in.
-    compile_cache_path: str = ""    # GEN_WORKER_COMPILE_CACHE
-    compile_cache_url: str = ""     # GEN_WORKER_COMPILE_CACHE_URL
-    compile_allow_cold: bool = False  # GEN_WORKER_COMPILE_ALLOW_COLD

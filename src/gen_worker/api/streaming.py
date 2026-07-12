@@ -62,10 +62,11 @@ class TokenUsage(msgspec.Struct, frozen=True, kw_only=True):
 
 
 class Done(msgspec.Struct, frozen=True, kw_only=True):
-    """End-of-stream marker. Yield exactly one Done() to terminate cleanly.
-
-    The dispatcher converts this into an ``IncrementalTokenStreamDone``
-    proto message and the terminal ``JobExecutionResult(success=True)``.
+    """Optional end-of-stream marker. Yielding it emits no chunk — the
+    dispatcher's ``_encode_chunk`` treats it as a no-op (see executor.py).
+    A stream ends naturally when the handler's generator exhausts; yield
+    ``Done()`` if you want to terminate explicitly without yielding a
+    final partial item.
     """
 
 
@@ -78,13 +79,6 @@ class Error(msgspec.Struct, frozen=True, kw_only=True):
     """
 
     message: str = ""
-
-
-# Tuple form for runtime ``isinstance`` checks in the dispatcher.
-_SIGNAL_TYPES: tuple[type, ...] = (
-    IncrementalTokenDelta, BatchItemDelta, TokenUsage, Done, Error,
-)
-TokenStreamSignal = Union[IncrementalTokenDelta, BatchItemDelta, TokenUsage, Done, Error]
 
 
 # ============================================================================

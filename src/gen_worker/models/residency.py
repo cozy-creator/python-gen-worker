@@ -767,32 +767,10 @@ class LoadedComponentKey:
         return f"shared::{readable}::dev{self.device_id}::{digest}"
 
 
-def build_function_owned_pipeline(
-    shared: Any,
-    pipeline_cls: Optional[Any] = None,
-    **extra_components: Any,
-) -> Any:
-    """Build a *function-owned* pipeline over SHARED immutable components:
-    own scheduler/mutable state, same heavy modules (same CUDA storages).
-    Tries ``pipeline_cls.from_pipe(shared)`` then ``pipeline_cls(**components)``."""
-    cls = pipeline_cls or type(shared)
-    from_pipe = getattr(cls, "from_pipe", None)
-    if callable(from_pipe):
-        return from_pipe(shared, **extra_components)
-    comps = getattr(shared, "components", None)
-    if isinstance(comps, dict):
-        return cls(**{**comps, **extra_components})
-    raise TypeError(
-        f"cannot build a function-owned pipeline from {type(shared).__name__}: "
-        "no from_pipe() and no .components dict to re-assemble"
-    )
-
-
 __all__ = [
     "Residency",
     "Tier",
     "LoadedComponentKey",
-    "build_function_owned_pipeline",
     "content_set_digest",
     "ON_DISK", "IN_RAM", "IN_VRAM", "EVICTED",
 ]

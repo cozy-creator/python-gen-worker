@@ -3,12 +3,10 @@
 from .cache_paths import (
     tensorhub_cache_dir,
     tensorhub_cas_dir,
-    worker_local_model_cache_dir_default,
 )
 from .download import (
     build_provider_index_from_manifest,
     ensure_local,
-    ensure_local_sync,
     lookup_provider_for_ref,
     set_provider_index,
 )
@@ -28,15 +26,12 @@ from .residency import (
     content_set_digest,
     Residency,
     Tier,
-    build_function_owned_pipeline,
 )
 
 __all__ = [
     "tensorhub_cache_dir",
     "tensorhub_cas_dir",
-    "worker_local_model_cache_dir_default",
     "ensure_local",
-    "ensure_local_sync",
     "set_provider_index",
     "lookup_provider_for_ref",
     "build_provider_index_from_manifest",
@@ -53,5 +48,4 @@ __all__ = [
     "Tier",
     "LoadedComponentKey",
     "content_set_digest",
-    "build_function_owned_pipeline",
 ]
