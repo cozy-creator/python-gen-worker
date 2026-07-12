@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.14.7 (2026-07-12)
+
+- **gw#421: retire the gen-worker-repo GPU CI lane; real-GPU coverage moves
+  to the e2e nightly.** Deleted the ephemeral-RunPod-4090 self-hosted-runner
+  scaffolding (`.github/workflows/gpu-ci.yml`, `gpu-runner-image.yml`,
+  `.github/gpu-runner/`) — it booted a 4090 per master push, the runner
+  registration was RunPod-host-flakiness-prone (booted pods that never came
+  online, one idle 40 min), and every check it ran either duplicated CPU CI
+  or is now covered end-to-end by the e2e repo's nightly `TestJ6` on the REAL
+  production path. Removed `tests/test_gpu_generation_smoke.py` (its garbage
+  tripwire duplicated `e2e/quality`; its fp8-vs-bf16 SSIM assertion is now the
+  J6 fp8 chapter against a real 4090, not a repo-local smoke).
+- **examples/flux2-klein-image: add the fp8 lane.** A second `@endpoint`
+  (`generate-turbo-fp8`, `storage_dtype="fp8"`) over the same repo so the
+  nightly proves fp8-E4M3 denoiser storage matches bf16 at the same seed
+  (SSIM gate). Shared components dedupe the text encoder + VAE across lanes.
+
 ## 0.14.6 (2026-07-11)
 
 - **gw#479: per-digest inflight lock in the content-addressed blob store.**
@@ -120,7 +137,6 @@
   `:latest`/`:prod` vectors (tensorhub copy sync = filed follow-up).
   Grep-guard `tests/test_ref_normal_form.py` rejects new ad-hoc grammar
   sites; round-trip vector test pins `format(parse(s))`.
-
 ## 0.13.25 (2026-07-11)
 
 - **gw#479: content-keyed shared components + transformer lanes.**

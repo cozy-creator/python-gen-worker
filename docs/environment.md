@@ -48,8 +48,10 @@ this page covers the worker itself.
 
 ## CI-lane opt-ins (raw env, tests/CI only)
 
-- `GEN_WORKER_GPU_SMOKE` / `GEN_WORKER_SMOKE_OUT` — nightly GPU CI lane
-  selection + artifact dir (`gpu-ci.yml`); never read by worker runtime code.
+- `GEN_WORKER_GPU_SMOKE` — opts a GPU-only smoke test into a run (e.g. the
+  llama-server CUDA smoke in `tests/test_llama_runtime.py`); never read by
+  worker runtime code. Real-model GPU coverage now lives in the e2e repo's
+  nightly `TestJ6` cloud journey, not a gen-worker-repo GPU lane.
 
 ## Internal plumbing (raw env, allowlisted in tests/test_env_surface.py)
 
