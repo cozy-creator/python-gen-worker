@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.14.5 (2026-07-11)
+
+- **gw#504: media-output wire contract pinned — save_image on ANY job kind
+  rides the media route, renewed token included.** J19 runs 48b–52d
+  post-mortem: the worker was wire-correct all along (media create carried
+  request_id/job_id; the hub keyed `outputs/<request-id>/<blake3>` and
+  stamped `producer_request_id` — verified in the run-51/52d hub logs). The
+  runs went red because tensorhub th#724 flipped OUTPUT-OWNER attribution
+  (invoked org → invoker org) between runs, which the harness's `?tenant=`
+  query didn't follow. New strict stand-in-hub suite
+  (`tests/test_media_output_route.py`) pins the worker half so a real
+  regression can't hide behind stack-side attribution changes: producer job
+  with repo-CAS routing armed + save_image → media create bound to the
+  token's request/job claims, parts + complete on the media route, ZERO
+  /commits-family calls; same asserts after a real ~80%-TTL capability-token
+  renewal against a stand-in renew endpoint; inference-kind parity.
+  Checkpoints keep the gw#471 /commits route. No runtime code change.
+
 ## 0.14.4 (2026-07-11)
 
 - **gw#497: mypy gates CI at ZERO errors — no baseline.** The #356-era type
