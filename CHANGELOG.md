@@ -1,30 +1,30 @@
 # Changelog
 
-## 0.15.0 (2026-07-12)
+## 0.15.1 (2026-07-12)
 
-- **pgw#509: `variants=` is deleted; checkpoint selection is a typed `model=`
-  payload argument (BREAKING).** The three-boundary rule — class = memory
-  (weights load once per instance), method = wire contract, arg = checkpoint.
-  A handler whose payload declares a field typed with a `ModelChoice` subclass
-  picks, per request, which curated checkpoint runs against the resident base;
-  16 near-identical fine-tunes collapse from 16 routable functions to one
-  `generate(model=)`. New authoring surface (`gen_worker.api.model`, exported
-  as `Model`, `ModelChoice`, `ModelDefaults`): the curated set is DATA — a
-  `str`-valued enum whose members are `Model` rows carrying a `ModelRef`
-  binding + typed per-model `ModelDefaults` (+ optional `hot`/`price` hints).
-  The handler reads `payload.model.defaults` as typed data (no `ctx.models`
-  string-sniffing); on the wire a pick is its id string and the JSON schema is
-  a closed `enum`. **BYOM is the field TYPE**: `model: SomeChoice` is
-  curated-only, `model: SomeChoice | ModelRef` opens an arbitrary
-  client-supplied ref — no `@byom` decorator, arch compat derived from the
-  loaded pipeline. Discovery emits a new per-function `model` block (field +
-  `byom` + `slot` + curated `choices[]` with structured binding/defaults/hints)
-  — the SDK→tensorhub contract the scheduler warm-pools against (th#761).
-- **`route=` (gw#479 payload-driven slot routing) is deleted** — zero endpoints
-  used it. Multi-slot lane classes still content-share and LRU-swap under VRAM
-  pressure; every declared slot is now promoted (no per-request lane pick).
-- Endpoints pinned `gen-worker<0.15` keep the old `variants=` surface until
-  they migrate (ie#469).
+- **gw#479: canonical config digests hoist child-only scalars to the
+  parent.** The qwen pair's remaining split (exact-container repro):
+  transformers 4.53 serialized image/video/vision token ids in
+  ``text_config`` ONLY, 4.57 at the top level ONLY — same values, mirrored
+  paths; parent-duplicate pruning alone could not equate them and each fp8
+  lane kept booking its own 9.4GB text encoder. Child scalar duplicating
+  the parent drops; child-only scalar hoists; a CONFLICTING child value
+  keeps both sides (keys separate). Verified equal inside the serve image
+  on the two real fp8 TE configs.
+
+
+## 0.14.15 (2026-07-12)
+
+- **gw#479: canonical config digests hoist child-only scalars to the
+  parent.** The qwen pair's remaining split (live A100 pod, exact-container
+  repro): transformers 4.53 serialized image/video/vision token ids in
+  ``text_config`` ONLY, 4.57 at the top level ONLY — same values, mirrored
+  paths, so parent-duplicate pruning alone could not equate them and each
+  lane kept booking its own 9.4GB fp8 text encoder. Canonical form now:
+  child scalar duplicating the parent drops; child-only scalar hoists to
+  the parent; a CONFLICTING child value keeps both sides (keys separate).
+  Verified equal inside the serve image on the two real fp8 TE configs.
+
 
 ## 0.14.14 (2026-07-12)
 
