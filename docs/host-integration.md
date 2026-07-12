@@ -53,7 +53,7 @@ Document shape:
 ```json
 {
   "protocol_version": 1,
-  "gen_worker_version": "0.14.15",
+  "gen_worker_version": "0.15.2",
   "capabilities": ["describe", "list_functions", "prefetch", "cancel",
                    "streaming", "tcp_listen", "serve_sidecar",
                    "hub_resolve", "variant_auto"],
@@ -189,7 +189,7 @@ Shape:
 ```json
 {
   "protocol_version": 1,
-  "gen_worker_version": "0.14.15",
+  "gen_worker_version": "0.15.2",
   "pid": 12345,
   "listen": "/abs/path/.gen-worker.sock",
   "ready_at": 1733356800.0,
