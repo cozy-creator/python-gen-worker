@@ -38,8 +38,9 @@ from .api.streaming import (
     IncrementalTokenDelta,
     StreamAccumulator,
     StreamResult,
+    TokenUsage,
 )
-from .api.types import Compute, MediaAsset
+from .api.types import Asset, Compute
 from .capability import HardwareUnmetError, InsufficientDiskError
 from .input_assets import cleanup_input_assets, materialize_input_assets
 from .models import disk_gc
@@ -193,10 +194,13 @@ def _map_exception(exc: BaseException) -> Tuple["pb.JobStatus", str]:
     return pb.JOB_STATUS_FATAL, f"{label}: {detail}"[:512] if detail else label
 
 
-def _output_media_seconds(output: Any) -> float:
-    """Sum probed MEDIA seconds (e.g. ``VideoAsset.duration_s``) across the
-    job output. Billing source for ``per_output_second`` (th#572)."""
-    total = 0.0
+def _scan_output_assets(output: Any) -> Tuple[float, int]:
+    """One walk over the job output: (summed MEDIA seconds, count of output
+    ``Asset``s). Billing sources for ``per_output_second`` (th#572) and
+    ``per_output`` (pgw#512) settlement — the ONLY ones; settlement must
+    never scavenge the result payload by field name."""
+    total_duration = 0.0
+    count = 0
     seen: set = set()
     stack = [output]
     while stack:
@@ -206,17 +210,29 @@ def _output_media_seconds(output: Any) -> float:
         if id(item) in seen:
             continue
         seen.add(id(item))
-        if isinstance(item, MediaAsset):
+        if isinstance(item, Asset):
+            count += 1
             d = getattr(item, "duration_s", None)
             if isinstance(d, (int, float)) and d > 0:
-                total += float(d)
+                total_duration += float(d)
         elif isinstance(item, dict):
             stack.extend(item.values())
         elif isinstance(item, (list, tuple, set, frozenset)):
             stack.extend(item)
         elif isinstance(item, msgspec.Struct):
             stack.extend(getattr(item, f, None) for f in item.__struct_fields__)
-    return total
+    return total_duration, count
+
+
+def _output_token_usage(output: Any) -> Optional[TokenUsage]:
+    """The terminal ``TokenUsage`` signal, when the job was a token stream
+    (pgw#512). Non-streaming handlers report no token usage — that's a
+    tenant/runtime authoring a ``TokenUsage`` explicitly (see
+    ``runtimes/llama.py``), not something inferable from an arbitrary
+    output shape."""
+    if isinstance(output, StreamResult):
+        return output.usage
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -2543,6 +2559,15 @@ class Executor:
                 ctx._gpu_slot_lease = lease
                 if job.ctx.cancelled:
                     raise CanceledError("canceled")
+                # pgw#513: reset the CUDA peak-allocator watermark now that
+                # this job exclusively owns gpu_index (jobs serialize under
+                # _gpu_semaphore) — peak_vram_bytes then measures THIS job's
+                # peak, not the process-lifetime high-water mark.
+                if torch is not None and torch.cuda.is_available():
+                    try:
+                        torch.cuda.reset_peak_memory_stats(gpu_index)
+                    except Exception:
+                        pass
             started = time.monotonic()
             # Pin-while-executing: the models (and adapter snapshots) this job
             # uses are not eviction candidates for its duration. Routed lanes
@@ -3003,11 +3028,14 @@ class Executor:
         output: Any = None,
     ) -> pb.JobMetrics:
         runtime_ms = int((time.monotonic() - started) * 1000)
-        peak_rss = 0
+        # rss_at_end_bytes (pgw#513): instantaneous RSS, honestly named — the
+        # OS gives no per-process peak-RSS reset, so this is NOT a per-job
+        # peak (unlike peak_vram_bytes below, reset at handler start).
+        rss_at_end = 0
         try:
             import psutil
 
-            peak_rss = int(psutil.Process().memory_info().rss)
+            rss_at_end = int(psutil.Process().memory_info().rss)
         except Exception:
             pass
         peak_vram = 0
@@ -3016,10 +3044,15 @@ class Executor:
                 peak_vram = int(torch.cuda.max_memory_allocated(gpu_index))
             except Exception:
                 pass
+        duration_s, output_count = _scan_output_assets(output)
+        usage = _output_token_usage(output)
         return pb.JobMetrics(
-            runtime_ms=runtime_ms, queue_ms=queue_ms, peak_rss_bytes=peak_rss,
+            runtime_ms=runtime_ms, queue_ms=queue_ms, rss_at_end_bytes=rss_at_end,
             peak_vram_bytes=peak_vram, concurrency_at_start=max(0, concurrency_at_start),
-            output_media_duration_s=_output_media_seconds(output),
+            output_media_duration_s=duration_s, output_count=output_count,
+            input_tokens=usage.prompt_tokens if usage is not None else 0,
+            input_cached_tokens=usage.cached_tokens if usage is not None else 0,
+            output_tokens=usage.completion_tokens if usage is not None else 0,
         )
 
     async def _send_result(

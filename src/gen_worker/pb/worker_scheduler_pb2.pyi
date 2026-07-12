@@ -336,20 +336,28 @@ class JobResult(_message.Message):
     def __init__(self, request_id: _Optional[str] = ..., attempt: _Optional[int] = ..., status: _Optional[_Union[JobStatus, str]] = ..., inline: _Optional[bytes] = ..., blob_ref: _Optional[str] = ..., safe_message: _Optional[str] = ..., metrics: _Optional[_Union[JobMetrics, _Mapping]] = ...) -> None: ...
 
 class JobMetrics(_message.Message):
-    __slots__ = ("runtime_ms", "queue_ms", "peak_rss_bytes", "peak_vram_bytes", "concurrency_at_start", "output_media_duration_s")
+    __slots__ = ("runtime_ms", "queue_ms", "rss_at_end_bytes", "peak_vram_bytes", "concurrency_at_start", "output_media_duration_s", "input_tokens", "input_cached_tokens", "output_tokens", "output_count")
     RUNTIME_MS_FIELD_NUMBER: _ClassVar[int]
     QUEUE_MS_FIELD_NUMBER: _ClassVar[int]
-    PEAK_RSS_BYTES_FIELD_NUMBER: _ClassVar[int]
+    RSS_AT_END_BYTES_FIELD_NUMBER: _ClassVar[int]
     PEAK_VRAM_BYTES_FIELD_NUMBER: _ClassVar[int]
     CONCURRENCY_AT_START_FIELD_NUMBER: _ClassVar[int]
     OUTPUT_MEDIA_DURATION_S_FIELD_NUMBER: _ClassVar[int]
+    INPUT_TOKENS_FIELD_NUMBER: _ClassVar[int]
+    INPUT_CACHED_TOKENS_FIELD_NUMBER: _ClassVar[int]
+    OUTPUT_TOKENS_FIELD_NUMBER: _ClassVar[int]
+    OUTPUT_COUNT_FIELD_NUMBER: _ClassVar[int]
     runtime_ms: int
     queue_ms: int
-    peak_rss_bytes: int
+    rss_at_end_bytes: int
     peak_vram_bytes: int
     concurrency_at_start: int
     output_media_duration_s: float
-    def __init__(self, runtime_ms: _Optional[int] = ..., queue_ms: _Optional[int] = ..., peak_rss_bytes: _Optional[int] = ..., peak_vram_bytes: _Optional[int] = ..., concurrency_at_start: _Optional[int] = ..., output_media_duration_s: _Optional[float] = ...) -> None: ...
+    input_tokens: int
+    input_cached_tokens: int
+    output_tokens: int
+    output_count: int
+    def __init__(self, runtime_ms: _Optional[int] = ..., queue_ms: _Optional[int] = ..., rss_at_end_bytes: _Optional[int] = ..., peak_vram_bytes: _Optional[int] = ..., concurrency_at_start: _Optional[int] = ..., output_media_duration_s: _Optional[float] = ..., input_tokens: _Optional[int] = ..., input_cached_tokens: _Optional[int] = ..., output_tokens: _Optional[int] = ..., output_count: _Optional[int] = ...) -> None: ...
 
 class JobProgress(_message.Message):
     __slots__ = ("request_id", "attempt", "seq", "data", "content_type")

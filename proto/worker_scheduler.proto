@@ -259,8 +259,14 @@ enum JobStatus {
 message JobMetrics {
   int64 runtime_ms     = 1; // handler start -> handler completion
   int64 queue_ms       = 2; // worker-local queue wait before start
-  int64 peak_rss_bytes = 3; // peak host RSS during execution; 0 = unmeasured
-  int64 peak_vram_bytes = 4; // peak VRAM during execution; 0 = unmeasured
+  // Host RSS sampled at job completion (NOT a per-job peak: the OS gives no
+  // per-process peak-RSS reset, so this is an honest instantaneous reading,
+  // not a high-water mark — pgw#513). 0 = unmeasured.
+  int64 rss_at_end_bytes = 3;
+  // Peak VRAM during execution. torch.cuda.reset_peak_memory_stats() runs at
+  // handler start (GPU jobs serialize under the worker's GPU semaphore, so
+  // this IS a true per-job peak — pgw#513). 0 = unmeasured.
+  int64 peak_vram_bytes = 4;
   int32 concurrency_at_start = 5; // jobs already active on the worker at admit
   // Summed MEDIA seconds of the media assets in the job's output (e.g.
   // VideoAsset.duration_s probed at save time). 0 = no media duration
@@ -268,6 +274,13 @@ message JobMetrics {
   // (th#572) — settlement must fail closed rather than fall back to
   // runtime_ms wall-clock.
   double output_media_duration_s = 6;
+  // Typed billing usage (pgw#512) — the ONLY settlement source for
+  // per_million_tokens/per_output pricing. Settlement must read these, never
+  // scavenge the (possibly blob-ref'd, tenant-controlled) result payload.
+  int64 input_tokens = 7;
+  int64 input_cached_tokens = 8;
+  int64 output_tokens = 9;
+  int64 output_count = 10; // count of generated output Assets (images/videos/audios/files)
 }
 
 // Worker -> orchestrator streaming output chunk. Ordered per (request_id,
