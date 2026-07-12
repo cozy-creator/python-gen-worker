@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.13.34 (2026-07-11)
+
+- **gw#504 (backport from 0.14.5): media-output wire contract pinned.**
+  save_image on ANY job kind rides the media route with the capability
+  token's request/job binding — including after a real ~80%-TTL token
+  renewal — and never touches the /commits family; checkpoints keep the
+  gw#471 /commits route. Strict stand-in-hub suite
+  (`tests/test_media_output_route.py`). No runtime code change: the J19
+  48b-52d sample flip was tensorhub th#724 output-owner attribution, not
+  the worker.
+
 ## 0.13.25 (2026-07-11)
 
 - **gw#479: content-keyed shared components + transformer lanes.**
