@@ -850,6 +850,19 @@ def apply_low_vram_config(
             pipeline=pipeline, model_size_gb=model_size_gb, peak_vram_gb=peak_vram_gb,
         )
         log.info("low_vram: auto-selected mode=%s", effective_mode)
+    if effective_mode in ("group_offload", "sequential") and getattr(
+        pipeline, "_cozy_gguf_quant", None
+    ):
+        # GGUF-loaded pipelines (cl#27): enable_model_cpu_offload is the
+        # deepest safe rung — sequential offload is a known upstream break
+        # (accelerate KeyError on gguf-quantized params); group offload is
+        # untested with dequant-on-use. Clamp instead of crashing mid-load.
+        log.warning(
+            "low_vram: %s requested on a gguf pipeline; clamping to "
+            "model_offload (deeper rungs break on gguf-quantized params)",
+            effective_mode,
+        )
+        effective_mode = "model_offload"
     if effective_mode in _CPU_OFFLOAD_MODES:
         _forbid_cpu_inference(f"CPU-offloaded inference (mode={effective_mode})")
 

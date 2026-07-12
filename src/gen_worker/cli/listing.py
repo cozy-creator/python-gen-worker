@@ -87,6 +87,61 @@ def detected_capabilities() -> Dict[str, Any]:
     return out
 
 
+def _gguf_probe(
+    binding: Any, caps: Any, free_gb: float,
+) -> Optional[Dict[str, Any]]:
+    """cl#27: would the local ladder serve this function via a stored
+    #gguf-<qtype> flavor? One hub resolve per bare tensorhub binding, only
+    consulted when the declared-Resources verdict already says the function
+    can't run natively. Quiet + fail-open: any miss/failure returns None and
+    the declared verdict stands."""
+    import os
+
+    if os.getenv("GEN_WORKER_NO_PRECISION_LADDER", "").strip() == "1":
+        return None
+    if getattr(binding, "provider", "") != "tensorhub":
+        return None
+    if getattr(binding, "flavor", "") or getattr(binding, "storage_dtype", ""):
+        return None  # author override — never laddered
+    try:
+        from ..api.binding import wire_ref
+        from ..models.hub_client import resolve_repo
+        from ..models.ladder import (
+            gguf_fit_bounds,
+            ladder_model_from_resolved,
+            resolve,
+            resolve_local_gguf,
+        )
+        from ..models.memory import cpu_offload_forbidden
+        from ..models.refs import parse_model_ref
+
+        thref = parse_model_ref(wire_ref(binding)).tensorhub
+        if thref is None or thref.digest:
+            return None
+        model = ladder_model_from_resolved(resolve_repo(thref, timeout=5.0))
+        gpu_sm = int(getattr(caps, "gpu_sm", 0) or 0)
+        native = resolve(
+            model, gpu_sm=gpu_sm, free_vram_gb=free_gb,
+            libs=tuple(getattr(caps, "installed_libs", ()) or ()),
+        )
+        if not native.refusal:
+            return None  # a native rung fits — the ladder never reaches gguf
+        pick = resolve_local_gguf(
+            model, gpu_sm=gpu_sm, free_vram_gb=free_gb,
+            allow_te_offload=not cpu_offload_forbidden())
+        if pick is None:
+            return None
+        row = next((r for r in model.flavors if r.token == pick.flavor), None)
+        est, te_offload = 0.0, False
+        if row is not None:
+            resident, offloaded = gguf_fit_bounds(model, row.size_gb)
+            te_offload = resident > free_gb
+            est = offloaded if te_offload else resident
+        return {"flavor": pick.flavor, "est_gb": est, "te_offload": te_offload}
+    except Exception:
+        return None
+
+
 def function_entries(
     candidates: List["_SelectedFunction"],
     *,
@@ -96,7 +151,13 @@ def function_entries(
     ``serve --list-functions --json``. With ``detected`` (the
     ``detected_capabilities()`` block), each entry carries a ``fit`` verdict
     (``fits | offload | incompatible``) computed from its ``Resources``."""
-    from ..models.hub_policy import TensorhubWorkerCapabilities, variant_fit
+    from ..models.hub_policy import (
+        FIT_EMERGENCY,
+        FIT_EMERGENCY_FP8,
+        FIT_OFFLOAD,
+        TensorhubWorkerCapabilities,
+        variant_fit,
+    )
 
     caps: Optional[TensorhubWorkerCapabilities] = None
     free_gb = 0.0
@@ -153,6 +214,35 @@ def function_entries(
                 entry["advisory"] = plan.warning
             elif plan.reason and not plan.serveable:
                 entry["advisory"] = plan.reason
+            # cl#27: when nothing native fits, the local ladder may serve a
+            # stored #gguf-<qtype> flavor instead of emergency-nf4/offload —
+            # surface the SAME pick the setup-time walk will make.
+            if fit in (FIT_EMERGENCY_FP8, FIT_EMERGENCY, FIT_OFFLOAD):
+                gguf = _gguf_probe(primary, caps, free_gb)
+                if gguf is not None:
+                    from ..models.hub_policy import FIT_GGUF
+                    from ..models.ladder import gguf_qtype
+
+                    qtype = gguf_qtype(gguf["flavor"]) or gguf["flavor"]
+                    entry["fit"] = FIT_GGUF
+                    entry["fit_flavor"] = gguf["flavor"]
+                    resident_note = (
+                        "denoiser resident, TEs offloaded"
+                        if gguf.get("te_offload") else "fully resident"
+                    )
+                    entry["fit_reason"] = (
+                        f"runs via GGUF {qtype} (local-only, reduced quality): "
+                        f"~{gguf['est_gb']:.1f} GB {resident_note}, "
+                        f"{free_gb:.1f} GB free"
+                    )
+                    entry["serveable"] = True
+                    entry["run_mode"] = FIT_GGUF
+                    entry["est_latency_multiplier"] = 1.75
+                    entry["advisory"] = (
+                        "pre-quantized GGUF rung: fit regime only — "
+                        "no compile/TRT speedups, quality below the stored "
+                        "bf16/fp8 flavors"
+                    )
         out.append(entry)
     return out
 

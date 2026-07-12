@@ -542,6 +542,83 @@ def block_offload_active(obj: Any) -> bool:
     )
 
 
+def detect_gguf_snapshot(path: Path) -> Optional[tuple[Path, str]]:
+    """cl#27: a composed GGUF snapshot (gguf denoiser + base tree, built by
+    gguf_local.fetch_gguf_snapshot). Returns ``(gguf_file, qtype)`` or None.
+    Marker-first; structural fallback (sole .gguf + model_index.json) covers
+    a dir that lost its marker."""
+    p = Path(path)
+    if not p.is_dir() or not (p / "model_index.json").exists():
+        return None
+    from .gguf_local import read_marker
+    from .ladder import gguf_qtype
+
+    marker = read_marker(p)
+    if marker:
+        gguf = p / str(marker.get("gguf_path") or "")
+        qtype = str(marker.get("qtype") or "")
+        if gguf.is_file() and qtype:
+            return gguf, qtype
+    ggufs = sorted(x for x in p.rglob("*.gguf") if x.is_file())
+    if len(ggufs) == 1:
+        # Best-effort qtype from the filename tail (telemetry only).
+        tail = ggufs[0].stem.replace(".", "-").rsplit("-", 1)[-1].lower()
+        return ggufs[0], gguf_qtype("gguf-" + tail)
+    return None
+
+
+def load_gguf_pipeline(
+    cls: Any, path: Path, gguf_file: Path, *,
+    components: Optional[Dict[str, Any]] = None,
+) -> Any:
+    """The GGUF diffusion lane (GGUF-DESIGN §1): denoiser via
+    ``from_single_file(..., quantization_config=GGUFQuantizationConfig)`` —
+    dequant-on-use, bf16 compute (the platform quantization-policy compute
+    dtype) — composed with the base tree's other components via
+    ``from_pretrained``. The explicit ``config=`` from the base tree is also
+    the diffusers #13001 workaround (klein shape-init bug). Never
+    ``Pipeline.from_pretrained`` on the gguf itself."""
+    import importlib
+
+    import torch
+    from diffusers import GGUFQuantizationConfig
+
+    path = Path(path)
+    index = json.loads((path / "model_index.json").read_text("utf-8"))
+    comp = next((c for c in _FP8_STORAGE_COMPONENTS
+                 if isinstance(index.get(c), list) and len(index[c]) == 2), None)
+    if comp is None:
+        raise ValueError(
+            f"gguf composition: model_index.json in {path} has no "
+            f"transformer/unet component"
+        )
+    module_name, class_name = index[comp]
+    denoiser_cls = getattr(importlib.import_module(str(module_name)), str(class_name))
+    compute = torch.bfloat16
+    denoiser = denoiser_cls.from_single_file(
+        str(gguf_file),
+        config=str(path / comp),
+        quantization_config=GGUFQuantizationConfig(compute_dtype=compute),
+        torch_dtype=compute,
+    )
+    kwargs: Dict[str, Any] = dict(components or {})
+    kwargs[comp] = denoiser
+    logger.info(
+        "gguf lane: %s %s from %s (compute bf16), rest from %s",
+        comp, class_name, gguf_file.name, path,
+    )
+    pipe = cls.from_pretrained(str(path), torch_dtype=compute, **kwargs)
+    # Component policy (GGUF-DESIGN §1): TEs are never GGUF — on this fit
+    # rung they take fp8 storage (halved resident bytes, bf16 compute), with
+    # the offload ladder as the relief valve beyond that. The gguf-quantized
+    # denoiser must NOT be fp8-cast, so target the TE modules only.
+    for te_name in _FP8_TEXT_ENCODER_COMPONENTS:
+        mod = getattr(pipe, te_name, None)
+        if mod is not None and hasattr(mod, "parameters"):
+            apply_fp8_storage(mod, compute_dtype=compute)
+    return pipe
+
+
 def _single_file_checkpoint(path: Path) -> Optional[Path]:
     """A snapshot that is one loose checkpoint rather than a pretrained layout:
     the path itself when it's a ``.safetensors`` file, or the directory's sole
@@ -853,6 +930,18 @@ def load_from_pretrained(
         if components:
             logger.warning("preloaded components ignored on the svdq lane")
         return load_svdq_pipeline(cls, Path(path), svdq_art)
+    # GGUF composed snapshots (cl#27): self-describing, like svdq. Already
+    # 4-bit/8-bit stored — the adaptive fit rungs and fp8 storage never
+    # apply; the offload ladder caps at model_offload (memory.py clamp).
+    gguf_art = detect_gguf_snapshot(Path(path))
+    if gguf_art is not None and callable(getattr(cls, "from_pretrained", None)):
+        gguf_file, qtype = gguf_art
+        pipe = load_gguf_pipeline(cls, Path(path), gguf_file, components=components)
+        try:
+            pipe._cozy_gguf_quant = qtype or "gguf"
+        except Exception:
+            pass
+        return pipe
     kwargs: Dict[str, Any] = {}
     if components:
         kwargs.update(components)
@@ -938,6 +1027,8 @@ __all__ = [
     "safetensors_file_valid",
     "read_on_disk_quant_config",
     "synthesize_quantization_config",
+    "detect_gguf_snapshot",
+    "load_gguf_pipeline",
     "apply_fp8_storage",
     "apply_block_window_offload",
     "block_offload_active",

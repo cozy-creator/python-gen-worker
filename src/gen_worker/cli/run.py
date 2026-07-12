@@ -707,6 +707,14 @@ def _resolve_local_path(
     # cozy_snapshot downloader. TENSORHUB_URL selects the hub; TENSORHUB_TOKEN
     # (optional) unlocks private repos. Offline stays CAS-only.
     if parsed.provider == "tensorhub" and parsed.tensorhub is not None:
+        from ..models.ladder import gguf_qtype
+
+        if gguf_qtype(str(parsed.tensorhub.flavor or "")):
+            # cl#27: a #gguf-<qtype> flavor is denoiser-only — fetch the
+            # composed snapshot (base tree minus denoiser weights + gguf).
+            return _fetch_gguf_snapshot(
+                parsed.tensorhub, cache_dir=cache_dir, emit=emit, offline=offline,
+            )
         if offline:
             # Tag refs: a previous online resolve remembered tag->digest.
             ref_map = _hub_ref_map_path(cache_dir, parsed.tensorhub)
@@ -787,6 +795,40 @@ def _resolve_local_path(
     raise _ModelResolutionError(
         f"unsupported model ref: {ref!r} (provider={provider!r})"
     )
+
+
+def _fetch_gguf_snapshot(
+    thref: Any, *, cache_dir: Path, emit: Callable[[Dict[str, Any]], None],
+    offline: bool,
+) -> str:
+    """cl#27: composed snapshot for a #gguf-<qtype> ref (gguf denoiser + the
+    base tree's non-denoiser components). Offline honors the remembered
+    composed digest like any other tag ref."""
+    if offline:
+        ref_map = _hub_ref_map_path(cache_dir, thref)
+        if ref_map.exists():
+            cached = cache_dir / "snapshots" / ref_map.read_text().strip()
+            if cached.exists():
+                return str(cached)
+        raise _ModelResolutionError(
+            f"--offline: gguf ref {thref.canonical()} not in local CAS "
+            f"({cache_dir}); warm the cache by running without --offline once."
+        )
+    from ..models.gguf_local import fetch_gguf_snapshot
+    from ..models.hub_client import HubResolveError
+
+    try:
+        snap = fetch_gguf_snapshot(thref, cache_dir=cache_dir, emit=emit)
+    except HubResolveError as e:
+        raise _ModelResolutionError(str(e)) from e
+    except _ModelResolutionError:
+        raise
+    except Exception as e:
+        raise _ModelResolutionError(
+            f"failed to download gguf snapshot for {thref.canonical()}: {e}"
+        ) from e
+    _remember_hub_ref(cache_dir, thref, Path(snap).name)
+    return snap
 
 
 def _remember_hub_ref(cache_dir: Path, thref: Any, digest: str) -> None:

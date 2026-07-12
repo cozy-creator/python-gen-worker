@@ -187,6 +187,14 @@ class LadderModel:
     # e.g. latent upsamplers) removes ALL cast rungs (fp8 cast-at-load,
     # emergency nf4); stored flavors and the bf16 base are unaffected.
     castable: bool = True
+    # Local GGUF rungs (cl#27) only — never read by the shared-spec walk:
+    # base-tree bytes OUTSIDE the denoiser (encoders/VAE/... that load
+    # alongside a gguf denoiser), the text-encoder share of those (TEs get
+    # fp8 storage + offload per the component policy — never GGUF), and
+    # whether the base is a composable diffusers tree (model_index.json).
+    non_denoiser_gb: float = 0.0
+    te_gb: float = 0.0
+    diffusers_tree: bool = False
 
 
 @dataclass(frozen=True)
@@ -309,11 +317,108 @@ def resolve(
 
 
 # ---------------------------------------------------------------------------
+# Local-only GGUF rungs (cl#27, the consumption half of GGUF-DESIGN). NOT part
+# of the shared Go/Py ladder spec: production (tensorhub's Go resolver +
+# HelloAck picks) never selects #gguf-* — the only caller is the local walk
+# below, which production never runs. Quadrant: local ∧ no fp4 cores ∧ no
+# native rung fits. A pre-quantized k-quant flavor beats runtime emergency-nf4
+# on startup (no load-time quant), quality (calibrated super-blocks), and
+# transfer (~¼ of bf16) — so it slots BETWEEN the native rungs and the
+# loading layer's nf4/offload machinery.
+# ---------------------------------------------------------------------------
+
+# fp4 cores (Blackwell, SM >= 100): nvfp4/svdq-fp4 strictly dominate GGUF —
+# the GGUF rung must never appear there (GGUF-DESIGN invariant 2).
+FP4_CORES_MIN_SM = 100
+
+# k-quant preference, quality-descending. Only qtypes diffusers' GGUF
+# dequant loads (Q2_K..Q8_0 + legacy); IQ-quants and float ggufs never rungs.
+GGUF_QUALITY_ORDER = (
+    "q8_0", "q6_k", "q5_k_m", "q5_k_s", "q5_1", "q5_0",
+    "q4_k_m", "q4_k_s", "q4_1", "q4_0", "q3_k_m", "q3_k_s", "q2_k",
+)
+
+_DENOISER_DIRS = ("transformer", "unet")
+
+
+def gguf_qtype(flavor: str) -> str:
+    """``gguf-q4_k_m`` -> ``q4_k_m``; "" for anything that is not a
+    ladder-eligible gguf flavor token."""
+    token = str(flavor or "").strip().lower()
+    if not token.startswith("gguf-"):
+        return ""
+    qtype = token[len("gguf-"):]
+    return qtype if qtype in GGUF_QUALITY_ORDER else ""
+
+
+def is_denoiser_weight_path(path: str) -> bool:
+    """True for a manifest path holding denoiser WEIGHTS — the files a GGUF
+    flavor replaces. Everything under transformer/ or unet/ except the
+    config.json the gguf loader still needs."""
+    p = str(path or "").strip().lstrip("/")
+    head, _, rest = p.partition("/")
+    if head not in _DENOISER_DIRS or not rest:
+        return False
+    return rest != "config.json"
+
+
+def is_te_weight_path(path: str) -> bool:
+    """Text-encoder component files (text_encoder/, text_encoder_2/, ...)."""
+    p = str(path or "").strip().lstrip("/")
+    head, _, rest = p.partition("/")
+    return bool(rest) and head.startswith("text_encoder")
+
+
+# TE fp8 storage halves resident text-encoder bytes (fp8-E4M3 at rest,
+# per-layer bf16 upcast via apply_fp8_storage — no fp8 silicon required).
+GGUF_TE_FP8_FACTOR = 0.5
+
+
+def gguf_fit_bounds(model: LadderModel, size_gb: float) -> tuple[float, float]:
+    """(resident_est, te_offload_est) for one gguf flavor of ``size_gb``.
+
+    Component policy: the gguf artifact replaces only the denoiser; VAE &co
+    stay resident at compute dtype; TEs load with fp8 storage (halved) and
+    are the offloadable component when even that doesn't fit."""
+    overhead = max(0.0, model.non_denoiser_gb - model.te_gb)
+    resident = size_gb + overhead + GGUF_TE_FP8_FACTOR * model.te_gb
+    return resident, size_gb + overhead
+
+
+def resolve_local_gguf(
+    model: LadderModel, *, gpu_sm: int, free_vram_gb: float,
+    allow_te_offload: bool = True,
+) -> Optional[Resolution]:
+    """Best stored #gguf-<qtype> flavor that fits, quality-descending — or
+    None. Fit uses the flavor's REAL size, two bounds per flavor: the
+    fully-resident bound (gguf denoiser + overheads + fp8-stored TEs), then
+    — when the host permits CPU offload — the TE-offload bound (how a
+    9B-class model serves on an 8GB card: denoiser resident, TEs streamed).
+    ``allow_te_offload=False`` (GEN_WORKER_FORBID_CPU_OFFLOAD hosts) keeps
+    only the resident bound."""
+    if gpu_sm <= 0 or gpu_sm >= FP4_CORES_MIN_SM:
+        return None
+    if not model.diffusers_tree:
+        return None  # composition needs a base model_index.json tree
+    rows = [(GGUF_QUALITY_ORDER.index(q), r) for r in model.flavors
+            if (q := gguf_qtype(r.token)) and r.size_gb > 0]
+    rows.sort(key=lambda t: (t[0], t[1].token))
+    for _, row in rows:
+        resident, offloaded = gguf_fit_bounds(model, row.size_gb)
+        if resident <= free_vram_gb or (
+            allow_te_offload and offloaded <= free_vram_gb
+        ):
+            return Resolution(flavor=row.token, mode=MODE_NATIVE)
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Local (no-orchestrator) resolution — cozy-local's half of th#697. The hub
 # path delivers picks via HelloAck; this walks the SAME ladder against the
 # hub catalog's sibling-flavor rows and rebinds bare tensorhub bindings to
-# the best NATIVE rung. Emergency-nf4 / offload stay the loading layer's
-# fit machinery (gw#389) — a refusal here just keeps the declared binding.
+# the best NATIVE rung — then, when nothing native fits, the local-only GGUF
+# rungs above. Emergency-nf4 / offload stay the loading layer's fit
+# machinery (gw#389) — a refusal here just keeps the declared binding.
 # ---------------------------------------------------------------------------
 
 
@@ -329,9 +434,23 @@ def ladder_model_from_resolved(rr: Any) -> LadderModel:
             size_gb=float(getattr(sib, "size_bytes", 0) or 0) / 1e9,
             placement=placement_from_metadata(getattr(sib, "placement", None)),
         ))
+    non_denoiser = 0
+    te_bytes = 0
+    diffusers_tree = False
+    for f in getattr(rr, "files", None) or ():
+        path = str(getattr(f, "path", "") or "")
+        if path.strip().lstrip("/") == "model_index.json":
+            diffusers_tree = True
+        if not is_denoiser_weight_path(path):
+            non_denoiser += int(getattr(f, "size_bytes", 0) or 0)
+            if is_te_weight_path(path):
+                te_bytes += int(getattr(f, "size_bytes", 0) or 0)
     return LadderModel(
         base_size_gb=float(getattr(rr, "size_bytes", 0) or 0) / 1e9,
         flavors=tuple(rows),
+        non_denoiser_gb=non_denoiser / 1e9,
+        te_gb=te_bytes / 1e9,
+        diffusers_tree=diffusers_tree,
     )
 
 
@@ -370,14 +489,28 @@ def resolve_local_bindings(
         except Exception as exc:  # resolver/network failures fail open
             logger.debug("local ladder: resolve of %s failed (%s); keeping declared", name, exc)
             continue
+        gpu_sm = int(getattr(caps, "gpu_sm", 0) or 0)
         res = resolve(
             model,
-            gpu_sm=int(getattr(caps, "gpu_sm", 0) or 0),
+            gpu_sm=gpu_sm,
             free_vram_gb=free_vram_gb,
             libs=tuple(getattr(caps, "installed_libs", ()) or ()),
             quality_floor=quality_floor,
         )
-        if res.refusal or (not res.flavor and not res.cast):
+        if res.refusal:
+            # No native rung fits — the local-only GGUF rungs (cl#27) sit
+            # between here and the loading layer's nf4/offload machinery.
+            gguf = None
+            if quality_floor == "":
+                from .memory import cpu_offload_forbidden
+
+                gguf = resolve_local_gguf(
+                    model, gpu_sm=gpu_sm, free_vram_gb=free_vram_gb,
+                    allow_te_offload=not cpu_offload_forbidden())
+            if gguf is None:
+                continue
+            res = gguf
+        if not res.flavor and not res.cast:
             continue
         # gw#494: THE single pick-fold (shared with the hub HelloAck path),
         # round-trip guard included — a pick the rebound binding can't
@@ -410,6 +543,9 @@ __all__ = [
     "CLASS_SVDQ_FP4",
     "CLASS_SVDQ_INT4",
     "EMERGENCY_NF4_VRAM_FACTOR",
+    "FP4_CORES_MIN_SM",
+    "GGUF_QUALITY_ORDER",
+    "GGUF_TE_FP8_FACTOR",
     "FlavorRow",
     "LadderModel",
     "MODE_EMERGENCY",
@@ -420,8 +556,13 @@ __all__ = [
     "REFUSE_NO_RUNG",
     "Resolution",
     "classify_flavor_token",
+    "gguf_fit_bounds",
+    "gguf_qtype",
+    "is_denoiser_weight_path",
+    "is_te_weight_path",
     "ladder_model_from_resolved",
     "resolve_local_bindings",
+    "resolve_local_gguf",
     "default_placement",
     "placement_for_flavor",
     "placement_from_metadata",

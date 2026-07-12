@@ -100,6 +100,11 @@ FIT_SVDQ_FP4 = "svdq_fp4"
 FIT_SVDQ_INT4 = "svdq_int4"
 FIT_EMERGENCY_FP8 = "emergency_fp8"
 FIT_EMERGENCY = "emergency_quant"
+# cl#27: a stored #gguf-<qtype> flavor fits where nothing native does —
+# local-only, reduced quality, no compile/TRT ever. Never produced by
+# variant_fit (declared-Resources math); the listing layer overrides with it
+# after a live ladder probe (ladder.resolve_local_gguf).
+FIT_GGUF = "gguf_quant"
 FIT_OFFLOAD = "offload"
 FIT_INCOMPATIBLE = "incompatible"
 

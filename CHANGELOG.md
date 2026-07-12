@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.15.3 (2026-07-12)
+
+- **cl#27: local-only GGUF rungs — an 8GB card serves 12B-class diffusion
+  via stored `#gguf-<qtype>` flavors.** When no native rung fits and the
+  card has no fp4 cores (SM < 100), the local ladder walk
+  (`resolve_local_bindings`) rebinds a bare tensorhub binding to the best
+  stored k-quant flavor (quality-descending, `q8_0` ... `q2_k`) — ahead of
+  the loading layer's emergency-nf4/offload machinery. Fit uses the
+  flavor's REAL size, two bounds per the component policy: fully-resident
+  (gguf denoiser + VAE/overheads + fp8-stored TEs) first, then the
+  TE-offload bound (denoiser resident, TEs streamed — the 9B-on-8GB
+  story); `GEN_WORKER_FORBID_CPU_OFFLOAD` hosts keep only the resident
+  bound. NOT part of the shared
+  Go/Py ladder spec: production resolvers never pick gguf (LOCAL-ONLY
+  invariant); conformance vectors unchanged.
+- **Composed GGUF snapshots** (`models/gguf_local.py`): a gguf flavor
+  checkpoint is denoiser-only (th#611), so the fetch merges the base
+  manifest minus denoiser weights with the gguf — one snapshot dir,
+  blob-dedup'd, ~1/4 of the bf16 denoiser transfer.
+- **GGUF diffusion loading lane** in `load_from_pretrained`: denoiser via
+  `from_single_file(..., quantization_config=GGUFQuantizationConfig)` with
+  explicit `config=` from the base tree (also the diffusers #13001 klein
+  workaround), rest composed via `from_pretrained`; TEs get fp8 storage
+  (never GGUF — transformers dequants to fp32). Offload ladder clamps
+  at `model_offload` for gguf pipes (sequential offload is a known
+  upstream break on gguf params).
+- **`run --list` / `serve --list-functions` surface the pick**: functions
+  whose declared verdict was emergency/offload get `fit="gguf_quant"` +
+  `fit_flavor` + an honest reduced-quality/no-speedup advisory when the
+  ladder would serve gguf (fail-open probe).
+- **`prefetch` now walks the local precision ladder first**, so it pulls
+  the same flavor setup will rebind to (`#fp8`/`#gguf-*`) instead of the
+  bare bf16 artifact.
+
 ## 0.15.2 (2026-07-12)
 
 - **th#763: cold tensorhub refs block-and-serve instead of fataling the

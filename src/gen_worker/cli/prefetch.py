@@ -86,16 +86,24 @@ def _handle_prefetch(args: argparse.Namespace) -> int:
     candidates = _collect_class_methods(mod)
 
     # Collect unique (ref, provider) jobs so a binding shared across
-    # functions/classes is downloaded once.
+    # functions/classes is downloaded once. The th#697 local ladder walk
+    # runs per class first so prefetch pulls the SAME flavor (#fp8 /
+    # #gguf-<qtype>, cl#27) that setup will rebind to — not the bare bf16.
+    from .run import _apply_local_precision_ladder
+
     jobs: Dict[Tuple[str, str], Tuple[str, str, tuple]] = {}
     for c in candidates:
-        for param_name, binding in c.bindings.items():
+        bindings = {
+            k: v for k, v in c.bindings.items() if isinstance(v, BINDING_TYPES)
+        }
+        bindings = _apply_local_precision_ladder(
+            bindings, offline=bool(args.offline), emit=emit)
+        for param_name, binding in bindings.items():
             try:
-                if isinstance(binding, BINDING_TYPES):
-                    ref, provider = _resolve_binding_to_ref(
-                        param_name=param_name, binding=binding)
-                    ap = tuple(getattr(binding, "files", ()) or ())
-                    jobs[(ref, provider)] = (ref, provider, ap)
+                ref, provider = _resolve_binding_to_ref(
+                    param_name=param_name, binding=binding)
+                ap = tuple(getattr(binding, "files", ()) or ())
+                jobs[(ref, provider)] = (ref, provider, ap)
             except Exception as e:
                 sys.stderr.write(f"prefetch: skipping binding {param_name!r}: {e}\n")
 
