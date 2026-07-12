@@ -223,6 +223,36 @@ def test_canonical_config_digest_folds_save_era_noise(tmp_path) -> None:
     assert ca and ca == cb
 
 
+def test_canonical_config_prunes_parent_duplicated_subconfig_keys(tmp_path) -> None:
+    """Live qwen pair: transformers 4.53 serialized vision token ids into
+    BOTH the top-level VL config and text_config; 4.57 only at top. The
+    materialized top-level values are identical — the sub-config duplicate
+    is save-era redundancy and must not split content keys. A sub-config
+    value that DIFFERS from the parent still separates."""
+    import json
+
+    from gen_worker.models.config_identity import canonical_json_digest
+
+    a, b, c = tmp_path / "a", tmp_path / "b", tmp_path / "c"
+    for d in (a, b, c):
+        d.mkdir()
+    top = {"model_type": "qwen2_5_vl", "vision_start_token_id": 151652,
+           "vision_end_token_id": 151653}
+    saved_by_453 = dict(top, text_config={"hidden_size": 8, "vision_start_token_id": 151652,
+                                          "vision_end_token_id": 151653})
+    saved_by_457 = dict(top, text_config={"hidden_size": 8})
+    genuinely_diff = dict(top, text_config={"hidden_size": 8, "vision_start_token_id": 99})
+    # cfg.json name => structural path (no AutoConfig instantiation noise).
+    (a / "cfg.json").write_text(json.dumps(saved_by_453))
+    (b / "cfg.json").write_text(json.dumps(saved_by_457))
+    (c / "cfg.json").write_text(json.dumps(genuinely_diff))
+    da = canonical_json_digest(a / "cfg.json")
+    db = canonical_json_digest(b / "cfg.json")
+    dc = canonical_json_digest(c / "cfg.json")
+    assert da and da == db
+    assert dc != da
+
+
 def test_share_plan_survives_config_provenance_noise(tmp_path, lane_repos) -> None:
     """Repo B's vae config rewritten by a 'newer library' (provenance stamp +
     reindented + explicit null): the vae must STILL share."""
