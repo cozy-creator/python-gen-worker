@@ -1,10 +1,12 @@
 # marco-polo
 
-The hello-world inference endpoint. Send `{"text": "marco"}`, get back `{"response": "polo"}`. Anything else gets a snarky fallback.
+The hello-world inference endpoint. Send `{"text": "marco"}`, get back
+`{"response": "polo"}`. Anything else raises `ValidationError` (exercises the
+failed-request billing branch).
 
 ## What it demonstrates
-- Minimal `@inference` shape — msgspec.Struct in, msgspec.Struct out.
-- Cooperative cancellation via `ctx.raise_if_canceled()`.
+- Minimal `@endpoint` class — msgspec.Struct in, msgspec.Struct out.
+- Cooperative cancellation via `ctx.raise_if_cancelled()`.
 - No GPU, no models, no dependencies.
 
 ## When to copy it
@@ -15,13 +17,13 @@ The hello-world inference endpoint. Send `{"text": "marco"}`, get back `{"respon
 ## Local smoke test
 
 ```bash
-$ gen-worker run --payload '{"text":"marco"}'
+$ gen-worker run --method marco_polo --payload '{"text":"marco"}'
 {"event":"result","value":{"response":"polo"}}
 
-$ gen-worker run --payload '{"text":"hello"}'
-{"event":"result","value":{"response":"Bro you're supposed to say 'marco'!"}}
+$ gen-worker run --method marco_polo --payload '{"text":"hello"}'
+# ValidationError — traceback on stderr, exit 1
 
-$ gen-worker run --payload '{"text":"marco"}' | jq -r .value.response
+$ gen-worker run --method marco_polo --payload '{"text":"marco"}' | jq -r .value.response
 polo
 ```
 
@@ -51,5 +53,7 @@ vs gRPC in production — see the fidelity caveat in
 [../../docs/local-dev.md](../../docs/local-dev.md).
 
 ## Files
-- `src/marco_polo/main.py` — 15 lines of handler.
-- `endpoint.toml`, `pyproject.toml` — Tensorhub generates the Dockerfile for this endpoint from managed build hints.
+- `src/marco_polo/main.py` — sync, async-slow, and streaming variants of the
+  same handler.
+- `pyproject.toml` — Tensorhub generates the Dockerfile for this endpoint
+  from managed build hints.

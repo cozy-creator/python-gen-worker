@@ -151,15 +151,15 @@ yet wired into the local CLI. HuggingFace refs are fully self-contained.
 
 `gen-worker run` installs a two-stage SIGINT handler:
 
-- **First Ctrl-C** — flips `ctx._canceled` so user code observes via
-  `ctx.is_canceled() / ctx.raise_if_canceled()`. Long-running loops
+- **First Ctrl-C** — trips the request's cancel flag so user code observes
+  via `ctx.cancelled` / `ctx.raise_if_cancelled()`. Long-running loops
   inside the function body exit cleanly with `CanceledError`, which the
   CLI translates to exit 130.
 - **Second Ctrl-C within 2s** — hard-exits 130 immediately. Useful when
   the function isn't checking for cancellation.
 
 Authors who want to test their cancellation path can press Ctrl-C once
-and watch their `raise_if_canceled()` fire.
+and watch their `raise_if_cancelled()` fire.
 
 ## `ctx.save_*` and the local output dir
 
@@ -193,7 +193,7 @@ $ gen-worker run --payload '{"text":"marco"}'
 {"event":"result","value":{"response":"polo"}}
 
 $ gen-worker run --payload '{"text":"hello"}'
-{"event":"result","value":{"response":"Bro you're supposed to say 'marco'!"}}
+# ValidationError: expected 'marco', got 'hello' — traceback on stderr, exit 1
 
 $ gen-worker run --payload '{"text":42}'
 gen-worker run: payload validation failed: Expected `str`, got `int` - at `$.text`
@@ -287,20 +287,16 @@ stdin/UDS locally vs gRPC in prod). That's the right trade for warm-model fast
 iteration; byte-for-byte prod fidelity would need the real gRPC Worker against a
 local stub-scheduler.
 
-## The three shapes
-
-`gen-worker` gives you three ways to run an endpoint locally, differing in
-process model and how often the model loads:
+## The two shapes
 
 | Shape | Process model | When to use |
 |---|---|---|
-| `gen-worker run` | One-shot: load → run → exit (one process). | Scripting, CI, one-off pokes, piping to `jq`. Cold-loads each time (unless a warm `serve` is already up on the default socket — then `run` attaches to it). |
+| `gen-worker run` | One-shot: load → run → exit (one process). | Scripting, CI, one-off pokes, piping to `jq`. Cold-loads each time; pass `--attach` to dispatch through a warm `serve` socket instead. |
 | `gen-worker serve` + `gen-worker invoke` | Two processes / terminals: a warm worker + a thin client. | Tight iteration; this is the production/Docker topology (long-running worker, requests fired at it). |
-| `gen-worker repl` | One process: load once, then interactive. | Interactive exploration with the model held resident; type many requests at a prompt. |
 
 ## Ergonomic payload args (#350)
 
-Instead of hand-writing JSON, `run`, `invoke`, and `repl` accept httpie-style
+Instead of hand-writing JSON, `run` and `invoke` accept httpie-style
 tokens that are **coerced against the function's `msgspec.Struct`** so types
 and bounds match the real decode path:
 
@@ -319,37 +315,7 @@ gen-worker invoke generate "a cat" seed=42
 ```
 
 `--payload '<json>'` still works as the escape hatch; ergonomic tokens **merge
-over** it. In `repl`, tokens are split shell-style, so a multi-word value must
-be quoted just like in a shell (`"a cat" steps=5`).
-
-## `gen-worker repl`
-
-A load-once interactive session: it boots the endpoint (eager `setup()`, model
-resident) and loops over typed requests, reusing the same engine as `serve`.
-
-```bash
-$ cd examples/marco-polo
-$ gen-worker repl
-gen-worker repl — marco_polo.main (1 function(s): marco_polo)
-type ':help' for commands, ':quit' to exit
-active function: marco_polo
-marco_polo> "marco"
-{"response":"polo"}
-```
-
-Each line is either ergonomic tokens / raw JSON (a request to the active
-function) or a meta-command:
-
-| Command | Action |
-|---|---|
-| `:use <fn>` | switch the active function |
-| `:functions` | list functions |
-| `:schema` | print the active function's input JSON Schema |
-| `:help` | show help |
-| `:quit` (or `:q`) | exit |
-
-**Ctrl-C** cancels the in-flight request and returns to the prompt; **Ctrl-D**
-exits (and runs `shutdown()`).
+over** it.
 
 ## Deployment shapes (Docker / k8s)
 
@@ -401,17 +367,15 @@ Cancelling a request and stopping the worker both funnel through the same
   drains them cooperatively, then shuts down (runs `shutdown()`, removes the
   socket). SIGTERM (k8s/orchestrator graceful stop) takes the identical path.
   `SIGKILL` is uncatchable — it bypasses all cleanup.
-- **`repl`, Ctrl-C:** cancels the in-flight request and returns to the prompt;
-  Ctrl-D exits.
 
-Tenant code should observe cancellation by calling `ctx.raise_if_canceled()`
-inside loops, or by waiting on `ctx.cancel_event` — the **same idiom**
-production uses for an orchestrator interrupt.
+Tenant code observes cancellation by calling `ctx.raise_if_cancelled()`
+inside loops (or polling `ctx.cancelled`) — the **same idiom** production
+uses for an orchestrator interrupt.
 
 ## When `gen-worker run` is the wrong tool
 
 - **Resource gating.** The CLI doesn't enforce VRAM / compute-capability
-  gates. If your endpoint declares `min_vram_gb=80` and you're on a 24GB
+  gates. If your endpoint declares `vram_gb=80` and you're on a 24GB
   card, the CLI happily tries to load the model and fails inside torch.
 - **Multi-tenant scheduling.** No request queuing, no fairness, no
   micro-batching. One request, sequential dispatch.

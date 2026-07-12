@@ -13,4 +13,4 @@ An `@endpoint(kind="conversion")` that publishes an **orphan checkpoint** — a 
 
 ## Files
 - `from_scratch.py` — the endpoint; uses `torch.manual_seed` for deterministic output.
-- `endpoint.toml` — declares CPU-only resources (this example doesn't need GPU).
+- `endpoint.toml` — CPU-only build profile (this example doesn't need GPU).

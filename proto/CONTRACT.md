@@ -525,7 +525,7 @@ via `ModelOp{DOWNLOAD}` (pre-positioning) or `ModelOp{ADOPT_COMPILE_CACHE}`
    client via presigned GET/redirect.
 
 **Capability token renewal (#561).** `RunJob.capability_token` is TTL'd per
-workload (inference 1h / conversion 24h / training 7d). A job that outlives
+workload (inference 1h / training 1h / conversion 24h — th#639: trainers renew hourly instead of holding a week-long credential). A job that outlives
 its token renews over HTTP: `POST {file_base_url}/v1/worker/capability/renew`
 with `authorization: Bearer <worker JWT>` and body `{request_id, attempt,
 capability_token}`. O re-mints the SAME grants with a fresh expiry iff the
