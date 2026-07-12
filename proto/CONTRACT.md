@@ -313,10 +313,14 @@ those never travel on the wire.
 |---|---|---|---|
 | `runtime_ms` | W | O runtime EWMA (placement/autoscale ETA) | handler start → completion |
 | `queue_ms` | W | O local-queue EWMA | worker-local wait before start |
-| `peak_rss_bytes` | W (psutil sample) | O memory profile samples | 0 = unmeasured |
-| `peak_vram_bytes` | W (CUDA peak stats) | O VRAM profile samples | 0 = unmeasured |
+| `rss_at_end_bytes` | W (psutil sample at job completion) | O memory profile samples | instantaneous RSS, NOT a per-job peak (the OS gives no per-process peak-RSS reset — pgw#513); 0 = unmeasured |
+| `peak_vram_bytes` | W (CUDA peak stats, reset at handler start) | O VRAM profile samples | true per-job peak: GPU jobs serialize under W's GPU semaphore, so `reset_peak_memory_stats()` at handler start isolates this job's peak (pgw#513); 0 = unmeasured |
 | `concurrency_at_start` | W executor | O observed-parallelism profile | active jobs at admit |
 | `output_media_duration_s` | W executor (sums probed `duration_s` of output media assets) | O `per_output_second` settlement (th#572) | MEDIA seconds, never wall-clock; 0 = unreported ⇒ media-unit settlement fails closed |
+| `input_tokens` | W (folds streaming `TokenUsage`) | O `per_million_tokens` settlement (pgw#512) | 0 = unreported |
+| `input_cached_tokens` | W (folds streaming `TokenUsage`) | O `per_million_tokens` settlement (pgw#512) | 0 = unreported |
+| `output_tokens` | W (folds streaming `TokenUsage`) | O `per_million_tokens` settlement (pgw#512) | 0 = unreported |
+| `output_count` | W executor (counts output `Asset`s) | O `per_output` settlement (pgw#512) | replaces result-payload scavenging; 0 = unreported |
 
 ### JobProgress (W → O)
 Streaming output chunks (LLM token deltas, AR-TTS audio, structured partials).

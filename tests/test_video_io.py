@@ -96,11 +96,11 @@ def test_expected_output_duration_ref_compiles() -> None:
     ]
 
 
-def test_output_media_seconds_sums_nested_video_durations() -> None:
+def test_scan_output_assets_sums_nested_video_durations_and_counts() -> None:
     import msgspec
 
     from gen_worker.api.types import AudioAsset, ImageAsset
-    from gen_worker.executor import _output_media_seconds
+    from gen_worker.executor import _scan_output_assets
 
     class Out(msgspec.Struct):
         videos: list[VideoAsset]
@@ -110,9 +110,13 @@ def test_output_media_seconds_sums_nested_video_durations() -> None:
     v2 = VideoAsset(ref="b", duration_s=2.0)
     unprobed = VideoAsset(ref="c")  # probe failed: duration_s None
     out = Out(videos=[v1, unprobed], extras={"more": (v2, ImageAsset(ref="i"), AudioAsset(ref="s"))})
-    assert _output_media_seconds(out) == 12.5
-    assert _output_media_seconds(None) == 0.0
-    assert _output_media_seconds({"images": [ImageAsset(ref="i")]}) == 0.0
+    # 5 total Assets (v1, unprobed, v2, image, audio); only videos with a
+    # probed duration_s contribute media seconds (pgw#512: output_count is
+    # the ONLY per_output settlement source, replacing field-name scavenging
+    # of "images"/"videos"/"audios" keys).
+    assert _scan_output_assets(out) == (12.5, 5)
+    assert _scan_output_assets(None) == (0.0, 0)
+    assert _scan_output_assets({"images": [ImageAsset(ref="i")]}) == (0.0, 1)
 
 
 def test_job_metrics_carries_output_media_duration() -> None:
