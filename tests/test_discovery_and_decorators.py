@@ -429,7 +429,9 @@ def test_manifest_emits_model_placement_key(tmp_pkg: Path) -> None:
     """One handler -> one function; a ModelChoice payload field emits the
     `model` block (field + byom + slot + curated choices carrying structured
     ModelRef bindings, typed defaults, and hot/price hints) — the pgw#509
-    SDK->tensorhub (th#761) contract."""
+    SDK->tensorhub (th#761) contract. The wai choice's allow_lora binding
+    also gets the endpoint's Compile(family=...) stamp (pgw#519), same as a
+    top-level allow_lora binding would."""
     from gen_worker.discovery.discover import discover_functions
 
     pkg = tmp_pkg / "ep_model"
@@ -439,7 +441,7 @@ def test_manifest_emits_model_placement_key(tmp_pkg: Path) -> None:
         import enum
         from typing import Union
         import msgspec
-        from gen_worker import (Hub, HF, Model, ModelChoice, ModelDefaults,
+        from gen_worker import (Compile, Hub, HF, Model, ModelChoice, ModelDefaults,
                                 ModelRef, RequestContext, Resources, endpoint)
 
         class D(ModelDefaults, frozen=True):
@@ -458,7 +460,8 @@ def test_manifest_emits_model_placement_key(tmp_pkg: Path) -> None:
             y: str
 
         @endpoint(models={"pipeline": Hub("o/base"), "vae": Hub("o/vae")},
-                  resources=Resources(vram_gb=12))
+                  resources=Resources(vram_gb=12),
+                  compile=Compile(family="wai-arch", shapes=((512, 512),)))
         class Gen:
             def setup(self, pipeline: object, vae: object) -> None: ...
             def generate(self, ctx: RequestContext, data: In_) -> Out_:
@@ -476,6 +479,7 @@ def test_manifest_emits_model_placement_key(tmp_pkg: Path) -> None:
     assert by_id["wai"]["binding"]["provider"] == "tensorhub"
     assert by_id["wai"]["binding"]["ref"] == "o/wai"
     assert by_id["wai"]["binding"]["allow_lora"] is True
+    assert by_id["wai"]["binding"]["family"] == "wai-arch"
     assert by_id["wai"]["defaults"] == {"steps": 28, "guidance": 6.0}
     assert by_id["wai"]["hot"] is True
     assert by_id["pony"]["binding"]["provider"] == "hf"
@@ -591,3 +595,100 @@ def test_allow_lora_without_compile_family_raises() -> None:
 
     with pytest.raises(ValueError, match="allow_lora"):
         _extract_entries(Gen, "testmod")
+
+
+def test_model_choice_binding_family_matches_top_level_binding(tmp_pkg: Path) -> None:
+    """pgw#519: model.choices[].binding gets the SAME family stamp that a
+    top-level bindings block gets from Compile(family=...) — tensorhub's
+    th#586 architecture gate polices allow_lora targets on both surfaces
+    identically, so a builder-path deploy of a ModelChoice endpoint (e.g.
+    sdxl) doesn't hard-fail while a plain allow_lora endpoint passes."""
+    from gen_worker.discovery.discover import discover_functions
+
+    pkg = tmp_pkg / "ep_choice_family"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "main.py").write_text(textwrap.dedent("""
+        import enum
+        from typing import Union
+        import msgspec
+        from gen_worker import (Compile, Hub, HF, Model, ModelChoice, ModelDefaults,
+                                ModelRef, RequestContext, Resources, endpoint)
+
+        class D(ModelDefaults, frozen=True):
+            steps: int = 28
+
+        class M(ModelChoice[D], enum.Enum):
+            A = Model("a", Hub("o/a", allow_lora=True), D(28))
+            B = Model("b", Hub("o/b", allow_lora=True), D(30))
+
+        class In_(msgspec.Struct):
+            prompt: str = ""
+            model: Union[M, ModelRef] = M.A
+
+        class Out_(msgspec.Struct):
+            y: str
+
+        @endpoint(models={"pipeline": Hub("o/base", allow_lora=True), "vae": Hub("o/vae")},
+                  resources=Resources(vram_gb=12),
+                  compile=Compile(family="sdxl", shapes=((1024, 1024),)))
+        class Gen:
+            def setup(self, pipeline: object, vae: object) -> None: ...
+            def generate(self, ctx: RequestContext, data: In_) -> Out_:
+                return Out_(y="ok")
+    """))
+
+    fns = discover_functions(tmp_pkg, main_module="ep_choice_family.main")
+    (fn,) = fns
+
+    top_level_family = fn["bindings"]["pipeline"]["family"]
+    assert top_level_family == "sdxl"
+    assert "family" not in fn["bindings"]["vae"]      # no allow_lora, no stamp
+
+    by_id = {c["id"]: c for c in fn["model"]["choices"]}
+    assert set(by_id) == {"a", "b"}
+    for choice in by_id.values():
+        assert choice["binding"]["allow_lora"] is True
+        # Choice-binding emission equals top-level emission w.r.t. family.
+        assert choice["binding"]["family"] == top_level_family
+
+
+def test_model_choice_allow_lora_without_compile_family_raises(tmp_pkg: Path) -> None:
+    """Mirrors test_allow_lora_without_compile_family_raises for the
+    choices[].binding surface: a ModelChoice endpoint with an allow_lora
+    choice and no Compile(family=...) must fail loudly at discovery, not
+    silently ship an unstamped binding tensorhub's th#586 gate will reject."""
+    from gen_worker.discovery.discover import discover_functions
+
+    pkg = tmp_pkg / "ep_choice_family_missing"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "main.py").write_text(textwrap.dedent("""
+        import enum
+        from typing import Union
+        import msgspec
+        from gen_worker import (Hub, Model, ModelChoice, ModelDefaults,
+                                ModelRef, RequestContext, Resources, endpoint)
+
+        class D(ModelDefaults, frozen=True):
+            steps: int = 28
+
+        class M(ModelChoice[D], enum.Enum):
+            A = Model("a", Hub("o/a", allow_lora=True), D(28))
+
+        class In_(msgspec.Struct):
+            prompt: str = ""
+            model: Union[M, ModelRef] = M.A
+
+        class Out_(msgspec.Struct):
+            y: str
+
+        @endpoint(models={"pipeline": Hub("o/base")}, resources=Resources(vram_gb=12))
+        class Gen:
+            def setup(self, pipeline: object) -> None: ...
+            def generate(self, ctx: RequestContext, data: In_) -> Out_:
+                return Out_(y="ok")
+    """))
+
+    with pytest.raises(ValueError, match="allow_lora"):
+        discover_functions(tmp_pkg, main_module="ep_choice_family_missing.main")
