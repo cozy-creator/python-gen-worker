@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.14.14 (2026-07-12)
+
+- **gw#407 host-RAM admission sizes multi-slot setups by the LARGEST slot,
+  not the sum.** Slots stage sequentially under the load lock and move to
+  VRAM before the next slot loads; summing refused two 28GiB fp8 lanes as
+  "56.2GiB incoming" on a 61GiB-RAM A100 pod that never stages more than
+  one slot at a time (gw#479 J24M run19). Single-slot behavior unchanged;
+  the J17 16-variant case (separate records) unchanged.
+
+
 ## 0.14.13 (2026-07-12)
 
 - **ie#468 rung 2: `apply_block_window_offload` — block-window weight offload
