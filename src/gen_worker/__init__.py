@@ -16,6 +16,7 @@ subclass from ``@endpoint(kind=...)`` before dispatch.
 from . import io
 from .api.binding import Civitai, HF, Hub, ModelRef, ModelScope
 from .api.decorators import Compile, Resources, endpoint
+from .api.model import Model, ModelChoice, ModelDefaults
 from .api.errors import (
     CanceledError,
     FatalError,
@@ -61,6 +62,10 @@ __all__ = [
     "Civitai",
     "ModelRef",
     "ModelScope",
+    # Curated model-selection (payload `model=` placement key).
+    "Model",
+    "ModelChoice",
+    "ModelDefaults",
     # Context types.
     "RequestContext",
     "ConversionContext",

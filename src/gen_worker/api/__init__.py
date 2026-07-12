@@ -2,6 +2,7 @@
 
 from .binding import Binding, Civitai, HF, Hub, ModelRef, ModelScope
 from .decorators import Resources, endpoint
+from .model import Model, ModelChoice, ModelDefaults
 from .errors import (
     AuthError,
     CanceledError,
@@ -47,6 +48,9 @@ __all__ = [
     "Civitai",
     "HF",
     "Hub",
+    "Model",
+    "ModelChoice",
+    "ModelDefaults",
     "ModelRef",
     "ModelScope",
     "Resources",

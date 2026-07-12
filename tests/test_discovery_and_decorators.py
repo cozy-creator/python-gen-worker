@@ -4,8 +4,9 @@ One test per distinct behavior:
 
   1. Plain-function endpoint: discovered + dispatched with no class/setup.
   2. Class endpoint: public methods are routable; helpers must be private.
-  3. variants={name: (binding, Resources)} stamps N routable functions with
-     per-variant binding/resources (+ payload 'variant' Literal validation).
+  3. model= placement key: a ModelChoice payload field is a curated closed
+     enum whose picks carry typed defaults; `Choice | ModelRef` opens BYOM;
+     ONE handler stays ONE function (no fan-out).
   4. Optional shutdown/setup; async-generator = streaming.
   5. Resources(vram_gb=..) implies gpu.
   6. msgspec.Meta bounds compile into the discovered endpoint.lock schema.
@@ -16,15 +17,19 @@ One test per distinct behavior:
 
 from __future__ import annotations
 
+import enum
 import logging
 import textwrap
 from pathlib import Path
-from typing import Annotated, AsyncIterator, Literal
+from typing import Annotated, AsyncIterator, Union
 
 import msgspec
 import pytest
 
-from gen_worker import HF, Hub, RequestContext, Resources, endpoint
+from gen_worker import (
+    HF, Hub, Model, ModelChoice, ModelDefaults, ModelRef, RequestContext,
+    Resources, endpoint,
+)
 from gen_worker.registry import collect_from_namespace, extract_specs
 
 
@@ -36,12 +41,14 @@ class _Out(msgspec.Struct):
     result: str
 
 
-class _VarIn(msgspec.Struct):
-    variant: str = "a"
+class _Defaults(ModelDefaults, frozen=True):
+    steps: int
+    guidance: float = 5.0
 
 
-class _VarIn2(msgspec.Struct):
-    variant: Literal["a", "zz"] = "a"
+class _Model(ModelChoice[_Defaults], enum.Enum):
+    SMALL = Model("small", Hub("o/small"), _Defaults(20), hot=True)
+    LARGE = Model("large", HF("o/large"), _Defaults(30, 7.0), price=3.0)
 
 
 # --------------------------------------------------------------------------- #
@@ -143,96 +150,72 @@ def test_model_slot_must_match_setup_param() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 3. variants fan-out                                                           #
+# 3. model= placement key (pgw#509)                                             #
 # --------------------------------------------------------------------------- #
 
 
-def test_variants_stamp_routable_functions_with_per_variant_overrides() -> None:
+class _CuratedIn(msgspec.Struct):
+    prompt: str = ""
+    model: _Model = _Model.SMALL
+
+
+class _ByomIn(msgspec.Struct):
+    prompt: str = ""
+    model: Union[_Model, ModelRef] = _Model.SMALL
+
+
+def test_model_choice_is_a_closed_enum_with_typed_defaults() -> None:
+    # Wire form is the id string; the pick decodes back to a member whose
+    # defaults are read as typed data (no ctx.models string-sniffing).
+    raw = msgspec.msgpack.encode(_CuratedIn(model=_Model.LARGE))
+    assert msgspec.msgpack.decode(raw) == {"prompt": "", "model": "large"}
+    back = msgspec.msgpack.decode(raw, type=_CuratedIn)
+    assert back.model is _Model.LARGE
+    assert back.model.defaults.steps == 30
+    assert back.model.ref.source == "huggingface" and back.model.ref.path == "o/large"
+    assert back.model.hot is False and back.model.price == 3.0
+    # JSON schema is a closed enum — the curated allowlist.
+    schema = msgspec.json.schema(_CuratedIn)
+    assert schema["$defs"]["_Model"]["enum"] == ["large", "small"]
+
+
+def test_model_choice_byom_union_accepts_client_modelref() -> None:
+    # A curated pick and an arbitrary client ModelRef decode through the same
+    # field, distinguished on the wire by JSON type (string vs object).
+    cur = msgspec.json.encode(_ByomIn(model=_Model.SMALL))
+    byo = msgspec.json.encode(
+        _ByomIn(model=ModelRef(source="civitai", path="12345"))
+    )
+    assert msgspec.json.decode(cur, type=_ByomIn).model is _Model.SMALL
+    picked = msgspec.json.decode(byo, type=_ByomIn).model
+    assert isinstance(picked, ModelRef) and picked.path == "12345"
+
+
+def test_one_handler_is_one_function_not_a_fan_out() -> None:
+    # 16 near-identical checkpoints used to be 16 variant functions; now the
+    # class exposes ONE routable `generate` and selection is the payload arg.
     @endpoint(
-        model=HF("o/base", dtype="bf16"),
-        resources=Resources(vram_gb=24),
-        variants={
-            "gen-fp8": (HF("o/base-fp8"), Resources(vram_gb=14)),
-            "gen-nvfp4": HF("o/base-nvfp4"),  # bare binding: class resources
-        },
+        models={"pipeline": Hub("o/base"), "vae": Hub("o/vae")},
+        resources=Resources(vram_gb=12),
     )
     class Gen:
-        def setup(self, model: str) -> None:
-            self.model = model
+        def setup(self, pipeline: object, vae: object) -> None: ...
 
-        def generate(self, ctx: RequestContext, data: _In) -> _Out:
-            return _Out(result="")
+        def generate(self, ctx: RequestContext, data: _CuratedIn) -> _Out:
+            return _Out(result=str(data.model.defaults.steps))
 
-    specs = {s.name: s for s in extract_specs(Gen)}
-    assert sorted(specs) == ["gen-fp8", "gen-nvfp4", "generate"]
-    assert specs["generate"].models["model"].ref == "o/base"
-    assert specs["generate"].resources.vram_gb == 24
-    assert specs["gen-fp8"].models["model"].ref == "o/base-fp8"
-    assert specs["gen-fp8"].resources.vram_gb == 14
-    assert specs["gen-nvfp4"].resources.vram_gb == 24
-    # Variant specs must not share one instance (different weights).
-    assert len({s.instance_key for s in specs.values()}) == 3
+    specs = extract_specs(Gen)
+    assert [s.name for s in specs] == ["generate"]
+    assert list(specs[0].models) == ["pipeline", "vae"]
 
 
-def test_variants_inherit_shared_aux_slots() -> None:
-    @endpoint(
-        models={"pipeline": HF("o/base", dtype="fp16"), "vae": HF("o/vae-fix", dtype="fp16")},
-        variants={"gen-alt": HF("o/alt")},
-    )
-    class Gen:
-        def setup(self, pipeline: str, vae: str) -> None: ...
-
-        def generate(self, ctx: RequestContext, data: _In) -> _Out:
-            return _Out(result="")
-
-    specs = {s.name: s for s in extract_specs(Gen)}
-    # The variant swaps only the primary slot; the aux vae slot is inherited.
-    assert specs["gen-alt"].models["pipeline"].ref == "o/alt"
-    assert specs["gen-alt"].models["vae"].ref == "o/vae-fix"
-    assert specs["generate"].models["pipeline"].ref == "o/base"
-
-
-def test_variants_without_class_model_are_the_full_routable_set() -> None:
-    @endpoint(variants={
-        "small": Hub("o/small"),
-        "large": Hub("o/large"),
-    })
-    class Gen:
-        def setup(self, model: str) -> None:
-            self.model = model
-
-        def generate(self, ctx: RequestContext, data: _In) -> _Out:
-            return _Out(result="")
-
-    assert sorted(s.name for s in extract_specs(Gen)) == ["large", "small"]
-
-
-def test_variants_validation() -> None:
-    with pytest.raises(ValueError, match="exactly\\s+ONE handler"):
-        @endpoint(variants={"a": HF("o/r")})
-        class TwoHandlers:
-            def setup(self, model: str) -> None: ...
-            def f(self, ctx: RequestContext, data: _In) -> _Out: ...
-            def g(self, ctx: RequestContext, data: _In) -> _Out: ...
-
-    with pytest.raises(ValueError, match="duplicate"):
-        @endpoint(variants={" a": HF("o/r"), "a": HF("o/r2")})
-        class DupNames:
-            def setup(self, model: str) -> None: ...
-            def gen(self, ctx: RequestContext, data: _In) -> _Out: ...
-
-    # payload 'variant' field must be Literal-typed with declared members.
-    with pytest.raises(ValueError, match="Literal"):
-        @endpoint(variants={"a": HF("o/r")})
-        class BadLiteral:
-            def setup(self, model: str) -> None: ...
-            def gen(self, ctx: RequestContext, data: _VarIn) -> _Out: ...
-
-    with pytest.raises(ValueError, match="zz"):
-        @endpoint(variants={"a": HF("o/r")})
-        class BadMember:
-            def setup(self, model: str) -> None: ...
-            def gen(self, ctx: RequestContext, data: _VarIn2) -> _Out: ...
+def test_model_row_rejects_non_modelref_and_bad_defaults() -> None:
+    with pytest.raises(TypeError, match="ModelRef"):
+        Model("x", "not-a-ref", _Defaults(10))  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="ModelDefaults"):
+        Model("x", Hub("o/r"), object())  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="non-empty id"):
+        Model("", Hub("o/r"), _Defaults(10))
 
 
 # --------------------------------------------------------------------------- #
@@ -442,39 +425,62 @@ def test_from_scratch_example_uses_publish_contract() -> None:
     assert s.output_type is mod.FromScratchResult
 
 
-def test_manifest_keeps_variant_entries(tmp_pkg: Path) -> None:
-    """variants= rows share (module, class, python_name) with their base
-    function; the manifest dedup must key on the stamped name too."""
+def test_manifest_emits_model_placement_key(tmp_pkg: Path) -> None:
+    """One handler -> one function; a ModelChoice payload field emits the
+    `model` block (field + byom + slot + curated choices carrying structured
+    ModelRef bindings, typed defaults, and hot/price hints) — the pgw#509
+    SDK->tensorhub (th#761) contract."""
     from gen_worker.discovery.discover import discover_functions
 
-    pkg = tmp_pkg / "ep_variants"
+    pkg = tmp_pkg / "ep_model"
     pkg.mkdir()
     (pkg / "__init__.py").write_text("")
     (pkg / "main.py").write_text(textwrap.dedent("""
+        import enum
+        from typing import Union
         import msgspec
-        from gen_worker import HF, RequestContext, Resources, endpoint
+        from gen_worker import (Hub, HF, Model, ModelChoice, ModelDefaults,
+                                ModelRef, RequestContext, Resources, endpoint)
+
+        class D(ModelDefaults, frozen=True):
+            steps: int
+            guidance: float = 5.0
+
+        class M(ModelChoice[D], enum.Enum):
+            WAI = Model("wai", Hub("o/wai", allow_lora=True), D(28, 6.0), hot=True)
+            PONY = Model("pony", HF("o/pony"), D(30), price=2.0)
 
         class In_(msgspec.Struct):
-            x: str = ""
+            prompt: str = ""
+            model: Union[M, ModelRef] = M.WAI
 
         class Out_(msgspec.Struct):
             y: str
 
-        @endpoint(
-            model=HF("o/base", dtype="bf16"),
-            resources=Resources(vram_gb=24),
-            variants={"generate_fp8": (HF("o/base-fp8"), Resources(vram_gb=14))},
-        )
+        @endpoint(models={"pipeline": Hub("o/base"), "vae": Hub("o/vae")},
+                  resources=Resources(vram_gb=12))
         class Gen:
-            def setup(self, model: str) -> None:
-                self.model = model
-
+            def setup(self, pipeline: object, vae: object) -> None: ...
             def generate(self, ctx: RequestContext, data: In_) -> Out_:
                 return Out_(y="ok")
     """))
 
-    fns = discover_functions(tmp_pkg, main_module="ep_variants.main")
-    assert sorted(f["name"] for f in fns) == ["generate", "generate-fp8"]
+    fns = discover_functions(tmp_pkg, main_module="ep_model.main")
+    assert [f["name"] for f in fns] == ["generate"]
+    block = fns[0]["model"]
+    assert block["field"] == "model"
+    assert block["byom"] is True
+    assert block["slot"] == "pipeline"
+    by_id = {c["id"]: c for c in block["choices"]}
+    assert set(by_id) == {"wai", "pony"}
+    assert by_id["wai"]["binding"]["provider"] == "tensorhub"
+    assert by_id["wai"]["binding"]["ref"] == "o/wai"
+    assert by_id["wai"]["binding"]["allow_lora"] is True
+    assert by_id["wai"]["defaults"] == {"steps": 28, "guidance": 6.0}
+    assert by_id["wai"]["hot"] is True
+    assert by_id["pony"]["binding"]["provider"] == "hf"
+    assert by_id["pony"]["price"] == 2.0
+    assert "hot" not in by_id["pony"]      # false hint omitted
 
 
 def test_model_shorthand_skips_server_handle_setup_param() -> None:

@@ -59,9 +59,6 @@ class EndpointSpec:
     timeout_ms: Optional[int] = None
     runtime: Optional[str] = None
     compile: Optional[Compile] = None  # opt-in torch.compile spec (#384)
-    # Payload-driven slot routing (gw#479): promotes/pins only the slots a
-    # request needs; None = every slot (single-lane classes, functions).
-    route: Optional[Callable[[Any], Any]] = None
     module: str = ""              # declaring module
     walked_module: str = ""       # top-level package the object was found under
 
@@ -71,8 +68,8 @@ class EndpointSpec:
 
     @property
     def instance_key(self) -> Any:
-        """Specs sharing this key share one class instance. Variant specs of
-        the same class differ in their bindings and get separate instances."""
+        """Specs sharing this key share one class instance (same class + same
+        resolved binding set)."""
         return (self.cls, tuple(sorted(self.models.items())))
 
 
@@ -160,14 +157,13 @@ def _spec_for_handler(
         models=dict(models),
         runtime=decl.runtime,
         compile=decl.compile,
-        route=decl.route,
         module=getattr(cls or method, "__module__", "") or "",
         walked_module=walked_module,
     )
 
 
 def extract_specs(obj: Any, *, walked_module: str = "") -> List[EndpointSpec]:
-    """All EndpointSpecs declared by one decorated object (variants expanded)."""
+    """All EndpointSpecs declared by one decorated object (one per handler)."""
     decl: Optional[EndpointDecl] = getattr(obj, ATTR, None)
     if decl is None:
         return []
@@ -190,28 +186,6 @@ def extract_specs(obj: Any, *, walked_module: str = "") -> List[EndpointSpec]:
         getattr(cls, "__gen_worker_handlers__", []) or []
     )
     out: List[EndpointSpec] = []
-
-    if decl.variants:
-        attr_name, method = handlers[0]
-        slot = next(iter(decl.models), "model")
-        # Base function (method-named) only when the class declares its own
-        # binding; otherwise the variants fully define the routable set.
-        if decl.models:
-            out.append(_spec_for_handler(
-                fn_name=attr_name, method=method, decl=decl, cls=cls,
-                attr_name=attr_name, models=dict(decl.models),
-                resources=decl.resources, walked_module=walked,
-            ))
-        for variant in decl.variants:
-            # Variants swap only the primary slot; shared aux slots (vae,
-            # refiner, extra encoders) are inherited from the class binding.
-            out.append(_spec_for_handler(
-                fn_name=variant.name, method=method, decl=decl, cls=cls,
-                attr_name=attr_name, models={**decl.models, slot: variant.binding},
-                resources=variant.resources or decl.resources,
-                walked_module=walked,
-            ))
-        return out
 
     for attr_name, method in handlers:
         out.append(_spec_for_handler(

@@ -86,9 +86,11 @@ never a constructor argument. `storage_dtype="fp8"` keeps denoiser weights in
 fp8-E4M3 storage with per-layer upcast to the compute `dtype` (half the VRAM
 on any card); fp8-stored `#fp8` flavors get the same treatment automatically.
 
-Multi-variant endpoints (`bf16`/`fp8`/... checkpoints with different VRAM
-envelopes) declare `variants={name: (binding, Resources)}` — one handler body,
-one routable function per variant. Streaming = an async-generator handler.
+Curated checkpoint selection is a runtime payload argument: a handler declares
+`model: SomeModelChoice` (a `ModelChoice` enum of `Model` rows, each carrying a
+`ModelRef` binding + typed per-model defaults) and reads `payload.model.defaults`
+typed — one `generate(model=)` replaces N near-identical functions. `model:
+SomeModelChoice | ModelRef` opens BYOM. Streaming = an async-generator handler.
 Engine-hosted endpoints declare `runtime="vllm"` and get a booted,
 health-checked server subprocess injected into `setup()`.
 
