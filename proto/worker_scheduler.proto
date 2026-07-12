@@ -143,6 +143,11 @@ message StateDelta {
   repeated string available_functions = 2; // dispatchable now
   repeated string loading_functions   = 3; // present but models still materializing
   int64 free_vram_bytes = 4; // measured free VRAM; sent on material change
+  // Jobs past the decode->finalize handoff (gw#516): GPU slot terminally
+  // released, encode/upload tail still running, JobResult not yet shipped.
+  // Drain/retire must wait for these — GPU-idle alone is NOT work-idle.
+  // Additive: old workers never set it; old orchestrators ignore it.
+  int32 finalizing_jobs = 5;
 }
 
 enum WorkerPhase {
@@ -288,6 +293,13 @@ message JobMetrics {
   int64 input_cached_tokens = 8;
   int64 output_tokens = 9;
   int64 output_count = 10; // count of generated output Assets (images/videos/audios/files)
+  // gw#516 pipelined finalize split of runtime_ms. slot_held_ms is how long
+  // the job actually held the GPU slot (acquire -> terminal release);
+  // finalize_wall_ms is the slotless encode/upload tail that overlapped the
+  // next request's compute. slot_held_ms + finalize_wall_ms ~= runtime_ms
+  // for GPU jobs. Both 0 = unmeasured (CPU job, or a pre-gw#516 worker).
+  int64 slot_held_ms = 11;
+  int64 finalize_wall_ms = 12;
 }
 
 // Worker -> orchestrator streaming output chunk. Ordered per (request_id,

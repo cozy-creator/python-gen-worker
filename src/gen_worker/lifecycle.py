@@ -107,6 +107,9 @@ class Lifecycle:
             available_functions=self.executor.available_functions(),
             loading_functions=self.executor.loading_functions(),
             free_vram_bytes=(free // quantum) * quantum,
+            # gw#516: encode/upload tails past the GPU-slot release. The hub
+            # must not drain/retire this worker on GPU-idleness alone.
+            finalizing_jobs=self.executor.finalizing_jobs(),
         )
 
     def build_resources(self) -> pb.WorkerResources:

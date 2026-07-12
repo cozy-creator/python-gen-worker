@@ -908,6 +908,9 @@ class _Job:
     renew_task: Optional[asyncio.Task] = None
     finished: bool = False
     superseded: bool = False
+    # gw#516: True while the job is past the decode->finalize handoff (GPU
+    # slot terminally released, encode/upload tail running, result unshipped).
+    finalizing: bool = False
     admitted_at: float = dc_field(default_factory=time.monotonic)
     # One JobProgress seq space per job, shared by stream chunks and ctx
     # events so interleaved sends stay monotonic. itertools.count.__next__
@@ -1009,6 +1012,12 @@ class Executor:
         self.jobs: Dict[Tuple[str, int], _Job] = {}
         self._idle = asyncio.Event()
         self._idle.set()
+        # gw#516: count of jobs in their slotless finalize tail. Mutated from
+        # handler threads at the terminal slot release, so lock-guarded;
+        # surfaced to the hub via StateDelta.finalizing_jobs.
+        self._finalizing_lock = threading.Lock()
+        self._finalizing_count = 0
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
         # Instance groups: specs sharing (cls, bindings) share one instance;
         # variant specs of the same class get separate instances. Function-
         # shaped endpoints (cls=None) have no instance at all.
@@ -1347,6 +1356,46 @@ class Executor:
 
     def in_flight_keys(self) -> List[Tuple[str, int]]:
         return [k for k, j in self.jobs.items() if not j.finished and not j.superseded]
+
+    # ---- finalize tracking (gw#516) ------------------------------------------
+
+    def finalizing_jobs(self) -> int:
+        """Jobs past the decode->finalize handoff: GPU slot terminally
+        released, encode/upload tail still running, result unshipped. The
+        hub must treat these as live work (drain/retire gating) even though
+        the GPU is already serving the next request."""
+        with self._finalizing_lock:
+            return self._finalizing_count
+
+    def _enter_finalize(self, job: _Job) -> None:
+        """Handler-thread callback at the terminal GPU-slot release."""
+        with self._finalizing_lock:
+            if job.finalizing or job.finished:
+                return
+            job.finalizing = True
+            self._finalizing_count += 1
+        self._signal_state_change_threadsafe()
+
+    def _exit_finalize(self, job: _Job) -> None:
+        """Job coroutine, after its result shipped (any terminal path)."""
+        with self._finalizing_lock:
+            if not job.finalizing:
+                return
+            job.finalizing = False
+            self._finalizing_count -= 1
+        self._signal_state_change_threadsafe()
+
+    def _signal_state_change_threadsafe(self) -> None:
+        """_on_state_change from any thread: lifecycle.state_changed needs a
+        running loop, so handler-thread callers hop onto the executor loop."""
+        loop = self._loop
+        if loop is not None and not loop.is_closed():
+            try:
+                loop.call_soon_threadsafe(self._on_state_change)
+                return
+            except RuntimeError:
+                pass
+        self._on_state_change()
 
     # ---- setup -------------------------------------------------------------
 
@@ -2603,8 +2652,13 @@ class Executor:
         try:
             if needs_gpu:
                 await self._gpu_semaphore.acquire()
-                lease = _GpuSlotLease(self._gpu_semaphore, asyncio.get_running_loop())
+                self._loop = asyncio.get_running_loop()
+                lease = _GpuSlotLease(self._gpu_semaphore, self._loop)
                 ctx._gpu_slot_lease = lease
+                # gw#516: the handler thread reports the terminal
+                # decode->finalize slot release so the hub sees the job as
+                # "finalizing" while its encode/upload tail runs slotless.
+                ctx._on_finalize_release = lambda: self._enter_finalize(job)
                 if job.ctx.cancelled:
                     raise CanceledError("canceled")
                 # pgw#513: reset the CUDA peak-allocator watermark now that
@@ -2665,21 +2719,30 @@ class Executor:
                         )
             metrics = self._metrics(queue_ms, started, concurrency_at_start, gpu_index,
                                     output=output)
+            handler_done = time.monotonic()
             # Handler GPU work is done — free the slot before result-blob
             # upload and result send so the next job's compute starts now.
             if lease is not None:
-                if not lease.yield_slot() and lease.released_at is not None:
+                overlapped = not lease.yield_slot()
+                released_at = lease.released_at
+                if released_at is not None:
+                    # gw#516 typed split of runtime_ms: how long the GPU slot
+                    # was actually held vs the slotless finalize tail.
+                    metrics.slot_held_ms = max(
+                        0, int((released_at - started) * 1000))
+                    metrics.finalize_wall_ms = max(
+                        0, int((handler_done - released_at) * 1000))
+                if overlapped and released_at is not None:
                     # The handler released terminally at the decode->finalize
                     # handoff (gw#476/gw#516): the whole encode/upload tail
-                    # overlapped the next request. Until JobMetrics grows a
-                    # slot-held field this line IS the overlap evidence.
+                    # overlapped the next request.
                     logger.info(
                         "FINALIZE_OVERLAP fn=%s request=%s slot_held_ms=%d "
                         "handler_wall_ms=%d overlap_ms=%d",
                         spec.name, run.request_id,
-                        int((lease.released_at - started) * 1000),
-                        int((time.monotonic() - started) * 1000),
-                        int((time.monotonic() - lease.released_at) * 1000))
+                        int((released_at - started) * 1000),
+                        int((handler_done - started) * 1000),
+                        int((handler_done - released_at) * 1000))
             if spec.output_mode == "stream":
                 # gw#475: live deltas are droppable by contract (in-memory
                 # ProgressHub only) — the terminal JobResult carries the
@@ -2708,6 +2771,9 @@ class Executor:
         finally:
             if lease is not None:
                 lease.yield_slot()
+            # gw#516: result shipped (any terminal path) — the job leaves the
+            # finalizing set the hub gates drain/retire on.
+            self._exit_finalize(job)
             self._maybe_idle()
 
     async def _materialize_source(

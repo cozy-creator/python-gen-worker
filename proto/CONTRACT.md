@@ -214,6 +214,7 @@ to avoid chatter). Never periodic. O overwrites its copy wholesale.
 | `available_functions` | W registry + model gating | O dispatch eligibility + autoscale supply | dispatchable now |
 | `loading_functions` | W registry | O supply (counts 0 capacity) + display | present but models still materializing; disjoint from available |
 | `free_vram_bytes` | W CUDA probe | O placement (free-VRAM ladder) | measured free VRAM |
+| `finalizing_jobs` | W executor (gw#516) | O drain/retire gating + worker status display | jobs past the decode→finalize handoff: GPU slot released, encode/upload tail running, `JobResult` unshipped. GPU-idle alone is NOT work-idle |
 
 ### RunJob (O → W)
 
@@ -321,6 +322,8 @@ those never travel on the wire.
 | `input_cached_tokens` | W (folds streaming `TokenUsage`) | O `per_million_tokens` settlement (pgw#512) | 0 = unreported |
 | `output_tokens` | W (folds streaming `TokenUsage`) | O `per_million_tokens` settlement (pgw#512) | 0 = unreported |
 | `output_count` | W executor (counts output `Asset`s) | O `per_output` settlement (pgw#512) | replaces result-payload scavenging; 0 = unreported |
+| `slot_held_ms` | W executor (gw#516) | O GPU-occupancy profile / overlap evidence | GPU-slot acquire → terminal release; < `runtime_ms` when the handler released at the decode→finalize handoff |
+| `finalize_wall_ms` | W executor (gw#516) | O overlap evidence | slotless encode/upload tail after the release (overlaps the next request's compute). Both 0 = unmeasured (CPU job / pre-gw#516 worker) |
 
 ### JobProgress (W → O)
 Streaming output chunks (LLM token deltas, AR-TTS audio, structured partials).
