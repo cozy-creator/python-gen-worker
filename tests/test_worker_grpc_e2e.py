@@ -437,6 +437,45 @@ def test_gpu_slot_survives_cancel_during_yielded_window(scheduler_and_worker) ->
     assert res.status == pb.JOB_STATUS_OK
 
 
+def test_finalize_release_overlaps_peer_compute_and_slot_survives(scheduler_and_worker) -> None:
+    """gw#476/gw#516: a handler that terminally releases its GPU slot at the
+    decode->finalize handoff lets the NEXT job's compute run while it is
+    still encoding, completes without reacquiring, and leaves the semaphore
+    balanced (a third GPU job still runs)."""
+    import e2e_endpoints as ep
+
+    scheduler, _harness = scheduler_and_worker
+    conn = scheduler.wait_connection(0)
+    conn.wait_for(
+        lambda m: m.WhichOneof("msg") == "state_delta"
+        and m.state_delta.phase == pb.WORKER_PHASE_READY
+    )
+    ep.FINALIZE_PROBE_STARTED.clear()
+    ep.FINALIZE_PEER_RAN.clear()
+    cuda = pb.ResolvedCompute(accelerator="cuda", gpu_index=0)
+    conn.send(run_job=pb.RunJob(
+        request_id="r-final-probe", attempt=1, function_name="finalize-probe",
+        input_payload=_msgpack("x"), compute=cuda))
+    assert ep.FINALIZE_PROBE_STARTED.wait(timeout=10.0), "probe never started"
+    # The probe is now inside its encode tail with the slot released; the
+    # peer's compute must be able to run BEFORE the probe's handler returns.
+    conn.send(run_job=pb.RunJob(
+        request_id="r-final-peer", attempt=1, function_name="finalize-peer",
+        input_payload=_msgpack("x"), compute=cuda))
+    res = conn.wait_for(_is_result_for("r-final-probe")).job_result
+    assert res.status == pb.JOB_STATUS_OK
+    assert _decode_out(res.inline).response == "overlapped"
+    res = conn.wait_for(_is_result_for("r-final-peer")).job_result
+    assert res.status == pb.JOB_STATUS_OK
+    # Executor's post-handler release no-oped (already released) without
+    # unbalancing the semaphore: a follow-up GPU job still gets the slot.
+    conn.send(run_job=pb.RunJob(
+        request_id="r-final-after", attempt=1, function_name="sleepy",
+        input_payload=_msgpack("x"), compute=cuda))
+    res = conn.wait_for(_is_result_for("r-final-after")).job_result
+    assert res.status == pb.JOB_STATUS_OK
+
+
 def test_marco_polo_example_serves_under_the_new_core() -> None:
     """#365 acceptance: examples/marco-polo runs against the fake scheduler."""
     import sys

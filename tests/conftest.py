@@ -11,9 +11,16 @@ issue #345.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import gen_worker
+
+# Deterministic CPU encode wherever the suite runs (gw#476): never probe or
+# engage NVENC from tests — CI has no GPU, and dev boxes that have one must
+# not do GPU work from the unit suite. Selection tests override + refresh
+# the cache explicitly.
+os.environ.setdefault("GEN_WORKER_VIDEO_ENCODER", "x264")
 
 _REPO_SRC = Path(__file__).resolve().parents[1] / "src"
 _LOCATION = Path(gen_worker.__file__).resolve()

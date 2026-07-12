@@ -871,13 +871,17 @@ class _GpuSlotLease:
     hold is released at most once.
     """
 
-    __slots__ = ("_sem", "_loop", "_lock", "_held")
+    __slots__ = ("_sem", "_loop", "_lock", "_held", "released_at")
 
     def __init__(self, sem: asyncio.Semaphore, loop: asyncio.AbstractEventLoop) -> None:
         self._sem = sem
         self._loop = loop
         self._lock = threading.Lock()
         self._held = True
+        # Monotonic time of the FIRST release — the terminal finalize handoff
+        # (gw#476/gw#516) or the executor's post-handler release, whichever
+        # came first. Reads out the finalize-overlap window.
+        self.released_at: Optional[float] = None
 
     def yield_slot(self) -> bool:
         """Release the slot if held (any thread). True iff this call released."""
@@ -885,6 +889,7 @@ class _GpuSlotLease:
             if not self._held:
                 return False
             self._held = False
+            self.released_at = time.monotonic()
         try:
             on_loop = asyncio.get_running_loop() is self._loop
         except RuntimeError:
@@ -2620,7 +2625,18 @@ class Executor:
             # Handler GPU work is done — free the slot before result-blob
             # upload and result send so the next job's compute starts now.
             if lease is not None:
-                lease.yield_slot()
+                if not lease.yield_slot() and lease.released_at is not None:
+                    # The handler released terminally at the decode->finalize
+                    # handoff (gw#476/gw#516): the whole encode/upload tail
+                    # overlapped the next request. Until JobMetrics grows a
+                    # slot-held field this line IS the overlap evidence.
+                    logger.info(
+                        "FINALIZE_OVERLAP fn=%s request=%s slot_held_ms=%d "
+                        "handler_wall_ms=%d overlap_ms=%d",
+                        spec.name, run.request_id,
+                        int((lease.released_at - started) * 1000),
+                        int((time.monotonic() - started) * 1000),
+                        int((time.monotonic() - lease.released_at) * 1000))
             if spec.output_mode == "stream":
                 # gw#475: live deltas are droppable by contract (in-memory
                 # ProgressHub only) — the terminal JobResult carries the

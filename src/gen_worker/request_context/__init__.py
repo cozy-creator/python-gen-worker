@@ -419,6 +419,24 @@ class RequestContext:
             if self._canceled:
                 lease.yield_slot()
 
+    def _release_gpu_slot_for_finalize(self) -> None:
+        """Worker-internal: TERMINAL GPU-slot release at the decode->finalize
+        handoff (gw#476 / gw#516). The handler is done with GPU compute; the
+        encode + upload tail proceeds slotless so the next request's denoise
+        starts now instead of idling the GPU (measured up to 179s on a
+        CPU-contended host). Unlike :meth:`_gpu_slot_yielded` there is no
+        reacquire — a finishing request must never block behind the next
+        request's denoise just to return. The executor's post-handler release
+        no-ops (lease transitions are once-only), so the semaphore balance
+        stays exact. Tenant GPU work after this call runs unscheduled —
+        finalize helpers call it only once frames are on the host. No-op
+        without a lease (CPU jobs, local runs) or when already yielded."""
+        lease = self._gpu_slot_lease
+        if lease is not None and lease.yield_slot():
+            logger.info(
+                "request %s: GPU slot released for finalize; encode/upload "
+                "overlaps the next request's compute", self.request_id)
+
     def _emit_event(self, event_type: str, payload: Optional[Dict[str, Any]] = None) -> None:
         """Worker-internal: emit a progress/event payload (best-effort)."""
         if not self._emitter:
