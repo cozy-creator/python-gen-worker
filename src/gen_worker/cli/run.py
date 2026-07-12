@@ -26,7 +26,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import msgspec
 
-from ..api.binding import Civitai, HF, Hub, ModelScope, wire_ref
+from ..api.binding import ModelRef, wire_ref
 from ..api.errors import CanceledError
 from ..config import get_settings
 from .local_context import build_local_context
@@ -597,7 +597,7 @@ def _fetch_tensorhub_snapshot(
 
 def _resolve_binding_to_ref(*, param_name: str, binding: Any) -> Tuple[str, str]:
     """Return ``(model_ref, provider)`` for one binding."""
-    if isinstance(binding, (Hub, HF, Civitai, ModelScope)):
+    if isinstance(binding, ModelRef):
         return wire_ref(binding), binding.provider
     raise _UsageError(
         f"unknown binding type for param {param_name!r}: {type(binding).__name__}"

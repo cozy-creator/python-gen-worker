@@ -1,6 +1,6 @@
 """Public SDK surface: the @endpoint decorator, bindings, types, and errors."""
 
-from .binding import Binding, Civitai, HF, Hub, ModelScope
+from .binding import Binding, Civitai, HF, Hub, ModelRef, ModelScope
 from .decorators import Resources, endpoint
 from .errors import (
     AuthError,
@@ -47,6 +47,7 @@ __all__ = [
     "Civitai",
     "HF",
     "Hub",
+    "ModelRef",
     "ModelScope",
     "Resources",
     "endpoint",
