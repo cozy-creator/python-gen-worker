@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.14.8 (2026-07-12)
+
+- **ie#463: `diffusers_step_callback` gains `window=(start, end)`.** Multi-stage
+  pipelines (denoise + latent-upsample refine, etc.) now compose two calls,
+  each reporting into its own sub-range of the request's 0..1 progress bar,
+  instead of the second stage resetting the bar to 0. `step`/`total` on the
+  wire still describe progress within the current stage. Default
+  `window=(0.0, 1.0)` is unchanged (fully backward compatible) — every
+  existing single-stage caller is unaffected. Fixes the gap that led
+  ltx-video-2.3 to hand-roll its own step callback, which omitted
+  `raise_if_cancelled()` and left long video jobs uncancellable mid-run.
+
 ## 0.14.7 (2026-07-12)
 
 - **gw#421: retire the gen-worker-repo GPU CI lane; real-GPU coverage moves
