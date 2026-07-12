@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.14.9 (2026-07-12)
+
+- **gw#479: canonical config digests prune sub-config keys duplicating the
+  parent.** Live qwen evidence (fp8 lanes, A100): transformers 4.53
+  serialized vision_start/end_token_id into BOTH the top-level VL config
+  and text_config; 4.57 writes them only at top — materialized top-level
+  values identical, but the sub-config duplicate kept two byte-identical
+  text encoders on separate content keys (each lane booked its own 9.4GB
+  TE; only the vae shared). Sub-config values that DIFFER from the parent
+  still separate keys.
+
+
 ## 0.14.8 (2026-07-12)
 
 - **ie#463: `diffusers_step_callback` gains `window=(start, end)`.** Multi-stage

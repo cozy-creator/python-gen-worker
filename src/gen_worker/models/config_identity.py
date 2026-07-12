@@ -50,6 +50,17 @@ def _normalize(value: Any) -> Any:
             if k == "torch_dtype":
                 k = "dtype"
             out[k] = _normalize(v)
+        # Prune sub-dict keys that duplicate the parent's same-named scalar:
+        # save-era redundancy, not content (qwen live evidence: transformers
+        # 4.53 wrote vision_start/end_token_id into BOTH the top-level VL
+        # config and text_config; 4.57 writes them only at top — the
+        # materialized top-level values are identical either way).
+        for k, v in out.items():
+            if isinstance(v, dict):
+                out[k] = {
+                    kk: vv for kk, vv in v.items()
+                    if isinstance(vv, (dict, list)) or kk not in out or out[kk] != vv
+                }
         return out
     if isinstance(value, list):
         return [_normalize(v) for v in value]
