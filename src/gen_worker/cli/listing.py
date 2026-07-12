@@ -21,9 +21,9 @@ if TYPE_CHECKING:
 
 def describe_binding(binding: Any) -> Dict[str, Any]:
     """Introspect one model binding into a JSON-able dict (no model load)."""
-    from ..api.binding import BINDING_TYPES
+    from ..api.binding import Civitai, HF, Hub, ModelScope
 
-    if isinstance(binding, BINDING_TYPES):
+    if isinstance(binding, (Hub, HF, Civitai, ModelScope)):
         out: Dict[str, Any] = {
             "type": type(binding).__name__,
             "provider": binding.provider,

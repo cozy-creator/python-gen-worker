@@ -322,8 +322,8 @@ def _find_handler_methods(cls: type) -> list[tuple[str, Callable[..., Any]]]:
             f"@endpoint class {cls.__name__!r}: no handler methods found. "
             "Define at least one public method taking (self, ctx, payload)."
         )
-    for attr, member in out:
-        _validate_handler_shape(f"{cls.__name__}.{attr}", member, is_method=True)
+    for handler_name, handler_fn in out:
+        _validate_handler_shape(f"{cls.__name__}.{handler_name}", handler_fn, is_method=True)
     return out
 
 

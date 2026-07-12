@@ -53,7 +53,7 @@ def _fake_download(monkeypatch, tmp_path):
     snapshots layout so GC deletes real files."""
 
     async def fake_ensure_local(ref, *, snapshot=None, cache_dir=None, **kw) -> Path:
-        size = sum(int(f["size_bytes"]) for f in (snapshot or {}).get("files", []))
+        size = sum(int(f.size_bytes) for f in (snapshot.files if snapshot else []))
         d = Path(cache_dir) / "snapshots" / ref.replace("/", "--")
         d.mkdir(parents=True, exist_ok=True)
         (d / "w.bin").write_bytes(b"\0" * size)

@@ -15,10 +15,12 @@ import urllib.parse
 from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Literal, Mapping, Optional
 
 if TYPE_CHECKING:  # heavy deps stay import-time-free; methods import lazily
     import torch
+
+    from ._concurrent_upload import BudgetGate
 
 from ..api.errors import AuthError
 from ..api.types import (
@@ -220,7 +222,7 @@ class RequestContext:
             )
         return self._file_api_base_url.rstrip("/")
 
-    def _get_upload_budget_gate(self):
+    def _get_upload_budget_gate(self) -> "BudgetGate":
         """Lazy-construct the capability-budget gate from the JWT claims.
 
         Pure pass-through when the token has no budget claims (dev/test
@@ -374,7 +376,7 @@ class RequestContext:
             logger.info("request %s marked for cancellation.", self.request_id)
 
     @contextmanager
-    def _gpu_slot_yielded(self):
+    def _gpu_slot_yielded(self) -> "Iterator[None]":
         """Worker-internal: release the job's GPU slot for the duration of
         blocking non-GPU I/O (blob upload), re-acquiring before returning to
         tenant code (#382). No-op when there is no lease (CPU jobs, local
@@ -623,7 +625,8 @@ class RequestContext:
             from ..io import probe_video
 
             for key, value in probe_video(
-                bytes(video) if isinstance(video, (bytes, bytearray)) else video
+                bytes(video) if isinstance(video, (bytes, bytearray))
+                else os.fspath(video)
             ).items():
                 setattr(asset, key, value)
         except Exception:
@@ -766,6 +769,37 @@ class _PublisherMixin:
     Not a public surface: tenants should never import this directly.
     """
 
+    if TYPE_CHECKING:
+        # The host contract (gw#497): everything this mixin borrows from
+        # RequestContext, declared so mypy checks the mixin against the
+        # composition instead of erroring attr-defined on every use.
+        request_id: str
+        cancelled: bool
+        _hf_token: str
+        _compute: Compute
+        _source_info: Dict[str, Any]
+        _destination_info: Dict[str, Any]
+        _file_api_base_url: Optional[str]
+        _worker_capability_token: Optional[str]
+        _job_id: Optional[str]
+
+        def save_bytes(self, ref: str, data: bytes) -> Asset: ...
+        def save_file(self, ref: str, local_path: "str | os.PathLike[str]") -> Asset: ...
+        def _open_output_stream(
+            self, ref: str, *, create: bool = ...,
+            expected_size_bytes: Optional[int] = ...,
+        ) -> "_RequestOutputStream": ...
+        def _emit_checkpoint_saved(
+            self, ref: str, *, step_number: Optional[int] = ...,
+            epoch_number: Optional[int] = ..., output_kind: Optional[str] = ...,
+            size_bytes: Optional[int] = ...,
+        ) -> None: ...
+        def _get_upload_budget_gate(self) -> "BudgetGate": ...
+        def _get_worker_capability_token(self) -> str: ...
+        def _repo_job_upload_scope(self) -> "Optional[tuple[str, str, str]]": ...
+        def _require_repo_job_scope_for_tensors(self, ref: str) -> None: ...
+        def _should_stream_output_to_file_api(self, ref: str) -> bool: ...
+
     @property
     def hf_token(self) -> str:
         """HuggingFace API token for gen_worker.convert / conversion helpers.
@@ -868,7 +902,7 @@ class _PublisherMixin:
             raise FileNotFoundError(src)
         size = int(os.path.getsize(src))
         _enforce_output_file_size_limit(size)
-        fmt = str(format or "").strip() or _infer_tensors_format(ref or local_path)
+        fmt = str(format or "").strip() or _infer_tensors_format(ref or os.fspath(local_path))
 
         # Job-scoped writes publish through the /commits stream (gw#471) so
         # the returned Tensors carries a blake3 digest + blob_digest and each
@@ -998,8 +1032,10 @@ class _PublisherMixin:
         """Open a chunk-writable output stream that finalizes to Tensors."""
         ref = _normalize_output_ref(ref)
         self._require_repo_job_scope_for_tensors(ref)
+        from typing import cast as _cast
+
         return _RequestOutputStream(
-            ctx=self,
+            ctx=_cast("RequestContext", self),
             ref=ref,
             kind="checkpoint",
             format=format,
@@ -1519,11 +1555,10 @@ class TrainingContext(_PublisherMixin, RequestContext):
         """
         now = time.monotonic()
         last = self._last_metric_monotonic
-        is_first = last is None
         is_last = total > 0 and step >= total
         has_val = val_loss is not None
         if (
-            not is_first and not is_last and not has_val
+            last is not None and not is_last and not has_val
             and (now - last) < self.metric_min_interval_s
         ):
             return

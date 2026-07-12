@@ -125,9 +125,8 @@ class _BoundedFileReader:
     def __enter__(self) -> "_BoundedFileReader":
         return self
 
-    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         self.close()
-        return False
 
 
 class PutPool:
@@ -187,9 +186,8 @@ class PutPool:
     def __enter__(self) -> "PutPool":
         return self
 
-    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
         self.close()
-        return False
 
 
 class TransportError(RuntimeError):
@@ -303,7 +301,7 @@ def upload_part_to_presigned_url(
         use_shared_pool = pool is not None and attempt == 1
         try:
             with _BoundedFileReader(file_path, offset, length) as body:
-                if use_shared_pool:
+                if pool is not None and use_shared_pool:
                     resp = pool.put(url, body=body, length=length)
                 else:
                     # Fresh pool per attempt. ``maxsize=1`` keeps the pool's
@@ -344,7 +342,7 @@ def upload_part_to_presigned_url(
         except InterruptedError:
             raise
         except BaseException as exc:
-            if use_shared_pool:
+            if pool is not None and use_shared_pool:
                 # Never let a possibly-poisoned socket serve another part.
                 pool.discard_connections()
             err = _classify_transport_exception(exc)
@@ -365,8 +363,8 @@ def upload_part_to_presigned_url(
             body_sample = resp.data.decode("utf-8", errors="replace")
         except Exception:
             body_sample = ""
-        err = _classify_response_status(resp.status, body_sample)
-        if err is None:
+        status_err = _classify_response_status(resp.status, body_sample)
+        if status_err is None:
             etag = ""
             try:
                 # urllib3 normalizes header names case-insensitively.
@@ -386,13 +384,13 @@ def upload_part_to_presigned_url(
                 )
             return etag
 
-        last_err = err
-        if not err.retryable or attempt >= max_attempts:
-            raise err
+        last_err = status_err
+        if not status_err.retryable or attempt >= max_attempts:
+            raise status_err
         sleep_s = _backoff_sleep_s(attempt)
         logger.info(
             "presigned_part_retry attempt=%d/%d sleep_s=%.2f status=%d",
-            attempt, max_attempts, sleep_s, err.status_code or 0,
+            attempt, max_attempts, sleep_s, status_err.status_code or 0,
         )
         time.sleep(sleep_s)
 

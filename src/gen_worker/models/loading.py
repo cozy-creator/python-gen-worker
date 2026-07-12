@@ -605,7 +605,7 @@ def emergency_quantization_config(cls: Any) -> Optional[Any]:
     except ImportError as exc:
         logger.warning("emergency nf4 unavailable (%s); falling to offload", exc)
         return None
-    kwargs = {
+    kwargs: Dict[str, Any] = {
         "load_in_4bit": True,
         "bnb_4bit_quant_type": "nf4",
         "bnb_4bit_compute_dtype": torch.bfloat16,

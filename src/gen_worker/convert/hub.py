@@ -564,7 +564,7 @@ class HubClient:
             uploaded=uploaded,
             deduped=deduped,
             total_bytes=sum(f.size_bytes for f in resolved),
-            checkpoint_id=str(ckpt.get("checkpoint_id") or "").strip(),
+            checkpoint_id=str((ckpt or {}).get("checkpoint_id") or "").strip(),
             response=final,
         )
 

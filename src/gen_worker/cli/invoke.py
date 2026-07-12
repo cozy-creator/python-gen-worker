@@ -399,8 +399,8 @@ def _handle_invoke(args: argparse.Namespace) -> int:
         payload = _resolve_payload(args)
         # Unix paths resolve to absolute; a tcp://host:port spec passes through.
         if transport.is_unix(args.socket_path):
-            _, _p = transport.parse_addr(args.socket_path)
-            sock_path: Any = str(Path(_p).resolve())
+            sock_path: Any = str(
+                Path(transport.parse_addr(args.socket_path).host).resolve())
         else:
             sock_path = args.socket_path
         request = {

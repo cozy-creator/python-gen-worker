@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.14.4 (2026-07-11)
+
+- **gw#497: mypy gates CI at ZERO errors — no baseline.** The #356-era type
+  debt (107 errors at audit time, 95 on the 0.14 stack) is fixed outright and
+  `uv run mypy src/gen_worker` is a blocking CI step. Seam fixes, not
+  suppressions: pb.Snapshot now converts ONCE into the typed
+  `WorkerResolvedRepo` (`executor._snapshot_to_resolved`) and threads through
+  `ensure_local` / `ensure_snapshot_async` — the dict-or-object `_field`
+  duck-type coercion in cozy_snapshot is DELETED along with the legacy
+  entries[]/snapshotDigest/camelCase wire tolerances (the 3-representation
+  th#736-shaped seam is gone). `_PublisherMixin` declares its host contract
+  (TYPE_CHECKING block) instead of 31 attr-defined suppressions;
+  `cli/transport.Address` is a NamedTuple (scheme/host/port) killing the
+  union-of-tuple-sizes indexing hacks; `__exit__` return types no longer
+  claim exception-swallowing; `RUNTIME_FACTORIES` is typed; stale
+  `type: ignore`s removed. Zero behavior change intended; suite green.
+
 ## 0.14.3 (2026-07-11)
 
 - **gw#479 follow-up: canonical JSON-config digests in content keys.** Live

@@ -358,6 +358,7 @@ class _Endpoint:
                 instances_by_cls[cls_id] = inst
                 self._instances.append(inst)
                 self._setup_locks[id(inst)] = threading.Lock()
+                assert sel.cls is not None  # inst was built from sel.cls
                 # Stable per-class residency key (the class qualname is unique
                 # within an endpoint and maps 1:1 to one held instance/pipeline).
                 self._model_id_by_inst[id(inst)] = (
@@ -370,7 +371,7 @@ class _Endpoint:
                 # shadowing.
                 raise run_mod._UsageError(
                     f"duplicate @inference.function name {fn_name!r} "
-                    f"(hosted by {sel.cls.__name__}.{sel.attr_name})"
+                    f"(hosted by {sel.cls.__name__ if sel.cls else '<function>'}.{sel.attr_name})"
                 )
             self.functions[fn_name] = _ServedFunction(sel, inst)
         if eager:
@@ -751,8 +752,8 @@ def _sidecar_path(listen_spec: str) -> Path:
     collide; in cwd for TCP (no socket file).
     """
     addr = transport.parse_addr(listen_spec)
-    if addr[0] == "unix":
-        return Path(str(addr[1]) + ".json")
+    if addr.scheme == "unix":
+        return Path(addr.host + ".json")
     return Path.cwd() / ".gen-worker.serve.json"
 
 
@@ -995,8 +996,7 @@ def _serve_inner(args: argparse.Namespace) -> int:
     # absolute form so teardown unlinks the right file regardless of cwd.
     listen_spec = getattr(args, "listen", None) or args.socket_path
     if transport.is_unix(listen_spec):
-        _, _p = transport.parse_addr(listen_spec)
-        listen_spec = str(Path(_p).resolve())
+        listen_spec = str(Path(transport.parse_addr(listen_spec).host).resolve())
     stop = threading.Event()
 
     # 3. SIGINT / SIGTERM -> cancel in-flight requests, then clean teardown.

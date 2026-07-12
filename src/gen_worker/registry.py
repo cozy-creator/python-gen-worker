@@ -122,7 +122,7 @@ def _spec_for_handler(
     ctx_param, payload_param = params[0].name, params[1].name
 
     payload_type = hints.get(payload_param)
-    if not _is_struct(payload_type):
+    if not isinstance(payload_type, type) or not _is_struct(payload_type):
         raise ValueError(
             f"{owner}: payload param {payload_param!r} must be annotated "
             f"with a msgspec.Struct (got {payload_type!r})"

@@ -162,9 +162,10 @@ class StreamAccumulator:
                 rec["error"] = item.error
             if item.finished or item.error:
                 # Only finished/errored items reach the terminal record.
-                content: Union[str, bytes] = b"".join(rec["chunks"])
+                raw = b"".join(rec["chunks"])
+                content: Union[str, bytes] = raw
                 if rec["content_type"].startswith("text/"):
-                    content = content.decode("utf-8", errors="replace")
+                    content = raw.decode("utf-8", errors="replace")
                 self._finished.append(StreamItem(
                     item_id=key[0], index=key[1], content=content,
                     content_type=rec["content_type"], error=rec["error"],
