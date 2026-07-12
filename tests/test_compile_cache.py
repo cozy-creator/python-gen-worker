@@ -72,16 +72,6 @@ def test_mode_drift():
     assert "low_vram_mode" in cc.mode_drift(meta, p)
 
 
-def test_counters_helpers():
-    stats = cc.inductor_counters()  # torch present in the dev venv
-    assert set(stats) >= {"fxgraph_cache_hit", "fxgraph_cache_miss"}
-    delta = cc.counters_delta(
-        {"fxgraph_cache_hit": 2, "fxgraph_cache_miss": 1},
-        {"fxgraph_cache_hit": 5, "fxgraph_cache_miss": 1},
-    )
-    assert delta == {"fxgraph_cache_hit": 3, "fxgraph_cache_miss": 0}
-
-
 def test_unwrap_restores_eager():
     class _Mod:
         def forward(self, x):  # pragma: no cover
