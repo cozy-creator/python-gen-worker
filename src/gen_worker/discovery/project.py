@@ -5,6 +5,9 @@ The one meaningful config value is ``main`` — the module that declares the
 
     [tool.gen_worker]
     main = "my_endpoint.main"
+    # optional: EXTRA heavy import roots discovery stubs when missing
+    # (merged with gen_worker.discovery.heavy_deps.DEFAULT_HEAVY_ROOTS)
+    discovery_heavy_deps = ["nunchaku"]
 """
 
 from __future__ import annotations
@@ -19,6 +22,9 @@ class ProjectConfig:
     root: Path
     name: str   # [project].name (may be empty)
     main: str   # [tool.gen_worker].main
+    # [tool.gen_worker].discovery_heavy_deps — extra heavy import roots to
+    # stub during build-time discovery when not installed.
+    discovery_heavy_deps: tuple[str, ...] = ()
 
 
 def load_project_config(path: str | Path | None = None) -> ProjectConfig:
@@ -44,6 +50,16 @@ def load_project_config(path: str | Path | None = None) -> ProjectConfig:
             f"{pyproject}: missing [tool.gen_worker] main. Add:\n"
             '    [tool.gen_worker]\n    main = "your_package.main"'
         )
+    raw_heavy = (gw or {}).get("discovery_heavy_deps") if isinstance(gw, dict) else None
+    if raw_heavy is None:
+        heavy: tuple[str, ...] = ()
+    elif isinstance(raw_heavy, list) and all(isinstance(v, str) for v in raw_heavy):
+        heavy = tuple(v.strip() for v in raw_heavy if v.strip())
+    else:
+        raise ValueError(
+            f"{pyproject}: [tool.gen_worker] discovery_heavy_deps must be a "
+            "list of import-root strings"
+        )
     project = data.get("project") if isinstance(data, dict) else None
     name = str((project or {}).get("name") or "").strip() if isinstance(project, dict) else ""
-    return ProjectConfig(root=root, name=name, main=main)
+    return ProjectConfig(root=root, name=name, main=main, discovery_heavy_deps=heavy)
