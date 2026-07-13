@@ -40,6 +40,11 @@ _DEFAULT_MODEL_OFFLOAD_THRESHOLD_GB = 8.0
 _DEFAULT_GROUP_OFFLOAD_THRESHOLD_GB = 6.0
 # Safety margin below free VRAM reserved for activations.
 _DEFAULT_SAFETY_MARGIN_GB = 2.0
+# cl#27: gguf pipes were picked by the ladder's RESIDENT bound; on small
+# cards the general margin above always eats the rung (an 8GB card is never
+# 2GB clear), so residency is honored with this lane margin + the vae_only
+# decode-spike guards instead of falling to CPU offload.
+_GGUF_RESIDENT_MARGIN_GB = 0.5
 # Free headroom beyond the requirement above which "off" beats "vae_only".
 _DEFAULT_OFF_HEADROOM_GB = 8.0
 
@@ -863,6 +868,27 @@ def apply_low_vram_config(
             effective_mode,
         )
         effective_mode = "model_offload"
+    if (
+        mode == "auto"
+        and effective_mode == "model_offload"
+        and getattr(pipeline, "_cozy_gguf_quant", None)
+    ):
+        # cl#27: the ladder picked this rung on its RESIDENT bound. Honor it:
+        # if the measured pipe fits free VRAM with the lane margin, stay
+        # resident under the vae_only guards rather than CPU-offload (which
+        # FORBID hosts turn into a refusal of a fitting model).
+        measured = (
+            model_size_gb if model_size_gb is not None
+            else estimate_pipeline_size_gb(pipeline)
+        )
+        avail_now = get_available_vram_gb()
+        if measured > 0.0 and measured + _GGUF_RESIDENT_MARGIN_GB <= avail_now:
+            log.info(
+                "low_vram: gguf pipeline fits resident (%.2f GB + %.1f margin "
+                "<= %.2f GB free); vae_only instead of model_offload",
+                measured, _GGUF_RESIDENT_MARGIN_GB, avail_now,
+            )
+            effective_mode = "vae_only"
     if effective_mode in _CPU_OFFLOAD_MODES:
         _forbid_cpu_inference(f"CPU-offloaded inference (mode={effective_mode})")
 
