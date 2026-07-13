@@ -271,3 +271,19 @@ def test_multi_weight_bundle_detection(tmp_path) -> None:
     (d / "qwen_image_vae.safetensors").write_bytes(b"x")
     assert _is_multi_weight_bundle(d)
 
+
+
+def test_hidream_o1_family_hint() -> None:
+    """ie#478: HiDream-O1 repos stamp model_family=hidream-o1 at ingest so
+    the mirror's inference-defaults PUT (th#767) has a family to key on."""
+    from gen_worker.convert.layout import (
+        canonical_model_family_from_variant,
+        infer_model_family_from_hint,
+        infer_model_family_variant_from_hint,
+    )
+
+    for hint in ("HiDream-ai/HiDream-O1-Image-Dev", "HiDream-ai/HiDream-O1-Image",
+                 "hidream-o1-image-full"):
+        assert infer_model_family_variant_from_hint(hint) == "hidream_o1"
+        assert infer_model_family_from_hint(hint) == "hidream-o1"
+    assert canonical_model_family_from_variant("hidream_o1") == "hidream-o1"

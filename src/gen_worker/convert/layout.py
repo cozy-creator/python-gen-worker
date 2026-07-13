@@ -67,6 +67,8 @@ def canonical_model_family_from_variant(variant: str) -> str:
         return "wan"
     if raw in {"auraflow"}:
         return "auraflow"
+    if raw == "hidream_o1":
+        return "hidream-o1"
     if raw == "sdxl":
         return "sdxl"
     if raw == "sd15":
@@ -89,6 +91,8 @@ def infer_model_family_variant_from_hint(value: str | None) -> str:
         return "wan21"
     if "wan" in normalized and any(tok in normalized for tok in ("video", "i2v", "t2v", "vace")):
         return "wan22"
+    if "hidreamo1" in normalized:
+        return "hidream_o1"
     if "qwenimage" in normalized:
         return "qwen_image"
     if "zimage" in normalized:
