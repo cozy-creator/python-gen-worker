@@ -127,7 +127,7 @@ def test_lora_overrides_apply_field_level_on_fallback_recipe() -> None:
     """The worked example from CONTRACT.md: a distillation lora's
     steps=4/guidance=0 beats the base checkpoint's 28/6; fields the lora
     left null (scheduler/max_guidance) stay untouched."""
-    slot = Slot(object, default=_REF, fallback=SdxlDefaults(steps=28, guidance=6.0))
+    slot = Slot(object, default_checkpoint=_REF, default_config=SdxlDefaults(steps=28, guidance=6.0))
     lora_raw = msgspec.json.encode(SdxlLoraDefaults(steps=4, guidance=0.0)).decode()
     resolved = resolve_slot(
         "pipeline", slot, ref=_REF, family="sdxl", lora_metadata_json=[lora_raw],
@@ -140,7 +140,7 @@ def test_lora_overrides_apply_field_level_on_fallback_recipe() -> None:
 def test_lora_overrides_apply_on_top_of_repo_metadata_whole_object_result() -> None:
     """Repo metadata (whole-object) resolves first; the lora's field-level
     override applies on top of THAT result, not the code fallback."""
-    slot = Slot(object, default=_REF, fallback=SdxlDefaults(steps=28, guidance=6.0))
+    slot = Slot(object, default_checkpoint=_REF, default_config=SdxlDefaults(steps=28, guidance=6.0))
     repo_raw = msgspec.json.encode(SdxlDefaults(steps=40, guidance=5.0)).decode()
     lora_raw = msgspec.json.encode(SdxlLoraDefaults(guidance=0.0)).decode()
     resolved = resolve_slot(
@@ -151,7 +151,7 @@ def test_lora_overrides_apply_on_top_of_repo_metadata_whole_object_result() -> N
 
 
 def test_multiple_loras_apply_in_order_later_wins_on_shared_field() -> None:
-    slot = Slot(object, default=_REF, fallback=SdxlDefaults(steps=28, guidance=6.0))
+    slot = Slot(object, default_checkpoint=_REF, default_config=SdxlDefaults(steps=28, guidance=6.0))
     lora_a = msgspec.json.encode(SdxlLoraDefaults(steps=8, guidance=2.0)).decode()
     lora_b = msgspec.json.encode(SdxlLoraDefaults(steps=4)).decode()  # guidance untouched
     resolved = resolve_slot(
@@ -165,7 +165,7 @@ def test_lora_only_fields_never_ride_ctx_slots_defaults() -> None:
     """trigger_words/recommended_weight have no checkpoint-recipe analog —
     they are NOT merged into ctx.slots[slot].defaults (out of this issue's
     settled endpoint-authoring scope)."""
-    slot = Slot(object, default=_REF, fallback=SdxlDefaults(steps=28))
+    slot = Slot(object, default_checkpoint=_REF, default_config=SdxlDefaults(steps=28))
     lora_raw = msgspec.json.encode(
         SdxlLoraDefaults(trigger_words=("mystyle",), recommended_weight=0.7)
     ).decode()
@@ -178,7 +178,7 @@ def test_lora_only_fields_never_ride_ctx_slots_defaults() -> None:
 
 
 def test_lora_with_no_opinions_leaves_recipe_untouched() -> None:
-    slot = Slot(object, default=_REF, fallback=SdxlDefaults(steps=28, guidance=6.0))
+    slot = Slot(object, default_checkpoint=_REF, default_config=SdxlDefaults(steps=28, guidance=6.0))
     lora_raw = msgspec.json.encode(SdxlLoraDefaults(trigger_words=("x",))).decode()
     resolved = resolve_slot(
         "pipeline", slot, ref=_REF, family="sdxl", lora_metadata_json=[lora_raw],
@@ -188,7 +188,7 @@ def test_lora_with_no_opinions_leaves_recipe_untouched() -> None:
 
 
 def test_empty_lora_metadata_entries_are_skipped() -> None:
-    slot = Slot(object, default=_REF, fallback=SdxlDefaults(steps=28))
+    slot = Slot(object, default_checkpoint=_REF, default_config=SdxlDefaults(steps=28))
     resolved = resolve_slot(
         "pipeline", slot, ref=_REF, lora_metadata_json=["", "  "],
     )
@@ -198,7 +198,7 @@ def test_empty_lora_metadata_entries_are_skipped() -> None:
 def test_lora_metadata_for_unregistered_lora_kind_family_is_skipped() -> None:
     """No kind="lora" vocabulary registered for this family -> best-effort
     skip, never blocks the checkpoint's own resolved recipe."""
-    slot = Slot(object, default=_REF, fallback=SdxlDefaults(steps=28))
+    slot = Slot(object, default_checkpoint=_REF, default_config=SdxlDefaults(steps=28))
     resolved = resolve_slot(
         "pipeline", slot, ref=_REF, family="does-not-exist",
         lora_metadata_json=['{"steps": 4}'],
@@ -207,7 +207,7 @@ def test_lora_metadata_for_unregistered_lora_kind_family_is_skipped() -> None:
 
 
 def test_malformed_lora_metadata_raises_like_repo_metadata_does() -> None:
-    slot = Slot(object, default=_REF, fallback=SdxlDefaults(steps=28))
+    slot = Slot(object, default_checkpoint=_REF, default_config=SdxlDefaults(steps=28))
     with pytest.raises(ValueError, match="validation"):
         resolve_slot(
             "pipeline", slot, ref=_REF, family="sdxl",
@@ -217,7 +217,7 @@ def test_malformed_lora_metadata_raises_like_repo_metadata_does() -> None:
 
 def test_resolve_slots_threads_lora_metadata_per_slot() -> None:
     slots = {
-        "pipeline": Slot(object, default=_REF, fallback=SdxlDefaults(steps=28, guidance=6.0)),
+        "pipeline": Slot(object, default_checkpoint=_REF, default_config=SdxlDefaults(steps=28, guidance=6.0)),
     }
     lora_raw = msgspec.json.encode(SdxlLoraDefaults(steps=4)).decode()
     out = resolve_slots(
