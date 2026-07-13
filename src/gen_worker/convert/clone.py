@@ -274,10 +274,18 @@ def build_flavor_tree(
     # Dtype conversion per weight set.
     groups = snapshot_weight_groups(work_root, work_layout)
     is_fp8 = spec.dtype == "fp8"
+    fp8_block_scope = False
     if is_fp8 and work_layout != "diffusers":
-        raise ValueError(
-            "fp8 storage flavors are component-scoped; request "
-            'file_layout="diffusers" (repackage first for singlefile sources)')
+        # One root weight set = a transformers backbone (the whole checkpoint
+        # IS the denoiser, e.g. HiDream-O1's UiT): block-scoped fp8 cast.
+        # Multi-set singlefile bundles still refuse — component identity is
+        # ambiguous there.
+        if len(groups) != 1 or groups[0][0] != "":
+            raise ValueError(
+                "fp8 storage flavors need component identity: a diffusers "
+                "layout, or a single root weight set (transformers "
+                f"backbone) — found {len(groups)} weight set(s)")
+        fp8_block_scope = True
     if quantize_components:
         target_names = set(quantize_components)
     elif is_fp8:
@@ -305,7 +313,7 @@ def build_flavor_tree(
         result = run_inline_conversion(
             source_path=entry, out_dir=dest, target_dtype=spec.dtype,
             target_file_type="safetensors", shard_prefix=stem or "model",
-            source_repo_dir=comp_dir,
+            source_repo_dir=comp_dir, fp8_block_scope=fp8_block_scope,
         )
         attrs.update({k: v for k, v in result.attributes.items() if k not in attrs})
         converted.add(comp)

@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.22.4 (2026-07-13)
+
+- **gw: fp8 storage flavors for transformers-BACKBONE snapshots (ie#478).**
+  `streaming_fp8_snapshot` / the clone `build_flavor_tree` fp8 lane now
+  accept a non-diffusers layout when the snapshot is exactly ONE root
+  weight set (sharded-transformers backbone — the whole checkpoint IS the
+  denoiser, e.g. HiDream-O1's pixel-space UiT). The cast is BLOCK-SCOPED:
+  eligible weights must live under a repeated-block container (`.<idx>.`
+  path segment) in addition to the existing skip patterns, keeping the
+  stored fp8 set a strict subset of the runtime block-window walk
+  (`_fp8_block_windows`) so every stored-fp8 tensor is re-armed by any
+  consumer. Zero-cast outputs refuse loudly (never a silently-uncast
+  "fp8" flavor). Multi-set singlefile bundles still refuse — component
+  identity is ambiguous there. New `run_inline_conversion(...,
+  fp8_block_scope=)` / `streaming_fp8_storage_cast(..., block_scope=)`
+  pass-throughs.
+
 ## 0.22.3 (2026-07-13)
 
 - **pgw#516 (settled foundation): LoRA-kind family vocabulary + FIELD-LEVEL
