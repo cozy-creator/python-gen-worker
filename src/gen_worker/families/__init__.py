@@ -9,22 +9,29 @@ export-schemas`` or a build's discovery walk runs.
 from __future__ import annotations
 
 from .base import (
+    KIND_CHECKPOINT,
+    KIND_LORA,
     FamilyDefaults,
     export_all_schemas,
     export_json_schema,
     family,
     family_for,
     family_registry,
+    schema_filename,
 )
-from .sdxl import SdxlDefaults, SdxlScheduler
+from .sdxl import SdxlDefaults, SdxlLoraDefaults, SdxlScheduler
 
 __all__ = [
+    "KIND_CHECKPOINT",
+    "KIND_LORA",
     "FamilyDefaults",
     "SdxlDefaults",
+    "SdxlLoraDefaults",
     "SdxlScheduler",
     "export_all_schemas",
     "export_json_schema",
     "family",
     "family_for",
     "family_registry",
+    "schema_filename",
 ]

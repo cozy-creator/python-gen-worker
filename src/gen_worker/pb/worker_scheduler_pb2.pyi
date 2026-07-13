@@ -282,12 +282,14 @@ class ModelBinding(_message.Message):
     def __init__(self, slot: _Optional[str] = ..., ref: _Optional[str] = ..., loras: _Optional[_Iterable[_Union[LoraOverlay, _Mapping]]] = ..., inference_defaults: _Optional[str] = ...) -> None: ...
 
 class LoraOverlay(_message.Message):
-    __slots__ = ("ref", "weight")
+    __slots__ = ("ref", "weight", "inference_defaults")
     REF_FIELD_NUMBER: _ClassVar[int]
     WEIGHT_FIELD_NUMBER: _ClassVar[int]
+    INFERENCE_DEFAULTS_FIELD_NUMBER: _ClassVar[int]
     ref: str
     weight: float
-    def __init__(self, ref: _Optional[str] = ..., weight: _Optional[float] = ...) -> None: ...
+    inference_defaults: str
+    def __init__(self, ref: _Optional[str] = ..., weight: _Optional[float] = ..., inference_defaults: _Optional[str] = ...) -> None: ...
 
 class Snapshot(_message.Message):
     __slots__ = ("digest", "files")

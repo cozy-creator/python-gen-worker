@@ -267,6 +267,26 @@ exactly like base-model refs. W never fetches user LoRA refs upstream.
 |---|---|---|---|
 | `ref` | O resolver | W `ensure_local` + digest-keyed adapter state-dict cache | canonical tensorhub ref of the adapter snapshot |
 | `weight` | O from `_models[slot].loras[].weight` | W `set_adapters` per-adapter scale | hub validates to [-4, 4]; W mirror-checks and fails INVALID out of range |
+| `inference_defaults` | O repo metadata (th#767b / pgw#516, `PUT .../metadata/inference-defaults` on a LORA-kind repo, validated against the family's LORA schema at PUT time) | W `ctx.slots[slot].defaults` resolution chain (`gen_worker.api.slot.resolve_slot`) | JSON-encoded family-typed LoRA recipe-opinion object (an instance of the family's `kind="lora"` vocabulary struct, e.g. `SdxlLoraDefaults`); `""` = lora repo has none set. Additive — workers predating the field ignore it |
+
+**Composition rule (pgw#516 settled foundation) — FIELD-LEVEL, not whole-object.**
+`ModelBinding.inference_defaults` (the CHECKPOINT's metadata) uses
+whole-object precedence over the endpoint's code fallback (§ above: repo
+metadata replaces the fallback entirely). `LoraOverlay.inference_defaults`
+is different: after the checkpoint's resolved recipe is computed, W applies
+each lora's inference_defaults ONE FIELD AT A TIME — only the fields it
+shares with the checkpoint's family struct (e.g. SDXL's `scheduler`,
+`steps`, `guidance`, `max_guidance`), and only when that field is non-null
+("no opinion" fields never touch the result). Loras apply IN ORDER
+(`ModelBinding.loras[0]` first); a later lora's non-null field wins over an
+earlier one's. Fields with no checkpoint-recipe analog
+(`trigger_words`/`recommended_weight`) are NOT merged into
+`ctx.slots[slot].defaults` — an endpoint reads a lora's own resolved object
+for those (out of this contract's settled scope). Worked example: a
+checkpoint resolves `steps=28, guidance=6.0`; a distillation lora rides the
+pick with `{"steps":4,"guidance":0}` — the merged
+`ctx.slots["pipeline"].defaults` reads `steps=4, guidance=0`, scheduler/
+max_guidance untouched (the lora left them null).
 
 ### Snapshot / SnapshotFile (embedded in RunJob.snapshots and ModelOp)
 

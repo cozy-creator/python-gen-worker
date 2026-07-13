@@ -225,6 +225,18 @@ message ModelBinding {
 message LoraOverlay {
   string ref    = 1; // canonical tensorhub ref of the adapter snapshot
   double weight = 2; // adapter scale; hub validates to [-4, 4], worker mirror-checks
+  // th#767b / pgw#516: THIS LoRA's own family-typed inference-defaults/
+  // recipe-opinion object, JSON-encoded ("" = none set) — an instance of
+  // the family's LORA-kind vocabulary struct (gen_worker.families
+  // `@family(name, kind="lora")`, validated hub-side against
+  // `<root>.lora.schema.json`, internal/modelfamily/inferencedefaults).
+  // Consumer: the SDK's `ctx.slots[slot].defaults` resolution chain applies
+  // this object's non-null fields as FIELD-LEVEL overrides on the
+  // checkpoint's resolved recipe, in lora order (later loras win on a
+  // shared field) — NOT the whole-object repo-metadata-over-fallback
+  // precedence `ModelBinding.inference_defaults` uses. Additive: old
+  // workers ignore this field.
+  string inference_defaults = 3;
 }
 
 // A pinned tensorhub repo snapshot with presigned download URLs. The worker

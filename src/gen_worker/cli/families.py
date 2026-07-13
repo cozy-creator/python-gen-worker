@@ -1,9 +1,12 @@
 """``gen-worker families`` — the pgw#520 family-vocabulary CLI surface.
 
-``export-schemas <dir>`` writes one ``<family>.schema.json`` per registered
-:class:`~gen_worker.families.FamilyDefaults` subclass — the JSON Schema
-(draft 2020-12, ``additionalProperties: false``) tensorhub validates repo
-inference-defaults metadata against at PUT time (th#767c).
+``export-schemas <dir>`` writes one ``<family>[.lora].schema.json`` per
+registered ``(family, kind)`` :class:`~gen_worker.families.FamilyDefaults`
+subclass — the JSON Schema (draft 2020-12, ``additionalProperties: false``)
+tensorhub validates repo inference-defaults metadata against at PUT time
+(th#767c checkpoint kind; th#767b lora kind — see
+:func:`gen_worker.families.schema_filename` for the naming convention both
+sides share).
 
 Only the SHIPPED families (``gen_worker.families``) are registered by
 default; an endpoint project with its own third-party families should
@@ -58,7 +61,7 @@ def _handle_export_schemas(args: argparse.Namespace) -> int:
             sys.stderr.write(f"gen-worker families export-schemas: failed to import {args.module!r}: {e}\n")
             return 2
 
-    from ..families import export_all_schemas
+    from ..families import export_all_schemas, schema_filename
 
     schemas = export_all_schemas()
     if not schemas:
@@ -67,8 +70,8 @@ def _handle_export_schemas(args: argparse.Namespace) -> int:
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    for name, schema in schemas.items():
-        dest = out_dir / f"{name}.schema.json"
+    for (name, kind), schema in schemas.items():
+        dest = out_dir / schema_filename(name, kind=kind)
         dest.write_text(json.dumps(schema, indent=2, sort_keys=True) + "\n")
         sys.stderr.write(f"wrote {dest}\n")
     return 0

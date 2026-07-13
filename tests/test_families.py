@@ -11,13 +11,17 @@ import msgspec
 import pytest
 
 from gen_worker.families import (
+    KIND_CHECKPOINT,
+    KIND_LORA,
     FamilyDefaults,
     SdxlDefaults,
+    SdxlLoraDefaults,
     export_all_schemas,
     export_json_schema,
     family,
     family_for,
     family_registry,
+    schema_filename,
 )
 
 TESTDATA = Path(__file__).parent / "testdata"
@@ -95,10 +99,12 @@ def test_sdxl_schema_is_closed_draft_2020_12() -> None:
     assert schema["type"] == "object"
 
 
-def test_export_all_schemas_keys_by_family_name() -> None:
+def test_export_all_schemas_keys_by_family_name_and_kind() -> None:
     schemas = export_all_schemas()
-    assert "sdxl" in schemas
-    assert schemas["sdxl"]["title"] == "SdxlDefaults"
+    assert ("sdxl", "checkpoint") in schemas
+    assert schemas[("sdxl", "checkpoint")]["title"] == "SdxlDefaults"
+    assert ("sdxl", "lora") in schemas
+    assert schemas[("sdxl", "lora")]["title"] == "SdxlLoraDefaults"
 
 
 def test_max_guidance_is_optional_clamp_field() -> None:
@@ -119,3 +125,82 @@ def test_cli_export_schemas_writes_one_file_per_family(tmp_path: Path) -> None:
     assert "sdxl.schema.json" in written
     body = json.loads((out_dir / "sdxl.schema.json").read_text())
     assert body["title"] == "SdxlDefaults"
+    assert "sdxl.lora.schema.json" in written
+    lora_body = json.loads((out_dir / "sdxl.lora.schema.json").read_text())
+    assert lora_body["title"] == "SdxlLoraDefaults"
+
+
+# --------------------------------------------------------------------------- #
+# Kind axis (pgw#516 settled foundation): same family name, a SEPARATE       #
+# checkpoint-vs-lora vocabulary.                                              #
+# --------------------------------------------------------------------------- #
+
+
+def test_sdxl_lora_registers_under_same_family_different_kind() -> None:
+    assert family_for("sdxl") is SdxlDefaults  # kind defaults to "checkpoint"
+    assert family_for("sdxl", kind=KIND_CHECKPOINT) is SdxlDefaults
+    assert family_for("sdxl", kind=KIND_LORA) is SdxlLoraDefaults
+    assert family_for("sdxl", kind=KIND_LORA) is not SdxlDefaults
+
+
+def test_family_registry_is_scoped_by_kind() -> None:
+    checkpoint_reg = family_registry(kind=KIND_CHECKPOINT)
+    lora_reg = family_registry(kind=KIND_LORA)
+    assert checkpoint_reg["sdxl"] is SdxlDefaults
+    assert lora_reg["sdxl"] is SdxlLoraDefaults
+    assert checkpoint_reg["sdxl"] is not lora_reg["sdxl"]
+
+
+def test_sdxl_lora_fields_default_to_no_opinion() -> None:
+    """Every field but trigger_words/schema_version defaults to None — 'no
+    opinion' (pgw#516: a pure style overlay sets nothing)."""
+    d = SdxlLoraDefaults()
+    assert d.trigger_words == ()
+    assert d.recommended_weight is None
+    assert d.steps is None
+    assert d.guidance is None
+    assert d.max_guidance is None
+    assert d.scheduler is None
+    assert d.family == "sdxl"
+    assert d.kind == "lora"
+
+
+def test_sdxl_checkpoint_instance_reports_checkpoint_kind() -> None:
+    assert SdxlDefaults().kind == "checkpoint"
+
+
+def test_sdxl_lora_schema_export_matches_golden_file() -> None:
+    golden = json.loads((TESTDATA / "sdxl.lora.schema.json").read_text())
+    assert export_json_schema("sdxl", kind=KIND_LORA) == golden
+
+
+def test_schema_filename_convention() -> None:
+    assert schema_filename("sdxl") == "sdxl.schema.json"
+    assert schema_filename("sdxl", kind=KIND_CHECKPOINT) == "sdxl.schema.json"
+    assert schema_filename("sdxl", kind=KIND_LORA) == "sdxl.lora.schema.json"
+
+
+def test_duplicate_family_kind_pair_raises_but_cross_kind_is_fine() -> None:
+    with pytest.raises(ValueError, match="already registered"):
+        @family("sdxl", kind=KIND_LORA)
+        class Dupe(FamilyDefaults, frozen=True):
+            pass
+
+    # A brand-new family name may register a checkpoint AND a lora kind
+    # without collision — that's the whole point of the kind axis.
+    @family("_test_only_family", kind=KIND_CHECKPOINT)
+    class _Ckpt(FamilyDefaults, frozen=True):
+        pass
+
+    @family("_test_only_family", kind=KIND_LORA)
+    class _Lora(FamilyDefaults, frozen=True):
+        pass
+
+    assert family_for("_test_only_family", kind=KIND_CHECKPOINT) is _Ckpt
+    assert family_for("_test_only_family", kind=KIND_LORA) is _Lora
+
+
+def test_unregistered_kind_lookup_returns_none() -> None:
+    assert family_for("does-not-exist", kind=KIND_LORA) is None
+    with pytest.raises(KeyError):
+        export_json_schema("does-not-exist", kind=KIND_LORA)
