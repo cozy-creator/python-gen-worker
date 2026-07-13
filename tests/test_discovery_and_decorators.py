@@ -261,6 +261,19 @@ def test_resources_vram_implies_gpu() -> None:
         Resources(compute_capability=-1)
 
 
+def test_resources_host_ask_gw490() -> None:
+    r = Resources(ram_gb=64, vcpus=16)
+    assert r.ram_gb == 64.0 and r.vcpus == 16
+    assert r.gpu is False  # host asks never imply a GPU
+    raw = msgspec.to_builtins(r)
+    assert raw["ram_gb"] == 64.0 and raw["vcpus"] == 16
+    assert "ram_gb" not in msgspec.to_builtins(Resources())  # omit_defaults
+    with pytest.raises(ValueError):
+        Resources(ram_gb=0)
+    with pytest.raises(ValueError):
+        Resources(vcpus=-2)
+
+
 # --------------------------------------------------------------------------- #
 # 6. msgspec.Meta bounds compile into the discovered schema                     #
 # --------------------------------------------------------------------------- #

@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.17.3 (2026-07-12)
+
+- **gw#490: host-resource requirements vocabulary.** `Resources()` gains
+  `ram_gb` and `vcpus` — the per-function HOST ask (video-class endpoints:
+  pinned TE park + CPU-heavy encode need ~64 GB / 16 vCPU). Discovery emits
+  them in `endpoint.lock` (same `msgspec.to_builtins` path as `vram_gb`);
+  tensorhub's builder maps them to `min_ram_gb`/`min_vcpus` in the release
+  requirement payload and folds them into pod-creation minimums
+  (`CreatePodRequest.MinMemoryGB`/`MinVCPUCount`, th#740
+  read-back-and-reject). Host asks never imply `gpu=True`.
+
 ## 0.17.2 (2026-07-12)
 
 - **pgw#519: `model.choices[].binding` was missing the `family` stamp.**
