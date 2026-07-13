@@ -28,15 +28,13 @@ necessity — better to run degraded than not run at all (Paul's ruling,
 2026-07-10). The orchestrator hears about every degraded serve (FnDegraded)
 and owns moving the workload to a bigger card.
 
-Selection ACROSS stored flavors stays upstream: the registry pre-expands
-``variants={}`` into separate routable per-flavor functions, this planner
-marks each one serveable/unserveable + how-it-runs, and the hub's routing
-(th#597 ranking) — or ``hub_policy.select_variant`` for cozy-local
-``--variant auto`` — picks the highest-quality fitting flavor. bf16 -> fp8 ->
-nvfp4 -> int4 falls out of that ranking over the serveable set; this planner
-adds the RUNTIME rungs (fp8 storage / nf4 / offload / cpu) for the one
-function it was given, plus an honest hint when a stored flavor would have
-served natively.
+Selection ACROSS stored flavors stays upstream: this planner marks each
+function serveable/unserveable + how-it-runs, and the hub's routing (th#597
+ranking) picks the highest-quality fitting flavor. bf16 -> fp8 -> nvfp4 ->
+int4 falls out of that ranking over the serveable set; this planner adds the
+RUNTIME rungs (fp8 storage / nf4 / offload / cpu) for the one function it
+was given, plus an honest hint when a stored flavor would have served
+natively.
 
 Every degraded plan carries ``wanted`` (what the function declares) and
 ``ran`` (what actually runs) so the worker can report the degradation

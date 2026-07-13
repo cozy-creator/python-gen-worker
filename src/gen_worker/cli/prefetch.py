@@ -23,7 +23,7 @@ import json
 import sys
 from typing import Any, Dict, Tuple
 
-from ..api.binding import BINDING_TYPES
+from ..api.binding import ModelRef
 
 
 def add_subparser(sub: "argparse._SubParsersAction[Any]") -> None:
@@ -49,13 +49,13 @@ def add_subparser(sub: "argparse._SubParsersAction[Any]") -> None:
 
 
 def _handle_prefetch(args: argparse.Namespace) -> int:
-    # Reuse run's discovery + resolution/download machinery (same package).
+    # Reuse run's discovery + the shared hub-less resolver (models/provision).
+    from ..api.binding import wire_ref
+    from ..models.provision import resolve_local_path
     from .run import (
         _collect_class_methods,
         _ensure_sys_path,
         _load_project_main,
-        _resolve_binding_to_ref,
-        _resolve_local_path,
     )
 
     if args.json:
@@ -91,9 +91,8 @@ def _handle_prefetch(args: argparse.Namespace) -> int:
     for c in candidates:
         for param_name, binding in c.bindings.items():
             try:
-                if isinstance(binding, BINDING_TYPES):
-                    ref, provider = _resolve_binding_to_ref(
-                        param_name=param_name, binding=binding)
+                if isinstance(binding, ModelRef):
+                    ref, provider = wire_ref(binding), binding.provider
                     ap = tuple(getattr(binding, "files", ()) or ())
                     jobs[(ref, provider)] = (ref, provider, ap)
             except Exception as e:
@@ -110,10 +109,10 @@ def _handle_prefetch(args: argparse.Namespace) -> int:
     failures = 0
     for ref, provider, ap in jobs.values():
         try:
-            path = _resolve_local_path(
+            path = resolve_local_path(
                 ref=ref, provider=provider, offline=args.offline, emit=emit, allow_patterns=ap)
             emit({"kind": "prefetch.ref.ready", "ref": ref, "provider": provider, "local": path})
-        except Exception as e:  # _ModelResolutionError + any provider import/IO error
+        except Exception as e:  # ModelResolutionError + any provider import/IO error
             failures += 1
             emit({"kind": "prefetch.ref.failed", "ref": ref, "provider": provider, "error": str(e)})
             if not args.json:

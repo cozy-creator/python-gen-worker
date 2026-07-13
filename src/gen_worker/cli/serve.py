@@ -277,9 +277,11 @@ class _Endpoint:
 
     def __init__(
         self, *, offline: bool, allow_publish: bool, vram_budget_gb: float = 0.0,
+        device: str = "",
     ) -> None:
         self.offline = offline
         self.allow_publish = allow_publish
+        self.device = device
         self.gpu_semaphore = _make_gpu_semaphore()
         # function_name -> _ServedFunction
         self.functions: Dict[str, _ServedFunction] = {}
@@ -402,7 +404,7 @@ class _Endpoint:
                     served.selected.bindings, offline=self.offline,
                 )
                 before = memory.cuda_allocated_bytes()
-                run_mod.run_setup(inst, resolved)
+                run_mod.run_setup(inst, resolved, device=self.device)
                 measured = max(0, memory.cuda_allocated_bytes() - before)
                 self._setup_done.add(iid)
 
@@ -592,10 +594,10 @@ def _resolve_static_models(
     }
     if not static:
         return {}
-    return run_mod._resolve_models_for_setup(
-        bindings=static,
-        offline=offline,
-        emit=_stderr_emitter,
+    from ..models import provision
+
+    return provision.resolve_bindings(
+        static, offline=offline, emit=_stderr_emitter,
     )
 
 
@@ -981,14 +983,12 @@ def _serve_inner(args: argparse.Namespace) -> int:
         candidates, getattr(args, "functions", None),
     )
 
-    if args.device:
-        os.environ["GEN_WORKER_LOCAL_DEVICE"] = args.device
-
     # 2. Boot the endpoint — setup() once per class, hold instances warm.
     endpoint = _Endpoint(
         offline=bool(args.offline),
         allow_publish=bool(args.allow_publish),
         vram_budget_gb=float(getattr(args, "vram_budget", 0.0) or 0.0),
+        device=str(getattr(args, "device", "") or ""),
     )
     endpoint.boot(candidates, eager=bool(getattr(args, "eager", False)))
 

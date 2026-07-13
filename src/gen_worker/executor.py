@@ -44,6 +44,7 @@ from .api.types import Asset, Compute
 from .capability import HardwareUnmetError, InsufficientDiskError
 from .input_assets import cleanup_input_assets, materialize_input_assets
 from .models import disk_gc
+from .models import provision
 from .models import residency as residency_mod
 from .models.memory import (
     cpu_offload_forbidden,
@@ -1816,14 +1817,7 @@ class Executor:
     def _model_index_components(path: str) -> set:
         """Component names the snapshot's model_index.json declares — the
         only names safe to pass as preloaded modules to from_pretrained."""
-        try:
-            import json
-
-            with open(Path(path) / "model_index.json", "r", encoding="utf-8") as f:
-                index = json.load(f)
-            return {k for k in index if not k.startswith("_")}
-        except Exception:
-            return set()
+        return provision.model_index_components(path)
 
     async def _injection_kwargs(
         self,
@@ -1871,12 +1865,7 @@ class Executor:
             elif ann is Path:
                 kwargs[slot] = Path(path)
             elif isinstance(ann, type) and callable(getattr(ann, "from_pretrained", None)):
-                from .models.loading import load_from_pretrained
-                from .models.memory import place_pipeline
-
                 binding = spec.models.get(slot)
-                dtype = str(getattr(binding, "dtype", "") or "")
-                storage_dtype = str(getattr(binding, "storage_dtype", "") or "")
                 # Worker-owned placement/offload policy: one decider for the
                 # whole worker; endpoints never write device/offload code.
                 # Plan-time offload verdicts and the learned degraded floor
@@ -1922,29 +1911,11 @@ class Executor:
                         b for comp, b in sizes.items() if comp not in injected)
                     if excl_bytes > 0:
                         await asyncio.to_thread(res.make_room, excl_bytes)
-                # th#737: a cast directive on a denoiser-less diffusers
-                # tree is a load-time no-op that would silently serve bf16.
-                # Gate it up front when the snapshot's model_index proves
-                # there is no cast surface (unknown layouts pass through;
-                # the post-load outcome check below is the backstop).
-                if storage_dtype in ("fp8", "fp8+te"):
-                    comps = self._model_index_components(path)
-                    if comps and not ({"transformer", "unet"} & comps):
-                        self._record_cast_drop(
-                            spec, ref=ref, wanted=storage_dtype,
-                            ran=(dtype or "bf16"),
-                            detail=(
-                                f"cast {storage_dtype!r} dropped for slot "
-                                f"{slot!r}: pipeline has no denoiser/cast "
-                                f"surface (components: {sorted(comps)}); "
-                                "serving at base precision"),
-                        )
-                        storage_dtype = ""
                 before = self._vram_allocated()
                 try:
-                    pipe = await asyncio.to_thread(
-                        load_from_pretrained, ann, path, dtype=dtype,
-                        storage_dtype=storage_dtype, components=injected,
+                    sl = await asyncio.to_thread(
+                        provision.load_slot, ann, path, binding=binding,
+                        slot=slot, ref=ref, mode=mode, components=injected,
                     )
                 except Exception as exc:
                     # Corruption-shaped load failure (gw#408): digest-verify
@@ -1964,39 +1935,26 @@ class Executor:
                     )
                     path = str(fresh)
                     paths[slot] = path
-                    pipe = await asyncio.to_thread(
-                        load_from_pretrained, ann, path, dtype=dtype,
-                        storage_dtype=storage_dtype, components=injected,
+                    sl = await asyncio.to_thread(
+                        provision.load_slot, ann, path, binding=binding,
+                        slot=slot, ref=ref, mode=mode, components=injected,
                     )
-                rung = str(getattr(pipe, "_cozy_adaptive_rung", "") or "")
-                cast_failed = getattr(
-                    pipe, "_cozy_fp8_storage_requested", False
-                ) and not getattr(pipe, "_cozy_fp8_storage_ok", True)
-                if rung == "nf4" or (rung == "fp8" and not cast_failed):
-                    # gw#491: the loader engaged an emergency rung because
-                    # free VRAM at load was tighter than gate-time planning
-                    # assumed — reconcile it into ServePlan/FnDegraded.
-                    self._record_adaptive_rung(
-                        spec, ref=ref, rung=rung,
-                        detail=(
-                            f"adaptive fit rung {rung!r} engaged at load for "
-                            f"slot {slot!r} ({type(pipe).__name__}); free "
-                            "VRAM below the stored-precision footprint"),
-                    )
-                elif cast_failed and not rung:
-                    # th#737 backstop: the RESOLUTION cast was attempted at
-                    # load and failed on every target — structural report,
-                    # not a silent bf16 fallback. (A failed adaptive fp8 is
-                    # not a plan deviation: the plan was base precision.)
+                pipe = sl.obj
+                # Reconcile the load outcomes into ServePlan/FnDegraded via
+                # the state-delta path — the shared core decides WHAT
+                # degraded (details non-empty), the executor reports it.
+                if sl.pre_drop_detail:
                     self._record_cast_drop(
-                        spec, ref=ref, wanted=(storage_dtype or "fp8"),
-                        ran=(dtype or "bf16"),
-                        detail=(
-                            f"fp8 storage failed on every component of slot "
-                            f"{slot!r} ({type(pipe).__name__}); serving at "
-                            "base precision"),
-                    )
-                placed = await asyncio.to_thread(place_pipeline, pipe, mode=mode, ref=ref)
+                        spec, ref=ref, wanted=sl.pre_drop_wanted,
+                        ran=sl.ran, detail=sl.pre_drop_detail)
+                if sl.rung_detail:
+                    self._record_adaptive_rung(
+                        spec, ref=ref, rung=sl.rung, detail=sl.rung_detail)
+                elif sl.cast_fail_detail:
+                    self._record_cast_drop(
+                        spec, ref=ref, wanted=sl.cast_fail_wanted,
+                        ran=sl.ran, detail=sl.cast_fail_detail)
+                placed = sl.placed
                 if placed.get("oom_demotions"):
                     self._record_demotion(
                         spec, ref=ref, phase="load",
@@ -2088,22 +2046,9 @@ class Executor:
         return lane_obj, lane_bytes
 
     def _enable_compiled(self, pipe: Any, cfg: Any, artifact: Optional[Path]) -> bool:
-        """Arm the best available compiled path for a freshly loaded pipeline:
-        a TRT engine artifact swaps the module (fail-soft), anything else goes
-        through the torch.compile cache policy (which also covers the no-
-        artifact and ALLOW_COLD lanes)."""
-        from . import compile_cache, trt_engine
-
-        if artifact is not None:
-            try:
-                meta = trt_engine.unpack_metadata(Path(artifact))
-            except Exception:
-                meta = None
-            if meta is not None and str(meta.get("kind") or "") == "trt-engine":
-                if trt_engine.enable(pipe, cfg, self.store._cache_dir, artifact):
-                    return True
-                artifact = None  # unusable engine: fall through to eager policy
-        return compile_cache.enable(pipe, cfg, self.store._cache_dir, artifact)
+        """Arm the best available compiled path for a freshly loaded pipeline
+        (shared with the local CLI — provision.enable_compiled)."""
+        return provision.enable_compiled(pipe, cfg, self.store._cache_dir, artifact)
 
     @staticmethod
     def _vram_allocated() -> int:

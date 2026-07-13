@@ -108,12 +108,8 @@ production launcher ever populated them through Settings either.
 - `GEN_WORKER_COMPILE_ALLOW_COLD` — opt into cold `torch.compile` without a
   seeded artifact (needs a C toolchain), read raw in
   `compile_cache.py::apply`.
-- `GEN_WORKER_LOCAL_DEVICE` — set by `run/serve --device` for endpoint code;
-  read back on the local path.
 - `GEN_WORKER_LOCAL_OUTPUT_DIR`, `USER` — cozy-local app plumbing / login
   fallback (`cli/local_context.py`).
-- `GEN_WORKER_NO_PRECISION_LADDER` — local-run ladder opt-out, read
-  per-invocation (`cli/run.py`).
 - `COZY_HTTP_CONNECT_TIMEOUT_S` / `COZY_HTTP_READ_TIMEOUT_S` — http timeout
   floors, per-call by design so tests can tune them (`net.py`, gw#456).
 - `COZY_CIVITAI_DOWNLOAD_ATTEMPTS`, `COZY_CLONE_DOWNLOAD_ATTEMPTS` —

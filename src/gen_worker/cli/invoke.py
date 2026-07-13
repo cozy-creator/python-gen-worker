@@ -145,14 +145,6 @@ def add_subparser(sub: argparse._SubParsersAction[Any]) -> None:
         help="Python module to import for schema (overrides [tool.gen_worker] main).",
     )
     p.add_argument(
-        "--variant", dest="variant", default=None,
-        help=(
-            "Resolve <function-name> to a declared `variants={}` row before "
-            "sending: a variant name, or 'auto' to pick the best fit for "
-            "this machine (needs the endpoint module importable locally)."
-        ),
-    )
-    p.add_argument(
         "--socket", dest="socket_path", default=DEFAULT_SOCKET_PATH,
         help=(
             "Unix domain socket of the running serve "
@@ -370,32 +362,9 @@ def _print_value(value: Any, pretty: bool) -> None:
     sys.stdout.flush()
 
 
-def _resolve_variant_name(args: argparse.Namespace) -> str:
-    """``--variant``: map <function-name> to the chosen variant row's fn_name
-    via the shared #380 selector (imports the endpoint module, no model load)."""
-    _root, mod = run_mod.load_endpoint_module(
-        config_path=args.config_path, module=args.module,
-    )
-    candidates = run_mod.discover_candidates(mod)
-    selected = run_mod.select_function_with_variant(
-        candidates,
-        cls_name=None,
-        method_name=args.function_name,
-        variant=args.variant,
-    )
-    return selected.fn_name
-
-
 def _handle_invoke(args: argparse.Namespace) -> int:
     stream = bool(getattr(args, "stream", False))
     try:
-        if getattr(args, "variant", None):
-            resolved_name = _resolve_variant_name(args)
-            if resolved_name != args.function_name:
-                sys.stderr.write(
-                    f"gen-worker invoke: variant -> {resolved_name}\n"
-                )
-                args.function_name = resolved_name
         payload = _resolve_payload(args)
         # Unix paths resolve to absolute; a tcp://host:port spec passes through.
         if transport.is_unix(args.socket_path):

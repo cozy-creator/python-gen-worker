@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.17.4 (2026-07-12)
+
+- **pgw#515: de-fork `cli/run.py` from the executor.** The local CLI's
+  hand-synchronized replica of binding→download→dtype→placement→compile
+  (five "Executor parity" comments) is gone. New
+  `gen_worker.models.provision` is the ONE load+place core both drive:
+  `load_slot` (annotation-typed injection, binding dtype/storage_dtype,
+  th#737 pre-load cast gate, gw#491 adaptive-rung outcomes, worker-owned
+  placement) and `enable_compiled` (TRT-then-inductor policy — the CLI now
+  gets the TRT lane it previously lacked). Executor behavior is unchanged;
+  it reports the `SlotLoad` outcomes into ServePlan/FnDegraded exactly as
+  before. The CLI's hub-less resolve half (`resolve_local_path` /
+  `resolve_bindings`: local CAS, th#560 standalone Hub resolve, direct
+  HF/Civitai/ModelScope) also lives in provision; `prefetch` drives it too.
+- **Deleted the duplicate precision-ladder walk** —
+  `models/ladder.resolve` / `resolve_local_bindings` (+ `LadderModel` /
+  `FlavorRow` / `Resolution` and the Py copy of the shared conformance
+  vectors). It was reachable only from the CLI and its fp8 VRAM factor
+  (0.75 of weight bytes) disagreed with the loader's fit factor (0.55 of
+  card size) — two ladders, different physics. One fit ladder remains: the
+  loading layer's runtime rungs (fp8 storage → nf4 → offload), same as
+  production. The hub-side Go resolver keeps the walk (picks arrive via
+  HelloAck); `ladder.py` keeps only the classification + placement halves.
+  Local runs no longer pre-rebind bare Hub refs to stored sibling flavors
+  (`GEN_WORKER_NO_PRECISION_LADDER` is gone with the feature).
+- **`GEN_WORKER_LOCAL_DEVICE` env-to-self channel deleted.** `--device` now
+  threads as an explicit argument (`run_setup(..., device=)`, serve's
+  `_Endpoint(device=)`); endpoint code should not read that env var.
+- **CLI `--variant` removed** (run/invoke) along with
+  `select_function_with_variant` and the `variant_auto` capability token —
+  `variants={}` no longer exists (pgw#509); base function selection only.
+- **CLI behavior now matches production where the fork disagreed:** slot
+  compute dtype defaults to the loader's own default instead of a local
+  fp16/fp32 guess (binding `dtype=` still wins); unannotated or
+  unrecognized setup slots receive the snapshot path (not a force-loaded
+  `DiffusionPipeline`); handler-parameter injection passes snapshot paths
+  (`str`/`Path`), as the executor always did.
+
 ## 0.17.3 (2026-07-12)
 
 - **gw#490: host-resource requirements vocabulary.** `Resources()` gains
@@ -10,6 +48,7 @@
   requirement payload and folds them into pod-creation minimums
   (`CreatePodRequest.MinMemoryGB`/`MinVCPUCount`, th#740
   read-back-and-reject). Host asks never imply `gpu=True`.
+
 
 ## 0.17.2 (2026-07-12)
 
