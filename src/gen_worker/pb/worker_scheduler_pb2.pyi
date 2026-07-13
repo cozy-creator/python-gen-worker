@@ -274,14 +274,16 @@ class ResolvedCompute(_message.Message):
     def __init__(self, accelerator: _Optional[str] = ..., gpu_index: _Optional[int] = ..., gpu_count: _Optional[int] = ..., vram_gb: _Optional[int] = ...) -> None: ...
 
 class ModelBinding(_message.Message):
-    __slots__ = ("slot", "ref", "loras")
+    __slots__ = ("slot", "ref", "loras", "inference_defaults")
     SLOT_FIELD_NUMBER: _ClassVar[int]
     REF_FIELD_NUMBER: _ClassVar[int]
     LORAS_FIELD_NUMBER: _ClassVar[int]
+    INFERENCE_DEFAULTS_FIELD_NUMBER: _ClassVar[int]
     slot: str
     ref: str
     loras: _containers.RepeatedCompositeFieldContainer[LoraOverlay]
-    def __init__(self, slot: _Optional[str] = ..., ref: _Optional[str] = ..., loras: _Optional[_Iterable[_Union[LoraOverlay, _Mapping]]] = ...) -> None: ...
+    inference_defaults: str
+    def __init__(self, slot: _Optional[str] = ..., ref: _Optional[str] = ..., loras: _Optional[_Iterable[_Union[LoraOverlay, _Mapping]]] = ..., inference_defaults: _Optional[str] = ...) -> None: ...
 
 class LoraOverlay(_message.Message):
     __slots__ = ("ref", "weight")

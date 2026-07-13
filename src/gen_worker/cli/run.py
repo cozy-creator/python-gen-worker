@@ -186,6 +186,7 @@ class _SelectedFunction:
         is_generator: bool,
         bindings: Dict[str, Any],
         resources: Any = None,
+        slots: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.cls = cls
         self.attr_name = attr_name
@@ -197,6 +198,7 @@ class _SelectedFunction:
         self.is_generator = is_generator
         self.bindings = bindings
         self.resources = resources
+        self.slots = slots or {}
 
 
 def _collect_class_methods(mod: Any) -> List[_SelectedFunction]:
@@ -217,6 +219,7 @@ def _collect_class_methods(mod: Any) -> List[_SelectedFunction]:
             is_generator=es.output_mode == "stream",
             bindings=dict(es.models),
             resources=es.resources,
+            slots=dict(es.slots),
         )
         for es in collect_from_namespace(mod)
     ]
@@ -633,6 +636,27 @@ def _handler_kwargs(bound_method: Any, resolved_models: Dict[str, str]) -> Dict[
     return kwargs
 
 
+def _resolve_ctx_slots(ctx: Any, selected: "_SelectedFunction") -> None:
+    """Hub-less ``ctx.slots`` (pgw#520): no hub means no repo-metadata JSON
+    ever arrives, so every Slot resolves against its code ``fallback=``
+    preset (or errors when it has none) — exactly the th#767 "default= is
+    the ONLY resolution source in hub-less mode" contract."""
+    from ..api.slot import resolve_slot
+
+    resolved: Dict[str, Any] = {}
+    errors: Dict[str, str] = {}
+    for name, slot in selected.slots.items():
+        try:
+            resolved[name] = resolve_slot(
+                name, slot, ref=selected.bindings.get(name),
+            )
+        except ValueError as exc:
+            errors[name] = str(exc)
+    set_slots = getattr(ctx, "_set_resolved_slots", None)
+    if callable(set_slots):
+        set_slots(resolved, errors)
+
+
 def dispatch_request(
     *,
     selected: _SelectedFunction,
@@ -660,7 +684,10 @@ def dispatch_request(
 
     resolved_models = provision.resolve_bindings(
         selected.bindings, offline=offline, emit=emit,
+        slots=selected.slots, payload=payload,
     )
+    if selected.slots:
+        _resolve_ctx_slots(ctx, selected)
     if on_resolved is not None:
         on_resolved(resolved_models)
 

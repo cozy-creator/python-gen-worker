@@ -44,6 +44,7 @@ class LoraOverlay(TypedDict):
     weight: float
 
 from ..api.errors import AuthError
+from ..api.slot import ResolvedSlot
 from ..api.types import (
     Asset,
     AudioAsset,
@@ -52,6 +53,40 @@ from ..api.types import (
     Tensors,
     VideoAsset,
 )
+
+
+class _SlotTable(Mapping):
+    """``ctx.slots`` — a read-only mapping of slot name -> ResolvedSlot.
+
+    Built once at context construction (executor.py::_run_job_pinned / the
+    CLI's hub-less dispatch); resolution FAILURES (missing repo metadata +
+    no code fallback, no ref for the slot) are stored per-key and raised
+    lazily on ``__getitem__`` — "clear error at request time" means when the
+    HANDLER actually reads that slot, not a blanket failure for every
+    Slot-declared endpoint whose handler never touches an unresolved one."""
+
+    __slots__ = ("_resolved", "_errors")
+
+    def __init__(
+        self,
+        resolved: Mapping[str, "ResolvedSlot[Any]"],
+        errors: Mapping[str, str],
+    ) -> None:
+        self._resolved = dict(resolved)
+        self._errors = dict(errors)
+
+    def __getitem__(self, key: str) -> "ResolvedSlot[Any]":
+        if key in self._resolved:
+            return self._resolved[key]
+        if key in self._errors:
+            raise ValueError(self._errors[key])
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter({**self._resolved, **self._errors})
+
+    def __len__(self) -> int:
+        return len(set(self._resolved) | set(self._errors))
 
 
 def _default_compute() -> Compute:
@@ -127,6 +162,8 @@ class RequestContext:
         compute: Optional["Compute"] = None,
         models: Optional[Dict[str, Any]] = None,
         loras: Optional[Dict[str, Any]] = None,
+        resolved_slots: Optional[Mapping[str, "ResolvedSlot[Any]"]] = None,
+        slot_errors: Optional[Mapping[str, str]] = None,
         hf_token: str = "",
     ) -> None:
         self._request_id = str(request_id or "").strip()
@@ -161,6 +198,7 @@ class RequestContext:
         self._compute: "Compute" = compute if compute is not None else _default_compute()
         self._models = _copy_context_metadata(models or {})
         self._loras = _copy_context_metadata(loras or {})
+        self._slots = _SlotTable(resolved_slots or {}, slot_errors or {})
 
         # Capability-budget gate (issue #269 back-pressure). Lazy-built from
         # the worker_capability_token's max_total_bytes + max_bytes_per_file
@@ -206,6 +244,26 @@ class RequestContext:
         requests. The worker applies/removes the adapters around the handler
         call; this surface is read-only metadata."""
         return _copy_context_metadata(self._loras)
+
+    @property
+    def slots(self) -> Mapping[str, "ResolvedSlot[Any]"]:
+        """The pgw#520 resolution chain, one entry per ``Slot``-declared
+        model slot: ``ctx.slots["pipeline"].ref`` / ``.defaults`` — repo
+        metadata merged over the endpoint's code fallback preset. A slot
+        with no repo metadata and no ``Slot(fallback=...)`` raises on
+        access (not at dispatch) — read it only when your handler needs it.
+        """
+        return self._slots
+
+    def _set_resolved_slots(
+        self,
+        resolved: Mapping[str, "ResolvedSlot[Any]"],
+        errors: Optional[Mapping[str, str]] = None,
+    ) -> None:
+        """CLI-only mutator (``gen-worker run``/``serve``): the hub-less
+        resolve step runs after context construction, unlike the executor
+        which has every input up front."""
+        self._slots = _SlotTable(resolved, errors or {})
 
     @property
     def device(self) -> "torch.device":

@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import msgspec
 
 from gen_worker.api.binding import Binding
+from gen_worker.api.slot import Slot
 from gen_worker.api.types import (
     Asset,
     AudioAsset,
@@ -326,6 +327,42 @@ def _stamp_lora_family(binding_manifest: Dict[str, Any], compile_family: str, co
     binding_manifest["family"] = compile_family
 
 
+def _model_ref_to_manifest(ref: Any) -> Dict[str, Any]:
+    """``default_ref``/curated-choice ref shape shared by the slots block:
+    ``{source, path, tag?, flavor?}`` — a structured ModelRef (pgw#511)."""
+    out: Dict[str, Any] = {"source": ref.source, "path": ref.path}
+    if ref.tag and ref.tag != "latest":
+        out["tag"] = ref.tag
+    if ref.flavor:
+        out["flavor"] = ref.flavor
+    return out
+
+
+def _slot_to_manifest(name: str, slot: Slot, *, compile_family: str) -> Dict[str, Any]:
+    """One ``functions[].slots[]`` entry (pgw#520 / th#767): the hub-side
+    mapping/resolution contract for a Slot-declared model slot — NOT a
+    model choice list (``model.choices[]`` stays the ModelChoice-only
+    surface; a Slot endpoint never emits it)."""
+    out: Dict[str, Any] = {
+        "name": name,
+        "pipeline_class": f"{slot.pipeline_cls.__module__}.{slot.pipeline_cls.__qualname__}",
+    }
+    if slot.selected_by:
+        out["selected_by"] = slot.selected_by
+    if slot.default is not None:
+        out["default_ref"] = _model_ref_to_manifest(slot.default)
+    # Compile(family=...) is the explicit, functionally-load-bearing
+    # declaration (compile-cache keying) — it wins over the slot's own
+    # fallback-preset registration when both are present, mirroring
+    # _stamp_lora_family's precedence for the bindings-block stamp below.
+    family = compile_family or slot.family
+    if family:
+        out["family"] = family
+    if slot.fallback is not None:
+        out["fallback_defaults"] = msgspec.to_builtins(slot.fallback)
+    return out
+
+
 def _model_choice_in(ann: Any) -> Tuple[Optional[type], bool]:
     """Inspect a payload field annotation for a curated ``ModelChoice`` set.
 
@@ -552,10 +589,21 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
         # allow_lora bindings carry the endpoint's architecture family so the
         # hub's th#586 gate can police adapter targets (builder rejects
         # allow_lora without family). pgw#519: the same stamp applies to
-        # model.choices[].binding rows, not just top-level bindings.
+        # model.choices[].binding rows, not just top-level bindings. pgw#520:
+        # a Slot-declared binding with no Compile(family=...) may still carry
+        # a family via its own fallback preset's registration — that's what
+        # es.slot_family reconciles (Compile(family=) wins when both exist).
         compile_family = es.compile.family if es.compile is not None else ""
         for key, block in bindings_block.items():
-            _stamp_lora_family(block, compile_family, f"{es.name} binding {key!r}")
+            slot_family = es.slot_family.get(key, "") if es.slot_family else ""
+            _stamp_lora_family(
+                block, compile_family or slot_family, f"{es.name} binding {key!r}"
+            )
+
+        slots_block = [
+            _slot_to_manifest(name, slot, compile_family=compile_family)
+            for name, slot in es.slots.items()
+        ]
 
         input_schema, input_sha = _schema_and_hash(es.payload_type)
         moderation = _collect_payload_moderation_metadata(es.payload_type)
@@ -607,6 +655,8 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
         }
         if model_key is not None:
             fn["model"] = model_key
+        if slots_block:
+            fn["slots"] = slots_block
         if incremental and es.delta_type is not None:
             fn["delta_type"] = _type_id(es.delta_type)
             fn["delta_schema_sha256"] = delta_sha

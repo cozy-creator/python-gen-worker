@@ -17,6 +17,8 @@ from . import io
 from .api.binding import Civitai, HF, Hub, ModelRef, ModelScope
 from .api.decorators import Compile, Resources, endpoint
 from .api.model import Model, ModelChoice, ModelDefaults
+from .api.slot import ResolvedSlot, Slot
+from .families import FamilyDefaults
 from .api.errors import (
     CanceledError,
     FatalError,
@@ -66,6 +68,10 @@ __all__ = [
     "Model",
     "ModelChoice",
     "ModelDefaults",
+    # Hub-resolved model slots (pgw#520) + the per-family defaults vocabulary.
+    "Slot",
+    "ResolvedSlot",
+    "FamilyDefaults",
     # Context types.
     "RequestContext",
     "ConversionContext",

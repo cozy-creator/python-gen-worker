@@ -207,6 +207,15 @@ message ModelBinding {
   // resolves them and attaches presigned snapshots in RunJob.snapshots;
   // workers never fetch upstream. Additive: old workers ignore this field.
   repeated LoraOverlay loras = 3;
+  // th#767c: the resolved repo's inference-defaults metadata for this slot,
+  // JSON-encoded as an instance of the slot's family vocabulary struct
+  // (gen_worker.families.FamilyDefaults subclass; see `gen-worker families
+  // export-schemas` for the JSON Schema tensorhub validates repo metadata
+  // against at PUT time). Empty when the resolved repo carries no metadata
+  // — the worker falls back to the endpoint's code-declared
+  // Slot(fallback=...) preset. Additive: old orchestrators omit this field
+  // and workers degrade to fallback-only.
+  string inference_defaults = 4;
 }
 
 // One LoRA adapter overlay: a resolved tensorhub ref + its adapter weight.

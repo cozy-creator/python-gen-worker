@@ -180,6 +180,33 @@ def _capability_job_id(token: str) -> Optional[str]:
         return None
 
 
+def _resolve_slots_kwargs(spec: EndpointSpec, run: "pb.RunJob") -> Dict[str, Any]:
+    """``ctx.slots`` resolution chain (pgw#520): merge each Slot-declared
+    slot's repo-metadata ``ModelBinding.inference_defaults`` over its code
+    fallback preset. Returns the ``resolved_slots=``/``slot_errors=``
+    kwargs for ``RequestContext.__init__`` — a slot that fails to resolve
+    (no metadata + no fallback, or no ref) is deferred to a ``ctx.slots[name]``
+    access error instead of failing the whole dispatch."""
+    if not spec.slots:
+        return {"resolved_slots": {}, "slot_errors": {}}
+    from .api.slot import resolve_slot
+
+    raw_defaults = {b.slot: b.inference_defaults for b in run.models if b.inference_defaults}
+    resolved: Dict[str, Any] = {}
+    errors: Dict[str, str] = {}
+    for name, slot in spec.slots.items():
+        try:
+            resolved[name] = resolve_slot(
+                name, slot,
+                ref=spec.models.get(name),
+                family=spec.slot_family.get(name, ""),
+                raw_metadata_json=raw_defaults.get(name, ""),
+            )
+        except ValueError as exc:
+            errors[name] = str(exc)
+    return {"resolved_slots": resolved, "slot_errors": errors}
+
+
 def _map_exception(exc: BaseException) -> Tuple["pb.JobStatus", str]:
     """-> (JobStatus, safe_message)."""
     if isinstance(exc, (CanceledError, asyncio.CancelledError)):
@@ -2539,6 +2566,7 @@ class Executor:
                 )
                 for b in run.models if b.loras
             },
+            **_resolve_slots_kwargs(spec, run),
             source_info=source_info,
             destination_info=destination_info,
             execution_hints=execution_hints,

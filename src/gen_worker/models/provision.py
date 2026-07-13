@@ -204,12 +204,34 @@ def resolve_bindings(
     *,
     offline: bool,
     emit: EmitFn,
+    slots: Optional[Mapping[str, Any]] = None,
+    payload: Any = None,
 ) -> Dict[str, str]:
-    """Resolve every binding to a local path / loader-ready string."""
+    """Resolve every binding to a local path / loader-ready string.
+
+    ``slots``/``payload`` (pgw#520): when a binding's slot is Slot-declared
+    with a ``selected_by`` field, and this hub-less run has no hub to
+    resolve a curated/BYOM pick against, a payload that actually NAMES a
+    model (a non-empty ``selected_by`` field value) is a clear usage error
+    instead of silently running the slot's default — ``cozy run`` only ever
+    runs a Slot's ``default`` ref locally.
+    """
     from ..api.binding import ModelRef, wire_ref
 
     out: Dict[str, str] = {}
     for param_name, binding in bindings.items():
+        slot = (slots or {}).get(param_name)
+        selected_by = str(getattr(slot, "selected_by", "") or "") if slot is not None else ""
+        if selected_by and payload is not None:
+            picked = str(getattr(payload, selected_by, "") or "").strip()
+            if picked:
+                raise ModelResolutionError(
+                    f"slot {param_name!r}: payload names model {picked!r} via "
+                    f"{selected_by!r}, but no hub is configured — "
+                    "hub-less mode (`cozy run` / `gen-worker run`) only runs "
+                    "a Slot's default= ref; configure HUB= (or drop the "
+                    f"{selected_by!r} field) to run against a hub."
+                )
         if not isinstance(binding, ModelRef):
             raise ModelResolutionError(
                 f"unknown binding type for param {param_name!r}: "
