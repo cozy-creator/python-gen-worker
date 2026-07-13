@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.18.1 (2026-07-13)
+
+- fix(families): normalize docstring-derived schema descriptions with `inspect.cleandoc`
+  (msgspec 0.21 emits raw-indented docstrings; broke the golden-file test and the v0.18.0
+  PyPI publish). No API change.
+
 ## 0.18.0 (2026-07-12)
 
 - **pgw#520: `Slot(pipeline_cls, selected_by=, default=, fallback=)` — the
