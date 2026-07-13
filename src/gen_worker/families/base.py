@@ -39,6 +39,7 @@ family, not an open bag of keys.
 
 from __future__ import annotations
 
+import inspect
 from typing import Any, Callable, Dict, Optional, Type, TypeVar
 
 import msgspec
@@ -113,6 +114,18 @@ def family_for(name: str) -> Optional[Type[FamilyDefaults]]:
     return _REGISTRY.get(str(name or "").strip()) or None
 
 
+def _clean_descriptions(node: Dict[str, Any]) -> None:
+    """Dedent docstring-derived ``description`` values in place.
+
+    msgspec 0.21 emits the RAW class docstring (leading indentation intact);
+    older msgspec dedented it. The exported schema is a stable contract
+    (golden-file-tested), so normalize with ``inspect.cleandoc`` — one
+    output regardless of msgspec's docstring handling."""
+    desc = node.get("description")
+    if isinstance(desc, str):
+        node["description"] = inspect.cleandoc(desc)
+
+
 def export_json_schema(name: str) -> Dict[str, Any]:
     """Standalone JSON Schema (draft 2020-12) for one registered family.
 
@@ -132,6 +145,10 @@ def export_json_schema(name: str) -> Dict[str, Any]:
         # No nested defs (a family with no struct-valued fields): the
         # top-level schema IS the body.
         body = {k: v for k, v in raw.items() if k not in ("$ref", "$defs")}
+    _clean_descriptions(body)
+    for d in defs.values():
+        if isinstance(d, dict):
+            _clean_descriptions(d)
     schema: Dict[str, Any] = {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "$id": f"https://schemas.cozy.art/gen-worker/families/{name}.schema.json",
