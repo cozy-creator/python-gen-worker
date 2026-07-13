@@ -12,7 +12,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from gen_worker.models.download import _match_allow_patterns, download_hf, select_hf_files
+from gen_worker.models.download import (
+    _match_allow_patterns,
+    download_hf,
+    select_component_paths,
+    select_hf_files,
+)
 from gen_worker.models.refs import HuggingFaceRef
 
 _DIFFUSERS_REPO = [
@@ -159,6 +164,113 @@ def test_match_allow_patterns() -> None:
     # Trailing slash means the whole directory (huggingface_hub semantics).
     assert _match_allow_patterns(files, ("split_files/",)) == {"split_files/vae/ae.safetensors"}
     assert _match_allow_patterns(files, ("nope.bin",)) == set()
+
+
+# --- components= subset (pgw#505): fetch only named pipeline component
+# subfolders + root config files, not the whole repo -------------------------
+
+
+def test_select_component_paths_keeps_named_dirs_and_root_json() -> None:
+    sel = select_component_paths(_DIFFUSERS_REPO, ("vae",))
+    assert sel == {
+        "model_index.json",
+        "vae/config.json",
+        "vae/diffusion_pytorch_model.safetensors",
+        "vae/diffusion_pytorch_model.fp16.safetensors",
+    }
+
+
+def test_select_component_paths_empty_components_keeps_everything() -> None:
+    assert select_component_paths(_DIFFUSERS_REPO, ()) == set(_DIFFUSERS_REPO)
+
+
+def test_select_component_paths_root_non_json_dropped() -> None:
+    sel = select_component_paths(_DIFFUSERS_REPO, ("vae",))
+    assert "README.md" not in sel
+
+
+def _stub_hub_diffusers(monkeypatch, tmp_path):
+    """Stub huggingface_hub over the diffusers-shaped repo fixture."""
+    import huggingface_hub
+
+    calls: dict[str, object] = {}
+    sizes = {p: 1024 for p in _DIFFUSERS_REPO}
+
+    class _Api:
+        def __init__(self, token=None):
+            pass
+
+        def list_repo_files(self, **kw):
+            return list(_DIFFUSERS_REPO)
+
+        def list_repo_tree(self, **kw):
+            return [SimpleNamespace(path=p, size=s) for p, s in sizes.items()]
+
+    def _snap(**kw):
+        calls.update(kw)
+        return str(tmp_path)
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", _Api)
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", _snap)
+    return calls
+
+
+def test_download_hf_components_narrows_to_one_component(monkeypatch, tmp_path) -> None:
+    calls = _stub_hub_diffusers(monkeypatch, tmp_path)
+    download_hf(HuggingFaceRef(repo_id="owner/sdxl-full"), components=("vae",))
+    fetched = set(calls["allow_patterns"])
+    assert fetched <= set(select_component_paths(_DIFFUSERS_REPO, ("vae",)))
+    assert any(p.startswith("vae/") for p in fetched)
+    assert not any(
+        p.startswith("transformer/") or p.startswith("text_encoder/") for p in fetched
+    )
+    # Still applies the normal per-component flavor pick within the subset.
+    assert "vae/diffusion_pytorch_model.fp16.safetensors" in fetched
+    assert "vae/diffusion_pytorch_model.safetensors" not in fetched
+
+
+def test_download_hf_components_matching_nothing_is_a_clear_error(monkeypatch, tmp_path) -> None:
+    _stub_hub_diffusers(monkeypatch, tmp_path)
+    with pytest.raises(ValueError, match="components="):
+        download_hf(HuggingFaceRef(repo_id="owner/sdxl-full"), components=("nope",))
+
+
+def test_download_hf_components_unrecognized_layout_fetches_narrowed_set(
+    monkeypatch, tmp_path,
+) -> None:
+    """A components= narrowing that doesn't resolve to a recognizable
+    diffusers/root-weights layout still fetches exactly the narrowed set —
+    never silently reverts to the whole repo."""
+    import huggingface_hub
+
+    files = {
+        "notes.txt": 10,
+        "split_files/vae/ae.safetensors": 1000,
+        "split_files/unet/model.safetensors": 2000,
+    }
+    calls: dict[str, object] = {}
+
+    class _Api:
+        def __init__(self, token=None):
+            pass
+
+        def list_repo_files(self, **kw):
+            return list(files)
+
+        def list_repo_tree(self, **kw):
+            return [SimpleNamespace(path=p, size=s) for p, s in files.items()]
+
+    def _snap(**kw):
+        calls.update(kw)
+        return str(tmp_path)
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", _Api)
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", _snap)
+
+    download_hf(HuggingFaceRef(repo_id="owner/split-repo"), components=("split_files",))
+    assert set(calls["allow_patterns"]) == {
+        "split_files/vae/ae.safetensors", "split_files/unet/model.safetensors",
+    }
 
 
 def _stub_hub(monkeypatch, tmp_path, repo=_T5_REPO):

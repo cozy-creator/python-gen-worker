@@ -35,6 +35,9 @@ def describe_binding(binding: Any) -> Dict[str, Any]:
         files = tuple(getattr(binding, "files", ()) or ())
         if files:
             out["files"] = list(files)
+        components = tuple(getattr(binding, "components", ()) or ())
+        if components:
+            out["components"] = list(components)
         return out
     return {"type": type(binding).__name__}
 

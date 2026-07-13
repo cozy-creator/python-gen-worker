@@ -316,6 +316,7 @@ def resolve_bindings(
             ref=wire_ref(binding), provider=binding.source,
             offline=offline, emit=emit,
             allow_patterns=tuple(getattr(binding, "files", ()) or ()),
+            components=tuple(getattr(binding, "components", ()) or ()),
             civitai_version_id=str(getattr(binding, "version", "") or ""),
         )
     return out
@@ -341,16 +342,29 @@ def _remember_hub_ref(cache_dir: Path, thref: Any, digest: str) -> None:
 
 
 def _fetch_tensorhub_snapshot(
-    thref: Any, *, cache_dir: Path, emit: EmitFn,
+    thref: Any, *, cache_dir: Path, emit: EmitFn, components: Tuple[str, ...] = (),
 ) -> str:
     """Resolve a Hub ref via th#560 and download its snapshot into the CAS.
 
     One re-resolve retry on a presigned-URL expiry mid-download (the same
     contract the orchestrator honors on ``url_expired``).
+
+    ``components`` (pgw#505): th#560's resolve route always returns the
+    FULL repo manifest today (selective CAS resolve is the hub-side
+    ModelOp DOWNLOAD scoping — a separate, not-yet-built platform change).
+    Until then this narrows client-side: the worker fully owns this
+    resolve+download+materialize loop (unlike the production executor path,
+    which digest-verifies against an orchestrator-issued file list), so it
+    can safely fetch only the declared components — ``ensure_snapshot_async``
+    keys the materialized directory by ``(digest, components)`` so a partial
+    fetch never collides with a full one of the same ref. NOTE: offline
+    reuse (``--offline`` / the ``_hub_ref_map_path`` tag memory below) only
+    covers the FULL-repo case — a components=-scoped ref must be fetched
+    online at least once per component set.
     """
     import asyncio
 
-    from .cozy_snapshot import ensure_snapshot_async
+    from .cozy_snapshot import ensure_snapshot_async, snapshot_dir_key
     from .errors import UrlExpiredError
     from .hub_client import HubResolveError, resolve_repo
 
@@ -365,10 +379,12 @@ def _fetch_tensorhub_snapshot(
     emit({"kind": "model_fetch.started", "ref": canonical, "provider": "tensorhub"})
     resolved = _resolve()
 
-    # Already materialized under the resolved digest? No download.
-    snap_dir = cache_dir / "snapshots" / resolved.snapshot_digest
+    # Already materialized under the resolved (digest, components) key? No download.
+    key = snapshot_dir_key(resolved.snapshot_digest, components)
+    snap_dir = cache_dir / "snapshots" / key
     if snap_dir.exists():
-        _remember_hub_ref(cache_dir, thref, resolved.snapshot_digest)
+        if not components:
+            _remember_hub_ref(cache_dir, thref, resolved.snapshot_digest)
         emit({"kind": "model_fetch.completed", "ref": canonical,
               "provider": "tensorhub", "local_dir": str(snap_dir)})
         return str(snap_dir)
@@ -387,6 +403,7 @@ def _fetch_tensorhub_snapshot(
     async def _download(res: Any) -> Path:
         return await ensure_snapshot_async(
             base_dir=cache_dir, ref=thref, resolved=res, progress=_progress,
+            components=components,
         )
 
     try:
@@ -402,7 +419,8 @@ def _fetch_tensorhub_snapshot(
         raise ModelResolutionError(
             f"failed to download tensorhub snapshot for {canonical}: {e}"
         ) from e
-    _remember_hub_ref(cache_dir, thref, resolved.snapshot_digest)
+    if not components:
+        _remember_hub_ref(cache_dir, thref, resolved.snapshot_digest)
     emit({"kind": "model_fetch.completed", "ref": canonical,
           "provider": "tensorhub", "local_dir": str(snap)})
     return str(snap)
@@ -411,6 +429,7 @@ def _fetch_tensorhub_snapshot(
 def resolve_local_path(
     *, ref: str, provider: str, offline: bool, emit: EmitFn,
     allow_patterns: Tuple[str, ...] = (),
+    components: Tuple[str, ...] = (),
     civitai_version_id: str = "",
 ) -> str:
     """Resolve one model ref to a local snapshot dir / loader-ready string.
@@ -423,6 +442,10 @@ def resolve_local_path(
          public resolve route (th#560); ``--offline`` stays CAS-only (exit 3).
       5. Civitai refs → model → latest-version lookup (or the pinned
          version), then ``download_civitai``.
+
+    ``components`` (pgw#505) narrows an HF/tensorhub fetch to the named
+    pipeline component subfolders (+ root config files) — see
+    ``download.select_component_paths`` / ``cozy_snapshot.snapshot_dir_key``.
     """
     from .cache_paths import tensorhub_cas_dir
     from .refs import parse_model_ref
@@ -451,6 +474,9 @@ def resolve_local_path(
         if offline:
             # Best-effort: check the HF cache (huggingface_hub manages this
             # itself; a cache hit returns a path, miss raises).
+            patterns = list(allow_patterns)
+            if components and not patterns:
+                patterns = [f"{c}/" for c in components] + ["*.json"]
             try:
                 from ..net import hf
                 p = hf().snapshot_download(
@@ -459,7 +485,7 @@ def resolve_local_path(
                     local_files_only=True,
                     cache_dir=get_settings().hf_home or None,
                     token=get_settings().hf_token or None,
-                    allow_patterns=list(allow_patterns) or None,
+                    allow_patterns=patterns or None,
                 )
                 return str(p)
             except Exception as e:
@@ -478,6 +504,7 @@ def resolve_local_path(
                 hf_home=get_settings().hf_home or None,
                 hf_token=get_settings().hf_token or None,
                 allow_patterns=tuple(allow_patterns),
+                components=components,
             )
         except Exception as e:
             raise ModelResolutionError(
@@ -536,7 +563,7 @@ def resolve_local_path(
                 "snapshot pre-seeded)."
             )
         return _fetch_tensorhub_snapshot(
-            parsed.tensorhub, cache_dir=cache_dir, emit=emit,
+            parsed.tensorhub, cache_dir=cache_dir, emit=emit, components=components,
         )
 
     # Civitai refs: download the model-version files directly. Auth (for gated

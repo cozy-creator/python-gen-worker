@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -8,10 +9,11 @@ import re
 import shutil
 import threading
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set
 
 from .cozy_cas import _download_one_file as _download_one_file
 from .cozy_cas import _norm_rel_path
+from .download import components_present, select_component_paths
 from .hub_client import WorkerResolvedRepo, WorkerResolvedRepoFile
 from .refs import TensorhubRef
 from ..capability import InsufficientDiskError
@@ -142,6 +144,36 @@ def _validate_resolved(ref: TensorhubRef, resolved: WorkerResolvedRepo) -> Worke
     return WorkerResolvedRepo(snapshot_digest=snapshot_digest, files=files)
 
 
+def snapshot_dir_key(snapshot_digest: str, components: Sequence[str] = ()) -> str:
+    """On-disk snapshot-directory key (pgw#505): the bare digest normally, or
+    ``<digest>__c<fingerprint>`` when ``components`` narrows the materialized
+    tree to a SUBSET of the digest's full content. Keyed separately so a
+    component-scoped (partial) materialization can never be mistaken for —
+    or collide with — the full one under the same digest."""
+    comps = sorted({c.strip() for c in components if c and str(c).strip()})
+    if not comps:
+        return snapshot_digest
+    fingerprint = hashlib.sha1("+".join(comps).encode()).hexdigest()[:12]
+    return f"{snapshot_digest}__c{fingerprint}"
+
+
+def _filter_resolved_components(
+    ref: TensorhubRef, res: WorkerResolvedRepo, components: Sequence[str],
+) -> WorkerResolvedRepo:
+    """Narrow a validated :class:`WorkerResolvedRepo` to the declared
+    pipeline components (+ root config files) — the tensorhub-source twin of
+    ``download.select_component_paths`` for the HF path."""
+    paths = [f.path for f in res.files]
+    if not components_present(paths, components):
+        raise ValueError(
+            f"components= {list(components)!r} matched nothing in "
+            f"{ref.canonical()} snapshot {res.snapshot_digest[:16]}"
+        )
+    keep = select_component_paths(paths, components)
+    files = [f for f in res.files if f.path in keep]
+    return WorkerResolvedRepo(snapshot_digest=res.snapshot_digest, files=files)
+
+
 # ---------------------------------------------------------------------------
 # Main downloader
 # ---------------------------------------------------------------------------
@@ -151,7 +183,8 @@ class CozySnapshotDownloader:
 
     Layout under <base_dir>:
       blobs/blake3/<aa>/<bb>/<digest>
-      snapshots/<snapshot_digest>/...
+      snapshots/<snapshot_digest>/...            (whole repo)
+      snapshots/<snapshot_digest>__c<fp>/...     (components=-scoped subset, pgw#505)
     """
 
     def __init__(self) -> None:
@@ -164,6 +197,7 @@ class CozySnapshotDownloader:
         *,
         resolved: Optional[WorkerResolvedRepo],
         progress: Optional[ProgressFn] = None,
+        components: Sequence[str] = (),
     ) -> Path:
         blobs_root = base_dir / "blobs"
         snaps_root = base_dir / "snapshots"
@@ -177,10 +211,17 @@ class CozySnapshotDownloader:
                 "cozy snapshot requires orchestrator-resolved URLs (resolved=None)"
             )
         res = _validate_resolved(ref, resolved)
+        if components:
+            res = _filter_resolved_components(ref, res, components)
 
-        snap_dir = snaps_root / res.snapshot_digest
+        # pgw#505: a components=-scoped fetch materializes a NARROWER tree
+        # than the digest's full content, so it is keyed separately (never
+        # under the bare digest — that name is reserved for the complete
+        # snapshot).
+        key = snapshot_dir_key(res.snapshot_digest, components)
+        snap_dir = snaps_root / key
         if snap_dir.exists():
-            _log.info("snapshot_cached digest=%s", res.snapshot_digest[:16])
+            _log.info("snapshot_cached key=%s", key[:24])
             return snap_dir
 
         # Coordinate concurrent builders via threading (works across event loops).
@@ -188,23 +229,23 @@ class CozySnapshotDownloader:
         with _SNAP_LOCK:
             if snap_dir.exists():
                 return snap_dir
-            entry = _SNAP_ENTRIES.get(res.snapshot_digest)
+            entry = _SNAP_ENTRIES.get(key)
             if entry is None:
                 entry = _SnapshotEntry()
-                _SNAP_ENTRIES[res.snapshot_digest] = entry
+                _SNAP_ENTRIES[key] = entry
                 is_builder = True
             else:
                 is_builder = False
 
         if not is_builder:
-            _log.info("snapshot_waiting digest=%s (another builder active)", res.snapshot_digest[:16])
+            _log.info("snapshot_waiting key=%s (another builder active)", key[:24])
             await loop.run_in_executor(None, entry.event.wait)
             if entry.exception is not None:
                 raise RuntimeError("concurrent snapshot build failed") from entry.exception
             return snap_dir
 
         try:
-            _log.info("snapshot_build_start digest=%s files=%d", res.snapshot_digest[:16], len(res.files))
+            _log.info("snapshot_build_start key=%s files=%d", key[:24], len(res.files))
             await self._ensure_blobs(blobs_root, res.files, progress=progress)
             # Materialization copies/concatenates multi-GB trees — strictly
             # off the event loop (gw#407: a loop blocked for the duration of
@@ -213,7 +254,7 @@ class CozySnapshotDownloader:
             await asyncio.to_thread(
                 self._materialize_snapshot, blobs_root, snaps_root, snap_dir, res
             )
-            _log.info("snapshot_build_done digest=%s", res.snapshot_digest[:16])
+            _log.info("snapshot_build_done key=%s", key[:24])
             return snap_dir
         except BaseException as exc:
             entry.exception = exc
@@ -224,8 +265,8 @@ class CozySnapshotDownloader:
             # entry so the next request creates a fresh builder and retries;
             # waiters already holding this entry still see its exception once.
             with _SNAP_LOCK:
-                if _SNAP_ENTRIES.get(res.snapshot_digest) is entry:
-                    del _SNAP_ENTRIES[res.snapshot_digest]
+                if _SNAP_ENTRIES.get(key) is entry:
+                    del _SNAP_ENTRIES[key]
             entry.event.set()
 
     def _materialize_snapshot(
@@ -237,7 +278,7 @@ class CozySnapshotDownloader:
     ) -> None:
         """Blocking build phase (worker thread): reassemble + hardlink into a
         ``.building`` dir, then atomically rename into place."""
-        tmp = snaps_root / f"{res.snapshot_digest}.building"
+        tmp = snaps_root / f"{snap_dir.name}.building"
         if tmp.exists():
             shutil.rmtree(tmp)
         tmp.mkdir(parents=True, exist_ok=True)
@@ -497,6 +538,9 @@ async def ensure_snapshot_async(
     ref: TensorhubRef,
     resolved: Optional[WorkerResolvedRepo],
     progress: Optional[ProgressFn] = None,
+    components: Sequence[str] = (),
 ) -> Path:
     dl = CozySnapshotDownloader()
-    return await dl.ensure_snapshot(base_dir, ref, resolved=resolved, progress=progress)
+    return await dl.ensure_snapshot(
+        base_dir, ref, resolved=resolved, progress=progress, components=components,
+    )
