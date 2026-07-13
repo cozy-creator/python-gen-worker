@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.22.6 (2026-07-13)
+
+- convert/layout: HiDream-O1 family hint — `HiDream-ai/HiDream-O1-Image*`
+  repos stamp `model_family="hidream-o1"` at ingest, so the mirror's th#767
+  inference-defaults PUT has a family to key on (ie#478).
+
 ## 0.22.5 (2026-07-13)
 
 - **packaging: grpcio floor 1.82.1.** The shipped pb stubs are generated
