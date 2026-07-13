@@ -224,3 +224,33 @@ def test_gguf_ud_and_iquant_tokens_labeled() -> None:
     assert c.attrs["dtype"] == "gguf:ud-q4_k_xl"
     c2 = classify_repo(["model-IQ4_XS.gguf"])
     assert c2.attrs["dtype"] == "gguf:iq4_xs"
+
+
+def test_pipeline_tree_trellis_shape() -> None:
+    files = [
+        "pipeline.json",
+        "README.md",
+        "assets/teaser.png",
+        "ckpts/ss_flow_img_dit_1_3B_64_bf16.json",
+        "ckpts/ss_flow_img_dit_1_3B_64_bf16.safetensors",
+        "ckpts/shape_dec_next_dc_f16c32_fp16.json",
+        "ckpts/shape_dec_next_dc_f16c32_fp16.safetensors",
+        "ckpts/tex_dec_next_dc_f16c32_fp16.json",
+        "ckpts/tex_dec_next_dc_f16c32_fp16.safetensors",
+    ]
+    c = classify_repo(files)
+    assert c.strategy == "pipeline_tree"
+    assert c.runtime_library == "trellis2"
+    allow = set(c.allow_patterns)
+    # EVERY safetensors rides — mixed per-model dtypes are intentional, no
+    # dtype-variant pick.
+    for p in files:
+        if p.endswith((".safetensors", ".json")):
+            assert p in allow, p
+    assert "assets/teaser.png" not in allow
+    assert c.attrs["file_layout"] == "singlefile"
+
+
+def test_pipeline_tree_without_weights_falls_through() -> None:
+    with pytest.raises(RepoRefusal):
+        classify_repo(["pipeline.json", "README.md"])

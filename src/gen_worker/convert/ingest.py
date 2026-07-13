@@ -420,6 +420,9 @@ def ingest_huggingface(
         "diffusers-single-file": "diffusers",
         "diffusers-lora": "diffusers",
         "llama-cpp": "llama.cpp",
+        # No hub-recognized loader library for TRELLIS-style pipeline trees:
+        # publish with library_name unset (validator opt-out, e2e #112).
+        "trellis2": "",
     }.get(library, library)
     repo_spec = {
         "kind": "adapter" if library in {"peft", "diffusers-lora"} else "model",

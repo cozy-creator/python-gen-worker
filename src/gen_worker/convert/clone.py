@@ -750,6 +750,7 @@ def run_clone(
         strategy = source.classification.strategy if source.classification is not None else ""
         publish_as_is = strategy in {
             "transformers", "peft", "sentence_transformers", "gguf", "native_lora",
+            "pipeline_tree",
         }
 
         for i, spec in enumerate(specs):
