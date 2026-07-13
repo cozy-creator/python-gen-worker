@@ -135,9 +135,13 @@ def test_apply_fp8_storage_on_bare_module_defaults_bf16() -> None:
     assert compute is torch.bfloat16
 
 
-def test_binding_storage_dtype_applies_fp8(tmp_path: Path) -> None:
+def test_binding_storage_dtype_applies_fp8(tmp_path: Path, monkeypatch) -> None:
+    # gw#534: the cast is involuntary now — pin the doesn't-fit-bf16 path
+    # (the roomy-card upgrade lives in test_bf16_resident_upcast.py).
     import torch
 
+    monkeypatch.setattr(
+        "gen_worker.models.loading.bf16_resident_fits", lambda *a, **k: False)
     _Pipe.calls = []
     pipe = load_from_pretrained(_Pipe, _snapshot(tmp_path), dtype="bf16",
                                 storage_dtype="fp8")
@@ -149,11 +153,13 @@ def test_binding_storage_dtype_applies_fp8(tmp_path: Path) -> None:
     assert compute is torch.bfloat16
 
 
-def test_fp8_stored_flavor_auto_preserved(tmp_path: Path) -> None:
-    """An #fp8 flavor snapshot loads at bf16 compute and gets its storage
-    precision restored — never silently upcast into 2x the VRAM."""
+def test_fp8_stored_flavor_auto_preserved(tmp_path: Path, monkeypatch) -> None:
+    """An #fp8 flavor snapshot that does NOT fit bf16-resident loads at bf16
+    compute and gets its storage precision restored (involuntary W8A16)."""
     import torch
 
+    monkeypatch.setattr(
+        "gen_worker.models.loading.bf16_resident_fits", lambda *a, **k: False)
     _Pipe.calls = []
     pipe = load_from_pretrained(_Pipe, _snapshot(tmp_path, "F8_E4M3"))
     (kwargs,) = _Pipe.calls

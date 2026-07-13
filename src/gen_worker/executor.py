@@ -2419,7 +2419,8 @@ class Executor:
                         # prep mode is traced into the cells — a drifted
                         # pipeline can only miss, so reject deterministically
                         # instead of paying a warmup to find out.
-                        drift = compile_cache.mode_drift(meta, obj)
+                        drift = (compile_cache.mode_drift(meta, obj)
+                                 or compile_cache.lane_drift(meta, obj))
                         if drift:
                             return await fail("key_mismatch", drift)
                         # Re-adoption of a re-published cell: drop the previous

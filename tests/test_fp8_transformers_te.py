@@ -178,10 +178,15 @@ def test_binding_accepts_fp8_te() -> None:
         Hub("o/r", storage_dtype="fp8+vae")
 
 
-def test_load_from_pretrained_fp8_te(tmp_path) -> None:
-    """The executor path: storage_dtype="fp8+te" reaches the TE component."""
+def test_load_from_pretrained_fp8_te(tmp_path, monkeypatch) -> None:
+    """The executor path: storage_dtype="fp8+te" reaches the TE component
+    (gw#534: pinned to the involuntary path — a roomy card upgrades to
+    bf16-resident instead)."""
     import json as _json
     import struct as _struct
+
+    monkeypatch.setattr(
+        "gen_worker.models.loading.bf16_resident_fits", lambda *a, **k: False)
 
     from gen_worker.models.loading import load_from_pretrained
 

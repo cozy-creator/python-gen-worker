@@ -97,7 +97,11 @@ def _snapshot(tmp_path: Path, components: dict) -> Path:
     return tmp_path
 
 
-def test_load_stamps_cast_ok(tmp_path: Path) -> None:
+def test_load_stamps_cast_ok(tmp_path: Path, monkeypatch) -> None:
+    # gw#534: pin the involuntary-cast path (a roomy card upgrades to
+    # bf16-resident instead — covered in test_bf16_resident_upcast.py).
+    monkeypatch.setattr(
+        "gen_worker.models.loading.bf16_resident_fits", lambda *a, **k: False)
     snap = _snapshot(tmp_path, {"transformer": ["x", "y"]})
     pipe = load_from_pretrained(_DenoiserPipe, snap, dtype="bf16",
                                 storage_dtype="fp8")
@@ -106,7 +110,9 @@ def test_load_stamps_cast_ok(tmp_path: Path) -> None:
     assert len(pipe.transformer.casting_calls) == 1
 
 
-def test_load_stamps_cast_failure(tmp_path: Path) -> None:
+def test_load_stamps_cast_failure(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "gen_worker.models.loading.bf16_resident_fits", lambda *a, **k: False)
     snap = _snapshot(tmp_path, {"latent_upsampler": ["x", "y"]})
     pipe = load_from_pretrained(_NoSurfacePipe, snap, dtype="bf16",
                                 storage_dtype="fp8")
@@ -198,6 +204,8 @@ class _DenoiserShim(_DenoiserPipe):
 
 def test_executor_keeps_cast_on_denoiser_snapshot(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv("GEN_WORKER_FORBID_CPU_OFFLOAD", "0")
+    monkeypatch.setattr(
+        "gen_worker.models.loading.bf16_resident_fits", lambda *a, **k: False)
 
     class Endpoint:
         def setup(self, m: _DenoiserShim) -> None:
