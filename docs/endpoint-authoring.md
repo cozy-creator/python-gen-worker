@@ -57,6 +57,27 @@ annotation (`FluxPipeline` → `from_pretrained`; `str`/`Path` → the local
 snapshot dir), and owns device placement and low-VRAM offload. Endpoint code
 never calls `.to("cuda")`, `enable_model_cpu_offload()`, or `empty_cache()`.
 
+## Imports go at module top — including torch
+
+Write `import torch` (and every other heavy dep) at module top like any
+normal Python. Build-time discovery imports your module to read `@endpoint`
+metadata; when a heavy dep isn't installed in the discovery environment, the
+SDK stubs it (allowlist: torch, torchvision, torchaudio, triton, xformers,
+flash_attn, bitsandbytes — extend via
+`[tool.gen_worker] discovery_heavy_deps = ["my_heavy_lib"]`), so the import
+costs nothing. The old convention of deferring `import torch` into handler
+bodies is retired — don't do it.
+
+The one boundary: don't EXECUTE heavy-dep code at module scope
+(`DTYPE = torch.bfloat16`, `torch.cuda.is_available()` at import time).
+Under a stub that fails discovery loudly with a message naming the fix —
+move the code into `setup()` or the handler.
+
+Discovery also hard-fails when any module in your package fails to import
+for any OTHER reason (missing non-heavy dep, SyntaxError): a broken
+submodule fails the build with the real traceback instead of silently
+dropping its functions from the manifest.
+
 ## Bindings
 
 The slot name is the `models={}` key (or, with the single-binding `model=`

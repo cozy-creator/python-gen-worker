@@ -11,6 +11,13 @@ Invariants:
   skipped (third-party re-exports stay out).
 * Each object is yielded exactly once even when re-exported into multiple
   namespaces (dedup by ``id``).
+* A module that fails to IMPORT is a HARD failure
+  (:class:`EndpointImportError`), never log-and-continue — a silently
+  skipped submodule means an endpoint.lock (or live route table) silently
+  missing functions. A missing heavy dep is not an excuse: build-time
+  discovery arms :mod:`gen_worker.discovery.heavy_deps` stubs first, so
+  module-top ``import torch`` succeeds without torch installed; any other
+  ImportError/SyntaxError fails the walk with the original traceback chained.
 """
 
 from __future__ import annotations
@@ -25,6 +32,15 @@ from typing import Any
 from ..api.decorators import ATTR
 
 logger = logging.getLogger(__name__)
+
+
+class EndpointImportError(ImportError):
+    """An endpoint module (or one of its submodules) failed to import.
+
+    Raised instead of skipping so a broken module can never silently drop
+    functions from the manifest or the worker's route table. The original
+    exception is chained (``__cause__``) so builds see the real traceback.
+    """
 
 
 @dataclass(frozen=True)
@@ -47,12 +63,10 @@ def find_endpoints(module_names: list[str]) -> list[FoundEndpoint]:
         try:
             top_module = importlib.import_module(top_name)
         except Exception as exc:
-            logger.exception(
-                "Could not import user module '%s': %s. "
-                "Walker will return no endpoints from this module.",
-                top_name, exc,
-            )
-            continue
+            raise EndpointImportError(
+                f"could not import endpoint module {top_name!r}: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
 
         modules_to_scan: list[Any] = [top_module]
         if hasattr(top_module, "__path__"):
@@ -61,10 +75,10 @@ def find_endpoints(module_names: list[str]) -> list[FoundEndpoint]:
                 try:
                     modules_to_scan.append(importlib.import_module(sub.name))
                 except Exception as exc:
-                    logger.warning(
-                        "Skipping submodule '%s' — import failed: %s.",
-                        sub.name, exc,
-                    )
+                    raise EndpointImportError(
+                        f"could not import endpoint submodule {sub.name!r} "
+                        f"(walking {top_name!r}): {type(exc).__name__}: {exc}"
+                    ) from exc
 
         package_prefix = top_module.__name__ + "."
         for scan_module in modules_to_scan:

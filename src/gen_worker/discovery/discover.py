@@ -6,6 +6,7 @@ manifest as TOML on stdout. Run as ``python -m gen_worker.discovery``.
 import hashlib
 import json
 import sys
+import traceback
 import typing
 import types as py_types
 from pathlib import Path
@@ -25,9 +26,10 @@ from gen_worker.api.types import (
     Tensors,
     VideoAsset,
 )
+from gen_worker.discovery.heavy_deps import stub_missing_heavy_deps
 from gen_worker.discovery.names import slugify_name
 from gen_worker.discovery.project import load_project_config
-from gen_worker.discovery.walk import find_endpoints
+from gen_worker.discovery.walk import EndpointImportError, find_endpoints
 
 
 def _type_id(t: type) -> Dict[str, str]:
@@ -504,9 +506,21 @@ def _assert_unique_function_names(functions: List[Dict[str, Any]]) -> None:
     )
 
 
-def discover_functions(root: Optional[Path] = None, *, main_module: str | None = None) -> List[Dict[str, Any]]:
+def discover_functions(
+    root: Optional[Path] = None,
+    *,
+    main_module: str | None = None,
+    extra_heavy_deps: Tuple[str, ...] = (),
+) -> List[Dict[str, Any]]:
     """Discover every @endpoint object under ``main_module``'s top-level
-    package and return the manifest ``functions`` entries."""
+    package and return the manifest ``functions`` entries.
+
+    Build-time discovery arms :func:`stub_missing_heavy_deps` around the walk:
+    heavy roots (torch, ...) missing from the environment are stubbed so
+    module-top ``import torch`` costs nothing, while any code that actually
+    USES the dep at import time fails loudly. ``extra_heavy_deps`` extends the
+    default allowlist (``[tool.gen_worker] discovery_heavy_deps``).
+    """
     if root is None:
         root = Path.cwd()
     root = root.resolve()
@@ -523,30 +537,31 @@ def discover_functions(root: Optional[Path] = None, *, main_module: str | None =
         sys.path.insert(0, src_str)
 
     top_level = main_module.split(".", 1)[0]
-    try:
-        found = find_endpoints([top_level])
-    except Exception as e:
-        raise ValueError(
-            f"failed to walk endpoint package {top_level!r} (derived from "
-            f"[tool.gen_worker] main={main_module!r}): {e}"
-        ) from e
+    with stub_missing_heavy_deps(extra_heavy_deps):
+        try:
+            found = find_endpoints([top_level])
+        except Exception as e:
+            raise ValueError(
+                f"failed to walk endpoint package {top_level!r} (derived from "
+                f"[tool.gen_worker] main={main_module!r}): {e}"
+            ) from e
 
-    functions: List[Dict[str, Any]] = []
-    seen: Set[Tuple[str, str, str, str]] = set()
-    for f in found:
-        for entry in _extract_entries(f.obj, f.walked_module):
-            # (module, class, python_name, name) dedups objects re-found under
-            # multiple walked packages; name is one handler per method now.
-            key = (
-                entry.get("declared_module", entry.get("module", "")),
-                entry.get("class_name", ""),
-                entry.get("python_name", ""),
-                entry.get("name", ""),
-            )
-            if key in seen:
-                continue
-            seen.add(key)
-            functions.append(entry)
+        functions: List[Dict[str, Any]] = []
+        seen: Set[Tuple[str, str, str, str]] = set()
+        for f in found:
+            for entry in _extract_entries(f.obj, f.walked_module):
+                # (module, class, python_name, name) dedups objects re-found under
+                # multiple walked packages; name is one handler per method now.
+                key = (
+                    entry.get("declared_module", entry.get("module", "")),
+                    entry.get("class_name", ""),
+                    entry.get("python_name", ""),
+                    entry.get("name", ""),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                functions.append(entry)
 
     _assert_unique_function_names(functions)
     return functions
@@ -686,7 +701,9 @@ def discover_manifest(root: Optional[Path] = None) -> Dict[str, Any]:
 
     cfg = load_project_config(root)
 
-    functions = discover_functions(root, main_module=cfg.main)
+    functions = discover_functions(
+        root, main_module=cfg.main, extra_heavy_deps=cfg.discovery_heavy_deps
+    )
 
     seen_fn: Dict[str, str] = {}
     for fn in functions:
@@ -728,6 +745,14 @@ def main() -> None:
     try:
         manifest = discover_manifest()
     except Exception as e:
+        # A broken endpoint module fails the BUILD, with the real import
+        # traceback — never a log-and-continue that ships an endpoint.lock
+        # silently missing functions.
+        cause: Optional[BaseException] = e
+        while cause is not None and not isinstance(cause, EndpointImportError):
+            cause = cause.__cause__
+        if cause is not None:
+            traceback.print_exc(file=sys.stderr)
         print(f"error: {e}", file=sys.stderr)
         sys.exit(1)
 

@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.22.1 (2026-07-13)
+
+- **pgw#506: discovery-time lazy-import stubs for heavy deps — the
+  defer-`import torch`-into-handlers convention is retired.** Build-time
+  discovery (`python -m gen_worker.discovery` / `discover_functions`) arms
+  `gen_worker.discovery.heavy_deps.stub_missing_heavy_deps`: when an
+  allowlisted heavy root (torch, torchvision, torchaudio, triton, xformers,
+  flash_attn, bitsandbytes; extend via `[tool.gen_worker]
+  discovery_heavy_deps = [...]`) is MISSING from the environment, a stub is
+  served for it (and any submodule) so module-top `import torch` succeeds and
+  schemas still build — while every attribute TOUCH on the stub raises an
+  actionable `HeavyDepStubError` naming the fix (move module-scope use into
+  `setup()`/the handler, or install the dep). When the dep IS installed
+  (in-image discovery), nothing changes.
+- **Discovery hard-fails on endpoint module import errors.** `find_endpoints`
+  no longer logs-and-continues when a module or submodule fails to import —
+  that silently shipped endpoint.locks (and live route tables) missing
+  functions. Any non-heavy-dep ImportError/SyntaxError now raises
+  `EndpointImportError` with the original exception chained; the discovery
+  CLI prints the full traceback and fails the build.
+- docs: endpoint-authoring guide — module-top imports are the rule; the
+  defer-imports convention is deleted.
+- **Rebased onto 0.21.0 (pgw#523 provider/ref alias retirement, pgw#517
+  compile= hard-error, pgw#524 SDK friction batch).** No functional overlap:
+  the heavy-dep stub seam and the hard-fail-on-import-error walk both operate
+  purely at `find_endpoints`/`discover_functions` time, before any
+  Slot/ModelRef emission logic runs; those PRs' changes to manifest/binding
+  emission are downstream of a successful discovery walk and untouched here.
+
 ## 0.22.0 (2026-07-13)
 
 **pgw#526 + pgw#527 — ctx hierarchy honesty + dead-surface cuts (BREAKING).**
