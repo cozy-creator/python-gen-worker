@@ -43,6 +43,10 @@ class LoraOverlay(TypedDict):
     ref: str
     weight: float
 
+
+LogLevel = Literal["debug", "info", "warning", "error"]
+"""Severity for :meth:`RequestContext.log` (pgw#508's operator stream)."""
+
 from ..api.errors import AuthError
 from ..api.slot import ResolvedSlot
 from ..api.types import (
@@ -516,6 +520,9 @@ class RequestContext:
     ) -> None:
         """Report request progress (best-effort, rides ``request.progress``).
 
+        This is the USER-facing stream — the cozy-art job feed renders it
+        directly. For platform/operator-only diagnostics use :meth:`log`.
+
         ``progress`` is a 0..1 fraction; ``step``/``total`` carry the exact
         step counter when known (e.g. denoise step 5 of 20) so UIs can render
         "5 / 20" instead of a bare percentage.
@@ -550,8 +557,35 @@ class RequestContext:
             payload["size_bytes"] = int(size_bytes)
         self._emit_event("request.checkpoint", payload)
 
-    def log(self, message: str, level: str = "info") -> None:
-        self._emit_event("request.log", {"message": message, "level": level})
+    def log(self, message: str, level: LogLevel = "info", **fields: Any) -> None:
+        """Emit a request-scoped OPERATOR diagnostic (rides ``request.log``).
+
+        pgw#508: this is the PLATFORM/OPERATOR debug stream, full stop —
+        never user-facing. tensorhub persists it under an operator-only event
+        kind and never serves it on a tenant-facing surface (SSE job feed,
+        events.bin, poll); it does not reach the cozy-art job card. See
+        proto/CONTRACT.md § "The ctx event lane" for the wire-level routing
+        contract.
+
+        One-line rule for authors: module-level ``logging.getLogger(__name__)``
+        for boot-time/cross-request logging; ``ctx.log`` for anything scoped
+        to THIS request you'd want when debugging it (resolved model/
+        scheduler choice, retry/degradation detail, malformed-input detail);
+        ``ctx.progress`` for what the human watching the job should see.
+        There is no user-visible counterpart to ``ctx.log`` — a product
+        surface for extra user-facing text would be a deliberate addition,
+        not an overload of this method (YAGNI until a real surface asks).
+
+        ``**fields`` rides the payload as structured JSON extras (e.g.
+        ``ctx.log("OOM retry", level="warning", free_gb=2.1, rung="offload")``)
+        so operators can filter/grep without parsing the message string.
+        Best-effort like every ctx event: dropped silently if unencodable or
+        no emitter is configured.
+        """
+        payload: Dict[str, Any] = {"message": message, "level": level}
+        if fields:
+            payload["fields"] = fields
+        self._emit_event("request.log", payload)
 
     def _c2pa_manifest_kwargs(self) -> Dict[str, Any]:
         model_refs = [str(v) for v in (self._models or {}).values()]
