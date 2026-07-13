@@ -181,17 +181,24 @@ def _capability_job_id(token: str) -> Optional[str]:
 
 
 def _resolve_slots_kwargs(spec: EndpointSpec, run: "pb.RunJob") -> Dict[str, Any]:
-    """``ctx.slots`` resolution chain (pgw#520): merge each Slot-declared
-    slot's repo-metadata ``ModelBinding.inference_defaults`` over its code
-    fallback preset. Returns the ``resolved_slots=``/``slot_errors=``
-    kwargs for ``RequestContext.__init__`` — a slot that fails to resolve
-    (no metadata + no fallback, or no ref) is deferred to a ``ctx.slots[name]``
-    access error instead of failing the whole dispatch."""
+    """``ctx.slots`` resolution chain (pgw#520 / pgw#516): merge each
+    Slot-declared slot's repo-metadata ``ModelBinding.inference_defaults``
+    over its code fallback preset, then apply each riding lora's
+    ``LoraOverlay.inference_defaults`` as a FIELD-LEVEL override, in lora
+    order (pgw#516 composition rule — see ``api.slot._apply_lora_overrides``).
+    Returns the ``resolved_slots=``/``slot_errors=`` kwargs for
+    ``RequestContext.__init__`` — a slot that fails to resolve (no metadata +
+    no fallback, or no ref) is deferred to a ``ctx.slots[name]`` access error
+    instead of failing the whole dispatch."""
     if not spec.slots:
         return {"resolved_slots": {}, "slot_errors": {}}
     from .api.slot import resolve_slot
 
     raw_defaults = {b.slot: b.inference_defaults for b in run.models if b.inference_defaults}
+    lora_defaults = {
+        b.slot: tuple(lo.inference_defaults for lo in b.loras if lo.inference_defaults)
+        for b in run.models if b.loras
+    }
     resolved: Dict[str, Any] = {}
     errors: Dict[str, str] = {}
     for name, slot in spec.slots.items():
@@ -201,6 +208,7 @@ def _resolve_slots_kwargs(spec: EndpointSpec, run: "pb.RunJob") -> Dict[str, Any
                 ref=spec.models.get(name),
                 family=spec.slot_family.get(name, ""),
                 raw_metadata_json=raw_defaults.get(name, ""),
+                lora_metadata_json=lora_defaults.get(name, ()),
             )
         except ValueError as exc:
             errors[name] = str(exc)

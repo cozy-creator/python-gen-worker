@@ -34,12 +34,12 @@ bare ref's slot NAME.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Generic, Mapping, Optional, TypeVar
+from typing import Any, Dict, Generic, Mapping, Optional, Sequence, TypeVar
 
 import msgspec
 
 from .binding import ModelRef
-from ..families.base import FamilyDefaults, family_for
+from ..families.base import KIND_LORA, FamilyDefaults, family_for
 
 D = TypeVar("D", bound=FamilyDefaults)
 
@@ -137,6 +137,56 @@ class ResolvedSlot(Generic[D]):
         return f"ResolvedSlot(ref={self.ref!r}, defaults={self.defaults!r})"
 
 
+def _apply_lora_overrides(
+    name: str, base: D, fam: str, lora_metadata_json: Sequence[str],
+) -> D:
+    """pgw#516 composition rule: apply each lora's non-``None`` fields onto
+    ``base`` (the checkpoint's already-resolved recipe) FIELD BY FIELD, in
+    ``lora_metadata_json`` order (a later lora's non-``None`` field wins over
+    an earlier one's on the same field) — NOT the whole-object precedence
+    :func:`resolve_slot` uses for repo-metadata-over-fallback above.
+
+    Only fields ``base``'s own struct declares participate — a lora's
+    LoRA-only fields (``trigger_words``, ``recommended_weight``: no
+    checkpoint-recipe analog) and ``schema_version`` are never merged in.
+    Missing/empty entries are skipped. A lora family with no registered
+    ``kind="lora"`` vocabulary is skipped silently (best-effort enhancement:
+    an unmerged lora override never blocks the checkpoint's own resolved
+    recipe). A present-but-MALFORMED lora metadata document (tensorhub
+    already schema-validated it at PUT time — a decode failure here means
+    real version skew) raises, matching the checkpoint metadata's own
+    fail-loud posture.
+    """
+    if not lora_metadata_json:
+        return base
+    lora_cls = family_for(fam, kind=KIND_LORA) if fam else None
+    if lora_cls is None:
+        return base
+    base_fields = set(type(base).__struct_fields__)
+    result = base
+    for i, raw in enumerate(lora_metadata_json):
+        raw = (raw or "").strip()
+        if not raw:
+            continue
+        try:
+            lora_defaults: Any = msgspec.json.decode(raw.encode("utf-8"), type=lora_cls)
+        except (msgspec.ValidationError, msgspec.DecodeError) as exc:
+            raise ValueError(
+                f"slot {name!r}: loras[{i}] inference-defaults metadata failed "
+                f"{lora_cls.__name__} validation: {exc}"
+            ) from exc
+        overrides: Dict[str, Any] = {}
+        for f in lora_defaults.__struct_fields__:
+            if f == "schema_version" or f not in base_fields:
+                continue
+            v = getattr(lora_defaults, f)
+            if v is not None:
+                overrides[f] = v
+        if overrides:
+            result = msgspec.structs.replace(result, **overrides)
+    return result
+
+
 def resolve_slot(
     name: str,
     slot: "Slot[D]",
@@ -144,10 +194,12 @@ def resolve_slot(
     ref: Optional[ModelRef],
     family: str = "",
     raw_metadata_json: str = "",
+    lora_metadata_json: Sequence[str] = (),
 ) -> "ResolvedSlot[D]":
-    """Merge repo-metadata inference defaults over ``slot.default_config``
-    — the pgw#520 resolution chain shared by the production executor and
-    the hub-less CLI path.
+    """Merge repo-metadata inference defaults over ``slot.default_config``,
+    then apply per-lora FIELD-LEVEL overrides — the pgw#520/pgw#516
+    resolution chain shared by the production executor and the hub-less CLI
+    path.
 
     Precedence: repo metadata (``raw_metadata_json``, when non-empty) wins
     over ``slot.default_config`` entirely (a repo either fully specifies its
@@ -156,6 +208,11 @@ def resolve_slot(
     metadata behind the code default). ``default_config`` LOSES to repo
     metadata — it is a recipe of last resort. Missing metadata AND no
     default_config is a clear error, not a silent empty object.
+
+    ``lora_metadata_json`` (pgw#516, in lora-ride order — riding
+    ``ModelBinding.loras[i].inference_defaults`` on the wire) applies LAST,
+    field by field, on top of whichever recipe precedence above picked — see
+    :func:`_apply_lora_overrides`.
     """
     if ref is None:
         raise ValueError(
@@ -182,9 +239,11 @@ def resolve_slot(
                 f"slot {name!r}: repo inference-defaults metadata failed "
                 f"{defaults_cls.__name__} validation: {exc}"
             ) from exc
+        defaults = _apply_lora_overrides(name, defaults, fam, lora_metadata_json)
         return ResolvedSlot(ref=ref, defaults=defaults)
     if slot.default_config is not None:
-        return ResolvedSlot(ref=ref, defaults=slot.default_config)
+        merged = _apply_lora_overrides(name, slot.default_config, fam, lora_metadata_json)
+        return ResolvedSlot(ref=ref, defaults=merged)
     raise ValueError(
         f"slot {name!r}: no repo inference-defaults metadata for the "
         "resolved model and no Slot(default_config=...) on the endpoint — "
@@ -198,6 +257,7 @@ def resolve_slots(
     refs: Mapping[str, Optional[ModelRef]],
     families: Mapping[str, str] = {},
     raw_metadata: Mapping[str, str] = {},
+    lora_metadata: Mapping[str, Sequence[str]] = {},
 ) -> Dict[str, "ResolvedSlot[Any]" | Exception]:
     """Resolve every declared slot, collecting per-slot failures instead of
     raising — callers (RequestContext) surface each failure lazily, only
@@ -212,6 +272,7 @@ def resolve_slots(
                 ref=refs.get(name),
                 family=families.get(name, ""),
                 raw_metadata_json=raw_metadata.get(name, ""),
+                lora_metadata_json=lora_metadata.get(name, ()),
             )
         except ValueError as exc:
             out[name] = exc

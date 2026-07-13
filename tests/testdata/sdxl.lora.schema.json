@@ -1,0 +1,81 @@
+{
+  "$id": "https://schemas.cozy.art/gen-worker/families/sdxl.lora.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "SDXL LoRA overlay recipe opinions (pgw#516 settled foundation).\n\nA LoRA repo's OWN metadata — trained-in trigger words, the weight the\ntrainer/curator recommends, and any recipe opinions the adapter carries\n(a distillation LoRA pinning ``steps=4``/``guidance=0``). EVERY field\nbut ``trigger_words``/``schema_version`` defaults to ``None``: \"no\nopinion\" — a LoRA that is purely a style/subject overlay with no\nrecipe requirements sets nothing, and the checkpoint's own recipe\npasses through untouched.\n\nComposition (th#767b, the SETTLED part of pgw#516): when this LoRA\nrides a pick, its non-``None`` fields OVERRIDE the base checkpoint's\nresolved recipe FIELD BY FIELD (not whole-object like the repo-metadata-\nover-fallback precedence above) — see\n``gen_worker.api.slot.resolve_slot``'s ``lora_metadata_json`` merge and\n``proto/CONTRACT.md``'s ``LoraOverlay.inference_defaults`` row. Only the\nfields this struct shares with :class:`SdxlDefaults` (``scheduler``,\n``steps``, ``guidance``, ``max_guidance``) participate in that merge;\n``trigger_words``/``recommended_weight`` have no checkpoint-recipe\nanalog and are NOT applied to ``ctx.slots[slot].defaults`` — an\nendpoint reads them off the resolved lora's own object (the\nendpoint-authoring surface for that is explicitly OUT of this issue's\nsettled foundation).",
+  "properties": {
+    "guidance": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "max_guidance": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "recommended_weight": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "scheduler": {
+      "anyOf": [
+        {
+          "enum": [
+            "dpmpp_2m_karras",
+            "dpmpp_2m_sde_karras",
+            "euler_a"
+          ]
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "schema_version": {
+      "default": 1,
+      "type": "integer"
+    },
+    "steps": {
+      "anyOf": [
+        {
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "trigger_words": {
+      "default": [],
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [],
+  "title": "SdxlLoraDefaults",
+  "type": "object"
+}

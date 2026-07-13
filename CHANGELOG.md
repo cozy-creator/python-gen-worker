@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.22.3 (2026-07-13)
+
+- **pgw#516 (settled foundation): LoRA-kind family vocabulary + FIELD-LEVEL
+  lora composition (th#767 one level down).** `gen_worker.families` gains a
+  KIND axis — `@family(name, kind="checkpoint"|"lora")`, same family name,
+  a separate typed vocabulary struct per kind (default `kind="checkpoint"`,
+  every existing `@family("sdxl")` call site is unaffected). Ships
+  `SdxlLoraDefaults` (`trigger_words`, `recommended_weight`, `steps`,
+  `guidance`, `max_guidance`, `scheduler` — every field but
+  `trigger_words`/`schema_version` defaults to `None`, "no opinion").
+  `family_for`/`family_registry`/`export_json_schema`/`export_all_schemas`
+  all take/key on `kind`; `gen-worker families export-schemas` now writes
+  `<family>.schema.json` (checkpoint) AND `<family>.lora.schema.json`
+  (lora) per registered pair (`export_json_schema` also now round-trips its
+  return value through JSON so every caller — not just the CLI — sees
+  JSON-safe types, e.g. tuple defaults as arrays).
+- **Composition rule**: when a lora rides a pick, its non-`None`
+  inference-defaults fields override the resolved checkpoint recipe FIELD
+  BY FIELD (not the whole-object repo-metadata-over-fallback precedence),
+  in lora-ride order — a distillation lora's `steps=4`/`guidance=0` beats
+  the base checkpoint's `28`/`6`. `resolve_slot`/`resolve_slots` gain
+  `lora_metadata_json=`; `ctx.slots[slot].defaults` is the merged result.
+  Wire: `LoraOverlay` gains `inference_defaults` (proto field 3) — see
+  `proto/CONTRACT.md`.
+- Endpoint-authoring surface for curated LoRA menus (e.g. `TurboLora`-style
+  enums) stays OUT of scope by design — open per pgw#516/th#767.
+- **Rebased onto 0.21.0 (pgw#524's `Slot(fallback=)` -> `Slot(default_config=)`
+  rename, pgw#532's dynamic slot materialization).** This PR's original diff
+  (authored pre-rename) still referenced `slot.fallback` in
+  `api/slot.py::resolve_slot`'s no-repo-metadata branch; ported to
+  `slot.default_config`, keeping the pgw#516 field-level lora-override
+  composition (`_apply_lora_overrides`) wrapped around it — same treatment
+  the repo-metadata branch already got. No interaction with #243's dispatch
+  materialization: that PR rebinds WHICH checkpoint a Slot resolves to
+  per-dispatch (`_effective_spec`); this PR governs what `.defaults` looks
+  like once a checkpoint (any checkpoint) is already picked — the two
+  compose without overlap.
+
 ## 0.22.2 (2026-07-13)
 
 - **pgw#505: selective component download — declare-on-binding.** `Hub`/`HF`
