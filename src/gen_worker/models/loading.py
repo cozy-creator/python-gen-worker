@@ -645,6 +645,65 @@ def _merge_sharded_checkpoint(snapshot_dir: Path, index_path: Path) -> Path:
     return merged
 
 
+# --- fp8 download, bf16 resident (gw#534 rung 2) ----------------------------
+# W8A16 layerwise casting is never chosen voluntarily (Paul 2026-07-13: the
+# per-forward cast tax measured +44% H100 / +73% B200 wall). A planned fp8
+# storage lane (stored #fp8 flavor or resolved cast) is UPGRADED to plain
+# bf16-resident weights when the whole snapshot fits free VRAM with headroom:
+# the fp8 artifact stays the small download, the upcast happens ONCE at load
+# (from_pretrained's torch_dtype already does it — we simply skip the hooks
+# that would re-cast down). Hooks remain only when bf16 does not fit.
+BF16_RESIDENT_MARGIN_GB = 4.0  # activations + allocator headroom
+
+# The pipeline's weight lane, part of the compile-cache graph key (gw#534):
+# "" = plain resident weights (incl. the bf16-resident upcast), "fp8-hooks" =
+# layerwise-cast hooks armed (the hooks are traced into the FX graphs).
+_WEIGHT_LANE_ATTR = "_cozy_weight_lane"
+
+
+def pipeline_weight_lane(pipeline: Any) -> str:
+    lane = str(getattr(pipeline, _WEIGHT_LANE_ATTR, "") or "")
+    if lane == "bf16-resident":
+        return ""  # traces identically to plain bf16
+    if lane:
+        return lane
+    for name in _FP8_STORAGE_COMPONENTS:
+        if getattr(getattr(pipeline, name, None), "_cozy_fp8_storage_applied", False):
+            return "fp8-hooks"
+    if getattr(pipeline, "_cozy_fp8_storage_applied", False):
+        return "fp8-hooks"
+    return ""
+
+
+def bf16_resident_fits(
+    path: Path, *, text_encoders: bool = False, free_gb: Optional[float] = None
+) -> bool:
+    """True when the snapshot can serve fully bf16-RESIDENT within free VRAM
+    minus :data:`BF16_RESIDENT_MARGIN_GB` (fp8-stored cast targets doubled for
+    the upcast). False on CPU-only hosts or unreadable snapshots — the caller
+    keeps today's hook path."""
+    if free_gb is None:
+        from .memory import get_available_vram_gb
+
+        free_gb = get_available_vram_gb()
+    if free_gb <= 0:
+        return False
+    comp = snapshot_component_weight_bytes(Path(path))
+    total = sum(comp.values())
+    if total <= 0:
+        return False
+    targets = set(_FP8_STORAGE_COMPONENTS)
+    if text_encoders:
+        targets |= set(_FP8_TEXT_ENCODER_COMPONENTS)
+    upcast_extra = 0
+    for name, nbytes in comp.items():
+        probe = Path(path) / name if name else Path(path)
+        if (name in targets or not name) and detect_on_disk_dtype(probe) == "fp8":
+            upcast_extra += nbytes
+    resident_gb = (total + upcast_extra) / float(1 << 30)
+    return resident_gb <= float(free_gb) - BF16_RESIDENT_MARGIN_GB
+
+
 # --- Runtime fit rungs (th#546 emergency lane + th#683 fp8 storage) --------
 # Fit ladder: bf16 -> #fp8 flavor -> #nvfp4 (Blackwell) -> runtime fp8-E4M3
 # storage -> EMERGENCY nf4 -> CPU offload. When even the downloaded flavor
@@ -992,6 +1051,18 @@ def load_from_pretrained(
                 pass
     fp8_storage = storage_dtype in ("fp8", "fp8+te") or sniffed == "fp8"
     fp8_text_encoders = storage_dtype == "fp8+te"
+    bf16_resident = False
+    if fp8_storage and bf16_resident_fits(Path(path), text_encoders=fp8_text_encoders):
+        # gw#534 rung 2: fp8 download, bf16 resident — skip the cast hooks
+        # (never voluntary W8A16); from_pretrained's torch_dtype upcasts once.
+        fp8_storage = False
+        fp8_text_encoders = False
+        bf16_resident = True
+        logger.info(
+            "RESIDENT_UPCAST model=%s: fp8 storage lane upgraded to "
+            "bf16-resident weights (fits with headroom); layerwise-cast "
+            "hooks skipped", path,
+        )
     adaptive_rung = ""  # gw#491: load-time rung engagement, stamped on the pipe
     if not read_on_disk_quant_config(Path(path)):
         qc = synthesize_quantization_config(attrs)
@@ -1031,6 +1102,13 @@ def load_from_pretrained(
         try:
             pipe._cozy_fp8_storage_requested = True
             pipe._cozy_fp8_storage_ok = bool(applied)
+            if applied:
+                setattr(pipe, _WEIGHT_LANE_ATTR, "fp8-hooks")
+        except Exception:
+            pass
+    elif bf16_resident:
+        try:
+            setattr(pipe, _WEIGHT_LANE_ATTR, "bf16-resident")
         except Exception:
             pass
     if adaptive_rung == "nf4":
@@ -1065,7 +1143,9 @@ __all__ = [
     "synthesize_quantization_config",
     "apply_fp8_storage",
     "apply_block_window_offload",
+    "bf16_resident_fits",
     "block_offload_active",
+    "pipeline_weight_lane",
     "emergency_quant_enabled",
     "bitsandbytes_available",
     "runtime_fp8_storage_supported",

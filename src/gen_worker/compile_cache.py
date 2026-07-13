@@ -179,6 +179,7 @@ def artifact_metadata(
     low_vram_mode: str = "",
     storage_dtype: str = "",
     compile_mode: str = "whole",
+    weight_lane: str = "",
 ) -> Dict[str, Any]:
     """Producer-side metadata for :func:`pack` (no timestamps: artifacts of
     identical content must be byte-identical). ``source_ref``/``source_digest``
@@ -186,9 +187,12 @@ def artifact_metadata(
     ``low_vram_mode`` is the prep mode the producer pipeline was traced under
     (gw#391): its flags are traced into the graphs, so a consumer prepped in a
     different mode must reject the cell. ``storage_dtype`` records the weight
-    storage the graphs were traced under (fp8 layerwise-cast hooks are traced
-    INTO the graphs — ie#381); informational, a drift is a cache miss, never
-    an error. Shape rows are (w, h) or (w, h, frames) — see ``Compile``."""
+    storage the binding REQUESTED — informational only. ``weight_lane`` is the
+    lane the built pipeline ACTUALLY traced under (gw#534:
+    ``loading.pipeline_weight_lane`` — "" plain-resident, "fp8-hooks"
+    layerwise-cast; the hooks are traced INTO the graphs, ie#381) and is
+    parity-checked at :func:`enable` like ``low_vram_mode``. Shape rows are
+    (w, h) or (w, h, frames) — see ``Compile``."""
     return {
         "format": ARTIFACT_FORMAT,
         "kind": "torch-inductor-cache",
@@ -202,6 +206,7 @@ def artifact_metadata(
         "low_vram_mode": str(low_vram_mode or ""),
         "storage_dtype": str(storage_dtype or ""),
         "compile_mode": str(compile_mode or "whole"),
+        "weight_lane": str(weight_lane or ""),
         "libs": _lib_versions(),
     }
 
@@ -428,6 +433,21 @@ def mode_drift(meta: Dict[str, Any], pipeline: Any) -> str:
     have = low_vram_mode(pipeline)
     if want != have:
         return f"low_vram_mode {want!r} != pipeline {have!r}"
+    return ""
+
+
+def lane_drift(meta: Dict[str, Any], pipeline: Any) -> str:
+    """'' when the cell's traced weight lane matches this pipeline's, else the
+    mismatch (gw#534). Enforced SYMMETRICALLY (unlike ``mode_drift``): a
+    bf16-resident pipeline must never adopt hook-cast-traced graphs and vice
+    versa — both directions are guaranteed FX-graph misses that would serve
+    eager while reporting adopted (the gw#391 bug class)."""
+    want = str(meta.get("weight_lane") or "")
+    from .models.loading import pipeline_weight_lane
+
+    have = pipeline_weight_lane(pipeline)
+    if want != have:
+        return f"weight_lane {want!r} != pipeline {have!r}"
     return ""
 
 
@@ -730,7 +750,7 @@ def enable(
         getattr(cfg, "family", "") or "", cache_dir=cache_dir, artifact=artifact
     )
     if meta is not None:
-        drift = mode_drift(meta, pipeline)
+        drift = mode_drift(meta, pipeline) or lane_drift(meta, pipeline)
         if drift:
             logger.warning("compile-cache: %s; staying eager", drift)
             meta = None
@@ -874,12 +894,17 @@ def build(
             "was inductor already latched to another dir in this process?"
         )
 
+    from .models.loading import pipeline_weight_lane
+
     meta = artifact_metadata(
         family=family, source_ref=source_ref, source_digest=source_digest,
         shapes=cfg.shapes, targets=cfg.targets,
         low_vram_mode=str(placed.get("mode") or ""),
         storage_dtype=storage_dtype,
         compile_mode="regional" if regional else "whole",
+        # gw#534: the lane the pipeline ACTUALLY traced under — the loader may
+        # have upgraded a requested fp8 cast to bf16-resident on this pod.
+        weight_lane=pipeline_weight_lane(pipe),
     )
     label = flavor_label(meta["sku"], meta["torch"])
     artifact = pack(capture_root, out_dir / f"{label}.tar.gz", meta)
@@ -905,6 +930,7 @@ __all__ = [
     "gen_worker_version",
     "inductor_counters",
     "is_cache_ref",
+    "lane_drift",
     "mode_drift",
     "pack",
     "prepare",

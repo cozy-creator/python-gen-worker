@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.23.0 (2026-07-13)
+
+- **gw#534: fp8 download, bf16 resident — W8A16 layerwise casting is never
+  voluntary.** The measured per-forward cast tax of the fp8-storage lane is
+  +44% wall on H100 / +73% on B200 vs bf16-resident (gw#534 profiles). A
+  planned fp8 storage lane (stored `#fp8` flavor or resolved `storage_dtype`
+  cast) is now UPGRADED at load to plain bf16-resident weights whenever the
+  snapshot fits free VRAM with headroom (`bf16_resident_fits`, 4GB activation
+  margin; fp8-stored cast targets counted at 2x for the upcast): the fp8
+  artifact stays the small download, `from_pretrained`'s torch_dtype upcasts
+  once, and the per-layer cast hooks are skipped. Hooks remain only when bf16
+  does not fit (involuntary W8A16). Compile-cache: cells record
+  `weight_lane` — the lane the built pipeline ACTUALLY traced under
+  ("" plain-resident / "fp8-hooks") — and `enable()` + the executor adopt
+  path reject lane drift symmetrically (a bf16-resident pipeline must never
+  adopt hook-cast-traced graphs and vice versa; both are guaranteed FX-graph
+  misses that would serve eager while reporting adopted).
 ## 0.22.6 (2026-07-13)
 
 - convert/layout: HiDream-O1 family hint — `HiDream-ai/HiDream-O1-Image*`
