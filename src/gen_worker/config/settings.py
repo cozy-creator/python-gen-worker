@@ -76,9 +76,8 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     # CAS/cache roots. cache_dir moves the whole tensorhub cache off /tmp
     # (cozy local persists weights across reboots); cas_dir points the
     # standalone CLI (`gen-worker run`) at an explicit CAS root — also the
-    # test-isolation knob for tests/test_hub_resolve_and_variants.py,
-    # tests/test_run_civitai.py, tests/test_cli_run.py (real consumer:
-    # cli/run.py._resolve_local_path, part of the pgw#515 fork).
+    # test-isolation knob for the CLI resolver tests (real consumer:
+    # models/provision.py::resolve_local_path).
     tensorhub_cache_dir: str = ""  # TENSORHUB_CACHE_DIR
     tensorhub_cas_dir: str = ""    # TENSORHUB_CAS_DIR
 

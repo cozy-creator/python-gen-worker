@@ -28,7 +28,6 @@ PROTOCOL_VERSION = 1
 #   - "tcp_listen"     : `serve --listen tcp://host:port` (#347)
 #   - "serve_sidecar"  : machine-readable `.gen-worker.serve.json` handle (#349)
 #   - "hub_resolve"    : standalone Hub-ref resolve via TENSORHUB_URL (#379)
-#   - "variant_auto"   : `--variant auto` + listing fit verdicts (#380)
 CAPABILITIES: List[str] = [
     "describe",
     "list_functions",
@@ -38,7 +37,6 @@ CAPABILITIES: List[str] = [
     "tcp_listen",
     "serve_sidecar",
     "hub_resolve",
-    "variant_auto",
 ]
 
 

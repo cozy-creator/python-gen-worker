@@ -129,9 +129,6 @@ def function_entries(
         res_dict = _describe_resources(resources)
         if res_dict:
             entry["resources"] = res_dict
-        variant_of = str(getattr(c, "variant_of", "") or "")
-        if variant_of:
-            entry["variant_of"] = variant_of
         if caps is not None:
             from ..models.serve_fit import plan_serve
 

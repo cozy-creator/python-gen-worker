@@ -31,7 +31,6 @@ Current capabilities:
 | `tcp_listen` | `serve --listen tcp://host:port` |
 | `serve_sidecar` | machine-readable `.gen-worker.serve.json` handle |
 | `hub_resolve` | standalone Hub-ref resolve via `TENSORHUB_URL` |
-| `variant_auto` | `--variant auto` + listing fit verdicts |
 
 Rule of thumb: **gate every behavior off `capabilities`.** New tokens are
 added when a feature ships; absence means "not available in this build."
@@ -56,7 +55,7 @@ Document shape:
   "gen_worker_version": "0.15.2",
   "capabilities": ["describe", "list_functions", "prefetch", "cancel",
                    "streaming", "tcp_listen", "serve_sidecar",
-                   "hub_resolve", "variant_auto"],
+                   "hub_resolve"],
   "endpoint": {
     "main_module": "myendpoint.main",
     "kind": "inference",

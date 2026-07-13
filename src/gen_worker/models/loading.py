@@ -660,11 +660,9 @@ def _merge_sharded_checkpoint(snapshot_dir: Path, index_path: Path) -> Path:
 # runtime rung and the Go/Py ladder never drift.
 EMERGENCY_FIT_FACTOR = EMERGENCY_NF4_VRAM_FACTOR
 # Resident factor after fp8-E4M3 storage of the denoiser, expressed against
-# the declared CARD SIZE (resources.vram_gb) — a DIFFERENT base than the
-# ladder's CAST_FP8_VRAM_FACTOR (0.75), which is against raw WEIGHT BYTES
-# (base_size_gb). They estimate the same physical fp8-resident VRAM but the
-# denominators differ (card size includes activation/framework headroom over
-# raw weights), so the numbers legitimately differ and must NOT be equated.
+# the declared CARD SIZE (resources.vram_gb — includes activation/framework
+# headroom over raw weights). The ONE fp8 fit factor (pgw#515 deleted the
+# duplicate ladder walk and its weight-bytes-based 0.75 estimate).
 FP8_STORAGE_FIT_FACTOR = 0.55
 _EMERGENCY_MARGIN_GB = 2.0
 

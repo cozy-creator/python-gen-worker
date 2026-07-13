@@ -1,6 +1,6 @@
 """#379 client-side Hub resolve + #380 variant auto-selection.
 
-#379: ``_resolve_local_path`` on a tensorhub ref resolves against a REAL local
+#379: ``provision.resolve_local_path`` on a tensorhub ref resolves against a REAL local
 HTTP server speaking tensorhub's public resolve route (th#560) and downloads
 blobs into the blake3 CAS via the shared cozy_snapshot path — no mocks on the
 unit under test, only a stdlib HTTP server standing in for the hub + R2.
@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Tuple
 import pytest
 from blake3 import blake3
 
-import gen_worker.cli.run as run_mod
+import gen_worker.models.provision as prov_mod
 from gen_worker.api.decorators import Resources
 from gen_worker.models.hub_client import (
     HubRepoNotFoundError,
@@ -142,7 +142,7 @@ def test_hub_ref_resolves_and_lands_in_cas(local_hub, monkeypatch, tmp_path):
     monkeypatch.delenv("TENSORHUB_TOKEN", raising=False)
 
     seen, emit = _events()
-    local = run_mod._resolve_local_path(
+    local = prov_mod.resolve_local_path(
         ref="root/tiny", provider="tensorhub", offline=False, emit=emit,
     )
     assert local.endswith(state.snapshot_digest)
@@ -159,7 +159,7 @@ def test_hub_ref_resolves_and_lands_in_cas(local_hub, monkeypatch, tmp_path):
     assert all(e.get("provider") == "tensorhub" for e in seen)
 
     # Second resolve is a no-download cache hit (snapshot dir short-circuits).
-    local2 = run_mod._resolve_local_path(
+    local2 = prov_mod.resolve_local_path(
         ref="root/tiny", provider="tensorhub", offline=False, emit=lambda e: None,
     )
     assert local2 == local
@@ -171,7 +171,7 @@ def test_hub_token_sent_as_bearer(local_hub, monkeypatch, tmp_path):
     monkeypatch.setenv("TENSORHUB_URL", base)
     monkeypatch.setenv("TENSORHUB_CAS_DIR", str(tmp_path))
     monkeypatch.setenv("TENSORHUB_TOKEN", "oat_secret")
-    run_mod._resolve_local_path(
+    prov_mod.resolve_local_path(
         ref="root/tiny:latest", provider="tensorhub", offline=False, emit=lambda e: None,
     )
     assert state.auth_headers == ["Bearer oat_secret"]
@@ -185,8 +185,8 @@ def test_hub_404_is_typed_not_found(local_hub, monkeypatch, tmp_path):
     ref = parse_model_ref("root/ghost", provider="tensorhub").tensorhub
     with pytest.raises(HubRepoNotFoundError, match="not found"):
         resolve_repo(ref, base_url=base)
-    with pytest.raises(run_mod._ModelResolutionError, match="not found"):
-        run_mod._resolve_local_path(
+    with pytest.raises(prov_mod.ModelResolutionError, match="not found"):
+        prov_mod.resolve_local_path(
             ref="root/ghost", provider="tensorhub", offline=False, emit=lambda e: None,
         )
 
@@ -194,14 +194,14 @@ def test_hub_404_is_typed_not_found(local_hub, monkeypatch, tmp_path):
 def test_hub_offline_is_cas_only(monkeypatch, tmp_path):
     monkeypatch.setenv("TENSORHUB_CAS_DIR", str(tmp_path))
     monkeypatch.setenv("TENSORHUB_URL", "http://127.0.0.1:9")  # must not be dialed
-    with pytest.raises(run_mod._ModelResolutionError, match="--offline"):
-        run_mod._resolve_local_path(
+    with pytest.raises(prov_mod.ModelResolutionError, match="--offline"):
+        prov_mod.resolve_local_path(
             ref="root/tiny", provider="tensorhub", offline=True, emit=lambda e: None,
         )
     # Digest-pinned ref whose snapshot IS pre-seeded works offline.
     snap = tmp_path / "snapshots" / "abcd1234"
     snap.mkdir(parents=True)
-    local = run_mod._resolve_local_path(
+    local = prov_mod.resolve_local_path(
         ref="root/tiny@blake3:abcd1234", provider="tensorhub", offline=True,
         emit=lambda e: None,
     )
@@ -213,18 +213,18 @@ def test_hub_offline_reuses_remembered_tag_ref(local_hub, monkeypatch, tmp_path)
     _seed(state, {"w.bin": b"tag-ref-weights"})
     monkeypatch.setenv("TENSORHUB_URL", base)
     monkeypatch.setenv("TENSORHUB_CAS_DIR", str(tmp_path))
-    online = run_mod._resolve_local_path(
+    online = prov_mod.resolve_local_path(
         ref="root/tiny:latest", provider="tensorhub", offline=False, emit=lambda e: None,
     )
     # Now fully offline (hub unreachable): the tag->digest memory serves it.
     monkeypatch.setenv("TENSORHUB_URL", "http://127.0.0.1:9")
-    offline = run_mod._resolve_local_path(
+    offline = prov_mod.resolve_local_path(
         ref="root/tiny:latest", provider="tensorhub", offline=True, emit=lambda e: None,
     )
     assert offline == online
     # A never-fetched tag still misses with the typed error.
-    with pytest.raises(run_mod._ModelResolutionError, match="--offline"):
-        run_mod._resolve_local_path(
+    with pytest.raises(prov_mod.ModelResolutionError, match="--offline"):
+        prov_mod.resolve_local_path(
             ref="root/tiny:other", provider="tensorhub", offline=True, emit=lambda e: None,
         )
 
@@ -232,8 +232,8 @@ def test_hub_offline_reuses_remembered_tag_ref(local_hub, monkeypatch, tmp_path)
 def test_hub_no_base_url_is_actionable(monkeypatch, tmp_path):
     monkeypatch.setenv("TENSORHUB_CAS_DIR", str(tmp_path))
     monkeypatch.delenv("TENSORHUB_URL", raising=False)
-    with pytest.raises(run_mod._ModelResolutionError, match="TENSORHUB_URL"):
-        run_mod._resolve_local_path(
+    with pytest.raises(prov_mod.ModelResolutionError, match="TENSORHUB_URL"):
+        prov_mod.resolve_local_path(
             ref="root/tiny", provider="tensorhub", offline=False, emit=lambda e: None,
         )
 
@@ -247,7 +247,7 @@ def test_url_expired_triggers_one_reresolve(local_hub, monkeypatch, tmp_path):
     monkeypatch.setenv("TENSORHUB_CAS_DIR", str(tmp_path))
 
     seen, emit = _events()
-    local = run_mod._resolve_local_path(
+    local = prov_mod.resolve_local_path(
         ref="root/tiny", provider="tensorhub", offline=False, emit=emit,
     )
     assert state.resolves == 2  # initial + one re-resolve

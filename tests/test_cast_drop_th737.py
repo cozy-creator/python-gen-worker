@@ -1,9 +1,7 @@
 """th#737: a cast pick that cannot be satisfied is a STRUCTURAL degradation,
 never a silent bf16 fallback.
 
-Three layers under test:
-- ladder: ``castable=False`` removes cast rungs (shared vectors cover the
-  walk; here the local-model plumbing);
+Two layers under test:
 - loading: the cast outcome is stamped on the pipe
   (``_cozy_fp8_storage_requested`` / ``_cozy_fp8_storage_ok``);
 - executor: a denoiser-less snapshot drops the cast pre-load and records a
@@ -20,37 +18,14 @@ import struct
 from pathlib import Path
 
 import msgspec
-import pytest
 
 from gen_worker.api.binding import Hub
 from gen_worker.api.decorators import Resources
 from gen_worker.executor import Executor, ModelStore
-from gen_worker.models.ladder import LadderModel, resolve
 from gen_worker.models.loading import load_from_pretrained
 from gen_worker.models.serve_fit import ServePlan, cast_dropped
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import EndpointSpec
-
-
-# --------------------------------------------------------------------------
-# ladder: castable gate
-# --------------------------------------------------------------------------
-
-
-def test_ladder_no_cast_rung_when_not_castable() -> None:
-    got = resolve(
-        LadderModel(base_size_gb=11.4, castable=False),
-        gpu_sm=90, free_vram_gb=79.0,
-    )
-    assert (got.flavor, got.cast, got.refusal) == ("", "", "")
-
-
-def test_ladder_refuses_instead_of_phantom_cast() -> None:
-    got = resolve(
-        LadderModel(base_size_gb=11.4, castable=False),
-        gpu_sm=90, free_vram_gb=10.0,
-    )
-    assert got.refusal == "no_runnable_precision"
 
 
 # --------------------------------------------------------------------------
