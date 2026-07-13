@@ -542,6 +542,21 @@ def fp8_cast_eligible(
     return not any(re.search(p, module_path) for p in skip_patterns)
 
 
+# ``.<block-list>.<idx>.`` segment — a param living under a repeated-block
+# container (nn.ModuleList child). The transformers-backbone fp8 lane casts
+# ONLY these, mirroring the runtime block-window walk
+# (gen_worker.models.loading._fp8_block_windows): params outside repeated
+# blocks (embeddings, final norms, heads) stay at source precision, so the
+# stored flavor is a strict subset of what any consumer re-arms.
+_FP8_BLOCK_SCOPE_RE = r"\.\d+\."
+
+
+def _in_repeated_block(name: str) -> bool:
+    import re
+
+    return re.search(_FP8_BLOCK_SCOPE_RE, name) is not None
+
+
 def streaming_fp8_storage_cast(
     input_path: Path,
     out_dir: Path,
@@ -549,16 +564,24 @@ def streaming_fp8_storage_cast(
     shard_prefix: str = "model",
     shard_threshold: int = MAX_SAFETENSORS_SHARD_BYTES,
     skip_patterns: tuple[str, ...] = FP8_SKIP_TENSOR_PATTERNS,
+    block_scope: bool = False,
 ) -> dict[str, Any]:
     """Produce the fp8-E4M3 storage flavor of one weight set, streaming.
 
     Eligible weights are clamped to ±448 and stored as F8_E4M3; everything
     else keeps its source dtype. Scale-free by design: consumption is
     diffusers layerwise casting (fp8 bytes resident, bf16/fp16 compute).
+
+    ``block_scope=True`` (the transformers-backbone lane) additionally
+    requires an eligible weight to live under a repeated-block container
+    (``.<idx>.`` path segment) — the stored set stays a strict subset of the
+    runtime block-window walk.
     """
     import torch
 
     def out_st_dtype_for(name: str, src_st: str, shape: list[int]) -> str:
+        if block_scope and not _in_repeated_block(name):
+            return src_st
         if fp8_cast_eligible(name, src_st, shape, skip_patterns=skip_patterns):
             return "F8_E4M3"
         return src_st
@@ -864,14 +887,37 @@ def streaming_fp8_snapshot(
     ``te_components`` (the ``fp8+te`` rung, gw#460 — pass
     :data:`FP8_TE_COMPONENTS`) get the transformers block-window cast whose
     eligible set is derived from the loader itself. Every other component
-    passes through untouched. Refuses singlefile layouts — fp8 storage is
-    component-scoped and single-file keyspaces don't name components
-    reliably."""
-    if file_layout != "diffusers":
-        raise ConversionImplementationError(
-            "fp8 storage flavors are produced from diffusers layouts only "
-            "(component-scoped); repackage singlefile sources first")
+    passes through untouched.
+
+    Non-diffusers layouts are supported for exactly ONE shape: a single
+    root weight set (sharded-transformers backbone — the whole checkpoint
+    IS the denoiser, e.g. a UiT like HiDream-O1). That set gets the
+    block-scoped fp8 cast; multi-set singlefile bundles still refuse
+    (component identity is ambiguous there)."""
     source_dir, out_dir = Path(source_dir), Path(out_dir)
+    if file_layout != "diffusers":
+        root_groups = snapshot_weight_groups(source_dir, file_layout)
+        if len(root_groups) != 1 or root_groups[0][0] != "":
+            raise ConversionImplementationError(
+                "fp8 storage flavors need component identity: a diffusers "
+                "layout, or a single root weight set (transformers "
+                f"backbone) — found {len(root_groups)} weight set(s) in "
+                f"{file_layout!r} layout")
+        entry = root_groups[0][1]
+        result = streaming_fp8_storage_cast(
+            entry, out_dir,
+            shard_prefix=_group_shard_prefix(entry),
+            shard_threshold=shard_threshold,
+            block_scope=True,
+        )
+        if not int(result["converted_count"]):
+            raise ConversionImplementationError(
+                "no fp8-castable weights in the root weight set (nothing "
+                "under a repeated-block container missed the skip patterns)")
+        copy_non_weight_files(source_dir, out_dir, skip_components={""})
+        return {"tensor_count": int(result["tensor_count"]),
+                "converted_count": int(result["converted_count"]),
+                "components": [""], "output_dir": out_dir}
     denoiser_set, te_set = set(components), set(te_components)
     groups = [(c, e) for c, e in snapshot_weight_groups(source_dir, "diffusers")
               if c in denoiser_set | te_set]

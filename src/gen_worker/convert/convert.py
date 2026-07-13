@@ -212,6 +212,7 @@ def run_inline_conversion(
     target_file_type: str = "safetensors",
     shard_prefix: str = "model",
     source_repo_dir: Path | None = None,
+    fp8_block_scope: bool = False,
 ) -> InlineConversionResult:
     """Run the appropriate inline conversion for the requested target_dtype.
 
@@ -271,6 +272,7 @@ def run_inline_conversion(
             source_path=source_path,
             out_dir=out_dir,
             shard_prefix=shard_prefix,
+            block_scope=fp8_block_scope,
         )
 
     # bitsandbytes nf4 / fp4 — runs on CPU for the quant pass; save_pretrained
@@ -354,15 +356,19 @@ def _run_fp8_storage_inline(
     source_path: Path,
     out_dir: Path,
     shard_prefix: str,
+    block_scope: bool = False,
 ) -> InlineConversionResult:
     """fp8-E4M3 storage cast of one weight set (the ``#fp8`` flavor),
     streaming per-tensor. Layerwise-casting skip patterns are honored so a
     consumer's ``apply_fp8_storage`` reproduces the runtime fp8-storage lane
-    exactly. Stamps dtype ``fp8`` — the detector keys on F8_E4M3 headers."""
+    exactly. Stamps dtype ``fp8`` — the detector keys on F8_E4M3 headers.
+    ``block_scope=True`` = the transformers-backbone lane (repeated-block
+    params only)."""
     from .writer import streaming_fp8_storage_cast
 
     result = streaming_fp8_storage_cast(
         Path(source_path), Path(out_dir), shard_prefix=shard_prefix,
+        block_scope=block_scope,
     )
     index_path = result.get("index_path")
     attrs = {

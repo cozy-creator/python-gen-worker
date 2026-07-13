@@ -282,13 +282,21 @@ def test_streaming_fp8_snapshot_denoiser_only(tmp_path: Path) -> None:
     assert (out / "model_index.json").is_file()
 
 
-def test_streaming_fp8_snapshot_refuses_singlefile(tmp_path: Path) -> None:
+def test_streaming_fp8_snapshot_singlefile_needs_block_weights(tmp_path: Path) -> None:
+    """A single root weight set is the transformers-backbone lane (ie#478):
+    block-scoped cast. With nothing under a repeated-block container it
+    still refuses — never a silently-uncast 'fp8' flavor."""
     from gen_worker.convert.writer import ConversionImplementationError
 
     (tmp_path / "src").mkdir()
     save_file({"w": torch.randn(4, 4)}, str(tmp_path / "src" / "model.safetensors"))
     with pytest.raises(ConversionImplementationError):
         streaming_fp8_snapshot(tmp_path / "src", tmp_path / "out", file_layout="singlefile")
+
+    save_file({"blocks.0.attn.weight": torch.randn(4, 4)},
+              str(tmp_path / "src" / "model.safetensors"))
+    stats = streaming_fp8_snapshot(tmp_path / "src", tmp_path / "out2", file_layout="singlefile")
+    assert stats["converted_count"] == 1
 
 
 def test_clone_normalizes_fp8_spellings() -> None:
