@@ -238,7 +238,7 @@ class DatasetRef(msgspec.Struct):
     """Reserved-name dataset descriptor for transform-kind job payloads.
 
     The executor materializes each ``payload.datasets`` entry into a local
-    parquet snapshot before the handler runs (``ctx.dataset_paths[ref]`` /
+    dataset snapshot before the handler runs (``ctx.dataset_paths[ref]`` /
     ``ctx.resolve_dataset``). Used by calibration-based quant, pruning with
     gradient scoring, distillation, and fine-tuning.
 
