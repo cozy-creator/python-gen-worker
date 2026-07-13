@@ -18,7 +18,6 @@ ModelScope downloads — through the same download layer.
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -26,6 +25,9 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Optional, Tuple
 
 from ..config import get_settings
+from .loading import model_index_components
+
+__all__ = ["model_index_components"]  # re-export: single source in loading.py (gw#521)
 
 logger = logging.getLogger(__name__)
 
@@ -39,17 +41,6 @@ class ModelResolutionError(Exception):
 # ---------------------------------------------------------------------------
 # Shared load + place + compile (executor and CLI)
 # ---------------------------------------------------------------------------
-
-
-def model_index_components(path: str | Path) -> set:
-    """Component names the snapshot's model_index.json declares — the
-    only names safe to pass as preloaded modules to from_pretrained."""
-    try:
-        with open(Path(path) / "model_index.json", "r", encoding="utf-8") as f:
-            index = json.load(f)
-        return {k for k in index if not k.startswith("_")}
-    except Exception:
-        return set()
 
 
 @dataclass

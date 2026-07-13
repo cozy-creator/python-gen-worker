@@ -535,21 +535,25 @@ def select_auto_mode(
         requirement = max(model_gb, float(peak_vram_gb))
     margin = _DEFAULT_SAFETY_MARGIN_GB
 
-    # Very low free VRAM: even a fitting model needs aggressive help for activations.
-    if avail <= _DEFAULT_GROUP_OFFLOAD_THRESHOLD_GB:
-        return "group_offload"
-
     if requirement > 0.0:
         usable = max(0.0, avail - margin)
-        if requirement > usable:
-            return "model_offload"
-        # Fits. With generous FREE headroom run fully unoptimized; on a tighter
-        # card keep the cheap vae_only guard for VAE-decode spikes.
-        if (usable - requirement) >= _DEFAULT_OFF_HEADROOM_GB:
-            return "off"
-        return "vae_only"
+        # Fits (measured weights + margin — a quantized pipeline measures its
+        # REAL post-quant size): resident, never offloaded. gw#521: the old
+        # absolute low-free-VRAM rule group-offloaded pipelines the emergency
+        # rung had just shrunk to fit, making the rung pointless on exactly
+        # the cards it exists for.
+        if requirement <= usable:
+            if (usable - requirement) >= _DEFAULT_OFF_HEADROOM_GB:
+                return "off"
+            return "vae_only"
+        # Doesn't fit: very low free VRAM needs the aggressive rung.
+        if avail <= _DEFAULT_GROUP_OFFLOAD_THRESHOLD_GB:
+            return "group_offload"
+        return "model_offload"
 
     # Unknown model size: conservative free-VRAM thresholds.
+    if avail <= _DEFAULT_GROUP_OFFLOAD_THRESHOLD_GB:
+        return "group_offload"
     if avail <= _DEFAULT_MODEL_OFFLOAD_THRESHOLD_GB:
         return "model_offload"
     return "vae_only"
@@ -650,6 +654,9 @@ def _apply_group_offload(
     *,
     offload_to_disk_path: Optional[str],
 ) -> bool:
+    # Mechanism-level guard (gw#521): every offload entry point refuses under
+    # the kill-switch, not just the apply_low_vram_config policy layer.
+    _forbid_cpu_inference("group offload (weights stream from CPU/disk)")
     try:
         import torch
     except Exception:
@@ -897,6 +904,7 @@ def apply_low_vram_config(
             )
 
     if effective_mode == "model_offload":
+        _forbid_cpu_inference("model CPU offload")  # mechanism guard (gw#521)
         _pin_fragile_vae(pipeline, applied, log)
         ok = _call_if_present(pipeline, "enable_model_cpu_offload")
         if not ok:
@@ -917,6 +925,7 @@ def apply_low_vram_config(
             effective_mode = "sequential"
 
     if effective_mode == "sequential":
+        _forbid_cpu_inference("sequential CPU offload")  # mechanism guard (gw#521)
         _pin_fragile_vae(pipeline, applied, log)
         _move_pipeline_to_cpu(pipeline)
         flush_memory()
