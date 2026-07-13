@@ -335,21 +335,3 @@ def test_variant_fit_runtime_rung_verdicts() -> None:
     assert "emergency quality" in reason
     # 4-bit estimate still too big -> offload even on a CUDA host
     assert variant_fit(Resources(vram_gb=60), caps, 20.0)[0] == FIT_OFFLOAD
-
-
-def test_select_variant_prefers_runtime_quant_over_offload() -> None:
-    from gen_worker.api import Resources
-    from gen_worker.models.hub_policy import (
-        TensorhubWorkerCapabilities,
-        select_variant,
-    )
-
-    caps = TensorhubWorkerCapabilities(
-        cuda_version="12.8", gpu_sm=89, torch_version="2.11", installed_libs=[])
-    choice = select_variant(
-        [("generate", Resources(vram_gb=34)), ("generate-big", Resources(vram_gb=80))],
-        caps, 20.0,
-    )
-    assert choice is not None
-    assert choice.name == "generate"
-    assert choice.fit == "emergency_fp8"

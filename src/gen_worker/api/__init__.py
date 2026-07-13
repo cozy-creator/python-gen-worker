@@ -30,7 +30,6 @@ from .streaming import (
 from .types import (
     Asset,
     AudioAsset,
-    Compute,
     ExpectedOutput,
     ImageAsset,
     MediaAsset,
@@ -76,7 +75,6 @@ __all__ = [
     "iter_transformers_text_deltas",
     "Asset",
     "AudioAsset",
-    "Compute",
     "ExpectedOutput",
     "ImageAsset",
     "MediaAsset",

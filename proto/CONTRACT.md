@@ -229,7 +229,7 @@ to avoid chatter). Never periodic. O overwrites its copy wholesale.
 | `invoker_id` | O request state | W `ctx.invoker_id` (read-only tenant surface) | optional |
 | `capability_token` | O token mint (cached per worker+tenant) | W tensorhub HTTP auth (uploads, blob PUT) | per-job scoped credential |
 | `output_mode` | O from `Prefer: bytes=inline\|url` header | W save/output path | INLINE = return small media raw in payload; URL = upload + return refs. UNSPECIFIED = URL |
-| `compute` | O scheduler | W CUDA binding + `ctx.compute` | see below |
+| `compute` | O scheduler | W GPU-semaphore gating + CUDA binding | see below |
 | `models` | O binding resolver (endpoint defaults + `_models` envelope) | W model injection (`ensure_local` + typed path/pipeline) + per-request LoRA overlays | slot → ref (+ optional `loras`) |
 | `snapshots` | O resolver | W download stack | presigned snapshots for tensorhub-CAS refs in `models` (including LoRA overlay refs) that O doesn't know to be on this worker's disk; W ignores entries already local (digest match). hf/civitai refs need no snapshot |
 
@@ -237,10 +237,13 @@ to avoid chatter). Never periodic. O overwrites its copy wholesale.
 
 | field | producer | consumer | semantics |
 |---|---|---|---|
-| `accelerator` | O endpoint resources | W GPU-semaphore gating ("cuda" acquires; "none" bypasses) + ctx | "cuda" \| "none" |
+| `accelerator` | O endpoint resources | W GPU-semaphore gating ("cuda" acquires; "none" bypasses) | "cuda" \| "none" |
 | `gpu_index` | O per-GPU slot scheduler | W `CUDA_VISIBLE_DEVICES` / `set_device` before handler | 0-based; 0 for single-GPU |
-| `gpu_count` | O endpoint resources | W `ctx.compute` (tenant adaptation, e.g. parallelism) | GPUs granted |
-| `vram_gb` | O endpoint resources | W `ctx.compute` (tenant batch-size adaptation) + low-VRAM decider | VRAM granted |
+
+`gpu_count`/`vram_gb` (fields 3/4) were CUT in pgw#526 along with the `ctx.compute`
+tenant surface they fed: documented and plumbed through every dispatch, read by zero
+endpoints. Field numbers + names are `reserved`. The worker's own VRAM decisions read
+the endpoint's declared `Resources` + probed free VRAM, never the wire.
 
 ### ModelBinding (embedded in RunJob)
 

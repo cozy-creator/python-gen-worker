@@ -52,7 +52,6 @@ from ..api.slot import ResolvedSlot
 from ..api.types import (
     Asset,
     AudioAsset,
-    Compute,
     ImageAsset,
     Tensors,
     VideoAsset,
@@ -91,15 +90,6 @@ class _SlotTable(Mapping):
 
     def __len__(self) -> int:
         return len(set(self._resolved) | set(self._errors))
-
-
-def _default_compute() -> Compute:
-    """Sentinel Compute used when the orchestrator didn't attach RunJob.compute.
-
-    Tenants can safely read ``ctx.compute.vram_gb`` etc. without None-checks;
-    zero / empty values are the "not specified" signal.
-    """
-    return Compute()
 
 
 def _copy_context_metadata(value: Any) -> Any:
@@ -161,14 +151,10 @@ class RequestContext:
         worker_capability_token: Optional[str] = None,
         local_output_dir: Optional[str] = None,
         execution_hints: Optional[Dict[str, Any]] = None,
-        source_info: Optional[Dict[str, Any]] = None,
-        destination_info: Optional[Dict[str, Any]] = None,
-        compute: Optional["Compute"] = None,
         models: Optional[Dict[str, Any]] = None,
         loras: Optional[Dict[str, Any]] = None,
         resolved_slots: Optional[Mapping[str, "ResolvedSlot[Any]"]] = None,
         slot_errors: Optional[Mapping[str, str]] = None,
-        hf_token: str = "",
     ) -> None:
         self._request_id = str(request_id or "").strip()
         self._job_id = str(job_id or "").strip() or None
@@ -177,7 +163,6 @@ class RequestContext:
         self._timeout_ms = timeout_ms
         self._file_api_base_url = (file_api_base_url or "").strip() or None
         self._worker_capability_token = (worker_capability_token or "").strip() or None
-        self._hf_token = (hf_token or "").strip()
         self._local_output_dir = (local_output_dir or "").strip() or None
         self._execution_hints = dict(execution_hints or {})
         self._started_at = time.time()
@@ -188,35 +173,19 @@ class RequestContext:
         self._cancel_event = threading.Event()
         self._emitter = emitter
         self._cached_repo_job_scope: Optional[tuple[str, str, str]] = None
-        # Reserved-name producer contract attributes. Populated by the
-        # executor's ctx construction (executor.py::_run_job_pinned) before
-        # invoking tenant code when the endpoint is a producer kind and the
-        # payload declares the reserved `source`/`destination` struct fields.
-        self._source_info = dict(source_info or {})
-        self._destination_info = dict(destination_info or {})
-        self._source_path: Optional[str] = None
-        # Resolved hardware for this invocation (tensorhub #232). Populated
-        # by the executor from RunJob.compute (proto ResolvedCompute).
-        # Sentinel defaults when unset — tenants can safely read fields
-        # without None-checks.
-        self._compute: "Compute" = compute if compute is not None else _default_compute()
         self._models = _copy_context_metadata(models or {})
         self._loras = _copy_context_metadata(loras or {})
         self._slots = _SlotTable(resolved_slots or {}, slot_errors or {})
 
         # Capability-budget gate (issue #269 back-pressure). Lazy-built from
         # the worker_capability_token's max_total_bytes + max_bytes_per_file
-        # claims on first upload. The pool's per-file fan-out can over-commit
-        # if multiple 30+ GiB shards run in parallel; the gate blocks new
-        # reservations until in-flight bytes fit the aggregate budget.
+        # claims on first upload. Lives on the base (not the producer mixin)
+        # because the base save_file path reserves against it too. The pool's
+        # per-file fan-out can over-commit if multiple 30+ GiB shards run in
+        # parallel; the gate blocks new reservations until in-flight bytes
+        # fit the aggregate budget.
         self._upload_budget_gate = None  # type: Optional["BudgetGate"]
         self._upload_budget_gate_lock = threading.Lock()
-
-        # Repo fields declared by the ingest pipeline before the first
-        # checkpoint commit. Sent in the /commits body so tensorhub can
-        # auto-create the destination repo; empty values are omitted and
-        # tensorhub keeps/inherits existing repo values.
-        self._repo_spec: Dict[str, str] = {}
 
         # GPU-slot lease (#382). Set by the executor for GPU jobs; lets
         # blocking uploads release the GPU slot while they wait on the
@@ -793,7 +762,19 @@ class RequestContext:
         return asset
 
 
-    def save_file(self, ref: str, local_path: str | os.PathLike[str]) -> Asset:
+    def save_file(
+        self,
+        ref: str,
+        local_path: str | os.PathLike[str],
+        *,
+        create: bool = False,
+    ) -> Asset:
+        """Upload a local file as an output Asset.
+
+        ``create=True`` requires the ref to be new (local backend: the
+        destination path must not exist; remote: the upload session is
+        opened in create mode).
+        """
         ref = _normalize_output_ref(ref)
         src = str(os.fspath(local_path) if local_path else "").strip()
         if not src:
@@ -807,21 +788,23 @@ class RequestContext:
         signed_tmp = self._c2pa_sign_file(ref, src)
         if signed_tmp is not None:
             try:
-                return self._save_file_inner(ref, signed_tmp)
+                return self._save_file_inner(ref, signed_tmp, create=create)
             finally:
                 try:
                     os.unlink(signed_tmp)
                 except OSError:
                     pass
-        return self._save_file_inner(ref, src)
+        return self._save_file_inner(ref, src, create=create)
 
-    def _save_file_inner(self, ref: str, src: str) -> Asset:
+    def _save_file_inner(self, ref: str, src: str, *, create: bool = False) -> Asset:
         size = int(os.path.getsize(src))
         _enforce_output_file_size_limit(size)
 
         local_out = self._resolve_local_output_path(ref)
         if local_out:
             dst = Path(local_out)
+            if create and dst.exists():
+                raise RuntimeError("output path already exists")
             dst.parent.mkdir(parents=True, exist_ok=True)
             with open(src, "rb") as fin, open(dst, "wb") as fout:
                 shutil.copyfileobj(fin, fout, length=1024 * 1024)
@@ -839,7 +822,7 @@ class RequestContext:
         # inside save_checkpoint's non-streaming branch is a no-op for
         # the same thread.
         with self._get_upload_budget_gate().reserve(size):
-            stream = self._open_output_stream(ref, create=False, expected_size_bytes=size)
+            stream = self._open_output_stream(ref, create=create, expected_size_bytes=size)
             with open(src, "rb") as fin:
                 while True:
                     chunk = fin.read(8 * 1024 * 1024)
@@ -866,48 +849,6 @@ class RequestContext:
             create=create,
             expected_size_bytes=expected_size_bytes,
         )
-
-    def _save_file_create(self, ref: str, local_path: str | os.PathLike[str]) -> Asset:
-        ref = _normalize_output_ref(ref)
-        src = str(os.fspath(local_path) if local_path else "").strip()
-        if not src:
-            raise ValueError("local_path is required")
-        if not os.path.exists(src):
-            raise FileNotFoundError(src)
-
-        size = int(os.path.getsize(src))
-        _enforce_output_file_size_limit(size)
-
-        local_out = self._resolve_local_output_path(ref)
-        if local_out:
-            dst = Path(local_out)
-            if dst.exists():
-                raise RuntimeError("output path already exists")
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            with open(src, "rb") as fin, open(dst, "wb") as fout:
-                shutil.copyfileobj(fin, fout, length=1024 * 1024)
-            sha = _sha256_file(str(dst))
-            return Asset(
-                ref=ref,
-                owner=self._owner,
-                local_path=str(dst),
-                mime_type=None,
-                size_bytes=size,
-                sha256=sha,
-            )
-        # Reserve aggregate-bytes budget (issue #269 back-pressure).
-        with self._get_upload_budget_gate().reserve(size):
-            stream = self._open_output_stream(ref, create=True, expected_size_bytes=size)
-            with open(src, "rb") as fin:
-                while True:
-                    chunk = fin.read(8 * 1024 * 1024)
-                    if not chunk:
-                        break
-                    stream.write(chunk)
-            out = stream.finalize()
-            if isinstance(out, Asset):
-                return out
-            raise RuntimeError("file save failed (invalid_asset_response)")
 
     # Issue #1 (slim-request-context): admin-plane visibility toggles
     # (publish_checkpoint / publish_dataset / publish_endpoint /
@@ -940,8 +881,36 @@ class _PublisherMixin:
     inheritance (so ``self`` has ``_file_api_base_url`` / ``_owner`` /
     ``_get_worker_capability_token``).
 
+    Producer-only STATE lives here too (pgw#526): the reserved
+    ``source``/``destination`` payload structs, the hf token, and the repo
+    spec for checkpoint commits initialize in this ``__init__`` — a plain
+    inference ``RequestContext`` never carries them.
+
     Not a public surface: tenants should never import this directly.
     """
+
+    def __init__(
+        self,
+        *args: Any,
+        source_info: Optional[Dict[str, Any]] = None,
+        destination_info: Optional[Dict[str, Any]] = None,
+        hf_token: str = "",
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        # Reserved-name producer contract attributes. Populated by the
+        # executor's ctx construction (executor.py::_run_job_pinned) before
+        # invoking tenant code when the payload declares the reserved
+        # `source`/`destination` struct fields.
+        self._source_info = dict(source_info or {})
+        self._destination_info = dict(destination_info or {})
+        self._source_path: Optional[str] = None
+        self._hf_token = (hf_token or "").strip()
+        # Repo fields declared by the ingest pipeline before the first
+        # checkpoint commit. Sent in the /commits body so tensorhub can
+        # auto-create the destination repo; empty values are omitted and
+        # tensorhub keeps/inherits existing repo values.
+        self._repo_spec: Dict[str, str] = {}
 
     if TYPE_CHECKING:
         # The host contract (gw#497): everything this mixin borrows from
@@ -949,16 +918,15 @@ class _PublisherMixin:
         # composition instead of erroring attr-defined on every use.
         request_id: str
         cancelled: bool
-        _hf_token: str
-        _compute: Compute
-        _source_info: Dict[str, Any]
-        _destination_info: Dict[str, Any]
         _file_api_base_url: Optional[str]
         _worker_capability_token: Optional[str]
         _job_id: Optional[str]
 
         def save_bytes(self, ref: str, data: bytes) -> Asset: ...
-        def save_file(self, ref: str, local_path: "str | os.PathLike[str]") -> Asset: ...
+        def save_file(
+            self, ref: str, local_path: "str | os.PathLike[str]",
+            *, create: bool = ...,
+        ) -> Asset: ...
         def _open_output_stream(
             self, ref: str, *, create: bool = ...,
             expected_size_bytes: Optional[int] = ...,
@@ -981,11 +949,6 @@ class _PublisherMixin:
         Empty string when unconfigured — helpers fall back to
         unauthenticated calls (public repos work)."""
         return self._hf_token
-
-    @property
-    def compute(self) -> Compute:
-        """Resolved hardware for this invocation (read-only)."""
-        return self._compute
 
     # Reserved-name conversion/training contract. `source` and `destination`
     # come from the job payload's reserved fields; `source_path` is populated
@@ -1067,65 +1030,33 @@ class _PublisherMixin:
         dispatchers attach it to the final ``checkpoint_flavors[]`` publish
         payload; per-file repo-CAS ``/complete`` remains parts-only.
         """
-        ref = _normalize_output_ref(ref)
-        self._require_repo_job_scope_for_tensors(ref)
         src = str(os.fspath(local_path) if local_path else "").strip()
         if not src:
             raise ValueError("local_path is required")
         if not os.path.exists(src):
             raise FileNotFoundError(src)
-        size = int(os.path.getsize(src))
-        _enforce_output_file_size_limit(size)
-        fmt = str(format or "").strip() or _infer_tensors_format(ref or os.fspath(local_path))
 
-        # Job-scoped writes publish through the /commits stream (gw#471) so
-        # the returned Tensors carries a blake3 digest + blob_digest and each
-        # save materializes one finalized repo revision.
-        # Reserve aggregate-bytes budget (issue #269 back-pressure). Held
-        # across either branch (streaming or save_file fallthrough). Save_file
-        # is reentrancy-aware so its inner reserve() is a no-op.
-        with self._get_upload_budget_gate().reserve(size):
-            if self._repo_job_upload_scope() is not None and self._should_stream_output_to_file_api(ref):
-                stream = self.open_checkpoint_stream(
-                    ref,
-                    format=fmt,
-                    expected_size_bytes=size,
-                    produced_by_kind=produced_by_kind,
-                    step_number=step_number,
-                    epoch_number=epoch_number,
-                    output_kind=output_kind,
-                    target_dtype=target_dtype,
-                    flavor=flavor,
-                    attributes=attributes,
-                )
-                with open(src, "rb") as fin:
-                    while True:
-                        chunk = fin.read(8 * 1024 * 1024)
-                        if not chunk:
-                            break
-                        stream.write(chunk)
-                out = stream.finalize()
-                if isinstance(out, Tensors):
-                    self._emit_checkpoint_saved(
-                        ref, step_number=step_number, epoch_number=epoch_number,
-                        output_kind=output_kind, size_bytes=size,
-                    )
-                    return out
-                raise RuntimeError("file save failed (invalid_tensors_response)")
+        def _feed(stream: _RequestOutputStream) -> None:
+            with open(src, "rb") as fin:
+                while True:
+                    chunk = fin.read(8 * 1024 * 1024)
+                    if not chunk:
+                        break
+                    stream.write(chunk)
 
-            asset = self.save_file(ref, src)
-        self._emit_checkpoint_saved(
-            ref, step_number=step_number, epoch_number=epoch_number,
-            output_kind=output_kind, size_bytes=size,
-        )
-        return Tensors(
-            ref=asset.ref,
-            owner=asset.owner,
-            local_path=asset.local_path,
-            format=fmt,
-            size_bytes=asset.size_bytes,
-            sha256=asset.sha256,
-            download_token=asset.download_token,
+        return self._publish_checkpoint(
+            ref,
+            size=int(os.path.getsize(src)),
+            format=format,
+            feed=_feed,
+            fallback=lambda r: self.save_file(r, src),
+            produced_by_kind=produced_by_kind,
+            step_number=step_number,
+            epoch_number=epoch_number,
+            output_kind=output_kind,
+            target_dtype=target_dtype,
+            flavor=flavor,
+            attributes=attributes,
         )
 
     def save_checkpoint_bytes(
@@ -1140,45 +1071,88 @@ class _PublisherMixin:
         output_kind: Optional[str] = None,
         target_dtype: Optional[str] = None,
         flavor: Optional[str] = None,
+        attributes: Optional[dict] = None,
     ) -> Tensors:
         """Save in-memory checkpoint/model-weight bytes."""
         if not isinstance(data, (bytes, bytearray)):
             raise TypeError("save_checkpoint_bytes expects bytes")
         payload = bytes(data)
-        _enforce_output_file_size_limit(len(payload))
+        return self._publish_checkpoint(
+            ref,
+            size=len(payload),
+            format=format,
+            feed=lambda stream: stream.write(payload),
+            fallback=lambda r: self.save_bytes(r, payload),
+            produced_by_kind=produced_by_kind,
+            step_number=step_number,
+            epoch_number=epoch_number,
+            output_kind=output_kind,
+            target_dtype=target_dtype,
+            flavor=flavor,
+            attributes=attributes,
+        )
+
+    def _publish_checkpoint(
+        self,
+        ref: str,
+        *,
+        size: int,
+        format: Optional[str],
+        feed: Callable[[_RequestOutputStream], object],
+        fallback: Callable[[str], Asset],
+        produced_by_kind: Optional[str],
+        step_number: Optional[int],
+        epoch_number: Optional[int],
+        output_kind: Optional[str],
+        target_dtype: Optional[str],
+        flavor: Optional[str],
+        attributes: Optional[dict],
+    ) -> Tensors:
+        """Shared save_checkpoint / save_checkpoint_bytes core.
+
+        Job-scoped writes publish through the /commits stream (gw#471) so
+        the returned Tensors carries a blake3 digest + blob_digest and each
+        save materializes one finalized repo revision; everything else falls
+        back to the plain asset save the ``fallback`` callable provides.
+        """
         ref = _normalize_output_ref(ref)
         self._require_repo_job_scope_for_tensors(ref)
+        _enforce_output_file_size_limit(size)
         fmt = str(format or "").strip() or _infer_tensors_format(ref)
 
-        # Job-scoped writes publish through the /commits stream; see
-        # save_checkpoint for the rationale.
-        if self._repo_job_upload_scope() is not None and self._should_stream_output_to_file_api(ref):
-            stream = self.open_checkpoint_stream(
-                ref,
-                format=fmt,
-                expected_size_bytes=len(payload),
-                produced_by_kind=produced_by_kind,
-                step_number=step_number,
-                epoch_number=epoch_number,
-                output_kind=output_kind,
-                target_dtype=target_dtype,
-                flavor=flavor,
+        def _emit() -> None:
+            self._emit_checkpoint_saved(
+                ref, step_number=step_number, epoch_number=epoch_number,
+                output_kind=output_kind, size_bytes=size,
             )
-            stream.write(payload)
-            out = stream.finalize()
-            if isinstance(out, Tensors):
-                self._emit_checkpoint_saved(
-                    ref, step_number=step_number, epoch_number=epoch_number,
-                    output_kind=output_kind, size_bytes=len(payload),
-                )
-                return out
-            raise RuntimeError("file save failed (invalid_tensors_response)")
 
-        asset = self.save_bytes(ref, payload)
-        self._emit_checkpoint_saved(
-            ref, step_number=step_number, epoch_number=epoch_number,
-            output_kind=output_kind, size_bytes=len(payload),
-        )
+        # Reserve aggregate-bytes budget (issue #269 back-pressure). Held
+        # across either branch (streaming or asset-save fallthrough); the
+        # fallback saves are reentrancy-aware so their inner reserve() is a
+        # no-op for the same thread.
+        with self._get_upload_budget_gate().reserve(size):
+            if self._repo_job_upload_scope() is not None and self._should_stream_output_to_file_api(ref):
+                stream = self.open_checkpoint_stream(
+                    ref,
+                    format=fmt,
+                    expected_size_bytes=size,
+                    produced_by_kind=produced_by_kind,
+                    step_number=step_number,
+                    epoch_number=epoch_number,
+                    output_kind=output_kind,
+                    target_dtype=target_dtype,
+                    flavor=flavor,
+                    attributes=attributes,
+                )
+                feed(stream)
+                out = stream.finalize()
+                if isinstance(out, Tensors):
+                    _emit()
+                    return out
+                raise RuntimeError("file save failed (invalid_tensors_response)")
+
+            asset = fallback(ref)
+        _emit()
         return Tensors(
             ref=asset.ref,
             owner=asset.owner,
@@ -1336,13 +1310,17 @@ class _PublisherMixin:
         return dest_path
 
     def checkpoint_dir(self, *, key: str) -> Path:
-        """Return a scratch dir keyed by (job_id, key), for trainer
-        ``output_dir`` / ``resume_from_checkpoint`` use.
+        """Return a JOB-SCOPED SCRATCH dir keyed by (job_id, key) — a stable
+        working directory for trainer ``output_dir`` use within one job.
 
-        NOTE: lives under ``tempfile.gettempdir()`` — pod-local ``/tmp``, not
-        durable storage. It survives a THREAD/process restart within the
-        same pod but is gone on pod churn/eviction (design gap tracked
-        separately; this docstring describes reality, not the aspiration).
+        NOT persistent storage (pgw#527): it lives under
+        ``tempfile.gettempdir()`` — pod-local ``/tmp``, gone at pod
+        churn/eviction. Do not park resume state here; durable resume goes
+        through published checkpoints (``save_checkpoint`` / the job's
+        source repo). What it IS good for: a deterministic path that
+        survives handler retries within the same pod/process, so a trainer
+        can wipe-and-recreate it at start (the image_lora_finetuner
+        pattern) without colliding with other jobs.
         """
         job_id = self._job_id or self.request_id or "x"
         base = Path(tempfile.gettempdir()) / "txform-persistent" / str(job_id)
@@ -1526,15 +1504,7 @@ class DatasetContext(_PublisherMixin, RequestContext):
     ) -> dict[str, Any]:
         """Publish a dataset revision into ``tensorhub.datasets``.
 
-        Writes to the datasets
-        subsystem instead of ``repo_checkpoints``. The flow:
-
-        1. Resolve ``destination_dataset`` (owner/name) against tensorhub.
-        2. If the dataset row doesn't exist: ``POST /api/v1/datasets`` with
-           ``{owner, name, visibility, schema: features_json}``.
-        3. Otherwise: ``PATCH /api/v1/datasets/:id`` to update the schema
-           + row_artifacts_json.
-
+        Writes to the datasets subsystem instead of ``repo_checkpoints``.
         The individual file bytes are expected to already be in CAS via
         prior ``save_checkpoint`` calls — this method just records the
         dataset-level metadata pointing at those blobs. The server
@@ -1562,116 +1532,24 @@ class DatasetContext(_PublisherMixin, RequestContext):
         Returns:
             ``{ok: True, dataset_id: str, owner: str, name: str, existed: bool}``.
 
-        Raises ``RuntimeError`` on HTTP failure. Callers in
-        ``_finalize_produced_variants`` wrap with try/except so a failed
-        dataset publish doesn't crash the job; the blob uploads already
-        landed by that point.
+        Raises ``AuthError`` on 401/403 and ``RuntimeError`` on any other
+        HTTP failure. The hub-API plumbing lives next to ``HubClient``
+        (``gen_worker.convert.hub.publish_dataset_revision``).
         """
-        import requests
-        owner, name = _parse_owner_repo(destination_dataset)
-        base = (self._file_api_base_url or "").strip().rstrip("/")
-        if not base:
-            raise RuntimeError("publish_dataset_revision: no file_api_base_url")
-        token = self._get_worker_capability_token()
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "X-Cozy-Owner": owner,
-        }
+        from ..convert.hub import publish_dataset_revision
 
-        # Stash the kind (+ dataset_info if provided) inside features_json
-        # using a reserved `__cozy_*__` key so it survives through the
-        # server's features_json passthrough. Once tensorhub adds a
-        # dedicated `kind` column, migrate these to top-level fields.
-        raw_schema = dict(features_json or {})
-        if isinstance(raw_schema.get("features"), dict):
-            features_payload = dict(raw_schema)
-        else:
-            features_payload = {"features": raw_schema}
-        if kind:
-            features_payload["__cozy_kind__"] = kind
-        if dataset_info:
-            features_payload["__cozy_dataset_info__"] = dataset_info
-        if snapshot_manifest:
-            features_payload["__cozy_snapshot_manifest__"] = snapshot_manifest
-
-        # Step 1: look up any existing dataset by (tenant, name). tensorhub
-        # lists by ?tenant= and we filter client-side; this is O(N) but N is
-        # small (typically <100 datasets per org in practice).
-        list_url = (
-            f"{base}/api/v1/datasets?tenant={urllib.parse.quote(owner, safe='')}"
+        return publish_dataset_revision(
+            base_url=(self._file_api_base_url or "").strip(),
+            token=self._get_worker_capability_token(),
+            destination_dataset=destination_dataset,
+            features_json=features_json,
+            row_artifacts_json=row_artifacts_json,
+            snapshot_manifest=snapshot_manifest,
+            visibility=visibility,
+            kind=kind,
+            dataset_info=dataset_info,
         )
-        list_resp = requests.get(list_url, headers=headers, timeout=30)
-        existing_id = ""
-        if 200 <= list_resp.status_code < 300:
-            try:
-                items = list_resp.json().get("items") or []
-                for it in items:
-                    if str(it.get("name") or "").lower() == name.lower():
-                        existing_id = str(it.get("dataset_id") or "")
-                        break
-            except Exception:
-                pass
 
-        if not existing_id:
-            # Step 2a: create.
-            create_url = f"{base}/api/v1/datasets"
-            create_body = {
-                "tenant": owner,
-                "name": name,
-                "visibility": visibility,
-                "schema": features_payload,
-            }
-            resp = requests.post(
-                create_url,
-                headers=headers,
-                data=json.dumps(create_body).encode("utf-8"),
-                timeout=30,
-            )
-            if resp.status_code in (401, 403):
-                raise AuthError(f"dataset create unauthorized ({resp.status_code})")
-            if resp.status_code < 200 or resp.status_code >= 300:
-                raise RuntimeError(
-                    f"dataset create failed ({resp.status_code}): {resp.text[:256]}"
-                )
-            data = resp.json() if resp.text else {}
-            dataset_id = str(data.get("dataset_id") or "")
-            return {
-                "ok": True,
-                "dataset_id": dataset_id,
-                "owner": owner,
-                "name": name,
-                "existed": False,
-            }
-
-        # Step 2b: update via PATCH.
-        patch_url = f"{base}/api/v1/datasets/{urllib.parse.quote(existing_id, safe='')}"
-        patch_body: Dict[str, Any] = {
-            "schema": features_payload,
-        }
-        if row_artifacts_json is not None:
-            patch_body["row_artifacts"] = row_artifacts_json
-        if visibility in ("private", "public"):
-            patch_body["visibility"] = visibility
-        resp = requests.patch(
-            patch_url,
-            headers=headers,
-            data=json.dumps(patch_body).encode("utf-8"),
-            timeout=30,
-        )
-        if resp.status_code in (401, 403):
-            raise AuthError(f"dataset patch unauthorized ({resp.status_code})")
-        if resp.status_code < 200 or resp.status_code >= 300:
-            raise RuntimeError(
-                f"dataset patch failed ({resp.status_code}): {resp.text[:256]}"
-            )
-        return {
-            "ok": True,
-            "dataset_id": existing_id,
-            "owner": owner,
-            "name": name,
-            "existed": True,
-        }
 
 class TrainingMetric(msgspec.Struct, frozen=True, kw_only=True):
     """Typed per-step training metric (pgw#450), payload of a
@@ -1694,13 +1572,10 @@ class TrainingMetric(msgspec.Struct, frozen=True, kw_only=True):
 class TrainingContext(_PublisherMixin, RequestContext):
     """RequestContext for ``@endpoint(kind="training")`` endpoints.
 
-    From ``_PublisherMixin``: repo-metadata RPCs, ``resolve_dataset`` /
-    ``dataset_paths`` (the executor materializes ``payload.datasets`` before
-    the handler runs) and ``checkpoint_dir`` (pod-local scratch keyed by
-    job — see its docstring for the durability caveat).
-    ``save_checkpoint`` lives on the base ``RequestContext`` (gated by
-    ``_require_repo_job_scope_for_tensors``) because internal upload paths
-    call it via ``getattr`` regardless of which subclass the request used.
+    From ``_PublisherMixin``: repo-metadata RPCs, ``save_checkpoint``,
+    ``resolve_dataset`` / ``dataset_paths`` (the executor materializes
+    ``payload.datasets`` before the handler runs) and ``checkpoint_dir``
+    (job-scoped scratch, NOT durable — see its docstring).
     Delegated trainers (subprocess ai-toolkit and friends) run through
     ``gen_worker.subproc.run_process`` with ``ctx=self`` for cancellation.
     """

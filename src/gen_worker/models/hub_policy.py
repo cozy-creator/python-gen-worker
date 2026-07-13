@@ -86,11 +86,11 @@ def detect_worker_capabilities(*, extra_libs: Optional[List[str]] = None) -> Ten
 
 
 # ---------------------------------------------------------------------------
-# Variant auto-selection (#380) — pick the best routable variant for THIS
-# machine from `variants={name: (binding, Resources)}` declarations. Pure
-# logic over (Resources, capabilities, free VRAM); consumer CLIs (cozy) call
-# it through `run --list` / `--variant auto` instead of reimplementing
-# hardware policy in Go.
+# Fit-verdict policy (#380) — classify ONE function's Resources on THIS
+# machine. Pure logic over (Resources, capabilities, free VRAM); consumed by
+# serve_fit.plan_serve (the executor's flavor-fit ladder) and `run --list`.
+# The old select_variant ranking helper was deleted in pgw#527 — dead since
+# `--variant auto` was removed (pgw#226/#515); ranking now lives hub-side.
 # ---------------------------------------------------------------------------
 
 FIT_FITS = "fits"
@@ -136,13 +136,6 @@ def quant_flavor_kind(binding: Any) -> str:
     if flavor.startswith("nvfp4"):
         return "nvfp4"
     return ""
-
-
-@dataclass(frozen=True)
-class VariantChoice:
-    name: str
-    fit: str  # one of the FIT_* verdicts (never incompatible)
-    reason: str = ""
 
 
 def variant_fit(
@@ -263,80 +256,3 @@ def variant_fit(
     )
 
 
-def select_variant(
-    variants: List[tuple],
-    caps: TensorhubWorkerCapabilities,
-    free_vram_gb: float,
-    *,
-    base: Optional[tuple] = None,
-) -> Optional[VariantChoice]:
-    """Pick the best routable variant.
-
-    ``variants`` rows are ``(fn_name, Resources)`` or
-    ``(fn_name, Resources, binding)``; ``base`` is the base binding's row when
-    the class declares one. Policy — SM-aware (the shared-ladder ordering,
-    ``FP8_COMPUTE_MIN_SM``):
-      1. drop incompatible rows (SM / library / svdq pin-matrix / nvfp4
-         Blackwell gate; fp8 is never dropped on SM);
-      2. a fitting svdq_fp4 row wins outright — on Blackwell the SVDQuant
-         flavor beats fp8/bf16 on BOTH latency and VRAM (gw#405 measured);
-      3. fp8-vs-bf16 over the fitting set is SM-conditional (Paul's ruling
-         "run fp8 wherever we can"): on fp8-compute silicon (SM>=89) a
-         fitting stored fp8 row outranks bf16 (faster+smaller); below SM89
-         bf16-if-it-fits wins and fp8 is only a fit fallback. Within each
-         rung prefer the largest declared vram_gb; nvfp4 (Blackwell) trails;
-      4. a fitting svdq_int4 row (4-bit fit rung: nothing bigger fits);
-      5. an emergency_fp8 row (runtime fp8-E4M3 storage), then an
-         emergency_quant row if the nf4 rung applies
-         (runs at below-platform quality, loudly);
-      6. else the base binding + the offload ladder;
-      7. no base → the smallest-VRAM compatible variant, offloaded;
-      8. nothing routable → None.
-    """
-    from .ladder import FP8_COMPUTE_MIN_SM
-
-    def _vram(res: Any) -> float:
-        v = getattr(res, "vram_gb", None)
-        return float(v) if v is not None else 0.0
-
-    compat: List[tuple[str, Any, str, str]] = []
-    for row in variants:
-        name, res = row[0], row[1]
-        row_binding = row[2] if len(row) > 2 else None
-        fit, reason = variant_fit(res, caps, free_vram_gb, binding=row_binding)
-        if fit != FIT_INCOMPATIBLE:
-            compat.append((name, res, fit, reason))
-
-    # SM>=89: fp8 tensor cores → prefer fp8 over bf16. Below: bf16-if-fits first.
-    if caps.gpu_sm >= FP8_COMPUTE_MIN_SM:
-        native_order = (FIT_SVDQ_FP4, FIT_FP8, FIT_FITS, FIT_NVFP4)
-    else:
-        native_order = (FIT_SVDQ_FP4, FIT_FITS, FIT_FP8, FIT_NVFP4)
-    for rung in native_order:
-        fitting = [row for row in compat if row[2] == rung]
-        if fitting:
-            name, _res, fit, reason = max(fitting, key=lambda r: _vram(r[1]))
-            return VariantChoice(name=name, fit=fit, reason=reason)
-
-    # svdq_int4 (gw#415): a stored 4-bit flavor that fits when nothing
-    # full-precision does — ahead of the emergency runtime-quant rungs.
-    # Emergency rungs (th#546 / th#683): nothing stored fits, but runtime
-    # fp8-E4M3 storage or 4-bit quantization would — prefer them over the
-    # offload ladder (ladder position: after stored flavors, before offload).
-    for rung in (FIT_SVDQ_INT4, FIT_EMERGENCY_FP8, FIT_EMERGENCY):
-        rows = [row for row in compat if row[2] == rung]
-        if rows:
-            name, _res, fit, reason = max(rows, key=lambda r: _vram(r[1]))
-            return VariantChoice(name=name, fit=fit, reason=reason)
-
-    if base is not None:
-        base_name, base_res = base[0], base[1]
-        base_binding = base[2] if len(base) > 2 else None
-        fit, reason = variant_fit(base_res, caps, free_vram_gb, binding=base_binding)
-        if fit != FIT_INCOMPATIBLE:
-            return VariantChoice(name=base_name, fit=fit, reason=reason)
-
-    if compat:
-        name, _res, fit, reason = min(compat, key=lambda r: _vram(r[1]))
-        return VariantChoice(name=name, fit=fit, reason=reason)
-    return None

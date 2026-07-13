@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.22.0 (2026-07-13)
+
+**pgw#526 + pgw#527 — ctx hierarchy honesty + dead-surface cuts (BREAKING).**
+
+- **Producer state off the base ctx (pgw#526).** `_source_info` /
+  `_destination_info` / `_source_path` / `_hf_token` / `_repo_spec` now
+  initialize in `_PublisherMixin.__init__` — a plain inference
+  `RequestContext` no longer carries state only producer accessors could
+  read. `RequestContext.__init__` loses the `source_info=` /
+  `destination_info=` / `hf_token=` / `compute=` kwargs (producer kwargs
+  move to the mixin; the executor passes them only for producer kinds).
+  The upload-budget gate stays on the base: the base `save_file` path
+  reserves against it.
+- **`ctx.compute` DELETED; `ResolvedCompute.gpu_count`/`vram_gb` cut from
+  the wire (pgw#526, audit P5).** The surface was documented in
+  proto/CONTRACT + docstrings, plumbed through every dispatch, raised
+  `AttributeError` on inference contexts, and had ZERO endpoint readers.
+  `gen_worker.api.Compute` is gone; proto field numbers 3/4 are
+  `reserved`. `accelerator` + `gpu_index` (GPU-semaphore gating + CUDA
+  binding) survive. Coordinated tensorhub PR trims the proto mirror +
+  dispatch population — deploy both sides together (protobuf keeps the
+  wire compatible either way: unknown/absent fields decode as zeros).
+- **Save-path dedupe (pgw#526).** `_save_file_create` folded into
+  `save_file(ref, local_path, *, create=False)`; `save_checkpoint` /
+  `save_checkpoint_bytes` now share one `_publish_checkpoint` core (the
+  bytes variant gains the upload-budget reservation and `attributes=`
+  parity it was missing). `publish_dataset_revision`'s raw-requests hub
+  plumbing moved next to `HubClient`
+  (`gen_worker.convert.hub.publish_dataset_revision`); the
+  `DatasetContext` method is a thin delegate.
+- **`checkpoint_dir` stops promising persistence (pgw#527, audit §5.5).**
+  Documented as JOB-SCOPED SCRATCH under pod-local `/tmp`: gone at pod
+  churn; durable resume goes through published checkpoints. Evidence: the
+  only production trainer (image_lora_finetuner) wipes the dir at start
+  ("Resume v1 = clean restart") and publishes checkpoints for resume;
+  RunPod volumes, when mounted, are the model-cache volume — not a
+  trainer-resume home. No behavior change.
+- **`hub_policy.select_variant` + `VariantChoice` deleted (pgw#527).**
+  Zero production callers since `--variant auto` was removed (pgw#226/
+  #515); ranking lives hub-side. `variant_fit` (the serve-fit ladder's
+  verdict function) is untouched.
+- **Rebased onto 0.21.0 (pgw#532 dynamic slot materialization).** No
+  functional overlap: pgw#532 rebinds each declared `Slot` to the
+  dispatch-resolved pick in `_effective_spec`/`_slot_dispatch_binding`;
+  this PR's ctx-hierarchy changes are orthogonal (producer-state
+  location, not slot resolution). Both apply cleanly side by side —
+  `_effective_spec`'s derived-binding-set flow and the `_PublisherMixin`
+  producer-state move touch disjoint concerns in `executor.py`.
+
 ## 0.21.0 (2026-07-13)
 
 **BREAKING(-ish) — pgw#532: worker-side dynamic slot materialization (the last th#767
@@ -107,7 +156,6 @@ healthy hub binding.
   `uv sync --locked`, so a green PR actually implies a green publish (the
   0.18.0 silent-publish-failure root cause: publish re-resolved different
   dependency versions than what PR CI validated).
-
 ## 0.18.1 (2026-07-13)
 
 - fix(families): normalize docstring-derived schema descriptions with `inspect.cleandoc`
