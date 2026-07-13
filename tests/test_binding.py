@@ -9,11 +9,11 @@ from gen_worker import HF, Civitai, Hub, ModelScope
 from gen_worker.api.binding import wire_ref
 
 
-def test_construction_provider_and_invalid_ref_rejection() -> None:
-    assert Hub("owner/repo").provider == "tensorhub"
-    assert HF("owner/repo").provider == "hf"
-    assert Civitai("123456").provider == "civitai"
-    assert ModelScope("owner/repo").provider == "modelscope"
+def test_construction_source_and_invalid_ref_rejection() -> None:
+    assert Hub("owner/repo").source == "tensorhub"
+    assert HF("owner/repo").source == "huggingface"
+    assert Civitai("123456").source == "civitai"
+    assert ModelScope("owner/repo").source == "modelscope"
 
     with pytest.raises(ValueError):
         Hub("")
@@ -28,7 +28,7 @@ def test_construction_provider_and_invalid_ref_rejection() -> None:
 def test_kw_metadata_normalized_and_frozen() -> None:
     b = HF(" owner/repo ", revision=" main ", dtype=" bf16 ", subfolder=" te ",
            files=(" a/*.safetensors ", ""))
-    assert b.ref == "owner/repo"
+    assert b.path == "owner/repo"
     assert b.revision == "main"
     assert b.dtype == "bf16"
     assert b.subfolder == "te"
@@ -71,6 +71,21 @@ def test_wire_ref_encoding() -> None:
     # load-time metadata never enters the ref
     assert wire_ref(HF("o/r", dtype="bf16", subfolder="te")) == "o/r"
     assert wire_ref(Civitai("123", version="456")) == "123"
+
+
+def test_provider_ref_allow_lora_aliases_retired() -> None:
+    """pgw#523 hard cut: ModelRef is pure identity + fetch scope. The old
+    `.provider`/`.ref` back-compat aliases and the `allow_lora` permission
+    flag are gone — use `.source`/`.path`; overlay permission lives on the
+    slot policy, not this struct."""
+    ref = Hub("owner/repo")
+    assert not hasattr(ref, "provider")
+    assert not hasattr(ref, "ref")
+    assert not hasattr(ref, "allow_lora")
+    with pytest.raises(TypeError):
+        Hub("owner/repo", allow_lora=True)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        HF("owner/repo", allow_lora=True)  # type: ignore[call-arg]
 
 
 def test_typed_payload_size_errors_expose_structured_fields() -> None:

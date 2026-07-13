@@ -313,7 +313,7 @@ def resolve_bindings(
                 f"{type(binding).__name__}"
             )
         out[param_name] = resolve_local_path(
-            ref=wire_ref(binding), provider=binding.provider,
+            ref=wire_ref(binding), provider=binding.source,
             offline=offline, emit=emit,
             allow_patterns=tuple(getattr(binding, "files", ()) or ()),
             civitai_version_id=str(getattr(binding, "version", "") or ""),

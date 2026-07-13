@@ -273,7 +273,7 @@ class Lifecycle:
                 continue
             for binding in spec.models.values():
                 ref = wire_ref(binding)
-                if binding.provider != "tensorhub" and ref not in prefetch_refs:
+                if binding.source != "tensorhub" and ref not in prefetch_refs:
                     # hf/civitai refs need no orchestrator snapshot; tensorhub
                     # refs arrive via ModelOp{DOWNLOAD} after HelloAck (§7).
                     prefetch_refs.append(ref)
@@ -293,7 +293,7 @@ class Lifecycle:
                 continue
             missing = sorted({
                 wire_ref(b) for b in spec.models.values()
-                if b.provider == "tensorhub"
+                if b.source == "tensorhub"
                 and self.executor.store.local_path(wire_ref(b)) is None
             })
             if missing:
