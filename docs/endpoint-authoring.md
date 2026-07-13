@@ -84,13 +84,21 @@ The slot name is the `models={}` key (or, with the single-binding `model=`
 shorthand, the `setup()` parameter name). It is never a constructor argument.
 
 ```python
-HF("owner/repo", revision=..., dtype=..., subfolder=..., files=(...), storage_dtype=...)
-Hub("owner/repo", tag="latest", flavor="", storage_dtype="")  # tensorhub
+HF("owner/repo", revision=..., dtype=..., subfolder=..., files=(...), components=(...), storage_dtype=...)
+Hub("owner/repo", tag="latest", flavor="", components=(...), storage_dtype="")  # tensorhub
 Civitai("123456", version="789")             # civitai model id
 ModelScope("owner/repo", revision=..., files=(...))
 ```
 
 `files` are `snapshot_download` allow-patterns for split-checkpoint repos.
+
+`components` (tensorhub/huggingface only) fetches only the named pipeline
+component subfolders instead of the whole repo — root config files
+(`model_index.json` and other root `*.json`) are always kept alongside. The
+win case: a slot binds a full pipeline repo but only needs ONE component out
+of it, e.g. `Hub("owner/sdxl-repo", components=("vae",))` for a VAE swap —
+`unet`/`text_encoder`/etc. never download. Civitai/modelscope reject it
+(civitai artifacts aren't component-structured; modelscope has `files=`).
 
 `storage_dtype="fp8"` keeps denoiser weights in fp8-E4M3 STORAGE with
 per-layer upcast to the compute `dtype` (diffusers layerwise casting) — half

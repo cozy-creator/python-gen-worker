@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import pytest
@@ -163,6 +164,58 @@ def test_hub_ref_resolves_and_lands_in_cas(local_hub, monkeypatch, tmp_path):
         ref="root/tiny", provider="tensorhub", offline=False, emit=lambda e: None,
     )
     assert local2 == local
+
+
+def test_hub_ref_components_fetches_only_named_subfolder(local_hub, monkeypatch, tmp_path):
+    """pgw#505: the CLI hub-less path narrows the tensorhub fetch to the
+    declared components — a full pipeline repo bound only for its vae/ never
+    materializes unet/ locally, and lands under a directory keyed separately
+    from the full-repo fetch."""
+    base, state = local_hub
+    _seed(state, {
+        "model_index.json": b"{}",
+        "unet/model.safetensors": b"unet-bytes",
+        "vae/model.safetensors": b"vae-bytes",
+    })
+    monkeypatch.setenv("TENSORHUB_URL", base)
+    monkeypatch.setenv("TENSORHUB_CAS_DIR", str(tmp_path))
+    monkeypatch.delenv("TENSORHUB_TOKEN", raising=False)
+
+    seen, emit = _events()
+    local = prov_mod.resolve_local_path(
+        ref="root/tiny", provider="tensorhub", offline=False, emit=emit,
+        components=("vae",),
+    )
+    snap = Path(local)
+    assert snap.name != state.snapshot_digest  # never aliases the full-repo dir
+    assert (snap / "model_index.json").read_bytes() == b"{}"
+    assert (snap / "vae" / "model.safetensors").read_bytes() == b"vae-bytes"
+    assert not (snap / "unet").exists()
+    # unet's blob was never downloaded — only vae + the root json landed in CAS.
+    unet_digest = blake3(b"unet-bytes").hexdigest()
+    assert not (tmp_path / "blobs" / "blake3" / unet_digest[:2] / unet_digest[2:4] / unet_digest).exists()
+
+    # A subsequent FULL fetch (no components=) of the same ref lands under a
+    # DIFFERENT directory and gets everything, including unet/.
+    full = prov_mod.resolve_local_path(
+        ref="root/tiny", provider="tensorhub", offline=False, emit=lambda e: None,
+    )
+    assert full != local
+    assert (Path(full) / "unet" / "model.safetensors").read_bytes() == b"unet-bytes"
+
+
+def test_hub_ref_components_matching_nothing_is_a_clear_error(local_hub, monkeypatch, tmp_path):
+    base, state = local_hub
+    _seed(state, {"model_index.json": b"{}", "vae/model.safetensors": b"vae-bytes"})
+    monkeypatch.setenv("TENSORHUB_URL", base)
+    monkeypatch.setenv("TENSORHUB_CAS_DIR", str(tmp_path))
+    monkeypatch.delenv("TENSORHUB_TOKEN", raising=False)
+
+    with pytest.raises(prov_mod.ModelResolutionError, match="components="):
+        prov_mod.resolve_local_path(
+            ref="root/tiny", provider="tensorhub", offline=False, emit=lambda e: None,
+            components=("nope",),
+        )
 
 
 def test_hub_token_sent_as_bearer(local_hub, monkeypatch, tmp_path):

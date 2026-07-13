@@ -88,6 +88,23 @@ def test_provider_ref_allow_lora_aliases_retired() -> None:
         HF("owner/repo", allow_lora=True)  # type: ignore[call-arg]
 
 
+def test_components_allowed_on_tensorhub_and_huggingface_only() -> None:
+    hub = Hub("o/r", components=(" vae ", "", "unet"))
+    assert hub.components == ("vae", "unet")
+
+    hf = HF("o/r", components=("vae",))
+    assert hf.components == ("vae",)
+
+    # Civitai()/ModelScope() don't even expose a components= kwarg; direct
+    # ModelRef construction is the only way to hit the validation.
+    from gen_worker.api.binding import ModelRef
+
+    with pytest.raises(ValueError, match="components="):
+        ModelRef(source="civitai", path="123", components=("vae",))
+    with pytest.raises(ValueError, match="components="):
+        ModelRef(source="modelscope", path="o/r", components=("vae",))
+
+
 def test_typed_payload_size_errors_expose_structured_fields() -> None:
     from gen_worker import ValidationError
     from gen_worker.api.errors import OutputTooLargeError
