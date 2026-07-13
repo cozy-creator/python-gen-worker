@@ -579,7 +579,7 @@ wheels = [
 
 [[package]]
 name = "gen-worker"
-version = "0.22.4"
+version = "0.22.5"
 source = { editable = "." }
 dependencies = [
     { name = "blake3" },
@@ -651,8 +651,8 @@ requires-dist = [
     { name = "c2pa-python", marker = "extra == 'signing'", specifier = ">=0.36" },
     { name = "diffusers", marker = "extra == 'dev'", specifier = ">=0.39.0" },
     { name = "gguf", specifier = ">=0.10.0" },
-    { name = "grpcio", specifier = ">=1.80.0" },
-    { name = "grpcio-tools", marker = "extra == 'dev'", specifier = ">=1.80.0" },
+    { name = "grpcio", specifier = ">=1.82.1" },
+    { name = "grpcio-tools", marker = "extra == 'dev'", specifier = ">=1.82.1" },
     { name = "huggingface-hub", specifier = ">=0.26.0" },
     { name = "msgspec", specifier = ">=0.18.6" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.10.0" },

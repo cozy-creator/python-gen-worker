@@ -1,6 +1,6 @@
 [project]
 name = "gen-worker"
-version = "0.22.4"
+version = "0.22.5"
 description = "A library used to build custom functions in Cozy Creator's serverless function platform."
 readme = "README.md"
 license = "MIT"
@@ -21,7 +21,7 @@ classifiers = [
 # a 3.12+ mypy target anyway.
 requires-python = ">=3.12"
 dependencies = [
-    "grpcio>=1.80.0",
+    "grpcio>=1.82.1",
     "msgspec>=0.18.6",
     "protobuf>=6.30.0",
     "requests>=2.32.0",
@@ -84,7 +84,7 @@ dev = [
     # transformers+accelerate activate the bnb nf4 convert integration test.
     "accelerate>=1.9",
     "diffusers>=0.39.0",
-    "grpcio-tools>=1.80.0",
+    "grpcio-tools>=1.82.1",
     # 5.13 floor: the fp8+te writer keys on transformers-5 conversion_mapping /
     # core_model_loading internals; <5.5.2 has the fast-safetensors Gemma
     # key-rename bug. Producer/consumer symmetry with the serve fleet (te#45).

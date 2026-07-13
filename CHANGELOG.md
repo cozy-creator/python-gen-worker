@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.22.5 (2026-07-13)
+
+- **packaging: grpcio floor 1.82.1.** The shipped pb stubs are generated
+  with grpcio-tools 1.82.1 and refuse to import under older grpcio
+  (th#766: conversion image crash-looped on locked 1.81.1).
+
 ## 0.22.4 (2026-07-13)
 
 - **gw: fp8 storage flavors for transformers-BACKBONE snapshots (ie#478).**
