@@ -262,16 +262,12 @@ class RunJob(_message.Message):
     def __init__(self, request_id: _Optional[str] = ..., attempt: _Optional[int] = ..., function_name: _Optional[str] = ..., input_payload: _Optional[bytes] = ..., timeout_ms: _Optional[int] = ..., tenant: _Optional[str] = ..., invoker_id: _Optional[str] = ..., capability_token: _Optional[str] = ..., output_mode: _Optional[_Union[OutputMode, str]] = ..., compute: _Optional[_Union[ResolvedCompute, _Mapping]] = ..., models: _Optional[_Iterable[_Union[ModelBinding, _Mapping]]] = ..., snapshots: _Optional[_Mapping[str, Snapshot]] = ...) -> None: ...
 
 class ResolvedCompute(_message.Message):
-    __slots__ = ("accelerator", "gpu_index", "gpu_count", "vram_gb")
+    __slots__ = ("accelerator", "gpu_index")
     ACCELERATOR_FIELD_NUMBER: _ClassVar[int]
     GPU_INDEX_FIELD_NUMBER: _ClassVar[int]
-    GPU_COUNT_FIELD_NUMBER: _ClassVar[int]
-    VRAM_GB_FIELD_NUMBER: _ClassVar[int]
     accelerator: str
     gpu_index: int
-    gpu_count: int
-    vram_gb: int
-    def __init__(self, accelerator: _Optional[str] = ..., gpu_index: _Optional[int] = ..., gpu_count: _Optional[int] = ..., vram_gb: _Optional[int] = ...) -> None: ...
+    def __init__(self, accelerator: _Optional[str] = ..., gpu_index: _Optional[int] = ...) -> None: ...
 
 class ModelBinding(_message.Message):
     __slots__ = ("slot", "ref", "loras", "inference_defaults")

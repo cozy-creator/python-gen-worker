@@ -217,10 +217,9 @@ class _RequestOutputStream:
                         attributes=self._lineage_attributes,
                     )
                 else:
-                    if self._create:
-                        raw = self._ctx._save_file_create(self._ref, self._tmp_path)
-                    else:
-                        raw = self._ctx.save_file(self._ref, self._tmp_path)
+                    raw = self._ctx.save_file(
+                        self._ref, self._tmp_path, create=self._create
+                    )
                 self._result = self._with_stream_mode(raw)
                 self._finalized = True
                 self._maybe_emit_progress(stage="stream_finalized", force=True)
@@ -390,7 +389,9 @@ class _RequestOutputStream:
             mode="merge",
             message=f"checkpoint {self._ref}",
             provenance=provenance,
-            repo_spec=dict(ctx._repo_spec),
+            # Producer-only state (pgw#526): checkpoint streams only open on
+            # producer contexts, which carry _repo_spec on _PublisherMixin.
+            repo_spec=dict(getattr(ctx, "_repo_spec", None) or {}),
             part_progress=_part_progress,
         )
         self._uploader_meta = {"revision_id": result.revision_id, "checkpoint_id": result.checkpoint_id}

@@ -606,6 +606,136 @@ class HubClient:
         }
 
 
+def publish_dataset_revision(
+    *,
+    base_url: str,
+    token: str,
+    destination_dataset: str,
+    features_json: dict[str, Any],
+    row_artifacts_json: Optional[dict[str, Any]] = None,
+    snapshot_manifest: Optional[list[dict[str, Any]]] = None,
+    visibility: str = "private",
+    kind: str = "",
+    dataset_info: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Publish a dataset revision into ``tensorhub.datasets``.
+
+    Hub-API plumbing for ``DatasetContext.publish_dataset_revision`` (which
+    documents the tenant-facing contract). The flow:
+
+    1. Resolve ``destination_dataset`` (owner/name) against tensorhub.
+    2. If the dataset row doesn't exist: ``POST /api/v1/datasets`` with
+       ``{tenant, name, visibility, schema: features_json}``.
+    3. Otherwise: ``PATCH /api/v1/datasets/:id`` to update the schema
+       (+ row_artifacts / visibility).
+
+    ``kind`` / ``dataset_info`` / ``snapshot_manifest`` ride inside
+    ``features_json`` under reserved ``__cozy_*__`` keys until tensorhub
+    grows dedicated columns. Raises ``AuthError`` on 401/403 and
+    ``RuntimeError`` on any other HTTP failure.
+    """
+    from ..api.errors import AuthError
+    from ..request_context._helpers import _parse_owner_repo
+
+    owner, name = _parse_owner_repo(destination_dataset)
+    base = (base_url or "").strip().rstrip("/")
+    if not base:
+        raise RuntimeError("publish_dataset_revision: no file_api_base_url")
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "X-Cozy-Owner": owner,
+    }
+
+    # Stash the kind (+ dataset_info if provided) inside features_json
+    # using a reserved `__cozy_*__` key so it survives through the
+    # server's features_json passthrough. Once tensorhub adds a
+    # dedicated `kind` column, migrate these to top-level fields.
+    raw_schema = dict(features_json or {})
+    if isinstance(raw_schema.get("features"), dict):
+        features_payload = dict(raw_schema)
+    else:
+        features_payload = {"features": raw_schema}
+    if kind:
+        features_payload["__cozy_kind__"] = kind
+    if dataset_info:
+        features_payload["__cozy_dataset_info__"] = dataset_info
+    if snapshot_manifest:
+        features_payload["__cozy_snapshot_manifest__"] = snapshot_manifest
+
+    # Step 1: look up any existing dataset by (tenant, name). tensorhub
+    # lists by ?tenant= and we filter client-side; this is O(N) but N is
+    # small (typically <100 datasets per org in practice).
+    list_url = f"{base}/api/v1/datasets?tenant={urllib.parse.quote(owner, safe='')}"
+    list_resp = requests.get(list_url, headers=headers, timeout=30)
+    existing_id = ""
+    if 200 <= list_resp.status_code < 300:
+        try:
+            items = list_resp.json().get("items") or []
+            for it in items:
+                if str(it.get("name") or "").lower() == name.lower():
+                    existing_id = str(it.get("dataset_id") or "")
+                    break
+        except Exception:
+            pass
+
+    if not existing_id:
+        # Step 2a: create.
+        create_body = {
+            "tenant": owner,
+            "name": name,
+            "visibility": visibility,
+            "schema": features_payload,
+        }
+        resp = requests.post(
+            f"{base}/api/v1/datasets",
+            headers=headers,
+            data=json.dumps(create_body).encode("utf-8"),
+            timeout=30,
+        )
+        if resp.status_code in (401, 403):
+            raise AuthError(f"dataset create unauthorized ({resp.status_code})")
+        if resp.status_code < 200 or resp.status_code >= 300:
+            raise RuntimeError(
+                f"dataset create failed ({resp.status_code}): {resp.text[:256]}"
+            )
+        data = resp.json() if resp.text else {}
+        return {
+            "ok": True,
+            "dataset_id": str(data.get("dataset_id") or ""),
+            "owner": owner,
+            "name": name,
+            "existed": False,
+        }
+
+    # Step 2b: update via PATCH.
+    patch_url = f"{base}/api/v1/datasets/{urllib.parse.quote(existing_id, safe='')}"
+    patch_body: dict[str, Any] = {"schema": features_payload}
+    if row_artifacts_json is not None:
+        patch_body["row_artifacts"] = row_artifacts_json
+    if visibility in ("private", "public"):
+        patch_body["visibility"] = visibility
+    resp = requests.patch(
+        patch_url,
+        headers=headers,
+        data=json.dumps(patch_body).encode("utf-8"),
+        timeout=30,
+    )
+    if resp.status_code in (401, 403):
+        raise AuthError(f"dataset patch unauthorized ({resp.status_code})")
+    if resp.status_code < 200 or resp.status_code >= 300:
+        raise RuntimeError(
+            f"dataset patch failed ({resp.status_code}): {resp.text[:256]}"
+        )
+    return {
+        "ok": True,
+        "dataset_id": existing_id,
+        "owner": owner,
+        "name": name,
+        "existed": True,
+    }
+
+
 def files_from_tree(tree: Path, *, prefix: str = "") -> list[CommitFile]:
     """Build CommitFile entries for every regular file under ``tree``.
 
@@ -634,4 +764,5 @@ __all__ = [
     "CommitResult",
     "blake3_file",
     "files_from_tree",
+    "publish_dataset_revision",
 ]

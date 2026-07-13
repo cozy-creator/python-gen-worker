@@ -99,3 +99,55 @@ def test_models_property_copies() -> None:
     m = ctx.models
     m["pipe"] = "mutated"
     assert ctx.models["pipe"] == "o/r"
+
+
+# ---------------------------------------------------------------------------
+# pgw#526: producer state lives on _PublisherMixin, not the inference base.
+# ---------------------------------------------------------------------------
+
+def test_inference_ctx_carries_no_producer_state() -> None:
+    ctx = _ctx()
+    for attr in ("_source_info", "_destination_info", "_source_path",
+                 "_hf_token", "_repo_spec"):
+        assert not hasattr(ctx, attr), attr
+    for surface in ("hf_token", "source", "destination", "source_path",
+                    "set_repo_spec", "save_checkpoint", "checkpoint_dir",
+                    "compute"):
+        assert not hasattr(ctx, surface), surface
+
+
+def test_producer_ctx_carries_producer_state() -> None:
+    from gen_worker.request_context import TrainingContext
+
+    ctx = TrainingContext(
+        request_id="r1",
+        source_info={"ref": "o/base"},
+        destination_info={"ref": "o/dest"},
+        hf_token="  tok  ",
+    )
+    assert ctx.source == {"ref": "o/base"}
+    assert ctx.destination == {"ref": "o/dest"}
+    assert ctx.hf_token == "tok"
+    assert ctx.source_path is None
+    ctx._set_source_path("/models/base")
+    assert ctx.source_path == "/models/base"
+    ctx.set_repo_spec(kind="lora", model_family="sdxl")
+    assert ctx._repo_spec == {"kind": "lora", "model_family": "sdxl"}
+
+
+def test_producer_kwargs_rejected_on_inference_ctx() -> None:
+    with pytest.raises(TypeError):
+        RequestContext(request_id="r1", hf_token="tok")  # type: ignore[call-arg]
+
+
+def test_save_file_create_flag_local_backend(tmp_path) -> None:
+    src = tmp_path / "src.bin"
+    src.write_bytes(b"payload")
+    ctx = RequestContext(request_id="r1", local_output_dir=str(tmp_path / "outs"))
+    out = ctx.save_file("outs/a.bin", src, create=True)
+    assert isinstance(out, Asset)
+    with pytest.raises(RuntimeError):
+        ctx.save_file("outs/a.bin", src, create=True)
+    # Plain save_file overwrites freely.
+    out2 = ctx.save_file("outs/a.bin", src)
+    assert out2.size_bytes == len(b"payload")

@@ -8,7 +8,6 @@ from gen_worker.models.hub_policy import (
     FIT_INCOMPATIBLE,
     FIT_NVFP4,
     TensorhubWorkerCapabilities,
-    select_variant,
 )
 from gen_worker.models.serve_fit import (
     RUN_CPU,
@@ -177,55 +176,3 @@ def test_stored_flavor_that_does_not_fit_offloads_not_requants() -> None:
         binding=_Binding(flavor="fp8"),
     )
     assert plan.serveable and plan.run_mode == RUN_OFFLOAD
-
-
-# --------------------------------------------------------------------------
-# Cross-flavor selection (cozy-local `--variant auto`): the ladder over the
-# pre-expanded flavor rows — bf16 -> fp8 -> nvfp4 -> 4-bit.
-# --------------------------------------------------------------------------
-
-_ROWS = [
-    ("gen@bf16", Resources(vram_gb=24.0), _Binding(flavor="")),
-    ("gen@fp8", Resources(vram_gb=13.0), _Binding(flavor="fp8")),
-    ("gen@nvfp4", Resources(vram_gb=8.0), _Binding(flavor="nvfp4")),
-]
-
-
-def test_select_variant_prefers_fp8_on_fp8_compute_card() -> None:
-    # SM89 (Ada) has fp8 tensor cores: with both bf16 and fp8 fitting, fp8
-    # wins (faster AND smaller) — Paul's "run fp8 wherever we can".
-    choice = select_variant(_ROWS, CAPS_4090, free_vram_gb=23.6)
-    assert choice is not None and choice.name == "gen@fp8"
-    assert choice.fit == FIT_FP8
-
-
-def test_select_variant_prefers_bf16_below_fp8_compute() -> None:
-    # SM86 (Ampere) has no fp8 tensor cores — fp8 storage upcasts to bf16 at
-    # the same speed, so bf16 is preferred when it fits; fp8 is a fit fallback.
-    choice = select_variant(_ROWS, CAPS_SMALL, free_vram_gb=23.6)
-    assert choice is not None and choice.name == "gen@bf16"
-
-
-def test_select_variant_picks_fp8_flavor_on_fp8_capable_card() -> None:
-    # 16GB free: bf16 (24 GB card hint) doesn't fit; the stored fp8 row does
-    # and this SM89 card is fp8-compatible.
-    choice = select_variant(_ROWS, CAPS_4090, free_vram_gb=16.0)
-    assert choice is not None and choice.name == "gen@fp8"
-    assert choice.fit == FIT_FP8
-
-
-def test_select_variant_picks_nvfp4_on_blackwell_when_only_it_fits() -> None:
-    # 10GB free: bf16 + fp8 don't fit; nvfp4 fits and Blackwell runs it.
-    choice = select_variant(_ROWS, CAPS_BLACKWELL, free_vram_gb=10.0)
-    assert choice is not None and choice.name == "gen@nvfp4"
-    assert choice.fit == FIT_NVFP4
-
-
-def test_select_variant_sub_sm89_uses_fp8_fallback_when_bf16_too_big() -> None:
-    # SM86: nvfp4 stays HW-incompatible (Blackwell-only) and is dropped, but
-    # the stored fp8 row is NOT dropped (universal storage). 12GB free: bf16
-    # (24-1=23) doesn't fit, the fp8 row (13-1=12 <= 12) does and serves
-    # natively — fp8 is the fit fallback below fp8-compute silicon.
-    choice = select_variant(_ROWS, CAPS_SMALL, free_vram_gb=12.0)
-    assert choice is not None and choice.name == "gen@fp8"
-    assert choice.fit == FIT_FP8

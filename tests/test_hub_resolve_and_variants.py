@@ -5,9 +5,10 @@ HTTP server speaking tensorhub's public resolve route (th#560) and downloads
 blobs into the blake3 CAS via the shared cozy_snapshot path — no mocks on the
 unit under test, only a stdlib HTTP server standing in for the hub + R2.
 
-#380: ``select_variant`` policy — the serve-time flavor-fit ladder
-(SM/library gates, VRAM ladder, base fallback). This is the precision-flavor
-ladder (th#546/th#683), unrelated to the removed ``variants=`` decorator.
+#380: ``variant_fit`` gates — the serve-time fit verdicts (SM/library
+gates). This is the precision-flavor ladder (th#546/th#683), unrelated to
+the removed ``variants=`` decorator. The select_variant ranking helper was
+deleted in pgw#527 (zero production callers post-#226).
 """
 
 from __future__ import annotations
@@ -28,7 +29,6 @@ from gen_worker.models.hub_client import (
 )
 from gen_worker.models.hub_policy import (
     TensorhubWorkerCapabilities,
-    select_variant,
     variant_fit,
 )
 from gen_worker.models.refs import parse_model_ref
@@ -267,7 +267,7 @@ def test_resolve_repo_flavor_and_digest_params(local_hub, monkeypatch, tmp_path)
 
 
 # ---------------------------------------------------------------------------
-# #380 select_variant policy
+# #380 variant_fit gates
 # ---------------------------------------------------------------------------
 
 _CAPS_4070 = TensorhubWorkerCapabilities(
@@ -297,39 +297,9 @@ def test_library_gate():
     assert fit == "incompatible" and "transformer_engine" in reason
 
 
-def test_vram_ladder_picks_largest_fitting():
-    # 16 GB free on SM89: bf16 (24) offloads, fp8 (14) fits, nvfp4 SM-gated.
-    choice = select_variant(_FLUX_VARIANTS, _CAPS_4070, 16.0)
-    assert choice is not None and choice.name == "flux-fp8" and choice.fit == "fits"
-    # 30 GB free: prefer the largest precision that fits.
-    choice = select_variant(_FLUX_VARIANTS, _CAPS_4070, 30.0)
-    assert choice.name == "flux-bf16"
-    # SM100 with 12.5 GB free: nvfp4 (12 GB card rec) unlocked and the only
-    # fit — fp8's 14 GB-card recommendation implies a >=13 GB free floor.
-    choice = select_variant(_FLUX_VARIANTS, _CAPS_B200, 12.5)
-    assert choice.name == "flux-nvfp4"
-
-
-def test_base_fallback_below_every_floor():
-    # 8 GB free: nothing fits resident, but fp8's runtime fp8-storage
-    # estimate (14 * 0.55 = 7.7) does -> the automatic runtime rungs
-    # (gw#420 / th#683) outrank offload.
-    choice = select_variant(
-        _FLUX_VARIANTS, _CAPS_4070, 8.0, base=("flux", Resources(vram_gb=24)),
-    )
-    assert choice.name == "flux-fp8" and choice.fit == "emergency_fp8"
-    # 5 GB free: even 4-bit estimates too big -> base binding + offload ladder.
-    choice = select_variant(
-        _FLUX_VARIANTS, _CAPS_4070, 5.0, base=("flux", Resources(vram_gb=24)),
-    )
-    assert choice.name == "flux" and choice.fit == "offload"
-    # No base declared -> smallest compatible variant, offloaded.
-    choice = select_variant(_FLUX_VARIANTS, _CAPS_4070, 5.0)
-    assert choice.name == "flux-fp8" and choice.fit == "offload"
-
-
 def test_cpu_box_has_no_routable_gpu_variant():
-    assert select_variant(_FLUX_VARIANTS, _CAPS_CPU, 0.0) is None
+    fit, reason = variant_fit(_FLUX_VARIANTS[0][1], _CAPS_CPU, 0.0)
+    assert fit == "incompatible" and "no CUDA GPU" in reason
     fit, _ = variant_fit(Resources(), _CAPS_CPU, 0.0)
     assert fit == "fits"  # CPU-only endpoints still fit
 

@@ -189,13 +189,16 @@ enum OutputMode {
   OUTPUT_MODE_INLINE      = 2; // small outputs inline in the result payload
 }
 
-// Resolved hardware for this invocation. gpu_index binds the CUDA context;
-// the rest is surfaced read-only to tenant code as ctx.compute.
+// Resolved hardware for this invocation: accelerator gates the worker's GPU
+// semaphore; gpu_index binds the CUDA context. pgw#526 cut gpu_count/vram_gb
+// (and the ctx.compute tenant surface they fed): documented and plumbed
+// through every dispatch, read by zero endpoints. Reserved so the numbers
+// can't come back with different semantics.
 message ResolvedCompute {
+  reserved 3, 4;
+  reserved "gpu_count", "vram_gb";
   string accelerator = 1; // "cuda" | "none"
   int32  gpu_index   = 2; // 0-based GPU ordinal picked by the per-GPU slot scheduler
-  int32  gpu_count   = 3;
-  int32  vram_gb     = 4;
 }
 
 message ModelBinding {

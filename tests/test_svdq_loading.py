@@ -15,12 +15,10 @@ import pytest
 
 from gen_worker import Hub, Resources
 from gen_worker.models.hub_policy import (
-    FIT_FP8,
     FIT_INCOMPATIBLE,
     FIT_SVDQ_FP4,
     FIT_SVDQ_INT4,
     TensorhubWorkerCapabilities,
-    select_variant,
     svdq_flavor_kind,
     variant_fit,
 )
@@ -262,62 +260,6 @@ def test_variant_fit_svdq_requires_nunchaku_library(stack_ok: None) -> None:
 # --------------------------------------------------------------------------
 # selection ordering (QUANTIZATION-POLICY fit ladder)
 # --------------------------------------------------------------------------
-
-def _rows() -> list[tuple[str, Any, Any]]:
-    return [
-        ("generate_turbo_bf16", Resources(vram_gb=24), _PLAIN_BINDING),
-        ("generate_turbo_fp8", Resources(vram_gb=15), Hub(
-            "Tongyi-MAI/Z-Image-Turbo", flavor="fp8")),
-        ("generate_turbo_svdq_fp4", Resources(vram_gb=14), _FP4_BINDING),
-    ]
-
-
-def test_select_variant_svdq_fp4_outranks_everything_fitting(stack_ok: None) -> None:
-    choice = select_variant(_rows(), _caps(120), 30.0)
-    assert choice is not None
-    assert choice.name == "generate_turbo_svdq_fp4"
-    assert choice.fit == FIT_SVDQ_FP4
-
-
-def test_select_variant_falls_back_when_pin_fails(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        "gen_worker.models.svdq.svdq_stack_reason", lambda: "stack broken",
-    )
-    choice = select_variant(_rows(), _caps(120), 30.0)
-    assert choice is not None
-    # svdq-fp4 drops on the broken pin; on Blackwell (fp8-compute) the stored
-    # fp8 row then outranks bf16 (Paul's fp8-preferred ruling).
-    assert choice.name == "generate_turbo_fp8"
-    assert choice.fit == FIT_FP8
-
-
-def test_select_variant_int4_is_fit_rung_not_speed_rung(stack_ok: None) -> None:
-    rows = [
-        ("generate_bf16", Resources(vram_gb=24), _PLAIN_BINDING),
-        ("generate_fp8", Resources(vram_gb=15), Hub(
-            "Tongyi-MAI/Z-Image-Turbo", flavor="fp8")),
-        ("generate_svdq_int4", Resources(vram_gb=10), _INT4_BINDING),
-    ]
-    caps = _caps(89)
-    # fp8 fits -> fp8 wins (int4 never outranks a fitting full-precision row).
-    choice = select_variant(rows, caps, 16.0)
-    assert choice is not None and choice.name == "generate_fp8"
-    # nothing but the int4 flavor fits -> int4 rung fires.
-    choice = select_variant(rows, caps, 12.0)
-    assert choice is not None
-    assert choice.name == "generate_svdq_int4"
-    assert choice.fit == FIT_SVDQ_INT4
-
-
-def test_select_variant_non_blackwell_ignores_fp4_row(stack_ok: None) -> None:
-    choice = select_variant(_rows(), _caps(89), 30.0)
-    assert choice is not None
-    # fp4 is Blackwell-only and dropped on SM89; the stored fp8 row wins over
-    # bf16 because SM89 (Ada) has fp8 tensor cores (fp8-preferred).
-    assert choice.name == "generate_turbo_fp8"
-
 
 # --------------------------------------------------------------------------
 # load routing

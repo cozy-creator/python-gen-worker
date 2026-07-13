@@ -40,7 +40,7 @@ from .api.streaming import (
     StreamResult,
     TokenUsage,
 )
-from .api.types import Asset, Compute
+from .api.types import Asset
 from .capability import HardwareUnmetError, InsufficientDiskError
 from .input_assets import cleanup_input_assets, materialize_input_assets
 from .models import disk_gc
@@ -2697,12 +2697,21 @@ class Executor:
         if run.output_mode == pb.OUTPUT_MODE_INLINE:
             execution_hints["output_format"] = "inline"
         job_id: Optional[str] = None
+        # Producer-only ctx state (pgw#526): the reserved source/destination
+        # structs and the hf token live on _PublisherMixin.__init__ — a plain
+        # inference RequestContext takes none of these kwargs.
+        producer_kwargs: Dict[str, Any] = {}
         if producer:
             execution_hints["kind"] = spec.kind
             dest_repo = _producer_destination_repo(payload, destination_info)
             if dest_repo:
                 execution_hints["destination_repo"] = dest_repo
             job_id = _capability_job_id(run.capability_token)
+            producer_kwargs = dict(
+                source_info=source_info,
+                destination_info=destination_info,
+                hf_token=getattr(self._settings, "hf_token", "") or "",
+            )
 
         ctx_cls = _CONTEXT_BY_KIND.get(spec.kind, RequestContext)
         ctx = ctx_cls(
@@ -2714,12 +2723,6 @@ class Executor:
             timeout_ms=timeout_ms or None,
             file_api_base_url=self.file_base_url or None,
             worker_capability_token=run.capability_token or None,
-            compute=Compute(
-                accelerator=(compute.accelerator if compute is not None else
-                             ("cuda" if spec.needs_gpu else "none")),
-                vram_gb=int(compute.vram_gb) if compute is not None else 0,
-                gpu_count=int(compute.gpu_count) if compute is not None else 0,
-            ),
             models={b.slot: b.ref for b in run.models},
             loras={
                 b.slot: tuple(
@@ -2728,10 +2731,8 @@ class Executor:
                 for b in run.models if b.loras
             },
             **_resolve_slots_kwargs(spec, run),
-            source_info=source_info,
-            destination_info=destination_info,
             execution_hints=execution_hints,
-            hf_token=getattr(self._settings, "hf_token", "") or "",
+            **producer_kwargs,
         )
         job.ctx = ctx
         if run.capability_token and self.file_base_url:

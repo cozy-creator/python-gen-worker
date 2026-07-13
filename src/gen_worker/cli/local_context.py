@@ -123,7 +123,10 @@ class LocalRequestContextMixin:
             raise TypeError("save_bytes expects bytes")
         return _save_local_bytes(ref, bytes(data))
 
-    def save_file(self, ref: str, local_path: "str | os.PathLike[str]") -> Asset:
+    def save_file(
+        self, ref: str, local_path: "str | os.PathLike[str]", *, create: bool = False
+    ) -> Asset:
+        # `create` is a no-op locally: dev runs overwrite freely.
         return _save_local_file(ref, local_path)
 
 
