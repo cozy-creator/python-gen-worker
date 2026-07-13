@@ -92,7 +92,7 @@ def _handle_prefetch(args: argparse.Namespace) -> int:
         for param_name, binding in c.bindings.items():
             try:
                 if isinstance(binding, ModelRef):
-                    ref, provider = wire_ref(binding), binding.provider
+                    ref, provider = wire_ref(binding), str(binding.source)
                     ap = tuple(getattr(binding, "files", ()) or ())
                     jobs[(ref, provider)] = (ref, provider, ap)
             except Exception as e:

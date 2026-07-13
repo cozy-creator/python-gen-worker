@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.20.0 (2026-07-13)
+
+**BREAKING — pgw#523: `ModelRef` is pure identity + fetch scope; `.provider`/`.ref` aliases retired.**
+
+- **Part A — evict `allow_lora` (identity != permission).** Deleted `allow_lora` from
+  `ModelRef` and the `Hub(...)`/`HF(...)` kwargs. th#772 moved overlay permission to the
+  slot-policy `loras` axis; the th#586 architecture gate has always keyed off the declared
+  binding/slot FAMILY (`EffectiveBindingFamily`), never this flag, so it never gated
+  anything at runtime — only a registration-time co-occurrence check (allow_lora=true
+  requires family), which tensorhub also retires this release. `_stamp_lora_family` ->
+  `_stamp_family`: family stamping is now unconditional-when-known on every binding
+  (top-level `bindings` blocks and `model.choices[].binding` rows alike), not
+  allow_lora-triggered.
+- **Part B — retire the `.provider`/`.ref` back-compat aliases.** `ModelRef` now exposes
+  only `.source`/`.path`. Every in-repo consumer (discovery manifest emission, executor
+  prefetch/download plumbing, residency cache-key labeling, the CLI's list/prefetch
+  commands) repoints at `.source`/`.path`. The manifest `bindings.<slot>.provider` wire
+  field now carries the pgw#511 vocabulary directly (`"huggingface"`/`"modelscope"`, not
+  the old `"hf"` short form) — requires tensorhub's widened `provider` DB CHECK deployed
+  first (th#523 companion PR). `models/refs.py::parse_model_ref` accepts both `"hf"` and
+  `"huggingface"` as input and keeps normalizing to the internal `"hf"` token, so the
+  ref-grammar module and every `parsed.provider == "hf"` comparison downstream (download/
+  provision) are unaffected.
+- Hard cut, no back-compat: constructing `Hub(..., allow_lora=True)` or reading
+  `ref.provider`/`ref.ref` now fails immediately (`TypeError`/`AttributeError`).
+
 ## 0.19.1 (2026-07-13)
 
 - **pgw#517: `compile=` is no longer silently inert on self-loading

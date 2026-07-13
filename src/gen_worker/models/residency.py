@@ -777,7 +777,7 @@ class LoadedComponentKey:
             dtype = dtype or str(getattr(binding, "dtype", "") or "")
             quantization = quantization or str(getattr(binding, "storage_dtype", "") or "")
             if not label:
-                ref = str(getattr(binding, "ref", "") or "")
+                ref = str(getattr(binding, "path", "") or "")
                 label = f"{ref}/{component}" if ref else component
         return cls(
             content_digest=str(content_digest or "").strip(),

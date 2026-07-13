@@ -71,7 +71,7 @@ def test_slot_emits_slots_block_not_model_choices(tmp_pkg: Path) -> None:
     # The plain vae binding still emits through the ordinary bindings block
     # (back-compat: bare ModelRef contributes no `slots` entry).
     assert "vae" not in {s["name"] for s in fn["slots"]}
-    assert fn["bindings"]["vae"]["provider"] == "hf"
+    assert fn["bindings"]["vae"]["provider"] == "huggingface"
 
 
 def test_slot_with_no_selected_by_or_default_emits_minimal_block(tmp_pkg: Path) -> None:
@@ -107,11 +107,12 @@ def test_slot_with_no_selected_by_or_default_emits_minimal_block(tmp_pkg: Path) 
     assert slot["family"] == "sdxl"  # from the default_config preset's registration
 
 
-def test_slot_allow_lora_family_from_fallback_when_no_compile(tmp_pkg: Path) -> None:
-    """pgw#520 reconciliation of pgw#519's _stamp_lora_family: a Slot-
-    declared allow_lora binding with no Compile(family=...) resolves its
-    family stamp from the Slot's own fallback-preset registration instead
-    of hard-failing."""
+def test_slot_family_from_fallback_when_no_compile(tmp_pkg: Path) -> None:
+    """pgw#520 reconciliation of pgw#519's family stamping (pgw#523: the
+    stamp function is now unconditional-when-known, not allow_lora-
+    triggered): a Slot-declared binding with no Compile(family=...)
+    resolves its family stamp from the Slot's own fallback-preset
+    registration."""
     from gen_worker.discovery.discover import discover_functions
 
     pkg = tmp_pkg / "ep_slot_lora"
@@ -130,7 +131,7 @@ def test_slot_allow_lora_family_from_fallback_when_no_compile(tmp_pkg: Path) -> 
 
         @endpoint(model=Slot(
             object,
-            default_checkpoint=Hub("o/base", allow_lora=True),
+            default_checkpoint=Hub("o/base"),
             default_config=SdxlDefaults(steps=28),
         ))
         class Gen:
@@ -141,7 +142,7 @@ def test_slot_allow_lora_family_from_fallback_when_no_compile(tmp_pkg: Path) -> 
 
     fns = discover_functions(tmp_pkg, main_module="ep_slot_lora.main")
     (fn,) = fns
-    assert fn["bindings"]["model"]["allow_lora"] is True
+    assert "allow_lora" not in fn["bindings"]["model"]
     assert fn["bindings"]["model"]["family"] == "sdxl"
 
 
@@ -164,7 +165,7 @@ def test_compile_family_wins_over_slot_fallback_family(tmp_pkg: Path) -> None:
             y: str
 
         @endpoint(
-            model=Slot(object, default_checkpoint=Hub("o/base", allow_lora=True),
+            model=Slot(object, default_checkpoint=Hub("o/base"),
                        default_config=SdxlDefaults(steps=28)),
             compile=Compile(family="explicit-family", shapes=((512, 512),)),
         )

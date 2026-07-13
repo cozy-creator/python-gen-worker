@@ -696,7 +696,7 @@ class ModelStore:
                 # Confident classification only (binding / boot provider
                 # index) — unknown refs still flow to the download layer's
                 # dispatch, which raises the same typed error terminally.
-                prov = (getattr(binding, "provider", None)
+                prov = (getattr(binding, "source", None)
                         or lookup_provider_for_ref(ref, default=""))
                 if prov == "tensorhub":
                     # The worker cannot resolve tensorhub-CAS refs itself
@@ -737,7 +737,7 @@ class ModelStore:
                         resolved = _snapshot_to_resolved(snapshot)
                     path = await ensure_local(
                         ref,
-                        provider=getattr(binding, "provider", None),
+                        provider=getattr(binding, "source", None),
                         snapshot=resolved,
                         cache_dir=self._cache_dir,
                         hf_home=self._hf_home,
@@ -1741,7 +1741,7 @@ class Executor:
         missing: set = set()
         for slot in self._setup_slots(spec):
             binding = spec.models[slot]
-            if getattr(binding, "provider", "tensorhub") != "tensorhub":
+            if getattr(binding, "source", "tensorhub") != "tensorhub":
                 continue
             r = wire_ref(binding)
             if (self.store.local_path(r) is None
