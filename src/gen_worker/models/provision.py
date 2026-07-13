@@ -18,6 +18,7 @@ ModelScope downloads — through the same download layer.
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import time
 from dataclasses import dataclass, field
@@ -182,6 +183,89 @@ def enable_compiled(
                 return True
             artifact = None  # unusable engine: fall through to eager policy
     return compile_cache.enable(pipe, cfg, cache_dir, artifact)
+
+
+# ---------------------------------------------------------------------------
+# pgw#517: the arming seam for SELF-loaded pipelines. `enable_compiled`
+# above is what the executor calls automatically for a worker-loaded
+# (pipeline-class-annotated) setup() slot; a str/Path-annotated slot never
+# builds a `pipe` the executor can see (the endpoint's own setup() does),
+# so that arming call is unreachable for it. `arm_compile` is the same
+# policy exposed to the endpoint itself: an explicit, ctx-less call the
+# author makes at the end of setup(), mirroring `place_pipeline`'s existing
+# "worker-owned policy, endpoint invokes it directly" pattern for self-
+# loaded pipelines (`gen_worker.models.memory.place_pipeline`).
+#
+# The (Compile, cache_dir, compile-artifact) triple `enable_compiled` needs
+# are executor/CLI internals an endpoint has no business constructing
+# itself — a `contextvars.ContextVar` carries them instead, scoped by the
+# caller (executor/CLI) to exactly the `setup()` call, so `arm_compile(pipe)`
+# needs no parameter beyond the pipeline and cannot leak past setup().
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _ArmingContext:
+    compile: Any
+    cache_dir: Optional[Path]
+    artifact: Optional[Path]
+
+
+_ARMING_CTX: "contextvars.ContextVar[Optional[_ArmingContext]]" = contextvars.ContextVar(
+    "gen_worker_compile_arming_ctx", default=None
+)
+
+
+class ArmingScope:
+    """Context manager the executor/CLI holds open around one ``setup()``
+    call so ``arm_compile()`` can reach the active ``Compile`` spec, compile
+    cache dir, and any hub-attached artifact. Re-entrant-safe (a nested
+    scope restores the outer one on exit); a no-op when ``compile`` is
+    ``None`` so callers can open it unconditionally."""
+
+    def __init__(
+        self, compile: Any, cache_dir: Optional[Path] = None,
+        artifact: Optional[Path] = None,
+    ) -> None:
+        self._value = (
+            _ArmingContext(compile=compile, cache_dir=cache_dir, artifact=artifact)
+            if compile is not None else None
+        )
+        self._token: Optional["contextvars.Token[Optional[_ArmingContext]]"] = None
+
+    def __enter__(self) -> "ArmingScope":
+        if self._value is not None:
+            self._token = _ARMING_CTX.set(self._value)
+        return self
+
+    def __exit__(self, *exc_info: Any) -> None:
+        if self._token is not None:
+            _ARMING_CTX.reset(self._token)
+            self._token = None
+
+
+def arm_compile(pipe: Any) -> bool:
+    """Arm ``@endpoint(compile=Compile(...))`` on a pipeline the endpoint
+    loaded and placed itself (a str/Path-annotated ``setup()`` slot the
+    executor never materializes — pgw#517). Call once per pipeline object,
+    at the end of ``setup()``, after placement. Same cache-artifact-gated
+    policy as the automatic worker-loaded path: arms only when a verified
+    compiled artifact for (family, SKU, torch, triton) is seeded, otherwise
+    stays eager. Returns whether a compiled path was armed.
+
+    Raises ``RuntimeError`` if called with no active arming scope — i.e.
+    outside a ``setup()`` whose endpoint declares ``compile=Compile(...)``.
+    Compile is a setup-time-only concern; there is deliberately no way to
+    call this per-request."""
+    ctx = _ARMING_CTX.get()
+    if ctx is None:
+        raise RuntimeError(
+            "gen_worker.arm_compile() called with no active compile-arming "
+            "scope. It only works inside an endpoint's setup(), and only "
+            "when @endpoint(compile=Compile(...)) is declared on that "
+            "function/class."
+        )
+    return enable_compiled(pipe, ctx.compile, ctx.cache_dir, ctx.artifact)
 
 
 # ---------------------------------------------------------------------------

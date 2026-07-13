@@ -19,6 +19,7 @@ from .api.decorators import Compile, Resources, endpoint
 from .api.model import Model, ModelChoice, ModelDefaults
 from .api.slot import ResolvedSlot, Slot
 from .families import FamilyDefaults
+from .models.provision import arm_compile
 from .api.errors import (
     CanceledError,
     FatalError,
@@ -59,6 +60,7 @@ __all__ = [
     "endpoint",
     "Resources",
     "Compile",
+    "arm_compile",
     "HF",
     "Hub",
     "Civitai",

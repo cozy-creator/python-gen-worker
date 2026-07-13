@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.19.1 (2026-07-13)
+
+- **pgw#517: `compile=` is no longer silently inert on self-loading
+  (str/Path-slot) endpoints.** The executor only ever armed
+  `compile=Compile(...)` automatically on a `setup()` slot it loads itself
+  (a pipeline-class annotation) — an endpoint that self-loads from a
+  `str`/`Path` slot declared `compile=` that seeded the manifest/shape
+  contract but never actually armed at request time. Discovery now hard-
+  errors on that combination (was silent). Two fixes, both documented in
+  the error: annotate the slot with the pipeline class so the worker loads
+  it and arms compile automatically, or call the new
+  `gen_worker.arm_compile(pipe)` at the end of `setup()` yourself — same
+  cache-artifact-gated policy as the automatic path, eager otherwise. The
+  arming context (`Compile` spec, cache dir, hub-attached artifact) is
+  carried by a `contextvars.ContextVar` the executor scopes to the
+  `setup()` call, so `arm_compile` needs no `ctx` parameter and cannot be
+  called outside `setup()`. See `docs/compile-cache.md`.
+
 ## 0.19.0 (2026-07-13)
 
 **pgw#524: SDK friction batch (first-Slot-consumer findings).**

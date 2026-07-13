@@ -454,6 +454,7 @@ def test_manifest_emits_model_placement_key(tmp_pkg: Path) -> None:
         import enum
         from typing import Union
         import msgspec
+        import gen_worker
         from gen_worker import (Compile, Hub, HF, Model, ModelChoice, ModelDefaults,
                                 ModelRef, RequestContext, Resources, endpoint)
 
@@ -476,7 +477,8 @@ def test_manifest_emits_model_placement_key(tmp_pkg: Path) -> None:
                   resources=Resources(vram_gb=12),
                   compile=Compile(family="wai-arch", shapes=((512, 512),)))
         class Gen:
-            def setup(self, pipeline: object, vae: object) -> None: ...
+            def setup(self, pipeline: object, vae: object) -> None:
+                gen_worker.arm_compile(pipeline)  # pgw#517: self-loaded slots
             def generate(self, ctx: RequestContext, data: In_) -> Out_:
                 return Out_(y="ok")
     """))
@@ -527,6 +529,7 @@ def test_compile_block_emits_video_shapes_and_storage_dtype() -> None:
     """ie#381: the lock's compile block carries (w, h, frames) rows verbatim
     and the primary binding's weight-storage lane, so the hub's cell producer
     builds from an identically-loaded (fp8) pipeline."""
+    import gen_worker
     from gen_worker import Compile, Hub
     from gen_worker.discovery.discover import _extract_entries
 
@@ -541,7 +544,9 @@ def test_compile_block_emits_video_shapes_and_storage_dtype() -> None:
     )
     class Gen:
         def setup(self, model: str) -> None:
+            # self-loading (str) slot: arms compile explicitly (pgw#517).
             self.model = model
+            gen_worker.arm_compile(self.model)
 
         def generate(self, ctx: RequestContext, data: _In) -> _Out:
             return _Out(result="")
@@ -563,7 +568,9 @@ def test_compile_block_omits_storage_dtype_for_bf16_bindings() -> None:
     )
     class Gen:
         def setup(self, model: str) -> None:
+            # self-loading (str) slot: arms compile explicitly (pgw#517).
             self.model = model
+            gen_worker.arm_compile(self.model)
 
         def generate(self, ctx: RequestContext, data: _In) -> _Out:
             return _Out(result="")
@@ -573,6 +580,7 @@ def test_compile_block_omits_storage_dtype_for_bf16_bindings() -> None:
 
 
 def test_allow_lora_binding_emits_flag_and_family() -> None:
+    import gen_worker
     from gen_worker import Compile, Hub
     from gen_worker.discovery.discover import _extract_entries
 
@@ -583,7 +591,9 @@ def test_allow_lora_binding_emits_flag_and_family() -> None:
     )
     class Gen:
         def setup(self, model: str) -> None:
+            # self-loading (str) slot: arms compile explicitly (pgw#517).
             self.model = model
+            gen_worker.arm_compile(self.model)
 
         def generate(self, ctx: RequestContext, data: _In) -> _Out:
             return _Out(result="")
@@ -625,6 +635,7 @@ def test_model_choice_binding_family_matches_top_level_binding(tmp_pkg: Path) ->
         import enum
         from typing import Union
         import msgspec
+        import gen_worker
         from gen_worker import (Compile, Hub, HF, Model, ModelChoice, ModelDefaults,
                                 ModelRef, RequestContext, Resources, endpoint)
 
@@ -646,7 +657,8 @@ def test_model_choice_binding_family_matches_top_level_binding(tmp_pkg: Path) ->
                   resources=Resources(vram_gb=12),
                   compile=Compile(family="sdxl", shapes=((1024, 1024),)))
         class Gen:
-            def setup(self, pipeline: object, vae: object) -> None: ...
+            def setup(self, pipeline: object, vae: object) -> None:
+                gen_worker.arm_compile(pipeline)  # pgw#517: self-loaded slots
             def generate(self, ctx: RequestContext, data: In_) -> Out_:
                 return Out_(y="ok")
     """))

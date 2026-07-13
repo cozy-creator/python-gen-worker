@@ -166,6 +166,58 @@ def _validate_slot_selected_by(
             )
 
 
+def _validate_compile_arms(
+    owner: str,
+    cls: Optional[type],
+    compile: Optional[Compile],
+    models: Dict[str, Binding],
+) -> None:
+    """pgw#517: ``compile=`` only ever arms automatically on a setup() slot
+    the WORKER loads itself (a pipeline-class annotation exposing
+    ``from_pretrained`` — mirrors the executor's annotation branch in
+    ``_injection_kwargs``). An endpoint whose setup() model slots are ALL
+    self-loading (str/Path/other non-pipeline annotations — the endpoint
+    builds its own pipeline) never reaches that arming path: the declared
+    ``compile=`` seeds the manifest/shape contract but never runs, silently.
+    Fail loudly at discovery time unless the endpoint opts into the
+    ``arm_compile()`` seam itself (best-effort source scan — a missing
+    source is never a build blocker, only a missed opt-in detection)."""
+    if compile is None or cls is None or not models:
+        return
+    setup = getattr(cls, "setup", None)
+    if not callable(setup):
+        return
+    try:
+        hints = typing.get_type_hints(setup)
+    except Exception:
+        return
+    worker_loaded = any(
+        isinstance(ann, type) and callable(getattr(ann, "from_pretrained", None))
+        for ann in (hints.get(name) for name in models)
+    )
+    if worker_loaded:
+        return
+    try:
+        source = inspect.getsource(setup)
+    except (OSError, TypeError):
+        return  # can't prove either way; don't block the build on it
+    if "arm_compile" in source:
+        return
+    raise ValueError(
+        f"{owner}: compile=Compile(...) is declared but no setup() model "
+        "slot is annotated with a pipeline class (all slots are self-loading "
+        "str/Path annotations) -- the worker only arms compile on slots it "
+        "loads itself (a class annotation exposing from_pretrained), so "
+        "this compile= block seeds the manifest but never runs at request "
+        "time. Fix one of: (1) annotate the slot with the pipeline class "
+        "(e.g. `pipeline: WanPipeline` instead of `pipeline: str`) so the "
+        "worker loads it and arms compile automatically, or (2) keep the "
+        "self-loading slot and call gen_worker.arm_compile(pipe) yourself "
+        "at the end of setup(), after placement -- same cache-artifact-"
+        "gated policy, eager otherwise."
+    )
+
+
 def _spec_for_handler(
     *,
     fn_name: str,
@@ -196,6 +248,7 @@ def _spec_for_handler(
             f"with a msgspec.Struct (got {payload_type!r})"
         )
     _validate_slot_selected_by(owner, slots, payload_type)
+    _validate_compile_arms(owner, cls, decl.compile, models)
     compile_family = decl.compile.family if decl.compile is not None else ""
     # Compile(family=...) is the explicit, functionally-load-bearing
     # declaration (compile-cache keying) — it wins over a slot's own

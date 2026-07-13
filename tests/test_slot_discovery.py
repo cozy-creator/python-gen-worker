@@ -153,6 +153,7 @@ def test_compile_family_wins_over_slot_fallback_family(tmp_pkg: Path) -> None:
     (pkg / "__init__.py").write_text("")
     (pkg / "main.py").write_text(textwrap.dedent("""
         import msgspec
+        import gen_worker
         from gen_worker import Compile, Hub, RequestContext, Slot, endpoint
         from gen_worker.families import SdxlDefaults
 
@@ -168,7 +169,8 @@ def test_compile_family_wins_over_slot_fallback_family(tmp_pkg: Path) -> None:
             compile=Compile(family="explicit-family", shapes=((512, 512),)),
         )
         class Gen:
-            def setup(self, model: object) -> None: ...
+            def setup(self, model: object) -> None:
+                gen_worker.arm_compile(model)  # pgw#517: self-loaded slot
             def generate(self, ctx: RequestContext, data: In_) -> Out_:
                 return Out_(y="ok")
     """))
