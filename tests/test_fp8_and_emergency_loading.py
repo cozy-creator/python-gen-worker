@@ -94,8 +94,15 @@ def _write_safetensors(path: Path, dtype: str, nbytes: int) -> None:
 
 
 def _snapshot(tmp_path: Path, dtype: str = "BF16", nbytes: int = 1024) -> Path:
-    (tmp_path / "model_index.json").write_text('{"_class_name": "Pipe"}')
-    _write_safetensors(tmp_path / "diffusion_pytorch_model.safetensors", dtype, nbytes)
+    """Realistic component layout (gw#521): the fit ladder derives quant
+    targets from the tree's REAL component names, so the denoiser weights
+    live under transformer/ and model_index.json declares it."""
+    (tmp_path / "model_index.json").write_text(
+        '{"_class_name": "Pipe", "transformer": ["diffusers", "X"]}')
+    (tmp_path / "transformer").mkdir(exist_ok=True)
+    _write_safetensors(
+        tmp_path / "transformer" / "diffusion_pytorch_model.safetensors",
+        dtype, nbytes)
     return tmp_path
 
 
@@ -195,9 +202,9 @@ def test_emergency_rung_engages_when_flavor_cannot_fit(
     fake_diffusers: Any, emergency_on: None, tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """The canonical case: a 27GB fp8 flavor on a 10GB-free card — the rung
+    """The canonical case: a 24GB fp8 flavor on a 10GB-free card — the rung
     quantizes the denoiser to nf4 with the loud warning."""
-    snap = _snapshot(tmp_path, "F8_E4M3", 27 << 30)
+    snap = _snapshot(tmp_path, "F8_E4M3", 24 << 30)
     _Pipe.calls = []
     with caplog.at_level("WARNING"):
         pipe = load_from_pretrained(_Pipe, snap)
@@ -206,6 +213,8 @@ def test_emergency_rung_engages_when_flavor_cannot_fit(
     assert isinstance(qc, _FakePipelineQuantizationConfig)
     assert qc.quant_backend == "bitsandbytes_4bit"
     assert qc.quant_kwargs["bnb_4bit_quant_type"] == "nf4"
+    # gw#521: the target is the snapshot's REAL denoiser, never a guess.
+    assert qc.components_to_quantize == ["transformer"]
     assert "EMERGENCY 4-bit quantization" in caplog.text
     assert "below platform standards" in caplog.text
     # nf4 supersedes the fp8-storage rung — no layerwise casting on top
