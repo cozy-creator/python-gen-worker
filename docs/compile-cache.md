@@ -32,3 +32,38 @@ Family keying: caches key on the traced graph + shapes, not weights — one
 artifact serves every fine-tune of a family. Add a boot `warmup()` that
 renders each declared shape (see examples/flux2-klein-image) so requests
 never see the (cache-served) compile.
+
+## Self-loading (str/Path-slot) endpoints — pgw#517
+
+The arming described above ("At load the worker seeds a VERIFIED artifact
+... then arms guarded `torch.compile`") only happens for a `setup()` slot
+the worker loads itself — a slot annotated with the pipeline class (e.g.
+`pipeline: StableDiffusionXLPipeline`). A `str`/`Path`-annotated slot is
+**self-loading**: the endpoint constructs (and places) the pipeline inside
+its own `setup()`, so the executor never sees the object and has nothing to
+arm compile on. Declaring `compile=Compile(...)` on such an endpoint used to
+be silently inert — the manifest/shape contract still got seeded, but
+nothing ever compiled. Discovery now hard-errors on this combination.
+
+Fix one of:
+
+1. **Annotate the slot with the pipeline class** instead of `str`/`Path` —
+   the worker loads it and arms compile automatically, same as any other
+   endpoint.
+2. **Keep the self-load and arm explicitly.** Call `gen_worker.arm_compile(pipe)`
+   once per pipeline object at the end of `setup()`, after placement:
+
+   ```python
+   def setup(self, pipeline: str) -> None:
+       pipe = _load_pipeline(pipeline, WanPipeline)
+       pipe = _place(pipe)
+       gen_worker.arm_compile(pipe)   # same cache-artifact-gated policy
+       self.pipeline = pipe
+   ```
+
+   `arm_compile` reads the endpoint's own `Compile` spec, cache dir, and any
+   hub-attached artifact from a scope the executor holds open for the
+   duration of `setup()` — no `ctx` parameter needed, and it raises if
+   called anywhere else (compile is a setup-time-only concern). An endpoint
+   with several self-loaded pipelines sharing weights (e.g. one class
+   assembling `self.t2i`/`self.i2v`/`self.v2v`) calls it once per object.

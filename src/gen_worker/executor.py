@@ -1521,10 +1521,20 @@ class Executor:
                     spec, setup, paths, server=rec.server,
                     compile_artifact=compile_artifact, snapshots=snapshots)
                 rec.shared_keys.extend(inj.shared_keys)
-                if asyncio.iscoroutinefunction(setup):
-                    await setup(**inj.kwargs)
-                else:
-                    await asyncio.to_thread(setup, **inj.kwargs)
+                # pgw#517: a self-loading (str/Path-slot) endpoint builds its
+                # own pipeline inside setup() and the executor never sees it
+                # to arm compile automatically (the branch above only fires
+                # for class-annotated slots) — hold the arming scope open so
+                # a `gen_worker.arm_compile(pipe)` call from inside setup()
+                # reaches the same cache-artifact-gated policy. No-op when
+                # spec.compile is None.
+                with provision.ArmingScope(
+                    spec.compile, self.store._cache_dir, compile_artifact,
+                ):
+                    if asyncio.iscoroutinefunction(setup):
+                        await setup(**inj.kwargs)
+                    else:
+                        await asyncio.to_thread(setup, **inj.kwargs)
             warmup = getattr(instance, "warmup", None)
             if callable(warmup):
                 from . import compile_cache
