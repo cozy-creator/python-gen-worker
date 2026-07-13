@@ -340,8 +340,14 @@ At most 15 members:
 | `generator(seed)` | seeded `torch.Generator` on `device` |
 | `deadline`, `time_remaining()` | absolute deadline / seconds left |
 | `cancelled`, `raise_if_cancelled()` | THE cancellation spelling |
-| `progress(fraction, stage=)`, `log(msg, level=)` | events to the caller |
+| `progress(fraction, stage=)` | USER-facing status event (the job card) |
+| `log(msg, level=, **fields)` | PLATFORM/OPERATOR diagnostic, never user-facing (pgw#508) |
 | `save_bytes/file/image/audio/video` | persist outputs → typed `Asset` |
+
+Logging rule of thumb: module-level `logging.getLogger(__name__)` for
+boot-time/cross-request logging; `ctx.log` for anything scoped to THIS
+request you'd want when debugging it; `ctx.progress` for what the human
+watching the job should see.
 
 ## Project config
 

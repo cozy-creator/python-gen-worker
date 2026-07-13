@@ -37,6 +37,20 @@ def test_progress_and_log_emit_events() -> None:
     kinds = [e["type"] for e in events]
     assert kinds == ["request.progress", "request.log"]
     assert events[0]["payload"] == {"progress": 0.5, "stage": "denoise"}
+    assert events[1]["payload"] == {"message": "hello", "level": "warning"}
+
+
+def test_log_default_level_and_structured_fields() -> None:
+    events = []
+    ctx = RequestContext(request_id="r1", emitter=events.append)
+    ctx.log("plain")
+    ctx.log("OOM retry", level="warning", free_gb=2.1, rung="offload")
+    assert events[0]["payload"] == {"message": "plain", "level": "info"}
+    assert events[1]["payload"] == {
+        "message": "OOM retry",
+        "level": "warning",
+        "fields": {"free_gb": 2.1, "rung": "offload"},
+    }
 
 
 def test_progress_carries_optional_step_and_total() -> None:

@@ -344,6 +344,39 @@ progress (§1), so subscribers may observe seq gaps; `JobResult` is the
 authoritative output. There is no stream-done/stream-error message: the
 terminal `JobResult` (any status) ends the stream.
 
+**The ctx event lane (pgw#508).** `RequestContext` methods (`ctx.progress`,
+`ctx.log`, checkpoint/warning/training-metric helpers) don't get their own
+wire message — each rides a `JobProgress` chunk whose `content_type` is the
+constant `application/x-request-event+json` (`EVENT_CONTENT_TYPE` in
+executor.py / `RequestEventContentType` in tensorhub's runtimestore) and
+whose `data` is a JSON envelope `{request_id, type, payload, timestamp}`.
+This is a CONTENT-TYPE DISCRIMINATOR inside one wire message, not a second
+message type — O inspects `content_type` before falling back to the generic
+streaming-output path. `type` is one of:
+
+| `type` | audience | O persistence | tolerates shedding |
+|---|---|---|---|
+| `request.progress` | USER-facing (cozy-art job card) | latest-tick only, in-memory (th#737); never a durable row | yes — a dropped mid-run tick is superseded by the next one; only the final state matters |
+| `request.log` | PLATFORM/OPERATOR ONLY, full stop — never user-facing | durable `job.log` row (request_events) | yes — a dropped debug line is an acceptable loss; nothing downstream depends on completeness |
+| `request.checkpoint` | USER-facing | durable `job.checkpoint` row | no — every save is individually meaningful (a training run's checkpoint list must be complete) |
+| `request.warning` | USER-facing | durable `job.warning` row | no — sparse and actionable (e.g. `artifact_upload_failed`) |
+| `request.training_metric` | USER-facing (training job UI) | durable `job.training.metric` row, downsampled to ≥5s apart (final step and any `val_loss` point always persist) | yes between persisted points — the chart only needs the trend, not every tick |
+
+O enforces the `request.log` exception at TWO points, because the live
+`JobProgress` chunk reaches O before the durable row exists: (1) the live
+hub fan-out (`ProgressHub`/SSE `output.delta` path) drops any chunk whose
+decoded `type` is `request.log` outright — it is never wrapped as a generic
+delta and shown to a tenant subscriber; (2) the durable read path
+(`/v1/requests/:id/events`, `/events.bin`) filters `job.log` rows out of
+what it streams to the tenant-scoped SSE routes. There is no operator-facing
+read surface for `job.log` yet — it exists to be queried directly (psql /
+future admin tooling), not to be served over the tenant API.
+
+Every other `type` keeps the base `JobProgress` shedding contract (§1
+send-queue policy: `JobProgress` is the FIRST thing dropped under queue
+overflow) — durability past that point is what the table above's
+"persistence" column adds, not a wire-level delivery guarantee.
+
 ### CancelJob (O → W)
 Sent on client cancel, reconcile cleanup (§1), or O-side abort.
 
