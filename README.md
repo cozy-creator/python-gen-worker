@@ -94,13 +94,20 @@ SomeModelChoice | ModelRef` opens BYOM. Streaming = an async-generator handler.
 Engine-hosted endpoints declare `runtime="vllm"` and get a booted,
 health-checked server subprocess injected into `setup()`.
 
+`Slot(pipeline_cls, selected_by=, default=, fallback=)` is the hub-resolved
+alternative to `ModelChoice`: the model SET lives in platform config, not
+code. `ctx.slots["<name>"]` returns a typed `ResolvedSlot` — repo-metadata
+inference defaults (a `gen_worker.families.FamilyDefaults` vocabulary,
+tensorhub-validated) merged over the endpoint's code `fallback=` preset.
+
 Full reference: [docs/endpoint-authoring.md](docs/endpoint-authoring.md).
 
 ## Public surface
 
 - The decorator + bindings: `endpoint`, `Resources`, `Compile`, `HF`, `Hub`,
   `Civitai`, `ModelScope`, `ModelRef`
-- Model selection: `Model`, `ModelChoice`, `ModelDefaults`
+- Model selection: `Model`, `ModelChoice`, `ModelDefaults`, `Slot`,
+  `ResolvedSlot`, `gen_worker.families.FamilyDefaults`
 - Contexts: `RequestContext` (≤15 members), `ConversionContext`,
   `DatasetContext`, `TrainingContext`
 - Errors: `ValidationError`, `RetryableError`, `CanceledError`, `FatalError`

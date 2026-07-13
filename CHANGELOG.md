@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.18.0 (2026-07-12)
+
+- **pgw#520: `Slot(pipeline_cls, selected_by=, default=, fallback=)` — the
+  SDK half of th#767.** The model SET moves off the endpoint into hub-side
+  configuration; code declares a slot's load-time compat, which payload
+  field branches it, an optional hub-less/seed default ref, and a typed
+  code fallback preset. A bare `ModelRef` value in `models={}`/`model=` is
+  still sugar for `Slot(<inferred class>, default=ref)` — fully back-compat
+  within this release. `selected_by` is validated at spec-construction time
+  against the handler's OWN payload (a plain `str` field; the hub overlays
+  the live allowed-value enum, never baked into the SDK schema).
+- **`gen_worker.families` — per-family inference-defaults vocabulary.** New
+  `FamilyDefaults` msgspec base (frozen, `forbid_unknown_fields=True`) with
+  `class SdxlDefaults(FamilyDefaults, family="sdxl")`-style self-
+  registration (msgspec's `StructMeta` doesn't forward unrecognized class
+  kwargs to `__init_subclass__`, so registration lives in a small metaclass
+  wrapping it). Ships the SDXL vocabulary (scheduler/steps/guidance/
+  quality_preamble/negative/max_guidance — `max_guidance` is a CLAMP
+  constraint, never a wire reshape). `gen-worker families export-schemas
+  <dir>` writes `<family>.schema.json` per registered family — standard
+  JSON Schema draft 2020-12, `additionalProperties: false` — the contract
+  tensorhub validates repo metadata against at PUT time.
+- **Discovery emits a `slots` manifest block** for Slot-declared endpoints:
+  `{name, pipeline_class, selected_by?, default_ref?{source,path,tag,
+  flavor}, family?, fallback_defaults?}` per slot. `model.choices[]`
+  (ModelChoice) is untouched and still emitted for existing endpoints —
+  Slot endpoints simply never emit it (no first-party curated list,
+  th#767). An `allow_lora` binding on a Slot with no `Compile(family=)`
+  now resolves its family stamp from the Slot's own fallback-preset
+  registration (mirrors/extends pgw#519's `_stamp_lora_family`).
+- **`ctx.slots["<name>"]` resolution chain.** Returns a typed
+  `ResolvedSlot[D]` (`.ref`, `.defaults`): repo-metadata inference defaults
+  (wire: new `ModelBinding.inference_defaults` JSON field, th#767c —
+  documented in `proto/CONTRACT.md`) merged over the endpoint's code
+  `Slot(fallback=...)` preset, whole-object precedence (a repo either fully
+  specifies its family vocabulary, validated by tensorhub at PUT time, or
+  it doesn't — no field-level merge). A slot with neither metadata nor a
+  fallback raises on FIRST ACCESS, not at dispatch, so an unrelated
+  handler never pays for a slot it doesn't read. Explicit payload values
+  still win over `.defaults` — that precedence is handler logic.
+- **Hub-less resolution (`cozy run` / `gen-worker run` / `serve`).** A
+  Slot's `default=` ref is the only resolution source with no hub
+  configured; a payload that NAMES a model via `selected_by` in hub-less
+  mode fails clearly (`ModelResolutionError`) instead of silently running
+  the default. `ctx.slots` resolves the same way locally, against
+  `Slot(fallback=...)` only (no repo metadata exists off-hub).
+
 ## 0.17.4 (2026-07-12)
 
 - **pgw#515: de-fork `cli/run.py` from the executor.** The local CLI's

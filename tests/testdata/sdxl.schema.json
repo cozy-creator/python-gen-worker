@@ -1,0 +1,50 @@
+{
+  "$id": "https://schemas.cozy.art/gen-worker/families/sdxl.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "SDXL inference defaults + constraints.\n\n``max_guidance`` is a CLAMP constraint (e.g. a distilled/turbo lineage\npins guidance low) \u2014 it bounds the payload's ``guidance`` field, it\nnever reshapes the wire contract (pgw#520 boundary: repo metadata may\nclamp within a function's payload schema, never add/remove fields).",
+  "properties": {
+    "guidance": {
+      "default": 6.0,
+      "type": "number"
+    },
+    "max_guidance": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "negative": {
+      "default": "",
+      "type": "string"
+    },
+    "quality_preamble": {
+      "default": "",
+      "type": "string"
+    },
+    "scheduler": {
+      "default": "euler_a",
+      "enum": [
+        "dpmpp_2m_karras",
+        "dpmpp_2m_sde_karras",
+        "euler_a"
+      ]
+    },
+    "schema_version": {
+      "default": 1,
+      "type": "integer"
+    },
+    "steps": {
+      "default": 28,
+      "type": "integer"
+    }
+  },
+  "required": [],
+  "title": "SdxlDefaults",
+  "type": "object"
+}

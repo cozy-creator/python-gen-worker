@@ -136,6 +136,70 @@ weight-sharing forces one class. A distilled turbo that shares the base is a
 `generate_turbo` method on the same class (shares the resident base); a
 standalone distilled checkpoint is a separate class/endpoint.
 
+## `Slot`: hub-resolved model slots (pgw#520 / th#767)
+
+`ModelChoice` above bakes the curated set into the endpoint image — fine
+for a first-party endpoint that ships its own recipes, but the model SET is
+CATALOG, not code (th#767): adding a checkpoint shouldn't be a software
+release. `Slot(pipeline_cls, selected_by=, default=, fallback=)` is the
+hub-resolved alternative — a `models={}`/`model=` value alongside (or
+instead of) a plain binding:
+
+```python
+from gen_worker import HF, RequestContext, Slot, endpoint
+from gen_worker.families import SdxlDefaults
+
+@endpoint(models={
+    "pipeline": Slot(
+        StableDiffusionXLPipeline,
+        selected_by="model",                                   # payload field that branches this slot
+        default=HF("stabilityai/stable-diffusion-xl-base-1.0"), # hub-less / seed-publish ref
+        fallback=SdxlDefaults(steps=28, guidance=6.0),          # used when the resolved repo has no metadata
+    ),
+    "vae": HF("madebyollin/sdxl-vae-fp16-fix"),   # bare ModelRef: sugar for Slot(default=ref)
+})
+class Generate:
+    def setup(self, pipeline: StableDiffusionXLPipeline, vae) -> None: ...
+
+    def generate(self, ctx: RequestContext, p: TextToImage) -> ImageOutput:
+        d = ctx.slots["pipeline"].defaults   # typed SdxlDefaults — repo metadata > fallback
+        steps = p.steps if p.steps is not None else d.steps
+```
+
+- `selected_by` names a **plain `str`** payload field — validated at
+  registration against that field's presence/type. The hub overlays the
+  live allowed-value enum onto it; the SDK never bakes a curated list.
+- `default` seeds the hub mapping at first publish and is the ONLY
+  resolution source in hub-less mode (`gen-worker run` / `cozy run`); a
+  live hub mapping always wins when present.
+- `fallback` is a typed preset from `gen_worker.families` (a per-family
+  vocabulary struct — see below) used when the resolved repo publishes no
+  inference-defaults metadata of its own.
+- No curated list, no family kwarg on the endpoint: compat derives from
+  `pipeline_cls`; family comes from `fallback`'s registration or the
+  endpoint's `Compile(family=...)`.
+
+**Per-family defaults vocabulary** (`gen_worker.families`): a typed,
+versioned, JSON-Schema-exportable struct per architecture — the shape
+tensorhub validates repo metadata against at PUT time:
+
+```python
+from gen_worker.families import FamilyDefaults, family
+
+@family("sdxl")
+class SdxlDefaults(FamilyDefaults, frozen=True):
+    scheduler: Literal["euler_a", "dpmpp_2m_karras", "dpmpp_2m_sde_karras"] = "euler_a"
+    steps: int = 28
+    guidance: float = 6.0
+    max_guidance: float | None = None   # a CLAMP constraint, never a wire reshape
+```
+
+`gen-worker families export-schemas <dir>` writes `<family>.schema.json`
+per registered family. `ctx.slots["<name>"]` merges repo metadata over the
+`Slot`'s `fallback` (whole-object precedence — a resolved repo either fully
+specifies its family vocabulary or it doesn't); a slot with neither raises
+on first ACCESS, not at dispatch.
+
 ## Lanes: multi-model classes with shared components (gw#479)
 
 A class binding 2+ pipeline slots whose snapshots share byte-identical

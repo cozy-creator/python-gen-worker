@@ -17,6 +17,7 @@ import msgspec
 
 from .api.binding import Binding
 from .api.decorators import ATTR, Compile, EndpointDecl, Resources
+from .api.slot import Slot
 from .discovery.names import slugify_name
 from .discovery.walk import find_endpoints
 
@@ -56,6 +57,14 @@ class EndpointSpec:
     payload_param: str = "payload"
     resources: Resources = field(default_factory=Resources)
     models: Dict[str, Binding] = field(default_factory=dict)  # slot -> binding
+    # Slot-declared entries in `models` (pgw#520): slot -> Slot metadata
+    # (selected_by/default/fallback). A subset of `models`'s keys — bare
+    # bindings have no entry here.
+    slots: Dict[str, Slot] = field(default_factory=dict)
+    # Resolved family name per Slot (slot.family, or the endpoint's
+    # Compile(family=...) when the slot declares no fallback preset) —
+    # precomputed once here so ctx.slots doesn't need EndpointDecl.compile.
+    slot_family: Dict[str, str] = field(default_factory=dict)
     timeout_ms: Optional[int] = None
     runtime: Optional[str] = None
     compile: Optional[Compile] = None  # opt-in torch.compile spec (#384)
@@ -96,6 +105,39 @@ def _inspect_return(owner: str, ret: Any) -> tuple[str, Optional[type], Optional
     )
 
 
+def _validate_slot_selected_by(
+    owner: str, slots: Dict[str, Slot], payload_type: type
+) -> None:
+    """pgw#520: a Slot's ``selected_by`` must name a plain-``str`` field on
+    THIS handler's payload — validated per-handler (not per-class) because
+    one ``models=`` decl can be shared by methods with different payload
+    types. Fails at spec-construction time (discovery walk / CLI collection
+    / executor boot), never at first invoke."""
+    if not slots:
+        return
+    try:
+        hints = typing.get_type_hints(payload_type, include_extras=False)
+    except Exception:
+        hints = getattr(payload_type, "__annotations__", {}) or {}
+    for slot_name, slot in slots.items():
+        if not slot.selected_by:
+            continue
+        if slot.selected_by not in hints:
+            raise ValueError(
+                f"{owner}: Slot({slot_name!r}).selected_by={slot.selected_by!r} "
+                f"names no field on payload {payload_type.__name__!r}"
+            )
+        ann = hints[slot.selected_by]
+        if ann is not str:
+            raise ValueError(
+                f"{owner}: Slot({slot_name!r}).selected_by="
+                f"{slot.selected_by!r} must be a plain str field on "
+                f"{payload_type.__name__!r} (got {ann!r}); the hub overlays "
+                "the live allowed-value enum onto this field, it is never "
+                "baked into the SDK type"
+            )
+
+
 def _spec_for_handler(
     *,
     fn_name: str,
@@ -104,6 +146,7 @@ def _spec_for_handler(
     cls: Optional[type],
     attr_name: str,
     models: Dict[str, Binding],
+    slots: Dict[str, Slot],
     resources: Resources,
     walked_module: str,
 ) -> EndpointSpec:
@@ -124,6 +167,14 @@ def _spec_for_handler(
             f"{owner}: payload param {payload_param!r} must be annotated "
             f"with a msgspec.Struct (got {payload_type!r})"
         )
+    _validate_slot_selected_by(owner, slots, payload_type)
+    compile_family = decl.compile.family if decl.compile is not None else ""
+    # Compile(family=...) is the explicit, functionally-load-bearing
+    # declaration (compile-cache keying) — it wins over a slot's own
+    # fallback-preset registration when both are present.
+    slot_family = {
+        name: (compile_family or slot.family) for name, slot in slots.items()
+    }
     ret = hints.get("return")
     if ret is None:
         raise ValueError(f"{owner}: missing return type annotation")
@@ -155,6 +206,8 @@ def _spec_for_handler(
         payload_param=payload_param,
         resources=resources,
         models=dict(models),
+        slots=dict(slots),
+        slot_family=slot_family,
         runtime=decl.runtime,
         compile=decl.compile,
         module=getattr(cls or method, "__module__", "") or "",
@@ -177,6 +230,7 @@ def extract_specs(obj: Any, *, walked_module: str = "") -> List[EndpointSpec]:
             cls=None,
             attr_name="",
             models=dict(decl.models),
+            slots=dict(decl.slots),
             resources=decl.resources,
             walked_module=walked,
         )]
@@ -191,6 +245,7 @@ def extract_specs(obj: Any, *, walked_module: str = "") -> List[EndpointSpec]:
         out.append(_spec_for_handler(
             fn_name=attr_name, method=method, decl=decl, cls=cls,
             attr_name=attr_name, models=dict(decl.models),
+            slots=dict(decl.slots),
             resources=decl.resources, walked_module=walked,
         ))
     return out
