@@ -48,9 +48,17 @@ def test_big_model_fits_on_big_card_no_offload():
     assert _mode(24.0, 6.9) == "off"
 
 
-def test_very_low_vram_is_aggressive_even_for_small_models():
-    # <=6GB total: even a fitting model gets aggressive group offload.
-    assert _mode(4.0, 1.5) == "group_offload"
+def test_fitting_model_stays_resident_at_low_free_vram():
+    # gw#521: a model that FITS (e.g. one the emergency nf4 rung just shrank)
+    # must never be thrown to group offload by an absolute free-VRAM rule —
+    # that made the salvation rung pointless on exactly the cards it exists
+    # for (nf4 SDXL ~2.5GB group-offloaded on a 4070 at 4.4GB free).
+    assert _mode(4.0, 1.5) == "vae_only"
+
+
+def test_very_low_vram_is_aggressive_when_model_does_not_fit():
+    # <=6GB free AND the model doesn't fit -> the aggressive rung.
+    assert _mode(4.0, 3.5) == "group_offload"
 
 
 def test_unknown_model_size_falls_back_to_conservative_threshold():
