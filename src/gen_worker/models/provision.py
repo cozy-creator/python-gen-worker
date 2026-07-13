@@ -214,7 +214,7 @@ def resolve_bindings(
     resolve a curated/BYOM pick against, a payload that actually NAMES a
     model (a non-empty ``selected_by`` field value) is a clear usage error
     instead of silently running the slot's default — ``cozy run`` only ever
-    runs a Slot's ``default`` ref locally.
+    runs a Slot's ``default_checkpoint`` ref locally.
     """
     from ..api.binding import ModelRef, wire_ref
 
@@ -229,8 +229,8 @@ def resolve_bindings(
                     f"slot {param_name!r}: payload names model {picked!r} via "
                     f"{selected_by!r}, but no hub is configured — "
                     "hub-less mode (`cozy run` / `gen-worker run`) only runs "
-                    "a Slot's default= ref; configure HUB= (or drop the "
-                    f"{selected_by!r} field) to run against a hub."
+                    "a Slot's default_checkpoint= ref; configure HUB= (or "
+                    f"drop the {selected_by!r} field) to run against a hub."
                 )
         if not isinstance(binding, ModelRef):
             raise ModelResolutionError(

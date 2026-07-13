@@ -141,9 +141,9 @@ standalone distilled checkpoint is a separate class/endpoint.
 `ModelChoice` above bakes the curated set into the endpoint image — fine
 for a first-party endpoint that ships its own recipes, but the model SET is
 CATALOG, not code (th#767): adding a checkpoint shouldn't be a software
-release. `Slot(pipeline_cls, selected_by=, default=, fallback=)` is the
-hub-resolved alternative — a `models={}`/`model=` value alongside (or
-instead of) a plain binding:
+release. `Slot(pipeline_cls, selected_by=, default_checkpoint=,
+default_config=)` is the hub-resolved alternative — a `models={}`/`model=`
+value alongside (or instead of) a plain binding:
 
 ```python
 from gen_worker import HF, RequestContext, Slot, endpoint
@@ -152,32 +152,45 @@ from gen_worker.families import SdxlDefaults
 @endpoint(models={
     "pipeline": Slot(
         StableDiffusionXLPipeline,
-        selected_by="model",                                   # payload field that branches this slot
-        default=HF("stabilityai/stable-diffusion-xl-base-1.0"), # hub-less / seed-publish ref
-        fallback=SdxlDefaults(steps=28, guidance=6.0),          # used when the resolved repo has no metadata
+        selected_by="model",                                              # payload field that branches this slot
+        default_checkpoint=HF("stabilityai/stable-diffusion-xl-base-1.0"), # hub-less / seed-publish ref
+        default_config=SdxlDefaults(steps=28, guidance=6.0),               # used when the resolved repo has no metadata
     ),
-    "vae": HF("madebyollin/sdxl-vae-fp16-fix"),   # bare ModelRef: sugar for Slot(default=ref)
+    "vae": HF("madebyollin/sdxl-vae-fp16-fix"),   # bare ModelRef: sugar for Slot(default_checkpoint=ref)
 })
 class Generate:
     def setup(self, pipeline: StableDiffusionXLPipeline, vae) -> None: ...
 
     def generate(self, ctx: RequestContext, p: TextToImage) -> ImageOutput:
-        d = ctx.slots["pipeline"].defaults   # typed SdxlDefaults — repo metadata > fallback
+        d = ctx.slots["pipeline"].defaults   # typed SdxlDefaults — repo metadata > default_config
         steps = p.steps if p.steps is not None else d.steps
 ```
 
-- `selected_by` names a **plain `str`** payload field — validated at
-  registration against that field's presence/type. The hub overlays the
-  live allowed-value enum onto it; the SDK never bakes a curated list.
-- `default` seeds the hub mapping at first publish and is the ONLY
-  resolution source in hub-less mode (`gen-worker run` / `cozy run`); a
-  live hub mapping always wins when present.
-- `fallback` is a typed preset from `gen_worker.families` (a per-family
-  vocabulary struct — see below) used when the resolved repo publishes no
-  inference-defaults metadata of its own.
+- `selected_by` names a payload field typed **plain `str`** (or
+  `str | ModelRef`, the wire's BYOM-open shape — see below) — validated at
+  registration against that field's presence/type, and REQUIRES
+  `default_checkpoint=...` (a request-branching slot with no code-side
+  default has nothing to seed the hub mapping with; the hub rejects it at
+  registration, the SDK fails at author time instead). The hub overlays the
+  live allowed-value enum onto the field; the SDK never bakes a curated
+  list.
+- `default_checkpoint` seeds the hub mapping at first publish and is the
+  ONLY resolution source in hub-less mode (`gen-worker run` / `cozy run`);
+  a live hub mapping always wins when present.
+- `default_config` is a typed preset from `gen_worker.families` (a
+  per-family vocabulary struct — see below) used when the resolved repo
+  publishes no inference-defaults metadata of its own. It LOSES to repo
+  metadata when both are present — a recipe of last resort.
 - No curated list, no family kwarg on the endpoint: compat derives from
-  `pipeline_cls`; family comes from `fallback`'s registration or the
+  `pipeline_cls`; family comes from `default_config`'s registration or the
   endpoint's `Compile(family=...)`.
+
+**`selected_by` field contract**: the payload field is typed plain `str`
+for a curated-only pick, or `str | ModelRef` to also accept a
+client-supplied structured `ModelRef` (bring-your-own-model) — the hub
+resolves either shape to a concrete ref before the worker ever sees the
+request; the SDK schema never bakes the curated-value enum into either
+form.
 
 **Per-family defaults vocabulary** (`gen_worker.families`): a typed,
 versioned, JSON-Schema-exportable struct per architecture — the shape
@@ -196,9 +209,32 @@ class SdxlDefaults(FamilyDefaults, frozen=True):
 
 `gen-worker families export-schemas <dir>` writes `<family>.schema.json`
 per registered family. `ctx.slots["<name>"]` merges repo metadata over the
-`Slot`'s `fallback` (whole-object precedence — a resolved repo either fully
-specifies its family vocabulary or it doesn't); a slot with neither raises
-on first ACCESS, not at dispatch.
+`Slot`'s `default_config` (whole-object precedence — a resolved repo either
+fully specifies its family vocabulary or it doesn't); a slot with neither
+raises on first ACCESS, not at dispatch.
+
+**Positional construction:** `FamilyDefaults`'s own `schema_version` field
+is `kw_only=True` on the BASE class, but msgspec's `kw_only` only affects
+fields declared on the class where it's set — it does not propagate to a
+subclass's own fields. `SdxlDefaults(steps=28, guidance=6.0)` and
+`SdxlDefaults("euler_a", 28, 6.0)` (declaration order) both work; prefer
+keyword args in your own presets — positional order follows FIELD
+DECLARATION order, not intuition, and a stray positional value silently
+lands on the wrong field (msgspec does not type-check plain construction).
+
+**Testing:** `gen_worker.testing` builds a `RequestContext` with stubbed
+`ctx.slots` for handler unit tests, no hand-rolled fake context needed:
+
+```python
+from gen_worker.testing import fake_context
+from gen_worker import HF
+from gen_worker.families import SdxlDefaults
+
+ctx = fake_context(slots={
+    "pipeline": (HF("stabilityai/stable-diffusion-xl-base-1.0"), SdxlDefaults(steps=28)),
+})
+out = Generate().generate(ctx, TextToImage(prompt="a cat"))
+```
 
 ## Lanes: multi-model classes with shared components (gw#479)
 

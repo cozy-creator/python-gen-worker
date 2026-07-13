@@ -63,6 +63,15 @@ class FamilyDefaults(
     ``forbid_unknown_fields=True`` is inherited by every family — the
     exported JSON schema is closed (``additionalProperties: false``): a
     contract, not a suggestion.
+
+    **Positional construction (pgw#524):** this base's own ``kw_only=True``
+    only marks ITS field (``schema_version``) keyword-only — msgspec's
+    ``kw_only`` does not propagate to a subclass's own fields. A preset row
+    like ``SdxlDefaults("euler_a", 28, 6.0)`` (declaration order) works
+    fine; it is NOT a TypeError. Still, prefer keyword args in your own
+    presets — positional order follows field DECLARATION order, and msgspec
+    does not type-check plain construction, so a misordered positional call
+    silently lands values on the wrong field instead of raising.
     """
 
     schema_version: int = 1

@@ -39,8 +39,8 @@ def test_slot_emits_slots_block_not_model_choices(tmp_pkg: Path) -> None:
             models={
                 "pipeline": Slot(
                     object, selected_by="model",
-                    default=HF("stabilityai/stable-diffusion-xl-base-1.0"),
-                    fallback=SdxlDefaults(steps=28, guidance=6.0),
+                    default_checkpoint=HF("stabilityai/stable-diffusion-xl-base-1.0"),
+                    default_config=SdxlDefaults(steps=28, guidance=6.0),
                 ),
                 "vae": HF("madebyollin/sdxl-vae-fp16-fix"),
             },
@@ -60,13 +60,13 @@ def test_slot_emits_slots_block_not_model_choices(tmp_pkg: Path) -> None:
     assert slot["name"] == "pipeline"
     assert slot["pipeline_class"] == "builtins.object"
     assert slot["selected_by"] == "model"
-    assert slot["default_ref"] == {
+    assert slot["default_checkpoint"] == {
         "source": "huggingface",
         "path": "stabilityai/stable-diffusion-xl-base-1.0",
     }
     assert slot["family"] == "sdxl"
-    assert slot["fallback_defaults"]["steps"] == 28
-    assert slot["fallback_defaults"]["guidance"] == 6.0
+    assert slot["default_config"]["steps"] == 28
+    assert slot["default_config"]["guidance"] == 6.0
 
     # The plain vae binding still emits through the ordinary bindings block
     # (back-compat: bare ModelRef contributes no `slots` entry).
@@ -91,7 +91,7 @@ def test_slot_with_no_selected_by_or_default_emits_minimal_block(tmp_pkg: Path) 
         class Out_(msgspec.Struct):
             y: str
 
-        @endpoint(model=Slot(object, fallback=SdxlDefaults(steps=20)))
+        @endpoint(model=Slot(object, default_config=SdxlDefaults(steps=20)))
         class Gen:
             def setup(self, model: object) -> None: ...
             def generate(self, ctx: RequestContext, data: In_) -> Out_:
@@ -103,8 +103,8 @@ def test_slot_with_no_selected_by_or_default_emits_minimal_block(tmp_pkg: Path) 
     (slot,) = fn["slots"]
     assert slot["name"] == "model"
     assert "selected_by" not in slot
-    assert "default_ref" not in slot
-    assert slot["family"] == "sdxl"  # from the fallback preset's registration
+    assert "default_checkpoint" not in slot
+    assert slot["family"] == "sdxl"  # from the default_config preset's registration
 
 
 def test_slot_allow_lora_family_from_fallback_when_no_compile(tmp_pkg: Path) -> None:
@@ -130,8 +130,8 @@ def test_slot_allow_lora_family_from_fallback_when_no_compile(tmp_pkg: Path) -> 
 
         @endpoint(model=Slot(
             object,
-            default=Hub("o/base", allow_lora=True),
-            fallback=SdxlDefaults(steps=28),
+            default_checkpoint=Hub("o/base", allow_lora=True),
+            default_config=SdxlDefaults(steps=28),
         ))
         class Gen:
             def setup(self, model: object) -> None: ...
@@ -163,8 +163,8 @@ def test_compile_family_wins_over_slot_fallback_family(tmp_pkg: Path) -> None:
             y: str
 
         @endpoint(
-            model=Slot(object, default=Hub("o/base", allow_lora=True),
-                       fallback=SdxlDefaults(steps=28)),
+            model=Slot(object, default_checkpoint=Hub("o/base", allow_lora=True),
+                       default_config=SdxlDefaults(steps=28)),
             compile=Compile(family="explicit-family", shapes=((512, 512),)),
         )
         class Gen:

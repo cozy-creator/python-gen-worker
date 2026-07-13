@@ -38,6 +38,20 @@ def test_family_registry_contains_shipped_families() -> None:
     assert reg["sdxl"] is SdxlDefaults
 
 
+def test_positional_construction_works_kw_only_does_not_leak_to_subclass(
+) -> None:
+    """pgw#524 item 2: FamilyDefaults's own `schema_version` field is
+    kw_only=True, but msgspec's kw_only only affects fields declared on the
+    class where it's set — it does NOT propagate to a subclass's own
+    fields. A copy-pasted positional preset row (declaration order) must
+    keep working, not TypeError."""
+    d = SdxlDefaults("euler_a", 28, 6.0)
+    assert d.scheduler == "euler_a"
+    assert d.steps == 28
+    assert d.guidance == 6.0
+    assert d.schema_version == 1  # base's kw_only field: unaffected default
+
+
 def test_duplicate_family_name_raises() -> None:
     with pytest.raises(ValueError, match="already registered"):
         @family("sdxl")

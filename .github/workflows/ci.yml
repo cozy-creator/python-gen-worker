@@ -22,8 +22,13 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
+      # --locked (pgw#524 item 6): resolve exactly what uv.lock pins — the
+      # same resolution publish.yml uses on tag push, so PR-CI green
+      # actually implies publish green (fails loudly instead if uv.lock
+      # drifts from pyproject.toml, the 0.18.0 silent-publish-failure root
+      # cause).
       - name: Install dependencies
-        run: uv sync --extra dev
+        run: uv sync --locked --extra dev
 
       # GATING (gw#497): the tree is mypy-clean (zeroed 2026-07-11 — the
       # #356-era 88-error debt is gone; no baseline, no continue-on-error).

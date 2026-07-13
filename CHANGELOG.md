@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.19.0 (2026-07-13)
+
+**pgw#524: SDK friction batch (first-Slot-consumer findings).**
+
+- **BREAKING: `Slot(default=, fallback=)` -> `Slot(default_checkpoint=,
+  default_config=)`.** Manifest wire keys `default_ref`/`fallback_defaults`
+  -> `default_checkpoint`/`default_config` in LOCKSTEP with a tensorhub
+  companion PR (`manifest_contract.go`, release hydration, slot resolution).
+  Hard cut, no back-compat alias — `default_config` still LOSES to repo
+  metadata (a recipe of last resort). The `inference-endpoints` sdxl
+  endpoint pins `gen-worker<0.19` and keeps working on the old kwargs until
+  its own floor bump; it is NOT updated by this release (out of scope).
+- **Discovery-time error: a request-branching Slot needs a default.**
+  `Slot(selected_by=..., default_checkpoint=None)` now fails at
+  registration (`extract_specs`/discovery walk) instead of at hub publish
+  — tensorhub already rejected this manifest shape; the SDK now catches it
+  at author time.
+- **`selected_by` field contract widened.** A payload field named by
+  `selected_by` may now type as `str | ModelRef` in addition to plain
+  `str` — the wire already accepts a client-supplied structured `ModelRef`
+  object (BYOM), which the hub resolves before the worker sees it.
+- **`gen_worker.testing.fake_context`/`stub_slots`** — the `ctx.slots`
+  test helper every Slot-declared endpoint's unit tests needed, replacing
+  hand-rolled `FakeCtx`es.
+- **`FamilyDefaults` positional construction confirmed + locked by test.**
+  msgspec's `kw_only=True` on the base only affects the base's own field
+  (`schema_version`); it does not propagate to a subclass's own fields, so
+  `SdxlDefaults("euler_a", 28, 6.0)` already worked — documented loudly on
+  the class (positional order follows field declaration order; msgspec
+  does not type-check plain construction, so prefer keyword args).
+- **CI/publish hardening:** both `ci.yml` and `publish.yml` now run
+  `uv sync --locked`, so a green PR actually implies a green publish (the
+  0.18.0 silent-publish-failure root cause: publish re-resolved different
+  dependency versions than what PR CI validated).
+
 ## 0.18.1 (2026-07-13)
 
 - fix(families): normalize docstring-derived schema descriptions with `inspect.cleandoc`

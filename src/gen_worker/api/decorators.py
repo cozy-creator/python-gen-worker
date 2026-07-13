@@ -180,9 +180,9 @@ class EndpointDecl(msgspec.Struct, frozen=True, kw_only=True):
     resources: Resources = msgspec.field(default_factory=Resources)
     models: Mapping[str, Binding] = msgspec.field(default_factory=dict)
     # Slot-declared entries in `models=`/`model=` (pgw#520): a subset of
-    # `models`' keys, carrying the Slot's selected_by/default/fallback
-    # metadata that `models` (a plain Binding map, for back-compat with
-    # every existing model-injection call site) can't hold.
+    # `models`' keys, carrying the Slot's selected_by/default_checkpoint/
+    # default_config metadata that `models` (a plain Binding map, for
+    # back-compat with every existing model-injection call site) can't hold.
     slots: Mapping[str, Slot] = msgspec.field(default_factory=dict)
     runtime: Optional[str] = None
     name: Optional[str] = None  # function-shaped endpoints only
@@ -230,13 +230,13 @@ def _reject_producer_generator(owner: str, fn: Callable[..., Any], kind: str) ->
 def _split_slot_like(key: str, v: "SlotLike") -> Tuple[Optional[Binding], Optional[Slot]]:
     """One ``models={}``/``model=`` value -> ``(binding_or_None, slot_or_None)``.
 
-    A ``Slot`` contributes its ``default`` (if any) to the plain binding map
-    every existing model-injection call site (executor, CLI, prefetch)
-    already understands, PLUS itself to the slots map the pgw#520 surfaces
-    (discovery emission, the resolution chain) read. A bare binding
+    A ``Slot`` contributes its ``default_checkpoint`` (if any) to the plain
+    binding map every existing model-injection call site (executor, CLI,
+    prefetch) already understands, PLUS itself to the slots map the pgw#520
+    surfaces (discovery emission, the resolution chain) read. A bare binding
     contributes only to the binding map — it carries no Slot metadata."""
     if isinstance(v, Slot):
-        return v.default, v
+        return v.default_checkpoint, v
     if isinstance(v, BINDING_TYPES):
         return v, None
     raise TypeError(
@@ -484,10 +484,10 @@ def endpoint(
 
     ``model=``/``models=`` values are a ``Binding`` (a fixed pick — HF/Hub/
     Civitai/ModelScope) or a :class:`~gen_worker.api.slot.Slot` (a
-    hub-resolved slot: ``selected_by=``, ``default=``, ``fallback=``;
-    pgw#520). A bare binding is sugar for ``Slot(<inferred pipeline class>,
-    default=ref)`` with no hub involvement — both forms can mix in one
-    ``models={}`` dict.
+    hub-resolved slot: ``selected_by=``, ``default_checkpoint=``,
+    ``default_config=``; pgw#520). A bare binding is sugar for
+    ``Slot(<inferred pipeline class>, default_checkpoint=ref)`` with no hub
+    involvement — both forms can mix in one ``models={}`` dict.
     """
     if kind not in KINDS:
         raise ValueError(f"@endpoint kind must be one of {KINDS}, got {kind!r}")

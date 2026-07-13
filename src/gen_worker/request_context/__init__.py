@@ -253,8 +253,9 @@ class RequestContext:
     def slots(self) -> Mapping[str, "ResolvedSlot[Any]"]:
         """The pgw#520 resolution chain, one entry per ``Slot``-declared
         model slot: ``ctx.slots["pipeline"].ref`` / ``.defaults`` — repo
-        metadata merged over the endpoint's code fallback preset. A slot
-        with no repo metadata and no ``Slot(fallback=...)`` raises on
+        metadata merged over the endpoint's code ``default_config`` preset
+        (which LOSES to repo metadata when both are present). A slot with
+        no repo metadata and no ``Slot(default_config=...)`` raises on
         access (not at dispatch) — read it only when your handler needs it.
         """
         return self._slots
