@@ -1021,6 +1021,24 @@ def load_from_pretrained(
         if components:
             logger.warning("preloaded components ignored on the svdq lane")
         return load_svdq_pipeline(cls, Path(path), svdq_art)
+    # W8A8 fp8-GEMM flavors (gw#534): fp8 weights WITH scales take the
+    # scaled-mm lane (fp8 resident, no per-layer cast); hosts without usable
+    # scaled_mm dequant once to bf16-resident. Precedes the storage-cast
+    # rungs — a scale-free fp8 tree never detects here.
+    from .w8a8 import detect_w8a8_artifact, load_w8a8_pipeline
+
+    w8a8_art = detect_w8a8_artifact(Path(path))
+    if w8a8_art is not None and callable(getattr(cls, "from_pretrained", None)):
+        compute = None
+        if dtype:
+            try:
+                compute = get_torch_dtype(dtype)
+            except ImportError:
+                pass
+        return load_w8a8_pipeline(
+            cls, Path(path), w8a8_art, compute_dtype=compute,
+            components=components,
+        )
     kwargs: Dict[str, Any] = {}
     if components:
         kwargs.update(components)
