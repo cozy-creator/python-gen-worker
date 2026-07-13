@@ -17,14 +17,14 @@ import shutil
 import threading
 import time
 import typing
-from dataclasses import dataclass, field as dc_field
+from dataclasses import dataclass, field as dc_field, replace as dc_replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 
 import msgspec
 
-from .api.binding import wire_ref
+from .api.binding import ModelRef, wire_ref
 from .api.errors import (
     ArtifactTransferError,
     CanceledError,
@@ -205,6 +205,30 @@ def _resolve_slots_kwargs(spec: EndpointSpec, run: "pb.RunJob") -> Dict[str, Any
         except ValueError as exc:
             errors[name] = str(exc)
     return {"resolved_slots": resolved, "slot_errors": errors}
+
+
+def _hub_binding_for_wire_ref(ref: str) -> ModelRef:
+    """A tensorhub-source binding for a hub-named wire ref (pgw#532).
+
+    ``RunJob.models`` / ModelOp refs name hub-CAS repos in the canonical
+    ``owner/repo[:tag][#flavor]`` grammar; this mints the binding the
+    executor materializes them through (``ensure_local`` then follows the
+    tensorhub lane: orchestrator snapshots or the th#763 missing_snapshot
+    re-mint — never an upstream self-fetch). Raises ``ValueError`` when
+    ``ref`` does not parse under that grammar (e.g. a raw upstream id the
+    hub stamped for an unmirrored slot default)."""
+    from .models.refs import parse_model_ref
+
+    parsed = parse_model_ref(ref)
+    th = parsed.tensorhub
+    if th is None:  # pragma: no cover - parse_model_ref(tensorhub) guarantees it
+        raise ValueError(f"{ref!r} is not a tensorhub ref")
+    return ModelRef(
+        source="tensorhub",
+        path=f"{th.owner}/{th.repo}",
+        tag=th.tag or "latest",
+        flavor=th.flavor or "",
+    )
 
 
 def _map_exception(exc: BaseException) -> Tuple["pb.JobStatus", str]:
@@ -1017,6 +1041,10 @@ class Executor:
         self._declared_models: Dict[str, Dict[str, Any]] = {
             s.name: dict(s.models) for s in specs
         }
+        # pgw#532: hub-named ref -> the ONE tensorhub binding object minted
+        # for it. Identity-stable so equal picks across requests derive equal
+        # instance keys (one resident instance per (class, resolved pick)).
+        self._hub_bindings: Dict[str, ModelRef] = {}
         self._gpu_semaphore = asyncio.Semaphore(max(1, gpu_slots))
         # Model loads/promotions serialize so allocator-delta measurements
         # and free-VRAM reads don't cross-contaminate (#369).
@@ -1368,6 +1396,14 @@ class Executor:
             if spec.cls is None:
                 out.append(name)
                 continue
+            if spec.slots:
+                # pgw#532 dynamic slots: the hub owns the slot's model set —
+                # serveability is per-dispatch (RunJob carries the resolved
+                # refs + snapshots; setup materializes THEM, never the code
+                # seed). Gate only on hardware/setup failures, never on a
+                # resident instance the worker cannot create by itself.
+                out.append(name)
+                continue
             rec = self._classes[spec.instance_key]
             if rec.ready or (not spec.models and rec.failed is None):
                 out.append(name)
@@ -1378,7 +1414,7 @@ class Executor:
         return sorted(
             name for name, spec in self.specs.items()
             if name not in avail and name not in self.unavailable
-            and spec.cls is not None
+            and spec.cls is not None and not spec.slots
             and self._classes[spec.instance_key].failed is None
         )
 
@@ -1425,6 +1461,90 @@ class Executor:
                 pass
         self._on_state_change()
 
+    # ---- dynamic slot materialization (pgw#532 / th#767) --------------------
+
+    def _hub_binding(self, ref: str) -> ModelRef:
+        """The one binding object for a hub-named wire ref (raises
+        ``ValueError`` on non-CAS grammar). Registered with the store so
+        provider classification stays confident on bare-ref paths."""
+        binding = self._hub_bindings.get(ref)
+        if binding is None:
+            binding = self._hub_bindings.setdefault(ref, _hub_binding_for_wire_ref(ref))
+            self.store.register_binding(wire_ref(binding), binding)
+        return binding
+
+    def _slot_dispatch_binding(
+        self, spec: EndpointSpec, slot: str, run_ref: str
+    ) -> ModelRef:
+        """The binding a declared Slot materializes for THIS dispatch.
+
+        Precedence (pgw#532): the hub-resolved pick from
+        ``RunJob.models[slot]`` > the code-declared ``default_checkpoint``
+        when it is itself a CAS ref. A hub-connected worker NEVER
+        materializes a Slot's raw upstream default (mirror-first, gw#465):
+        when neither source yields a CAS ref the dispatch fails RETRYABLE —
+        the hub must resolve the slot to a ref this worker can load, not
+        the worker self-fetching Civitai/HF.
+        """
+        declared = spec.models.get(slot)
+        if run_ref:
+            if (
+                declared is not None
+                and declared.source == "tensorhub"
+                and run_ref == wire_ref(declared)
+            ):
+                return declared
+            try:
+                return self._hub_binding(run_ref)
+            except ValueError:
+                logger.warning(
+                    "slot %r of %s: resolved_models ref %r is not a CAS ref; "
+                    "falling back to the declared default", slot, spec.name, run_ref)
+        if declared is not None and declared.source == "tensorhub":
+            return declared
+        raise RetryableError(
+            f"slot {slot!r} of {spec.name!r} has no loadable hub ref for this "
+            f"request (resolved_models[{slot!r}]={run_ref!r}, declared "
+            f"default source={getattr(declared, 'source', None)!r}); a "
+            "hub-connected worker never fetches a Slot's raw upstream "
+            "default (pgw#532/gw#465) — the hub must resolve the slot to a "
+            "tensorhub-CAS ref"
+        )
+
+    def _effective_spec(self, spec: EndpointSpec, run: "pb.RunJob") -> EndpointSpec:
+        """The spec THIS dispatch runs (pgw#532): every declared Slot rebound
+        to the hub-resolved pick in ``RunJob.models``. A pick that differs
+        from the declared binding derives a NEW instance key — one resident
+        instance per (class, resolved binding set), so ``setup()`` re-runs
+        for the pick and setup-held state (``self.pipeline``) stays coherent
+        per checkpoint while the LRU machinery evicts whole instances.
+        Function-shaped (``cls=None``) specs rebind too — their slots inject
+        via ``_handler_kwargs``, which reads the same ``spec.models``."""
+        if not spec.slots:
+            return spec
+        run_refs = {
+            b.slot: b.ref.strip() for b in run.models if b.slot and b.ref.strip()
+        }
+        effective = dict(spec.models)
+        for slot in spec.slots:
+            effective[slot] = self._slot_dispatch_binding(
+                spec, slot, run_refs.get(slot, ""))
+        if effective == spec.models:
+            return spec
+        return dc_replace(spec, models=effective)
+
+    def _class_record(self, spec: EndpointSpec) -> _ClassRecord:
+        """Instance-group record for ``spec``, created on first sight for
+        DERIVED (per-pick) specs. Never removed: records are tiny and the
+        distinct-pick set a worker sees is bounded by its disk anyway."""
+        assert spec.cls is not None
+        rec = self._classes.get(spec.instance_key)
+        if rec is None:
+            rec = self._classes.setdefault(spec.instance_key, _ClassRecord(cls=spec.cls))
+        if not any(s is spec or s == spec for s in rec.specs):
+            rec.specs.append(spec)
+        return rec
+
     # ---- setup -------------------------------------------------------------
 
     async def ensure_setup(
@@ -1436,7 +1556,7 @@ class Executor:
         if spec.cls is None:
             return None  # function-shaped endpoint: no instance, no setup
         self.store.bind_loop()
-        rec = self._classes[spec.instance_key]
+        rec = self._class_record(spec)
         async with rec.lock:
             if rec.ready and rec.stale:
                 # gw#494: the instance was loaded for a superseded pick —
@@ -2127,11 +2247,32 @@ class Executor:
                 specs = [s for s in self.specs.values()
                          if ref in (wire_ref(b) for b in s.models.values())]
                 if not specs:
-                    # No endpoint binds this ref; nothing owns a VRAM load for it.
+                    # pgw#532: derived (per-pick) specs bind refs the static
+                    # decls never name — a LOAD for a pick this worker has
+                    # dispatched before must promote/re-set-up its instance.
+                    seen: set = set()
+                    for rec in self._classes.values():
+                        if id(rec) in seen:
+                            continue
+                        seen.add(id(rec))
+                        for s in rec.specs:
+                            if s not in specs and ref in (
+                                    wire_ref(b) for b in s.models.values()):
+                                specs.append(s)
+                if not specs:
+                    # No endpoint binds this ref; nothing owns a VRAM load
+                    # for it. (For a Slot-declared endpoint the bytes+snapshot
+                    # ARE banked above, so the next dispatch naming this pick
+                    # materializes instantly — the pre-warm degrades to a
+                    # download, never to an upstream fetch.)
                     await self._send(pb.WorkerMessage(model_event=pb.ModelEvent(
                         ref=ref, state=pb.MODEL_STATE_FAILED, error="load_failed")))
                     return
-                ready = [s for s in specs if self._classes[s.instance_key].ready]
+                ready = [
+                    s for s in specs
+                    if (owner := self._classes.get(s.instance_key)) is not None
+                    and owner.ready
+                ]
                 if ready:
                     # A resident instance already owns the ref: promote/touch it.
                     # Never cold-set-up the OTHER specs sharing the ref — a
@@ -2512,6 +2653,16 @@ class Executor:
             payload: Any = msgspec.msgpack.decode(run.input_payload, type=spec.payload_type)
         except (msgspec.ValidationError, msgspec.DecodeError) as exc:
             await self._finish(job, pb.JOB_STATUS_INVALID, safe_message=_sanitize(str(exc)))
+            return
+        try:
+            # pgw#532: rebind declared Slots to the hub-resolved picks for
+            # THIS dispatch (instance-per-pick). The derived spec drives the
+            # whole job — pins, setup, adapters, ctx.slots — so every
+            # downstream consumer sees the pick, never the code seed.
+            spec = job.spec = self._effective_spec(spec, run)
+        except Exception as exc:
+            status, msg = _map_exception(exc)
+            await self._finish(job, status, safe_message=msg)
             return
         routed = list(spec.models)
         # Pin this job's model refs for its WHOLE lifetime (gw#409): the gap
