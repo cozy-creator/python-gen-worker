@@ -64,6 +64,15 @@ class ModelRef(msgspec.Struct, frozen=True):
     constructor — they pin ``source`` and apply the per-registry validation
     below (mirrored in ``__post_init__`` so it holds for direct construction
     too, e.g. ``msgspec.structs.replace``).
+
+    ``components`` (pgw#505, tensorhub/huggingface only): restricts the
+    fetch to the named pipeline component subfolders — e.g. a full SDXL repo
+    bound only for its VAE: ``Hub("owner/sdxl-repo", components=("vae",))``.
+    Root config files (``model_index.json`` and other root ``*.json``) are
+    always kept alongside the named subfolders. Empty (default) fetches the
+    whole repo — today's behavior. Civitai/modelscope reject it: civitai
+    artifacts aren't component-structured, and modelscope's ``files=`` glob
+    already covers the split-checkpoint case.
     """
 
     source: ModelSource
@@ -76,6 +85,7 @@ class ModelRef(msgspec.Struct, frozen=True):
     storage_dtype: str = ""
     version: str = ""
     files: tuple[str, ...] = ()
+    components: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         # msgspec.structs.force_setattr, NOT object.__setattr__: the latter
@@ -92,6 +102,7 @@ class ModelRef(msgspec.Struct, frozen=True):
         force(self, "dtype", _clean(self.dtype))
         force(self, "version", _clean(self.version))
         force(self, "files", tuple(_clean(p) for p in self.files if _clean(p)))
+        force(self, "components", tuple(_clean(p) for p in self.components if _clean(p)))
         force(self, "storage_dtype", _clean_storage_dtype(self.storage_dtype))
 
         if self.source == "tensorhub":
@@ -105,9 +116,18 @@ class ModelRef(msgspec.Struct, frozen=True):
         elif self.source == "civitai":
             if not self.path:
                 raise ValueError("Civitai requires a non-empty model id")
+            if self.components:
+                raise ValueError(
+                    "Civitai bindings do not support components= "
+                    "(civitai artifacts aren't component-structured)"
+                )
         elif self.source == "modelscope":
             if "/" not in self.path:
                 raise ValueError(f"ModelScope(id=) must be 'owner/repo', got {self.path!r}")
+            if self.components:
+                raise ValueError(
+                    "ModelScope bindings do not support components= (use files= instead)"
+                )
         else:
             raise ValueError(f"unknown ModelRef source {self.source!r}")
 
@@ -118,11 +138,18 @@ def Hub(
     tag: str = "latest",
     flavor: str = "",
     storage_dtype: str = "",
+    components: tuple[str, ...] = (),
 ) -> ModelRef:
-    """Tensorhub-backed binding: ``Hub("owner/repo", tag=, flavor=, storage_dtype=)``."""
+    """Tensorhub-backed binding: ``Hub("owner/repo", tag=, flavor=, storage_dtype=, components=)``.
+
+    ``components=`` (pgw#505) fetches only the named pipeline component
+    subfolders (+ root config files) instead of the whole repo — e.g. a
+    full SDXL checkpoint bound only for its VAE:
+    ``Hub("owner/sdxl-repo", components=("vae",))``.
+    """
     return ModelRef(
         source="tensorhub", path=ref, tag=tag, flavor=flavor,
-        storage_dtype=storage_dtype,
+        storage_dtype=storage_dtype, components=components,
     )
 
 
@@ -133,20 +160,27 @@ def HF(
     dtype: str = "",
     subfolder: str = "",
     files: tuple[str, ...] = (),
+    components: tuple[str, ...] = (),
     storage_dtype: str = "",
 ) -> ModelRef:
-    """HuggingFace-backed binding: ``HF(id, revision=, dtype=, subfolder=, files=, storage_dtype=)``.
+    """HuggingFace-backed binding: ``HF(id, revision=, dtype=, subfolder=, files=, components=, storage_dtype=)``.
 
     ``files`` are ``snapshot_download`` ``allow_patterns`` globs — set them to
     fetch only specific files (ComfyUI / split-checkpoint repos with no
-    ``model_index.json``). ``dtype`` selects the torch COMPUTE precision at
-    load time (``"bf16"`` / ``"fp16"`` / ``"fp32"``). ``storage_dtype="fp8"``
-    keeps denoiser weights in fp8-E4M3 storage with per-layer upcast to the
-    compute dtype (VRAM fit on any card; see ``STORAGE_DTYPES``).
+    ``model_index.json``). ``components=`` (pgw#505) is the diffusers-layout
+    counterpart: name the pipeline component subfolders to fetch (e.g.
+    ``components=("unet", "text_encoder")``); root config files
+    (``model_index.json`` + other root ``*.json``) are always kept. When both
+    are set, ``files=`` is matched within the ``components=``-narrowed
+    listing. ``dtype`` selects the torch COMPUTE precision at load time
+    (``"bf16"`` / ``"fp16"`` / ``"fp32"``). ``storage_dtype="fp8"`` keeps
+    denoiser weights in fp8-E4M3 storage with per-layer upcast to the compute
+    dtype (VRAM fit on any card; see ``STORAGE_DTYPES``).
     """
     return ModelRef(
         source="huggingface", path=ref, revision=revision, dtype=dtype,
-        subfolder=subfolder, files=files, storage_dtype=storage_dtype,
+        subfolder=subfolder, files=files, components=components,
+        storage_dtype=storage_dtype,
     )
 
 

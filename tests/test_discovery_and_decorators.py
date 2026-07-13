@@ -629,6 +629,52 @@ def test_binding_emits_no_family_when_none_declared() -> None:
     assert "family" not in block
 
 
+def test_components_binding_emits_in_manifest() -> None:
+    """pgw#505: a declared components= subset surfaces on the manifest
+    binding block for both tensorhub and huggingface sources — the hub
+    reads it to scope its ModelOp DOWNLOAD resolve; the worker's own
+    download layer reads it off the binding object directly (not the
+    manifest) on the hub-less/local paths."""
+    from gen_worker import Hub
+    from gen_worker.discovery.discover import _extract_entries
+
+    @endpoint(
+        models={
+            "pipeline": Hub("o/sdxl-full", components=("vae",)),
+            "extra": HF("o/hf-repo", components=("unet", "text_encoder")),
+        },
+        resources=Resources(vram_gb=12),
+    )
+    class Gen:
+        def setup(self, pipeline: str, extra: str) -> None:
+            self.pipeline = pipeline
+
+        def generate(self, ctx: RequestContext, data: _In) -> _Out:
+            return _Out(result="")
+
+    (entry,) = _extract_entries(Gen, "testmod")
+    bindings = entry["bindings"]
+    assert bindings["pipeline"]["components"] == ["vae"]
+    assert bindings["extra"]["components"] == ["unet", "text_encoder"]
+
+
+def test_no_components_binding_omits_manifest_key() -> None:
+    from gen_worker import Hub
+    from gen_worker.discovery.discover import _extract_entries
+
+    @endpoint(model=Hub("o/whole-repo"), resources=Resources(vram_gb=12))
+    class Gen:
+        def setup(self, model: str) -> None:
+            self.model = model
+
+        def generate(self, ctx: RequestContext, data: _In) -> _Out:
+            return _Out(result="")
+
+    (entry,) = _extract_entries(Gen, "testmod")
+    (block,) = entry["bindings"].values()
+    assert "components" not in block
+
+
 def test_model_choice_binding_family_matches_top_level_binding(tmp_pkg: Path) -> None:
     """pgw#519: model.choices[].binding gets the SAME family stamp that a
     top-level bindings block gets from Compile(family=...) — tensorhub's

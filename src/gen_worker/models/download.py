@@ -195,6 +195,7 @@ async def ensure_local(
     hf_token: Optional[str] = None,
     civitai_api_key: str = "",
     allow_patterns: Sequence[str] = (),
+    components: Sequence[str] = (),
     progress: Optional[ProgressFn] = None,
 ) -> Path:
     """Materialize ``ref`` on disk; return its local path.
@@ -207,6 +208,20 @@ async def ensure_local(
     authoritative and the bytes come from tensorhub-CAS, never the upstream
     registry. Refs without a snapshot fall back to their provider's direct
     download (hf/civitai/modelscope) or fail retryably (tensorhub).
+
+    ``components`` (pgw#505) is honored on the HF direct-download branch.
+    It is deliberately NOT applied to the ``snapshot is not None`` branch:
+    that snapshot is orchestrator-resolved and the executor's residency
+    layer digest-verifies the materialized tree against the FULL
+    ``snapshot.files`` list it was handed (``ModelStore._verify_snapshot_tree``)
+    — filtering what gets written here without the orchestrator also
+    filtering what it verifies would turn every boot into a spurious
+    corruption/quarantine loop. Selective fetch for tensorhub-sourced
+    snapshots is therefore the hub's ModelOp DOWNLOAD scoping (the manifest
+    now carries ``components`` for it to read) — worker-side selective fetch
+    for tensorhub refs lands on the hub-less CLI path instead
+    (``models/provision.py::_fetch_tensorhub_snapshot``), which owns its own
+    resolve+download+materialize loop end to end.
     """
     base = Path(cache_dir) if cache_dir is not None else tensorhub_cas_dir()
     prov = provider or lookup_provider_for_ref(ref)
@@ -240,6 +255,7 @@ async def ensure_local(
             hf_home=hf_home,
             hf_token=hf_token,
             allow_patterns=tuple(allow_patterns),
+            components=tuple(components),
             progress=progress,
         )
 
@@ -360,6 +376,47 @@ def select_hf_files(
     for group in weights_by_dir.values():
         selected.update(_pick(group))
     return selected
+
+
+def select_component_paths(paths: Sequence[str], components: Sequence[str]) -> set[str]:
+    """Narrow a repo file listing to declared pipeline COMPONENTS (pgw#505):
+    every path under a ``<component>/`` subfolder, plus every root-level
+    ``*.json`` (``model_index.json`` and siblings — always kept so
+    downstream component-set introspection / pipeline-class detection still
+    works off the narrowed tree). Empty ``components`` returns every path
+    unchanged (whole-repo, today's default). Shared by the HF downloader and
+    the tensorhub CAS snapshot downloader (``cozy_snapshot.py``) — the ONE
+    filter both sources apply.
+    """
+    comps = {c.strip() for c in components if c and str(c).strip()}
+    if not comps:
+        return set(paths)
+    keep: set[str] = set()
+    for p in paths:
+        if not p:
+            continue
+        if "/" not in p:
+            if p.lower().endswith(".json"):
+                keep.add(p)
+            continue
+        top = p.split("/", 1)[0]
+        if top in comps:
+            keep.add(p)
+    return keep
+
+
+def components_present(paths: Sequence[str], components: Sequence[str]) -> bool:
+    """Whether every declared component names an ACTUAL subfolder in
+    ``paths``. Root config files are always kept by
+    :func:`select_component_paths` regardless of ``components`` — so a
+    typo'd component name can't be detected by an empty result alone (the
+    root jsons keep the selection non-empty); this checks the component
+    NAMES themselves matched something."""
+    comps = {c.strip() for c in components if c and str(c).strip()}
+    if not comps:
+        return True
+    dirs = {p.split("/", 1)[0] for p in paths if p and "/" in p}
+    return bool(dirs & comps)
 
 
 def _match_allow_patterns(repo_files: Sequence[str], patterns: Sequence[str]) -> set[str]:
@@ -489,12 +546,21 @@ def download_hf(
     hf_home: Optional[str] = None,
     hf_token: Optional[str] = None,
     allow_patterns: Sequence[str] = (),
+    components: Sequence[str] = (),
     progress: Optional[ProgressFn] = None,
     local_files_only: bool = False,
 ) -> Path:
     """Blocking HF snapshot download (call via ``ensure_local`` /
     ``asyncio.to_thread``). Transfer, cache, resume and locking are
-    huggingface_hub's; this only plans the file selection."""
+    huggingface_hub's; this only plans the file selection.
+
+    ``components`` (pgw#505) narrows the repo listing to the named pipeline
+    component subfolders (+ root config files, via
+    :func:`select_component_paths`) BEFORE the existing ``files=``/auto
+    variant-selection logic runs — so a component-scoped fetch still gets
+    per-component flavor picking (bf16 > fp16 > untagged), just over a
+    smaller candidate set.
+    """
     from ..net import hf
 
     try:
@@ -510,6 +576,7 @@ def download_hf(
         raise ValueError("empty hf repo_id")
     hf_home = (hf_home or "").strip() or None
     hf_token = (hf_token or "").strip() or None
+    comps = tuple(c.strip() for c in components if c and str(c).strip())
     kwargs: dict[str, Any] = {}
     if hf_home:
         kwargs["cache_dir"] = hf_home
@@ -517,13 +584,25 @@ def download_hf(
         kwargs["token"] = hf_token
 
     if local_files_only:
+        patterns = list(allow_patterns)
+        if comps and not patterns:
+            # No repo listing available offline to narrow precisely — fall
+            # back to component-subfolder + root-json glob patterns.
+            patterns = [f"{c}/" for c in comps] + ["*.json"]
         return Path(snapshot_download(
             repo_id=repo_id, revision=ref.revision, local_files_only=True,
-            allow_patterns=list(allow_patterns) or None, **kwargs,
+            allow_patterns=patterns or None, **kwargs,
         ))
 
     api = HfApi(token=hf_token)
     repo_files = list(api.list_repo_files(repo_id=repo_id, repo_type="model", revision=ref.revision))
+
+    if comps:
+        if not components_present(repo_files, comps):
+            raise ValueError(
+                f"components= {list(comps)!r} matched nothing in {repo_id}"
+            )
+        repo_files = sorted(select_component_paths(repo_files, comps))
 
     selected: Optional[set[str]]
     if allow_patterns:
@@ -540,6 +619,13 @@ def download_hf(
         selected = select_hf_files(repo_files, flavor=ref.flavor)
         if selected is not None:
             kwargs["allow_patterns"] = sorted(selected)
+        elif comps:
+            # components= narrowed the listing but the repo has no
+            # recognized diffusers/root-weights layout for select_hf_files
+            # to specialize further — fetch exactly the components= subset
+            # rather than silently reverting to the whole repo.
+            selected = set(repo_files)
+            kwargs["allow_patterns"] = repo_files
 
     # Best-effort size guard against accidental huge downloads.
     total_hint: Optional[int] = None
@@ -874,6 +960,8 @@ __all__ = [
     "download_hf",
     "download_civitai",
     "select_hf_files",
+    "select_component_paths",
+    "components_present",
     "fetch_civitai_model",
     "fetch_civitai_model_version",
     "parse_civitai_version_id",

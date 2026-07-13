@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.22.2 (2026-07-13)
+
+- **pgw#505: selective component download — declare-on-binding.** `Hub`/`HF`
+  gain `components=` (mirrors `files=`): restricts a fetch to the named
+  pipeline component subfolders (+ root config files, e.g.
+  `model_index.json`) instead of the whole repo — the win case is a full
+  pipeline repo bound for exactly ONE component, e.g.
+  `Hub("owner/sdxl-repo", components=("vae",))`. Civitai/modelscope reject
+  it (civitai artifacts aren't component-structured; modelscope already has
+  `files=`). `components=` surfaces on the manifest binding block (tensorhub
+  + huggingface) so the hub's ModelOp DOWNLOAD scoping can read it once
+  built — that platform-side selective CAS resolve is NOT part of this
+  release. Worker-side filtering ships now on two paths that fully own
+  their own resolve+download+materialize loop: the HF downloader (both the
+  production executor and the CLI) narrows `snapshot_download`'s
+  `allow_patterns` to the declared subfolders before the existing
+  flavor-selection logic runs; the CLI's hub-less tensorhub resolve
+  (`cozy run` / `gen-worker run`, th#560) narrows the fetched blob set and
+  keys the materialized snapshot directory by `(digest, components)` so a
+  component-scoped fetch can never collide with — or be mistaken for — the
+  full-repo one. The production executor's orchestrator-resolved snapshot
+  path is deliberately left unfiltered: its residency layer digest-verifies
+  the materialized tree against the orchestrator's full file list, so
+  scoping there is the hub's job, not the worker's.
+- **Rebased onto 0.21.0 (post-#233 `allow_lora` eviction, post-#243 dynamic
+  slot materialization).** This PR's original diff (authored pre-#233) also
+  re-added `allow_lora=` to `ModelRef`/`Hub`/`HF` and an
+  `_binding_to_manifest`/discovery emission path for it — all of that is
+  dropped on rebase; `allow_lora` stays evicted (overlay permission is a
+  slot-policy concern, th#772, not a binding-identity flag). Only the
+  `components=` axis (a genuinely new field, disjoint from `allow_lora`)
+  survives. `binding.py`, `discover.py`, `test_binding.py`, and
+  `test_discovery_and_decorators.py` all had this same shape of conflict;
+  resolved identically in each. No interaction with #243's slot
+  materialization — `components=` is a fetch-scope hint on a fixed binding,
+  orthogonal to which pick gets dispatched.
+
 ## 0.21.0 (2026-07-13)
 
 **BREAKING(-ish) — pgw#532: worker-side dynamic slot materialization (the last th#767

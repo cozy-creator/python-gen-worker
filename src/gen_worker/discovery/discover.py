@@ -288,6 +288,11 @@ def _binding_to_manifest(binding: Binding, param_name: str = "") -> Dict[str, An
             out["tag"] = binding.tag
         if binding.flavor:
             out["flavor"] = binding.flavor
+        if binding.components:
+            # pgw#505: the hub's ModelOp DOWNLOAD scoping (platform-side,
+            # not yet built) reads this to resolve only the named pipeline
+            # component subfolders instead of the whole repo.
+            out["components"] = list(binding.components)
     elif binding.source == "huggingface":
         for k in ("revision", "dtype", "subfolder"):
             v = getattr(binding, k)
@@ -295,6 +300,8 @@ def _binding_to_manifest(binding: Binding, param_name: str = "") -> Dict[str, An
                 out[k] = v
         if binding.files:
             out["files"] = list(binding.files)
+        if binding.components:
+            out["components"] = list(binding.components)
     elif binding.source == "civitai":
         if binding.version:
             out["version"] = binding.version
@@ -323,13 +330,15 @@ def _stamp_family(binding_manifest: Dict[str, Any], family: str) -> None:
 
 def _model_ref_to_manifest(ref: Any) -> Dict[str, Any]:
     """``default_checkpoint``/curated-choice ref shape shared by the slots
-    block: ``{source, path, tag?, flavor?}`` — a structured ModelRef
-    (pgw#511)."""
+    block: ``{source, path, tag?, flavor?, components?}`` — a structured
+    ModelRef (pgw#511; ``components`` added pgw#505)."""
     out: Dict[str, Any] = {"source": ref.source, "path": ref.path}
     if ref.tag and ref.tag != "latest":
         out["tag"] = ref.tag
     if ref.flavor:
         out["flavor"] = ref.flavor
+    if ref.components:
+        out["components"] = list(ref.components)
     return out
 
 

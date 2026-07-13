@@ -767,6 +767,7 @@ class ModelStore:
                         hf_home=self._hf_home,
                         hf_token=self._hf_token,
                         allow_patterns=tuple(getattr(binding, "files", ()) or ()),
+                        components=tuple(getattr(binding, "components", ()) or ()),
                         progress=_progress,
                     )
                     self.residency.track_disk(ref, path)
