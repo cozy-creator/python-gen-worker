@@ -2773,7 +2773,7 @@ class Executor:
 
     async def _materialize_datasets(self, ctx: Any, payload: Any) -> None:
         """Reserved-datasets contract (gw#425): materialize every
-        ``payload.datasets`` entry (DatasetRef) into a local parquet snapshot
+        ``payload.datasets`` entry (DatasetRef) into a local dataset snapshot
         before the handler runs. Paths land in ``ctx.dataset_paths``."""
         datasets = getattr(payload, "datasets", None)
         if not datasets:

@@ -1374,17 +1374,17 @@ class _PublisherMixin:
         ``payload.datasets[].ref`` at submit and mints the ``read_dataset``
         grant by UUID; a grant-scoped token can't list) — those hit
         materialize directly. ``owner/name`` refs stay for local/dev via the
-        ``?tenant=`` list lookup. Flow (th#642 wire format):
+        ``?tenant=`` list lookup. Flow (th#698 blob-manifest wire format):
 
         1. Slash-less ref → dataset_id verbatim; otherwise
            ``GET /api/v1/datasets?tenant=<owner>`` → the row's ``dataset_id``.
-        2. ``GET /api/v1/datasets/:id/materialize?format=parquet&include_urls=true``
-           → HF-datasets columnar parquet shards (image bytes embedded) with
+        2. ``GET /api/v1/datasets/:id/materialize?format=files&include_urls=true``
+           → a rows.jsonl-style entry index (raw CAS blobs by digest) with
            presigned URLs, sizes and blake3 checksums. A 202 (async snapshot
            build, th#691) is polled until ready within ``budget_s`` (default
            30 min, ≥ the hub's 20-min build budget); a typed
            ``snapshot_build_failed`` raises ``SnapshotBuildFailedError``.
-        3. Stream each shard to disk (bounded memory), digest-verified, with
+        3. Stream each entry to disk (bounded memory), digest-verified, with
            bounded retries. Entries lacking a presigned URL fall back to the
            repo-CAS by-digest reader.
 
