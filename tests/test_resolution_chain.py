@@ -1,5 +1,5 @@
 """pgw#520 resolution chain: ``resolve_slot``/``resolve_slots`` merge repo-
-metadata inference defaults over an endpoint's code ``Slot(fallback=...)``
+metadata inference defaults over an endpoint's code ``Slot(default_config=...)``
 preset, and ``ctx.slots[name]`` surfaces the result (or a lazy error) to the
 handler."""
 
@@ -17,7 +17,7 @@ _REF = HF("stabilityai/stable-diffusion-xl-base-1.0")
 
 
 def test_no_metadata_uses_fallback_preset() -> None:
-    slot = Slot(object, default=_REF, fallback=SdxlDefaults(steps=28, guidance=6.0))
+    slot = Slot(object, default_checkpoint=_REF, default_config=SdxlDefaults(steps=28, guidance=6.0))
     resolved = resolve_slot("pipeline", slot, ref=_REF)
     assert resolved.ref is _REF
     assert resolved.defaults.steps == 28
@@ -29,7 +29,7 @@ def test_repo_metadata_wins_over_fallback_wholesale() -> None:
     instance replaces the fallback entirely (tensorhub validates the WHOLE
     object at PUT time, so a partial merge would hide invalid metadata
     behind the code default)."""
-    slot = Slot(object, default=_REF, fallback=SdxlDefaults(steps=28, guidance=6.0))
+    slot = Slot(object, default_checkpoint=_REF, default_config=SdxlDefaults(steps=28, guidance=6.0))
     raw = msgspec.json.encode(SdxlDefaults(steps=40, scheduler="dpmpp_2m_karras")).decode()
     resolved = resolve_slot("pipeline", slot, ref=_REF, raw_metadata_json=raw)
     assert resolved.defaults.steps == 40
@@ -42,7 +42,7 @@ def test_repo_metadata_wins_over_fallback_wholesale() -> None:
 def test_repo_metadata_with_no_fallback_resolves_via_explicit_family() -> None:
     """A hub-only slot (no code fallback) can still decode repo metadata
     when the endpoint's Compile(family=...) supplies the family name."""
-    slot = Slot(object, default=_REF)  # no fallback
+    slot = Slot(object, default_checkpoint=_REF)  # no default_config
     raw = msgspec.json.encode(SdxlDefaults(steps=22)).decode()
     resolved = resolve_slot("pipeline", slot, ref=_REF, family="sdxl", raw_metadata_json=raw)
     assert isinstance(resolved.defaults, SdxlDefaults)
@@ -50,34 +50,34 @@ def test_repo_metadata_with_no_fallback_resolves_via_explicit_family() -> None:
 
 
 def test_repo_metadata_with_no_resolvable_family_raises() -> None:
-    slot = Slot(object, default=_REF)  # no fallback, no family
+    slot = Slot(object, default_checkpoint=_REF)  # no default_config, no family
     raw = msgspec.json.encode(SdxlDefaults(steps=22)).decode()
     with pytest.raises(ValueError, match="no family is resolvable"):
         resolve_slot("pipeline", slot, ref=_REF, raw_metadata_json=raw)
 
 
 def test_invalid_repo_metadata_raises_clear_validation_error() -> None:
-    slot = Slot(object, default=_REF, fallback=SdxlDefaults(steps=28))
+    slot = Slot(object, default_checkpoint=_REF, default_config=SdxlDefaults(steps=28))
     with pytest.raises(ValueError, match="validation"):
         resolve_slot("pipeline", slot, ref=_REF, raw_metadata_json='{"steps": "not-an-int"}')
 
 
 def test_no_metadata_and_no_fallback_raises_clear_error() -> None:
-    slot = Slot(object, default=_REF)  # no fallback, no metadata
+    slot = Slot(object, default_checkpoint=_REF)  # no default_config, no metadata
     with pytest.raises(ValueError, match="nothing to resolve"):
         resolve_slot("pipeline", slot, ref=_REF)
 
 
 def test_no_ref_raises_clear_error() -> None:
-    slot = Slot(object, fallback=SdxlDefaults(steps=28))
+    slot = Slot(object, default_config=SdxlDefaults(steps=28))
     with pytest.raises(ValueError, match="no resolved model ref"):
         resolve_slot("pipeline", slot, ref=None)
 
 
 def test_resolve_slots_collects_per_slot_failures_without_raising() -> None:
     slots = {
-        "pipeline": Slot(object, default=_REF, fallback=SdxlDefaults(steps=28)),
-        "vae": Slot(object),  # no fallback, no metadata -> will fail
+        "pipeline": Slot(object, default_checkpoint=_REF, default_config=SdxlDefaults(steps=28)),
+        "vae": Slot(object),  # no default_config, no metadata -> will fail
     }
     out = resolve_slots(slots, refs={"pipeline": _REF, "vae": _REF})
     assert isinstance(out["pipeline"], ResolvedSlot)
@@ -91,7 +91,7 @@ def test_resolve_slots_collects_per_slot_failures_without_raising() -> None:
 
 def test_ctx_slots_returns_resolved_slot() -> None:
     resolved = resolve_slot(
-        "pipeline", Slot(object, default=_REF, fallback=SdxlDefaults(steps=28)), ref=_REF,
+        "pipeline", Slot(object, default_checkpoint=_REF, default_config=SdxlDefaults(steps=28)), ref=_REF,
     )
     ctx = RequestContext(request_id="r1", resolved_slots={"pipeline": resolved})
     got = ctx.slots["pipeline"]
@@ -124,7 +124,7 @@ def test_ctx_set_resolved_slots_mutator_used_by_cli() -> None:
     ctx = RequestContext(request_id="r1")
     assert list(ctx.slots) == []
     resolved = resolve_slot(
-        "pipeline", Slot(object, default=_REF, fallback=SdxlDefaults(steps=28)), ref=_REF,
+        "pipeline", Slot(object, default_checkpoint=_REF, default_config=SdxlDefaults(steps=28)), ref=_REF,
     )
     ctx._set_resolved_slots({"pipeline": resolved})
     assert ctx.slots["pipeline"].defaults.steps == 28

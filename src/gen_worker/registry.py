@@ -15,7 +15,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 import msgspec
 
-from .api.binding import Binding
+from .api.binding import Binding, ModelRef
 from .api.decorators import ATTR, Compile, EndpointDecl, Resources
 from .api.slot import Slot
 from .discovery.names import slugify_name
@@ -58,8 +58,8 @@ class EndpointSpec:
     resources: Resources = field(default_factory=Resources)
     models: Dict[str, Binding] = field(default_factory=dict)  # slot -> binding
     # Slot-declared entries in `models` (pgw#520): slot -> Slot metadata
-    # (selected_by/default/fallback). A subset of `models`'s keys — bare
-    # bindings have no entry here.
+    # (selected_by/default_checkpoint/default_config). A subset of
+    # `models`'s keys — bare bindings have no entry here.
     slots: Dict[str, Slot] = field(default_factory=dict)
     # Resolved family name per Slot (slot.family, or the endpoint's
     # Compile(family=...) when the slot declares no fallback preset) —
@@ -105,14 +105,34 @@ def _inspect_return(owner: str, ret: Any) -> tuple[str, Optional[type], Optional
     )
 
 
+def _is_selected_by_annotation(ann: Any) -> bool:
+    """pgw#524 item 5: a ``selected_by`` payload field must type as plain
+    ``str``, or as ``str | ModelRef`` — the wire also accepts a structured
+    :class:`~gen_worker.api.binding.ModelRef` object (a client-supplied
+    BYOM pick), which the hub resolves to a concrete ref before the worker
+    ever sees the request; the SDK never bakes the curated-value enum into
+    either shape."""
+    if ann is str:
+        return True
+    origin = typing.get_origin(ann)
+    if origin in (typing.Union, py_types.UnionType):
+        return frozenset(typing.get_args(ann)) == frozenset((str, ModelRef))
+    return False
+
+
 def _validate_slot_selected_by(
     owner: str, slots: Dict[str, Slot], payload_type: type
 ) -> None:
-    """pgw#520: a Slot's ``selected_by`` must name a plain-``str`` field on
-    THIS handler's payload — validated per-handler (not per-class) because
-    one ``models=`` decl can be shared by methods with different payload
-    types. Fails at spec-construction time (discovery walk / CLI collection
-    / executor boot), never at first invoke."""
+    """pgw#520: a Slot's ``selected_by`` must name a plain-``str`` (or
+    ``str | ModelRef``, pgw#524 item 5) field on THIS handler's payload —
+    validated per-handler (not per-class) because one ``models=`` decl can
+    be shared by methods with different payload types. Also enforces pgw#524
+    item 4: a request-branching slot (``selected_by`` set) with no
+    ``default_checkpoint`` has nothing to seed the hub mapping or bootstrap
+    placement with — tensorhub rejects it at manifest registration
+    (``builder.normalizeManifestSlot``), so fail here at AUTHOR time instead
+    of at publish time. Fails at spec-construction time (discovery walk /
+    CLI collection / executor boot), never at first invoke."""
     if not slots:
         return
     try:
@@ -122,19 +142,27 @@ def _validate_slot_selected_by(
     for slot_name, slot in slots.items():
         if not slot.selected_by:
             continue
+        if slot.default_checkpoint is None:
+            raise ValueError(
+                f"{owner}: Slot({slot_name!r}).selected_by={slot.selected_by!r} "
+                "requires default_checkpoint=... — a request-branching slot "
+                "with no code-side default has nothing to seed the hub "
+                "mapping/bootstrap placement with (the hub rejects this at "
+                "registration; fail here instead)"
+            )
         if slot.selected_by not in hints:
             raise ValueError(
                 f"{owner}: Slot({slot_name!r}).selected_by={slot.selected_by!r} "
                 f"names no field on payload {payload_type.__name__!r}"
             )
         ann = hints[slot.selected_by]
-        if ann is not str:
+        if not _is_selected_by_annotation(ann):
             raise ValueError(
                 f"{owner}: Slot({slot_name!r}).selected_by="
-                f"{slot.selected_by!r} must be a plain str field on "
-                f"{payload_type.__name__!r} (got {ann!r}); the hub overlays "
-                "the live allowed-value enum onto this field, it is never "
-                "baked into the SDK type"
+                f"{slot.selected_by!r} must be a plain str field (or "
+                f"str | ModelRef) on {payload_type.__name__!r} (got {ann!r}); "
+                "the hub overlays the live allowed-value enum onto this "
+                "field, it is never baked into the SDK type"
             )
 
 

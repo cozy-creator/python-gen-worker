@@ -328,8 +328,9 @@ def _stamp_lora_family(binding_manifest: Dict[str, Any], compile_family: str, co
 
 
 def _model_ref_to_manifest(ref: Any) -> Dict[str, Any]:
-    """``default_ref``/curated-choice ref shape shared by the slots block:
-    ``{source, path, tag?, flavor?}`` — a structured ModelRef (pgw#511)."""
+    """``default_checkpoint``/curated-choice ref shape shared by the slots
+    block: ``{source, path, tag?, flavor?}`` — a structured ModelRef
+    (pgw#511)."""
     out: Dict[str, Any] = {"source": ref.source, "path": ref.path}
     if ref.tag and ref.tag != "latest":
         out["tag"] = ref.tag
@@ -349,17 +350,17 @@ def _slot_to_manifest(name: str, slot: Slot, *, compile_family: str) -> Dict[str
     }
     if slot.selected_by:
         out["selected_by"] = slot.selected_by
-    if slot.default is not None:
-        out["default_ref"] = _model_ref_to_manifest(slot.default)
+    if slot.default_checkpoint is not None:
+        out["default_checkpoint"] = _model_ref_to_manifest(slot.default_checkpoint)
     # Compile(family=...) is the explicit, functionally-load-bearing
     # declaration (compile-cache keying) — it wins over the slot's own
-    # fallback-preset registration when both are present, mirroring
+    # default_config-preset registration when both are present, mirroring
     # _stamp_lora_family's precedence for the bindings-block stamp below.
     family = compile_family or slot.family
     if family:
         out["family"] = family
-    if slot.fallback is not None:
-        out["fallback_defaults"] = msgspec.to_builtins(slot.fallback)
+    if slot.default_config is not None:
+        out["default_config"] = msgspec.to_builtins(slot.default_config)
     return out
 
 
@@ -591,7 +592,7 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
         # allow_lora without family). pgw#519: the same stamp applies to
         # model.choices[].binding rows, not just top-level bindings. pgw#520:
         # a Slot-declared binding with no Compile(family=...) may still carry
-        # a family via its own fallback preset's registration — that's what
+        # a family via its own default_config preset's registration — that's what
         # es.slot_family reconciles (Compile(family=) wins when both exist).
         compile_family = es.compile.family if es.compile is not None else ""
         for key, block in bindings_block.items():

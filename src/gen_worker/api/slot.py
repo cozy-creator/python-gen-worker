@@ -13,10 +13,10 @@ per-repo pricing, hot hints) moved to platform config.
         "pipeline": Slot(
             StableDiffusionXLPipeline,
             selected_by="model",
-            default=HF("stabilityai/stable-diffusion-xl-base-1.0"),
-            fallback=SdxlDefaults(steps=28, guidance=6.0),
+            default_checkpoint=HF("stabilityai/stable-diffusion-xl-base-1.0"),
+            default_config=SdxlDefaults(steps=28, guidance=6.0),
         ),
-        "vae": Slot(AutoencoderKL, default=HF("madebyollin/sdxl-vae-fp16-fix")),
+        "vae": Slot(AutoencoderKL, default_checkpoint=HF("madebyollin/sdxl-vae-fp16-fix")),
     })
     class Generate:
         def setup(self, pipeline: StableDiffusionXLPipeline, vae: AutoencoderKL) -> None: ...
@@ -26,8 +26,8 @@ per-repo pricing, hot hints) moved to platform config.
             steps = p.steps if p.steps is not None else resolved.defaults.steps
 
 A bare :class:`~gen_worker.api.binding.ModelRef` value in ``models={}``/
-``model=`` is sugar for ``Slot(<inferred pipeline class>, default=ref)`` —
-the ``@endpoint`` decorator performs that inference from the
+``model=`` is sugar for ``Slot(<inferred pipeline class>, default_checkpoint=ref)``
+— the ``@endpoint`` decorator performs that inference from the
 ``setup()``/handler parameter annotation the same way it always resolved a
 bare ref's slot NAME.
 """
@@ -58,60 +58,62 @@ class Slot(Generic[D]):
     ``str`` (the schema enum of legal values is overlaid live by the hub,
     never baked into the SDK).
 
-    ``default`` seeds the hub mapping at first publish and is the ONLY
-    resolution source in hub-less mode (``cozy run``, hermetic tests) — a
-    live hub mapping always wins when present. ``None`` means this slot has
-    no code-side bootstrap ref: it only resolves against a hub mapping.
+    ``default_checkpoint`` seeds the hub mapping at first publish and is the
+    ONLY resolution source in hub-less mode (``cozy run``, hermetic tests) —
+    a live hub mapping always wins when present. ``None`` means this slot
+    has no code-side bootstrap ref: it only resolves against a hub mapping.
 
-    ``fallback`` is this slot's code-side :class:`FamilyDefaults` preset,
-    used when the resolved repo carries no inference-defaults metadata (the
-    th#767 precedence: payload > repo metadata > this fallback).
+    ``default_config`` is this slot's code-side :class:`FamilyDefaults`
+    preset, used when the resolved repo carries no inference-defaults
+    metadata. It LOSES to repo metadata (th#767 precedence: payload > repo
+    metadata > this default_config — a recipe of last resort).
     """
 
-    __slots__ = ("pipeline_cls", "selected_by", "default", "fallback")
+    __slots__ = ("pipeline_cls", "selected_by", "default_checkpoint", "default_config")
 
     def __init__(
         self,
         pipeline_cls: type,
         *,
         selected_by: str = "",
-        default: Optional[ModelRef] = None,
-        fallback: Optional[D] = None,
+        default_checkpoint: Optional[ModelRef] = None,
+        default_config: Optional[D] = None,
     ) -> None:
         if not isinstance(pipeline_cls, type):
             raise TypeError(
                 f"Slot(pipeline_cls=...) must be a class, got "
                 f"{type(pipeline_cls).__name__}"
             )
-        if default is not None and not isinstance(default, ModelRef):
+        if default_checkpoint is not None and not isinstance(default_checkpoint, ModelRef):
             raise TypeError(
-                f"Slot(default=...) must be a ModelRef (Hub/HF/Civitai/"
-                f"ModelScope), got {type(default).__name__}"
+                f"Slot(default_checkpoint=...) must be a ModelRef (Hub/HF/"
+                f"Civitai/ModelScope), got {type(default_checkpoint).__name__}"
             )
-        if fallback is not None and not isinstance(fallback, FamilyDefaults):
+        if default_config is not None and not isinstance(default_config, FamilyDefaults):
             raise TypeError(
-                f"Slot(fallback=...) must be a FamilyDefaults subclass "
-                f"instance, got {type(fallback).__name__}"
+                f"Slot(default_config=...) must be a FamilyDefaults subclass "
+                f"instance, got {type(default_config).__name__}"
             )
         self.pipeline_cls = pipeline_cls
         self.selected_by = str(selected_by or "").strip()
-        self.default = default
-        self.fallback = fallback
+        self.default_checkpoint = default_checkpoint
+        self.default_config = default_config
 
     @property
     def family(self) -> str:
-        """Family name from ``fallback``'s registration, or ``""`` when this
-        slot has no fallback (the endpoint's ``Compile(family=...)`` is the
-        other source the decorator reconciles against — see
-        ``gen_worker.api.decorators``)."""
-        if self.fallback is None:
+        """Family name from ``default_config``'s registration, or ``""``
+        when this slot has no default_config (the endpoint's
+        ``Compile(family=...)`` is the other source the decorator
+        reconciles against — see ``gen_worker.api.decorators``)."""
+        if self.default_config is None:
             return ""
-        return self.fallback.family
+        return self.default_config.family
 
     def __repr__(self) -> str:  # pragma: no cover - debug aid
         return (
             f"Slot({self.pipeline_cls.__name__}, selected_by={self.selected_by!r}, "
-            f"default={self.default!r}, fallback={self.fallback!r})"
+            f"default_checkpoint={self.default_checkpoint!r}, "
+            f"default_config={self.default_config!r})"
         )
 
 
@@ -143,24 +145,25 @@ def resolve_slot(
     family: str = "",
     raw_metadata_json: str = "",
 ) -> "ResolvedSlot[D]":
-    """Merge repo-metadata inference defaults over ``slot.fallback`` — the
-    pgw#520 resolution chain shared by the production executor and the
-    hub-less CLI path.
+    """Merge repo-metadata inference defaults over ``slot.default_config``
+    — the pgw#520 resolution chain shared by the production executor and
+    the hub-less CLI path.
 
     Precedence: repo metadata (``raw_metadata_json``, when non-empty) wins
-    over ``slot.fallback`` entirely (a repo either fully specifies its
+    over ``slot.default_config`` entirely (a repo either fully specifies its
     family vocabulary or it doesn't — tensorhub validates the whole object
     at metadata-PUT time, so a partial merge would silently hide invalid
-    metadata behind the code default). Missing metadata AND no fallback is a
-    clear error, not a silent empty object.
+    metadata behind the code default). ``default_config`` LOSES to repo
+    metadata — it is a recipe of last resort. Missing metadata AND no
+    default_config is a clear error, not a silent empty object.
     """
     if ref is None:
         raise ValueError(
             f"slot {name!r}: no resolved model ref for this request (no "
-            "Slot(default=...) and no hub resolution)"
+            "Slot(default_checkpoint=...) and no hub resolution)"
         )
     fam = str(family or slot.family or "").strip()
-    defaults_cls = type(slot.fallback) if slot.fallback is not None else (
+    defaults_cls = type(slot.default_config) if slot.default_config is not None else (
         family_for(fam) if fam else None
     )
     raw = (raw_metadata_json or "").strip()
@@ -168,9 +171,9 @@ def resolve_slot(
         if defaults_cls is None:
             raise ValueError(
                 f"slot {name!r}: repo metadata present but no family is "
-                "resolvable (no Slot(fallback=...) and no Compile(family=...) "
-                "on the endpoint) — cannot determine which vocabulary to "
-                "decode it against"
+                "resolvable (no Slot(default_config=...) and no "
+                "Compile(family=...) on the endpoint) — cannot determine "
+                "which vocabulary to decode it against"
             )
         try:
             defaults: Any = msgspec.json.decode(raw.encode("utf-8"), type=defaults_cls)
@@ -180,11 +183,11 @@ def resolve_slot(
                 f"{defaults_cls.__name__} validation: {exc}"
             ) from exc
         return ResolvedSlot(ref=ref, defaults=defaults)
-    if slot.fallback is not None:
-        return ResolvedSlot(ref=ref, defaults=slot.fallback)
+    if slot.default_config is not None:
+        return ResolvedSlot(ref=ref, defaults=slot.default_config)
     raise ValueError(
         f"slot {name!r}: no repo inference-defaults metadata for the "
-        "resolved model and no Slot(fallback=...) on the endpoint — "
+        "resolved model and no Slot(default_config=...) on the endpoint — "
         "nothing to resolve this slot's defaults from"
     )
 
