@@ -1,0 +1,131 @@
+name: Nightly GPU tests
+
+# gw#429: real-generation + torch/CUDA-dependent tests run here, nightly, on
+# ONE rented GPU pod — never in PR/push CI (ci.yml stays torch-less and fast;
+# default `pytest` is laptop-safe, see README's "Running tests").
+#
+# Cost: ~$0.50-1/night (one on-demand RTX 4090, community cloud, ~20-30 min
+# rental). Setup (one-time, human): add repo secret RUNPOD_API_KEY (a RunPod
+# account API key) — see HUMAN_MUST_DO.md in the tracker repo. This workflow
+# fails fast with a clear message until that secret exists.
+
+on:
+  schedule:
+    - cron: "0 9 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: nightly-gpu
+  cancel-in-progress: false
+
+env:
+  POD_NAME: gw-nightly-${{ github.run_id }}
+
+jobs:
+  gpu-suite:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check RUNPOD_API_KEY is configured
+        run: |
+          if [ -z "${{ secrets.RUNPOD_API_KEY }}" ]; then
+            echo "::error::RUNPOD_API_KEY repo secret is not set — this workflow is dormant until it's added (see HUMAN_MUST_DO.md)."
+            exit 1
+          fi
+
+      - name: Generate ephemeral SSH keypair
+        run: |
+          ssh-keygen -t ed25519 -f "${{ runner.temp }}/nightly_key" -N "" -C "gw-nightly-ci" -q
+          echo "SSH_PRIVKEY=${{ runner.temp }}/nightly_key" >> "$GITHUB_ENV"
+          echo "SSH_PUBKEY=$(cat "${{ runner.temp }}/nightly_key.pub")" >> "$GITHUB_ENV"
+
+      - name: Rent GPU pod
+        id: pod
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+        run: |
+          set +e
+          out=$(.github/scripts/nightly_rent_pod.sh)
+          rc=$?
+          set -e
+          echo "$out"
+          eval "$(echo "$out" | grep -E '^POD_(ID|IP|PORT)=')"
+          [ -n "${POD_ID:-}" ] && echo "pod_id=$POD_ID" >> "$GITHUB_OUTPUT"
+          [ -n "${POD_IP:-}" ] && echo "pod_ip=$POD_IP" >> "$GITHUB_OUTPUT"
+          [ -n "${POD_PORT:-}" ] && echo "pod_port=$POD_PORT" >> "$GITHUB_OUTPUT"
+          exit $rc
+
+      - name: Run suite on pod
+        id: suite
+        if: always() && steps.pod.outputs.pod_ip != ''
+        run: |
+          scp -P "${{ steps.pod.outputs.pod_port }}" -i "$SSH_PRIVKEY" \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            .github/scripts/nightly_remote_suite.sh \
+            "root@${{ steps.pod.outputs.pod_ip }}:/root/nightly_remote_suite.sh"
+          ssh -p "${{ steps.pod.outputs.pod_port }}" -i "$SSH_PRIVKEY" \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 \
+            "root@${{ steps.pod.outputs.pod_ip }}" \
+            "REPO_SHA=${{ github.sha }} bash /root/nightly_remote_suite.sh"
+
+      - name: Collect results
+        if: always() && steps.pod.outputs.pod_ip != ''
+        run: |
+          scp -P "${{ steps.pod.outputs.pod_port }}" -i "$SSH_PRIVKEY" \
+            -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+            "root@${{ steps.pod.outputs.pod_ip }}:/workspace/gen-worker/*-junit.xml" . || true
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: nightly-gpu-results
+          path: "*-junit.xml"
+          if-no-files-found: ignore
+
+      - name: Terminate pod (required — must not survive the job)
+        id: terminate
+        if: always() && steps.pod.outputs.pod_id != ''
+        env:
+          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+          POD_ID: ${{ steps.pod.outputs.pod_id }}
+        run: .github/scripts/nightly_teardown_pod.sh
+
+      - name: Workflow summary
+        if: always()
+        run: |
+          {
+            echo "## Nightly GPU tests"
+            echo ""
+            echo "- pod: \`${{ steps.pod.outputs.pod_id || 'not created' }}\`"
+            echo "- suite: ${{ steps.suite.outcome || 'skipped' }}"
+            echo "- teardown: ${{ steps.terminate.outcome || 'skipped' }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Notify on failure (pinned tracking issue)
+        if: >-
+          always() &&
+          (steps.pod.outcome == 'failure' ||
+           steps.suite.outcome == 'failure' ||
+           steps.terminate.outcome == 'failure')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title="Nightly GPU tests failing"
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          existing=$(gh issue list --repo "${{ github.repository }}" \
+            --search "$title in:title" --state open --json number -q '.[0].number' 2>/dev/null || true)
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --repo "${{ github.repository }}" --body "Run failed: $run_url"
+          else
+            gh issue create --repo "${{ github.repository }}" --title "$title" --body "Run failed: $run_url"
+          fi
+
+      - name: Fail if the suite itself failed
+        if: always() && steps.suite.outcome == 'failure'
+        run: exit 1

@@ -129,6 +129,19 @@ Plain `uv run pytest` would fall through to a global launcher — always pass
 `~/.local` install silently shadows the working tree (`tests/conftest.py`
 hard-fails if `gen_worker` resolves outside `src/`).
 
+`pytest` (no args) is laptop-safe: no GPU, no real model downloads, no real
+generation. Tests that need those carry `@pytest.mark.gpu` and are excluded
+by default (`addopts = -m 'not gpu'` in `pyproject.toml`); most also
+module-gate on an env var so they skip cleanly even if you run them by name.
+Run the heavy tier explicitly:
+
+```bash
+GEN_WORKER_GPU_SMOKE=1 uv run --extra dev --extra torch --extra images pytest -m gpu
+```
+
+This is what the [nightly workflow](.github/workflows/nightly.yml) runs on a
+rented GPU pod (gw#429) — never in PR/push CI.
+
 ## Documentation
 
 - [docs/endpoint-authoring.md](docs/endpoint-authoring.md) — the `@endpoint`

@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **Nightly GPU test tier (gw#429).** Real-generation and torch/CUDA-dependent
+  tests now run nightly on a rented RTX 4090 pod
+  (`.github/workflows/nightly.yml`), never ambient. Default `pytest` stays
+  laptop-safe: heavy tests carry `@pytest.mark.gpu`, excluded by default
+  (`addopts = -m 'not gpu'`); run explicitly with `pytest -m gpu`.
+
 ## 0.12.3
 
 - **SVDQuant/nunchaku 4-bit loader mode (gw#415).** A `#svdq-fp4-rN` /

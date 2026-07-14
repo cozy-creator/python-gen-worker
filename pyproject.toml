@@ -146,7 +146,17 @@ ignore = ["E402"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["integration: network tests against real tiny HF models"]
+markers = [
+    "integration: network tests against real tiny HF models",
+    # gw#429: real GPU generation / heavy hardware-bound runs. Excluded by
+    # default (see addopts below) — nightly-only, on a rented pod. Run
+    # explicitly with `pytest -m gpu`; an explicit `-m` on the command line
+    # overrides addopts's default exclusion.
+    "gpu: real GPU generation and other heavy hardware-bound runs — nightly tier only",
+]
+# Laptop-safe by default: excludes @pytest.mark.gpu. `pytest -m gpu` runs the
+# heavy tier explicitly (see README's Running tests section).
+addopts = "-m 'not gpu'"
 # Prefer the working-tree source so a bare `pytest` never tests a stale wheel.
 # The supported command is still `uv run --extra dev pytest` (pytest is a dev
 # extra); tests/conftest.py hard-fails if gen_worker resolves outside src/.
