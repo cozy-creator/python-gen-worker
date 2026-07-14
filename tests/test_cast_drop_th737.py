@@ -163,8 +163,6 @@ class _UpsamplerShim:
 
 def test_executor_drops_cast_on_denoiserless_snapshot(
         tmp_path, monkeypatch, caplog) -> None:
-    monkeypatch.setenv("GEN_WORKER_FORBID_CPU_OFFLOAD", "0")
-
     class Endpoint:
         def setup(self, m: _UpsamplerShim) -> None:
             self.m = m
@@ -203,7 +201,6 @@ class _DenoiserShim(_DenoiserPipe):
 
 
 def test_executor_keeps_cast_on_denoiser_snapshot(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("GEN_WORKER_FORBID_CPU_OFFLOAD", "0")
     monkeypatch.setattr(
         "gen_worker.models.loading.bf16_resident_fits", lambda *a, **k: False)
 

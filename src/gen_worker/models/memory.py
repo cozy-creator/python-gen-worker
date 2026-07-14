@@ -42,6 +42,7 @@ _DEFAULT_GROUP_OFFLOAD_THRESHOLD_GB = 6.0
 _DEFAULT_SAFETY_MARGIN_GB = 2.0
 # Free headroom beyond the requirement above which "off" beats "vae_only".
 _DEFAULT_OFF_HEADROOM_GB = 8.0
+_GGUF_RESIDENT_MARGIN_GB = 0.5
 
 # Sentinel attribute set on pipelines to make apply_low_vram_config idempotent.
 _COZY_MODE_ATTR = "_cozy_low_vram_mode"
@@ -142,32 +143,6 @@ def degraded_log_line(
         parts.append(f"free_gb={free_gb:.1f}")
     line = " ".join(parts)
     return f"{line}: {detail}" if detail else line
-
-
-def cpu_offload_forbidden() -> bool:
-    """True when GEN_WORKER_FORBID_CPU_OFFLOAD=1 vetoes any CPU-touching
-    placement or demotion. Non-raising predicate for runtime callers (the
-    executor's OOM-demotion path, gw#463). Deliberately NOT consulted by
-    serve planning (Paul's ruling 2026-07-10: needing offload is never a
-    serveability refusal)."""
-    return os.environ.get("GEN_WORKER_FORBID_CPU_OFFLOAD") == "1"
-
-
-def _forbid_cpu_inference(detail: str) -> None:
-    """Raise when GEN_WORKER_FORBID_CPU_OFFLOAD=1 vetoes a CPU-touching placement.
-
-    Operator kill-switch for dev machines so agents/tests can't silently melt
-    the box with CPU-offloaded real-model inference; those runs belong on the
-    GPU CI lane. Fires only at actual pipeline-placement time, i.e. only when
-    real weights are about to touch the CPU on a box whose operator explicitly
-    forbade that. Unset everywhere in production.
-    """
-    if cpu_offload_forbidden():
-        raise RuntimeError(
-            f"GEN_WORKER_FORBID_CPU_OFFLOAD=1: refusing {detail}. "
-            "Real-model inference that does not fit in free VRAM must run on "
-            "the GPU CI lane, not this machine."
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -654,9 +629,6 @@ def _apply_group_offload(
     *,
     offload_to_disk_path: Optional[str],
 ) -> bool:
-    # Mechanism-level guard (gw#521): every offload entry point refuses under
-    # the kill-switch, not just the apply_low_vram_config policy layer.
-    _forbid_cpu_inference("group offload (weights stream from CPU/disk)")
     try:
         import torch
     except Exception:
@@ -745,6 +717,29 @@ def _apply_group_offload(
     return any_applied
 
 
+def _gguf_resident_override(
+    pipeline: Any, effective: Mode, log: logging.Logger,
+) -> Mode:
+    """Keep a selected GGUF rung resident when its remaining weights fit."""
+    if effective not in _CPU_OFFLOAD_MODES or not getattr(
+        pipeline, "_cozy_gguf_quant", None
+    ):
+        return effective
+    total = estimate_pipeline_size_gb(pipeline)
+    remaining = max(0.0, total - estimate_cuda_resident_gb(pipeline))
+    available = get_available_vram_gb()
+    if total > 0.0 and remaining + _GGUF_RESIDENT_MARGIN_GB <= available:
+        log.info(
+            "low_vram: GGUF pipeline fits resident (%.2f GB remaining, "
+            "%.2f GB free); using vae_only instead of %s",
+            remaining,
+            available,
+            effective,
+        )
+        return "vae_only"
+    return effective
+
+
 def place_pipeline(
     pipeline: Any,
     *,
@@ -772,12 +767,12 @@ def place_pipeline(
         import torch
 
         if not torch.cuda.is_available():
-            _forbid_cpu_inference("CPU-only inference (no CUDA available)")
             return {"mode": "cpu"}
     except Exception:
-        _forbid_cpu_inference("CPU-only inference (torch/CUDA unavailable)")
         return {"mode": "cpu"}
     effective = select_auto_mode(pipeline=pipeline) if mode == "auto" else mode
+    if mode == "auto":
+        effective = _gguf_resident_override(pipeline, effective, log)
     requested = effective
     demotions = 0
     while True:
@@ -857,8 +852,17 @@ def apply_low_vram_config(
             pipeline=pipeline, model_size_gb=model_size_gb, peak_vram_gb=peak_vram_gb,
         )
         log.info("low_vram: auto-selected mode=%s", effective_mode)
-    if effective_mode in _CPU_OFFLOAD_MODES:
-        _forbid_cpu_inference(f"CPU-offloaded inference (mode={effective_mode})")
+    if effective_mode in ("group_offload", "sequential") and getattr(
+        pipeline, "_cozy_gguf_quant", None
+    ):
+        log.warning(
+            "low_vram: %s is unsupported for a GGUF pipeline; using "
+            "model_offload",
+            effective_mode,
+        )
+        effective_mode = "model_offload"
+    if mode == "auto":
+        effective_mode = _gguf_resident_override(pipeline, effective_mode, log)
 
     applied: Dict[str, Any] = {
         "mode": effective_mode,
@@ -904,7 +908,6 @@ def apply_low_vram_config(
             )
 
     if effective_mode == "model_offload":
-        _forbid_cpu_inference("model CPU offload")  # mechanism guard (gw#521)
         _pin_fragile_vae(pipeline, applied, log)
         ok = _call_if_present(pipeline, "enable_model_cpu_offload")
         if not ok:
@@ -925,7 +928,6 @@ def apply_low_vram_config(
             effective_mode = "sequential"
 
     if effective_mode == "sequential":
-        _forbid_cpu_inference("sequential CPU offload")  # mechanism guard (gw#521)
         _pin_fragile_vae(pipeline, applied, log)
         _move_pipeline_to_cpu(pipeline)
         flush_memory()
@@ -1062,7 +1064,6 @@ __all__ = [
     "next_offload_rung",
     "deeper_offload_mode",
     "is_cuda_oom",
-    "cpu_offload_forbidden",
     "degraded_log_line",
     "OFFLOAD_LADDER",
     "with_oom_retry",

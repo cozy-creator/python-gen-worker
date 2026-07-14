@@ -1,10 +1,4 @@
-"""setup() receives LOADED models (not path strings) + fatal errors carry class+detail.
-
-GEN_WORKER_FORBID_CPU_OFFLOAD: this box exports =1. The injection tests drive
-`_load_injected_model` through the real `place_pipeline` call with a ~0-byte
-`_FakePipe` stub (no real weights, no CUDA touch beyond the veto check itself),
-so they scope the veto OFF explicitly (test_oom_degraded_ladder.py pattern).
-"""
+"""setup() receives LOADED models (not path strings) + fatal errors carry class+detail."""
 import gen_worker.cli.run as cli_run
 from gen_worker.executor import _map_exception
 from gen_worker.pb import worker_scheduler_pb2 as pb
@@ -35,7 +29,6 @@ def test_run_setup_loads_annotated_slot(tmp_path, monkeypatch):
             seen["pipeline"] = pipeline
 
     monkeypatch.setattr(cli_run, "_INJECTED_CACHE", {})
-    monkeypatch.setenv("GEN_WORKER_FORBID_CPU_OFFLOAD", "0")  # see module docstring
     cli_run.run_setup(EP(), {"pipeline": str(tmp_path)})
     assert isinstance(seen["pipeline"], _FakePipe)
     assert seen["pipeline"].loaded_from == str(tmp_path)
@@ -75,7 +68,6 @@ def test_run_setup_loads_module_layout_slot(tmp_path, monkeypatch):
             seen["vae"] = vae
 
     monkeypatch.setattr(cli_run, "_INJECTED_CACHE", {})
-    monkeypatch.setenv("GEN_WORKER_FORBID_CPU_OFFLOAD", "0")  # see module docstring
     cli_run.run_setup(EP(), {"vae": str(tmp_path)})
     assert isinstance(seen["vae"], _FakePipe)
     assert seen["vae"].loaded_from == str(tmp_path)

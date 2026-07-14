@@ -100,6 +100,7 @@ FIT_SVDQ_FP4 = "svdq_fp4"
 FIT_SVDQ_INT4 = "svdq_int4"
 FIT_EMERGENCY_FP8 = "emergency_fp8"
 FIT_EMERGENCY = "emergency_quant"
+FIT_GGUF = "gguf_quant"
 FIT_OFFLOAD = "offload"
 FIT_INCOMPATIBLE = "incompatible"
 
@@ -254,5 +255,4 @@ def variant_fit(
     return FIT_OFFLOAD, (
         f"declares {float(vram):g} GB VRAM, {float(free_vram_gb):.1f} GB free"
     )
-
 

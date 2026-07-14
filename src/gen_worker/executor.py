@@ -47,7 +47,6 @@ from .models import disk_gc
 from .models import provision
 from .models import residency as residency_mod
 from .models.memory import (
-    cpu_offload_forbidden,
     deeper_offload_mode,
     degraded_log_line,
     estimate_cuda_resident_gb,
@@ -2129,7 +2128,9 @@ class Executor:
                         needed_gb=estimate_pipeline_size_gb(pipe),
                         detail="CUDA OOM at load; pipeline placed offloaded",
                     )
-                if slot_share and str(placed.get("mode") or "") not in ("", "off", "cpu"):
+                if slot_share and str(placed.get("mode") or "") not in (
+                    "", "off", "vae_only", "cpu",
+                ):
                     raise RetryableError(
                         f"lane {slot!r} of {spec.name} placed "
                         f"{placed.get('mode')!r}: shared-component lanes "
@@ -3064,8 +3065,6 @@ class Executor:
             return False
         if spec.output_mode == "stream":
             return False  # chunks already emitted; a replay would duplicate them
-        if cpu_offload_forbidden():
-            return False  # dev-box guard: fail the job rather than CPU-offload
         pipes: List[Tuple[str, Any]] = []
         for slot in spec.models:
             ref = wire_ref(spec.models[slot])

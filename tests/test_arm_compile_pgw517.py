@@ -219,7 +219,6 @@ def _executor(spec: EndpointSpec, tmp_path: Path, sent: list) -> Executor:
 def test_executor_arms_self_loaded_pipeline_via_arm_compile(
     tmp_path, monkeypatch
 ) -> None:
-    monkeypatch.setenv("GEN_WORKER_FORBID_CPU_OFFLOAD", "0")
     applied: list[tuple] = []
 
     def _fake_apply(pipeline, cfg, *, cache_ready, guard=True):
@@ -265,7 +264,6 @@ def test_executor_never_arms_without_an_explicit_call(tmp_path, monkeypatch) -> 
     pre-pgw#517 bug — discovery now blocks it, but EndpointSpec can still be
     hand-built like this in a test; the executor must not paper over it by
     auto-arming something it never saw)."""
-    monkeypatch.setenv("GEN_WORKER_FORBID_CPU_OFFLOAD", "0")
     applied: list = []
     monkeypatch.setattr(cc, "apply", lambda *a, **k: applied.append(1) or True)
 

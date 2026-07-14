@@ -7,12 +7,6 @@ DDPMPipeline subclass whose ``.to("cuda")`` raises the real
 touching CUDA — so every fallback line (place_pipeline ladder, executor
 demotion bookkeeping, retry-once, FnDegraded re-emit) executes end to end on a
 CUDA-less host.
-
-GEN_WORKER_FORBID_CPU_OFFLOAD: this box exports =1. Tests that exercise the
-degrade path scope it OFF explicitly — justified because nothing real runs:
-the pipelines are ~1 MB shims, the offload hooks only record, and no model
-inference (GPU or CPU) ever executes. The veto behavior itself is asserted in
-the dedicated FORBID tests below.
 """
 
 import asyncio
@@ -86,8 +80,7 @@ class ShimPipe(DDPMPipeline):
 
 @pytest.fixture()
 def shim_env(monkeypatch, tmp_path_factory):
-    """CUDA-less ladder harness: cuda 'present', 20 GB free, veto OFF."""
-    monkeypatch.setenv("GEN_WORKER_FORBID_CPU_OFFLOAD", "0")  # see module docstring
+    """CUDA-less ladder harness: cuda 'present', 20 GB free."""
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(memory, "get_available_vram_gb", lambda *a, **k: 20.0)
     ShimPipe.reset()
@@ -165,13 +158,6 @@ def test_planned_offload_skips_doomed_resident_attempt(shim_env) -> None:
     assert applied["mode"] == "model_offload"
     assert "oom_demotions" not in applied
     assert ShimPipe.to_cuda_attempts == 0  # ie#369: no doomed resident attempt
-
-
-def test_forbid_env_still_vetoes_load_demotion(shim_env, monkeypatch) -> None:
-    monkeypatch.setenv("GEN_WORKER_FORBID_CPU_OFFLOAD", "1")
-    pipe = ShimPipe.from_pretrained(str(shim_env))
-    with pytest.raises(RuntimeError, match="GEN_WORKER_FORBID_CPU_OFFLOAD"):
-        memory.place_pipeline(pipe, ref="acme/tiny")
 
 
 def test_demote_pipeline_walks_and_terminates(shim_env) -> None:
@@ -342,35 +328,6 @@ def test_inference_oom_in_degraded_mode_fails_retryable(shim_env, tmp_path) -> N
         assert calls["n"] == 4
         assert _result(sent, "r2").status == pb.JOB_STATUS_RETRYABLE
         assert ex.degraded_floor["acme/tiny"] == "group_offload"
-
-    asyncio.run(_go())
-
-
-def test_forbid_env_disables_inference_degrade(shim_env, tmp_path, monkeypatch) -> None:
-    calls = {"n": 0}
-
-    class Endpoint:
-        def setup(self, m: ShimPipe) -> None:
-            self.m = m
-
-        def run(self, ctx, payload: _In) -> _Out:
-            calls["n"] += 1
-            raise OOM("CUDA out of memory")
-
-    ShimPipe.reset(oom_on_cuda=False)
-    spec = _spec(Endpoint)
-    sent: list = []
-
-    async def _go() -> None:
-        ex = _executor(spec, tmp_path, shim_env, sent)
-        # Veto ON before anything runs: load still fits resident (no OOM at
-        # load, so no CPU-touching placement), but the mid-inference OOM must
-        # NOT degrade on a forbidding box.
-        monkeypatch.setenv("GEN_WORKER_FORBID_CPU_OFFLOAD", "1")
-        await _run_job(ex, "r1")
-        assert calls["n"] == 1  # no degraded retry on a forbidding box
-        assert _result(sent, "r1").status == pb.JOB_STATUS_RETRYABLE
-        assert ex.degraded_floor == {}
 
     asyncio.run(_go())
 

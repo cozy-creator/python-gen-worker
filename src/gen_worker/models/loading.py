@@ -451,16 +451,7 @@ def apply_block_window_offload(
     device placement too). Composes with fp8 storage windows: fp8 bytes
     stream over PCIe (half the traffic), upcast happens on-device.
 
-    PRECEDENCE: ``GEN_WORKER_FORBID_CPU_OFFLOAD=1`` VETOES this rung — the
-    operator kill-switch wins over degraded mode, raising instead of parking
-    weights (same precedence as the executor's OOM-demotion path, gw#463).
-
     Returns True when any module was armed. Idempotent per module."""
-    from .memory import _forbid_cpu_inference
-
-    _forbid_cpu_inference(
-        "block-window host-RAM weight offload (degraded rung 2, ie#468)"
-    )
     try:
         import torch
     except ImportError:
@@ -540,6 +531,73 @@ def block_offload_active(obj: Any) -> bool:
         getattr(getattr(obj, name, None), "_cozy_block_offload_applied", False)
         for name in _BLOCK_OFFLOAD_COMPONENTS
     )
+
+
+def detect_gguf_snapshot(path: Path) -> Optional[tuple[Path, str]]:
+    """Return the GGUF denoiser and qtype in a composed diffusers snapshot."""
+    p = Path(path)
+    if not p.is_dir() or not (p / "model_index.json").exists():
+        return None
+    from .gguf_local import gguf_qtype, read_marker
+
+    marker = read_marker(p)
+    if marker:
+        gguf = p / str(marker.get("gguf_path") or "")
+        qtype = str(marker.get("qtype") or "")
+        if gguf.is_file() and qtype:
+            return gguf, qtype
+    ggufs = sorted(x for x in p.rglob("*.gguf") if x.is_file())
+    if len(ggufs) != 1:
+        return None
+    tail = ggufs[0].stem.replace(".", "-").rsplit("-", 1)[-1].lower()
+    qtype = gguf_qtype("gguf-" + tail)
+    return (ggufs[0], qtype) if qtype else None
+
+
+def load_gguf_pipeline(
+    cls: Any,
+    path: Path,
+    gguf_file: Path,
+    *,
+    components: Optional[Dict[str, Any]] = None,
+) -> Any:
+    """Load a GGUF denoiser into the remaining components' base tree."""
+    import importlib
+
+    import torch
+    from diffusers import GGUFQuantizationConfig
+
+    path = Path(path)
+    index = json.loads((path / "model_index.json").read_text("utf-8"))
+    component = next(
+        (
+            name
+            for name in _FP8_STORAGE_COMPONENTS
+            if isinstance(index.get(name), list) and len(index[name]) == 2
+        ),
+        None,
+    )
+    if component is None:
+        raise ValueError(
+            f"GGUF composition in {path} has no transformer/unet component"
+        )
+    module_name, class_name = index[component]
+    denoiser_cls = getattr(importlib.import_module(str(module_name)), str(class_name))
+    compute = torch.bfloat16
+    denoiser = denoiser_cls.from_single_file(
+        str(gguf_file),
+        config=str(path / component),
+        quantization_config=GGUFQuantizationConfig(compute_dtype=compute),
+        torch_dtype=compute,
+    )
+    kwargs = dict(components or {})
+    kwargs[component] = denoiser
+    pipe = cls.from_pretrained(str(path), torch_dtype=compute, **kwargs)
+    for name in _FP8_TEXT_ENCODER_COMPONENTS:
+        text_encoder = getattr(pipe, name, None)
+        if text_encoder is not None and hasattr(text_encoder, "parameters"):
+            apply_fp8_storage(text_encoder, compute_dtype=compute)
+    return pipe
 
 
 def _single_file_checkpoint(path: Path) -> Optional[Path]:
@@ -1039,6 +1097,17 @@ def load_from_pretrained(
             cls, Path(path), w8a8_art, compute_dtype=compute,
             components=components,
         )
+    gguf_art = detect_gguf_snapshot(Path(path))
+    if gguf_art is not None and callable(getattr(cls, "from_pretrained", None)):
+        gguf_file, qtype = gguf_art
+        pipe = load_gguf_pipeline(
+            cls, Path(path), gguf_file, components=components,
+        )
+        try:
+            pipe._cozy_gguf_quant = qtype
+        except Exception:
+            pass
+        return pipe
     kwargs: Dict[str, Any] = {}
     if components:
         kwargs.update(components)
@@ -1156,6 +1225,7 @@ __all__ = [
     "get_torch_dtype",
     "detect_diffusers_variant",
     "detect_on_disk_dtype",
+    "detect_gguf_snapshot",
     "safetensors_file_valid",
     "read_on_disk_quant_config",
     "synthesize_quantization_config",
@@ -1172,4 +1242,5 @@ __all__ = [
     "snapshot_component_weight_bytes",
     "snapshot_weight_bytes",
     "load_from_pretrained",
+    "load_gguf_pipeline",
 ]

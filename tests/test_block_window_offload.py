@@ -2,8 +2,8 @@
 
 The gw#460 windows in reverse: per-block weights rest in host RAM and stream
 to the execution device only for that block's forward. CPU-safe: hook order,
-rebind correctness, fp8-window composition, and the FORBID_CPU_OFFLOAD veto
-precedence need no GPU (``device="cpu"`` exercises the full rebind path).
+rebind correctness, and fp8-window composition need no GPU
+(``device="cpu"`` exercises the full rebind path).
 """
 
 from __future__ import annotations
@@ -36,25 +36,6 @@ def _forward(model: Any, ids: Any) -> Any:
     with torch.no_grad():
         out = model(input_ids=ids, attention_mask=torch.ones_like(ids))
     return out.last_hidden_state.float()
-
-
-@pytest.fixture(autouse=True)
-def _no_forbid(monkeypatch):
-    # This dev box exports the veto; the non-veto tests need it clear.
-    monkeypatch.delenv("GEN_WORKER_FORBID_CPU_OFFLOAD", raising=False)
-
-
-def test_forbid_cpu_offload_veto_wins(monkeypatch):
-    """PRECEDENCE: the operator kill-switch beats degraded rung 2 — the call
-    raises before any weight is parked (same rule as the gw#463 OOM path)."""
-    monkeypatch.setenv("GEN_WORKER_FORBID_CPU_OFFLOAD", "1")
-    model = _tiny_t5()
-    before = {n: p.data_ptr() for n, p in model.named_parameters()}
-    with pytest.raises(RuntimeError, match="GEN_WORKER_FORBID_CPU_OFFLOAD"):
-        apply_block_window_offload(model, device="cpu")
-    after = {n: p.data_ptr() for n, p in model.named_parameters()}
-    assert before == after  # untouched
-    assert not block_offload_active(model)
 
 
 def test_offload_preserves_outputs_and_rebinds():

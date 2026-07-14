@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.25.0 (2026-07-14)
+
+- **cl#27: local-only GGUF fit rung.** A bare Tensorhub binding can select the
+  best compatible `#gguf-<qtype>` sibling only after the base, runtime-fp8,
+  and compatible native flavors miss. The local resolver composes that
+  denoiser with the base diffusers tree in the CAS, and the loader injects it
+  with `GGUFQuantizationConfig` while retaining the base encoders, VAE, and
+  scheduler. Production precision resolution remains hub-owned and never
+  selects this local-only rung.
+- **Placement follows code, not an ENV veto.** Removed
+  `GEN_WORKER_FORBID_CPU_OFFLOAD` and its test-only overrides; CPU/offload
+  decisions now always run through the worker's actual fit and OOM-demotion
+  logic. Shared-component lanes also correctly recognize `vae_only` as a
+  resident mode.
+- **CI/runtime torch baseline is CUDA 13.0.** The locked Linux/Windows uv
+  source now resolves `torch==2.13.0+cu130` and
+  `torchvision==0.28.0+cu130`, matching the managed endpoint fleet.
+- No endpoint-authoring API names changed in this release.
+
 ## 0.24.2 (2026-07-14)
 
 - **gw#534: compile-cache cell labels carry the traced weight lane.**
