@@ -9,6 +9,7 @@ insufficient_disk, and the boot-time rescan baseline.
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 
 import pytest
@@ -120,6 +121,57 @@ def test_keep_pressure_evicts_lowest_controller_priority_first(
         await store.ensure_local("t/mid", _snapshot("dm", 3000))
         await store.ensure_local("t/low", _snapshot("dl", 3000))
         await store.ensure_local("t/job", _snapshot("dj", 2000))
+
+    asyncio.run(_run())
+    assert _evicted(sent) == ["t/low"]
+
+
+def test_keep_priority_outranks_recent_use(tmp_path, _fake_download, monkeypatch) -> None:
+    sent: list = []
+    store = _store(tmp_path, sent)
+    store.keep = ["t/high", "t/low"]
+
+    async def _run() -> None:
+        await store.ensure_local("t/high", _snapshot("dh", 3000))
+        await store.ensure_local("t/low", _snapshot("dl", 3000))
+        now = time.time()
+        monkeypatch.setattr(
+            store._index,
+            "last_used",
+            lambda ref: now - 7200 if ref == "t/high" else now,
+        )
+        monkeypatch.setattr(executor_mod, "_DISK_GC_GRACE_S", 3600.0)
+        await asyncio.to_thread(store.gc_disk, 6000)
+        await asyncio.sleep(0)
+
+    asyncio.run(_run())
+    assert _evicted(sent) == ["t/low"]
+
+
+def test_gc_uses_one_keep_snapshot_during_replace(
+    tmp_path, _fake_download, monkeypatch
+) -> None:
+    sent: list = []
+    store = _store(tmp_path, sent)
+    store.keep = ["t/high", "t/low"]
+
+    async def _run() -> None:
+        await store.ensure_local("t/high", _snapshot("dh", 3000))
+        await store.ensure_local("t/low", _snapshot("dl", 3000))
+        refs_in = store.residency.refs_in
+        replaced = False
+
+        def replace_during_scan(tier):
+            nonlocal replaced
+            refs = refs_in(tier)
+            if not replaced:
+                replaced = True
+                store.keep = ["t/replacement"]
+            return refs
+
+        monkeypatch.setattr(store.residency, "refs_in", replace_during_scan)
+        await asyncio.to_thread(store.gc_disk, 6000)
+        await asyncio.sleep(0)
 
     asyncio.run(_run())
     assert _evicted(sent) == ["t/low"]

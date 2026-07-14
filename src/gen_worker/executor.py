@@ -584,34 +584,43 @@ class ModelStore:
     def gc_disk(self, target_free_bytes: int, *, exclude: Tuple[str, ...] = ()) -> None:
         """Evict LRU disk-tier refs until free disk reaches the target.
         Non-keep refs go first (grace-honoring, then grace-ignoring); under
-        keep-pressure the escape hatch evicts LRU `keep` refs too (contract §7
-        — EVICTED is emitted so the hub re-downloads when demand returns).
+        keep-pressure the escape hatch evicts lowest-priority `keep` refs too
+        (contract §7 — EVICTED is emitted so the hub re-downloads when demand
+        returns).
         In-use / loaded refs are never touched."""
+        keep = tuple(self.keep)
+        keep_rank = {ref: index for index, ref in enumerate(keep)}
         for include_keep, honor_grace in (
-            (False, True), (False, False), (True, True), (True, False),
+            (False, True), (False, False), (True, False),
         ):
-            for ref in self._gc_candidates(include_keep, honor_grace, exclude):
+            for ref in self._gc_candidates(
+                include_keep, honor_grace, exclude, keep, keep_rank
+            ):
                 if self._disk_free() >= target_free_bytes:
                     return
                 self._evict_disk_ref(ref)
 
     def _gc_candidates(
-        self, include_keep: bool, honor_grace: bool, exclude: Tuple[str, ...]
+        self,
+        include_keep: bool,
+        honor_grace: bool,
+        exclude: Tuple[str, ...],
+        keep: Tuple[str, ...],
+        keep_rank: Dict[str, int],
     ) -> List[str]:
         now = time.time()
         out: List[Tuple[float, str]] = []
         for ref in self.residency.refs_in(residency_mod.Tier.DISK):
             if ref in exclude or self.residency.in_use(ref):
                 continue
-            if (ref in self.keep) != include_keep:
+            if (ref in keep) != include_keep:
                 continue
             last = self._index.last_used(ref)
             if honor_grace and (now - last) < _DISK_GC_GRACE_S:
                 continue
             out.append((last, ref))
         if include_keep:
-            rank = {ref: index for index, ref in enumerate(self.keep)}
-            out.sort(key=lambda item: (-rank[item[1]], item[0], item[1]))
+            out.sort(key=lambda item: (-keep_rank[item[1]], item[0], item[1]))
         else:
             out.sort()
         return [r for _, r in out]
@@ -659,6 +668,9 @@ class ModelStore:
         ensure_local wakes us and then queues behind the lock. Raises
         :class:`MissingSnapshotError` when nothing arrives in
         ``_MISSING_SNAPSHOT_WAIT_S``."""
+        snapshot = self._snapshots.get(ref)
+        if snapshot is not None and snapshot.digest and snapshot.files:
+            return snapshot
         waiter = self._snapshot_waiters.get(ref)
         if waiter is None:
             waiter = self._snapshot_waiters[ref] = asyncio.Event()

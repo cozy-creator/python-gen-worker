@@ -91,6 +91,41 @@ def test_store_cold_ref_blocks_until_remint_then_serves(tmp_path, monkeypatch) -
     asyncio.run(_run())
 
 
+def test_store_uses_snapshot_banked_while_waiting_for_ref_lock(tmp_path, monkeypatch) -> None:
+    """A remint between the pre-lock lookup and snapshot wait is not lost."""
+    import gen_worker.executor as ex_mod
+    from gen_worker.executor import ModelStore
+
+    sent: List[pb.WorkerMessage] = []
+
+    async def _send(msg: pb.WorkerMessage) -> None:
+        sent.append(msg)
+
+    async def _fake_download(ref: str, **kwargs: Any) -> Path:
+        assert kwargs.get("snapshot") is not None
+        path = tmp_path / ref.replace("/", "_")
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    monkeypatch.setattr(ex_mod, "ensure_local", _fake_download)
+    ref = "acme/banked-before-wait"
+    store = ModelStore(_send, cache_dir=tmp_path)
+    store.register_binding(ref, Hub(ref))
+
+    async def _run() -> None:
+        lock = store._lock(ref)
+        await lock.acquire()
+        cold = asyncio.create_task(store.ensure_local(ref))
+        await asyncio.sleep(0)
+        assert not cold.done()
+        store.bank_snapshot(ref, _snapshot())
+        lock.release()
+        assert await asyncio.wait_for(cold, 0.5) == tmp_path / "acme_banked-before-wait"
+
+    asyncio.run(_run())
+    assert _failed_events(sent) == []
+
+
 def test_missing_snapshot_maps_retryable_never_fatal() -> None:
     """A cold worker mid-resolution asks the scheduler to retry the job."""
     from gen_worker.executor import _map_exception
