@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.24.0 (2026-07-13)
+
+- **gw#534: W8A8 fp8-GEMM loader mode — the calibrated-quant serve path.**
+  A `#fp8-w8a8` flavor (fp8-E4M3 weights WITH scales; per-Linear
+  `weight` / `weight_scale` / optional static `input_scale`; exclusion by
+  absence — the gw#534 artifact contract) is detected by header sniff and
+  served with quantized Linears swapped for `Fp8ScaledLinear`:
+  `torch._scaled_mm` over RESIDENT fp8 weights, per-row dynamic activation
+  quant (static calibrated scale when present), bias fused, no per-layer
+  upcast. Hosts without usable scaled_mm (pre-sm89 / missing kernels — live
+  device probe, never a version table) dequant once at load to bf16-resident:
+  same numerics, never a refusal. Scale-FREE fp8 trees (the storage-cast
+  `#fp8` flavor) never match — the scales are the distinguisher. Pipelines
+  stamp `_cozy_weight_lane="w8a8"`, keying the compile cache (lane_drift):
+  W8A8 pipelines never adopt W8A16/bf16-traced graphs and vice versa.
+  `models/w8a8.py` also ships the data-free producer (`quantize_tree_w8a8`,
+  per-out-channel amax scales) used by tests and `scripts/w8a8_parity.py`
+  (same-seed bf16 / w8a16 / w8a8 quality + speed harness); calibrated
+  production artifacts come from the conversion side (te#79).
+
 ## 0.23.0 (2026-07-13)
 
 - **gw#534: fp8 download, bf16 resident — W8A16 layerwise casting is never
