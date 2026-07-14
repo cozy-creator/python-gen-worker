@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.24.2 (2026-07-14)
+
+- **gw#534: compile-cache cell labels carry the traced weight lane.**
+  `flavor_label(sku, torch, weight_lane)` suffixes non-plain lanes
+  (`-w8a8` for scaled_mm graphs, `-w8a16` for layerwise-cast-hook graphs);
+  plain resident stays unsuffixed. Cells of different lanes are different
+  FX graphs — one label per (family, sku, torch) made a W8A8 cell and a
+  bf16 cell collide in the family repo. `build()` derives the suffix from
+  the loaded pipeline's actual lane. Tensorhub's compilecache.FlavorLabel
+  mirrors byte-compatibly (th#786 companion).
+
 ## 0.24.1 (2026-07-14)
 
 - **gw#534: Fp8ScaledLinear eager quant without fp32 intermediates.** The

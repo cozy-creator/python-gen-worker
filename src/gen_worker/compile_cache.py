@@ -123,11 +123,23 @@ def gen_worker_version() -> str:
         return ""
 
 
-def flavor_label(sku: str, torch_version: str) -> str:
-    """Repo-flavor label for an artifact: ``inductor-rtx-4090-torch2.9``.
-    The full versions live in metadata; the label is for humans + selection."""
+def lane_token(weight_lane: str) -> str:
+    """Label token for a traced weight lane (gw#534): cells of different
+    lanes are DIFFERENT graphs and must not collide on one flavor label.
+    "" (plain resident, incl. bf16-resident) stays unsuffixed."""
+    return {"": "", "fp8-hooks": "w8a16", "w8a8": "w8a8"}.get(
+        str(weight_lane or ""), str(weight_lane))
+
+
+def flavor_label(sku: str, torch_version: str, weight_lane: str = "") -> str:
+    """Repo-flavor label for an artifact: ``inductor-rtx-4090-torch2.9`` (+
+    ``-w8a8``/``-w8a16`` for non-plain weight lanes, gw#534). The full
+    versions live in metadata; the label is for humans + selection. MUST stay
+    byte-compatible with tensorhub's compilecache.FlavorLabel."""
     short = ".".join(str(torch_version).split("+")[0].split(".")[:2])
-    return f"inductor-{sku}-torch{short}"
+    label = f"inductor-{sku}-torch{short}"
+    tok = lane_token(weight_lane)
+    return f"{label}-{tok}" if tok else label
 
 
 def system_repo(family: str) -> str:
@@ -906,7 +918,7 @@ def build(
         # have upgraded a requested fp8 cast to bf16-resident on this pod.
         weight_lane=pipeline_weight_lane(pipe),
     )
-    label = flavor_label(meta["sku"], meta["torch"])
+    label = flavor_label(meta["sku"], meta["torch"], meta.get("weight_lane", ""))
     artifact = pack(capture_root, out_dir / f"{label}.tar.gz", meta)
     return artifact, meta, timings
 
@@ -930,6 +942,7 @@ __all__ = [
     "gen_worker_version",
     "inductor_counters",
     "is_cache_ref",
+    "lane_token",
     "lane_drift",
     "mode_drift",
     "pack",
