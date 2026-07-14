@@ -33,7 +33,7 @@ from typing import Any, Dict, List, Optional
 import msgspec
 
 from .config import get_settings
-from .cuda_probe import CUDA_PROBE_FAILED_MARKER, manifest_needs_cuda, probe_cuda
+from .cuda_probe import CUDA_PROBE_FAILED_MARKER, probe_cuda, should_probe_cuda
 from .models.cache_paths import tensorhub_cas_dir
 try:
     from .worker import Worker
@@ -215,7 +215,7 @@ def _run_main() -> int:
     # device actually works BEFORE we hello the orchestrator and accept a
     # job — a busy/unavailable GPU (RunPod bad-host fault) must kill this
     # pod now, not terminal-fail a real request at model load.
-    if manifest_needs_cuda(manifest):
+    if should_probe_cuda(manifest):
         probe = probe_cuda()
         if not probe.ok:
             logger.error("%s: %s", CUDA_PROBE_FAILED_MARKER, probe.reason)

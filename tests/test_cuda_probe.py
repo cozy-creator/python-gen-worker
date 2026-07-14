@@ -13,7 +13,12 @@ import pytest
 import torch
 
 from gen_worker import entrypoint
-from gen_worker.cuda_probe import CUDA_PROBE_FAILED_MARKER, manifest_needs_cuda, probe_cuda
+from gen_worker.cuda_probe import (
+    CUDA_PROBE_FAILED_MARKER,
+    manifest_needs_cuda,
+    probe_cuda,
+    should_probe_cuda,
+)
 
 
 class _FakeTensor:
@@ -75,6 +80,30 @@ def test_manifest_needs_cuda_false_for_accelerator_none() -> None:
 def test_manifest_needs_cuda_false_for_missing_manifest() -> None:
     assert manifest_needs_cuda(None) is False
     assert manifest_needs_cuda({}) is False
+
+
+@pytest.mark.parametrize(
+    ("gpu_flags", "cuda_build", "expected"),
+    [
+        ([False], False, False),
+        ([False], True, False),
+        ([True], False, True),
+        ([True], True, True),
+        ([False, True], False, False),
+        ([False, True], True, True),
+    ],
+)
+def test_should_probe_cuda_uses_torch_build_only_for_mixed_manifests(
+    gpu_flags: list[bool], cuda_build: bool, expected: bool
+) -> None:
+    manifest = {
+        "functions": [
+            {"name": str(i), "resources": {"gpu": True} if gpu else {}}
+            for i, gpu in enumerate(gpu_flags)
+        ]
+    }
+
+    assert should_probe_cuda(manifest, cuda_build=cuda_build) is expected
 
 
 def _write_manifest(path: Path, *, gpu: bool) -> None:
@@ -146,3 +175,37 @@ def test_entrypoint_skips_probe_when_manifest_has_no_gpu_function(
     code = entrypoint._run_main()
 
     assert code == 0
+
+
+def test_entrypoint_skips_probe_for_mixed_manifest_in_cpu_torch_image(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    manifest_path = tmp_path / "endpoint.lock"
+    manifest_path.write_bytes(
+        msgspec.toml.encode(
+            {
+                "functions": [
+                    {"name": "cpu", "module": "fake_mod", "resources": {}},
+                    {"name": "gpu", "module": "fake_mod", "resources": {"gpu": True}},
+                ]
+            }
+        )
+    )
+    _base_env(monkeypatch, tmp_path, manifest_path)
+    monkeypatch.setattr(torch.version, "cuda", None)
+
+    def _unexpected_probe(*a: Any, **k: Any) -> None:
+        raise AssertionError("a mixed release's CPU image must not probe CUDA")
+
+    monkeypatch.setattr(entrypoint, "probe_cuda", _unexpected_probe)
+
+    class _StubWorker:
+        def __init__(self, *a: Any, **k: Any) -> None:
+            pass
+
+        def run(self) -> int:
+            return 0
+
+    monkeypatch.setattr(entrypoint, "Worker", _StubWorker)
+
+    assert entrypoint._run_main() == 0
