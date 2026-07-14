@@ -743,6 +743,31 @@ def _apply_group_offload(
     return any_applied
 
 
+def _gguf_resident_override(pipeline: Any, effective: Mode, log: logging.Logger) -> Mode:
+    """cl#27: the gguf rung was picked by the ladder's RESIDENT bound — honor
+    it at placement. When auto-selection lands on a CPU-offload mode for a
+    gguf pipe, re-check with the bytes still to place (the gguf denoiser is
+    often already CUDA-resident from ``from_single_file``, which is exactly
+    why free VRAM looks tight): if they fit under the lane margin, stay
+    resident with the vae_only guards. Without this, the general 2GB margin
+    makes every 8GB card refuse a fitting rung on FORBID hosts."""
+    if effective not in _CPU_OFFLOAD_MODES or not getattr(
+        pipeline, "_cozy_gguf_quant", None
+    ):
+        return effective
+    total = estimate_pipeline_size_gb(pipeline)
+    remaining = max(0.0, total - estimate_cuda_resident_gb(pipeline))
+    avail = get_available_vram_gb()
+    if total > 0.0 and remaining + _GGUF_RESIDENT_MARGIN_GB <= avail:
+        log.info(
+            "low_vram: gguf pipeline fits resident (%.2f GB to place + %.1f "
+            "margin <= %.2f GB free, total %.2f GB); vae_only instead of %s",
+            remaining, _GGUF_RESIDENT_MARGIN_GB, avail, total, effective,
+        )
+        return "vae_only"
+    return effective
+
+
 def place_pipeline(
     pipeline: Any,
     *,
@@ -776,6 +801,8 @@ def place_pipeline(
         _forbid_cpu_inference("CPU-only inference (torch/CUDA unavailable)")
         return {"mode": "cpu"}
     effective = select_auto_mode(pipeline=pipeline) if mode == "auto" else mode
+    if mode == "auto":
+        effective = _gguf_resident_override(pipeline, effective, log)
     requested = effective
     demotions = 0
     while True:
@@ -868,27 +895,8 @@ def apply_low_vram_config(
             effective_mode,
         )
         effective_mode = "model_offload"
-    if (
-        mode == "auto"
-        and effective_mode == "model_offload"
-        and getattr(pipeline, "_cozy_gguf_quant", None)
-    ):
-        # cl#27: the ladder picked this rung on its RESIDENT bound. Honor it:
-        # if the measured pipe fits free VRAM with the lane margin, stay
-        # resident under the vae_only guards rather than CPU-offload (which
-        # FORBID hosts turn into a refusal of a fitting model).
-        measured = (
-            model_size_gb if model_size_gb is not None
-            else estimate_pipeline_size_gb(pipeline)
-        )
-        avail_now = get_available_vram_gb()
-        if measured > 0.0 and measured + _GGUF_RESIDENT_MARGIN_GB <= avail_now:
-            log.info(
-                "low_vram: gguf pipeline fits resident (%.2f GB + %.1f margin "
-                "<= %.2f GB free); vae_only instead of model_offload",
-                measured, _GGUF_RESIDENT_MARGIN_GB, avail_now,
-            )
-            effective_mode = "vae_only"
+    if mode == "auto":
+        effective_mode = _gguf_resident_override(pipeline, effective_mode, log)
     if effective_mode in _CPU_OFFLOAD_MODES:
         _forbid_cpu_inference(f"CPU-offloaded inference (mode={effective_mode})")
 
