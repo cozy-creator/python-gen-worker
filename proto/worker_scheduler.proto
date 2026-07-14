@@ -28,7 +28,7 @@ option go_package = "github.com/cozy-creator/tensorhub/internal/orchestrator/grp
 // FAILED_PRECONDITION. No minor versions, no feature gates, no negotiation.
 enum ProtocolVersion {
   PROTOCOL_VERSION_UNSPECIFIED = 0;
-  PROTOCOL_VERSION_CURRENT     = 2;
+  PROTOCOL_VERSION_CURRENT     = 3;
 }
 
 service WorkerScheduler {
@@ -118,13 +118,31 @@ message InFlightJob {
 message HelloAck {
   ProtocolVersion protocol_version = 1; // orchestrator's version, for symmetric validation
   string file_base_url = 2;  // tensorhub base URL for capability-token HTTP calls (uploads, blob refs)
-  repeated string keep = 3;  // refs the worker's disk eviction must protect
+  repeated string keep = 3;  // legacy v2 field; ignored by protocol v3 workers
   // th#697 precision ladder: per-model flavor resolutions for THIS worker's
   // card. The worker applies each entry to bindings whose wire ref equals
   // `ref` (a bare declared ref): download/load `resolved_ref` and apply the
   // `cast` transform at load. Full-replace with the ack. Additive: old
   // workers ignore it and load their declared bindings.
   repeated ModelResolution resolutions = 4;
+  // Full-replace desired model residency for this worker (protocol v3).
+  DesiredResidency desired_residency = 5;
+}
+
+// Declarative worker model state. Lists are ordered by orchestrator priority;
+// snapshots cover every disk/hot ref the worker may need.
+message DesiredResidency {
+  uint64 generation = 1;
+  repeated string disk_refs = 2;
+  repeated DesiredInstance hot = 3;
+  map<string, Snapshot> snapshots = 4;
+}
+
+// One complete runnable endpoint instance. `models` is the same complete
+// slot-to-ref binding set carried by RunJob.
+message DesiredInstance {
+  string function_name = 1;
+  repeated ModelBinding models = 2;
 }
 
 // One precision-ladder resolution (th#697): declared bare ref -> the concrete
@@ -148,6 +166,9 @@ message StateDelta {
   // Drain/retire must wait for these — GPU-idle alone is NOT work-idle.
   // Additive: old workers never set it; old orchestrators ignore it.
   int32 finalizing_jobs = 5;
+  // Latest desired-residency generation accepted by this worker. This is
+  // observation, not convergence; ModelEvent reports best-effort outcomes.
+  uint64 observed_residency_generation = 6;
 }
 
 enum WorkerPhase {
@@ -241,7 +262,8 @@ message LoraOverlay {
 
 // A pinned tensorhub repo snapshot with presigned download URLs. The worker
 // never calls tensorhub for ref resolution; the orchestrator is the only
-// resolver and ships snapshots on ModelOp / RunJob.
+// resolver and ships snapshots on DesiredResidency / RunJob (or compile-cache
+// adoption ModelOp).
 message Snapshot {
   string digest = 1; // snapshot digest the download is pinned to
   repeated SnapshotFile files = 2;
@@ -352,18 +374,15 @@ message CancelJob {
 message ModelOp {
   ModelOpKind op = 1;
   string ref = 2;
-  // Presigned snapshot for tensorhub-CAS refs; unset for hf/civitai refs the
-  // worker fetches from the upstream provider directly. Set on DOWNLOAD (and
-  // on LOAD when the ref may not be on disk yet), and always on
-  // ADOPT_COMPILE_CACHE.
+  // Presigned compile-cache snapshot. Ordinary model residency is declared in
+  // HelloAck.desired_residency; ModelOp is only the compile-cache escape hatch.
   Snapshot snapshot = 3;
 }
 
 enum ModelOpKind {
   MODEL_OP_KIND_UNSPECIFIED = 0;
-  MODEL_OP_KIND_DOWNLOAD    = 1; // fetch to disk; do NOT promote to VRAM
-  MODEL_OP_KIND_LOAD        = 2; // promote to VRAM (downloading first if needed)
-  MODEL_OP_KIND_UNLOAD      = 3; // demote out of VRAM
+  reserved 1, 2, 3;
+  reserved "MODEL_OP_KIND_DOWNLOAD", "MODEL_OP_KIND_LOAD", "MODEL_OP_KIND_UNLOAD";
   // Hot-adopt a torch.compile cache artifact: ref is a compile-cache flavor
   // ref (`_system/family-<f>#inductor-<sku>-torch<maj.min>`). The worker
   // downloads+verifies+seeds the cache, re-wraps the already-resident modules
@@ -376,8 +395,8 @@ enum ModelOpKind {
 }
 
 // Worker -> orchestrator model residency transition. The single channel for
-// download progress, load/unload outcomes, VRAM footprints, and evictions —
-// whether triggered by a ModelOp or by the worker's own cache policy.
+// transfer/setup outcomes, VRAM footprints, and evictions — whether triggered
+// by desired-state reconciliation, compile-cache adoption, or local policy.
 message ModelEvent {
   string ref = 1;
   ModelState state = 2;

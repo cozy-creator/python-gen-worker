@@ -1,6 +1,7 @@
 """Job execution: intake, GPU semaphore, deadline + cancellation watchdog,
 sync-on-thread / async-on-loop, JobProgress deltas, result send, and the
-worker-side model seam (ensure-local + setup injection + ModelOp handling).
+worker-side model seam (ensure-local, setup injection, declarative residency,
+and compile-cache adoption).
 
 One dispatch path for every endpoint kind. Everything runs on the single
 asyncio loop; sync tenant code runs in threads via asyncio.to_thread.
@@ -217,7 +218,7 @@ def _resolve_slots_kwargs(spec: EndpointSpec, run: "pb.RunJob") -> Dict[str, Any
 def _hub_binding_for_wire_ref(ref: str) -> ModelRef:
     """A tensorhub-source binding for a hub-named wire ref (pgw#532).
 
-    ``RunJob.models`` / ModelOp refs name hub-CAS repos in the canonical
+    ``RunJob.models`` / desired-instance refs name hub-CAS repos in the canonical
     ``owner/repo[:tag][#flavor]`` grammar; this mints the binding the
     executor materializes them through (``ensure_local`` then follows the
     tensorhub lane: orchestrator snapshots or the th#763 missing_snapshot
@@ -343,8 +344,8 @@ def _snapshot_to_resolved(snap: pb.Snapshot) -> "WorkerResolvedRepo":
     )
 
 
-def _model_op_error_vocab(exc: BaseException) -> str:
-    """Contract §9 ModelEvent.error vocabulary for LOAD/UNLOAD failures."""
+def _model_failure_vocab(exc: BaseException) -> str:
+    """Contract §9 ModelEvent.error vocabulary for residency failures."""
     if is_cuda_oom(exc):
         return "oom"
     if isinstance(exc, MissingSnapshotError):
@@ -435,11 +436,10 @@ class ModelStore:
         # (gw#408): a cached snapshot is re-verified on first use per process
         # so pod-churn corruption can never be trusted forever.
         self._verified: set[str] = set()
-        # Last digest-carrying snapshot seen per ref (gw#465): ModelOp{LOAD}
-        # and companion-slot setups arrive snapshot-less; without memory of
-        # the hub's earlier DOWNLOAD snapshot they cannot materialize
-        # tensorhub refs. Stale URLs self-heal: they fail url_expired and the
-        # hub re-mints.
+        # Last digest-carrying snapshot seen per ref (gw#465): companion-slot
+        # setups may arrive snapshot-less; without memory of the hub's desired
+        # state / RunJob snapshot they cannot materialize tensorhub refs. Stale
+        # URLs self-heal: they fail url_expired and the hub re-mints.
         self._snapshots: Dict[str, pb.Snapshot] = {}
         # Cold-ref waiters (th#763): ensure_local blocks here until the
         # hub's re-minted DOWNLOAD banks a snapshot for the ref.
@@ -633,16 +633,16 @@ class ModelStore:
 
     def register_binding(self, ref: str, binding: Any) -> None:
         """Endpoint-spec binding for ``ref`` — supplies files/provider on
-        download paths that only carry the bare ref (ModelOp, startup
-        prefetch), so ``files=`` selections apply everywhere (#377)."""
+        download paths that only carry the bare ref (DesiredResidency or
+        startup prefetch), so ``files=`` selections apply everywhere (#377)."""
         self._bindings.setdefault(ref, binding)
 
     async def _await_hub_snapshot(self, ref: str) -> pb.Snapshot:
         """Cold tensorhub ref with no orchestrator-resolved snapshot: emit
-        ``missing_snapshot`` (the hub re-mints a DOWNLOAD op with fresh
-        URLs on seeing it — connect_worker handleModelFailure) and block
+        ``missing_snapshot`` (the hub refreshes desired state with fresh URLs
+        on seeing it — connect_worker handleModelFailure) and block
         until that snapshot is banked (th#763). The bank site runs OUTSIDE
-        the per-ref lock this coroutine holds, so the re-minted DOWNLOAD's
+        the per-ref lock this coroutine holds, so the refreshed reconcile's
         ensure_local wakes us and then queues behind the lock. Raises
         :class:`MissingSnapshotError` when nothing arrives in
         ``_MISSING_SNAPSHOT_WAIT_S``."""
@@ -1194,7 +1194,7 @@ class Executor:
             # gw#494: transactional application — (1) a ready instance whose
             # loaded refs diverged from the rebound refs is stale: vacate it
             # so nothing stays booked under the old resolved refs (pins,
-            # promotes, adapters and UNLOAD all key off the CURRENT wire
+            # promotions, adapters, and eviction all key off the CURRENT wire
             # refs; a divergent record orphans its VRAM forever).
             stale: List[_ClassRecord] = []
             seen: set = set()
@@ -1541,6 +1541,51 @@ class Executor:
             return spec
         return dc_replace(spec, models=effective)
 
+    async def ensure_desired_instance(
+        self,
+        desired: "pb.DesiredInstance",
+        snapshots: Dict[str, "pb.Snapshot"],
+    ) -> None:
+        """Best-effort warm of one declarative, fully bound instance."""
+        spec = self.specs.get(desired.function_name)
+        if spec is None:
+            raise ValidationError(f"unknown function {desired.function_name!r}")
+        if spec.cls is None:
+            raise ValidationError(
+                f"function {desired.function_name!r} has no persistent instance to warm"
+            )
+
+        pairs = [(m.slot.strip(), m.ref.strip()) for m in desired.models]
+        bindings = dict(pairs)
+        expected = set(spec.models)
+        if any(not slot or not ref for slot, ref in pairs):
+            raise ValidationError(
+                f"desired instance {desired.function_name!r} has an empty slot or ref"
+            )
+        if len(bindings) != len(pairs) or set(bindings) != expected:
+            raise ValidationError(
+                f"desired instance {desired.function_name!r} must bind exactly "
+                f"{sorted(expected)!r}; got {sorted(bindings)!r}"
+            )
+
+        run = pb.RunJob(function_name=desired.function_name, models=desired.models)
+        effective = self._effective_spec(spec, run)
+        resolved = {slot: wire_ref(binding) for slot, binding in effective.models.items()}
+        if resolved != bindings:
+            raise ValidationError(
+                f"desired instance {desired.function_name!r} does not match the "
+                "worker's resolved bindings"
+            )
+        try:
+            await self.ensure_setup(effective, snapshots)
+        except Exception as exc:
+            error = _model_failure_vocab(exc)
+            for ref in dict.fromkeys(bindings.values()):
+                await self._send(pb.WorkerMessage(model_event=pb.ModelEvent(
+                    ref=ref, state=pb.MODEL_STATE_FAILED, error=error,
+                )))
+            raise
+
     def _class_record(self, spec: EndpointSpec) -> _ClassRecord:
         """Instance-group record for ``spec``, created on first sight for
         DERIVED (per-pick) specs. Never removed: records are tiny and the
@@ -1585,7 +1630,7 @@ class Executor:
                 self._mark_setup_failed(rec, exc)
                 raise
             if rec.failed is not None:
-                # Recovery (hub-directed LOAD retry succeeded): lift the
+                # Recovery (desired-state retry succeeded): lift the
                 # per-function disable; the next StateDelta re-advertises.
                 rec.failed = None
                 for s in rec.specs:
@@ -1859,24 +1904,6 @@ class Executor:
             if await asyncio.to_thread(res.make_room, needed):
                 break
         self._on_state_change()
-
-    def _missing_slot_refs(
-        self, spec: EndpointSpec, snapshots: Optional[Dict[str, pb.Snapshot]]
-    ) -> set:
-        """Tensorhub setup-slot refs of ``spec`` the worker cannot materialize
-        right now: not on disk, no snapshot in this op, none remembered
-        (gw#465). Non-tensorhub slots self-fetch and never block."""
-        missing: set = set()
-        for slot in self._setup_slots(spec):
-            binding = spec.models[slot]
-            if getattr(binding, "source", "tensorhub") != "tensorhub":
-                continue
-            r = wire_ref(binding)
-            if (self.store.local_path(r) is None
-                    and not (snapshots and r in snapshots)
-                    and not self.store.has_snapshot(r)):
-                missing.add(r)
-        return missing
 
     @staticmethod
     def _setup_slots(spec: EndpointSpec) -> List[str]:
@@ -2242,97 +2269,24 @@ class Executor:
             if server is not None:
                 await asyncio.to_thread(server.stop)
 
-    # ---- ModelOp -----------------------------------------------------------
+    # ---- Compile-cache adoption -------------------------------------------
 
     async def handle_model_op(self, op: pb.ModelOp) -> None:
+        """Handle the sole v3 ModelOp: hot adoption of a compile cache."""
+        if op.op != pb.MODEL_OP_KIND_ADOPT_COMPILE_CACHE:
+            return
         self.store.bind_loop()
         ref = op.ref
         snap = op.snapshot if op.HasField("snapshot") else None
         try:
-            if op.op == pb.MODEL_OP_KIND_DOWNLOAD:
-                await self.store.ensure_local(ref, snap)
-            elif op.op == pb.MODEL_OP_KIND_LOAD:
-                await self.store.ensure_local(ref, snap)
-                snapshots = {ref: snap} if snap is not None else None
-                specs = [s for s in self.specs.values()
-                         if ref in (wire_ref(b) for b in s.models.values())]
-                if not specs:
-                    # pgw#532: derived (per-pick) specs bind refs the static
-                    # decls never name — a LOAD for a pick this worker has
-                    # dispatched before must promote/re-set-up its instance.
-                    seen: set = set()
-                    for rec in self._classes.values():
-                        if id(rec) in seen:
-                            continue
-                        seen.add(id(rec))
-                        for s in rec.specs:
-                            if s not in specs and ref in (
-                                    wire_ref(b) for b in s.models.values()):
-                                specs.append(s)
-                if not specs:
-                    # No endpoint binds this ref; nothing owns a VRAM load
-                    # for it. (For a Slot-declared endpoint the bytes+snapshot
-                    # ARE banked above, so the next dispatch naming this pick
-                    # materializes instantly — the pre-warm degrades to a
-                    # download, never to an upstream fetch.)
-                    await self._send(pb.WorkerMessage(model_event=pb.ModelEvent(
-                        ref=ref, state=pb.MODEL_STATE_FAILED, error="load_failed")))
-                    return
-                ready = [
-                    s for s in specs
-                    if (owner := self._classes.get(s.instance_key)) is not None
-                    and owner.ready
-                ]
-                if ready:
-                    # A resident instance already owns the ref: promote/touch it.
-                    # Never cold-set-up the OTHER specs sharing the ref — a
-                    # shared companion (one vae bound to every variant of a
-                    # family) would cascade one LOAD into loading every sibling
-                    # checkpoint (gw#465).
-                    for s in ready:
-                        await self.ensure_setup(s, snapshots)
-                else:
-                    target = next(
-                        (s for s in specs
-                         if not self._missing_slot_refs(s, snapshots)), None)
-                    if target is None:
-                        # Every candidate needs a sibling slot the worker cannot
-                        # materialize. Name the blockers so the hub re-mints and
-                        # re-sends DOWNLOAD for them, and fail THIS op with the
-                        # same vocabulary — never a phantom download_failed.
-                        blockers: set = set()
-                        for s in specs:
-                            blockers |= self._missing_slot_refs(s, snapshots)
-                        for m in sorted(blockers):
-                            logger.warning(
-                                "ModelOp LOAD %s deferred: sibling slot %s has "
-                                "no snapshot; reporting missing_snapshot", ref, m)
-                            await self._send(pb.WorkerMessage(model_event=pb.ModelEvent(
-                                ref=m, state=pb.MODEL_STATE_FAILED,
-                                error="missing_snapshot")))
-                        await self._send(pb.WorkerMessage(model_event=pb.ModelEvent(
-                            ref=ref, state=pb.MODEL_STATE_FAILED,
-                            error="missing_snapshot")))
-                        return
-                    await self.ensure_setup(target, snapshots)
-            elif op.op == pb.MODEL_OP_KIND_UNLOAD:
-                if self._ref_in_use(ref):
-                    await self._send(pb.WorkerMessage(model_event=pb.ModelEvent(
-                        ref=ref, state=pb.MODEL_STATE_FAILED, error="model_in_use")))
-                    return
-                await self._unload_ref(ref)
-            elif op.op == pb.MODEL_OP_KIND_ADOPT_COMPILE_CACHE:
-                await self._adopt_compile_cache(ref, snap)
+            await self._adopt_compile_cache(ref, snap)
         except Exception as exc:
-            logger.warning("ModelOp %s on %s failed: %s", op.op, ref, exc)
-            # ensure_local already emitted FAILED for download errors; emit for
-            # load/unload paths that failed outside it. OOM must say "oom" —
-            # it is the orchestrator's trigger to UNLOAD a resident model for
-            # headroom (contract §9 vocabulary).
-            if op.op != pb.MODEL_OP_KIND_DOWNLOAD:
-                await self._send(pb.WorkerMessage(model_event=pb.ModelEvent(
-                    ref=ref, state=pb.MODEL_STATE_FAILED,
-                    error=_model_op_error_vocab(exc))))
+            logger.warning("compile-cache adoption on %s failed: %s", ref, exc)
+            await self._send(pb.WorkerMessage(model_event=pb.ModelEvent(
+                ref=ref,
+                state=pb.MODEL_STATE_FAILED,
+                error=f"adopt_failed:{type(exc).__name__.lower()}",
+            )))
 
     async def _adopt_compile_cache(self, ref: str, snap: Optional[pb.Snapshot]) -> None:
         """Hot adoption (th#567): download+verify a compiled artifact and
@@ -2568,23 +2522,6 @@ class Executor:
                 self.store.residency.release_shared(key)
             rec.shared_keys.clear()
             self.store.residency.drain_shared()
-        self._on_state_change()
-
-    async def _unload_ref(self, ref: str) -> None:
-        """Hub UNLOAD: free the ref's VRAM. Worker-owned pipelines demote to
-        the warm RAM tier (instance stays ready; the next LOAD/RunJob promotes
-        back in seconds); tenant-loaded refs require record teardown (#371)."""
-        async with self._load_lock:
-            res = self.store.residency
-            if res.tier(ref) is residency_mod.Tier.VRAM:
-                if await asyncio.to_thread(res.demote, ref):
-                    self._on_state_change()
-                    return
-            rec = self._record_holding(ref)
-            if rec is not None:
-                await self._vacate_record(rec)
-            else:
-                res.release_to_disk(ref)
         self._on_state_change()
 
     # ---- job intake --------------------------------------------------------

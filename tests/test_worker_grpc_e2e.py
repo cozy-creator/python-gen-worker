@@ -749,8 +749,8 @@ def test_send_queue_results_survive_reconnect_until_shipped() -> None:
 
 
 # ---------------------------------------------------------------------------
-# ModelOp DOWNLOAD / LOAD / UNLOAD round-trip (#366): a tensorhub-bound
-# function is gated until LOAD; ModelEvents follow the contract state machine.
+# Desired-residency round-trip: a Tensorhub-bound function is gated until its
+# exact instance is warm; ModelEvents follow the contract state machine.
 # ---------------------------------------------------------------------------
 
 
@@ -762,7 +762,7 @@ def _is_model_event(ref: str, state: int):
     )
 
 
-def test_model_op_download_load_unload_round_trip(tmp_path, monkeypatch) -> None:
+def test_desired_residency_downloads_and_warms_round_trip(tmp_path, monkeypatch) -> None:
     import http.server
 
     from blake3 import blake3
@@ -812,20 +812,27 @@ def test_model_op_download_load_unload_round_trip(tmp_path, monkeypatch) -> None
         assert "model-echo" not in ready.state_delta.available_functions
         assert "model-echo" in ready.state_delta.loading_functions
 
-        # DOWNLOAD -> DOWNLOADING then ON_DISK.
-        conn.send(model_op=pb.ModelOp(
-            op=pb.MODEL_OP_KIND_DOWNLOAD, ref="e2e/tiny", snapshot=snapshot))
+        # One full desired state downloads the ref, warms the exact endpoint
+        # instance, and reports the accepted generation.
+        conn.send(hello_ack=pb.HelloAck(
+            protocol_version=pb.PROTOCOL_VERSION_CURRENT,
+            desired_residency=pb.DesiredResidency(
+                generation=1,
+                disk_refs=["e2e/tiny"],
+                hot=[pb.DesiredInstance(
+                    function_name="model-echo",
+                    models=[pb.ModelBinding(slot="model", ref="e2e/tiny")],
+                )],
+                snapshots={"e2e/tiny": snapshot},
+            ),
+        ))
         conn.wait_for(_is_model_event("e2e/tiny", pb.MODEL_STATE_DOWNLOADING))
         conn.wait_for(_is_model_event("e2e/tiny", pb.MODEL_STATE_ON_DISK))
-
-        # LOAD -> setup runs (typed str path injection); CPU host => IN_RAM;
-        # the function flips to available.
-        conn.send(model_op=pb.ModelOp(
-            op=pb.MODEL_OP_KIND_LOAD, ref="e2e/tiny", snapshot=snapshot))
         conn.wait_for(_is_model_event("e2e/tiny", pb.MODEL_STATE_IN_RAM))
         conn.wait_for(
             lambda m: m.WhichOneof("msg") == "state_delta"
             and "model-echo" in m.state_delta.available_functions
+            and m.state_delta.observed_residency_generation == 1
         )
 
         # The handler sees the materialized snapshot content.
@@ -840,18 +847,6 @@ def test_model_op_download_load_unload_round_trip(tmp_path, monkeypatch) -> None
         snap_refs = {r.ref for r in harness.worker.executor.store.residency_snapshot()}
         assert "e2e/tiny" in snap_refs
 
-        # UNLOAD -> teardown; residency falls back to ON_DISK (a SECOND
-        # on-disk event, after the download's); function gated again.
-        conn.send(model_op=pb.ModelOp(op=pb.MODEL_OP_KIND_UNLOAD, ref="e2e/tiny"))
-        deadline = time.monotonic() + _TIMEOUT
-        while conn.count(_is_model_event("e2e/tiny", pb.MODEL_STATE_ON_DISK)) < 2:
-            assert time.monotonic() < deadline, "no ON_DISK event after UNLOAD"
-            time.sleep(0.02)
-        conn.wait_for(
-            lambda m: m.WhichOneof("msg") == "state_delta"
-            and "model-echo" not in m.state_delta.available_functions
-            and "model-echo" in m.state_delta.loading_functions
-        )
     finally:
         harness.stop()
         server.stop(grace=0)
@@ -862,8 +857,8 @@ def test_model_op_download_load_unload_round_trip(tmp_path, monkeypatch) -> None
 # Setup failure surfaces FnUnavailable (th#581 worker-side / ernie roster
 # find): a function whose pipeline setup raises must NOT sit in
 # loading_functions forever under a READY phase — it leaves BOTH lists and a
-# terminal FnUnavailable{setup_failed} reaches the hub. A later LOAD retry
-# that succeeds re-advertises it; a re-failure re-emits.
+# terminal FnUnavailable{setup_failed} reaches the hub. Re-sending the same
+# desired generation retries setup and re-advertises it after recovery.
 # ---------------------------------------------------------------------------
 
 
@@ -923,10 +918,22 @@ def test_setup_failure_emits_fn_unavailable_and_recovers(tmp_path, monkeypatch) 
         )
         assert "broken-echo" in ready.state_delta.loading_functions
 
-        # LOAD -> setup raises -> terminal per-function signal, and the fn
+        desired = pb.DesiredResidency(
+            generation=1,
+            disk_refs=["e2e/broken"],
+            hot=[pb.DesiredInstance(
+                function_name="broken-echo",
+                models=[pb.ModelBinding(slot="model", ref="e2e/broken")],
+            )],
+            snapshots={"e2e/broken": snapshot},
+        )
+
+        # Desired setup raises -> terminal per-function signal, and the fn
         # leaves BOTH available and loading (no more silent-ready limbo).
-        conn.send(model_op=pb.ModelOp(
-            op=pb.MODEL_OP_KIND_LOAD, ref="e2e/broken", snapshot=snapshot))
+        conn.send(hello_ack=pb.HelloAck(
+            protocol_version=pb.PROTOCOL_VERSION_CURRENT,
+            desired_residency=desired,
+        ))
         sig = conn.wait_for(_is_fn_unavailable).fn_unavailable
         assert "pipeline exploded" in sig.detail
         conn.wait_for(
@@ -934,17 +941,20 @@ def test_setup_failure_emits_fn_unavailable_and_recovers(tmp_path, monkeypatch) 
             and "broken-echo" not in m.state_delta.available_functions
             and "broken-echo" not in m.state_delta.loading_functions
         )
-        # The load path also reports the model op failure itself.
+        # The residency path also reports the model failure itself.
         conn.wait_for(_is_model_event("e2e/broken", pb.MODEL_STATE_FAILED))
 
-        # Hub-directed retry succeeds -> the disable lifts and the function
-        # is advertised (this is the capability-change event the hub needs).
+        # Same-generation full replacement is a retry (and URL refresh), so
+        # setup succeeds without inventing an imperative command.
         e2e_endpoints.BREAK_SETUP.clear()
-        conn.send(model_op=pb.ModelOp(
-            op=pb.MODEL_OP_KIND_LOAD, ref="e2e/broken", snapshot=snapshot))
+        conn.send(hello_ack=pb.HelloAck(
+            protocol_version=pb.PROTOCOL_VERSION_CURRENT,
+            desired_residency=desired,
+        ))
         conn.wait_for(
             lambda m: m.WhichOneof("msg") == "state_delta"
             and "broken-echo" in m.state_delta.available_functions
+            and m.state_delta.observed_residency_generation == 1
         )
         assert "broken-echo" not in harness.worker.executor.unavailable
 
@@ -956,19 +966,6 @@ def test_setup_failure_emits_fn_unavailable_and_recovers(tmp_path, monkeypatch) 
         assert res.status == pb.JOB_STATUS_OK
         assert _decode_out(res.inline).response == payload.decode()
 
-        # Re-failure after recovery re-emits (dedupe set is pruned).
-        e2e_endpoints.BREAK_SETUP.set()
-        conn.send(model_op=pb.ModelOp(op=pb.MODEL_OP_KIND_UNLOAD, ref="e2e/broken"))
-        deadline = time.monotonic() + _TIMEOUT
-        while "broken-echo" in harness.worker.executor.available_functions():
-            assert time.monotonic() < deadline, "UNLOAD did not gate broken-echo"
-            time.sleep(0.02)
-        conn.send(model_op=pb.ModelOp(
-            op=pb.MODEL_OP_KIND_LOAD, ref="e2e/broken", snapshot=snapshot))
-        deadline = time.monotonic() + _TIMEOUT
-        while conn.count(_is_fn_unavailable) < 2:
-            assert time.monotonic() < deadline, "no second fn_unavailable"
-            time.sleep(0.02)
     finally:
         e2e_endpoints.BREAK_SETUP.set()
         harness.stop()

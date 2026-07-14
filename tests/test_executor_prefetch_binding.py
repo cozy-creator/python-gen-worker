@@ -1,8 +1,4 @@
-"""#377: binding files=/provider must apply on EVERY download path.
-
-The ModelOp/startup-prefetch paths only carry the bare ref; the executor
-registers each endpoint binding by wire ref so ModelStore.ensure_local can
-recover files/provider at the download-layer boundary (no network)."""
+"""#377: binding files/provider apply to bare-ref residency downloads."""
 
 from __future__ import annotations
 
@@ -65,23 +61,8 @@ def _capture_download(monkeypatch, tmp_path: Path) -> List[Dict[str, Any]]:
     return calls
 
 
-def test_model_op_download_applies_binding_files(monkeypatch, tmp_path) -> None:
-    calls = _capture_download(monkeypatch, tmp_path)
-
-    async def _run() -> None:
-        ex = Executor([_spec()], _noop_send)
-        await ex.handle_model_op(pb.ModelOp(op=pb.MODEL_OP_KIND_DOWNLOAD, ref=_REF))
-
-    asyncio.run(_run())
-    assert len(calls) == 1
-    assert calls[0]["ref"] == _REF
-    assert calls[0]["provider"] == "huggingface"
-    assert calls[0]["allow_patterns"] == _BINDING.files
-
-
 def test_bare_ref_store_ensure_local_applies_binding_files(monkeypatch, tmp_path) -> None:
-    # The lifecycle startup-prefetch shape: store.ensure_local(ref) with
-    # nothing else.
+    # DesiredResidency carries a ref and snapshot, not the declared binding.
     calls = _capture_download(monkeypatch, tmp_path)
 
     async def _run() -> None:

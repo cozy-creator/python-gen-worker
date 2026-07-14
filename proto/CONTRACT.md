@@ -3,7 +3,7 @@
 Proto: `worker_scheduler.proto`, package `cozy.scheduler`, service
 `WorkerScheduler`, one RPC: `Connect(stream WorkerMessage) returns (stream SchedulerMessage)`.
 This REPLACES the old `scheduler.v1` proto entirely. No compat, no negotiation:
-`ProtocolVersion.PROTOCOL_VERSION_CURRENT = 2` is the only accepted version.
+`ProtocolVersion.PROTOCOL_VERSION_CURRENT = 3` is the only accepted version.
 
 Roles: **W** = gen-worker (Python), **O** = orchestrator (tensorhub Go).
 Every field below names its producer and consumer; anything without both was deleted.
@@ -83,8 +83,10 @@ Immediately after `HelloAck`, W flushes its buffered unsent `JobResult`s
 (§4 results are never dropped).
 
 **HelloAck re-send.** O re-sends `HelloAck` mid-connection whenever release
-config changes (e.g. the `keep` set). Full-replace semantics: W overwrites
-`file_base_url` and its keep set wholesale.
+config or desired model residency changes. Full-replace semantics: W
+overwrites `file_base_url`, resolutions, and desired residency wholesale.
+The same residency generation MAY be resent with refreshed snapshot URLs;
+only a generation lower than the latest observed generation is stale.
 
 **Send-queue policy (W).** One bounded outbound queue. `JobResult` is NEVER
 dropped: results persist in the queue across reconnects until written to a
@@ -200,7 +202,20 @@ Reply to Hello; re-sent on config change (full replace).
 |---|---|---|---|
 | `protocol_version` | O constant | W version gate | symmetric validation |
 | `file_base_url` | O config (`FileAPIBaseURL`) | W upload stack / blob-ref PUT flow (§8) | tensorhub HTTP base for capability-token calls |
-| `keep` | O release prefetch plan | W disk-eviction policy | refs the worker must not evict from disk; NOT a download order (see §7) |
+| `keep` | legacy v2 release config | none in v3 | retained field number only; v3 W ignores it |
+| `resolutions` | O precision resolver | W endpoint bindings | full-replace declared-ref to worker-specific ref/cast picks |
+| `desired_residency` | O scheduler/controller | W model reconciler | full-replace per-worker disk and hot-instance goal (§7) |
+
+### DesiredResidency / DesiredInstance (embedded in HelloAck)
+
+| field | producer | consumer | semantics |
+|---|---|---|---|
+| `generation` | O desired-state store | W observation fence | monotonic desired revision; observation does not imply convergence |
+| `disk_refs` | O locality scheduler | W downloader + disk GC | ordered refs to materialize and protect from eviction while headroom allows |
+| `hot` | O locality scheduler | W endpoint setup | ordered runnable instances; each names a function and its complete `ModelBinding` slot map |
+| `snapshots` | O resolver | W downloader | snapshots for every disk/hot ref that needs one; same semantics as `RunJob.snapshots` |
+| `hot[].function_name` | O release manifest | W registry lookup | endpoint function whose persistent instance should be warm |
+| `hot[].models` | O binding resolver | W existing RunJob binding path | complete slot to immutable-ref map; incomplete or mismatched maps are rejected |
 
 ### StateDelta (W → O)
 Full-replace snapshot of ALL dynamic worker state. Edge-triggered: sent
@@ -215,6 +230,7 @@ to avoid chatter). Never periodic. O overwrites its copy wholesale.
 | `loading_functions` | W registry | O supply (counts 0 capacity) + display | present but models still materializing; disjoint from available |
 | `free_vram_bytes` | W CUDA probe | O placement (free-VRAM ladder) | measured free VRAM |
 | `finalizing_jobs` | W executor (gw#516) | O drain/retire gating + worker status display | jobs past the decode→finalize handoff: GPU slot released, encode/upload tail running, `JobResult` unshipped. GPU-idle alone is NOT work-idle |
+| `observed_residency_generation` | W desired-state receiver | O controller status | latest non-stale generation accepted; not a convergence claim — `ModelEvent`/`Hello.models` report actual state |
 
 ### RunJob (O → W)
 
@@ -288,7 +304,7 @@ pick with `{"steps":4,"guidance":0}` — the merged
 `ctx.slots["pipeline"].defaults` reads `steps=4, guidance=0`, scheduler/
 max_guidance untouched (the lora left them null).
 
-### Snapshot / SnapshotFile (embedded in RunJob.snapshots and ModelOp)
+### Snapshot / SnapshotFile (embedded in RunJob, DesiredResidency, and ModelOp)
 
 | field | producer | consumer | semantics |
 |---|---|---|---|
@@ -296,7 +312,7 @@ max_guidance untouched (the lora left them null).
 | `files[].path` | O | W file placement | repo-relative path |
 | `files[].size_bytes` | O | W disk-headroom check + progress totals | file size |
 | `files[].blake3` | O | W post-download verification (digest-poisoning guard) | content hash |
-| `files[].url` | O presigner | W downloader | presigned GET; expiry ⇒ `ModelEvent{FAILED, error:"url_expired"}` and O re-sends the op with fresh URLs |
+| `files[].url` | O presigner | W downloader | presigned GET; expiry ⇒ `ModelEvent{FAILED, error:"url_expired"}` and O re-sends the same desired generation or job with fresh URLs |
 
 Standalone CLIENTS (cozy CLI, `gen-worker prefetch`) pull the SAME shape over
 HTTP instead: `GET /api/v1/repos/:tenant/:name/resolve?tag=&flavor=` (#560 —
@@ -414,19 +430,18 @@ and the cancel is a no-op. Cancel of an unknown pair is silently ignored.
 There is no queued-only/item-level cancel.
 
 ### ModelOp (O → W)
-Producers: prefetch planner (after Hello, for `keep` refs missing from
-`Hello.models`), cold-locality download affinity, VRAM packer (LOAD ahead of
-predicted demand, UNLOAD for headroom).
+Producer: compile-cache adoption only. Model download/load/unload lifecycle is
+declarative through `HelloAck.desired_residency`; v3 O MUST NOT send the legacy
+DOWNLOAD/LOAD/UNLOAD enum values.
 
 | field | producer | consumer | semantics |
 |---|---|---|---|
-| `op` | O | W model layer | DOWNLOAD = to disk only; LOAD = promote to VRAM (fetching first if needed); UNLOAD = demote out of VRAM (stays on disk/RAM per cache policy); ADOPT_COMPILE_CACHE = hot-adopt a torch.compile cache (below) |
+| `op` | O | W model layer | ADOPT_COMPILE_CACHE only |
 | `ref` | O | W | canonical ref |
-| `snapshot` | O resolver | W downloader | required for tensorhub-CAS refs not already local; unset for hf/civitai; always set on ADOPT_COMPILE_CACHE |
+| `snapshot` | O resolver | W downloader | required for ADOPT_COMPILE_CACHE |
 
 Every ModelOp is answered by ≥1 `ModelEvent` for the ref (success path emits
-the new state; failure path emits FAILED). W MAY refuse UNLOAD for a model
-serving in-flight jobs: `ModelEvent{FAILED, error:"model_in_use"}`.
+ADOPTED; failure path emits FAILED).
 
 **ADOPT_COMPILE_CACHE** (hot adoption, #567): `ref` is a compile-cache flavor
 ref — `_system/family-<f>#inductor-<sku>-torch<maj.min>`. W downloads the
@@ -450,17 +465,17 @@ defensively. Workers predating this kind ignore it silently (unknown enum, no
 ModelEvent); O treats the absence of a reply as not-adopted, never an error.
 
 ### ModelEvent (W → O)
-The single model-residency channel. Emitted for ModelOp outcomes AND
-worker-initiated transitions (LRU eviction, demotion, on-demand load during a
-job). Replaces load/unload results, model-ready signals, and the JSON
-download-event fabric.
+The single model-residency channel. Emitted for desired-state outcomes,
+compile-cache adoption, AND worker-initiated transitions (LRU eviction,
+demotion, on-demand load during a job). Replaces load/unload results,
+model-ready signals, and the JSON download-event fabric.
 
 | field | producer | consumer | semantics |
 |---|---|---|---|
 | `ref` | W | O residency index | |
 | `state` | W model cache | O: DOWNLOADING/ON_DISK feed pending-download affinity (parked jobs dispatch on ON_DISK); IN_RAM/IN_VRAM/ON_DISK update the placement tier index; EVICTED removes the ref; FAILED fails the pending op | current state machine position |
 | `vram_bytes` | W measured (allocator delta across load) | O model-size cache → VRAM packing | set with IN_VRAM |
-| `error` | W | O op-failure handling (e.g. OOM ⇒ pick LRU vram model, send UNLOAD then retry LOAD; url_expired ⇒ re-mint snapshot and re-send) + triage log | set with FAILED |
+| `error` | W | O reconcile handling (e.g. OOM ⇒ revise desired hot set; url_expired ⇒ re-mint snapshots and re-send the same generation) + triage log | set with FAILED |
 | `bytes_done`/`bytes_total` | W downloader (emit ≤1 per 5s per ref) | O boot/capacity progress display | set with DOWNLOADING |
 | `duration_ms` | W adopt handler | O adoption bookkeeping + fleet-adoption-latency metric | set with ADOPTED: wall time of download+seed+re-wrap+warmup |
 | `cache_hits`/`cache_misses` | W adopt handler (inductor FX-graph cache counter delta across the warmup) | O adoption observability: hits ≥ 1 on every ADOPTED; misses > 0 = partial shape coverage | set with ADOPTED (gw#391) |
@@ -483,8 +498,8 @@ when a function's model download / pipeline setup fails terminally
 (`reason: setup_failed` — the function is dropped from BOTH
 `available_functions` and `loading_functions` instead of sitting in
 loading forever under a READY phase). One message per function,
-deduplicated. A later hub-directed `ModelOp{LOAD}` retries the setup; on
-success the function reappears in `StateDelta.available_functions`.
+deduplicated. A later desired-state reconciliation or `RunJob` retries setup;
+on success the function reappears in `StateDelta.available_functions`.
 
 | field | producer | consumer | semantics |
 |---|---|---|---|
@@ -552,14 +567,21 @@ The stream is HTTP/2: reliable, ordered per direction. Consequences relied on:
 
 ---
 
-## 7. Model prefetch / keep
+## 7. Declarative model residency
 
-`HelloAck.keep` is a retention set, not a download order. After HelloAck, O
-compares `keep` against its residency view (`Hello.models` + events) and
-issues `ModelOp{DOWNLOAD}` (with snapshots where needed) for missing refs —
-the ONE prefetch mechanism. W's eviction policy never removes a `keep` ref
-from disk while headroom allows; if disk pressure forces it, W emits
-`ModelEvent{EVICTED}` so O knows to re-download later.
+`HelloAck.desired_residency` is the full per-worker goal. W accepts each
+non-stale generation without blocking the receive loop, replaces its disk
+keep set from `disk_refs`, cancels obsolete background reconciliation, and
+works the ordered disk refs then ordered hot instances. Reconciliation starts
+only while the executor is job-idle; an active `RunJob` and its exact bindings
+always take precedence over pending background work. Hot instances reuse the
+same binding derivation and setup path as `RunJob`; there is no second loader.
+
+`observed_residency_generation` means only that W accepted the desired state.
+Actual progress and failures are `ModelEvent`s, with `Hello.models` as the
+reconnect baseline. W MAY evict desired refs under real disk/VRAM pressure and
+reports that honestly; O then revises or re-sends desired state. Same-generation
+re-sends refresh expired snapshots and retry failed work.
 
 **Compile-cache snapshots (#569).** When a release's endpoint declares
 `compile=Compile(family=...)` and boot-attach is enabled (opt-in; default OFF
@@ -569,8 +591,7 @@ the resolved `_system/family-<f>#inductor-<sku>-torch<maj.min>` snapshot to
 recognizes the key by the `_system/family-<f>#inductor-` prefix for the
 declared family, downloads it like any snapshot, and seeds it before pipeline
 load; verification failure ⇒ eager, never an error. The same ref may arrive
-via `ModelOp{DOWNLOAD}` (pre-positioning) or `ModelOp{ADOPT_COMPILE_CACHE}`
-(hot adoption, §4).
+via `ModelOp{ADOPT_COMPILE_CACHE}` (hot adoption, §4).
 
 ---
 
@@ -658,9 +679,9 @@ ADOPT_COMPILE_CACHE only — `adopt_failed:<reason>` with reason ∈ {`bad_ref`,
   per-function capability metadata belongs to deploy-time manifests.
 - `WorkerKVPrefixCache` — producer never existed.
 - `EndpointConfig` (repo allowlists, per-function model keyspaces, disabled
-  functions, payload-ref availability) — O gates dispatch itself; W learns
-  its retention set from `HelloAck.keep` and gets snapshots on
-  `ModelOp`/`RunJob`. Nothing else was consumed by the worker it will keep.
+  functions, payload-ref availability) — O gates dispatch itself; W gets its
+  model goal from `HelloAck.desired_residency` and request bindings from
+  `RunJob`. Nothing else was consumed by the worker it will keep.
 - `InterruptJobCommand.item_ids`/`cancel_queued_only` — item batching is dead;
   cancel is whole-request.
 - `JobExecutionObservation` fields: identity/context fields O already knows
@@ -676,6 +697,8 @@ ADOPT_COMPILE_CACHE only — `adopt_failed:<reason>` with reason ∈ {`bad_ref`,
   and re-added deliberately as `ModelBinding.loras` once BYOM (gw#393 /
   th#585) gave it a producer.
 - `WorkerResources.gpu_is_busy` — derivable from O's own assignment map.
-- `DownloadModelCommand.priority` — never read; retention lives in `keep`.
+- `DownloadModelCommand.priority` — never read; ordered desired-state lists
+  express controller preference without a second priority system.
 - `WorkerDrainResult` — stream close is the drain ack.
-- Reserved-tag graveyard — renumbered from 1, no reservations, one version.
+- Reserved-tag graveyard — messages were renumbered from 1; only removed v3
+  `ModelOpKind` values 1–3 stay reserved to prevent accidental wire reuse.

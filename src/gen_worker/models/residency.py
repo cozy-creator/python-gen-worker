@@ -475,7 +475,7 @@ class Residency:
         return True
 
     def release_to_disk(self, ref: str) -> bool:
-        """Drop the loaded object entirely (UNLOAD); disk snapshot kept.
+        """Drop the loaded object entirely; disk snapshot kept.
         Refuses executing/shared-held entries."""
         with self._lock:
             e = self._entries.get(ref)

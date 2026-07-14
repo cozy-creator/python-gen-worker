@@ -15,9 +15,8 @@ Covered here:
   2. dispatch pick != default: the executor loads the PICKED checkpoint and
      ``ctx.slots[name].ref`` reflects the pick, not the code default.
   3. instance-per-pick residency: two picks = two resident instances (one
-     ``setup()`` per (class, resolved pick)); UNLOAD evicts one whole
-     instance while the other stays warm; a later LOAD for the evicted pick
-     matches its derived record and re-sets it up.
+     ``setup()`` per (class, resolved pick)); a repeated pick reuses its
+     existing instance.
   4. default-only path with a CAS default_checkpoint: unchanged (one
      instance, base record, ctx.slots ref = declared default).
   5. an unusable (non-CAS) resolved_models stamp with a raw upstream
@@ -245,12 +244,11 @@ def test_dispatch_pick_loads_picked_checkpoint(tmp_path, monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 3. instance-per-pick: two picks = two instances; UNLOAD evicts one whole
-#    instance; LOAD re-materializes the evicted pick's derived record
+# 3. instance-per-pick: two picks = two instances; repeated picks reuse them
 # ---------------------------------------------------------------------------
 
 
-def test_two_picks_two_instances_then_lru_evicts_whole_instance(tmp_path, monkeypatch) -> None:
+def test_two_picks_create_two_reusable_instances(tmp_path, monkeypatch) -> None:
     setup_calls: List[Tuple[str, str]] = []
     ex, sent, downloads = _harness(tmp_path, monkeypatch, setup_calls)
 
@@ -284,17 +282,6 @@ def test_two_picks_two_instances_then_lru_evicts_whole_instance(tmp_path, monkey
         assert r3.status == pb.JOB_STATUS_OK, r3.safe_message
         assert len(setup_calls) == 2, "resident pick must not re-run setup()"
 
-        # Hub-directed UNLOAD of pick A vacates THAT instance only.
-        await ex.handle_model_op(pb.ModelOp(op=pb.MODEL_OP_KIND_UNLOAD, ref=PICK_A))
-        ready = _ready_records(ex)
-        assert len(ready) == 1, "UNLOAD must evict exactly one pick's instance"
-        held = {r for rec in ready for r in rec.held_refs}
-        assert PICK_B in held and PICK_A not in held
-
-        # LOAD for the evicted pick matches its derived record and re-sets up.
-        await ex.handle_model_op(pb.ModelOp(
-            op=pb.MODEL_OP_KIND_LOAD, ref=PICK_A, snapshot=_snapshot("aa" * 32)))
-        assert len(setup_calls) == 3
         assert len(_ready_records(ex)) == 2
 
     asyncio.run(_run())
@@ -369,28 +356,6 @@ def test_raw_stamp_over_raw_default_fails_retryable_without_fetch(tmp_path, monk
     assert setup_calls == []
     assert downloads == [], f"a refused dispatch must not download: {downloads}"
     assert "generate" not in ex.unavailable, "a per-request refusal must not disable the function"
-
-
-# ---------------------------------------------------------------------------
-# LOAD for a never-dispatched pick: bytes banked, typed failure, no setup
-# ---------------------------------------------------------------------------
-
-
-def test_load_of_unknown_pick_banks_bytes_and_fails_typed(tmp_path, monkeypatch) -> None:
-    setup_calls: List[Tuple[str, str]] = []
-    ex, sent, downloads = _harness(tmp_path, monkeypatch, setup_calls)
-
-    asyncio.run(ex.handle_model_op(pb.ModelOp(
-        op=pb.MODEL_OP_KIND_LOAD, ref=PICK_A, snapshot=_snapshot("aa" * 32))))
-
-    # Pre-warm degraded to a download: bytes + snapshot banked for the next
-    # dispatch, no instance guessed into existence, typed failure reported.
-    assert {d["ref"] for d in downloads} == {PICK_A}
-    assert ex.store.has_snapshot(PICK_A)
-    assert setup_calls == []
-    failed = [m.model_event for m in sent if m.WhichOneof("msg") == "model_event"
-              and m.model_event.state == pb.MODEL_STATE_FAILED]
-    assert [(e.ref, e.error) for e in failed] == [(PICK_A, "load_failed")]
 
 
 # ---------------------------------------------------------------------------

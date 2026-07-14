@@ -47,9 +47,6 @@ class JobStatus(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
 class ModelOpKind(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
     MODEL_OP_KIND_UNSPECIFIED: _ClassVar[ModelOpKind]
-    MODEL_OP_KIND_DOWNLOAD: _ClassVar[ModelOpKind]
-    MODEL_OP_KIND_LOAD: _ClassVar[ModelOpKind]
-    MODEL_OP_KIND_UNLOAD: _ClassVar[ModelOpKind]
     MODEL_OP_KIND_ADOPT_COMPILE_CACHE: _ClassVar[ModelOpKind]
 
 class ModelState(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
@@ -85,9 +82,6 @@ JOB_STATUS_RETRYABLE: JobStatus
 JOB_STATUS_FATAL: JobStatus
 JOB_STATUS_CANCELED: JobStatus
 MODEL_OP_KIND_UNSPECIFIED: ModelOpKind
-MODEL_OP_KIND_DOWNLOAD: ModelOpKind
-MODEL_OP_KIND_LOAD: ModelOpKind
-MODEL_OP_KIND_UNLOAD: ModelOpKind
 MODEL_OP_KIND_ADOPT_COMPILE_CACHE: ModelOpKind
 MODEL_STATE_UNSPECIFIED: ModelState
 MODEL_STATE_DOWNLOADING: ModelState
@@ -191,16 +185,45 @@ class InFlightJob(_message.Message):
     def __init__(self, request_id: _Optional[str] = ..., attempt: _Optional[int] = ...) -> None: ...
 
 class HelloAck(_message.Message):
-    __slots__ = ("protocol_version", "file_base_url", "keep", "resolutions")
+    __slots__ = ("protocol_version", "file_base_url", "keep", "resolutions", "desired_residency")
     PROTOCOL_VERSION_FIELD_NUMBER: _ClassVar[int]
     FILE_BASE_URL_FIELD_NUMBER: _ClassVar[int]
     KEEP_FIELD_NUMBER: _ClassVar[int]
     RESOLUTIONS_FIELD_NUMBER: _ClassVar[int]
+    DESIRED_RESIDENCY_FIELD_NUMBER: _ClassVar[int]
     protocol_version: ProtocolVersion
     file_base_url: str
     keep: _containers.RepeatedScalarFieldContainer[str]
     resolutions: _containers.RepeatedCompositeFieldContainer[ModelResolution]
-    def __init__(self, protocol_version: _Optional[_Union[ProtocolVersion, str]] = ..., file_base_url: _Optional[str] = ..., keep: _Optional[_Iterable[str]] = ..., resolutions: _Optional[_Iterable[_Union[ModelResolution, _Mapping]]] = ...) -> None: ...
+    desired_residency: DesiredResidency
+    def __init__(self, protocol_version: _Optional[_Union[ProtocolVersion, str]] = ..., file_base_url: _Optional[str] = ..., keep: _Optional[_Iterable[str]] = ..., resolutions: _Optional[_Iterable[_Union[ModelResolution, _Mapping]]] = ..., desired_residency: _Optional[_Union[DesiredResidency, _Mapping]] = ...) -> None: ...
+
+class DesiredResidency(_message.Message):
+    __slots__ = ("generation", "disk_refs", "hot", "snapshots")
+    class SnapshotsEntry(_message.Message):
+        __slots__ = ("key", "value")
+        KEY_FIELD_NUMBER: _ClassVar[int]
+        VALUE_FIELD_NUMBER: _ClassVar[int]
+        key: str
+        value: Snapshot
+        def __init__(self, key: _Optional[str] = ..., value: _Optional[_Union[Snapshot, _Mapping]] = ...) -> None: ...
+    GENERATION_FIELD_NUMBER: _ClassVar[int]
+    DISK_REFS_FIELD_NUMBER: _ClassVar[int]
+    HOT_FIELD_NUMBER: _ClassVar[int]
+    SNAPSHOTS_FIELD_NUMBER: _ClassVar[int]
+    generation: int
+    disk_refs: _containers.RepeatedScalarFieldContainer[str]
+    hot: _containers.RepeatedCompositeFieldContainer[DesiredInstance]
+    snapshots: _containers.MessageMap[str, Snapshot]
+    def __init__(self, generation: _Optional[int] = ..., disk_refs: _Optional[_Iterable[str]] = ..., hot: _Optional[_Iterable[_Union[DesiredInstance, _Mapping]]] = ..., snapshots: _Optional[_Mapping[str, Snapshot]] = ...) -> None: ...
+
+class DesiredInstance(_message.Message):
+    __slots__ = ("function_name", "models")
+    FUNCTION_NAME_FIELD_NUMBER: _ClassVar[int]
+    MODELS_FIELD_NUMBER: _ClassVar[int]
+    function_name: str
+    models: _containers.RepeatedCompositeFieldContainer[ModelBinding]
+    def __init__(self, function_name: _Optional[str] = ..., models: _Optional[_Iterable[_Union[ModelBinding, _Mapping]]] = ...) -> None: ...
 
 class ModelResolution(_message.Message):
     __slots__ = ("ref", "resolved_ref", "cast")
@@ -213,18 +236,20 @@ class ModelResolution(_message.Message):
     def __init__(self, ref: _Optional[str] = ..., resolved_ref: _Optional[str] = ..., cast: _Optional[str] = ...) -> None: ...
 
 class StateDelta(_message.Message):
-    __slots__ = ("phase", "available_functions", "loading_functions", "free_vram_bytes", "finalizing_jobs")
+    __slots__ = ("phase", "available_functions", "loading_functions", "free_vram_bytes", "finalizing_jobs", "observed_residency_generation")
     PHASE_FIELD_NUMBER: _ClassVar[int]
     AVAILABLE_FUNCTIONS_FIELD_NUMBER: _ClassVar[int]
     LOADING_FUNCTIONS_FIELD_NUMBER: _ClassVar[int]
     FREE_VRAM_BYTES_FIELD_NUMBER: _ClassVar[int]
     FINALIZING_JOBS_FIELD_NUMBER: _ClassVar[int]
+    OBSERVED_RESIDENCY_GENERATION_FIELD_NUMBER: _ClassVar[int]
     phase: WorkerPhase
     available_functions: _containers.RepeatedScalarFieldContainer[str]
     loading_functions: _containers.RepeatedScalarFieldContainer[str]
     free_vram_bytes: int
     finalizing_jobs: int
-    def __init__(self, phase: _Optional[_Union[WorkerPhase, str]] = ..., available_functions: _Optional[_Iterable[str]] = ..., loading_functions: _Optional[_Iterable[str]] = ..., free_vram_bytes: _Optional[int] = ..., finalizing_jobs: _Optional[int] = ...) -> None: ...
+    observed_residency_generation: int
+    def __init__(self, phase: _Optional[_Union[WorkerPhase, str]] = ..., available_functions: _Optional[_Iterable[str]] = ..., loading_functions: _Optional[_Iterable[str]] = ..., free_vram_bytes: _Optional[int] = ..., finalizing_jobs: _Optional[int] = ..., observed_residency_generation: _Optional[int] = ...) -> None: ...
 
 class RunJob(_message.Message):
     __slots__ = ("request_id", "attempt", "function_name", "input_payload", "timeout_ms", "tenant", "invoker_id", "capability_token", "output_mode", "compute", "models", "snapshots")

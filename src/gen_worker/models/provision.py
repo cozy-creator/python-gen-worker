@@ -353,7 +353,7 @@ def _fetch_tensorhub_snapshot(
 
     ``components`` (pgw#505): th#560's resolve route always returns the
     FULL repo manifest today (selective CAS resolve is the hub-side
-    ModelOp DOWNLOAD scoping — a separate, not-yet-built platform change).
+    desired-snapshot scoping — a separate, not-yet-built platform change).
     Until then this narrows client-side: the worker fully owns this
     resolve+download+materialize loop (unlike the production executor path,
     which digest-verifies against an orchestrator-issued file list), so it
