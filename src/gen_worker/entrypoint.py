@@ -33,7 +33,6 @@ from typing import Any, Dict, List, Optional
 import msgspec
 
 from .config import get_settings
-from .cuda_probe import CUDA_PROBE_FAILED_MARKER, manifest_needs_cuda, probe_cuda
 from .models.cache_paths import tensorhub_cas_dir
 try:
     from .worker import Worker
@@ -210,18 +209,6 @@ def _run_main() -> int:
         _log_worker_fatal("cache_preflight", e, exit_code=1)
         logger.error(str(e))
         return 1
-
-    # Boot-time CUDA probe (gw#529): on a GPU-needing manifest, verify the
-    # device actually works BEFORE we hello the orchestrator and accept a
-    # job — a busy/unavailable GPU (RunPod bad-host fault) must kill this
-    # pod now, not terminal-fail a real request at model load.
-    if manifest_needs_cuda(manifest):
-        probe = probe_cuda()
-        if not probe.ok:
-            logger.error("%s: %s", CUDA_PROBE_FAILED_MARKER, probe.reason)
-            _log_worker_fatal("cuda_probe", RuntimeError(probe.reason), exit_code=1)
-            return 1
-        _log_startup_phase("cuda_probe_ok", status="ok")
 
     if not settings.orchestrator_public_addr:
         logger.error("Settings.orchestrator_public_addr is empty (set ORCHESTRATOR_PUBLIC_ADDR env). Refusing to start worker.")

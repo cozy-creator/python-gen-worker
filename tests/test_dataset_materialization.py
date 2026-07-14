@@ -73,7 +73,6 @@ class _FakeHub:
         self.build_failed = False  # 503 typed snapshot_build_failed
         self.materialize_requests = 0
         self.seen_wait: List[str] = []
-        self.seen_format: List[str] = []
         # Rows the list endpoint knows + ids materialize serves. th#641
         # production refs are bare UUIDs the list endpoint never saw.
         self.known_ids = {"ds-1", _DATASET_UUID}
@@ -115,7 +114,6 @@ class _FakeHub:
                     outer.materialize_requests += 1
                     q = urllib.parse.parse_qs(parsed.query)
                     outer.seen_wait.append(q.get("wait", [""])[0])
-                    outer.seen_format.append(q.get("format", [""])[0])
                     if outer.build_failed:
                         self._json({"error": "snapshot_build_failed",
                                     "error_code": "encode_error"}, status=503)
@@ -224,8 +222,6 @@ def test_resolve_dataset_downloads_verified_parquet(hub) -> None:
     _assert_snapshot(root, hub)
     assert ctx.dataset_paths["acme/faces"] == str(root)
     assert hub.seen_auth[0] == "Bearer cap-tok"
-    # gw#531: the worker requests the th#698 blob manifest, not parquet.
-    assert hub.seen_format == ["files"]
     # Second resolve is a cache hit — no extra shard fetch.
     n = hub.shard_requests
     assert ctx.resolve_dataset("acme/faces") == str(root)

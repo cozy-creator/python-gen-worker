@@ -127,12 +127,6 @@ FP8_COMPUTE_MIN_SM = 89
 
 EMERGENCY_NF4_VRAM_FACTOR = 0.45  # nf4 denoiser, encoders/VAE at compute dtype
 
-# Per-component resident-bytes factor for a bnb-nf4 quantized module vs its
-# bf16/fp16 stored bytes (4-bit packed + double-quant + quant-state overhead).
-# Used by the load-time fit ladder's per-component estimate (gw#521); the
-# whole-model EMERGENCY_NF4_VRAM_FACTOR above stays the hub-side coarse spec.
-NF4_WEIGHT_BYTES_FACTOR = 0.30
-
 
 __all__ = [
     "FP8_COMPUTE_MIN_SM",
@@ -142,7 +136,6 @@ __all__ = [
     "CLASS_SVDQ_FP4",
     "CLASS_SVDQ_INT4",
     "EMERGENCY_NF4_VRAM_FACTOR",
-    "NF4_WEIGHT_BYTES_FACTOR",
     "Placement",
     "classify_flavor_token",
     "default_placement",

@@ -52,15 +52,13 @@ def _clean_storage_dtype(v: object) -> str:
 
 class ModelRef(msgspec.Struct, frozen=True):
     """ONE structured model reference (pgw#511): ``source`` is explicit, never
-    inferred from shape or which factory built the value. Pure identity +
-    fetch scope — no permission fields live here (pgw#523: overlay
-    permission is a slot-policy concern, not an identity-struct flag).
+    inferred from shape or which factory built the value.
 
     Carries the union of every registry's per-source fields (tensorhub:
-    ``tag``/``flavor``; huggingface: ``revision``/``dtype``/``subfolder``/
-    ``files``; civitai: ``version``; modelscope: ``revision``/``files``).
-    ``storage_dtype`` is shared by tensorhub/huggingface. Build one via
-    ``Hub``/``HF``/``Civitai``/``ModelScope`` rather than the raw
+    ``tag``/``flavor``/``allow_lora``; huggingface: ``revision``/``dtype``/
+    ``subfolder``/``files``; civitai: ``version``; modelscope: ``revision``/
+    ``files``). ``storage_dtype`` is shared by tensorhub/huggingface. Build
+    one via ``Hub``/``HF``/``Civitai``/``ModelScope`` rather than the raw
     constructor — they pin ``source`` and apply the per-registry validation
     below (mirrored in ``__post_init__`` so it holds for direct construction
     too, e.g. ``msgspec.structs.replace``).
@@ -73,6 +71,13 @@ class ModelRef(msgspec.Struct, frozen=True):
     whole repo — today's behavior. Civitai/modelscope reject it: civitai
     artifacts aren't component-structured, and modelscope's ``files=`` glob
     already covers the split-checkpoint case.
+
+    ``.provider`` and ``.ref`` are back-compat aliases for call sites that
+    predate the explicit ``source``/``path`` fields: ``.provider`` returns
+    the OLDER, narrower vocabulary (``"hf"`` not ``"huggingface"``; no
+    ``"modelscope"``) that tensorhub's build-manifest ``bindings.<slot>.provider``
+    column is DB-CHECK-constrained to — do not repoint manifest/download code
+    at ``.source`` without also widening that constraint.
     """
 
     source: ModelSource
@@ -86,6 +91,7 @@ class ModelRef(msgspec.Struct, frozen=True):
     version: str = ""
     files: tuple[str, ...] = ()
     components: tuple[str, ...] = ()
+    allow_lora: bool = False
 
     def __post_init__(self) -> None:
         # msgspec.structs.force_setattr, NOT object.__setattr__: the latter
@@ -104,6 +110,7 @@ class ModelRef(msgspec.Struct, frozen=True):
         force(self, "files", tuple(_clean(p) for p in self.files if _clean(p)))
         force(self, "components", tuple(_clean(p) for p in self.components if _clean(p)))
         force(self, "storage_dtype", _clean_storage_dtype(self.storage_dtype))
+        force(self, "allow_lora", bool(self.allow_lora))
 
         if self.source == "tensorhub":
             if not self.tag:
@@ -131,6 +138,20 @@ class ModelRef(msgspec.Struct, frozen=True):
         else:
             raise ValueError(f"unknown ModelRef source {self.source!r}")
 
+    @property
+    def provider(self) -> str:
+        """Back-compat alias, OLD narrower vocabulary: ``"hf"`` (not
+        ``"huggingface"``) for huggingface refs, ``source`` verbatim
+        otherwise. This is what tensorhub's build-manifest
+        ``bindings.<slot>.provider`` column expects — use ``.source`` for
+        anything new (pgw#511 wire vocabulary)."""
+        return "hf" if self.source == "huggingface" else self.source
+
+    @property
+    def ref(self) -> str:
+        """Back-compat alias for ``.path``."""
+        return self.path
+
 
 def Hub(
     ref: str,
@@ -139,8 +160,14 @@ def Hub(
     flavor: str = "",
     storage_dtype: str = "",
     components: tuple[str, ...] = (),
+    allow_lora: bool = False,
 ) -> ModelRef:
-    """Tensorhub-backed binding: ``Hub("owner/repo", tag=, flavor=, storage_dtype=, components=)``.
+    """Tensorhub-backed binding: ``Hub("owner/repo", tag=, flavor=, storage_dtype=, components=, allow_lora=)``.
+
+    ``allow_lora=True`` opts the slot into per-request LoRA overlays
+    (``_models.<slot>.loras``, ie#358) — the endpoint must also declare
+    ``Compile(family=...)`` so the hub's architecture gate can police
+    adapter targets.
 
     ``components=`` (pgw#505) fetches only the named pipeline component
     subfolders (+ root config files) instead of the whole repo — e.g. a
@@ -149,7 +176,7 @@ def Hub(
     """
     return ModelRef(
         source="tensorhub", path=ref, tag=tag, flavor=flavor,
-        storage_dtype=storage_dtype, components=components,
+        storage_dtype=storage_dtype, components=components, allow_lora=allow_lora,
     )
 
 
@@ -162,6 +189,7 @@ def HF(
     files: tuple[str, ...] = (),
     components: tuple[str, ...] = (),
     storage_dtype: str = "",
+    allow_lora: bool = False,
 ) -> ModelRef:
     """HuggingFace-backed binding: ``HF(id, revision=, dtype=, subfolder=, files=, components=, storage_dtype=)``.
 
@@ -180,7 +208,7 @@ def HF(
     return ModelRef(
         source="huggingface", path=ref, revision=revision, dtype=dtype,
         subfolder=subfolder, files=files, components=components,
-        storage_dtype=storage_dtype,
+        storage_dtype=storage_dtype, allow_lora=allow_lora,
     )
 
 

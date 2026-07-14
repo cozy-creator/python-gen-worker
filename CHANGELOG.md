@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.22.2 (2026-07-13)
+## 0.20.0 (2026-07-13)
 
 - **pgw#505: selective component download — declare-on-binding.** `Hub`/`HF`
   gain `components=` (mirrors `files=`): restricts a fetch to the named
@@ -24,91 +24,6 @@
   path is deliberately left unfiltered: its residency layer digest-verifies
   the materialized tree against the orchestrator's full file list, so
   scoping there is the hub's job, not the worker's.
-- **Rebased onto 0.21.0 (post-#233 `allow_lora` eviction, post-#243 dynamic
-  slot materialization).** This PR's original diff (authored pre-#233) also
-  re-added `allow_lora=` to `ModelRef`/`Hub`/`HF` and an
-  `_binding_to_manifest`/discovery emission path for it — all of that is
-  dropped on rebase; `allow_lora` stays evicted (overlay permission is a
-  slot-policy concern, th#772, not a binding-identity flag). Only the
-  `components=` axis (a genuinely new field, disjoint from `allow_lora`)
-  survives. `binding.py`, `discover.py`, `test_binding.py`, and
-  `test_discovery_and_decorators.py` all had this same shape of conflict;
-  resolved identically in each. No interaction with #243's slot
-  materialization — `components=` is a fetch-scope hint on a fixed binding,
-  orthogonal to which pick gets dispatched.
-
-## 0.21.0 (2026-07-13)
-
-**BREAKING(-ish) — pgw#532: worker-side dynamic slot materialization (the last th#767
-piece).** A hub-connected worker no longer materializes a declared `Slot`'s
-`default_checkpoint` from its raw upstream — the fc157 live failure where a Civitai
-default hit `civitai_not_found` at boot setup and cascaded `load_failed` onto every
-healthy hub binding.
-
-- **Materialization precedence per declared Slot** (executor `_slot_dispatch_binding`):
-  the hub-resolved pick from `RunJob.models[slot]` (a tensorhub-CAS ref; snapshots ride
-  the dispatch / earlier ModelOps, th#763 re-mint covers cold refs) > the code-declared
-  `default_checkpoint` when it is itself a `Hub(...)` CAS ref > **fail RETRYABLE** —
-  never a raw Civitai/HF/ModelScope self-fetch (mirror-first, gw#465). Hub-less
-  (`cozy run` / `gen-worker run`) resolution of the raw default is unchanged
-  (`models/provision.resolve_bindings`).
-- **Boot**: `lifecycle.startup()` no longer prefetches Slot seeds from upstream and no
-  longer eagerly sets up Slot-declared endpoints with the code seed; dynamic-slot
-  functions advertise available once hardware-gated and materialize per dispatch.
-- **Instance-per-pick**: `_effective_spec` rebinds every declared Slot to the dispatch's
-  resolved pick; the derived binding set derives a new `instance_key`, so `setup()` runs
-  once per (class, resolved pick), `self.pipeline`-style setup-held state stays coherent
-  per checkpoint, multiple picks stay warm side by side, and the existing residency/LRU
-  machinery evicts whole instances. `ModelOp{LOAD}` now also matches per-pick derived
-  records (promote/re-set-up a previously-dispatched pick); a LOAD for a never-dispatched
-  pick banks bytes+snapshot and reports `load_failed` (pre-warm degrades to a download).
-- **`ctx.slots[name].ref` is the resolved pick** (not the code default);
-  `.defaults` still merges the wire's `inference_defaults` over the code preset.
-- `gen_worker.testing` helpers unchanged (the `ctx.slots` stub shape is identical).
-
-## 0.20.0 (2026-07-13)
-
-**BREAKING — pgw#523: `ModelRef` is pure identity + fetch scope; `.provider`/`.ref` aliases retired.**
-
-- **Part A — evict `allow_lora` (identity != permission).** Deleted `allow_lora` from
-  `ModelRef` and the `Hub(...)`/`HF(...)` kwargs. th#772 moved overlay permission to the
-  slot-policy `loras` axis; the th#586 architecture gate has always keyed off the declared
-  binding/slot FAMILY (`EffectiveBindingFamily`), never this flag, so it never gated
-  anything at runtime — only a registration-time co-occurrence check (allow_lora=true
-  requires family), which tensorhub also retires this release. `_stamp_lora_family` ->
-  `_stamp_family`: family stamping is now unconditional-when-known on every binding
-  (top-level `bindings` blocks and `model.choices[].binding` rows alike), not
-  allow_lora-triggered.
-- **Part B — retire the `.provider`/`.ref` back-compat aliases.** `ModelRef` now exposes
-  only `.source`/`.path`. Every in-repo consumer (discovery manifest emission, executor
-  prefetch/download plumbing, residency cache-key labeling, the CLI's list/prefetch
-  commands) repoints at `.source`/`.path`. The manifest `bindings.<slot>.provider` wire
-  field now carries the pgw#511 vocabulary directly (`"huggingface"`/`"modelscope"`, not
-  the old `"hf"` short form) — requires tensorhub's widened `provider` DB CHECK deployed
-  first (th#523 companion PR). `models/refs.py::parse_model_ref` accepts both `"hf"` and
-  `"huggingface"` as input and keeps normalizing to the internal `"hf"` token, so the
-  ref-grammar module and every `parsed.provider == "hf"` comparison downstream (download/
-  provision) are unaffected.
-- Hard cut, no back-compat: constructing `Hub(..., allow_lora=True)` or reading
-  `ref.provider`/`ref.ref` now fails immediately (`TypeError`/`AttributeError`).
-
-## 0.19.1 (2026-07-13)
-
-- **pgw#517: `compile=` is no longer silently inert on self-loading
-  (str/Path-slot) endpoints.** The executor only ever armed
-  `compile=Compile(...)` automatically on a `setup()` slot it loads itself
-  (a pipeline-class annotation) — an endpoint that self-loads from a
-  `str`/`Path` slot declared `compile=` that seeded the manifest/shape
-  contract but never actually armed at request time. Discovery now hard-
-  errors on that combination (was silent). Two fixes, both documented in
-  the error: annotate the slot with the pipeline class so the worker loads
-  it and arms compile automatically, or call the new
-  `gen_worker.arm_compile(pipe)` at the end of `setup()` yourself — same
-  cache-artifact-gated policy as the automatic path, eager otherwise. The
-  arming context (`Compile` spec, cache dir, hub-attached artifact) is
-  carried by a `contextvars.ContextVar` the executor scopes to the
-  `setup()` call, so `arm_compile` needs no `ctx` parameter and cannot be
-  called outside `setup()`. See `docs/compile-cache.md`.
 
 ## 0.19.0 (2026-07-13)
 

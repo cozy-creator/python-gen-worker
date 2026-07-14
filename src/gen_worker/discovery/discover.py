@@ -276,9 +276,9 @@ def _binding_to_manifest(binding: Binding, param_name: str = "") -> Dict[str, An
     """
     out: Dict[str, Any] = {
         "kind": "fixed",
-        "provider": binding.source,
+        "provider": binding.provider,
         "slot_name": param_name,
-        "ref": binding.path,
+        "ref": binding.ref,
     }
     if binding.source == "tensorhub":
         # Normal form (gw#492): the default tag ('latest') is elided at the
@@ -293,6 +293,8 @@ def _binding_to_manifest(binding: Binding, param_name: str = "") -> Dict[str, An
             # not yet built) reads this to resolve only the named pipeline
             # component subfolders instead of the whole repo.
             out["components"] = list(binding.components)
+        if binding.allow_lora:
+            out["allow_lora"] = True
     elif binding.source == "huggingface":
         for k in ("revision", "dtype", "subfolder"):
             v = getattr(binding, k)
@@ -302,6 +304,8 @@ def _binding_to_manifest(binding: Binding, param_name: str = "") -> Dict[str, An
             out["files"] = list(binding.files)
         if binding.components:
             out["components"] = list(binding.components)
+        if binding.allow_lora:
+            out["allow_lora"] = True
     elif binding.source == "civitai":
         if binding.version:
             out["version"] = binding.version
@@ -313,19 +317,21 @@ def _binding_to_manifest(binding: Binding, param_name: str = "") -> Dict[str, An
     return out
 
 
-def _stamp_family(binding_manifest: Dict[str, Any], family: str) -> None:
-    """Stamp a binding manifest with the endpoint's architecture family
-    (pgw#523: unconditional-when-known, not ``allow_lora``-triggered) so
-    tensorhub's th#586 gate can family-police any LoRA overlay attached at
-    this slot. Identity (the binding) and permission (whether a LoRA may
-    attach here — the slot-policy ``loras`` axis, th#772) are separate
-    concerns; this only carries the family fact through. Shared by
-    top-level ``bindings`` blocks and ``model.choices[].binding`` rows
-    (pgw#519) so both surfaces stamp identically. No-op when the family
-    isn't known — nothing to police."""
-    if not family:
+def _stamp_lora_family(binding_manifest: Dict[str, Any], compile_family: str, context: str) -> None:
+    """Stamp an ``allow_lora`` binding manifest with the endpoint's
+    ``Compile(family=...)`` so tensorhub's th#586 architecture gate can
+    police adapter targets (the builder rejects ``allow_lora`` bindings
+    lacking a family). Shared by top-level ``bindings`` blocks and
+    ``model.choices[].binding`` rows (pgw#519) so both surfaces stamp
+    identically."""
+    if not binding_manifest.get("allow_lora"):
         return
-    binding_manifest["family"] = family
+    if not compile_family:
+        raise ValueError(
+            f"{context}: allow_lora bindings require "
+            "Compile(family=...) on the endpoint"
+        )
+    binding_manifest["family"] = compile_family
 
 
 def _model_ref_to_manifest(ref: Any) -> Dict[str, Any]:
@@ -358,7 +364,7 @@ def _slot_to_manifest(name: str, slot: Slot, *, compile_family: str) -> Dict[str
     # Compile(family=...) is the explicit, functionally-load-bearing
     # declaration (compile-cache keying) — it wins over the slot's own
     # default_config-preset registration when both are present, mirroring
-    # _stamp_family's precedence for the bindings-block stamp below.
+    # _stamp_lora_family's precedence for the bindings-block stamp below.
     family = compile_family or slot.family
     if family:
         out["family"] = family
@@ -411,9 +417,10 @@ def _collect_model_placement_key(
     catalog/UI renders ``choices[].defaults``.
 
     ``compile_family`` mirrors the endpoint's ``Compile(family=...)`` onto
-    each choice binding via :func:`_stamp_family` — identically to how
-    top-level ``bindings`` blocks are stamped (pgw#519), unconditionally
-    when known (pgw#523)."""
+    each ``allow_lora`` choice binding via :func:`_stamp_lora_family` —
+    identically to how top-level ``bindings`` blocks are stamped (pgw#519):
+    tensorhub's th#586 gate rejects ``allow_lora`` choice bindings lacking a
+    family just like it does top-level ones."""
     try:
         hints = typing.get_type_hints(payload_type)
     except Exception:
@@ -443,7 +450,13 @@ def _collect_model_placement_key(
     choices: List[Dict[str, Any]] = []
     for row in choice_enum.rows():  # type: ignore[attr-defined]
         binding_manifest = _binding_to_manifest(row.ref, slot)
-        _stamp_family(binding_manifest, compile_family)
+        _stamp_lora_family(
+            binding_manifest,
+            compile_family,
+            f"{name}: {payload_type.__name__}.{field_name} choice {row.id!r}"
+            if name
+            else f"{payload_type.__name__}.{field_name} choice {row.id!r}",
+        )
         entry: Dict[str, Any] = {
             "id": row.id,
             "binding": binding_manifest,
@@ -583,10 +596,9 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
             key: _binding_to_manifest(binding, key)
             for key, binding in es.models.items()
         }
-        # Every binding carries the endpoint's architecture family, when
-        # known, so the hub's th#586 gate can family-police any LoRA
-        # overlay attached at that slot (pgw#523: unconditional-when-known,
-        # not allow_lora-triggered). pgw#519: the same stamp applies to
+        # allow_lora bindings carry the endpoint's architecture family so the
+        # hub's th#586 gate can police adapter targets (builder rejects
+        # allow_lora without family). pgw#519: the same stamp applies to
         # model.choices[].binding rows, not just top-level bindings. pgw#520:
         # a Slot-declared binding with no Compile(family=...) may still carry
         # a family via its own default_config preset's registration — that's what
@@ -594,7 +606,9 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
         compile_family = es.compile.family if es.compile is not None else ""
         for key, block in bindings_block.items():
             slot_family = es.slot_family.get(key, "") if es.slot_family else ""
-            _stamp_family(block, compile_family or slot_family)
+            _stamp_lora_family(
+                block, compile_family or slot_family, f"{es.name} binding {key!r}"
+            )
 
         slots_block = [
             _slot_to_manifest(name, slot, compile_family=compile_family)

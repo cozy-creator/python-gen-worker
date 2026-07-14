@@ -1,10 +1,9 @@
 """Dataset snapshot materialization against the tensorhub datasets API.
 
 Free functions used by ``_PublisherMixin.resolve_dataset``: look up a dataset
-row by (tenant, name), fetch its blob manifest (th#698 wire format — a
-rows.jsonl-style entry index with presigned URLs / inline text / raw CAS
-blob digests) — polling 202 until the async snapshot build is ready
-(DATASET-V2 contract, gw#457) — and stream each entry to disk with blake3
+row by (tenant, name), fetch its parquet materialize manifest (presigned shard
+URLs, th#642 wire format) — polling 202 until the async snapshot build is
+ready (DATASET-V2 contract, gw#457) — and stream each shard to disk with
 digest verification + bounded retries.
 """
 from __future__ import annotations
@@ -117,7 +116,7 @@ def fetch_materialize_manifest(
     budget_s: float = _MATERIALIZE_BUDGET_S,
     cancelled: Optional[Callable[[], bool]] = None,
 ) -> Tuple[str, List[Dict[str, Any]]]:
-    """GET /datasets/:id/materialize?format=files&include_urls=true.
+    """GET /datasets/:id/materialize?format=parquet&include_urls=true.
 
     Authorizes by dataset id + read_dataset grant (or tenant read perm).
     Returns (snapshot_id, entries); entries carry
@@ -135,7 +134,7 @@ def fetch_materialize_manifest(
 
     url = (
         f"{base}/api/v1/datasets/{urllib.parse.quote(dataset_id, safe='')}"
-        "/materialize?format=files&include_urls=true"
+        "/materialize?format=parquet&include_urls=true"
         f"&wait={_MATERIALIZE_WAIT_HINT_S}"
     )
     headers = {"Authorization": f"Bearer {token}"}

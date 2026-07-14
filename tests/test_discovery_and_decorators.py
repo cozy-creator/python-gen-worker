@@ -442,9 +442,9 @@ def test_manifest_emits_model_placement_key(tmp_pkg: Path) -> None:
     """One handler -> one function; a ModelChoice payload field emits the
     `model` block (field + byom + slot + curated choices carrying structured
     ModelRef bindings, typed defaults, and hot/price hints) — the pgw#509
-    SDK->tensorhub (th#761) contract. Every choice binding gets the
-    endpoint's Compile(family=...) stamp (pgw#519), unconditionally when
-    known (pgw#523: family stamping is no longer allow_lora-triggered)."""
+    SDK->tensorhub (th#761) contract. The wai choice's allow_lora binding
+    also gets the endpoint's Compile(family=...) stamp (pgw#519), same as a
+    top-level allow_lora binding would."""
     from gen_worker.discovery.discover import discover_functions
 
     pkg = tmp_pkg / "ep_model"
@@ -454,7 +454,6 @@ def test_manifest_emits_model_placement_key(tmp_pkg: Path) -> None:
         import enum
         from typing import Union
         import msgspec
-        import gen_worker
         from gen_worker import (Compile, Hub, HF, Model, ModelChoice, ModelDefaults,
                                 ModelRef, RequestContext, Resources, endpoint)
 
@@ -463,7 +462,7 @@ def test_manifest_emits_model_placement_key(tmp_pkg: Path) -> None:
             guidance: float = 5.0
 
         class M(ModelChoice[D], enum.Enum):
-            WAI = Model("wai", Hub("o/wai"), D(28, 6.0), hot=True)
+            WAI = Model("wai", Hub("o/wai", allow_lora=True), D(28, 6.0), hot=True)
             PONY = Model("pony", HF("o/pony"), D(30), price=2.0)
 
         class In_(msgspec.Struct):
@@ -477,8 +476,7 @@ def test_manifest_emits_model_placement_key(tmp_pkg: Path) -> None:
                   resources=Resources(vram_gb=12),
                   compile=Compile(family="wai-arch", shapes=((512, 512),)))
         class Gen:
-            def setup(self, pipeline: object, vae: object) -> None:
-                gen_worker.arm_compile(pipeline)  # pgw#517: self-loaded slots
+            def setup(self, pipeline: object, vae: object) -> None: ...
             def generate(self, ctx: RequestContext, data: In_) -> Out_:
                 return Out_(y="ok")
     """))
@@ -493,11 +491,11 @@ def test_manifest_emits_model_placement_key(tmp_pkg: Path) -> None:
     assert set(by_id) == {"wai", "pony"}
     assert by_id["wai"]["binding"]["provider"] == "tensorhub"
     assert by_id["wai"]["binding"]["ref"] == "o/wai"
+    assert by_id["wai"]["binding"]["allow_lora"] is True
     assert by_id["wai"]["binding"]["family"] == "wai-arch"
     assert by_id["wai"]["defaults"] == {"steps": 28, "guidance": 6.0}
     assert by_id["wai"]["hot"] is True
-    assert by_id["pony"]["binding"]["provider"] == "huggingface"
-    assert by_id["pony"]["binding"]["family"] == "wai-arch"
+    assert by_id["pony"]["binding"]["provider"] == "hf"
     assert by_id["pony"]["price"] == 2.0
     assert "hot" not in by_id["pony"]      # false hint omitted
 
@@ -517,11 +515,11 @@ def test_model_shorthand_skips_server_handle_setup_param() -> None:
 
     (s,) = extract_specs(Chat)
     assert list(s.models) == ["model"]
-    assert s.models["model"].path == "o/llm"
+    assert s.models["model"].ref == "o/llm"
 
 
 # --------------------------------------------------------------------------- #
-# 8. binding family stamping (ie#358 / pgw#523)                                #
+# 8. allow_lora bindings (ie#358)                                               #
 # --------------------------------------------------------------------------- #
 
 
@@ -529,7 +527,6 @@ def test_compile_block_emits_video_shapes_and_storage_dtype() -> None:
     """ie#381: the lock's compile block carries (w, h, frames) rows verbatim
     and the primary binding's weight-storage lane, so the hub's cell producer
     builds from an identically-loaded (fp8) pipeline."""
-    import gen_worker
     from gen_worker import Compile, Hub
     from gen_worker.discovery.discover import _extract_entries
 
@@ -544,9 +541,7 @@ def test_compile_block_emits_video_shapes_and_storage_dtype() -> None:
     )
     class Gen:
         def setup(self, model: str) -> None:
-            # self-loading (str) slot: arms compile explicitly (pgw#517).
             self.model = model
-            gen_worker.arm_compile(self.model)
 
         def generate(self, ctx: RequestContext, data: _In) -> _Out:
             return _Out(result="")
@@ -568,9 +563,7 @@ def test_compile_block_omits_storage_dtype_for_bf16_bindings() -> None:
     )
     class Gen:
         def setup(self, model: str) -> None:
-            # self-loading (str) slot: arms compile explicitly (pgw#517).
             self.model = model
-            gen_worker.arm_compile(self.model)
 
         def generate(self, ctx: RequestContext, data: _In) -> _Out:
             return _Out(result="")
@@ -579,54 +572,26 @@ def test_compile_block_omits_storage_dtype_for_bf16_bindings() -> None:
     assert "storage_dtype" not in entry["compile"]
 
 
-def test_binding_emits_family_stamp_from_compile() -> None:
-    """pgw#523: family stamping is unconditional-when-known — no allow_lora
-    flag gates it, and ModelRef carries no such flag any more (identity !=
-    permission; overlay permission lives on the slot-policy loras axis,
-    th#772)."""
+def test_allow_lora_binding_emits_flag_and_family() -> None:
     from gen_worker import Compile, Hub
     from gen_worker.discovery.discover import _extract_entries
 
     @endpoint(
-        model=Hub("cozy/sdxl-base"),
+        model=Hub("cozy/sdxl-base", allow_lora=True),
         resources=Resources(vram_gb=12),
         compile=Compile(family="sdxl", shapes=((1024, 1024),)),
     )
     class Gen:
         def setup(self, model: str) -> None:
-            # self-loading (str) slot: arms compile explicitly (pgw#517).
             self.model = model
-            gen_worker.arm_compile(self.model)
 
         def generate(self, ctx: RequestContext, data: _In) -> _Out:
             return _Out(result="")
 
     (entry,) = _extract_entries(Gen, "testmod")
     (block,) = entry["bindings"].values()
-    assert "allow_lora" not in block
+    assert block["allow_lora"] is True
     assert block["family"] == "sdxl"
-
-
-def test_binding_emits_no_family_when_none_declared() -> None:
-    """pgw#523: with no Compile(family=...) and no fallback-preset family,
-    a binding simply carries no `family` key — this used to hard-fail when
-    allow_lora=True lacked a family (th#586's gate rekeyed off the binding/
-    slot family directly, not that flag, so the co-occurrence requirement
-    is gone too)."""
-    from gen_worker import Hub
-    from gen_worker.discovery.discover import _extract_entries
-
-    @endpoint(model=Hub("cozy/sdxl-base"), resources=Resources(vram_gb=12))
-    class Gen:
-        def setup(self, model: str) -> None:
-            self.model = model
-
-        def generate(self, ctx: RequestContext, data: _In) -> _Out:
-            return _Out(result="")
-
-    (entry,) = _extract_entries(Gen, "testmod")
-    (block,) = entry["bindings"].values()
-    assert "family" not in block
 
 
 def test_components_binding_emits_in_manifest() -> None:
@@ -675,13 +640,28 @@ def test_no_components_binding_omits_manifest_key() -> None:
     assert "components" not in block
 
 
+def test_allow_lora_without_compile_family_raises() -> None:
+    from gen_worker import Hub
+    from gen_worker.discovery.discover import _extract_entries
+
+    @endpoint(model=Hub("cozy/sdxl-base", allow_lora=True), resources=Resources(vram_gb=12))
+    class Gen:
+        def setup(self, model: str) -> None:
+            self.model = model
+
+        def generate(self, ctx: RequestContext, data: _In) -> _Out:
+            return _Out(result="")
+
+    with pytest.raises(ValueError, match="allow_lora"):
+        _extract_entries(Gen, "testmod")
+
+
 def test_model_choice_binding_family_matches_top_level_binding(tmp_pkg: Path) -> None:
     """pgw#519: model.choices[].binding gets the SAME family stamp that a
     top-level bindings block gets from Compile(family=...) — tensorhub's
-    th#586 architecture gate polices LoRA targets against it on both
-    surfaces identically. pgw#523: the stamp is unconditional-when-known,
-    so EVERY binding under the endpoint (including "vae", which carries no
-    permission flag of any kind any more) gets it, not just some subset."""
+    th#586 architecture gate polices allow_lora targets on both surfaces
+    identically, so a builder-path deploy of a ModelChoice endpoint (e.g.
+    sdxl) doesn't hard-fail while a plain allow_lora endpoint passes."""
     from gen_worker.discovery.discover import discover_functions
 
     pkg = tmp_pkg / "ep_choice_family"
@@ -691,7 +671,6 @@ def test_model_choice_binding_family_matches_top_level_binding(tmp_pkg: Path) ->
         import enum
         from typing import Union
         import msgspec
-        import gen_worker
         from gen_worker import (Compile, Hub, HF, Model, ModelChoice, ModelDefaults,
                                 ModelRef, RequestContext, Resources, endpoint)
 
@@ -699,8 +678,8 @@ def test_model_choice_binding_family_matches_top_level_binding(tmp_pkg: Path) ->
             steps: int = 28
 
         class M(ModelChoice[D], enum.Enum):
-            A = Model("a", Hub("o/a"), D(28))
-            B = Model("b", Hub("o/b"), D(30))
+            A = Model("a", Hub("o/a", allow_lora=True), D(28))
+            B = Model("b", Hub("o/b", allow_lora=True), D(30))
 
         class In_(msgspec.Struct):
             prompt: str = ""
@@ -709,12 +688,11 @@ def test_model_choice_binding_family_matches_top_level_binding(tmp_pkg: Path) ->
         class Out_(msgspec.Struct):
             y: str
 
-        @endpoint(models={"pipeline": Hub("o/base"), "vae": Hub("o/vae")},
+        @endpoint(models={"pipeline": Hub("o/base", allow_lora=True), "vae": Hub("o/vae")},
                   resources=Resources(vram_gb=12),
                   compile=Compile(family="sdxl", shapes=((1024, 1024),)))
         class Gen:
-            def setup(self, pipeline: object, vae: object) -> None:
-                gen_worker.arm_compile(pipeline)  # pgw#517: self-loaded slots
+            def setup(self, pipeline: object, vae: object) -> None: ...
             def generate(self, ctx: RequestContext, data: In_) -> Out_:
                 return Out_(y="ok")
     """))
@@ -724,21 +702,21 @@ def test_model_choice_binding_family_matches_top_level_binding(tmp_pkg: Path) ->
 
     top_level_family = fn["bindings"]["pipeline"]["family"]
     assert top_level_family == "sdxl"
-    assert fn["bindings"]["vae"]["family"] == "sdxl"  # stamped unconditionally now
+    assert "family" not in fn["bindings"]["vae"]      # no allow_lora, no stamp
 
     by_id = {c["id"]: c for c in fn["model"]["choices"]}
     assert set(by_id) == {"a", "b"}
     for choice in by_id.values():
-        assert "allow_lora" not in choice["binding"]
+        assert choice["binding"]["allow_lora"] is True
         # Choice-binding emission equals top-level emission w.r.t. family.
         assert choice["binding"]["family"] == top_level_family
 
 
-def test_model_choice_binding_emits_no_family_when_none_declared(tmp_pkg: Path) -> None:
-    """Mirrors test_binding_emits_no_family_when_none_declared for the
-    choices[].binding surface: with no Compile(family=...) a choice binding
-    simply carries no `family` key — discovery no longer hard-fails here
-    (pgw#523 retired the allow_lora-requires-family co-occurrence check)."""
+def test_model_choice_allow_lora_without_compile_family_raises(tmp_pkg: Path) -> None:
+    """Mirrors test_allow_lora_without_compile_family_raises for the
+    choices[].binding surface: a ModelChoice endpoint with an allow_lora
+    choice and no Compile(family=...) must fail loudly at discovery, not
+    silently ship an unstamped binding tensorhub's th#586 gate will reject."""
     from gen_worker.discovery.discover import discover_functions
 
     pkg = tmp_pkg / "ep_choice_family_missing"
@@ -755,7 +733,7 @@ def test_model_choice_binding_emits_no_family_when_none_declared(tmp_pkg: Path) 
             steps: int = 28
 
         class M(ModelChoice[D], enum.Enum):
-            A = Model("a", Hub("o/a"), D(28))
+            A = Model("a", Hub("o/a", allow_lora=True), D(28))
 
         class In_(msgspec.Struct):
             prompt: str = ""
@@ -771,7 +749,5 @@ def test_model_choice_binding_emits_no_family_when_none_declared(tmp_pkg: Path) 
                 return Out_(y="ok")
     """))
 
-    fns = discover_functions(tmp_pkg, main_module="ep_choice_family_missing.main")
-    (fn,) = fns
-    (choice,) = fn["model"]["choices"]
-    assert "family" not in choice["binding"]
+    with pytest.raises(ValueError, match="allow_lora"):
+        discover_functions(tmp_pkg, main_module="ep_choice_family_missing.main")

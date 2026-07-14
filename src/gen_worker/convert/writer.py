@@ -18,7 +18,6 @@ torch/safetensors imports are deferred so importing gen_worker.convert stays che
 from __future__ import annotations
 
 import json
-import re
 import shutil
 import struct
 from dataclasses import dataclass
@@ -1015,74 +1014,9 @@ def shard_safetensors_by_offset(
         os.close(fd)
 
 
-# ---------------------------------------------------------------------------
-# Canonical published filenames (gw#466 / gw#522)
-# ---------------------------------------------------------------------------
-
-CAST_NORMALIZE_DTYPES = {"fp16", "bf16", "fp32", "f16", "f32"}
-
-VARIANT_WEIGHT_NAME_RE = re.compile(
-    r"^(?P<base>.+)\.(?P<v>fp16|bf16|fp32)"
-    r"(?P<shard>-\d{5}-of-\d{5})?\.safetensors(?P<idx>\.index\.json)?$"
-)
-
-
-def normalize_variant_filenames(tree: Path) -> None:
-    """Strip dtype-variant tokens from published weight filenames — the ONE
-    canonical-naming pass every publish path runs (gw#466, unified by gw#522).
-
-    dtype is a checkpoint axis (flavor) in repo-cas — one dtype per tree — so
-    HF variant suffixes are redundant, and the resharder composes an index
-    name diffusers cannot find (live twice: J23 juggernaut-xl, gw#522
-    sdxl-base — "diffusion_pytorch_model.fp16.safetensors.index.json" where
-    diffusers' _add_variant expects
-    "diffusion_pytorch_model.safetensors.index.fp16.json"; loads died).
-    Canonical names sidestep the class. A directory whose canonical twin
-    already exists is left untouched (dual-dtype upstream trees must not
-    collide). Quant flavors (fp8/int4/…) are never normalized — their names
-    carry loader semantics. Idempotent."""
-    dirs = sorted({p.parent for p in Path(tree).rglob("*.safetensors*") if p.is_file()})
-    for d in dirs:
-        renames: dict[str, str] = {}
-        for p in sorted(d.iterdir()):
-            m = VARIANT_WEIGHT_NAME_RE.match(p.name)
-            if not m:
-                continue
-            new_name = f"{m['base']}{m['shard'] or ''}.safetensors{m['idx'] or ''}"
-            if (d / new_name).exists():
-                renames.clear()
-                break
-            renames[p.name] = new_name
-        for old_name, new_name in renames.items():
-            (d / old_name).rename(d / new_name)
-        if not renames:
-            continue
-        for idx in d.glob("*.safetensors.index.json"):
-            try:
-                payload = json.loads(idx.read_text(encoding="utf-8"))
-            except Exception:  # noqa: BLE001
-                continue
-            weight_map = payload.get("weight_map")
-            if not isinstance(weight_map, dict):
-                continue
-            changed = False
-            for key, shard in weight_map.items():
-                if shard in renames:
-                    weight_map[key] = renames[shard]
-                    changed = True
-            if changed:
-                idx.write_text(
-                    json.dumps(payload, separators=(",", ":"), sort_keys=True),
-                    encoding="utf-8",
-                )
-
-
 __all__ = [
     "ConversionImplementationError",
-    "CAST_NORMALIZE_DTYPES",
     "MAX_SAFETENSORS_SHARD_BYTES",
-    "VARIANT_WEIGHT_NAME_RE",
-    "normalize_variant_filenames",
     "ShardPlan",
     "plan_shards",
     "build_index",

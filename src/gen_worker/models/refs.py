@@ -128,19 +128,12 @@ def parse_model_ref(raw: str, *, provider: str = "tensorhub") -> ParsedModelRef:
     keyword argument (default ``"tensorhub"``). No string prefixes are
     accepted — callers must split prefix/payload upstream and pass them
     in explicitly.
-
-    Accepts either spelling of the huggingface provider — the short
-    internal form ``"hf"`` and the pgw#511 wire form ``"huggingface"``
-    (``ModelRef.source``, since pgw#523 deleted the ``.provider`` alias
-    that used to narrow it before callers got here) — and always returns
-    ``ParsedModelRef(provider="hf", ...)`` so every existing ``== "hf"``
-    comparison downstream keeps working unchanged.
     """
     s = (raw or "").strip()
     if not s:
         raise ValueError("empty model ref")
 
-    if provider in ("hf", "huggingface"):
+    if provider == "hf":
         repo = s
         # Issue #17: runtime wire format carries flavor in the ref string
         # (e.g. "owner/repo#bf16") to identify which variant of an HF

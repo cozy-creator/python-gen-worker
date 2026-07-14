@@ -26,12 +26,15 @@ def describe_binding(binding: Any) -> Dict[str, Any]:
     if isinstance(binding, ModelRef):
         out: Dict[str, Any] = {
             "type": binding.source,
-            "ref": binding.path,
+            "provider": binding.provider,
+            "ref": binding.ref,
         }
         for key in ("tag", "flavor", "revision", "dtype", "subfolder", "version", "storage_dtype"):
             v = getattr(binding, key, "")
             if v:
                 out[key] = v
+        if getattr(binding, "allow_lora", False):
+            out["allow_lora"] = True
         files = tuple(getattr(binding, "files", ()) or ())
         if files:
             out["files"] = list(files)

@@ -75,7 +75,7 @@ def test_model_op_download_applies_binding_files(monkeypatch, tmp_path) -> None:
     asyncio.run(_run())
     assert len(calls) == 1
     assert calls[0]["ref"] == _REF
-    assert calls[0]["provider"] == "huggingface"
+    assert calls[0]["provider"] == "hf"
     assert calls[0]["allow_patterns"] == _BINDING.files
 
 
@@ -89,7 +89,7 @@ def test_bare_ref_store_ensure_local_applies_binding_files(monkeypatch, tmp_path
         await ex.store.ensure_local(_REF)
 
     asyncio.run(_run())
-    assert calls[0]["provider"] == "huggingface"
+    assert calls[0]["provider"] == "hf"
     assert calls[0]["allow_patterns"] == _BINDING.files
 
 

@@ -271,18 +271,9 @@ class Lifecycle:
         for spec in self.executor.specs.values():
             if spec.name in self.executor.unavailable:
                 continue
-            for slot, binding in spec.models.items():
-                if slot in spec.slots:
-                    # pgw#532: a declared Slot's default_checkpoint is a SEED
-                    # for the hub mapping, not a load instruction — the hub
-                    # resolves the slot (registered binding / per-request
-                    # pick) and drives DOWNLOADs itself. A hub-connected
-                    # worker never self-fetches the raw upstream default
-                    # (mirror-first, gw#465 — the fc157 civitai_not_found
-                    # boot failure).
-                    continue
+            for binding in spec.models.values():
                 ref = wire_ref(binding)
-                if binding.source != "tensorhub" and ref not in prefetch_refs:
+                if binding.provider != "tensorhub" and ref not in prefetch_refs:
                     # hf/civitai refs need no orchestrator snapshot; tensorhub
                     # refs arrive via ModelOp{DOWNLOAD} after HelloAck (§7).
                     prefetch_refs.append(ref)
@@ -297,22 +288,12 @@ class Lifecycle:
 
         await self.set_phase(pb.WORKER_PHASE_LOADING_PIPELINES)
         awaiting_hub: Dict[str, List[str]] = {}
-        dynamic: List[str] = []
         for spec in list(self.executor.specs.values()):
             if spec.name in self.executor.unavailable:
                 continue
-            if spec.slots:
-                # pgw#532: dynamic slots materialize the HUB-resolved ref
-                # (ModelOp pre-drives / RunJob resolved_models + snapshots),
-                # per dispatch, instance-per-pick. Setting up eagerly here
-                # would load the code seed — the exact fc157 setup-failure
-                # bug (raw civitai default -> civitai_not_found -> every
-                # function load_failed).
-                dynamic.append(spec.name)
-                continue
             missing = sorted({
                 wire_ref(b) for b in spec.models.values()
-                if b.source == "tensorhub"
+                if b.provider == "tensorhub"
                 and self.executor.store.local_path(wire_ref(b)) is None
             })
             if missing:
@@ -328,10 +309,6 @@ class Lifecycle:
                 await self.executor.ensure_setup(spec)
             except Exception as exc:
                 logger.error("startup setup of %s failed: %s", spec.name, exc)
-        if dynamic:
-            logger.info(
-                "dynamic-slot functions serve hub-resolved picks per dispatch "
-                "(pgw#532; no boot-time setup): %s", ", ".join(sorted(dynamic)))
         if awaiting_hub:
             logger.warning(
                 "functions waiting on hub-supplied snapshots (ModelOp{DOWNLOAD}, "
