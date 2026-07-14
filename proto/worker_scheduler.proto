@@ -449,7 +449,7 @@ message FnDegraded {
 // Orchestrator -> worker: stop accepting work, finish in-flight jobs, ship
 // results, close the stream, exit. No reply message; stream close is the ack.
 message Drain {
-  int64 deadline_ms = 1; // relative grace budget; worker aborts remaining work at expiry
+  int64 deadline_ms = 1; // 0 waits indefinitely; >0 is the total grace budget from receipt
 }
 
 // ---------------------------------------------------------------------------

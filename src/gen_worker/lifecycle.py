@@ -95,6 +95,7 @@ class Lifecycle:
         # mere membership) so a runtime ladder demotion (gw#463) re-emits.
         self._emitted_degraded: dict[str, str] = {}
         self._drain_task: Optional[asyncio.Task] = None
+        self._drain_deadline_at: Optional[float] = None
 
     # ---- snapshots -----------------------------------------------------------
 
@@ -346,29 +347,44 @@ class Lifecycle:
     # ---- drain -------------------------------------------------------------------
 
     def start_drain(self, deadline_ms: int) -> None:
-        if self._drain_task is None or self._drain_task.done():
-            self._drain_task = asyncio.create_task(
-                self.drain(deadline_ms), name="drain"
-            )
+        if self.draining:
+            return
+        self._begin_drain(deadline_ms)
+        self._drain_task = asyncio.create_task(self._finish_drain(), name="drain")
 
     async def drain(self, deadline_ms: int = 0) -> None:
         """stop admitting -> finish in-flight -> ship buffered results ->
-        close the stream -> signal exit 0."""
+        close the stream -> signal exit 0. Zero waits without a cutoff."""
         if self.draining:
             return
+        self._begin_drain(deadline_ms)
+        await self._finish_drain()
+
+    def _begin_drain(self, deadline_ms: int) -> None:
+        """Synchronously stop admission and anchor the deadline at receipt."""
         self.draining = True
         self.executor.draining = True
         logger.info("drain started (deadline_ms=%d)", deadline_ms)
+        deadline_s = (deadline_ms / 1000.0) if deadline_ms > 0 else None
+        loop = asyncio.get_running_loop()
+        self._drain_deadline_at = loop.time() + deadline_s if deadline_s is not None else None
+        if self._drain_deadline_at is None and self.transport is not None:
+            self.transport.begin_non_expiring_drain()
+
+    async def _finish_drain(self) -> None:
+        deadline_at = self._drain_deadline_at
+        loop = asyncio.get_running_loop()
         await self.maybe_send_state_delta()
 
-        deadline_s = (deadline_ms / 1000.0) if deadline_ms > 0 else None
-        finished = await self.executor.wait_idle(timeout=deadline_s)
+        wait_timeout = None if deadline_at is None else max(0.0, deadline_at - loop.time())
+        finished = await self.executor.wait_idle(timeout=wait_timeout)
         if not finished:
             logger.warning("drain deadline expired; aborting remaining jobs as RETRYABLE")
             await self.executor.abort_all(safe_message="worker draining")
 
         await self.executor.shutdown_instances()
         if self.transport is not None:
-            await self.transport.close_after_flush(timeout=30.0)
+            flush_timeout = None if deadline_at is None else max(0.0, deadline_at - loop.time())
+            await self.transport.close_after_flush(timeout=flush_timeout)
         self.drained.set()
         logger.info("drain complete")

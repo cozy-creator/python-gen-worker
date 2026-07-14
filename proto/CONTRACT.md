@@ -503,7 +503,7 @@ Producers: autoscaler retirement, deploy rollover, operator action.
 
 | field | producer | consumer | semantics |
 |---|---|---|---|
-| `deadline_ms` | O policy | W drain loop | relative grace budget from receipt |
+| `deadline_ms` | O policy | W drain loop | `0` waits indefinitely; `>0` is the total grace budget from receipt |
 
 W behavior: stop admitting (`RunJob` after Drain ⇒ `JobResult{RETRYABLE,
 safe_message:"worker draining"}` without JobAccepted), finish in-flight jobs,
