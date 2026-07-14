@@ -189,7 +189,12 @@ def _build_module_class() -> type:
             else:
                 sa = (x2.abs().amax(dim=-1, keepdim=True).float()
                       / _FP8_MAX).clamp(min=1e-12)
-            xq = (x2.float() / sa).clamp(-_FP8_MAX, _FP8_MAX).to(torch.float8_e4m3fn)
+            # Quantize in the COMPUTE dtype (reciprocal multiply) — fp32
+            # intermediates here doubled the eager activation traffic and made
+            # eager w8a8 as slow as the cast hooks it replaces (H100 measured;
+            # bf16 mantissa loss is irrelevant next to the fp8 target).
+            xq = (x2 * (1.0 / sa).to(x2.dtype)).clamp(
+                -_FP8_MAX, _FP8_MAX).to(torch.float8_e4m3fn)
             scaled_mm: Any = torch._scaled_mm
             y = scaled_mm(
                 xq, self.weight.t(), scale_a=sa, scale_b=self.weight_scale.t(),

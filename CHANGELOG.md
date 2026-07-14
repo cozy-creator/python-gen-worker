@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.24.1 (2026-07-14)
+
+- **gw#534: Fp8ScaledLinear eager quant without fp32 intermediates.** The
+  activation quant now runs in the compute dtype (reciprocal multiply);
+  the fp32 division path doubled eager activation traffic and made eager
+  w8a8 as slow as the cast hooks it replaces. Measured on H100 SXM
+  (qwen-image DiT 20B, 1024² b=1): eager w8a8 306.2 -> 265.4 ms/forward
+  (eager w8a16 prod lane: 304.8; bf16: 211.9). COMPILED (regional
+  per-block, ie#381 — quant ops fuse, GEMMs run fp8-rate): bf16 163.9 |
+  w8a16 250.8 | **w8a8 142.1 ms/forward — 1.77x vs the compiled W8A16 prod
+  lane, 2.15x vs today's eager prod path, 1.15x over compiled bf16**. The
+  cast tax survives compile on the w8a16 lane (hooks run outside the
+  graphs) — W8A8 is the only fix. Quality parity (same-seed
+  FLUX.2-klein-4B, 1024², vs bf16 reference): w8a8 PSNR 25.02 dB ==
+  w8a16 24.87 dB.
+
 ## 0.24.0 (2026-07-13)
 
 - **gw#534: W8A8 fp8-GEMM loader mode — the calibrated-quant serve path.**
