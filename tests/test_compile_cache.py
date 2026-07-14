@@ -359,3 +359,15 @@ def test_endpoint_compile_reaches_spec():
         @endpoint(compile="yes")  # type: ignore[arg-type]
         def bad(ctx, p: In) -> Out:
             return Out()
+
+
+def test_flavor_label_carries_weight_lane_gw534() -> None:
+    from gen_worker.compile_cache import flavor_label, is_cache_ref, lane_token
+
+    assert flavor_label("rtx-4090", "2.9.1+cu128") == "inductor-rtx-4090-torch2.9"
+    assert flavor_label("h100-80gb-hbm3", "2.13.0+cu129", "w8a8") == (
+        "inductor-h100-80gb-hbm3-torch2.13-w8a8")
+    assert flavor_label("rtx-4090", "2.9.1", "fp8-hooks") == (
+        "inductor-rtx-4090-torch2.9-w8a16")
+    assert lane_token("") == "" and lane_token("w8a8") == "w8a8"
+    assert is_cache_ref("_system/family-qwen-image#inductor-h100-80gb-hbm3-torch2.13-w8a8")
