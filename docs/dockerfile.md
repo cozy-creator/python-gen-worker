@@ -73,7 +73,7 @@ Use `ARG BASE_IMAGE` when your build profile uses **managed mode**
 a build arg.
 
 ```dockerfile
-ARG BASE_IMAGE=pytorch/pytorch:2.11.0-cuda12.8-cudnn9-runtime
+ARG BASE_IMAGE=pytorch/pytorch:2.13.0-cuda13.0-cudnn9-runtime@sha256:db80a41f8428644cebcb3d75b0b62df334ab6c0e75785951eb25f48bfbd42407
 FROM ${BASE_IMAGE}
 WORKDIR /app
 COPY . /app
@@ -169,29 +169,27 @@ RUN echo "build-nonce=${BUILD_NONCE}" \
 ## Full real-world example (managed mode + uv)
 
 ```dockerfile
-ARG BASE_IMAGE=pytorch/pytorch:2.11.0-cuda12.8-cudnn9-runtime
+ARG BASE_IMAGE=pytorch/pytorch:2.13.0-cuda13.0-cudnn9-runtime@sha256:db80a41f8428644cebcb3d75b0b62df334ab6c0e75785951eb25f48bfbd42407
 FROM ${BASE_IMAGE}
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 WORKDIR /app
 
-ENV UV_CACHE_DIR=/var/cache/uv \
-    UV_LINK_MODE=copy \
-    HOME=/root \
-    XDG_CACHE_HOME=/root/.cache
-
 COPY pyproject.toml uv.lock /app/
 
 RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
-    uv export --no-dev --no-hashes --no-sources --no-emit-project --no-emit-local \
+    uv export --cache-dir /var/cache/uv --link-mode copy \
+      --no-dev --no-hashes --no-sources --no-emit-project --no-emit-local \
       -o /tmp/requirements.txt \
-    && uv pip install --system --break-system-packages --no-deps -r /tmp/requirements.txt
+    && uv pip install --cache-dir /var/cache/uv --link-mode copy \
+      --system --break-system-packages --no-deps -r /tmp/requirements.txt
 
 COPY . /app
 
 RUN --mount=type=cache,id=cozy-uv-cache,target=/var/cache/uv,sharing=locked \
-    uv pip install --system --break-system-packages --no-deps --no-sources /app \
+    uv pip install --cache-dir /var/cache/uv --link-mode copy \
+      --system --break-system-packages --no-deps --no-sources /app \
     && mkdir -p /app/.tensorhub \
     && python -m gen_worker.discovery > /app/.tensorhub/endpoint.lock
 
