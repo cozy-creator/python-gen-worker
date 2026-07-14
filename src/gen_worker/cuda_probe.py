@@ -56,3 +56,31 @@ def manifest_needs_cuda(manifest: Optional[dict[str, Any]]) -> bool:
         if bool((fn.get("resources") or {}).get("gpu")):
             return True
     return False
+
+
+def should_probe_cuda(
+    manifest: Optional[dict[str, Any]], *, cuda_build: Optional[bool] = None
+) -> bool:
+    """Whether this concrete worker image must pass the CUDA health probe.
+
+    A manifest may contain both CPU and GPU functions because one endpoint
+    release can publish separate ``accelerator=none`` and ``accelerator=cuda``
+    images.  In that mixed case the installed torch build is the authoritative
+    signal: probe CUDA images and let CPU-only images serve the CPU lane.  A
+    GPU-only manifest is always probed so an accidentally CPU-built image
+    fails before it can register.
+    """
+    functions = (manifest or {}).get("functions", []) or []
+    gpu_requirements = [bool((fn.get("resources") or {}).get("gpu")) for fn in functions]
+    if not any(gpu_requirements):
+        return False
+    if all(gpu_requirements):
+        return True
+    if cuda_build is None:
+        try:
+            import torch
+
+            cuda_build = bool(torch.version.cuda)
+        except Exception:
+            return True
+    return cuda_build

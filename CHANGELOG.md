@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.25.2 (2026-07-14)
+
+- **Mixed CPU/GPU releases probe the device owned by their concrete image.**
+  A release-level discovery manifest contains both lanes, so the prior
+  any-GPU-function check killed the CPU conversion image before worker hello.
+  Mixed manifests now use the installed Torch build as the lane signal: CUDA
+  images retain the bad-host health probe, while CPU-only images start their
+  CPU functions without an environment-variable override. GPU-only manifests
+  still fail closed when CUDA is absent.
+
 ## 0.25.0 (2026-07-14)
 
 - **cl#27: local-only GGUF fit rung.** A bare Tensorhub binding can select the
