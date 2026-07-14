@@ -114,6 +114,9 @@ def test_find_spec_probes_stay_honest() -> None:
     # is find_spec-only) must NOT see a missing dep as installed — a fooled
     # probe unlocks module-scope use of the dep in library code.
     with stub_missing_heavy_deps(extra=(FAKE,)):
+        stub = _stmt_import(f"import {FAKE}")[FAKE]
+        assert isinstance(stub, _HeavyDepStub)
+        assert FAKE not in sys.modules
         assert importlib.util.find_spec(FAKE) is None
         with pytest.raises(ModuleNotFoundError):
             importlib.import_module(FAKE)  # programmatic probe, not stubbed
@@ -147,7 +150,8 @@ def test_stubs_removed_on_exit() -> None:
     before_import = builtins.__import__
     with stub_missing_heavy_deps(extra=(FAKE,)):
         _stmt_import(f"import {FAKE}.nn")
-        assert FAKE in sys.modules
+        assert FAKE not in sys.modules
+        assert f"{FAKE}.nn" not in sys.modules
     assert builtins.__import__ is before_import
     assert FAKE not in sys.modules
     assert f"{FAKE}.nn" not in sys.modules

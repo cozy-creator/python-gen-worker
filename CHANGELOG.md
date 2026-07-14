@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.26.1 (2026-07-14)
+
+- **NVENC per-request fallback recreates the PyAV output container.** A
+  hardware stream that failed during codec open remained attached to the
+  original container, so mux startup retried that orphan and failed even
+  after adding libx264. The fallback now starts with a clean container.
+- **Discovery stubs no longer poison later optional-dependency probes.** A
+  missing heavy module remains usable through its returned stub reference,
+  but is removed from `sys.modules` immediately so `find_spec()` stays honest.
+
 ## 0.26.0 (2026-07-14)
 
 - **Model residency is declarative.** Protocol v3 replaces ordinary

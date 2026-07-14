@@ -89,6 +89,33 @@ def test_hardware_open_failure_falls_back_per_encode(tmp_path, monkeypatch) -> N
     assert _decode_frame_count(str(out)) == 4
 
 
+def test_hardware_stream_open_failure_recreates_container(tmp_path, monkeypatch) -> None:
+    """A stream can be added before NVENC refuses to open. The orphan must
+    not ride into the software fallback container and fail again at mux."""
+    out = tmp_path / "fallback-after-stream.mp4"
+    enc = ve.StreamingVideoEncoder(
+        out,
+        fps=24,
+        encoder=ve.EncoderChoice("h264_nvenc", {}, hardware=True),
+    )
+    containers = []
+    real_add = enc._add_video_stream
+
+    def fail_hardware_then_add_software(choice, width, height):
+        containers.append(enc._container)
+        if choice.hardware:
+            raise RuntimeError("NVENC session exhausted after add_stream")
+        return real_add(choice, width, height)
+
+    monkeypatch.setattr(enc, "_add_video_stream", fail_hardware_then_add_software)
+    enc.add(_frames(count=4))
+    enc.finish()
+
+    assert containers[0] is not containers[1]
+    assert enc.encoder.codec == "libx264"
+    assert _decode_frame_count(str(out)) == 4
+
+
 # ---- streaming encoder -------------------------------------------------------
 
 
