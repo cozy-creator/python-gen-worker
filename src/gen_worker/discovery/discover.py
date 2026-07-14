@@ -332,8 +332,8 @@ def _stamp_family(binding_manifest: Dict[str, Any], family: str) -> None:
 
 def _model_ref_to_manifest(ref: Any) -> Dict[str, Any]:
     """``default_checkpoint``/curated-choice ref shape shared by the slots
-    block: ``{source, path, tag?, flavor?, components?}`` — a structured
-    ModelRef (pgw#511; ``components`` added pgw#505)."""
+    block: ``{source, path, tag?, flavor?, revision?, version?, components?}``
+    — a structured ModelRef (pgw#511; ``components`` added pgw#505)."""
     out: Dict[str, Any] = {"source": ref.source, "path": ref.path}
     if ref.tag and ref.tag != "latest":
         out["tag"] = ref.tag
@@ -341,6 +341,10 @@ def _model_ref_to_manifest(ref: Any) -> Dict[str, Any]:
         out["flavor"] = ref.flavor
     if ref.components:
         out["components"] = list(ref.components)
+    if ref.source in ("huggingface", "modelscope") and ref.revision:
+        out["revision"] = ref.revision
+    if ref.source == "civitai" and ref.version:
+        out["version"] = ref.version
     return out
 
 
