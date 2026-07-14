@@ -96,6 +96,9 @@ class Lifecycle:
         self._emitted_degraded: dict[str, str] = {}
         self._drain_task: Optional[asyncio.Task] = None
         self._drain_deadline_at: Optional[float] = None
+        self._desired_residency: Optional[pb.DesiredResidency] = None
+        self._residency_task: Optional[asyncio.Task] = None
+        self._observed_residency_generation = 0
 
     # ---- snapshots -----------------------------------------------------------
 
@@ -111,6 +114,7 @@ class Lifecycle:
             # gw#516: encode/upload tails past the GPU-slot release. The hub
             # must not drain/retire this worker on GPU-idleness alone.
             finalizing_jobs=self.executor.finalizing_jobs(),
+            observed_residency_generation=self._observed_residency_generation,
         )
 
     def build_resources(self) -> pb.WorkerResources:
@@ -149,14 +153,27 @@ class Lifecycle:
         )
 
     async def on_hello_ack(self, ack: pb.HelloAck) -> None:
-        # Full-replace config: file base URL + disk-retention keep set.
+        # Full-replace config: file base URL + desired model residency.
         self.executor.file_base_url = ack.file_base_url or ""
-        self.executor.store.keep = set(ack.keep)
         # th#697: apply the hub's precision-ladder picks for THIS card
         # (full-replace: refs absent from the map revert to declared).
         self.executor.apply_model_resolutions({
             r.ref: (r.resolved_ref, r.cast) for r in ack.resolutions
         })
+        desired = pb.DesiredResidency()
+        desired.CopyFrom(ack.desired_residency)
+        generation = int(desired.generation)
+        if generation < self._observed_residency_generation:
+            logger.info(
+                "ignoring stale desired residency generation %d (observed %d)",
+                generation, self._observed_residency_generation,
+            )
+        else:
+            self._observed_residency_generation = generation
+            self.executor.store.keep = list(dict.fromkeys(ref for ref in desired.disk_refs if ref))
+            for ref, snapshot in desired.snapshots.items():
+                self.executor.store.bank_snapshot(ref, snapshot)
+            self._replace_residency_reconcile(desired)
         # New connection: per-worker fn disables/degradations were wiped by
         # Hello; re-emit any that still hold, then re-baseline dynamic state.
         self._emitted_unavailable.clear()
@@ -165,19 +182,79 @@ class Lifecycle:
         self._last_delta = None
         await self.maybe_send_state_delta()
 
+    def _replace_residency_reconcile(self, desired: "pb.DesiredResidency") -> None:
+        self._cancel_residency_reconcile()
+        self._desired_residency = desired
+        self._resume_residency_reconcile()
+
+    def _cancel_residency_reconcile(self) -> None:
+        task = getattr(self, "_residency_task", None)
+        if task is not None:
+            task.cancel()
+        self._residency_task = None
+
+    def _resume_residency_reconcile(self) -> None:
+        desired = getattr(self, "_desired_residency", None)
+        if desired is None or self.draining:
+            return
+        self._residency_task = asyncio.create_task(
+            self._reconcile_residency(desired),
+            name=f"residency-{int(desired.generation)}",
+        )
+
+    async def _reconcile_residency(self, desired: "pb.DesiredResidency") -> None:
+        """Converge in declared order while tenant work has first claim."""
+        snapshots = dict(desired.snapshots)
+        try:
+            for ref in desired.disk_refs:
+                if not ref:
+                    continue
+                await self.executor.wait_idle()
+                if self.draining:
+                    return
+                try:
+                    await self.executor.store.ensure_local(ref, snapshots.get(ref))
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning("desired disk residency failed for %s: %s", ref, exc)
+
+            for instance in desired.hot:
+                await self.executor.wait_idle()
+                if self.draining:
+                    return
+                try:
+                    await self.executor.ensure_desired_instance(instance, snapshots)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning(
+                        "desired hot residency failed for %s: %s",
+                        instance.function_name, exc,
+                    )
+        except asyncio.CancelledError:
+            return
+
     async def on_message(self, msg: pb.SchedulerMessage) -> None:
         which = msg.WhichOneof("msg")
         if which == "run_job":
-            await self.executor.handle_run_job(msg.run_job)
+            # A tenant request preempts unrelated background transfer/setup.
+            # Re-running desired state after idle is cheap: local refs and
+            # ready instances short-circuit through the existing dedupe paths.
+            self._cancel_residency_reconcile()
+            try:
+                await self.executor.handle_run_job(msg.run_job)
+            finally:
+                self._resume_residency_reconcile()
         elif which == "cancel_job":
             self.executor.handle_cancel(msg.cancel_job)
         elif which == "model_op":
-            # Model work must never block the receive path.
-            asyncio.create_task(self._model_op_then_delta(msg.model_op))
+            # Compile-cache adoption must never block the receive path.
+            asyncio.create_task(self._adopt_compile_cache_then_delta(msg.model_op))
         elif which == "drain":
             self.start_drain(int(msg.drain.deadline_ms or 0))
 
-    async def _model_op_then_delta(self, op: pb.ModelOp) -> None:
+    async def _adopt_compile_cache_then_delta(self, op: pb.ModelOp) -> None:
         try:
             await self.executor.handle_model_op(op)
         finally:
@@ -285,7 +362,7 @@ class Lifecycle:
                 ref = wire_ref(binding)
                 if binding.source != "tensorhub" and ref not in prefetch_refs:
                     # hf/civitai refs need no orchestrator snapshot; tensorhub
-                    # refs arrive via ModelOp{DOWNLOAD} after HelloAck (§7).
+                    # refs arrive via DesiredResidency / RunJob (§7).
                     prefetch_refs.append(ref)
 
         if prefetch_refs:
@@ -304,7 +381,7 @@ class Lifecycle:
                 continue
             if spec.slots:
                 # pgw#532: dynamic slots materialize the HUB-resolved ref
-                # (ModelOp pre-drives / RunJob resolved_models + snapshots),
+                # (DesiredResidency pre-warms / RunJob supplies snapshots),
                 # per dispatch, instance-per-pick. Setting up eagerly here
                 # would load the code seed — the exact fc157 setup-failure
                 # bug (raw civitai default -> civitai_not_found -> every
@@ -317,12 +394,11 @@ class Lifecycle:
                 and self.executor.store.local_path(wire_ref(b)) is None
             })
             if missing:
-                # Waits for ModelOp / RunJob snapshots (§7). This wait is
-                # UNBOUNDED and hub-driven: if the release was registered
-                # without bindings the hub's keep set is empty, no
-                # ModelOp{DOWNLOAD} ever arrives, and the function sits in
-                # loading_functions forever (ie#455 z-image fns=[]) — so say
-                # so loudly instead of dropping the function in silence.
+                # Waits for DesiredResidency / RunJob snapshots (§7). This wait
+                # is unbounded and hub-driven: a release without resolved
+                # desired bindings leaves the function in loading_functions
+                # forever (ie#455 z-image fns=[]), so say so loudly instead of
+                # dropping the function in silence.
                 awaiting_hub[spec.name] = missing
                 continue
             try:
@@ -335,10 +411,9 @@ class Lifecycle:
                 "(pgw#532; no boot-time setup): %s", ", ".join(sorted(dynamic)))
         if awaiting_hub:
             logger.warning(
-                "functions waiting on hub-supplied snapshots (ModelOp{DOWNLOAD}, "
+                "functions waiting on hub-supplied snapshots (DesiredResidency, "
                 "contract §7) and NOT yet servable: %s — if these never arrive, "
-                "check that the release was registered WITH function bindings "
-                "for these refs (hub keep set must not be empty)",
+                "check that the release has resolved desired bindings for these refs",
                 "; ".join(f"{fn} <- {', '.join(refs)}" for fn, refs in sorted(awaiting_hub.items())),
             )
 
@@ -364,6 +439,7 @@ class Lifecycle:
         """Synchronously stop admission and anchor the deadline at receipt."""
         self.draining = True
         self.executor.draining = True
+        self._cancel_residency_reconcile()
         logger.info("drain started (deadline_ms=%d)", deadline_ms)
         deadline_s = (deadline_ms / 1000.0) if deadline_ms > 0 else None
         loop = asyncio.get_running_loop()

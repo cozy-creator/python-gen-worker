@@ -217,7 +217,7 @@ async def ensure_local(
     — filtering what gets written here without the orchestrator also
     filtering what it verifies would turn every boot into a spurious
     corruption/quarantine loop. Selective fetch for tensorhub-sourced
-    snapshots is therefore the hub's ModelOp DOWNLOAD scoping (the manifest
+    snapshots is therefore the hub's desired-snapshot scoping (the manifest
     now carries ``components`` for it to read) — worker-side selective fetch
     for tensorhub refs lands on the hub-less CLI path instead
     (``models/provision.py::_fetch_tensorhub_snapshot``), which owns its own

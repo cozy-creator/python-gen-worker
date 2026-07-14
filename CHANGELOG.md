@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.26.0 (2026-07-14)
+
+- **Model residency is declarative.** Protocol v3 replaces ordinary
+  download/load/unload commands with a full-replace per-worker desired disk
+  set and ordered hot runnable instances. Workers report the accepted
+  generation separately from actual residency events.
+- **Tenant work preempts background reconciliation.** A `RunJob` cancels
+  unrelated desired-state work before request setup, then resumes the current
+  desired generation when the executor becomes idle.
+- Hot dynamic-slot instances reuse the request binding and setup path, so the
+  function plus complete slot-to-immutable-ref map identifies exactly one
+  runnable instance without a second loader.
+
 ## 0.25.2 (2026-07-14)
 
 - **Mixed CPU/GPU releases probe the device owned by their concrete image.**

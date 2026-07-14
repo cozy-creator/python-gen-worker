@@ -291,7 +291,7 @@ def _binding_to_manifest(binding: Binding, param_name: str = "") -> Dict[str, An
         if binding.flavor:
             out["flavor"] = binding.flavor
         if binding.components:
-            # pgw#505: the hub's ModelOp DOWNLOAD scoping (platform-side,
+            # pgw#505: the hub's desired-snapshot scoping (platform-side,
             # not yet built) reads this to resolve only the named pipeline
             # component subfolders instead of the whole repo.
             out["components"] = list(binding.components)

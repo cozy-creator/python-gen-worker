@@ -69,7 +69,10 @@ def test_startup_logs_functions_waiting_on_hub_snapshots(caplog, monkeypatch) ->
 
     # (c) the wait is LOGGED, naming the function and the hub ref
     msgs = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
-    assert any("generate" in m and "tensorhub/z-image" in m and "ModelOp" in m for m in msgs), msgs
+    assert any(
+        "generate" in m and "tensorhub/z-image" in m and "DesiredResidency" in m
+        for m in msgs
+    ), msgs
 
 
 def test_startup_does_not_log_when_nothing_waits_on_hub(caplog, tmp_path, monkeypatch) -> None:

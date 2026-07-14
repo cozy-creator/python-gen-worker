@@ -80,7 +80,7 @@ class E2EEndpoint:
 
 @endpoint(model=Hub("e2e/tiny"))
 class ModelBoundEndpoint:
-    """Tensorhub-bound endpoint: only becomes available after ModelOp LOAD."""
+    """Tensorhub-bound endpoint: available after its desired instance warms."""
 
     def setup(self, model: str) -> None:
         self.model_path = model
@@ -98,7 +98,7 @@ BREAK_SETUP.set()
 
 @endpoint(model=Hub("e2e/broken"))
 class BrokenSetupEndpoint:
-    """Setup raises while BREAK_SETUP is set; a later LOAD retry recovers."""
+    """Setup raises while BREAK_SETUP is set; desired-state retry recovers."""
 
     def setup(self, model: str) -> None:
         if BREAK_SETUP.is_set():
