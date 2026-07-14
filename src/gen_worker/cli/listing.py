@@ -87,6 +87,43 @@ def detected_capabilities() -> Dict[str, Any]:
     return out
 
 
+def _gguf_probe(
+    binding: Any, caps: Any, free_gb: float,
+) -> Optional[Dict[str, Any]]:
+    """Return the local GGUF pick for a bare Tensorhub binding, if any."""
+    if (
+        getattr(binding, "source", "") != "tensorhub"
+        or getattr(binding, "flavor", "")
+        or getattr(binding, "storage_dtype", "")
+        or getattr(binding, "components", ())
+    ):
+        return None
+    try:
+        from ..api.binding import wire_ref
+        from ..models.gguf_local import select_gguf
+        from ..models.hub_client import resolve_repo
+        from ..models.refs import parse_model_ref
+
+        thref = parse_model_ref(wire_ref(binding)).tensorhub
+        if thref is None or thref.digest or thref.flavor:
+            return None
+        pick = select_gguf(
+            resolve_repo(thref),
+            gpu_sm=int(getattr(caps, "gpu_sm", 0) or 0),
+            free_vram_gb=free_gb,
+            installed_libs=tuple(getattr(caps, "installed_libs", ()) or ()),
+        )
+        if pick is None:
+            return None
+        return {
+            "flavor": pick.flavor,
+            "est_gb": pick.estimated_vram_gb,
+            "te_offload": pick.te_offload,
+        }
+    except Exception:
+        return None
+
+
 def function_entries(
     candidates: List["_SelectedFunction"],
     *,
@@ -96,7 +133,14 @@ def function_entries(
     ``serve --list-functions --json``. With ``detected`` (the
     ``detected_capabilities()`` block), each entry carries a ``fit`` verdict
     (``fits | offload | incompatible``) computed from its ``Resources``."""
-    from ..models.hub_policy import TensorhubWorkerCapabilities, variant_fit
+    from ..models.hub_policy import (
+        FIT_EMERGENCY,
+        FIT_EMERGENCY_FP8,
+        FIT_GGUF,
+        FIT_OFFLOAD,
+        TensorhubWorkerCapabilities,
+        variant_fit,
+    )
 
     caps: Optional[TensorhubWorkerCapabilities] = None
     free_gb = 0.0
@@ -150,6 +194,25 @@ def function_entries(
                 entry["advisory"] = plan.warning
             elif plan.reason and not plan.serveable:
                 entry["advisory"] = plan.reason
+            if fit in (FIT_EMERGENCY_FP8, FIT_EMERGENCY, FIT_OFFLOAD):
+                gguf = _gguf_probe(primary, caps, free_gb)
+                if gguf is not None:
+                    entry.update({
+                        "fit": FIT_GGUF,
+                        "fit_flavor": gguf["flavor"],
+                        "fit_reason": (
+                            f"runs via {gguf['flavor']} (~{gguf['est_gb']:.1f} "
+                            f"GB, {free_gb:.1f} GB free)"
+                        ),
+                        "serveable": True,
+                        "run_mode": (
+                            "offload" if gguf["te_offload"] else "native"
+                        ),
+                        "advisory": (
+                            "local-only GGUF fit rung; reduced quality and no "
+                            "compiled-engine acceleration"
+                        ),
+                    })
         out.append(entry)
     return out
 

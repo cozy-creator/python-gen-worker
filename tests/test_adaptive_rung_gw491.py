@@ -153,7 +153,6 @@ def _executor(spec: EndpointSpec, tmp_path: Path, snap: Path, sent: list) -> Exe
 
 
 def test_executor_records_adaptive_rung(tmp_path, monkeypatch, caplog) -> None:
-    monkeypatch.setenv("GEN_WORKER_FORBID_CPU_OFFLOAD", "0")
     monkeypatch.setattr(loading_mod, "_adaptive_fit_rung",
                         lambda *a, **k: ("nf4", ("bnb", {})))
 

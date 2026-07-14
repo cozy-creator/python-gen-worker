@@ -1,6 +1,6 @@
 [project]
 name = "gen-worker"
-version = "0.24.2"
+version = "0.25.0"
 description = "A library used to build custom functions in Cozy Creator's serverless function platform."
 readme = "README.md"
 license = "MIT"
@@ -152,21 +152,20 @@ markers = ["integration: network tests against real tiny HF models"]
 # extra); tests/conftest.py hard-fails if gen_worker resolves outside src/.
 pythonpath = ["src"]
 
-# NOTE: the CUDA 12.9 torch pin below is uv-only — it is read by `uv sync` /
+# NOTE: the CUDA 13.0 torch pin below is uv-only — it is read by `uv sync` /
 # `uv build` in this repo, NOT by `pip`. `pip install gen-worker[torch]`
 # resolves torch from PyPI (a CPU or default-CUDA build) and may differ. Tenant
 # images built by Tensorhub pin their own torch/CUDA build; this pin only fixes
-# the local dev + CI environment. cu128 wheel index ends at torch 2.11; cu129
-# keeps CUDA-12 driver compatibility (cu130 needs r580+ host drivers).
+# the local dev + CI environment and matches the managed CUDA 13.0 fleet.
 [[tool.uv.index]]
-name = "pytorch-cu129"
-url = "https://download.pytorch.org/whl/cu129"
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
 explicit = true
 
 [tool.uv.sources]
 torch = [
-  { index = "pytorch-cu129", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+  { index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
 torchvision = [
-  { index = "pytorch-cu129", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+  { index = "pytorch-cu130", marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]

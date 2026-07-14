@@ -9,8 +9,8 @@ as standalone libraries/CLIs outside a full worker bring-up (`net.py`,
 `convert/ingest.py`, `convert/clone.py`, `cli/run.py`, `compile_cache.py`)
 read a few env vars directly with their own defaults — those are
 self-contained and tested independently of the Settings loader (e.g.
-`COZY_HTTP_*_TIMEOUT_S`, `COZY_CONVERT_*`, `GEN_WORKER_FORBID_CPU_OFFLOAD`,
-`GEN_WORKER_COMPILE_*`). New pod-launch config should still go on Settings;
+`COZY_HTTP_*_TIMEOUT_S`, `COZY_CONVERT_*`, `GEN_WORKER_COMPILE_*`). New
+pod-launch config should still go on Settings;
 a raw read is the exception for library-standalone knobs, not the norm.
 
 Built on msgspec.Struct (already a worker dep) instead of pydantic-settings to

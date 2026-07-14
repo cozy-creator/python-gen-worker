@@ -292,6 +292,7 @@ def resolve_bindings(
     runs a Slot's ``default_checkpoint`` ref locally.
     """
     from ..api.binding import ModelRef, wire_ref
+    from .gguf_local import maybe_rebind_gguf
 
     out: Dict[str, str] = {}
     for param_name, binding in bindings.items():
@@ -312,12 +313,13 @@ def resolve_bindings(
                 f"unknown binding type for param {param_name!r}: "
                 f"{type(binding).__name__}"
             )
+        selected = binding if offline else maybe_rebind_gguf(binding)
         out[param_name] = resolve_local_path(
-            ref=wire_ref(binding), provider=binding.source,
+            ref=wire_ref(selected), provider=selected.source,
             offline=offline, emit=emit,
-            allow_patterns=tuple(getattr(binding, "files", ()) or ()),
-            components=tuple(getattr(binding, "components", ()) or ()),
-            civitai_version_id=str(getattr(binding, "version", "") or ""),
+            allow_patterns=tuple(getattr(selected, "files", ()) or ()),
+            components=tuple(getattr(selected, "components", ()) or ()),
+            civitai_version_id=str(getattr(selected, "version", "") or ""),
         )
     return out
 
@@ -562,6 +564,25 @@ def resolve_local_path(
                 "--offline once (or set TENSORHUB_CAS_DIR to a path with the "
                 "snapshot pre-seeded)."
             )
+        from .gguf_local import fetch_gguf_snapshot, gguf_qtype
+
+        if gguf_qtype(str(parsed.tensorhub.flavor or "")):
+            if components:
+                raise ModelResolutionError(
+                    "GGUF composed snapshots require the complete base model; "
+                    "components= cannot be combined with a #gguf-* flavor"
+                )
+            try:
+                gguf_snap = fetch_gguf_snapshot(
+                    parsed.tensorhub, cache_dir=cache_dir, emit=emit,
+                )
+            except Exception as e:
+                raise ModelResolutionError(
+                    "failed to compose tensorhub GGUF snapshot for "
+                    f"{parsed.tensorhub.canonical()}: {e}"
+                ) from e
+            _remember_hub_ref(cache_dir, parsed.tensorhub, Path(gguf_snap).name)
+            return gguf_snap
         return _fetch_tensorhub_snapshot(
             parsed.tensorhub, cache_dir=cache_dir, emit=emit, components=components,
         )

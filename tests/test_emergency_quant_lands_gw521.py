@@ -230,7 +230,6 @@ def test_fragile_vae_stays_resident_and_decode_is_dtype_safe(
     decodes fp32 latents against hook-restored fp16 weights ("Input type
     (float) and bias type (c10::Half)"). The fragile VAE must stay resident
     under EVERY offload rung and the SDXL upcast+decode path must work."""
-    monkeypatch.setenv("GEN_WORKER_FORBID_CPU_OFFLOAD", "0")
     from gen_worker.models.memory import apply_low_vram_config
 
     pipe = _tiny_sdxl(torch.float16)
@@ -255,7 +254,7 @@ def test_quantized_pipeline_places_resident_not_offloaded(
 ) -> None:
     """select_auto_mode (gw#521): a pipeline the nf4 rung just shrank to fit
     must place resident — the old absolute low-free-VRAM rule group-offloaded
-    it (or hit the FORBID guard), making the salvation rung pointless."""
+    it, making the salvation rung pointless."""
     pipe = _tiny_sdxl()
     pipe.save_pretrained(tmp_path, safe_serialization=True)
     del pipe
@@ -267,9 +266,7 @@ def test_quantized_pipeline_places_resident_not_offloaded(
     assert getattr(loaded, "_cozy_adaptive_rung", "") == "nf4"
 
     # 4.4GB free (the live 4070 number): the quantized tiny pipe FITS, so
-    # placement must not pick a CPU-offload rung (FORBID=1 stays enforced —
-    # resident placement never trips it).
-    monkeypatch.setenv("GEN_WORKER_FORBID_CPU_OFFLOAD", "1")
+    # placement must not pick a CPU-offload rung.
     from gen_worker.models import memory
 
     monkeypatch.setattr(memory, "get_available_vram_gb", lambda *a, **k: 4.4)
