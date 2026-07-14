@@ -380,7 +380,7 @@ def _presigned_upload_file_scoped(
 
     # --- Step 3: Complete ---
     complete_url = f"{url}/{session_id}/complete"
-    complete_payload = {
+    complete_payload: Dict[str, Any] = {
         "parts": [{"part_number": pn, "etag": et} for pn, et in etags],
     }
     if complete_extra:

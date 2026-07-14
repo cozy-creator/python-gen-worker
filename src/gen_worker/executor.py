@@ -38,13 +38,11 @@ from .api.streaming import (
     IncrementalTokenDelta,
     StreamAccumulator,
     StreamResult,
-    TokenUsage,
 )
-from .api.types import Asset, Compute
+from .api.types import Compute, MediaAsset
 from .capability import HardwareUnmetError, InsufficientDiskError
 from .input_assets import cleanup_input_assets, materialize_input_assets
 from .models import disk_gc
-from .models import provision
 from .models import residency as residency_mod
 from .models.memory import (
     cpu_offload_forbidden,
@@ -65,7 +63,6 @@ from .pb import worker_scheduler_pb2 as pb
 from .registry import EndpointSpec
 
 if typing.TYPE_CHECKING:
-    from .models.hub_client import WorkerResolvedRepo
     from .models.serve_fit import ServePlan
 from .request_context import (
     ConversionContext,
@@ -94,11 +91,6 @@ _CANCEL_GRACE_S = 5.0
 _STUCK_THREAD_RECYCLE_S = 30.0
 _DOWNLOAD_RETRIES = 3
 _PROGRESS_EVENT_MIN_INTERVAL_S = 5.0
-# th#763: how long a cold tensorhub ref waits for the hub's re-minted
-# snapshot after reporting missing_snapshot. The FAILED event triggers an
-# immediate hub-side re-mint (resolve + DOWNLOAD push), so arrival is
-# seconds; the bound only caps a hub that never answers.
-_MISSING_SNAPSHOT_WAIT_S = 60.0
 _GiB = 1024 ** 3
 # Disk headroom preserved beyond a download's known size (#370).
 _DISK_GC_MARGIN_BYTES = 2 * _GiB
@@ -112,19 +104,12 @@ except Exception:  # pragma: no cover
 
 
 # Credential material inside exception messages (auth headers, presigned-URL
-# query params) and worker-filesystem paths (pgw#514/P8: a FileNotFoundError
-# ships "ExcClass: first-line" to the client — absolute paths leak pod
-# internals). Redacted in place — replacing the whole message with
+# query params). Redacted in place — replacing the whole message with
 # "internal error" made every download/publish failure undiagnosable from the
 # hub (pods ship no logs; presigned URLs carry X-Amz-* params).
 _REDACTIONS = (
     re.compile(r"Bearer\s+[^\s\"'&]+"),
     re.compile(r"(?:X-Amz-[A-Za-z0-9-]+|Signature)=[^&\s\"']*"),
-    # Absolute unix filesystem paths (/tmp/..., /app/..., /home/...): require
-    # two segments so bare "/" and owner/repo-style refs survive, and no
-    # scheme/word directly before the slash so URL paths inside https://...
-    # stay intact. Pods are linux-only; no Windows drive-path variant.
-    re.compile(r"(?<![\w:/])/(?:[\w.@+-]+/)+[\w.@+-]*"),
 )
 
 
@@ -180,43 +165,11 @@ def _capability_job_id(token: str) -> Optional[str]:
         return None
 
 
-def _resolve_slots_kwargs(spec: EndpointSpec, run: "pb.RunJob") -> Dict[str, Any]:
-    """``ctx.slots`` resolution chain (pgw#520): merge each Slot-declared
-    slot's repo-metadata ``ModelBinding.inference_defaults`` over its code
-    fallback preset. Returns the ``resolved_slots=``/``slot_errors=``
-    kwargs for ``RequestContext.__init__`` — a slot that fails to resolve
-    (no metadata + no fallback, or no ref) is deferred to a ``ctx.slots[name]``
-    access error instead of failing the whole dispatch."""
-    if not spec.slots:
-        return {"resolved_slots": {}, "slot_errors": {}}
-    from .api.slot import resolve_slot
-
-    raw_defaults = {b.slot: b.inference_defaults for b in run.models if b.inference_defaults}
-    resolved: Dict[str, Any] = {}
-    errors: Dict[str, str] = {}
-    for name, slot in spec.slots.items():
-        try:
-            resolved[name] = resolve_slot(
-                name, slot,
-                ref=spec.models.get(name),
-                family=spec.slot_family.get(name, ""),
-                raw_metadata_json=raw_defaults.get(name, ""),
-            )
-        except ValueError as exc:
-            errors[name] = str(exc)
-    return {"resolved_slots": resolved, "slot_errors": errors}
-
-
 def _map_exception(exc: BaseException) -> Tuple["pb.JobStatus", str]:
     """-> (JobStatus, safe_message)."""
     if isinstance(exc, (CanceledError, asyncio.CancelledError)):
         return pb.JOB_STATUS_CANCELED, "canceled"
-    # INVALID (400, never retried) is reserved for typed validation errors and
-    # msgspec payload decode failures. A BARE ValueError is NOT invalid input
-    # (pgw#514/P9): PIL/numpy/tenant code raise ValueError for internal bugs,
-    # and mapping those to INVALID blamed the client and suppressed retries —
-    # they fall through to FATAL (class name + sanitized detail) below.
-    if isinstance(exc, (ValidationError, msgspec.ValidationError, msgspec.DecodeError)):
+    if isinstance(exc, (ValidationError, msgspec.ValidationError, msgspec.DecodeError, ValueError)):
         return pb.JOB_STATUS_INVALID, _sanitize(str(exc) or "invalid input")
     if isinstance(exc, RetryableError):
         return pb.JOB_STATUS_RETRYABLE, _sanitize(str(exc) or "retryable error")
@@ -227,11 +180,6 @@ def _map_exception(exc: BaseException) -> Tuple["pb.JobStatus", str]:
     if isinstance(exc, UrlExpiredError):
         # Hub-side URL staleness, not a client problem — retry re-mints URLs.
         return pb.JOB_STATUS_RETRYABLE, "model download url expired"
-    if isinstance(exc, MissingSnapshotError):
-        # A cold worker mid-resolution must never fatal a user request
-        # (th#763): the missing_snapshot ModelEvent makes the hub re-mint,
-        # so a retry (here or on a warmer worker) succeeds.
-        return pb.JOB_STATUS_RETRYABLE, "model snapshot not resolved yet"
     if is_cuda_oom(exc):
         # Never FATAL (gw#463): a bigger/idler card can serve this. The
         # degraded-mode retry already ran by the time this maps.
@@ -244,13 +192,10 @@ def _map_exception(exc: BaseException) -> Tuple["pb.JobStatus", str]:
     return pb.JOB_STATUS_FATAL, f"{label}: {detail}"[:512] if detail else label
 
 
-def _scan_output_assets(output: Any) -> Tuple[float, int]:
-    """One walk over the job output: (summed MEDIA seconds, count of output
-    ``Asset``s). Billing sources for ``per_output_second`` (th#572) and
-    ``per_output`` (pgw#512) settlement — the ONLY ones; settlement must
-    never scavenge the result payload by field name."""
-    total_duration = 0.0
-    count = 0
+def _output_media_seconds(output: Any) -> float:
+    """Sum probed MEDIA seconds (e.g. ``VideoAsset.duration_s``) across the
+    job output. Billing source for ``per_output_second`` (th#572)."""
+    total = 0.0
     seen: set = set()
     stack = [output]
     while stack:
@@ -260,29 +205,17 @@ def _scan_output_assets(output: Any) -> Tuple[float, int]:
         if id(item) in seen:
             continue
         seen.add(id(item))
-        if isinstance(item, Asset):
-            count += 1
+        if isinstance(item, MediaAsset):
             d = getattr(item, "duration_s", None)
             if isinstance(d, (int, float)) and d > 0:
-                total_duration += float(d)
+                total += float(d)
         elif isinstance(item, dict):
             stack.extend(item.values())
         elif isinstance(item, (list, tuple, set, frozenset)):
             stack.extend(item)
         elif isinstance(item, msgspec.Struct):
             stack.extend(getattr(item, f, None) for f in item.__struct_fields__)
-    return total_duration, count
-
-
-def _output_token_usage(output: Any) -> Optional[TokenUsage]:
-    """The terminal ``TokenUsage`` signal, when the job was a token stream
-    (pgw#512). Non-streaming handlers report no token usage — that's a
-    tenant/runtime authoring a ``TokenUsage`` explicitly (see
-    ``runtimes/llama.py``), not something inferable from an arbitrary
-    output shape."""
-    if isinstance(output, StreamResult):
-        return output.usage
-    return None
+    return total
 
 
 # ---------------------------------------------------------------------------
@@ -292,24 +225,14 @@ def _output_token_usage(output: Any) -> Optional[TokenUsage]:
 # ---------------------------------------------------------------------------
 
 
-def _snapshot_to_resolved(snap: pb.Snapshot) -> "WorkerResolvedRepo":
-    """pb.Snapshot -> the typed resolved-manifest struct (gw#497): the ONE
-    wire-boundary conversion; everything downstream (ensure_local,
-    ensure_snapshot_async) is typed — no dict laundering."""
-    from .models.hub_client import WorkerResolvedRepo, WorkerResolvedRepoFile
-
-    return WorkerResolvedRepo(
-        snapshot_digest=snap.digest,
-        files=[
-            WorkerResolvedRepoFile(
-                path=f.path,
-                size_bytes=int(f.size_bytes),
-                blake3=f.blake3,
-                url=f.url or None,
-            )
+def _snapshot_to_resolved(snap: pb.Snapshot) -> Dict[str, Any]:
+    return {
+        "snapshot_digest": snap.digest,
+        "files": [
+            {"path": f.path, "size_bytes": f.size_bytes, "blake3": f.blake3, "url": f.url}
             for f in snap.files
         ],
-    )
+    }
 
 
 def _model_op_error_vocab(exc: BaseException) -> str:
@@ -410,9 +333,6 @@ class ModelStore:
         # tensorhub refs. Stale URLs self-heal: they fail url_expired and the
         # hub re-mints.
         self._snapshots: Dict[str, pb.Snapshot] = {}
-        # Cold-ref waiters (th#763): ensure_local blocks here until the
-        # hub's re-minted DOWNLOAD banks a snapshot for the ref.
-        self._snapshot_waiters: Dict[str, asyncio.Event] = {}
 
     def _default_disk_free(self) -> int:
         p = Path(self._cache_dir)
@@ -476,19 +396,13 @@ class ModelStore:
         (gw#465): snapshot-less ops for it can still materialize the bytes."""
         return ref in self._snapshots
 
-    def component_digests(self, ref: str, local_path: Optional[Path] = None) -> Dict[str, str]:
+    def component_digests(self, ref: str) -> Dict[str, str]:
         """Per-component content identity of ``ref``'s snapshot (gw#479):
-        ``{top_level_subfolder: content_set_digest}``. Weight/data files use
-        the wire snapshot's per-file blake3; small JSON sidecars use
-        CANONICAL digests read from ``local_path`` (save-era serialization —
-        provenance stamps, explicit defaults, torch_dtype/dtype vocabulary —
-        must not break sharing of byte-identical weights; see
-        models/config_identity.py). Root-level files group under ``""``
-        (never shared — model_index.json etc. differ per repo). Empty when
-        no digest-carrying snapshot was seen — sharing stays off; weights
-        are never hashed from disk."""
-        from .models.config_identity import CANONICAL_JSON_MAX_BYTES, canonical_json_digest
-
+        ``{top_level_subfolder: content_set_digest}`` derived from the wire
+        snapshot's per-file blake3 digests. Root-level files group under
+        ``""`` (never shared — model_index.json etc. differ per repo).
+        Empty when no digest-carrying snapshot was seen — content-keyed
+        sharing then stays off; the loader never hashes snapshots itself."""
         snap = self._snapshots.get(ref)
         if snap is None:
             return {}
@@ -500,14 +414,7 @@ class ModelStore:
             comp, _, rest = rel.partition("/")
             if not rest:
                 comp, rest = "", rel
-            digest = str(f.blake3)
-            if (local_path is not None and comp
-                    and rest.endswith(".json")
-                    and int(f.size_bytes) <= CANONICAL_JSON_MAX_BYTES):
-                canonical = canonical_json_digest(Path(local_path) / rel)
-                if canonical:
-                    digest = canonical
-            groups.setdefault(comp, {})[rest] = digest
+            groups.setdefault(comp, {})[rest] = str(f.blake3)
         return {c: residency_mod.content_set_digest(files)
                 for c, files in groups.items()}
 
@@ -606,38 +513,6 @@ class ModelStore:
         prefetch), so ``files=`` selections apply everywhere (#377)."""
         self._bindings.setdefault(ref, binding)
 
-    async def _await_hub_snapshot(self, ref: str) -> pb.Snapshot:
-        """Cold tensorhub ref with no orchestrator-resolved snapshot: emit
-        ``missing_snapshot`` (the hub re-mints a DOWNLOAD op with fresh
-        URLs on seeing it — connect_worker handleModelFailure) and block
-        until that snapshot is banked (th#763). The bank site runs OUTSIDE
-        the per-ref lock this coroutine holds, so the re-minted DOWNLOAD's
-        ensure_local wakes us and then queues behind the lock. Raises
-        :class:`MissingSnapshotError` when nothing arrives in
-        ``_MISSING_SNAPSHOT_WAIT_S``."""
-        waiter = self._snapshot_waiters.get(ref)
-        if waiter is None:
-            waiter = self._snapshot_waiters[ref] = asyncio.Event()
-        await self._event(ref, pb.MODEL_STATE_FAILED, error="missing_snapshot")
-        logger.info("no snapshot for %s; waiting up to %.0fs for the hub re-mint",
-                    ref, _MISSING_SNAPSHOT_WAIT_S)
-        try:
-            await asyncio.wait_for(waiter.wait(), _MISSING_SNAPSHOT_WAIT_S)
-        except asyncio.TimeoutError:
-            raise MissingSnapshotError(
-                f"tensorhub ref {ref!r} needs an orchestrator-resolved "
-                f"snapshot; none arrived within {_MISSING_SNAPSHOT_WAIT_S:.0f}s "
-                "of reporting missing_snapshot"
-            ) from None
-        finally:
-            self._snapshot_waiters.pop(ref, None)
-        snapshot = self._snapshots.get(ref)
-        if snapshot is None or not snapshot.digest:
-            raise MissingSnapshotError(
-                f"tensorhub ref {ref!r} woke without a digest-carrying snapshot"
-            )
-        return snapshot
-
     async def ensure_local(
         self,
         ref: str,
@@ -654,9 +529,6 @@ class ModelStore:
             binding = self._bindings.get(ref)
         if snapshot is not None and snapshot.digest and snapshot.files:
             self._snapshots[ref] = snapshot
-            waiter = self._snapshot_waiters.get(ref)
-            if waiter is not None:
-                waiter.set()
         elif snapshot is None:
             snapshot = self._snapshots.get(ref)
         async with self._lock(ref):
@@ -692,27 +564,30 @@ class ModelStore:
                 # hub sees the true story, not a spurious FAILED.
                 await asyncio.to_thread(self._quarantine_snapshot, ref, cached, bad)
                 # fall through to a fresh download below
-            if snapshot is None or not snapshot.digest:
-                # Confident classification only (binding / boot provider
-                # index) — unknown refs still flow to the download layer's
-                # dispatch, which raises the same typed error terminally.
-                prov = (getattr(binding, "source", None)
-                        or lookup_provider_for_ref(ref, default=""))
-                if prov == "tensorhub":
-                    # The worker cannot resolve tensorhub-CAS refs itself
-                    # (gw#465). Report missing_snapshot — the hub's re-mint
-                    # trigger — then BLOCK until the re-minted DOWNLOAD
-                    # banks a snapshot (th#763: a user request must never
-                    # be the sacrificial cache warmer). No DOWNLOADING
-                    # event, no retry burn; a hub that never answers raises
-                    # the typed error (mapped RETRYABLE, never FATAL).
-                    snapshot = await self._await_hub_snapshot(ref)
             if snapshot is not None and snapshot.files:
                 # Sizes are known up front for tensorhub snapshots: gate on
                 # disk headroom, GC-ing LRU refs first (#370).
                 await self._ensure_disk_headroom(
                     ref, sum(int(f.size_bytes) for f in snapshot.files)
                 )
+            if snapshot is None or not snapshot.digest:
+                # Confident classification only (binding / boot provider
+                # index) — unknown refs still flow to the download layer's
+                # dispatch, which raises the same typed error terminally.
+                prov = (getattr(binding, "provider", None)
+                        or lookup_provider_for_ref(ref, default=""))
+                if prov == "tensorhub":
+                    # Deterministic local condition (gw#465): the worker
+                    # cannot resolve tensorhub-CAS refs itself. Fail fast
+                    # (no DOWNLOADING event, no retry burn) with its own
+                    # vocabulary so the hub re-mints instead of counting a
+                    # phantom download_failed.
+                    await self._event(ref, pb.MODEL_STATE_FAILED,
+                                      error="missing_snapshot")
+                    raise MissingSnapshotError(
+                        f"tensorhub ref {ref!r} needs an orchestrator-resolved "
+                        "snapshot and none was provided or previously seen"
+                    )
             last_progress = 0.0
 
             def _progress(done: int, total: Optional[int]) -> None:
@@ -737,7 +612,7 @@ class ModelStore:
                         resolved = _snapshot_to_resolved(snapshot)
                     path = await ensure_local(
                         ref,
-                        provider=getattr(binding, "source", None),
+                        provider=getattr(binding, "provider", None),
                         snapshot=resolved,
                         cache_dir=self._cache_dir,
                         hf_home=self._hf_home,
@@ -756,14 +631,8 @@ class ModelStore:
                 except Exception as exc:
                     terminal = _is_terminal_download_error(exc) or attempt >= _DOWNLOAD_RETRIES
                     if terminal:
-                        vocab = self._error_vocab(exc)
-                        if vocab == "download_failed":
-                            # th#757: the generic bucket must carry the root
-                            # cause — pods are often unreachable and the hub
-                            # log is the only forensic surface (J24M run11:
-                            # a starved request was undiagnosable hub-side).
-                            vocab = f"download_failed: {_sanitize(f'{type(exc).__name__}: {exc}')[:200]}"
-                        await self._event(ref, pb.MODEL_STATE_FAILED, error=vocab)
+                        await self._event(ref, pb.MODEL_STATE_FAILED,
+                                          error=self._error_vocab(exc))
                         raise
                     logger.warning("download of %s failed (attempt %d): %s; retrying in %.1fs",
                                    ref, attempt, exc, delay)
@@ -895,14 +764,6 @@ class _ClassRecord:
     # Content-keyed shared components this record holds (gw#479): released
     # (refcount--) at vacate so the entries become LRU/drain candidates.
     shared_keys: List[Any] = dc_field(default_factory=list)
-    # gw#494: the wire refs this record's instance BOOKED at load time —
-    # teardown releases exactly these (never a re-derivation from the
-    # possibly-rebound spec.models), so booking and clearing are provably
-    # the same key space.
-    held_refs: List[str] = dc_field(default_factory=list)
-    # gw#494: a resolution re-pick moved the specs' bindings away from
-    # held_refs; the instance serves the OLD pick and must be vacated.
-    stale: bool = False
 
 
 def _shared_loader_must_hit() -> Any:
@@ -936,9 +797,6 @@ class _Job:
     renew_task: Optional[asyncio.Task] = None
     finished: bool = False
     superseded: bool = False
-    # gw#516: True while the job is past the decode->finalize handoff (GPU
-    # slot terminally released, encode/upload tail running, result unshipped).
-    finalizing: bool = False
     admitted_at: float = dc_field(default_factory=time.monotonic)
     # One JobProgress seq space per job, shared by stream chunks and ctx
     # events so interleaved sends stay monotonic. itertools.count.__next__
@@ -959,17 +817,13 @@ class _GpuSlotLease:
     hold is released at most once.
     """
 
-    __slots__ = ("_sem", "_loop", "_lock", "_held", "released_at")
+    __slots__ = ("_sem", "_loop", "_lock", "_held")
 
     def __init__(self, sem: asyncio.Semaphore, loop: asyncio.AbstractEventLoop) -> None:
         self._sem = sem
         self._loop = loop
         self._lock = threading.Lock()
         self._held = True
-        # Monotonic time of the FIRST release — the terminal finalize handoff
-        # (gw#476/gw#516) or the executor's post-handler release, whichever
-        # came first. Reads out the finalize-overlap window.
-        self.released_at: Optional[float] = None
 
     def yield_slot(self) -> bool:
         """Release the slot if held (any thread). True iff this call released."""
@@ -977,7 +831,6 @@ class _GpuSlotLease:
             if not self._held:
                 return False
             self._held = False
-            self.released_at = time.monotonic()
         try:
             on_loop = asyncio.get_running_loop() is self._loop
         except RuntimeError:
@@ -1004,6 +857,7 @@ class Executor:
         settings: Any = None,
         store: Optional[ModelStore] = None,
         gpu_slots: int = 1,
+        on_state_change: Optional[Callable[[], None]] = None,
     ) -> None:
         self.specs: Dict[str, EndpointSpec] = {s.name: s for s in specs}
         self._send = send
@@ -1027,9 +881,7 @@ class Executor:
         # set (gw#399). Demotion out of VRAM drops attachments.
         self._adapters = lora_util.AdapterResidency()
         self.store.residency.pre_demote = self._adapters.detach
-        # Real wiring is worker.py assigning this attribute directly
-        # (Executor is constructed before Lifecycle exists).
-        self._on_state_change: Callable[[], None] = lambda: None
+        self._on_state_change = on_state_change or (lambda: None)
         self.file_base_url: str = ""
         # Current worker JWT for hub HTTP calls (capability renewal). Worker
         # wiring points this at the transport's rotated credential.
@@ -1040,12 +892,6 @@ class Executor:
         self.jobs: Dict[Tuple[str, int], _Job] = {}
         self._idle = asyncio.Event()
         self._idle.set()
-        # gw#516: count of jobs in their slotless finalize tail. Mutated from
-        # handler threads at the terminal slot release, so lock-guarded;
-        # surfaced to the hub via StateDelta.finalizing_jobs.
-        self._finalizing_lock = threading.Lock()
-        self._finalizing_count = 0
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
         # Instance groups: specs sharing (cls, bindings) share one instance;
         # variant specs of the same class get separate instances. Function-
         # shaped endpoints (cls=None) have no instance at all.
@@ -1057,12 +903,6 @@ class Executor:
             rec.specs.append(s)
         # Hardware-gate failures: fn name -> (reason, detail, axes).
         self.unavailable: Dict[str, Tuple[str, str, Dict[str, str]]] = {}
-        # gw#494: entries in `unavailable` that gate_functions owns — cleared
-        # and re-derived on every (re-)gate so gating is idempotent; setup
-        # failures (owned by _mark_setup_failed) survive re-gates.
-        self._gate_owned: set = set()
-        # Last hardware probe, so resolutions can re-run the gates.
-        self._last_gpu_info: Optional[Dict[str, Any]] = None
         # th#683 P3: how each serveable function will run on the actual card
         # (native / emergency / offload / cpu) + honest-guidance advisory.
         self.serve_plans: Dict[str, "ServePlan"] = {}
@@ -1079,18 +919,14 @@ class Executor:
         ``resolutions`` maps a DECLARED wire ref to ``(resolved_ref, cast)``
         (HelloAck full-replace semantics: refs absent from the map revert to
         their authored bindings). Rebinding folds the resolved flavor into
-        the binding via :func:`rebind_pick` (THE single fold, shared with the
-        local ladder) and stamps ``cast`` as ``storage_dtype``, so every
+        the binding and stamps ``cast`` as ``storage_dtype``, so every
         downstream consumer — wire_ref residency keys, downloads, setup,
-        loading — follows the pick with no per-call-site changes.
-
-        Application is TRANSACTIONAL (gw#494): a ready instance whose loaded
-        refs no longer match its (re)bound refs is marked stale and vacated —
-        its residency bookings under the OLD resolved refs are released and
-        the next setup/LOAD loads the new pick — and the hardware gates +
-        serve plans re-run against the rebound bindings.
+        loading — follows the pick with no per-call-site changes. Already-
+        loaded pipelines are not reloaded; picks apply to future setups.
         """
-        from .api.binding import rebind_pick
+        import dataclasses
+
+        from .models.refs import parse_model_ref
 
         changed = False
         rehomed: List[Tuple[Any, EndpointSpec]] = []
@@ -1106,16 +942,28 @@ class Executor:
                 if pick is not None:
                     resolved_ref, cast = pick
                     try:
-                        new_binding = rebind_pick(
-                            base_binding,
-                            resolved_ref=(
-                                resolved_ref if resolved_ref != base_ref else ""),
-                            cast=cast)
+                        rebound = base_binding
+                        if resolved_ref and resolved_ref != base_ref:
+                            parsed = parse_model_ref(resolved_ref)
+                            if parsed.tensorhub is None:
+                                raise ValueError(
+                                    f"resolution {resolved_ref!r} is not a "
+                                    "tensorhub ref")
+                            rebound = dataclasses.replace(
+                                rebound, flavor=parsed.tensorhub.flavor)
+                        if cast:
+                            rebound = dataclasses.replace(rebound, storage_dtype=cast)
+                        if resolved_ref and wire_ref(rebound) != resolved_ref:
+                            logger.warning(
+                                "precision resolution %s -> %s does not round-trip "
+                                "through the binding (got %s); keeping declared ref",
+                                base_ref, resolved_ref, wire_ref(rebound))
+                        else:
+                            new_binding = rebound
                     except (ValueError, TypeError, AttributeError) as exc:
                         logger.warning(
                             "precision resolution %s -> %r rejected: %s",
                             base_ref, pick, exc)
-                        new_binding = base_binding
                 if spec.models.get(slot) is not new_binding:
                     spec.models[slot] = new_binding
                     self.store.register_binding(wire_ref(new_binding), new_binding)
@@ -1135,7 +983,6 @@ class Executor:
         # sm90 cast=fp8 pick on a bf16 upsampler killed every worker stream
         # ~1s after HelloAck, churning H100 pods at 60s intervals).
         for old_key, spec in rehomed:
-            assert spec.cls is not None  # only cls-specs are rehomed
             rec = self._classes.get(old_key)
             if rec is not None and spec in rec.specs:
                 rec.specs.remove(spec)
@@ -1155,51 +1002,7 @@ class Executor:
             if rec is not None and not rec.specs and self._classes.get(old_key) is rec:
                 self._classes.pop(old_key, None)
         if changed:
-            # gw#494: transactional application — (1) a ready instance whose
-            # loaded refs diverged from the rebound refs is stale: vacate it
-            # so nothing stays booked under the old resolved refs (pins,
-            # promotes, adapters and UNLOAD all key off the CURRENT wire
-            # refs; a divergent record orphans its VRAM forever).
-            stale: List[_ClassRecord] = []
-            seen: set = set()
-            for rec in self._classes.values():
-                if id(rec) in seen:
-                    continue
-                seen.add(id(rec))
-                if not rec.ready or not rec.held_refs:
-                    continue
-                wanted = {wire_ref(b) for s in rec.specs for b in s.models.values()}
-                if set(rec.held_refs) != wanted:
-                    rec.stale = True
-                    stale.append(rec)
-            if stale:
-                try:
-                    loop = asyncio.get_running_loop()
-                except RuntimeError:
-                    loop = None  # sync context: ensure_setup vacates on next touch
-                if loop is not None:
-                    for rec in stale:
-                        loop.create_task(self._revalidate_record(rec))
-            # (2) gates + serve plans re-run against the rebound bindings
-            # (idempotent; also settles the startup()-vs-HelloAck order race).
-            if self._last_gpu_info is not None:
-                self.gate_functions(self._last_gpu_info)
             self._on_state_change()
-
-    async def _revalidate_record(self, rec: "_ClassRecord") -> None:
-        """Vacate a stale instance (gw#494): its pipelines were loaded for a
-        superseded pick, so release the residency bookings under the OLD
-        resolved refs; the next setup/LOAD loads the current pick. Records
-        with jobs in flight are left for ``ensure_setup`` to vacate on the
-        next touch."""
-        async with rec.lock:
-            if not rec.ready or not rec.stale:
-                return
-            async with self._load_lock:
-                if self._record_in_use(rec):
-                    return
-                await self._vacate_record(rec)
-        self._on_state_change()
 
     # ---- availability ----------------------------------------------------
 
@@ -1223,14 +1026,6 @@ class Executor:
         from .models.hub_policy import FIT_INCOMPATIBLE, TensorhubWorkerCapabilities
         from .models.serve_fit import RUN_CPU, RUN_OFFLOAD, plan_serve
 
-        # Idempotent re-gate (gw#494): drop only the marks THIS gate made
-        # last time; setup failures and other owners survive. Remember the
-        # probe so apply_model_resolutions can re-run us.
-        self._last_gpu_info = dict(gpu_info)
-        for fn in self._gate_owned:
-            self.unavailable.pop(fn, None)
-        self._gate_owned = set()
-
         total_vram_gb = float(gpu_info.get("gpu_total_mem") or 0) / (1024 ** 3)
         free_vram_gb = float(gpu_info.get("gpu_free_mem") or gpu_info.get("gpu_total_mem") or 0) / (1024 ** 3)
         detected_sm = str(gpu_info.get("gpu_sm") or "")
@@ -1252,7 +1047,6 @@ class Executor:
                     "compute_capability_unmet",
                     f"requires SM {r.compute_capability:.1f}, detected {detected_cc:.1f}",
                     {"detected_sm": f"{detected_cc:.1f}", "required_sm": f"{float(r.compute_capability):.1f}"})
-                self._gate_owned.add(name)
                 continue
             missing = [lib for lib in (r.libraries or ()) if lib not in libs]
             if missing:
@@ -1262,7 +1056,6 @@ class Executor:
                 self.unavailable[name] = (
                     "missing_cuda_library", f"missing required libraries: {', '.join(missing)}",
                     {"missing": ",".join(missing)})
-                self._gate_owned.add(name)
                 continue
 
             # Adaptive serve-time fit for the VRAM / GPU-presence / stored-
@@ -1287,7 +1080,6 @@ class Executor:
                     code, plan.reason,
                     {"detected_vram_gb": f"{total_vram_gb:.0f}",
                      "recommended_vram_gb": (f"{r.vram_gb:.0f}" if r.vram_gb else "")})
-                self._gate_owned.add(name)
                 continue
             if plan.degraded:
                 logger.warning(degraded_log_line(
@@ -1385,46 +1177,6 @@ class Executor:
     def in_flight_keys(self) -> List[Tuple[str, int]]:
         return [k for k, j in self.jobs.items() if not j.finished and not j.superseded]
 
-    # ---- finalize tracking (gw#516) ------------------------------------------
-
-    def finalizing_jobs(self) -> int:
-        """Jobs past the decode->finalize handoff: GPU slot terminally
-        released, encode/upload tail still running, result unshipped. The
-        hub must treat these as live work (drain/retire gating) even though
-        the GPU is already serving the next request."""
-        with self._finalizing_lock:
-            return self._finalizing_count
-
-    def _enter_finalize(self, job: _Job) -> None:
-        """Handler-thread callback at the terminal GPU-slot release."""
-        with self._finalizing_lock:
-            if job.finalizing or job.finished:
-                return
-            job.finalizing = True
-            self._finalizing_count += 1
-        self._signal_state_change_threadsafe()
-
-    def _exit_finalize(self, job: _Job) -> None:
-        """Job coroutine, after its result shipped (any terminal path)."""
-        with self._finalizing_lock:
-            if not job.finalizing:
-                return
-            job.finalizing = False
-            self._finalizing_count -= 1
-        self._signal_state_change_threadsafe()
-
-    def _signal_state_change_threadsafe(self) -> None:
-        """_on_state_change from any thread: lifecycle.state_changed needs a
-        running loop, so handler-thread callers hop onto the executor loop."""
-        loop = self._loop
-        if loop is not None and not loop.is_closed():
-            try:
-                loop.call_soon_threadsafe(self._on_state_change)
-                return
-            except RuntimeError:
-                pass
-        self._on_state_change()
-
     # ---- setup -------------------------------------------------------------
 
     async def ensure_setup(
@@ -1438,12 +1190,6 @@ class Executor:
         self.store.bind_loop()
         rec = self._classes[spec.instance_key]
         async with rec.lock:
-            if rec.ready and rec.stale:
-                # gw#494: the instance was loaded for a superseded pick —
-                # vacate (releasing its OLD-ref bookings) and set up fresh
-                # with the current bindings.
-                async with self._load_lock:
-                    await self._vacate_record(rec)
             if rec.ready:
                 await self._promote_setup_refs(spec, promote_slots)
                 return rec.instance
@@ -1490,17 +1236,10 @@ class Executor:
     ) -> Any:
         assert spec.cls is not None  # guarded by ensure_setup
         setup_slots = self._setup_slots(spec)
-        # gw#494: residency keys for this setup are derived ONCE, here, in
-        # resolved space; downloads, booking and the record's held_refs all
-        # use these exact strings (a HelloAck rebind during an await below
-        # cannot split download/booking/teardown identities).
-        slot_refs: Dict[str, str] = {
-            slot: wire_ref(spec.models[slot]) for slot in setup_slots
-        }
         paths: Dict[str, str] = {}
         for slot in setup_slots:
             binding = spec.models[slot]
-            ref = slot_refs[slot]
+            ref = wire_ref(binding)
             snap = (snapshots or {}).get(ref)
             path = await self.store.ensure_local(ref, snap, binding=binding)
             paths[slot] = str(path)
@@ -1521,20 +1260,10 @@ class Executor:
                     spec, setup, paths, server=rec.server,
                     compile_artifact=compile_artifact, snapshots=snapshots)
                 rec.shared_keys.extend(inj.shared_keys)
-                # pgw#517: a self-loading (str/Path-slot) endpoint builds its
-                # own pipeline inside setup() and the executor never sees it
-                # to arm compile automatically (the branch above only fires
-                # for class-annotated slots) — hold the arming scope open so
-                # a `gen_worker.arm_compile(pipe)` call from inside setup()
-                # reaches the same cache-artifact-gated policy. No-op when
-                # spec.compile is None.
-                with provision.ArmingScope(
-                    spec.compile, self.store._cache_dir, compile_artifact,
-                ):
-                    if asyncio.iscoroutinefunction(setup):
-                        await setup(**inj.kwargs)
-                    else:
-                        await asyncio.to_thread(setup, **inj.kwargs)
+                if asyncio.iscoroutinefunction(setup):
+                    await setup(**inj.kwargs)
+                else:
+                    await asyncio.to_thread(setup, **inj.kwargs)
             warmup = getattr(instance, "warmup", None)
             if callable(warmup):
                 from . import compile_cache
@@ -1565,10 +1294,7 @@ class Executor:
                     process_vram_bytes, rec.server.process.pid)
             self._register_residency(
                 spec, setup_slots, inj.loaded, vram_delta,
-                lane_slots=inj.lane_slots, shared_bytes=inj.shared_bytes,
-                slot_refs=slot_refs)
-            rec.held_refs = sorted(set(slot_refs.values()))
-            rec.stale = False
+                lane_slots=inj.lane_slots, shared_bytes=inj.shared_bytes)
         return instance
 
     def _register_residency(
@@ -1580,7 +1306,6 @@ class Executor:
         *,
         lane_slots: Optional[set] = None,
         shared_bytes: int = 0,
-        slot_refs: Optional[Dict[str, str]] = None,
     ) -> None:
         """Honest per-ref residency after a setup (#369). Worker-constructed
         pipelines carry their own measured allocator delta AND the object
@@ -1592,14 +1317,11 @@ class Executor:
         them here would clobber a mid-setup demotion."""
         res = self.store.residency
         lanes = lane_slots or set()
-        refs = slot_refs or {}
         per_ref: Dict[str, Tuple[Any, int]] = {}
         for slot in setup_slots:
             if slot in lanes:
                 continue
-            # gw#494: book under the SAME key the setup derived (never a
-            # fresh wire_ref over possibly-rebound spec.models).
-            ref = refs.get(slot) or wire_ref(spec.models[slot])
+            ref = wire_ref(spec.models[slot])
             obj, measured = loaded.get(slot, (None, 0))
             prev_obj, prev_bytes = per_ref.get(ref, (None, 0))
             per_ref[ref] = (obj or prev_obj, prev_bytes + measured)
@@ -1681,21 +1403,14 @@ class Executor:
         incoming bytes plus the floor, fail RETRYABLE instead of thrashing.
 
         Only worker-loaded (pipeline-typed) slots count: tenant-owned and
-        engine-runtime slots do not stage full weight sets in host RAM.
-
-        Multi-slot setups stage SEQUENTIALLY under the load lock — each
-        slot's weights move to VRAM (freeing host RAM) before the next slot
-        loads — so the honest staging requirement is the LARGEST slot, not
-        the sum (gw#479 live: two 28GiB fp8 lanes were refused as "56.2GiB
-        incoming" on a 61GiB host that stages at most 28GiB at once)."""
+        engine-runtime slots do not stage full weight sets in host RAM."""
         slots = self._worker_loaded_slots(spec)
         if not paths or not slots:
             return
         incoming = 0
         for slot, p in paths.items():
             if slot in slots:
-                slot_bytes = await asyncio.to_thread(disk_gc.tree_bytes, Path(p))
-                incoming = max(incoming, slot_bytes)
+                incoming += await asyncio.to_thread(disk_gc.tree_bytes, Path(p))
         if incoming <= 0:
             return
         if await asyncio.to_thread(self.store.residency.make_room_ram, incoming):
@@ -1741,7 +1456,7 @@ class Executor:
         missing: set = set()
         for slot in self._setup_slots(spec):
             binding = spec.models[slot]
-            if getattr(binding, "source", "tensorhub") != "tensorhub":
+            if getattr(binding, "provider", "tensorhub") != "tensorhub":
                 continue
             r = wire_ref(binding)
             if (self.store.local_path(r) is None
@@ -1764,8 +1479,7 @@ class Executor:
         """Boot the runtime="vllm"/"llama-server" subprocess and health-wait."""
         from .runtimes.server import RUNTIME_FACTORIES
 
-        assert spec.runtime  # validated at decoration
-        factory = RUNTIME_FACTORIES[spec.runtime]
+        factory = RUNTIME_FACTORIES[spec.runtime]  # validated at decoration
         if not paths:
             raise ValidationError(
                 f"runtime={spec.runtime!r} on {spec.name!r} requires a model binding"
@@ -1825,7 +1539,7 @@ class Executor:
             if binding is None:
                 return None
             ref = wire_ref(binding)
-            digests = self.store.component_digests(ref, local_path=Path(paths[slot]))
+            digests = self.store.component_digests(ref)
             keys[slot] = {
                 comp: residency_mod.LoadedComponentKey.for_component(
                     content_digest=digest, component=comp, binding=binding,
@@ -1854,7 +1568,14 @@ class Executor:
     def _model_index_components(path: str) -> set:
         """Component names the snapshot's model_index.json declares — the
         only names safe to pass as preloaded modules to from_pretrained."""
-        return provision.model_index_components(path)
+        try:
+            import json
+
+            with open(Path(path) / "model_index.json", "r", encoding="utf-8") as f:
+                index = json.load(f)
+            return {k for k in index if not k.startswith("_")}
+        except Exception:
+            return set()
 
     async def _injection_kwargs(
         self,
@@ -1902,7 +1623,12 @@ class Executor:
             elif ann is Path:
                 kwargs[slot] = Path(path)
             elif isinstance(ann, type) and callable(getattr(ann, "from_pretrained", None)):
+                from .models.loading import load_from_pretrained
+                from .models.memory import place_pipeline
+
                 binding = spec.models.get(slot)
+                dtype = str(getattr(binding, "dtype", "") or "")
+                storage_dtype = str(getattr(binding, "storage_dtype", "") or "")
                 # Worker-owned placement/offload policy: one decider for the
                 # whole worker; endpoints never write device/offload code.
                 # Plan-time offload verdicts and the learned degraded floor
@@ -1948,11 +1674,29 @@ class Executor:
                         b for comp, b in sizes.items() if comp not in injected)
                     if excl_bytes > 0:
                         await asyncio.to_thread(res.make_room, excl_bytes)
+                # th#737: a cast directive on a denoiser-less diffusers
+                # tree is a load-time no-op that would silently serve bf16.
+                # Gate it up front when the snapshot's model_index proves
+                # there is no cast surface (unknown layouts pass through;
+                # the post-load outcome check below is the backstop).
+                if storage_dtype in ("fp8", "fp8+te"):
+                    comps = self._model_index_components(path)
+                    if comps and not ({"transformer", "unet"} & comps):
+                        self._record_cast_drop(
+                            spec, ref=ref, wanted=storage_dtype,
+                            ran=(dtype or "bf16"),
+                            detail=(
+                                f"cast {storage_dtype!r} dropped for slot "
+                                f"{slot!r}: pipeline has no denoiser/cast "
+                                f"surface (components: {sorted(comps)}); "
+                                "serving at base precision"),
+                        )
+                        storage_dtype = ""
                 before = self._vram_allocated()
                 try:
-                    sl = await asyncio.to_thread(
-                        provision.load_slot, ann, path, binding=binding,
-                        slot=slot, ref=ref, mode=mode, components=injected,
+                    pipe = await asyncio.to_thread(
+                        load_from_pretrained, ann, path, dtype=dtype,
+                        storage_dtype=storage_dtype, components=injected,
                     )
                 except Exception as exc:
                     # Corruption-shaped load failure (gw#408): digest-verify
@@ -1972,26 +1716,39 @@ class Executor:
                     )
                     path = str(fresh)
                     paths[slot] = path
-                    sl = await asyncio.to_thread(
-                        provision.load_slot, ann, path, binding=binding,
-                        slot=slot, ref=ref, mode=mode, components=injected,
+                    pipe = await asyncio.to_thread(
+                        load_from_pretrained, ann, path, dtype=dtype,
+                        storage_dtype=storage_dtype, components=injected,
                     )
-                pipe = sl.obj
-                # Reconcile the load outcomes into ServePlan/FnDegraded via
-                # the state-delta path — the shared core decides WHAT
-                # degraded (details non-empty), the executor reports it.
-                if sl.pre_drop_detail:
-                    self._record_cast_drop(
-                        spec, ref=ref, wanted=sl.pre_drop_wanted,
-                        ran=sl.ran, detail=sl.pre_drop_detail)
-                if sl.rung_detail:
+                rung = str(getattr(pipe, "_cozy_adaptive_rung", "") or "")
+                cast_failed = getattr(
+                    pipe, "_cozy_fp8_storage_requested", False
+                ) and not getattr(pipe, "_cozy_fp8_storage_ok", True)
+                if rung == "nf4" or (rung == "fp8" and not cast_failed):
+                    # gw#491: the loader engaged an emergency rung because
+                    # free VRAM at load was tighter than gate-time planning
+                    # assumed — reconcile it into ServePlan/FnDegraded.
                     self._record_adaptive_rung(
-                        spec, ref=ref, rung=sl.rung, detail=sl.rung_detail)
-                elif sl.cast_fail_detail:
+                        spec, ref=ref, rung=rung,
+                        detail=(
+                            f"adaptive fit rung {rung!r} engaged at load for "
+                            f"slot {slot!r} ({type(pipe).__name__}); free "
+                            "VRAM below the stored-precision footprint"),
+                    )
+                elif cast_failed and not rung:
+                    # th#737 backstop: the RESOLUTION cast was attempted at
+                    # load and failed on every target — structural report,
+                    # not a silent bf16 fallback. (A failed adaptive fp8 is
+                    # not a plan deviation: the plan was base precision.)
                     self._record_cast_drop(
-                        spec, ref=ref, wanted=sl.cast_fail_wanted,
-                        ran=sl.ran, detail=sl.cast_fail_detail)
-                placed = sl.placed
+                        spec, ref=ref, wanted=(storage_dtype or "fp8"),
+                        ran=(dtype or "bf16"),
+                        detail=(
+                            f"fp8 storage failed on every component of slot "
+                            f"{slot!r} ({type(pipe).__name__}); serving at "
+                            "base precision"),
+                    )
+                placed = await asyncio.to_thread(place_pipeline, pipe, mode=mode, ref=ref)
                 if placed.get("oom_demotions"):
                     self._record_demotion(
                         spec, ref=ref, phase="load",
@@ -2054,10 +1811,7 @@ class Executor:
             measured = 0
             if isinstance(module, nn.Module):
                 measured = int(estimate_cuda_resident_gb(module) * _GiB)
-            def _hold(m: Any = module) -> Any:
-                return m
-
-            res.acquire_shared(key, _hold, vram_bytes=measured)
+            res.acquire_shared(key, lambda m=module: m, vram_bytes=measured)
             result.shared_keys.append(key)
             fresh_bytes += measured
         comps = getattr(pipe, "components", None) or {}
@@ -2083,9 +1837,22 @@ class Executor:
         return lane_obj, lane_bytes
 
     def _enable_compiled(self, pipe: Any, cfg: Any, artifact: Optional[Path]) -> bool:
-        """Arm the best available compiled path for a freshly loaded pipeline
-        (shared with the local CLI — provision.enable_compiled)."""
-        return provision.enable_compiled(pipe, cfg, self.store._cache_dir, artifact)
+        """Arm the best available compiled path for a freshly loaded pipeline:
+        a TRT engine artifact swaps the module (fail-soft), anything else goes
+        through the torch.compile cache policy (which also covers the no-
+        artifact and ALLOW_COLD lanes)."""
+        from . import compile_cache, trt_engine
+
+        if artifact is not None:
+            try:
+                meta = trt_engine.unpack_metadata(Path(artifact))
+            except Exception:
+                meta = None
+            if meta is not None and str(meta.get("kind") or "") == "trt-engine":
+                if trt_engine.enable(pipe, cfg, self.store._cache_dir, artifact):
+                    return True
+                artifact = None  # unusable engine: fall through to eager policy
+        return compile_cache.enable(pipe, cfg, self.store._cache_dir, artifact)
 
     @staticmethod
     def _vram_allocated() -> int:
@@ -2336,11 +2103,9 @@ class Executor:
             logger.warning(
                 "compile-cache adopt %s: %d fxgraph misses during warmup — "
                 "cell covers the declared shapes only partially", ref, misses)
-        # cache_hits/cache_misses/warmup_s computed above (hits/misses/
-        # warmup_s) but intentionally NOT sent — the orchestrator has no
-        # reader for them (pgw#514/P3; see the proto field comments).
         await self._send(pb.WorkerMessage(model_event=pb.ModelEvent(
-            ref=ref, state=pb.MODEL_STATE_ADOPTED, duration_ms=duration_ms)))
+            ref=ref, state=pb.MODEL_STATE_ADOPTED, duration_ms=duration_ms,
+            cache_hits=hits, cache_misses=misses, warmup_s=warmup_s)))
 
     def _ref_in_use(self, ref: str) -> bool:
         for job in self.jobs.values():
@@ -2350,34 +2115,20 @@ class Executor:
                 return True
         return False
 
-    def _record_refs(self, rec: _ClassRecord) -> List[str]:
-        """The wire refs a record's instance holds: the load-time booking
-        keys when stamped (gw#494), else the current binding derivation
-        (records that never completed a setup)."""
-        if rec.held_refs:
-            return list(rec.held_refs)
-        return [wire_ref(b) for s in rec.specs for b in s.models.values()]
-
     def _record_holding(self, ref: str) -> Optional[_ClassRecord]:
         for rec in self._classes.values():
             if not rec.ready:
                 continue
-            if ref in self._record_refs(rec):
+            if any(ref in (wire_ref(b) for b in s.models.values()) for s in rec.specs):
                 return rec
         return None
 
     def _record_in_use(self, rec: _ClassRecord) -> bool:
-        # A job on a rebound spec no longer references the record's held
-        # refs — membership of the job's spec in this record is the honest
-        # "instance in use" signal (gw#494).
-        for job in self.jobs.values():
-            if job.finished or job.superseded or job.spec is None:
-                continue
-            if job.spec in rec.specs:
-                return True
-        for ref in self._record_refs(rec):
-            if self._ref_in_use(ref) or self.store.residency.in_use(ref):
-                return True
+        for s in rec.specs:
+            for b in s.models.values():
+                ref = wire_ref(b)
+                if self._ref_in_use(ref) or self.store.residency.in_use(ref):
+                    return True
         return False
 
     async def _vacate_record(self, rec: _ClassRecord) -> None:
@@ -2402,13 +2153,9 @@ class Executor:
                 await asyncio.to_thread(torch.cuda.empty_cache)
             except Exception:
                 pass
-        # gw#494: release exactly what the instance BOOKED (held_refs) —
-        # re-deriving from spec.models would release the wrong keys after a
-        # resolution rebind, leaving the old entries' VRAM booked forever.
-        for ref in self._record_refs(rec):
-            self.store.residency.release_to_disk(ref)
-        rec.held_refs = []
-        rec.stale = False
+        for s in rec.specs:
+            for b in s.models.values():
+                self.store.residency.release_to_disk(wire_ref(b))
         if rec.shared_keys:
             # Drop this record's holds on content-keyed shared components
             # (gw#479); entries no other record references get evicted.
@@ -2505,15 +2252,39 @@ class Executor:
 
     # ---- job execution -----------------------------------------------------
 
+    def _routed_slots(self, spec: EndpointSpec, payload: Any) -> List[str]:
+        """Model slots this request needs (gw#479). Classes without route=
+        use every declared slot (single-lane behavior, unchanged)."""
+        if spec.route is None or spec.cls is None:
+            return list(spec.models)
+        try:
+            routed = [str(s) for s in spec.route(payload)]
+        except Exception as exc:
+            raise ValidationError(
+                f"route() for {spec.name} failed: {exc}") from exc
+        unknown = [s for s in routed if s not in spec.models]
+        if unknown or not routed:
+            raise ValidationError(
+                f"route() for {spec.name} returned {routed!r}; declared model "
+                f"slots are {sorted(spec.models)}")
+        return routed
+
     async def _run_job(self, job: _Job, run: pb.RunJob) -> None:
         spec = job.spec
         assert spec is not None
+        # Decode BEFORE pinning: payload-driven routing (gw#479) decides which
+        # lanes this job pins/promotes — pinning an idle lane would block the
+        # make_room swap that promoting the routed lane needs.
         try:
-            payload: Any = msgspec.msgpack.decode(run.input_payload, type=spec.payload_type)
+            payload = msgspec.msgpack.decode(run.input_payload, type=spec.payload_type)
         except (msgspec.ValidationError, msgspec.DecodeError) as exc:
             await self._finish(job, pb.JOB_STATUS_INVALID, safe_message=_sanitize(str(exc)))
             return
-        routed = list(spec.models)
+        try:
+            routed = self._routed_slots(spec, payload)
+        except ValidationError as exc:
+            await self._finish(job, pb.JOB_STATUS_INVALID, safe_message=_sanitize(str(exc)))
+            return
         # Pin this job's model refs for its WHOLE lifetime (gw#409): the gap
         # between ensure_setup's promote and the execution-time pin let a
         # concurrent job's make_room demote a just-promoted pipeline. Refs
@@ -2576,7 +2347,6 @@ class Executor:
                 )
                 for b in run.models if b.loras
             },
-            **_resolve_slots_kwargs(spec, run),
             source_info=source_info,
             destination_info=destination_info,
             execution_hints=execution_hints,
@@ -2635,24 +2405,10 @@ class Executor:
         try:
             if needs_gpu:
                 await self._gpu_semaphore.acquire()
-                self._loop = asyncio.get_running_loop()
-                lease = _GpuSlotLease(self._gpu_semaphore, self._loop)
+                lease = _GpuSlotLease(self._gpu_semaphore, asyncio.get_running_loop())
                 ctx._gpu_slot_lease = lease
-                # gw#516: the handler thread reports the terminal
-                # decode->finalize slot release so the hub sees the job as
-                # "finalizing" while its encode/upload tail runs slotless.
-                ctx._on_finalize_release = lambda: self._enter_finalize(job)
                 if job.ctx.cancelled:
                     raise CanceledError("canceled")
-                # pgw#513: reset the CUDA peak-allocator watermark now that
-                # this job exclusively owns gpu_index (jobs serialize under
-                # _gpu_semaphore) — peak_vram_bytes then measures THIS job's
-                # peak, not the process-lifetime high-water mark.
-                if torch is not None and torch.cuda.is_available():
-                    try:
-                        torch.cuda.reset_peak_memory_stats(gpu_index)
-                    except Exception:
-                        pass
             started = time.monotonic()
             # Pin-while-executing: the models (and adapter snapshots) this job
             # uses are not eviction candidates for its duration. Routed lanes
@@ -2702,30 +2458,10 @@ class Executor:
                         )
             metrics = self._metrics(queue_ms, started, concurrency_at_start, gpu_index,
                                     output=output)
-            handler_done = time.monotonic()
             # Handler GPU work is done — free the slot before result-blob
             # upload and result send so the next job's compute starts now.
             if lease is not None:
-                overlapped = not lease.yield_slot()
-                released_at = lease.released_at
-                if released_at is not None:
-                    # gw#516 typed split of runtime_ms: how long the GPU slot
-                    # was actually held vs the slotless finalize tail.
-                    metrics.slot_held_ms = max(
-                        0, int((released_at - started) * 1000))
-                    metrics.finalize_wall_ms = max(
-                        0, int((handler_done - released_at) * 1000))
-                if overlapped and released_at is not None:
-                    # The handler released terminally at the decode->finalize
-                    # handoff (gw#476/gw#516): the whole encode/upload tail
-                    # overlapped the next request.
-                    logger.info(
-                        "FINALIZE_OVERLAP fn=%s request=%s slot_held_ms=%d "
-                        "handler_wall_ms=%d overlap_ms=%d",
-                        spec.name, run.request_id,
-                        int((released_at - started) * 1000),
-                        int((handler_done - started) * 1000),
-                        int((handler_done - released_at) * 1000))
+                lease.yield_slot()
             if spec.output_mode == "stream":
                 # gw#475: live deltas are droppable by contract (in-memory
                 # ProgressHub only) — the terminal JobResult carries the
@@ -2754,9 +2490,6 @@ class Executor:
         finally:
             if lease is not None:
                 lease.yield_slot()
-            # gw#516: result shipped (any terminal path) — the job leaves the
-            # finalizing set the hub gates drain/retire on.
-            self._exit_finalize(job)
             self._maybe_idle()
 
     async def _materialize_source(
@@ -3136,14 +2869,11 @@ class Executor:
         output: Any = None,
     ) -> pb.JobMetrics:
         runtime_ms = int((time.monotonic() - started) * 1000)
-        # rss_at_end_bytes (pgw#513): instantaneous RSS, honestly named — the
-        # OS gives no per-process peak-RSS reset, so this is NOT a per-job
-        # peak (unlike peak_vram_bytes below, reset at handler start).
-        rss_at_end = 0
+        peak_rss = 0
         try:
             import psutil
 
-            rss_at_end = int(psutil.Process().memory_info().rss)
+            peak_rss = int(psutil.Process().memory_info().rss)
         except Exception:
             pass
         peak_vram = 0
@@ -3152,15 +2882,10 @@ class Executor:
                 peak_vram = int(torch.cuda.max_memory_allocated(gpu_index))
             except Exception:
                 pass
-        duration_s, output_count = _scan_output_assets(output)
-        usage = _output_token_usage(output)
         return pb.JobMetrics(
-            runtime_ms=runtime_ms, queue_ms=queue_ms, rss_at_end_bytes=rss_at_end,
+            runtime_ms=runtime_ms, queue_ms=queue_ms, peak_rss_bytes=peak_rss,
             peak_vram_bytes=peak_vram, concurrency_at_start=max(0, concurrency_at_start),
-            output_media_duration_s=duration_s, output_count=output_count,
-            input_tokens=usage.prompt_tokens if usage is not None else 0,
-            input_cached_tokens=usage.cached_tokens if usage is not None else 0,
-            output_tokens=usage.completion_tokens if usage is not None else 0,
+            output_media_duration_s=_output_media_seconds(output),
         )
 
     async def _send_result(

@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import IO, Literal, Optional
+from typing import IO, Annotated, Literal, Optional
 
 import msgspec
 
@@ -99,12 +99,8 @@ class AudioAsset(MediaAsset):
     """Reference to audio media bytes."""
 
 
-# Named, documented base for endpoint string-enum payload fields. It is a
-# direct alias for enum.StrEnum, NOT a subclass: subclassing an empty enum base
-# makes members of a tenant's `class Size(StringEnum)` resolve as `str` to mypy
-# (an empty-enum-base gap), which forced `# type: ignore[assignment]` on every
-# preset default `size: Size = Size.SQUARE`. The alias checks clean (ie#345).
-StringEnum = StrEnum
+class StringEnum(StrEnum):
+    """Base class for endpoint-declared string enum payload fields."""
 
 
 @dataclass(frozen=True)
@@ -149,6 +145,10 @@ class PromptRole:
     def __post_init__(self) -> None:
         if self.role not in ("positive", "negative"):
             raise ValueError("PromptRole.role must be 'positive' or 'negative'")
+
+
+PositivePrompt = Annotated[str, PromptRole("positive")]
+NegativePrompt = Annotated[str, PromptRole("negative")]
 
 
 class Tensors(msgspec.Struct):

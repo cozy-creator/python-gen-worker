@@ -3,19 +3,22 @@
 Autoregressive TTS models (Chatterbox, Bark, MusicGen, …) are
 architecturally Llama-class decoders that emit *audio* tokens instead of text
 tokens. The decoder side fits cleanly onto a continuous-batching engine
-(vLLM today; SGLang has no community AR-TTS runners yet); the post-decoder
-side runs a learned audio codec (S3 token decoder, SoundStream, EnCodec, …)
-to turn token ids back into a waveform.
+(vLLM / SGLang); the post-decoder side runs a learned audio codec (S3 token
+decoder, SoundStream, EnCodec, …) to turn token ids back into a waveform.
 
-The BatchedWorker SDK shape (``@endpoint(runtime="vllm")`` on an async class,
-see ``api/decorators.py``) needs two pieces of model-specific metadata to
-wire an endpoint:
+The BatchedWorker SDK shape (`@inference(runtime="vllm" or "sglang")` on an
+async class) needs three pieces of model-specific metadata to wire an
+endpoint:
 
   1. ``vllm_arch`` — the vLLM model class name to load with
      ``LLM(model=..., model_class=vllm_arch)``. Maps to a registered vLLM
      architecture; chatterbox-vllm publishes ``LlamaChatterboxModel`` as
-     a community vLLM model. ``None`` if the model has no vLLM port yet.
-  2. ``audio_codec_decoder`` — the decoder import path that turns the
+     a community vLLM model.
+  2. ``sglang_runner`` — SGLang runtime model name, if/when SGLang grows
+     native support. Today this is ``None`` for every AR-TTS model because
+     SGLang does not yet ship community AR-TTS runners; vLLM is the
+     production path.
+  3. ``audio_codec_decoder`` — the decoder import path that turns the
      audio-token sequence into a waveform. The BatchedWorker calls this
      after the engine emits a token-id batch. Different models use
      different codecs; the registry abstracts that detail so endpoints
@@ -31,9 +34,9 @@ model-class name (e.g. ``"Chatterbox"``). Endpoints look up their entry at
         raise FatalError("ar_tts model class is not registered")
     # spec.vllm_arch == "LlamaChatterboxModel"
 
-This module performs *no* engine imports. ``vllm`` / codec weights are
-loaded inside the endpoint's ``setup()`` so endpoint code can import on a
-CPU-only machine for discovery + unit testing.
+This module performs *no* engine imports. ``vllm`` / ``sglang`` / codec
+weights are loaded inside the endpoint's ``setup()`` so endpoint code can
+import on a CPU-only machine for discovery + unit testing.
 
 References:
   - chatterbox-vllm port: https://github.com/randombk/chatterbox-vllm
@@ -56,6 +59,7 @@ class ARTTSModelSpec(msgspec.Struct, frozen=True, kw_only=True):
       vllm_arch: vLLM model class name (registered via
         ``ModelRegistry.register_model``). ``None`` if the model has no
         vLLM port yet.
+      sglang_runner: SGLang runtime model name. ``None`` if not supported.
       audio_codec_decoder: Import path or registry key for the codec
         decoder that converts audio-token ids → waveform samples.
       sample_rate_hz: Native sample rate of the codec output, in hertz.
@@ -70,6 +74,7 @@ class ARTTSModelSpec(msgspec.Struct, frozen=True, kw_only=True):
 
     model_class: str
     vllm_arch: Optional[str] = None
+    sglang_runner: Optional[str] = None
     audio_codec_decoder: Optional[str] = None
     sample_rate_hz: int = 24000
     audio_token_vocab_size: Optional[int] = None
@@ -94,6 +99,7 @@ _REGISTRY: dict[str, ARTTSModelSpec] = {
     "chatterbox": ARTTSModelSpec(
         model_class="Chatterbox",
         vllm_arch="LlamaChatterboxModel",
+        sglang_runner=None,
         audio_codec_decoder="chatterbox.models.s3gen.S3Gen",
         sample_rate_hz=24000,
         audio_token_vocab_size=8192,
@@ -110,6 +116,7 @@ _REGISTRY: dict[str, ARTTSModelSpec] = {
     "musicgen": ARTTSModelSpec(
         model_class="MusicGen",
         vllm_arch=None,
+        sglang_runner=None,
         audio_codec_decoder="encodec.EncodecModel",
         sample_rate_hz=32000,
         audio_token_vocab_size=2048,

@@ -52,6 +52,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
+from .config import get_settings
+
 logger = logging.getLogger(__name__)
 
 ENV_CACHE_PATH = "GEN_WORKER_COMPILE_CACHE"       # local artifact (tar) or seeded dir
@@ -138,34 +140,24 @@ def system_repo(family: str) -> str:
     return f"_system/family-{fam}"
 
 
-def parse_cell_ref(ref: str) -> Tuple[str, str]:
-    """(family, flavor) from a system cell ref
-    (``_system/family-<f>[:tag][@digest][#<flavor>]``) via the ONE ref
-    grammar (gw#492); ('', '') when the ref is not a system-family ref."""
-    from .models.refs import parse_model_ref
-
-    try:
-        parsed = parse_model_ref(str(ref or ""))
-    except ValueError:
-        return "", ""
-    th = parsed.tensorhub
-    if th is None or th.owner != "_system" or not th.repo.startswith("family-"):
-        return "", ""
-    return th.repo[len("family-"):], th.flavor or ""
-
-
 def family_from_ref(ref: str) -> str:
-    """Family encoded in a compile-cache ref; '' when the ref is not a
-    system-family cell ref."""
-    return parse_cell_ref(ref)[0]
+    """Family encoded in a compile-cache ref
+    (``_system/family-<f>[:tag][@digest][#inductor-...]``); '' when the ref
+    is not a compile-cache ref."""
+    repo = str(ref or "").split("#", 1)[0].split("@", 1)[0].split(":", 1)[0]
+    owner, _, name = repo.partition("/")
+    if owner == "_system" and name.startswith("family-"):
+        return name[len("family-"):]
+    return ""
 
 
 def is_cache_ref(ref: str, family: str = "") -> bool:
     """True when ``ref`` names an inductor compile-cache cell (optionally of
     one specific family)."""
-    fam, flavor = parse_cell_ref(ref)
+    fam = family_from_ref(ref)
     if not fam or (family and fam != family):
         return False
+    flavor = ref.split("#", 1)[1] if "#" in ref else ""
     return flavor.startswith("inductor-")
 
 
@@ -460,14 +452,10 @@ def prepare(
     then ``GEN_WORKER_COMPILE_CACHE`` (local tar), then
     ``GEN_WORKER_COMPILE_CACHE_URL``. Returns the artifact metadata on a
     verified hit (cache dirs seeded), else None with the reason logged.
-
-    ``local``/``url`` are raw env reads, not Settings fields — no production
-    launcher has ever set them (pgw#514 dead-config sweep), but they're a
-    real, tested manual-override path (see test_compile_cache.py) for local
-    dev / the compile-cell producer job, kept as library-standalone knobs.
     """
-    local = os.environ.get(ENV_CACHE_PATH, "").strip()
-    url = os.environ.get(ENV_CACHE_URL, "").strip()
+    settings = get_settings()
+    local = settings.compile_cache_path.strip()
+    url = settings.compile_cache_url.strip()
     root = Path(cache_dir) if cache_dir else Path.home() / ".cache" / "gen-worker"
     root = root / "compile-cache"
     try:
@@ -585,9 +573,8 @@ def apply(
 
     Only compiles when a verified cache artifact was seeded (``cache_ready``)
     or the process explicitly opted into cold compilation AND has a C
-    toolchain (``allow_cold``; defaults to the ``GEN_WORKER_COMPILE_ALLOW_COLD``
-    env var, read raw — not a Settings field, see ``prepare()``). Anything
-    else is a logged no-op — eager, never a stall.
+    toolchain (``allow_cold``; defaults to the GEN_WORKER_COMPILE_ALLOW_COLD
+    setting). Anything else is a logged no-op — eager, never a stall.
 
     ``guard=True`` (consumer): a failing compiled call permanently unwraps to
     eager. ``guard=False`` (compile job): failures must raise, a silently
@@ -604,7 +591,7 @@ def apply(
         return False
     if not cache_ready:
         if allow_cold is None:
-            allow_cold = os.environ.get(ENV_ALLOW_COLD, "").strip().lower() in ("1", "true", "yes")
+            allow_cold = get_settings().compile_allow_cold
         if not allow_cold:
             logger.info("compile-cache: no verified cache artifact; staying eager")
             return False
@@ -899,7 +886,6 @@ __all__ = [
     "counters_delta",
     "enable",
     "family_from_ref",
-    "parse_cell_ref",
     "find_artifact",
     "flavor_label",
     "gen_worker_version",

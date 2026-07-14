@@ -214,7 +214,6 @@ to avoid chatter). Never periodic. O overwrites its copy wholesale.
 | `available_functions` | W registry + model gating | O dispatch eligibility + autoscale supply | dispatchable now |
 | `loading_functions` | W registry | O supply (counts 0 capacity) + display | present but models still materializing; disjoint from available |
 | `free_vram_bytes` | W CUDA probe | O placement (free-VRAM ladder) | measured free VRAM |
-| `finalizing_jobs` | W executor (gw#516) | O drain/retire gating + worker status display | jobs past the decode→finalize handoff: GPU slot released, encode/upload tail running, `JobResult` unshipped. GPU-idle alone is NOT work-idle |
 
 ### RunJob (O → W)
 
@@ -249,7 +248,6 @@ to avoid chatter). Never periodic. O overwrites its copy wholesale.
 | `slot` | O from endpoint manifest | W injection: maps to the endpoint's declared model parameter | slot name |
 | `ref` | O resolver | W `ensure_local` + injection | canonical ref string |
 | `loras` | O `_models` override gate (AllowLora) + BYOM ingest (th#585) | W per-request adapter overlay (gw#393) + adapter residency (gw#399) | LoRA overlays riding this slot's base model; attached as unfused named adapters that stay resident on the pipeline, ACTIVE only for jobs that name them (explicit activation — adapter-free jobs always run with adapters disabled). Purely W-side: O never routes on adapter residency. Empty for adapter-free jobs; workers predating the field ignore it |
-| `inference_defaults` | O repo-metadata store (th#767c: PUT-time validated against the family's exported JSON Schema) | W `ctx.slots[slot].defaults` resolution chain (pgw#520) | JSON object, an instance of the slot's family vocabulary struct (`gen_worker.families.FamilyDefaults` subclass). Empty when the resolved repo carries no metadata — W merges by falling back to the endpoint's code-declared `Slot(fallback=...)` preset; empty AND no fallback ⇒ `ctx.slots[slot]` raises when the handler reads it. Additive: workers predating the field ignore it (Slot resolution falls back to the code preset unconditionally) |
 
 ### LoraOverlay (embedded in ModelBinding.loras)
 
@@ -315,16 +313,10 @@ those never travel on the wire.
 |---|---|---|---|
 | `runtime_ms` | W | O runtime EWMA (placement/autoscale ETA) | handler start → completion |
 | `queue_ms` | W | O local-queue EWMA | worker-local wait before start |
-| `rss_at_end_bytes` | W (psutil sample at job completion) | O memory profile samples | instantaneous RSS, NOT a per-job peak (the OS gives no per-process peak-RSS reset — pgw#513); 0 = unmeasured |
-| `peak_vram_bytes` | W (CUDA peak stats, reset at handler start) | O VRAM profile samples | true per-job peak: GPU jobs serialize under W's GPU semaphore, so `reset_peak_memory_stats()` at handler start isolates this job's peak (pgw#513); 0 = unmeasured |
+| `peak_rss_bytes` | W (psutil sample) | O memory profile samples | 0 = unmeasured |
+| `peak_vram_bytes` | W (CUDA peak stats) | O VRAM profile samples | 0 = unmeasured |
 | `concurrency_at_start` | W executor | O observed-parallelism profile | active jobs at admit |
 | `output_media_duration_s` | W executor (sums probed `duration_s` of output media assets) | O `per_output_second` settlement (th#572) | MEDIA seconds, never wall-clock; 0 = unreported ⇒ media-unit settlement fails closed |
-| `input_tokens` | W (folds streaming `TokenUsage`) | O `per_million_tokens` settlement (pgw#512) | 0 = unreported |
-| `input_cached_tokens` | W (folds streaming `TokenUsage`) | O `per_million_tokens` settlement (pgw#512) | 0 = unreported |
-| `output_tokens` | W (folds streaming `TokenUsage`) | O `per_million_tokens` settlement (pgw#512) | 0 = unreported |
-| `output_count` | W executor (counts output `Asset`s) | O `per_output` settlement (pgw#512) | replaces result-payload scavenging; 0 = unreported |
-| `slot_held_ms` | W executor (gw#516) | O GPU-occupancy profile / overlap evidence | GPU-slot acquire → terminal release; < `runtime_ms` when the handler released at the decode→finalize handoff |
-| `finalize_wall_ms` | W executor (gw#516) | O overlap evidence | slotless encode/upload tail after the release (overlaps the next request's compute). Both 0 = unmeasured (CPU job / pre-gw#516 worker) |
 
 ### JobProgress (W → O)
 Streaming output chunks (LLM token deltas, AR-TTS audio, structured partials).
@@ -343,39 +335,6 @@ a connection: ordered, complete. Across reconnect: W MAY drop buffered
 progress (§1), so subscribers may observe seq gaps; `JobResult` is the
 authoritative output. There is no stream-done/stream-error message: the
 terminal `JobResult` (any status) ends the stream.
-
-**The ctx event lane (pgw#508).** `RequestContext` methods (`ctx.progress`,
-`ctx.log`, checkpoint/warning/training-metric helpers) don't get their own
-wire message — each rides a `JobProgress` chunk whose `content_type` is the
-constant `application/x-request-event+json` (`EVENT_CONTENT_TYPE` in
-executor.py / `RequestEventContentType` in tensorhub's runtimestore) and
-whose `data` is a JSON envelope `{request_id, type, payload, timestamp}`.
-This is a CONTENT-TYPE DISCRIMINATOR inside one wire message, not a second
-message type — O inspects `content_type` before falling back to the generic
-streaming-output path. `type` is one of:
-
-| `type` | audience | O persistence | tolerates shedding |
-|---|---|---|---|
-| `request.progress` | USER-facing (cozy-art job card) | latest-tick only, in-memory (th#737); never a durable row | yes — a dropped mid-run tick is superseded by the next one; only the final state matters |
-| `request.log` | PLATFORM/OPERATOR ONLY, full stop — never user-facing | durable `job.log` row (request_events) | yes — a dropped debug line is an acceptable loss; nothing downstream depends on completeness |
-| `request.checkpoint` | USER-facing | durable `job.checkpoint` row | no — every save is individually meaningful (a training run's checkpoint list must be complete) |
-| `request.warning` | USER-facing | durable `job.warning` row | no — sparse and actionable (e.g. `artifact_upload_failed`) |
-| `request.training_metric` | USER-facing (training job UI) | durable `job.training.metric` row, downsampled to ≥5s apart (final step and any `val_loss` point always persist) | yes between persisted points — the chart only needs the trend, not every tick |
-
-O enforces the `request.log` exception at TWO points, because the live
-`JobProgress` chunk reaches O before the durable row exists: (1) the live
-hub fan-out (`ProgressHub`/SSE `output.delta` path) drops any chunk whose
-decoded `type` is `request.log` outright — it is never wrapped as a generic
-delta and shown to a tenant subscriber; (2) the durable read path
-(`/v1/requests/:id/events`, `/events.bin`) filters `job.log` rows out of
-what it streams to the tenant-scoped SSE routes. There is no operator-facing
-read surface for `job.log` yet — it exists to be queried directly (psql /
-future admin tooling), not to be served over the tenant API.
-
-Every other `type` keeps the base `JobProgress` shedding contract (§1
-send-queue policy: `JobProgress` is the FIRST thing dropped under queue
-overflow) — durability past that point is what the table above's
-"persistence" column adds, not a wire-level delivery guarantee.
 
 ### CancelJob (O → W)
 Sent on client cancel, reconcile cleanup (§1), or O-side abort.
@@ -562,7 +521,7 @@ via `ModelOp{DOWNLOAD}` (pre-positioning) or `ModelOp{ADOPT_COMPILE_CACHE}`
    client via presigned GET/redirect.
 
 **Capability token renewal (#561).** `RunJob.capability_token` is TTL'd per
-workload (inference 1h / training 1h / conversion 24h — th#639: trainers renew hourly instead of holding a week-long credential). A job that outlives
+workload (inference 1h / conversion 24h / training 7d). A job that outlives
 its token renews over HTTP: `POST {file_base_url}/v1/worker/capability/renew`
 with `authorization: Bearer <worker JWT>` and body `{request_id, attempt,
 capability_token}`. O re-mints the SAME grants with a fresh expiry iff the

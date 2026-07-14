@@ -209,9 +209,9 @@ def hf_env(hf_server, monkeypatch, tmp_path):
     monkeypatch.setenv(net.CONNECT_TIMEOUT_ENV, "2")
     monkeypatch.setenv(net.READ_TIMEOUT_ENV, "2")
     monkeypatch.setenv("COZY_CLONE_DOWNLOAD_ATTEMPTS", "2")
-    # Socket timeouts are the stall detector under test; the disk-scan
-    # watchdog's fixed 180s window (models/download.py) stays well out of
-    # the way of every assertion in this file (all bound well under 60s).
+    # Socket timeouts are the stall detector under test; keep the disk-scan
+    # watchdog out of the way.
+    monkeypatch.setenv("COZY_HF_DOWNLOAD_STALL_TIMEOUT_S", "60")
     net.install_hf_http_timeouts()
     return base
 

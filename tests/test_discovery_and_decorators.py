@@ -4,9 +4,8 @@ One test per distinct behavior:
 
   1. Plain-function endpoint: discovered + dispatched with no class/setup.
   2. Class endpoint: public methods are routable; helpers must be private.
-  3. model= placement key: a ModelChoice payload field is a curated closed
-     enum whose picks carry typed defaults; `Choice | ModelRef` opens BYOM;
-     ONE handler stays ONE function (no fan-out).
+  3. variants={name: (binding, Resources)} stamps N routable functions with
+     per-variant binding/resources (+ payload 'variant' Literal validation).
   4. Optional shutdown/setup; async-generator = streaming.
   5. Resources(vram_gb=..) implies gpu.
   6. msgspec.Meta bounds compile into the discovered endpoint.lock schema.
@@ -17,19 +16,15 @@ One test per distinct behavior:
 
 from __future__ import annotations
 
-import enum
 import logging
 import textwrap
 from pathlib import Path
-from typing import Annotated, AsyncIterator, Union
+from typing import Annotated, AsyncIterator, Literal
 
 import msgspec
 import pytest
 
-from gen_worker import (
-    HF, Hub, Model, ModelChoice, ModelDefaults, ModelRef, RequestContext,
-    Resources, endpoint,
-)
+from gen_worker import HF, Hub, RequestContext, Resources, endpoint
 from gen_worker.registry import collect_from_namespace, extract_specs
 
 
@@ -41,14 +36,12 @@ class _Out(msgspec.Struct):
     result: str
 
 
-class _Defaults(ModelDefaults, frozen=True):
-    steps: int
-    guidance: float = 5.0
+class _VarIn(msgspec.Struct):
+    variant: str = "a"
 
 
-class _Model(ModelChoice[_Defaults], enum.Enum):
-    SMALL = Model("small", Hub("o/small"), _Defaults(20), hot=True)
-    LARGE = Model("large", HF("o/large"), _Defaults(30, 7.0), price=3.0)
+class _VarIn2(msgspec.Struct):
+    variant: Literal["a", "zz"] = "a"
 
 
 # --------------------------------------------------------------------------- #
@@ -150,72 +143,96 @@ def test_model_slot_must_match_setup_param() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# 3. model= placement key (pgw#509)                                             #
+# 3. variants fan-out                                                           #
 # --------------------------------------------------------------------------- #
 
 
-class _CuratedIn(msgspec.Struct):
-    prompt: str = ""
-    model: _Model = _Model.SMALL
-
-
-class _ByomIn(msgspec.Struct):
-    prompt: str = ""
-    model: Union[_Model, ModelRef] = _Model.SMALL
-
-
-def test_model_choice_is_a_closed_enum_with_typed_defaults() -> None:
-    # Wire form is the id string; the pick decodes back to a member whose
-    # defaults are read as typed data (no ctx.models string-sniffing).
-    raw = msgspec.msgpack.encode(_CuratedIn(model=_Model.LARGE))
-    assert msgspec.msgpack.decode(raw) == {"prompt": "", "model": "large"}
-    back = msgspec.msgpack.decode(raw, type=_CuratedIn)
-    assert back.model is _Model.LARGE
-    assert back.model.defaults.steps == 30
-    assert back.model.ref.source == "huggingface" and back.model.ref.path == "o/large"
-    assert back.model.hot is False and back.model.price == 3.0
-    # JSON schema is a closed enum — the curated allowlist.
-    schema = msgspec.json.schema(_CuratedIn)
-    assert schema["$defs"]["_Model"]["enum"] == ["large", "small"]
-
-
-def test_model_choice_byom_union_accepts_client_modelref() -> None:
-    # A curated pick and an arbitrary client ModelRef decode through the same
-    # field, distinguished on the wire by JSON type (string vs object).
-    cur = msgspec.json.encode(_ByomIn(model=_Model.SMALL))
-    byo = msgspec.json.encode(
-        _ByomIn(model=ModelRef(source="civitai", path="12345"))
-    )
-    assert msgspec.json.decode(cur, type=_ByomIn).model is _Model.SMALL
-    picked = msgspec.json.decode(byo, type=_ByomIn).model
-    assert isinstance(picked, ModelRef) and picked.path == "12345"
-
-
-def test_one_handler_is_one_function_not_a_fan_out() -> None:
-    # 16 near-identical checkpoints used to be 16 variant functions; now the
-    # class exposes ONE routable `generate` and selection is the payload arg.
+def test_variants_stamp_routable_functions_with_per_variant_overrides() -> None:
     @endpoint(
-        models={"pipeline": Hub("o/base"), "vae": Hub("o/vae")},
-        resources=Resources(vram_gb=12),
+        model=HF("o/base", dtype="bf16"),
+        resources=Resources(vram_gb=24),
+        variants={
+            "gen-fp8": (HF("o/base-fp8"), Resources(vram_gb=14)),
+            "gen-nvfp4": HF("o/base-nvfp4"),  # bare binding: class resources
+        },
     )
     class Gen:
-        def setup(self, pipeline: object, vae: object) -> None: ...
+        def setup(self, model: str) -> None:
+            self.model = model
 
-        def generate(self, ctx: RequestContext, data: _CuratedIn) -> _Out:
-            return _Out(result=str(data.model.defaults.steps))
+        def generate(self, ctx: RequestContext, data: _In) -> _Out:
+            return _Out(result="")
 
-    specs = extract_specs(Gen)
-    assert [s.name for s in specs] == ["generate"]
-    assert list(specs[0].models) == ["pipeline", "vae"]
+    specs = {s.name: s for s in extract_specs(Gen)}
+    assert sorted(specs) == ["gen-fp8", "gen-nvfp4", "generate"]
+    assert specs["generate"].models["model"].ref == "o/base"
+    assert specs["generate"].resources.vram_gb == 24
+    assert specs["gen-fp8"].models["model"].ref == "o/base-fp8"
+    assert specs["gen-fp8"].resources.vram_gb == 14
+    assert specs["gen-nvfp4"].resources.vram_gb == 24
+    # Variant specs must not share one instance (different weights).
+    assert len({s.instance_key for s in specs.values()}) == 3
 
 
-def test_model_row_rejects_non_modelref_and_bad_defaults() -> None:
-    with pytest.raises(TypeError, match="ModelRef"):
-        Model("x", "not-a-ref", _Defaults(10))  # type: ignore[arg-type]
-    with pytest.raises(TypeError, match="ModelDefaults"):
-        Model("x", Hub("o/r"), object())  # type: ignore[arg-type]
-    with pytest.raises(ValueError, match="non-empty id"):
-        Model("", Hub("o/r"), _Defaults(10))
+def test_variants_inherit_shared_aux_slots() -> None:
+    @endpoint(
+        models={"pipeline": HF("o/base", dtype="fp16"), "vae": HF("o/vae-fix", dtype="fp16")},
+        variants={"gen-alt": HF("o/alt")},
+    )
+    class Gen:
+        def setup(self, pipeline: str, vae: str) -> None: ...
+
+        def generate(self, ctx: RequestContext, data: _In) -> _Out:
+            return _Out(result="")
+
+    specs = {s.name: s for s in extract_specs(Gen)}
+    # The variant swaps only the primary slot; the aux vae slot is inherited.
+    assert specs["gen-alt"].models["pipeline"].ref == "o/alt"
+    assert specs["gen-alt"].models["vae"].ref == "o/vae-fix"
+    assert specs["generate"].models["pipeline"].ref == "o/base"
+
+
+def test_variants_without_class_model_are_the_full_routable_set() -> None:
+    @endpoint(variants={
+        "small": Hub("o/small"),
+        "large": Hub("o/large"),
+    })
+    class Gen:
+        def setup(self, model: str) -> None:
+            self.model = model
+
+        def generate(self, ctx: RequestContext, data: _In) -> _Out:
+            return _Out(result="")
+
+    assert sorted(s.name for s in extract_specs(Gen)) == ["large", "small"]
+
+
+def test_variants_validation() -> None:
+    with pytest.raises(ValueError, match="exactly\\s+ONE handler"):
+        @endpoint(variants={"a": HF("o/r")})
+        class TwoHandlers:
+            def setup(self, model: str) -> None: ...
+            def f(self, ctx: RequestContext, data: _In) -> _Out: ...
+            def g(self, ctx: RequestContext, data: _In) -> _Out: ...
+
+    with pytest.raises(ValueError, match="duplicate"):
+        @endpoint(variants={" a": HF("o/r"), "a": HF("o/r2")})
+        class DupNames:
+            def setup(self, model: str) -> None: ...
+            def gen(self, ctx: RequestContext, data: _In) -> _Out: ...
+
+    # payload 'variant' field must be Literal-typed with declared members.
+    with pytest.raises(ValueError, match="Literal"):
+        @endpoint(variants={"a": HF("o/r")})
+        class BadLiteral:
+            def setup(self, model: str) -> None: ...
+            def gen(self, ctx: RequestContext, data: _VarIn) -> _Out: ...
+
+    with pytest.raises(ValueError, match="zz"):
+        @endpoint(variants={"a": HF("o/r")})
+        class BadMember:
+            def setup(self, model: str) -> None: ...
+            def gen(self, ctx: RequestContext, data: _VarIn2) -> _Out: ...
 
 
 # --------------------------------------------------------------------------- #
@@ -259,19 +276,6 @@ def test_resources_vram_implies_gpu() -> None:
         Resources(vram_gb=0)
     with pytest.raises(ValueError):
         Resources(compute_capability=-1)
-
-
-def test_resources_host_ask_gw490() -> None:
-    r = Resources(ram_gb=64, vcpus=16)
-    assert r.ram_gb == 64.0 and r.vcpus == 16
-    assert r.gpu is False  # host asks never imply a GPU
-    raw = msgspec.to_builtins(r)
-    assert raw["ram_gb"] == 64.0 and raw["vcpus"] == 16
-    assert "ram_gb" not in msgspec.to_builtins(Resources())  # omit_defaults
-    with pytest.raises(ValueError):
-        Resources(ram_gb=0)
-    with pytest.raises(ValueError):
-        Resources(vcpus=-2)
 
 
 # --------------------------------------------------------------------------- #
@@ -438,68 +442,39 @@ def test_from_scratch_example_uses_publish_contract() -> None:
     assert s.output_type is mod.FromScratchResult
 
 
-def test_manifest_emits_model_placement_key(tmp_pkg: Path) -> None:
-    """One handler -> one function; a ModelChoice payload field emits the
-    `model` block (field + byom + slot + curated choices carrying structured
-    ModelRef bindings, typed defaults, and hot/price hints) — the pgw#509
-    SDK->tensorhub (th#761) contract. Every choice binding gets the
-    endpoint's Compile(family=...) stamp (pgw#519), unconditionally when
-    known (pgw#523: family stamping is no longer allow_lora-triggered)."""
+def test_manifest_keeps_variant_entries(tmp_pkg: Path) -> None:
+    """variants= rows share (module, class, python_name) with their base
+    function; the manifest dedup must key on the stamped name too."""
     from gen_worker.discovery.discover import discover_functions
 
-    pkg = tmp_pkg / "ep_model"
+    pkg = tmp_pkg / "ep_variants"
     pkg.mkdir()
     (pkg / "__init__.py").write_text("")
     (pkg / "main.py").write_text(textwrap.dedent("""
-        import enum
-        from typing import Union
         import msgspec
-        import gen_worker
-        from gen_worker import (Compile, Hub, HF, Model, ModelChoice, ModelDefaults,
-                                ModelRef, RequestContext, Resources, endpoint)
-
-        class D(ModelDefaults, frozen=True):
-            steps: int
-            guidance: float = 5.0
-
-        class M(ModelChoice[D], enum.Enum):
-            WAI = Model("wai", Hub("o/wai"), D(28, 6.0), hot=True)
-            PONY = Model("pony", HF("o/pony"), D(30), price=2.0)
+        from gen_worker import HF, RequestContext, Resources, endpoint
 
         class In_(msgspec.Struct):
-            prompt: str = ""
-            model: Union[M, ModelRef] = M.WAI
+            x: str = ""
 
         class Out_(msgspec.Struct):
             y: str
 
-        @endpoint(models={"pipeline": Hub("o/base"), "vae": Hub("o/vae")},
-                  resources=Resources(vram_gb=12),
-                  compile=Compile(family="wai-arch", shapes=((512, 512),)))
+        @endpoint(
+            model=HF("o/base", dtype="bf16"),
+            resources=Resources(vram_gb=24),
+            variants={"generate_fp8": (HF("o/base-fp8"), Resources(vram_gb=14))},
+        )
         class Gen:
-            def setup(self, pipeline: object, vae: object) -> None:
-                gen_worker.arm_compile(pipeline)  # pgw#517: self-loaded slots
+            def setup(self, model: str) -> None:
+                self.model = model
+
             def generate(self, ctx: RequestContext, data: In_) -> Out_:
                 return Out_(y="ok")
     """))
 
-    fns = discover_functions(tmp_pkg, main_module="ep_model.main")
-    assert [f["name"] for f in fns] == ["generate"]
-    block = fns[0]["model"]
-    assert block["field"] == "model"
-    assert block["byom"] is True
-    assert block["slot"] == "pipeline"
-    by_id = {c["id"]: c for c in block["choices"]}
-    assert set(by_id) == {"wai", "pony"}
-    assert by_id["wai"]["binding"]["provider"] == "tensorhub"
-    assert by_id["wai"]["binding"]["ref"] == "o/wai"
-    assert by_id["wai"]["binding"]["family"] == "wai-arch"
-    assert by_id["wai"]["defaults"] == {"steps": 28, "guidance": 6.0}
-    assert by_id["wai"]["hot"] is True
-    assert by_id["pony"]["binding"]["provider"] == "huggingface"
-    assert by_id["pony"]["binding"]["family"] == "wai-arch"
-    assert by_id["pony"]["price"] == 2.0
-    assert "hot" not in by_id["pony"]      # false hint omitted
+    fns = discover_functions(tmp_pkg, main_module="ep_variants.main")
+    assert sorted(f["name"] for f in fns) == ["generate", "generate-fp8"]
 
 
 def test_model_shorthand_skips_server_handle_setup_param() -> None:
@@ -517,11 +492,11 @@ def test_model_shorthand_skips_server_handle_setup_param() -> None:
 
     (s,) = extract_specs(Chat)
     assert list(s.models) == ["model"]
-    assert s.models["model"].path == "o/llm"
+    assert s.models["model"].ref == "o/llm"
 
 
 # --------------------------------------------------------------------------- #
-# 8. binding family stamping (ie#358 / pgw#523)                                #
+# 8. allow_lora bindings (ie#358)                                               #
 # --------------------------------------------------------------------------- #
 
 
@@ -529,7 +504,6 @@ def test_compile_block_emits_video_shapes_and_storage_dtype() -> None:
     """ie#381: the lock's compile block carries (w, h, frames) rows verbatim
     and the primary binding's weight-storage lane, so the hub's cell producer
     builds from an identically-loaded (fp8) pipeline."""
-    import gen_worker
     from gen_worker import Compile, Hub
     from gen_worker.discovery.discover import _extract_entries
 
@@ -544,9 +518,7 @@ def test_compile_block_emits_video_shapes_and_storage_dtype() -> None:
     )
     class Gen:
         def setup(self, model: str) -> None:
-            # self-loading (str) slot: arms compile explicitly (pgw#517).
             self.model = model
-            gen_worker.arm_compile(self.model)
 
         def generate(self, ctx: RequestContext, data: _In) -> _Out:
             return _Out(result="")
@@ -568,9 +540,7 @@ def test_compile_block_omits_storage_dtype_for_bf16_bindings() -> None:
     )
     class Gen:
         def setup(self, model: str) -> None:
-            # self-loading (str) slot: arms compile explicitly (pgw#517).
             self.model = model
-            gen_worker.arm_compile(self.model)
 
         def generate(self, ctx: RequestContext, data: _In) -> _Out:
             return _Out(result="")
@@ -579,44 +549,33 @@ def test_compile_block_omits_storage_dtype_for_bf16_bindings() -> None:
     assert "storage_dtype" not in entry["compile"]
 
 
-def test_binding_emits_family_stamp_from_compile() -> None:
-    """pgw#523: family stamping is unconditional-when-known — no allow_lora
-    flag gates it, and ModelRef carries no such flag any more (identity !=
-    permission; overlay permission lives on the slot-policy loras axis,
-    th#772)."""
+def test_allow_lora_binding_emits_flag_and_family() -> None:
     from gen_worker import Compile, Hub
     from gen_worker.discovery.discover import _extract_entries
 
     @endpoint(
-        model=Hub("cozy/sdxl-base"),
+        model=Hub("cozy/sdxl-base", allow_lora=True),
         resources=Resources(vram_gb=12),
         compile=Compile(family="sdxl", shapes=((1024, 1024),)),
     )
     class Gen:
         def setup(self, model: str) -> None:
-            # self-loading (str) slot: arms compile explicitly (pgw#517).
             self.model = model
-            gen_worker.arm_compile(self.model)
 
         def generate(self, ctx: RequestContext, data: _In) -> _Out:
             return _Out(result="")
 
     (entry,) = _extract_entries(Gen, "testmod")
     (block,) = entry["bindings"].values()
-    assert "allow_lora" not in block
+    assert block["allow_lora"] is True
     assert block["family"] == "sdxl"
 
 
-def test_binding_emits_no_family_when_none_declared() -> None:
-    """pgw#523: with no Compile(family=...) and no fallback-preset family,
-    a binding simply carries no `family` key — this used to hard-fail when
-    allow_lora=True lacked a family (th#586's gate rekeyed off the binding/
-    slot family directly, not that flag, so the co-occurrence requirement
-    is gone too)."""
+def test_allow_lora_without_compile_family_raises() -> None:
     from gen_worker import Hub
     from gen_worker.discovery.discover import _extract_entries
 
-    @endpoint(model=Hub("cozy/sdxl-base"), resources=Resources(vram_gb=12))
+    @endpoint(model=Hub("cozy/sdxl-base", allow_lora=True), resources=Resources(vram_gb=12))
     class Gen:
         def setup(self, model: str) -> None:
             self.model = model
@@ -624,108 +583,5 @@ def test_binding_emits_no_family_when_none_declared() -> None:
         def generate(self, ctx: RequestContext, data: _In) -> _Out:
             return _Out(result="")
 
-    (entry,) = _extract_entries(Gen, "testmod")
-    (block,) = entry["bindings"].values()
-    assert "family" not in block
-
-
-def test_model_choice_binding_family_matches_top_level_binding(tmp_pkg: Path) -> None:
-    """pgw#519: model.choices[].binding gets the SAME family stamp that a
-    top-level bindings block gets from Compile(family=...) — tensorhub's
-    th#586 architecture gate polices LoRA targets against it on both
-    surfaces identically. pgw#523: the stamp is unconditional-when-known,
-    so EVERY binding under the endpoint (including "vae", which carries no
-    permission flag of any kind any more) gets it, not just some subset."""
-    from gen_worker.discovery.discover import discover_functions
-
-    pkg = tmp_pkg / "ep_choice_family"
-    pkg.mkdir()
-    (pkg / "__init__.py").write_text("")
-    (pkg / "main.py").write_text(textwrap.dedent("""
-        import enum
-        from typing import Union
-        import msgspec
-        import gen_worker
-        from gen_worker import (Compile, Hub, HF, Model, ModelChoice, ModelDefaults,
-                                ModelRef, RequestContext, Resources, endpoint)
-
-        class D(ModelDefaults, frozen=True):
-            steps: int = 28
-
-        class M(ModelChoice[D], enum.Enum):
-            A = Model("a", Hub("o/a"), D(28))
-            B = Model("b", Hub("o/b"), D(30))
-
-        class In_(msgspec.Struct):
-            prompt: str = ""
-            model: Union[M, ModelRef] = M.A
-
-        class Out_(msgspec.Struct):
-            y: str
-
-        @endpoint(models={"pipeline": Hub("o/base"), "vae": Hub("o/vae")},
-                  resources=Resources(vram_gb=12),
-                  compile=Compile(family="sdxl", shapes=((1024, 1024),)))
-        class Gen:
-            def setup(self, pipeline: object, vae: object) -> None:
-                gen_worker.arm_compile(pipeline)  # pgw#517: self-loaded slots
-            def generate(self, ctx: RequestContext, data: In_) -> Out_:
-                return Out_(y="ok")
-    """))
-
-    fns = discover_functions(tmp_pkg, main_module="ep_choice_family.main")
-    (fn,) = fns
-
-    top_level_family = fn["bindings"]["pipeline"]["family"]
-    assert top_level_family == "sdxl"
-    assert fn["bindings"]["vae"]["family"] == "sdxl"  # stamped unconditionally now
-
-    by_id = {c["id"]: c for c in fn["model"]["choices"]}
-    assert set(by_id) == {"a", "b"}
-    for choice in by_id.values():
-        assert "allow_lora" not in choice["binding"]
-        # Choice-binding emission equals top-level emission w.r.t. family.
-        assert choice["binding"]["family"] == top_level_family
-
-
-def test_model_choice_binding_emits_no_family_when_none_declared(tmp_pkg: Path) -> None:
-    """Mirrors test_binding_emits_no_family_when_none_declared for the
-    choices[].binding surface: with no Compile(family=...) a choice binding
-    simply carries no `family` key — discovery no longer hard-fails here
-    (pgw#523 retired the allow_lora-requires-family co-occurrence check)."""
-    from gen_worker.discovery.discover import discover_functions
-
-    pkg = tmp_pkg / "ep_choice_family_missing"
-    pkg.mkdir()
-    (pkg / "__init__.py").write_text("")
-    (pkg / "main.py").write_text(textwrap.dedent("""
-        import enum
-        from typing import Union
-        import msgspec
-        from gen_worker import (Hub, Model, ModelChoice, ModelDefaults,
-                                ModelRef, RequestContext, Resources, endpoint)
-
-        class D(ModelDefaults, frozen=True):
-            steps: int = 28
-
-        class M(ModelChoice[D], enum.Enum):
-            A = Model("a", Hub("o/a"), D(28))
-
-        class In_(msgspec.Struct):
-            prompt: str = ""
-            model: Union[M, ModelRef] = M.A
-
-        class Out_(msgspec.Struct):
-            y: str
-
-        @endpoint(models={"pipeline": Hub("o/base")}, resources=Resources(vram_gb=12))
-        class Gen:
-            def setup(self, pipeline: object) -> None: ...
-            def generate(self, ctx: RequestContext, data: In_) -> Out_:
-                return Out_(y="ok")
-    """))
-
-    fns = discover_functions(tmp_pkg, main_module="ep_choice_family_missing.main")
-    (fn,) = fns
-    (choice,) = fn["model"]["choices"]
-    assert "family" not in choice["binding"]
+    with pytest.raises(ValueError, match="allow_lora"):
+        _extract_entries(Gen, "testmod")

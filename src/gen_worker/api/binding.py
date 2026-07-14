@@ -8,22 +8,12 @@ single ``model=`` binding, the ``setup()``/handler parameter name).
     Hub("owner/repo", tag="canary", flavor="nf4")
     Civitai("123456", version="789012")
     ModelScope("circlestone-labs/Anima", files=("split_files/*.safetensors",))
-
-``ModelRef`` (pgw#511) is the ONE structured type: ``source`` is an explicit
-field (never inferred from which factory built the value), ``path`` is the
-bare repo/model id. ``Hub``/``HF``/``Civitai``/``ModelScope`` are thin
-FACTORY FUNCTIONS over ``ModelRef`` — sugar, not a second type — that pin
-``source`` and keep each registry's historical constructor signature and
-validation.
 """
 
 from __future__ import annotations
 
-from typing import Any, Literal
-
-import msgspec
-
-ModelSource = Literal["tensorhub", "huggingface", "civitai", "modelscope"]
+from dataclasses import dataclass
+from typing import ClassVar, Union
 
 
 def _clean(s: object) -> str:
@@ -50,91 +40,40 @@ def _clean_storage_dtype(v: object) -> str:
     return q
 
 
-class ModelRef(msgspec.Struct, frozen=True):
-    """ONE structured model reference (pgw#511): ``source`` is explicit, never
-    inferred from shape or which factory built the value. Pure identity +
-    fetch scope — no permission fields live here (pgw#523: overlay
-    permission is a slot-policy concern, not an identity-struct flag).
+@dataclass(frozen=True)
+class Hub:
+    """Tensorhub-backed binding: ``Hub("owner/repo", tag=, flavor=, storage_dtype=, allow_lora=)``.
 
-    Carries the union of every registry's per-source fields (tensorhub:
-    ``tag``/``flavor``; huggingface: ``revision``/``dtype``/``subfolder``/
-    ``files``; civitai: ``version``; modelscope: ``revision``/``files``).
-    ``storage_dtype`` is shared by tensorhub/huggingface. Build one via
-    ``Hub``/``HF``/``Civitai``/``ModelScope`` rather than the raw
-    constructor — they pin ``source`` and apply the per-registry validation
-    below (mirrored in ``__post_init__`` so it holds for direct construction
-    too, e.g. ``msgspec.structs.replace``).
+    ``allow_lora=True`` opts the slot into per-request LoRA overlays
+    (``_models.<slot>.loras``, ie#358) — the endpoint must also declare
+    ``Compile(family=...)`` so the hub's architecture gate can police
+    adapter targets.
     """
 
-    source: ModelSource
-    path: str
-    tag: str = ""
+    PROVIDER: ClassVar[str] = "tensorhub"
+
+    ref: str
+    tag: str = "prod"
     flavor: str = ""
-    revision: str = ""
-    subfolder: str = ""
-    dtype: str = ""
     storage_dtype: str = ""
-    version: str = ""
-    files: tuple[str, ...] = ()
+    allow_lora: bool = False
 
     def __post_init__(self) -> None:
-        # msgspec.structs.force_setattr, NOT object.__setattr__: the latter
-        # raises "can't apply this __setattr__" on frozen msgspec Structs
-        # under CPython 3.12 (every serve image) while passing on 3.13 (dev
-        # venvs + CI) — J24M run16 shipped an image whose endpoint import
-        # died at decoration and discovery found no functions.
-        force = msgspec.structs.force_setattr
-        force(self, "path", _clean(self.path))
-        force(self, "tag", _clean(self.tag))
-        force(self, "flavor", _clean(self.flavor))
-        force(self, "revision", _clean(self.revision))
-        force(self, "subfolder", _clean(self.subfolder))
-        force(self, "dtype", _clean(self.dtype))
-        force(self, "version", _clean(self.version))
-        force(self, "files", tuple(_clean(p) for p in self.files if _clean(p)))
-        force(self, "storage_dtype", _clean_storage_dtype(self.storage_dtype))
+        object.__setattr__(self, "ref", _clean(self.ref))
+        object.__setattr__(self, "tag", _clean(self.tag) or "prod")
+        object.__setattr__(self, "flavor", _clean(self.flavor))
+        object.__setattr__(self, "storage_dtype", _clean_storage_dtype(self.storage_dtype))
+        object.__setattr__(self, "allow_lora", bool(self.allow_lora))
+        if not self.ref:
+            raise ValueError(f"{type(self).__name__} requires a non-empty ref")
 
-        if self.source == "tensorhub":
-            if not self.tag:
-                msgspec.structs.force_setattr(self, "tag", "latest")
-            if not self.path:
-                raise ValueError("Hub requires a non-empty ref")
-        elif self.source == "huggingface":
-            if "/" not in self.path:
-                raise ValueError(f"HF(id=) must be 'owner/repo', got {self.path!r}")
-        elif self.source == "civitai":
-            if not self.path:
-                raise ValueError("Civitai requires a non-empty model id")
-        elif self.source == "modelscope":
-            if "/" not in self.path:
-                raise ValueError(f"ModelScope(id=) must be 'owner/repo', got {self.path!r}")
-        else:
-            raise ValueError(f"unknown ModelRef source {self.source!r}")
+    @property
+    def provider(self) -> str:
+        return type(self).PROVIDER
 
 
-def Hub(
-    ref: str,
-    *,
-    tag: str = "latest",
-    flavor: str = "",
-    storage_dtype: str = "",
-) -> ModelRef:
-    """Tensorhub-backed binding: ``Hub("owner/repo", tag=, flavor=, storage_dtype=)``."""
-    return ModelRef(
-        source="tensorhub", path=ref, tag=tag, flavor=flavor,
-        storage_dtype=storage_dtype,
-    )
-
-
-def HF(
-    ref: str,
-    *,
-    revision: str = "",
-    dtype: str = "",
-    subfolder: str = "",
-    files: tuple[str, ...] = (),
-    storage_dtype: str = "",
-) -> ModelRef:
+@dataclass(frozen=True)
+class HF:
     """HuggingFace-backed binding: ``HF(id, revision=, dtype=, subfolder=, files=, storage_dtype=)``.
 
     ``files`` are ``snapshot_download`` ``allow_patterns`` globs — set them to
@@ -144,108 +83,110 @@ def HF(
     keeps denoiser weights in fp8-E4M3 storage with per-layer upcast to the
     compute dtype (VRAM fit on any card; see ``STORAGE_DTYPES``).
     """
-    return ModelRef(
-        source="huggingface", path=ref, revision=revision, dtype=dtype,
-        subfolder=subfolder, files=files, storage_dtype=storage_dtype,
-    )
+
+    PROVIDER: ClassVar[str] = "hf"
+
+    ref: str
+    revision: str = ""
+    dtype: str = ""
+    subfolder: str = ""
+    files: tuple[str, ...] = ()
+    storage_dtype: str = ""
+    allow_lora: bool = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "ref", _clean(self.ref))
+        object.__setattr__(self, "revision", _clean(self.revision))
+        object.__setattr__(self, "dtype", _clean(self.dtype))
+        object.__setattr__(self, "subfolder", _clean(self.subfolder))
+        object.__setattr__(
+            self, "files", tuple(_clean(p) for p in self.files if _clean(p))
+        )
+        object.__setattr__(self, "storage_dtype", _clean_storage_dtype(self.storage_dtype))
+        object.__setattr__(self, "allow_lora", bool(self.allow_lora))
+        if "/" not in self.ref:
+            raise ValueError(f"HF(id=) must be 'owner/repo', got {self.ref!r}")
+
+    @property
+    def provider(self) -> str:
+        return type(self).PROVIDER
 
 
-def Civitai(ref: str, *, version: str = "") -> ModelRef:
+@dataclass(frozen=True)
+class Civitai:
     """Civitai-backed binding: ``Civitai(model_id, version=)``.
 
     ``ref`` is the Civitai MODEL id; pin a specific model-version with
     ``version=``.
     """
-    return ModelRef(source="civitai", path=ref, version=version)
+
+    PROVIDER: ClassVar[str] = "civitai"
+
+    ref: str
+    version: str = ""
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "ref", _clean(self.ref))
+        object.__setattr__(self, "version", _clean(self.version))
+        if not self.ref:
+            raise ValueError("Civitai requires a non-empty model id")
+
+    @property
+    def provider(self) -> str:
+        return type(self).PROVIDER
 
 
-def ModelScope(
-    ref: str, *, revision: str = "", files: tuple[str, ...] = (),
-) -> ModelRef:
+@dataclass(frozen=True)
+class ModelScope:
     """ModelScope-backed binding: ``ModelScope(id, revision=, files=)``.
 
     File-oriented (no diffusers-layout requirement) — the clean source for
     ComfyUI / DiffSynth split checkpoints.
     """
-    return ModelRef(source="modelscope", path=ref, revision=revision, files=files)
+
+    PROVIDER: ClassVar[str] = "modelscope"
+
+    ref: str
+    revision: str = ""
+    files: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "ref", _clean(self.ref))
+        object.__setattr__(self, "revision", _clean(self.revision))
+        object.__setattr__(
+            self, "files", tuple(_clean(p) for p in self.files if _clean(p))
+        )
+        if "/" not in self.ref:
+            raise ValueError(f"ModelScope(id=) must be 'owner/repo', got {self.ref!r}")
+
+    @property
+    def provider(self) -> str:
+        return type(self).PROVIDER
 
 
-Binding = ModelRef
-BINDING_TYPES: tuple[type, ...] = (ModelRef,)
+Binding = Union[Hub, HF, Civitai, ModelScope]
+BINDING_TYPES: tuple[type, ...] = (Hub, HF, Civitai, ModelScope)
 
 
 def wire_ref(binding: Binding) -> str:
-    """Normal-form ref string for the wire / cache key — delegates to the ONE
-    grammar module (``gen_worker.models.refs``, gw#492).
+    """Canonical ref string for the wire / cache key.
 
-    Hub refs carry ``:tag`` (elided when ``latest``, the grammar default) and
-    ``#flavor`` suffixes; HF refs carry ``@revision``. Load-time metadata
-    (dtype/subfolder/files/storage_dtype) never enters the ref.
+    Hub refs carry ``:tag`` (non-prod) and ``#flavor`` suffixes; HF refs
+    carry ``@revision``. Load-time metadata (dtype/subfolder/files/
+    storage_dtype) never enters the ref.
     """
-    from ..models.refs import HuggingFaceRef, fold_ref
-
-    if binding.source == "tensorhub":
-        # The default tag never overrides one embedded in ``ref``.
-        tag = binding.tag if binding.tag != "latest" else ""
-        return fold_ref(binding.path, tag=tag, flavor=binding.flavor)
-    if binding.source == "huggingface":
-        return HuggingFaceRef(binding.path, binding.revision or None).canonical()
-    return binding.path
-
-
-def rebind_pick(
-    binding: Binding,
-    *,
-    resolved_ref: str = "",
-    flavor: "str | None" = None,
-    cast: str = "",
-) -> Binding:
-    """THE fold of a precision pick into a binding (gw#494) — the hub
-    HelloAck path (``resolved_ref`` + ``cast``) and the local-ladder path
-    (``flavor`` + ``cast``) share this one implementation.
-
-    ``resolved_ref`` is authoritative when given: its flavor (possibly none)
-    replaces the binding's. ``flavor=None`` leaves the binding's flavor
-    untouched. Raises ``ValueError`` when the pick cannot round-trip through
-    ``wire_ref`` — a pick the rebound binding cannot re-mint would split the
-    slot into two residency identities (the th#736 mechanic). This is also
-    how a flavor/cast fold onto a source without that axis (e.g. an HF ref's
-    flavor, which never enters its wire_ref) gets rejected — the rebound
-    struct always accepts the field (msgspec has no per-source shape), so the
-    round-trip mismatch is the enforcement point.
-    """
-    from msgspec import structs
-
-    from ..models.refs import fold_ref, normalize_model_ref, parse_model_ref
-
-    if resolved_ref:
-        parsed = parse_model_ref(resolved_ref)
-        if parsed.tensorhub is None:
-            raise ValueError(f"resolution {resolved_ref!r} is not a tensorhub ref")
-        flavor = parsed.tensorhub.flavor or ""
-    rebound: Any = binding
-    try:
-        if flavor is not None and flavor != binding.flavor:
-            rebound = structs.replace(rebound, flavor=flavor)
-        if cast:
-            rebound = structs.replace(rebound, storage_dtype=cast)
-    except TypeError as exc:
-        raise ValueError(f"pick does not fit binding {binding!r}: {exc}") from exc
-    if resolved_ref:
-        expected = normalize_model_ref(resolved_ref)
-    elif flavor:
-        expected = fold_ref(wire_ref(binding), flavor=flavor)
-    else:
-        expected = None
-    if expected is not None and wire_ref(rebound) != expected:
-        raise ValueError(
-            f"pick {expected!r} does not round-trip through the binding "
-            f"(got {wire_ref(rebound)!r})"
-        )
-    return rebound
+    out = binding.ref
+    if isinstance(binding, Hub):
+        if binding.tag and binding.tag != "prod":
+            out = f"{out}:{binding.tag}"
+        if binding.flavor:
+            out = f"{out}#{binding.flavor}"
+    elif isinstance(binding, HF) and binding.revision:
+        out = f"{out}@{binding.revision}"
+    return out
 
 
 __all__ = [
-    "Binding", "BINDING_TYPES", "Civitai", "HF", "Hub", "ModelRef",
-    "ModelScope", "STORAGE_DTYPES", "rebind_pick", "wire_ref",
+    "Binding", "BINDING_TYPES", "Civitai", "HF", "Hub", "ModelScope",
+    "STORAGE_DTYPES", "wire_ref",
 ]

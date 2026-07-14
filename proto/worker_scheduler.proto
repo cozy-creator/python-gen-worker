@@ -87,10 +87,6 @@ message WorkerResources {
   string gpu_sm           = 4; // compute capability, e.g. "89"
   repeated string installed_libs = 5; // e.g. "torchao"
   string image_digest     = 6; // docker image sha256
-  // Currently unpopulated (pgw#514/P4): no launcher sets WORKER_GIT_COMMIT
-  // and no Go reader consumes this field. Kept for a future coordinated fill
-  // (image_digest has the same "no producer yet" gap but a plausible one —
-  // see gen-worker Settings.worker_image_digest).
   string git_commit       = 7;
   string instance_id      = 8; // cloud provider instance id (e.g. runpod pod id)
 }
@@ -143,11 +139,6 @@ message StateDelta {
   repeated string available_functions = 2; // dispatchable now
   repeated string loading_functions   = 3; // present but models still materializing
   int64 free_vram_bytes = 4; // measured free VRAM; sent on material change
-  // Jobs past the decode->finalize handoff (gw#516): GPU slot terminally
-  // released, encode/upload tail still running, JobResult not yet shipped.
-  // Drain/retire must wait for these — GPU-idle alone is NOT work-idle.
-  // Additive: old workers never set it; old orchestrators ignore it.
-  int32 finalizing_jobs = 5;
 }
 
 enum WorkerPhase {
@@ -207,15 +198,6 @@ message ModelBinding {
   // resolves them and attaches presigned snapshots in RunJob.snapshots;
   // workers never fetch upstream. Additive: old workers ignore this field.
   repeated LoraOverlay loras = 3;
-  // th#767c: the resolved repo's inference-defaults metadata for this slot,
-  // JSON-encoded as an instance of the slot's family vocabulary struct
-  // (gen_worker.families.FamilyDefaults subclass; see `gen-worker families
-  // export-schemas` for the JSON Schema tensorhub validates repo metadata
-  // against at PUT time). Empty when the resolved repo carries no metadata
-  // — the worker falls back to the endpoint's code-declared
-  // Slot(fallback=...) preset. Additive: old orchestrators omit this field
-  // and workers degrade to fallback-only.
-  string inference_defaults = 4;
 }
 
 // One LoRA adapter overlay: a resolved tensorhub ref + its adapter weight.
@@ -269,10 +251,7 @@ enum JobStatus {
   JOB_STATUS_INVALID     = 2; // bad input; never retry
   JOB_STATUS_RETRYABLE   = 3; // transient; orchestrator may requeue (bumping attempt)
   JOB_STATUS_FATAL       = 4; // permanent execution failure; do not retry
-  JOB_STATUS_CANCELED    = 5; // terminal ack of CancelJob (NOT deadline abort — a
-                               // deadline expiry sends FATAL, safe_message:"deadline
-                               // exceeded"; see executor.py's _DeadlineExceeded handler
-                               // and CONTRACT.md's status table)
+  JOB_STATUS_CANCELED    = 5; // terminal ack of CancelJob (or local deadline abort)
 }
 
 // The one metrics vehicle. Worker-observed values only; the orchestrator
@@ -280,14 +259,8 @@ enum JobStatus {
 message JobMetrics {
   int64 runtime_ms     = 1; // handler start -> handler completion
   int64 queue_ms       = 2; // worker-local queue wait before start
-  // Host RSS sampled at job completion (NOT a per-job peak: the OS gives no
-  // per-process peak-RSS reset, so this is an honest instantaneous reading,
-  // not a high-water mark — pgw#513). 0 = unmeasured.
-  int64 rss_at_end_bytes = 3;
-  // Peak VRAM during execution. torch.cuda.reset_peak_memory_stats() runs at
-  // handler start (GPU jobs serialize under the worker's GPU semaphore, so
-  // this IS a true per-job peak — pgw#513). 0 = unmeasured.
-  int64 peak_vram_bytes = 4;
+  int64 peak_rss_bytes = 3; // peak host RSS during execution; 0 = unmeasured
+  int64 peak_vram_bytes = 4; // peak VRAM during execution; 0 = unmeasured
   int32 concurrency_at_start = 5; // jobs already active on the worker at admit
   // Summed MEDIA seconds of the media assets in the job's output (e.g.
   // VideoAsset.duration_s probed at save time). 0 = no media duration
@@ -295,20 +268,6 @@ message JobMetrics {
   // (th#572) — settlement must fail closed rather than fall back to
   // runtime_ms wall-clock.
   double output_media_duration_s = 6;
-  // Typed billing usage (pgw#512) — the ONLY settlement source for
-  // per_million_tokens/per_output pricing. Settlement must read these, never
-  // scavenge the (possibly blob-ref'd, tenant-controlled) result payload.
-  int64 input_tokens = 7;
-  int64 input_cached_tokens = 8;
-  int64 output_tokens = 9;
-  int64 output_count = 10; // count of generated output Assets (images/videos/audios/files)
-  // gw#516 pipelined finalize split of runtime_ms. slot_held_ms is how long
-  // the job actually held the GPU slot (acquire -> terminal release);
-  // finalize_wall_ms is the slotless encode/upload tail that overlapped the
-  // next request's compute. slot_held_ms + finalize_wall_ms ~= runtime_ms
-  // for GPU jobs. Both 0 = unmeasured (CPU job, or a pre-gw#516 worker).
-  int64 slot_held_ms = 11;
-  int64 finalize_wall_ms = 12;
 }
 
 // Worker -> orchestrator streaming output chunk. Ordered per (request_id,
@@ -371,14 +330,12 @@ message ModelEvent {
   int64 bytes_done = 5;  // download progress; set while state = DOWNLOADING
   int64 bytes_total = 6; // set while state = DOWNLOADING (0 = unknown)
   int64 duration_ms = 7; // op wall time; set when state = ADOPTED
-  // Adoption observability (gw#391), intended for state = ADOPTED on inductor
+  // Adoption observability (gw#391), set when state = ADOPTED for inductor
   // cells: FX-graph cache hits/misses observed during the adoption warmup and
-  // the warmup wall seconds. hits>0 with misses>0 would mean partial shape
-  // coverage. NOT currently populated by gen-worker (pgw#514/P3): the
-  // orchestrator has no reader for these three fields, so the worker stopped
-  // writing them rather than ship values nothing consumes. Re-populate
-  // (executor.py's compile-cache adopt path already computes hits/misses/
-  // warmup_s locally) if/when the orchestrator grows a reader.
+  // the warmup wall seconds. A warmup observing ZERO hits never reports
+  // ADOPTED - it rolls back to eager and reports adopt_failed:cache_miss; an
+  // endpoint without warmup() cannot prove the cell and reports
+  // adopt_failed:no_warmup. hits>0 with misses>0 = partial shape coverage.
   int64 cache_hits = 8;
   int64 cache_misses = 9;
   double warmup_s = 10;
@@ -406,11 +363,7 @@ enum ModelState {
 message FnUnavailable {
   string function_name = 1;
   // reason vocabulary: compute_capability_unmet, insufficient_vram,
-  // missing_cuda_library, cuda_unavailable, setup_failed. (NOT
-  // insufficient_disk — disk pressure is treated as transient and only ever
-  // fails the job RETRYABLE; it never disables the function. See gen-worker
-  // executor.py Executor._mark_setup_failed / the setup/injection except
-  // branch, both of which explicitly exclude InsufficientDiskError here.)
+  // missing_cuda_library, insufficient_disk, cuda_unavailable, setup_failed.
   string reason = 2;
   string detail = 3; // human-readable elaboration for the admin availability view
   map<string, string> axes = 4; // e.g. {detected_sm: "8.9", required_sm: "10.0"}

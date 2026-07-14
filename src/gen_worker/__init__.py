@@ -14,12 +14,8 @@ subclass from ``@endpoint(kind=...)`` before dispatch.
 """
 
 from . import io
-from .api.binding import Civitai, HF, Hub, ModelRef, ModelScope
+from .api.binding import Civitai, HF, Hub, ModelScope
 from .api.decorators import Compile, Resources, endpoint
-from .api.model import Model, ModelChoice, ModelDefaults
-from .api.slot import ResolvedSlot, Slot
-from .families import FamilyDefaults
-from .models.provision import arm_compile
 from .api.errors import (
     CanceledError,
     FatalError,
@@ -60,20 +56,10 @@ __all__ = [
     "endpoint",
     "Resources",
     "Compile",
-    "arm_compile",
     "HF",
     "Hub",
     "Civitai",
-    "ModelRef",
     "ModelScope",
-    # Curated model-selection (payload `model=` placement key).
-    "Model",
-    "ModelChoice",
-    "ModelDefaults",
-    # Hub-resolved model slots (pgw#520) + the per-family defaults vocabulary.
-    "Slot",
-    "ResolvedSlot",
-    "FamilyDefaults",
     # Context types.
     "RequestContext",
     "ConversionContext",

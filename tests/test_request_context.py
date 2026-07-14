@@ -1,10 +1,18 @@
-"""RequestContext surface: cancellation, deadlines, events, typed save_* assets."""
+"""RequestContext surface: <=16 public members, one cancellation spelling,
+typed save_* assets, generator(seed), and real subclass inheritance for the
+producer contexts (no import-time setattr)."""
 
 from __future__ import annotations
 
 import pytest
 
-from gen_worker import CanceledError, RequestContext
+from gen_worker import (
+    CanceledError,
+    ConversionContext,
+    DatasetContext,
+    RequestContext,
+    TrainingContext,
+)
 from gen_worker.api.types import Asset, ImageAsset
 
 
@@ -12,7 +20,22 @@ def _ctx(**kw) -> RequestContext:
     return RequestContext(request_id="r1", **kw)
 
 
-def test_cancel_trips_cancelled_and_raise_if_cancelled() -> None:
+def test_public_surface_is_capped_at_16_members() -> None:
+    members = sorted(
+        n for n in dir(RequestContext)
+        if not n.startswith("_")
+    )
+    expected = {
+        "request_id", "device", "deadline", "time_remaining",
+        "cancelled", "raise_if_cancelled", "progress", "log",
+        "save_bytes", "save_file", "save_image", "save_audio", "save_video",
+        "generator", "models", "loras",
+    }
+    assert set(members) == expected
+    assert len(members) <= 16
+
+
+def test_one_cancellation_spelling() -> None:
     ctx = _ctx()
     assert ctx.cancelled is False
     ctx.raise_if_cancelled()  # no-op
@@ -20,6 +43,9 @@ def test_cancel_trips_cancelled_and_raise_if_cancelled() -> None:
     assert ctx.cancelled is True
     with pytest.raises(CanceledError):
         ctx.raise_if_cancelled()
+    # the old spellings are gone
+    for old in ("is_canceled", "raise_if_canceled", "cancel", "done", "emit"):
+        assert not hasattr(ctx, old)
 
 
 def test_deadline_and_time_remaining() -> None:
@@ -37,20 +63,6 @@ def test_progress_and_log_emit_events() -> None:
     kinds = [e["type"] for e in events]
     assert kinds == ["request.progress", "request.log"]
     assert events[0]["payload"] == {"progress": 0.5, "stage": "denoise"}
-    assert events[1]["payload"] == {"message": "hello", "level": "warning"}
-
-
-def test_log_default_level_and_structured_fields() -> None:
-    events = []
-    ctx = RequestContext(request_id="r1", emitter=events.append)
-    ctx.log("plain")
-    ctx.log("OOM retry", level="warning", free_gb=2.1, rung="offload")
-    assert events[0]["payload"] == {"message": "plain", "level": "info"}
-    assert events[1]["payload"] == {
-        "message": "OOM retry",
-        "level": "warning",
-        "fields": {"free_gb": 2.1, "rung": "offload"},
-    }
 
 
 def test_progress_carries_optional_step_and_total() -> None:
@@ -92,6 +104,28 @@ def test_save_video_from_file(tmp_path) -> None:
     out = ctx.save_video(src, "clips/final")
     assert out.ref.endswith(".mp4")
     assert (tmp_path / "outs" / out.ref).read_bytes() == b"vid"
+
+
+def test_producer_contexts_are_real_subclasses() -> None:
+    for cls in (ConversionContext, DatasetContext, TrainingContext):
+        assert issubclass(cls, RequestContext)
+        ctx = cls(request_id="r1")
+        # producer surface lives on the subclass, not the base
+        assert hasattr(ctx, "save_checkpoint")
+        assert hasattr(ctx, "set_repo_spec")
+        assert hasattr(ctx, "hf_token")
+        # checkpoint publishing is gen_worker.convert.publish_flavors, not a ctx RPC
+        assert not hasattr(ctx, "publish_repo_revision")
+    assert hasattr(ConversionContext(request_id="r1"), "mktemp")
+    # gw#425: producer-shared dataset + resume surface (mixin-level).
+    for cls in (ConversionContext, DatasetContext, TrainingContext):
+        ctx = cls(request_id="r1")
+        assert hasattr(ctx, "resolve_dataset")
+        assert hasattr(ctx, "checkpoint_dir")
+        assert ctx.dataset_paths == {}
+    base = RequestContext(request_id="r1")
+    for producer_only in ("save_checkpoint", "mktemp", "resolve_dataset", "checkpoint_dir"):
+        assert not hasattr(base, producer_only)
 
 
 def test_models_property_copies() -> None:

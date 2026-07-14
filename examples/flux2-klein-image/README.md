@@ -17,8 +17,10 @@ Send `{"prompt": "a lighthouse at dusk"}`, get back a PNG.
 - Image output through `gen_worker.io.write_image(..., as_type=ImageAsset)` —
   PNGs exceed the inline threshold and ride the stored blob_ref path.
 
-A minimal single-function (`generate_turbo`) sibling of
-`inference-endpoints/flux.2-klein-4b`.
+Ported from `inference-endpoints/flux.2-klein-4b`, which is written against
+the retired pre-#368 authoring surface (`@inference`/`Case`/`HFRepo`/
+`parametrize`); this is a minimal single-function (`generate_turbo`) port
+onto the current `@endpoint`/`HF`/`Resources` v2 surface.
 
 Driven end to end by the cozy e2e J6 GPU cloud journey (`task e2e-gpu-cloud`
 in the e2e repo): real RunPod RTX 4090 pod -> HF download -> IN_VRAM

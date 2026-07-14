@@ -15,22 +15,21 @@ import pytest
 
 import gen_worker.models.cozy_snapshot as snap_mod
 from gen_worker.models.cozy_snapshot import ensure_snapshot_async
-from gen_worker.models.hub_client import WorkerResolvedRepo, WorkerResolvedRepoFile
 from gen_worker.models.refs import TensorhubRef
 
 _DIGEST = "ab" * 32
 
 
-def _resolved() -> WorkerResolvedRepo:
-    return WorkerResolvedRepo(
-        snapshot_digest=_DIGEST,
-        files=[WorkerResolvedRepoFile(
-            path="model.safetensors",
-            size_bytes=5,
-            blake3="cd" * 32,
-            url="http://example.invalid/blob",
-        )],
-    )
+def _resolved() -> dict:
+    return {
+        "snapshot_digest": _DIGEST,
+        "files": [{
+            "path": "model.safetensors",
+            "size_bytes": 5,
+            "blake3": "cd" * 32,
+            "url": "http://example.invalid/blob",
+        }],
+    }
 
 
 def test_failed_build_is_evicted_and_retry_succeeds(tmp_path: Path, monkeypatch) -> None:

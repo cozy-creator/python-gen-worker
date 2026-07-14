@@ -2,9 +2,9 @@
 name = "sd15_hub_image"
 version = "1.0.0"
 description = "Stable Diffusion 1.5 served from a tensorhub repo-cas mirror (Hub binding)"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.11,<3.13"
 dependencies = [
-    "gen-worker>=0.17",
+    "gen-worker>=0.11.0,<0.12",
     "diffusers>=0.31",
     "transformers>=4.46",
     "accelerate>=1.0",
@@ -20,8 +20,3 @@ packages = ["src/sd15_hub_image"]
 
 [tool.gen_worker]
 main = "sd15_hub_image.main"
-
-# The example tracks the in-repo gen-worker (pre-gw#492 wheels elide ':prod'
-# from wire refs and can never load a tag-qualified Hub binding — th#766).
-[tool.uv.sources]
-gen-worker = { path = "../..", editable = true }

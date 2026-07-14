@@ -85,9 +85,6 @@ class TestIncrementalWriter:
 
 class TestStreamingDtypeCast:
     def test_fp32_to_fp16_values_and_nonfloat_passthrough(self, tmp_path: Path) -> None:
-        # Seeded: unseeded randn occasionally draws |x| >= 2 where fp16
-        # spacing (2^-9 ~ 2e-3) exceeds the atol=1e-3 assertion (CI flake).
-        torch.manual_seed(0)
         src = _make_safetensors(tmp_path / "in.safetensors", {
             "w": torch.randn(32, 32, dtype=torch.float32),
             "idx": torch.arange(6, dtype=torch.int32),

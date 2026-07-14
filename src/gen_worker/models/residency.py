@@ -127,19 +127,6 @@ def _obj_manages_own_device(obj: Any) -> bool:
     )
 
 
-def _obj_offload_hooked(obj: Any) -> bool:
-    """Any offload arming that parks weights in host RAM (gw#521): the
-    diffusers CPU-offload modes plus the ie#468 block-window rung."""
-    if _obj_manages_own_device(obj):
-        return True
-    try:
-        from .loading import block_offload_active
-
-        return bool(block_offload_active(obj))
-    except Exception:
-        return False
-
-
 def _move_obj(obj: Any, device: str) -> None:
     """Whole-object ``.to(device)``. Raises on failure — the caller
     (:meth:`Residency._move_verified`) owns rollback; swallowing a mid-move
@@ -284,32 +271,7 @@ class Residency:
     ) -> None:
         """Register a VRAM-resident object with its MEASURED footprint
         (``torch.cuda.memory_allocated`` delta across the load, or
-        :func:`~gen_worker.models.memory.estimate_cuda_resident_gb`).
-
-        Offload-hooked pipelines (diffusers CPU-offload modes, block-window
-        offload) are booked in the RAM tier instead (gw#521): their weights
-        rest in host RAM and the allocator delta across such a load is noise
-        (0.03GB registered live), so a VRAM booking would be a lie in both
-        tier and size."""
-        if obj is not None and _obj_offload_hooked(obj):
-            logger.info(
-                "residency: %s is offload-hooked; booking RAM tier "
-                "(VRAM unmeasurable under offload hooks)", ref,
-            )
-            hint = int(estimate_pipeline_size_gb(obj) * _GiB)
-            with self._lock:
-                e = self._entries.setdefault(ref, _Entry(ref=ref, tier=Tier.RAM))
-                e.tier = Tier.RAM
-                e.obj = obj
-                if path is not None:
-                    e.path = Path(path)
-                e.vram_bytes = 0
-                e.vram_hint = max(e.vram_hint, hint)
-                if pinned:
-                    e.pinned = True
-                e.last_used = time.monotonic()
-            self._emit(ref, IN_RAM)
-            return
+        :func:`~gen_worker.models.memory.estimate_cuda_resident_gb`)."""
         measured = int(vram_bytes)
         if measured <= 0 and obj is not None:
             measured = int(estimate_cuda_resident_gb(obj) * _GiB)
@@ -777,7 +739,7 @@ class LoadedComponentKey:
             dtype = dtype or str(getattr(binding, "dtype", "") or "")
             quantization = quantization or str(getattr(binding, "storage_dtype", "") or "")
             if not label:
-                ref = str(getattr(binding, "path", "") or "")
+                ref = str(getattr(binding, "ref", "") or "")
                 label = f"{ref}/{component}" if ref else component
         return cls(
             content_digest=str(content_digest or "").strip(),
@@ -805,10 +767,32 @@ class LoadedComponentKey:
         return f"shared::{readable}::dev{self.device_id}::{digest}"
 
 
+def build_function_owned_pipeline(
+    shared: Any,
+    pipeline_cls: Optional[Any] = None,
+    **extra_components: Any,
+) -> Any:
+    """Build a *function-owned* pipeline over SHARED immutable components:
+    own scheduler/mutable state, same heavy modules (same CUDA storages).
+    Tries ``pipeline_cls.from_pipe(shared)`` then ``pipeline_cls(**components)``."""
+    cls = pipeline_cls or type(shared)
+    from_pipe = getattr(cls, "from_pipe", None)
+    if callable(from_pipe):
+        return from_pipe(shared, **extra_components)
+    comps = getattr(shared, "components", None)
+    if isinstance(comps, dict):
+        return cls(**{**comps, **extra_components})
+    raise TypeError(
+        f"cannot build a function-owned pipeline from {type(shared).__name__}: "
+        "no from_pipe() and no .components dict to re-assemble"
+    )
+
+
 __all__ = [
     "Residency",
     "Tier",
     "LoadedComponentKey",
+    "build_function_owned_pipeline",
     "content_set_digest",
     "ON_DISK", "IN_RAM", "IN_VRAM", "EVICTED",
 ]

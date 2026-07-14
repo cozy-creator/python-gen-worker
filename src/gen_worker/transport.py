@@ -245,11 +245,14 @@ class Transport:
 
     def _make_channel(self, target: str, use_tls: bool) -> grpc.aio.Channel:
         if use_tls:
-            # System trust roots. The custom-CA-bundle knob (GRPC_CA_BUNDLE)
-            # was deleted in pgw#514 — no deployment ever set it.
+            roots: Optional[bytes] = None
+            bundle = (getattr(self._settings, "grpc_ca_bundle", "") or "").strip()
+            if bundle:
+                with open(bundle, "rb") as f:
+                    roots = f.read()
             return grpc.aio.secure_channel(
                 target,
-                grpc.ssl_channel_credentials(),
+                grpc.ssl_channel_credentials(root_certificates=roots),
                 options=self._channel_options(),
             )
         return grpc.aio.insecure_channel(target, options=self._channel_options())

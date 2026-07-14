@@ -157,12 +157,9 @@ def test_adopt_success_rewraps_warms_and_reports(tmp_path, monkeypatch):
     assert len(adopted) == 1
     assert adopted[0].ref == CACHE_REF
     assert adopted[0].duration_ms >= 0
-    # cache_hits/cache_misses/warmup_s are computed internally (gating the
-    # cache_miss rollback below) but intentionally not sent on the wire —
-    # the orchestrator has no reader for them (pgw#514/P3).
-    assert adopted[0].cache_hits == 0
-    assert adopted[0].cache_misses == 0
-    assert adopted[0].warmup_s == 0
+    assert adopted[0].cache_hits == 3
+    assert adopted[0].cache_misses == 1
+    assert adopted[0].warmup_s >= 0
     assert not _events(sent, pb.MODEL_STATE_FAILED)
     assert len(applied) == 1 and applied[0][2] is True
     assert isinstance(applied[0][0], _Pipe)

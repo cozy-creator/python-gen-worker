@@ -15,40 +15,12 @@ import urllib.parse
 from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Callable,
-    Dict,
-    Iterator,
-    List,
-    Literal,
-    Mapping,
-    Optional,
-    Tuple,
-    TypedDict,
-)
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Literal, Mapping, Optional
 
 if TYPE_CHECKING:  # heavy deps stay import-time-free; methods import lazily
-    import numpy as np
     import torch
-    from PIL import Image
-
-    from ._concurrent_upload import BudgetGate
-
-
-class LoraOverlay(TypedDict):
-    """One per-request LoRA overlay riding a model slot (gw#393)."""
-
-    ref: str
-    weight: float
-
-
-LogLevel = Literal["debug", "info", "warning", "error"]
-"""Severity for :meth:`RequestContext.log` (pgw#508's operator stream)."""
 
 from ..api.errors import AuthError
-from ..api.slot import ResolvedSlot
 from ..api.types import (
     Asset,
     AudioAsset,
@@ -59,42 +31,8 @@ from ..api.types import (
 )
 
 
-class _SlotTable(Mapping):
-    """``ctx.slots`` — a read-only mapping of slot name -> ResolvedSlot.
-
-    Built once at context construction (executor.py::_run_job_pinned / the
-    CLI's hub-less dispatch); resolution FAILURES (missing repo metadata +
-    no code fallback, no ref for the slot) are stored per-key and raised
-    lazily on ``__getitem__`` — "clear error at request time" means when the
-    HANDLER actually reads that slot, not a blanket failure for every
-    Slot-declared endpoint whose handler never touches an unresolved one."""
-
-    __slots__ = ("_resolved", "_errors")
-
-    def __init__(
-        self,
-        resolved: Mapping[str, "ResolvedSlot[Any]"],
-        errors: Mapping[str, str],
-    ) -> None:
-        self._resolved = dict(resolved)
-        self._errors = dict(errors)
-
-    def __getitem__(self, key: str) -> "ResolvedSlot[Any]":
-        if key in self._resolved:
-            return self._resolved[key]
-        if key in self._errors:
-            raise ValueError(self._errors[key])
-        raise KeyError(key)
-
-    def __iter__(self) -> Iterator[str]:
-        return iter({**self._resolved, **self._errors})
-
-    def __len__(self) -> int:
-        return len(set(self._resolved) | set(self._errors))
-
-
 def _default_compute() -> Compute:
-    """Sentinel Compute used when the orchestrator didn't attach RunJob.compute.
+    """Sentinel Compute used when the orchestrator didn't attach resolved_compute.
 
     Tenants can safely read ``ctx.compute.vram_gb`` etc. without None-checks;
     zero / empty values are the "not specified" signal.
@@ -160,14 +98,18 @@ class RequestContext:
         file_api_base_url: Optional[str] = None,
         worker_capability_token: Optional[str] = None,
         local_output_dir: Optional[str] = None,
+        required_models: Optional[List[str]] = None,
         execution_hints: Optional[Dict[str, Any]] = None,
+        parent_request_id: Optional[str] = None,
+        child_request_id: Optional[str] = None,
+        item_id: Optional[str] = None,
+        item_index: Optional[int] = None,
+        item_span: Optional[Dict[str, int]] = None,
         source_info: Optional[Dict[str, Any]] = None,
         destination_info: Optional[Dict[str, Any]] = None,
         compute: Optional["Compute"] = None,
         models: Optional[Dict[str, Any]] = None,
         loras: Optional[Dict[str, Any]] = None,
-        resolved_slots: Optional[Mapping[str, "ResolvedSlot[Any]"]] = None,
-        slot_errors: Optional[Mapping[str, str]] = None,
         hf_token: str = "",
     ) -> None:
         self._request_id = str(request_id or "").strip()
@@ -179,7 +121,13 @@ class RequestContext:
         self._worker_capability_token = (worker_capability_token or "").strip() or None
         self._hf_token = (hf_token or "").strip()
         self._local_output_dir = (local_output_dir or "").strip() or None
+        self._required_models = list(required_models or [])
         self._execution_hints = dict(execution_hints or {})
+        self._parent_request_id = str(parent_request_id or "").strip() or None
+        self._child_request_id = str(child_request_id or "").strip() or None
+        self._item_id = str(item_id or "").strip() or None
+        self._item_index = int(item_index) if item_index is not None else None
+        self._item_span = dict(item_span or {})
         self._started_at = time.time()
         self._deadline: Optional[float] = None
         if timeout_ms is not None and timeout_ms > 0:
@@ -188,21 +136,20 @@ class RequestContext:
         self._cancel_event = threading.Event()
         self._emitter = emitter
         self._cached_repo_job_scope: Optional[tuple[str, str, str]] = None
-        # Reserved-name producer contract attributes. Populated by the
-        # executor's ctx construction (executor.py::_run_job_pinned) before
-        # invoking tenant code when the endpoint is a producer kind and the
-        # payload declares the reserved `source`/`destination` struct fields.
+        # Reserved-name conversion/training contract attributes. Populated by
+        # Worker._handle_job_request before invoking tenant code when the
+        # endpoint is kind=conversion|training and the payload declares the
+        # reserved `source`/`destination` struct fields.
         self._source_info = dict(source_info or {})
         self._destination_info = dict(destination_info or {})
         self._source_path: Optional[str] = None
-        # Resolved hardware for this invocation (tensorhub #232). Populated
-        # by the executor from RunJob.compute (proto ResolvedCompute).
-        # Sentinel defaults when unset — tenants can safely read fields
-        # without None-checks.
+        # Resolved hardware for this invocation (tensorhub #232). Populated by
+        # Worker._handle_job_request from JobExecutionRequest.resolved_compute.
+        # Sentinel defaults when unset — tenants can safely read fields without
+        # None-checks.
         self._compute: "Compute" = compute if compute is not None else _default_compute()
         self._models = _copy_context_metadata(models or {})
         self._loras = _copy_context_metadata(loras or {})
-        self._slots = _SlotTable(resolved_slots or {}, slot_errors or {})
 
         # Capability-budget gate (issue #269 back-pressure). Lazy-built from
         # the worker_capability_token's max_total_bytes + max_bytes_per_file
@@ -222,10 +169,6 @@ class RequestContext:
         # blocking uploads release the GPU slot while they wait on the
         # network. None for CPU jobs and local (CLI) runs.
         self._gpu_slot_lease: Optional[Any] = None
-        # gw#516: executor callback fired on the TERMINAL slot release at the
-        # decode->finalize handoff, so the worker's finalizing-job count (and
-        # the hub's StateDelta view of it) tracks the encode/upload tail.
-        self._on_finalize_release: Optional[Callable[[], None]] = None
 
     @property
     def request_id(self) -> str:
@@ -237,38 +180,17 @@ class RequestContext:
         return self._deadline
 
     @property
-    def models(self) -> Dict[str, str]:
+    def models(self) -> Dict[str, Any]:
         """Resolved model refs for this invocation, keyed by slot name."""
         return _copy_context_metadata(self._models)
 
     @property
-    def loras(self) -> Dict[str, Tuple[LoraOverlay, ...]]:
+    def loras(self) -> Dict[str, Any]:
         """Per-request LoRA overlays riding each model slot (gw#393):
         slot name -> tuple of ``{"ref", "weight"}``. Empty for adapter-free
         requests. The worker applies/removes the adapters around the handler
         call; this surface is read-only metadata."""
         return _copy_context_metadata(self._loras)
-
-    @property
-    def slots(self) -> Mapping[str, "ResolvedSlot[Any]"]:
-        """The pgw#520 resolution chain, one entry per ``Slot``-declared
-        model slot: ``ctx.slots["pipeline"].ref`` / ``.defaults`` — repo
-        metadata merged over the endpoint's code ``default_config`` preset
-        (which LOSES to repo metadata when both are present). A slot with
-        no repo metadata and no ``Slot(default_config=...)`` raises on
-        access (not at dispatch) — read it only when your handler needs it.
-        """
-        return self._slots
-
-    def _set_resolved_slots(
-        self,
-        resolved: Mapping[str, "ResolvedSlot[Any]"],
-        errors: Optional[Mapping[str, str]] = None,
-    ) -> None:
-        """CLI-only mutator (``gen-worker run``/``serve``): the hub-less
-        resolve step runs after context construction, unlike the executor
-        which has every input up front."""
-        self._slots = _SlotTable(resolved, errors or {})
 
     @property
     def device(self) -> "torch.device":
@@ -298,7 +220,7 @@ class RequestContext:
             )
         return self._file_api_base_url.rstrip("/")
 
-    def _get_upload_budget_gate(self) -> "BudgetGate":
+    def _get_upload_budget_gate(self):
         """Lazy-construct the capability-budget gate from the JWT claims.
 
         Pure pass-through when the token has no budget claims (dev/test
@@ -385,7 +307,7 @@ class RequestContext:
         destination_repo = str(hints.get("destination_repo") or "").strip()
         if destination_repo == "":
             return None
-        job_id = str(self._job_id or "").strip()
+        job_id = str(hints.get("job_id") or "").strip() or str(self._job_id or "").strip()
         if job_id == "":
             return None
         try:
@@ -452,7 +374,7 @@ class RequestContext:
             logger.info("request %s marked for cancellation.", self.request_id)
 
     @contextmanager
-    def _gpu_slot_yielded(self) -> "Iterator[None]":
+    def _gpu_slot_yielded(self):
         """Worker-internal: release the job's GPU slot for the duration of
         blocking non-GPU I/O (blob upload), re-acquiring before returning to
         tenant code (#382). No-op when there is no lease (CPU jobs, local
@@ -473,31 +395,6 @@ class RequestContext:
             lease.reacquire()
             if self._canceled:
                 lease.yield_slot()
-
-    def _release_gpu_slot_for_finalize(self) -> None:
-        """Worker-internal: TERMINAL GPU-slot release at the decode->finalize
-        handoff (gw#476 / gw#516). The handler is done with GPU compute; the
-        encode + upload tail proceeds slotless so the next request's denoise
-        starts now instead of idling the GPU (measured up to 179s on a
-        CPU-contended host). Unlike :meth:`_gpu_slot_yielded` there is no
-        reacquire — a finishing request must never block behind the next
-        request's denoise just to return. The executor's post-handler release
-        no-ops (lease transitions are once-only), so the semaphore balance
-        stays exact. Tenant GPU work after this call runs unscheduled —
-        finalize helpers call it only once frames are on the host. No-op
-        without a lease (CPU jobs, local runs) or when already yielded."""
-        lease = self._gpu_slot_lease
-        if lease is not None and lease.yield_slot():
-            logger.info(
-                "request %s: GPU slot released for finalize; encode/upload "
-                "overlaps the next request's compute", self.request_id)
-            notify = self._on_finalize_release
-            if notify is not None:
-                try:
-                    notify()
-                except Exception:
-                    logger.exception(
-                        "finalize-release notification failed (non-fatal)")
 
     def _emit_event(self, event_type: str, payload: Optional[Dict[str, Any]] = None) -> None:
         """Worker-internal: emit a progress/event payload (best-effort)."""
@@ -520,9 +417,6 @@ class RequestContext:
         total: Optional[int] = None,
     ) -> None:
         """Report request progress (best-effort, rides ``request.progress``).
-
-        This is the USER-facing stream — the cozy-art job feed renders it
-        directly. For platform/operator-only diagnostics use :meth:`log`.
 
         ``progress`` is a 0..1 fraction; ``step``/``total`` carry the exact
         step counter when known (e.g. denoise step 5 of 20) so UIs can render
@@ -558,62 +452,8 @@ class RequestContext:
             payload["size_bytes"] = int(size_bytes)
         self._emit_event("request.checkpoint", payload)
 
-    def log(self, message: str, level: LogLevel = "info", **fields: Any) -> None:
-        """Emit a request-scoped OPERATOR diagnostic (rides ``request.log``).
-
-        pgw#508: this is the PLATFORM/OPERATOR debug stream, full stop —
-        never user-facing. tensorhub persists it under an operator-only event
-        kind and never serves it on a tenant-facing surface (SSE job feed,
-        events.bin, poll); it does not reach the cozy-art job card. See
-        proto/CONTRACT.md § "The ctx event lane" for the wire-level routing
-        contract.
-
-        One-line rule for authors: module-level ``logging.getLogger(__name__)``
-        for boot-time/cross-request logging; ``ctx.log`` for anything scoped
-        to THIS request you'd want when debugging it (resolved model/
-        scheduler choice, retry/degradation detail, malformed-input detail);
-        ``ctx.progress`` for what the human watching the job should see.
-        There is no user-visible counterpart to ``ctx.log`` — a product
-        surface for extra user-facing text would be a deliberate addition,
-        not an overload of this method (YAGNI until a real surface asks).
-
-        ``**fields`` rides the payload as structured JSON extras (e.g.
-        ``ctx.log("OOM retry", level="warning", free_gb=2.1, rung="offload")``)
-        so operators can filter/grep without parsing the message string.
-        Best-effort like every ctx event: dropped silently if unencodable or
-        no emitter is configured.
-        """
-        payload: Dict[str, Any] = {"message": message, "level": level}
-        if fields:
-            payload["fields"] = fields
-        self._emit_event("request.log", payload)
-
-    def _c2pa_manifest_kwargs(self) -> Dict[str, Any]:
-        model_refs = [str(v) for v in (self._models or {}).values()]
-        model_refs += [
-            str(ov.get("ref", ""))
-            for overlays in (self._loras or {}).values()
-            for ov in overlays
-        ]
-        return {"request_id": self._request_id, "models": model_refs}
-
-    def _c2pa_sign_bytes(self, ref: str, data: bytes) -> bytes:
-        """C2PA-sign media payloads at the finalize seam (th#714).
-
-        Returns ``data`` unchanged when signing is unconfigured or the
-        payload is not a signable media format; raises when signing is
-        configured but fails (an unlabeled asset must not ship silently).
-        """
-        from .. import content_credentials
-
-        return content_credentials.sign_media_bytes(data, ref=ref, **self._c2pa_manifest_kwargs())
-
-    def _c2pa_sign_file(self, ref: str, src: str) -> Optional[str]:
-        """File variant of :meth:`_c2pa_sign_bytes` — returns a signed temp
-        path (caller unlinks) or None when signing doesn't apply."""
-        from .. import content_credentials
-
-        return content_credentials.sign_media_file(src, ref=ref, **self._c2pa_manifest_kwargs())
+    def log(self, message: str, level: str = "info") -> None:
+        self._emit_event("request.log", {"message": message, "level": level})
 
     # Inline-bytes threshold: when the client requested
     # `Prefer: bytes=inline` AND the payload is at or below this many
@@ -626,9 +466,8 @@ class RequestContext:
         if not isinstance(data, (bytes, bytearray)):
             raise TypeError("save_bytes expects bytes")
         data = bytes(data)
-        ref = _normalize_output_ref(ref)
-        data = self._c2pa_sign_bytes(ref, data)
         _enforce_output_file_size_limit(len(data))
+        ref = _normalize_output_ref(ref)
 
         local_path = self._resolve_local_output_path(ref)
         if local_path:
@@ -673,7 +512,7 @@ class RequestContext:
 
     def save_image(
         self,
-        image: "Image.Image",
+        image: Any,
         ref: Optional[str] = None,
         *,
         format: str = "webp",
@@ -718,7 +557,7 @@ class RequestContext:
 
     def save_audio(
         self,
-        audio: "np.ndarray[Any, Any] | torch.Tensor | bytes",
+        audio: Any,
         ref: Optional[str] = None,
         *,
         sample_rate: int = 44100,
@@ -748,7 +587,7 @@ class RequestContext:
                 raise ValidationError(
                     "save_audio needs the audio extra: pip install 'gen-worker[audio]'"
                 ) from exc
-            arr: Any = audio
+            arr = audio
             if hasattr(arr, "detach"):
                 arr = arr.detach().cpu().numpy()
             arr = np.asarray(arr)
@@ -784,8 +623,7 @@ class RequestContext:
             from ..io import probe_video
 
             for key, value in probe_video(
-                bytes(video) if isinstance(video, (bytes, bytearray))
-                else os.fspath(video)
+                bytes(video) if isinstance(video, (bytes, bytearray)) else video
             ).items():
                 setattr(asset, key, value)
         except Exception:
@@ -801,21 +639,6 @@ class RequestContext:
         if not os.path.exists(src):
             raise FileNotFoundError(src)
 
-        # C2PA signing (th#714): media files upload as a signed temp copy;
-        # the caller's file is never mutated. No-op unless signing is
-        # configured and the file is a signable media format.
-        signed_tmp = self._c2pa_sign_file(ref, src)
-        if signed_tmp is not None:
-            try:
-                return self._save_file_inner(ref, signed_tmp)
-            finally:
-                try:
-                    os.unlink(signed_tmp)
-                except OSError:
-                    pass
-        return self._save_file_inner(ref, src)
-
-    def _save_file_inner(self, ref: str, src: str) -> Asset:
         size = int(os.path.getsize(src))
         _enforce_output_file_size_limit(size)
 
@@ -943,37 +766,6 @@ class _PublisherMixin:
     Not a public surface: tenants should never import this directly.
     """
 
-    if TYPE_CHECKING:
-        # The host contract (gw#497): everything this mixin borrows from
-        # RequestContext, declared so mypy checks the mixin against the
-        # composition instead of erroring attr-defined on every use.
-        request_id: str
-        cancelled: bool
-        _hf_token: str
-        _compute: Compute
-        _source_info: Dict[str, Any]
-        _destination_info: Dict[str, Any]
-        _file_api_base_url: Optional[str]
-        _worker_capability_token: Optional[str]
-        _job_id: Optional[str]
-
-        def save_bytes(self, ref: str, data: bytes) -> Asset: ...
-        def save_file(self, ref: str, local_path: "str | os.PathLike[str]") -> Asset: ...
-        def _open_output_stream(
-            self, ref: str, *, create: bool = ...,
-            expected_size_bytes: Optional[int] = ...,
-        ) -> "_RequestOutputStream": ...
-        def _emit_checkpoint_saved(
-            self, ref: str, *, step_number: Optional[int] = ...,
-            epoch_number: Optional[int] = ..., output_kind: Optional[str] = ...,
-            size_bytes: Optional[int] = ...,
-        ) -> None: ...
-        def _get_upload_budget_gate(self) -> "BudgetGate": ...
-        def _get_worker_capability_token(self) -> str: ...
-        def _repo_job_upload_scope(self) -> "Optional[tuple[str, str, str]]": ...
-        def _require_repo_job_scope_for_tensors(self, ref: str) -> None: ...
-        def _should_stream_output_to_file_api(self, ref: str) -> bool: ...
-
     @property
     def hf_token(self) -> str:
         """HuggingFace API token for gen_worker.convert / conversion helpers.
@@ -1076,7 +868,7 @@ class _PublisherMixin:
             raise FileNotFoundError(src)
         size = int(os.path.getsize(src))
         _enforce_output_file_size_limit(size)
-        fmt = str(format or "").strip() or _infer_tensors_format(ref or os.fspath(local_path))
+        fmt = str(format or "").strip() or _infer_tensors_format(ref or local_path)
 
         # Job-scoped writes publish through the /commits stream (gw#471) so
         # the returned Tensors carries a blake3 digest + blob_digest and each
@@ -1206,10 +998,8 @@ class _PublisherMixin:
         """Open a chunk-writable output stream that finalizes to Tensors."""
         ref = _normalize_output_ref(ref)
         self._require_repo_job_scope_for_tensors(ref)
-        from typing import cast as _cast
-
         return _RequestOutputStream(
-            ctx=_cast("RequestContext", self),
+            ctx=self,
             ref=ref,
             kind="checkpoint",
             format=format,
@@ -1336,13 +1126,10 @@ class _PublisherMixin:
         return dest_path
 
     def checkpoint_dir(self, *, key: str) -> Path:
-        """Return a scratch dir keyed by (job_id, key), for trainer
-        ``output_dir`` / ``resume_from_checkpoint`` use.
+        """Return a PERSISTENT scratch dir keyed by (job_id, key).
 
-        NOTE: lives under ``tempfile.gettempdir()`` — pod-local ``/tmp``, not
-        durable storage. It survives a THREAD/process restart within the
-        same pod but is gone on pod churn/eviction (design gap tracked
-        separately; this docstring describes reality, not the aspiration).
+        Survives worker restart — intended for trainer ``output_dir`` so
+        ``resume_from_checkpoint`` can pick up where a preempted job left off.
         """
         job_id = self._job_id or self.request_id or "x"
         base = Path(tempfile.gettempdir()) / "txform-persistent" / str(job_id)
@@ -1696,8 +1483,7 @@ class TrainingContext(_PublisherMixin, RequestContext):
 
     From ``_PublisherMixin``: repo-metadata RPCs, ``resolve_dataset`` /
     ``dataset_paths`` (the executor materializes ``payload.datasets`` before
-    the handler runs) and ``checkpoint_dir`` (pod-local scratch keyed by
-    job — see its docstring for the durability caveat).
+    the handler runs) and ``checkpoint_dir`` (persistent resume scratch).
     ``save_checkpoint`` lives on the base ``RequestContext`` (gated by
     ``_require_repo_job_scope_for_tensors``) because internal upload paths
     call it via ``getattr`` regardless of which subclass the request used.
@@ -1733,10 +1519,11 @@ class TrainingContext(_PublisherMixin, RequestContext):
         """
         now = time.monotonic()
         last = self._last_metric_monotonic
+        is_first = last is None
         is_last = total > 0 and step >= total
         has_val = val_loss is not None
         if (
-            last is not None and not is_last and not has_val
+            not is_first and not is_last and not has_val
             and (now - last) < self.metric_min_interval_s
         ):
             return

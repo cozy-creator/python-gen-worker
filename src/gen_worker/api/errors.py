@@ -77,6 +77,16 @@ class OutputTooLargeError(ValidationError):
         super().__init__(f"output file too large (size_bytes={self.size_bytes}, max_bytes={self.max_bytes})")
 
 
+class InputTooLargeError(ValidationError):
+    """Input artifact exceeds the configured worker-side size limit."""
+
+    def __init__(self, *, size_bytes: int, max_bytes: int, source: str = "input") -> None:
+        self.size_bytes = int(max(0, size_bytes))
+        self.max_bytes = int(max_bytes)
+        self.source = source
+        super().__init__(f"{source} too large: {self.size_bytes} bytes (max {self.max_bytes})")
+
+
 class RefCompatibilitySurprise(ValidationError):
     """Post-download runtime mismatch on a caller-supplied PAYLOAD_REF.
 

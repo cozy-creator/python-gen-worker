@@ -33,27 +33,34 @@ _ENV_TO_FIELD: Dict[str, str] = {
     "HF_HOME": "hf_home",
     "TENSORHUB_PUBLIC_URL": "tensorhub_public_url",
     "ORCHESTRATOR_PUBLIC_ADDR": "orchestrator_public_addr",
+    "GRPC_CA_BUNDLE": "grpc_ca_bundle",
     "WORKER_ID": "worker_id",
     "WORKER_JWT": "worker_jwt",
     "ENDPOINT_LOCK_PATH": "endpoint_lock_path",
     "RUNPOD_POD_ID": "runpod_pod_id",
     "WORKER_DISCONNECTED_TIMEOUT_S": "worker_disconnected_timeout_s",
     "WORKER_IMAGE_DIGEST": "worker_image_digest",
+    "WORKER_GIT_COMMIT": "worker_git_commit",
     "TENSORHUB_URL": "tensorhub_url",
     "TENSORHUB_TOKEN": "tensorhub_token",
     "TENSORHUB_CACHE_DIR": "tensorhub_cache_dir",
     "TENSORHUB_CAS_DIR": "tensorhub_cas_dir",
     "CIVITAI_API_KEY": "civitai_api_key",
-    "GEN_WORKER_C2PA_CERT_PATH": "c2pa_cert_path",
-    "GEN_WORKER_C2PA_KEY_PATH": "c2pa_key_path",
-    "GEN_WORKER_C2PA_ALG": "c2pa_alg",
-    "GEN_WORKER_C2PA_TA_URL": "c2pa_ta_url",
+    "COZY_HF_DOWNLOAD_STALL_TIMEOUT_S": "hf_download_stall_timeout_s",
+    "COZY_HF_DOWNLOAD_MAX_SECONDS": "hf_download_max_seconds",
+    "COZY_HF_MAX_REPO_BYTES": "hf_max_repo_bytes",
+    "GEN_WORKER_ATTACHED_LORA_MAX": "attached_lora_max",
+    "GEN_WORKER_ATTACHED_LORA_MAX_BYTES": "attached_lora_max_bytes",
+    "GEN_WORKER_COMPILE_CACHE": "compile_cache_path",
+    "GEN_WORKER_COMPILE_CACHE_URL": "compile_cache_url",
+    "GEN_WORKER_COMPILE_ALLOW_COLD": "compile_allow_cold",
 }
 
 # Secondary env names for a field, consulted only when the primary name is
 # unset or empty (mirrors the historical `os.getenv(A) or os.getenv(B)`).
 _ENV_ALIASES: Dict[str, str] = {
     "CIVITAI_TOKEN": "civitai_api_key",
+    "HUGGING_FACE_HUB_TOKEN": "hf_token",
 }
 
 _FIELD_NAMES = frozenset(_ENV_TO_FIELD.values())
@@ -169,7 +176,7 @@ def _load_yaml(paths: Iterable[str] | None = None) -> Dict[str, str]:
         if not p.is_file():
             continue
         try:
-            import yaml
+            import yaml  # type: ignore[import-untyped]
 
             data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
         except Exception:

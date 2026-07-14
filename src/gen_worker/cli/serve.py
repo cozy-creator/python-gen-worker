@@ -277,11 +277,9 @@ class _Endpoint:
 
     def __init__(
         self, *, offline: bool, allow_publish: bool, vram_budget_gb: float = 0.0,
-        device: str = "",
     ) -> None:
         self.offline = offline
         self.allow_publish = allow_publish
-        self.device = device
         self.gpu_semaphore = _make_gpu_semaphore()
         # function_name -> _ServedFunction
         self.functions: Dict[str, _ServedFunction] = {}
@@ -360,7 +358,6 @@ class _Endpoint:
                 instances_by_cls[cls_id] = inst
                 self._instances.append(inst)
                 self._setup_locks[id(inst)] = threading.Lock()
-                assert sel.cls is not None  # inst was built from sel.cls
                 # Stable per-class residency key (the class qualname is unique
                 # within an endpoint and maps 1:1 to one held instance/pipeline).
                 self._model_id_by_inst[id(inst)] = (
@@ -373,7 +370,7 @@ class _Endpoint:
                 # shadowing.
                 raise run_mod._UsageError(
                     f"duplicate @inference.function name {fn_name!r} "
-                    f"(hosted by {sel.cls.__name__ if sel.cls else '<function>'}.{sel.attr_name})"
+                    f"(hosted by {sel.cls.__name__}.{sel.attr_name})"
                 )
             self.functions[fn_name] = _ServedFunction(sel, inst)
         if eager:
@@ -404,7 +401,7 @@ class _Endpoint:
                     served.selected.bindings, offline=self.offline,
                 )
                 before = memory.cuda_allocated_bytes()
-                run_mod.run_setup(inst, resolved, device=self.device)
+                run_mod.run_setup(inst, resolved)
                 measured = max(0, memory.cuda_allocated_bytes() - before)
                 self._setup_done.add(iid)
 
@@ -594,10 +591,10 @@ def _resolve_static_models(
     }
     if not static:
         return {}
-    from ..models import provision
-
-    return provision.resolve_bindings(
-        static, offline=offline, emit=_stderr_emitter,
+    return run_mod._resolve_models_for_setup(
+        bindings=static,
+        offline=offline,
+        emit=_stderr_emitter,
     )
 
 
@@ -754,8 +751,8 @@ def _sidecar_path(listen_spec: str) -> Path:
     collide; in cwd for TCP (no socket file).
     """
     addr = transport.parse_addr(listen_spec)
-    if addr.scheme == "unix":
-        return Path(addr.host + ".json")
+    if addr[0] == "unix":
+        return Path(str(addr[1]) + ".json")
     return Path.cwd() / ".gen-worker.serve.json"
 
 
@@ -983,12 +980,14 @@ def _serve_inner(args: argparse.Namespace) -> int:
         candidates, getattr(args, "functions", None),
     )
 
+    if args.device:
+        os.environ["GEN_WORKER_LOCAL_DEVICE"] = args.device
+
     # 2. Boot the endpoint — setup() once per class, hold instances warm.
     endpoint = _Endpoint(
         offline=bool(args.offline),
         allow_publish=bool(args.allow_publish),
         vram_budget_gb=float(getattr(args, "vram_budget", 0.0) or 0.0),
-        device=str(getattr(args, "device", "") or ""),
     )
     endpoint.boot(candidates, eager=bool(getattr(args, "eager", False)))
 
@@ -996,7 +995,8 @@ def _serve_inner(args: argparse.Namespace) -> int:
     # absolute form so teardown unlinks the right file regardless of cwd.
     listen_spec = getattr(args, "listen", None) or args.socket_path
     if transport.is_unix(listen_spec):
-        listen_spec = str(Path(transport.parse_addr(listen_spec).host).resolve())
+        _, _p = transport.parse_addr(listen_spec)
+        listen_spec = str(Path(_p).resolve())
     stop = threading.Event()
 
     # 3. SIGINT / SIGTERM -> cancel in-flight requests, then clean teardown.

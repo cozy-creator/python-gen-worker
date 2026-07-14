@@ -56,7 +56,7 @@ def detect_worker_capabilities(*, extra_libs: Optional[List[str]] = None) -> Ten
     # (plain-name library gating keeps working).
     if "tensorrt" in installed:
         try:
-            import tensorrt
+            import tensorrt  # type: ignore
 
             installed.append(f"tensorrt=={tensorrt.__version__}")
         except Exception:

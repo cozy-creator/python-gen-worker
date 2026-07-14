@@ -204,7 +204,7 @@ class _RequestOutputStream:
                 return self._result
             else:
                 if self._kind == "checkpoint":
-                    raw = getattr(self._ctx, "save_checkpoint")(
+                    raw = self._ctx.save_checkpoint(
                         self._ref,
                         self._tmp_path,
                         format=self._format,
@@ -409,7 +409,7 @@ class _RequestOutputStream:
             sha256=self._sha.hexdigest(),
             blake3=blake3_hex,
             blob_digest=f"blake3:{blake3_hex}",
-            snapshot_digest=str((ckpt or {}).get("snapshot_digest") or "").strip() or None,
+            snapshot_digest=str(ckpt.get("snapshot_digest") or "").strip() or None,
             stream_mode=self.stream_mode,
         )
 
@@ -547,8 +547,9 @@ class _RequestOutputStream:
     def __enter__(self) -> "_RequestOutputStream":
         return self
 
-    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
         if exc_type is None:
             self.finalize()
         else:
             self.close()
+        return False

@@ -1,13 +1,12 @@
 """Public SDK surface: the @endpoint decorator, bindings, types, and errors."""
 
-from .binding import Binding, Civitai, HF, Hub, ModelRef, ModelScope
+from .binding import Binding, Civitai, HF, Hub, ModelScope
 from .decorators import Resources, endpoint
-from .model import Model, ModelChoice, ModelDefaults
-from .slot import ResolvedSlot, Slot, resolve_slot
 from .errors import (
     AuthError,
     CanceledError,
     FatalError,
+    InputTooLargeError,
     OutputTooLargeError,
     RefCompatibilitySurprise,
     ResourceError,
@@ -24,6 +23,7 @@ from .streaming import (
     IncrementalTokenDelta,
     StreamItem,
     StreamResult,
+    TokenStreamSignal,
     TokenUsage,
     iter_transformers_text_deltas,
 )
@@ -34,6 +34,8 @@ from .types import (
     ExpectedOutput,
     ImageAsset,
     MediaAsset,
+    NegativePrompt,
+    PositivePrompt,
     PromptRole,
     StringEnum,
     Tensors,
@@ -45,20 +47,14 @@ __all__ = [
     "Civitai",
     "HF",
     "Hub",
-    "Model",
-    "ModelChoice",
-    "ModelDefaults",
-    "ModelRef",
     "ModelScope",
-    "ResolvedSlot",
     "Resources",
-    "Slot",
     "endpoint",
-    "resolve_slot",
     "diffusers_step_callback",
     "AuthError",
     "CanceledError",
     "FatalError",
+    "InputTooLargeError",
     "OutputTooLargeError",
     "RefCompatibilitySurprise",
     "ResourceError",
@@ -72,6 +68,7 @@ __all__ = [
     "IncrementalTokenDelta",
     "StreamItem",
     "StreamResult",
+    "TokenStreamSignal",
     "TokenUsage",
     "iter_transformers_text_deltas",
     "Asset",
@@ -80,6 +77,8 @@ __all__ = [
     "ExpectedOutput",
     "ImageAsset",
     "MediaAsset",
+    "NegativePrompt",
+    "PositivePrompt",
     "PromptRole",
     "StringEnum",
     "Tensors",

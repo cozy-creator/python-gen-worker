@@ -21,17 +21,20 @@ if TYPE_CHECKING:
 
 def describe_binding(binding: Any) -> Dict[str, Any]:
     """Introspect one model binding into a JSON-able dict (no model load)."""
-    from ..api.binding import ModelRef
+    from ..api.binding import BINDING_TYPES
 
-    if isinstance(binding, ModelRef):
+    if isinstance(binding, BINDING_TYPES):
         out: Dict[str, Any] = {
-            "type": binding.source,
-            "ref": binding.path,
+            "type": type(binding).__name__,
+            "provider": binding.provider,
+            "ref": binding.ref,
         }
         for key in ("tag", "flavor", "revision", "dtype", "subfolder", "version", "storage_dtype"):
             v = getattr(binding, key, "")
             if v:
                 out[key] = v
+        if getattr(binding, "allow_lora", False):
+            out["allow_lora"] = True
         files = tuple(getattr(binding, "files", ()) or ())
         if files:
             out["files"] = list(files)
@@ -126,6 +129,9 @@ def function_entries(
         res_dict = _describe_resources(resources)
         if res_dict:
             entry["resources"] = res_dict
+        variant_of = str(getattr(c, "variant_of", "") or "")
+        if variant_of:
+            entry["variant_of"] = variant_of
         if caps is not None:
             from ..models.serve_fit import plan_serve
 

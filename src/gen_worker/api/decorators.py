@@ -22,26 +22,23 @@
 * An async-generator handler streams (inference only); there is no separate
   streaming decorator.
 * ``runtime="vllm"`` boots an engine-hosting server subprocess before setup.
-
-Checkpoint SELECTION is a runtime payload argument, not a build-time fan-out:
-a handler whose payload declares a field typed with a ``ModelChoice`` subclass
-picks, per request, which curated checkpoint runs against the resident base
-(pgw#509 — ``gen_worker.api.model``). Divergent WIRE contracts are separate
-methods; only weight-sharing forces one class.
+* ``variants={name: (binding, Resources)}`` stamps one separately-routable,
+  separately-placeable function per variant from a single handler body. With
+  ``models={}`` the variant binding swaps the FIRST declared slot; remaining
+  aux slots (e.g. a shared VAE) are inherited by every variant.
 """
 
 from __future__ import annotations
 
 import inspect
-from typing import Any, Callable, Dict, Mapping, Optional, Tuple, TypeVar, Union, overload
+import typing
+from typing import Any, Callable, Literal, Mapping, Optional, Sequence, TypeVar
 
 import msgspec
 
 from .binding import BINDING_TYPES, Binding
-from .slot import Slot
 
 T = TypeVar("T")
-SlotLike = Union[Binding, Slot]
 
 KINDS = ("inference", "training", "dataset", "conversion")
 RESERVED_METHODS = frozenset({"setup", "warmup", "shutdown"})
@@ -49,7 +46,7 @@ RESERVED_METHODS = frozenset({"setup", "warmup", "shutdown"})
 
 class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     """Hardware envelope for one function: ``Resources(gpu, vram_gb,
-    compute_capability, libraries, ram_gb, vcpus)``.
+    compute_capability, libraries)``.
 
     ``vram_gb`` is the recommended minimum CARD size: the total VRAM (GB) of
     the smallest card the function targets — ``vram_gb=24`` means "runs on a
@@ -70,12 +67,6 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     then refuses the CPU-touching rungs (offload / cpu) outright instead of
     serving slowly. The on-GPU rungs (fp8 storage, emergency 4-bit) remain
     available under ``strict_vram``.
-
-    ``ram_gb`` / ``vcpus`` (gw#490) declare the HOST-side ask: minimum host
-    RAM (GB) and vCPU count the pod must be created with. Video-class
-    endpoints need both (pinned TE park + CPU-heavy encode); the hub maps
-    them to provider pod-creation minimums (th#740) and destroys
-    under-allocated pods at create. Host asks do not imply ``gpu=True``.
     """
 
     gpu: bool = False
@@ -83,8 +74,6 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
     compute_capability: float | None = None
     libraries: tuple[str, ...] = ()
     strict_vram: bool = False
-    ram_gb: float | None = None
-    vcpus: int | None = None
 
     def __post_init__(self) -> None:
         force = msgspec.structs.force_setattr
@@ -104,16 +93,14 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
             ))
         if self.vram_gb is not None or self.compute_capability is not None:
             force(self, "gpu", True)
-        if self.ram_gb is not None:
-            r = float(self.ram_gb)
-            if r <= 0:
-                raise ValueError(f"ram_gb must be positive, got {r}")
-            force(self, "ram_gb", r)
-        if self.vcpus is not None:
-            n = int(self.vcpus)
-            if n <= 0:
-                raise ValueError(f"vcpus must be positive, got {n}")
-            force(self, "vcpus", n)
+
+
+class Variant(msgspec.Struct, frozen=True):
+    """One resolved ``variants={}`` row: binding + optional Resources override."""
+
+    name: str
+    binding: Any
+    resources: Resources | None = None
 
 
 class Compile(msgspec.Struct, frozen=True):
@@ -179,15 +166,16 @@ class EndpointDecl(msgspec.Struct, frozen=True, kw_only=True):
     kind: str = "inference"
     resources: Resources = msgspec.field(default_factory=Resources)
     models: Mapping[str, Binding] = msgspec.field(default_factory=dict)
-    # Slot-declared entries in `models=`/`model=` (pgw#520): a subset of
-    # `models`' keys, carrying the Slot's selected_by/default_checkpoint/
-    # default_config metadata that `models` (a plain Binding map, for
-    # back-compat with every existing model-injection call site) can't hold.
-    slots: Mapping[str, Slot] = msgspec.field(default_factory=dict)
+    variants: tuple[Variant, ...] = ()
     runtime: Optional[str] = None
     name: Optional[str] = None  # function-shaped endpoints only
     is_function: bool = False
     compile: Optional[Compile] = None
+    # Payload-driven slot routing (gw#479): ``route(payload) -> slot names``
+    # the request actually needs. The executor promotes/pins only those
+    # slots, so multi-lane classes (two transformers over one shared
+    # encoder) swap the idle lane instead of thrashing both per request.
+    route: Optional[Callable[[Any], Sequence[str]]] = None
 
 
 ATTR = "__gen_worker_endpoint__"
@@ -227,48 +215,100 @@ def _reject_producer_generator(owner: str, fn: Callable[..., Any], kind: str) ->
         )
 
 
-def _split_slot_like(key: str, v: "SlotLike") -> Tuple[Optional[Binding], Optional[Slot]]:
-    """One ``models={}``/``model=`` value -> ``(binding_or_None, slot_or_None)``.
-
-    A ``Slot`` contributes its ``default_checkpoint`` (if any) to the plain
-    binding map every existing model-injection call site (executor, CLI,
-    prefetch) already understands, PLUS itself to the slots map the pgw#520
-    surfaces (discovery emission, the resolution chain) read. A bare binding
-    contributes only to the binding map — it carries no Slot metadata."""
-    if isinstance(v, Slot):
-        return v.default_checkpoint, v
-    if isinstance(v, BINDING_TYPES):
-        return v, None
-    raise TypeError(
-        f"@endpoint models[{key!r}] must be a HF/Hub/Civitai/ModelScope "
-        f"binding or Slot(...), got {type(v).__name__}"
-    )
-
-
 def _normalize_models(
-    model: Optional["SlotLike"], models: Optional[Mapping[str, "SlotLike"]]
-) -> Tuple[Dict[str, Binding], Dict[str, Slot]]:
+    model: Optional[Binding], models: Optional[Mapping[str, Binding]]
+) -> dict[str, Binding]:
     if model is not None and models is not None:
         raise ValueError("@endpoint: pass model= OR models=, not both")
     if model is not None:
+        if not isinstance(model, BINDING_TYPES):
+            raise TypeError(
+                f"@endpoint(model=) must be a HF/Hub/Civitai/ModelScope binding, "
+                f"got {type(model).__name__}"
+            )
         # Single-binding shorthand: the slot name is resolved from the
         # setup()/handler parameter name at class validation time.
-        binding, slot = _split_slot_like("", model)
-        out_models: Dict[str, Binding] = {"": binding} if binding is not None else {}
-        out_slots: Dict[str, Slot] = {"": slot} if slot is not None else {}
-        return out_models, out_slots
-    out_models = {}
-    out_slots = {}
-    for key, v in (models or {}).items():
+        return {"": model}
+    out: dict[str, Binding] = {}
+    for key, b in (models or {}).items():
         k = str(key or "").strip()
         if not k or not k.isidentifier():
             raise ValueError(f"@endpoint models key {key!r} must be an identifier")
-        binding, slot = _split_slot_like(k, v)
-        if binding is not None:
-            out_models[k] = binding
-        if slot is not None:
-            out_slots[k] = slot
-    return out_models, out_slots
+        if not isinstance(b, BINDING_TYPES):
+            raise TypeError(
+                f"@endpoint models[{k!r}] must be a HF/Hub/Civitai/ModelScope "
+                f"binding, got {type(b).__name__}"
+            )
+        out[k] = b
+    return out
+
+
+def _normalize_variants(
+    variants: Optional[Mapping[str, Any]], default_resources: Resources
+) -> tuple[Variant, ...]:
+    if not variants:
+        return ()
+    rows: list[Variant] = []
+    seen: set[str] = set()
+    for raw_name, value in variants.items():
+        name = str(raw_name or "").strip()
+        if not name:
+            raise ValueError("@endpoint variants: empty variant name")
+        if name in seen:
+            raise ValueError(f"@endpoint variants: duplicate name {name!r}")
+        seen.add(name)
+        res: Resources | None = None
+        if isinstance(value, tuple):
+            if len(value) != 2 or not isinstance(value[1], Resources):
+                raise TypeError(
+                    f"@endpoint variants[{name!r}] must be a binding or "
+                    "(binding, Resources) pair"
+                )
+            binding, res = value
+        else:
+            binding = value
+        if not isinstance(binding, BINDING_TYPES):
+            raise TypeError(
+                f"@endpoint variants[{name!r}]: expected a HF/Hub/Civitai/"
+                f"ModelScope binding, got {type(binding).__name__}"
+            )
+        rows.append(Variant(name=name, binding=binding, resources=res or default_resources))
+    return tuple(rows)
+
+
+def _literal_members(t: Any) -> Optional[tuple[Any, ...]]:
+    if typing.get_origin(t) is Literal:
+        return tuple(typing.get_args(t))
+    return None
+
+
+def _validate_variant_literal(cls_name: str, method: Callable[..., Any], names: Sequence[str]) -> None:
+    """If the handler payload declares a ``variant`` field, it must be a
+    ``Literal[...]`` whose members are a subset of the declared variant names
+    (build-time validation of the discriminator, carried over from the old
+    dispatch() Literal check)."""
+    try:
+        hints = typing.get_type_hints(method)
+        params = _handler_params(method, is_method=True)
+        payload_type = hints.get(params[1].name)
+        field_hints = typing.get_type_hints(payload_type)
+    except Exception:
+        return
+    field_type = field_hints.get("variant")
+    if field_type is None:
+        return
+    members = _literal_members(field_type)
+    if members is None:
+        raise ValueError(
+            f"@endpoint class {cls_name!r}: payload field 'variant' must be "
+            f"Literal[...]-typed so variant names are validated (got {field_type!r})."
+        )
+    unknown = sorted({str(m) for m in members} - set(names))
+    if unknown:
+        raise ValueError(
+            f"@endpoint class {cls_name!r}: payload 'variant' Literal member(s) "
+            f"{unknown} match no declared variant (variants: {sorted(names)})."
+        )
 
 
 def _find_handler_methods(cls: type) -> list[tuple[str, Callable[..., Any]]]:
@@ -282,8 +322,8 @@ def _find_handler_methods(cls: type) -> list[tuple[str, Callable[..., Any]]]:
             f"@endpoint class {cls.__name__!r}: no handler methods found. "
             "Define at least one public method taking (self, ctx, payload)."
         )
-    for handler_name, handler_fn in out:
-        _validate_handler_shape(f"{cls.__name__}.{handler_name}", handler_fn, is_method=True)
+    for attr, member in out:
+        _validate_handler_shape(f"{cls.__name__}.{attr}", member, is_method=True)
     return out
 
 
@@ -313,66 +353,53 @@ def _is_server_handle_param(p: inspect.Parameter) -> bool:
 
 def _resolve_single_slot(
     cls: type,
-    models: Dict[str, Binding],
-    slots: Dict[str, Slot],
+    models: dict[str, Binding],
     handlers: list[tuple[str, Callable[..., Any]]],
-) -> Tuple[Dict[str, Binding], Dict[str, Slot]]:
-    """Resolve the ``model=`` shorthand's slot name from setup()/handler
-    params. Exactly one of ``models``/``slots`` holds the ``""`` key (a bare
-    binding or a Slot, never both — ``_normalize_models`` is the only
-    producer)."""
-    if "" not in models and "" not in slots:
-        return models, slots
-
-    def _name_it() -> str:
-        setup_kwargs = _setup_params(cls)
-        if setup_kwargs:
-            named = [
-                n for n, p in setup_kwargs.items()
-                if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
-                and not _is_server_handle_param(p)
-            ]
-            if len(named) == 1:
-                return named[0]
-            raise ValueError(
-                f"@endpoint class {cls.__name__!r}: model= needs exactly one "
-                f"setup() parameter to name the slot (setup declares {named})."
-            )
-        # No setup: slot name comes from the (single) handler's injected param.
-        injected: set[str] = set()
-        for attr, method in handlers:
-            for p in _handler_params(method, is_method=True)[2:]:
-                injected.add(p.name)
-        if len(injected) == 1:
-            return injected.pop()
+) -> dict[str, Binding]:
+    """Resolve the ``model=`` shorthand's slot name from setup()/handler params."""
+    if "" not in models:
+        return models
+    binding = models.pop("")
+    setup_kwargs = _setup_params(cls)
+    if setup_kwargs:
+        named = [
+            n for n, p in setup_kwargs.items()
+            if p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+            and not _is_server_handle_param(p)
+        ]
+        if len(named) == 1:
+            models[named[0]] = binding
+            return models
         raise ValueError(
-            f"@endpoint class {cls.__name__!r}: model= with no setup() needs "
-            f"exactly one injected handler parameter after (ctx, payload) to "
-            f"name the slot (found {sorted(injected) or 'none'})."
+            f"@endpoint class {cls.__name__!r}: model= needs exactly one "
+            f"setup() parameter to name the slot (setup declares {named})."
         )
+    # No setup: slot name comes from the (single) handler's injected param.
+    injected: set[str] = set()
+    for attr, method in handlers:
+        for p in _handler_params(method, is_method=True)[2:]:
+            injected.add(p.name)
+    if len(injected) == 1:
+        models[injected.pop()] = binding
+        return models
+    raise ValueError(
+        f"@endpoint class {cls.__name__!r}: model= with no setup() needs "
+        f"exactly one injected handler parameter after (ctx, payload) to name "
+        f"the slot (found {sorted(injected) or 'none'})."
+    )
 
-    name = _name_it()
-    if "" in models:
-        models[name] = models.pop("")
-    if "" in slots:
-        slots[name] = slots.pop("")
-    return models, slots
 
-
-def _validate_class_models(
-    cls: type, models: Dict[str, Binding], slots: Dict[str, Slot]
-) -> None:
+def _validate_class_models(cls: type, models: dict[str, Binding]) -> None:
     """Model slots must be consumable: by setup() params (stateful) or by
     handler params (per-call injection when there is no setup)."""
-    all_keys = set(models) | set(slots)
-    if not all_keys:
+    if not models:
         return
     setup_kwargs = _setup_params(cls)
     if setup_kwargs is not None:
         has_var_kw = any(
             p.kind is inspect.Parameter.VAR_KEYWORD for p in setup_kwargs.values()
         )
-        missing = [k for k in all_keys if k not in setup_kwargs and not has_var_kw]
+        missing = [k for k in models if k not in setup_kwargs and not has_var_kw]
         if missing:
             raise ValueError(
                 f"@endpoint class {cls.__name__!r}: models slot(s) {missing} "
@@ -386,26 +413,51 @@ def _decorate_class(
     *,
     kind: str,
     resources: Resources,
-    models: Dict[str, Binding],
-    slots: Dict[str, Slot],
+    models: dict[str, Binding],
+    variants: Optional[Mapping[str, Any]],
     runtime: Optional[str],
     compile: Optional[Compile] = None,
+    route: Optional[Callable[[Any], Sequence[str]]] = None,
 ) -> type:
     handlers = _find_handler_methods(cls)
     for attr, member in handlers:
         _reject_producer_generator(f"{cls.__name__}.{attr}", member, kind)
-    models, slots = _resolve_single_slot(cls, models, slots, handlers)
-    _validate_class_models(cls, models, slots)
+    models = _resolve_single_slot(cls, models, handlers)
+    _validate_class_models(cls, models)
+
+    variant_rows = _normalize_variants(variants, resources)
+    if variant_rows:
+        if len(handlers) != 1:
+            raise ValueError(
+                f"@endpoint class {cls.__name__!r}: variants= requires exactly "
+                f"ONE handler method to fan out over (found {len(handlers)})."
+            )
+        # Multi-slot classes: variants swap the FIRST declared slot; the
+        # remaining (aux) slots are shared across all variants.
+        _validate_variant_literal(
+            cls.__name__, handlers[0][1], [v.name for v in variant_rows]
+        )
 
     if runtime is not None and runtime not in ("vllm", "llama-server"):
         raise ValueError(
             f"@endpoint class {cls.__name__!r}: runtime must be 'vllm' or "
             f"'llama-server', got {runtime!r}"
         )
+    if route is not None:
+        if not callable(route):
+            raise TypeError(
+                f"@endpoint class {cls.__name__!r}: route= must be callable "
+                f"(payload -> model slot names), got {type(route).__name__}"
+            )
+        if len(models) < 2:
+            raise ValueError(
+                f"@endpoint class {cls.__name__!r}: route= needs 2+ model "
+                f"slots to route between (declared {sorted(models) or 'none'})"
+            )
 
     decl = EndpointDecl(
-        kind=kind, resources=resources, models=models, slots=slots,
-        runtime=runtime, compile=compile,
+        kind=kind, resources=resources, models=models,
+        variants=variant_rows, runtime=runtime, compile=compile, route=route,
     )
     setattr(cls, ATTR, decl)
     setattr(cls, "__gen_worker_handlers__", handlers)
@@ -417,15 +469,15 @@ def _decorate_function(
     *,
     kind: str,
     resources: Resources,
-    models: Dict[str, Binding],
-    slots: Dict[str, Slot],
+    models: dict[str, Binding],
     runtime: Optional[str],
     name: Optional[str],
     compile: Optional[Compile] = None,
 ) -> Callable[..., Any]:
     _validate_handler_shape(fn.__name__, fn, is_method=False)
     _reject_producer_generator(fn.__name__, fn, kind)
-    if "" in models or "" in slots:
+    if "" in models:
+        binding = models.pop("")
         injected = [p.name for p in _handler_params(fn, is_method=False)[2:]]
         if len(injected) != 1:
             raise ValueError(
@@ -433,18 +485,14 @@ def _decorate_function(
                 f"injected parameter after (ctx, payload) to name the slot "
                 f"(found {injected or 'none'})."
             )
-        slot_name = injected[0]
-        if "" in models:
-            models[slot_name] = models.pop("")
-        if "" in slots:
-            slots[slot_name] = slots.pop("")
+        models[injected[0]] = binding
     if runtime is not None:
         raise ValueError(
             f"@endpoint function {fn.__name__!r}: runtime= requires a class "
             "with setup() (the engine server outlives single calls)."
         )
     decl = EndpointDecl(
-        kind=kind, resources=resources, models=models, slots=slots,
+        kind=kind, resources=resources, models=models,
         runtime=None, name=(name or fn.__name__), is_function=True,
         compile=compile,
     )
@@ -452,43 +500,20 @@ def _decorate_function(
     return fn
 
 
-@overload
-def endpoint(target: T) -> T: ...  # bare @endpoint on a class/function
-
-
-@overload
-def endpoint(
-    *,
-    kind: str = ...,
-    model: Optional[SlotLike] = ...,
-    models: Optional[Mapping[str, SlotLike]] = ...,
-    resources: Optional[Resources] = ...,
-    runtime: Optional[str] = ...,
-    name: Optional[str] = ...,
-    compile: Optional[Compile] = ...,
-) -> Callable[[T], T]: ...  # configured @endpoint(...) form
-
-
 def endpoint(
     target: Optional[T] = None,
     *,
     kind: str = "inference",
-    model: Optional[SlotLike] = None,
-    models: Optional[Mapping[str, SlotLike]] = None,
+    model: Optional[Binding] = None,
+    models: Optional[Mapping[str, Binding]] = None,
     resources: Optional[Resources] = None,
+    variants: Optional[Mapping[str, Any]] = None,
     runtime: Optional[str] = None,
     name: Optional[str] = None,
     compile: Optional[Compile] = None,
+    route: Optional[Callable[[Any], Sequence[str]]] = None,
 ) -> Any:
-    """The one endpoint decorator. See the module docstring for shapes.
-
-    ``model=``/``models=`` values are a ``Binding`` (a fixed pick — HF/Hub/
-    Civitai/ModelScope) or a :class:`~gen_worker.api.slot.Slot` (a
-    hub-resolved slot: ``selected_by=``, ``default_checkpoint=``,
-    ``default_config=``; pgw#520). A bare binding is sugar for
-    ``Slot(<inferred pipeline class>, default_checkpoint=ref)`` with no hub
-    involvement — both forms can mix in one ``models={}`` dict.
-    """
+    """The one endpoint decorator. See the module docstring for shapes."""
     if kind not in KINDS:
         raise ValueError(f"@endpoint kind must be one of {KINDS}, got {kind!r}")
     resources_value = resources if resources is not None else Resources()
@@ -500,7 +525,7 @@ def endpoint(
         raise TypeError(
             f"@endpoint compile= must be a Compile, got {type(compile).__name__}"
         )
-    model_map, slot_map = _normalize_models(model, models)
+    model_map = _normalize_models(model, models)
 
     def apply(obj: Any) -> Any:
         if inspect.isclass(obj):
@@ -508,13 +533,23 @@ def endpoint(
                 raise ValueError("@endpoint name= applies to functions only; "
                                  "class handlers route by method name")
             return _decorate_class(
-                obj, kind=kind, resources=resources_value, models=dict(model_map),
-                slots=dict(slot_map), runtime=runtime, compile=compile,
+                obj, kind=kind, resources=resources_value, models=model_map,
+                variants=variants, runtime=runtime, compile=compile, route=route,
             )
         if inspect.isfunction(obj):
+            if variants:
+                raise ValueError(
+                    f"@endpoint function {obj.__name__!r}: variants= requires a "
+                    "class (each variant needs its own setup state)."
+                )
+            if route is not None:
+                raise ValueError(
+                    f"@endpoint function {obj.__name__!r}: route= requires a "
+                    "class with setup() (slot routing selects among loaded lanes)."
+                )
             return _decorate_function(
                 obj, kind=kind, resources=resources_value, models=dict(model_map),
-                slots=dict(slot_map), runtime=runtime, name=name, compile=compile,
+                runtime=runtime, name=name, compile=compile,
             )
         raise TypeError(
             f"@endpoint requires a function or class, got {type(obj).__name__}"
@@ -525,4 +560,4 @@ def endpoint(
     return apply
 
 
-__all__ = ["Compile", "EndpointDecl", "Resources", "SlotLike", "endpoint"]
+__all__ = ["Compile", "EndpointDecl", "Resources", "Variant", "endpoint"]

@@ -474,19 +474,19 @@ class HubClient:
             ],
             "mode": mode,
         }
-        # Wire-boundary token hygiene (gw#488): tensorhub derives a flavor
-        # row from the DTYPE (derivePublishFlavors) and validates every
-        # token against [a-z0-9][a-z0-9._-]{0,63} — the internal dtype-axis
-        # colon forms ("gguf:q4_k_m", "int8:awq") publish as "-" forms.
-        # ONE implementation: gen_worker.models.refs.flavor_token (gw#492).
-        from gen_worker.models.refs import flavor_token as _token
-
         if tags:
-            df = _token(default_flavor)
+            df = default_flavor.replace(":", "-")
             body["tags"] = [
                 {"tag": t, **({"default_flavor": df} if df else {})}
                 for t in tags
             ]
+        # Wire-boundary token hygiene (gw#488): tensorhub derives a flavor
+        # row from the DTYPE (derivePublishFlavors) and validates every
+        # token against [a-z0-9][a-z0-9._-]{0,63} — the internal dtype-axis
+        # colon forms ("gguf:q4_k_m", "int8:awq") publish as "-" forms.
+        def _token(v: str) -> str:
+            return v.replace(":", "-")
+
         for key, val in (
             ("message", message), ("flavor", _token(flavor)),
             ("default_flavor", _token(default_flavor)),
@@ -564,7 +564,7 @@ class HubClient:
             uploaded=uploaded,
             deduped=deduped,
             total_bytes=sum(f.size_bytes for f in resolved),
-            checkpoint_id=str((ckpt or {}).get("checkpoint_id") or "").strip(),
+            checkpoint_id=str(ckpt.get("checkpoint_id") or "").strip(),
             response=final,
         )
 

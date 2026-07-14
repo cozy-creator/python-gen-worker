@@ -25,7 +25,8 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Any
+from concurrent.futures import ThreadPoolExecutor
+from typing import Sequence, Callable, List, TypeVar
 
 logger = logging.getLogger(__name__)
 
@@ -132,19 +133,20 @@ class _BudgetReservation:
         self._held = True
         return self
 
-    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+    def __exit__(self, exc_type, exc, tb) -> bool:
         gate = self._gate
         depth = getattr(gate._tls, "depth", 0)
         if depth > 0:
             gate._tls.depth = depth - 1
         # Only the outermost reservation releases bytes.
         if not self._held:
-            return
+            return False
         if gate._max_total_bytes > 0:
             with gate._cond:
                 gate._inflight = max(0, gate._inflight - self._size)
                 gate._cond.notify_all()
         self._held = False
+        return False
 
 
 def budget_gate_from_capability_jwt(token: str) -> BudgetGate:
@@ -167,7 +169,7 @@ def budget_gate_from_capability_jwt(token: str) -> BudgetGate:
     def _int_claim(key: str) -> int:
         raw = claims.get(key)
         try:
-            value = int(raw or 0)
+            value = int(raw)
         except (TypeError, ValueError):
             return 0
         return value if value > 0 else 0

@@ -214,18 +214,6 @@ def _run_main() -> int:
         logger.error("Settings.orchestrator_public_addr is empty (set ORCHESTRATOR_PUBLIC_ADDR env). Refusing to start worker.")
         return 1
 
-    # C2PA content-credential signing (th#714): ON iff a cert is configured;
-    # logs a loud warning when off, refuses to start when configured-but-broken
-    # (a worker that believes it signs but doesn't is a compliance hole).
-    try:
-        from .content_credentials import configure as _c2pa_configure
-
-        _c2pa_configure(settings)
-    except Exception as e:
-        _log_worker_fatal("c2pa_configure", e, exit_code=1)
-        logger.error(str(e))
-        return 1
-
     logger.info("Starting worker...")
     logger.info("  Orchestrator Public Address: %s", settings.orchestrator_public_addr)
     logger.info("  User Function Modules: %s", user_modules)

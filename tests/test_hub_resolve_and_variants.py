@@ -1,13 +1,12 @@
 """#379 client-side Hub resolve + #380 variant auto-selection.
 
-#379: ``provision.resolve_local_path`` on a tensorhub ref resolves against a REAL local
+#379: ``_resolve_local_path`` on a tensorhub ref resolves against a REAL local
 HTTP server speaking tensorhub's public resolve route (th#560) and downloads
 blobs into the blake3 CAS via the shared cozy_snapshot path — no mocks on the
 unit under test, only a stdlib HTTP server standing in for the hub + R2.
 
-#380: ``select_variant`` policy — the serve-time flavor-fit ladder
-(SM/library gates, VRAM ladder, base fallback). This is the precision-flavor
-ladder (th#546/th#683), unrelated to the removed ``variants=`` decorator.
+#380: ``select_variant`` policy (SM/library gates, VRAM ladder, base
+fallback), listing fit verdicts, and ``--variant auto`` selection.
 """
 
 from __future__ import annotations
@@ -15,15 +14,19 @@ from __future__ import annotations
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
+import msgspec
 import pytest
 from blake3 import blake3
 
-import gen_worker.models.provision as prov_mod
+import gen_worker.cli.run as run_mod
+from gen_worker import RequestContext, endpoint
+from gen_worker.api.binding import HF
 from gen_worker.api.decorators import Resources
 from gen_worker.models.hub_client import (
     HubRepoNotFoundError,
+    HubResolveError,
     resolve_repo,
 )
 from gen_worker.models.hub_policy import (
@@ -142,7 +145,7 @@ def test_hub_ref_resolves_and_lands_in_cas(local_hub, monkeypatch, tmp_path):
     monkeypatch.delenv("TENSORHUB_TOKEN", raising=False)
 
     seen, emit = _events()
-    local = prov_mod.resolve_local_path(
+    local = run_mod._resolve_local_path(
         ref="root/tiny", provider="tensorhub", offline=False, emit=emit,
     )
     assert local.endswith(state.snapshot_digest)
@@ -159,7 +162,7 @@ def test_hub_ref_resolves_and_lands_in_cas(local_hub, monkeypatch, tmp_path):
     assert all(e.get("provider") == "tensorhub" for e in seen)
 
     # Second resolve is a no-download cache hit (snapshot dir short-circuits).
-    local2 = prov_mod.resolve_local_path(
+    local2 = run_mod._resolve_local_path(
         ref="root/tiny", provider="tensorhub", offline=False, emit=lambda e: None,
     )
     assert local2 == local
@@ -171,7 +174,7 @@ def test_hub_token_sent_as_bearer(local_hub, monkeypatch, tmp_path):
     monkeypatch.setenv("TENSORHUB_URL", base)
     monkeypatch.setenv("TENSORHUB_CAS_DIR", str(tmp_path))
     monkeypatch.setenv("TENSORHUB_TOKEN", "oat_secret")
-    prov_mod.resolve_local_path(
+    run_mod._resolve_local_path(
         ref="root/tiny:latest", provider="tensorhub", offline=False, emit=lambda e: None,
     )
     assert state.auth_headers == ["Bearer oat_secret"]
@@ -185,8 +188,8 @@ def test_hub_404_is_typed_not_found(local_hub, monkeypatch, tmp_path):
     ref = parse_model_ref("root/ghost", provider="tensorhub").tensorhub
     with pytest.raises(HubRepoNotFoundError, match="not found"):
         resolve_repo(ref, base_url=base)
-    with pytest.raises(prov_mod.ModelResolutionError, match="not found"):
-        prov_mod.resolve_local_path(
+    with pytest.raises(run_mod._ModelResolutionError, match="not found"):
+        run_mod._resolve_local_path(
             ref="root/ghost", provider="tensorhub", offline=False, emit=lambda e: None,
         )
 
@@ -194,14 +197,14 @@ def test_hub_404_is_typed_not_found(local_hub, monkeypatch, tmp_path):
 def test_hub_offline_is_cas_only(monkeypatch, tmp_path):
     monkeypatch.setenv("TENSORHUB_CAS_DIR", str(tmp_path))
     monkeypatch.setenv("TENSORHUB_URL", "http://127.0.0.1:9")  # must not be dialed
-    with pytest.raises(prov_mod.ModelResolutionError, match="--offline"):
-        prov_mod.resolve_local_path(
+    with pytest.raises(run_mod._ModelResolutionError, match="--offline"):
+        run_mod._resolve_local_path(
             ref="root/tiny", provider="tensorhub", offline=True, emit=lambda e: None,
         )
     # Digest-pinned ref whose snapshot IS pre-seeded works offline.
     snap = tmp_path / "snapshots" / "abcd1234"
     snap.mkdir(parents=True)
-    local = prov_mod.resolve_local_path(
+    local = run_mod._resolve_local_path(
         ref="root/tiny@blake3:abcd1234", provider="tensorhub", offline=True,
         emit=lambda e: None,
     )
@@ -213,18 +216,18 @@ def test_hub_offline_reuses_remembered_tag_ref(local_hub, monkeypatch, tmp_path)
     _seed(state, {"w.bin": b"tag-ref-weights"})
     monkeypatch.setenv("TENSORHUB_URL", base)
     monkeypatch.setenv("TENSORHUB_CAS_DIR", str(tmp_path))
-    online = prov_mod.resolve_local_path(
+    online = run_mod._resolve_local_path(
         ref="root/tiny:latest", provider="tensorhub", offline=False, emit=lambda e: None,
     )
     # Now fully offline (hub unreachable): the tag->digest memory serves it.
     monkeypatch.setenv("TENSORHUB_URL", "http://127.0.0.1:9")
-    offline = prov_mod.resolve_local_path(
+    offline = run_mod._resolve_local_path(
         ref="root/tiny:latest", provider="tensorhub", offline=True, emit=lambda e: None,
     )
     assert offline == online
     # A never-fetched tag still misses with the typed error.
-    with pytest.raises(prov_mod.ModelResolutionError, match="--offline"):
-        prov_mod.resolve_local_path(
+    with pytest.raises(run_mod._ModelResolutionError, match="--offline"):
+        run_mod._resolve_local_path(
             ref="root/tiny:other", provider="tensorhub", offline=True, emit=lambda e: None,
         )
 
@@ -232,8 +235,8 @@ def test_hub_offline_reuses_remembered_tag_ref(local_hub, monkeypatch, tmp_path)
 def test_hub_no_base_url_is_actionable(monkeypatch, tmp_path):
     monkeypatch.setenv("TENSORHUB_CAS_DIR", str(tmp_path))
     monkeypatch.delenv("TENSORHUB_URL", raising=False)
-    with pytest.raises(prov_mod.ModelResolutionError, match="TENSORHUB_URL"):
-        prov_mod.resolve_local_path(
+    with pytest.raises(run_mod._ModelResolutionError, match="TENSORHUB_URL"):
+        run_mod._resolve_local_path(
             ref="root/tiny", provider="tensorhub", offline=False, emit=lambda e: None,
         )
 
@@ -247,7 +250,7 @@ def test_url_expired_triggers_one_reresolve(local_hub, monkeypatch, tmp_path):
     monkeypatch.setenv("TENSORHUB_CAS_DIR", str(tmp_path))
 
     seen, emit = _events()
-    local = prov_mod.resolve_local_path(
+    local = run_mod._resolve_local_path(
         ref="root/tiny", provider="tensorhub", offline=False, emit=emit,
     )
     assert state.resolves == 2  # initial + one re-resolve
@@ -333,3 +336,117 @@ def test_cpu_box_has_no_routable_gpu_variant():
     fit, _ = variant_fit(Resources(), _CAPS_CPU, 0.0)
     assert fit == "fits"  # CPU-only endpoints still fit
 
+
+# ---------------------------------------------------------------------------
+# #380 CLI surfaces: listing fit verdicts + --variant auto selection
+# ---------------------------------------------------------------------------
+
+class _VIn(msgspec.Struct):
+    prompt: str = ""
+
+
+class _VOut(msgspec.Struct):
+    ok: bool
+
+
+def _variant_module():
+    import types
+
+    mod = types.ModuleType("_test_variants")
+
+    @endpoint(
+        kind="inference",
+        resources=Resources(vram_gb=24),
+        models={"pipeline": HF("org/base")},
+        variants={
+            "gen-fp8": (HF("org/base-fp8"), Resources(vram_gb=14)),
+            "gen-nvfp4": (HF("org/base-nvfp4"), Resources(vram_gb=12, compute_capability=10.0)),
+        },
+    )
+    class Gen:
+        def setup(self, pipeline: object) -> None:
+            pass
+
+        def generate(self, ctx: RequestContext, payload: _VIn) -> _VOut:
+            return _VOut(ok=True)
+
+    mod.Gen = Gen
+    return mod
+
+
+def _patched_hw(monkeypatch, *, sm: int, free_gb: float, libs=()):  # helpers
+    import gen_worker.models.hub_policy as hp
+    import gen_worker.models.memory as mem
+
+    caps = TensorhubWorkerCapabilities(
+        cuda_version="12.8" if sm else "", gpu_sm=sm,
+        torch_version="2.11", installed_libs=list(libs),
+    )
+    monkeypatch.setattr(hp, "detect_worker_capabilities", lambda **_k: caps)
+    monkeypatch.setattr(mem, "get_available_vram_gb", lambda *a, **k: free_gb)
+
+
+def test_listing_carries_fit_and_variant_of(monkeypatch):
+    from gen_worker.cli.listing import build_description
+
+    _patched_hw(monkeypatch, sm=89, free_gb=16.0)
+    mod = _variant_module()
+    candidates = run_mod.discover_candidates(mod)
+    doc = build_description(main_module="_test_variants", candidates=candidates)
+
+    assert doc["detected"]["gpu_sm"] == 89
+    assert doc["detected"]["free_vram_gb"] == 16.0
+    by_name = {f["name"]: f for f in doc["functions"]}
+    assert set(by_name) == {"generate", "gen-fp8", "gen-nvfp4"}
+    # 24 GB > 16 free, but 24 * 0.55 fits -> automatic fp8-storage rung (th#683)
+    assert by_name["generate"]["fit"] == "emergency_fp8"
+    assert "variant_of" not in by_name["generate"]
+    assert by_name["gen-fp8"]["fit"] == "fits"
+    assert by_name["gen-fp8"]["variant_of"] == "generate"
+    assert by_name["gen-nvfp4"]["fit"] == "incompatible"
+    assert by_name["gen-nvfp4"]["resources"]["vram_gb"] == 12.0
+
+
+def test_variant_auto_picks_fp8_on_sm89(monkeypatch):
+    _patched_hw(monkeypatch, sm=89, free_gb=16.0)
+    mod = _variant_module()
+    candidates = run_mod.discover_candidates(mod)
+    picked = run_mod.select_function_with_variant(
+        candidates, cls_name=None, method_name="generate",
+        default_name=None, variant="auto",
+    )
+    assert picked.fn_name == "gen-fp8"
+
+
+def test_variant_auto_base_fallback_below_floor(monkeypatch):
+    # 8 GB free: gen-fp8's 4-bit estimate fits -> emergency rung (gw#420).
+    _patched_hw(monkeypatch, sm=89, free_gb=8.0)
+    mod = _variant_module()
+    candidates = run_mod.discover_candidates(mod)
+    picked = run_mod.select_function_with_variant(
+        candidates, cls_name=None, method_name="generate",
+        default_name=None, variant="auto",
+    )
+    assert picked.fn_name == "gen-fp8"
+    # 5 GB free: no 4-bit estimate fits -> base + offload ladder.
+    _patched_hw(monkeypatch, sm=89, free_gb=5.0)
+    picked = run_mod.select_function_with_variant(
+        candidates, cls_name=None, method_name="generate",
+        default_name=None, variant="auto",
+    )
+    assert picked.fn_name == "generate"
+
+
+def test_variant_by_name_and_unknown(monkeypatch):
+    mod = _variant_module()
+    candidates = run_mod.discover_candidates(mod)
+    picked = run_mod.select_function_with_variant(
+        candidates, cls_name=None, method_name="generate",
+        default_name=None, variant="gen-fp8",
+    )
+    assert picked.fn_name == "gen-fp8"
+    with pytest.raises(run_mod._UsageError, match="available"):
+        run_mod.select_function_with_variant(
+            candidates, cls_name=None, method_name="generate",
+            default_name=None, variant="nope",
+        )

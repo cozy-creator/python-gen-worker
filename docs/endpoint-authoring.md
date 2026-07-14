@@ -64,7 +64,7 @@ shorthand, the `setup()` parameter name). It is never a constructor argument.
 
 ```python
 HF("owner/repo", revision=..., dtype=..., subfolder=..., files=(...), storage_dtype=...)
-Hub("owner/repo", tag="latest", flavor="", storage_dtype="")  # tensorhub
+Hub("owner/repo", tag="prod", flavor="", storage_dtype="")   # tensorhub
 Civitai("123456", version="789")             # civitai model id
 ModelScope("owner/repo", revision=..., files=(...))
 ```
@@ -85,173 +85,51 @@ runtime-quantizes the denoiser to 4-bit nf4 with a loud warning (quality
 below platform standards) rather than falling straight to CPU offload.
 Fit ladder: bf16 → `#fp8` → `#nvfp4` (Blackwell) → emergency-nf4 → offload.
 
-## Model selection: `model=` is a payload argument (pgw#509)
+## Variants
 
-Checkpoint selection is a runtime PAYLOAD FIELD, not a build-time fan-out. A
-handler whose payload declares a field typed with a `ModelChoice` subclass
-picks, per request, which curated checkpoint runs against the resident base.
-16 near-identical fine-tunes = ONE `generate(model=)`, not 16 functions.
-
-Declare the curated set as DATA — one row per checkpoint carrying its
-`ModelRef` binding + typed per-model defaults:
+One handler body, N separately-placeable routable functions:
 
 ```python
-class SdxlDefaults(ModelDefaults, frozen=True):
-    scheduler: Literal["euler_a", "dpmpp_2m_karras"]
-    steps: int
-    guidance: float
-
-class SdxlModel(ModelChoice[SdxlDefaults], enum.Enum):
-    WAI  = Model("wai-illustrious",     Hub("tensorhub/wai-illustrious"), SdxlDefaults("euler_a", 28, 6.0), hot=True)
-    PONY = Model("cyberrealistic-pony", Hub("tensorhub/cyberrealistic-pony"), SdxlDefaults("dpmpp_2m_karras", 30, 5.0))
-
-class TextToImage(msgspec.Struct):
-    prompt: str
-    model: SdxlModel = SdxlModel.WAI          # curated-only
-
-@endpoint(models={"pipeline": Hub("tensorhub/wai-illustrious"), "vae": Hub("tensorhub/sdxl-vae")})
-class SDXLFamily:
-    def setup(self, pipeline, vae): ...
-    def generate(self, ctx, p: TextToImage) -> ImageOutput:
-        d = p.model.defaults                  # typed SdxlDefaults — no ctx.models sniffing
-        ...
-```
-
-On the wire a pick is its id string (`"wai-illustrious"`); the JSON schema is
-a closed `enum` (the curated allowlist). Defaults are manifest-exported so the
-catalog/UI can render `steps: 28` before submit. Discovery emits the whole set
-(each choice's binding + defaults + `hot`/`price` hints) for the scheduler to
-warm-pool per checkpoint.
-
-**BYOM is the field TYPE.** `model: SdxlModel` is curated-only; `model:
-SdxlModel | ModelRef` additionally accepts an arbitrary client-supplied
-`ModelRef` (bring-your-own-model). No `@byom` decorator, no `sources=` —
-architecture compatibility is derived from the pipeline the endpoint's
-`models=` loads. Per-method policy falls out of method=contract: a `generate`
-method can be BYOM-open while a `generate_turbo` method (fixed distillation
-LoRA) stays curated.
-
-Divergent WIRE contracts are separate METHODS, not `Optional` fields; only
-weight-sharing forces one class. A distilled turbo that shares the base is a
-`generate_turbo` method on the same class (shares the resident base); a
-standalone distilled checkpoint is a separate class/endpoint.
-
-## `Slot`: hub-resolved model slots (pgw#520 / th#767)
-
-`ModelChoice` above bakes the curated set into the endpoint image — fine
-for a first-party endpoint that ships its own recipes, but the model SET is
-CATALOG, not code (th#767): adding a checkpoint shouldn't be a software
-release. `Slot(pipeline_cls, selected_by=, default_checkpoint=,
-default_config=)` is the hub-resolved alternative — a `models={}`/`model=`
-value alongside (or instead of) a plain binding:
-
-```python
-from gen_worker import HF, RequestContext, Slot, endpoint
-from gen_worker.families import SdxlDefaults
-
-@endpoint(models={
-    "pipeline": Slot(
-        StableDiffusionXLPipeline,
-        selected_by="model",                                              # payload field that branches this slot
-        default_checkpoint=HF("stabilityai/stable-diffusion-xl-base-1.0"), # hub-less / seed-publish ref
-        default_config=SdxlDefaults(steps=28, guidance=6.0),               # used when the resolved repo has no metadata
-    ),
-    "vae": HF("madebyollin/sdxl-vae-fp16-fix"),   # bare ModelRef: sugar for Slot(default_checkpoint=ref)
-})
+@endpoint(
+    model=HF("org/base", dtype="bf16"),
+    resources=Resources(vram_gb=24),
+    variants={
+        "generate-fp8": (HF("org/base-fp8"), Resources(vram_gb=14)),
+    },
+)
 class Generate:
-    def setup(self, pipeline: StableDiffusionXLPipeline, vae) -> None: ...
-
-    def generate(self, ctx: RequestContext, p: TextToImage) -> ImageOutput:
-        d = ctx.slots["pipeline"].defaults   # typed SdxlDefaults — repo metadata > default_config
-        steps = p.steps if p.steps is not None else d.steps
+    def setup(self, model: FluxPipeline): self.model = model
+    def generate(self, ctx, p: In) -> Out: ...
 ```
 
-- `selected_by` names a payload field typed **plain `str`** (or
-  `str | ModelRef`, the wire's BYOM-open shape — see below) — validated at
-  registration against that field's presence/type, and REQUIRES
-  `default_checkpoint=...` (a request-branching slot with no code-side
-  default has nothing to seed the hub mapping with; the hub rejects it at
-  registration, the SDK fails at author time instead). The hub overlays the
-  live allowed-value enum onto the field; the SDK never bakes a curated
-  list.
-- `default_checkpoint` seeds the hub mapping at first publish and is the
-  ONLY resolution source in hub-less mode (`gen-worker run` / `cozy run`);
-  a live hub mapping always wins when present.
-- `default_config` is a typed preset from `gen_worker.families` (a
-  per-family vocabulary struct — see below) used when the resolved repo
-  publishes no inference-defaults metadata of its own. It LOSES to repo
-  metadata when both are present — a recipe of last resort.
-- No curated list, no family kwarg on the endpoint: compat derives from
-  `pipeline_cls`; family comes from `default_config`'s registration or the
-  endpoint's `Compile(family=...)`.
+Each variant key is a routable function name with its own binding and
+`Resources` (falls back to the class values). The base method-named function
+is stamped only when the class declares `model=`/`models=`. If your payload
+echoes the variant in a `variant` field, type it `Literal[...]` — members are
+validated against the declared variants at import time.
 
-**`selected_by` field contract**: the payload field is typed plain `str`
-for a curated-only pick, or `str | ModelRef` to also accept a
-client-supplied structured `ModelRef` (bring-your-own-model) — the hub
-resolves either shape to a concrete ref before the worker ever sees the
-request; the SDK schema never bakes the curated-value enum into either
-form.
-
-**Per-family defaults vocabulary** (`gen_worker.families`): a typed,
-versioned, JSON-Schema-exportable struct per architecture — the shape
-tensorhub validates repo metadata against at PUT time:
-
-```python
-from gen_worker.families import FamilyDefaults, family
-
-@family("sdxl")
-class SdxlDefaults(FamilyDefaults, frozen=True):
-    scheduler: Literal["euler_a", "dpmpp_2m_karras", "dpmpp_2m_sde_karras"] = "euler_a"
-    steps: int = 28
-    guidance: float = 6.0
-    max_guidance: float | None = None   # a CLAMP constraint, never a wire reshape
-```
-
-`gen-worker families export-schemas <dir>` writes `<family>.schema.json`
-per registered family. `ctx.slots["<name>"]` merges repo metadata over the
-`Slot`'s `default_config` (whole-object precedence — a resolved repo either
-fully specifies its family vocabulary or it doesn't); a slot with neither
-raises on first ACCESS, not at dispatch.
-
-**Positional construction:** `FamilyDefaults`'s own `schema_version` field
-is `kw_only=True` on the BASE class, but msgspec's `kw_only` only affects
-fields declared on the class where it's set — it does not propagate to a
-subclass's own fields. `SdxlDefaults(steps=28, guidance=6.0)` and
-`SdxlDefaults("euler_a", 28, 6.0)` (declaration order) both work; prefer
-keyword args in your own presets — positional order follows FIELD
-DECLARATION order, not intuition, and a stray positional value silently
-lands on the wrong field (msgspec does not type-check plain construction).
-
-**Testing:** `gen_worker.testing` builds a `RequestContext` with stubbed
-`ctx.slots` for handler unit tests, no hand-rolled fake context needed:
-
-```python
-from gen_worker.testing import fake_context
-from gen_worker import HF
-from gen_worker.families import SdxlDefaults
-
-ctx = fake_context(slots={
-    "pipeline": (HF("stabilityai/stable-diffusion-xl-base-1.0"), SdxlDefaults(steps=28)),
-})
-out = Generate().generate(ctx, TextToImage(prompt="a cat"))
-```
-
-## Lanes: multi-model classes with shared components (gw#479)
+## Lanes: multi-model classes with input routing (gw#479)
 
 A class binding 2+ pipeline slots whose snapshots share byte-identical
 components (content-keyed by the files' blake3 digests) loads the shared set
 ONCE; each slot's exclusive weights (its transformer) are an independent
-residency entry the worker LRU-swaps under VRAM pressure:
+residency entry the worker LRU-swaps under VRAM pressure. Declare `route=`
+so only the lane a request needs is promoted/pinned:
 
 ```python
-@endpoint(models={"t2i": Hub("org/base"), "edit": Hub("org/edit")})
+def _route(p: In) -> tuple[str, ...]:
+    return ("edit",) if p.images else ("t2i",)
+
+@endpoint(models={"t2i": Hub("org/base"), "edit": Hub("org/edit")}, route=_route)
 class Generate:
     def setup(self, t2i: QwenImagePipeline, edit: QwenImageEditPlusPipeline): ...
     def generate(self, ctx, p: In) -> Out: ...  # picks self.t2i / self.edit
 ```
 
-This COMPENSATES for split-vendor base+edit releases (Qwen, HiDream, Wan
-t2v/i2v); unified models (one transformer doing t2i + edit) bind one model.
+The handler must only touch the lane(s) `route` named — the idle lane may be
+warm in host RAM. This mechanism COMPENSATES for split-vendor base+edit
+releases (Qwen, HiDream, Wan t2v/i2v); unified models (one transformer doing
+t2i + edit) need no lanes — bind one model and skip `route=`.
 
 ## Resources
 
@@ -376,14 +254,8 @@ At most 15 members:
 | `generator(seed)` | seeded `torch.Generator` on `device` |
 | `deadline`, `time_remaining()` | absolute deadline / seconds left |
 | `cancelled`, `raise_if_cancelled()` | THE cancellation spelling |
-| `progress(fraction, stage=)` | USER-facing status event (the job card) |
-| `log(msg, level=, **fields)` | PLATFORM/OPERATOR diagnostic, never user-facing (pgw#508) |
+| `progress(fraction, stage=)`, `log(msg, level=)` | events to the caller |
 | `save_bytes/file/image/audio/video` | persist outputs → typed `Asset` |
-
-Logging rule of thumb: module-level `logging.getLogger(__name__)` for
-boot-time/cross-request logging; `ctx.log` for anything scoped to THIS
-request you'd want when debugging it; `ctx.progress` for what the human
-watching the job should see.
 
 ## Project config
 

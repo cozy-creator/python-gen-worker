@@ -13,7 +13,7 @@ from typing import List, Optional
 
 import msgspec
 
-from gen_worker.api.errors import RetryableError, ValidationError
+from gen_worker.api.errors import RetryableError
 from gen_worker.api.types import SourceRepo
 from gen_worker.executor import Executor
 from gen_worker.pb import worker_scheduler_pb2 as pb
@@ -118,9 +118,7 @@ def test_source_download_failure_classifies_like_model_bindings(tmp_path) -> Non
         res = await h.run(_ConvIn(source=SourceRepo(ref="acme/base-model:prod")))
         assert res.status == pb.JOB_STATUS_RETRYABLE
 
-        # ensure_local raises typed ValidationError for unsupported refs
-        # (pgw#514/P9: bare ValueError now maps FATAL, not INVALID).
-        h2 = _Harness(tmp_path, fail_with=ValidationError("unsupported model ref"))
+        h2 = _Harness(tmp_path, fail_with=ValueError("unsupported model ref"))
         res2 = await h2.run(_ConvIn(source=SourceRepo(ref="not-a-ref")))
         assert res2.status == pb.JOB_STATUS_INVALID
 

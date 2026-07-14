@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import json
 import logging
 import os
 import re
@@ -34,12 +35,9 @@ from .ingest import (
     plan_huggingface,
 )
 from .writer import (
-    CAST_NORMALIZE_DTYPES as _CAST_NORMALIZE_DTYPES,
     FP8_DEFAULT_COMPONENTS,
     MAX_SAFETENSORS_SHARD_BYTES,
-    VARIANT_WEIGHT_NAME_RE as _VARIANT_WEIGHT_NAME_RE,
     copy_non_weight_files,
-    normalize_variant_filenames as _normalize_variant_filenames,
     shard_safetensors_by_offset,
     snapshot_weight_groups,
 )
@@ -82,9 +80,7 @@ class OutputSpec:
 
     @property
     def label(self) -> str:
-        from gen_worker.models.refs import flavor_token
-
-        return flavor_token(f"{self.dtype}-{self.file_layout}-{self.file_type}")
+        return f"{self.dtype}-{self.file_layout}-{self.file_type}".replace(":", "-")
 
 
 @dataclass
@@ -157,6 +153,62 @@ def normalize_outputs(values: Iterable[Any] | None, *, layout_hint: str = "diffu
 # ---------------------------------------------------------------------------
 # Flavor tree construction
 # ---------------------------------------------------------------------------
+
+_CAST_NORMALIZE_DTYPES = {"fp16", "bf16", "fp32", "f16", "f32"}
+
+_VARIANT_WEIGHT_NAME_RE = re.compile(
+    r"^(?P<base>.+)\.(?P<v>fp16|bf16|fp32)"
+    r"(?P<shard>-\d{5}-of-\d{5})?\.safetensors(?P<idx>\.index\.json)?$"
+)
+
+
+def _normalize_variant_filenames(tree: Path) -> None:
+    """Strip dtype-variant tokens from published weight filenames.
+
+    dtype is a checkpoint axis (flavor) in repo-cas — one dtype per tree — so
+    HF variant suffixes are redundant, and the resharder composes an index
+    name diffusers cannot find (J23 live: juggernaut-xl published
+    "diffusion_pytorch_model.fp16.safetensors.index.json" where diffusers'
+    _add_variant expects "diffusion_pytorch_model.safetensors.index.fp16.json";
+    variant=fp16 serve setup died). Canonical names sidestep the class.
+    A directory whose canonical twin already exists is left untouched
+    (dual-dtype upstream trees must not collide). Quant flavors (fp8/int4/…)
+    are never normalized — their names carry loader semantics."""
+    dirs = sorted({p.parent for p in tree.rglob("*.safetensors*") if p.is_file()})
+    for d in dirs:
+        renames: dict[str, str] = {}
+        for p in sorted(d.iterdir()):
+            m = _VARIANT_WEIGHT_NAME_RE.match(p.name)
+            if not m:
+                continue
+            new_name = f"{m['base']}{m['shard'] or ''}.safetensors{m['idx'] or ''}"
+            if (d / new_name).exists():
+                renames.clear()
+                break
+            renames[p.name] = new_name
+        for old_name, new_name in renames.items():
+            (d / old_name).rename(d / new_name)
+        if not renames:
+            continue
+        for idx in d.glob("*.safetensors.index.json"):
+            try:
+                payload = json.loads(idx.read_text(encoding="utf-8"))
+            except Exception:  # noqa: BLE001
+                continue
+            weight_map = payload.get("weight_map")
+            if not isinstance(weight_map, dict):
+                continue
+            changed = False
+            for key, shard in weight_map.items():
+                if shard in renames:
+                    weight_map[key] = renames[shard]
+                    changed = True
+            if changed:
+                idx.write_text(
+                    json.dumps(payload, separators=(",", ":"), sort_keys=True),
+                    encoding="utf-8",
+                )
+
 
 def _stage_oversize_safetensors(tree: Path) -> None:
     """Replace any >5 GB safetensors in the tree with HF-convention byte-offset
@@ -361,20 +413,6 @@ def _publish_from_bank(
                 provider, plan.source_ref, spec.label,
                 bool(r.get("found")), bool(r.get("ready")))
             return None
-        # gw#522: manifests banked before the canonical-naming pass carry
-        # variant-token filenames diffusers cannot load (old-convention
-        # sharded index); replaying them republishes the breakage forever.
-        # Treat as a miss — the full clone re-creates canonical names.
-        stale = [
-            str(f.get("path") or "") for f in payload["files"]
-            if _VARIANT_WEIGHT_NAME_RE.match(Path(str(f.get("path") or "")).name)
-        ]
-        if stale:
-            logger.warning(
-                "download-skip bank entry for %s:%s spec=%s predates canonical "
-                "naming (e.g. %s); full clone republishes canonical names",
-                provider, plan.source_ref, spec.label, stale[0])
-            return None
         payloads[spec.label] = payload
 
     source_bytes = sum(size for _, size, _ in plan.bank_files())
@@ -393,8 +431,7 @@ def _publish_from_bank(
                 )
                 for f in payload["files"]
             ]
-            metadata_raw = payload.get("metadata")
-            metadata = dict(metadata_raw) if isinstance(metadata_raw, dict) else {}
+            metadata = payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {}
             metadata = dict(metadata)
             metadata["download_skip"] = "bank"
             # Banked repo_specs are frozen at bank time and can carry a stale
@@ -622,7 +659,7 @@ def run_clone(
         # flavor from the hub's banked manifests. Any miss/error falls
         # through to the full clone below (fail-open).
         _progress(0.02, "clone.plan")
-        plan: Any = None
+        plan = None
         try:
             if provider == "huggingface":
                 plan = plan_huggingface(
@@ -710,7 +747,6 @@ def run_clone(
         strategy = source.classification.strategy if source.classification is not None else ""
         publish_as_is = strategy in {
             "transformers", "peft", "sentence_transformers", "gguf", "native_lora",
-            "pipeline_tree",
         }
 
         for i, spec in enumerate(specs):
@@ -746,9 +782,7 @@ def run_clone(
                 # Hub flavor tokens are [a-z0-9][a-z0-9._-]{0,63}: the gguf
                 # dtype-axis label ("gguf:q4_k_m") publishes as "gguf-q4_k_m"
                 # (the th#611 flavor convention).
-                from gen_worker.models.refs import flavor_token
-
-                flavor_label = flavor_token(flavor_label)
+                flavor_label = flavor_label.replace(":", "-")
             except InlineConversionNotPossible as exc:
                 entry: dict[str, Any] = {
                     "spec_label": spec.label, "dtype": spec.dtype,
@@ -765,12 +799,6 @@ def run_clone(
                     "file_type": spec.file_type, "reason": str(exc),
                 })
                 continue
-
-            # gw#522: EVERY publish path emits canonical filenames — this
-            # seam also covers the publish-as-is lane build_flavor_tree
-            # never touches. Idempotent on already-normalized trees.
-            if spec.file_type != "gguf" and flavor_label in _CAST_NORMALIZE_DTYPES:
-                _normalize_variant_filenames(Path(tree))
 
             files = files_from_tree(tree)
             if not files:

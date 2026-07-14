@@ -30,7 +30,6 @@ Current capabilities:
 | `streaming` | multi-frame streamed responses (`{"stream":true}`) |
 | `tcp_listen` | `serve --listen tcp://host:port` |
 | `serve_sidecar` | machine-readable `.gen-worker.serve.json` handle |
-| `hub_resolve` | standalone Hub-ref resolve via `TENSORHUB_URL` |
 
 Rule of thumb: **gate every behavior off `capabilities`.** New tokens are
 added when a feature ships; absence means "not available in this build."
@@ -52,10 +51,9 @@ Document shape:
 ```json
 {
   "protocol_version": 1,
-  "gen_worker_version": "0.15.2",
+  "gen_worker_version": "0.8.0",
   "capabilities": ["describe", "list_functions", "prefetch", "cancel",
-                   "streaming", "tcp_listen", "serve_sidecar",
-                   "hub_resolve"],
+                   "streaming", "tcp_listen", "serve_sidecar"],
   "endpoint": {
     "main_module": "myendpoint.main",
     "kind": "inference",
@@ -85,9 +83,10 @@ Notes:
   `{"$ref": "#/$defs/X", "$defs": {...}}`; gen-worker **inlines that top-level
   ref** so `input_schema["properties"]` is directly available (a host builds
   field prompts off it). Nested struct references stay under `$defs`.
-- **`models`** maps each model slot to its binding descriptor:
-  `type`/`provider`/`ref` plus whichever of `tag`/`flavor`/`revision`/
-  `dtype`/`subfolder`/`version`/`storage_dtype`/`allow_lora`/`files` are set.
+- **`models`** maps each model param to its binding descriptor — `Repo` /
+  `HF` / `Civitai` carry `provider`/`ref`/`tag`/`flavor`/
+  `allow_override`; a `Dispatch` binding carries `field` + a `table` of
+  per-key bindings.
 
 `serve --list-functions --json` is a **thin alias** — it emits
 `{"functions": [...]}` using the identical per-function builder, so the array
@@ -188,7 +187,7 @@ Shape:
 ```json
 {
   "protocol_version": 1,
-  "gen_worker_version": "0.15.2",
+  "gen_worker_version": "0.8.0",
   "pid": 12345,
   "listen": "/abs/path/.gen-worker.sock",
   "ready_at": 1733356800.0,
@@ -240,8 +239,8 @@ fed by many sources and observed by tenant code one way. Every source resolves a
 | Worker stop | `serve` `Ctrl-C`/SIGTERM, or production drain | `cancel_all()` → `ctx.cancel()` on every in-flight request, then `shutdown()` |
 
 **Observation (tenant side) — identical everywhere:** call
-`ctx.raise_if_cancelled()` inside loops, or poll `ctx.cancelled`.
-Cancellation is only *prompt* for cooperative handlers; a
+`ctx.raise_if_canceled()` inside loops, or wait on `ctx.cancel_event`
+(`ctx.done()`). Cancellation is only *prompt* for cooperative handlers; a
 single-shot handler stuck in a tight C/CUDA call won't observe it until it
 returns.
 
@@ -268,6 +267,6 @@ a host can branch on it directly.
 
 ## See also
 
-- [local-dev.md](local-dev.md) — the CLI shapes (`run`, `serve` + `invoke`),
-  ergonomic payload args, and deployment topologies.
+- [local-dev.md](local-dev.md) — the three CLI shapes (`run` / `serve` +
+  `invoke` / `repl`), ergonomic payload args, and deployment topologies.
 - [endpoint-authoring.md](endpoint-authoring.md) — decorator + binding reference.

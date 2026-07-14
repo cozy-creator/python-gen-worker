@@ -12,8 +12,8 @@ pip install gen-worker[torch]   # for PyTorch inference/training
 pip install gen-worker          # plain Python (e.g. API-proxy endpoints)
 ```
 
-Optional extras: `[images]` / `[audio]` / `[video]` for media I/O,
-`[vision]` for torchvision, `[datasets]` for parquet shard reads.
+Optional extras: `[images]` for image I/O, `[audio]` for audio I/O,
+`[trainer]` for trainer-class endpoints.
 
 ## Hello world
 
@@ -86,30 +86,17 @@ never a constructor argument. `storage_dtype="fp8"` keeps denoiser weights in
 fp8-E4M3 storage with per-layer upcast to the compute `dtype` (half the VRAM
 on any card); fp8-stored `#fp8` flavors get the same treatment automatically.
 
-Curated checkpoint selection is a runtime payload argument: a handler declares
-`model: SomeModelChoice` (a `ModelChoice` enum of `Model` rows, each carrying a
-`ModelRef` binding + typed per-model defaults) and reads `payload.model.defaults`
-typed — one `generate(model=)` replaces N near-identical functions. `model:
-SomeModelChoice | ModelRef` opens BYOM. Streaming = an async-generator handler.
+Multi-variant endpoints (`bf16`/`fp8`/... checkpoints with different VRAM
+envelopes) declare `variants={name: (binding, Resources)}` — one handler body,
+one routable function per variant. Streaming = an async-generator handler.
 Engine-hosted endpoints declare `runtime="vllm"` and get a booted,
 health-checked server subprocess injected into `setup()`.
-
-`Slot(pipeline_cls, selected_by=, default_checkpoint=, default_config=)` is
-the hub-resolved alternative to `ModelChoice`: the model SET lives in
-platform config, not code. `ctx.slots["<name>"]` returns a typed
-`ResolvedSlot` — repo-metadata inference defaults (a
-`gen_worker.families.FamilyDefaults` vocabulary, tensorhub-validated)
-merged over the endpoint's code `default_config=` preset (which LOSES to
-repo metadata — a recipe of last resort).
 
 Full reference: [docs/endpoint-authoring.md](docs/endpoint-authoring.md).
 
 ## Public surface
 
-- The decorator + bindings: `endpoint`, `Resources`, `Compile`, `HF`, `Hub`,
-  `Civitai`, `ModelScope`, `ModelRef`
-- Model selection: `Model`, `ModelChoice`, `ModelDefaults`, `Slot`,
-  `ResolvedSlot`, `gen_worker.families.FamilyDefaults`
+- The decorator + bindings: `endpoint`, `Resources`, `HF`, `Hub`, `Civitai`, `ModelScope`
 - Contexts: `RequestContext` (≤15 members), `ConversionContext`,
   `DatasetContext`, `TrainingContext`
 - Errors: `ValidationError`, `RetryableError`, `CanceledError`, `FatalError`

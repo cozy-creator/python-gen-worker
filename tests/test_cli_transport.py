@@ -26,8 +26,8 @@ _EXAMPLE_DIR = Path(__file__).resolve().parents[1] / "examples" / "marco-polo"
 def test_parse_addr_forms() -> None:
     assert transport.parse_addr("tcp://0.0.0.0:9000") == ("tcp", "0.0.0.0", 9000)
     assert transport.parse_addr("tcp://host:1") == ("tcp", "host", 1)
-    assert transport.parse_addr("unix:///tmp/x.sock") == ("unix", "/tmp/x.sock", 0)
-    assert transport.parse_addr("./.gen-worker.sock") == ("unix", "./.gen-worker.sock", 0)
+    assert transport.parse_addr("unix:///tmp/x.sock") == ("unix", "/tmp/x.sock")
+    assert transport.parse_addr("./.gen-worker.sock") == ("unix", "./.gen-worker.sock")
     assert transport.is_unix("./x.sock") and not transport.is_unix("tcp://h:1")
     assert transport.display("tcp://h:2") == "tcp://h:2"
 

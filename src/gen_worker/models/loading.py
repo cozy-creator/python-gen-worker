@@ -10,7 +10,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .ladder import EMERGENCY_NF4_VRAM_FACTOR, NF4_WEIGHT_BYTES_FACTOR
+from .ladder import EMERGENCY_NF4_VRAM_FACTOR
 
 logger = logging.getLogger(__name__)
 
@@ -397,151 +397,6 @@ def apply_fp8_storage(obj: Any, *, compute_dtype: Any = None,
     return applied
 
 
-class _BlockOffloadWindow:
-    """Degraded-mode rung 2 (ie#468): one transformer block's weights REST in
-    host RAM (pinned when possible) and stream to the execution device only
-    for that block's forward. The pre-hook is PREPENDED so the H2D copy runs
-    before any fp8 upcast window (gw#460) on the same block — composed order:
-    host fp8 bytes -> device fp8 -> device compute dtype. The post-hook
-    rebinds ``.data`` to the pristine host copy (weights are read-only at
-    inference; no copy-back), so whatever dtype games other hooks played in
-    between are discarded. ``always_call`` keeps the rebind on exceptions —
-    a mid-block CUDA OOM must not leave the window resident."""
-
-    def __init__(self, params: List[Any], hosts: List[Any], device: Any) -> None:
-        self._params = params
-        self._hosts = hosts
-        self._device = device
-
-    def install(self, block: Any) -> None:
-        block.register_forward_pre_hook(self._pre, prepend=True)
-        block.register_forward_hook(self._post, always_call=True)
-
-    def _pre(self, module: Any, args: Any) -> None:
-        for p, h in zip(self._params, self._hosts):
-            p.data = h.to(self._device, non_blocking=True)
-
-    def _post(self, module: Any, args: Any, output: Any = None) -> None:
-        for p, h in zip(self._params, self._hosts):
-            p.data = h
-
-
-# Components block-window offload targets on a pipeline object (the VRAM
-# dominators); callers pass their own set for model-specific choices (e.g.
-# ltx adds "connectors" and "text_encoder").
-_BLOCK_OFFLOAD_COMPONENTS: tuple[str, ...] = ("transformer", "unet")
-
-
-def apply_block_window_offload(
-    obj: Any,
-    *,
-    components: tuple[str, ...] = _BLOCK_OFFLOAD_COMPONENTS,
-    device: Any = None,
-) -> bool:
-    """Park a module's per-block weights in pinned host RAM and stream each
-    block to ``device`` for its forward only — the gw#460 block windows in
-    reverse (degraded-mode rung 2, ie#468). Quality-preserving but slow
-    (whole-model PCIe traffic per forward); a guaranteed-completion last
-    resort for VRAM-constrained cards, never a production serving mode.
-
-    ``obj`` is a pipeline (named ``components`` are offloaded) or a bare
-    module. Parameters outside the discovered block windows — embeddings,
-    final norms, projections — are moved TO ``device`` (they must be
-    resident; the gw#460 outside-a-block dtype/device hazard applies to
-    device placement too). Composes with fp8 storage windows: fp8 bytes
-    stream over PCIe (half the traffic), upcast happens on-device.
-
-    PRECEDENCE: ``GEN_WORKER_FORBID_CPU_OFFLOAD=1`` VETOES this rung — the
-    operator kill-switch wins over degraded mode, raising instead of parking
-    weights (same precedence as the executor's OOM-demotion path, gw#463).
-
-    Returns True when any module was armed. Idempotent per module."""
-    from .memory import _forbid_cpu_inference
-
-    _forbid_cpu_inference(
-        "block-window host-RAM weight offload (degraded rung 2, ie#468)"
-    )
-    try:
-        import torch
-    except ImportError:
-        logger.warning("block-window offload ignored: torch not installed")
-        return False
-    if device is None:
-        if not torch.cuda.is_available():
-            logger.warning("block-window offload ignored: no CUDA device")
-            return False
-        device = "cuda"
-
-    targets: List[tuple[str, Any]] = []
-    for name in components:
-        mod = getattr(obj, name, None)
-        if mod is not None and hasattr(mod, "parameters"):
-            targets.append((name, mod))
-    if not targets and hasattr(obj, "parameters"):
-        targets.append((type(obj).__name__, obj))
-
-    applied = False
-    for name, mod in targets:
-        if getattr(mod, "_cozy_block_offload_applied", False):
-            applied = True
-            continue
-        windows = _fp8_block_windows(mod) or _fp8_block_windows_whole(mod)
-        if not windows:
-            logger.warning("block-window offload: no weight windows in %s", name)
-            continue
-        pin = True
-        parked_ids: set[int] = set()
-        parked_bytes = 0
-        for _bname, block, params in windows:
-            hosts: List[Any] = []
-            for p in params:
-                host = None
-                if pin:
-                    try:
-                        host = torch.empty_like(p.data, device="cpu", pin_memory=True)
-                    except RuntimeError as exc:
-                        pin = False
-                        logger.warning(
-                            "block-window offload: pinned host alloc failed (%s); "
-                            "falling back to pageable staging (slower)", exc,
-                        )
-                if host is None:
-                    host = torch.empty_like(p.data, device="cpu")
-                host.copy_(p.data)
-                p.data = host
-                hosts.append(host)
-                parked_ids.add(id(p))
-                parked_bytes += host.numel() * host.element_size()
-            _BlockOffloadWindow(params, hosts, device).install(block)
-        # Everything OUTSIDE the windows must be resident on the device.
-        for p in mod.parameters():
-            if id(p) not in parked_ids and p.device != torch.device(device):
-                p.data = p.data.to(device)
-        for b in mod.buffers():
-            if b.device != torch.device(device):
-                b.data = b.data.to(device)
-        mod._cozy_block_offload_applied = True
-        applied = True
-        logger.warning(
-            "DEGRADED_MODE=engaged model=%s phase=load rung=resident->block_offload: "
-            "%d blocks / %.1f GiB parked in %s host RAM, streaming per forward",
-            name, len(windows), parked_bytes / float(1 << 30),
-            "pinned" if pin else "pageable",
-        )
-    return applied
-
-
-def block_offload_active(obj: Any) -> bool:
-    """True when :func:`apply_block_window_offload` armed ``obj`` or any of
-    its standard components."""
-    if getattr(obj, "_cozy_block_offload_applied", False):
-        return True
-    return any(
-        getattr(getattr(obj, name, None), "_cozy_block_offload_applied", False)
-        for name in _BLOCK_OFFLOAD_COMPONENTS
-    )
-
-
 def _single_file_checkpoint(path: Path) -> Optional[Path]:
     """A snapshot that is one loose checkpoint rather than a pretrained layout:
     the path itself when it's a ``.safetensors`` file, or the directory's sole
@@ -660,9 +515,11 @@ def _merge_sharded_checkpoint(snapshot_dir: Path, index_path: Path) -> Path:
 # runtime rung and the Go/Py ladder never drift.
 EMERGENCY_FIT_FACTOR = EMERGENCY_NF4_VRAM_FACTOR
 # Resident factor after fp8-E4M3 storage of the denoiser, expressed against
-# the declared CARD SIZE (resources.vram_gb — includes activation/framework
-# headroom over raw weights). The ONE fp8 fit factor (pgw#515 deleted the
-# duplicate ladder walk and its weight-bytes-based 0.75 estimate).
+# the declared CARD SIZE (resources.vram_gb) — a DIFFERENT base than the
+# ladder's CAST_FP8_VRAM_FACTOR (0.75), which is against raw WEIGHT BYTES
+# (base_size_gb). They estimate the same physical fp8-resident VRAM but the
+# denominators differ (card size includes activation/framework headroom over
+# raw weights), so the numbers legitimately differ and must NOT be equated.
 FP8_STORAGE_FIT_FACTOR = 0.55
 _EMERGENCY_MARGIN_GB = 2.0
 
@@ -688,57 +545,29 @@ def runtime_fp8_storage_supported() -> bool:
         return False
 
 
-def model_index_components(path: str | Path) -> set:
-    """Component names the snapshot's model_index.json declares. Empty set
-    when there is no readable model_index.json (single-file checkpoints,
-    transformers layouts)."""
-    try:
-        with open(Path(path) / "model_index.json", "r", encoding="utf-8") as f:
-            index = json.load(f)
-        return {k for k in index if not k.startswith("_")}
-    except Exception:
-        return set()
-
-
-def _safetensors_data_bytes(p: Path) -> int:
-    import struct
-
-    with open(p, "rb") as f:
-        raw = f.read(8)
-        if len(raw) < 8:
-            return 0
-        (n,) = struct.unpack("<Q", raw)
-        if n <= 0 or n > _MAX_SAFETENSORS_HEADER_BYTES:
-            return 0
-        header = json.loads(f.read(n))
-    total = 0
-    for value in header.values():
-        if isinstance(value, dict) and "data_offsets" in value:
-            s, e = value["data_offsets"]
-            total += int(e) - int(s)
-    return total
-
-
-def snapshot_component_weight_bytes(model_path: Path) -> Dict[str, int]:
-    """Tensor bytes per top-level component dir (header-declared data ranges;
-    no tensor reads). Root-level files book under ``""``. Empty dict when
-    undetectable."""
-    out: Dict[str, int] = {}
-    root = Path(model_path)
-    try:
-        for p in sorted(root.rglob("*.safetensors")):
-            rel = p.relative_to(root)
-            comp = rel.parts[0] if len(rel.parts) > 1 else ""
-            out[comp] = out.get(comp, 0) + _safetensors_data_bytes(p)
-    except (OSError, ValueError):
-        return {}
-    return {k: v for k, v in out.items() if v > 0}
-
-
 def snapshot_weight_bytes(model_path: Path) -> int:
     """Total tensor bytes across the snapshot's safetensors (header-declared
     data ranges; no tensor reads). 0 when undetectable."""
-    return sum(snapshot_component_weight_bytes(model_path).values())
+    import struct
+
+    total = 0
+    try:
+        for p in sorted(Path(model_path).rglob("*.safetensors")):
+            with open(p, "rb") as f:
+                raw = f.read(8)
+                if len(raw) < 8:
+                    continue
+                (n,) = struct.unpack("<Q", raw)
+                if n <= 0 or n > _MAX_SAFETENSORS_HEADER_BYTES:
+                    continue
+                header = json.loads(f.read(n))
+            for value in header.values():
+                if isinstance(value, dict) and "data_offsets" in value:
+                    s, e = value["data_offsets"]
+                    total += int(e) - int(s)
+    except (OSError, ValueError):
+        return 0
+    return total
 
 
 def bitsandbytes_available() -> bool:
@@ -757,18 +586,9 @@ def bitsandbytes_available() -> bool:
         return False
 
 
-def emergency_quantization_config(
-    cls: Any,
-    *,
-    components: Optional[List[str]] = None,
-    compute_dtype: Any = None,
-) -> Optional[Any]:
-    """bnb-nf4 config for the emergency rung, scoped to ``components`` (the
-    snapshot's REAL denoiser/text-encoder names — gw#521: a config naming
-    absent components is silently ignored by diffusers, so the caller derives
-    the list from the tree and this function refuses an empty one). None
-    (with a warning) when the stack can't do it — the offload ladder then
-    carries it."""
+def emergency_quantization_config(cls: Any) -> Optional[Any]:
+    """Denoiser-scoped bnb-nf4 config for the emergency rung. None (with a
+    warning) when the stack can't do it — the offload ladder then carries it."""
     if not bitsandbytes_available():
         logger.warning(
             "emergency nf4 unavailable (bitsandbytes not installed in this "
@@ -785,74 +605,34 @@ def emergency_quantization_config(
     except ImportError as exc:
         logger.warning("emergency nf4 unavailable (%s); falling to offload", exc)
         return None
-    kwargs: Dict[str, Any] = {
+    kwargs = {
         "load_in_4bit": True,
         "bnb_4bit_quant_type": "nf4",
-        "bnb_4bit_compute_dtype": compute_dtype or torch.bfloat16,
+        "bnb_4bit_compute_dtype": torch.bfloat16,
         "bnb_4bit_use_double_quant": True,
     }
     if isinstance(cls, type) and issubclass(cls, diffusers.DiffusionPipeline):
-        targets = list(_FP8_STORAGE_COMPONENTS) if components is None else list(components)
-        if not targets:
-            logger.warning(
-                "emergency nf4 skipped: no quantizable component in the "
-                "snapshot (denoiser-less tree); the offload ladder carries it"
-            )
-            return None
-        try:
-            return PipelineQuantizationConfig(
-                quant_backend="bitsandbytes_4bit",
-                quant_kwargs=kwargs,
-                components_to_quantize=targets,
-            )
-        except ValueError as exc:
-            # diffusers validates the bnb config signature against BOTH
-            # libraries; a diffusers/transformers skew raises here — skip the
-            # rung instead of killing the load.
-            logger.warning("emergency nf4 unavailable (%s); falling to offload", exc)
-            return None
+        return PipelineQuantizationConfig(
+            quant_backend="bitsandbytes_4bit",
+            quant_kwargs=kwargs,
+            components_to_quantize=list(_FP8_STORAGE_COMPONENTS),
+        )
     from diffusers.quantizers.quantization_config import BitsAndBytesConfig
 
     return BitsAndBytesConfig(**kwargs)
 
 
-def _bnb_quantized_components(pipe: Any, targets: List[str]) -> List[str]:
-    """The subset of ``targets`` whose modules actually hold bnb 4-bit layers
-    after the load — the gw#521 no-op detector (diffusers silently ignores
-    config components absent from the pipeline)."""
-    landed: List[str] = []
-    for name in targets:
-        mod = getattr(pipe, name, None)
-        if mod is None or not hasattr(mod, "modules"):
-            continue
-        try:
-            for m in mod.modules():
-                if type(m).__name__ in ("Linear4bit", "LinearNF4", "LinearFP4"):
-                    landed.append(name)
-                    break
-        except Exception:  # noqa: BLE001
-            continue
-    return landed
-
-
 def _adaptive_fit_rung(
-    cls: Any, path: Path, *, fp8_planned: bool, compute_dtype: Any = None
+    cls: Any, path: Path, *, fp8_planned: bool
 ) -> tuple[str, Optional[Any]]:
     """Serve-time fit ladder at load (th#683 P3): when the snapshot's
     estimated resident bytes (after any planned fp8 storage) exceed free
-    VRAM, engage the cheapest-quality-loss runtime lever that FITS:
-    fp8-E4M3 storage first (denoiser weights ~halve, quality ~= a stored
-    #fp8 flavor), then the nf4 emergency rung — denoiser first, text
-    encoders joining only when the denoiser alone isn't enough. Targets are
-    the snapshot's REAL component names (gw#521: a config naming absent
-    components is silently ignored by diffusers — the rung must never be a
-    hard-coded archetype guess). When even nf4 cannot fit, the rung is
-    SKIPPED (full-precision weights preserved; the offload ladder carries
-    it) instead of paying the quality cost for nothing.
-
-    Returns ``(mode, config)``: ``("", None)`` fits as planned (or no rung
-    helps); ``("fp8", None)`` engage fp8 storage; ``("nf4", qc)``
-    emergency-quantize."""
+    VRAM, engage the cheapest-quality-loss runtime lever that fits:
+    fp8-E4M3 storage first (bf16/fp16 weights ~halve, quality ~= a stored
+    #fp8 flavor), then the nf4 emergency rung. Returns ``(mode, config)``:
+    ``("", None)`` fits as planned; ``("fp8", None)`` engage fp8 storage;
+    ``("nf4", qc)`` emergency-quantize (qc None when the stack can't — the
+    offload ladder then carries it)."""
     if not emergency_quant_enabled():
         return "", None
     from .memory import get_available_vram_gb
@@ -860,68 +640,34 @@ def _adaptive_fit_rung(
     free_gb = get_available_vram_gb()
     if free_gb <= 0:
         return "", None
-    comp_bytes = snapshot_component_weight_bytes(path)
-    total = sum(comp_bytes.values())
-    if total <= 0:
+    disk = snapshot_weight_bytes(path)
+    if disk <= 0:
         return "", None
-    budget = max(0.0, free_gb - _EMERGENCY_MARGIN_GB) * float(1 << 30)
-
-    named = model_index_components(path) or set(comp_bytes)
-    denoisers = [c for c in _FP8_STORAGE_COMPONENTS
-                 if c in named and comp_bytes.get(c, 0) > 0]
-    encoders = [c for c in _FP8_TEXT_ENCODER_COMPONENTS
-                if c in named and comp_bytes.get(c, 0) > 0]
-    denoiser_bytes = sum(comp_bytes[c] for c in denoisers)
-
-    on_disk = detect_on_disk_dtype(path)
-    resident = float(total)
-    if fp8_planned and on_disk != "fp8":
-        resident -= 0.5 * denoiser_bytes  # fp8 storage halves the denoiser
-    total_gb = total / float(1 << 30)
-    if resident <= budget:
+    resident_gb = disk / float(1 << 30)
+    if fp8_planned and detect_on_disk_dtype(path) != "fp8":
+        resident_gb *= 0.5  # bf16/fp16 snapshot halved by fp8 storage
+    budget_gb = max(0.0, free_gb - _EMERGENCY_MARGIN_GB)
+    if resident_gb <= budget_gb:
         return "", None
     # fp8-storage rung: only for un-quantized bf16/fp16 snapshots (an already
     # quantized flavor can't be halved again) when the halved estimate fits.
-    if not fp8_planned and on_disk in ("bf16", "fp16") and denoisers \
+    if not fp8_planned and detect_on_disk_dtype(path) in ("bf16", "fp16") \
             and runtime_fp8_storage_supported() \
-            and total - 0.5 * denoiser_bytes <= budget:
+            and resident_gb * 0.5 <= budget_gb:
         logger.warning(
             "fp8-E4M3 emergency weight storage engaged for %s (%.1f GB "
             "weights, %.1f GB free) — near-native quality; a stored #fp8 "
             "flavor of this model would serve natively here.",
-            path, total_gb, free_gb,
+            path, resident_gb, free_gb,
         )
         return "fp8", None
-    if not denoisers:
-        logger.warning(
-            "emergency nf4 skipped for %s: no denoiser component in the "
-            "snapshot (components: %s); the offload ladder carries it",
-            path, sorted(named),
-        )
-        return "", None
-    # nf4 rung: denoiser first; text encoders join only when needed.
-    targets = list(denoisers)
-    est = total - denoiser_bytes * (1.0 - NF4_WEIGHT_BYTES_FACTOR)
-    if est > budget and encoders:
-        targets += encoders
-        est -= sum(comp_bytes[c] for c in encoders) * (1.0 - NF4_WEIGHT_BYTES_FACTOR)
-    if est > budget:
-        logger.warning(
-            "emergency nf4 skipped for %s: even 4-bit weights (~%.1f GB) "
-            "exceed the %.1f GB budget; keeping full precision — the "
-            "offload ladder carries it",
-            path, est / float(1 << 30), budget / float(1 << 30),
-        )
-        return "", None
-    qc = emergency_quantization_config(
-        cls, components=targets, compute_dtype=compute_dtype)
+    qc = emergency_quantization_config(cls)
     if qc is not None:
         logger.warning(
-            "EMERGENCY 4-bit quantization engaged for %s (components %s; "
-            "%.1f GB weights, %.1f GB free) — quality below platform "
-            "standards; a larger card or Blackwell SKU would serve stored "
-            "flavors instead.",
-            path, targets, total_gb, free_gb,
+            "EMERGENCY 4-bit quantization engaged for %s (%.1f GB weights, "
+            "%.1f GB free) — quality below platform standards; a larger card "
+            "or Blackwell SKU would serve stored flavors instead.",
+            path, resident_gb, free_gb,
         )
     return "nf4", qc
 
@@ -996,10 +742,7 @@ def load_from_pretrained(
     if not read_on_disk_quant_config(Path(path)):
         qc = synthesize_quantization_config(attrs)
         if qc is None:
-            mode, eqc = _adaptive_fit_rung(
-                cls, Path(path), fp8_planned=fp8_storage,
-                compute_dtype=kwargs.get("torch_dtype"),
-            )
+            mode, eqc = _adaptive_fit_rung(cls, Path(path), fp8_planned=fp8_storage)
             if mode == "fp8":
                 fp8_storage = True  # runtime fp8-E4M3 storage rung (th#683)
                 adaptive_rung = "fp8"
@@ -1033,19 +776,6 @@ def load_from_pretrained(
             pipe._cozy_fp8_storage_ok = bool(applied)
         except Exception:
             pass
-    if adaptive_rung == "nf4":
-        # gw#521: verify the quant actually LANDED — a config whose component
-        # names miss the pipeline is silently ignored by diffusers, and a
-        # full-precision pipeline stamped "nf4" lies to placement and billing.
-        targets = list(getattr(
-            kwargs.get("quantization_config"), "components_to_quantize", None) or [])
-        if targets and not _bnb_quantized_components(pipe, targets):
-            logger.error(
-                "EMERGENCY nf4 did NOT land on %s (targets %s, pipeline %s) — "
-                "serving full precision; the offload ladder carries it",
-                path, targets, type(pipe).__name__,
-            )
-            adaptive_rung = ""
     if adaptive_rung:
         # gw#491: a silently-engaged emergency rung is the th#736 bug class —
         # the executor reconciles this stamp into ServePlan.ran / FnDegraded.
@@ -1064,14 +794,10 @@ __all__ = [
     "read_on_disk_quant_config",
     "synthesize_quantization_config",
     "apply_fp8_storage",
-    "apply_block_window_offload",
-    "block_offload_active",
     "emergency_quant_enabled",
     "bitsandbytes_available",
     "runtime_fp8_storage_supported",
     "emergency_quantization_config",
-    "model_index_components",
-    "snapshot_component_weight_bytes",
     "snapshot_weight_bytes",
     "load_from_pretrained",
 ]

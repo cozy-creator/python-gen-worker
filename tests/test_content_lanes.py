@@ -25,6 +25,7 @@ from diffusers import AutoencoderKL, DDPMScheduler, DiffusionPipeline, UNet2DMod
 
 from gen_worker.api.binding import HF
 from gen_worker.api.decorators import Resources
+from gen_worker.api.errors import ValidationError
 from gen_worker.executor import Executor, ModelStore
 from gen_worker.models.cozy_cas import _blake3_file
 from gen_worker.models.residency import Tier
@@ -112,11 +113,15 @@ class _In(msgspec.Struct):
     x: str
 
 
-def _lane_spec(cls: type, models: dict) -> EndpointSpec:
+def _route(payload: "_In"):
+    return ("a",) if payload.x == "a" else ("b",)
+
+
+def _lane_spec(cls: type, models: dict, route=None) -> EndpointSpec:
     return EndpointSpec(
         name="lanes", method=cls.run, kind="inference", payload_type=_In,
         output_mode="single", cls=cls, attr_name="run", models=models,
-        resources=Resources(),
+        resources=Resources(), route=route,
     )
 
 
@@ -183,124 +188,48 @@ def test_share_plan_only_covers_byte_identical_components(tmp_path, lane_repos) 
     assert ex._component_share_plan(spec2, paths, hints) is None
 
 
-def test_canonical_config_digest_folds_save_era_noise(tmp_path) -> None:
-    """gw#479 live lesson (qwen fp8 casts): byte-identical weights, configs
-    differing only in save-era serialization must share; real field changes
-    must not."""
-    import json
+def test_routed_slots_validation(tmp_path, lane_repos) -> None:
+    repos = {"acme/a": lane_repos["a"], "acme/b": lane_repos["b"]}
+    spec = _lane_spec(
+        _Lanes, {"a": HF("acme/a"), "b": HF("acme/b")}, route=_route)
+    ex = _executor([spec], tmp_path, 4 * _GiB, [], repos)
 
-    from gen_worker.models.config_identity import canonical_json_digest
+    assert ex._routed_slots(spec, _In(x="a")) == ["a"]
+    assert ex._routed_slots(spec, _In(x="edit")) == ["b"]
 
-    a, b = tmp_path / "a", tmp_path / "b"
-    a.mkdir(), b.mkdir()
-
-    base = {"act_fn": "silu", "torch_dtype": "float32", "sample_size": 32,
-            "_diffusers_version": "0.34.0.dev0", "latents_mean": None}
-    saved_by_newer = {"act_fn": "silu", "dtype": "float32", "sample_size": 32,
-                      "_diffusers_version": "0.36.0.dev0"}
-    (a / "cfg.json").write_text(json.dumps(base))
-    (b / "cfg.json").write_text(json.dumps(saved_by_newer, indent=2))
-    da, db = canonical_json_digest(a / "cfg.json"), canonical_json_digest(b / "cfg.json")
-    assert da and da == db                       # provenance/null/dtype-rename fold
-
-    real_change = dict(saved_by_newer, sample_size=64)
-    (b / "cfg2.json").write_text(json.dumps(real_change))
-    assert canonical_json_digest(b / "cfg2.json") != da   # real field differs
-
-    # transformers config.json: explicit class defaults fold out via AutoConfig.
-    gpt_a = {"model_type": "gpt2", "n_layer": 2, "n_head": 2, "n_embd": 8}
-    gpt_b = {"model_type": "gpt2", "n_layer": 2, "n_head": 2, "n_embd": 8,
-             "resid_pdrop": 0.1, "_name_or_path": "/scratch/x",
-             "transformers_version": "4.53.1"}  # resid_pdrop 0.1 IS the default
-    (a / "config.json").write_text(json.dumps(gpt_a))
-    (b / "config.json").write_text(json.dumps(gpt_b))
-    ca, cb = canonical_json_digest(a / "config.json"), canonical_json_digest(b / "config.json")
-    assert ca and ca == cb
+    bad = _lane_spec(
+        _Lanes, {"a": HF("acme/a"), "b": HF("acme/b")},
+        route=lambda p: ("nope",))
+    with pytest.raises(ValidationError):
+        ex._routed_slots(bad, _In(x="a"))
+    empty = _lane_spec(
+        _Lanes, {"a": HF("acme/a"), "b": HF("acme/b")}, route=lambda p: ())
+    with pytest.raises(ValidationError):
+        ex._routed_slots(empty, _In(x="a"))
+    # No route= -> every slot (unchanged single-lane behavior).
+    plain = _lane_spec(_Lanes, {"a": HF("acme/a"), "b": HF("acme/b")})
+    assert ex._routed_slots(plain, _In(x="a")) == ["a", "b"]
 
 
-def test_canonical_config_prunes_parent_duplicated_subconfig_keys(tmp_path) -> None:
-    """Live qwen pair: transformers 4.53 serialized vision token ids into
-    BOTH the top-level VL config and text_config; 4.57 only at top. The
-    materialized top-level values are identical — the sub-config duplicate
-    is save-era redundancy and must not split content keys. A sub-config
-    value that DIFFERS from the parent still separates."""
-    import json
+def test_route_decorator_validation() -> None:
+    from gen_worker import Hub, endpoint
 
-    from gen_worker.models.config_identity import canonical_json_digest
+    with pytest.raises(ValueError):
+        @endpoint(model=Hub("o/r"), route=lambda p: ("m",))
+        class OneSlot:
+            def setup(self, m: str) -> None: ...
+            def run(self, ctx, payload: _In) -> _In: ...
 
-    a, b, c = tmp_path / "a", tmp_path / "b", tmp_path / "c"
-    for d in (a, b, c):
-        d.mkdir()
-    top = {"model_type": "qwen2_5_vl", "vision_start_token_id": 151652,
-           "vision_end_token_id": 151653}
-    saved_by_453 = dict(top, text_config={"hidden_size": 8, "vision_start_token_id": 151652,
-                                          "vision_end_token_id": 151653})
-    saved_by_457 = dict(top, text_config={"hidden_size": 8})
-    genuinely_diff = dict(top, text_config={"hidden_size": 8, "vision_start_token_id": 99})
-    # cfg.json name => structural path (no AutoConfig instantiation noise).
-    (a / "cfg.json").write_text(json.dumps(saved_by_453))
-    (b / "cfg.json").write_text(json.dumps(saved_by_457))
-    (c / "cfg.json").write_text(json.dumps(genuinely_diff))
-    da = canonical_json_digest(a / "cfg.json")
-    db = canonical_json_digest(b / "cfg.json")
-    dc = canonical_json_digest(c / "cfg.json")
-    assert da and da == db
-    assert dc != da
+    @endpoint(models={"a": Hub("o/a"), "b": Hub("o/b")}, route=_route)
+    class TwoSlots:
+        def setup(self, a: str, b: str) -> None: ...
+        def run(self, ctx, payload: _In) -> _In: ...
 
-    # MIRROR case (live pod evidence): 4.53 serialized the ids in the
-    # sub-config ONLY, 4.57 at the parent ONLY — same values, different
-    # level. Child-only scalars hoist to the parent, so both canonicalize
-    # identically; a CONFLICTING child value still separates.
-    d, e, f = tmp_path / "d", tmp_path / "e", tmp_path / "f"
-    for x in (d, e, f):
-        x.mkdir()
-    child_only = {"model_type": "qwen2_5_vl",
-                  "text_config": {"hidden_size": 8, "vision_start_token_id": 151652}}
-    parent_only = {"model_type": "qwen2_5_vl", "vision_start_token_id": 151652,
-                   "text_config": {"hidden_size": 8}}
-    conflict = {"model_type": "qwen2_5_vl", "vision_start_token_id": 151652,
-                "text_config": {"hidden_size": 8, "vision_start_token_id": 99}}
-    (d / "cfg.json").write_text(json.dumps(child_only))
-    (e / "cfg.json").write_text(json.dumps(parent_only))
-    (f / "cfg.json").write_text(json.dumps(conflict))
-    dd = canonical_json_digest(d / "cfg.json")
-    de = canonical_json_digest(e / "cfg.json")
-    df = canonical_json_digest(f / "cfg.json")
-    assert dd and dd == de
-    assert df != dd
-
-
-def test_share_plan_survives_config_provenance_noise(tmp_path, lane_repos) -> None:
-    """Repo B's vae config rewritten by a 'newer library' (provenance stamp +
-    reindented + explicit null): the vae must STILL share."""
-    import json
-    import shutil
-
-    src_a, src_b = lane_repos["a"], lane_repos["b"]
-    a = tmp_path / "repo-a"
-    b = tmp_path / "repo-b"
-    shutil.copytree(src_a, a)
-    shutil.copytree(src_b, b)
-    cfg_path = b / "vae" / "config.json"
-    cfg = json.loads(cfg_path.read_text())
-    cfg["_diffusers_version"] = "9.99.9"
-    cfg["latents_mean"] = None
-    cfg_path.write_text(json.dumps(cfg, indent=4, sort_keys=True))
-
-    repos = {"acme/a": a, "acme/b": b}
-    spec = _lane_spec(_Lanes, {"a": HF("acme/a"), "b": HF("acme/b")})
-    ex = _executor([spec], tmp_path / "cache", 4 * _GiB, [], repos)
-    hints = {"a": TinyLanePipe, "b": TinyLanePipe}
-    paths = {"a": str(a), "b": str(b)}
-    plan = ex._component_share_plan(spec, paths, hints)
-    assert plan is not None
-    assert "vae" in plan["a"] and "vae" in plan["b"]     # canonical digests folded the noise
-    assert plan["a"]["vae"] == plan["b"]["vae"]
-    assert "unet" not in plan["a"]                        # weights still gate
+    assert TwoSlots.__gen_worker_endpoint__.route is _route
 
 
 # --------------------------------------------------------------------------- #
-# Real loads: sharing, accounting, lane swap (CUDA)                             #
+# Real loads: sharing, accounting, lane swap (CUDA)
 # --------------------------------------------------------------------------- #
 
 
@@ -308,7 +237,8 @@ def test_share_plan_survives_config_provenance_noise(tmp_path, lane_repos) -> No
 def test_lanes_share_one_vae_instance_and_count_it_once(tmp_path, lane_repos) -> None:
     sent: list = []
     repos = {"acme/a": lane_repos["a"], "acme/b": lane_repos["b"]}
-    spec = _lane_spec(_Lanes, {"a": HF("acme/a"), "b": HF("acme/b")})
+    spec = _lane_spec(
+        _Lanes, {"a": HF("acme/a"), "b": HF("acme/b")}, route=_route)
 
     async def _run() -> None:
         ex = _executor([spec], tmp_path, 4 * _GiB, sent, repos)
@@ -349,7 +279,7 @@ def test_lane_swap_moves_only_the_exclusive_module(tmp_path, lane_repos) -> None
     sent: list = []
     repos = {"acme/a": lane_repos["a"], "acme/b": lane_repos["b"]}
     spec = _lane_spec(
-        _Lanes, {"a": HF("acme/a"), "b": HF("acme/b")})
+        _Lanes, {"a": HF("acme/a"), "b": HF("acme/b")}, route=_route)
 
     def _dev(module) -> str:
         return next(module.parameters()).device.type
@@ -416,7 +346,7 @@ def test_vacate_releases_shared_holds(tmp_path, lane_repos) -> None:
     sent: list = []
     repos = {"acme/a": lane_repos["a"], "acme/b": lane_repos["b"]}
     spec = _lane_spec(
-        _Lanes, {"a": HF("acme/a"), "b": HF("acme/b")})
+        _Lanes, {"a": HF("acme/a"), "b": HF("acme/b")}, route=_route)
 
     async def _run() -> None:
         ex = _executor([spec], tmp_path, 4 * _GiB, sent, repos)

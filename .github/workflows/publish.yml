@@ -23,16 +23,13 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
 
-      # --locked (pgw#524 item 6): fail loudly if uv.lock drifts from
-      # pyproject.toml instead of silently re-resolving newer dependency
-      # versions than what PR CI (ci.yml, also --locked) validated — the
-      # 0.18.0 root cause: a tag's publish run resolved different versions
-      # than the merged PR did and failed AFTER the tag was already cut.
       - name: Install dependencies
-        run: uv sync --locked --extra dev
+        run: uv sync --extra dev
 
-      # mypy already gates ci.yml on every push/PR to master (gw#497); tags are
-      # cut from master after CI passes, so re-running it here is redundant.
+      - name: Type check
+        continue-on-error: true  # Type debt in clone/conversion/etc — see follow-up; visible in logs, doesn't block publish.
+        run: uv run mypy src/gen_worker
+
       - name: Run tests
         run: uv run pytest tests/ -v
 

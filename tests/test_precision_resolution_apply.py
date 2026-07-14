@@ -1,4 +1,5 @@
-"""th#697 P4: the worker applies hub precision resolutions to its bindings."""
+"""th#697 P4: the worker applies hub precision resolutions to its bindings,
+and the local (no-orchestrator) ladder rebinding walks the same spec."""
 
 from __future__ import annotations
 
@@ -9,6 +10,9 @@ import msgspec
 from gen_worker.api.binding import Hub, wire_ref
 from gen_worker.api.decorators import Resources
 from gen_worker.executor import Executor
+from gen_worker.models.hub_client import WorkerResolvedFlavor, WorkerResolvedRepo
+from gen_worker.models.hub_policy import TensorhubWorkerCapabilities
+from gen_worker.models.ladder import resolve_local_bindings
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import EndpointSpec
 
@@ -29,7 +33,7 @@ def _spec() -> EndpointSpec:
     return EndpointSpec(
         name="generate", method=_Fake.generate, kind="inference",
         payload_type=_In, output_mode="single", cls=_Fake,
-        models={"pipeline": Hub("acme/z-image")},
+        models={"pipeline": Hub("acme/z-image", tag="prod")},
         resources=Resources(gpu=True),
     )
 
@@ -84,6 +88,62 @@ def test_hello_ack_shape_applies() -> None:
     )
     ex.apply_model_resolutions({r.ref: (r.resolved_ref, r.cast) for r in ack.resolutions})
     assert wire_ref(ex.specs["generate"].models["pipeline"]) == "acme/z-image#svdq-int4-r128"
+
+
+def _caps(sm: int, libs: tuple = ()) -> TensorhubWorkerCapabilities:
+    return TensorhubWorkerCapabilities(
+        cuda_version="12.8", gpu_sm=sm, torch_version="2.8.0", installed_libs=libs,
+    )
+
+
+def _resolved_repo() -> WorkerResolvedRepo:
+    return WorkerResolvedRepo(
+        snapshot_digest="d1", files=[], size_bytes=12_200_000_000,
+        sibling_flavors=[
+            WorkerResolvedFlavor(flavor="", size_bytes=12_200_000_000),
+            WorkerResolvedFlavor(flavor="svdq-int4-r128", size_bytes=3_900_000_000),
+        ],
+    )
+
+
+def test_resolve_local_bindings_picks_stored_flavor() -> None:
+    bindings = {"pipeline": Hub("acme/z-image", tag="prod")}
+    out = resolve_local_bindings(
+        bindings, caps=_caps(89, ("nunchaku",)), free_vram_gb=23.0,
+        resolver=lambda thref: _resolved_repo(),
+    )
+    assert wire_ref(out["pipeline"]) == "acme/z-image#svdq-int4-r128"
+
+
+def test_resolve_local_bindings_cast_rung_on_hopper() -> None:
+    bindings = {"pipeline": Hub("acme/z-image", tag="prod")}
+    out = resolve_local_bindings(
+        bindings, caps=_caps(90), free_vram_gb=78.0,
+        resolver=lambda thref: _resolved_repo(),
+    )
+    assert wire_ref(out["pipeline"]) == "acme/z-image"
+    assert out["pipeline"].storage_dtype == "fp8"
+
+
+def test_resolve_local_bindings_never_touches_pinned_or_failing() -> None:
+    pinned = Hub("acme/z-image", flavor="fp8")
+    hf_style = Hub("acme/z-image", storage_dtype="fp8")
+
+    def _boom(thref):
+        raise RuntimeError("offline")
+
+    out = resolve_local_bindings(
+        {"a": pinned, "b": hf_style},
+        caps=_caps(89, ("nunchaku",)), free_vram_gb=23.0,
+        resolver=lambda thref: _resolved_repo(),
+    )
+    assert out["a"] is pinned and out["b"] is hf_style
+
+    bare = Hub("acme/z-image")
+    out = resolve_local_bindings(
+        {"c": bare}, caps=_caps(89), free_vram_gb=23.0, resolver=_boom,
+    )
+    assert out["c"] is bare
 
 
 def test_apply_model_resolutions_rehomes_the_instance_group() -> None:

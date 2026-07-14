@@ -257,14 +257,11 @@ def test_truncated_cached_blob_is_redownloaded_at_build(tmp_path: Path, monkeypa
     from gen_worker.models.cozy_snapshot import ensure_snapshot_async
     from gen_worker.models.refs import TensorhubRef
 
-    from gen_worker.models.hub_client import WorkerResolvedRepo, WorkerResolvedRepoFile
-
-    resolved = WorkerResolvedRepo(
-        snapshot_digest="55" * 32,
-        files=[WorkerResolvedRepoFile(
-            path="model.safetensors", size_bytes=len(content),
-            blake3=digest, url="http://example.invalid/blob")],
-    )
+    resolved = {
+        "snapshot_digest": "55" * 32,
+        "files": [{"path": "model.safetensors", "size_bytes": len(content),
+                   "blake3": digest, "url": "http://example.invalid/blob"}],
+    }
     out = asyncio.run(ensure_snapshot_async(
         base_dir=tmp_path, ref=TensorhubRef(owner="e2e", repo="tiny"),
         resolved=resolved,
@@ -320,60 +317,3 @@ def test_safetensors_file_valid(tmp_path: Path) -> None:
     empty = tmp_path / "empty.safetensors"
     empty.write_bytes(b"")
     assert not safetensors_file_valid(empty)
-
-
-# --------------------------------------------------------------------------- #
-# gw#479 multi-lane fallout: refs sharing blobs must download each blob ONCE
-# --------------------------------------------------------------------------- #
-
-
-def test_concurrent_refs_sharing_a_blob_download_it_once(tmp_path: Path, monkeypatch) -> None:
-    """Two refs materializing CONCURRENTLY share a blob (split-vendor lanes
-    share 9.7GB of encoder shards): without the per-digest inflight lock both
-    streamed into the same .part, interleaved writes failed verification, and
-    the second ref died download_failed on three real pods (J24M runs 10-12).
-    The second task must WAIT and reuse the finished blob."""
-    content = _tiny_safetensors()
-    digest = blake3(content).hexdigest()
-    calls = {"n": 0, "inflight": 0, "max_inflight": 0}
-
-    async def _slow_dl(url, dst, expected_size, expected_blake3, on_bytes=None):
-        calls["n"] += 1
-        calls["inflight"] += 1
-        calls["max_inflight"] = max(calls["max_inflight"], calls["inflight"])
-        await asyncio.sleep(0.05)  # hold the download open so tasks overlap
-        dst.write_bytes(content)
-        calls["inflight"] -= 1
-
-    monkeypatch.setattr(snap_mod, "_download_one_file", _slow_dl)
-
-    from gen_worker.models.cozy_snapshot import ensure_snapshot_async
-    from gen_worker.models.hub_client import WorkerResolvedRepo, WorkerResolvedRepoFile
-    from gen_worker.models.refs import TensorhubRef
-
-    def _resolved(snap_digest: str, exclusive: bytes) -> WorkerResolvedRepo:
-        return WorkerResolvedRepo(
-            snapshot_digest=snap_digest,
-            files=[
-                WorkerResolvedRepoFile(
-                    path="text_encoder/model.safetensors", size_bytes=len(content),
-                    blake3=digest, url="http://example.invalid/shared"),
-            ],
-        )
-
-    async def _both() -> None:
-        await asyncio.gather(
-            ensure_snapshot_async(
-                base_dir=tmp_path, ref=TensorhubRef(owner="e2e", repo="lane-a"),
-                resolved=_resolved("aa" * 32, b"a")),
-            ensure_snapshot_async(
-                base_dir=tmp_path, ref=TensorhubRef(owner="e2e", repo="lane-b"),
-                resolved=_resolved("bb" * 32, b"b")),
-        )
-
-    asyncio.run(_both())
-    assert calls["n"] == 1, f"shared blob downloaded {calls['n']}x — inflight lock missing"
-    assert calls["max_inflight"] == 1
-    for repo in ("lane-a", "lane-b"):
-        snap_dirs = list((tmp_path).rglob("text_encoder/model.safetensors"))
-    assert len(snap_dirs) >= 1

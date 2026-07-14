@@ -64,22 +64,20 @@ def _manifest(*binding_blocks: dict) -> dict:
     [
         (
             {"pipeline": {"kind": "fixed", "provider": "hf",
-                          "ref": "bfl/FLUX.2-klein-4B", "flavor": "bf16"}},
-            {"bfl/FLUX.2-klein-4B#bf16": "hf"},
+                          "ref": "bfl/FLUX.2-klein-4B", "flavor": "bf16", "tag": "prod"}},
+            {"bfl/FLUX.2-klein-4B#bf16": "hf", "bfl/FLUX.2-klein-4B": "hf"},
         ),
         (
-            # A non-default tag folds into the normal-form key.
             {"pipeline": {"kind": "fixed", "provider": "tensorhub",
-                          "ref": "acme/flux", "flavor": "fp8", "tag": "canary"}},
-            {"acme/flux:canary#fp8": "tensorhub"},
+                          "ref": "acme/flux", "flavor": "fp8", "tag": "prod"}},
+            {"acme/flux:prod#fp8": "tensorhub", "acme/flux#fp8": "tensorhub"},
         ),
         (
-            # Dispatch table: one repo name, two providers per flavor variant.
             {"pipeline": {"kind": "dispatch", "field": "variant", "table": {
-                "bf16": {"provider": "hf", "ref": "owner/flux", "flavor": "bf16"},
-                "fp8": {"provider": "tensorhub", "ref": "owner/flux", "flavor": "fp8"},
+                "bf16": {"provider": "hf", "ref": "owner/flux", "flavor": "bf16", "tag": "prod"},
+                "fp8": {"provider": "tensorhub", "ref": "owner/flux", "flavor": "fp8", "tag": "prod"},
             }}},
-            {"owner/flux#bf16": "hf", "owner/flux#fp8": "tensorhub"},
+            {"owner/flux#bf16": "hf", "owner/flux:prod#fp8": "tensorhub"},
         ),
     ],
 )
@@ -113,20 +111,6 @@ def test_lookup_default_and_index() -> None:
     assert lookup_provider_for_ref("not/in-index") == "tensorhub"
     set_provider_index(None)
     assert lookup_provider_for_ref("acme/flux#bf16") == "tensorhub"  # cleared
-
-
-def test_lookup_exact_flavor_beats_repo_fallback() -> None:
-    """Dispatch tables may bind two providers to ONE repo name via flavors:
-    the exact normal-form key disambiguates, and a hub-minted pick of a NEW
-    flavor still routes via the repo-identity fallback."""
-    set_provider_index({"owner/flux#bf16": "hf", "owner/flux#fp8": "tensorhub"})
-    assert lookup_provider_for_ref("owner/flux#fp8") == "tensorhub"
-    assert lookup_provider_for_ref("owner/flux#bf16") == "hf"
-    # normalization: ':latest' and flavor case fold to the same key
-    assert lookup_provider_for_ref("owner/flux:latest#FP8") == "tensorhub"
-    # unseen flavor -> repo-identity fallback (first provider indexed)
-    assert lookup_provider_for_ref("owner/flux#svdq-int4") == "hf"
-    set_provider_index(None)
 
 
 @pytest.mark.parametrize(

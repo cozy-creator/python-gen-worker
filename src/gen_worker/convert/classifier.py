@@ -67,11 +67,10 @@ class RepoRefusal(RuntimeError):
 class RepoClassification:
     """Result of :func:`classify_repo` + :func:`select_files`."""
 
-    strategy: str          # diffusers | pipeline_tree | transformers | peft |
-                           # sentence_transformers | gguf | native_lora | aio_singlefile
-    runtime_library: str   # diffusers | trellis2 | transformers | peft |
-                           # sentence-transformers | llama-cpp |
-                           # diffusers-single-file | diffusers-lora
+    strategy: str          # diffusers | transformers | peft | sentence_transformers |
+                           # gguf | native_lora | aio_singlefile
+    runtime_library: str   # diffusers | transformers | peft | sentence-transformers |
+                           # llama-cpp | diffusers-single-file | diffusers-lora
     allow_patterns: list[str]
     attrs: dict[str, str] = field(default_factory=dict)
     detection_reason: str = ""
@@ -234,15 +233,6 @@ def classify_repo(
 
     has_st = any(p.lower().endswith(".safetensors") for p in paths)
     has_st_index = any(p.lower().endswith(".safetensors.index.json") for p in paths)
-
-    # 3.5 pipeline tree (TRELLIS-style: pipeline.json at root composing nested
-    # per-model checkpoint pairs, e.g. ckpts/<name>.{json,safetensors}). The
-    # tree is one artifact — every safetensors rides, no dtype-variant pick
-    # (mixed per-model dtypes are intentional upstream).
-    if "pipeline.json" in root_set and has_st:
-        pt_weights = sorted(p for p in paths if p.lower().endswith(".safetensors"))
-        return _finish("pipeline_tree", "trellis2", pt_weights, [],
-                       {"file_layout": "singlefile"}, "pipeline.json at root")
 
     # 4. transformers
     if config_json is not None and "config.json" in root_set and (has_st or has_st_index):

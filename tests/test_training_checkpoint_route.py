@@ -488,7 +488,7 @@ def test_checkpoint_upload_failure_emits_typed_warning(dead_hub: str, tmp_path) 
     src.write_bytes(b"weights")
     events: List[Dict[str, Any]] = []
     ctx = _ctx(dead_hub, events, hints={
-        "kind": "training", "destination_repo": DEST_REPO,
+        "kind": "training", "destination_repo": DEST_REPO, "job_id": JOB_ID,
     })
 
     with pytest.raises(Exception, match="404"):

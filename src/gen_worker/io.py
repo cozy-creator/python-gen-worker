@@ -67,7 +67,7 @@ def read_image(asset: Asset, mode: str = "RGB") -> Any:
             "gen_worker.io.read_image requires Pillow. "
             "Install with `pip install gen-worker[images]`."
         ) from e
-    img: "Image.Image" = Image.open(_local_path(asset))
+    img = Image.open(_local_path(asset))
     if mode and img.mode != mode:
         img = img.convert(mode)
     return img
@@ -103,7 +103,7 @@ def read_audio(
         try:
             from math import gcd
 
-            from scipy.signal import resample_poly
+            from scipy.signal import resample_poly  # type: ignore
 
             g = gcd(int(sr), int(target_sample_rate))
             data = resample_poly(
@@ -213,27 +213,14 @@ def write_video(
     hand-rolling tempfile + ``export_to_video`` and audio survives the mux.
 
     - ``frames``: list of PIL images, a numpy array ``[F, H, W, C]`` (float in
-      [0, 1] or uint8), a torch tensor of the same shape, OR an iterator/
-      generator of such chunks — chunks are encoded as they are produced
-      (VAE framewise decode seam) and the full clip is never rebuffered.
+      [0, 1] or uint8), or a torch tensor of the same shape.
     - ``audio``: waveform ``[channels, samples]`` (numpy or torch, float in
       [-1, 1]); mono is duplicated to stereo. ``audio_sample_rate`` is
       required when audio is given.
-
-    Encoder selection + GPU-slot handoff (gw#476 / gw#516): the backend is
-    NVENC when the card has the encoder block (probed once per process),
-    else libx264 at a fast preset. For array input the request's GPU slot is
-    terminally released once the frames are on the host — the CPU encode and
-    the upload overlap the next request's denoise instead of idling the GPU
-    (measured up to 179s of idle on a CPU-contended host). Do not run more
-    GPU work on ``ctx`` after this call. For iterator input the release
-    happens when the iterator is exhausted (the producer is still decoding
-    on the GPU while chunks stream into the encoder).
     """
     try:
-        import numpy as np  # noqa: F401  (hard dep of the encode path)
-
-        from .video_encode import StreamingVideoEncoder, finalize_permit, frames_to_uint8
+        import av
+        import numpy as np
     except ImportError as e:
         raise ImportError(
             "gen_worker.io.write_video requires PyAV + numpy. "
@@ -245,57 +232,116 @@ def write_video(
             raise ValidationError("write_video: audio_sample_rate is required with audio")
         sample_rate = int(audio_sample_rate)
 
-    import os
-    import tempfile
+    arr = _frames_to_uint8(frames, np)
+    height, width = int(arr.shape[1]), int(arr.shape[2])
+    # libx264/yuv420p needs even dimensions; crop a stray row/column.
+    height -= height % 2
+    width -= width % 2
+    arr = arr[:, :height, :width]
 
-    streaming = _is_chunk_iterator(frames)
+    import tempfile
 
     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as handle:
         tmp_path = handle.name
     try:
-        with StreamingVideoEncoder(
-            tmp_path, fps=fps, audio_sample_rate=sample_rate or None
-        ) as encoder:
-            if streaming:
-                # Chunks arrive while the producer still owns the GPU; the
-                # encode interleaves (NVENC costs zero SMs). Release the slot
-                # only once decode is done, before the flush + upload tail.
-                for chunk in frames:
-                    encoder.add(chunk)
-                _release_gpu_slot_for_finalize(ctx)
-                encoder.finish(audio)
-            else:
-                arr = frames_to_uint8(frames)
-                # Bounded CPU-finalize admission BEFORE the slot release:
-                # back-pressure holds the GPU slot rather than stacking raw
-                # frame buffers in host RAM (gw#516).
-                with finalize_permit():
-                    _release_gpu_slot_for_finalize(ctx)
-                    encoder.add(arr)
-                    del arr
-                    encoder.finish(audio)
+        container = av.open(tmp_path, mode="w")
+        try:
+            stream = container.add_stream("libx264", rate=round(fps))
+            stream.width = width
+            stream.height = height
+            stream.pix_fmt = "yuv420p"
+            # Both streams must exist before the first mux writes the header.
+            audio_stream = (
+                _prepare_audio_stream(container, sample_rate, av)
+                if audio is not None
+                else None
+            )
+            for frame_array in arr:
+                frame = av.VideoFrame.from_ndarray(frame_array, format="rgb24")
+                for packet in stream.encode(frame):
+                    container.mux(packet)
+            for packet in stream.encode():
+                container.mux(packet)
+            if audio_stream is not None:
+                _mux_audio(container, audio_stream, audio, sample_rate, av, np)
+        finally:
+            container.close()
         return ctx.save_video(tmp_path, ref, format="mp4")
     finally:
+        import os
+
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
 
 
-def _is_chunk_iterator(frames: Any) -> bool:
-    """True for generators/iterators of frame chunks (streaming input).
+def _frames_to_uint8(frames: Any, np: Any) -> Any:
+    """Coerce PIL list / float array / torch tensor to uint8 [F, H, W, C]."""
+    if isinstance(frames, (list, tuple)):
+        if not frames:
+            raise ValidationError("write_video: frames is empty")
+        frames = np.stack([np.asarray(f.convert("RGB") if hasattr(f, "convert") else f) for f in frames])
+    if hasattr(frames, "detach"):  # torch tensor
+        frames = frames.detach().to("cpu").float().numpy()
+    arr = np.asarray(frames)
+    if arr.ndim != 4 or arr.shape[-1] != 3:
+        raise ValidationError(
+            f"write_video: frames must be [F, H, W, 3], got shape {arr.shape}"
+        )
+    if arr.dtype != np.uint8:
+        arr = arr.astype("float32")
+        if float(arr.max(initial=0.0)) <= 1.0:
+            arr = arr * 255.0
+        arr = np.clip(arr.round(), 0, 255).astype("uint8")
+    return arr
 
-    Lists/tuples (PIL frames), numpy arrays, and torch tensors are buffered
-    input; everything else with ``__next__`` streams.
-    """
-    if isinstance(frames, (list, tuple)) or hasattr(frames, "__array__") or hasattr(frames, "detach"):
-        return False
-    return hasattr(frames, "__next__") or hasattr(frames, "__iter__")
+
+def _prepare_audio_stream(container: Any, sample_rate: int, av: Any) -> Any:
+    from fractions import Fraction
+
+    stream = container.add_stream("aac", rate=sample_rate)
+    cc = stream.codec_context
+    cc.sample_rate = sample_rate
+    cc.layout = "stereo"
+    cc.time_base = Fraction(1, sample_rate)
+    return stream
 
 
-def _release_gpu_slot_for_finalize(ctx: Any) -> None:
-    """Terminal GPU-slot release at the decode->finalize handoff (gw#516)."""
-    release = getattr(ctx, "_release_gpu_slot_for_finalize", None)
-    if callable(release):
-        release()
+def _mux_audio(container: Any, stream: Any, audio: Any, sample_rate: int, av: Any, np: Any) -> None:
+    """Append an AAC stereo track (mirrors diffusers ltx2 export_utils)."""
+    if hasattr(audio, "detach"):
+        audio = audio.detach().to("cpu").float().numpy()
+    wave = np.asarray(audio, dtype="float32")
+    if wave.ndim == 1:
+        wave = wave[None, :]
+    if wave.ndim != 2:
+        raise ValidationError(f"write_video: audio must be [channels, samples], got shape {wave.shape}")
+    if wave.shape[0] == 1:
+        wave = np.repeat(wave, 2, axis=0)
+    elif wave.shape[0] > 2:
+        wave = wave[:2]
+    wave = np.ascontiguousarray(np.clip(wave, -1.0, 1.0))
+
+    cc = stream.codec_context
+    # One packed-s16 input frame; the resampler converts to the encoder's
+    # format and assigns pts (mirrors diffusers ltx2 export_utils._write_audio).
+    pcm = (wave.T * 32767.0).astype("int16")  # [samples, 2] interleaved
+    frame_in = av.AudioFrame.from_ndarray(
+        np.ascontiguousarray(pcm.reshape(1, -1)), format="s16", layout="stereo"
+    )
+    frame_in.sample_rate = sample_rate
+
+    resampler = av.audio.resampler.AudioResampler(
+        format=cc.format or "fltp", layout=cc.layout or "stereo", rate=cc.sample_rate or sample_rate
+    )
+    next_pts = 0
+    for rframe in resampler.resample(frame_in):
+        if rframe.pts is None:
+            rframe.pts = next_pts
+        next_pts += rframe.samples
+        rframe.sample_rate = sample_rate
+        container.mux(stream.encode(rframe))
+    for packet in stream.encode():
+        container.mux(packet)
 
 
 __all__ = [

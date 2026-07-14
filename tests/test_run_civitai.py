@@ -1,6 +1,6 @@
-"""Civitai ref resolution for the local CLI (issue #351 / #341).
+"""Civitai ref resolution in ``gen-worker run`` (issue #351 / #341).
 
-``provision.resolve_local_path`` treats a ``CivitaiRepo`` ref as a MODEL id and resolves
+``_resolve_local_path`` treats a ``CivitaiRepo`` ref as a MODEL id and resolves
 it to the latest published version — unless a version is pinned via
 ``CivitaiRepo.version()`` (threaded in as ``civitai_version_id``), in which case
 it is used directly with no model lookup. A failed model lookup or a model with
@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import pytest
 
+import gen_worker.cli.run as run_mod
 import gen_worker.models.download as dl_mod
-import gen_worker.models.provision as prov_mod
 
 
 @pytest.fixture(autouse=True)
@@ -39,7 +39,7 @@ def test_pinned_version_skips_model_lookup(monkeypatch, tmp_path):
 
     monkeypatch.setattr(dl_mod, "fetch_civitai_model", _must_not_call)
     monkeypatch.setattr(dl_mod, "download_civitai", _fake_download)
-    path = prov_mod.resolve_local_path(
+    path = run_mod._resolve_local_path(
         ref="123456", provider="civitai", offline=False, emit=_no_emit,
         civitai_version_id="789012",
     )
@@ -57,7 +57,7 @@ def test_happy_path_resolves_latest_version(monkeypatch):
         dl_mod, "download_civitai",
         lambda vid, out, **kw: captured.setdefault("vid", vid) or out,
     )
-    prov_mod.resolve_local_path(ref="123456", provider="civitai", offline=False, emit=_no_emit)
+    run_mod._resolve_local_path(ref="123456", provider="civitai", offline=False, emit=_no_emit)
     assert captured["vid"] == 555  # modelVersions[0] = latest
 
 
@@ -71,8 +71,8 @@ def test_failed_model_lookup_raises_no_download(monkeypatch):
         dl_mod, "download_civitai",
         lambda *a, **k: dl.__setitem__("n", dl["n"] + 1) or a[1],
     )
-    with pytest.raises(prov_mod.ModelResolutionError):
-        prov_mod.resolve_local_path(ref="999", provider="civitai", offline=False, emit=_no_emit)
+    with pytest.raises(run_mod._ModelResolutionError):
+        run_mod._resolve_local_path(ref="999", provider="civitai", offline=False, emit=_no_emit)
     assert dl["n"] == 0  # never silently downloaded a guessed version
 
 
@@ -85,11 +85,11 @@ def test_model_with_no_versions_raises_no_download(monkeypatch):
         dl_mod, "download_civitai",
         lambda *a, **k: dl.__setitem__("n", dl["n"] + 1) or a[1],
     )
-    with pytest.raises(prov_mod.ModelResolutionError):
-        prov_mod.resolve_local_path(ref="123456", provider="civitai", offline=False, emit=_no_emit)
+    with pytest.raises(run_mod._ModelResolutionError):
+        run_mod._resolve_local_path(ref="123456", provider="civitai", offline=False, emit=_no_emit)
     assert dl["n"] == 0
 
 
 def test_offline_civitai_raises(monkeypatch):
-    with pytest.raises(prov_mod.ModelResolutionError):
-        prov_mod.resolve_local_path(ref="123456", provider="civitai", offline=True, emit=_no_emit)
+    with pytest.raises(run_mod._ModelResolutionError):
+        run_mod._resolve_local_path(ref="123456", provider="civitai", offline=True, emit=_no_emit)

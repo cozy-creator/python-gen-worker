@@ -19,23 +19,6 @@ from ..s3_transfer import S3TransferGrant, download_file_with_grant
 
 _log = logging.getLogger("gen_worker.download")
 
-# Per-digest inflight downloads (gw#479 multi-lane fallout, th#757 forensics):
-# two refs materializing concurrently SHARE blobs in the content-addressed
-# store (split-vendor lanes: 9.7GB of identical encoder shards). Without a
-# per-digest lock both tasks streamed into the SAME .part file, interleaved
-# writes failed size/blake3 verification 3x, and the second ref died with
-# download_failed on every attempt (J24M runs 10-12, three pods, ~2.5min in —
-# while every blob verified byte-perfect in R2). First task downloads; the
-# second awaits the lock, re-checks usability, and reuses the finished blob.
-_INFLIGHT_BLOB_LOCKS: dict[str, "asyncio.Lock"] = {}
-_INFLIGHT_BLOB_LOCKS_CAP = 8192
-
-
-def _inflight_blob_lock(digest: str) -> "asyncio.Lock":
-    if len(_INFLIGHT_BLOB_LOCKS) > _INFLIGHT_BLOB_LOCKS_CAP:
-        _INFLIGHT_BLOB_LOCKS.clear()  # bounded memory; races just re-lock
-    return _INFLIGHT_BLOB_LOCKS.setdefault(digest, asyncio.Lock())
-
 ProgressFn = Callable[[int, Optional[int]], None]
 
 # Free space that must remain after downloading the missing blobs.
@@ -88,6 +71,18 @@ def _is_parts_manifest(path: str) -> bool:
     return path.endswith(".parts.json")
 
 
+def _field(obj: Any, *keys: str) -> Any:
+    """Read a field from dict or object, trying keys in order."""
+    for k in keys:
+        if isinstance(obj, dict):
+            v = obj.get(k)
+        else:
+            v = getattr(obj, k, None)
+        if v is not None:
+            return v
+    return None
+
+
 def _try_hardlink_or_copy(src: Path, dst: Path) -> None:
     if dst.exists():
         dst.unlink()
@@ -105,31 +100,36 @@ def _try_hardlink_or_copy(src: Path, dst: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Validate the typed resolved manifest (gw#497: WorkerResolvedRepo is THE
-# shape — each wire boundary parses into it; no dict-or-object duck typing).
+# Coerce orchestrator wire format -> internal type
 # ---------------------------------------------------------------------------
 
-def _validate_resolved(ref: TensorhubRef, resolved: WorkerResolvedRepo) -> WorkerResolvedRepo:
-    """Normalize digest prefixes and reject unusable manifests."""
-    snapshot_digest = (resolved.snapshot_digest or "").strip()
+def _coerce_resolved_model(ref: TensorhubRef, resolved: Any) -> WorkerResolvedRepo:
+    """Accept both wire spellings: .entries[] (blake3:-prefixed digests) and .files[]."""
+    snapshot_digest = str(_field(resolved, "snapshot_digest", "snapshotDigest") or "").strip()
     if not snapshot_digest:
         raise ValueError("resolved model missing snapshot_digest")
     snapshot_digest = _strip_blake3_prefix(snapshot_digest) or snapshot_digest
 
+    files_raw = list(_field(resolved, "entries", "files") or [])
     files: List[WorkerResolvedRepoFile] = []
-    for f in resolved.files:
-        path = (f.path or "").strip()
+    for ent in files_raw:
+        path = str(_field(ent, "path") or "").strip()
         if not path:
             continue
-        blake3_hex = _strip_blake3_prefix((f.blake3 or "").strip().lower())
-        url = (f.url or "").strip() or None
-        transfer_grant = f.transfer_grant if isinstance(f.transfer_grant, dict) else None
+        blake3_hex = str(_field(ent, "blake3", "BLAKE3") or "").strip().lower()
+        if not blake3_hex:
+            blake3_hex = _strip_blake3_prefix(str(_field(ent, "digest") or ""))
+        url = str(_field(ent, "url") or "").strip() or None
+        transfer_grant = _field(ent, "transfer_grant", "s3_transfer_grant")
+        if not isinstance(transfer_grant, dict):
+            transfer_grant = None
+        size_bytes = int(_field(ent, "size_bytes") or 0)
         if not blake3_hex or (not url and transfer_grant is None):
             raise ValueError(f"resolved model file missing blake3/transfer: {path}")
         files.append(
             WorkerResolvedRepoFile(
                 path=path,
-                size_bytes=int(f.size_bytes or 0),
+                size_bytes=size_bytes,
                 blake3=blake3_hex,
                 url=url,
                 transfer_grant=transfer_grant,
@@ -139,7 +139,10 @@ def _validate_resolved(ref: TensorhubRef, resolved: WorkerResolvedRepo) -> Worke
     if not files:
         raise ValueError("resolved model has empty files list")
 
-    return WorkerResolvedRepo(snapshot_digest=snapshot_digest, files=files)
+    return WorkerResolvedRepo(
+        snapshot_digest=snapshot_digest,
+        files=files,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +165,7 @@ class CozySnapshotDownloader:
         base_dir: Path,
         ref: TensorhubRef,
         *,
-        resolved: Optional[WorkerResolvedRepo],
+        resolved: Any,
         progress: Optional[ProgressFn] = None,
     ) -> Path:
         blobs_root = base_dir / "blobs"
@@ -176,7 +179,7 @@ class CozySnapshotDownloader:
             raise RuntimeError(
                 "cozy snapshot requires orchestrator-resolved URLs (resolved=None)"
             )
-        res = _validate_resolved(ref, resolved)
+        res = _coerce_resolved_model(ref, resolved)
 
         snap_dir = snaps_root / res.snapshot_digest
         if snap_dir.exists():
@@ -331,14 +334,6 @@ class CozySnapshotDownloader:
             if self._blob_usable(dst, f):
                 _log.info("blob_cached path=%s digest=%s", f.path, digest[:16])
                 return
-            async with _inflight_blob_lock(digest):
-                if self._blob_usable(dst, f):
-                    _log.info("blob_shared_inflight path=%s digest=%s (sibling ref downloaded it)",
-                              f.path, digest[:16])
-                    return
-                await _dl_locked(f, digest, dst)
-
-        async def _dl_locked(f: WorkerResolvedRepoFile, digest: str, dst: Path) -> None:
             async with sem:
                 if self._blob_usable(dst, f):
                     return
@@ -495,7 +490,7 @@ async def ensure_snapshot_async(
     *,
     base_dir: Path,
     ref: TensorhubRef,
-    resolved: Optional[WorkerResolvedRepo],
+    resolved: Any,
     progress: Optional[ProgressFn] = None,
 ) -> Path:
     dl = CozySnapshotDownloader()

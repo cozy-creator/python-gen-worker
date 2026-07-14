@@ -19,7 +19,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Callable, Dict, Optional, Sequence
+from typing import Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -186,7 +186,7 @@ def llama_server(
     boot_timeout_s: float = _DEFAULT_BOOT_TIMEOUT_S,
     vram_budget_gb: Optional[float] = None,
     n_ctx: Optional[int] = None,
-) -> "ServerProcess | DegradingBoot":
+):
     """``llama-server -m <gguf>`` with the built-in /health endpoint.
 
     ``model_source`` may be the ``.gguf`` file or a snapshot dir (the
@@ -248,9 +248,7 @@ def process_vram_bytes(pid: int) -> int:
     return total
 
 
-RUNTIME_FACTORIES: Dict[str, Callable[[str], "ServerProcess | DegradingBoot"]] = {
-    "vllm": vllm_server, "llama-server": llama_server,
-}
+RUNTIME_FACTORIES = {"vllm": vllm_server, "llama-server": llama_server}
 
 
 __all__ = [

@@ -15,14 +15,10 @@ from __future__ import annotations
 
 import socket
 from pathlib import Path
-from typing import NamedTuple
+from typing import Tuple, Union
 
-class Address(NamedTuple):
-    """("unix", path, 0) | ("tcp", host, port)."""
-
-    scheme: str
-    host: str  # unix socket path when scheme == "unix"
-    port: int = 0
+# ("unix", path) | ("tcp", host, port)
+Address = Union[Tuple[str, str], Tuple[str, str, int]]
 
 
 def parse_addr(spec: str) -> Address:
@@ -32,26 +28,26 @@ def parse_addr(spec: str) -> Address:
         host, sep, port = hostport.rpartition(":")
         if not sep or not port.isdigit():
             raise ValueError(f"bad tcp address {spec!r}; expected tcp://host:port")
-        return Address("tcp", host or "0.0.0.0", int(port))
+        return ("tcp", host or "0.0.0.0", int(port))
     if s.startswith("unix://"):
-        return Address("unix", s[len("unix://"):])
-    return Address("unix", s)
+        return ("unix", s[len("unix://"):])
+    return ("unix", s)
 
 
 def is_unix(spec: str) -> bool:
-    return parse_addr(spec).scheme == "unix"
+    return parse_addr(spec)[0] == "unix"
 
 
 def display(spec: str) -> str:
     addr = parse_addr(spec)
-    return addr.host if addr.scheme == "unix" else f"tcp://{addr.host}:{addr.port}"
+    return addr[1] if addr[0] == "unix" else f"tcp://{addr[1]}:{addr[2]}"
 
 
 def create_listener(spec: str, backlog: int = 8) -> socket.socket:
     """Bind + listen on ``spec``. Removes a stale unix socket first."""
     addr = parse_addr(spec)
-    if addr.scheme == "unix":
-        path = Path(addr.host)
+    if addr[0] == "unix":
+        path = Path(addr[1])
         if path.exists():
             try:
                 path.unlink()
@@ -62,9 +58,10 @@ def create_listener(spec: str, backlog: int = 8) -> socket.socket:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind(str(path))
     else:
+        _, host, port = addr
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind((addr.host, addr.port))
+        s.bind((host, port))
     s.listen(backlog)
     return s
 
@@ -72,9 +69,9 @@ def create_listener(spec: str, backlog: int = 8) -> socket.socket:
 def cleanup_listener(spec: str) -> None:
     """Remove the unix socket file (no-op for TCP)."""
     addr = parse_addr(spec)
-    if addr.scheme == "unix":
+    if addr[0] == "unix":
         try:
-            Path(addr.host).unlink()
+            Path(addr[1]).unlink()
         except OSError:
             pass
 
@@ -82,14 +79,15 @@ def cleanup_listener(spec: str) -> None:
 def create_client(spec: str, connect_timeout: float) -> socket.socket:
     """Connect to ``spec`` (raises OSError/FileNotFoundError on failure)."""
     addr = parse_addr(spec)
-    if addr.scheme == "unix":
-        if not Path(addr.host).exists():
-            raise FileNotFoundError(addr.host)
+    if addr[0] == "unix":
+        if not Path(addr[1]).exists():
+            raise FileNotFoundError(addr[1])
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.settimeout(connect_timeout)
-        s.connect(str(addr.host))
+        s.connect(str(addr[1]))
     else:
+        _, host, port = addr
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(connect_timeout)
-        s.connect((addr.host or "127.0.0.1", addr.port))
+        s.connect((host or "127.0.0.1", port))
     return s

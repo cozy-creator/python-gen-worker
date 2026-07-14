@@ -14,21 +14,20 @@ import pytest
 import gen_worker.models.cozy_snapshot as snap_mod
 import gen_worker.models.download as dl_mod
 from gen_worker.models.download import ensure_local
-from gen_worker.models.hub_client import WorkerResolvedRepo, WorkerResolvedRepoFile
 
 _DIGEST = "12" * 32
 
 
-def _resolved() -> WorkerResolvedRepo:
-    return WorkerResolvedRepo(
-        snapshot_digest=_DIGEST,
-        files=[WorkerResolvedRepoFile(
-            path="model_index.json",
-            size_bytes=4,
-            blake3="cd" * 32,
-            url="http://r2.invalid/presigned",
-        )],
-    )
+def _resolved() -> dict:
+    return {
+        "snapshot_digest": _DIGEST,
+        "files": [{
+            "path": "model_index.json",
+            "size_bytes": 4,
+            "blake3": "cd" * 32,
+            "url": "http://r2.invalid/presigned",
+        }],
+    }
 
 
 @pytest.fixture()

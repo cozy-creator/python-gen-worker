@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional
 import msgspec
 import pytest
 
-from gen_worker.api.binding import Hub, ModelRef
+from gen_worker.api.binding import Hub
 from gen_worker.executor import Executor
 from gen_worker.models.errors import MissingSnapshotError
 from gen_worker.pb import worker_scheduler_pb2 as pb
@@ -39,7 +39,7 @@ VARIANT_A = Hub("acme/variant-a")
 VARIANT_B = Hub("acme/variant-b")
 
 
-def _spec(name: str, checkpoint: ModelRef, calls: List[str]) -> EndpointSpec:
+def _spec(name: str, checkpoint: Hub, calls: List[str]) -> EndpointSpec:
     class Endpoint:
         def setup(self, model: str, vae: str) -> None:
             calls.append(name)
@@ -165,16 +165,12 @@ def test_snapshot_memory_enables_companion_setup(tmp_path, monkeypatch) -> None:
     assert not _failed_events(sent), _failed_events(sent)
 
 
-def test_store_missing_snapshot_waits_then_raises_typed(tmp_path, monkeypatch) -> None:
-    """ModelStore.ensure_local on a snapshot-less tensorhub ref (th#763):
-    emits FAILED ``missing_snapshot`` immediately (the hub's re-mint
-    trigger), then BLOCKS for the re-minted snapshot; when nothing arrives
-    it raises the typed error — no DOWNLOADING ghost, never a phantom
-    ``download_failed``."""
-    import gen_worker.executor as ex_mod
+def test_store_missing_snapshot_is_fast_and_never_says_download_failed(tmp_path) -> None:
+    """ModelStore.ensure_local on a snapshot-less tensorhub ref: no DOWNLOADING
+    event ("model download started" ghost), no retry burn, FAILED carries
+    ``missing_snapshot``."""
     from gen_worker.executor import ModelStore
 
-    monkeypatch.setattr(ex_mod, "_MISSING_SNAPSHOT_WAIT_S", 0.2)
     sent: List[pb.WorkerMessage] = []
 
     async def _send(msg: pb.WorkerMessage) -> None:
@@ -182,7 +178,7 @@ def test_store_missing_snapshot_waits_then_raises_typed(tmp_path, monkeypatch) -
 
     store = ModelStore(_send, cache_dir=tmp_path)
     # endpoint refs are registered at boot (#377) — that's what makes the
-    # provider classification confident enough to classify the miss
+    # provider classification confident enough to fail fast
     store.register_binding("acme/never-resolved", Hub("acme/never-resolved"))
 
     async def _run() -> None:
@@ -191,62 +187,8 @@ def test_store_missing_snapshot_waits_then_raises_typed(tmp_path, monkeypatch) -
 
     t0 = time.monotonic()
     asyncio.run(_run())
-    elapsed = time.monotonic() - t0
-    assert 0.2 <= elapsed < 2.0, f"must block for the re-mint window, took {elapsed:.2f}s"
+    assert time.monotonic() - t0 < 1.0
     states = [m.model_event.state for m in sent if m.WhichOneof("msg") == "model_event"]
     assert pb.MODEL_STATE_DOWNLOADING not in states
     failed = _failed_events(sent)
     assert failed and failed[-1].error == "missing_snapshot"
-
-
-def test_store_cold_ref_blocks_until_remint_then_serves(tmp_path, monkeypatch) -> None:
-    """th#763 block-and-serve: a cold ensure_local reports missing_snapshot
-    and WAITS; the hub's re-minted DOWNLOAD (a concurrent ensure_local WITH
-    the snapshot) wakes it and the original call returns the materialized
-    path — the first user request per unseen ref succeeds instead of
-    fataling as the sacrificial cache warmer."""
-    import gen_worker.executor as ex_mod
-    from gen_worker.executor import ModelStore
-
-    monkeypatch.setattr(ex_mod, "_MISSING_SNAPSHOT_WAIT_S", 10.0)
-    sent: List[pb.WorkerMessage] = []
-
-    async def _send(msg: pb.WorkerMessage) -> None:
-        sent.append(msg)
-
-    async def _fake_download(ref: str, **kwargs: Any) -> Path:
-        assert kwargs.get("snapshot") is not None, "download must carry the re-minted snapshot"
-        p = tmp_path / ref.replace("/", "_")
-        p.mkdir(parents=True, exist_ok=True)
-        return p
-
-    monkeypatch.setattr(ex_mod, "ensure_local", _fake_download)
-    store = ModelStore(_send, cache_dir=tmp_path)
-    store.register_binding("acme/cold-ref", Hub("acme/cold-ref"))
-
-    async def _run() -> None:
-        cold = asyncio.create_task(store.ensure_local("acme/cold-ref"))
-        # Hub reacts to the FAILED(missing_snapshot) event with a DOWNLOAD op.
-        for _ in range(100):
-            if _failed_events(sent):
-                break
-            await asyncio.sleep(0.01)
-        assert _failed_events(sent) and _failed_events(sent)[-1].error == "missing_snapshot"
-        assert not cold.done(), "cold caller must still be waiting on the re-mint"
-        remint = asyncio.create_task(store.ensure_local("acme/cold-ref", _snapshot()))
-        path = await asyncio.wait_for(cold, 5.0)
-        assert path == tmp_path / "acme_cold-ref"
-        assert await asyncio.wait_for(remint, 5.0) == path
-
-    asyncio.run(_run())
-
-
-def test_missing_snapshot_maps_retryable_never_fatal() -> None:
-    """th#763: a job that hits MissingSnapshotError must come back
-    JOB_STATUS_RETRYABLE — a cold worker mid-resolution must never fatal a
-    user request."""
-    from gen_worker.executor import _map_exception
-
-    status, msg = _map_exception(MissingSnapshotError("tensorhub ref needs a snapshot"))
-    assert status == pb.JOB_STATUS_RETRYABLE
-    assert "snapshot" in msg

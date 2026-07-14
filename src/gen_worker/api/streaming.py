@@ -56,17 +56,15 @@ class TokenUsage(msgspec.Struct, frozen=True, kw_only=True):
     """
 
     prompt_tokens: int = 0
-    cached_tokens: int = 0
     completion_tokens: int = 0
     tokens_per_second: float = 0.0
 
 
 class Done(msgspec.Struct, frozen=True, kw_only=True):
-    """Optional end-of-stream marker. Yielding it emits no chunk — the
-    dispatcher's ``_encode_chunk`` treats it as a no-op (see executor.py).
-    A stream ends naturally when the handler's generator exhausts; yield
-    ``Done()`` if you want to terminate explicitly without yielding a
-    final partial item.
+    """End-of-stream marker. Yield exactly one Done() to terminate cleanly.
+
+    The dispatcher converts this into an ``IncrementalTokenStreamDone``
+    proto message and the terminal ``JobExecutionResult(success=True)``.
     """
 
 
@@ -79,6 +77,13 @@ class Error(msgspec.Struct, frozen=True, kw_only=True):
     """
 
     message: str = ""
+
+
+# Tuple form for runtime ``isinstance`` checks in the dispatcher.
+_SIGNAL_TYPES: tuple[type, ...] = (
+    IncrementalTokenDelta, BatchItemDelta, TokenUsage, Done, Error,
+)
+TokenStreamSignal = Union[IncrementalTokenDelta, BatchItemDelta, TokenUsage, Done, Error]
 
 
 # ============================================================================
@@ -157,10 +162,9 @@ class StreamAccumulator:
                 rec["error"] = item.error
             if item.finished or item.error:
                 # Only finished/errored items reach the terminal record.
-                raw = b"".join(rec["chunks"])
-                content: Union[str, bytes] = raw
+                content: Union[str, bytes] = b"".join(rec["chunks"])
                 if rec["content_type"].startswith("text/"):
-                    content = raw.decode("utf-8", errors="replace")
+                    content = content.decode("utf-8", errors="replace")
                 self._finished.append(StreamItem(
                     item_id=key[0], index=key[1], content=content,
                     content_type=rec["content_type"], error=rec["error"],

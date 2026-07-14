@@ -9,11 +9,14 @@ same code paths a diffusers pipeline would (no GPU needed).
 
 from __future__ import annotations
 
+import pytest
+
 from gen_worker import HF, Hub
 from gen_worker.models import (
     LoadedComponentKey,
     Residency,
     Tier,
+    build_function_owned_pipeline,
     content_set_digest,
 )
 
@@ -245,3 +248,28 @@ def test_adapter_identity_separates_two_lora_overlays() -> None:
     k1 = _key(component="P", adapter_id="lora:A")
     k2 = _key(component="P", adapter_id="lora:B")
     assert k1 != k2
+
+
+# --------------------------------------------------------------------------- #
+# Function-owned pipeline over shared components                                #
+# --------------------------------------------------------------------------- #
+
+
+def test_build_function_owned_pipeline_shares_modules_not_pipeline() -> None:
+    base = _new_base()
+    fn_pipe = build_function_owned_pipeline(base, _FakePipeline)
+    assert fn_pipe is not base
+    assert fn_pipe.scheduler is not base.scheduler
+    assert fn_pipe.components["vae"] is base.components["vae"]
+    assert fn_pipe.components["text_encoder"] is base.components["text_encoder"]
+
+
+def test_build_function_owned_pipeline_assembles_from_components_dict() -> None:
+    class _NoFromPipe:
+        def __init__(self, **components: object) -> None:
+            self.components = dict(components)
+
+    base = _new_base()
+    fn = build_function_owned_pipeline(base, _NoFromPipe)
+    assert isinstance(fn, _NoFromPipe)
+    assert fn.components["vae"] is base.components["vae"]

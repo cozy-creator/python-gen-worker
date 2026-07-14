@@ -115,15 +115,15 @@ class LocalRequestContextMixin:
     """
 
     def __init__(self, *args: Any, allow_publish: bool = False, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)  # type: ignore[misc]
         self._local_allow_publish = bool(allow_publish)
 
-    def save_bytes(self, ref: str, data: bytes) -> Asset:
+    def save_bytes(self, ref: str, data: bytes) -> Asset:  # type: ignore[override]
         if not isinstance(data, (bytes, bytearray)):
             raise TypeError("save_bytes expects bytes")
         return _save_local_bytes(ref, bytes(data))
 
-    def save_file(self, ref: str, local_path: "str | os.PathLike[str]") -> Asset:
+    def save_file(self, ref: str, local_path: "str | os.PathLike[str]") -> Asset:  # type: ignore[override]
         return _save_local_file(ref, local_path)
 
 
@@ -139,7 +139,7 @@ class LocalConversionContext(LocalRequestContextMixin, ConversionContext):
     implementation — useful for round-tripping against a dev tensorhub).
     """
 
-    def materialize_blob(self, digest: str, dest: "str | os.PathLike[str]") -> Path:
+    def materialize_blob(self, digest: str, dest: "str | os.PathLike[str]") -> Path:  # type: ignore[override]
         if self._local_allow_publish:
             return super().materialize_blob(digest, dest)
         # Local stub: look in the tensorhub CAS for a matching snapshot. If
@@ -166,7 +166,7 @@ class LocalConversionContext(LocalRequestContextMixin, ConversionContext):
 class LocalDatasetContext(LocalRequestContextMixin, DatasetContext):
     """Dataset-kind local context."""
 
-    def materialize_blob(self, digest: str, dest: "str | os.PathLike[str]") -> Path:
+    def materialize_blob(self, digest: str, dest: "str | os.PathLike[str]") -> Path:  # type: ignore[override]
         # Same fallback as ConversionContext.
         from ..models.cache_paths import tensorhub_cas_dir
         d = (digest or "").strip()

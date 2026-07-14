@@ -15,9 +15,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 import msgspec
 
-from .api.binding import Binding, ModelRef
+from .api.binding import Binding
 from .api.decorators import ATTR, Compile, EndpointDecl, Resources
-from .api.slot import Slot
 from .discovery.names import slugify_name
 from .discovery.walk import find_endpoints
 
@@ -57,17 +56,12 @@ class EndpointSpec:
     payload_param: str = "payload"
     resources: Resources = field(default_factory=Resources)
     models: Dict[str, Binding] = field(default_factory=dict)  # slot -> binding
-    # Slot-declared entries in `models` (pgw#520): slot -> Slot metadata
-    # (selected_by/default_checkpoint/default_config). A subset of
-    # `models`'s keys — bare bindings have no entry here.
-    slots: Dict[str, Slot] = field(default_factory=dict)
-    # Resolved family name per Slot (slot.family, or the endpoint's
-    # Compile(family=...) when the slot declares no fallback preset) —
-    # precomputed once here so ctx.slots doesn't need EndpointDecl.compile.
-    slot_family: Dict[str, str] = field(default_factory=dict)
     timeout_ms: Optional[int] = None
     runtime: Optional[str] = None
     compile: Optional[Compile] = None  # opt-in torch.compile spec (#384)
+    # Payload-driven slot routing (gw#479): promotes/pins only the slots a
+    # request needs; None = every slot (single-lane classes, functions).
+    route: Optional[Callable[[Any], Any]] = None
     module: str = ""              # declaring module
     walked_module: str = ""       # top-level package the object was found under
 
@@ -77,8 +71,8 @@ class EndpointSpec:
 
     @property
     def instance_key(self) -> Any:
-        """Specs sharing this key share one class instance (same class + same
-        resolved binding set)."""
+        """Specs sharing this key share one class instance. Variant specs of
+        the same class differ in their bindings and get separate instances."""
         return (self.cls, tuple(sorted(self.models.items())))
 
 
@@ -105,119 +99,6 @@ def _inspect_return(owner: str, ret: Any) -> tuple[str, Optional[type], Optional
     )
 
 
-def _is_selected_by_annotation(ann: Any) -> bool:
-    """pgw#524 item 5: a ``selected_by`` payload field must type as plain
-    ``str``, or as ``str | ModelRef`` — the wire also accepts a structured
-    :class:`~gen_worker.api.binding.ModelRef` object (a client-supplied
-    BYOM pick), which the hub resolves to a concrete ref before the worker
-    ever sees the request; the SDK never bakes the curated-value enum into
-    either shape."""
-    if ann is str:
-        return True
-    origin = typing.get_origin(ann)
-    if origin in (typing.Union, py_types.UnionType):
-        return frozenset(typing.get_args(ann)) == frozenset((str, ModelRef))
-    return False
-
-
-def _validate_slot_selected_by(
-    owner: str, slots: Dict[str, Slot], payload_type: type
-) -> None:
-    """pgw#520: a Slot's ``selected_by`` must name a plain-``str`` (or
-    ``str | ModelRef``, pgw#524 item 5) field on THIS handler's payload —
-    validated per-handler (not per-class) because one ``models=`` decl can
-    be shared by methods with different payload types. Also enforces pgw#524
-    item 4: a request-branching slot (``selected_by`` set) with no
-    ``default_checkpoint`` has nothing to seed the hub mapping or bootstrap
-    placement with — tensorhub rejects it at manifest registration
-    (``builder.normalizeManifestSlot``), so fail here at AUTHOR time instead
-    of at publish time. Fails at spec-construction time (discovery walk /
-    CLI collection / executor boot), never at first invoke."""
-    if not slots:
-        return
-    try:
-        hints = typing.get_type_hints(payload_type, include_extras=False)
-    except Exception:
-        hints = getattr(payload_type, "__annotations__", {}) or {}
-    for slot_name, slot in slots.items():
-        if not slot.selected_by:
-            continue
-        if slot.default_checkpoint is None:
-            raise ValueError(
-                f"{owner}: Slot({slot_name!r}).selected_by={slot.selected_by!r} "
-                "requires default_checkpoint=... — a request-branching slot "
-                "with no code-side default has nothing to seed the hub "
-                "mapping/bootstrap placement with (the hub rejects this at "
-                "registration; fail here instead)"
-            )
-        if slot.selected_by not in hints:
-            raise ValueError(
-                f"{owner}: Slot({slot_name!r}).selected_by={slot.selected_by!r} "
-                f"names no field on payload {payload_type.__name__!r}"
-            )
-        ann = hints[slot.selected_by]
-        if not _is_selected_by_annotation(ann):
-            raise ValueError(
-                f"{owner}: Slot({slot_name!r}).selected_by="
-                f"{slot.selected_by!r} must be a plain str field (or "
-                f"str | ModelRef) on {payload_type.__name__!r} (got {ann!r}); "
-                "the hub overlays the live allowed-value enum onto this "
-                "field, it is never baked into the SDK type"
-            )
-
-
-def _validate_compile_arms(
-    owner: str,
-    cls: Optional[type],
-    compile: Optional[Compile],
-    models: Dict[str, Binding],
-) -> None:
-    """pgw#517: ``compile=`` only ever arms automatically on a setup() slot
-    the WORKER loads itself (a pipeline-class annotation exposing
-    ``from_pretrained`` — mirrors the executor's annotation branch in
-    ``_injection_kwargs``). An endpoint whose setup() model slots are ALL
-    self-loading (str/Path/other non-pipeline annotations — the endpoint
-    builds its own pipeline) never reaches that arming path: the declared
-    ``compile=`` seeds the manifest/shape contract but never runs, silently.
-    Fail loudly at discovery time unless the endpoint opts into the
-    ``arm_compile()`` seam itself (best-effort source scan — a missing
-    source is never a build blocker, only a missed opt-in detection)."""
-    if compile is None or cls is None or not models:
-        return
-    setup = getattr(cls, "setup", None)
-    if not callable(setup):
-        return
-    try:
-        hints = typing.get_type_hints(setup)
-    except Exception:
-        return
-    worker_loaded = any(
-        isinstance(ann, type) and callable(getattr(ann, "from_pretrained", None))
-        for ann in (hints.get(name) for name in models)
-    )
-    if worker_loaded:
-        return
-    try:
-        source = inspect.getsource(setup)
-    except (OSError, TypeError):
-        return  # can't prove either way; don't block the build on it
-    if "arm_compile" in source:
-        return
-    raise ValueError(
-        f"{owner}: compile=Compile(...) is declared but no setup() model "
-        "slot is annotated with a pipeline class (all slots are self-loading "
-        "str/Path annotations) -- the worker only arms compile on slots it "
-        "loads itself (a class annotation exposing from_pretrained), so "
-        "this compile= block seeds the manifest but never runs at request "
-        "time. Fix one of: (1) annotate the slot with the pipeline class "
-        "(e.g. `pipeline: WanPipeline` instead of `pipeline: str`) so the "
-        "worker loads it and arms compile automatically, or (2) keep the "
-        "self-loading slot and call gen_worker.arm_compile(pipe) yourself "
-        "at the end of setup(), after placement -- same cache-artifact-"
-        "gated policy, eager otherwise."
-    )
-
-
 def _spec_for_handler(
     *,
     fn_name: str,
@@ -226,7 +107,6 @@ def _spec_for_handler(
     cls: Optional[type],
     attr_name: str,
     models: Dict[str, Binding],
-    slots: Dict[str, Slot],
     resources: Resources,
     walked_module: str,
 ) -> EndpointSpec:
@@ -242,20 +122,11 @@ def _spec_for_handler(
     ctx_param, payload_param = params[0].name, params[1].name
 
     payload_type = hints.get(payload_param)
-    if not isinstance(payload_type, type) or not _is_struct(payload_type):
+    if not _is_struct(payload_type):
         raise ValueError(
             f"{owner}: payload param {payload_param!r} must be annotated "
             f"with a msgspec.Struct (got {payload_type!r})"
         )
-    _validate_slot_selected_by(owner, slots, payload_type)
-    _validate_compile_arms(owner, cls, decl.compile, models)
-    compile_family = decl.compile.family if decl.compile is not None else ""
-    # Compile(family=...) is the explicit, functionally-load-bearing
-    # declaration (compile-cache keying) — it wins over a slot's own
-    # fallback-preset registration when both are present.
-    slot_family = {
-        name: (compile_family or slot.family) for name, slot in slots.items()
-    }
     ret = hints.get("return")
     if ret is None:
         raise ValueError(f"{owner}: missing return type annotation")
@@ -287,17 +158,16 @@ def _spec_for_handler(
         payload_param=payload_param,
         resources=resources,
         models=dict(models),
-        slots=dict(slots),
-        slot_family=slot_family,
         runtime=decl.runtime,
         compile=decl.compile,
+        route=decl.route,
         module=getattr(cls or method, "__module__", "") or "",
         walked_module=walked_module,
     )
 
 
 def extract_specs(obj: Any, *, walked_module: str = "") -> List[EndpointSpec]:
-    """All EndpointSpecs declared by one decorated object (one per handler)."""
+    """All EndpointSpecs declared by one decorated object (variants expanded)."""
     decl: Optional[EndpointDecl] = getattr(obj, ATTR, None)
     if decl is None:
         return []
@@ -311,7 +181,6 @@ def extract_specs(obj: Any, *, walked_module: str = "") -> List[EndpointSpec]:
             cls=None,
             attr_name="",
             models=dict(decl.models),
-            slots=dict(decl.slots),
             resources=decl.resources,
             walked_module=walked,
         )]
@@ -322,11 +191,32 @@ def extract_specs(obj: Any, *, walked_module: str = "") -> List[EndpointSpec]:
     )
     out: List[EndpointSpec] = []
 
+    if decl.variants:
+        attr_name, method = handlers[0]
+        slot = next(iter(decl.models), "model")
+        # Base function (method-named) only when the class declares its own
+        # binding; otherwise the variants fully define the routable set.
+        if decl.models:
+            out.append(_spec_for_handler(
+                fn_name=attr_name, method=method, decl=decl, cls=cls,
+                attr_name=attr_name, models=dict(decl.models),
+                resources=decl.resources, walked_module=walked,
+            ))
+        for variant in decl.variants:
+            # Variants swap only the primary slot; shared aux slots (vae,
+            # refiner, extra encoders) are inherited from the class binding.
+            out.append(_spec_for_handler(
+                fn_name=variant.name, method=method, decl=decl, cls=cls,
+                attr_name=attr_name, models={**decl.models, slot: variant.binding},
+                resources=variant.resources or decl.resources,
+                walked_module=walked,
+            ))
+        return out
+
     for attr_name, method in handlers:
         out.append(_spec_for_handler(
             fn_name=attr_name, method=method, decl=decl, cls=cls,
             attr_name=attr_name, models=dict(decl.models),
-            slots=dict(decl.slots),
             resources=decl.resources, walked_module=walked,
         ))
     return out

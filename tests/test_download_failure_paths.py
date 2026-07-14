@@ -12,8 +12,6 @@ import threading
 from pathlib import Path
 
 import pytest
-
-from gen_worker.models.hub_client import WorkerResolvedRepo, WorkerResolvedRepoFile
 import requests
 
 import gen_worker.models.cozy_cas as cas_mod
@@ -115,16 +113,16 @@ def test_terminal_download_error_classification() -> None:
     assert not _is_terminal_download_error(requests.ConnectionError("reset"))
 
 
-def _resolved(payload: bytes, url: str) -> WorkerResolvedRepo:
-    return WorkerResolvedRepo(
-        snapshot_digest="ab" * 32,
-        files=[WorkerResolvedRepoFile(
-            path="model.safetensors",
-            size_bytes=len(payload),
-            blake3=blake3(payload).hexdigest(),
-            url=url,
-        )],
-    )
+def _resolved(payload: bytes, url: str) -> dict:
+    return {
+        "snapshot_digest": "ab" * 32,
+        "files": [{
+            "path": "model.safetensors",
+            "size_bytes": len(payload),
+            "blake3": blake3(payload).hexdigest(),
+            "url": url,
+        }],
+    }
 
 
 def test_snapshot_disk_headroom_check(tmp_path: Path, monkeypatch) -> None:

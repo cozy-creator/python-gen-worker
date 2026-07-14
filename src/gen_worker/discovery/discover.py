@@ -13,8 +13,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import msgspec
 
-from gen_worker.api.binding import Binding
-from gen_worker.api.slot import Slot
+from gen_worker.api.binding import HF, Binding, Civitai, Hub, ModelScope
 from gen_worker.api.types import (
     Asset,
     AudioAsset,
@@ -276,184 +275,34 @@ def _binding_to_manifest(binding: Binding, param_name: str = "") -> Dict[str, An
     """
     out: Dict[str, Any] = {
         "kind": "fixed",
-        "provider": binding.source,
+        "provider": binding.provider,
         "slot_name": param_name,
-        "ref": binding.path,
+        "ref": binding.ref,
     }
-    if binding.source == "tensorhub":
-        # Normal form (gw#492): the default tag ('latest') is elided at the
-        # manifest boundary so hub-minted keep/routing refs stay byte-equal
-        # to worker-minted wire refs (Go folds a non-empty tag verbatim).
-        if binding.tag and binding.tag != "latest":
-            out["tag"] = binding.tag
+    if isinstance(binding, Hub):
+        out["tag"] = binding.tag
         if binding.flavor:
             out["flavor"] = binding.flavor
-    elif binding.source == "huggingface":
+        if binding.allow_lora:
+            out["allow_lora"] = True
+    elif isinstance(binding, HF):
         for k in ("revision", "dtype", "subfolder"):
             v = getattr(binding, k)
             if v:
                 out[k] = v
         if binding.files:
             out["files"] = list(binding.files)
-    elif binding.source == "civitai":
+        if binding.allow_lora:
+            out["allow_lora"] = True
+    elif isinstance(binding, Civitai):
         if binding.version:
             out["version"] = binding.version
-    elif binding.source == "modelscope":
+    elif isinstance(binding, ModelScope):
         if binding.revision:
             out["revision"] = binding.revision
         if binding.files:
             out["files"] = list(binding.files)
     return out
-
-
-def _stamp_family(binding_manifest: Dict[str, Any], family: str) -> None:
-    """Stamp a binding manifest with the endpoint's architecture family
-    (pgw#523: unconditional-when-known, not ``allow_lora``-triggered) so
-    tensorhub's th#586 gate can family-police any LoRA overlay attached at
-    this slot. Identity (the binding) and permission (whether a LoRA may
-    attach here — the slot-policy ``loras`` axis, th#772) are separate
-    concerns; this only carries the family fact through. Shared by
-    top-level ``bindings`` blocks and ``model.choices[].binding`` rows
-    (pgw#519) so both surfaces stamp identically. No-op when the family
-    isn't known — nothing to police."""
-    if not family:
-        return
-    binding_manifest["family"] = family
-
-
-def _model_ref_to_manifest(ref: Any) -> Dict[str, Any]:
-    """``default_checkpoint``/curated-choice ref shape shared by the slots
-    block: ``{source, path, tag?, flavor?}`` — a structured ModelRef
-    (pgw#511)."""
-    out: Dict[str, Any] = {"source": ref.source, "path": ref.path}
-    if ref.tag and ref.tag != "latest":
-        out["tag"] = ref.tag
-    if ref.flavor:
-        out["flavor"] = ref.flavor
-    return out
-
-
-def _slot_to_manifest(name: str, slot: Slot, *, compile_family: str) -> Dict[str, Any]:
-    """One ``functions[].slots[]`` entry (pgw#520 / th#767): the hub-side
-    mapping/resolution contract for a Slot-declared model slot — NOT a
-    model choice list (``model.choices[]`` stays the ModelChoice-only
-    surface; a Slot endpoint never emits it)."""
-    out: Dict[str, Any] = {
-        "name": name,
-        "pipeline_class": f"{slot.pipeline_cls.__module__}.{slot.pipeline_cls.__qualname__}",
-    }
-    if slot.selected_by:
-        out["selected_by"] = slot.selected_by
-    if slot.default_checkpoint is not None:
-        out["default_checkpoint"] = _model_ref_to_manifest(slot.default_checkpoint)
-    # Compile(family=...) is the explicit, functionally-load-bearing
-    # declaration (compile-cache keying) — it wins over the slot's own
-    # default_config-preset registration when both are present, mirroring
-    # _stamp_family's precedence for the bindings-block stamp below.
-    family = compile_family or slot.family
-    if family:
-        out["family"] = family
-    if slot.default_config is not None:
-        out["default_config"] = msgspec.to_builtins(slot.default_config)
-    return out
-
-
-def _model_choice_in(ann: Any) -> Tuple[Optional[type], bool]:
-    """Inspect a payload field annotation for a curated ``ModelChoice`` set.
-
-    Returns ``(choice_enum, accepts_byom)``: the ``ModelChoice`` subclass the
-    field is typed with (or ``None``), and whether the field ALSO accepts an
-    arbitrary client-supplied :class:`ModelRef` (``ModelChoice | ModelRef`` =
-    BYOM-open). ``Optional[...]`` (a ``None`` union member) does not imply
-    BYOM."""
-    from gen_worker.api.binding import ModelRef
-    from gen_worker.api.model import is_model_choice
-
-    origin = typing.get_origin(ann)
-    if origin in (typing.Union, py_types.UnionType):
-        args = typing.get_args(ann)
-    else:
-        args = (ann,)
-    choice: Optional[type] = None
-    byom = False
-    for arg in args:
-        if is_model_choice(arg):
-            if choice is not None and choice is not arg:
-                raise ValueError(
-                    "a payload field may reference only one ModelChoice set"
-                )
-            choice = arg
-        elif arg is ModelRef:
-            byom = True
-    return choice, byom
-
-
-def _collect_model_placement_key(
-    payload_type: type, models: Dict[str, Any], compile_family: str = "", name: str = ""
-) -> Optional[Dict[str, Any]]:
-    """The handler's checkpoint placement key (pgw#509), or ``None``.
-
-    Scans the payload's top-level fields for one typed with a ``ModelChoice``
-    subclass and emits the curated set — each choice's structured
-    :class:`ModelRef` binding, typed per-model defaults, and optional
-    ``hot``/``price`` hints — plus whether the field accepts BYOM and which
-    ``models=`` slot the pick swaps into. This is the SDK->tensorhub contract
-    (th#761): the scheduler warm-pools per ``choices[].binding`` ref; the
-    catalog/UI renders ``choices[].defaults``.
-
-    ``compile_family`` mirrors the endpoint's ``Compile(family=...)`` onto
-    each choice binding via :func:`_stamp_family` — identically to how
-    top-level ``bindings`` blocks are stamped (pgw#519), unconditionally
-    when known (pgw#523)."""
-    try:
-        hints = typing.get_type_hints(payload_type)
-    except Exception:
-        hints = getattr(payload_type, "__annotations__", {}) or {}
-
-    field_name: Optional[str] = None
-    choice_enum: Optional[type] = None
-    byom = False
-    for name in getattr(payload_type, "__struct_fields__", ()) or ():
-        if name not in hints:
-            continue
-        found, field_byom = _model_choice_in(hints[name])
-        if found is None:
-            continue
-        if choice_enum is not None:
-            raise ValueError(
-                f"{payload_type.__name__}: multiple ModelChoice fields "
-                f"({field_name!r}, {name!r}); a handler has one placement key"
-            )
-        field_name, choice_enum, byom = name, found, field_byom
-
-    if choice_enum is None or field_name is None:
-        return None
-
-    # The pick swaps the primary (first-declared) model slot.
-    slot = next(iter(models), "")
-    choices: List[Dict[str, Any]] = []
-    for row in choice_enum.rows():  # type: ignore[attr-defined]
-        binding_manifest = _binding_to_manifest(row.ref, slot)
-        _stamp_family(binding_manifest, compile_family)
-        entry: Dict[str, Any] = {
-            "id": row.id,
-            "binding": binding_manifest,
-            "defaults": msgspec.to_builtins(row.defaults),
-        }
-        if row.hot:
-            entry["hot"] = True
-        if row.price is not None:
-            entry["price"] = row.price
-        choices.append(entry)
-    if not choices:
-        raise ValueError(
-            f"{payload_type.__name__}.{field_name}: ModelChoice "
-            f"{choice_enum.__name__} declares no models"
-        )
-    block: Dict[str, Any] = {"field": field_name, "byom": byom, "choices": choices}
-    if slot:
-        block["slot"] = slot
-    return block
 
 
 def _schema_and_hash(t: type) -> Tuple[Dict[str, Any], str]:
@@ -500,7 +349,7 @@ def _assert_unique_function_names(functions: List[Dict[str, Any]]) -> None:
     raise ValueError(
         "duplicate function name(s) within the endpoint — function names are the "
         "external routing identifiers and must be unique. Rename the handler "
-        "method:\n" + "\n".join(lines)
+        "method (or a variants= key):\n" + "\n".join(lines)
     )
 
 
@@ -535,8 +384,8 @@ def discover_functions(root: Optional[Path] = None, *, main_module: str | None =
     seen: Set[Tuple[str, str, str, str]] = set()
     for f in found:
         for entry in _extract_entries(f.obj, f.walked_module):
-            # (module, class, python_name, name) dedups objects re-found under
-            # multiple walked packages; name is one handler per method now.
+            # name is part of the key: variants= share (module, class,
+            # python_name) with their base function but stamp distinct names.
             key = (
                 entry.get("declared_module", entry.get("module", "")),
                 entry.get("class_name", ""),
@@ -574,29 +423,21 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
             key: _binding_to_manifest(binding, key)
             for key, binding in es.models.items()
         }
-        # Every binding carries the endpoint's architecture family, when
-        # known, so the hub's th#586 gate can family-police any LoRA
-        # overlay attached at that slot (pgw#523: unconditional-when-known,
-        # not allow_lora-triggered). pgw#519: the same stamp applies to
-        # model.choices[].binding rows, not just top-level bindings. pgw#520:
-        # a Slot-declared binding with no Compile(family=...) may still carry
-        # a family via its own default_config preset's registration — that's what
-        # es.slot_family reconciles (Compile(family=) wins when both exist).
+        # allow_lora bindings carry the endpoint's architecture family so the
+        # hub's th#586 gate can police adapter targets (builder rejects
+        # allow_lora without family).
         compile_family = es.compile.family if es.compile is not None else ""
-        for key, block in bindings_block.items():
-            slot_family = es.slot_family.get(key, "") if es.slot_family else ""
-            _stamp_family(block, compile_family or slot_family)
-
-        slots_block = [
-            _slot_to_manifest(name, slot, compile_family=compile_family)
-            for name, slot in es.slots.items()
-        ]
+        for block in bindings_block.values():
+            if block.get("allow_lora"):
+                if not compile_family:
+                    raise ValueError(
+                        f"{es.name}: allow_lora bindings require "
+                        "Compile(family=...) on the endpoint"
+                    )
+                block["family"] = compile_family
 
         input_schema, input_sha = _schema_and_hash(es.payload_type)
         moderation = _collect_payload_moderation_metadata(es.payload_type)
-        model_key = _collect_model_placement_key(
-            es.payload_type, es.models, compile_family, es.name
-        )
         output_type = es.output_type
         if output_type is None:
             raise ValueError(
@@ -640,10 +481,6 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
             "is_async": es.is_async,
             "timeout_ms": es.timeout_ms,
         }
-        if model_key is not None:
-            fn["model"] = model_key
-        if slots_block:
-            fn["slots"] = slots_block
         if incremental and es.delta_type is not None:
             fn["delta_type"] = _type_id(es.delta_type)
             fn["delta_schema_sha256"] = delta_sha

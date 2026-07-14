@@ -107,9 +107,6 @@ class Lifecycle:
             available_functions=self.executor.available_functions(),
             loading_functions=self.executor.loading_functions(),
             free_vram_bytes=(free // quantum) * quantum,
-            # gw#516: encode/upload tails past the GPU-slot release. The hub
-            # must not drain/retire this worker on GPU-idleness alone.
-            finalizing_jobs=self.executor.finalizing_jobs(),
         )
 
     def build_resources(self) -> pb.WorkerResources:
@@ -121,10 +118,7 @@ class Lifecycle:
             gpu_sm=str(hw.get("gpu_sm") or ""),
             installed_libs=[str(x) for x in (hw.get("installed_libs") or [])],
             image_digest=self._settings.worker_image_digest,
-            # git_commit intentionally unpopulated (pgw#514/P4): no launcher
-            # ever set WORKER_GIT_COMMIT and Go never read WorkerResources
-            # .git_commit — dead on both ends. Field stays on the wire
-            # (deleting it needs a coordinated tensorhub proto update).
+            git_commit=self._settings.worker_git_commit,
             instance_id=self._settings.runpod_pod_id or "",
         )
 
@@ -273,7 +267,7 @@ class Lifecycle:
                 continue
             for binding in spec.models.values():
                 ref = wire_ref(binding)
-                if binding.source != "tensorhub" and ref not in prefetch_refs:
+                if binding.provider != "tensorhub" and ref not in prefetch_refs:
                     # hf/civitai refs need no orchestrator snapshot; tensorhub
                     # refs arrive via ModelOp{DOWNLOAD} after HelloAck (§7).
                     prefetch_refs.append(ref)
@@ -293,7 +287,7 @@ class Lifecycle:
                 continue
             missing = sorted({
                 wire_ref(b) for b in spec.models.values()
-                if b.source == "tensorhub"
+                if b.provider == "tensorhub"
                 and self.executor.store.local_path(wire_ref(b)) is None
             })
             if missing:

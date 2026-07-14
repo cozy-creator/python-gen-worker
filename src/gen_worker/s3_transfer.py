@@ -186,8 +186,9 @@ class _sdk_upload_slot:
     def __enter__(self) -> None:
         _sdk_upload_slots.acquire()
 
-    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> bool:
         _sdk_upload_slots.release()
+        return False
 
 
 class _BotoTransferProgress:
