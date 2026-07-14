@@ -257,6 +257,14 @@ class StreamingVideoEncoder:
                 "hardware encoder %s failed to open (%s: %s); "
                 "falling back to libx264 for this encode",
                 self._encoder.codec, type(exc).__name__, exc)
+            # add_stream() leaves the failed hardware stream attached. A
+            # second stream in that container makes PyAV retry the orphan
+            # when muxing starts, so the advertised fallback fails too.
+            try:
+                self._container.close()
+            except Exception:
+                logger.debug("failed hardware encoder container close", exc_info=True)
+            self._container = av.open(self._path, mode="w")
             self._encoder = _x264()
             self._stream = self._add_video_stream(self._encoder, width, height)
         if self._sample_rate:

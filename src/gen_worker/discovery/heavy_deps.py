@@ -165,6 +165,16 @@ def stub_missing_heavy_deps(extra: Iterable[str] = ()) -> Iterator[frozenset[str
                 sys.meta_path.remove(finder)
             except ValueError:
                 pass
+            # Keep later optional-dependency probes honest. A retained stub
+            # makes find_spec(root) report installed even though package
+            # metadata correctly has no matching distribution.
+            for module_name in [
+                n
+                for n, module in sys.modules.items()
+                if isinstance(module, _HeavyDepStub)
+                and n.split(".", 1)[0] == root
+            ]:
+                del sys.modules[module_name]
 
     builtins.__import__ = _import
     try:
