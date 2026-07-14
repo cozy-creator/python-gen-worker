@@ -188,6 +188,7 @@ class Transport:
         self._stopping = asyncio.Event()
         self._connected = asyncio.Event()
         self._clean_close = False
+        self._non_expiring_drain = False
         self.reconnect_delays: List[float] = []  # observability + tests
         self._consecutive_auth_failures = 0
         self._first_auth_failure_at: Optional[float] = None
@@ -221,12 +222,21 @@ class Transport:
 
     # ---- drain / shutdown --------------------------------------------------
 
-    async def close_after_flush(self, timeout: float = 30.0) -> None:
-        """Drain path: ship everything queued, then end the stream and stop."""
-        await self.queue.wait_empty(timeout=timeout)
-        self._clean_close = True
+    def begin_non_expiring_drain(self) -> None:
+        """Keep reconnecting until a zero-deadline drain ships its results."""
+        self._non_expiring_drain = True
+
+    async def close_after_flush(self, timeout: Optional[float] = None) -> bool:
+        """Ship the queue, then stop; ``None`` waits until every result ships."""
+        flushed = await self.queue.wait_empty(timeout=timeout)
+        self._clean_close = flushed
+        if not flushed:
+            logger.warning(
+                "drain flush deadline expired; closing abruptly for hub reconciliation"
+            )
         self._stopping.set()
         await self.queue.notify()
+        return flushed
 
     def stop(self) -> None:
         self._stopping.set()
@@ -340,7 +350,11 @@ class Transport:
                 if now - self._connected_at >= _BACKOFF_RESET_AFTER_S:
                     attempt = 0
             timeout_s = float(self._settings.worker_disconnected_timeout_s or 0)
-            if timeout_s > 0 and now - last_connected > timeout_s:
+            if (
+                timeout_s > 0
+                and now - last_connected > timeout_s
+                and not self._non_expiring_drain
+            ):
                 raise FatalTransportError(
                     f"no successful connection for {timeout_s:.0f}s; exiting for reap"
                 )

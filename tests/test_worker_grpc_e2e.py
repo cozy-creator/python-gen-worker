@@ -323,7 +323,6 @@ def test_full_contract_round_trip(scheduler_and_worker) -> None:
         input_payload=_msgpack("marco")))
     conn3.wait_for(_is_accept_for("r-last"))
     conn3.send(drain=pb.Drain(deadline_ms=5000))
-    time.sleep(0.05)
     conn3.send(run_job=pb.RunJob(
         request_id="r-after-drain", attempt=1, function_name="echo",
         input_payload=_msgpack("marco")))
