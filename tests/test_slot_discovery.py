@@ -74,6 +74,47 @@ def test_slot_emits_slots_block_not_model_choices(tmp_pkg: Path) -> None:
     assert fn["bindings"]["vae"]["provider"] == "huggingface"
 
 
+def test_slot_preserves_provider_pins_in_binding_and_default(tmp_pkg: Path) -> None:
+    from gen_worker.discovery.discover import discover_functions
+
+    pkg = tmp_pkg / "ep_slot_pins"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("")
+    (pkg / "main.py").write_text(textwrap.dedent("""
+        import msgspec
+        from gen_worker import Civitai, HF, ModelScope, RequestContext, Slot, endpoint
+
+        class In_(msgspec.Struct):
+            prompt: str = ""
+
+        class Out_(msgspec.Struct):
+            y: str
+
+        @endpoint(models={
+            "pipeline": Slot(object, default_checkpoint=Civitai("827184", version="2883731")),
+            "hf": Slot(object, default_checkpoint=HF("owner/repo", revision="deadbeef")),
+            "modelscope": Slot(object, default_checkpoint=ModelScope("owner/repo", revision="v1")),
+        })
+        class Gen:
+            def setup(self, pipeline: object, hf: object, modelscope: object) -> None: ...
+            def generate(self, ctx: RequestContext, data: In_) -> Out_:
+                return Out_(y="ok")
+    """))
+
+    (fn,) = discover_functions(tmp_pkg, main_module="ep_slot_pins.main")
+    slots = {slot["name"]: slot for slot in fn["slots"]}
+
+    assert fn["bindings"]["pipeline"]["ref"] == "827184"
+    assert fn["bindings"]["pipeline"]["version"] == "2883731"
+    assert slots["pipeline"]["default_checkpoint"] == {
+        "source": "civitai", "path": "827184", "version": "2883731",
+    }
+    assert fn["bindings"]["hf"]["revision"] == "deadbeef"
+    assert slots["hf"]["default_checkpoint"]["revision"] == "deadbeef"
+    assert fn["bindings"]["modelscope"]["revision"] == "v1"
+    assert slots["modelscope"]["default_checkpoint"]["revision"] == "v1"
+
+
 def test_slot_with_no_selected_by_or_default_emits_minimal_block(tmp_pkg: Path) -> None:
     from gen_worker.discovery.discover import discover_functions
 
