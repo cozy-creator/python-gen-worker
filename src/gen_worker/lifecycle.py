@@ -170,7 +170,9 @@ class Lifecycle:
             )
         else:
             self._observed_residency_generation = generation
-            self.executor.store.keep = {ref for ref in desired.disk_refs if ref}
+            self.executor.store.keep = list(dict.fromkeys(ref for ref in desired.disk_refs if ref))
+            for ref, snapshot in desired.snapshots.items():
+                self.executor.store.bank_snapshot(ref, snapshot)
             self._replace_residency_reconcile(desired)
         # New connection: per-worker fn disables/degradations were wiped by
         # Hello; re-emit any that still hold, then re-baseline dynamic state.

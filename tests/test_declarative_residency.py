@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import re
+import tomllib
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -112,6 +115,22 @@ def test_proto_field_numbers_match_tensorhub_contract() -> None:
     assert not hasattr(pb, "MODEL_OP_KIND_UNLOAD")
 
 
+def test_declared_protobuf_floor_imports_generated_code() -> None:
+    root = Path(__file__).parents[1]
+    project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    requirement = next(
+        dep for dep in project["project"]["dependencies"] if dep.startswith("protobuf>=")
+    )
+    floor = tuple(map(int, requirement.removeprefix("protobuf>=").split(".")))
+    source = (root / "src/gen_worker/pb/worker_scheduler_pb2.py").read_text(
+        encoding="utf-8"
+    )
+    match = re.search(r"Protobuf Python Version: (\d+)\.(\d+)\.(\d+)", source)
+    assert match is not None
+    assert floor >= tuple(map(int, match.groups()))
+    assert pb.DESCRIPTOR.name == "worker_scheduler.proto"
+
+
 def test_full_replace_supersedes_and_same_generation_refreshes_urls(monkeypatch) -> None:
     async def run() -> None:
         lifecycle, executor, transport = _lifecycle()
@@ -168,13 +187,40 @@ def test_full_replace_supersedes_and_same_generation_refreshes_urls(monkeypatch)
             disk_refs=["acme/stale"],
             snapshots={"acme/stale": _snapshot("https://r2/stale")},
         )))
-        assert executor.store.keep == {"acme/new"}
+        assert executor.store.keep == ["acme/new"]
         assert lifecycle._state_delta().observed_residency_generation == 2
         assert calls == [
             ("acme/old", "https://r2/old"),
             ("acme/new", "https://r2/new-1"),
             ("acme/new", "https://r2/new-2"),
         ]
+
+    asyncio.run(run())
+
+
+def test_non_idle_hello_ack_banks_snapshot_before_reconcile() -> None:
+    async def run() -> None:
+        lifecycle, executor, _ = _lifecycle()
+        ref = "tensorhub/active-request"
+        executor._idle.clear()
+        waiting = asyncio.create_task(executor.store._await_hub_snapshot(ref))
+        await asyncio.sleep(0)
+        assert not waiting.done()
+
+        await lifecycle.on_hello_ack(pb.HelloAck(
+            desired_residency=pb.DesiredResidency(
+                generation=1,
+                disk_refs=[ref],
+                snapshots={ref: _snapshot("https://r2/reminted")},
+            )
+        ))
+
+        snapshot = await asyncio.wait_for(waiting, 0.1)
+        assert snapshot.files[0].url == "https://r2/reminted"
+        assert not executor._idle.is_set()
+        assert lifecycle._residency_task is not None
+        assert not lifecycle._residency_task.done()
+        lifecycle._cancel_residency_reconcile()
 
     asyncio.run(run())
 

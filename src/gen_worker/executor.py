@@ -428,7 +428,7 @@ class ModelStore:
         )
         self._locks: Dict[str, asyncio.Lock] = {}
         self._bindings: Dict[str, Any] = {}
-        self.keep: set[str] = set()
+        self.keep: list[str] = []
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._index = disk_gc.RefIndex(self._cache_dir)
         self._disk_free = disk_free_bytes_fn or self._default_disk_free
@@ -506,6 +506,15 @@ class ModelStore:
         """A digest-carrying snapshot for ``ref`` was seen this connection
         (gw#465): snapshot-less ops for it can still materialize the bytes."""
         return ref in self._snapshots
+
+    def bank_snapshot(self, ref: str, snapshot: pb.Snapshot) -> None:
+        """Make hub metadata available without starting a download."""
+        if not ref or not snapshot.digest or not snapshot.files:
+            return
+        self._snapshots[ref] = snapshot
+        waiter = self._snapshot_waiters.get(ref)
+        if waiter is not None:
+            waiter.set()
 
     def component_digests(self, ref: str, local_path: Optional[Path] = None) -> Dict[str, str]:
         """Per-component content identity of ``ref``'s snapshot (gw#479):
@@ -600,7 +609,11 @@ class ModelStore:
             if honor_grace and (now - last) < _DISK_GC_GRACE_S:
                 continue
             out.append((last, ref))
-        out.sort()
+        if include_keep:
+            rank = {ref: index for index, ref in enumerate(self.keep)}
+            out.sort(key=lambda item: (-rank[item[1]], item[0], item[1]))
+        else:
+            out.sort()
         return [r for _, r in out]
 
     def _evict_disk_ref(self, ref: str) -> None:
@@ -684,10 +697,7 @@ class ModelStore:
         if binding is None:
             binding = self._bindings.get(ref)
         if snapshot is not None and snapshot.digest and snapshot.files:
-            self._snapshots[ref] = snapshot
-            waiter = self._snapshot_waiters.get(ref)
-            if waiter is not None:
-                waiter.set()
+            self.bank_snapshot(ref, snapshot)
         elif snapshot is None:
             snapshot = self._snapshots.get(ref)
         async with self._lock(ref):
