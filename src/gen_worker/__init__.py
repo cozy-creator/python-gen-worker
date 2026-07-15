@@ -52,6 +52,7 @@ from .request_context import (
     TrainingContext,
     TrainingMetric,
 )
+from .runtimes.server import VLLMRuntime
 from .subproc import run_process
 
 
@@ -105,5 +106,6 @@ __all__ = [
     "ImageAsset",
     "StringEnum",
     "VideoAsset",
+    "VLLMRuntime",
     "io",
 ]

@@ -30,6 +30,7 @@ from gen_worker.discovery.heavy_deps import stub_missing_heavy_deps
 from gen_worker.discovery.names import slugify_name
 from gen_worker.discovery.project import load_project_config
 from gen_worker.discovery.walk import EndpointImportError, find_endpoints
+from gen_worker.runtimes.server import runtime_name
 
 
 def _type_id(t: type) -> Dict[str, str]:
@@ -652,7 +653,7 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
             "declared_module": es.module or module_name,
             "class_name": es.cls.__name__ if es.cls is not None else "",
             "kind": es.kind,
-            "runtime": es.runtime,
+            "runtime": runtime_name(es.runtime) if es.runtime is not None else None,
             "resources": res_dict,
             "bindings": bindings_block,
             "payload_type": _type_id(es.payload_type),

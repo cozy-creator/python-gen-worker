@@ -17,6 +17,7 @@ from .errors import (
     WorkerError,
 )
 from .progress import diffusers_step_callback
+from ..runtimes.server import VLLMRuntime
 from .streaming import (
     BatchItemDelta,
     Done,
@@ -82,4 +83,5 @@ __all__ = [
     "StringEnum",
     "Tensors",
     "VideoAsset",
+    "VLLMRuntime",
 ]

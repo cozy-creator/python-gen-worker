@@ -505,9 +505,11 @@ def test_manifest_emits_model_placement_key(tmp_pkg: Path) -> None:
 def test_model_shorthand_skips_server_handle_setup_param() -> None:
     """runtime= endpoints inject a ServerHandle into setup(); the model=
     shorthand must resolve the slot from the remaining parameter."""
-    from gen_worker.runtimes.server import ServerHandle
+    from gen_worker.runtimes.server import ServerHandle, VLLMRuntime
 
-    @endpoint(model=HF("o/llm"), resources=Resources(vram_gb=40), runtime="vllm")
+    runtime = VLLMRuntime(max_model_len=16384, gpu_memory_utilization=0.94)
+
+    @endpoint(model=HF("o/llm"), resources=Resources(vram_gb=40), runtime=runtime)
     class Chat:
         def setup(self, model: str, server: ServerHandle) -> None:
             self.base_url = server.base_url
@@ -516,6 +518,7 @@ def test_model_shorthand_skips_server_handle_setup_param() -> None:
             return _Out(result="")
 
     (s,) = extract_specs(Chat)
+    assert s.runtime is runtime
     assert list(s.models) == ["model"]
     assert s.models["model"].path == "o/llm"
 

@@ -19,12 +19,57 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Callable, Dict, Optional, Sequence
+from typing import Callable, Dict, Optional, Sequence, Union
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_BOOT_TIMEOUT_S = 600.0
 _TERM_GRACE_S = 10.0
+_RUNTIME_NAMES = frozenset(("vllm", "llama-server"))
+
+
+@dataclass(frozen=True)
+class VLLMRuntime:
+    """Typed vLLM process configuration owned by the worker lifecycle.
+
+    Startup has no wall-clock deadline: while the process is alive but not yet
+    healthy, the worker advertises the function in ``StateDelta.loading_functions``.
+    Process exit becomes a typed setup failure; readiness becomes availability.
+    """
+
+    max_model_len: Optional[int] = None
+    gpu_memory_utilization: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        if self.max_model_len is not None and self.max_model_len <= 0:
+            raise ValueError("VLLMRuntime.max_model_len must be positive")
+        if self.gpu_memory_utilization is not None and not 0.0 < self.gpu_memory_utilization <= 1.0:
+            raise ValueError("VLLMRuntime.gpu_memory_utilization must be in (0, 1]")
+
+    @property
+    def engine(self) -> str:
+        return "vllm"
+
+    def command_args(self) -> tuple[str, ...]:
+        args: list[str] = []
+        if self.max_model_len is not None:
+            args.extend(("--max-model-len", str(self.max_model_len)))
+        if self.gpu_memory_utilization is not None:
+            args.extend(("--gpu-memory-utilization", str(self.gpu_memory_utilization)))
+        return tuple(args)
+
+
+RuntimeSpec = Union[str, VLLMRuntime]
+
+
+def runtime_name(runtime: RuntimeSpec) -> str:
+    """Wire/discovery name for a validated runtime declaration."""
+    if isinstance(runtime, VLLMRuntime):
+        return runtime.engine
+    if isinstance(runtime, str) and runtime in _RUNTIME_NAMES:
+        return runtime
+    raise ValueError(
+        f"runtime must be 'vllm', 'llama-server', or VLLMRuntime(...), got {runtime!r}"
+    )
 
 
 def free_port() -> int:
@@ -83,13 +128,15 @@ class ServerProcess:
         *,
         health_url: str,
         base_url: str = "",
-        boot_timeout_s: float = _DEFAULT_BOOT_TIMEOUT_S,
+        boot_timeout_s: Optional[float] = None,
         env: Optional[dict[str, str]] = None,
     ) -> None:
         self.command = [str(c) for c in command]
         self.health_url = health_url
         self.base_url = base_url or health_url.rsplit("/", 1)[0]
-        self.boot_timeout_s = float(boot_timeout_s)
+        if boot_timeout_s is not None and boot_timeout_s <= 0:
+            raise ValueError("boot_timeout_s must be positive when provided")
+        self.boot_timeout_s = float(boot_timeout_s) if boot_timeout_s is not None else None
         self.env = env
 
     def start(self) -> ServerHandle:
@@ -108,7 +155,9 @@ class ServerProcess:
         return handle
 
     def _wait_healthy(self, proc: subprocess.Popen) -> None:
-        deadline = time.monotonic() + self.boot_timeout_s
+        deadline = (
+            time.monotonic() + self.boot_timeout_s if self.boot_timeout_s is not None else None
+        )
         delay = 0.25
         while True:
             code = proc.poll()
@@ -123,7 +172,7 @@ class ServerProcess:
                         return
             except (urllib.error.URLError, OSError, TimeoutError):
                 pass
-            if time.monotonic() >= deadline:
+            if deadline is not None and time.monotonic() >= deadline:
                 raise ServerBootError(
                     f"engine server failed health check within "
                     f"{self.boot_timeout_s:.0f}s at {self.health_url}"
@@ -137,7 +186,7 @@ def vllm_server(
     *,
     port: Optional[int] = None,
     extra_args: Sequence[str] = (),
-    boot_timeout_s: float = _DEFAULT_BOOT_TIMEOUT_S,
+    boot_timeout_s: Optional[float] = None,
 ) -> ServerProcess:
     """``vllm serve <model_path>`` with an OpenAI-compatible API + /health."""
     p = port or free_port()
@@ -183,7 +232,7 @@ def llama_server(
     *,
     port: Optional[int] = None,
     extra_args: Sequence[str] = (),
-    boot_timeout_s: float = _DEFAULT_BOOT_TIMEOUT_S,
+    boot_timeout_s: Optional[float] = None,
     vram_budget_gb: Optional[float] = None,
     n_ctx: Optional[int] = None,
 ) -> "ServerProcess | DegradingBoot":
@@ -253,14 +302,26 @@ RUNTIME_FACTORIES: Dict[str, Callable[[str], "ServerProcess | DegradingBoot"]] =
 }
 
 
+def runtime_process(runtime: RuntimeSpec, model_path: str) -> "ServerProcess | DegradingBoot":
+    """Build the process represented by a typed endpoint runtime declaration."""
+    name = runtime_name(runtime)
+    if isinstance(runtime, VLLMRuntime):
+        return vllm_server(model_path, extra_args=runtime.command_args())
+    return RUNTIME_FACTORIES[name](model_path)
+
+
 __all__ = [
     "DegradingBoot",
     "RUNTIME_FACTORIES",
+    "RuntimeSpec",
     "ServerBootError",
     "ServerHandle",
     "ServerProcess",
+    "VLLMRuntime",
     "free_port",
     "llama_server",
     "process_vram_bytes",
+    "runtime_name",
+    "runtime_process",
     "vllm_server",
 ]

@@ -21,7 +21,7 @@
   rejected for producer kinds: nothing is ever published by yielding.
 * An async-generator handler streams (inference only); there is no separate
   streaming decorator.
-* ``runtime="vllm"`` boots an engine-hosting server subprocess before setup.
+* ``runtime=VLLMRuntime(...)`` boots a worker-owned engine server before setup.
 
 Checkpoint SELECTION is a runtime payload argument, not a build-time fan-out:
 a handler whose payload declares a field typed with a ``ModelChoice`` subclass
@@ -37,6 +37,7 @@ from typing import Any, Callable, Dict, Mapping, Optional, Tuple, TypeVar, Union
 
 import msgspec
 
+from ..runtimes.server import RuntimeSpec, runtime_name
 from .binding import BINDING_TYPES, Binding
 from .slot import Slot
 
@@ -184,7 +185,7 @@ class EndpointDecl(msgspec.Struct, frozen=True, kw_only=True):
     # default_config metadata that `models` (a plain Binding map, for
     # back-compat with every existing model-injection call site) can't hold.
     slots: Mapping[str, Slot] = msgspec.field(default_factory=dict)
-    runtime: Optional[str] = None
+    runtime: Optional[RuntimeSpec] = None
     name: Optional[str] = None  # function-shaped endpoints only
     is_function: bool = False
     compile: Optional[Compile] = None
@@ -388,7 +389,7 @@ def _decorate_class(
     resources: Resources,
     models: Dict[str, Binding],
     slots: Dict[str, Slot],
-    runtime: Optional[str],
+    runtime: Optional[RuntimeSpec],
     compile: Optional[Compile] = None,
 ) -> type:
     handlers = _find_handler_methods(cls)
@@ -397,11 +398,8 @@ def _decorate_class(
     models, slots = _resolve_single_slot(cls, models, slots, handlers)
     _validate_class_models(cls, models, slots)
 
-    if runtime is not None and runtime not in ("vllm", "llama-server"):
-        raise ValueError(
-            f"@endpoint class {cls.__name__!r}: runtime must be 'vllm' or "
-            f"'llama-server', got {runtime!r}"
-        )
+    if runtime is not None:
+        runtime_name(runtime)
 
     decl = EndpointDecl(
         kind=kind, resources=resources, models=models, slots=slots,
@@ -419,7 +417,7 @@ def _decorate_function(
     resources: Resources,
     models: Dict[str, Binding],
     slots: Dict[str, Slot],
-    runtime: Optional[str],
+    runtime: Optional[RuntimeSpec],
     name: Optional[str],
     compile: Optional[Compile] = None,
 ) -> Callable[..., Any]:
@@ -463,7 +461,7 @@ def endpoint(
     model: Optional[SlotLike] = ...,
     models: Optional[Mapping[str, SlotLike]] = ...,
     resources: Optional[Resources] = ...,
-    runtime: Optional[str] = ...,
+    runtime: Optional[RuntimeSpec] = ...,
     name: Optional[str] = ...,
     compile: Optional[Compile] = ...,
 ) -> Callable[[T], T]: ...  # configured @endpoint(...) form
@@ -476,7 +474,7 @@ def endpoint(
     model: Optional[SlotLike] = None,
     models: Optional[Mapping[str, SlotLike]] = None,
     resources: Optional[Resources] = None,
-    runtime: Optional[str] = None,
+    runtime: Optional[RuntimeSpec] = None,
     name: Optional[str] = None,
     compile: Optional[Compile] = None,
 ) -> Any:

@@ -20,6 +20,7 @@ from .api.decorators import ATTR, Compile, EndpointDecl, Resources
 from .api.slot import Slot
 from .discovery.names import slugify_name
 from .discovery.walk import find_endpoints
+from .runtimes.server import RuntimeSpec
 
 _ITER_ORIGINS = (
     typing.Iterator, typing.Iterable, typing.AsyncIterator, typing.AsyncIterable,
@@ -66,7 +67,7 @@ class EndpointSpec:
     # precomputed once here so ctx.slots doesn't need EndpointDecl.compile.
     slot_family: Dict[str, str] = field(default_factory=dict)
     timeout_ms: Optional[int] = None
-    runtime: Optional[str] = None
+    runtime: Optional[RuntimeSpec] = None
     compile: Optional[Compile] = None  # opt-in torch.compile spec (#384)
     module: str = ""              # declaring module
     walked_module: str = ""       # top-level package the object was found under

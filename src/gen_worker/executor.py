@@ -1996,16 +1996,15 @@ class Executor:
 
     async def _boot_engine_server(self, spec: EndpointSpec, paths: Dict[str, str]) -> Any:
         """Boot the runtime="vllm"/"llama-server" subprocess and health-wait."""
-        from .runtimes.server import RUNTIME_FACTORIES
+        from .runtimes.server import runtime_process
 
         assert spec.runtime  # validated at decoration
-        factory = RUNTIME_FACTORIES[spec.runtime]
         if not paths:
             raise ValidationError(
                 f"runtime={spec.runtime!r} on {spec.name!r} requires a model binding"
             )
         model_path = next(iter(paths.values()))
-        proc = factory(model_path)
+        proc = runtime_process(spec.runtime, model_path)
         return await asyncio.to_thread(proc.start)
 
     async def _fetch_compile_snapshot(
