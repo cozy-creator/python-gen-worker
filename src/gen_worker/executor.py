@@ -1630,11 +1630,15 @@ class Executor:
         try:
             await self.ensure_setup(effective, snapshots)
         except Exception as exc:
-            error = _model_failure_vocab(exc)
-            for ref in dict.fromkeys(bindings.values()):
-                await self._send(pb.WorkerMessage(model_event=pb.ModelEvent(
-                    ref=ref, state=pb.MODEL_STATE_FAILED, error=error,
-                )))
+            # Host-RAM admission already emitted the precise largest staged
+            # ref(s) that caused the capacity failure. Do not overwrite that
+            # signal by failing smaller shared refs such as an SDXL VAE.
+            if not isinstance(exc, InsufficientHostRamError):
+                error = _model_failure_vocab(exc)
+                for ref in dict.fromkeys(bindings.values()):
+                    await self._send(pb.WorkerMessage(model_event=pb.ModelEvent(
+                        ref=ref, state=pb.MODEL_STATE_FAILED, error=error,
+                    )))
             raise
 
     def _class_record(self, spec: EndpointSpec) -> _ClassRecord:
@@ -1925,10 +1929,16 @@ class Executor:
         if not paths or not slots:
             return
         incoming = 0
+        incoming_refs: List[str] = []
         for slot, p in paths.items():
             if slot in slots:
                 slot_bytes = await asyncio.to_thread(disk_gc.tree_bytes, Path(p))
-                incoming = max(incoming, slot_bytes)
+                ref = wire_ref(spec.models[slot])
+                if slot_bytes > incoming:
+                    incoming = slot_bytes
+                    incoming_refs = [ref]
+                elif slot_bytes == incoming and slot_bytes > 0:
+                    incoming_refs.append(ref)
         if incoming <= 0:
             return
         res = self.store.residency
@@ -1974,7 +1984,7 @@ class Executor:
             if after.sufficient:
                 return
 
-        raise InsufficientHostRamError(
+        error = InsufficientHostRamError(
             spec.name,
             incoming_bytes=incoming,
             floor_bytes=after.floor_bytes,
@@ -1983,6 +1993,16 @@ class Executor:
             available_after_bytes=after.available_bytes,
             evicted_refs=tuple(dict.fromkeys(evicted)),
         )
+        # th#807: model-failure state is the scheduler's typed capacity seam.
+        # Only the largest sequentially staged ref(s) caused this admission
+        # decision; failing a smaller shared VAE would poison unrelated jobs.
+        for ref in dict.fromkeys(incoming_refs):
+            await self._send(pb.WorkerMessage(model_event=pb.ModelEvent(
+                ref=ref,
+                state=pb.MODEL_STATE_FAILED,
+                error=error.reason,
+            )))
+        raise error
 
     async def _make_room_for(self, spec: EndpointSpec, setup_slots: List[str]) -> None:
         """Evict idle LRU pipelines before loading instead of degrading the
