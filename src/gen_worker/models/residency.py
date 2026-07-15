@@ -235,6 +235,20 @@ class Residency:
             e = self._entries.get(ref)
             return e.obj if e else None
 
+    def replace_object(self, ref: str, obj: Any) -> bool:
+        """Replace a resident ref's bookkeeping object without a state event.
+
+        Record-owner handoff can change the representative object while the
+        same logical ref remains resident. In particular, ``None`` releases a
+        departed typed object when the surviving owner is tenant-loaded.
+        """
+        with self._lock:
+            e = self._entries.get(ref)
+            if e is None:
+                return False
+            e.obj = obj
+            return True
+
     def vram_bytes(self, ref: str) -> int:
         with self._lock:
             e = self._entries.get(ref)
