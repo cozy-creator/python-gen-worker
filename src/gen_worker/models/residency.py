@@ -76,6 +76,19 @@ class Tier(str, Enum):
     DISK = "DISK"
 
 
+@dataclass(frozen=True)
+class HostRamHeadroom:
+    """One observed host-RAM admission decision."""
+
+    available_bytes: int
+    floor_bytes: int
+    required_bytes: int
+
+    @property
+    def sufficient(self) -> bool:
+        return self.available_bytes >= self.required_bytes
+
+
 @dataclass
 class _Entry:
     ref: str
@@ -195,6 +208,15 @@ class Residency:
         if self._free_vram_fn is not None:
             return int(self._free_vram_fn())
         return _default_free_vram_bytes()
+
+    def host_ram_headroom(self, needed_bytes: int) -> HostRamHeadroom:
+        """Observed capacity for one incoming host-staged model load."""
+        floor = int(_effective_ram_floor_gb() * _GiB)
+        return HostRamHeadroom(
+            available_bytes=int(get_available_ram_gb() * _GiB),
+            floor_bytes=floor,
+            required_bytes=max(0, int(needed_bytes)) + floor,
+        )
 
     # ---- queries ---------------------------------------------------------------
 
@@ -580,32 +602,6 @@ class Residency:
             candidates.sort(key=lambda e: e.last_used)
             return [e.ref for e in candidates]
 
-    def make_room_ram(self, needed_bytes: int) -> bool:
-        """Host-RAM admission for an incoming load of ``needed_bytes`` (gw#407):
-        release warm RAM-tier LRU entries to disk until available host RAM
-        covers the load plus the RAM floor. False means even an empty warm
-        tier cannot make the load safe — the caller must refuse the load
-        (RETRYABLE) instead of thrashing the host into the keepalive-stall
-        livelock (J17: 16 SDXL variants on a 31GB host)."""
-        floor_bytes = int(_effective_ram_floor_gb() * _GiB)
-        target = int(needed_bytes) + floor_bytes
-
-        def _avail() -> int:
-            return int(get_available_ram_gb() * _GiB)
-
-        if _avail() >= target:
-            return True
-        for ref in self.lru_ram_victims():
-            if not self.release_to_disk(ref):
-                continue
-            logger.info(
-                "residency: released warm %s to disk for %d bytes of host-RAM headroom",
-                ref, needed_bytes,
-            )
-            if _avail() >= target:
-                return True
-        return _avail() >= target
-
     # ---- shared components (#335, folded in) -----------------------------------
 
     def acquire_shared(
@@ -808,6 +804,7 @@ class LoadedComponentKey:
 __all__ = [
     "Residency",
     "Tier",
+    "HostRamHeadroom",
     "LoadedComponentKey",
     "content_set_digest",
     "ON_DISK", "IN_RAM", "IN_VRAM", "EVICTED",
