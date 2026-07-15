@@ -107,6 +107,54 @@ def test_probe_caps_meminfo_at_cgroup_limit(tmp_path: Path) -> None:
     assert ram.meminfo_total_gb > 4.0
 
 
+def test_probe_counts_inactive_file_as_reclaimable_headroom(tmp_path: Path) -> None:
+    """#543: model reads may fill a cgroup's inactive file page cache.
+
+    ``memory.current`` includes that cache, but the kernel can reclaim pages on
+    the inactive file LRU for the next tensor allocation.  Admission therefore
+    uses cgroup working set, not raw usage.
+    """
+    root, proc = _fake_cgroup(
+        tmp_path,
+        files={
+            "memory.max": str(4 * _GiB),
+            "memory.current": str(3 * _GiB),
+            "memory.stat": f"anon {_GiB}\ninactive_file {2 * _GiB}\n",
+        },
+    )
+    ram = probe_host_ram(root=root, proc_self_cgroup=proc)
+    assert ram.available_gb == pytest.approx(3.0)
+
+
+def test_probe_keeps_active_file_in_cgroup_working_set(tmp_path: Path) -> None:
+    """Only the kernel's inactive file list is treated as ready headroom."""
+    root, proc = _fake_cgroup(
+        tmp_path,
+        files={
+            "memory.max": str(4 * _GiB),
+            "memory.current": str(3 * _GiB),
+            "memory.stat": (
+                f"inactive_file {_GiB}\nactive_file {_GiB}\n"
+            ),
+        },
+    )
+    ram = probe_host_ram(root=root, proc_self_cgroup=proc)
+    assert ram.available_gb == pytest.approx(2.0)
+
+
+def test_probe_uses_v1_hierarchical_inactive_file(tmp_path: Path) -> None:
+    root, proc = _fake_cgroup(
+        tmp_path,
+        files={
+            "memory/memory.limit_in_bytes": str(4 * _GiB),
+            "memory/memory.usage_in_bytes": str(3 * _GiB),
+            "memory/memory.stat": f"total_inactive_file {2 * _GiB}\n",
+        },
+    )
+    ram = probe_host_ram(root=root, proc_self_cgroup=proc)
+    assert ram.available_gb == pytest.approx(3.0)
+
+
 def test_probe_without_cgroup_is_meminfo_passthrough(tmp_path: Path) -> None:
     root, proc = _fake_cgroup(tmp_path, files={})
     ram = probe_host_ram(root=root, proc_self_cgroup=proc)
