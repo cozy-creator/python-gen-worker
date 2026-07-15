@@ -788,8 +788,10 @@ def _civitai_select_files(
 ) -> list[dict[str, Any]]:
     """Downloadable weight files of a model version, primary first.
 
-    Safetensors files win when present (unchanged behavior). GGUF-only
-    versions (th#611: klein/qwen fine-tunes published only as quants)
+    Safetensors files win when present. Civitai may publish alternative
+    precisions under the same filename; keep the primary/first alternative
+    once so a later variant cannot overwrite it on disk. GGUF-only versions
+    (th#611: klein/qwen fine-tunes published only as quants)
     select exactly ONE gguf — civitai reuses a single filename across
     quantType variants, so downloading several would collide on disk:
     ``gguf_quant`` picks it explicitly, else the preference order applies.
@@ -809,7 +811,10 @@ def _civitai_select_files(
             gg.append(entry)
     if st:
         st.sort(key=lambda f: (0 if f["primary"] else 1, f["id"], f["name"]))
-        return st
+        unique: dict[str, dict[str, Any]] = {}
+        for f in st:
+            unique.setdefault(f["name"], f)
+        return list(unique.values())
     if not gg:
         return []
     gg.sort(key=lambda f: (f["id"], f["name"]))
