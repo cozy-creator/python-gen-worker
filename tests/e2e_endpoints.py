@@ -108,3 +108,33 @@ class BrokenSetupEndpoint:
     def broken_echo(self, ctx: RequestContext, data: EchoIn) -> EchoOut:
         weights = Path(self.model_path) / "model.safetensors"
         return EchoOut(response=weights.read_text())
+
+
+class _RamPressurePipeline:
+    """Pipeline-shaped annotation for the host-RAM admission wire test."""
+
+    @classmethod
+    def from_pretrained(cls, path: str, **kwargs: object) -> "_RamPressurePipeline":
+        return cls()
+
+    def to(self, device: str) -> "_RamPressurePipeline":
+        return self
+
+
+@endpoint(models={
+    "pipeline": Hub("e2e/ram-pressure-pipeline"),
+    "vae": Hub("e2e/ram-pressure-shared-vae"),
+})
+class RamPressureEndpoint:
+    """Two staged refs: only the larger pipeline may fail RAM admission."""
+
+    def setup(
+        self,
+        pipeline: _RamPressurePipeline,
+        vae: _RamPressurePipeline,
+    ) -> None:
+        self.pipeline = pipeline
+        self.vae = vae
+
+    def ram_pressure(self, ctx: RequestContext, data: EchoIn) -> EchoOut:
+        return EchoOut(response="unexpectedly loaded")

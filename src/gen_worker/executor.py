@@ -42,7 +42,11 @@ from .api.streaming import (
     TokenUsage,
 )
 from .api.types import Asset
-from .capability import HardwareUnmetError, InsufficientDiskError
+from .capability import (
+    HardwareUnmetError,
+    InsufficientDiskError,
+    InsufficientHostRamError,
+)
 from .input_assets import cleanup_input_assets, materialize_input_assets
 from .models import disk_gc
 from .models import provision
@@ -53,7 +57,6 @@ from .models.memory import (
     estimate_cuda_resident_gb,
     estimate_pipeline_size_gb,
     flush_memory,
-    get_available_ram_gb,
     get_available_vram_gb,
     is_cuda_oom,
     low_vram_mode,
@@ -1627,11 +1630,15 @@ class Executor:
         try:
             await self.ensure_setup(effective, snapshots)
         except Exception as exc:
-            error = _model_failure_vocab(exc)
-            for ref in dict.fromkeys(bindings.values()):
-                await self._send(pb.WorkerMessage(model_event=pb.ModelEvent(
-                    ref=ref, state=pb.MODEL_STATE_FAILED, error=error,
-                )))
+            # Host-RAM admission already emitted the precise largest staged
+            # ref(s) that caused the capacity failure. Do not overwrite that
+            # signal by failing smaller shared refs such as an SDXL VAE.
+            if not isinstance(exc, InsufficientHostRamError):
+                error = _model_failure_vocab(exc)
+                for ref in dict.fromkeys(bindings.values()):
+                    await self._send(pb.WorkerMessage(model_event=pb.ModelEvent(
+                        ref=ref, state=pb.MODEL_STATE_FAILED, error=error,
+                    )))
             raise
 
     def _class_record(self, spec: EndpointSpec) -> _ClassRecord:
@@ -1729,8 +1736,11 @@ class Executor:
         # Loads serialize: concurrent setups would cross-contaminate each
         # other's allocator deltas and place_pipeline's free-VRAM reads.
         async with self._load_lock:
-            await self._ensure_host_ram_for(spec, paths)
             await self._make_room_for(spec, setup_slots)
+            # VRAM make-room may demote the old pipeline into host RAM. Admit
+            # the incoming load only AFTER that transition so the probe sees
+            # the actual post-demotion pressure (pgw#541).
+            await self._ensure_host_ram_for(spec, paths)
             instance = spec.cls()
             setup = getattr(instance, "setup", None)
             inj = _InjectionResult(kwargs={}, loaded={})
@@ -1893,13 +1903,19 @@ class Executor:
         }
 
     async def _ensure_host_ram_for(self, spec: EndpointSpec, paths: Dict[str, str]) -> None:
-        """Load-size-aware host-RAM admission (gw#407). ``from_pretrained``
+        """Owner-aware host-RAM admission (gw#407/pgw#541). ``from_pretrained``
         stages the full weight set in host RAM before placement; loading into
         a nearly-full host pushes it into reclaim-thrash that stalls the whole
         process — including gRPC keepalive acks — so the hub disconnects and
-        requeues in a livelock (J17: 16 SDXL variants on a 31GB host). Free
-        warm RAM-tier LRU pipelines first; when even that cannot cover the
-        incoming bytes plus the floor, fail RETRYABLE instead of thrashing.
+        requeues in a livelock (J17: 16 SDXL variants on a 31GB host).
+
+        A warm pipeline is owned by both Residency and its endpoint
+        ``_ClassRecord``. Clearing only the Residency reference reports
+        ON_DISK while ``record.instance`` still owns every tensor. Evict
+        record-owned victims through ``_vacate_record``; only ownerless
+        entries may use ``release_to_disk`` directly. Re-probe observed RAM
+        after every teardown and fail RETRYABLE if the real headroom still
+        cannot cover the incoming bytes plus the derived floor.
 
         Only worker-loaded (pipeline-typed) slots count: tenant-owned and
         engine-runtime slots do not stage full weight sets in host RAM.
@@ -1913,20 +1929,80 @@ class Executor:
         if not paths or not slots:
             return
         incoming = 0
+        incoming_refs: List[str] = []
         for slot, p in paths.items():
             if slot in slots:
                 slot_bytes = await asyncio.to_thread(disk_gc.tree_bytes, Path(p))
-                incoming = max(incoming, slot_bytes)
+                ref = wire_ref(spec.models[slot])
+                if slot_bytes > incoming:
+                    incoming = slot_bytes
+                    incoming_refs = [ref]
+                elif slot_bytes == incoming and slot_bytes > 0:
+                    incoming_refs.append(ref)
         if incoming <= 0:
             return
-        if await asyncio.to_thread(self.store.residency.make_room_ram, incoming):
+        res = self.store.residency
+        before = await asyncio.to_thread(res.host_ram_headroom, incoming)
+        if before.sufficient:
             return
-        avail = get_available_ram_gb()
-        raise RetryableError(
-            f"insufficient host RAM to load {spec.name}: "
-            f"~{incoming / _GiB:.1f}GiB incoming, {avail:.1f}GiB available "
-            "after releasing the warm tier"
+
+        evicted: List[str] = []
+        after = before
+        for ref in res.lru_ram_victims():
+            # A previous record teardown may already have transitioned every
+            # ref that appeared in the snapshot of LRU candidates.
+            if res.tier(ref) is not residency_mod.Tier.RAM:
+                continue
+            rec = self._record_holding(ref)
+            if rec is not None:
+                if self._record_in_use(rec):
+                    continue
+                owned = [
+                    held for held in self._record_refs(rec)
+                    if res.tier(held) in (residency_mod.Tier.RAM, residency_mod.Tier.VRAM)
+                ]
+                await self._vacate_record(rec)
+                evicted.extend(owned)
+                logger.info(
+                    "host-RAM admission vacated warm record refs=%s for %s",
+                    owned, spec.name,
+                )
+            elif await asyncio.to_thread(res.release_to_disk, ref):
+                evicted.append(ref)
+                logger.info(
+                    "host-RAM admission released ownerless warm ref=%s for %s",
+                    ref, spec.name,
+                )
+            else:
+                continue
+
+            # Let completed demotion/to_thread frames release their arguments,
+            # then collect after the record owner is gone before observing RAM.
+            await asyncio.sleep(0)
+            await asyncio.to_thread(flush_memory)
+            after = await asyncio.to_thread(res.host_ram_headroom, incoming)
+            if after.sufficient:
+                return
+
+        error = InsufficientHostRamError(
+            spec.name,
+            incoming_bytes=incoming,
+            floor_bytes=after.floor_bytes,
+            required_bytes=after.required_bytes,
+            available_before_bytes=before.available_bytes,
+            available_after_bytes=after.available_bytes,
+            evicted_refs=tuple(dict.fromkeys(evicted)),
         )
+        # th#807: model-failure state is the scheduler's typed capacity seam.
+        # Only the largest sequentially staged ref(s) caused this admission
+        # decision; failing a smaller shared VAE would poison unrelated jobs.
+        for ref in dict.fromkeys(incoming_refs):
+            await self._send(pb.WorkerMessage(model_event=pb.ModelEvent(
+                ref=ref,
+                state=pb.MODEL_STATE_FAILED,
+                error=error.reason,
+            )))
+        raise error
 
     async def _make_room_for(self, spec: EndpointSpec, setup_slots: List[str]) -> None:
         """Evict idle LRU pipelines before loading instead of degrading the

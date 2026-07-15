@@ -888,6 +888,112 @@ def test_desired_residency_downloads_and_warms_round_trip(tmp_path, monkeypatch)
 
 
 # ---------------------------------------------------------------------------
+# Host-RAM admission failure crosses the real worker transport before the
+# retry result. Only the largest staged ref fails; the smaller shared VAE
+# remains usable by other functions (th#807).
+# ---------------------------------------------------------------------------
+
+
+def test_host_ram_failure_precedes_retryable_result_on_wire(tmp_path, monkeypatch) -> None:
+    import http.server
+
+    from blake3 import blake3
+
+    from gen_worker.models import disk_gc
+    from gen_worker.models import residency as residency_mod
+
+    monkeypatch.setenv("TENSORHUB_CACHE_DIR", str(tmp_path / "hub-cache"))
+    monkeypatch.setattr(residency_mod, "get_total_ram_gb", lambda: 31.0)
+    monkeypatch.setattr(residency_mod, "get_available_ram_gb", lambda: 8.0)
+
+    pipeline_payload = b"large-pipeline"
+    vae_payload = b"small-shared-vae"
+    serve_dir = tmp_path / "www"
+    serve_dir.mkdir()
+    (serve_dir / "pipeline").write_bytes(pipeline_payload)
+    (serve_dir / "vae").write_bytes(vae_payload)
+
+    class _Quiet(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, directory=str(serve_dir), **kwargs)
+
+        def log_message(self, *args):
+            pass
+
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Quiet)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base_url = f"http://127.0.0.1:{httpd.server_address[1]}"
+
+    def _snapshot(payload: bytes, name: str) -> pb.Snapshot:
+        return pb.Snapshot(
+            digest=f"ram-pressure-{name}",
+            files=[pb.SnapshotFile(
+                path="model.safetensors",
+                size_bytes=len(payload),
+                blake3=blake3(payload).hexdigest(),
+                url=f"{base_url}/{name}",
+            )],
+        )
+
+    def _tree_bytes(path) -> int:
+        payload = (path / "model.safetensors").read_bytes()
+        return (6 if payload == pipeline_payload else 1) * 1024**3
+
+    monkeypatch.setattr(disk_gc, "tree_bytes", _tree_bytes)
+
+    pipeline_ref = "e2e/ram-pressure-pipeline"
+    vae_ref = "e2e/ram-pressure-shared-vae"
+    scheduler = FakeScheduler()
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
+    pb_grpc.add_WorkerSchedulerServicer_to_server(scheduler, server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    harness = _Harness(scheduler, port)
+    harness.start()
+    try:
+        conn = scheduler.wait_connection(0)
+        conn.wait_for(
+            lambda message: message.WhichOneof("msg") == "state_delta"
+            and message.state_delta.phase == pb.WORKER_PHASE_READY
+        )
+        conn.send(run_job=pb.RunJob(
+            request_id="r-host-ram",
+            attempt=1,
+            function_name="ram-pressure",
+            input_payload=_msgpack("marco"),
+            snapshots={
+                pipeline_ref: _snapshot(pipeline_payload, "pipeline"),
+                vae_ref: _snapshot(vae_payload, "vae"),
+            },
+        ))
+        result = conn.wait_for(_is_result_for("r-host-ram")).job_result
+        assert result.status == pb.JOB_STATUS_RETRYABLE
+
+        with conn._recv_cond:
+            received = list(conn.received)
+        failed = [
+            (index, message.model_event)
+            for index, message in enumerate(received)
+            if message.WhichOneof("msg") == "model_event"
+            and message.model_event.state == pb.MODEL_STATE_FAILED
+        ]
+        assert [
+            (event.ref, event.error) for _, event in failed
+        ] == [(pipeline_ref, "insufficient_host_ram")]
+        result_index = next(
+            index for index, message in enumerate(received)
+            if message.WhichOneof("msg") == "job_result"
+            and message.job_result.request_id == "r-host-ram"
+        )
+        assert failed[0][0] < result_index
+        assert all(event.ref != vae_ref for _, event in failed)
+    finally:
+        harness.stop()
+        server.stop(grace=0)
+        httpd.shutdown()
+
+
+# ---------------------------------------------------------------------------
 # Setup failure surfaces FnUnavailable (th#581 worker-side / ernie roster
 # find): a function whose pipeline setup raises must NOT sit in
 # loading_functions forever under a READY phase — it leaves BOTH lists and a
