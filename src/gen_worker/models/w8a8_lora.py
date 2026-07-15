@@ -346,7 +346,7 @@ def apply_branch_adapters(
                 )
             enable_lora_branches(model, bucket)
     else:
-        covered_paths = set()
+        covered_paths: set[str] = set()
         for m, _w, _ref in mapped:
             covered_paths.update(m)
         for path, mod in quantized_modules(model).items():
