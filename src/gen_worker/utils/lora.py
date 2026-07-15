@@ -317,11 +317,14 @@ class AdapterResidency:
             st = self._state(ref, pipe)
             try:
                 if denoiser is not None:
-                    # A compiled pipeline traced ONE bucket; a resize would
-                    # mean a recompile at swap time — never allowed in prod.
+                    # Compiled pipelines keep canonical placement and ONE
+                    # traced bucket (a resize would mean a recompile at swap
+                    # time — never allowed in prod); eager pipelines use
+                    # sparse placement (branch kernels only where covered).
+                    compiled = getattr(pipe, "_cozy_compile", None) is not None
                     w8a8_lora.apply_branch_adapters(
                         denoiser, branch_set,
-                        allow_resize=getattr(pipe, "_cozy_compile", None) is None,
+                        allow_resize=not compiled, uniform=compiled,
                         request_id=request_id,
                     )
                     w8a8_lora.stamp_lane(pipe, denoiser)

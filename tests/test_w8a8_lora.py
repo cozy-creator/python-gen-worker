@@ -134,6 +134,7 @@ def test_apply_kohya_folds_scale_into_b(denoiser: Any) -> None:
     sd = _kohya_sd(picked, rank=4, alpha=2.0)
     stats = apply_branch_adapters(denoiser, [(sd, 0.5, "t/a")])
     assert stats["bucket"] == 16 and stats["covered"] == 2
+    assert stats["sparse"] is True
     mods = quantized_modules(denoiser)
     for path, mod in mods.items():
         if path in picked:
@@ -146,7 +147,19 @@ def test_apply_kohya_folds_scale_into_b(denoiser: Any) -> None:
             assert mod.lora_a[4:].abs().sum() == 0
             assert mod.lora_b[:, 4:].abs().sum() == 0
         else:
-            assert mod.lora_b.abs().sum() == 0  # canonical zeroed slot
+            # sparse (eager) placement: uncovered layers carry NO branch
+            assert mod.lora_a is None and mod.lora_b is None
+
+
+def test_apply_uniform_keeps_canonical_zeroed_slots(denoiser: Any) -> None:
+    picked = _pick(denoiser, 1)
+    sd = _kohya_sd(picked, rank=4, alpha=4.0)
+    stats = apply_branch_adapters(denoiser, [(sd, 1.0, "t/a")], uniform=True)
+    assert stats["sparse"] is False
+    for path, mod in quantized_modules(denoiser).items():
+        assert mod.lora_a is not None  # canonical placement everywhere
+        if path not in picked:
+            assert mod.lora_b.abs().sum() == 0  # zeroed slot, same graph
 
 
 def test_peft_and_scoped_key_forms_resolve(denoiser: Any) -> None:
@@ -187,7 +200,7 @@ def test_rank_concat_addend_matches_sum_of_adapters(denoiser: Any) -> None:
     assert torch.allclose(got, want, rtol=0.05, atol=0.05)  # bf16 accumulation
 
 
-def test_swap_is_copy_only_and_clear_zeroes(denoiser: Any) -> None:
+def test_swap_is_copy_only_and_clear_semantics(denoiser: Any) -> None:
     picked = _pick(denoiser, 2)
     apply_branch_adapters(denoiser, [(_kohya_sd(picked, 4, 4.0), 1.0, "t/a")])
     ids = [id(m.lora_a) for m in quantized_modules(denoiser).values()]
@@ -196,24 +209,37 @@ def test_swap_is_copy_only_and_clear_zeroes(denoiser: Any) -> None:
     assert stats["resized"] is False
     assert ids == [id(m.lora_a) for m in quantized_modules(denoiser).values()]
     assert w8a8_lora.branches_active(denoiser)
+    # sparse clear DROPS buffers — bare eager requests are exactly branchless
     clear_branch_adapters(denoiser)
     assert not w8a8_lora.branches_active(denoiser)
+    assert branch_bucket(denoiser) == 0
     for mod in quantized_modules(denoiser).values():
-        assert mod.lora_b.abs().sum() == 0
-    assert branch_bucket(denoiser) == 16  # graph family stays
+        assert mod.lora_a is None
+    # canonical clear ZEROES and keeps the graph family
+    apply_branch_adapters(denoiser, [(_kohya_sd(picked, 4, 4.0), 1.0, "t/a")],
+                          uniform=True)
+    clear_branch_adapters(denoiser)
+    assert branch_bucket(denoiser) == 16
+    for mod in quantized_modules(denoiser).values():
+        assert mod.lora_b is not None and mod.lora_b.abs().sum() == 0
 
 
 def test_bucket_growth_and_compiled_resize_refusal(denoiser: Any) -> None:
     picked = _pick(denoiser, 1)
-    apply_branch_adapters(denoiser, [(_kohya_sd(picked, 4, 4.0), 1.0, "t/a")])
+    enable_lora_branches(denoiser, 16)
     big = _kohya_sd(picked, 24, 24.0)
     with pytest.raises(ValidationError):
-        apply_branch_adapters(denoiser, [(big, 1.0, "t/big")], allow_resize=False)
-    stats = apply_branch_adapters(denoiser, [(big, 1.0, "t/big")])
+        apply_branch_adapters(denoiser, [(big, 1.0, "t/big")],
+                              uniform=True, allow_resize=False)
+    stats = apply_branch_adapters(denoiser, [(big, 1.0, "t/big")], uniform=True)
     assert stats["bucket"] == 32 and stats["resized"] is True
-    # never shrink back — stay on the already-traced graph
-    stats = apply_branch_adapters(denoiser, [(_kohya_sd(picked, 4, 4.0), 1.0, "t/a")])
+    # canonical placement never shrinks — stay on the already-traced graph
+    stats = apply_branch_adapters(
+        denoiser, [(_kohya_sd(picked, 4, 4.0), 1.0, "t/a")], uniform=True)
     assert stats["bucket"] == 32 and stats["resized"] is False
+    # sparse placement resizes freely (eager: no traced graph to protect)
+    stats = apply_branch_adapters(denoiser, [(_kohya_sd(picked, 4, 4.0), 1.0, "t/a")])
+    assert stats["bucket"] == 16 and stats["sparse"] is True
 
 
 def test_unresolved_and_misshaped_keys_fail_loud(denoiser: Any) -> None:
@@ -333,12 +359,12 @@ def test_residency_routes_denoiser_to_branch_and_te_to_peft(denoiser: Any) -> No
     assert len(pipe.loaded) == 1
     assert set(pipe.loaded[0][0]) == {te_key}
     assert w8a8_lora.branches_active(denoiser)
-    assert pipe._cozy_weight_lane == "w8a8-lora16"
+    assert pipe._cozy_weight_lane == "w8a8-lora16-sparse"
     assert res.needs_deactivation("m")
     res.deactivate("m", pipe, request_id="r1")
     assert not w8a8_lora.branches_active(denoiser)
-    for mod in quantized_modules(denoiser).values():
-        assert mod.lora_b.abs().sum() == 0
+    # eager pipe: deactivation drops the branches entirely
+    assert branch_bucket(denoiser) == 0
 
 
 def test_residency_branch_only_pipe_needs_no_peft_surface(denoiser: Any) -> None:
@@ -364,6 +390,7 @@ def test_residency_refuses_resize_on_compiled_pipe(denoiser: Any) -> None:
     res = lora_util.AdapterResidency()
     with pytest.raises(ValidationError, match="recompile at swap"):
         res.activate("m", pipe, [_prepared(_kohya_sd(picked, 24, 24.0), "t/big")])
+    assert branch_bucket(denoiser) == 16  # canonical graph family untouched
     # rollback left nothing active
     assert not w8a8_lora.branches_active(denoiser)
 
@@ -438,7 +465,7 @@ def test_gpu_full_pipeline_with_branch_runs(w8a8_tree: Path) -> None:
     picked = _pick(denoiser, 2)
     apply_branch_adapters(denoiser, [(_kohya_sd(picked, 8, 8.0), 0.5, "t/a")])
     w8a8_lora.stamp_lane(pipe, denoiser)
-    assert pipe._cozy_weight_lane == "w8a8-lora16"
+    assert pipe._cozy_weight_lane == "w8a8-lora16-sparse"
     out = pipe(batch_size=1, num_inference_steps=2, output_type="np")
     assert out.images.shape[-3:] == (8, 8, 3)
     # swap without touching graphs, then clear back to the zeroed set

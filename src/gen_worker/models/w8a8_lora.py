@@ -34,6 +34,9 @@ RANK_BUCKETS = (16, 32, 64, 128)
 
 _BUCKET_ATTR = "_cozy_lora_bucket"
 _ACTIVE_ATTR = "_cozy_lora_active"
+_SPARSE_ATTR = "_cozy_lora_sparse"
+_MAPCACHE_ATTR = "_cozy_lora_mapcache"
+_MAPCACHE_MAX = 8
 _DENOISER_PREFIXES = ("unet.", "transformer.", "lora_unet_", "lora_transformer_")
 # (normalized suffix marker, is_down) — dotted forms after key normalization.
 _DOWN_SUFFIXES = (".lora_down.weight", ".lora.down.weight", ".lora_A.weight")
@@ -74,8 +77,10 @@ def branch_bucket(model: Any) -> int:
     return int(getattr(model, _BUCKET_ATTR, 0) or 0)
 
 
-def lora_lane(bucket: int) -> str:
-    return f"w8a8-lora{int(bucket)}"
+def lora_lane(bucket: int, sparse: bool = False) -> str:
+    # Sparse (eager-only) placement is a different graph per coverage
+    # pattern — the "-sparse" suffix can never match a produced cell label.
+    return f"w8a8-lora{int(bucket)}" + ("-sparse" if sparse else "")
 
 
 def split_state_dict(sd: Dict[str, Any]) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -110,17 +115,25 @@ def _base_and_kind(key: str) -> Tuple[str, str]:
     return "", ""
 
 
-def _kohya_to_diffusers(sd: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Normalize a kohya/sd-scripts adapter (incl. LDM block naming) through
-    diffusers' own converter — the exact mapping the bf16 peft path uses.
-    None when the converter can't handle it (caller falls back / fails)."""
+def _kohya_to_diffusers(sd: Dict[str, Any], model: Any) -> Optional[Dict[str, Any]]:
+    """Normalize a kohya/sd-scripts adapter (incl. SGM/LDM block naming)
+    through diffusers' own converters — the exact mapping the bf16 peft
+    path uses (lora_pipeline.lora_state_dict order: SGM block rename with
+    the real unet config, then the non-diffusers conversion). None when the
+    converters can't handle it (caller falls back / fails)."""
     try:
         from diffusers.loaders.lora_conversion_utils import (
             _convert_non_diffusers_lora_to_diffusers,
+            _maybe_map_sgm_blocks_to_diffusers,
         )
 
-        converted, alphas = _convert_non_diffusers_lora_to_diffusers(dict(sd))
+        sd = dict(sd)
+        if any(p in k for k in sd for p in
+               ("input_blocks", "middle_block", "output_blocks")):
+            sd = _maybe_map_sgm_blocks_to_diffusers(sd, model.config)
+        converted, alphas = _convert_non_diffusers_lora_to_diffusers(sd)
     except Exception:
+        logger.warning("w8a8 lora: kohya->diffusers conversion failed", exc_info=True)
         return None
     out = dict(converted)
     out.update(alphas or {})  # "<base>.alpha" -> float
@@ -170,7 +183,7 @@ def map_adapter(
     mods = quantized_modules(model)
     groups, unresolved = _group_keys(den_sd, mods)
     if unresolved and any(k.startswith("lora_unet_") for k in den_sd):
-        converted = _kohya_to_diffusers(den_sd)
+        converted = _kohya_to_diffusers(den_sd, model)
         if converted is not None:
             groups, unresolved = _group_keys(converted, mods)
     if unresolved:
@@ -222,15 +235,17 @@ def alloc_branch_buffers(mod: Any, bucket: int) -> None:
 
 def enable_lora_branches(model: Any, bucket: int) -> None:
     """Allocate branch buffers on EVERY quantized Linear (canonical
-    placement). Idempotent at the same bucket; a different bucket
-    reallocates (a new graph family)."""
+    placement — one traced graph over all coverage patterns; the compiled
+    lane). Idempotent at the same bucket; a different bucket reallocates
+    (a new graph family)."""
     if bucket not in RANK_BUCKETS:
         raise ValidationError(f"invalid lora rank bucket {bucket} (valid: {RANK_BUCKETS})")
-    if branch_bucket(model) == bucket:
+    if branch_bucket(model) == bucket and not getattr(model, _SPARSE_ATTR, False):
         return
     for mod in quantized_modules(model).values():
         alloc_branch_buffers(mod, bucket)
     setattr(model, _BUCKET_ATTR, int(bucket))
+    setattr(model, _SPARSE_ATTR, False)
     setattr(model, _ACTIVE_ATTR, False)
 
 
@@ -245,13 +260,19 @@ def disable_lora_branches(model: Any) -> None:
         mod.lora_b = None
     if hasattr(model, _BUCKET_ATTR):
         delattr(model, _BUCKET_ATTR)
+    setattr(model, _SPARSE_ATTR, False)
     setattr(model, _ACTIVE_ATTR, False)
 
 
 def clear_branch_adapters(model: Any) -> None:
-    """Zero the active set (B only — the addend is exactly 0). Buffers and
-    the traced graph stay; the next swap is still just a copy."""
+    """Deactivate. Canonical (compiled) placement zeroes B — the addend is
+    exactly 0 and the traced graph stays. Sparse (eager) placement DROPS the
+    buffers instead: eager pays per-kernel launch cost even for zeroed
+    branches, so bare requests go back to exactly branchless speed."""
     if not branch_bucket(model):
+        return
+    if getattr(model, _SPARSE_ATTR, False):
+        disable_lora_branches(model)
         return
     for mod in quantized_modules(model).values():
         if getattr(mod, "lora_b", None) is not None:
@@ -268,14 +289,21 @@ def apply_branch_adapters(
     adapters: Sequence[Tuple[Dict[str, Any], float, str]],
     *,
     allow_resize: bool = True,
+    uniform: bool = False,
     request_id: str = "",
 ) -> Dict[str, Any]:
     """Make exactly ``adapters`` (state_dict, user weight, ref) the denoiser's
     active branch set. Rank-concat across adapters, pad to the bucket, fold
     ``alpha/rank * weight`` into the B copy. Returns swap stats.
 
-    ``allow_resize=False`` (compiled pipelines) refuses bucket changes —
-    a resize is a new graph family, and prod never compiles at runtime."""
+    ``uniform=True`` (compiled pipelines) keeps canonical placement — every
+    quantized Linear carries a branch, zeroed slots for uncovered layers,
+    never shrinking the bucket; ``allow_resize=False`` additionally refuses
+    bucket changes (a resize is a new graph family, and prod never compiles
+    at runtime). ``uniform=False`` (eager) allocates branches ONLY on
+    covered layers and drops stale ones — eager pays a per-kernel launch
+    tax even for zeroed slots, so sparse placement keeps uncovered layers
+    at exactly branchless speed."""
     import torch
 
     t0 = time.monotonic()
@@ -283,7 +311,21 @@ def apply_branch_adapters(
         clear_branch_adapters(model)
         return {"bucket": branch_bucket(model), "resized": False, "covered": 0,
                 "modules": 0, "copied_bytes": 0, "swap_ms": 0}
-    mapped = [(map_adapter(sd, model, ref=ref), w, ref) for sd, w, ref in adapters]
+    # Mapping is pure in the state dict; repeat swaps of a resident adapter
+    # (the AdapterCache serves the SAME dict object) skip the key-mapping /
+    # kohya-conversion pass entirely.
+    cache: Dict[Any, Any] = getattr(model, _MAPCACHE_ATTR, None) or {}
+    mapped = []
+    for sd, w, ref in adapters:
+        key = (ref, id(sd), len(sd))
+        m = cache.get(key)
+        if m is None:
+            m = map_adapter(sd, model, ref=ref)
+            cache[key] = m
+            while len(cache) > _MAPCACHE_MAX:
+                cache.pop(next(iter(cache)))
+        mapped.append((m, w, ref))
+    setattr(model, _MAPCACHE_ATTR, cache)
     per_layer: Dict[str, int] = {}
     for m, _w, _ref in mapped:
         for path, (a, _b, _s) in m.items():
@@ -291,22 +333,48 @@ def apply_branch_adapters(
     needed = max(per_layer.values(), default=0)
     bucket = rank_bucket(max(needed, 1))
     current = branch_bucket(model)
-    if current >= bucket and current:
-        bucket = current  # never shrink — stay on the already-traced graph
-    if current != bucket:
-        if not allow_resize:
-            raise ValidationError(
-                f"active LoRA set needs rank bucket {bucket} but the compiled "
-                f"pipeline traced bucket {current or 'none'} — recompile at "
-                "swap time is never allowed; publish a matching lora cell"
-            )
-        enable_lora_branches(model, bucket)
+    was_sparse = bool(getattr(model, _SPARSE_ATTR, False))
+    if uniform:
+        if current >= bucket and current and not was_sparse:
+            bucket = current  # never shrink — stay on the already-traced graph
+        if current != bucket or was_sparse:
+            if not allow_resize:
+                raise ValidationError(
+                    f"active LoRA set needs rank bucket {bucket} but the compiled "
+                    f"pipeline traced bucket {current or 'none'} — recompile at "
+                    "swap time is never allowed; publish a matching lora cell"
+                )
+            enable_lora_branches(model, bucket)
+    else:
+        covered_paths = set()
+        for m, _w, _ref in mapped:
+            covered_paths.update(m)
+        for path, mod in quantized_modules(model).items():
+            if path in covered_paths:
+                if (getattr(mod, "lora_a", None) is None
+                        or int(mod.lora_a.shape[0]) != bucket):
+                    alloc_branch_buffers(mod, bucket)
+            elif getattr(mod, "lora_a", None) is not None:
+                for name in ("lora_a", "lora_b"):
+                    mod._buffers.pop(name, None)
+                    mod.__dict__.pop(name, None)
+                mod.lora_a = None
+                mod.lora_b = None
+        setattr(model, _BUCKET_ATTR, int(bucket))
+        setattr(model, _SPARSE_ATTR, True)
 
     copied = 0
     covered = 0
     mods = quantized_modules(model)
     with torch.no_grad():
+        # Stage on CPU, ship in ONE H2D transfer, then device-side slice
+        # copies — 2x739 individual pageable copies measured seconds at SDXL
+        # scale; one flat transfer is tens of ms.
+        plan: List[Tuple[Any, Any, Any]] = []
+        stage_dtype = None
         for path, mod in mods.items():
+            if getattr(mod, "lora_a", None) is None:
+                continue  # sparse placement: uncovered layer has no branch
             rows: List[Any] = []
             cols: List[Any] = []
             for m, weight, _ref in mapped:
@@ -314,26 +382,40 @@ def apply_branch_adapters(
                 if hit is None:
                     continue
                 a, b, alpha_scale = hit
-                rows.append(a.to(dtype=mod.lora_a.dtype))
-                cols.append(b.to(dtype=mod.lora_b.dtype) * (alpha_scale * weight))
+                rows.append(a)
+                cols.append(b.float() * (alpha_scale * weight))
             if not rows:
                 mod.lora_b.zero_()
                 continue
-            a_cat = torch.cat(rows, dim=0)
-            b_cat = torch.cat(cols, dim=1)
-            r = int(a_cat.shape[0])
-            mod.lora_a.zero_()
-            mod.lora_b.zero_()
-            mod.lora_a[:r].copy_(a_cat.to(mod.lora_a.device), non_blocking=True)
-            mod.lora_b[:, :r].copy_(b_cat.to(mod.lora_b.device), non_blocking=True)
-            copied += a_cat.numel() * a_cat.element_size()
-            copied += b_cat.numel() * b_cat.element_size()
+            if stage_dtype is None:
+                stage_dtype = mod.lora_a.dtype
+            a_cat = torch.cat(rows, dim=0).to(stage_dtype)
+            b_cat = torch.cat(cols, dim=1).to(stage_dtype)
+            plan.append((mod, a_cat, b_cat))
             covered += 1
+        if plan:
+            device = plan[0][0].lora_a.device
+            flat = torch.cat(
+                [t.reshape(-1) for _mod, a, b in plan for t in (a, b)])
+            copied = flat.numel() * flat.element_size()
+            flat = flat.to(device, non_blocking=True)
+            off = 0
+            for mod, a, b in plan:
+                r = int(a.shape[0])
+                mod.lora_a.zero_()
+                mod.lora_b.zero_()
+                n = a.numel()
+                mod.lora_a[:r].copy_(flat[off:off + n].view_as(a))
+                off += n
+                n = b.numel()
+                mod.lora_b[:, :r].copy_(flat[off:off + n].view_as(b))
+                off += n
         if torch.cuda.is_available():
             torch.cuda.synchronize()
     setattr(model, _ACTIVE_ATTR, True)
     stats = {
-        "bucket": bucket, "resized": current != bucket, "covered": covered,
+        "bucket": bucket, "resized": current != bucket,
+        "sparse": not uniform, "covered": covered,
         "modules": len(mods), "copied_bytes": copied,
         "swap_ms": int((time.monotonic() - t0) * 1000),
     }
@@ -350,8 +432,9 @@ def stamp_lane(pipe: Any, model: Any) -> None:
     """Keep the compile-cache graph key honest: branch-bearing pipelines are
     a different graph family per bucket (lane_drift guards both directions)."""
     bucket = branch_bucket(model)
+    sparse = bool(getattr(model, _SPARSE_ATTR, False))
     try:
-        pipe._cozy_weight_lane = lora_lane(bucket) if bucket else "w8a8"
+        pipe._cozy_weight_lane = lora_lane(bucket, sparse) if bucket else "w8a8"
     except Exception:
         pass
 
