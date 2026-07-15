@@ -127,10 +127,19 @@ def _kohya_sgm_normalize(sd: Dict[str, Any], model: Any) -> Optional[Dict[str, A
             _maybe_map_sgm_blocks_to_diffusers,
         )
 
-        return _maybe_map_sgm_blocks_to_diffusers(dict(sd), model.config)
+        mapped = _maybe_map_sgm_blocks_to_diffusers(dict(sd), model.config)
     except Exception:
         logger.warning("w8a8 lora: SGM block normalization failed", exc_info=True)
         return None
+    # The SGM pass renumbers blocks but keeps the sgm family names; the
+    # family rename is _convert_unet_lora_key's job in diffusers — do just
+    # that part here.
+    return {
+        k.replace("input_blocks", "down_blocks")
+         .replace("middle_block", "mid_block")
+         .replace("output_blocks", "up_blocks"): v
+        for k, v in mapped.items()
+    }
 
 
 def _group_keys(
