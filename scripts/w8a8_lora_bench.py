@@ -185,7 +185,11 @@ def run_quality(base: str, loras: list, steps: int, out: Path) -> dict:
     from gen_worker.models import w8a8_lora
 
     lp = _lpips_fn()
-    src = Path(snapshot_download(base))
+    # fp16-variant weights only — the stock SDXL repo is ~40GB with all
+    # variants; pods don't have the disk for that.
+    src = Path(snapshot_download(base, allow_patterns=[
+        "*.json", "**/*.json", "**/*.txt", "**/*.model",
+        "**/*.fp16.safetensors"]))
     tree = out / "w8a8-tree"
     if not (tree / "model_index.json").exists():
         quantize_tree_w8a8(src, tree)
@@ -210,10 +214,11 @@ def run_quality(base: str, loras: list, steps: int, out: Path) -> dict:
             assert art is not None
             pipe = load_w8a8_pipeline(
                 StableDiffusionXLPipeline, tree, art,
-                compute_dtype=torch.bfloat16)
+                compute_dtype=torch.bfloat16,
+                components={"variant": "fp16"})
         else:
             pipe = StableDiffusionXLPipeline.from_pretrained(
-                str(src), torch_dtype=torch.bfloat16)
+                str(src), torch_dtype=torch.bfloat16, variant="fp16")
         pipe.to("cuda")
         pipe.set_progress_bar_config(disable=True)
         # base (no lora)
