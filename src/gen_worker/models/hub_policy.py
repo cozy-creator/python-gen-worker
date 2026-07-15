@@ -41,7 +41,7 @@ def detect_worker_capabilities(*, extra_libs: Optional[List[str]] = None) -> Ten
     # Known optional libs that affect artifact compatibility.
     # Keep this hardcoded (no env config), per Cozy design.
     known = ["bitsandbytes", "torchao", "transformer_engine", "tensorrt",
-             "nunchaku", "deepcompressor"]
+             "nunchaku", "deepcompressor", "modelopt"]
     if extra_libs:
         known.extend(extra_libs)
     for name in known:

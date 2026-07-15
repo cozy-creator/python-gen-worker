@@ -176,3 +176,15 @@ def test_stored_flavor_that_does_not_fit_offloads_not_requants() -> None:
         binding=_Binding(flavor="fp8"),
     )
     assert plan.serveable and plan.run_mode == RUN_OFFLOAD
+
+
+def test_detect_probes_modelopt(monkeypatch):
+    """te#79 regression: `Resources(libraries=("modelopt",))` functions were
+    structurally unavailable — the executor's find_spec fallback passed but
+    plan_serve re-checked against installed_libs, which never probed
+    modelopt. The known-libs list must include it."""
+    from gen_worker.models import hub_policy
+
+    monkeypatch.setattr(hub_policy, "_is_importable", lambda name: True)
+    caps = hub_policy.detect_worker_capabilities()
+    assert "modelopt" in caps.installed_libs
