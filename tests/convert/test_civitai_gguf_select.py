@@ -35,6 +35,18 @@ def test_safetensors_win_over_gguf():
     assert [f["name"] for f in files] == ["model.safetensors"]
 
 
+def test_safetensors_same_name_keeps_primary_without_dropping_distinct_files():
+    files = _civitai_select_files({"files": [
+        _f("model.safetensors", id=2),
+        _f("text_encoder.safetensors", id=3),
+        _f("model.safetensors", id=1, primary=True),
+    ]})
+    assert [(f["id"], f["name"]) for f in files] == [
+        (1, "model.safetensors"),
+        (3, "text_encoder.safetensors"),
+    ]
+
+
 def test_gguf_only_picks_one_by_preference():
     files = _civitai_select_files({"files": [
         _f("m.gguf", id=1, quant="Q5_K_M"),
