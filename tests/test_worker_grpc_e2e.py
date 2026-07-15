@@ -166,7 +166,6 @@ class _Harness:
             orchestrator_public_addr=f"127.0.0.1:{port}",
             worker_id="e2e-worker",
             worker_jwt="",
-            worker_disconnected_timeout_s=60,
         )
         self.worker = Worker(
             settings,
@@ -334,6 +333,41 @@ def test_full_contract_round_trip(scheduler_and_worker) -> None:
     assert finished.status == pb.JOB_STATUS_OK
     assert conn3.client_done.wait(_TIMEOUT), "worker must close the stream after drain"
     assert harness.join() == 0
+
+
+def test_worker_reconnects_after_hub_restart() -> None:
+    scheduler = FakeScheduler()
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+    pb_grpc.add_WorkerSchedulerServicer_to_server(scheduler, server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    harness = _Harness(scheduler, port)
+    harness.start()
+    replacement = None
+    try:
+        scheduler.wait_connection(0)
+        before = len(harness.worker.transport.reconnect_delays)
+        assert server.stop(grace=0).wait(_TIMEOUT)
+
+        deadline = time.monotonic() + _TIMEOUT
+        while len(harness.worker.transport.reconnect_delays) < before + 4:
+            assert harness._thread.is_alive(), "worker exited while hub was down"
+            assert time.monotonic() < deadline, "worker did not keep reconnecting"
+            time.sleep(0.02)
+
+        replacement_scheduler = FakeScheduler()
+        replacement = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+        pb_grpc.add_WorkerSchedulerServicer_to_server(replacement_scheduler, replacement)
+        assert replacement.add_insecure_port(f"127.0.0.1:{port}") == port
+        replacement.start()
+
+        assert replacement_scheduler.wait_connection(0).hello is not None
+        assert harness.exit_code is None
+    finally:
+        harness.stop()
+        server.stop(grace=0)
+        if replacement is not None:
+            replacement.stop(grace=0)
 
 
 def test_deadline_marks_fatal_and_frees_the_worker(scheduler_and_worker) -> None:
@@ -594,7 +628,7 @@ def test_auth_rejection_within_window_keeps_retrying() -> None:
 
 def test_permanent_precondition_exits_fast() -> None:
     """worker_id_mismatch cannot heal by retrying: exit for reap immediately
-    instead of burning the disconnected timeout (#372)."""
+    instead of retrying forever (#372)."""
 
     class _Mismatch(FakeScheduler):
         def Connect(self, request_iterator, context):

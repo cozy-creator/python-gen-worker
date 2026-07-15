@@ -51,16 +51,6 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     # Runtime introspection (set by the RunPod runtime; not configuration).
     runpod_pod_id: str = ""
 
-    # Worker self-exit timeout when the orchestrator is unreachable.
-    # The reconnect loop is otherwise infinite (correct for transient
-    # network blips and single-replica restarts). After this many seconds
-    # of NO successful connection, the worker exits cleanly so its
-    # container is reaped by docker/runpod — handles stack-shutdown
-    # ergonomics (compose down, machine power-off) without a separate
-    # shutdown-coordination protocol. Default 600s = 10 min. gen-orchestrator
-    # issue #317.
-    worker_disconnected_timeout_s: int = 600
-
     # Provenance stamped into WorkerResources by the image build / launcher.
     # TODO(pgw#514/P4): nothing produces WORKER_IMAGE_DIGEST today (verified
     # against gen-orchestrator/tensorhub/e2e — no launcher sets it), so this

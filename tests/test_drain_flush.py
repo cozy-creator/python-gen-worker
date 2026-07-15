@@ -6,7 +6,7 @@ from gen_worker.config import Settings
 from gen_worker.executor import Executor
 from gen_worker.lifecycle import Lifecycle
 from gen_worker.pb import worker_scheduler_pb2 as pb
-from gen_worker.transport import FatalTransportError, Transport
+from gen_worker.transport import Transport
 
 
 class _IdleExecutor(Executor):
@@ -57,10 +57,7 @@ class _DisconnectHandlers:
 class _ReconnectTransport(Transport):
     def __init__(self) -> None:
         super().__init__(
-            Settings(
-                orchestrator_public_addr="localhost:1",
-                worker_disconnected_timeout_s=1,
-            ),
+            Settings(orchestrator_public_addr="localhost:1"),
             _DisconnectHandlers(),
             backoff_base_s=0.0,
             backoff_cap_s=0.0,
@@ -70,7 +67,6 @@ class _ReconnectTransport(Transport):
     async def _connect_once(self, target: str, use_tls: bool) -> None:
         self.connect_attempts += 1
         if self.connect_attempts == 1:
-            await asyncio.sleep(1.01)
             raise ConnectionError("orchestrator unavailable")
         kind, result = await self.queue.get()
         assert kind == "result"
@@ -84,7 +80,7 @@ def _result() -> pb.WorkerMessage:
     ))
 
 
-def test_non_expiring_drain_waits_for_blocked_result_queue() -> None:
+def test_unbounded_drain_waits_for_blocked_result_queue() -> None:
     async def _run() -> None:
         transport = Transport(Settings(orchestrator_public_addr="localhost:1"), object())
         executor = _IdleExecutor()
@@ -121,7 +117,6 @@ def test_explicit_drain_deadline_still_bounds_blocked_result_queue() -> None:
         assert lifecycle.drained.is_set()
         assert transport._stopping.is_set()
         assert not transport._clean_close
-        assert not transport._non_expiring_drain
         assert transport.queue.pending_result_keys == [("request-1", 1)]
         assert executor.wait_timeout is not None
         assert transport.flush_timeout is not None
@@ -151,7 +146,7 @@ def test_start_drain_stops_admission_and_anchors_deadline_synchronously() -> Non
     asyncio.run(_run())
 
 
-def test_non_expiring_drain_reconnects_past_disconnected_timeout() -> None:
+def test_unbounded_drain_reconnects_until_result_ships() -> None:
     async def _run() -> None:
         transport = _ReconnectTransport()
         executor = _IdleExecutor()
@@ -167,19 +162,5 @@ def test_non_expiring_drain_reconnects_past_disconnected_timeout() -> None:
         assert lifecycle.drained.is_set()
         assert transport._clean_close
         assert transport.queue.pending_result_keys == []
-
-    asyncio.run(_run())
-
-
-def test_disconnected_timeout_still_applies_without_non_expiring_drain() -> None:
-    async def _run() -> None:
-        transport = _ReconnectTransport()
-        try:
-            await transport.run()
-        except FatalTransportError as exc:
-            assert "no successful connection" in str(exc)
-        else:
-            raise AssertionError("ordinary disconnect unexpectedly retried past its lifetime")
-        assert transport.connect_attempts == 1
 
     asyncio.run(_run())
