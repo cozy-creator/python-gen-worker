@@ -1180,6 +1180,14 @@ def load_from_pretrained(
             kwargs.pop("variant", None)
             kwargs.pop("quantization_config", None)
             pipe = cls.from_pretrained(path, **kwargs)
+    from .memory import meta_tensors
+
+    unmaterialized = meta_tensors(pipe)
+    if unmaterialized:
+        raise RuntimeError(
+            f"{type(pipe).__name__} load left {len(unmaterialized)} "
+            f"unmaterialized meta tensors (e.g. {unmaterialized[:3]})"
+        )
     if fp8_storage and "quantization_config" not in kwargs:
         applied = apply_fp8_storage(pipe, compute_dtype=kwargs.get("torch_dtype"),
                                     text_encoders=fp8_text_encoders)

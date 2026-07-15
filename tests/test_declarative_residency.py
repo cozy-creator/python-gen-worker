@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import threading
 import tomllib
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +17,7 @@ from gen_worker.api.slot import Slot
 from gen_worker.executor import Executor
 from gen_worker.families.base import FamilyDefaults, family
 from gen_worker.lifecycle import Lifecycle
+from gen_worker.models import provision
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import EndpointSpec
 
@@ -26,7 +28,9 @@ class _Defaults(FamilyDefaults):
 
 
 class _Pipeline:
-    pass
+    @classmethod
+    def from_pretrained(cls, path: str, **kwargs: Any) -> "_Pipeline":
+        return cls()
 
 
 class _Input(msgspec.Struct):
@@ -37,7 +41,7 @@ def _spec() -> EndpointSpec:
     default = Civitai("827184", version="2883731")
 
     class Endpoint:
-        def setup(self, pipeline: str) -> None:  # pragma: no cover - replaced in tests
+        def setup(self, pipeline: _Pipeline) -> None:  # pragma: no cover - replaced in tests
             self.pipeline = pipeline
 
         def generate(self, ctx: Any, payload: _Input) -> dict:  # pragma: no cover
@@ -298,5 +302,79 @@ def test_run_job_preempts_then_resumes_current_desired_state(monkeypatch) -> Non
         executor._idle.set()
         await resumed.wait()
         assert calls == 2, "current desired state must resume after the job becomes idle"
+
+    asyncio.run(run())
+
+
+def test_run_job_cancellation_waits_for_model_load_thread(monkeypatch, tmp_path: Path) -> None:
+    async def run() -> None:
+        lifecycle, executor, _ = _lifecycle()
+        load_started = threading.Event()
+        release_load = threading.Event()
+        second_load_done = threading.Event()
+        counter_lock = threading.Lock()
+        active = 0
+        max_active = 0
+        calls = 0
+
+        async def ensure_local(ref: str, snapshot=None, *, binding=None):
+            return tmp_path
+
+        def load_slot(*args, **kwargs):
+            nonlocal active, max_active, calls
+            with counter_lock:
+                active += 1
+                max_active = max(max_active, active)
+                calls += 1
+                call = calls
+            try:
+                load_started.set()
+                assert release_load.wait(2), "test model load was never released"
+                return provision.SlotLoad(
+                    obj=_Pipeline(), is_pipeline=True, placed={"mode": "cpu"}
+                )
+            finally:
+                with counter_lock:
+                    active -= 1
+                if call == 2:
+                    second_load_done.set()
+
+        request_acquired_load_lock = asyncio.Event()
+
+        async def handle_run_job(run_job: pb.RunJob) -> None:
+            async with executor._load_lock:
+                request_acquired_load_lock.set()
+
+        monkeypatch.setattr(executor.store, "ensure_local", ensure_local)
+        monkeypatch.setattr(executor, "handle_run_job", handle_run_job)
+        monkeypatch.setattr(provision, "load_slot", load_slot)
+
+        picked = "tensorhub/cyberrealistic-pony:prod"
+        await lifecycle.on_hello_ack(pb.HelloAck(
+            desired_residency=pb.DesiredResidency(
+                generation=1,
+                hot=[pb.DesiredInstance(
+                    function_name="generate",
+                    models=[pb.ModelBinding(slot="pipeline", ref=picked)],
+                )],
+            )
+        ))
+        assert await asyncio.to_thread(load_started.wait, 2)
+
+        request = asyncio.create_task(lifecycle.on_message(pb.SchedulerMessage(
+            run_job=pb.RunJob(
+                request_id="request", attempt=1, function_name="generate",
+                models=[pb.ModelBinding(slot="pipeline", ref=picked)],
+            )
+        )))
+        await asyncio.sleep(0.05)
+        assert not request_acquired_load_lock.is_set()
+
+        release_load.set()
+        await asyncio.wait_for(request, 2)
+        assert request_acquired_load_lock.is_set()
+        assert await asyncio.to_thread(second_load_done.wait, 2)
+        assert max_active == 1
+        lifecycle._cancel_residency_reconcile()
 
     asyncio.run(run())
