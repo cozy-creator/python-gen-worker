@@ -371,49 +371,58 @@ def apply_branch_adapters(
     covered = 0
     mods = quantized_modules(model)
     with torch.no_grad():
-        # Stage on CPU, ship in ONE H2D transfer, then device-side slice
-        # copies — 2x739 individual pageable copies measured seconds at SDXL
-        # scale; one flat transfer is tens of ms.
-        plan: List[Tuple[Any, Any, Any]] = []
-        stage_dtype = None
+        # Ship RAW adapter tensors in ONE flat H2D transfer, then cast /
+        # scale-fold / place on DEVICE — per-layer CPU cat+cast+scale over
+        # hundreds of layers measured ~1s at SDXL scale, and 2x739
+        # individual pageable copies measured seconds.
+        plan: List[Tuple[Any, List[Any], List[Any]]] = []
+        pieces: List[Any] = []
         for path, mod in mods.items():
             if getattr(mod, "lora_a", None) is None:
                 continue  # sparse placement: uncovered layer has no branch
-            rows: List[Any] = []
-            cols: List[Any] = []
-            for m, weight, _ref in mapped:
-                hit = m.get(path)
-                if hit is None:
-                    continue
-                a, b, alpha_scale = hit
-                rows.append(a)
-                cols.append(b.float() * (alpha_scale * weight))
-            if not rows:
+            layer_hits = [(m[path], weight)
+                          for m, weight, _ref in mapped if path in m]
+            if not layer_hits:
                 mod.lora_b.zero_()
                 continue
-            if stage_dtype is None:
-                stage_dtype = mod.lora_a.dtype
-            a_cat = torch.cat(rows, dim=0).to(stage_dtype)
-            b_cat = torch.cat(cols, dim=1).to(stage_dtype)
-            plan.append((mod, a_cat, b_cat))
+            plan.append((mod, [h for h, _w in layer_hits],
+                         [w for _h, w in layer_hits]))
+            for (a, b, _s), _w in layer_hits:
+                pieces.append(a.reshape(-1))
+                pieces.append(b.reshape(-1))
             covered += 1
         if plan:
             device = plan[0][0].lora_a.device
-            flat = torch.cat(
-                [t.reshape(-1) for _mod, a, b in plan for t in (a, b)])
-            copied = flat.numel() * flat.element_size()
-            flat = flat.to(device, non_blocking=True)
-            off = 0
-            for mod, a, b in plan:
-                r = int(a.shape[0])
+            # mixed dtypes across adapters are possible; stage each dtype run
+            # contiguously in its own flat tensor
+            flats: Dict[Any, Any] = {}
+            offsets: Dict[Any, int] = {}
+            for dt in {p.dtype for p in pieces}:
+                flats[dt] = torch.cat([p for p in pieces if p.dtype == dt]).to(
+                    device, non_blocking=True)
+                offsets[dt] = 0
+                copied += flats[dt].numel() * flats[dt].element_size()
+
+            def take(t: Any) -> Any:
+                dt = t.dtype
+                n = t.numel()
+                out = flats[dt][offsets[dt]:offsets[dt] + n].view(t.shape)
+                offsets[dt] += n
+                return out
+
+            for mod, hits, weights in plan:
                 mod.lora_a.zero_()
                 mod.lora_b.zero_()
-                n = a.numel()
-                mod.lora_a[:r].copy_(flat[off:off + n].view_as(a))
-                off += n
-                n = b.numel()
-                mod.lora_b[:, :r].copy_(flat[off:off + n].view_as(b))
-                off += n
+                r0 = 0
+                for (a, b, alpha_scale), w in zip(hits, weights):
+                    r = int(a.shape[0])
+                    dev_a, dev_b = take(a), take(b)
+                    mod.lora_a[r0:r0 + r].copy_(dev_a)  # device-side cast
+                    mod.lora_b[:, r0:r0 + r].copy_(dev_b)
+                    scale = float(alpha_scale) * float(w)
+                    if scale != 1.0:
+                        mod.lora_b[:, r0:r0 + r].mul_(scale)
+                    r0 += r
         if torch.cuda.is_available():
             torch.cuda.synchronize()
     setattr(model, _ACTIVE_ATTR, True)
