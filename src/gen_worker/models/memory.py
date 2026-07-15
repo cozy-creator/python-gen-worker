@@ -394,6 +394,15 @@ def device_mismatches(obj: Any, device: str) -> List[tuple[str, str, str]]:
     return out
 
 
+def meta_tensors(obj: Any) -> List[tuple[str, str]]:
+    """Parameters/buffers left unmaterialized by a failed low-memory load."""
+    return [
+        (component, name)
+        for component, name, device in device_mismatches(obj, "cpu")
+        if device == "meta"
+    ]
+
+
 def repair_device_placement(obj: Any, device: str) -> List[tuple[str, str, str]]:
     """Targeted ``.to(device)`` on each component holding off-device tensors,
     then re-walk. Returns the remaining mismatches ([] = fully repaired)."""
@@ -778,12 +787,7 @@ def place_pipeline(
     while True:
         try:
             if effective in ("off", "vae_only") and callable(getattr(pipeline, "to", None)):
-                try:
-                    pipeline.to("cuda")
-                except BaseException as exc:
-                    if is_cuda_oom(exc):
-                        raise
-                    log.warning("place_pipeline: .to('cuda') failed: %s", exc)
+                pipeline.to("cuda")
             applied = apply_low_vram_config(pipeline, mode=effective, logger=log)
             if demotions:
                 applied["oom_demotions"] = demotions

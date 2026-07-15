@@ -15,6 +15,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import msgspec
+import pytest
 
 from gen_worker.api.binding import HF
 from gen_worker.api.decorators import Resources
@@ -186,6 +187,27 @@ def test_load_from_pretrained_routes_single_file(tmp_path: Path) -> None:
     assert isinstance(out, FakePipeline)
     assert calls["path"] == str(ckpt)
     assert "variant" not in calls["kwargs"]
+
+
+def test_single_file_load_rejects_unmaterialized_meta_tensors(tmp_path: Path) -> None:
+    torch = pytest.importorskip("torch")
+    ckpt = tmp_path / "model.safetensors"
+    ckpt.write_bytes(b"stub")
+
+    class FakePipeline:
+        def __init__(self):
+            self.components = {"unet": torch.nn.Linear(1, 1, device="meta")}
+
+        @classmethod
+        def from_pretrained(cls, path, **kwargs):  # pragma: no cover
+            raise AssertionError("single-file snapshot must not use from_pretrained")
+
+        @classmethod
+        def from_single_file(cls, path, **kwargs):
+            return cls()
+
+    with pytest.raises(RuntimeError, match="unmaterialized meta tensors"):
+        load_from_pretrained(FakePipeline, tmp_path, dtype="fp16")
 
 
 def test_load_from_pretrained_still_uses_pretrained_for_layouts(tmp_path: Path) -> None:

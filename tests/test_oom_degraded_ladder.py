@@ -152,6 +152,17 @@ def test_load_oom_demotes_to_model_offload(shim_env, caplog) -> None:
     assert "needed_gb=" in line and "free_gb=" in line
 
 
+def test_load_non_oom_placement_failure_propagates(shim_env, monkeypatch) -> None:
+    pipe = ShimPipe.from_pretrained(str(shim_env))
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("Cannot copy out of meta tensor; no data!")
+
+    monkeypatch.setattr(pipe, "to", fail)
+    with pytest.raises(RuntimeError, match="meta tensor"):
+        memory.place_pipeline(pipe, ref="acme/broken")
+
+
 def test_planned_offload_skips_doomed_resident_attempt(shim_env) -> None:
     pipe = ShimPipe.from_pretrained(str(shim_env))
     applied = memory.place_pipeline(pipe, mode="model_offload", ref="acme/tiny")

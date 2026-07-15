@@ -86,6 +86,25 @@ _CONTEXT_BY_KIND: Dict[str, type] = {
 logger = logging.getLogger(__name__)
 
 INLINE_RESULT_MAX_BYTES = 64 * 1024
+
+
+async def _to_thread_complete(func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+    """Join after cancellation: ``to_thread`` itself cannot be cancelled.
+
+    Diffusers/Accelerate mutate process-global meta-device hooks while loading,
+    so a surrounding model-load lock must outlive the worker thread.
+    """
+    work = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
+    try:
+        return await asyncio.shield(work)
+    except asyncio.CancelledError:
+        try:
+            await work
+        except BaseException:
+            pass
+        raise
+
+
 # ctx.progress/log/checkpoint events ride the JobProgress stream; the hub fans
 # them to /v1/requests/:id/events SSE as output.delta envelopes whose
 # payload.delta carries this JSON verbatim (th#640).
@@ -1729,7 +1748,7 @@ class Executor:
                     if asyncio.iscoroutinefunction(setup):
                         await setup(**inj.kwargs)
                     else:
-                        await asyncio.to_thread(setup, **inj.kwargs)
+                        await _to_thread_complete(setup, **inj.kwargs)
             warmup = getattr(instance, "warmup", None)
             if callable(warmup):
                 from . import compile_cache
@@ -1739,7 +1758,7 @@ class Executor:
                 if asyncio.iscoroutinefunction(warmup):
                     await warmup()
                 else:
-                    await asyncio.to_thread(warmup)
+                    await _to_thread_complete(warmup)
                 if spec.compile is not None:
                     stats = compile_cache.counters_delta(
                         counters_before, compile_cache.inductor_counters())
@@ -2124,10 +2143,10 @@ class Executor:
                     excl_bytes = sum(
                         b for comp, b in sizes.items() if comp not in injected)
                     if excl_bytes > 0:
-                        await asyncio.to_thread(res.make_room, excl_bytes)
+                        await _to_thread_complete(res.make_room, excl_bytes)
                 before = self._vram_allocated()
                 try:
-                    sl = await asyncio.to_thread(
+                    sl = await _to_thread_complete(
                         provision.load_slot, ann, path, binding=binding,
                         slot=slot, ref=ref, mode=mode, components=injected,
                     )
@@ -2149,7 +2168,7 @@ class Executor:
                     )
                     path = str(fresh)
                     paths[slot] = path
-                    sl = await asyncio.to_thread(
+                    sl = await _to_thread_complete(
                         provision.load_slot, ann, path, binding=binding,
                         slot=slot, ref=ref, mode=mode, components=injected,
                     )
@@ -2189,7 +2208,7 @@ class Executor:
                     # a TRT engine (#390, refit with this pipeline's weights)
                     # or an inductor cache (#384). No verified artifact =>
                     # stays eager. ``compile_artifact`` is hub-attached (#569).
-                    await asyncio.to_thread(
+                    await _to_thread_complete(
                         self._enable_compiled, pipe, spec.compile, compile_artifact,
                     )
                 delta = max(0, self._vram_allocated() - before)
