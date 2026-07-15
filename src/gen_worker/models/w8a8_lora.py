@@ -115,29 +115,22 @@ def _base_and_kind(key: str) -> Tuple[str, str]:
     return "", ""
 
 
-def _kohya_to_diffusers(sd: Dict[str, Any], model: Any) -> Optional[Dict[str, Any]]:
-    """Normalize a kohya/sd-scripts adapter (incl. SGM/LDM block naming)
-    through diffusers' own converters — the exact mapping the bf16 peft
-    path uses (lora_pipeline.lora_state_dict order: SGM block rename with
-    the real unet config, then the non-diffusers conversion). None when the
-    converters can't handle it (caller falls back / fails)."""
+def _kohya_sgm_normalize(sd: Dict[str, Any], model: Any) -> Optional[Dict[str, Any]]:
+    """Rename SGM/LDM block indices (input_blocks_4_1 ...) to diffusers block
+    paths using the REAL unet config — diffusers' own pre-pass, the same one
+    the bf16 peft path runs. Keys stay kohya-flat afterwards and resolve
+    against the model's module paths directly (down/up/alpha handled
+    natively; the full non-diffusers converter is NOT used — it emits legacy
+    attn-processor names that match no real module)."""
     try:
         from diffusers.loaders.lora_conversion_utils import (
-            _convert_non_diffusers_lora_to_diffusers,
             _maybe_map_sgm_blocks_to_diffusers,
         )
 
-        sd = dict(sd)
-        if any(p in k for k in sd for p in
-               ("input_blocks", "middle_block", "output_blocks")):
-            sd = _maybe_map_sgm_blocks_to_diffusers(sd, model.config)
-        converted, alphas = _convert_non_diffusers_lora_to_diffusers(sd)
+        return _maybe_map_sgm_blocks_to_diffusers(dict(sd), model.config)
     except Exception:
-        logger.warning("w8a8 lora: kohya->diffusers conversion failed", exc_info=True)
+        logger.warning("w8a8 lora: SGM block normalization failed", exc_info=True)
         return None
-    out = dict(converted)
-    out.update(alphas or {})  # "<base>.alpha" -> float
-    return out
 
 
 def _group_keys(
@@ -182,8 +175,10 @@ def map_adapter(
     output."""
     mods = quantized_modules(model)
     groups, unresolved = _group_keys(den_sd, mods)
-    if unresolved and any(k.startswith("lora_unet_") for k in den_sd):
-        converted = _kohya_to_diffusers(den_sd, model)
+    if unresolved and any(
+            p in k for k in den_sd
+            for p in ("input_blocks", "middle_block", "output_blocks")):
+        converted = _kohya_sgm_normalize(den_sd, model)
         if converted is not None:
             groups, unresolved = _group_keys(converted, mods)
     if unresolved:
