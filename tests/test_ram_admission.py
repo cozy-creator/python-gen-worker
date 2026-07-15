@@ -11,6 +11,7 @@ and a load that still cannot fit fails RETRYABLE instead of thrashing.
 from __future__ import annotations
 
 import asyncio
+import gc
 import logging
 import time
 import weakref
@@ -22,7 +23,7 @@ import pytest
 from gen_worker.api.binding import HF
 from gen_worker.api.decorators import Resources
 from gen_worker.capability import InsufficientHostRamError
-from gen_worker.executor import Executor, ModelStore
+from gen_worker.executor import Executor, ModelStore, _Job
 from gen_worker.models import residency as residency_mod
 from gen_worker.models.residency import Residency, Tier
 from gen_worker.pb import worker_scheduler_pb2 as pb
@@ -123,6 +124,9 @@ class _FakePipe:
 
     def to(self, device: str) -> "_FakePipe":
         return self
+
+    def enable_model_cpu_offload(self) -> None:
+        pass
 
 
 def _spec(
@@ -260,7 +264,11 @@ def test_setup_vacates_warm_record_after_vram_make_room(
                 on_disk.append(rec_a.instance is None)
 
         res._on_event = _event
-        inst_b = await ex.ensure_setup(spec_b)
+        # _run_job pins refs before setup. The pre-existing shared entry is
+        # therefore execution-pinned here, but that incidental pin still must
+        # not make either older record the incoming job's active instance.
+        with res.executing("acme/shared-vae"):
+            inst_b = await ex.ensure_setup(spec_b)
         assert isinstance(inst_b.m, _FakePipe)
         assert res.tier("acme/a") is Tier.DISK
         assert rec_a.ready is False
@@ -268,6 +276,100 @@ def test_setup_vacates_warm_record_after_vram_make_room(
         await asyncio.sleep(0)
         assert pipeline() is None
         assert on_disk == [True]
+
+    asyncio.run(_run())
+
+
+def test_shared_ref_does_not_pin_idle_record_or_publish_false_disk(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """pgw#542: a job's shared VAE is not ownership of every old pipeline."""
+    from gen_worker.models import disk_gc
+
+    class Endpoint:
+        def setup(self, pipeline: _FakePipe, vae: _FakePipe) -> None:
+            self.pipeline = pipeline
+            self.vae = vae
+
+        def run(self, ctx, payload: _In):  # pragma: no cover
+            return payload
+
+    shared = HF("acme/shared-vae")
+    spec_a = _spec(
+        "a", Endpoint, {"pipeline": HF("acme/a"), "vae": shared})
+    spec_b = _spec(
+        "b", Endpoint, {"pipeline": HF("acme/b"), "vae": shared})
+    spec_c = _spec(
+        "c", Endpoint, {"pipeline": HF("acme/c"), "vae": shared})
+    monkeypatch.setattr(disk_gc, "tree_bytes", lambda p: 6 * _GiB)
+    monkeypatch.setattr(residency_mod, "get_total_ram_gb", lambda: 31.0)
+
+    async def _run() -> None:
+        ex = _executor([spec_a, spec_b, spec_c], tmp_path)
+        res = ex.store.residency
+        monkeypatch.setattr(
+            residency_mod, "get_available_ram_gb", lambda: 24.0)
+        await ex.ensure_setup(spec_a)
+        await ex.ensure_setup(spec_c)
+        rec_a = ex._classes[spec_a.instance_key]
+        rec_c = ex._classes[spec_c.instance_key]
+
+        async def _cached_local(ref, snapshot=None, *, binding=None) -> Path:
+            if res.local_path(ref) is None:
+                res.track_disk(ref, tmp_path)
+            return tmp_path
+
+        ex.store.ensure_local = _cached_local  # type: ignore[method-assign]
+
+        # This is the production ordering: handle_run_job installs B before
+        # its setup begins. B's shared VAE must not make A or C look active.
+        ex.jobs[("incoming", 1)] = _Job("incoming", 1, spec_b)
+        monkeypatch.setattr(
+            residency_mod,
+            "get_available_ram_gb",
+            lambda: 20.0 if rec_a.instance is None else 8.0,
+        )
+        events: list[tuple[str, str]] = []
+        res._on_event = lambda ref, state, *_: events.append((ref, state))
+        sent: list[pb.WorkerMessage] = []
+
+        async def _capture(message: pb.WorkerMessage) -> None:
+            sent.append(message)
+
+        ex._send = _capture
+
+        inst_b = await ex.ensure_setup(spec_b)
+
+        assert isinstance(inst_b.pipeline, _FakePipe)
+        assert rec_a.ready is False
+        assert rec_a.instance is None
+        assert rec_c.ready is True
+        assert res.tier("acme/a") is Tier.DISK
+        assert res.tier("acme/shared-vae") is Tier.RAM
+        assert ("acme/a", residency_mod.ON_DISK) in events
+        assert ("acme/shared-vae", residency_mod.ON_DISK) not in events
+        assert not any(
+            message.WhichOneof("msg") == "model_event"
+            and message.model_event.state == pb.MODEL_STATE_FAILED
+            for message in sent
+        )
+
+        # The latest-loaded B owns Residency.obj(shared). Removing B while C
+        # survives must transfer that strong reference to C, not retain B's
+        # VAE or falsely publish shared as ON_DISK.
+        rec_b = ex._classes[spec_b.instance_key]
+        b_vae = weakref.ref(inst_b.vae)
+        c_vae = rec_c.instance.vae
+        ex.jobs.pop(("incoming", 1))
+        events.clear()
+        del inst_b
+        await ex._vacate_record(rec_b)
+        gc.collect()
+
+        assert b_vae() is None
+        assert res.obj("acme/shared-vae") is c_vae
+        assert res.tier("acme/shared-vae") is Tier.RAM
+        assert not [event for event in events if event[0] == "acme/shared-vae"]
 
     asyncio.run(_run())
 
