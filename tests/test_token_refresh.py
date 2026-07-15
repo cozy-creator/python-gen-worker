@@ -124,7 +124,6 @@ def test_token_refresh_swaps_credential_midstream_and_on_reconnect(rotating_sche
             orchestrator_public_addr=f"127.0.0.1:{port}",
             worker_id="rotation-worker",
             worker_jwt="boot-token",
-            worker_disconnected_timeout_s=60,
         )
         handlers = _Handlers()
         transport = Transport(settings, handlers, backoff_base_s=0.05, backoff_cap_s=0.2)
@@ -181,7 +180,6 @@ def test_empty_token_refresh_is_ignored(rotating_scheduler) -> None:
             orchestrator_public_addr=f"127.0.0.1:{port}",
             worker_id="rotation-worker",
             worker_jwt="boot-token",
-            worker_disconnected_timeout_s=60,
         )
         transport = Transport(settings, _Handlers(), backoff_base_s=0.05, backoff_cap_s=0.2)
         run_task = asyncio.create_task(transport.run())

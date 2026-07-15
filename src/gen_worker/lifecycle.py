@@ -444,9 +444,6 @@ class Lifecycle:
         deadline_s = (deadline_ms / 1000.0) if deadline_ms > 0 else None
         loop = asyncio.get_running_loop()
         self._drain_deadline_at = loop.time() + deadline_s if deadline_s is not None else None
-        if self._drain_deadline_at is None and self.transport is not None:
-            self.transport.begin_non_expiring_drain()
-
     async def _finish_drain(self) -> None:
         deadline_at = self._drain_deadline_at
         loop = asyncio.get_running_loop()

@@ -33,7 +33,6 @@ this page covers the worker itself.
 | `WORKER_ID` | `worker_id` | per-pod identity |
 | `ENDPOINT_LOCK_PATH` | `endpoint_lock_path` | discovery manifest path (baked default in images) |
 | `RUNPOD_POD_ID` | `runpod_pod_id` | set by the RunPod runtime |
-| `WORKER_DISCONNECTED_TIMEOUT_S` | `worker_disconnected_timeout_s` | self-exit window when orchestrator unreachable |
 | `WORKER_IMAGE_DIGEST` | `worker_image_digest` | provenance stamped by the image build — currently no launcher sets it (pgw#514/P4); kept for a future tensorhub stamp |
 
 ## Tuning knobs (Settings fields)

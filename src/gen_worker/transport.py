@@ -36,8 +36,7 @@ _AUTH_FAILURE_EXIT_WINDOW_S = 60.0
 _BACKOFF_RESET_AFTER_S = 60.0
 _HELLO_ACK_TIMEOUT_S = 30.0
 # FAILED_PRECONDITION details that can never heal by retrying: identity is
-# wrong for this deployment, so exit for reap instead of burning the full
-# disconnected timeout.
+# wrong for this deployment, so retrying cannot repair it.
 _PERMANENT_PRECONDITION_MARKERS = (
     "worker_id_mismatch",
     "release_id_mismatch",
@@ -46,8 +45,7 @@ _PERMANENT_PRECONDITION_MARKERS = (
 
 
 class FatalTransportError(Exception):
-    """Unrecoverable: protocol mismatch, repeated auth rejection, or the
-    disconnected-timeout elapsed. The worker process should exit."""
+    """Unrecoverable protocol mismatch or persistent registration rejection."""
 
 
 def normalize_grpc_addr(addr: str, default_tls: Optional[bool] = None) -> Tuple[str, bool]:
@@ -188,7 +186,6 @@ class Transport:
         self._stopping = asyncio.Event()
         self._connected = asyncio.Event()
         self._clean_close = False
-        self._non_expiring_drain = False
         self.reconnect_delays: List[float] = []  # observability + tests
         self._consecutive_auth_failures = 0
         self._first_auth_failure_at: Optional[float] = None
@@ -221,10 +218,6 @@ class Transport:
             return False
 
     # ---- drain / shutdown --------------------------------------------------
-
-    def begin_non_expiring_drain(self) -> None:
-        """Keep reconnecting until a zero-deadline drain ships its results."""
-        self._non_expiring_drain = True
 
     async def close_after_flush(self, timeout: Optional[float] = None) -> bool:
         """Ship the queue, then stop; ``None`` waits until every result ships."""
@@ -271,14 +264,11 @@ class Transport:
         return [("authorization", f"Bearer {token}")]
 
     async def run(self) -> None:
-        """Reconnect loop. Returns cleanly on drain close; raises
-        FatalTransportError on version mismatch / auth lockout / timeout."""
+        """Reconnect until stopped; fatal protocol/auth failures still exit."""
         attempt = 0
         redirect_addr: Optional[str] = None
         redirect_tls: Optional[bool] = None
         redirect_hops = 0
-        last_connected = time.monotonic()
-
         while not self._stopping.is_set():
             if redirect_addr is not None:
                 # Schemeless redirect targets inherit the TLS mode of the
@@ -346,18 +336,8 @@ class Transport:
 
             now = time.monotonic()
             if self._connected_at is not None:
-                last_connected = now
                 if now - self._connected_at >= _BACKOFF_RESET_AFTER_S:
                     attempt = 0
-            timeout_s = float(self._settings.worker_disconnected_timeout_s or 0)
-            if (
-                timeout_s > 0
-                and now - last_connected > timeout_s
-                and not self._non_expiring_drain
-            ):
-                raise FatalTransportError(
-                    f"no successful connection for {timeout_s:.0f}s; exiting for reap"
-                )
 
             delay = random.uniform(0, min(self._backoff_cap, self._backoff_base * (2 ** attempt)))
             attempt += 1
