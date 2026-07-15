@@ -16,14 +16,19 @@ import logging
 import time
 import weakref
 from pathlib import Path
+from types import SimpleNamespace
 
 import msgspec
+import psutil
 import pytest
 
 from gen_worker.api.binding import HF
 from gen_worker.api.decorators import Resources
+from gen_worker.api.slot import Slot
 from gen_worker.capability import InsufficientHostRamError
 from gen_worker.executor import Executor, ModelStore, _Job
+from gen_worker.lifecycle import Lifecycle
+from gen_worker.models import memory as memory_mod
 from gen_worker.models import residency as residency_mod
 from gen_worker.models.residency import Residency, Tier
 from gen_worker.pb import worker_scheduler_pb2 as pb
@@ -370,6 +375,137 @@ def test_shared_ref_does_not_pin_idle_record_or_publish_false_disk(
         assert res.obj("acme/shared-vae") is c_vae
         assert res.tier("acme/shared-vae") is Tier.RAM
         assert not [event for event in events if event[0] == "acme/shared-vae"]
+
+    asyncio.run(_run())
+
+
+def test_declarative_ninth_sdxl_load_uses_reclaimable_cgroup_cache(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """#543: inactive file cache must not look like live SDXL pipeline RAM.
+
+    The injected cgroup observation stays at its byte limit while anonymous
+    pipeline memory is replaced by inactive model-file cache.  Raw
+    ``memory.current`` therefore never falls, exactly the false admission
+    signal seen by e2e #170.  The production DesiredResidency reconciler must
+    use reclaimable working-set headroom, vacate the minimum idle records, and
+    load model nine without a timer or retry loop.
+    """
+    from gen_worker.models import disk_gc
+
+    live: weakref.WeakSet[object] = weakref.WeakSet()
+
+    def _load(cls, path, **kwargs):
+        obj = cls()
+        live.add(obj)
+        return obj
+
+    monkeypatch.setattr(_FakePipe, "from_pretrained", classmethod(_load))
+
+    class Endpoint:
+        def setup(self, pipeline: _FakePipe, vae: _FakePipe) -> None:
+            self.pipeline = pipeline
+            self.vae = vae
+
+        def run(self, ctx, payload: _In):  # pragma: no cover
+            return payload
+
+    base_pipeline = HF("acme/sdxl-0")
+    shared_vae = HF("acme/sdxl-vae")
+    spec = EndpointSpec(
+        name="generate", method=Endpoint.run, kind="inference",
+        payload_type=_In, output_mode="single", cls=Endpoint,
+        attr_name="run", models={"pipeline": base_pipeline, "vae": shared_vae},
+        slots={
+            "pipeline": Slot(_FakePipe, default_checkpoint=base_pipeline),
+            "vae": Slot(_FakePipe, default_checkpoint=shared_vae),
+        },
+        resources=Resources(vram_gb=12),
+    )
+    ex = _executor([spec], tmp_path)
+    sent: list[pb.WorkerMessage] = []
+
+    async def _capture(message: pb.WorkerMessage) -> None:
+        sent.append(message)
+
+    ex._send = _capture
+    lifecycle = Lifecycle(
+        SimpleNamespace(worker_jwt="", worker_id="worker", runpod_pod_id=""),
+        ex,
+    )
+    model_bytes = 6_941_377_969
+    monkeypatch.setattr(disk_gc, "tree_bytes", lambda path: model_bytes)
+
+    root = tmp_path / "cgroup"
+    root.mkdir(exist_ok=True)
+    proc = tmp_path / "proc-self-cgroup"
+    proc.write_text("0::/\n")
+    limit = 31 * _GiB
+    (root / "memory.max").write_text(str(limit))
+    (root / "memory.current").write_text(str(limit))
+    pressure = False
+    object_bytes = 7 * _GiB // 5  # 1.4GiB per pipeline/VAE object
+
+    monkeypatch.setattr(
+        psutil, "virtual_memory",
+        lambda: SimpleNamespace(total=125 * _GiB, available=125 * _GiB),
+    )
+
+    def _ram() -> memory_mod.HostRam:
+        if not pressure:
+            inactive = limit
+        else:
+            working = len(live) * object_bytes
+            inactive = max(0, limit - working)
+        (root / "memory.stat").write_text(f"inactive_file {inactive}\n")
+        return memory_mod.probe_host_ram(root=root, proc_self_cgroup=proc)
+
+    monkeypatch.setattr(residency_mod, "get_total_ram_gb", lambda: 31.0)
+    monkeypatch.setattr(
+        residency_mod, "get_available_ram_gb",
+        lambda: 31.0 if not pressure else _ram().available_gb,
+    )
+
+    async def _apply(generation: int, pipeline_ref: str) -> None:
+        await lifecycle.on_hello_ack(pb.HelloAck(
+            desired_residency=pb.DesiredResidency(
+                generation=generation,
+                hot=[pb.DesiredInstance(
+                    function_name="generate",
+                    models=[
+                        pb.ModelBinding(slot="pipeline", ref=pipeline_ref),
+                        pb.ModelBinding(slot="vae", ref="tensorhub/sdxl-vae:prod"),
+                    ],
+                )],
+            ),
+        ))
+        task = lifecycle._residency_task
+        assert task is not None
+        await asyncio.wait_for(asyncio.shield(task), 2)
+
+    async def _run() -> None:
+        nonlocal pressure
+        for i in range(8):
+            await _apply(i + 1, f"tensorhub/sdxl-{i}:prod")
+        assert len(live) == 16
+        old_records = [rec for rec in ex._classes.values() if rec.ready]
+
+        pressure = True
+        await _apply(9, "tensorhub/sdxl-8:prod")
+
+        ninth = next(
+            rec for rec in ex._classes.values()
+            if rec.ready and "tensorhub/sdxl-8:prod" in ex._record_refs(rec)
+        )
+        assert ninth.instance is not None
+        assert sum(not rec.ready for rec in old_records) == 2
+        assert len(live) == 14
+        assert not [
+            msg for msg in sent
+            if msg.WhichOneof("msg") == "model_event"
+            and msg.model_event.state == pb.MODEL_STATE_FAILED
+        ]
+        lifecycle._cancel_residency_reconcile()
 
     asyncio.run(_run())
 

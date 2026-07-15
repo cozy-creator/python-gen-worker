@@ -260,6 +260,38 @@ def cgroup_memory_current_bytes(
     return _read_cgroup_int(root / "memory" / "memory.usage_in_bytes")
 
 
+def _read_cgroup_stat(path: Path) -> Optional[Dict[str, int]]:
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return None
+    values: Dict[str, int] = {}
+    for line in lines:
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        try:
+            value = int(parts[1])
+        except ValueError:
+            continue
+        if value >= 0:
+            values[parts[0]] = value
+    return values
+
+
+def _cgroup_inactive_file_bytes(
+    root: Path = _CGROUP_ROOT,
+    proc_self_cgroup: Path = _PROC_SELF_CGROUP,
+) -> int:
+    """Kernel-reclaimable inactive-file bytes used by cgroup working set."""
+    for node in reversed(_v2_cgroup_nodes(root, proc_self_cgroup)):
+        stats = _read_cgroup_stat(node / "memory.stat")
+        if stats is not None:
+            return stats.get("inactive_file", 0)
+    stats = _read_cgroup_stat(root / "memory" / "memory.stat") or {}
+    return stats.get("total_inactive_file", stats.get("inactive_file", 0))
+
+
 def probe_host_ram(
     *,
     root: Path = _CGROUP_ROOT,
@@ -287,7 +319,15 @@ def probe_host_ram(
         )
     limit_gb = float(limit) / float(_GIB)
     current = cgroup_memory_current_bytes(root, proc_self_cgroup)
-    cg_avail_gb = max(0.0, float(limit - (current or 0)) / float(_GIB))
+    # #543: memory.current includes filesystem page cache. Repeated model
+    # downloads/loads can fill a pod's cgroup with inactive file page cache
+    # even after the corresponding pipeline objects are gone. The kernel
+    # reclaims pages on the inactive file LRU under pressure; count the same
+    # conservative working set used by production container schedulers instead
+    # of treating those pages as anonymous model memory.
+    inactive_file = _cgroup_inactive_file_bytes(root, proc_self_cgroup)
+    working_set = max(0, (current or 0) - inactive_file)
+    cg_avail_gb = max(0.0, float(limit - working_set) / float(_GIB))
     total = min(meminfo_total, limit_gb) if meminfo_total > 0 else limit_gb
     avail = min(meminfo_available, cg_avail_gb) if meminfo_available > 0 else cg_avail_gb
     constrained = meminfo_total <= 0 or limit_gb < meminfo_total
