@@ -238,9 +238,13 @@ def run_quality(base: str, loras: list, steps: int, out: Path) -> dict:
                 if rest:
                     pipe.load_lora_weights(dict(rest), adapter_name="te")
                     pipe.set_adapters(["te"], adapter_weights=[1.0])
+                    pipe.enable_lora()
             else:
                 pipe.load_lora_weights(dict(sd), adapter_name=ref.replace("/", "-"))
                 pipe.set_adapters([ref.replace("/", "-")], adapter_weights=[1.0])
+                # set_adapters does NOT clear a prior disable_lora flag — the
+                # same pitfall production lora_util handles with enable_lora.
+                pipe.enable_lora()
             for i, p in enumerate(PROMPTS):
                 imgs[(ref, i)] = _render(pipe, p, 4321 + i, steps)
             if w8a8_lane:
