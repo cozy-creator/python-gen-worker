@@ -56,6 +56,8 @@ from .models.memory import (
     get_available_ram_gb,
     get_available_vram_gb,
     is_cuda_oom,
+    low_vram_mode,
+    next_offload_rung,
 )
 from .models.cache_paths import tensorhub_cas_dir
 from .models.download import ensure_local, lookup_provider_for_ref
@@ -1143,6 +1145,10 @@ class Executor:
         # th#683 P3: how each serveable function will run on the actual card
         # (native / emergency / offload / cpu) + honest-guidance advisory.
         self.serve_plans: Dict[str, "ServePlan"] = {}
+        # Gate-time placement is immutable between hardware re-gates. Runtime
+        # degradation updates serve_plans for FnDegraded telemetry, but must
+        # not force an unrelated dynamic model pick down the same rung.
+        self._gate_serve_plans: Dict[str, "ServePlan"] = {}
         # gw#463: learned degraded floor per model ref — "this model+GPU
         # needed offload mode X". In-process only; consulted at every load so
         # a doomed fully-resident attempt is never paid twice (ie#369).
@@ -1348,6 +1354,7 @@ class Executor:
             primary = next(iter(spec.models.values()), None)
             plan = plan_serve(r, caps, free_vram_gb, binding=primary)
             self.serve_plans[name] = plan
+            self._gate_serve_plans[name] = plan
             if not plan.serveable:
                 if plan.run_mode in (RUN_CPU, RUN_OFFLOAD):
                     # The author's strict_vram opt-out of the CPU-touching
@@ -1927,10 +1934,18 @@ class Executor:
         from a prior load, else the endpoint's declared vram_gb."""
         res = self.store.residency
         refs = [wire_ref(spec.models[s]) for s in setup_slots]
-        needed = sum(res.vram_hint(r) for r in refs)
-        if needed <= 0 and spec.resources.vram_gb:
-            needed = int(float(spec.resources.vram_gb) * _GiB)
+        hints = [res.vram_hint(r) for r in refs]
+        needed = sum(hints)
+        # A partially-known set is still an unknown load. Live SDXL exposed
+        # the old sum-only bug: the fixed VAE had a small prior hint while a
+        # never-seen checkpoint had none, so admission reserved only the VAE
+        # and loaded a ~10GiB pipeline into an occupied 24GiB card.
+        if any(h <= 0 for h in hints) and spec.resources.vram_gb:
+            needed = max(needed, int(float(spec.resources.vram_gb) * _GiB))
         if needed <= 0:
+            return
+        # CPU-only workers do not have a VRAM tier to admit against.
+        if torch is None or not torch.cuda.is_available():
             return
         if await asyncio.to_thread(res.make_room, needed):
             self._on_state_change()
@@ -1943,8 +1958,31 @@ class Executor:
                 continue
             await self._vacate_record(rec)
             if await asyncio.to_thread(res.make_room, needed):
-                break
+                self._on_state_change()
+                return
+        # No arbitrary refusal at the recommendation boundary: vram_gb names
+        # a target card, not a hard free-byte requirement. If pinned work
+        # prevents full headroom, the freshly materialized pipeline's exact
+        # size drives place_pipeline's offload decision before any CUDA move.
         self._on_state_change()
+
+    def _placement_mode(self, spec: EndpointSpec, ref: str) -> str:
+        """Placement for one concrete model ref on this worker.
+
+        The hardware gate is function-wide and stable. Reactive OOM floors
+        are ref-specific: one large or malformed dynamic pick must never
+        spill every sibling pick to CPU offload.
+        """
+        from .models.serve_fit import RUN_OFFLOAD
+
+        plan = self._gate_serve_plans.get(spec.name)
+        mode = "model_offload" if (
+            plan is not None and plan.run_mode == RUN_OFFLOAD
+        ) else "auto"
+        floor = self.degraded_floor.get(ref, "")
+        if floor:
+            mode = deeper_offload_mode("" if mode == "auto" else mode, floor)
+        return mode
 
     @staticmethod
     def _setup_slots(spec: EndpointSpec) -> List[str]:
@@ -2105,16 +2143,8 @@ class Executor:
                 # pick the starting rung so a doomed fully-resident attempt
                 # is never paid (gw#463 / ie#369); a CUDA OOM inside is a
                 # ladder transition, not a failure.
-                from .models.serve_fit import RUN_OFFLOAD
-
                 ref = wire_ref(binding) if binding is not None else ""
-                plan = self.serve_plans.get(spec.name)
-                mode = "model_offload" if (
-                    plan is not None and plan.run_mode == RUN_OFFLOAD
-                ) else "auto"
-                floor = self.degraded_floor.get(ref, "")
-                if floor:
-                    mode = deeper_offload_mode("" if mode == "auto" else mode, floor)
+                mode = self._placement_mode(spec, ref)
                 slot_share = dict((share_plan or {}).get(slot) or {})
                 if slot_share and mode != "auto":
                     # Offload hooks on a shared module would poison sibling
@@ -2827,13 +2857,11 @@ class Executor:
                         output = await self._execute(job, spec, instance, ctx, payload, kwargs,
                                                      timeout_ms=timeout_ms, gpu_index=gpu_index)
                     except BaseException as exc:
-                        # Mid-inference CUDA OOM is a ladder transition, not a
-                        # request killer (gw#463): demote to the offload rung
-                        # and retry this request ONCE in degraded mode.
-                        if not await self._enter_degraded_for_oom(spec, ctx, exc):
-                            raise
-                        output = await self._execute(job, spec, instance, ctx, payload, kwargs,
-                                                     timeout_ms=timeout_ms, gpu_index=gpu_index)
+                        # A mid-inference CUDA OOM learns a per-ref floor, but
+                        # the live object is quarantined. The hub retries only
+                        # after ensure_setup reloads it cleanly at that rung.
+                        await self._quarantine_for_oom(spec, ctx, exc)
+                        raise
                 finally:
                     # Guaranteed-inactive on every exit (OK / cancel /
                     # deadline / handler error); attachments stay resident.
@@ -3024,76 +3052,76 @@ class Executor:
             )
         return pipe
 
-    async def _enter_degraded_for_oom(
+    async def _quarantine_for_oom(
         self, spec: EndpointSpec, ctx: RequestContext, exc: BaseException,
-    ) -> bool:
-        """Mid-inference CUDA OOM -> degraded-mode ladder transition (gw#463).
+    ) -> None:
+        """Quarantine an OOM'd instance and learn its next placement rung.
 
-        Flushes the CUDA cache, demotes this function's worker-owned resident
-        pipelines one offload rung (sticky until reload), records + reports
-        the demotion. True when the request should retry once in degraded
-        mode; False re-raises the original failure.
+        Diffusers offload hooks are setup-time state. Attaching them to a
+        fully resident pipeline after a mid-denoise OOM can leave CPU/CUDA
+        tensors mixed while Residency still advertises VRAM. Do not reuse or
+        retry that object in-process: mark its record stale, let the current
+        OOM return RETRYABLE, then reload cleanly at the learned per-ref rung
+        when the hub dispatches the retry.
+
         """
         if not is_cuda_oom(exc) or getattr(ctx, "cancelled", False):
-            return False
+            return
         if spec.kind != "inference":
             # Producer jobs (training/conversion) must surface RETRYABLE to
             # the hub — an in-process whole-job replay would redo hours of
             # work the hub can resume from a checkpoint instead.
-            return False
+            return
         if spec.output_mode == "stream":
-            return False  # chunks already emitted; a replay would duplicate them
-        pipes: List[Tuple[str, Any]] = []
+            return  # chunks already emitted; a replay would duplicate them
+        transitions: List[Tuple[str, str, str, float]] = []
         for slot in spec.models:
             ref = wire_ref(spec.models[slot])
             obj = self.store.residency.obj(ref)
-            if obj is not None:
-                pipes.append((ref, obj))
-        demotions = await asyncio.to_thread(self._demote_pipelines, pipes)
-        if pipes and not demotions:
-            return False  # every pipeline already terminal — degraded failed too
-        for ref, from_mode, to_mode, needed_gb in demotions:
+            if obj is None:
+                continue
+            # Component modules (for example a separately injected VAE) do
+            # not own a Diffusers offload surface. The enclosing pipeline is
+            # the transition owner; assigning a fake floor to the component
+            # would only poison its next load.
+            if not any(callable(getattr(obj, name, None)) for name in (
+                "enable_model_cpu_offload",
+                "enable_group_offload",
+                "enable_sequential_cpu_offload",
+            )):
+                continue
+            before = low_vram_mode(obj)
+            after = next_offload_rung(before)
+            if after is not None:
+                transitions.append(
+                    (ref, before, after, estimate_pipeline_size_gb(obj))
+                )
+        for ref, from_mode, to_mode, needed_gb in transitions:
             self._record_demotion(
                 spec, ref=ref, phase="inference",
                 from_rung=from_mode or "resident", to_rung=to_mode,
                 needed_gb=needed_gb,
                 detail=f"CUDA OOM mid-inference ({type(exc).__name__}); "
-                       "retrying this request once offloaded",
+                       "quarantining this instance for a clean offloaded reload",
             )
-        if not demotions:
+        flush_memory()
+        rec = self._classes.get(spec.instance_key)
+        if rec is not None and rec.ready:
+            rec.stale = True
+        if not transitions:
             logger.warning(degraded_log_line(
                 event="engaged", fn=spec.name, phase="inference",
                 free_gb=get_available_vram_gb(),
-                detail="CUDA OOM with no worker-owned pipeline to demote; "
-                       "flushed CUDA cache, retrying this request once"))
+                detail="CUDA OOM with no worker-owned pipeline rung; "
+                       "returning retryable without reusing the instance"))
         try:
-            # Platform-visible request event (the ie#369 bar): pod log AND
-            # hub event stream both say degraded mode engaged.
             ctx.log(
-                f"DEGRADED_MODE=engaged fn={spec.name}: CUDA OOM; retrying "
-                "once with CPU offload (slower). Sticky for this worker.",
+                f"DEGRADED_MODE=engaged fn={spec.name}: CUDA OOM; quarantining "
+                "this instance and reloading offloaded on retry.",
                 level="warning",
             )
         except Exception:
             pass
-        return True
-
-    @staticmethod
-    def _demote_pipelines(
-        pipes: List[Tuple[str, Any]],
-    ) -> List[Tuple[str, str, str, float]]:
-        """Sync half (thread): flush, then one ladder rung down per pipeline.
-        Returns (ref, from_mode, to_mode, needed_gb) per demoted pipeline."""
-        from .models.memory import demote_pipeline, low_vram_mode
-
-        flush_memory()
-        out: List[Tuple[str, str, str, float]] = []
-        for ref, pipe in pipes:
-            before = low_vram_mode(pipe)
-            after = demote_pipeline(pipe, logger=logger)
-            if after:
-                out.append((ref, before, after, estimate_pipeline_size_gb(pipe)))
-        return out
 
     async def _execute(
         self,

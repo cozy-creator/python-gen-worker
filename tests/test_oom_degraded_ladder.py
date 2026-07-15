@@ -52,12 +52,14 @@ class ShimPipe(DDPMPipeline):
 
     oom_on_cuda = True
     to_cuda_attempts = 0
+    to_cpu_attempts = 0
     offload_calls: list = []
 
     @classmethod
     def reset(cls, *, oom_on_cuda: bool = True) -> None:
         cls.oom_on_cuda = oom_on_cuda
         cls.to_cuda_attempts = 0
+        cls.to_cpu_attempts = 0
         cls.offload_calls = []
 
     def to(self, *args, **kwargs):
@@ -66,6 +68,8 @@ class ShimPipe(DDPMPipeline):
             type(self).to_cuda_attempts += 1
             if type(self).oom_on_cuda:
                 raise OOM("CUDA out of memory (injected, gw#463 test)")
+        else:
+            type(self).to_cpu_attempts += 1
         return self
 
     def enable_model_cpu_offload(self, *a, **k):
@@ -144,6 +148,7 @@ def test_load_oom_demotes_to_model_offload(shim_env, caplog) -> None:
     assert applied["mode"] == "model_offload"
     assert applied["oom_demotions"] == 1
     assert ShimPipe.to_cuda_attempts == 1
+    assert ShimPipe.to_cpu_attempts == 1  # partial CUDA move rolled back first
     assert ShimPipe.offload_calls == ["model_offload"]
     assert memory.low_vram_mode(pipe) == "model_offload"
     line = next(r.message for r in caplog.records if "DEGRADED_MODE" in r.message)
@@ -169,15 +174,6 @@ def test_planned_offload_skips_doomed_resident_attempt(shim_env) -> None:
     assert applied["mode"] == "model_offload"
     assert "oom_demotions" not in applied
     assert ShimPipe.to_cuda_attempts == 0  # ie#369: no doomed resident attempt
-
-
-def test_demote_pipeline_walks_and_terminates(shim_env) -> None:
-    pipe = ShimPipe.from_pretrained(str(shim_env))
-    assert memory.demote_pipeline(pipe) == "model_offload"
-    assert memory.demote_pipeline(pipe) == "group_offload"
-    assert memory.demote_pipeline(pipe) == "sequential"
-    assert memory.demote_pipeline(pipe) is None  # terminal rung: stays put
-    assert memory.low_vram_mode(pipe) == "sequential"
 
 
 # --------------------------------------------------------------------------- #
@@ -267,7 +263,8 @@ def test_setup_oom_learns_floor_and_skips_resident_on_reload(
     asyncio.run(_go())
 
 
-def test_inference_oom_demotes_and_retries_once(shim_env, tmp_path, caplog) -> None:
+def test_inference_oom_quarantines_then_reloads_on_retry(
+        shim_env, tmp_path, caplog) -> None:
     calls = {"n": 0}
 
     class Endpoint:
@@ -288,10 +285,11 @@ def test_inference_oom_demotes_and_retries_once(shim_env, tmp_path, caplog) -> N
         ex = _executor(spec, tmp_path, shim_env, sent)
         with caplog.at_level(logging.WARNING):
             await _run_job(ex, "r1")
-        assert _result(sent, "r1").status == pb.JOB_STATUS_OK
-        assert calls["n"] == 2  # retried exactly once, in degraded mode
-        pipe = ex.store.residency.obj("acme/tiny")
-        assert memory.low_vram_mode(pipe) == "model_offload"
+        assert _result(sent, "r1").status == pb.JOB_STATUS_RETRYABLE
+        assert calls["n"] == 1  # unsafe live-object replay is forbidden
+        old_pipe = ex.store.residency.obj("acme/tiny")
+        assert memory.low_vram_mode(old_pipe) == "off"
+        assert ex._classes[spec.instance_key].stale
         assert ex.degraded_floor["acme/tiny"] == "model_offload"
         assert ex.serve_plans["fn"].ran == "offload:model_offload"
         assert any("DEGRADED_MODE=engaged" in r.message and "phase=inference" in r.message
@@ -301,9 +299,13 @@ def test_inference_oom_demotes_and_retries_once(shim_env, tmp_path, caplog) -> N
             m.WhichOneof("msg") == "job_progress"
             and b"DEGRADED_MODE=engaged" in m.job_progress.data
             for m in sent)
-        # Sticky: the next request stays degraded — no rung flapping.
+        # Hub retry: stale resident is discarded, then rebuilt cleanly at the
+        # learned ref-specific floor.
         await _run_job(ex, "r2")
         assert _result(sent, "r2").status == pb.JOB_STATUS_OK
+        assert calls["n"] == 2
+        pipe = ex.store.residency.obj("acme/tiny")
+        assert pipe is not old_pipe
         assert memory.low_vram_mode(pipe) == "model_offload"
 
     asyncio.run(_go())
@@ -327,16 +329,14 @@ def test_inference_oom_in_degraded_mode_fails_retryable(shim_env, tmp_path) -> N
     async def _go() -> None:
         ex = _executor(spec, tmp_path, shim_env, sent)
         await _run_job(ex, "r1")
-        # One degraded retry, then the mapped status — RETRYABLE, never FATAL
-        # (a bigger card can serve it); the ladder floor deepened.
-        assert calls["n"] == 2
+        # No in-process replay: the hub retries after a clean reload.
+        assert calls["n"] == 1
         assert _result(sent, "r1").status == pb.JOB_STATUS_RETRYABLE
         assert _result(sent, "r1").safe_message == "out of memory"
         assert ex.degraded_floor["acme/tiny"] == "model_offload"
-        # Next request: demotes one MORE rung (group_offload), retries, fails
-        # RETRYABLE again — walking, not flapping.
+        # Next hub attempt reloads at model_offload, then learns the next rung.
         await _run_job(ex, "r2")
-        assert calls["n"] == 4
+        assert calls["n"] == 2
         assert _result(sent, "r2").status == pb.JOB_STATUS_RETRYABLE
         assert ex.degraded_floor["acme/tiny"] == "group_offload"
 
@@ -388,6 +388,36 @@ def test_runtime_demotion_reemits_fn_degraded(shim_env, tmp_path) -> None:
         assert len([m for m in tp.sent if m.WhichOneof("msg") == "fn_degraded"]) == 2
 
     asyncio.run(_go())
+
+
+def test_runtime_floor_is_per_ref_not_all_dynamic_picks(
+        shim_env, tmp_path) -> None:
+    """One oversized pick may degrade function telemetry, but placement for
+    a different concrete pick still starts from the hardware-gate plan."""
+    class Endpoint:
+        def setup(self, m: ShimPipe) -> None:
+            self.m = m
+
+        def run(self, ctx, payload: _In) -> _Out:  # pragma: no cover
+            return _Out()
+
+    spec = _spec(Endpoint)
+    ex = _executor(spec, tmp_path, shim_env, [])
+    native = ServePlan(
+        serveable=True, run_mode="native", fit="fits",
+        wanted="bf16", ran="bf16",
+    )
+    ex.serve_plans["fn"] = native
+    ex._gate_serve_plans["fn"] = native
+
+    ex._record_demotion(
+        spec, ref="acme/oversized", phase="inference",
+        from_rung="resident", to_rung="model_offload",
+    )
+
+    assert ex.serve_plans["fn"].run_mode == RUN_OFFLOAD  # telemetry
+    assert ex._placement_mode(spec, "acme/oversized") == "model_offload"
+    assert ex._placement_mode(spec, "acme/sibling") == "auto"
 
 
 def test_plan_serve_offload_rung_unchanged_by_reactive_path() -> None:

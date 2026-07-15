@@ -68,8 +68,9 @@ def effective_vram_requirement_gb(recommended_gb: float) -> float:
 _CPU_OFFLOAD_MODES = ("model_offload", "group_offload", "sequential")
 
 # The reactive (degraded-mode) half of the fit ladder, shallowest first
-# (gw#463). A CUDA OOM — at load OR mid-inference — demotes a pipeline one
-# rung at a time; the terminal rung is sequential offload.
+# (gw#463). A load-time CUDA OOM rolls back and retries one rung lower. A
+# mid-inference OOM records the next rung, quarantines the live object, and
+# applies that rung only during a clean reload.
 OFFLOAD_LADDER: tuple[str, ...] = _CPU_OFFLOAD_MODES
 
 
@@ -799,6 +800,17 @@ def place_pipeline(
             nxt = next_offload_rung(effective)
             if nxt is None:
                 raise
+            # ``pipeline.to('cuda')`` may have moved only a prefix of the
+            # component graph before the allocator raised. Offload hooks must
+            # start from a coherent CPU object; attaching them to that partial
+            # move creates the mixed-device fatal seen on live SDXL.
+            _move_pipeline_to_cpu(pipeline)
+            missed = repair_device_placement(pipeline, "cpu")
+            if missed:
+                raise RuntimeError(
+                    "CUDA OOM left the pipeline mixed-device and CPU rollback "
+                    f"failed ({missed[:5]!r})"
+                ) from exc
             flush_memory()
             log.warning(degraded_log_line(
                 event="engaged", model=ref, phase="load",
@@ -809,23 +821,6 @@ def place_pipeline(
             ))
             demotions += 1
             effective = nxt
-
-
-def demote_pipeline(pipeline: Any, *, logger: Optional[logging.Logger] = None) -> Optional[str]:
-    """Runtime ladder transition (gw#463): move an already-placed pipeline one
-    offload rung deeper after a mid-inference CUDA OOM. Returns the new mode,
-    or None when already terminal (sequential). Sticky: the applied mode is
-    recorded on the pipeline, so it stays degraded until reload."""
-    log = logger or _LOG
-    nxt = next_offload_rung(low_vram_mode(pipeline))
-    if nxt is None:
-        return None
-    try:
-        delattr(pipeline, _COZY_MODE_ATTR)
-    except AttributeError:
-        pass
-    apply_low_vram_config(pipeline, mode=nxt, logger=log)
-    return nxt
 
 
 def apply_low_vram_config(
@@ -1064,7 +1059,6 @@ __all__ = [
     "apply_low_vram_config",
     "low_vram_mode",
     "place_pipeline",
-    "demote_pipeline",
     "next_offload_rung",
     "deeper_offload_mode",
     "is_cuda_oom",
