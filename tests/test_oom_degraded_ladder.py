@@ -19,7 +19,7 @@ import pytest
 torch = pytest.importorskip("torch")
 diffusers = pytest.importorskip("diffusers")
 
-from diffusers import DDPMPipeline, DDPMScheduler, UNet2DModel
+from diffusers import AutoencoderKL, DDPMPipeline, DDPMScheduler, UNet2DModel
 
 from gen_worker.api.binding import HF
 from gen_worker.api.decorators import Resources
@@ -307,6 +307,75 @@ def test_inference_oom_quarantines_then_reloads_on_retry(
         pipe = ex.store.residency.obj("acme/tiny")
         assert pipe is not old_pipe
         assert memory.low_vram_mode(pipe) == "model_offload"
+
+    asyncio.run(_go())
+
+
+def test_inference_oom_floor_excludes_component_and_preserves_duck_owner(
+        shim_env, tmp_path) -> None:
+    """AutoencoderKL exposes ``enable_group_offload`` through ModelMixin, but
+    it is a component, not the owner of the pipeline's offload hooks. A floor
+    learned for the VAE reloads it on CPU and poisons later CUDA pipelines.
+    Custom duck-typed pipeline owners remain supported."""
+    class ShimVAE(AutoencoderKL):
+        def __init__(self) -> None:
+            # The quarantine test needs ModelMixin's real method surface, not
+            # AutoencoderKL weights.
+            torch.nn.Module.__init__(self)
+            self._cozy_low_vram_mode = "vae_only"
+
+    class DuckPipe:
+        _cozy_low_vram_mode = "vae_only"
+
+        def enable_model_cpu_offload(self) -> None:  # pragma: no cover
+            pass
+
+    class Endpoint:
+        def setup(self, pipeline: ShimPipe, vae: ShimVAE, custom: DuckPipe) -> None:
+            self.pipeline = pipeline
+            self.vae = vae
+            self.custom = custom
+
+        def run(self, ctx, payload: _In) -> _Out:  # pragma: no cover
+            return _Out()
+
+    spec = EndpointSpec(
+        name="fn", method=Endpoint.run, kind="inference", payload_type=_In,
+        output_mode="single", cls=Endpoint, attr_name="run",
+        models={
+            "pipeline": HF("acme/pipeline"),
+            "vae": HF("acme/vae"),
+            "custom": HF("acme/custom-pipeline"),
+        },
+        resources=Resources(vram_gb=1.0),
+    )
+    sent: list = []
+
+    async def _go() -> None:
+        ex = _executor(spec, tmp_path, shim_env, sent)
+        ShimPipe.reset(oom_on_cuda=False)
+        pipe = ShimPipe.from_pretrained(str(shim_env))
+        pipe._cozy_low_vram_mode = "vae_only"
+        vae = ShimVAE()
+        assert callable(getattr(vae, "enable_group_offload", None))
+        assert memory.low_vram_mode(vae) == "vae_only"
+        ex.store.residency.track_vram("acme/pipeline", pipe, vram_bytes=1)
+        ex.store.residency.track_vram("acme/vae", vae, vram_bytes=1)
+        ex.store.residency.track_vram(
+            "acme/custom-pipeline", DuckPipe(), vram_bytes=1)
+        rec = ex._classes[spec.instance_key]
+        rec.instance, rec.ready = Endpoint(), True
+
+        ctx = type("Ctx", (), {"cancelled": False, "log": lambda *a, **k: None})()
+        await ex._quarantine_for_oom(
+            spec, ctx, OOM("CUDA out of memory (injected mid-inference)"))
+
+        assert ex.degraded_floor == {
+            "acme/pipeline": "model_offload",
+            "acme/custom-pipeline": "model_offload",
+        }
+        assert "acme/vae" not in ex.degraded_floor
+        assert rec.stale
 
     asyncio.run(_go())
 

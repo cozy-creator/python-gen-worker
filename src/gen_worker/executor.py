@@ -3179,16 +3179,25 @@ class Executor:
             return
         if spec.output_mode == "stream":
             return  # chunks already emitted; a replay would duplicate them
+        # Diffusers component models expose some pipeline offload methods too
+        # (notably AutoencoderKL via ModelMixin). Exclude only that known
+        # component base, then retain the capability check below so custom
+        # duck-typed pipeline owners continue to work.
+        diffusers_component_type: Any = ()
+        try:
+            from diffusers import ModelMixin
+
+            diffusers_component_type = ModelMixin
+        except ImportError:
+            pass
         transitions: List[Tuple[str, str, str, float]] = []
         for slot in spec.models:
             ref = wire_ref(spec.models[slot])
             obj = self.store.residency.obj(ref)
             if obj is None:
                 continue
-            # Component modules (for example a separately injected VAE) do
-            # not own a Diffusers offload surface. The enclosing pipeline is
-            # the transition owner; assigning a fake floor to the component
-            # would only poison its next load.
+            if diffusers_component_type and isinstance(obj, diffusers_component_type):
+                continue
             if not any(callable(getattr(obj, name, None)) for name in (
                 "enable_model_cpu_offload",
                 "enable_group_offload",
