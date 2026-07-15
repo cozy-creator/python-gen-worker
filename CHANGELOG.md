@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.26.9 (2026-07-15)
+
+- hub_policy: probe `modelopt` in the known optional-libs list (te#79
+  regression: `Resources(libraries=("modelopt",))` functions were
+  structurally unavailable — the executor's find_spec fallback passed but
+  plan_serve re-checked installed_libs, which never probed modelopt).
+
+
 ## 0.26.1 (2026-07-14)
 
 - **NVENC per-request fallback recreates the PyAV output container.** A
