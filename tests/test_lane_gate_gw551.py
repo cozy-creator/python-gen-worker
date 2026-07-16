@@ -245,7 +245,8 @@ def _tiny_module(mb: int = 64) -> "torch.nn.Module":
 def test_pinned_swap_roundtrip_preserves_values_and_caches() -> None:
     m = _tiny_module().cuda()
     w = m[0].weight
-    before = w.detach().float().sum().item()
+    before = w.detach().cpu().clone()  # bitwise reference (device-reduction
+    #                                    sums are order-dependent -> flaky)
 
     assert swap_module(m, "cpu")
     assert w.device.type == "cpu"
@@ -259,7 +260,7 @@ def test_pinned_swap_roundtrip_preserves_values_and_caches() -> None:
 
     assert swap_module(m, "cuda")
     assert w.device.type == "cuda"
-    assert w.detach().float().sum().item() == pytest.approx(before, rel=1e-6)
+    assert torch.equal(w.detach().cpu(), before)
     assert cached_swap_bytes(m) > 0              # cache retained across promote
 
     # Unchanged weights: second demote is a pointer swap onto the SAME
@@ -267,7 +268,7 @@ def test_pinned_swap_roundtrip_preserves_values_and_caches() -> None:
     # view per access: compare storage pointers, not identity.)
     assert swap_module(m, "cpu")
     assert w.data.data_ptr() == host_ptr
-    assert w.detach().float().sum().item() == pytest.approx(before, rel=1e-6)
+    assert torch.equal(w.detach(), before)
 
 
 @_cuda
