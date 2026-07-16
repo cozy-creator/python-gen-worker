@@ -346,11 +346,15 @@ def load_w8a8_denoiser(root: Path, art: W8a8Artifact, *,
 
 def load_w8a8_pipeline(cls: Any, path: Path, art: W8a8Artifact, *,
                        compute_dtype: Any = None,
-                       components: Optional[Dict[str, Any]] = None) -> Any:
+                       components: Optional[Dict[str, Any]] = None,
+                       fp8_text_encoders: bool = False) -> Any:
     """Build the pipeline with the w8a8 denoiser wired in (svdq-style
     component injection). Stamps ``_cozy_weight_lane`` ("w8a8" on the
     scaled_mm lane, "bf16-resident" on the dequant lane) — the compile-cache
-    graph key (lane_drift, gw#534)."""
+    graph key (lane_drift, gw#534). ``fp8_text_encoders`` (the
+    ``storage_dtype="fp8+te"`` binding, gw#557) arms the gw#460 block-window
+    fp8 storage on the TEXT ENCODERS ONLY — the denoiser already holds fp8
+    scaled-mm modules that cast hooks must never touch."""
     import torch
 
     compute = compute_dtype or torch.bfloat16
@@ -364,6 +368,18 @@ def load_w8a8_pipeline(cls: Any, path: Path, art: W8a8Artifact, *,
         pipe._cozy_weight_lane = "w8a8" if mode == "scaled_mm" else "bf16-resident"
     except Exception:
         pass
+    if fp8_text_encoders:
+        from .loading import _FP8_TEXT_ENCODER_COMPONENTS, apply_fp8_storage
+
+        targets = tuple(
+            n for n in _FP8_TEXT_ENCODER_COMPONENTS
+            if hasattr(getattr(pipe, n, None), "parameters"))
+        if targets:
+            apply_fp8_storage(pipe, compute_dtype=compute, components=targets)
+        else:
+            logger.warning(
+                "w8a8: storage_dtype=fp8+te requested but %s has no text "
+                "encoders; serving without TE windows", type(pipe).__name__)
     return pipe
 
 

@@ -40,7 +40,10 @@ from .writer import (
     streaming_fp8_snapshot,
     streaming_fp8_storage_cast,
     streaming_fp8_te_cast,
+    streaming_w8a8_cast,
+    streaming_w8a8_snapshot,
     te_fp8_castable_keys,
+    verify_w8a8_snapshot,
 )
 
 # `gen_worker.convert.clone` module alias (clone.from_huggingface style).
@@ -63,6 +66,9 @@ __all__ = [
     "streaming_fp8_storage_cast",
     "streaming_fp8_te_cast",
     "te_fp8_castable_keys",
+    "streaming_w8a8_cast",
+    "streaming_w8a8_snapshot",
+    "verify_w8a8_snapshot",
     "FP8_TE_COMPONENTS",
     "CalibrationAction",
     "CalibrationPolicy",

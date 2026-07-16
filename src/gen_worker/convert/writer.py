@@ -599,6 +599,190 @@ def streaming_fp8_storage_cast(
 
 
 # ---------------------------------------------------------------------------
+# W8A8 per-channel-scaled fp8 producer (gw#557 / ie#494) — data-free requant
+# from the bf16 source, streaming. The artifact contract is gw#534's
+# ``#fp8-w8a8`` (consumed by gen_worker.models.w8a8): per quantized Linear a
+# F8_E4M3 ``weight`` plus a F32 [out] ``weight_scale`` DEQUANT twin; excluded
+# layers stay at source precision with NO scale tensor. Activation scales are
+# DYNAMIC at serve time (Paul's settled design — no static calibration), so
+# the producer emits no input_scale.
+# ---------------------------------------------------------------------------
+
+W8A8_QUANT_SCHEME = "fp8-w8a8"  # == gen_worker.models.w8a8.W8A8_FLAVOR (test-guarded)
+
+# The ie#494 probe spec: quantize ONLY repeated-block Linears; MoE-style
+# gate-logit projections stay full precision even when 16-aligned (the probe
+# skipped LTX's 288 ``to_gate_logits`` explicitly).
+W8A8_SKIP_TENSOR_PATTERNS: tuple[str, ...] = FP8_SKIP_TENSOR_PATTERNS + (
+    "gate_logits",
+)
+
+_W8A8_DIM_ALIGN = 16  # torch._scaled_mm alignment (models.w8a8._DIM_ALIGN)
+_SCALE_SUFFIX = ".weight_scale"
+
+
+def w8a8_cast_eligible(
+    name: str, src_st_dtype: str, shape: list[int],
+    *, skip_patterns: tuple[str, ...] = W8A8_SKIP_TENSOR_PATTERNS,
+) -> bool:
+    """True when a stored tensor becomes a quantized w8a8 Linear weight:
+    a 2-D float ``.weight`` under a repeated-block container, both dims
+    16-aligned, missing every skip pattern. Everything else (embeddings,
+    norms, projections outside blocks, misaligned or conv weights) stays at
+    source precision — mirroring the ie#494 probe's flip/skip list."""
+    if src_st_dtype not in {"F64", "F32", "F16", "BF16"}:
+        return False
+    if len(shape) != 2 or not name.endswith(".weight"):
+        return False
+    if shape[0] % _W8A8_DIM_ALIGN or shape[1] % _W8A8_DIM_ALIGN:
+        return False
+    if not _in_repeated_block(name):
+        return False
+    module_path = name[: -len(".weight")]
+    return not any(re.search(p, module_path) for p in skip_patterns)
+
+
+def streaming_w8a8_cast(
+    input_path: Path,
+    out_dir: Path,
+    *,
+    shard_prefix: str = "model",
+    shard_threshold: int = MAX_SAFETENSORS_SHARD_BYTES,
+    skip_patterns: tuple[str, ...] = W8A8_SKIP_TENSOR_PATTERNS,
+) -> dict[str, Any]:
+    """Per-channel-scaled fp8 requant of one weight set, streaming.
+
+    Two passes like :func:`_stream_reencode`, but eligible weights emit TWO
+    output tensors — the fp8 ``weight`` and its F32 [out] ``weight_scale``
+    (``scale = amax(row)/448``, ``q = round(w/scale)`` in fp32; the probe's
+    exact recipe). Peak anonymous memory ~ the largest single tensor.
+    ``.weight`` sorts immediately before ``.weight_scale``, so a weight is
+    always quantized before its scale is due — the scale is cached (tiny)
+    across a shard boundary if the plan splits the pair.
+    """
+    import torch
+    from safetensors import safe_open
+
+    shards_in = _resolve_input_shards(Path(input_path))
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Pass 1: header-only walk.
+    metas: list[tuple[str, str, list[int], Optional[Path]]] = []
+    size_map: dict[str, int] = {}
+    source_metadata: dict[str, str] = {}
+    quantized_names: set[str] = set()
+    for shard_path in shards_in:
+        with safe_open(str(shard_path), framework="pt", device="cpu") as f:
+            md = f.metadata()
+            if md:
+                source_metadata.update({str(k): str(v) for k, v in md.items()})
+            for name in f.keys():
+                if name.endswith(_SCALE_SUFFIX):
+                    raise ConversionImplementationError(
+                        f"source already carries {name!r} — refusing to "
+                        "re-quantize a w8a8 artifact (requant from the "
+                        "bf16 source instead)")
+                sl = f.get_slice(name)
+                shape = list(sl.get_shape())
+                numel = 1
+                for dim in shape:
+                    numel *= dim
+                if w8a8_cast_eligible(
+                        name, str(sl.get_dtype()), shape,
+                        skip_patterns=skip_patterns):
+                    quantized_names.add(name)
+                    metas.append((name, "F8_E4M3", shape, shard_path))
+                    size_map[name] = numel * _ST_DTYPE_SIZES["F8_E4M3"]
+                    scale_name = name[: -len(".weight")] + _SCALE_SUFFIX
+                    metas.append((scale_name, "F32", [shape[0]], None))
+                    size_map[scale_name] = shape[0] * _ST_DTYPE_SIZES["F32"]
+                else:
+                    metas.append((name, str(sl.get_dtype()), shape, shard_path))
+                    size_map[name] = numel * _ST_DTYPE_SIZES[str(sl.get_dtype())]
+
+    out_metadata = dict(source_metadata)
+    out_metadata.update({
+        "quant_scheme": W8A8_QUANT_SCHEME,
+        "quant_recipe": "w8a8-pcs-dynamic",
+        "calibration_corpus": "",
+        "modelopt_version": "",
+    })
+    plan = plan_shards(size_map, max_shard_bytes=shard_threshold,
+                       shard_prefix=shard_prefix)
+    per_shard: dict[str, list[tuple[str, str, list[int], Optional[Path]]]] = {
+        n: [] for n in plan.shard_names}
+    for row in metas:
+        dest = plan.weight_map.get(row[0])
+        if dest is not None:
+            per_shard[dest].append(row)
+
+    tensor_count = 0
+    pending_scales: dict[str, "torch.Tensor"] = {}
+    handles: dict[Path, Any] = {}
+    try:
+        for shard_name in plan.shard_names:
+            entries = per_shard[shard_name]
+            with IncrementalSafetensorsWriter(
+                out_dir / shard_name, metadata=out_metadata,
+            ) as w:
+                for name, out_dtype, shape, _src in entries:
+                    w.add_tensor_metadata(name, dtype=out_dtype, shape=shape)
+                w.write_header()
+                for name, _out_dtype, _shape, src in entries:
+                    if src is None:  # synthesized weight_scale
+                        w.write_tensor(
+                            name, _tensor_to_bytes(pending_scales.pop(name)))
+                        continue
+                    f = handles.get(src)
+                    if f is None:
+                        f = handles[src] = safe_open(
+                            str(src), framework="pt", device="cpu")
+                    t = f.get_tensor(name)
+                    tensor_count += 1
+                    if name in quantized_names:
+                        wf = t.float()
+                        scale = (wf.abs().amax(dim=1, keepdim=True)
+                                 / _FP8_E4M3_MAX).clamp(min=1e-12)
+                        q = (wf / scale).clamp(
+                            -_FP8_E4M3_MAX, _FP8_E4M3_MAX,
+                        ).to(torch.float8_e4m3fn)
+                        scale_name = name[: -len(".weight")] + _SCALE_SUFFIX
+                        pending_scales[scale_name] = scale.reshape(-1).contiguous()
+                        w.write_tensor(name, _tensor_to_bytes(q))
+                        del wf, q
+                    else:
+                        w.write_tensor(name, _tensor_to_bytes(t))
+                    del t
+    finally:
+        for f in handles.values():
+            try:
+                f.__exit__(None, None, None)
+            except Exception:  # noqa: BLE001
+                pass
+    if pending_scales:
+        raise ConversionImplementationError(
+            f"w8a8 cast left {len(pending_scales)} orphan scale tensor(s) "
+            f"(e.g. {sorted(pending_scales)[:3]})")
+
+    index_path: Optional[Path] = None
+    if len(plan.shard_names) > 1:
+        index_path = out_dir / f"{shard_prefix}.safetensors.index.json"
+        index_path.write_text(
+            json.dumps(build_index(plan), separators=(",", ":"), sort_keys=True),
+            encoding="utf-8",
+        )
+    return {
+        "tensor_count": tensor_count,
+        "converted_count": len(quantized_names),
+        "output_paths": [out_dir / n for n in plan.shard_names],
+        "index_path": index_path,
+        "shard_sizes": dict(plan.shard_sizes),
+        "metadata": out_metadata,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Snapshot-level streaming conversion (whole source tree, per weight group)
 # ---------------------------------------------------------------------------
 
@@ -949,6 +1133,163 @@ def streaming_fp8_snapshot(
             "components": sorted(done), "output_dir": out_dir}
 
 
+def streaming_w8a8_snapshot(
+    source_dir: Path,
+    out_dir: Path,
+    *,
+    file_layout: str,
+    components: tuple[str, ...] = FP8_DEFAULT_COMPONENTS,
+    te_components: tuple[str, ...] = (),
+    shard_threshold: int = MAX_SAFETENSORS_SHARD_BYTES,
+) -> dict[str, Any]:
+    """Produce the ``#fp8-w8a8`` flavor of a diffusers snapshot, streaming.
+
+    The denoiser (``components``) gets the per-channel-scaled w8a8 requant
+    (:func:`streaming_w8a8_cast`); ``te_components`` ride the SAME fp8+te
+    block-window storage cast the ``#fp8`` flavor uses (scale-free — text
+    encoders serve W8-storage, only the denoiser runs fp8 GEMMs). Every
+    other component passes through untouched. The denoiser's config gains
+    the gw#534 corroborating ``quantization_config`` (the safetensors
+    headers stay authoritative for detection)."""
+    source_dir, out_dir = Path(source_dir), Path(out_dir)
+    if file_layout != "diffusers":
+        raise ConversionImplementationError(
+            "w8a8 flavors need component identity: diffusers layout only")
+    denoiser_set, te_set = set(components), set(te_components)
+    groups = [(c, e) for c, e in snapshot_weight_groups(source_dir, "diffusers")
+              if c in denoiser_set | te_set]
+    if not any(c in denoiser_set for c, _ in groups):
+        raise ConversionImplementationError(
+            f"no w8a8-quantizable denoiser found (looked for {sorted(denoiser_set)})")
+    tensor_count = converted = 0
+    done: set[str] = set()
+    quantized_components: list[str] = []
+    for comp, entry in groups:
+        if comp in denoiser_set:
+            result = streaming_w8a8_cast(
+                entry, out_dir / comp,
+                shard_prefix=_group_shard_prefix(entry),
+                shard_threshold=shard_threshold,
+            )
+            if not int(result["converted_count"]):
+                raise ConversionImplementationError(
+                    f"no w8a8-eligible weights in component {comp!r} "
+                    "(nothing 2-D/16-aligned under a repeated-block "
+                    "container missed the skip patterns)")
+            quantized_components.append(comp)
+        else:
+            result = streaming_fp8_te_cast(
+                entry, out_dir / comp,
+                castable_keys=te_fp8_castable_keys(source_dir / comp),
+                shard_prefix=_group_shard_prefix(entry),
+                shard_threshold=shard_threshold,
+            )
+        tensor_count += int(result["tensor_count"])
+        converted += int(result["converted_count"])
+        done.add(comp)
+    copy_non_weight_files(source_dir, out_dir, skip_components=done)
+    for comp in quantized_components:
+        src_cfg = source_dir / comp / "config.json"
+        cfg = json.loads(src_cfg.read_text("utf-8")) if src_cfg.exists() else {}
+        cfg["quantization_config"] = {
+            "quant_method": "modelopt", "quant_algo": "FP8"}
+        dst_cfg = out_dir / comp / "config.json"
+        if dst_cfg.exists():
+            dst_cfg.unlink()  # hardlinked to the source — never write through
+        dst_cfg.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    return {"tensor_count": tensor_count, "converted_count": converted,
+            "components": sorted(done), "output_dir": out_dir}
+
+
+def verify_w8a8_snapshot(
+    source_dir: Path,
+    out_dir: Path,
+    *,
+    sample: int = 16,
+    seed: int = 0,
+) -> dict[str, Any]:
+    """Byte-gate a produced w8a8 tree against its source (gw#557 / ie#494).
+
+    Detection runs through the CONSUMER's own sniffer
+    (:func:`gen_worker.models.w8a8.detect_w8a8_artifact`), then for a
+    deterministic sample of quantized layers: (a) the recomputed
+    quant+scale bytes must be EXACTLY the artifact's (the recipe is
+    deterministic — any drift is corruption or a recipe change), and
+    (b) ``dequant(w_fp8 x scale)`` must sit within fp8-e4m3 format error of
+    the source (max row-relative error <= 2**-4 + subnormal floor).
+    Raises :class:`ConversionImplementationError` on any failure; returns a
+    report dict for produce logs."""
+    import random
+
+    import torch
+    from safetensors import safe_open
+
+    from gen_worker.models.w8a8 import detect_w8a8_artifact
+
+    source_dir, out_dir = Path(source_dir), Path(out_dir)
+    art = detect_w8a8_artifact(out_dir)
+    if art is None:
+        raise ConversionImplementationError(
+            f"byte-gate: {out_dir} does not detect as a w8a8 artifact")
+
+    def _tensor_map(files: list[Path]) -> dict[str, Path]:
+        where: dict[str, Path] = {}
+        for f in files:
+            with safe_open(str(f), framework="pt", device="cpu") as fh:
+                for k in fh.keys():
+                    where[k] = f
+        return where
+
+    out_where = _tensor_map(list(art.files))
+    src_where = _tensor_map(sorted(
+        p for p in (source_dir / art.component).glob("*.safetensors")
+        if p.is_file()))
+
+    names = list(art.quantized)
+    rng = random.Random(seed)
+    picked = names if len(names) <= sample else sorted(rng.sample(names, sample))
+    max_rel = 0.0
+    for layer in picked:
+        wname, sname = f"{layer}.weight", f"{layer}{_SCALE_SUFFIX}"
+        src_file = src_where.get(wname)
+        if src_file is None:
+            raise ConversionImplementationError(
+                f"byte-gate: quantized layer {wname!r} missing from source")
+        with safe_open(str(src_file), framework="pt", device="cpu") as fh:
+            src = fh.get_tensor(wname).float()
+        with safe_open(str(out_where[wname]), framework="pt", device="cpu") as fh:
+            got_q = fh.get_tensor(wname)
+        with safe_open(str(out_where[sname]), framework="pt", device="cpu") as fh:
+            got_s = fh.get_tensor(sname).float()
+        scale = (src.abs().amax(dim=1, keepdim=True)
+                 / _FP8_E4M3_MAX).clamp(min=1e-12)
+        want_q = (src / scale).clamp(
+            -_FP8_E4M3_MAX, _FP8_E4M3_MAX).to(torch.float8_e4m3fn)
+        if not torch.equal(want_q.view(torch.uint8), got_q.view(torch.uint8)):
+            raise ConversionImplementationError(
+                f"byte-gate: {wname} recomputed fp8 bytes differ from artifact")
+        if not torch.equal(scale.reshape(-1), got_s.reshape(-1)):
+            raise ConversionImplementationError(
+                f"byte-gate: {sname} recomputed scales differ from artifact")
+        deq = got_q.float() * got_s.reshape(-1, 1)
+        row_amax = src.abs().amax(dim=1, keepdim=True).clamp(min=1e-12)
+        rel = ((deq - src).abs() / row_amax).max().item()
+        # e4m3 half-ulp relative error at worst 2**-4 for normals, plus the
+        # subnormal quantization floor for near-zero elements.
+        if rel > 2 ** -4 + 2 ** -9:
+            raise ConversionImplementationError(
+                f"byte-gate: {wname} dequant error {rel:.5f} exceeds the "
+                "fp8-e4m3 format bound")
+        max_rel = max(max_rel, rel)
+    return {
+        "component": art.component,
+        "quantized_total": len(names),
+        "sampled": len(picked),
+        "byte_exact": True,
+        "max_rel_err": max_rel,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Raw byte-offset re-shard (no tensor decode)
 # ---------------------------------------------------------------------------
@@ -1143,6 +1484,12 @@ __all__ = [
     "streaming_fp8_storage_cast",
     "streaming_cast_snapshot",
     "streaming_fp8_snapshot",
+    "W8A8_QUANT_SCHEME",
+    "W8A8_SKIP_TENSOR_PATTERNS",
+    "w8a8_cast_eligible",
+    "streaming_w8a8_cast",
+    "streaming_w8a8_snapshot",
+    "verify_w8a8_snapshot",
     "snapshot_weight_groups",
     "copy_non_weight_files",
     "fp8_cast_eligible",
