@@ -35,6 +35,7 @@ if TYPE_CHECKING:  # heavy deps stay import-time-free; methods import lazily
     from PIL import Image
 
     from ._concurrent_upload import BudgetGate
+    from ..callout import CalloutClient
 
 
 class LoraOverlay(TypedDict):
@@ -419,6 +420,84 @@ class RequestContext:
             self._canceled = True
             self._cancel_event.set()
             logger.info("request %s marked for cancellation.", self.request_id)
+
+    # -- th#826 call-out primitive ------------------------------------------
+
+    def _callout_client(self) -> "CalloutClient":
+        from ..callout import CalloutClient
+
+        if not self._file_api_base_url:
+            from ..api.errors import ChildCallError
+
+            raise ChildCallError(
+                "no platform base URL in this invocation context; child calls "
+                "require running under the platform (or cozy-local)"
+            )
+        return CalloutClient(
+            base_url=self._file_api_base_url,
+            parent_request_id=self._request_id,
+            get_token=lambda: self._worker_capability_token or "",
+            cancel_event=self._cancel_event,
+        )
+
+    def call_endpoint(
+        self,
+        endpoint: str,
+        function: str,
+        payload: Dict[str, Any],
+        *,
+        tag: str = "prod",
+        wait: bool = True,
+        timeout_s: Optional[float] = 3600.0,
+        tier: Optional[str] = None,
+        poll_interval_s: float = 2.0,
+    ) -> Any:
+        """Call another endpoint's function as a CHILD request (th#826).
+
+        The function must be declared ``@endpoint(child_calls=True)`` — the
+        platform then scopes this invocation's credential for child calls.
+        Children bill the parent request's payer, inherit its availability
+        tier (``tier=`` may name a CHEAPER class, never escalate), count
+        against the tree's depth/budget ceilings, and die with the parent
+        when the tree is cancelled.
+
+        ``wait=True`` (default) blocks to a terminal state and returns the
+        child's output items (asset refs stay refs — pass them straight into
+        the next call's payload). ``wait=False`` returns a
+        :class:`~gen_worker.callout.ChildRequest` handle
+        (``.status()`` / ``.result()`` / ``.cancel()``).
+
+        Raises ``ChildCallRefusedError`` (typed admission refusals),
+        ``ChildRequestFailedError`` / ``ChildRequestCanceledError``,
+        ``ChildCallTimeoutError``, and ``CanceledError`` when this invocation
+        itself is cancelled mid-wait.
+        """
+        self.raise_if_cancelled()
+        client = self._callout_client()
+        request_id = client.submit(endpoint, function, payload, tag=tag, tier=tier)
+        from ..callout import ChildRequest
+
+        handle = ChildRequest(client, request_id)
+        if not wait:
+            return handle
+        return handle.result(timeout_s, poll_interval_s=poll_interval_s)
+
+    def workflow_checkpoint(self, key: str, fn: Callable[[], Any]) -> Any:
+        """Memoize one workflow step's result under this request (th#826).
+
+        Durability-by-memoization (WORKFLOW-DESIGN.md §4): the first call
+        computes ``fn()`` and stores its JSON-serializable result under
+        ``key``; a re-run of this invocation (worker death, retry attempt)
+        returns the stored value without recomputing. Values are small JSON
+        (step output refs, not media; 64KB cap).
+        """
+        client = self._callout_client()
+        value, found = client.checkpoint_get(key)
+        if found:
+            return value
+        value = fn()
+        client.checkpoint_put(key, value)
+        return value
 
     @contextmanager
     def _gpu_slot_yielded(self) -> "Iterator[None]":

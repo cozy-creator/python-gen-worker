@@ -119,3 +119,57 @@ class RefCompatibilitySurprise(ValidationError):
         if ref:
             detail = f"{detail} (ref={ref})"
         super().__init__(detail)
+
+
+class ChildCallError(WorkerError):
+    """Base class for th#826 call-out primitive failures (ctx.call_endpoint)."""
+
+
+class ChildCallRefusedError(ChildCallError):
+    """The hub refused the child-call admission (typed, deterministic).
+
+    ``code`` is the platform refusal code: ``call_depth_exceeded``,
+    ``call_cycle_detected``, ``tree_budget_exceeded``,
+    ``tier_escalation_denied``, ``parent_not_running``, ``budget_not_root``,
+    or ``child_calls_not_declared`` (this invocation's function did not
+    declare ``child_calls=True``, so it holds no child-call credential).
+    """
+
+    def __init__(self, code: str, message: str = "") -> None:
+        self.code = str(code or "").strip()
+        super().__init__(message or self.code)
+
+
+class ChildRequestFailedError(ChildCallError):
+    """The child request reached ``failed``."""
+
+    def __init__(self, request_id: str, error_type: str = "", error_message: str = "") -> None:
+        self.request_id = str(request_id or "")
+        self.error_type = str(error_type or "")
+        self.error_message = str(error_message or "")
+        detail = f"child request {self.request_id} failed"
+        if self.error_type:
+            detail += f" ({self.error_type})"
+        if self.error_message:
+            detail += f": {self.error_message}"
+        super().__init__(detail)
+
+
+class ChildRequestCanceledError(ChildCallError):
+    """The child request reached ``canceled`` (e.g. a tree cancel)."""
+
+    def __init__(self, request_id: str) -> None:
+        self.request_id = str(request_id or "")
+        super().__init__(f"child request {self.request_id} was canceled")
+
+
+class ChildCallTimeoutError(ChildCallError):
+    """The caller's wait budget ran out. The child keeps running — the caller
+    may ``cancel()`` it or keep polling via the handle."""
+
+    def __init__(self, request_id: str, timeout_s: float) -> None:
+        self.request_id = str(request_id or "")
+        self.timeout_s = float(timeout_s)
+        super().__init__(
+            f"child request {self.request_id} did not finish within {self.timeout_s:.0f}s"
+        )

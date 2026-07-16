@@ -188,6 +188,10 @@ class EndpointDecl(msgspec.Struct, frozen=True, kw_only=True):
     name: Optional[str] = None  # function-shaped endpoints only
     is_function: bool = False
     compile: Optional[Compile] = None
+    # th#826 call-out primitive: the function makes endpoint-to-endpoint
+    # child calls (ctx.call_endpoint / ctx.workflow_checkpoint). The hub
+    # mints the invoke_child credential ONLY for declaring functions.
+    child_calls: bool = False
 
 
 ATTR = "__gen_worker_endpoint__"
@@ -390,6 +394,7 @@ def _decorate_class(
     slots: Dict[str, Slot],
     runtime: Optional[str],
     compile: Optional[Compile] = None,
+    child_calls: bool = False,
 ) -> type:
     handlers = _find_handler_methods(cls)
     for attr, member in handlers:
@@ -405,7 +410,7 @@ def _decorate_class(
 
     decl = EndpointDecl(
         kind=kind, resources=resources, models=models, slots=slots,
-        runtime=runtime, compile=compile,
+        runtime=runtime, compile=compile, child_calls=child_calls,
     )
     setattr(cls, ATTR, decl)
     setattr(cls, "__gen_worker_handlers__", handlers)
@@ -422,6 +427,7 @@ def _decorate_function(
     runtime: Optional[str],
     name: Optional[str],
     compile: Optional[Compile] = None,
+    child_calls: bool = False,
 ) -> Callable[..., Any]:
     _validate_handler_shape(fn.__name__, fn, is_method=False)
     _reject_producer_generator(fn.__name__, fn, kind)
@@ -446,7 +452,7 @@ def _decorate_function(
     decl = EndpointDecl(
         kind=kind, resources=resources, models=models, slots=slots,
         runtime=None, name=(name or fn.__name__), is_function=True,
-        compile=compile,
+        compile=compile, child_calls=child_calls,
     )
     setattr(fn, ATTR, decl)
     return fn
@@ -466,6 +472,7 @@ def endpoint(
     runtime: Optional[str] = ...,
     name: Optional[str] = ...,
     compile: Optional[Compile] = ...,
+    child_calls: bool = ...,
 ) -> Callable[[T], T]: ...  # configured @endpoint(...) form
 
 
@@ -479,6 +486,7 @@ def endpoint(
     runtime: Optional[str] = None,
     name: Optional[str] = None,
     compile: Optional[Compile] = None,
+    child_calls: bool = False,
 ) -> Any:
     """The one endpoint decorator. See the module docstring for shapes.
 
@@ -510,11 +518,13 @@ def endpoint(
             return _decorate_class(
                 obj, kind=kind, resources=resources_value, models=dict(model_map),
                 slots=dict(slot_map), runtime=runtime, compile=compile,
+                child_calls=child_calls,
             )
         if inspect.isfunction(obj):
             return _decorate_function(
                 obj, kind=kind, resources=resources_value, models=dict(model_map),
                 slots=dict(slot_map), runtime=runtime, name=name, compile=compile,
+                child_calls=child_calls,
             )
         raise TypeError(
             f"@endpoint requires a function or class, got {type(obj).__name__}"

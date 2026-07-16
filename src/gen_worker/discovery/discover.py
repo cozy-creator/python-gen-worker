@@ -668,6 +668,10 @@ def _extract_entries(obj: Any, module_name: str) -> List[Dict[str, Any]]:
             "is_async": es.is_async,
             "timeout_ms": es.timeout_ms,
         }
+        # th#826: the child-call declaration — the hub mints the invoke_child
+        # capability grant only for declaring functions. Omitted when false.
+        if es.child_calls:
+            fn["child_calls"] = True
         if model_key is not None:
             fn["model"] = model_key
         if slots_block:

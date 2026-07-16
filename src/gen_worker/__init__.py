@@ -22,10 +22,16 @@ from .families import FamilyDefaults
 from .models.provision import arm_compile
 from .api.errors import (
     CanceledError,
+    ChildCallError,
+    ChildCallRefusedError,
+    ChildCallTimeoutError,
+    ChildRequestCanceledError,
+    ChildRequestFailedError,
     FatalError,
     RetryableError,
     ValidationError,
 )
+from .callout import ChildRequest
 from .api.progress import diffusers_step_callback
 from .api.streaming import (
     BatchItemDelta,
@@ -89,6 +95,13 @@ __all__ = [
     "RetryableError",
     "ValidationError",
     "FatalError",
+    # th#826 call-out primitive (ctx.call_endpoint / ctx.workflow_checkpoint).
+    "ChildRequest",
+    "ChildCallError",
+    "ChildCallRefusedError",
+    "ChildCallTimeoutError",
+    "ChildRequestCanceledError",
+    "ChildRequestFailedError",
     # Streaming signals.
     "BatchItemDelta",
     "Done",
