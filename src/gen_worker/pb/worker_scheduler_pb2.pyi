@@ -149,7 +149,7 @@ class Hello(_message.Message):
     def __init__(self, protocol_version: _Optional[_Union[ProtocolVersion, str]] = ..., worker_id: _Optional[str] = ..., release_id: _Optional[str] = ..., resources: _Optional[_Union[WorkerResources, _Mapping]] = ..., state: _Optional[_Union[StateDelta, _Mapping]] = ..., models: _Optional[_Iterable[_Union[ModelResidency, _Mapping]]] = ..., in_flight: _Optional[_Iterable[_Union[InFlightJob, _Mapping]]] = ...) -> None: ...
 
 class WorkerResources(_message.Message):
-    __slots__ = ("gpu_count", "vram_total_bytes", "gpu_name", "gpu_sm", "installed_libs", "image_digest", "git_commit", "instance_id")
+    __slots__ = ("gpu_count", "vram_total_bytes", "gpu_name", "gpu_sm", "installed_libs", "image_digest", "git_commit", "instance_id", "host_canary")
     GPU_COUNT_FIELD_NUMBER: _ClassVar[int]
     VRAM_TOTAL_BYTES_FIELD_NUMBER: _ClassVar[int]
     GPU_NAME_FIELD_NUMBER: _ClassVar[int]
@@ -158,6 +158,7 @@ class WorkerResources(_message.Message):
     IMAGE_DIGEST_FIELD_NUMBER: _ClassVar[int]
     GIT_COMMIT_FIELD_NUMBER: _ClassVar[int]
     INSTANCE_ID_FIELD_NUMBER: _ClassVar[int]
+    HOST_CANARY_FIELD_NUMBER: _ClassVar[int]
     gpu_count: int
     vram_total_bytes: int
     gpu_name: str
@@ -166,7 +167,30 @@ class WorkerResources(_message.Message):
     image_digest: str
     git_commit: str
     instance_id: str
-    def __init__(self, gpu_count: _Optional[int] = ..., vram_total_bytes: _Optional[int] = ..., gpu_name: _Optional[str] = ..., gpu_sm: _Optional[str] = ..., installed_libs: _Optional[_Iterable[str]] = ..., image_digest: _Optional[str] = ..., git_commit: _Optional[str] = ..., instance_id: _Optional[str] = ...) -> None: ...
+    host_canary: HostCanary
+    def __init__(self, gpu_count: _Optional[int] = ..., vram_total_bytes: _Optional[int] = ..., gpu_name: _Optional[str] = ..., gpu_sm: _Optional[str] = ..., installed_libs: _Optional[_Iterable[str]] = ..., image_digest: _Optional[str] = ..., git_commit: _Optional[str] = ..., instance_id: _Optional[str] = ..., host_canary: _Optional[_Union[HostCanary, _Mapping]] = ...) -> None: ...
+
+class HostCanary(_message.Message):
+    __slots__ = ("memcpy_gbps", "h2d_gbps", "d2h_gbps", "pinned_alloc_ok", "cpu_single_mbps", "cpu_multi_mbps", "vcpus", "ram_total_gb", "duration_ms")
+    MEMCPY_GBPS_FIELD_NUMBER: _ClassVar[int]
+    H2D_GBPS_FIELD_NUMBER: _ClassVar[int]
+    D2H_GBPS_FIELD_NUMBER: _ClassVar[int]
+    PINNED_ALLOC_OK_FIELD_NUMBER: _ClassVar[int]
+    CPU_SINGLE_MBPS_FIELD_NUMBER: _ClassVar[int]
+    CPU_MULTI_MBPS_FIELD_NUMBER: _ClassVar[int]
+    VCPUS_FIELD_NUMBER: _ClassVar[int]
+    RAM_TOTAL_GB_FIELD_NUMBER: _ClassVar[int]
+    DURATION_MS_FIELD_NUMBER: _ClassVar[int]
+    memcpy_gbps: float
+    h2d_gbps: float
+    d2h_gbps: float
+    pinned_alloc_ok: bool
+    cpu_single_mbps: float
+    cpu_multi_mbps: float
+    vcpus: int
+    ram_total_gb: float
+    duration_ms: int
+    def __init__(self, memcpy_gbps: _Optional[float] = ..., h2d_gbps: _Optional[float] = ..., d2h_gbps: _Optional[float] = ..., pinned_alloc_ok: _Optional[bool] = ..., cpu_single_mbps: _Optional[float] = ..., cpu_multi_mbps: _Optional[float] = ..., vcpus: _Optional[int] = ..., ram_total_gb: _Optional[float] = ..., duration_ms: _Optional[int] = ...) -> None: ...
 
 class ModelResidency(_message.Message):
     __slots__ = ("ref", "tier", "vram_bytes")

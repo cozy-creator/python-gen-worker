@@ -119,7 +119,28 @@ class Lifecycle:
 
     def build_resources(self) -> pb.WorkerResources:
         hw = self.hardware
+        # gw#550 boot host canary: measured once per process (cached), so
+        # reconnect Hellos re-ship the same boot-time facts. Never fatal.
+        canary = None
+        try:
+            from .host_canary import get_host_canary
+
+            c = get_host_canary()
+            canary = pb.HostCanary(
+                memcpy_gbps=c.memcpy_gbps,
+                h2d_gbps=c.h2d_gbps,
+                d2h_gbps=c.d2h_gbps,
+                pinned_alloc_ok=c.pinned_alloc_ok,
+                cpu_single_mbps=c.cpu_single_mbps,
+                cpu_multi_mbps=c.cpu_multi_mbps,
+                vcpus=c.vcpus,
+                ram_total_gb=c.ram_total_gb,
+                duration_ms=c.duration_ms,
+            )
+        except Exception:
+            logger.warning("host canary failed; Hello ships without it", exc_info=True)
         return pb.WorkerResources(
+            host_canary=canary,
             gpu_count=int(hw.get("gpu_count") or 0),
             vram_total_bytes=int(hw.get("gpu_total_mem") or 0),
             gpu_name=str(hw.get("gpu_name") or ""),

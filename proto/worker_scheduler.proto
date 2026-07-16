@@ -93,6 +93,25 @@ message WorkerResources {
   // see gen-worker Settings.worker_image_digest).
   string git_commit       = 7;
   string instance_id      = 8; // cloud provider instance id (e.g. runpod pod id)
+  // gw#550: one-shot boot host-quality measurement. Zeros = axis not
+  // measurable (CPU-only build, probe failure). Additive: old orchestrators
+  // ignore it; old workers send it unset.
+  HostCanary host_canary  = 9;
+}
+
+// Boot host canary (gw#550): the host properties the CPU-bound video tail
+// depends on (ie#484: 4-10x decode/encode spread at identical GPU step-ms).
+// Measured once per process in a bounded ~1.5 s before the first Hello.
+message HostCanary {
+  double memcpy_gbps     = 1; // host-RAM copy bandwidth, 256 MiB buffer
+  double h2d_gbps        = 2; // pinned host->device PCIe bandwidth
+  double d2h_gbps        = 3; // pinned device->host PCIe bandwidth
+  bool   pinned_alloc_ok = 4; // cudaHostAlloc of the staging buffer worked
+  double cpu_single_mbps = 5; // sha256 throughput, one thread
+  double cpu_multi_mbps  = 6; // sha256 throughput, min(vcpus,16) threads
+  int32  vcpus           = 7; // os.cpu_count() as seen in the container
+  double ram_total_gb    = 8; // cgroup-capped host RAM total
+  int64  duration_ms     = 9; // canary wall time (self-audit)
 }
 
 message ModelResidency {

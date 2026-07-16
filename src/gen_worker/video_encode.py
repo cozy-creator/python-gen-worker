@@ -168,6 +168,9 @@ def frames_to_uint8(frames: Any) -> Any:
 
     Accepts a single ``[H, W, 3]`` frame too (expanded to ``F=1``). Floats in
     [0, 1] are scaled; anything else is clipped to [0, 255].
+
+    CUDA tensors are converted on-device FIRST so only uint8 crosses PCIe
+    (gw#549: 4x fewer bytes than float32, 2x fewer than bf16).
     """
     import numpy as np
 
@@ -178,7 +181,12 @@ def frames_to_uint8(frames: Any) -> Any:
             [np.asarray(f.convert("RGB") if hasattr(f, "convert") else f) for f in frames]
         )
     if hasattr(frames, "detach"):  # torch tensor
-        frames = frames.detach().to("cpu").float().numpy()
+        if getattr(frames, "is_cuda", False):
+            from .media_transfer import cuda_tensor_to_uint8_host
+
+            frames, _ = cuda_tensor_to_uint8_host(frames)
+        else:
+            frames = frames.detach().to("cpu").float().numpy()
     arr = np.asarray(frames)
     if arr.ndim == 3 and arr.shape[-1] == 3:
         arr = arr[None]
@@ -233,6 +241,10 @@ class StreamingVideoEncoder:
         self._audio_stream: Any = None
         self._frames = 0
         self._closed = False
+        # gw#549 zero-copy handoff: wrap contiguous rgb24 arrays with PyAV's
+        # from_numpy_buffer (no intermediate copy into the AVFrame) when the
+        # installed av supports it; one failure disables it for this encode.
+        self._zero_copy = hasattr(av.VideoFrame, "from_numpy_buffer")
 
     @property
     def encoder(self) -> EncoderChoice:
@@ -300,11 +312,27 @@ class StreamingVideoEncoder:
             self._open(height, width)
         arr = arr[:, : self._stream.height, : self._stream.width]
         for frame_array in arr:
-            frame = self._av.VideoFrame.from_ndarray(frame_array, format="rgb24")
+            frame = self._video_frame(frame_array)
             for packet in self._stream.encode(frame):
                 self._container.mux(packet)
             self._frames += 1
         return self._frames
+
+    def _video_frame(self, frame_array: Any) -> Any:
+        """One rgb24 VideoFrame — zero-copy buffer wrap when possible.
+
+        The wrapped buffer is only read inside ``stream.encode`` (the rgb24
+        source is consumed by the yuv420p reformat before encode returns), so
+        reusing the caller's staging buffer afterwards is safe (gw#549).
+        """
+        if self._zero_copy and getattr(frame_array, "flags", None) is not None \
+                and frame_array.flags["C_CONTIGUOUS"]:
+            try:
+                return self._av.VideoFrame.from_numpy_buffer(frame_array, format="rgb24")
+            except Exception:
+                self._zero_copy = False
+                logger.debug("from_numpy_buffer failed; using from_ndarray", exc_info=True)
+        return self._av.VideoFrame.from_ndarray(frame_array, format="rgb24")
 
     def finish(self, audio: Any = None) -> str:
         """Flush the video stream, mux ``audio`` (waveform ``[C, samples]``)
