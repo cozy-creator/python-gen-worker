@@ -154,10 +154,16 @@ def _obj_offload_hooked(obj: Any) -> bool:
 
 
 def _move_obj(obj: Any, device: str) -> None:
-    """Whole-object ``.to(device)``. Raises on failure — the caller
+    """Move an object between devices: the pinned swap cache when it applies
+    (gw#551 — full-PCIe H2D promotes, pointer-swap demotes), else whole-object
+    ``.to(device)``. Raises on failure — the caller
     (:meth:`Residency._move_verified`) owns rollback; swallowing a mid-move
     CUDA OOM here used to book a half-moved pipeline as resident (gw#409)."""
     if obj is None or _obj_manages_own_device(obj):
+        return
+    from .pinned_swap import swap_object
+
+    if swap_object(obj, device):
         return
     to = getattr(obj, "to", None)
     if callable(to):
@@ -377,10 +383,15 @@ class Residency:
                 return False
             # Size-aware RAM floor (gw#407): demoting a pipeline of size X
             # eats ~X host RAM — landing it must still leave the floor, or
-            # the host thrashes into the keepalive-stall livelock.
+            # the host thrashes into the keepalive-stall livelock. Bytes
+            # already staged in the pinned swap cache (gw#551) are resident
+            # host RAM — only the uncached remainder is a fresh demand.
+            from .pinned_swap import cached_swap_bytes
+
             need_gb = float(e.vram_hint or e.vram_bytes) / _GiB
             if need_gb <= 0.0:
                 need_gb = estimate_pipeline_size_gb(e.obj)
+            need_gb = max(0.0, need_gb - cached_swap_bytes(e.obj) / _GiB)
             if get_available_ram_gb() - need_gb < _effective_ram_floor_gb():
                 logger.info(
                     "residency: refusing VRAM->RAM demote of %s (~%.1fGiB into "
@@ -492,7 +503,19 @@ class Residency:
             # pipelines into ~2GB free and OOMed mid-move, gw#409).
             hint = int(estimate_pipeline_size_gb(obj) * _GiB)
         t0 = time.monotonic()  # swap wall incl. the make_room demote (gw#479)
-        self.make_room(hint)
+        if not self.make_room(hint):
+            # Refuse FAST instead of paying a doomed multi-GB partial move +
+            # rollback (gw#551). Gate on the hard physical minimum — actual
+            # weight bytes — never the bookkeeping hint (which can inflate
+            # from residual shares, and is faked by budget-mode tests).
+            need = int(estimate_pipeline_size_gb(obj) * _GiB)
+            if need > 0 and self.free_vram_bytes() < need:
+                logger.info(
+                    "residency: promote of %s refused (weights %.1fGiB, free "
+                    "%.1fGiB after make_room)",
+                    ref, need / _GiB, self.free_vram_bytes() / _GiB,
+                )
+                return False
         with self._lock:
             e = self._entries.get(ref)
             if e is None or not e.movable:

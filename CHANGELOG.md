@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.30.0 (2026-07-16)
+
+- **gw#551: demoted lanes serve instead of crashing — swap-per-request for
+  multi-model releases.** te#79's serve proof showed a merged two-lane
+  endpoint whose lanes overcommit VRAM (bf16 qwen pair on one H100) demotes
+  one lane to host RAM and then CRASHES the next request on it (addmm device
+  mismatch / cuda generator vs cpu latents): every declared slot was
+  job-pinned (the idle sibling could never be LRU-swapped out), eager
+  promotion tried to promote ALL lanes (can never fit), and nothing between
+  "demoted" and "the handler calls the pipeline" re-promoted the used lane.
+  - `models/lane_gate.py`: every worker-constructed pipeline's `__call__` is
+    wrapped (identity/isinstance-preserving) to pin its lane and promote it
+    if demoted — LRU-swapping the idle sibling — before executing; a lane is
+    NEVER run cpu-resident. When VRAM truly cannot fit, the call queues
+    briefly then fails RETRYABLE; monolithic pipelines instead arm a
+    coherent CPU-offload rung (`memory.rearm_offload`) and serve degraded.
+  - Records holding 2+ worker-constructed pipelines become call-time-owned:
+    excluded from the whole-job pin and from eager `_promote_setup_refs`
+    (the gate owns exactly the lane a request touches). Swaps log loudly
+    (`LANE_SWAP … promote_ms=`) and keep riding the gw#479 ModelEvent
+    durations.
+  - `models/pinned_swap.py`: tier swaps go through a pinned host-RAM weight
+    cache instead of pageable `.to()` — demote of an unchanged weight is a
+    pointer swap (host copy already current), promote is one `non_blocking`
+    H2D per tensor at full PCIe bandwidth. Fail-soft to `.to()` on any
+    unsupported shape; `Residency.demote`'s host-RAM floor counts cached
+    bytes as already-resident.
+  - `Residency.promote` refuses fast (no doomed multi-GB partial move) when
+    free VRAM cannot hold the actual weight bytes after `make_room`.
+
+## 0.29.0 (2026-07-16)
+
+- **gw#549/gw#550: media transfer efficiency + boot host canary.** On-GPU
+  uint8 conversion + pinned async D2H staging + zero-copy PyAV handoff for
+  video encode; boot host canary (memcpy / pinned PCIe bandwidth / CPU score)
+  reported with worker registration. (Shipped in PR #269; entry added
+  retroactively.)
+
 ## 0.28.1 (2026-07-16)
 
 - **ie#381: the gw#534 rung-2 bf16-resident upgrade now respects the

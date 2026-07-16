@@ -1088,6 +1088,27 @@ def with_oom_retry(
     raise last_exc
 
 
+def rearm_offload(pipeline: Any, mode: Mode = "model_offload") -> bool:
+    """Serve-time offload fallback (gw#551): arm an offload rung on a
+    pipeline that was already configured once (clears the idempotency stamp).
+    Offload hooks must start from a coherent CPU object; the caller's failed
+    promote already rolled the pipeline back to cpu — this re-verifies."""
+    _move_pipeline_to_cpu(pipeline)
+    if repair_device_placement(pipeline, "cpu"):
+        return False
+    flush_memory()
+    try:
+        delattr(pipeline, _COZY_MODE_ATTR)
+    except AttributeError:
+        pass
+    applied = apply_low_vram_config(pipeline, mode=mode)
+    return bool(
+        applied.get("model_offload")
+        or applied.get("group_offload")
+        or applied.get("sequential_offload")
+    )
+
+
 def low_vram_mode(pipeline: Any) -> str:
     """The low-VRAM mode :func:`apply_low_vram_config` prepped this pipeline
     with ('' when never prepped). Part of the compile-cache graph key (gw#391):
@@ -1098,6 +1119,7 @@ def low_vram_mode(pipeline: Any) -> str:
 __all__ = [
     "apply_low_vram_config",
     "low_vram_mode",
+    "rearm_offload",
     "place_pipeline",
     "next_offload_rung",
     "deeper_offload_mode",
