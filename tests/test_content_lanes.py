@@ -355,7 +355,7 @@ def test_lane_swap_moves_only_the_exclusive_module(tmp_path, lane_repos) -> None
         return next(module.parameters()).device.type
 
     async def _run() -> None:
-        ex = _executor([spec], tmp_path, int(2.3 * _GiB), sent, repos)
+        ex = _executor([spec], tmp_path, int(2.2 * _GiB), sent, repos)
         inst = await ex.ensure_setup(spec)
         res = ex.store.residency
 

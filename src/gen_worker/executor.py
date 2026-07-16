@@ -988,6 +988,11 @@ class _ClassRecord:
     # gw#494: a resolution re-pick moved the specs' bindings away from
     # held_refs; the instance serves the OLD pick and must be vacated.
     stale: bool = False
+    # gw#551: wire refs of lane-registered slots (gw#479). Lane residency is
+    # call-time-owned (LaneGate promotes + pins around each pipeline call);
+    # the executor must neither whole-job-pin nor eagerly promote them, or
+    # the idle sibling can never be LRU-swapped out.
+    lane_refs: set = dc_field(default_factory=set)
 
 
 @dataclass
@@ -1025,6 +1030,10 @@ class _InjectionResult:
     lane_slots: set = dc_field(default_factory=set)
     shared_keys: List[Any] = dc_field(default_factory=list)
     shared_bytes: int = 0
+    # gw#551: slots whose pipeline __call__ the LaneGate wrapped. Only these
+    # may become call-time-owned; an un-gateable pipeline (no instance
+    # __call__) keeps the eager whole-job pin + promote path.
+    gated_slots: set = dc_field(default_factory=set)
 
 
 @dataclass
@@ -1684,6 +1693,17 @@ class Executor:
                     )))
             raise
 
+    def _job_pin_refs(self, spec: EndpointSpec, slots: List[str]) -> List[str]:
+        """Wire refs a job pins for its whole lifetime: every routed slot
+        EXCEPT lane refs (gw#551 — the LaneGate pins those around the actual
+        pipeline call, so the idle sibling stays LRU-demotable)."""
+        rec = self._classes.get(spec.instance_key) if spec.cls is not None else None
+        lane_refs = rec.lane_refs if rec is not None else set()
+        return [
+            r for s in slots
+            if (r := wire_ref(spec.models[s])) not in lane_refs
+        ]
+
     def _class_record(self, spec: EndpointSpec) -> _ClassRecord:
         """Instance-group record for ``spec``, created on first sight for
         DERIVED (per-pick) specs. Never removed: records are tiny and the
@@ -1716,7 +1736,7 @@ class Executor:
                 async with self._load_lock:
                     await self._vacate_record(rec)
             if rec.ready:
-                await self._promote_setup_refs(spec, promote_slots)
+                await self._promote_setup_refs(spec, promote_slots, rec=rec)
                 return rec.instance
             try:
                 instance = await self._setup_locked(spec, rec, snapshots)
@@ -1937,6 +1957,14 @@ class Executor:
                 lane_slots=inj.lane_slots, shared_bytes=inj.shared_bytes,
                 slot_refs=slot_refs)
             rec.held_refs = sorted(set(slot_refs.values()))
+            # gw#551: call-time-owned refs. Any record holding 2+ worker-
+            # constructed pipelines can overcommit VRAM (content-keyed lanes
+            # AND monolithic siblings alike) — those swap per use via the
+            # LaneGate instead of being job-pinned + eagerly promoted.
+            pipe_slots = {s for s, (obj, _) in inj.loaded.items() if obj is not None}
+            swap_owned = pipe_slots if len(pipe_slots) >= 2 else set(inj.lane_slots)
+            swap_owned &= inj.gated_slots  # un-gateable pipes stay eager
+            rec.lane_refs = {slot_refs[s] for s in swap_owned if s in slot_refs}
             rec.held_objects = {}
             for slot, ref in slot_refs.items():
                 obj = inj.loaded.get(slot, (None, 0))[0]
@@ -1993,17 +2021,26 @@ class Executor:
                 res.track_ram(ref, obj)   # CPU-only host / offloaded load
 
     async def _promote_setup_refs(
-        self, spec: EndpointSpec, slots: Optional[List[str]] = None
+        self,
+        spec: EndpointSpec,
+        slots: Optional[List[str]] = None,
+        rec: Optional[_ClassRecord] = None,
     ) -> None:
         """RunJob/LOAD for a demoted (RAM-tier) instance: swap the pipelines
-        back into VRAM instead of a cold reload (#371). ``slots`` narrows the
-        promote to the lanes a routed request needs (gw#479) — promoting an
-        idle lane would thrash swap-mode records on every request."""
+        back into VRAM instead of a cold reload (#371). Lane refs (gw#479)
+        are excluded (gw#551): lane dispatch is handler-side, so eagerly
+        promoting EVERY declared lane can never fit an overcommitted card —
+        the LaneGate promotes exactly the lane a request touches, at call
+        time."""
         res = self.store.residency
         setup_slots = self._setup_slots(spec)
         if slots is not None:
             setup_slots = [s for s in setup_slots if s in slots]
-        refs = [wire_ref(spec.models[s]) for s in setup_slots]
+        lane_refs = rec.lane_refs if rec is not None else set()
+        refs = [
+            r for s in setup_slots
+            if (r := wire_ref(spec.models[s])) not in lane_refs
+        ]
         cuda_host = torch is not None and torch.cuda.is_available()
         if any(res.tier(r) is residency_mod.Tier.RAM for r in refs):
             async with self._load_lock:
@@ -2650,6 +2687,8 @@ class Executor:
                     result.lane_slots.add(slot)
                 else:
                     loaded[slot] = (pipe, delta)
+                    if self._arm_lane_gate(pipe, ref, spec=spec):
+                        result.gated_slots.add(slot)
                 kwargs[slot] = pipe
             else:
                 kwargs[slot] = path
@@ -2709,7 +2748,49 @@ class Executor:
             res.track_vram(ref, lane_obj)
         else:
             res.track_ram(ref, lane_obj)
+        if self._arm_lane_gate(pipe, ref):
+            result.gated_slots.add(slot)
         return lane_obj, lane_bytes
+
+    def _arm_lane_gate(
+        self, pipe: Any, ref: str, spec: Optional[EndpointSpec] = None,
+    ) -> bool:
+        """gw#551: wrap a worker-constructed pipeline's ``__call__`` so a
+        demoted/incomplete residency entry is promoted (pinned, idle sibling
+        LRU-swapped out) before it executes — a cpu-resident lane must never
+        run. No-op for offload-hooked pipelines (they own their placement).
+        Monolithic pipelines (``spec`` given) additionally get the last-resort
+        offload fallback; shared-component lanes never do (hooks on a shared
+        module would poison sibling lanes)."""
+        from .models.lane_gate import LaneGate, arm_lane_gate
+
+        fallback = None
+        if spec is not None:
+            def fallback(s: EndpointSpec = spec) -> bool:
+                return self._serve_offload_fallback(s, pipe, ref)
+        return arm_lane_gate(pipe, LaneGate(
+            ref=ref, residency=self.store.residency, label=ref,
+            retry_exc=RetryableError, offload_fallback=fallback,
+        ))
+
+    def _serve_offload_fallback(self, spec: EndpointSpec, pipe: Any, ref: str) -> bool:
+        """Serve-time last resort (gw#551): promote could not fit even after
+        LRU demotions — arm a coherent CPU-offload rung on the (cpu-resident)
+        pipeline and rebook it honestly, instead of failing the request."""
+        from .models.memory import rearm_offload
+
+        if not rearm_offload(pipe):
+            return False
+        # Offload-hooked objects book the RAM tier (their VRAM is hook-owned).
+        self.store.residency.track_vram(ref, pipe)
+        self._record_demotion(
+            spec, ref=ref, phase="serve", from_rung="resident",
+            to_rung="model_offload",
+            needed_gb=estimate_pipeline_size_gb(pipe),
+            detail="VRAM promote could not fit after LRU demotions; serving "
+                   "CPU-offloaded (gw#551)",
+        )
+        return True
 
     def _enable_compiled(self, pipe: Any, cfg: Any, artifact: Optional[Path]) -> bool:
         """Arm the best available compiled path for a freshly loaded pipeline
@@ -3009,6 +3090,7 @@ class Executor:
             ):
                 released_refs.append(ref)
         rec.held_refs = []
+        rec.lane_refs = set()
         rec.held_objects = {}
         # Do not let this teardown frame itself retain a departing pipeline
         # while the cgroup probe decides whether capacity really progressed.
@@ -3122,9 +3204,13 @@ class Executor:
         # between ensure_setup's promote and the execution-time pin let a
         # concurrent job's make_room demote a just-promoted pipeline. Refs
         # without entries yet are no-ops; the inner pin still covers adapters.
+        # Lane refs are NOT job-pinned (gw#551): lane dispatch is handler-side,
+        # so pinning every declared lane would make the idle sibling
+        # un-demotable and the used lane un-promotable on an overcommitted
+        # card; the LaneGate pins exactly the lane it executes, at call time.
         try:
             with self.store.residency.executing(
-                *(wire_ref(spec.models[s]) for s in routed)
+                *self._job_pin_refs(spec, routed)
             ):
                 await self._run_job_pinned(job, run, payload, routed)
         finally:
@@ -3267,9 +3353,11 @@ class Executor:
                         pass
             started = time.monotonic()
             # Pin-while-executing: the models (and adapter snapshots) this job
-            # uses are not eviction candidates for its duration. Routed lanes
-            # only (gw#479): an idle lane must stay demotable.
-            exec_refs = [wire_ref(spec.models[s]) for s in routed]
+            # uses are not eviction candidates for its duration. Lane refs
+            # excluded (gw#551): the LaneGate pins the one lane the handler
+            # actually calls; pinning all of them here would deadlock the
+            # gate's promote against its own job's pins.
+            exec_refs = self._job_pin_refs(spec, routed)
             adapter_refs = [a.ref for group in adapters.values() for a in group]
             with self.store.residency.executing(*exec_refs, *adapter_refs):
                 active: List[Tuple[str, Any]] = []
