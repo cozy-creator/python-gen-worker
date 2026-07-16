@@ -156,6 +156,7 @@ class RequestContext:
         loras: Optional[Dict[str, Any]] = None,
         resolved_slots: Optional[Mapping[str, "ResolvedSlot[Any]"]] = None,
         slot_errors: Optional[Mapping[str, str]] = None,
+        boot_warmup: bool = False,
     ) -> None:
         self._request_id = str(request_id or "").strip()
         self._job_id = str(job_id or "").strip() or None
@@ -171,6 +172,7 @@ class RequestContext:
         if timeout_ms is not None and timeout_ms > 0:
             self._deadline = self._started_at + (timeout_ms / 1000.0)
         self._canceled = False
+        self._boot_warmup = bool(boot_warmup)
         self._cancel_event = threading.Event()
         self._emitter = emitter
         self._cached_repo_job_scope: Optional[tuple[str, str, str]] = None
@@ -200,6 +202,14 @@ class RequestContext:
     @property
     def request_id(self) -> str:
         return self._request_id
+
+    @property
+    def boot_warmup(self) -> bool:
+        """True when this call is the worker's boot-time synthetic warmup
+        (gw#470): the output is discarded, so a handler MAY cheapen the run
+        (e.g. ``steps = 1 if ctx.boot_warmup else steps``) — the allocator
+        peak is shape-driven, not step-driven."""
+        return self._boot_warmup
 
     @property
     def deadline(self) -> Optional[float]:

@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.28.0 (2026-07-16)
+
+- **gw#470 boot warmup default-on.** GPU inference endpoints now warm before
+  READY with zero author code: the worker synthesizes one minimal request per
+  handler from its typed payload schema (defaults kept; required `str` fields
+  fill `"warmup"`; required `ImageAsset`/`AudioAsset` fields get a tiny
+  generated PNG/WAV; nested structs/lists synthesize recursively) and runs it
+  post-`setup()` under the load lock. Output is discarded (no emitter, no
+  capability token, throwaway `local_output_dir`) — never billing/outputs/CAS.
+  - Fallback: `@endpoint(warmup={"method": {...}})` declares per-method
+    payloads (validated against the schema at decoration/walk time);
+    `{"method": None}` skips a method.
+  - A class-defined `warmup()` method still wins outright (the LTX path).
+  - Opt-out: `@endpoint(warmup=NoWarmup("reason"))` — in code, recorded, no
+    env knob.
+  - Enforcement: a GPU inference class with no warmable path and no explicit
+    declaration fails at decoration/walk time, not at first request.
+  - `ctx.boot_warmup` lets a handler cheapen its warmup run (e.g.
+    `steps = 1 if ctx.boot_warmup else steps` — the allocator peak is
+    shape-driven, not step-driven).
+  - A warmup CUDA OOM defers to the gw#521 runtime fit ladder (warn + READY)
+    instead of hard-failing the function; other warmup errors remain load
+    failures (loud, th#581 rails). Cancel/drain-safe on the existing
+    `_to_thread_complete` rails.
+
+
 ## 0.27.0 (2026-07-16)
 
 - **th#826 call-out primitive (workflows-as-endpoints).** Functions declared

@@ -116,6 +116,43 @@ class Resources(msgspec.Struct, frozen=True, omit_defaults=True):
             force(self, "vcpus", n)
 
 
+class NoWarmup(msgspec.Struct, frozen=True):
+    """Opt a class out of the default boot warmup (gw#470) with a recorded
+    reason: ``@endpoint(warmup=NoWarmup("engine captures CUDA graphs at
+    boot"))``. Warmup is behavior — the opt-out lives in code, never in an
+    env knob."""
+
+    reason: str
+
+    def __post_init__(self) -> None:
+        reason = str(self.reason or "").strip()
+        if not reason:
+            raise ValueError("NoWarmup requires a non-empty reason")
+        msgspec.structs.force_setattr(self, "reason", reason)
+
+
+WarmupDecl = Union[NoWarmup, Mapping[str, Any]]
+
+
+def _validate_warmup_decl(owner: str, warmup: Optional[WarmupDecl]) -> Optional[WarmupDecl]:
+    if warmup is None or isinstance(warmup, NoWarmup):
+        return warmup
+    if isinstance(warmup, Mapping):
+        for key in warmup:
+            k = str(key or "").strip()
+            if not k or not k.isidentifier():
+                raise ValueError(
+                    f"@endpoint {owner}: warmup= key {key!r} must be a handler "
+                    "method name"
+                )
+        return dict(warmup)
+    raise TypeError(
+        f"@endpoint {owner}: warmup= must be a "
+        "{method_name: payload} mapping or NoWarmup(reason), got "
+        f"{type(warmup).__name__}"
+    )
+
+
 class Compile(msgspec.Struct, frozen=True):
     """Opt-in torch.compile over pre-built per-SKU cache artifacts (#384).
 
@@ -192,6 +229,10 @@ class EndpointDecl(msgspec.Struct, frozen=True, kw_only=True):
     # child calls (ctx.call_endpoint / ctx.workflow_checkpoint). The hub
     # mints the invoke_child credential ONLY for declaring functions.
     child_calls: bool = False
+    # gw#470 boot warmup: None = auto-synthesize from each handler's payload
+    # schema; {method: payload-or-None} = declared warmup payloads (None
+    # skips that method); NoWarmup(reason) = class-level opt-out.
+    warmup: Optional[WarmupDecl] = None
 
 
 ATTR = "__gen_worker_endpoint__"
@@ -395,6 +436,7 @@ def _decorate_class(
     runtime: Optional[str],
     compile: Optional[Compile] = None,
     child_calls: bool = False,
+    warmup: Optional[WarmupDecl] = None,
 ) -> type:
     handlers = _find_handler_methods(cls)
     for attr, member in handlers:
@@ -411,9 +453,16 @@ def _decorate_class(
     decl = EndpointDecl(
         kind=kind, resources=resources, models=models, slots=slots,
         runtime=runtime, compile=compile, child_calls=child_calls,
+        warmup=_validate_warmup_decl(cls.__name__, warmup),
     )
     setattr(cls, ATTR, decl)
     setattr(cls, "__gen_worker_handlers__", handlers)
+    # gw#470: default-on boot warmup — fail unwarmable GPU inference classes
+    # at import when type hints resolve here (walk time re-checks). Lazy
+    # import: warmup.py imports this module.
+    from ..warmup import validate_at_decoration
+
+    validate_at_decoration(cls, decl)
     return cls
 
 
@@ -428,6 +477,7 @@ def _decorate_function(
     name: Optional[str],
     compile: Optional[Compile] = None,
     child_calls: bool = False,
+    warmup: Optional[WarmupDecl] = None,
 ) -> Callable[..., Any]:
     _validate_handler_shape(fn.__name__, fn, is_method=False)
     _reject_producer_generator(fn.__name__, fn, kind)
@@ -448,6 +498,11 @@ def _decorate_function(
         raise ValueError(
             f"@endpoint function {fn.__name__!r}: runtime= requires a class "
             "with setup() (the engine server outlives single calls)."
+        )
+    if warmup is not None:
+        raise ValueError(
+            f"@endpoint function {fn.__name__!r}: warmup= requires a class "
+            "with setup() (stateless functions hold nothing to warm)."
         )
     decl = EndpointDecl(
         kind=kind, resources=resources, models=models, slots=slots,
@@ -473,6 +528,7 @@ def endpoint(
     name: Optional[str] = ...,
     compile: Optional[Compile] = ...,
     child_calls: bool = ...,
+    warmup: Optional[WarmupDecl] = ...,
 ) -> Callable[[T], T]: ...  # configured @endpoint(...) form
 
 
@@ -487,6 +543,7 @@ def endpoint(
     name: Optional[str] = None,
     compile: Optional[Compile] = None,
     child_calls: bool = False,
+    warmup: Optional[WarmupDecl] = None,
 ) -> Any:
     """The one endpoint decorator. See the module docstring for shapes.
 
@@ -518,13 +575,13 @@ def endpoint(
             return _decorate_class(
                 obj, kind=kind, resources=resources_value, models=dict(model_map),
                 slots=dict(slot_map), runtime=runtime, compile=compile,
-                child_calls=child_calls,
+                child_calls=child_calls, warmup=warmup,
             )
         if inspect.isfunction(obj):
             return _decorate_function(
                 obj, kind=kind, resources=resources_value, models=dict(model_map),
                 slots=dict(slot_map), runtime=runtime, name=name, compile=compile,
-                child_calls=child_calls,
+                child_calls=child_calls, warmup=warmup,
             )
         raise TypeError(
             f"@endpoint requires a function or class, got {type(obj).__name__}"
@@ -535,4 +592,4 @@ def endpoint(
     return apply
 
 
-__all__ = ["Compile", "EndpointDecl", "Resources", "SlotLike", "endpoint"]
+__all__ = ["Compile", "EndpointDecl", "NoWarmup", "Resources", "SlotLike", "WarmupDecl", "endpoint"]
