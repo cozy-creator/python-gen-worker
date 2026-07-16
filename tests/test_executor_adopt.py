@@ -6,6 +6,7 @@ a compile-cache snapshot on RunJob.snapshots reaches compile_cache.enable."""
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
 
 import msgspec
@@ -63,7 +64,12 @@ def _artifact(tmp_path: Path, **meta_overrides) -> Path:
     (cap / "inductor" / "g").mkdir(parents=True)
     (cap / "inductor" / "g" / "code.py").write_text("x")
     (cap / "triton").mkdir()
-    meta = cc.artifact_metadata(family=FAMILY, shapes=[(768, 768)], targets=["transformer"])
+    cfg = Compile(shapes=((768, 768),), family=FAMILY)
+    signature, weight_contract = cc.execution_contract(_Pipe(), cfg)
+    meta = cc.artifact_metadata(
+        family=FAMILY, shapes=cfg.shapes, targets=cfg.targets,
+        graph_signature=signature, weight_contract=weight_contract,
+    )
     meta.update(meta_overrides)
     snapdir = tmp_path / "snap"
     snapdir.mkdir(exist_ok=True)
@@ -370,6 +376,38 @@ def test_fetch_compile_snapshot_ignores_other_families(tmp_path):
     snapshots = {"_system/family-sdxl#inductor-rtx-4090-torch2.9": pb.Snapshot()}
     assert asyncio.run(ex._fetch_compile_snapshot(spec, snapshots)) is None
     assert asyncio.run(ex._fetch_compile_snapshot(spec, None)) is None
+
+
+def test_fetch_compile_snapshot_selects_exact_w8a8_lane(tmp_path):
+    spec = replace(
+        _spec(), models={"pipeline": Hub(
+            "acme/klein-finetune", flavor="fp8-w8a8")},
+    )
+    ex, _sent = _wire_executor(spec, tmp_path)
+    plain = tmp_path / "plain"
+    w8a8 = tmp_path / "w8a8"
+    plain.mkdir()
+    w8a8.mkdir()
+    (plain / "plain.tar.gz").write_bytes(b"plain")
+    wanted = w8a8 / "w8a8.tar.gz"
+    wanted.write_bytes(b"w8a8")
+    seen: list[str] = []
+
+    async def _ensure(ref, snapshot=None, *, binding=None):
+        seen.append(ref)
+        return w8a8 if ref.endswith("-w8a8") else plain
+
+    ex.store.ensure_local = _ensure  # type: ignore[method-assign]
+    plain_ref = f"_system/family-{FAMILY}#inductor-rtx-4090-torch2.9"
+    w8a8_ref = plain_ref + "-w8a8"
+    snapshots = {
+        plain_ref: pb.Snapshot(),
+        w8a8_ref: pb.Snapshot(),
+        "acme/klein-finetune#fp8-w8a8": pb.Snapshot(),
+    }
+    got = asyncio.run(ex._fetch_compile_snapshot(spec, snapshots))
+    assert got == wanted
+    assert seen == [w8a8_ref]
 
 
 def test_prepare_with_explicit_artifact_seeds(tmp_path, monkeypatch):

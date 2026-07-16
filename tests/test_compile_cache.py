@@ -30,6 +30,16 @@ def test_flavor_label():
     assert cc.flavor_label("h100-80gb-hbm3", "2.11.0") == "inductor-h100-80gb-hbm3-torch2.11"
 
 
+def test_cell_lane_is_exact_and_checkpoint_free():
+    assert cc.cell_lane(
+        "_system/family-sdxl#inductor-rtx-4090-torch2.13-w8a8"
+    ) == "w8a8"
+    assert cc.cell_lane(
+        "_system/family-sdxl#inductor-rtx-4090-torch2.13"
+    ) == ""
+    assert cc.cell_lane("owner/checkpoint#fp8-w8a8") == ""
+
+
 def test_verify_mismatches():
     meta = cc.artifact_metadata(family="sd15", shapes=[(768, 768)], targets=["transformer"])
     assert cc.verify(meta, family="sd15") == ""
@@ -54,6 +64,85 @@ def test_verify_mismatches():
     other = dict(meta)
     del other["gen_worker"]
     assert "gen_worker" in cc.verify(other, family="sd15")
+
+    for field in ("sm", "cuda", "cuda_driver", "image_digest"):
+        other = dict(meta)
+        other[field] = "definitely-not-this-runtime"
+        assert field in cc.verify(other, family="sd15")
+
+
+def test_execution_contract_uses_structure_not_checkpoint_values():
+    torch = pytest.importorskip("torch")
+
+    class _Pipe:
+        def __init__(self, hidden: int, fill: float) -> None:
+            self.transformer = torch.nn.Sequential(
+                torch.nn.Linear(hidden, hidden), torch.nn.SiLU(),
+            )
+            with torch.no_grad():
+                self.transformer[0].weight.fill_(fill)
+
+    cfg = Compile(shapes=((1024, 1024),), targets=("transformer",), family="sdxl")
+    a_sig, a_weights = cc.execution_contract(_Pipe(16, 1.0), cfg)
+    b_sig, b_weights = cc.execution_contract(_Pipe(16, 9.0), cfg)
+    c_sig, _ = cc.execution_contract(_Pipe(32, 1.0), cfg)
+    assert a_sig == b_sig
+    assert a_weights == b_weights == {"lane": ""}
+    assert c_sig != a_sig
+
+
+def test_execution_contract_records_dynamic_w8a8_exclusions():
+    torch = pytest.importorskip("torch")
+
+    class _Scaled(torch.nn.Module):
+        _cozy_w8a8_linear = True
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.in_features = self.out_features = 16
+            self.register_buffer("weight", torch.empty(
+                16, 16, dtype=getattr(torch, "float8_e4m3fn")))
+            self.register_buffer("weight_scale", torch.ones(16, 1))
+            self.input_scale = None
+
+        def forward(self, x):
+            return x
+
+    class _Target(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fast = _Scaled()
+            self.sensitive = torch.nn.Linear(16, 16)
+
+    class _Pipe:
+        def __init__(self) -> None:
+            self.transformer = _Target()
+            self._cozy_weight_lane = "w8a8"
+
+    cfg = Compile(shapes=((1024, 1024),), targets=("transformer",), family="sdxl")
+    _signature, contract = cc.execution_contract(_Pipe(), cfg)
+    assert contract["operator"] == "torch._scaled_mm"
+    assert contract["activation_scaling"] == ["dynamic-per-row"]
+    assert [r["path"] for r in contract["quantized"]] == ["transformer:fast"]
+    assert [r["path"] for r in contract["excluded"]] == ["transformer:sensitive"]
+
+
+def test_w8a8_guard_never_retries_eager():
+    calls = {"eager": 0}
+
+    def eager(value):
+        calls["eager"] += 1
+        return value
+
+    def broken(_value):
+        raise RuntimeError("graph miss")
+
+    guarded = cc._guarded(eager, broken, "transformer", fail_closed=True)
+    with pytest.raises(cc.CompiledLaneUnavailableError, match="graph miss"):
+        guarded(1)
+    with pytest.raises(cc.CompiledLaneUnavailableError, match="graph miss"):
+        guarded(2)
+    assert calls["eager"] == 0
 
 
 def test_mode_drift():

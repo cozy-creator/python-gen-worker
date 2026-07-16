@@ -167,6 +167,10 @@ def _build_module_class() -> type:
         weight_scale: Any
         lora_a: Any  # None, or [bucket, in] bf16 branch buffer (gw#547)
         lora_b: Any  # None, or [out, bucket] with scale folded in
+        # Structural marker consumed by compile_cache.execution_contract.
+        # Unlike a class-name check it survives refactors and records no
+        # checkpoint-specific data.
+        _cozy_w8a8_linear = True
 
         def __init__(self, in_features: int, out_features: int, *,
                      bias: bool, compute_dtype: Any,

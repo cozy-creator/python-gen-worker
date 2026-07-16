@@ -2453,15 +2453,40 @@ class Executor:
         if spec.compile is None or not snapshots:
             return None
         from . import compile_cache, trt_engine
+        from .models.refs import parse_model_ref
 
         family = getattr(spec.compile, "family", "") or ""
-        candidates = [
-            (ref, snap) for ref, snap in snapshots.items()
-            if trt_engine.is_engine_ref(ref, family)
-        ] + [
-            (ref, snap) for ref, snap in snapshots.items()
-            if compile_cache.is_cache_ref(ref, family)
-        ]
+        model_refs = list(snapshots)
+        model_refs.extend(wire_ref(binding) for binding in spec.models.values())
+        wants_w8a8 = False
+        for model_ref in model_refs:
+            try:
+                parsed = parse_model_ref(model_ref).tensorhub
+            except ValueError:
+                continue
+            if (
+                parsed is not None and parsed.owner != "_system"
+                and parsed.flavor == "fp8-w8a8"
+            ):
+                wants_w8a8 = True
+                break
+        if wants_w8a8:
+            # TensorRT cells currently expose only their plain fp16 contract.
+            # The existing Forge's -w8a8 Inductor cell is the sole artifact
+            # proven to preserve Fp8ScaledLinear/torch._scaled_mm semantics.
+            candidates = [
+                (ref, snap) for ref, snap in snapshots.items()
+                if compile_cache.is_cache_ref(ref, family)
+                and compile_cache.cell_lane(ref) == "w8a8"
+            ]
+        else:
+            candidates = [
+                (ref, snap) for ref, snap in snapshots.items()
+                if trt_engine.is_engine_ref(ref, family)
+            ] + [
+                (ref, snap) for ref, snap in snapshots.items()
+                if compile_cache.is_cache_ref(ref, family)
+            ]
         for ref, snap in candidates:
             try:
                 local = await self.store.ensure_local(ref, snap)
@@ -2929,8 +2954,11 @@ class Executor:
                         # prep mode is traced into the cells — a drifted
                         # pipeline can only miss, so reject deterministically
                         # instead of paying a warmup to find out.
-                        drift = (compile_cache.mode_drift(meta, obj)
-                                 or compile_cache.lane_drift(meta, obj))
+                        drift = (
+                            compile_cache.mode_drift(meta, obj)
+                            or compile_cache.lane_drift(meta, obj)
+                            or compile_cache.contract_drift(meta, obj, s.compile)
+                        )
                         if drift:
                             return await fail("key_mismatch", drift)
                         # Re-adoption of a re-published cell: drop the previous
@@ -3446,6 +3474,17 @@ class Executor:
             await self._finish(job, pb.JOB_STATUS_FATAL, safe_message="deadline exceeded",
                                metrics=metrics)
         except BaseException as exc:
+            from .compile_cache import CompiledLaneUnavailableError
+
+            if isinstance(exc, CompiledLaneUnavailableError):
+                # A seeded W8A8 graph failing at call time is a genuine lane
+                # failure, not an invitation to retry eager under the same
+                # advertised function. Remove this worker/function pair from
+                # dispatch until a fresh setup with a compatible cell.
+                self.unavailable[spec.name] = (
+                    "compile_cell_failed", _sanitize(str(exc)), {},
+                )
+                self._on_state_change()
             status, msg = _map_exception(exc)
             if status == pb.JOB_STATUS_FATAL:
                 logger.exception("handler %s failed", spec.name)
