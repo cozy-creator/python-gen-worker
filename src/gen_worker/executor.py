@@ -2576,6 +2576,8 @@ class Executor:
                     sl = await _to_thread_complete(
                         provision.load_slot, ann, path, binding=binding,
                         slot=slot, ref=ref, mode=mode, components=injected,
+                        declared_vram_gb=float(
+                            getattr(spec.resources, "vram_gb", 0) or 0),
                     )
                 except Exception as exc:
                     # Corruption-shaped load failure (gw#408): digest-verify
@@ -2598,6 +2600,8 @@ class Executor:
                     sl = await _to_thread_complete(
                         provision.load_slot, ann, path, binding=binding,
                         slot=slot, ref=ref, mode=mode, components=injected,
+                        declared_vram_gb=float(
+                            getattr(spec.resources, "vram_gb", 0) or 0),
                     )
                 pipe = sl.obj
                 # Reconcile the load outcomes into ServePlan/FnDegraded via

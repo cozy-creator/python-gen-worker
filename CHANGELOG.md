@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.28.1 (2026-07-16)
+
+- **ie#381: the gw#534 rung-2 bf16-resident upgrade now respects the
+  function's declared VRAM envelope.** The weights-only fit check upgraded
+  LTX-22B's fp8+te lane to bf16-resident on 80 GB cards, silently consuming
+  the activation budget the envelope was measured around — every >=10 s
+  1080p request then served through the DEGRADED tiled-refine rung (slower
+  than the stored-fp8 recipe AND quality-taxed), while the compile-cell
+  producer traced the opposite weight lane. `bf16_resident_fits` gains a
+  `declared_vram_gb` term (upgrade only when `free >= declared +
+  upcast_extra`), plumbed from `Resources.vram_gb` through
+  `load_slot`/`load_from_pretrained`, and `compile_cache.build()` accepts
+  the same value so producer and serving worker decide the lane from the
+  same inputs (gw#391 parity). Declared-unknown loads (local CLI) keep the
+  old margin-only rule.
+
+
 ## 0.28.0 (2026-07-16)
 
 - **gw#470 boot warmup default-on.** GPU inference endpoints now warm before

@@ -734,12 +734,25 @@ def pipeline_weight_lane(pipeline: Any) -> str:
 
 
 def bf16_resident_fits(
-    path: Path, *, text_encoders: bool = False, free_gb: Optional[float] = None
+    path: Path, *, text_encoders: bool = False, free_gb: Optional[float] = None,
+    declared_vram_gb: float = 0.0,
 ) -> bool:
     """True when the snapshot can serve fully bf16-RESIDENT within free VRAM
     minus :data:`BF16_RESIDENT_MARGIN_GB` (fp8-stored cast targets doubled for
     the upcast). False on CPU-only hosts or unreadable snapshots — the caller
-    keeps today's hook path."""
+    keeps today's hook path.
+
+    ``declared_vram_gb`` is the function's declared card envelope
+    (``Resources.vram_gb``) when known. The declaration was measured under
+    the STORED lane (fp8 weights + activation peak + margin); the upcast
+    steals exactly its extra weight bytes from that activation budget, so
+    the upgrade additionally requires the card to have that many GB SPARE
+    over the declaration: ``free >= declared + upcast_extra``. Without this
+    term (ie#381 discovery), a weights-only check upgraded LTX-22B on an
+    80 GB card and every >=10 s 1080p request silently fell to the DEGRADED
+    tiled-refine rung — slower AND quality-taxed, defeating the fp8+te
+    recipe the envelope was designed around. 0 = unknown (local CLI, plain
+    loads): the weights-margin rule alone applies, as before."""
     if free_gb is None:
         from .memory import get_available_vram_gb
 
@@ -759,7 +772,13 @@ def bf16_resident_fits(
         if (name in targets or not name) and detect_on_disk_dtype(probe) == "fp8":
             upcast_extra += nbytes
     resident_gb = (total + upcast_extra) / float(1 << 30)
-    return resident_gb <= float(free_gb) - BF16_RESIDENT_MARGIN_GB
+    if resident_gb > float(free_gb) - BF16_RESIDENT_MARGIN_GB:
+        return False
+    if declared_vram_gb and declared_vram_gb > 0:
+        upcast_gb = upcast_extra / float(1 << 30)
+        if float(free_gb) < float(declared_vram_gb) + upcast_gb:
+            return False
+    return True
 
 
 # --- Runtime fit rungs (th#546 emergency lane + th#683 fp8 storage) --------
@@ -1051,6 +1070,7 @@ def load_from_pretrained(
     attrs: Optional[Dict[str, str]] = None,
     storage_dtype: str = "",
     components: Optional[Dict[str, Any]] = None,
+    declared_vram_gb: float = 0.0,
 ) -> Any:
     """``cls.from_pretrained(path)`` with the standard trimmings: torch dtype
     from the binding's dtype string, on-disk variant detection, quant-library
@@ -1139,7 +1159,9 @@ def load_from_pretrained(
     fp8_storage = storage_dtype in ("fp8", "fp8+te") or sniffed == "fp8"
     fp8_text_encoders = storage_dtype == "fp8+te"
     bf16_resident = False
-    if fp8_storage and bf16_resident_fits(Path(path), text_encoders=fp8_text_encoders):
+    if fp8_storage and bf16_resident_fits(
+            Path(path), text_encoders=fp8_text_encoders,
+            declared_vram_gb=declared_vram_gb):
         # gw#534 rung 2: fp8 download, bf16 resident — skip the cast hooks
         # (never voluntary W8A16); from_pretrained's torch_dtype upcasts once.
         fp8_storage = False
