@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import shutil
+import tempfile
 import threading
 import time
 import typing
@@ -205,7 +206,7 @@ def _capability_job_id(token: str) -> Optional[str]:
         return None
 
 
-def _resolve_slots_kwargs(spec: EndpointSpec, run: "pb.RunJob") -> Dict[str, Any]:
+def _resolve_slots_kwargs(spec: EndpointSpec, run: "Optional[pb.RunJob]") -> Dict[str, Any]:
     """``ctx.slots`` resolution chain (pgw#520 / pgw#516): merge each
     Slot-declared slot's repo-metadata ``ModelBinding.inference_defaults``
     over its code fallback preset, then apply each riding lora's
@@ -219,10 +220,11 @@ def _resolve_slots_kwargs(spec: EndpointSpec, run: "pb.RunJob") -> Dict[str, Any
         return {"resolved_slots": {}, "slot_errors": {}}
     from .api.slot import resolve_slot
 
-    raw_defaults = {b.slot: b.inference_defaults for b in run.models if b.inference_defaults}
+    run_models = list(run.models) if run is not None else []
+    raw_defaults = {b.slot: b.inference_defaults for b in run_models if b.inference_defaults}
     lora_defaults = {
         b.slot: tuple(lo.inference_defaults for lo in b.loras if lo.inference_defaults)
-        for b in run.models if b.loras
+        for b in run_models if b.loras
     }
     resolved: Dict[str, Any] = {}
     errors: Dict[str, str] = {}
@@ -1736,6 +1738,95 @@ class Executor:
             self._on_state_change()
             return instance
 
+    async def _run_synthesized_warmup(
+        self, spec: EndpointSpec, rec: _ClassRecord, instance: Any,
+        snapshots: Optional[Dict[str, pb.Snapshot]],
+    ) -> None:
+        """gw#470 default boot warmup: one synthesized (or `warmup=`-declared)
+        request per GPU inference handler of this instance group, run
+        post-setup pre-READY under the load lock. Output is discarded — the
+        ctx has no emitter/capability token and writes to a throwaway
+        local_output_dir, so nothing touches billing/outputs/CAS. A failure
+        propagates as a load failure."""
+        if spec.kind != "inference" or spec.cls is None:
+            return
+        from . import warmup as warmup_mod
+        from .api.decorators import ATTR as _DECL_ATTR
+
+        decl = getattr(spec.cls, _DECL_ATTR, None)
+        if decl is None:
+            # Not an @endpoint class (internally-constructed spec): no
+            # declaration surface exists, so no synthesized warmup either.
+            return
+        # Instance group = every spec sharing this instance: the code-table
+        # siblings (matching instance_key) plus whatever this record has
+        # already seen (covers pgw#532 derived per-pick specs).
+        siblings: Dict[str, EndpointSpec] = {
+            s.name: s for s in self.specs.values()
+            if s.cls is spec.cls and s.instance_key == spec.instance_key
+        }
+        for s in rec.specs:
+            siblings[s.name] = s
+        siblings[spec.name] = spec
+        jobs, skips = warmup_mod.plan(
+            siblings.values(),
+            decl_warmup=decl.warmup,
+            has_warmup_method=False,
+        )
+        for skip in skips:
+            logger.info("boot warmup skipped for %s: %s", skip.spec.name, skip.reason)
+        for wj in jobs:
+            handler_kwargs = await self._handler_kwargs(wj.spec, snapshots or {})
+            t0 = time.monotonic()
+            with tempfile.TemporaryDirectory(prefix="gw-warmup-") as tmp:
+                payload = wj.build(tmp)
+                ctx = RequestContext(
+                    request_id=f"boot-warmup-{wj.spec.name}",
+                    local_output_dir=tmp,
+                    models={slot: wire_ref(b) for slot, b in wj.spec.models.items()},
+                    **_resolve_slots_kwargs(wj.spec, None),
+                    boot_warmup=True,
+                )
+                try:
+                    await self._invoke_warmup(wj.spec, instance, ctx, payload, handler_kwargs)
+                except Exception as exc:
+                    if not is_cuda_oom(exc):
+                        raise
+                    # A warmup OOM must not take the function down: the
+                    # runtime fit ladder (gw#521) still serves it degraded
+                    # on the first real request. Flush and stop warming.
+                    logger.warning(
+                        "boot warmup %s OOMed (%s) — skipping remaining "
+                        "warmups; the first-request fit ladder owns this",
+                        wj.spec.name, exc)
+                    if torch is not None and torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    return
+            logger.info(
+                "boot warmup %s (%s): %.1fs",
+                wj.spec.name, "declared" if wj.declared else "synthesized",
+                time.monotonic() - t0)
+
+    async def _invoke_warmup(
+        self, spec: EndpointSpec, instance: Any, ctx: "RequestContext",
+        payload: Any, kwargs: Dict[str, Any],
+    ) -> None:
+        bound = getattr(instance, spec.attr_name)
+        call_kwargs = {spec.ctx_param: ctx, spec.payload_param: payload, **kwargs}
+        if spec.is_async_gen:
+            async for _ in bound(**call_kwargs):
+                pass
+        elif spec.is_async:
+            await bound(**call_kwargs)
+        else:
+            def _consume() -> None:
+                out = bound(**call_kwargs)
+                if spec.output_mode == "stream":
+                    for _ in out:
+                        pass
+
+            await _to_thread_complete(_consume)
+
     def _mark_setup_failed(self, rec: _ClassRecord, exc: BaseException) -> None:
         if isinstance(exc, (InsufficientDiskError, RetryableError, MissingSnapshotError)):
             # Transient pressure (disk GC frees space / warm-tier RAM drains /
@@ -1826,6 +1917,12 @@ class Executor:
                         stats.get("fxgraph_cache_hit", 0),
                         stats.get("fxgraph_cache_miss", 0),
                         time.monotonic() - warm_t0)
+            else:
+                # gw#470: no custom warmup() — run the synthesized boot
+                # warmup for every GPU inference handler of this instance
+                # group, still pre-READY under the load lock. A failure
+                # propagates as a load failure (loud, th#581 rails).
+                await self._run_synthesized_warmup(spec, rec, instance, snapshots)
             vram_delta = max(0, self._vram_allocated() - vram_before)
             if rec.server is not None:
                 # Engine subprocess VRAM is invisible to torch's allocator;

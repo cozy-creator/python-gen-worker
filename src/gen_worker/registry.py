@@ -333,6 +333,11 @@ def extract_specs(obj: Any, *, walked_module: str = "") -> List[EndpointSpec]:
             slots=dict(decl.slots),
             resources=decl.resources, walked_module=walked,
         ))
+    # gw#470: boot warmup is default-on for GPU inference classes — fail at
+    # walk time (discovery/CI/boot), never at first request.
+    from .warmup import validate_class_warmup
+
+    validate_class_warmup(cls, decl, out)
     return out
 
 
