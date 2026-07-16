@@ -68,6 +68,9 @@ class EndpointSpec:
     timeout_ms: Optional[int] = None
     runtime: Optional[str] = None
     compile: Optional[Compile] = None  # opt-in torch.compile spec (#384)
+    # th#826: the function makes endpoint-to-endpoint child calls; emitted
+    # into the discovery manifest so the hub mints the invoke_child grant.
+    child_calls: bool = False
     module: str = ""              # declaring module
     walked_module: str = ""       # top-level package the object was found under
 
@@ -291,6 +294,7 @@ def _spec_for_handler(
         slot_family=slot_family,
         runtime=decl.runtime,
         compile=decl.compile,
+        child_calls=decl.child_calls,
         module=getattr(cls or method, "__module__", "") or "",
         walked_module=walked_module,
     )

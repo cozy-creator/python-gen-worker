@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.27.0 (2026-07-16)
+
+- **th#826 call-out primitive (workflows-as-endpoints).** Functions declared
+  `@endpoint(child_calls=True)` may call other endpoints as attributed,
+  bounded, cancellable child requests:
+  - `ctx.call_endpoint(endpoint, function, payload, *, tag, wait, timeout_s,
+    tier)` — sync-await (returns output items) or `wait=False` for a
+    `ChildRequest` handle (`.status()` / `.result()` / `.cancel()`).
+  - `ctx.workflow_checkpoint(key, fn)` — step-result memoization under the
+    invocation (crash-resume by fast-forward; WORKFLOW-DESIGN.md §4).
+  - Typed errors: `ChildCallRefusedError` (depth/cycle/budget/tier/parent
+    refusals + `child_calls_not_declared`), `ChildRequestFailedError`,
+    `ChildRequestCanceledError`, `ChildCallTimeoutError`.
+  - Discovery emits `child_calls = true`; the hub mints the `invoke_child`
+    capability grant only for declaring functions. Children bill the parent
+    request's payer, inherit its availability tier, and die with the tree on
+    parent cancel.
+
+
 ## 0.26.9 (2026-07-15)
 
 - hub_policy: probe `modelopt` in the known optional-libs list (te#79
