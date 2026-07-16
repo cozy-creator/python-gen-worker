@@ -239,9 +239,11 @@ def _reshard_indexed_safetensors(index_path: Path, max_shard_bytes: int) -> None
 
 
 def _stage_oversize_safetensors(
-    tree: Path, *, max_shard_bytes: int = MAX_SAFETENSORS_SHARD_BYTES,
+    tree: Path, *, max_shard_bytes: int | None = None,
 ) -> None:
     """Reshard oversized safetensors by logical HF weight group."""
+    if max_shard_bytes is None:
+        max_shard_bytes = MAX_SAFETENSORS_SHARD_BYTES
     indexed_members: set[Path] = set()
     for index_path in sorted(tree.rglob("*.safetensors.index.json")):
         _reshard_indexed_safetensors(index_path, max_shard_bytes)
