@@ -432,6 +432,7 @@ def test_fetch_compile_snapshot_plain_lane_ignores_w8a8_cell(tmp_path):
     snapshots = {
         w8a8_ref: pb.Snapshot(),
         plain_ref: pb.Snapshot(),
+        "acme/unselected#fp8-w8a8": pb.Snapshot(),
     }
     got = asyncio.run(ex._fetch_compile_snapshot(spec, snapshots))
     assert got == wanted

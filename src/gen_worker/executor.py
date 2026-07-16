@@ -2457,17 +2457,23 @@ class Executor:
         from .models.refs import parse_model_ref
 
         family = getattr(spec.compile, "family", "") or ""
-        model_refs = list(snapshots)
-        model_refs.extend(wire_ref(binding) for binding in spec.models.values())
+        # The effective spec is already rebound to this RunJob's selected
+        # checkpoints. Snapshot maps also contain attached cells and may carry
+        # unrelated/prepositioned models, so they must not choose the lane.
+        model_refs = [wire_ref(binding) for binding in spec.models.values()]
         wants_w8a8 = False
         for model_ref in model_refs:
             try:
                 parsed = parse_model_ref(model_ref).tensorhub
             except ValueError:
                 continue
+            flavor = (parsed.flavor or "") if parsed is not None else ""
             if (
                 parsed is not None and parsed.owner != "_system"
-                and parsed.flavor == "fp8-w8a8"
+                and (
+                    flavor == "fp8-w8a8"
+                    or flavor.startswith("fp8-w8a8-")
+                )
             ):
                 wants_w8a8 = True
                 break

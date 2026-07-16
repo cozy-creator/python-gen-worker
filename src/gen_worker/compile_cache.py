@@ -8,9 +8,11 @@ inductor+triton cache dirs as a repo flavor; workers that opt in via
 ``@endpoint(compile=Compile(...))`` seed those dirs before load and hit the
 cache with no compiler and no stall.
 
-Policy: cache miss / key mismatch / no artifact => eager, never a boot stall
-or a runtime compile attempt in prod. The compile job itself opts into cold
-compilation with ``GEN_WORKER_COMPILE_ALLOW_COLD=1`` (requires a toolchain).
+Policy: cache miss / key mismatch / no artifact leaves ordinary lanes eager,
+never causing a boot stall or a runtime compile attempt in prod. A declared
+W8A8 lane instead fails retryably: eager/dequantized execution cannot claim
+W8A8. The compile job itself opts into cold compilation with
+``GEN_WORKER_COMPILE_ALLOW_COLD=1`` (requires a toolchain).
 
 Artifacts are FAMILY-keyed (settled 2026-07-06): torch.compile caches key on
 the traced graph + shapes, not the weights, so one artifact serves every
@@ -842,9 +844,10 @@ def apply(
     env var, read raw — not a Settings field, see ``prepare()``). Anything
     else is a logged no-op — eager, never a stall.
 
-    ``guard=True`` (consumer): a failing compiled call permanently unwraps to
-    eager. ``guard=False`` (compile job): failures must raise, a silently
-    eager warm-up would publish an empty artifact as success.
+    ``guard=True`` (consumer): a failing ordinary compiled call permanently
+    unwraps to eager; W8A8 fails closed. ``guard=False`` (compile job): all
+    failures raise, because a silently eager warm-up would publish an empty
+    artifact as success.
     """
     if getattr(pipeline, _MARKER_ATTR, None) is not None:
         return True
