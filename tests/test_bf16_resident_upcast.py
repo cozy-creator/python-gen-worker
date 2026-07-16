@@ -186,3 +186,34 @@ def test_lane_drift_bf16_resident_matches_plain_cells() -> None:
     assert lane_drift(artifact_metadata(family="f"), pipe) == ""
     assert "weight_lane" in lane_drift(
         artifact_metadata(family="f", weight_lane="fp8-hooks"), pipe)
+
+
+def test_declared_envelope_gates_the_upgrade(tmp_path: Path) -> None:
+    """ie#381: the upgrade must leave the DECLARED activation envelope
+    intact — free must exceed declared_vram + the upcast's extra weight
+    bytes, or the model that fit by design starts serving degraded."""
+    snap = _snapshot(tmp_path, "F8_E4M3", 2 << 30)  # 2GB fp8 -> +2GB upcast
+    # weights-margin alone passes at 79 GB free (4GB resident + 4 <= 79)…
+    assert bf16_resident_fits(snap, free_gb=79.0) is True
+    # …but a 78GB declared envelope needs 78 + 2 = 80 free: refuse.
+    assert bf16_resident_fits(snap, free_gb=79.0, declared_vram_gb=78) is False
+    # roomy card (B200-class): 140 + 2 <= 178 — upgrade stands.
+    assert bf16_resident_fits(snap, free_gb=178.0, declared_vram_gb=140) is True
+    # declared unknown (0): old rule only.
+    assert bf16_resident_fits(snap, free_gb=79.0, declared_vram_gb=0) is True
+
+
+def test_load_honors_declared_vram(vram, tmp_path: Path, monkeypatch) -> None:
+    """load_from_pretrained(declared_vram_gb=…) reaches the fits check: an
+    fp8+te load that would upgrade on a roomy card keeps hooks when the
+    declared envelope forbids it."""
+    snap = _snapshot(tmp_path, "F8_E4M3", 1 << 20, te_dtype="F8_E4M3",
+                     te_nbytes=1 << 20)
+    vram(79.0)
+    _Pipe.calls.clear()
+    pipe = load_from_pretrained(
+        _Pipe, snap, storage_dtype="fp8+te", declared_vram_gb=200.0)
+    assert pipeline_weight_lane(pipe) == "fp8-hooks"
+    pipe2 = load_from_pretrained(
+        _Pipe, snap, storage_dtype="fp8+te", declared_vram_gb=20.0)
+    assert pipeline_weight_lane(pipe2) == ""  # upgraded: 20 + ~0 <= 79

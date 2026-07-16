@@ -83,6 +83,7 @@ def load_slot(
     mode: str = "auto",
     components: Optional[Dict[str, Any]] = None,
     device: str = "",
+    declared_vram_gb: float = 0.0,
 ) -> SlotLoad:
     """Typed slot injection: the slot receives exactly what its ``setup``
     annotation says — a ``str``/``Path`` local path, or a constructed
@@ -129,7 +130,7 @@ def load_slot(
 
     pipe = load_from_pretrained(
         annotation, path, dtype=dtype, storage_dtype=storage_dtype,
-        components=components or None,
+        components=components or None, declared_vram_gb=declared_vram_gb,
     )
     out.obj = pipe
 

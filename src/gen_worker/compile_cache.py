@@ -837,6 +837,7 @@ def build(
     regional: bool = False,
     steps: int = 2,
     prompt: str = "cache warm-up: a lighthouse on a cliff at dawn, detailed",
+    declared_vram_gb: float = 0.0,
 ) -> Tuple[Path, Dict[str, Any], Dict[str, float]]:
     """Compile a diffusers pipeline over ``shapes`` and package the resulting
     inductor+triton caches as a per-SKU artifact.
@@ -873,7 +874,12 @@ def build(
     cfg = CompileCfg(shapes=tuple(shapes), targets=tuple(targets), regional=bool(regional))
     pipe = load_from_pretrained(
         DiffusionPipeline, str(model_path), dtype=dtype,
-        storage_dtype=storage_dtype)
+        storage_dtype=storage_dtype,
+        # Producer/consumer LANE parity (ie#381): the serving worker decides
+        # the bf16-resident upgrade against its function's declared envelope;
+        # the producer must decide with the same input or it traces the
+        # other lane and the cell never adopts.
+        declared_vram_gb=declared_vram_gb)
     # Producer/consumer graph parity (gw#391): the worker prepares pipelines
     # with place_pipeline (placement + vae/attention low-VRAM flags), and
     # those flags are traced INTO the graphs — the FX-graph cache key. A cell
