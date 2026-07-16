@@ -431,6 +431,9 @@ def ingest_huggingface(
         "class_name": str(classification.attrs.get("architecture") or ""),
     }
     attrs = dict(classification.attrs)
+    on_disk_dtype = _detect_snapshot_dtype(dest_dir)
+    if on_disk_dtype:
+        attrs["dtype"] = on_disk_dtype
     attrs.setdefault("runtime_library", library)
     metadata = {
         "source_provider": "huggingface",

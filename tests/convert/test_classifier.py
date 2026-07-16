@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import struct
+
 import pytest
 
 from gen_worker.convert.classifier import RepoRefusal, classify_repo
@@ -188,13 +191,35 @@ def test_hf_multi_weight_bundle_opts_out_of_layout_contract(tmp_path, monkeypatc
 
     def fake_dl(repo_id, rev, dest, *, allow_patterns, **kw):
         for p in allow_patterns:
-            (Path(dest) / p).write_bytes(b"x")
+            target = Path(dest) / p
+            if p.endswith(".safetensors"):
+                header = json.dumps({
+                    "weight": {
+                        "dtype": "BF16",
+                        "shape": [1],
+                        "data_offsets": [0, 2],
+                    },
+                }, separators=(",", ":")).encode()
+                target.write_bytes(struct.pack("<Q", len(header)) + header + b"\0\0")
+            else:
+                target.write_bytes(b"x")
 
     monkeypatch.setattr(ing, "_snapshot_download_with_retries", fake_dl)
     monkeypatch.setattr(ing, "install_hf_http_timeouts", lambda: None)
     src = ing.ingest_huggingface("ResembleAI/chatterbox", tmp_path / "d", plan=plan)
     assert src.repo_spec["library_name"] == ""
     assert src.metadata["multi_weight_bundle"] == "true"
+    assert src.attrs["dtype"] == "bf16"
+
+    from gen_worker.convert.clone import OutputSpec, build_flavor_tree
+
+    tree, attrs = build_flavor_tree(
+        src,
+        OutputSpec(dtype="source", file_layout="singlefile", file_type="safetensors"),
+        tmp_path / "source-flavor",
+    )
+    assert attrs["dtype"] == "bf16"
+    assert len(list(tree.glob("*.safetensors"))) == 3
 
 
 def test_gguf_multiquant_repo_size_gate_on_selected_set() -> None:

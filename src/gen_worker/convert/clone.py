@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import fcntl
 import hashlib
+import json
 import logging
 import os
 import re
@@ -158,16 +159,104 @@ def normalize_outputs(values: Iterable[Any] | None, *, layout_hint: str = "diffu
 # Flavor tree construction
 # ---------------------------------------------------------------------------
 
-def _stage_oversize_safetensors(tree: Path) -> None:
-    """Replace any >5 GB safetensors in the tree with HF-convention byte-offset
-    shards + index (raw copy, no decode)."""
+def _reshard_indexed_safetensors(index_path: Path, max_shard_bytes: int) -> None:
+    """Reshard one existing HF shard group without invalidating its index."""
+    payload = json.loads(index_path.read_text(encoding="utf-8"))
+    weight_map = payload.get("weight_map")
+    if not isinstance(weight_map, dict) or not weight_map:
+        raise ValueError(f"invalid safetensors index: {index_path}")
+    member_names = sorted({str(name) for name in weight_map.values()})
+    if any(Path(name).name != name for name in member_names):
+        raise ValueError(f"safetensors index member must be a basename: {index_path}")
+    members = [index_path.parent / name for name in member_names]
+    if not all(member.is_file() for member in members):
+        raise ValueError(f"safetensors index references a missing shard: {index_path}")
+    if not any(member.stat().st_size > max_shard_bytes for member in members):
+        return
+
+    prefix = index_path.name.removesuffix(".safetensors.index.json")
+    stage = index_path.parent / f".__reshard__{prefix}"
+    shutil.rmtree(stage, ignore_errors=True)
+    stage.mkdir()
+    pieces: list[tuple[Path, set[str]]] = []
+    try:
+        for member_number, (member_name, member) in enumerate(
+            zip(member_names, members), start=1,
+        ):
+            expected = {str(tensor) for tensor, shard in weight_map.items()
+                        if str(shard) == member_name}
+            if member.stat().st_size <= max_shard_bytes:
+                linked = stage / f"part-{member_number:05d}.safetensors"
+                os.link(member, linked)
+                pieces.append((linked, expected))
+                continue
+
+            shard_paths, nested_index, _ = shard_safetensors_by_offset(
+                member,
+                stage / f"part-{member_number:05d}",
+                max_shard_bytes=max_shard_bytes,
+                shard_prefix=f"part-{member_number:05d}",
+            )
+            nested_map = json.loads(nested_index.read_text(encoding="utf-8")).get(
+                "weight_map")
+            if not isinstance(nested_map, dict) or set(map(str, nested_map)) != expected:
+                raise ValueError(f"reshard tensor map disagrees with {index_path}")
+            for shard_path in shard_paths:
+                tensors = {str(tensor) for tensor, shard in nested_map.items()
+                           if str(shard) == shard_path.name}
+                pieces.append((shard_path, tensors))
+
+        new_weight_map: dict[str, str] = {}
+        final_pieces: list[tuple[Path, str]] = []
+        total = len(pieces)
+        for number, (piece, tensors) in enumerate(pieces, start=1):
+            name = f"{prefix}-{number:05d}-of-{total:05d}.safetensors"
+            destination = index_path.parent / name
+            if destination.exists() and destination not in members:
+                raise ValueError(f"reshard destination already exists: {destination}")
+            staged = stage / name
+            piece.rename(staged)
+            final_pieces.append((staged, name))
+            for tensor in tensors:
+                new_weight_map[tensor] = name
+        if set(new_weight_map) != set(map(str, weight_map)):
+            raise ValueError(f"reshard lost tensors from {index_path}")
+
+        new_payload = dict(payload)
+        new_payload["weight_map"] = new_weight_map
+        staged_index = stage / index_path.name
+        staged_index.write_text(
+            json.dumps(new_payload, separators=(",", ":"), sort_keys=True),
+            encoding="utf-8",
+        )
+        for member in members:
+            member.unlink()
+        for staged, name in final_pieces:
+            staged.replace(index_path.parent / name)
+        staged_index.replace(index_path)
+    finally:
+        shutil.rmtree(stage, ignore_errors=True)
+
+
+def _stage_oversize_safetensors(
+    tree: Path, *, max_shard_bytes: int = MAX_SAFETENSORS_SHARD_BYTES,
+) -> None:
+    """Reshard oversized safetensors by logical HF weight group."""
+    indexed_members: set[Path] = set()
+    for index_path in sorted(tree.rglob("*.safetensors.index.json")):
+        _reshard_indexed_safetensors(index_path, max_shard_bytes)
+        payload = json.loads(index_path.read_text(encoding="utf-8"))
+        weight_map = payload.get("weight_map")
+        if isinstance(weight_map, dict):
+            indexed_members.update(
+                index_path.parent / str(name) for name in weight_map.values())
     for f in sorted(tree.rglob("*.safetensors")):
-        if not f.is_file() or f.stat().st_size <= MAX_SAFETENSORS_SHARD_BYTES:
+        if f in indexed_members or not f.is_file() or f.stat().st_size <= max_shard_bytes:
             continue
         stem = f.stem
         stage = f.parent / f".__shard__{stem}"
         shard_paths, index_path, _ = shard_safetensors_by_offset(
-            f, stage, shard_prefix=stem)
+            f, stage, max_shard_bytes=max_shard_bytes, shard_prefix=stem)
         if len(shard_paths) > 1:
             f.unlink()
             for sp in shard_paths:
@@ -481,36 +570,133 @@ class CloneDiskSpaceError(RuntimeError):
     actionably instead of ENOSPC minutes into a 40GB download (gw#462)."""
 
 
-# Free space required = source_bytes x headroom: the source snapshot and each
-# converted flavor tree (+ repack temp) coexist on disk during publish.
-_DISK_HEADROOM_DEFAULT = 2.5
 _DISK_MARGIN_BYTES = 2 * 1024**3
+_PUBLISH_AS_IS_STRATEGIES = frozenset({
+    "transformers", "peft", "sentence_transformers", "gguf", "native_lora",
+    "pipeline_tree",
+})
+_DIRECT_GGUF_ENCODINGS = frozenset({"f32", "f16", "bf16", "q8_0"})
+_DTYPE_STORAGE_BITS = {
+    "fp32": 32, "f32": 32, "float32": 32,
+    "bf16": 16, "fp16": 16, "f16": 16, "float16": 16,
+    "fp8": 8, "fp8:e5m2": 8, "q8_0": 8,
+    "q6_k": 6,
+    "q5_k_m": 5, "q5_k_s": 5,
+    "nvfp4": 4, "int4": 4, "int4:nf4": 4, "int4:fp4": 4,
+    "nf4": 4, "fp4": 4, "q4_k_m": 4, "q4_k_s": 4, "q4_0": 4,
+    "q4_1": 4,
+    "q3_k_m": 3, "q3_k_s": 3,
+    "q2_k": 2,
+}
 
 
-def _preflight_disk(workdir: Path, plan: Any) -> None:
+def _preflight_disk(workdir: Path, plan: Any, specs: list[OutputSpec]) -> None:
     """Fail fast when the disk cannot fit the clone. The source plan knows
     every selected file's size before a byte is downloaded (HF list_repo_tree
-    / civitai version API); no plan (metadata fetch failed) skips the check
-    (fail-open — the download surfaces its own error)."""
+    / civitai version API). The bound covers plan-known files; a repackage
+    tool that fetches missing base components can still fail on its provider
+    download. An unavailable plan skips the check (fail-open)."""
     if plan is None:
         return
     try:
-        source_bytes = sum(int(size) for _, size, _ in plan.bank_files())
+        files = [(str(path), int(size)) for path, size, _ in plan.bank_files()]
+        source_bytes = sum(size for _, size in files)
+        provider = str(getattr(plan, "provider", "") or "").strip().lower()
+        classification = getattr(plan, "classification", None)
+        strategy = str(getattr(classification, "strategy", "") or "").strip().lower()
+        raw_attrs = getattr(classification, "attrs", None)
+        attrs = {
+            str(k): str(v).strip().lower()
+            for k, v in (raw_attrs.items() if isinstance(raw_attrs, dict) else ())
+        }
+        if classification is None and provider == "civitai":
+            source_type = (
+                "gguf" if files and all(path.lower().endswith(".gguf")
+                                        for path, _ in files)
+                else "safetensors"
+            )
+            attrs = {"file_layout": "singlefile", "file_type": source_type}
+            if source_type == "gguf":
+                strategy = "gguf"
     except Exception:  # noqa: BLE001 — preflight is best-effort on odd plans
         return
     if source_bytes <= 0:
         return
-    headroom = float(os.environ.get("COZY_CONVERT_DISK_HEADROOM", "") or _DISK_HEADROOM_DEFAULT)
-    required = int(source_bytes * headroom) + _DISK_MARGIN_BYTES
+
+    if strategy in _PUBLISH_AS_IS_STRATEGIES:
+        required = source_bytes + _DISK_MARGIN_BYTES
+        operation = f"{strategy} publishes the source tree directly"
+    else:
+        source_layout = attrs.get("file_layout", "")
+        source_dtype = attrs.get("dtype", "")
+        source_type = attrs.get("file_type", "") or (
+            "gguf" if any(path.lower().endswith(".gguf") for path, _ in files)
+            else "safetensors"
+        )
+        passthrough = [
+            spec for spec in specs
+            if source_layout and spec.file_layout == source_layout
+            and spec.file_type == source_type
+            and (spec.dtype == "source" or (source_dtype and spec.dtype == source_dtype))
+        ]
+        materialized = [spec for spec in specs if spec not in passthrough]
+        resharded_bytes = len(passthrough) * sum(
+            size for path, size in files
+            if path.lower().endswith(".safetensors")
+            and size > MAX_SAFETENSORS_SHARD_BYTES
+        )
+        # Untagged safetensors may still be a packed 4-bit tree. Mirrors do
+        # not use this estimate; explicit widening conversions do.
+        source_bits = _DTYPE_STORAGE_BITS.get(source_dtype, 4)
+        output_sizes = [
+            source_bytes if _DTYPE_STORAGE_BITS.get(spec.dtype, source_bits) <= source_bits
+            else (
+                source_bytes * _DTYPE_STORAGE_BITS[spec.dtype] + source_bits - 1
+            ) // source_bits
+            for spec in materialized
+        ]
+        gguf_intermediate = max(
+            (
+                (source_bytes * 16 + source_bits - 1) // source_bits
+                for spec in materialized
+                if spec.file_type == "gguf"
+                and spec.dtype not in _DIRECT_GGUF_ENCODINGS
+            ),
+            default=0,
+        )
+        repack = max(
+            (
+                size for spec, size in zip(materialized, output_sizes)
+                if spec.file_type != "gguf"
+                and source_layout and spec.file_layout != source_layout
+            ),
+            default=0,
+        )
+        required = (
+            source_bytes + sum(output_sizes) + gguf_intermediate
+            + resharded_bytes + repack + _DISK_MARGIN_BYTES
+        )
+        parts = []
+        if passthrough:
+            parts.append("hardlink passthrough")
+        if materialized:
+            parts.append(f"{len(materialized)} materialized output tree(s)")
+        if resharded_bytes:
+            parts.append("oversize-safetensors reshard output")
+        if gguf_intermediate:
+            parts.append("one intermediate F16 GGUF tree")
+        if repack:
+            parts.append("one layout-repack tree")
+        operation = ", ".join(parts) or "source tree"
+
     free = shutil.disk_usage(workdir).free
     if free < required:
         gib = float(1024**3)
         raise CloneDiskSpaceError(
             f"not enough disk for clone: need ~{required / gib:.1f} GiB free "
-            f"(source {source_bytes / gib:.1f} GiB x {headroom:g} headroom "
-            f"+ {_DISK_MARGIN_BYTES / gib:.0f} GiB margin), have {free / gib:.1f} GiB "
+            f"(source {source_bytes / gib:.1f} GiB; {operation}; "
+            f"{_DISK_MARGIN_BYTES / gib:.0f} GiB margin), have {free / gib:.1f} GiB "
             f"at {workdir}")
-
 
 def _sweep_stale_workdirs(base: Path, *, keep: Optional[Path] = None) -> None:
     """Remove clone scratch left by crashed predecessors: dirs whose flock is
@@ -676,7 +862,7 @@ def run_clone(
 
         # gw#462: the plan already knows every selected file's size — fail
         # fast on an undersized disk instead of ENOSPC mid-download.
-        _preflight_disk(workdir, plan)
+        _preflight_disk(workdir, plan, specs)
 
         _progress(0.05, "clone.ingest")
         dl_bytes = {"done": 0}
@@ -716,10 +902,7 @@ def run_clone(
         # Non-diffusers-class sources publish as-is; extra output specs that
         # would need conversion are refused per-flavor, not per-job.
         strategy = source.classification.strategy if source.classification is not None else ""
-        publish_as_is = strategy in {
-            "transformers", "peft", "sentence_transformers", "gguf", "native_lora",
-            "pipeline_tree",
-        }
+        publish_as_is = strategy in _PUBLISH_AS_IS_STRATEGIES
 
         for i, spec in enumerate(specs):
             flavor_label = spec.dtype

@@ -44,28 +44,20 @@ def _tiny_unet_fp16_tree(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def _reshard_old_convention(tree: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _reshard_old_convention(tree: Path) -> None:
     """Run the REAL resharder with a tiny threshold — this is exactly how the
     live mirrors got their old-convention index names."""
-    from gen_worker.convert.writer import shard_safetensors_by_offset
-
-    monkeypatch.setattr(clone_mod, "MAX_SAFETENSORS_SHARD_BYTES", 16 * 1024)
-    monkeypatch.setattr(
-        clone_mod, "shard_safetensors_by_offset",
-        lambda f, stage, **kw: shard_safetensors_by_offset(
-            f, stage, max_shard_bytes=16 * 1024, **kw),
-    )
-    clone_mod._stage_oversize_safetensors(tree)
+    clone_mod._stage_oversize_safetensors(tree, max_shard_bytes=16 * 1024)
 
 
 class TestShardedVariantIndex:
     def test_old_convention_tree_is_unloadable_by_real_diffusers(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self, tmp_path: Path,
     ) -> None:
         """Negative control: the pre-fix tree shape dies exactly like the
         live sdxl-base mirror did."""
         tree = _tiny_unet_fp16_tree(tmp_path)
-        _reshard_old_convention(tree, monkeypatch)
+        _reshard_old_convention(tree)
         old_idx = tree / "unet" / "diffusion_pytorch_model.fp16.safetensors.index.json"
         assert old_idx.exists(), "resharder no longer composes the old name?"
 
@@ -75,10 +67,10 @@ class TestShardedVariantIndex:
             UNet2DConditionModel.from_pretrained(tree / "unet", variant="fp16")
 
     def test_canonical_tree_loads_with_real_diffusers(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+        self, tmp_path: Path,
     ) -> None:
         tree = _tiny_unet_fp16_tree(tmp_path)
-        _reshard_old_convention(tree, monkeypatch)
+        _reshard_old_convention(tree)
         normalize_variant_filenames(tree)
 
         unet_dir = tree / "unet"
