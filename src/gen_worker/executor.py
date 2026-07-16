@@ -2448,8 +2448,9 @@ class Executor:
         """Hub-attached compiled-artifact snapshot for this endpoint's family
         (#569 boot-attach, opt-in hub-side): a TRT engine cell (#390,
         preferred — bigger measured win) or an inductor cache cell. Returns
-        the local artifact path, or None — missing/unusable snapshots mean
-        eager, never an error."""
+        the local artifact path, or None. A plain lane may continue eager;
+        W8A8 setup subsequently fails retryably unless this returns an exact
+        W8A8 Forge cell."""
         if spec.compile is None or not snapshots:
             return None
         from . import compile_cache, trt_engine
@@ -2486,6 +2487,7 @@ class Executor:
             ] + [
                 (ref, snap) for ref, snap in snapshots.items()
                 if compile_cache.is_cache_ref(ref, family)
+                and compile_cache.cell_lane(ref) != "w8a8"
             ]
         for ref, snap in candidates:
             try:

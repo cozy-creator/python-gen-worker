@@ -51,12 +51,8 @@ class Settings(msgspec.Struct, frozen=True, kw_only=True):
     # Runtime introspection (set by the RunPod runtime; not configuration).
     runpod_pod_id: str = ""
 
-    # Provenance stamped into WorkerResources by the image build / launcher.
-    # TODO(pgw#514/P4): nothing produces WORKER_IMAGE_DIGEST today (verified
-    # against gen-orchestrator/tensorhub/e2e — no launcher sets it), so this
-    # is always "" in production and the Go scaling-profile key that reads
-    # it (profiles.go) always sees an empty digest. Kept because tensorhub
-    # may start stamping it at pod-launch time; drop if that never lands.
+    # Immutable image provenance stamped by Tensorhub from the release image
+    # variant it selected for this pod.
     worker_image_digest: str = ""  # WORKER_IMAGE_DIGEST
 
     # tensorhub access for standalone clients (run/serve/prefetch). Production

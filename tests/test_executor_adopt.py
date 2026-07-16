@@ -410,6 +410,34 @@ def test_fetch_compile_snapshot_selects_exact_w8a8_lane(tmp_path):
     assert seen == [w8a8_ref]
 
 
+def test_fetch_compile_snapshot_plain_lane_ignores_w8a8_cell(tmp_path):
+    spec = _spec()
+    ex, _sent = _wire_executor(spec, tmp_path)
+    plain = tmp_path / "plain"
+    w8a8 = tmp_path / "w8a8"
+    plain.mkdir()
+    w8a8.mkdir()
+    wanted = plain / "plain.tar.gz"
+    wanted.write_bytes(b"plain")
+    (w8a8 / "w8a8.tar.gz").write_bytes(b"w8a8")
+    seen: list[str] = []
+
+    async def _ensure(ref, snapshot=None, *, binding=None):
+        seen.append(ref)
+        return w8a8 if ref.endswith("-w8a8") else plain
+
+    ex.store.ensure_local = _ensure  # type: ignore[method-assign]
+    plain_ref = f"_system/family-{FAMILY}#inductor-rtx-4090-torch2.9"
+    w8a8_ref = plain_ref + "-w8a8"
+    snapshots = {
+        w8a8_ref: pb.Snapshot(),
+        plain_ref: pb.Snapshot(),
+    }
+    got = asyncio.run(ex._fetch_compile_snapshot(spec, snapshots))
+    assert got == wanted
+    assert seen == [plain_ref]
+
+
 def test_prepare_with_explicit_artifact_seeds(tmp_path, monkeypatch):
     monkeypatch.delenv(cc.ENV_CACHE_PATH, raising=False)
     monkeypatch.delenv(cc.ENV_CACHE_URL, raising=False)
