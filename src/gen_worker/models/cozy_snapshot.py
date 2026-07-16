@@ -8,11 +8,13 @@ import os
 import re
 import shutil
 import threading
+import time
+import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set
 
-from .cozy_cas import _download_one_file as _download_one_file
-from .cozy_cas import _norm_rel_path
+from .cozy_cas import _blake3_file, _download_one_file as _download_one_file
+from .cozy_cas import _norm_rel_path, fsync_dir, fsync_file
 from .download import components_present, select_component_paths
 from .hub_client import WorkerResolvedRepo, WorkerResolvedRepoFile
 from .refs import TensorhubRef
@@ -195,6 +197,7 @@ class CozySnapshotDownloader:
         base_dir: Path,
         ref: TensorhubRef,
         *,
+        shared_base_dir: Optional[Path] = None,
         resolved: Optional[WorkerResolvedRepo],
         progress: Optional[ProgressFn] = None,
         components: Sequence[str] = (),
@@ -246,7 +249,17 @@ class CozySnapshotDownloader:
 
         try:
             _log.info("snapshot_build_start key=%s files=%d", key[:24], len(res.files))
-            await self._ensure_blobs(blobs_root, res.files, progress=progress)
+            shared_blobs_root = None
+            if shared_base_dir is not None:
+                candidate = Path(shared_base_dir) / "blobs"
+                if candidate.resolve() != blobs_root.resolve():
+                    shared_blobs_root = candidate
+            await self._ensure_blobs(
+                blobs_root,
+                res.files,
+                shared_blobs_root=shared_blobs_root,
+                progress=progress,
+            )
             # Materialization copies/concatenates multi-GB trees — strictly
             # off the event loop (gw#407: a loop blocked for the duration of
             # a snapshot build cannot answer the hub; under page-cache
@@ -310,6 +323,7 @@ class CozySnapshotDownloader:
         blobs_root: Path,
         files: List[WorkerResolvedRepoFile],
         *,
+        shared_blobs_root: Optional[Path] = None,
         progress: Optional[ProgressFn] = None,
     ) -> None:
         # Deduplicate by digest — same blob referenced by multiple paths (e.g.
@@ -377,7 +391,28 @@ class CozySnapshotDownloader:
                     _log.info("blob_shared_inflight path=%s digest=%s (sibling ref downloaded it)",
                               f.path, digest[:16])
                     return
+                if shared_blobs_root is not None:
+                    shared = _blob_path(shared_blobs_root, digest)
+                    started = time.monotonic()
+                    if await asyncio.to_thread(self._copy_verified_blob, shared, dst, f):
+                        _on_bytes(int(f.size_bytes or 0))
+                        _log.info(
+                            "blob_cache_hit source=endpoint_volume digest=%s bytes=%d transfer_ms=%d",
+                            digest[:16], int(f.size_bytes or 0),
+                            int((time.monotonic() - started) * 1000),
+                        )
+                        return
+                    _log.info("blob_cache_miss source=endpoint_volume digest=%s", digest[:16])
                 await _dl_locked(f, digest, dst)
+                if shared_blobs_root is not None:
+                    shared = _blob_path(shared_blobs_root, digest)
+                    published = await asyncio.to_thread(
+                        self._copy_verified_blob, dst, shared, f
+                    )
+                    _log.info(
+                        "blob_cache_publish source=public destination=endpoint_volume digest=%s bytes=%d published=%s",
+                        digest[:16], int(f.size_bytes or 0), published,
+                    )
 
         async def _dl_locked(f: WorkerResolvedRepoFile, digest: str, dst: Path) -> None:
             async with sem:
@@ -409,6 +444,62 @@ class CozySnapshotDownloader:
                 _log.info("blob_download_done path=%s digest=%s", f.path, digest[:16])
 
         await asyncio.gather(*(_dl(f) for f in unique))
+
+    @staticmethod
+    def _copy_verified_blob(
+        src: Path, dst: Path, f: WorkerResolvedRepoFile,
+    ) -> bool:
+        """Copy one immutable blob through a writer-unique atomic stage.
+
+        The final path is digest-only. Readers never observe partial bytes;
+        racing writers may replace the same final name only after each has
+        independently verified the declared size and BLAKE3.
+        """
+        expected_size = int(f.size_bytes or 0)
+        expected_digest = _strip_blake3_prefix(f.blake3)
+        try:
+            if not src.is_file():
+                return False
+            if expected_size and src.stat().st_size != expected_size:
+                _log.warning(
+                    "blob_cache_corrupt source=%s digest=%s reason=size expected=%d actual=%d",
+                    src, expected_digest[:16], expected_size, src.stat().st_size,
+                )
+                return False
+
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            tmp = dst.parent / (
+                f".{dst.name}.writer-{os.getpid()}-{threading.get_ident()}-{uuid.uuid4().hex}"
+            )
+            try:
+                with src.open("rb") as source, tmp.open("xb") as staged:
+                    shutil.copyfileobj(source, staged, length=4 * 1024 * 1024)
+                    staged.flush()
+                    os.fsync(staged.fileno())
+                if expected_size and tmp.stat().st_size != expected_size:
+                    _log.warning(
+                        "blob_cache_corrupt source=%s digest=%s reason=staged_size expected=%d actual=%d",
+                        src, expected_digest[:16], expected_size, tmp.stat().st_size,
+                    )
+                    return False
+                if expected_digest and _blake3_file(tmp).lower() != expected_digest.lower():
+                    _log.warning(
+                        "blob_cache_corrupt source=%s digest=%s reason=blake3",
+                        src, expected_digest[:16],
+                    )
+                    return False
+                os.replace(tmp, dst)
+                fsync_file(dst)
+                fsync_dir(dst.parent)
+                return True
+            finally:
+                tmp.unlink(missing_ok=True)
+        except OSError as exc:
+            _log.warning(
+                "blob_cache_copy_failed source=%s destination=%s digest=%s error=%s",
+                src, dst, expected_digest[:16], exc,
+            )
+            return False
 
     @staticmethod
     def _blob_usable(dst: Path, f: WorkerResolvedRepoFile) -> bool:
@@ -535,6 +626,7 @@ def delete_blobs(base_dir: Path, digests: Any) -> None:
 async def ensure_snapshot_async(
     *,
     base_dir: Path,
+    shared_base_dir: Optional[Path] = None,
     ref: TensorhubRef,
     resolved: Optional[WorkerResolvedRepo],
     progress: Optional[ProgressFn] = None,
@@ -542,5 +634,6 @@ async def ensure_snapshot_async(
 ) -> Path:
     dl = CozySnapshotDownloader()
     return await dl.ensure_snapshot(
-        base_dir, ref, resolved=resolved, progress=progress, components=components,
+        base_dir, ref, shared_base_dir=shared_base_dir,
+        resolved=resolved, progress=progress, components=components,
     )
