@@ -33,7 +33,7 @@ this page covers the worker itself.
 | `WORKER_ID` | `worker_id` | per-pod identity |
 | `ENDPOINT_LOCK_PATH` | `endpoint_lock_path` | discovery manifest path (baked default in images) |
 | `RUNPOD_POD_ID` | `runpod_pod_id` | set by the RunPod runtime |
-| `WORKER_IMAGE_DIGEST` | `worker_image_digest` | provenance stamped by the image build — currently no launcher sets it (pgw#514/P4); kept for a future tensorhub stamp |
+| `WORKER_IMAGE_DIGEST` | `worker_image_digest` | immutable provenance stamped by Tensorhub from the selected release image variant |
 
 ## Tuning knobs (Settings fields)
 

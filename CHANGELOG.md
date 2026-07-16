@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.32.1 (2026-07-16)
+
+- **ie#496: W8A8 production requires the exact compatible Forge cell.**
+  Workers select the family cell's `-w8a8` lane instead of the first attached
+  family artifact, and cell metadata binds the loaded module/tensor graph,
+  dynamic-scaled-mm/excluded-layer schema, shape table, GPU SM, CUDA driver,
+  compiler stack, and serving-image digest. The signature deliberately omits
+  checkpoint refs, digests, and tensor values, so graph-compatible SDXL, Pony,
+  and Illustrious weights share one cell. Missing/mismatched cells and runtime
+  graph failures are retryable lane failures; they never silently claim W8A8
+  while serving eager or dequantized compute.
+
 ## 0.32.0 (2026-07-16)
 
 - **gw#557 (ie#494 W8A8 productization core): streaming per-channel-scaled

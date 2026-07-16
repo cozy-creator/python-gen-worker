@@ -8,9 +8,11 @@ inductor+triton cache dirs as a repo flavor; workers that opt in via
 ``@endpoint(compile=Compile(...))`` seed those dirs before load and hit the
 cache with no compiler and no stall.
 
-Policy: cache miss / key mismatch / no artifact => eager, never a boot stall
-or a runtime compile attempt in prod. The compile job itself opts into cold
-compilation with ``GEN_WORKER_COMPILE_ALLOW_COLD=1`` (requires a toolchain).
+Policy: cache miss / key mismatch / no artifact leaves ordinary lanes eager,
+never causing a boot stall or a runtime compile attempt in prod. A declared
+W8A8 lane instead fails retryably: eager/dequantized execution cannot claim
+W8A8. The compile job itself opts into cold compilation with
+``GEN_WORKER_COMPILE_ALLOW_COLD=1`` (requires a toolchain).
 
 Artifacts are FAMILY-keyed (settled 2026-07-06): torch.compile caches key on
 the traced graph + shapes, not the weights, so one artifact serves every
@@ -38,6 +40,7 @@ compiled from — informational, never part of the match.
 
 from __future__ import annotations
 
+import ctypes
 import functools
 import gzip
 import hashlib
@@ -52,6 +55,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
+from .api.errors import RetryableError
+
 logger = logging.getLogger(__name__)
 
 ENV_CACHE_PATH = "GEN_WORKER_COMPILE_CACHE"       # local artifact (tar) or seeded dir
@@ -59,8 +64,10 @@ ENV_CACHE_URL = "GEN_WORKER_COMPILE_CACHE_URL"    # http(s) URL to the artifact
 ENV_ALLOW_COLD = "GEN_WORKER_COMPILE_ALLOW_COLD"  # compile without an artifact (needs cc)
 
 METADATA_NAME = "metadata.json"
-# 2 (gw#391): key gained the producer gen-worker version; format-1 cells
-# (gw#384 era) demonstrably miss the FX-graph cache on current code.
+# 2 (gw#391): key gained the producer gen-worker version. ie#496 extends its
+# metadata with the canonical module graph, shape/target table and weight-lane
+# schema without gratuitously invalidating proven non-W8A8 cells. New W8A8
+# consumers require those fields; checkpoint bytes remain deliberately absent.
 ARTIFACT_FORMAT = 2
 _MARKER_ATTR = "_cozy_compile"
 _JUNK_SUFFIXES = (".lock", ".tmp", ".pid")
@@ -83,9 +90,25 @@ def sku_slug(gpu_name: str) -> str:
     return out
 
 
+def _cuda_driver_version() -> str:
+    """CUDA driver API version without shelling out to provider tooling."""
+    try:
+        lib = ctypes.CDLL("libcuda.so.1")
+        value = ctypes.c_int()
+        if lib.cuInit(0) != 0 or lib.cuDriverGetVersion(ctypes.byref(value)) != 0:
+            return ""
+        return str(int(value.value))
+    except Exception:
+        return ""
+
+
 def runtime_key() -> Dict[str, str]:
     """The consumer-side half of the cache key, probed from this process."""
-    key = {"sku": "", "torch": "", "triton": "", "cuda": ""}
+    key = {
+        "sku": "", "sm": "", "torch": "", "triton": "", "cuda": "",
+        "cuda_driver": "", "image_digest": os.environ.get(
+            "WORKER_IMAGE_DIGEST", "").strip(),
+    }
     try:
         import torch
 
@@ -93,6 +116,11 @@ def runtime_key() -> Dict[str, str]:
         key["cuda"] = str(torch.version.cuda or "")
         if torch.cuda.is_available():
             key["sku"] = sku_slug(torch.cuda.get_device_name(0))
+            major, minor = torch.cuda.get_device_capability(0)
+            key["sm"] = f"sm_{major}{minor}"
+            # CUDA's integer encoding (e.g. 13000), obtained from libcuda
+            # rather than provider-specific nvidia-smi output.
+            key["cuda_driver"] = _cuda_driver_version()
     except Exception:
         pass
     try:
@@ -168,6 +196,22 @@ def parse_cell_ref(ref: str) -> Tuple[str, str]:
     return th.repo[len("family-"):], th.flavor or ""
 
 
+def cell_lane(ref: str) -> str:
+    """The compiled weight-lane token encoded in a system-cell ref.
+
+    The flavor is human/routing metadata; artifact metadata remains the
+    authority. This narrow parser exists so a worker presented several cells
+    for one family tries the exact lane instead of whichever mapping entry
+    happened to arrive first (ie#496).
+    """
+    _family, flavor = parse_cell_ref(ref)
+    _prefix, sep, suffix = flavor.partition("-torch")
+    if not sep:
+        return ""
+    _version, sep, lane = suffix.partition("-")
+    return lane if sep else ""
+
+
 def family_from_ref(ref: str) -> str:
     """Family encoded in a compile-cache ref; '' when the ref is not a
     system-family cell ref."""
@@ -194,6 +238,8 @@ def artifact_metadata(
     storage_dtype: str = "",
     compile_mode: str = "whole",
     weight_lane: str = "",
+    graph_signature: str = "",
+    weight_contract: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Producer-side metadata for :func:`pack` (no timestamps: artifacts of
     identical content must be byte-identical). ``source_ref``/``source_digest``
@@ -221,6 +267,8 @@ def artifact_metadata(
         "storage_dtype": str(storage_dtype or ""),
         "compile_mode": str(compile_mode or "whole"),
         "weight_lane": str(weight_lane or ""),
+        "graph_signature": str(graph_signature or ""),
+        "weight_contract": dict(weight_contract or {}),
         "libs": _lib_versions(),
     }
 
@@ -236,6 +284,13 @@ def verify(meta: Dict[str, Any], *, family: str = "") -> str:
     for field in ("sku", "torch", "triton"):
         want, have = str(meta.get(field) or ""), here[field]
         if want != have:
+            return f"{field} {want!r} != runtime {have!r}"
+    # Extended runtime axes are exact when a cell records them. Old proven
+    # non-W8A8 format-2 cells remain usable; W8A8 requires every field in
+    # contract_drift below and therefore never gets this compatibility path.
+    for field in ("sm", "cuda", "cuda_driver", "image_digest"):
+        want, have = str(meta.get(field) or ""), here[field]
+        if want and want != have:
             return f"{field} {want!r} != runtime {have!r}"
     want_gw, have_gw = str(meta.get("gen_worker") or ""), gen_worker_version()
     if want_gw != have_gw:
@@ -406,6 +461,10 @@ class AdoptError(RuntimeError):
         super().__init__(detail or reason)
 
 
+class CompiledLaneUnavailableError(RetryableError):
+    """A precision lane whose production contract requires a cell is unsafe."""
+
+
 def find_artifact(root: Path) -> Optional[Path]:
     """The compile-cache tarball inside a downloaded snapshot dir (or the
     file itself)."""
@@ -556,19 +615,169 @@ def _resolve_target(pipeline: Any, target: str) -> Optional[Tuple[Any, str, Call
     return None
 
 
-def _guarded(original: Callable[..., Any], compiled: Callable[..., Any], label: str) -> Callable[..., Any]:
-    """Never fail a request on compile problems: first error permanently
-    unwraps to eager (prod images can't compile uncached shapes)."""
-    state = {"failed": False}
+def _type_name(value: Any) -> str:
+    cls = type(value)
+    return f"{cls.__module__}.{cls.__qualname__}"
+
+
+def _direct_tensor_schema(module: Any) -> list[list[Any]]:
+    """Names/shapes/dtypes only; tensor values and checkpoint IDs stay out."""
+    rows: list[list[Any]] = []
+    for kind, method in (
+        ("parameter", getattr(module, "named_parameters", None)),
+        ("buffer", getattr(module, "named_buffers", None)),
+    ):
+        if not callable(method):
+            continue
+        try:
+            tensors = method(recurse=False)
+        except TypeError:
+            tensors = method()
+        for name, tensor in tensors:
+            rows.append([
+                kind, str(name), [int(v) for v in getattr(tensor, "shape", ())],
+                str(getattr(tensor, "dtype", "")),
+            ])
+    return sorted(rows)
+
+
+def execution_contract(pipeline: Any, cfg: Any) -> Tuple[str, Dict[str, Any]]:
+    """Canonical family-graph and weight-lane contract for one loaded model.
+
+    Fine-tunes with the same module graph produce the same result: no ref,
+    tag, source/checkpoint digest or tensor value is read. A structural
+    SDXL/Pony/Illustrious incompatibility (different module class/shape or
+    different scaled-mm exclusion surface) produces a different signature
+    and is rejected before adoption.
+    """
+    graph_targets: list[Dict[str, Any]] = []
+    quantized: list[Dict[str, Any]] = []
+    excluded: list[Dict[str, Any]] = []
+    seen_modules: set[int] = set()
+
+    for target in tuple(getattr(cfg, "targets", ()) or ()):
+        resolved = _resolve_target(pipeline, str(target))
+        if resolved is None:
+            graph_targets.append({"target": str(target), "missing": True})
+            continue
+        owner, attr, _fn = resolved
+        modules: list[Dict[str, Any]] = []
+        named = getattr(owner, "named_modules", None)
+        module_rows = list(named()) if callable(named) else [("", owner)]
+        for name, module in module_rows:
+            path = f"{target}:{name}" if name else str(target)
+            modules.append({
+                "path": path,
+                "type": _type_name(module),
+                "tensors": _direct_tensor_schema(module),
+            })
+            # A target such as vae.decode can overlap another declaration;
+            # record each module once in the W8A8 manifest.
+            if id(module) in seen_modules:
+                continue
+            seen_modules.add(id(module))
+            in_features = getattr(module, "in_features", None)
+            out_features = getattr(module, "out_features", None)
+            if not isinstance(in_features, int) or not isinstance(out_features, int):
+                continue
+            row = {
+                "path": path,
+                "in_features": int(in_features),
+                "out_features": int(out_features),
+            }
+            if bool(getattr(module, "_cozy_w8a8_linear", False)):
+                row["activation"] = (
+                    "static" if getattr(module, "input_scale", None) is not None
+                    else "dynamic-per-row"
+                )
+                quantized.append(row)
+            else:
+                row["type"] = _type_name(module)
+                excluded.append(row)
+        graph_targets.append({
+            "target": str(target), "attr": str(attr), "modules": modules,
+        })
+
+    graph = {
+        "pipeline": _type_name(pipeline),
+        "targets": graph_targets,
+    }
+    encoded = json.dumps(graph, sort_keys=True, separators=(",", ":")).encode()
+    from .models.loading import pipeline_weight_lane
+
+    lane = pipeline_weight_lane(pipeline)
+    weight_contract: Dict[str, Any] = {"lane": lane}
+    if lane.startswith("w8a8"):
+        activations = sorted({str(r["activation"]) for r in quantized})
+        weight_contract.update({
+            "artifact_schema": "fp8-w8a8-v1",
+            "operator": "torch._scaled_mm",
+            "weight_scaling": "per-output-channel",
+            "activation_scaling": activations,
+            "quantized": sorted(quantized, key=lambda r: str(r["path"])),
+            "excluded": sorted(excluded, key=lambda r: str(r["path"])),
+        })
+    return hashlib.sha256(encoded).hexdigest(), weight_contract
+
+
+def contract_drift(meta: Dict[str, Any], pipeline: Any, cfg: Any) -> str:
+    """Mismatch between the cell's declared graph and the loaded consumer."""
+    shapes = sorted(
+        [int(v) for v in row] for row in getattr(cfg, "shapes", ()))
+    cell_shapes = sorted(
+        [int(v) for v in row] for row in (meta.get("shapes") or ()))
+    if cell_shapes != shapes:
+        return f"shapes {cell_shapes!r} != declared {shapes!r}"
+    targets = [str(v) for v in getattr(cfg, "targets", ())]
+    if meta.get("targets") != targets:
+        return f"targets {meta.get('targets')!r} != declared {targets!r}"
+    signature, weight_contract = execution_contract(pipeline, cfg)
+    meta_signature = str(meta.get("graph_signature") or "")
+    meta_weights = meta.get("weight_contract") or {}
+    if not meta_signature and not meta_weights and not str(
+        weight_contract.get("lane") or ""
+    ).startswith("w8a8"):
+        return ""  # legacy format-2 non-W8A8 cell
+    if meta_signature != signature:
+        return "module graph signature mismatch"
+    if meta_weights != weight_contract:
+        return "weight-lane artifact schema/exclusion manifest mismatch"
+    if str(weight_contract.get("lane") or "").startswith("w8a8"):
+        activations = weight_contract.get("activation_scaling") or []
+        if activations != ["dynamic-per-row"]:
+            return f"W8A8 activation scaling must be dynamic-per-row, got {activations!r}"
+        if not weight_contract.get("quantized"):
+            return "W8A8 graph contains no torch._scaled_mm modules"
+        for field in ("sm", "cuda", "cuda_driver", "image_digest"):
+            if not str(meta.get(field) or ""):
+                return f"W8A8 cell missing {field} identity"
+    return ""
+
+
+def _guarded(
+    original: Callable[..., Any], compiled: Callable[..., Any], label: str,
+    *, fail_closed: bool = False,
+) -> Callable[..., Any]:
+    """Guard a compiled call; W8A8 cannot silently become eager compute."""
+    state: Dict[str, Any] = {"failed": False, "detail": ""}
 
     @functools.wraps(original)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         if state["failed"]:
+            if fail_closed:
+                raise CompiledLaneUnavailableError(state["detail"])
             return original(*args, **kwargs)
         try:
             return compiled(*args, **kwargs)
         except Exception as exc:  # noqa: BLE001 — any compile failure => eager
             state["failed"] = True
+            state["detail"] = (
+                f"compiled W8A8 target {label} failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            if fail_closed:
+                logger.error("compile-cache: %s", state["detail"])
+                raise CompiledLaneUnavailableError(state["detail"]) from exc
             logger.warning(
                 "compile-cache: compiled %s failed (%s: %s); eager for the rest "
                 "of this process", label, type(exc).__name__, exc,
@@ -585,10 +794,12 @@ def _clear_regional(mod: Any) -> None:
             m._compiled_call_impl = None
 
 
-def _guarded_regional(mod: Any, original: Callable[..., Any], label: str) -> Callable[..., Any]:
+def _guarded_regional(
+    mod: Any, original: Callable[..., Any], label: str, *, fail_closed: bool = False,
+) -> Callable[..., Any]:
     """Regional analogue of :func:`_guarded`: blocks are compiled in place,
     so eager fallback must first CLEAR the block compilations, then retry."""
-    state = {"failed": False}
+    state: Dict[str, Any] = {"failed": False, "detail": ""}
 
     @functools.wraps(original)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
@@ -597,11 +808,21 @@ def _guarded_regional(mod: Any, original: Callable[..., Any], label: str) -> Cal
                 return original(*args, **kwargs)
             except Exception as exc:  # noqa: BLE001 — any compile failure => eager
                 state["failed"] = True
+                state["detail"] = (
+                    f"regional compiled W8A8 target {label} failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                if fail_closed:
+                    _clear_regional(mod)
+                    logger.error("compile-cache: %s", state["detail"])
+                    raise CompiledLaneUnavailableError(state["detail"]) from exc
                 logger.warning(
                     "compile-cache: regional-compiled %s failed (%s: %s); eager "
                     "for the rest of this process", label, type(exc).__name__, exc,
                 )
                 _clear_regional(mod)
+        if fail_closed:
+            raise CompiledLaneUnavailableError(state["detail"])
         return original(*args, **kwargs)
 
     return wrapper
@@ -623,9 +844,10 @@ def apply(
     env var, read raw — not a Settings field, see ``prepare()``). Anything
     else is a logged no-op — eager, never a stall.
 
-    ``guard=True`` (consumer): a failing compiled call permanently unwraps to
-    eager. ``guard=False`` (compile job): failures must raise, a silently
-    eager warm-up would publish an empty artifact as success.
+    ``guard=True`` (consumer): a failing ordinary compiled call permanently
+    unwraps to eager; W8A8 fails closed. ``guard=False`` (compile job): all
+    failures raise, because a silently eager warm-up would publish an empty
+    artifact as success.
     """
     if getattr(pipeline, _MARKER_ATTR, None) is not None:
         return True
@@ -666,6 +888,9 @@ def apply(
         logger.debug("compile-cache: could not raise recompile limit", exc_info=True)
 
     regional = bool(getattr(cfg, "regional", False))
+    from .models.loading import pipeline_weight_lane
+
+    fail_closed = pipeline_weight_lane(pipeline).startswith("w8a8")
     applied: list[str] = []
     originals: list[Tuple[Any, str, Callable[..., Any]]] = []
     regional_mods: list[Any] = []
@@ -685,7 +910,8 @@ def apply(
             # place; the guard wrapper clears them on the first failure.
             owner.compile_repeated_blocks(dynamic=False)
             if guard:
-                setattr(owner, attr, _guarded_regional(owner, fn, target))
+                setattr(owner, attr, _guarded_regional(
+                    owner, fn, target, fail_closed=fail_closed))
                 originals.append((owner, attr, fn))
             regional_mods.append(owner)
             applied.append(target)
@@ -702,7 +928,8 @@ def apply(
             if vae is not None:
                 vae.to(memory_format=torch.channels_last)
         compiled = torch.compile(fn, dynamic=False)
-        setattr(owner, attr, _guarded(fn, compiled, target) if guard else compiled)
+        setattr(owner, attr, _guarded(
+            fn, compiled, target, fail_closed=fail_closed) if guard else compiled)
         applied.append(target)
         originals.append((owner, attr, fn))
     if not applied:
@@ -764,7 +991,11 @@ def enable(
         getattr(cfg, "family", "") or "", cache_dir=cache_dir, artifact=artifact
     )
     if meta is not None:
-        drift = mode_drift(meta, pipeline) or lane_drift(meta, pipeline)
+        drift = (
+            mode_drift(meta, pipeline)
+            or lane_drift(meta, pipeline)
+            or contract_drift(meta, pipeline, cfg)
+        )
         if drift:
             logger.warning("compile-cache: %s; staying eager", drift)
             meta = None
@@ -776,7 +1007,15 @@ def enable(
                 "compile-cache: cell compile_mode %r != declared %r; staying "
                 "eager (graphs would miss)", have, want)
             meta = None
-    return apply(pipeline, cfg, cache_ready=meta is not None)
+    armed = apply(pipeline, cfg, cache_ready=meta is not None)
+    from .models.loading import pipeline_weight_lane
+
+    if pipeline_weight_lane(pipeline).startswith("w8a8") and not armed:
+        raise CompiledLaneUnavailableError(
+            "W8A8 requires an exact compatible Forge cell; eager/dequantized "
+            "execution is not a W8A8 production lane"
+        )
+    return armed
 
 
 # ---------------------------------------------------------------------------
@@ -838,6 +1077,7 @@ def build(
     steps: int = 2,
     prompt: str = "cache warm-up: a lighthouse on a cliff at dawn, detailed",
     declared_vram_gb: float = 0.0,
+    serving_image_digest: str = "",
 ) -> Tuple[Path, Dict[str, Any], Dict[str, float]]:
     """Compile a diffusers pipeline over ``shapes`` and package the resulting
     inductor+triton caches as a per-SKU artifact.
@@ -916,6 +1156,7 @@ def build(
 
     from .models.loading import pipeline_weight_lane
 
+    graph_signature, weight_contract = execution_contract(pipe, cfg)
     meta = artifact_metadata(
         family=family, source_ref=source_ref, source_digest=source_digest,
         shapes=cfg.shapes, targets=cfg.targets,
@@ -925,7 +1166,15 @@ def build(
         # gw#534: the lane the pipeline ACTUALLY traced under — the loader may
         # have upgraded a requested fp8 cast to bf16-resident on this pod.
         weight_lane=pipeline_weight_lane(pipe),
+        graph_signature=graph_signature,
+        weight_contract=weight_contract,
     )
+    if serving_image_digest:
+        # The producer image contains a compiler; the graph is consumed by
+        # the endpoint's serving image. Tensorhub supplies that immutable OCI
+        # digest from the release, so it—not the producer container—is the
+        # identity the worker must match.
+        meta["image_digest"] = str(serving_image_digest).strip()
     label = flavor_label(meta["sku"], meta["torch"], meta.get("weight_lane", ""))
     artifact = pack(capture_root, out_dir / f"{label}.tar.gz", meta)
     return artifact, meta, timings
@@ -934,6 +1183,7 @@ def build(
 __all__ = [
     "ARTIFACT_FORMAT",
     "AdoptError",
+    "CompiledLaneUnavailableError",
     "build",
     "ENV_ALLOW_COLD",
     "ENV_CACHE_PATH",
@@ -941,8 +1191,11 @@ __all__ = [
     "apply",
     "artifact_metadata",
     "capture_env",
+    "cell_lane",
+    "contract_drift",
     "counters_delta",
     "enable",
+    "execution_contract",
     "family_from_ref",
     "parse_cell_ref",
     "find_artifact",
