@@ -232,7 +232,7 @@ def enable_compiled(
         if not reason:
             # the exact delivered-cell consumer path (verify + drift + arm)
             if cc.enable(pipe, cfg, cache_dir, artifact=target):
-                logger.info("local-cells: adopted stored cell %s", target)
+                _say(f"local-cells: adopted stored cell {target.name}")
                 return True
             reason = "seed/arm failed"
         _say(f"local-cells: stored cell no longer matches ({reason}); re-minting")
