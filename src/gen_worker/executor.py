@@ -2766,8 +2766,10 @@ class Executor:
 
         fallback = None
         if spec is not None:
-            def fallback(s: EndpointSpec = spec) -> bool:
-                return self._serve_offload_fallback(s, pipe, ref)
+            bound_spec = spec
+
+            def fallback() -> bool:
+                return self._serve_offload_fallback(bound_spec, pipe, ref)
         return arm_lane_gate(pipe, LaneGate(
             ref=ref, residency=self.store.residency, label=ref,
             retry_exc=RetryableError, offload_fallback=fallback,
