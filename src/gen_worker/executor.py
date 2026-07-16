@@ -10,6 +10,7 @@ asyncio loop; sync tenant code runs in threads via asyncio.to_thread.
 from __future__ import annotations
 
 import asyncio
+import gc
 import itertools
 import logging
 import os
@@ -987,6 +988,23 @@ class _ClassRecord:
     stale: bool = False
 
 
+@dataclass
+class _HostRamBlock:
+    """One exact, still-unsatisfied host-RAM admission observation."""
+
+    failure_event: pb.ModelEvent
+    last_available_bytes: int
+
+
+def _canonical_host_ram_refs(refs: typing.Iterable[str]) -> List[str]:
+    """Keep only canonical model refs suitable for protocol evidence."""
+    return list(dict.fromkeys(
+        ref
+        for value in refs
+        if (ref := str(value or "").strip()) and not ref.startswith("shared::")
+    ))
+
+
 def _shared_loader_must_hit() -> Any:
     """acquire_shared loader for peeked keys (gw#479): the object was seen in
     the cache under the load lock, so a miss here is a bookkeeping bug."""
@@ -1107,6 +1125,25 @@ class Executor:
         # Model loads/promotions serialize so allocator-delta measurements
         # and free-VRAM reads don't cross-contaminate (#369).
         self._load_lock = asyncio.Lock()
+        # pgw#548: worker-local capacity blocks retain the exact numeric
+        # requirement that failed. They are cleared only by a later measured
+        # observation after owner/pin release; no timer or prose retry path.
+        self._host_ram_lock = asyncio.Lock()
+        self._host_ram_send_lock = asyncio.Lock()
+        self._host_ram_generation = 0
+        self._host_ram_blocks: Dict[str, _HostRamBlock] = {}
+        # Commit-ordered, latest-per-ref producer outbox. Transport capacity
+        # enqueue is nonblocking, but this outbox still makes global generation
+        # order explicit under concurrent failure/progress producers.
+        self._host_ram_outbox: Dict[str, pb.ModelEvent] = {}
+        # Active failures survive until residency or measured satisfaction.
+        # Satisfied progress survives only until its exact generation completes
+        # stream.write; before delivery it replays after reconnect because
+        # Transport.reset_for_reconnect() intentionally sheds transient lanes.
+        # Once progress satisfies a block its failure is no longer replayed:
+        # older hubs ignore the additive progress enum and must not be handed a
+        # stale FAILED that they can never clear.
+        self._host_ram_progress: Dict[str, pb.ModelEvent] = {}
         # Parsed per-request LoRA state dicts, keyed by ref@digest (gw#393).
         self._adapter_cache = lora_util.AdapterCache()
         # Adapters attached to resident pipelines; requests toggle the active
@@ -1809,6 +1846,7 @@ class Executor:
                 if obj is not None or ref not in rec.held_objects:
                     rec.held_objects[ref] = obj
             rec.stale = False
+            await self._clear_host_ram_capacity(list(slot_refs.values()))
         return instance
 
     def _register_residency(
@@ -1911,6 +1949,175 @@ class Executor:
             if isinstance(ann, type) and callable(getattr(ann, "from_pretrained", None))
         }
 
+    async def _record_host_ram_failure(
+        self, refs: List[str], error: InsufficientHostRamError,
+    ) -> None:
+        """Publish and retain one typed capacity block per causal ref."""
+        causal_refs = sorted(_canonical_host_ram_refs(refs))
+        if not causal_refs:
+            return
+        evicted = _canonical_host_ram_refs(error.evicted_refs)
+        async with self._host_ram_lock:
+            self._host_ram_generation += 1
+            generation = self._host_ram_generation
+            for ref in causal_refs:
+                event = pb.ModelEvent(
+                    ref=ref,
+                    state=pb.MODEL_STATE_FAILED,
+                    error=error.reason,
+                    host_ram_required_bytes=error.required_bytes,
+                    host_ram_available_before_bytes=error.available_before_bytes,
+                    host_ram_available_after_bytes=error.available_after_bytes,
+                    host_ram_evicted_refs=evicted,
+                    host_ram_capacity_generation=generation,
+                )
+                self._host_ram_progress.pop(ref, None)
+                self._host_ram_blocks[ref] = _HostRamBlock(
+                    failure_event=event,
+                    last_available_bytes=error.available_after_bytes,
+                )
+                self._queue_host_ram_event_locked(event)
+        # Commit every causal ref before exposing the first event, and never
+        # hold the state lock across a potentially backpressured/cancelled send.
+        await self._flush_host_ram_outbox()
+
+    def _queue_host_ram_event_locked(self, event: pb.ModelEvent) -> None:
+        self._host_ram_outbox.pop(event.ref, None)
+        self._host_ram_outbox[event.ref] = event
+
+    async def _flush_host_ram_outbox(self) -> None:
+        """Serialize committed generations without holding the state lock."""
+        async with self._host_ram_send_lock:
+            while True:
+                async with self._host_ram_lock:
+                    if not self._host_ram_outbox:
+                        return
+                    event = next(iter(self._host_ram_outbox.values()))
+                await self._send(pb.WorkerMessage(model_event=event))
+                async with self._host_ram_lock:
+                    current = self._host_ram_outbox.get(event.ref)
+                    if current is not None and current == event:
+                        self._host_ram_outbox.pop(event.ref, None)
+
+    async def _observe_host_ram_progress(
+        self,
+        released_refs: List[str],
+        *,
+        collect_host: bool = False,
+    ) -> None:
+        """Emit progress only when a release measurably satisfies a block.
+
+        Callers invoke this after an owner record or execution pin has been
+        released. A release that leaves headroom unchanged or still below the
+        exact remembered requirement only advances the local numeric baseline;
+        it never wakes the orchestrator.
+        """
+        released = _canonical_host_ram_refs(released_refs)
+        # Let the RunJob pin/teardown frame release its references before the
+        # host-only cgroup probe. This is a yield, not a retry timer. In
+        # particular, do not call flush_memory here: it mutates CUDA cache and
+        # resets peak-memory metrics even for an ordinary RunJob pin release.
+        await asyncio.sleep(0)
+        async with self._host_ram_lock:
+            if not self._host_ram_blocks:
+                return
+            if collect_host:
+                # Actual endpoint teardown can leave cyclic host objects after
+                # all explicit owners are cleared. Collect host objects only;
+                # flush_memory would also mutate CUDA cache/peak metrics.
+                await asyncio.to_thread(gc.collect)
+            observed = await asyncio.to_thread(self.store.residency.host_ram_headroom, 0)
+            available = observed.available_bytes
+            satisfied: List[Tuple[str, _HostRamBlock]] = []
+            for ref, block in sorted(self._host_ram_blocks.items()):
+                previous = block.last_available_bytes
+                if available <= previous:
+                    # Keep the immediately preceding observation exact. A
+                    # later event must prove a positive change from this real
+                    # state, not from a stale high-water mark.
+                    block.last_available_bytes = available
+                    continue
+                required = int(block.failure_event.host_ram_required_bytes)
+                if available < required:
+                    block.last_available_bytes = available
+                    continue
+                satisfied.append((ref, block))
+            if not satisfied:
+                return
+
+            self._host_ram_generation += 1
+            generation = self._host_ram_generation
+            events: List[Tuple[str, pb.ModelEvent]] = []
+            for ref, block in satisfied:
+                event = pb.ModelEvent(
+                    ref=ref,
+                    state=pb.MODEL_STATE_HOST_CAPACITY_PROGRESS,
+                    host_ram_required_bytes=block.failure_event.host_ram_required_bytes,
+                    host_ram_available_before_bytes=block.last_available_bytes,
+                    host_ram_available_after_bytes=available,
+                    host_ram_evicted_refs=released,
+                    host_ram_capacity_generation=generation,
+                )
+                # Cache/pop before enqueue: a transport rotation cannot lose
+                # the satisfying observation; HelloAck replays this generation.
+                self._host_ram_progress[ref] = event
+                self._host_ram_blocks.pop(ref, None)
+                self._queue_host_ram_event_locked(event)
+                events.append((ref, event))
+        # As with failures, every satisfied ref is committed atomically before
+        # the first send and remains replayable if this task is cancelled.
+        await self._flush_host_ram_outbox()
+        for ref, event in events:
+            logger.info(
+                "host-RAM capacity progressed ref=%s generation=%d "
+                "required=%d available_before=%d available_after=%d released_refs=%s",
+                ref,
+                generation,
+                event.host_ram_required_bytes,
+                event.host_ram_available_before_bytes,
+                event.host_ram_available_after_bytes,
+                list(event.host_ram_evicted_refs),
+            )
+
+    async def _clear_host_ram_capacity(self, refs: List[str]) -> None:
+        """Drop stale block/replay state after the ref is actually resident."""
+        async with self._host_ram_lock:
+            for ref in refs:
+                self._host_ram_blocks.pop(ref, None)
+                self._host_ram_progress.pop(ref, None)
+            ref_set = set(refs)
+            for ref in ref_set:
+                self._host_ram_outbox.pop(ref, None)
+
+    async def host_ram_capacity_delivered(self, event: pb.ModelEvent) -> None:
+        """Retire only matching satisfied evidence after stream.write succeeds."""
+        if event.state != pb.MODEL_STATE_HOST_CAPACITY_PROGRESS:
+            return
+        async with self._host_ram_lock:
+            current = self._host_ram_progress.get(event.ref)
+            if (
+                current is not None
+                and current.host_ram_capacity_generation
+                == event.host_ram_capacity_generation
+            ):
+                self._host_ram_progress.pop(event.ref, None)
+
+    async def host_ram_capacity_replay(self) -> List[pb.WorkerMessage]:
+        """Snapshot active failures, then undelivered progress, for reconnect."""
+        async with self._host_ram_lock:
+            failures = sorted(
+                (block.failure_event for block in self._host_ram_blocks.values()),
+                key=lambda event: (event.host_ram_capacity_generation, event.ref),
+            )
+            progress = sorted(
+                self._host_ram_progress.values(),
+                key=lambda event: (event.host_ram_capacity_generation, event.ref),
+            )
+            return [
+                pb.WorkerMessage(model_event=event)
+                for event in [*failures, *progress]
+            ]
+
     async def _ensure_host_ram_for(self, spec: EndpointSpec, paths: Dict[str, str]) -> None:
         """Owner-aware host-RAM admission (gw#407/pgw#541). ``from_pretrained``
         stages the full weight set in host RAM before placement; loading into
@@ -1975,14 +2182,15 @@ class Executor:
                     held for held in self._record_refs(rec)
                     if res.tier(held) in (residency_mod.Tier.RAM, residency_mod.Tier.VRAM)
                 ]
-                await self._vacate_record(rec)
-                evicted.extend(owned)
+                released = await self._vacate_record(rec)
+                evicted.extend(released)
                 logger.info(
                     "host-RAM admission vacated warm record refs=%s for %s",
-                    owned, spec.name,
+                    released or owned, spec.name,
                 )
             elif await asyncio.to_thread(res.release_to_disk, ref):
-                evicted.append(ref)
+                released = [ref]
+                evicted.extend(released)
                 logger.info(
                     "host-RAM admission released ownerless warm ref=%s for %s",
                     ref, spec.name,
@@ -1995,6 +2203,8 @@ class Executor:
             await asyncio.sleep(0)
             await asyncio.to_thread(flush_memory)
             after = await asyncio.to_thread(res.host_ram_headroom, incoming)
+            if rec is None:
+                await self._observe_host_ram_progress(released)
             if after.sufficient:
                 return
 
@@ -2005,17 +2215,12 @@ class Executor:
             required_bytes=after.required_bytes,
             available_before_bytes=before.available_bytes,
             available_after_bytes=after.available_bytes,
-            evicted_refs=tuple(dict.fromkeys(evicted)),
+            evicted_refs=tuple(_canonical_host_ram_refs(evicted)),
         )
         # th#807: model-failure state is the scheduler's typed capacity seam.
         # Only the largest sequentially staged ref(s) caused this admission
         # decision; failing a smaller shared VAE would poison unrelated jobs.
-        for ref in dict.fromkeys(incoming_refs):
-            await self._send(pb.WorkerMessage(model_event=pb.ModelEvent(
-                ref=ref,
-                state=pb.MODEL_STATE_FAILED,
-                error=error.reason,
-            )))
+        await self._record_host_ram_failure(incoming_refs, error)
         raise error
 
     async def _make_room_for(self, spec: EndpointSpec, setup_slots: List[str]) -> None:
@@ -2644,10 +2849,12 @@ class Executor:
                 return True
         return False
 
-    async def _vacate_record(self, rec: _ClassRecord) -> None:
-        """Tear an instance down; publish refs with no remaining owner."""
+    async def _vacate_record(self, rec: _ClassRecord) -> List[str]:
+        """Tear an instance down and return refs whose owner was released."""
         held_refs = self._record_refs(rec)
         held_objects = rec.held_objects
+        released_refs: List[str] = []
+        old_obj: Any = None
         inst, rec.instance, rec.ready = rec.instance, None, False
         shutdown = getattr(inst, "shutdown", None)
         if inst is not None and callable(shutdown):
@@ -2658,10 +2865,15 @@ class Executor:
                     await asyncio.to_thread(shutdown)
             except Exception:
                 logger.exception("shutdown() during vacate failed")
+        # A bound method owns its instance. Drop it before measuring cgroup
+        # headroom, otherwise this teardown frame itself can retain the whole
+        # departing pipeline and suppress a genuine capacity transition.
+        shutdown = None
         del inst
         server, rec.server = rec.server, None
         if server is not None:
             await asyncio.to_thread(server.stop)
+        server = None
         if torch is not None and torch.cuda.is_available():
             try:
                 await asyncio.to_thread(torch.cuda.empty_cache)
@@ -2672,13 +2884,14 @@ class Executor:
         # resolution rebind. A multiply-held ref stays resident until its last
         # ready record owner leaves.
         for ref in held_refs:
+            tier_before = self.store.residency.tier(ref)
+            old_obj = held_objects.get(ref)
             owners = self._records_holding(ref)
             if owners:
                 # Residency keeps one representative object per wire ref. If
                 # it points at the departing record, transfer it to a survivor
                 # so the old pipeline can actually be collected. This is an
                 # ownership handoff, not an ON_DISK transition.
-                old_obj = held_objects.get(ref)
                 if old_obj is not None and self.store.residency.obj(ref) is old_obj:
                     replacement = next(
                         (owner.held_objects.get(ref) for owner in reversed(owners)
@@ -2686,10 +2899,22 @@ class Executor:
                         None,
                     )
                     self.store.residency.replace_object(ref, replacement)
+                if old_obj is not None:
+                    released_refs.append(ref)
                 continue
-            self.store.residency.release_to_disk(ref)
+            if self.store.residency.release_to_disk(ref) and (
+                old_obj is not None
+                or tier_before in (residency_mod.Tier.RAM, residency_mod.Tier.VRAM)
+            ):
+                released_refs.append(ref)
         rec.held_refs = []
         rec.held_objects = {}
+        # Do not let this teardown frame itself retain a departing pipeline
+        # while the cgroup probe decides whether capacity really progressed.
+        old_obj = None
+        replacement = None
+        owners = []
+        held_objects.clear()
         rec.stale = False
         if rec.shared_keys:
             # Drop this record's holds on content-keyed shared components
@@ -2699,6 +2924,9 @@ class Executor:
             rec.shared_keys.clear()
             self.store.residency.drain_shared()
         self._on_state_change()
+        released_refs = list(dict.fromkeys(released_refs))
+        await self._observe_host_ram_progress(released_refs, collect_host=True)
+        return released_refs
 
     # ---- job intake --------------------------------------------------------
 
@@ -2793,8 +3021,15 @@ class Executor:
         # between ensure_setup's promote and the execution-time pin let a
         # concurrent job's make_room demote a just-promoted pipeline. Refs
         # without entries yet are no-ops; the inner pin still covers adapters.
-        with self.store.residency.executing(*(wire_ref(spec.models[s]) for s in routed)):
-            await self._run_job_pinned(job, run, payload, routed)
+        try:
+            with self.store.residency.executing(
+                *(wire_ref(spec.models[s]) for s in routed)
+            ):
+                await self._run_job_pinned(job, run, payload, routed)
+        finally:
+            # The whole-job pin is now gone. Only a measured increase that
+            # satisfies a remembered requirement produces capacity progress.
+            await self._observe_host_ram_progress([])
 
     async def _run_job_pinned(
         self, job: _Job, run: pb.RunJob, payload: Any, routed: List[str]

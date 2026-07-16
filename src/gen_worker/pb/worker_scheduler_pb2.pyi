@@ -59,6 +59,7 @@ class ModelState(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     MODEL_STATE_EVICTED: _ClassVar[ModelState]
     MODEL_STATE_FAILED: _ClassVar[ModelState]
     MODEL_STATE_ADOPTED: _ClassVar[ModelState]
+    MODEL_STATE_HOST_CAPACITY_PROGRESS: _ClassVar[ModelState]
 PROTOCOL_VERSION_UNSPECIFIED: ProtocolVersion
 PROTOCOL_VERSION_CURRENT: ProtocolVersion
 RESIDENCY_TIER_UNSPECIFIED: ResidencyTier
@@ -91,6 +92,7 @@ MODEL_STATE_IN_VRAM: ModelState
 MODEL_STATE_EVICTED: ModelState
 MODEL_STATE_FAILED: ModelState
 MODEL_STATE_ADOPTED: ModelState
+MODEL_STATE_HOST_CAPACITY_PROGRESS: ModelState
 
 class WorkerMessage(_message.Message):
     __slots__ = ("hello", "state_delta", "job_accepted", "job_result", "job_progress", "model_event", "fn_unavailable", "fn_degraded")
@@ -423,7 +425,7 @@ class ModelOp(_message.Message):
     def __init__(self, op: _Optional[_Union[ModelOpKind, str]] = ..., ref: _Optional[str] = ..., snapshot: _Optional[_Union[Snapshot, _Mapping]] = ...) -> None: ...
 
 class ModelEvent(_message.Message):
-    __slots__ = ("ref", "state", "vram_bytes", "error", "bytes_done", "bytes_total", "duration_ms", "cache_hits", "cache_misses", "warmup_s")
+    __slots__ = ("ref", "state", "vram_bytes", "error", "bytes_done", "bytes_total", "duration_ms", "cache_hits", "cache_misses", "warmup_s", "host_ram_required_bytes", "host_ram_available_before_bytes", "host_ram_available_after_bytes", "host_ram_evicted_refs", "host_ram_capacity_generation")
     REF_FIELD_NUMBER: _ClassVar[int]
     STATE_FIELD_NUMBER: _ClassVar[int]
     VRAM_BYTES_FIELD_NUMBER: _ClassVar[int]
@@ -434,6 +436,11 @@ class ModelEvent(_message.Message):
     CACHE_HITS_FIELD_NUMBER: _ClassVar[int]
     CACHE_MISSES_FIELD_NUMBER: _ClassVar[int]
     WARMUP_S_FIELD_NUMBER: _ClassVar[int]
+    HOST_RAM_REQUIRED_BYTES_FIELD_NUMBER: _ClassVar[int]
+    HOST_RAM_AVAILABLE_BEFORE_BYTES_FIELD_NUMBER: _ClassVar[int]
+    HOST_RAM_AVAILABLE_AFTER_BYTES_FIELD_NUMBER: _ClassVar[int]
+    HOST_RAM_EVICTED_REFS_FIELD_NUMBER: _ClassVar[int]
+    HOST_RAM_CAPACITY_GENERATION_FIELD_NUMBER: _ClassVar[int]
     ref: str
     state: ModelState
     vram_bytes: int
@@ -444,7 +451,12 @@ class ModelEvent(_message.Message):
     cache_hits: int
     cache_misses: int
     warmup_s: float
-    def __init__(self, ref: _Optional[str] = ..., state: _Optional[_Union[ModelState, str]] = ..., vram_bytes: _Optional[int] = ..., error: _Optional[str] = ..., bytes_done: _Optional[int] = ..., bytes_total: _Optional[int] = ..., duration_ms: _Optional[int] = ..., cache_hits: _Optional[int] = ..., cache_misses: _Optional[int] = ..., warmup_s: _Optional[float] = ...) -> None: ...
+    host_ram_required_bytes: int
+    host_ram_available_before_bytes: int
+    host_ram_available_after_bytes: int
+    host_ram_evicted_refs: _containers.RepeatedScalarFieldContainer[str]
+    host_ram_capacity_generation: int
+    def __init__(self, ref: _Optional[str] = ..., state: _Optional[_Union[ModelState, str]] = ..., vram_bytes: _Optional[int] = ..., error: _Optional[str] = ..., bytes_done: _Optional[int] = ..., bytes_total: _Optional[int] = ..., duration_ms: _Optional[int] = ..., cache_hits: _Optional[int] = ..., cache_misses: _Optional[int] = ..., warmup_s: _Optional[float] = ..., host_ram_required_bytes: _Optional[int] = ..., host_ram_available_before_bytes: _Optional[int] = ..., host_ram_available_after_bytes: _Optional[int] = ..., host_ram_evicted_refs: _Optional[_Iterable[str]] = ..., host_ram_capacity_generation: _Optional[int] = ...) -> None: ...
 
 class FnUnavailable(_message.Message):
     __slots__ = ("function_name", "reason", "detail", "axes")

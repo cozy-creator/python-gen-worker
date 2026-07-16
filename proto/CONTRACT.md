@@ -79,8 +79,16 @@ reconciles against its assignment state:
 - request O has assigned to this worker but MISSING from `in_flight` → the
   worker lost it (crash/restart); O requeues with `attempt+1`.
 
-Immediately after `HelloAck`, W flushes its buffered unsent `JobResult`s
-(§4 results are never dropped).
+Immediately after `HelloAck`, W first replays active typed host-RAM failures
+and undelivered satisfying progress, then flushes its buffered unsent
+`JobResult`s (§4 results are never dropped). A satisfied ref replays only its
+self-contained progress event, never its obsolete failure (an older hub safely
+ignores the additive progress enum). The finite HelloAck baseline and this
+reconnect replay use a nonblocking prepend lane and are idempotent for a
+repeated midstream `HelloAck`. Newer logical state replaces every older
+same-identity queued copy. Host-capacity evidence uses a latest-generation-
+per-ref delivery lane, so an older FAILED cannot remain behind a newer
+PROGRESS or a retained result.
 
 **HelloAck re-send.** O re-sends `HelloAck` mid-connection whenever release
 config or desired model residency changes. Full-replace semantics: W
@@ -88,11 +96,20 @@ overwrites `file_base_url`, resolutions, and desired residency wholesale.
 The same residency generation MAY be resent with refreshed snapshot URLs;
 only a generation lower than the latest observed generation is stale.
 
-**Send-queue policy (W).** One bounded outbound queue. `JobResult` is NEVER
-dropped: results persist in the queue across reconnects until written to a
-live stream. Under overflow, drop order is: `JobProgress` (oldest first) →
-never anything else; if the queue is still full, W blocks the producer
-(backpressure) rather than dropping `ModelEvent`/`StateDelta`/`FnUnavailable`.
+**Send-queue policy (W).** One outbound queue with a bounded event/progress
+lane. `JobResult` is NEVER dropped: results persist across reconnects until
+written to a live stream and do not consume bounded event/progress capacity.
+Under overflow, drop order is: `JobProgress` (oldest first) → never anything
+else; if the bounded lane is still full, W blocks the producer (backpressure)
+rather than dropping `ModelEvent`/`StateDelta`/`FnUnavailable`. The finite
+HelloAck baseline/reconnect prepend described above is also outside that bound
+so the pre-send handler cannot deadlock behind preserved results or ordinary
+events queued while disconnected. Normal connected producers still use the
+bounded lane and its backpressure. Typed host-capacity evidence is finite
+state and bypasses that ordinary bound: only the newest undelivered generation
+per ref is queued. Successful `stream.write` is its delivery boundary (the
+same boundary used by durable `JobResult`); write failure/reset leaves
+executor-owned evidence for the next HelloAck replay.
 
 ---
 
@@ -473,20 +490,30 @@ model-ready signals, and the JSON download-event fabric.
 | field | producer | consumer | semantics |
 |---|---|---|---|
 | `ref` | W | O residency index | |
-| `state` | W model cache | O: DOWNLOADING/ON_DISK feed pending-download affinity (parked jobs dispatch on ON_DISK); IN_RAM/IN_VRAM/ON_DISK update the placement tier index; EVICTED removes the ref; FAILED fails the pending op | current state machine position |
+| `state` | W model cache | O: DOWNLOADING/ON_DISK feed pending-download affinity (parked jobs dispatch on ON_DISK); IN_RAM/IN_VRAM/ON_DISK update the placement tier index; EVICTED removes the ref; FAILED fails the pending op; HOST_CAPACITY_PROGRESS clears only the matching older host-RAM capacity block | current state machine position or a typed non-residency outcome |
 | `vram_bytes` | W measured (allocator delta across load) | O model-size cache → VRAM packing | set with IN_VRAM |
 | `error` | W | O reconcile handling (e.g. OOM ⇒ revise desired hot set; url_expired ⇒ re-mint snapshots and re-send the same generation) + triage log | set with FAILED |
 | `bytes_done`/`bytes_total` | W downloader (emit ≤1 per 5s per ref) | O boot/capacity progress display | set with DOWNLOADING |
 | `duration_ms` | W adopt handler | O adoption bookkeeping + fleet-adoption-latency metric | set with ADOPTED: wall time of download+seed+re-wrap+warmup |
 | `cache_hits`/`cache_misses` | W adopt handler (inductor FX-graph cache counter delta across the warmup) | O adoption observability: hits ≥ 1 on every ADOPTED; misses > 0 = partial shape coverage | set with ADOPTED (gw#391) |
 | `warmup_s` | W adopt handler | O adoption bookkeeping | set with ADOPTED: warmup wall seconds |
+| `host_ram_required_bytes` | W host-RAM admission | O capacity block / durable request evidence | exact incoming staging requirement including the derived safety floor; set with `FAILED{error:"insufficient_host_ram"}` and HOST_CAPACITY_PROGRESS |
+| `host_ram_available_before_bytes` / `host_ram_available_after_bytes` | W cgroup-aware host-RAM probe | O capacity block / durable request evidence | exact measured headroom around failed cleanup, or from the last insufficient observation to the satisfying observation |
+| `host_ram_evicted_refs` | W owner-aware record teardown | O capacity audit | FAILED: canonical refs released during that failed admission attempt; PROGRESS: refs released in the exact measured before→after transition that satisfied the requirement. Never inferred from logs, accumulated from unrelated observations, or an opaque worker-local `shared::*` cache key |
+| `host_ram_capacity_generation` | W executor | O capacity fencing | process-monotonic observation generation, fenced within the active Connect stream; the consumer resets its numeric fence on each Hello re-baseline, while a same-process reconnect replays only undelivered satisfying progress; progress clears only the same ref's older failed generation |
 
 **State machine per (worker, ref):** `DOWNLOADING → ON_DISK → IN_RAM ⇄ IN_VRAM`,
 demotions emit the new lower tier, `EVICTED` = removed from disk (fully gone).
 `FAILED` is not a residency: it reports "the last op failed" via `error`;
-residency stays whatever the last non-FAILED event said. O's baseline is
-`Hello.models`; events mutate it; reconnect re-baselines. `ADOPTED` is also
-not a residency tier: it reports one-shot success of ADOPT_COMPILE_CACHE for
+residency stays whatever the last non-FAILED event said. HOST_CAPACITY_PROGRESS
+is also not residency: it is emitted only when a remembered host-RAM failure's
+measured available headroom increases to at least its typed requirement after
+an owner or execution pin is released. Active failures replay before pending
+results after a stream reconnect; after satisfaction, only the self-contained
+progress event remains until successful stream delivery. Elapsed time and unrelated
+insufficient demotions do not produce it. O's baseline is `Hello.models`;
+events mutate it; reconnect
+re-baselines. `ADOPTED` is also not a residency tier: it reports one-shot success of ADOPT_COMPILE_CACHE for
 a compile-cache ref (whose bytes independently report DOWNLOADING/ON_DISK
 like any snapshot download). O MUST NOT feed `_system/family-*` compile-cache
 refs into model-failure availability handling: a failed cache ref means

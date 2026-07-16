@@ -416,6 +416,21 @@ message ModelEvent {
   int64 cache_hits = 8;
   int64 cache_misses = 9;
   double warmup_s = 10;
+  // Typed host-RAM admission evidence (pgw#548). Set on
+  // FAILED{error:"insufficient_host_ram"} and HOST_CAPACITY_PROGRESS only.
+  // A progress event's generation is strictly newer than the matching
+  // failure, and available_after_bytes satisfies required_bytes. The worker
+  // emits progress only after an observed owner/pin release increased
+  // measured headroom; elapsed time alone never produces this event.
+  int64 host_ram_required_bytes = 11;
+  int64 host_ram_available_before_bytes = 12;
+  int64 host_ram_available_after_bytes = 13;
+  repeated string host_ram_evicted_refs = 14;
+  // Monotonic only within one worker process. Consumers fence within the
+  // active Connect stream and reset that fence when a new Hello re-baselines
+  // the worker; same-process reconnects replay only satisfying generations
+  // whose successful stream.write delivery has not completed yet.
+  uint64 host_ram_capacity_generation = 15;
 }
 
 enum ModelState {
@@ -427,6 +442,9 @@ enum ModelState {
   MODEL_STATE_EVICTED     = 5; // removed from disk entirely
   MODEL_STATE_FAILED      = 6; // last op on this ref failed; residency unchanged
   MODEL_STATE_ADOPTED     = 7; // compile-cache ref adopted in place (not a residency tier)
+  // Measured host headroom now satisfies this ref's remembered failed
+  // requirement after owner/pin release. Not a residency tier.
+  MODEL_STATE_HOST_CAPACITY_PROGRESS = 8;
 }
 
 // ---------------------------------------------------------------------------

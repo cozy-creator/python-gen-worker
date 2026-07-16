@@ -744,6 +744,18 @@ def _progress_msg(rid: str, seq: int) -> pb.WorkerMessage:
         request_id=rid, attempt=1, seq=seq))
 
 
+def _host_capacity_msg(ref: str, state: int, generation: int) -> pb.WorkerMessage:
+    return pb.WorkerMessage(model_event=pb.ModelEvent(
+        ref=ref,
+        state=state,
+        error="insufficient_host_ram" if state == pb.MODEL_STATE_FAILED else "",
+        host_ram_required_bytes=12 * 1024**3,
+        host_ram_available_before_bytes=8 * 1024**3,
+        host_ram_available_after_bytes=16 * 1024**3,
+        host_ram_capacity_generation=generation,
+    ))
+
+
 def test_send_queue_drops_oldest_progress_never_results() -> None:
     async def _run() -> None:
         q = SendQueue(maxsize=2)
@@ -757,6 +769,316 @@ def test_send_queue_drops_oldest_progress_never_results() -> None:
         seqs = [m.job_progress.seq for k, m in kinds if k == "progress"]
         assert seqs == [2, 3]
         assert any(k == "result" for k, _m in kinds)
+
+    asyncio.run(_run())
+
+
+def test_pending_results_do_not_deadlock_pre_send_hello_ack_events() -> None:
+    """Results are durable but do not consume bounded event capacity.
+
+    HelloAck handlers run before the send loop and enqueue their state/event
+    baseline. Two preserved results in a maxsize=1 queue must not block that
+    enqueue forever during reconnect.
+    """
+    async def _run() -> None:
+        q = SendQueue(maxsize=1)
+        await q.put(_result_msg("r1"))
+        await q.put(_result_msg("r2"))
+        state = pb.WorkerMessage(state_delta=pb.StateDelta())
+        await asyncio.wait_for(q.put(state), 0.1)
+
+    asyncio.run(_run())
+
+
+def test_reconnect_capacity_replay_precedes_results_and_is_idempotent() -> None:
+    async def _run() -> None:
+        q = SendQueue(maxsize=1)
+        failure = _host_capacity_msg("acme/blocked", pb.MODEL_STATE_FAILED, 1)
+        progress = _host_capacity_msg(
+            "acme/recovered", pb.MODEL_STATE_HOST_CAPACITY_PROGRESS, 2,
+        )
+        # The failure was queued on the old stream but not written. Reset
+        # drops ordinary events and preserves both results.
+        await q.put(failure)
+        await q.put(_result_msg("r1"))
+        await q.put(_result_msg("r2"))
+        await q.reset_for_reconnect()
+
+        # HelloAck replay is nonblocking, ahead of durable results, and a
+        # duplicate midstream HelloAck cannot enqueue the same generations.
+        await asyncio.wait_for(q.prepend_reconnect([failure, progress]), 0.1)
+        await asyncio.wait_for(q.prepend_reconnect([failure, progress]), 0.1)
+        got = [await q.get() for _ in range(4)]
+        assert [msg.WhichOneof("msg") for _, msg in got] == [
+            "model_event", "model_event", "job_result", "job_result",
+        ]
+        assert [
+            msg.model_event.state for _, msg in got[:2]
+        ] == [pb.MODEL_STATE_FAILED, pb.MODEL_STATE_HOST_CAPACITY_PROGRESS]
+        assert len(q) == 0
+
+    asyncio.run(_run())
+
+
+def test_reconnect_capacity_keeps_failure_before_older_progress() -> None:
+    async def _run() -> None:
+        q = SendQueue(maxsize=1)
+        active_failure = _host_capacity_msg(
+            "acme/active", pb.MODEL_STATE_FAILED, 3,
+        )
+        undelivered_progress = _host_capacity_msg(
+            "acme/satisfied", pb.MODEL_STATE_HOST_CAPACITY_PROGRESS, 2,
+        )
+        await q.put(_result_msg("r1"))
+        await q.prepend_reconnect([active_failure, undelivered_progress])
+
+        got = [await q.get() for _ in range(3)]
+        assert [message for _kind, message in got] == [
+            active_failure, undelivered_progress, _result_msg("r1"),
+        ]
+
+    asyncio.run(_run())
+
+
+def test_reconnect_reorders_exact_pending_capacity_snapshot() -> None:
+    async def _run() -> None:
+        q = SendQueue(maxsize=1)
+        active_failure = _host_capacity_msg(
+            "acme/active", pb.MODEL_STATE_FAILED, 3,
+        )
+        undelivered_progress = _host_capacity_msg(
+            "acme/satisfied", pb.MODEL_STATE_HOST_CAPACITY_PROGRESS, 2,
+        )
+        # A midstream producer left the exact entries pending in the inverse
+        # order before HelloAck supplied its authoritative replay snapshot.
+        await q.put(undelivered_progress)
+        await q.put(active_failure)
+        await q.prepend_reconnect([active_failure, undelivered_progress])
+        await q.prepend_reconnect([active_failure, undelivered_progress])
+
+        got = [await q.get() for _ in range(2)]
+        assert [message for _kind, message in got] == [
+            active_failure, undelivered_progress,
+        ]
+        assert len(q) == 0
+
+    asyncio.run(_run())
+
+
+def test_selected_capacity_is_not_duplicated_and_reset_restores_replay_order() -> None:
+    async def _run() -> None:
+        q = SendQueue(maxsize=1)
+        active_failure = _host_capacity_msg(
+            "acme/active", pb.MODEL_STATE_FAILED, 3,
+        )
+        undelivered_progress = _host_capacity_msg(
+            "acme/satisfied", pb.MODEL_STATE_HOST_CAPACITY_PROGRESS, 2,
+        )
+        await q.put(undelivered_progress)
+        selected = await q.get()
+        await q.prepend_reconnect([active_failure, undelivered_progress])
+        assert selected[1] == undelivered_progress
+        assert await q.should_ship_capacity(selected[1])
+        assert len(q) == 1  # only FAILED; selected PROGRESS was not copied
+
+        # Cancellation/write failure resets the selected generation. The next
+        # HelloAck reconstructs the authoritative order from executor state.
+        await q.reset_for_reconnect()
+        await q.prepend_reconnect([active_failure, undelivered_progress])
+        got = [await q.get() for _ in range(2)]
+        assert [message for _kind, message in got] == [
+            active_failure, undelivered_progress,
+        ]
+
+    asyncio.run(_run())
+
+
+def test_newer_hello_ack_fences_blocked_ordinary_state_delta() -> None:
+    async def _run() -> None:
+        q = SendQueue(maxsize=1)
+        ordinary = pb.WorkerMessage(model_event=pb.ModelEvent(
+            ref="acme/on-disk", state=pb.MODEL_STATE_ON_DISK,
+        ))
+        ready = pb.WorkerMessage(state_delta=pb.StateDelta(
+            phase=pb.WORKER_PHASE_READY,
+            available_functions=["generate"],
+        ))
+        error = pb.WorkerMessage(state_delta=pb.StateDelta(
+            phase=pb.WORKER_PHASE_ERROR,
+        ))
+        await q.put(ordinary)
+        stale_put = asyncio.create_task(q.put(ready))
+        await asyncio.sleep(0)
+        assert not stale_put.done()
+
+        await q.prepend_reconnect([error])
+        await asyncio.wait_for(stale_put, 0.1)
+        first = await q.get()
+        second = await q.get()
+        assert first[1] == error
+        assert second[1] == ordinary
+        assert len(q) == 0
+
+    asyncio.run(_run())
+
+
+def test_capacity_evidence_bypasses_bound_and_newer_generation_wins() -> None:
+    """Typed capacity is finite state, so it cannot wake stale after progress."""
+    async def _run() -> None:
+        q = SendQueue(maxsize=1)
+        ordinary = pb.WorkerMessage(model_event=pb.ModelEvent(
+            ref="acme/on-disk", state=pb.MODEL_STATE_ON_DISK,
+        ))
+        failure = _host_capacity_msg("acme/blocked", pb.MODEL_STATE_FAILED, 1)
+        await q.put(ordinary)
+        capacity_put = asyncio.create_task(q.put(failure))
+        await asyncio.sleep(0)
+        assert capacity_put.done()
+        another_ordinary = pb.WorkerMessage(model_event=pb.ModelEvent(
+            ref="acme/also-on-disk", state=pb.MODEL_STATE_ON_DISK,
+        ))
+        blocked_ordinary = asyncio.create_task(q.put(another_ordinary))
+        await asyncio.sleep(0)
+        assert not blocked_ordinary.done()
+
+        progress = _host_capacity_msg(
+            "acme/blocked", pb.MODEL_STATE_HOST_CAPACITY_PROGRESS, 2,
+        )
+        await q.prepend_reconnect([progress])
+        first = await q.get()
+        await q.mark_event_shipped(first[1])
+        assert not blocked_ordinary.done()
+        second = await q.get()
+        await q.mark_event_shipped(second[1])
+        await asyncio.wait_for(blocked_ordinary, 0.1)
+        third = await q.get()
+        await q.mark_event_shipped(third[1])
+        assert first[1] == progress
+        assert second[1] == ordinary
+        assert third[1] == another_ordinary
+        assert len(q) == 0
+
+    asyncio.run(_run())
+
+
+def test_newer_capacity_generation_fences_selected_older_write() -> None:
+    async def _run() -> None:
+        q = SendQueue(maxsize=1)
+        failure = _host_capacity_msg("acme/blocked", pb.MODEL_STATE_FAILED, 1)
+        progress = _host_capacity_msg(
+            "acme/blocked", pb.MODEL_STATE_HOST_CAPACITY_PROGRESS, 2,
+        )
+        await q.put(failure)
+        selected = await q.get()
+        await q.prepend_reconnect([progress])
+
+        assert await q.should_ship_capacity(selected[1]) is False
+        current = await q.get()
+        assert current[1] == progress
+        assert await q.should_ship_capacity(current[1]) is True
+
+    asyncio.run(_run())
+
+
+def test_prepend_replaces_stale_same_identity_across_all_lanes() -> None:
+    async def _run() -> None:
+        q = SendQueue(maxsize=2)
+        ready = pb.WorkerMessage(state_delta=pb.StateDelta(
+            phase=pb.WORKER_PHASE_READY,
+            available_functions=["generate"],
+        ))
+        error = pb.WorkerMessage(state_delta=pb.StateDelta(
+            phase=pb.WORKER_PHASE_ERROR,
+        ))
+        failure = _host_capacity_msg("acme/blocked", pb.MODEL_STATE_FAILED, 1)
+        progress = _host_capacity_msg(
+            "acme/blocked", pb.MODEL_STATE_HOST_CAPACITY_PROGRESS, 2,
+        )
+        await q.put(ready)
+        # Reproduce an old disconnected capacity copy behind ordinary state;
+        # prepend must replace by logical identity, not exact serialization.
+        q._items.append(("event", failure))
+
+        await q.prepend_reconnect([error, progress])
+        first = await q.get()
+        second = await q.get()
+        assert first[1] == progress
+        assert second[1] == error
+        assert len(q) == 0
+
+    asyncio.run(_run())
+
+
+def test_capacity_get_prepend_race_is_fenced_and_reset_replays() -> None:
+    """A sender-owned event is not copied; a new stream clears the fence."""
+    async def _run() -> None:
+        q = SendQueue(maxsize=1)
+        failure = _host_capacity_msg("acme/blocked", pb.MODEL_STATE_FAILED, 1)
+        result = _result_msg("r1")
+        await q.put(failure)
+        await q.put(result)
+
+        first = await q.get()  # the single sender now owns the normal copy
+        assert first[1] == failure
+        await q.prepend_reconnect([failure])
+        await q.mark_event_shipped(first[1])
+        second = await q.get()
+        assert second[1] == result
+        await q.mark_result_shipped(second[1])
+        assert len(q) == 0
+
+        await q.reset_for_reconnect()
+        await q.prepend_reconnect([failure])
+        replay = await q.get()
+        assert replay[1] == failure
+        assert len(q) == 0
+
+    asyncio.run(_run())
+
+
+def test_high_volume_progress_does_not_grow_reconnect_bookkeeping() -> None:
+    async def _run() -> None:
+        q = SendQueue(maxsize=1)
+        for seq in range(2_000):
+            messages = (
+                _progress_msg("request", seq),
+                pb.WorkerMessage(model_event=pb.ModelEvent(
+                    ref="acme/downloading",
+                    state=pb.MODEL_STATE_DOWNLOADING,
+                    bytes_done=seq,
+                    bytes_total=2_000,
+                )),
+            )
+            for message in messages:
+                await q.put(message)
+                _kind, queued = await q.get()
+                await q.mark_event_shipped(queued)
+
+        assert q._reconnect_seen == {}
+        assert q._in_flight == set()
+        assert len(q) == 0
+
+    asyncio.run(_run())
+
+
+def test_distinct_shipped_capacity_events_leave_no_queue_fences() -> None:
+    async def _run() -> None:
+        q = SendQueue(maxsize=1)
+        for generation in range(1, 5_001):
+            message = _host_capacity_msg(
+                f"acme/model-{generation}",
+                pb.MODEL_STATE_HOST_CAPACITY_PROGRESS,
+                generation,
+            )
+            await q.put(message)
+            _kind, selected = await q.get()
+            assert await q.should_ship_capacity(selected)
+            await q.mark_event_shipped(selected)
+
+        assert q._capacity == {}
+        assert q._capacity_in_flight == {}
+        assert q._reconnect_seen == {}
+        assert q._in_flight == set()
 
     asyncio.run(_run())
 
@@ -980,6 +1302,12 @@ def test_host_ram_failure_precedes_retryable_result_on_wire(tmp_path, monkeypatc
         assert [
             (event.ref, event.error) for _, event in failed
         ] == [(pipeline_ref, "insufficient_host_ram")]
+        failure = failed[0][1]
+        assert failure.host_ram_required_bytes == pytest.approx(12.2 * 1024**3, rel=1e-6)
+        assert failure.host_ram_available_before_bytes == 8 * 1024**3
+        assert failure.host_ram_available_after_bytes == 8 * 1024**3
+        assert list(failure.host_ram_evicted_refs) == []
+        assert failure.host_ram_capacity_generation == 1
         result_index = next(
             index for index, message in enumerate(received)
             if message.WhichOneof("msg") == "job_result"

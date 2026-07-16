@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import inspect
 import logging
 import time
 import weakref
@@ -26,13 +27,15 @@ from gen_worker.api.binding import HF
 from gen_worker.api.decorators import Resources
 from gen_worker.api.slot import Slot
 from gen_worker.capability import InsufficientHostRamError
-from gen_worker.executor import Executor, ModelStore, _Job
+from gen_worker.config import Settings
+from gen_worker.executor import Executor, ModelStore, _ClassRecord, _Job
 from gen_worker.lifecycle import Lifecycle
 from gen_worker.models import memory as memory_mod
 from gen_worker.models import residency as residency_mod
-from gen_worker.models.residency import Residency, Tier
+from gen_worker.models.residency import LoadedComponentKey, Residency, Tier
 from gen_worker.pb import worker_scheduler_pb2 as pb
 from gen_worker.registry import EndpointSpec
+from gen_worker.transport import Transport
 
 _GiB = 1024 ** 3
 
@@ -140,13 +143,17 @@ def _spec(
     return EndpointSpec(
         name=name, method=cls.run, kind="inference", payload_type=_In,
         output_mode="single", cls=cls, attr_name="run", models=models,
+        is_async=inspect.iscoroutinefunction(cls.run),
         resources=Resources(vram_gb=vram_gb),
     )
 
 
-def _executor(specs, tmp_path: Path) -> Executor:
+def _executor(
+    specs, tmp_path: Path, sent: list[pb.WorkerMessage] | None = None,
+) -> Executor:
     async def _send(msg: pb.WorkerMessage) -> None:
-        pass
+        if sent is not None:
+            sent.append(msg)
 
     store = ModelStore(_send, cache_dir=tmp_path, vram_budget_bytes=24 * _GiB)
 
@@ -156,6 +163,20 @@ def _executor(specs, tmp_path: Path) -> Executor:
 
     store.ensure_local = _fake_ensure_local  # type: ignore[method-assign]
     return Executor(specs, _send, store=store)
+
+
+def _host_ram_error(
+    *, evicted_refs: tuple[str, ...] = (),
+) -> InsufficientHostRamError:
+    return InsufficientHostRamError(
+        "generate",
+        incoming_bytes=6 * _GiB,
+        floor_bytes=6 * _GiB,
+        required_bytes=12 * _GiB,
+        available_before_bytes=8 * _GiB,
+        available_after_bytes=8 * _GiB,
+        evicted_refs=evicted_refs,
+    )
 
 
 def test_setup_refused_retryable_when_host_ram_insufficient(tmp_path: Path, monkeypatch) -> None:
@@ -196,6 +217,780 @@ def test_setup_refused_retryable_when_host_ram_insufficient(tmp_path: Path, monk
         assert isinstance(inst.m, _FakePipe)
 
     asyncio.run(_run())
+
+
+def test_capacity_progress_requires_measured_owner_release(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """pgw#548: a release is not progress until measured headroom fits.
+
+    The first idle owner teardown improves RAM but remains below the exact
+    failed requirement, so it must not emit. The second teardown crosses the
+    requirement and emits one typed, generation-fenced event carrying the ref
+    from that exact satisfying transition. The same event is replayed on stream reconnect; a
+    fresh executor (process restart) has no stale in-memory progress to emit.
+    """
+    from gen_worker.models import disk_gc
+
+    class A:
+        def setup(self, m: _FakePipe) -> None:
+            self.m = m
+
+        def run(self, ctx, payload: _In):  # pragma: no cover
+            return payload
+
+    class B(A):
+        pass
+
+    class C(A):
+        pass
+
+    spec_a = _spec("a", A, {"m": HF("acme/a")})
+    spec_b = _spec("b", B, {"m": HF("acme/b")})
+    spec_c = _spec("c", C, {"m": HF("acme/c")})
+    monkeypatch.setattr(disk_gc, "tree_bytes", lambda p: 6 * _GiB)
+    monkeypatch.setattr(residency_mod, "get_total_ram_gb", lambda: 31.0)
+    available_gb = {"value": 24.0}
+    monkeypatch.setattr(
+        residency_mod, "get_available_ram_gb", lambda: available_gb["value"],
+    )
+    sent: list[pb.WorkerMessage] = []
+
+    async def _run() -> None:
+        ex = _executor([spec_a, spec_b, spec_c], tmp_path, sent)
+        await ex.ensure_setup(spec_a)
+        await ex.ensure_setup(spec_b)
+        rec_a = ex._classes[spec_a.instance_key]
+        rec_b = ex._classes[spec_b.instance_key]
+
+        available_gb["value"] = 8.0
+        with ex.store.residency.executing("acme/a", "acme/b"):
+            with pytest.raises(InsufficientHostRamError):
+                await ex.ensure_setup(spec_c)
+
+        failures = [
+            message.model_event for message in sent
+            if message.WhichOneof("msg") == "model_event"
+            and message.model_event.state == pb.MODEL_STATE_FAILED
+            and message.model_event.error == "insufficient_host_ram"
+        ]
+        assert len(failures) == 1
+        failure = failures[0]
+        assert failure.ref == "acme/c"
+        assert failure.host_ram_required_bytes == pytest.approx(12.2 * _GiB, rel=1e-6)
+        assert failure.host_ram_available_before_bytes == 8 * _GiB
+        assert failure.host_ram_available_after_bytes == 8 * _GiB
+        assert list(failure.host_ram_evicted_refs) == []
+        assert failure.host_ram_capacity_generation == 1
+
+        # One genuine owner release raises measured headroom, but not enough.
+        available_gb["value"] = 10.0
+        rec_a.stale = True
+        await ex._revalidate_record(rec_a)
+        assert not [
+            message for message in sent
+            if message.WhichOneof("msg") == "model_event"
+            and message.model_event.state == pb.MODEL_STATE_HOST_CAPACITY_PROGRESS
+        ]
+
+        # The next owner release crosses the remembered numeric requirement.
+        available_gb["value"] = 16.0
+        rec_b.stale = True
+        await ex._revalidate_record(rec_b)
+        progress = [
+            message.model_event for message in sent
+            if message.WhichOneof("msg") == "model_event"
+            and message.model_event.state == pb.MODEL_STATE_HOST_CAPACITY_PROGRESS
+        ]
+        assert len(progress) == 1
+        event = progress[0]
+        assert event.ref == "acme/c"
+        assert event.host_ram_required_bytes == failure.host_ram_required_bytes
+        assert event.host_ram_available_before_bytes == 10 * _GiB
+        assert event.host_ram_available_after_bytes == 16 * _GiB
+        assert list(event.host_ram_evicted_refs) == ["acme/b"]
+        assert event.host_ram_capacity_generation == 2
+
+        # Once progress supersedes the active block, reconnect replay retains
+        # only the self-contained progress. Replaying obsolete FAILED would
+        # strand an older hub that safely ignores the additive progress enum.
+        replay = await ex.host_ram_capacity_replay()
+        assert [message.model_event.state for message in replay] == [
+            pb.MODEL_STATE_HOST_CAPACITY_PROGRESS,
+        ]
+        assert replay[0].model_event.SerializeToString(deterministic=True) == (
+            event.SerializeToString(deterministic=True)
+        )
+
+        restarted_sent: list[pb.WorkerMessage] = []
+        restarted = _executor([spec_a, spec_b, spec_c], tmp_path, restarted_sent)
+        assert await restarted.host_ram_capacity_replay() == []
+
+    asyncio.run(_run())
+
+
+def test_host_capacity_batches_commit_before_cancelled_send(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Multi-ref failure/progress state is atomic and replayable.
+
+    The first send deliberately backpressures and then gets cancelled. Its
+    callback must still be able to acquire the capacity lock, proving no send
+    is awaited while state is locked. Every causal ref is visible to replay
+    before that first send completes.
+    """
+    async def _run() -> None:
+        ex = _executor([], tmp_path)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _backpressured_send(message: pb.WorkerMessage) -> None:
+            await asyncio.wait_for(ex._host_ram_lock.acquire(), 0.1)
+            ex._host_ram_lock.release()
+            entered.set()
+            await release.wait()
+
+        ex._send = _backpressured_send
+        failure_task = asyncio.create_task(ex._record_host_ram_failure(
+            ["acme/b", "acme/a"], _host_ram_error(),
+        ))
+        await asyncio.wait_for(entered.wait(), 0.2)
+        replay = await asyncio.wait_for(ex.host_ram_capacity_replay(), 0.1)
+        assert [message.model_event.ref for message in replay] == ["acme/a", "acme/b"]
+        assert all(
+            message.model_event.state == pb.MODEL_STATE_FAILED for message in replay
+        )
+        failure_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await failure_task
+
+        entered.clear()
+        monkeypatch.setattr(
+            ex.store.residency,
+            "host_ram_headroom",
+            lambda _incoming: SimpleNamespace(available_bytes=16 * _GiB),
+        )
+        progress_task = asyncio.create_task(
+            ex._observe_host_ram_progress(["acme/released"])
+        )
+        await asyncio.wait_for(entered.wait(), 0.2)
+        replay = await asyncio.wait_for(ex.host_ram_capacity_replay(), 0.1)
+        assert [message.model_event.state for message in replay] == [
+            pb.MODEL_STATE_HOST_CAPACITY_PROGRESS,
+            pb.MODEL_STATE_HOST_CAPACITY_PROGRESS,
+        ]
+        assert [message.model_event.ref for message in replay] == [
+            "acme/a", "acme/b",
+        ]
+        progress_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await progress_task
+
+        # Cancellation/backpressure never discards the committed progress.
+        # A later active block replays before those satisfied refs, while the
+        # obsolete failures for a/b stay absent for old-hub compatibility.
+        async def _discard(_message: pb.WorkerMessage) -> None:
+            pass
+
+        ex._send = _discard
+        await ex._record_host_ram_failure(["acme/c"], _host_ram_error())
+        replay = await ex.host_ram_capacity_replay()
+        assert [message.model_event.state for message in replay] == [
+            pb.MODEL_STATE_FAILED,
+            pb.MODEL_STATE_HOST_CAPACITY_PROGRESS,
+            pb.MODEL_STATE_HOST_CAPACITY_PROGRESS,
+        ]
+        assert [message.model_event.ref for message in replay] == [
+            "acme/c", "acme/a", "acme/b",
+        ]
+
+    asyncio.run(_run())
+
+
+def test_host_capacity_generations_enqueue_in_commit_order(tmp_path: Path) -> None:
+    async def _run() -> None:
+        ex = _executor([], tmp_path)
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        sent: list[tuple[int, str]] = []
+
+        async def _ordered_send(message: pb.WorkerMessage) -> None:
+            event = message.model_event
+            sent.append((int(event.host_ram_capacity_generation), event.ref))
+            if len(sent) == 1:
+                entered.set()
+                await release.wait()
+
+        ex._send = _ordered_send
+        first = asyncio.create_task(
+            ex._record_host_ram_failure(["acme/a"], _host_ram_error())
+        )
+        await asyncio.wait_for(entered.wait(), 0.2)
+        second = asyncio.create_task(
+            ex._record_host_ram_failure(["acme/b"], _host_ram_error())
+        )
+        await asyncio.sleep(0)
+        replay = await ex.host_ram_capacity_replay()
+        assert [
+            (int(message.model_event.host_ram_capacity_generation),
+             message.model_event.ref)
+            for message in replay
+        ] == [(1, "acme/a"), (2, "acme/b")]
+
+        release.set()
+        await asyncio.gather(first, second)
+        assert sent == [(1, "acme/a"), (2, "acme/b")]
+
+    asyncio.run(_run())
+
+
+def test_delivered_progress_retires_distinct_satisfied_refs(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    async def _run() -> None:
+        sent: list[pb.WorkerMessage] = []
+        ex = _executor([], tmp_path, sent)
+        refs = [f"acme/model-{index}" for index in range(2_000)]
+        await ex._record_host_ram_failure(refs, _host_ram_error())
+        monkeypatch.setattr(
+            ex.store.residency,
+            "host_ram_headroom",
+            lambda _incoming: SimpleNamespace(available_bytes=16 * _GiB),
+        )
+        await ex._observe_host_ram_progress(["acme/released"])
+        progress = [
+            message.model_event for message in sent
+            if message.WhichOneof("msg") == "model_event"
+            and message.model_event.state == pb.MODEL_STATE_HOST_CAPACITY_PROGRESS
+        ]
+        assert len(progress) == 2_000
+        assert len(ex._host_ram_progress) == 2_000
+        lifecycle = Lifecycle(
+            Settings(orchestrator_public_addr="localhost:1"), ex,
+        )
+
+        stale = pb.ModelEvent()
+        stale.CopyFrom(progress[0])
+        stale.host_ram_capacity_generation -= 1
+        await lifecycle.on_message_shipped(pb.WorkerMessage(model_event=stale))
+        assert progress[0].ref in ex._host_ram_progress
+        for event in progress:
+            await lifecycle.on_message_shipped(pb.WorkerMessage(model_event=event))
+
+        assert ex._host_ram_progress == {}
+        assert await ex.host_ram_capacity_replay() == []
+
+    asyncio.run(_run())
+
+
+def test_progress_reports_only_the_satisfying_release_transition(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    async def _run() -> None:
+        sent: list[pb.WorkerMessage] = []
+        ex = _executor([], tmp_path, sent)
+        await ex._record_host_ram_failure(["acme/blocked"], _host_ram_error())
+        available = {"bytes": 9 * _GiB}
+        monkeypatch.setattr(
+            ex.store.residency,
+            "host_ram_headroom",
+            lambda _incoming: SimpleNamespace(available_bytes=available["bytes"]),
+        )
+        for index in range(999):
+            await ex._observe_host_ram_progress([f"acme/unrelated-{index}"])
+        available["bytes"] = 16 * _GiB
+        await ex._observe_host_ram_progress(["acme/final-release"])
+
+        progress = [
+            message.model_event for message in sent
+            if message.WhichOneof("msg") == "model_event"
+            and message.model_event.state == pb.MODEL_STATE_HOST_CAPACITY_PROGRESS
+        ]
+        assert len(progress) == 1
+        assert list(progress[0].host_ram_evicted_refs) == ["acme/final-release"]
+
+    asyncio.run(_run())
+
+
+def test_hello_ack_replays_failure_before_preserved_results(
+    tmp_path: Path,
+) -> None:
+    """Exercise the real pre-send HelloAck boundary with maxsize=1."""
+    async def _run() -> None:
+        settings = Settings(orchestrator_public_addr="localhost:1")
+        ex = _executor([], tmp_path)
+        lifecycle = Lifecycle(settings, ex)
+        transport = Transport(settings, lifecycle, queue_maxsize=1)
+        lifecycle.transport = transport
+        ex._send = transport.send
+
+        # Failure enters the old stream queue, followed by two durable results.
+        await ex._record_host_ram_failure(["acme/incoming"], _host_ram_error())
+        for request_id in ("r1", "r2"):
+            await transport.send(pb.WorkerMessage(job_result=pb.JobResult(
+                request_id=request_id,
+                attempt=1,
+                status=pb.JOB_STATUS_RETRYABLE,
+            )))
+        await transport.queue.reset_for_reconnect()
+        transport._connected.set()
+
+        # on_hello_ack runs before Transport starts its send loop. It must not
+        # block on the two results, and it must prepend the lost active failure.
+        await asyncio.wait_for(lifecycle.on_hello_ack(pb.HelloAck()), 0.2)
+        lifecycle._cancel_residency_reconcile()
+        kind, message = await transport.queue.get()
+        assert kind == "event"
+        assert message.WhichOneof("msg") == "model_event"
+        assert message.model_event.state == pb.MODEL_STATE_FAILED
+        kind, message = await transport.queue.get()
+        assert kind == "event"
+        assert message.WhichOneof("msg") == "state_delta"
+        kind, message = await transport.queue.get()
+        assert kind == "result"
+        assert message.job_result.request_id == "r1"
+
+    asyncio.run(_run())
+
+
+def test_hello_ack_baseline_bypasses_full_disconnected_event_lane(
+    tmp_path: Path,
+) -> None:
+    """A real pre-send HelloAck cannot wait for its own not-yet-started sender."""
+    async def _run() -> None:
+        settings = Settings(orchestrator_public_addr="localhost:1")
+        ex = _executor([], tmp_path)
+        lifecycle = Lifecycle(settings, ex)
+        transport = Transport(settings, lifecycle, queue_maxsize=1)
+        lifecycle.transport = transport
+        ex._send = transport.send
+
+        await transport.queue.reset_for_reconnect()
+        await transport.send(pb.WorkerMessage(model_event=pb.ModelEvent(
+            ref="acme/already-on-disk",
+            state=pb.MODEL_STATE_ON_DISK,
+        )))
+        transport._connected.set()
+
+        await asyncio.wait_for(lifecycle.on_hello_ack(pb.HelloAck()), 0.2)
+        lifecycle._cancel_residency_reconcile()
+        first = await transport.queue.get()
+        second = await transport.queue.get()
+        assert first[1].WhichOneof("msg") == "state_delta"
+        assert second[1].WhichOneof("msg") == "model_event"
+        assert second[1].model_event.ref == "acme/already-on-disk"
+
+    asyncio.run(_run())
+
+
+def test_disconnected_capacity_failure_moves_ahead_of_results_once(
+    tmp_path: Path,
+) -> None:
+    """Queued capacity evidence is promoted atomically on the real HelloAck path."""
+    async def _run() -> None:
+        settings = Settings(orchestrator_public_addr="localhost:1")
+        ex = _executor([], tmp_path)
+        lifecycle = Lifecycle(settings, ex)
+        transport = Transport(settings, lifecycle, queue_maxsize=1)
+        lifecycle.transport = transport
+        ex._send = transport.send
+
+        for request_id in ("r1", "r2"):
+            await transport.send(pb.WorkerMessage(job_result=pb.JobResult(
+                request_id=request_id,
+                attempt=1,
+                status=pb.JOB_STATUS_RETRYABLE,
+            )))
+        await transport.queue.reset_for_reconnect()
+        # This is emitted while disconnected, after results were requeued. It
+        # begins in the ordinary lane behind them and must be moved, not copied.
+        await ex._record_host_ram_failure(["acme/incoming"], _host_ram_error())
+        transport._connected.set()
+
+        await asyncio.wait_for(lifecycle.on_hello_ack(pb.HelloAck()), 0.2)
+        await asyncio.wait_for(lifecycle.on_hello_ack(pb.HelloAck()), 0.2)
+        lifecycle._cancel_residency_reconcile()
+        got = [await transport.queue.get() for _ in range(4)]
+        messages = [message for _kind, message in got]
+        failures = [
+            index for index, message in enumerate(messages)
+            if message.WhichOneof("msg") == "model_event"
+            and message.model_event.state == pb.MODEL_STATE_FAILED
+        ]
+        results = [
+            index for index, message in enumerate(messages)
+            if message.WhichOneof("msg") == "job_result"
+        ]
+        assert failures == [0]
+        assert len(results) == 2
+        assert failures[0] < min(results)
+        assert len(transport.queue) == 0
+
+    asyncio.run(_run())
+
+
+def test_undelivered_progress_replays_after_queue_reset(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    async def _run() -> None:
+        settings = Settings(orchestrator_public_addr="localhost:1")
+        ex = _executor([], tmp_path)
+        lifecycle = Lifecycle(settings, ex)
+        transport = Transport(settings, lifecycle, queue_maxsize=1)
+        lifecycle.transport = transport
+        ex._send = transport.send
+
+        await ex._record_host_ram_failure(["acme/incoming"], _host_ram_error())
+        monkeypatch.setattr(
+            ex.store.residency,
+            "host_ram_headroom",
+            lambda _incoming: SimpleNamespace(available_bytes=16 * _GiB),
+        )
+        await ex._observe_host_ram_progress(["acme/released"])
+        assert "acme/incoming" in ex._host_ram_progress
+
+        await transport.queue.reset_for_reconnect()
+        transport._connected.set()
+        await asyncio.wait_for(lifecycle.on_hello_ack(pb.HelloAck()), 0.2)
+        lifecycle._cancel_residency_reconcile()
+        _kind, message = await transport.queue.get()
+        assert message.model_event.state == pb.MODEL_STATE_HOST_CAPACITY_PROGRESS
+        assert await transport.queue.should_ship_capacity(message)
+        await transport.queue.mark_event_shipped(message)
+        await lifecycle.on_message_shipped(message)
+        assert ex._host_ram_progress == {}
+
+    asyncio.run(_run())
+
+
+def test_host_capacity_events_never_expose_shared_cache_ids(
+    tmp_path: Path,
+) -> None:
+    async def _run() -> None:
+        ex = _executor([], tmp_path)
+        key = LoadedComponentKey.for_component(
+            content_digest="digest", component="text_encoder",
+        )
+        cache_id = key.cache_id()
+        await ex._record_host_ram_failure(
+            ["acme/incoming"],
+            _host_ram_error(evicted_refs=(cache_id, "acme/model")),
+        )
+        replay = await ex.host_ram_capacity_replay()
+        assert list(replay[0].model_event.host_ram_evicted_refs) == ["acme/model"]
+
+        # The actual shared-owner teardown path also keeps its opaque key
+        # local instead of presenting it as a canonical model ref.
+        ex.store.residency.acquire_shared(key, object)
+        rec = _ClassRecord(cls=object, ready=True, shared_keys=[key])
+        observed: list[str] = []
+
+        async def _capture(refs: list[str], *, collect_host: bool = False) -> None:
+            observed.extend(refs)
+
+        ex._observe_host_ram_progress = _capture  # type: ignore[method-assign]
+        await ex._vacate_record(rec)
+        assert cache_id not in observed
+
+    asyncio.run(_run())
+
+
+def test_teardown_collects_cyclic_host_owner_without_flush_memory(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Actual teardown collects host cycles before its capacity probe only."""
+    class CyclicEndpoint:
+        def __init__(self) -> None:
+            self.cycle = self
+
+    async def _run() -> None:
+        sent: list[pb.WorkerMessage] = []
+        ex = _executor([], tmp_path, sent)
+        endpoint = CyclicEndpoint()
+        endpoint_ref = weakref.ref(endpoint)
+        rec = _ClassRecord(cls=CyclicEndpoint, instance=endpoint, ready=True)
+        endpoint = None  # type: ignore[assignment]
+
+        monkeypatch.setattr(residency_mod, "get_total_ram_gb", lambda: 31.0)
+        monkeypatch.setattr(
+            residency_mod,
+            "get_available_ram_gb",
+            lambda: 8.0 if endpoint_ref() is not None else 16.0,
+        )
+        await ex._record_host_ram_failure(["acme/incoming"], _host_ram_error())
+
+        def _forbidden_flush() -> None:
+            raise AssertionError("teardown capacity probe must not call flush_memory")
+
+        monkeypatch.setattr("gen_worker.executor.flush_memory", _forbidden_flush)
+        await ex._vacate_record(rec)
+
+        assert endpoint_ref() is None
+        progress = [
+            message.model_event for message in sent
+            if message.WhichOneof("msg") == "model_event"
+            and message.model_event.state == pb.MODEL_STATE_HOST_CAPACITY_PROGRESS
+        ]
+        assert len(progress) == 1
+        assert progress[0].host_ram_available_before_bytes == 8 * _GiB
+        assert progress[0].host_ram_available_after_bytes == 16 * _GiB
+
+    asyncio.run(_run())
+
+
+def test_capacity_progress_observes_shutdown_endpoint_collection(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """The vacate frame must not retain an endpoint through ``shutdown``.
+
+    Endpoint shutdown hooks are bound methods, so keeping the local callable
+    alive through the cgroup probe also keeps every pipeline on ``self`` alive.
+    This models available RAM from the endpoint's actual reachability and
+    proves progress is emitted only after the last departing owner is gone.
+    """
+    from gen_worker.models import disk_gc
+
+    class Old:
+        def setup(self, m: _FakePipe) -> None:
+            self.m = m
+
+        def shutdown(self) -> None:
+            pass
+
+        def run(self, ctx, payload: _In):  # pragma: no cover
+            return payload
+
+    class Incoming:
+        def setup(self, m: _FakePipe) -> None:
+            self.m = m
+
+        def run(self, ctx, payload: _In):  # pragma: no cover
+            return payload
+
+    old_spec = _spec("old", Old, {"m": HF("acme/old")})
+    incoming_spec = _spec("incoming", Incoming, {"m": HF("acme/incoming")})
+    monkeypatch.setattr(disk_gc, "tree_bytes", lambda p: 6 * _GiB)
+    monkeypatch.setattr(residency_mod, "get_total_ram_gb", lambda: 31.0)
+    pressure = {"active": False}
+    endpoint: weakref.ReferenceType[object] | None = None
+
+    def _available() -> float:
+        if not pressure["active"]:
+            return 24.0
+        assert endpoint is not None
+        return 8.0 if endpoint() is not None else 24.0
+
+    monkeypatch.setattr(residency_mod, "get_available_ram_gb", _available)
+    sent: list[pb.WorkerMessage] = []
+
+    async def _run() -> None:
+        nonlocal endpoint
+        ex = _executor([old_spec, incoming_spec], tmp_path, sent)
+        await ex.ensure_setup(old_spec)
+        rec = ex._classes[old_spec.instance_key]
+        endpoint = weakref.ref(rec.instance)
+        pressure["active"] = True
+
+        # Pinning the old owner forces an honest failed admission and records
+        # the exact required capacity without evicting it in the same attempt.
+        with ex.store.residency.executing("acme/old"):
+            with pytest.raises(InsufficientHostRamError):
+                await ex.ensure_setup(incoming_spec)
+
+        await ex._vacate_record(rec)
+        assert endpoint() is None
+        progress = [
+            message.model_event for message in sent
+            if message.WhichOneof("msg") == "model_event"
+            and message.model_event.state == pb.MODEL_STATE_HOST_CAPACITY_PROGRESS
+        ]
+        assert len(progress) == 1
+        assert progress[0].ref == "acme/incoming"
+        assert progress[0].host_ram_available_before_bytes == 8 * _GiB
+        assert progress[0].host_ram_available_after_bytes == 24 * _GiB
+        assert list(progress[0].host_ram_evicted_refs) == ["acme/old"]
+
+    asyncio.run(_run())
+
+
+def test_runjob_pin_release_emits_measured_capacity_progress(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Concurrent admission stays blocked until a real RunJob pin releases."""
+    from gen_worker.models import disk_gc
+
+    started = asyncio.Event()
+    finish = asyncio.Event()
+    running = {"value": False}
+
+    class Busy:
+        def setup(self, m: _FakePipe) -> None:
+            self.m = m
+
+        async def run(self, ctx, payload: _In) -> _In:
+            running["value"] = True
+            started.set()
+            await finish.wait()
+            running["value"] = False
+            return payload
+
+    class Incoming:
+        def setup(self, m: _FakePipe) -> None:
+            self.m = m
+
+        def run(self, ctx, payload: _In):  # pragma: no cover
+            return payload
+
+    busy_spec = _spec("busy", Busy, {"m": HF("acme/busy")})
+    incoming_spec = _spec("incoming", Incoming, {"m": HF("acme/incoming")})
+    monkeypatch.setattr(disk_gc, "tree_bytes", lambda p: 6 * _GiB)
+    monkeypatch.setattr(residency_mod, "get_total_ram_gb", lambda: 31.0)
+    monkeypatch.setattr(
+        residency_mod,
+        "get_available_ram_gb",
+        lambda: 8.0 if running["value"] else 24.0,
+    )
+    sent: list[pb.WorkerMessage] = []
+
+    async def _run() -> None:
+        ex = _executor([busy_spec, incoming_spec], tmp_path, sent)
+        await ex.ensure_setup(busy_spec)
+        run = pb.RunJob(
+            request_id="busy-job",
+            attempt=1,
+            function_name="busy",
+            input_payload=msgspec.msgpack.encode(_In(x="work")),
+        )
+        await ex.handle_run_job(run)
+        await asyncio.wait_for(started.wait(), 1)
+
+        # The concurrent load cannot evict the executing record and records a
+        # typed block at the observed low headroom.
+        with pytest.raises(InsufficientHostRamError):
+            await ex.ensure_setup(incoming_spec)
+        assert not [
+            message for message in sent
+            if message.WhichOneof("msg") == "model_event"
+            and message.model_event.state == pb.MODEL_STATE_HOST_CAPACITY_PROGRESS
+        ]
+
+        # A pin release is not model teardown. Capacity observation may yield
+        # and probe host cgroup state, but must not run flush_memory (which
+        # empties CUDA cache and resets peak-memory accounting).
+        flush_calls = 0
+
+        def _unexpected_flush() -> None:
+            nonlocal flush_calls
+            flush_calls += 1
+
+        monkeypatch.setattr("gen_worker.executor.flush_memory", _unexpected_flush)
+        finish.set()
+        job = ex.jobs[(run.request_id, run.attempt)]
+        assert job.task is not None
+        await asyncio.wait_for(job.task, 1)
+        assert flush_calls == 0
+        progress = [
+            message.model_event for message in sent
+            if message.WhichOneof("msg") == "model_event"
+            and message.model_event.state == pb.MODEL_STATE_HOST_CAPACITY_PROGRESS
+        ]
+        assert len(progress) == 1
+        assert progress[0].ref == "acme/incoming"
+        assert progress[0].host_ram_available_before_bytes == 8 * _GiB
+        assert progress[0].host_ram_available_after_bytes == 24 * _GiB
+        assert list(progress[0].host_ram_evicted_refs) == []
+
+    asyncio.run(_run())
+
+
+def test_host_capacity_wire_is_ignored_by_pre_548_hub_descriptor() -> None:
+    """The additive fields/enum parse under the previous protocol-v3 shape."""
+    from google.protobuf import descriptor_pb2, descriptor_pool, message_factory
+
+    file = descriptor_pb2.FileDescriptorProto(
+        name="worker_scheduler_pre_548.proto",
+        package="cozy.scheduler.pre548",
+        syntax="proto3",
+    )
+    state = file.enum_type.add(name="ModelState")
+    for name, number in (
+        ("MODEL_STATE_UNSPECIFIED", 0),
+        ("MODEL_STATE_DOWNLOADING", 1),
+        ("MODEL_STATE_ON_DISK", 2),
+        ("MODEL_STATE_IN_RAM", 3),
+        ("MODEL_STATE_IN_VRAM", 4),
+        ("MODEL_STATE_EVICTED", 5),
+        ("MODEL_STATE_FAILED", 6),
+        ("MODEL_STATE_ADOPTED", 7),
+    ):
+        state.value.add(name=name, number=number)
+
+    model_event = file.message_type.add(name="ModelEvent")
+    fields = (
+        ("ref", 1, descriptor_pb2.FieldDescriptorProto.TYPE_STRING, ""),
+        ("state", 2, descriptor_pb2.FieldDescriptorProto.TYPE_ENUM,
+         ".cozy.scheduler.pre548.ModelState"),
+        ("vram_bytes", 3, descriptor_pb2.FieldDescriptorProto.TYPE_INT64, ""),
+        ("error", 4, descriptor_pb2.FieldDescriptorProto.TYPE_STRING, ""),
+        ("bytes_done", 5, descriptor_pb2.FieldDescriptorProto.TYPE_INT64, ""),
+        ("bytes_total", 6, descriptor_pb2.FieldDescriptorProto.TYPE_INT64, ""),
+        ("duration_ms", 7, descriptor_pb2.FieldDescriptorProto.TYPE_INT64, ""),
+        ("cache_hits", 8, descriptor_pb2.FieldDescriptorProto.TYPE_INT64, ""),
+        ("cache_misses", 9, descriptor_pb2.FieldDescriptorProto.TYPE_INT64, ""),
+        ("warmup_s", 10, descriptor_pb2.FieldDescriptorProto.TYPE_DOUBLE, ""),
+    )
+    for name, number, field_type, type_name in fields:
+        field = model_event.field.add(
+            name=name,
+            number=number,
+            label=descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL,
+            type=field_type,
+        )
+        if type_name:
+            field.type_name = type_name
+
+    worker_message = file.message_type.add(name="WorkerMessage")
+    worker_message.oneof_decl.add(name="msg")
+    field = worker_message.field.add(
+        name="model_event",
+        number=6,
+        label=descriptor_pb2.FieldDescriptorProto.LABEL_OPTIONAL,
+        type=descriptor_pb2.FieldDescriptorProto.TYPE_MESSAGE,
+        type_name=".cozy.scheduler.pre548.ModelEvent",
+    )
+    field.oneof_index = 0
+    descriptor = descriptor_pool.DescriptorPool().Add(file)
+    OldWorkerMessage = message_factory.GetMessageClass(
+        descriptor.message_types_by_name["WorkerMessage"]
+    )
+
+    progress = pb.WorkerMessage(model_event=pb.ModelEvent(
+        ref="tensorhub/model:prod",
+        state=pb.MODEL_STATE_HOST_CAPACITY_PROGRESS,
+        host_ram_required_bytes=12 * _GiB,
+        host_ram_available_before_bytes=10 * _GiB,
+        host_ram_available_after_bytes=16 * _GiB,
+        host_ram_evicted_refs=["tensorhub/old:prod"],
+        host_ram_capacity_generation=2,
+    ))
+    old_progress = OldWorkerMessage.FromString(progress.SerializeToString())
+    assert old_progress.WhichOneof("msg") == "model_event"
+    assert old_progress.model_event.ref == "tensorhub/model:prod"
+    assert old_progress.model_event.state == 8
+    assert old_progress.model_event.state not in range(0, 8)  # old switch: default/ignore
+    assert not hasattr(old_progress.model_event, "host_ram_required_bytes")
+
+    failure = pb.WorkerMessage(model_event=pb.ModelEvent(
+        ref="tensorhub/model:prod",
+        state=pb.MODEL_STATE_FAILED,
+        error="insufficient_host_ram",
+        host_ram_required_bytes=12 * _GiB,
+        host_ram_capacity_generation=1,
+    ))
+    old_failure = OldWorkerMessage.FromString(failure.SerializeToString())
+    assert old_failure.model_event.state == 6
+    assert old_failure.model_event.error == "insufficient_host_ram"
+    assert not hasattr(old_failure.model_event, "host_ram_capacity_generation")
 
 
 def test_setup_vacates_warm_record_after_vram_make_room(
@@ -506,6 +1301,123 @@ def test_declarative_ninth_sdxl_load_uses_reclaimable_cgroup_cache(
             and msg.model_event.state == pb.MODEL_STATE_FAILED
         ]
         lifecycle._cancel_residency_reconcile()
+
+    asyncio.run(_run())
+
+
+def test_runjob_sixteen_model_cgroup_swap_stress(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Sixteen production RunJob picks converge under a 31GiB cgroup cap.
+
+    The fake model objects supply deterministic anonymous working-set bytes;
+    the real cgroup parser, dynamic binding, RunJob, setup, owner-aware LRU,
+    pin, result, and cleanup paths remain in use. Time is irrelevant: every
+    decision follows the observed state of the disposable cgroup files.
+    """
+    from gen_worker.models import disk_gc
+
+    live: weakref.WeakSet[object] = weakref.WeakSet()
+
+    def _load(cls, path, **kwargs):
+        obj = cls()
+        live.add(obj)
+        return obj
+
+    monkeypatch.setattr(_FakePipe, "from_pretrained", classmethod(_load))
+
+    class Endpoint:
+        def setup(self, pipeline: _FakePipe, vae: _FakePipe) -> None:
+            self.pipeline = pipeline
+            self.vae = vae
+
+        def run(self, ctx, payload: _In) -> _In:
+            return payload
+
+    base_pipeline = HF("acme/sdxl-0")
+    shared_vae = HF("acme/sdxl-vae")
+    spec = EndpointSpec(
+        name="generate", method=Endpoint.run, kind="inference",
+        payload_type=_In, output_mode="single", cls=Endpoint,
+        attr_name="run", models={"pipeline": base_pipeline, "vae": shared_vae},
+        slots={
+            "pipeline": Slot(_FakePipe, default_checkpoint=base_pipeline),
+            "vae": Slot(_FakePipe, default_checkpoint=shared_vae),
+        },
+        resources=Resources(vram_gb=12),
+    )
+    sent: list[pb.WorkerMessage] = []
+    ex = _executor([spec], tmp_path, sent)
+    model_bytes = 6_941_377_969
+    monkeypatch.setattr(disk_gc, "tree_bytes", lambda path: model_bytes)
+
+    root = tmp_path / "runjob-cgroup"
+    root.mkdir()
+    proc = tmp_path / "runjob-proc-self-cgroup"
+    proc.write_text("0::/\n")
+    limit = 31 * _GiB
+    (root / "memory.max").write_text(str(limit))
+    (root / "memory.current").write_text(str(limit))
+    object_bytes = 7 * _GiB // 5
+    monkeypatch.setattr(
+        psutil, "virtual_memory",
+        lambda: SimpleNamespace(total=125 * _GiB, available=125 * _GiB),
+    )
+
+    def _ram() -> memory_mod.HostRam:
+        working = len(live) * object_bytes
+        (root / "memory.stat").write_text(
+            f"inactive_file {max(0, limit - working)}\n"
+        )
+        return memory_mod.probe_host_ram(root=root, proc_self_cgroup=proc)
+
+    monkeypatch.setattr(residency_mod, "get_total_ram_gb", lambda: 31.0)
+    monkeypatch.setattr(residency_mod, "get_available_ram_gb", lambda: _ram().available_gb)
+
+    async def _run() -> None:
+        observed_before: list[int] = []
+        ready_after: list[int] = []
+        for i in range(16):
+            observed_before.append(int(_ram().available_gb * _GiB))
+            pipeline_ref = f"tensorhub/sdxl-{i}:prod"
+            run = pb.RunJob(
+                request_id=f"swap-{i}",
+                attempt=1,
+                function_name="generate",
+                input_payload=msgspec.msgpack.encode(_In(x=str(i))),
+                models=[
+                    pb.ModelBinding(slot="pipeline", ref=pipeline_ref),
+                    pb.ModelBinding(slot="vae", ref="tensorhub/sdxl-vae:prod"),
+                ],
+            )
+            await ex.handle_run_job(run)
+            job = ex.jobs[(run.request_id, run.attempt)]
+            assert job.task is not None
+            await job.task
+            result = next(
+                message.job_result for message in reversed(sent)
+                if message.WhichOneof("msg") == "job_result"
+                and message.job_result.request_id == run.request_id
+            )
+            assert result.status == pb.JOB_STATUS_OK, result.safe_message
+            ready_after.append(len({
+                id(rec) for rec in ex._classes.values() if rec.ready
+            }))
+
+        required = model_bytes + int(31.0 * 0.2 * _GiB)
+        assert any(available < required for available in observed_before[8:])
+        assert max(ready_after) <= 8
+        assert len(live) <= 16
+        assert len([
+            message for message in sent
+            if message.WhichOneof("msg") == "job_result"
+        ]) == 16
+        assert not [
+            message for message in sent
+            if message.WhichOneof("msg") == "model_event"
+            and message.model_event.state == pb.MODEL_STATE_FAILED
+            and message.model_event.error == "insufficient_host_ram"
+        ]
 
     asyncio.run(_run())
 

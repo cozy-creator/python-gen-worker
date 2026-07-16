@@ -82,13 +82,39 @@ class SendQueue:
     def __init__(self, maxsize: int = 1024) -> None:
         self._maxsize = maxsize
         self._items: collections.deque[Tuple[str, pb.WorkerMessage]] = collections.deque()
+        # Reconnect evidence is inserted atomically ahead of preserved results.
+        # It is a small state replay, not ordinary producer traffic, so it is
+        # exempt from the progress/event bound and cannot deadlock HelloAck
+        # before the send loop starts.
+        self._reconnect: collections.deque[Tuple[str, pb.WorkerMessage]] = (
+            collections.deque()
+        )
+        # Per-stream fences. ``_reconnect_seen`` holds only the latest finite
+        # HelloAck baseline identity (state or function status) prepended or
+        # written in this epoch. Host-capacity evidence has its own generation-
+        # fenced delivery lane below. ``_in_flight`` closes the get/write race
+        # while the single sender owns one message.
+        self._reconnect_seen: dict[Tuple[str, str], bytes] = {}
+        self._in_flight: set[bytes] = set()
+        # Typed host-capacity evidence is finite state, not ordinary traffic:
+        # retain only the newest undelivered generation per ref. It bypasses
+        # the ordinary bound so an older blocked put can never wake after a
+        # newer satisfying generation and reinsert stale FAILED evidence.
+        self._capacity: dict[Tuple[str, str], pb.WorkerMessage] = {}
+        self._capacity_in_flight: dict[Tuple[str, str], int] = {}
+        # Finite full-replace identities only (state delta and per-function
+        # status). A newer enqueue/prepend attempt fences an older producer
+        # that is still blocked on the ordinary lane. Capacity refs do not
+        # enter this map; their generation-fenced lane above is authoritative.
+        self._state_attempt = 0
+        self._state_attempts: dict[Tuple[str, str], int] = {}
         self._cond = asyncio.Condition()
         # (request_id, attempt) -> JobResult WorkerMessage, until written to a
         # live stream. Survives reconnects; drives Hello.in_flight.
         self._pending_results: dict[Tuple[str, int], pb.WorkerMessage] = {}
 
     def __len__(self) -> int:
-        return len(self._items)
+        return len(self._capacity) + len(self._reconnect) + len(self._items)
 
     @property
     def pending_result_keys(self) -> List[Tuple[str, int]]:
@@ -101,6 +127,98 @@ class SendQueue:
                 return True
         return False
 
+    def _bounded_len(self) -> int:
+        # Durable JobResults are explicitly exempt from the queue bound. They
+        # must not consume event/progress capacity merely because they share
+        # the same deque (especially after reconnect requeues several results).
+        return sum(1 for kind, _msg in self._items if kind != _RESULT)
+
+    @staticmethod
+    def _message_key(msg: pb.WorkerMessage) -> Optional[bytes]:
+        if msg.WhichOneof("msg") == "job_result":
+            return None
+        return msg.SerializeToString(deterministic=True)
+
+    @classmethod
+    def _reconnect_identity(
+        cls, msg: pb.WorkerMessage,
+    ) -> Optional[Tuple[str, str]]:
+        which = msg.WhichOneof("msg")
+        if which == "state_delta":
+            return (which, "")
+        if which == "fn_unavailable":
+            return (which, msg.fn_unavailable.function_name)
+        if which == "fn_degraded":
+            return (which, msg.fn_degraded.function_name)
+        if cls._host_capacity_key(msg) is not None:
+            return ("host_capacity", msg.model_event.ref)
+        return None
+
+    @staticmethod
+    def _host_capacity_key(msg: pb.WorkerMessage) -> Optional[bytes]:
+        if msg.WhichOneof("msg") != "model_event":
+            return None
+        event = msg.model_event
+        if event.state == pb.MODEL_STATE_HOST_CAPACITY_PROGRESS or (
+            event.state == pb.MODEL_STATE_FAILED
+            and event.error == "insufficient_host_ram"
+            and event.host_ram_capacity_generation > 0
+        ):
+            return msg.SerializeToString(deterministic=True)
+        return None
+
+    @staticmethod
+    def _host_capacity_generation(msg: pb.WorkerMessage) -> int:
+        return int(msg.model_event.host_ram_capacity_generation)
+
+    def _remove_reconnect_identity(self, identity: Tuple[str, str]) -> None:
+        self._items = collections.deque(
+            (kind, queued)
+            for kind, queued in self._items
+            if self._reconnect_identity(queued) != identity
+        )
+        self._reconnect = collections.deque(
+            (kind, queued)
+            for kind, queued in self._reconnect
+            if self._reconnect_identity(queued) != identity
+        )
+
+    def _begin_state_attempt(self, identity: Tuple[str, str]) -> int:
+        self._state_attempt += 1
+        self._state_attempts[identity] = self._state_attempt
+        return self._state_attempt
+
+    def _put_capacity(
+        self, msg: pb.WorkerMessage, *, replay_order: bool = False,
+    ) -> None:
+        identity = self._reconnect_identity(msg)
+        if identity is None or identity[0] != "host_capacity":
+            raise ValueError("message is not typed host-capacity evidence")
+        generation = self._host_capacity_generation(msg)
+        current = self._capacity.get(identity)
+        current_generation = (
+            self._host_capacity_generation(current) if current is not None else -1
+        )
+        in_flight_generation = self._capacity_in_flight.get(identity, -1)
+        if max(current_generation, in_flight_generation) >= generation:
+            if (
+                replay_order
+                and current_generation == generation
+                and in_flight_generation < generation
+            ):
+                # HelloAck's active-failure/undelivered-progress snapshot is
+                # authoritative even when the exact entries were already
+                # pending in the opposite insertion order.
+                self._remove_reconnect_identity(identity)
+                self._reconnect_seen.pop(identity, None)
+                self._capacity.pop(identity, None)
+                self._capacity[identity] = msg
+            return
+        self._remove_reconnect_identity(identity)
+        self._reconnect_seen.pop(identity, None)
+        self._capacity.pop(identity, None)
+        self._capacity[identity] = msg
+
     async def put(self, msg: pb.WorkerMessage) -> None:
         kind = _msg_kind(msg)
         async with self._cond:
@@ -110,22 +228,141 @@ class SendQueue:
                 self._items.append((kind, msg))       # results exempt from the bound
                 self._cond.notify_all()
                 return
-            if len(self._items) >= self._maxsize:
-                if not self._drop_oldest_progress():
-                    if kind == _PROGRESS:
-                        return                        # nothing older to shed; drop this chunk
-                    while len(self._items) >= self._maxsize and not self._drop_oldest_progress():
-                        await self._cond.wait()       # backpressure: block the producer
+            if self._host_capacity_key(msg) is not None:
+                self._put_capacity(msg)
+                self._cond.notify_all()
+                return
+            identity = self._reconnect_identity(msg)
+            attempt: Optional[int] = None
+            if identity is not None:
+                attempt = self._begin_state_attempt(identity)
+                self._remove_reconnect_identity(identity)
+                self._reconnect_seen.pop(identity, None)
+                self._cond.notify_all()
+            while self._maxsize > 0 and self._bounded_len() >= self._maxsize:
+                if (
+                    identity is not None
+                    and self._state_attempts.get(identity) != attempt
+                ):
+                    return
+                if self._drop_oldest_progress():
+                    continue
+                if kind == _PROGRESS:
+                    return                            # drop this progress chunk
+                await self._cond.wait()               # backpressure: block the producer
+            if (
+                identity is not None
+                and self._state_attempts.get(identity) != attempt
+            ):
+                return
             self._items.append((kind, msg))
+            self._cond.notify_all()
+
+    async def prepend_reconnect(self, messages: List[pb.WorkerMessage]) -> None:
+        """Atomically prepend unseen reconnect evidence without backpressure.
+
+        The logical-identity map lasts for one connection epoch. Thus a midstream
+        duplicate HelloAck is idempotent, while reset_for_reconnect clears the
+        fence so the next stream can replay the same process generation.
+        Older copies of the same logical identity are replaced, not copied, so
+        stale state/capacity evidence cannot remain behind a durable result.
+        """
+        async with self._cond:
+            for msg in messages:
+                key = self._message_key(msg)
+                if key is None:
+                    continue
+                identity = self._reconnect_identity(msg)
+                if identity is None:
+                    raise ValueError(
+                        f"{msg.WhichOneof('msg')} is not finite reconnect state"
+                    )
+                if identity[0] == "host_capacity":
+                    self._put_capacity(msg, replay_order=True)
+                    continue
+                self._begin_state_attempt(identity)
+                if (
+                    self._reconnect_seen.get(identity) == key
+                    or key in self._in_flight
+                ):
+                    # Drop stale ordinary/reconnect copies of this logical
+                    # state while retaining the exact current prepend copy.
+                    self._items = collections.deque(
+                        (kind, queued)
+                        for kind, queued in self._items
+                        if self._reconnect_identity(queued) != identity
+                    )
+                    self._reconnect = collections.deque(
+                        (kind, queued)
+                        for kind, queued in self._reconnect
+                        if (
+                            self._reconnect_identity(queued) != identity
+                            or self._message_key(queued) == key
+                        )
+                    )
+                    continue
+                self._remove_reconnect_identity(identity)
+                self._reconnect_seen[identity] = key
+                self._reconnect.append((_msg_kind(msg), msg))
             self._cond.notify_all()
 
     async def get(self) -> Tuple[str, pb.WorkerMessage]:
         async with self._cond:
-            while not self._items:
+            while not self._capacity and not self._reconnect and not self._items:
                 await self._cond.wait()
-            item = self._items.popleft()
+            if self._capacity:
+                # Dict insertion order is causal: the live executor outbox
+                # inserts global commit order, while reconnect replay inserts
+                # every active FAILED before undelivered PROGRESS.
+                identity, message = next(iter(self._capacity.items()))
+                item = (_EVENT, self._capacity.pop(identity))
+                self._capacity_in_flight[identity] = (
+                    self._host_capacity_generation(message)
+                )
+            elif self._reconnect:
+                item = self._reconnect.popleft()
+            else:
+                item = self._items.popleft()
+            key = self._message_key(item[1])
+            if key is not None:
+                self._in_flight.add(key)
             self._cond.notify_all()
             return item
+
+    async def should_ship_capacity(self, msg: pb.WorkerMessage) -> bool:
+        identity = self._reconnect_identity(msg)
+        if identity is None or identity[0] != "host_capacity":
+            return True
+        generation = self._host_capacity_generation(msg)
+        key = self._message_key(msg)
+        async with self._cond:
+            newer = self._capacity.get(identity)
+            if (
+                newer is not None
+                and self._host_capacity_generation(newer) > generation
+            ):
+                if self._capacity_in_flight.get(identity) == generation:
+                    self._capacity_in_flight.pop(identity, None)
+                if key is not None:
+                    self._in_flight.discard(key)
+                self._cond.notify_all()
+                return False
+            return True
+
+    async def mark_event_shipped(self, msg: pb.WorkerMessage) -> None:
+        key = self._message_key(msg)
+        if key is None:
+            return
+        async with self._cond:
+            self._in_flight.discard(key)
+            identity = self._reconnect_identity(msg)
+            if identity is not None and identity[0] == "host_capacity":
+                generation = self._host_capacity_generation(msg)
+                if self._capacity_in_flight.get(identity) == generation:
+                    self._capacity_in_flight.pop(identity, None)
+            elif identity is not None:
+                self._reconnect_seen[identity] = key
+            self._cond.notify_all()
 
     async def mark_result_shipped(self, msg: pb.WorkerMessage) -> None:
         r = msg.job_result
@@ -134,8 +371,14 @@ class SendQueue:
             self._cond.notify_all()  # wake wait_empty (drain flush)
 
     async def reset_for_reconnect(self) -> None:
-        """Drop buffered progress/events; requeue every unshipped result."""
+        """Drop transient lanes; executor state replays capacity after HelloAck."""
         async with self._cond:
+            self._reconnect.clear()
+            self._reconnect_seen.clear()
+            self._in_flight.clear()
+            self._capacity.clear()
+            self._capacity_in_flight.clear()
+            self._state_attempts.clear()
             self._items.clear()
             for msg in self._pending_results.values():
                 self._items.append((_RESULT, msg))
@@ -144,7 +387,14 @@ class SendQueue:
     async def wait_empty(self, timeout: Optional[float] = None) -> bool:
         deadline = None if timeout is None else time.monotonic() + timeout
         async with self._cond:
-            while self._items or self._pending_results:
+            while (
+                self._reconnect
+                or self._capacity
+                or self._items
+                or self._in_flight
+                or self._capacity_in_flight
+                or self._pending_results
+            ):
                 remaining = None if deadline is None else deadline - time.monotonic()
                 if remaining is not None and remaining <= 0:
                     return False
@@ -166,6 +416,7 @@ class Transport:
       build_hello() -> pb.Hello                     (fresh full snapshot)
       on_hello_ack(ack: pb.HelloAck) -> Awaitable   (also mid-stream re-sends)
       on_message(msg: pb.SchedulerMessage) -> Awaitable  (MUST NOT block)
+      on_message_shipped(msg: pb.WorkerMessage) -> Awaitable (optional)
       on_disconnect() -> Awaitable
     """
 
@@ -200,6 +451,9 @@ class Transport:
 
     async def send(self, msg: pb.WorkerMessage) -> None:
         await self.queue.put(msg)
+
+    async def prepend_reconnect(self, messages: List[pb.WorkerMessage]) -> None:
+        await self.queue.prepend_reconnect(messages)
 
     @property
     def connected(self) -> bool:
@@ -424,9 +678,16 @@ class Transport:
     async def _send_loop(self, stream: Any) -> None:
         while True:
             kind, msg = await self.queue.get()
+            if not await self.queue.should_ship_capacity(msg):
+                continue
             await stream.write(msg)
             if kind == _RESULT:
                 await self.queue.mark_result_shipped(msg)
+            else:
+                await self.queue.mark_event_shipped(msg)
+            shipped = getattr(self._handlers, "on_message_shipped", None)
+            if shipped is not None:
+                await shipped(msg)
 
     async def _recv_loop(self, stream: Any) -> None:
         while True:
