@@ -217,3 +217,45 @@ def test_load_honors_declared_vram(vram, tmp_path: Path, monkeypatch) -> None:
     pipe2 = load_from_pretrained(
         _Pipe, snap, storage_dtype="fp8+te", declared_vram_gb=20.0)
     assert pipeline_weight_lane(pipe2) == ""  # upgraded: 20 + ~0 <= 79
+
+
+def _write_mixed_safetensors(path: Path, fp8_bytes: int, bf16_tensors: int,
+                             bf16_bytes_each: int) -> None:
+    """One shard: a single big F8_E4M3 weight + many small BF16 scale/norm
+    tensors (majority by COUNT is bf16, majority by BYTES is fp8 — the
+    produced-flavor layout, ie#381)."""
+    entries = {"w": {"dtype": "F8_E4M3", "shape": [fp8_bytes],
+                     "data_offsets": [0, fp8_bytes]}}
+    off = fp8_bytes
+    for i in range(bf16_tensors):
+        entries[f"s{i}"] = {"dtype": "BF16", "shape": [bf16_bytes_each],
+                            "data_offsets": [off, off + bf16_bytes_each]}
+        off += bf16_bytes_each
+    header = json.dumps(entries).encode()
+    with open(path, "wb") as f:
+        f.write(struct.pack("<Q", len(header)))
+        f.write(header)
+
+
+def test_mixed_dtype_fp8_bytes_still_count(tmp_path: Path) -> None:
+    """ie#381 fix 2: a produced fp8 flavor stores scales/norms in bf16 —
+    majority-by-COUNT says "bf16" but the upcast doubles the fp8 WEIGHT
+    bytes. The fits check must count them (the majority-dtype gate counted
+    zero and upgraded LTX into its own activation budget)."""
+    from gen_worker.models.loading import snapshot_component_fp8_bytes
+
+    snap = tmp_path
+    (snap / "model_index.json").write_text(json.dumps(
+        {"_class_name": "Pipe", "transformer": ["diffusers", "X"]}))
+    (snap / "transformer").mkdir()
+    _write_mixed_safetensors(
+        snap / "transformer" / "diffusion_pytorch_model.safetensors",
+        fp8_bytes=3 << 30, bf16_tensors=200, bf16_bytes_each=1 << 20)
+    # majority label is bf16 (200 tensors vs 1) yet fp8 bytes = 3GB
+    fp8 = snapshot_component_fp8_bytes(snap)
+    assert fp8.get("transformer", 0) == 3 << 30
+    # total ~3.2GB + upcast 3GB = ~6.2GB: fits at 12GB free, not at 9.9GB
+    assert bf16_resident_fits(snap, free_gb=12.0) is True
+    assert bf16_resident_fits(snap, free_gb=9.9) is False
+    # envelope term composes: declared 8 + upcast 3 = 11 > 10.5 free
+    assert bf16_resident_fits(snap, free_gb=10.5, declared_vram_gb=8) is False

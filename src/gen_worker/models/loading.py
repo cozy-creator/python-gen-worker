@@ -766,10 +766,14 @@ def bf16_resident_fits(
     targets = set(_FP8_STORAGE_COMPONENTS)
     if text_encoders:
         targets |= set(_FP8_TEXT_ENCODER_COMPONENTS)
+    # Per-TENSOR fp8 byte accounting (ie#381 fix 2): the majority-dtype
+    # component gate returned "bf16" for produced fp8 flavors whose scale/
+    # norm tensors outnumber the (much larger) fp8 weight tensors, counting
+    # the upcast as ZERO and letting the upgrade eat the activation budget.
+    fp8 = snapshot_component_fp8_bytes(Path(path))
     upcast_extra = 0
-    for name, nbytes in comp.items():
-        probe = Path(path) / name if name else Path(path)
-        if (name in targets or not name) and detect_on_disk_dtype(probe) == "fp8":
+    for name, nbytes in fp8.items():
+        if name in targets or not name:
             upcast_extra += nbytes
     resident_gb = (total + upcast_extra) / float(1 << 30)
     if resident_gb > float(free_gb) - BF16_RESIDENT_MARGIN_GB:
@@ -853,6 +857,47 @@ def _safetensors_data_bytes(p: Path) -> int:
             s, e = value["data_offsets"]
             total += int(e) - int(s)
     return total
+
+
+def _safetensors_fp8_bytes(p: Path) -> int:
+    """Bytes of F8_E4M3-stored tensors in one safetensors file (header-only)."""
+    import struct
+
+    with open(p, "rb") as f:
+        raw = f.read(8)
+        if len(raw) < 8:
+            return 0
+        (n,) = struct.unpack("<Q", raw)
+        if n <= 0 or n > _MAX_SAFETENSORS_HEADER_BYTES:
+            return 0
+        header = json.loads(f.read(n))
+    total = 0
+    for value in header.values():
+        if (isinstance(value, dict) and value.get("dtype") == "F8_E4M3"
+                and "data_offsets" in value):
+            s_, e_ = value["data_offsets"]
+            total += int(e_) - int(s_)
+    return total
+
+
+def snapshot_component_fp8_bytes(model_path: Path) -> Dict[str, int]:
+    """F8_E4M3 tensor bytes per top-level component dir. These are the bytes
+    a bf16-resident upcast DOUBLES — counted per tensor, not per component
+    majority label: a produced fp8 flavor stores scales/norms in bf16, so a
+    shard can be majority-BF16 by tensor COUNT while its weight bytes are
+    fp8 (LTX fp8 DiT: 247 bf16 vs 137 fp8 tensors per shard, but the fp8
+    tensors are ~3x the bytes — the majority-dtype gate undercounted the
+    upcast to zero, ie#381/gw#553)."""
+    out: Dict[str, int] = {}
+    root = Path(model_path)
+    try:
+        for p in sorted(root.rglob("*.safetensors")):
+            rel = p.relative_to(root)
+            comp = rel.parts[0] if len(rel.parts) > 1 else ""
+            out[comp] = out.get(comp, 0) + _safetensors_fp8_bytes(p)
+    except (OSError, ValueError):
+        return {}
+    return {k: v for k, v in out.items() if v > 0}
 
 
 def snapshot_component_weight_bytes(model_path: Path) -> Dict[str, int]:

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.30.1 (2026-07-16)
+
+- **ie#381 fix 2: the bf16-resident fit check counts fp8 bytes per TENSOR,
+  not per component majority label.** Produced fp8 flavors store scales and
+  norms in bf16, so a shard is majority-BF16 by tensor count while its
+  weight bytes are fp8 (LTX DiT: 247 bf16 vs 137 fp8 tensors, fp8 = 3x the
+  bytes) — `detect_on_disk_dtype`'s majority gate counted the upcast as
+  ZERO, neutering both the weights-margin rule and 0.28.1's declared-VRAM
+  envelope term, and the upgrade proceeded into the activation budget.
+  `snapshot_component_fp8_bytes` sums F8_E4M3 tensor bytes from the
+  safetensors headers; `bf16_resident_fits` doubles exactly those.
+
+
 ## 0.30.0 (2026-07-16)
 
 - **gw#551: demoted lanes serve instead of crashing — swap-per-request for
