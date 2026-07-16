@@ -221,6 +221,45 @@ def map_adapter(
     return out
 
 
+# Flat staging buffers above this size stay pageable — pinned host memory is
+# a shared, non-swappable resource and the cache holds up to _MAPCACHE_MAX.
+_PIN_MAX_BYTES = 512 << 20
+
+
+def _stage_adapter(mapped: Dict[str, Tuple[Any, Any, float]]) -> Dict[str, Any]:
+    """One adapter's swap-ready form: per-dtype flat CPU staging tensors
+    (pinned when small enough on CUDA hosts) + an index of every layer's
+    (dtype, offset, shape) slices. Built once per resident adapter; hot-swaps
+    then pay only one H2D transfer + device-side placement."""
+    import torch
+
+    by_dtype: Dict[Any, List[Tuple[str, str, Any]]] = {}
+    for path in sorted(mapped):
+        a, b, _alpha = mapped[path]
+        by_dtype.setdefault(a.dtype, []).append((path, "a", a))
+        by_dtype.setdefault(b.dtype, []).append((path, "b", b))
+    flat: Dict[Any, Any] = {}
+    slices: Dict[Tuple[str, str], Tuple[Any, int, Tuple[int, ...]]] = {}
+    for dt, items in by_dtype.items():
+        total = sum(t.numel() for _p, _tag, t in items)
+        pin = (torch.cuda.is_available()
+               and total * items[0][2].element_size() <= _PIN_MAX_BYTES)
+        buf = torch.empty(total, dtype=dt, pin_memory=pin)
+        off = 0
+        for path, tag, t in items:
+            n = t.numel()
+            buf[off:off + n].copy_(t.reshape(-1))
+            slices[(path, tag)] = (dt, off, tuple(t.shape))
+            off += n
+        flat[dt] = buf
+    index = {
+        path: (slices[(path, "a")], slices[(path, "b")], float(alpha))
+        for path, (_a, _b, alpha) in mapped.items()
+    }
+    ranks = {path: int(a.shape[0]) for path, (a, _b, _al) in mapped.items()}
+    return {"ranks": ranks, "flat": flat, "index": index}
+
+
 def alloc_branch_buffers(mod: Any, bucket: int) -> None:
     """Zeroed A/B buffers on one Fp8ScaledLinear (persistent=False — they
     move with the module, never enter state_dict)."""
@@ -315,25 +354,26 @@ def apply_branch_adapters(
         clear_branch_adapters(model)
         return {"bucket": branch_bucket(model), "resized": False, "covered": 0,
                 "modules": 0, "copied_bytes": 0, "swap_ms": 0}
-    # Mapping is pure in the state dict; repeat swaps of a resident adapter
-    # (the AdapterCache serves the SAME dict object) skip the key-mapping /
-    # kohya-conversion pass entirely.
+    # Mapping and flat staging are pure in the state dict; repeat swaps of a
+    # resident adapter (the AdapterCache serves the SAME dict object) skip
+    # the key-mapping pass AND the CPU flatten — the flatten measured ~700ms
+    # at SDXL scale, the actual H2D+device placement ~130ms.
     cache: Dict[Any, Any] = getattr(model, _MAPCACHE_ATTR, None) or {}
     mapped = []
     for sd, w, ref in adapters:
         key = (ref, id(sd), len(sd))
-        m = cache.get(key)
-        if m is None:
-            m = map_adapter(sd, model, ref=ref)
-            cache[key] = m
+        entry = cache.get(key)
+        if entry is None:
+            entry = _stage_adapter(map_adapter(sd, model, ref=ref))
+            cache[key] = entry
             while len(cache) > _MAPCACHE_MAX:
                 cache.pop(next(iter(cache)))
-        mapped.append((m, w, ref))
+        mapped.append((entry, w, ref))
     setattr(model, _MAPCACHE_ATTR, cache)
     per_layer: Dict[str, int] = {}
-    for m, _w, _ref in mapped:
-        for path, (a, _b, _s) in m.items():
-            per_layer[path] = per_layer.get(path, 0) + int(a.shape[0])
+    for entry, _w, _ref in mapped:
+        for path, r in entry["ranks"].items():
+            per_layer[path] = per_layer.get(path, 0) + r
     needed = max(per_layer.values(), default=0)
     bucket = rank_bucket(max(needed, 1))
     current = branch_bucket(model)
@@ -351,8 +391,8 @@ def apply_branch_adapters(
             enable_lora_branches(model, bucket)
     else:
         covered_paths: set[str] = set()
-        for m, _w, _ref in mapped:
-            covered_paths.update(m)
+        for entry, _w, _ref in mapped:
+            covered_paths.update(entry["ranks"])
         for path, mod in quantized_modules(model).items():
             if path in covered_paths:
                 if (getattr(mod, "lora_a", None) is None
@@ -371,58 +411,51 @@ def apply_branch_adapters(
     covered = 0
     mods = quantized_modules(model)
     with torch.no_grad():
-        # Ship RAW adapter tensors in ONE flat H2D transfer, then cast /
-        # scale-fold / place on DEVICE — per-layer CPU cat+cast+scale over
-        # hundreds of layers measured ~1s at SDXL scale, and 2x739
-        # individual pageable copies measured seconds.
-        plan: List[Tuple[Any, List[Any], List[Any]]] = []
-        pieces: List[Any] = []
+        # One H2D transfer per adapter of its CACHED flat staging buffer
+        # (pinned when small enough), then index-addressed device-side
+        # cast/scale-fold/placement — the per-swap CPU flatten measured
+        # ~700ms at SDXL scale; staged warm swaps pay only transfer+place.
+        device = None
+        for mod in mods.values():
+            if getattr(mod, "lora_a", None) is not None:
+                device = mod.lora_a.device
+                break
+        dev_flats: List[Dict[Any, Any]] = []
+        for entry, _w, _ref in mapped:
+            df = {dt: t.to(device, non_blocking=t.is_pinned())
+                  for dt, t in entry["flat"].items()}
+            dev_flats.append(df)
+            copied += sum(t.numel() * t.element_size()
+                          for t in entry["flat"].values())
         for path, mod in mods.items():
             if getattr(mod, "lora_a", None) is None:
                 continue  # sparse placement: uncovered layer has no branch
-            layer_hits = [(m[path], weight)
-                          for m, weight, _ref in mapped if path in m]
-            if not layer_hits:
-                mod.lora_b.zero_()
-                continue
-            plan.append((mod, [h for h, _w in layer_hits],
-                         [w for _h, w in layer_hits]))
-            for (a, b, _s), _w in layer_hits:
-                pieces.append(a.reshape(-1))
-                pieces.append(b.reshape(-1))
-            covered += 1
-        if plan:
-            device = plan[0][0].lora_a.device
-            # mixed dtypes across adapters are possible; stage each dtype run
-            # contiguously in its own flat tensor
-            flats: Dict[Any, Any] = {}
-            offsets: Dict[Any, int] = {}
-            for dt in {p.dtype for p in pieces}:
-                flats[dt] = torch.cat([p for p in pieces if p.dtype == dt]).to(
-                    device, non_blocking=True)
-                offsets[dt] = 0
-                copied += flats[dt].numel() * flats[dt].element_size()
-
-            def take(t: Any) -> Any:
-                dt = t.dtype
-                n = t.numel()
-                out = flats[dt][offsets[dt]:offsets[dt] + n].view(t.shape)
-                offsets[dt] += n
-                return out
-
-            for mod, hits, weights in plan:
-                mod.lora_a.zero_()
-                mod.lora_b.zero_()
-                r0 = 0
-                for (a, b, alpha_scale), w in zip(hits, weights):
-                    r = int(a.shape[0])
-                    dev_a, dev_b = take(a), take(b)
-                    mod.lora_a[r0:r0 + r].copy_(dev_a)  # device-side cast
-                    mod.lora_b[:, r0:r0 + r].copy_(dev_b)
-                    scale = float(alpha_scale) * float(w)
-                    if scale != 1.0:
-                        mod.lora_b[:, r0:r0 + r].mul_(scale)
-                    r0 += r
+            hit_any = False
+            r0 = 0
+            for (entry, w, _ref), df in zip(mapped, dev_flats):
+                idx = entry["index"].get(path)
+                if idx is None:
+                    continue
+                if not hit_any:
+                    mod.lora_a.zero_()
+                    mod.lora_b.zero_()
+                    hit_any = True
+                (dt_a, off_a, shp_a), (dt_b, off_b, shp_b), alpha_scale = idx
+                r = shp_a[0]
+                n_a = shp_a[0] * shp_a[1]
+                n_b = shp_b[0] * shp_b[1]
+                mod.lora_a[r0:r0 + r].copy_(
+                    df[dt_a][off_a:off_a + n_a].view(shp_a))
+                mod.lora_b[:, r0:r0 + r].copy_(
+                    df[dt_b][off_b:off_b + n_b].view(shp_b))
+                scale = alpha_scale * float(w)
+                if scale != 1.0:
+                    mod.lora_b[:, r0:r0 + r].mul_(scale)
+                r0 += r
+            if hit_any:
+                covered += 1
+            else:
+                mod.lora_b.zero_()  # canonical zeroed slot (uniform)
         if torch.cuda.is_available():
             torch.cuda.synchronize()
     setattr(model, _ACTIVE_ATTR, True)
