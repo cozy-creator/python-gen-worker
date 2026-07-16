@@ -175,12 +175,25 @@ class Lifecycle:
                 self.executor.store.bank_snapshot(ref, snapshot)
             self._replace_residency_reconcile(desired)
         # New connection: per-worker fn disables/degradations were wiped by
-        # Hello; re-emit any that still hold, then re-baseline dynamic state.
+        # Hello. Capacity evidence has causal priority over retained results;
+        # other finite baseline messages follow it in the same prepend lane.
         self._emitted_unavailable.clear()
         self._emitted_degraded.clear()
-        await self._emit_unavailable()
+        capacity_replay = await self.executor.host_ram_capacity_replay()
+        if capacity_replay:
+            if self.transport is not None:
+                # Nonblocking reconnect lane: active failures, then undelivered progress,
+                # both ahead of durable results. The queue dedupes a repeated
+                # midstream HelloAck within this connection epoch.
+                await self.transport.prepend_reconnect(capacity_replay)
+            else:
+                # Unit/embedded lifecycle without a Transport still observes
+                # the same ordered replay contract.
+                for message in capacity_replay:
+                    await self.executor._send(message)
+        await self._emit_unavailable(hello_ack=True)
         self._last_delta = None
-        await self.maybe_send_state_delta()
+        await self.maybe_send_state_delta(hello_ack=True)
 
     def _replace_residency_reconcile(self, desired: "pb.DesiredResidency") -> None:
         self._cancel_residency_reconcile()
@@ -265,6 +278,11 @@ class Lifecycle:
         self._emitted_unavailable.clear()
         self._emitted_degraded.clear()
 
+    async def on_message_shipped(self, msg: pb.WorkerMessage) -> None:
+        """Retire delivery-owned capacity progress after stream.write succeeds."""
+        if msg.WhichOneof("msg") == "model_event":
+            await self.executor.host_ram_capacity_delivered(msg.model_event)
+
     # ---- state emission --------------------------------------------------------
 
     def state_changed(self) -> None:
@@ -275,20 +293,33 @@ class Lifecycle:
             return
         loop.create_task(self.maybe_send_state_delta())
 
-    async def maybe_send_state_delta(self) -> None:
+    async def _send_state_message(
+        self, message: pb.WorkerMessage, *, hello_ack: bool = False,
+    ) -> None:
+        if self.transport is None:
+            return
+        prepend = getattr(self.transport, "prepend_reconnect", None)
+        if hello_ack and prepend is not None:
+            await prepend([message])
+            return
+        await self.transport.send(message)
+
+    async def maybe_send_state_delta(self, *, hello_ack: bool = False) -> None:
         if self.transport is None or not self.transport.connected:
             return
         delta = self._state_delta()
         raw = delta.SerializeToString(deterministic=True)
         if raw != self._last_delta:
             self._last_delta = raw
-            await self.transport.send(pb.WorkerMessage(state_delta=delta))
+            await self._send_state_message(
+                pb.WorkerMessage(state_delta=delta), hello_ack=hello_ack,
+            )
         # Deduped internally; must run even on an unchanged delta — a runtime
         # ladder demotion (gw#463) changes the ServePlan, not the delta bytes.
-        await self._emit_unavailable()
-        await self._emit_degraded()
+        await self._emit_unavailable(hello_ack=hello_ack)
+        await self._emit_degraded(hello_ack=hello_ack)
 
-    async def _emit_unavailable(self) -> None:
+    async def _emit_unavailable(self, *, hello_ack: bool = False) -> None:
         if self.transport is None:
             return
         # A recovered function leaves executor.unavailable; drop it from the
@@ -298,10 +329,14 @@ class Lifecycle:
             if name in self._emitted_unavailable:
                 continue
             self._emitted_unavailable.add(name)
-            await self.transport.send(pb.WorkerMessage(fn_unavailable=pb.FnUnavailable(
-                function_name=name, reason=reason, detail=detail, axes=axes)))
+            await self._send_state_message(
+                pb.WorkerMessage(fn_unavailable=pb.FnUnavailable(
+                    function_name=name, reason=reason, detail=detail, axes=axes,
+                )),
+                hello_ack=hello_ack,
+            )
 
-    async def _emit_degraded(self) -> None:
+    async def _emit_degraded(self, *, hello_ack: bool = False) -> None:
         """th#683 P3: per served function running degraded, tell the
         orchestrator STRUCTURALLY (FnDegraded, not just a log line) so
         placement learns "this release degraded on this card — it wants a
@@ -317,14 +352,17 @@ class Lifecycle:
             if self._emitted_degraded.get(name) == ran:
                 continue
             self._emitted_degraded[name] = ran
-            await self.transport.send(pb.WorkerMessage(fn_degraded=pb.FnDegraded(
-                function_name=name,
-                wanted=plan.wanted,
-                ran=ran,
-                reason=plan.warning,
-                est_latency_multiplier=float(plan.est_latency_multiplier),
-                recommended_vram_gb=float(plan.recommended_vram_gb or 0.0),
-            )))
+            await self._send_state_message(
+                pb.WorkerMessage(fn_degraded=pb.FnDegraded(
+                    function_name=name,
+                    wanted=plan.wanted,
+                    ran=ran,
+                    reason=plan.warning,
+                    est_latency_multiplier=float(plan.est_latency_multiplier),
+                    recommended_vram_gb=float(plan.recommended_vram_gb or 0.0),
+                )),
+                hello_ack=hello_ack,
+            )
 
     async def set_phase(self, phase: "pb.WorkerPhase") -> None:
         if phase == self.phase:
