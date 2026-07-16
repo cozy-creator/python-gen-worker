@@ -90,6 +90,27 @@ class PreparedAdapter:
     parse_ms: int = 0   # safetensors read + validation (0 on cache hit)
 
 
+def _split_for_w8a8(
+    adapters: Sequence["PreparedAdapter"],
+) -> tuple[List["PreparedAdapter"], List[tuple]]:
+    """(peft-path adapters with denoiser keys stripped, branch set) for a
+    w8a8-lane pipeline. Branch entries are (state_dict, weight, ref) —
+    the models.w8a8_lora.apply_branch_adapters contract."""
+    from dataclasses import replace
+
+    from ..models import w8a8_lora
+
+    peft: List[PreparedAdapter] = []
+    branch: List[tuple] = []
+    for a in adapters:
+        den, rest = w8a8_lora.split_state_dict(a.state_dict)
+        if den:
+            branch.append((den, a.weight, a.ref))
+        if rest:
+            peft.append(replace(a, state_dict=rest))
+    return peft, branch
+
+
 # ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------
@@ -276,8 +297,18 @@ class AdapterResidency:
         request_id: str = "",
     ) -> None:
         """Make exactly *adapters* the pipeline's active set. Attach failure
-        rolls back to a fully-deactivated pipeline."""
-        if not isinstance(pipe, LoraCapablePipeline):
+        rolls back to a fully-deactivated pipeline.
+
+        w8a8 pipelines (gw#547): denoiser keys go to the bf16 side-branch on
+        Fp8ScaledLinear (peft can't target it); text-encoder keys keep the
+        peft path below."""
+        from ..models import w8a8_lora
+
+        denoiser = w8a8_lora.branch_target(pipe)
+        branch_set: List[tuple] = []
+        if denoiser is not None:
+            adapters, branch_set = _split_for_w8a8(adapters)
+        if adapters and not isinstance(pipe, LoraCapablePipeline):
             raise ValidationError(
                 "model slot does not support LoRA adapters "
                 "(pipeline lacks load_lora_weights/set_adapters/unload_lora_weights)"
@@ -285,6 +316,25 @@ class AdapterResidency:
         with self._lock:
             st = self._state(ref, pipe)
             try:
+                if denoiser is not None:
+                    # Compiled pipelines keep canonical placement and ONE
+                    # traced bucket (a resize would mean a recompile at swap
+                    # time — never allowed in prod); eager pipelines use
+                    # sparse placement (branch kernels only where covered).
+                    compiled = getattr(pipe, "_cozy_compile", None) is not None
+                    w8a8_lora.apply_branch_adapters(
+                        denoiser, branch_set,
+                        allow_resize=not compiled, uniform=compiled,
+                        request_id=request_id,
+                    )
+                    w8a8_lora.stamp_lane(pipe, denoiser)
+                    if not adapters:
+                        # No peft half — make sure a previous request's TE
+                        # adapters are off, then we're done.
+                        if hasattr(pipe, "disable_lora"):
+                            pipe.disable_lora()
+                        st.active = True
+                        return
                 load_ms = 0
                 attached_now: List[str] = []
                 for a in adapters:
@@ -346,6 +396,17 @@ class AdapterResidency:
                 return
             t0 = time.monotonic()
             try:
+                from ..models import w8a8_lora
+
+                denoiser = w8a8_lora.branch_target(pipe)
+                if denoiser is not None:
+                    w8a8_lora.clear_branch_adapters(denoiser)
+            except Exception:
+                logger.warning(
+                    "[request_id=%s] w8a8 lora branch clear failed", request_id,
+                    exc_info=True,
+                )
+            try:
                 if hasattr(pipe, "disable_lora"):
                     pipe.disable_lora()
                 else:
@@ -374,6 +435,16 @@ class AdapterResidency:
         the AdapterCache re-attaches lazily on next use. Never raises."""
         with self._lock:
             st = self._pipes.pop(ref, None)
+            try:
+                from ..models import w8a8_lora
+
+                denoiser = w8a8_lora.branch_target(pipe)
+                if denoiser is not None:
+                    w8a8_lora.disable_lora_branches(denoiser)
+                    w8a8_lora.stamp_lane(pipe, denoiser)
+            except Exception:
+                logger.warning("w8a8 lora branch drop on demote failed for %s",
+                               ref, exc_info=True)
             if st is None or not st.attached or st.pipe_id != id(pipe):
                 return
             try:

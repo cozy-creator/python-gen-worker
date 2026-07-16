@@ -126,7 +126,9 @@ def gen_worker_version() -> str:
 def lane_token(weight_lane: str) -> str:
     """Label token for a traced weight lane (gw#534): cells of different
     lanes are DIFFERENT graphs and must not collide on one flavor label.
-    "" (plain resident, incl. bf16-resident) stays unsuffixed."""
+    "" (plain resident, incl. bf16-resident) stays unsuffixed. LoRA-branch
+    lanes (``w8a8-lora<bucket>``, gw#547) pass through — one graph family
+    per rank bucket."""
     return {"": "", "fp8-hooks": "w8a16", "w8a8": "w8a8"}.get(
         str(weight_lane or ""), str(weight_lane))
 

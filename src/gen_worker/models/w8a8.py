@@ -154,10 +154,19 @@ def _build_module_class() -> type:
         scalars are expanded at load). Activation quant is per-row dynamic
         (amax/448) unless a static ``input_scale`` was calibrated. NOTE:
         never ``.to(dtype=...)`` this module — a dtype cast would upcast the
-        fp8 buffer (device moves are fine)."""
+        fp8 buffer (device moves are fine).
+
+        Optional LoRA side-branch (gw#547): ``lora_a`` [bucket, in] /
+        ``lora_b`` [out, bucket] compute-dtype buffers, rank-padded to a
+        fixed bucket so every adapter in the bucket shares one traced graph.
+        The branch reads the ORIGINAL bf16 activation and adds onto the bf16
+        output — quantized weights are never touched; hot-swap is a buffer
+        copy (see models.w8a8_lora)."""
 
         weight: Any  # fp8 buffer (annotated: Module.__getattr__ unions confuse mypy)
         weight_scale: Any
+        lora_a: Any  # None, or [bucket, in] bf16 branch buffer (gw#547)
+        lora_b: Any  # None, or [out, bucket] with scale folded in
 
         def __init__(self, in_features: int, out_features: int, *,
                      bias: bool, compute_dtype: Any,
@@ -180,6 +189,12 @@ def _build_module_class() -> type:
                     out_features, dtype=compute_dtype, device=meta))
             else:
                 self.bias = None
+            self.lora_a = None
+            self.lora_b = None
+
+        def _lora_addend(self, x2: Any) -> Any:
+            # Per-adapter scale is folded into lora_b at copy time.
+            return (x2 @ self.lora_a.t()) @ self.lora_b.t()
 
         def forward(self, x: Any) -> Any:
             shape = x.shape
@@ -200,6 +215,8 @@ def _build_module_class() -> type:
                 xq, self.weight.t(), scale_a=sa, scale_b=self.weight_scale.t(),
                 bias=self.bias, out_dtype=x.dtype,
             )
+            if self.lora_a is not None:
+                y = y + self._lora_addend(x2)
             return y.reshape(*shape[:-1], self.out_features)
 
         def extra_repr(self) -> str:
