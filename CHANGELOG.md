@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.29.0 (2026-07-16)
+## 0.30.0 (2026-07-16)
 
 - **gw#551: demoted lanes serve instead of crashing — swap-per-request for
   multi-model releases.** te#79's serve proof showed a merged two-lane
@@ -29,6 +29,14 @@
     bytes as already-resident.
   - `Residency.promote` refuses fast (no doomed multi-GB partial move) when
     free VRAM cannot hold the actual weight bytes after `make_room`.
+
+## 0.29.0 (2026-07-16)
+
+- **gw#549/gw#550: media transfer efficiency + boot host canary.** On-GPU
+  uint8 conversion + pinned async D2H staging + zero-copy PyAV handoff for
+  video encode; boot host canary (memcpy / pinned PCIe bandwidth / CPU score)
+  reported with worker registration. (Shipped in PR #269; entry added
+  retroactively.)
 
 ## 0.28.1 (2026-07-16)
 
