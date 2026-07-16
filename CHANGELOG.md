@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.32.0 (2026-07-16)
+
+- **gw#557 (ie#494 W8A8 productization core): streaming per-channel-scaled
+  fp8 producer + byte-gate + fp8+te TE wiring on the w8a8 lane.**
+  `convert.writer` gains `streaming_w8a8_cast` / `streaming_w8a8_snapshot` —
+  a data-free requant of repeated-block denoiser Linears from the bf16
+  source into the gw#534 `#fp8-w8a8` artifact (fp8-E4M3 weights + F32 [out]
+  per-output-channel `weight_scale` twins; dynamic activation scales at
+  serve time, no calibration; gate-logit projections and everything outside
+  repeated blocks stay at source precision — the ie#494 probe's flip/skip
+  spec). Streaming two-pass per tensor, te#81 pattern: the model is never
+  materialized. `verify_w8a8_snapshot` byte-gates a produced tree against
+  its source (consumer-side detection, sampled recompute-exact quant+scale
+  bytes, dequant within the fp8-e4m3 format error bound).
+  `load_w8a8_pipeline` honors `storage_dtype="fp8+te"`: the gw#460
+  block-window fp8 storage now arms on the TEXT ENCODERS of a w8a8-served
+  pipeline (never its scaled-mm denoiser) via the new `components=` scope
+  override on `apply_fp8_storage`.
+
+
 ## 0.30.2 (2026-07-16)
 
 - **gw#554: clone disk admission follows the resolved work instead of a

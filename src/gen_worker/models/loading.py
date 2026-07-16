@@ -339,12 +339,16 @@ def _fp8_block_windows_whole(mod: Any) -> List[tuple[str, Any, List[Any]]]:
 
 
 def apply_fp8_storage(obj: Any, *, compute_dtype: Any = None,
-                      text_encoders: bool = False) -> bool:
+                      text_encoders: bool = False,
+                      components: Optional[tuple[str, ...]] = None) -> bool:
     """fp8-E4M3 weight storage with per-layer upcast to ``compute_dtype``
     (diffusers layerwise casting) on a pipeline's denoiser — or on ``obj``
     itself when it is a bare module (th#546 two-format policy).
     ``text_encoders=True`` (the ``storage_dtype="fp8+te"`` rung) extends the
     cast to the pipeline's text encoders via the transformers-aware path.
+    ``components`` overrides the target component names entirely (gw#557:
+    the w8a8 lane casts ONLY the text encoders — its denoiser holds fp8
+    scaled-mm modules that cast hooks must never touch).
 
     This is the universal VRAM-fit mechanism: fp8 bytes resident, bf16/fp16
     compute, no fp8 silicon required. Also the consumption path for stored
@@ -363,9 +367,10 @@ def apply_fp8_storage(obj: Any, *, compute_dtype: Any = None,
     if compute_dtype is None:
         compute_dtype = torch.bfloat16
 
-    components = _FP8_STORAGE_COMPONENTS
-    if text_encoders:
-        components += _FP8_TEXT_ENCODER_COMPONENTS
+    if components is None:
+        components = _FP8_STORAGE_COMPONENTS
+        if text_encoders:
+            components += _FP8_TEXT_ENCODER_COMPONENTS
     targets: List[tuple[str, Any]] = []
     for name in components:
         mod = getattr(obj, name, None)
@@ -1161,6 +1166,7 @@ def load_from_pretrained(
         return load_w8a8_pipeline(
             cls, Path(path), w8a8_art, compute_dtype=compute,
             components=components,
+            fp8_text_encoders=storage_dtype == "fp8+te",
         )
     gguf_art = detect_gguf_snapshot(Path(path))
     if gguf_art is not None and callable(getattr(cls, "from_pretrained", None)):
