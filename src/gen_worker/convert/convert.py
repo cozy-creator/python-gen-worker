@@ -30,6 +30,7 @@ endpoint.
 from __future__ import annotations
 
 import logging
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -746,6 +747,11 @@ def _run_gguf_inline(
             )
         if not final_path.exists() or final_path.stat().st_size <= 0:
             raise RuntimeError(f"llama-quantize produced no output for {dtype}")
+
+    # Scratch is part of the peak working set, never part of the published
+    # flavor tree. A cleanup failure must fail the flavor rather than leak an
+    # F16 intermediate and tool sidecars into Tensorhub.
+    shutil.rmtree(work_dir)
 
     attrs = {
         "dtype": f"gguf:{dtype}",

@@ -114,6 +114,9 @@ production launcher ever populated them through Settings either.
 - `COZY_CIVITAI_DOWNLOAD_ATTEMPTS`, `COZY_CLONE_DOWNLOAD_ATTEMPTS` —
   per-call test-tunable retry counts (`models/download.py`,
   `convert/ingest.py`).
-- `COZY_CONVERT_WORKDIR` / `_DISK_HEADROOM` / `_SCRATCH_TTL_S` /
-  `_RETAIN_WORKDIR` — convert-job scratch knobs set by the invoking harness
-  (`convert/clone.py`).
+- `COZY_CONVERT_WORKDIR` / `_SCRATCH_TTL_S` / `_RETAIN_WORKDIR` —
+  convert-job scratch knobs set by the invoking harness (`convert/clone.py`).
+  Clone disk admission itself is derived from the resolved source and output
+  operations and cannot be weakened by an environment override. The preflight
+  covers plan-known files; repackage tools fail normally if they later fetch
+  missing base components that exceed the remaining disk.

@@ -161,6 +161,7 @@ def test_gguf_direction(tiny_llama, tmp_path: Path) -> None:
         source_repo_dir=tiny_llama.dir,
     )
     assert result.output_paths and result.output_paths[0].suffix == ".gguf"
+    assert not (tmp_path / "gguf" / "_gguf_work").exists()
 
 
 def test_calibrated_dtype_refused(tiny_llama, tmp_path: Path) -> None:

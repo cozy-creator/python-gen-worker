@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.30.2 (2026-07-16)
+
+- **gw#554: clone disk admission follows the resolved work instead of a
+  configurable source-size multiplier.** Pure source mirrors account for
+  hardlinks and only the safetensors files that must be resharded; plan-known
+  conversions account for materialized output, layout-repack, and intermediate
+  GGUF trees. Hugging Face ingest records the observed on-disk dtype, and
+  existing HF shard groups are resharded with one valid index. This admits the
+  immutable 19.1 GiB Z-Image source mirror on the standard 40 GiB CPU worker
+  disk while retaining fail-fast bounds for real conversions. Repack tools may
+  still reject provider-fetched base components that were absent from the
+  source plan. The `COZY_CONVERT_DISK_HEADROOM` override is removed.
+
+
 ## 0.30.1 (2026-07-16)
 
 - **ie#381 fix 2: the bf16-resident fit check counts fp8 bytes per TENSOR,

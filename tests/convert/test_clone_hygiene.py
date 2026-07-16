@@ -7,9 +7,13 @@ no preflight, and failed-clone workdirs accumulated forever.
 from __future__ import annotations
 
 import fcntl
+import importlib.util
+import json
 import os
+import struct
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -17,17 +21,77 @@ from gen_worker.convert.clone import (
     CloneDiskSpaceError,
     _clone_workdir,
     _preflight_disk,
+    _stage_oversize_safetensors,
     _sweep_stale_workdirs,
+    normalize_outputs,
     run_clone,
 )
 
 
 class _Plan:
-    def __init__(self, sizes: list[int]) -> None:
+    def __init__(
+        self,
+        sizes: list[int],
+        *,
+        strategy: str = "",
+        attrs: dict[str, str] | None = None,
+        paths: list[str] | None = None,
+    ) -> None:
         self._sizes = sizes
+        self._paths = paths or [f"f{i}.safetensors" for i in range(len(sizes))]
+        self.classification = SimpleNamespace(strategy=strategy, attrs=attrs or {})
 
     def bank_files(self):
-        return [(f"f{i}", s, f"cid{i}") for i, s in enumerate(self._sizes)]
+        return [
+            (path, size, f"cid{i}") for i, (path, size) in enumerate(zip(self._paths, self._sizes))
+        ]
+
+
+def _specs(
+    dtype: str = "bf16",
+    layout: str = "diffusers",
+    file_type: str = "safetensors",
+):
+    return normalize_outputs(
+        [
+            {
+                "dtype": dtype,
+                "file_layout": layout,
+                "file_type": file_type,
+            }
+        ]
+    )
+
+
+def _z_image_plan() -> _Plan:
+    files = [
+        ("README.md", 6_015),
+        ("model_index.json", 467),
+        ("scheduler/scheduler_config.json", 173),
+        ("text_encoder/config.json", 726),
+        ("text_encoder/generation_config.json", 239),
+        ("text_encoder/model-00001-of-00003.safetensors", 3_957_900_840),
+        ("text_encoder/model-00002-of-00003.safetensors", 3_987_450_520),
+        ("text_encoder/model-00003-of-00003.safetensors", 99_630_640),
+        ("text_encoder/model.safetensors.index.json", 32_819),
+        ("tokenizer/merges.txt", 1_671_853),
+        ("tokenizer/tokenizer.json", 11_422_654),
+        ("tokenizer/tokenizer_config.json", 9_732),
+        ("tokenizer/vocab.json", 2_776_833),
+        ("transformer/config.json", 500),
+        ("transformer/diffusion_pytorch_model-00001-of-00002.safetensors", 9_973_727_144),
+        ("transformer/diffusion_pytorch_model-00002-of-00002.safetensors", 2_336_146_728),
+        ("transformer/diffusion_pytorch_model.safetensors.index.json", 48_969),
+        ("vae/config.json", 820),
+        ("vae/diffusion_pytorch_model.safetensors", 167_666_902),
+    ]
+    assert sum(size for _, size in files) == 20_538_494_574
+    return _Plan(
+        [size for _, size in files],
+        strategy="diffusers",
+        attrs={"dtype": "", "file_layout": "diffusers"},
+        paths=[path for path, _ in files],
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -37,27 +101,237 @@ class _Plan:
 def test_preflight_rejects_oversized_source_with_actionable_message(tmp_path: Path) -> None:
     # 10 PiB source cannot fit any real test filesystem.
     with pytest.raises(CloneDiskSpaceError, match=r"need ~.* GiB free .*have .* GiB"):
-        _preflight_disk(tmp_path, _Plan([10 * 1024**5]))
+        _preflight_disk(tmp_path, _Plan([10 * 1024**5]), _specs())
 
 
 def test_preflight_passes_tiny_source(tmp_path: Path) -> None:
-    _preflight_disk(tmp_path, _Plan([1024]))  # must not raise
+    _preflight_disk(tmp_path, _Plan([1024]), _specs())  # must not raise
 
 
 def test_preflight_skips_when_plan_unavailable(tmp_path: Path) -> None:
-    _preflight_disk(tmp_path, None)  # fail-open: download surfaces its own error
+    _preflight_disk(tmp_path, None, _specs())  # fail-open: download surfaces its own error
 
 
-def test_preflight_headroom_is_tunable(tmp_path: Path, monkeypatch) -> None:
+def test_preflight_has_no_environment_headroom_override(tmp_path: Path, monkeypatch) -> None:
     free = os.statvfs(tmp_path).f_bavail * os.statvfs(tmp_path).f_frsize
-    # A source about half the free space passes at 1x headroom but must fail
-    # at an absurd multiplier.
-    source = max(free // 2, 1)
+    source = max((free - 2 * 1024**3) // 2, 1)
     monkeypatch.setenv("COZY_CONVERT_DISK_HEADROOM", "1000000")
-    with pytest.raises(CloneDiskSpaceError):
-        _preflight_disk(tmp_path, _Plan([source]))
+    _preflight_disk(
+        tmp_path,
+        _Plan([source], strategy="transformers"),
+        _specs(dtype="source", layout="singlefile"),
+    )
     monkeypatch.setenv("COZY_CONVERT_DISK_HEADROOM", "0.000001")
-    _preflight_disk(tmp_path, _Plan([source]))
+    with pytest.raises(CloneDiskSpaceError):
+        _preflight_disk(
+            tmp_path,
+            _Plan([10 * 1024**5], strategy="transformers"),
+            _specs(dtype="source", layout="singlefile"),
+        )
+
+
+def test_z_image_source_mirror_fits_real_runpod_cpu_disk(tmp_path: Path, monkeypatch) -> None:
+    # Exact selected paths and sizes from immutable
+    # Tongyi-MAI/Z-Image@04cc4abb...3021. Four existing HF shard members are
+    # above Tensorhub's 2 GiB transfer limit and must be resharded together.
+    plan = _z_image_plan()
+    specs = _specs(dtype="source")
+    monkeypatch.setattr(
+        "gen_worker.convert.clone.shutil.disk_usage",
+        lambda _: SimpleNamespace(free=40 * 1024**3),
+    )
+    _preflight_disk(tmp_path, plan, specs)
+
+    monkeypatch.setattr(
+        "gen_worker.convert.clone.shutil.disk_usage",
+        lambda _: SimpleNamespace(free=30 * 1024**3),
+    )
+    with pytest.raises(
+        CloneDiskSpaceError,
+        match=r"hardlink passthrough.*oversize-safetensors reshard output",
+    ):
+        _preflight_disk(tmp_path, plan, specs)
+
+
+def test_untyped_z_image_bf16_conversion_does_not_assume_passthrough(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    plan = _Plan(
+        [20_538_494_574],
+        strategy="diffusers",
+        attrs={"dtype": "", "file_layout": "diffusers"},
+    )
+    monkeypatch.setattr(
+        "gen_worker.convert.clone.shutil.disk_usage",
+        lambda _: SimpleNamespace(free=40 * 1024**3),
+    )
+    with pytest.raises(CloneDiskSpaceError, match="materialized output tree"):
+        _preflight_disk(tmp_path, plan, _specs(dtype="bf16"))
+
+
+def test_civitai_plan_preserves_standard_cpu_clone_admission(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from gen_worker.convert.ingest import CivitaiSourcePlan
+
+    source_bytes = 6_900_000_000
+    plan = CivitaiSourcePlan(
+        version_id=1,
+        payload={"model": {"type": "Checkpoint"}},
+        files=[{
+            "name": "model.safetensors",
+            "size_bytes": source_bytes,
+            "sha256": "a" * 64,
+        }],
+        revision="sha256:" + "b" * 64,
+    )
+    monkeypatch.setattr(
+        "gen_worker.convert.clone.shutil.disk_usage",
+        lambda _: SimpleNamespace(free=40 * 1024**3),
+    )
+    _preflight_disk(tmp_path, plan, _specs(dtype="bf16", layout="singlefile"))
+
+
+def test_source_mirrors_account_for_every_oversized_safetensors(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    gib = 1024**3
+    plan = _Plan(
+        [6 * gib, 6 * gib],
+        strategy="diffusers",
+        attrs={"dtype": "bf16", "file_layout": "diffusers"},
+    )
+    monkeypatch.setattr(
+        "gen_worker.convert.clone.shutil.disk_usage",
+        lambda _: SimpleNamespace(free=32 * gib),
+    )
+    with pytest.raises(CloneDiskSpaceError, match="oversize-safetensors reshard output"):
+        _preflight_disk(
+            tmp_path,
+            plan,
+            _specs(dtype="source") + _specs(dtype="bf16"),
+        )
+
+
+def test_layout_repackage_accounts_for_output_and_temporary_tree(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    gib = 1024**3
+    plan = _Plan(
+        [20 * gib],
+        strategy="diffusers",
+        attrs={"dtype": "bf16", "file_layout": "diffusers"},
+    )
+    monkeypatch.setattr(
+        "gen_worker.convert.clone.shutil.disk_usage",
+        lambda _: SimpleNamespace(free=60 * gib),
+    )
+    with pytest.raises(CloneDiskSpaceError, match="layout-repack tree"):
+        _preflight_disk(tmp_path, plan, _specs(dtype="bf16", layout="singlefile"))
+
+
+def test_non_direct_gguf_accounts_for_f16_intermediate(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    gib = 1024**3
+    plan = _Plan(
+        [10 * gib],
+        strategy="diffusers",
+        attrs={"dtype": "bf16", "file_layout": "diffusers"},
+    )
+    monkeypatch.setattr(
+        "gen_worker.convert.clone.shutil.disk_usage",
+        lambda _: SimpleNamespace(free=31 * gib),
+    )
+    with pytest.raises(CloneDiskSpaceError, match="intermediate F16 GGUF"):
+        _preflight_disk(
+            tmp_path,
+            plan,
+            _specs(dtype="q4_k_m", layout="diffusers", file_type="gguf"),
+        )
+
+
+def test_multiple_gguf_outputs_share_one_intermediate_peak(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    gib = 1024**3
+    plan = _Plan(
+        [10 * gib],
+        strategy="diffusers",
+        attrs={"dtype": "bf16", "file_layout": "diffusers"},
+    )
+    monkeypatch.setattr(
+        "gen_worker.convert.clone.shutil.disk_usage",
+        lambda _: SimpleNamespace(free=45 * gib),
+    )
+    _preflight_disk(
+        tmp_path,
+        plan,
+        _specs(dtype="q4_k_m", layout="diffusers", file_type="gguf")
+        + _specs(dtype="q5_k_m", layout="diffusers", file_type="gguf"),
+    )
+
+
+def _write_raw_safetensors(path: Path, tensors: dict[str, int]) -> None:
+    offset = 0
+    header = {}
+    for name, size in tensors.items():
+        header[name] = {
+            "dtype": "F16",
+            "shape": [size // 2],
+            "data_offsets": [offset, offset + size],
+        }
+        offset += size
+    body = json.dumps(header, separators=(",", ":")).encode()
+    path.write_bytes(struct.pack("<Q", len(body)) + body + bytes(offset))
+
+
+def test_existing_hf_shard_group_remains_loadable_after_reshard(tmp_path: Path) -> None:
+    component = tmp_path / "transformer"
+    component.mkdir()
+    first = component / "model-00001-of-00002.safetensors"
+    second = component / "model-00002-of-00002.safetensors"
+    _write_raw_safetensors(first, {"a": 180, "b": 180})
+    _write_raw_safetensors(second, {"c": 80})
+    index = component / "model.safetensors.index.json"
+    index.write_text(json.dumps({
+        "metadata": {"total_size": 440},
+        "weight_map": {
+            "a": first.name,
+            "b": first.name,
+            "c": second.name,
+        },
+    }))
+
+    _stage_oversize_safetensors(tmp_path, max_shard_bytes=200)
+
+    payload = json.loads(index.read_text())
+    assert set(payload["weight_map"]) == {"a", "b", "c"}
+    assert not first.exists() and not second.exists()
+    for tensor, shard_name in payload["weight_map"].items():
+        shard = component / shard_name
+        assert shard.is_file()
+        raw = shard.read_bytes()
+        header_len = struct.unpack("<Q", raw[:8])[0]
+        header = json.loads(raw[8:8 + header_len])
+        assert tensor in header
+
+    if importlib.util.find_spec("safetensors") and importlib.util.find_spec("numpy"):
+        from safetensors import safe_open
+
+        loaded = set()
+        for shard_name in set(payload["weight_map"].values()):
+            with safe_open(str(component / shard_name), framework="numpy") as handle:
+                loaded.update(handle.keys())
+                for name in handle.keys():
+                    handle.get_tensor(name)
+        assert loaded == {"a", "b", "c"}
 
 
 # ---------------------------------------------------------------------------
