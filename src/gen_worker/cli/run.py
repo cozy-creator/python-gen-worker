@@ -612,9 +612,14 @@ def _load_injected_model(
         return sl.obj
     compile_cfg = getattr(decl, "compile", None) if decl is not None else None
     if compile_cfg is not None and device.strip().lower() != "cpu":
+        from ..local_cells import enable_compiled as enable_compiled_local
         from ..models.cache_paths import tensorhub_cas_dir
 
-        provision.enable_compiled(sl.obj, compile_cfg, Path(tensorhub_cas_dir()))
+        # Local runtime (gw#555): delivered/env artifacts first, then the
+        # user's local cell store — adopt a stored self-minted cell or mint
+        # one. This call-site is the ONLY entry to local minting; the
+        # production executor arms compile via hub-delivered cells only.
+        enable_compiled_local(sl.obj, compile_cfg, Path(tensorhub_cas_dir()))
     _INJECTED_CACHE[key] = sl.obj
     return sl.obj
 
