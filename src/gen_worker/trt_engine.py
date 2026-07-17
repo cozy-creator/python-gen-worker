@@ -42,7 +42,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from .compile_cache import (
     AdoptError,
@@ -484,7 +484,13 @@ def _unet_feeds(meta: Dict[str, Any], args: tuple, kwargs: dict) -> Dict[str, An
     return feeds
 
 
-def wrap_module(module: Any, runner: TrtModuleRunner, meta: Dict[str, Any]) -> None:
+def wrap_module(
+    module: Any,
+    runner: TrtModuleRunner,
+    meta: Dict[str, Any],
+    *,
+    eager_forward: Optional[Callable[..., Any]] = None,
+) -> None:
     """Swap ``module.forward`` for an optional engine behind a fail-soft guard.
 
     The first engine error synchronously revokes scheduler-visible compiled
@@ -492,7 +498,10 @@ def wrap_module(module: Any, runner: TrtModuleRunner, meta: Dict[str, Any]) -> N
     (config, dtype, device, weights) stays untouched — diffusers pipelines
     read its attributes, and its weights remain the refit source.
     """
-    original = module.forward
+    # A different-cell rearm replaces a failed wrapper in one assignment.
+    # Preserve the underlying eager callable rather than capturing the old
+    # wrapper as the new fallback.
+    original = eager_forward or module.forward
     state: Dict[str, Any] = {
         "failed": False,
         "successful_calls": 0,
@@ -580,8 +589,6 @@ def load_and_wrap(
     Raises :class:`AdoptError` with a classified reason on any failure and
     never publishes extracted files into a shared live cache.
     """
-    if getattr(pipeline, _MARKER_ATTR, None) is not None:
-        return getattr(pipeline, _MARKER_ATTR)["meta"]
     family = str(getattr(cfg, "family", "") or "")
     staged = stage_artifact(Path(artifact), family, cache_dir=cache_dir)
     try:
@@ -590,6 +597,17 @@ def load_and_wrap(
         module = getattr(pipeline, module_name, None)
         if module is None:
             raise AdoptError("no_target", f"pipeline has no module {module_name!r}")
+        eager_forward: Optional[Callable[..., Any]] = None
+        old_marker = getattr(pipeline, _MARKER_ATTR, None)
+        if old_marker is not None:
+            old_module = old_marker.get("module")
+            old_state = old_marker.get("state") or {}
+            eager_forward = old_state.get("original")
+            if old_module is not module or not callable(eager_forward):
+                raise AdoptError(
+                    "old_marker_invalid",
+                    "existing TRT marker does not retain this module's eager callable",
+                )
 
         t0 = time.monotonic()
         engine = _load_engine(staged.root / ENGINE_NAME)
@@ -601,7 +619,7 @@ def load_and_wrap(
             engine, meta, device=str(getattr(module, "device", "cuda")))
         # This is the first live mutation: the complete artifact, runtime key,
         # target, engine, and refit weights are already proven above.
-        wrap_module(module, runner, meta)
+        wrap_module(module, runner, meta, eager_forward=eager_forward)
         module_marker = getattr(module, _MARKER_ATTR, {})
         setattr(pipeline, _MARKER_ATTR, {
             "meta": meta,

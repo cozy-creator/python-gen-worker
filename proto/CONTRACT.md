@@ -251,6 +251,33 @@ to avoid chatter). Never periodic. O overwrites its copy wholesale.
 | `free_vram_bytes` | W CUDA probe | O placement (free-VRAM ladder) | measured free VRAM |
 | `finalizing_jobs` | W executor (gw#516) | O drain/retire gating + worker status display | jobs past the decode→finalize handoff: GPU slot released, encode/upload tail running, `JobResult` unshipped. GPU-idle alone is NOT work-idle |
 | `observed_residency_generation` | W desired-state receiver | O controller status | latest non-stale generation accepted; not a convergence claim — `ModelEvent`/`Hello.models` report actual state |
+| `compile_targets` | W executor | O compile-cell planner + dispatch fence | full-replace snapshot of exact READY live pipeline incarnations; omission removes the old address immediately |
+
+### CompileTarget (embedded in StateDelta)
+
+One row addresses one exact live pipeline object. It is session-local: setup
+mints `incarnation_id`, and vacate/reload mints another even when checkpoint
+bytes are unchanged. O MUST NOT reconstruct or match a target from family
+alone.
+
+| field | producer | consumer | semantics |
+|---|---|---|---|
+| `incarnation_id` | W setup | O adoption + RunJob planner | opaque live-object address; immutable for the row lifetime |
+| `family` | W endpoint `Compile` contract | O cell compatibility | exact non-empty Forge family |
+| `pipeline_weight_lane` | W loaded object | O lane matching | observed lane such as plain or `w8a8`; never inferred from the requested ref |
+| `lora_bucket` | W loaded object/contract | O cell compatibility | exact compiled LoRA bucket |
+| `contract_digest` | W graph/lane contract | O adoption + dispatch fence | digest of graph, shapes, targets, guidance regimes, low-VRAM mode, weight lane, activation scaling, and LoRA bucket |
+| `active_compile_ref` | W proven boot/adoption path | O dispatch eligibility | exact cell ref, or empty when eager/revoked; ref and digest are both present or both empty |
+| `active_compile_snapshot_digest` | W proven boot/adoption path | O immutable cell identity | exact cell snapshot digest paired with `active_compile_ref` |
+| `function_names` | W per-handler warmup proof | O applicability | sorted aliases proved on this exact object. The set is immutable for the incarnation; a skipped/unproved sibling is absent even if it shares endpoint config |
+| `model_bindings` | W setup ownership | O applicability + RunJob fence | sorted exact slot/ref/snapshot triples owned by this target. It may be a strict subset of RunJob setup bindings (for example SDXL pipeline owned, ancillary VAE omitted) |
+
+Inductor proof samples every compiled call, and setup/adoption warmups exclude
+concurrent GPU work before attributing cache-hit deltas to handler aliases.
+Mandatory W8A8 publishes no partial target: every non-skipped compatible alias
+must prove the exact active object/cell or setup fails and those handlers are
+reported unavailable. Explicitly skipped handlers such as legacy SDXL Turbo do
+not inherit another alias's proof.
 
 ### RunJob (O → W)
 
@@ -268,6 +295,31 @@ to avoid chatter). Never periodic. O overwrites its copy wholesale.
 | `compute` | O scheduler | W GPU-semaphore gating + CUDA binding | see below |
 | `models` | O binding resolver (endpoint defaults + `_models` envelope) | W model injection (`ensure_local` + typed path/pipeline) + per-request LoRA overlays | slot → ref (+ optional `loras`) |
 | `snapshots` | O resolver | W download stack | presigned snapshots for tensorhub-CAS refs in `models` (including LoRA overlay refs) that O doesn't know to be on this worker's disk; W ignores entries already local (digest match). hf/civitai refs need no snapshot |
+| `required_compile` | O unique target selection | W pre-setup + pre-execution fence | exact target/cell/contract required for this attempt; mandatory for W8A8 and fail-closed whenever present |
+
+### RequiredCompileExecution (embedded in RunJob)
+
+O selects exactly one active `CompileTarget` whose `function_names` contains
+the RunJob function and whose target-owned binding subset matches the RunJob
+refs plus immutable snapshot digests. Zero applicable active targets makes a
+W8A8 request wait/retry; multiple applicable targets are ambiguous and fail
+closed rather than choosing by map/order. Ancillary RunJob bindings that the
+target does not own do not broaden or certify the compiled graph.
+
+| field | producer | consumer | semantics |
+|---|---|---|---|
+| `target_incarnation_id` | O from current StateDelta | W exact live-object lookup | must still name the READY target selected for this worker session |
+| `cell_ref` | O from target active identity | W equality fence | exact immutable compile cell ref |
+| `cell_snapshot_digest` | O from target active identity | W equality fence | exact digest paired with `cell_ref` |
+| `contract_digest` | O from target | W graph/lane equality fence | must equal the live target contract digest |
+
+W validates this structure before setup/mutation and again after acquiring the
+GPU execution permit. Target replacement, binding drift, cell revocation, or a
+runtime guard failure therefore returns RETRYABLE without running tenant GPU
+work, including a request that queued while the old evidence was still valid.
+Hot adoption MUST prove the already-advertised immutable function set; it may
+not mutate aliases in place between ADOPTED, StateDelta, and a later causal
+runtime-guard failure.
 
 ### ResolvedCompute (embedded in RunJob)
 

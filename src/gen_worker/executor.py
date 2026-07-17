@@ -21,6 +21,7 @@ import threading
 import time
 import typing
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field as dc_field, replace as dc_replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
@@ -1542,7 +1543,8 @@ class Executor:
         # for it. Identity-stable so equal picks across requests derive equal
         # instance keys (one resident instance per (class, resolved pick)).
         self._hub_bindings: Dict[str, ModelRef] = {}
-        self._gpu_semaphore = asyncio.Semaphore(max(1, gpu_slots))
+        self._gpu_slots = max(1, gpu_slots)
+        self._gpu_semaphore = asyncio.Semaphore(self._gpu_slots)
         # Model loads/promotions serialize so allocator-delta measurements
         # and free-VRAM reads don't cross-contaminate (#369).
         self._load_lock = asyncio.Lock()
@@ -2087,15 +2089,32 @@ class Executor:
         detail: str,
     ) -> None:
         """Disable every alias owned by one failed mandatory compile target."""
+        self._mark_compile_names_unavailable(
+            rec, target.function_names, target.incarnation_id, detail)
+
+    def _mark_compile_setup_unavailable(
+        self, rec: _ClassRecord, spec: EndpointSpec, detail: str,
+    ) -> None:
+        """Fail loud for every handler requiring the unproven W8A8 setup."""
+        names = self._compile_contract_names(spec, rec) or {spec.name}
+        self._mark_compile_names_unavailable(rec, names, "", detail)
+
+    def _mark_compile_names_unavailable(
+        self,
+        rec: _ClassRecord,
+        names: typing.Iterable[str],
+        target_incarnation_id: str,
+        detail: str,
+    ) -> None:
         sanitized = _sanitize(detail)
-        for name in target.function_names:
+        for name in names:
             existing = self.unavailable.get(name)
             owner = self._compile_failure_owners.get(name)
             if existing is not None and (
                 existing[0] != "compile_cell_failed"
                 or owner is None
                 or owner[0] is not rec
-                or owner[1] != target.incarnation_id
+                or owner[1] != target_incarnation_id
             ):
                 # Never erase a hardware/setup disable or another target's
                 # ownership merely because this target also named the alias.
@@ -2104,7 +2123,7 @@ class Executor:
                 "compile_cell_failed", sanitized, {},
             )
             self._compile_failure_owners[name] = (
-                rec, target.incarnation_id,
+                rec, target_incarnation_id,
             )
 
     def _clear_recovered_compile_failures(self, rec: _ClassRecord) -> None:
@@ -2172,14 +2191,7 @@ class Executor:
         )
         active_artifacts = active_artifacts or {}
         function_proofs = function_proofs or {}
-        if spec.cls is not None and callable(getattr(spec.cls, "warmup", None)):
-            # A custom object-level warmup has no per-handler attribution.
-            # It can prove only the handler whose setup minted this target;
-            # sibling aliases must use declarative per-method warmups.
-            contract_names = {spec.name}
-        else:
-            jobs, _skips = self._warmup_plan(spec, rec)
-            contract_names = {job.spec.name for job in jobs}
+        contract_names = self._compile_contract_names(spec, rec)
         seen: set[int] = set()
         for candidate in candidates:
             pipeline = candidate.pipeline
@@ -2217,7 +2229,7 @@ class Executor:
             # the same owned slots and share its graph/lane contract. A class
             # sibling with a different checkpoint may share Python code but
             # cannot inherit this target's immutable applicability.
-            function_names: list[str] = []
+            compatible_names: set[str] = set()
             for alias in rec.specs:
                 alias_cfg = alias.compile
                 if alias_cfg is None:
@@ -2244,13 +2256,24 @@ class Executor:
                 ):
                     continue
                 name = str(alias.name).strip()
-                if name and name in permitted_names:
-                    function_names.append(name)
-            target.function_names = tuple(sorted(set(function_names)))
+                if name:
+                    compatible_names.add(name)
+            expected_names = compatible_names & contract_names
+            target.function_names = tuple(sorted(
+                compatible_names & permitted_names))
             mandatory_w8a8 = target.pipeline_weight_lane.startswith("w8a8")
             candidate_requested_w8a8 = any(
                 _ref_wants_w8a8(ref) for _slot, ref, _digest in bindings
             )
+            if (
+                (mandatory_w8a8 or candidate_requested_w8a8)
+                and set(target.function_names) != expected_names
+            ):
+                raise compile_cache.CompiledLaneUnavailableError(
+                    "mandatory W8A8 function proof incomplete "
+                    f"(expected={sorted(expected_names)!r} "
+                    f"proven={list(target.function_names)!r})"
+                )
             if not target.function_names or not bindings_valid:
                 detail = (
                     "immutable object applicability is incomplete "
@@ -2642,6 +2665,25 @@ class Executor:
             rec.specs.append(spec)
         return rec
 
+    @asynccontextmanager
+    async def _exclusive_gpu(self) -> typing.AsyncIterator[None]:
+        """Hold every worker GPU permit for setup/adoption proof warmups.
+
+        Inductor exposes process-global cache counters. Acquiring only one
+        permit on a multi-slot worker would let another graph increment them
+        inside this target's before/after window and falsely certify it.
+        These maintenance paths run before a job holds a permit themselves.
+        """
+        acquired = 0
+        try:
+            for _ in range(self._gpu_slots):
+                await self._gpu_semaphore.acquire()
+                acquired += 1
+            yield
+        finally:
+            for _ in range(acquired):
+                self._gpu_semaphore.release()
+
     # ---- setup -------------------------------------------------------------
 
     async def ensure_setup(
@@ -2681,7 +2723,7 @@ class Executor:
                 try:
                     desired_cell = await self._fetch_compile_snapshot(
                         spec, snapshots)
-                except compile_cache.CompiledLaneUnavailableError:
+                except compile_cache.CompiledLaneUnavailableError as exc:
                     if mandatory_w8a8:
                         # Desired state no longer supplies a mandatory exact
                         # cell. Remove the old READY incarnation before
@@ -2690,6 +2732,9 @@ class Executor:
                         rec.stale = True
                         async with self._load_lock:
                             await self._vacate_record(rec)
+                        self._mark_compile_setup_unavailable(
+                            rec, spec, str(exc))
+                        self._on_state_change()
                         raise
                     desired_cell = None
                 if desired_cell is not None:
@@ -2730,6 +2775,11 @@ class Executor:
                 # pipeline setup fails must surface a terminal per-function
                 # error to the hub, not sit in loading_functions forever
                 # while the worker reports READY.
+                from .compile_cache import CompiledLaneUnavailableError
+
+                if isinstance(exc, CompiledLaneUnavailableError):
+                    self._mark_compile_setup_unavailable(rec, spec, str(exc))
+                    self._on_state_change()
                 self._mark_setup_failed(rec, exc)
                 raise
             if rec.failed is not None:
@@ -2773,6 +2823,16 @@ class Executor:
             decl_warmup=decl.warmup,
             has_warmup_method=False,
         )
+
+    def _compile_contract_names(
+        self, spec: EndpointSpec, rec: _ClassRecord,
+    ) -> set[str]:
+        """Handler aliases this instance has an explicit warmup path for."""
+        if spec.cls is not None and callable(getattr(spec.cls, "warmup", None)):
+            # A custom object-level warmup has no per-handler attribution.
+            return {spec.name}
+        jobs, _skips = self._warmup_plan(spec, rec)
+        return {job.spec.name for job in jobs}
 
     async def _run_synthesized_warmup(
         self, spec: EndpointSpec, rec: _ClassRecord, instance: Any,
@@ -2978,26 +3038,24 @@ class Executor:
                 if proves_inductor
                 and id(candidate.pipeline) in inj.active_compile_artifacts
             }
-            warmed = 0
-            function_proofs: Dict[int, set[str]] = {}
             warmup = getattr(instance, "warmup", None)
-            if callable(warmup):
-                warm_t0 = time.monotonic()
-                if asyncio.iscoroutinefunction(warmup):
-                    await warmup()
-                else:
-                    await _to_thread_complete(warmup)
-                warmed = 1
-                if spec.compile is not None:
-                    logger.info(
-                        "compile-cache warmup %s completed in %.1fs",
-                        spec.name, time.monotonic() - warm_t0)
-            else:
-                # gw#470: no custom warmup() — run the synthesized boot
-                # warmup for every GPU inference handler of this instance
-                # group, still pre-READY under the load lock. A failure
-                # propagates as a load failure (loud, th#581 rails).
-                warmup_evidence = await self._run_synthesized_warmup(
+
+            async def run_warmup() -> Tuple[int, Dict[int, set[str]]]:
+                if callable(warmup):
+                    warm_t0 = time.monotonic()
+                    if asyncio.iscoroutinefunction(warmup):
+                        await warmup()
+                    else:
+                        await _to_thread_complete(warmup)
+                    if spec.compile is not None:
+                        logger.info(
+                            "compile-cache warmup %s completed in %.1fs",
+                            spec.name, time.monotonic() - warm_t0)
+                    return 1, {}
+
+                # gw#470: no custom warmup() — run every declared handler of
+                # this instance group. A failure propagates as a load failure.
+                evidence = await self._run_synthesized_warmup(
                     spec,
                     rec,
                     instance,
@@ -3007,8 +3065,15 @@ class Executor:
                         if id(candidate.pipeline) in inj.active_compile_artifacts
                     ),
                 )
-                warmed = warmup_evidence.count
-                function_proofs.update(warmup_evidence.functions_by_object)
+                return evidence.count, evidence.functions_by_object
+
+            if inj.active_compile_artifacts:
+                # Cache-hit counters are process-global. Hold every GPU permit
+                # so each exact guard window can belong to only this warmup.
+                async with self._exclusive_gpu():
+                    warmed, function_proofs = await run_warmup()
+            else:
+                warmed, function_proofs = await run_warmup()
             if proves_inductor:
                 unproven: list[_CompileObjectCandidate] = []
                 hits = 0
@@ -4299,9 +4364,10 @@ class Executor:
             if self.in_flight_keys():
                 return await fail("model_in_use")
 
-            # A job landing mid-adoption queues on the same GPU semaphore
-            # instead of racing a wrap/refit/warmup.
-            async with self._gpu_semaphore:
+            # A job landing mid-adoption queues behind every GPU permit;
+            # process-global Inductor counters cannot tolerate another slot
+            # compiling inside this exact target's proof window.
+            async with self._exclusive_gpu():
                 current = self._compile_target(target_incarnation_id)
                 if (
                     current is None

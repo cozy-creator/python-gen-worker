@@ -1243,6 +1243,103 @@ def test_flux_base_w8a8_boot_proves_generate_and_edit_aliases(
     assert {"edit", "generate"}.issubset(recovered_delta.available_functions)
 
 
+def test_flux_real_guard_proves_each_alias_under_exclusive_gpu_warmup(
+    tmp_path, monkeypatch,
+):
+    """Production setup uses one real guard counter window per FLUX alias."""
+    import gen_worker.executor as executor_mod
+    import torch
+
+    artifact = _artifact(tmp_path)
+    model_dir = tmp_path / "real-guard-model"
+    model_dir.mkdir()
+    calls = {"generate": 0, "edit": 0}
+    compiled_ready = threading.Event()
+
+    @endpoint(
+        models={"pipeline": Hub("acme/flux-base")},
+        resources=Resources(vram_gb=24),
+        compile=Compile(shapes=((768, 768),), family=FAMILY),
+        warmup={
+            "generate": {"prompt": "warmup"},
+            "edit": {"prompt": "warmup"},
+        },
+    )
+    class _FluxBaseEndpoint:
+        def setup(self, pipeline: _LoadablePipe) -> None:
+            self.pipeline = pipeline
+
+        def generate(self, ctx, payload: _In) -> _Out:
+            calls["generate"] += 1
+            self.pipeline.transformer.forward(payload.prompt)
+            return _Out(y="ok")
+
+        def edit(self, ctx, payload: _In) -> _Out:
+            calls["edit"] += 1
+            self.pipeline.transformer.forward(payload.prompt)
+            return _Out(y="ok")
+
+    specs = extract_specs(_FluxBaseEndpoint)
+    generate = next(spec for spec in specs if spec.name == "generate")
+    model_ref = wire_ref(generate.models["pipeline"])
+    pipe = _Pipe()
+
+    async def _send(_msg):
+        return None
+
+    ex = Executor(specs, _send, gpu_slots=2)
+    ex.store._cache_dir = tmp_path / "cas"
+
+    async def _download(ref, **kwargs):
+        return artifact.parent if ref == CACHE_REF else model_dir
+
+    def _compile(fn, **kwargs):
+        compiled_ready.set()
+        return fn
+
+    counters = iter((
+        {"fxgraph_cache_hit": 10, "fxgraph_cache_miss": 1},
+        {"fxgraph_cache_hit": 11, "fxgraph_cache_miss": 1},
+        {"fxgraph_cache_hit": 11, "fxgraph_cache_miss": 1},
+        {"fxgraph_cache_hit": 12, "fxgraph_cache_miss": 1},
+    ))
+    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(
+        provision,
+        "load_slot",
+        lambda *args, **kwargs: provision.SlotLoad(obj=pipe, is_pipeline=True),
+    )
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch, "compile", _compile)
+    monkeypatch.setattr(cc, "inductor_counters", lambda: next(counters))
+
+    async def scenario() -> None:
+        # Hold one of two permits. Setup may stage/arm, but its proof warmup
+        # must wait until it can hold the entire worker GPU execution surface.
+        await ex._gpu_semaphore.acquire()
+        task = asyncio.create_task(ex.ensure_setup(generate, {
+            model_ref: pb.Snapshot(digest=MODEL_DIGEST),
+            CACHE_REF: pb.Snapshot(digest=DIGEST_A),
+        }))
+        try:
+            assert await asyncio.to_thread(compiled_ready.wait, 10)
+            for _ in range(3):
+                await asyncio.sleep(0)
+            assert calls == {"generate": 0, "edit": 0}
+        finally:
+            ex._gpu_semaphore.release()
+        await task
+
+    asyncio.run(scenario())
+
+    assert calls == {"generate": 1, "edit": 1}
+    (target,) = ex.compile_targets()
+    assert list(target.function_names) == ["edit", "generate"]
+    assert target.active_compile_ref == CACHE_REF
+    assert cc.execution_count(pipe) == 2
+    assert cc.cache_hit_count(pipe) == 2
+
+
 def test_pipeline_target_owns_only_pipeline_not_ancillary_vae(
     tmp_path, monkeypatch,
 ):
@@ -1384,6 +1481,84 @@ def test_w8a8_without_exact_cell_fails_before_pipeline_load_or_handler(
     assert _ColdEndpoint.setups == 0
     assert _ColdEndpoint.warmups == 0
     assert _ColdEndpoint.runs == 0
+    assert ex.unavailable[spec.name][0] == "compile_cell_failed"
+
+
+def test_w8a8_partial_handler_proof_fails_loud_without_disabling_skipped_turbo(
+    tmp_path, monkeypatch,
+):
+    """Every required alias must prove the W8A8 cell; explicit skips do not."""
+    import gen_worker.executor as executor_mod
+
+    family = "sdxl"
+    cell_ref = f"_system/family-{family}#inductor-rtx-4090-torch2.9-w8a8"
+    artifact = _artifact(tmp_path, family=family)
+    model_dir = tmp_path / "partial-proof-model"
+    model_dir.mkdir()
+
+    @endpoint(
+        models={"pipeline": Hub("acme/sdxl", flavor="fp8-w8a8")},
+        resources=Resources(vram_gb=24),
+        compile=Compile(shapes=((1024, 1024),), family=family),
+        warmup={
+            "generate": {"prompt": "warmup"},
+            "edit": {"prompt": "warmup"},
+            "generate_turbo": None,
+        },
+    )
+    class _SdxlEndpoint:
+        def setup(self, pipeline: _LoadablePipe) -> None:
+            self.pipeline = pipeline
+
+        def generate(self, ctx, payload: _In) -> _Out:
+            _record_fake_warm(self.pipeline)
+            return _Out(y="ok")
+
+        def edit(self, ctx, payload: _In) -> _Out:
+            # The handler succeeds, but it did not execute the guarded graph.
+            return _Out(y="eager")
+
+        def generate_turbo(self, ctx, payload: _In) -> _Out:
+            raise AssertionError("explicitly skipped Turbo must not run")
+
+    specs = extract_specs(_SdxlEndpoint)
+    by_attr = {spec.attr_name: spec for spec in specs}
+    generate = by_attr["generate"]
+    model_ref = wire_ref(generate.models["pipeline"])
+    pipe = _LoadablePipe()
+    setattr(pipe, "_cozy_weight_lane", "w8a8")
+
+    async def _send(_msg):
+        return None
+
+    ex = Executor(specs, _send)
+    ex.store._cache_dir = tmp_path / "cas"
+
+    async def _download(ref, **kwargs):
+        return artifact.parent if ref == cell_ref else model_dir
+
+    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(
+        provision,
+        "load_slot",
+        lambda *args, **kwargs: provision.SlotLoad(obj=pipe, is_pipeline=True),
+    )
+    monkeypatch.setattr(ex, "_enable_compiled", _guarded_enable)
+
+    with pytest.raises(
+        cc.CompiledLaneUnavailableError,
+        match="mandatory W8A8 function proof incomplete",
+    ):
+        asyncio.run(ex.ensure_setup(generate, {
+            model_ref: pb.Snapshot(digest=MODEL_DIGEST),
+            cell_ref: pb.Snapshot(digest=DIGEST_A),
+        }))
+
+    required = {by_attr["generate"].name, by_attr["edit"].name}
+    assert set(ex.unavailable) == required
+    assert all(ex.unavailable[name][0] == "compile_cell_failed" for name in required)
+    assert by_attr["generate_turbo"].name not in ex.unavailable
+    assert ex.compile_targets() == []
 
 
 def test_production_w8a8_ignores_legacy_compile_environment_fallbacks(

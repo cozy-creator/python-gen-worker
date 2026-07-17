@@ -203,6 +203,81 @@ def test_failure_after_staging_cleans_isolated_tree_before_live_mutation(
     assert list(cache.glob("trt-engine-stage-*")) == []
 
 
+def test_different_cell_rearm_replaces_failed_wrapper_after_staged_proof(
+    tmp_path, monkeypatch,
+):
+    """A new exact TRT cell replaces, rather than reuses, a failed guard."""
+    cache = tmp_path / "cache"
+    artifact = _tar(
+        tmp_path,
+        meta=_meta(source_digest="new-cell"),
+        name="new-cell.tar.gz",
+    )
+    calls = {"eager": 0, "old": 0, "new": 0, "loads": 0}
+
+    class _Module:
+        device = "cuda"
+
+        def forward(self, *_args, **_kwargs):
+            calls["eager"] += 1
+            return "eager"
+
+        def state_dict(self):
+            return {}
+
+    class _Pipeline:
+        def __init__(self):
+            self.unet = _Module()
+
+    class _OldRunner:
+        def __call__(self, _feeds):
+            calls["old"] += 1
+            raise RuntimeError("old cell failed")
+
+    class _NewRunner:
+        def __init__(self, _engine, _meta, *, device):
+            assert device == "cuda"
+
+        def __call__(self, _feeds):
+            calls["new"] += 1
+            return "new-engine"
+
+    def _load_engine(_path):
+        calls["loads"] += 1
+        return object()
+
+    monkeypatch.setattr(te, "runtime_key", lambda: dict(RUNTIME))
+    monkeypatch.setattr(te, "_unet_feeds", lambda *args, **kwargs: {})
+    monkeypatch.setattr(te, "_load_engine", _load_engine)
+    monkeypatch.setattr(te, "_refit_engine", lambda _engine, _weights: None)
+    monkeypatch.setattr(te, "TrtModuleRunner", _NewRunner)
+
+    pipeline = _Pipeline()
+    old_meta = _meta(source_digest="old-cell")
+    te.wrap_module(pipeline.unet, _OldRunner(), old_meta)
+    old_module_marker = getattr(pipeline.unet, te._MARKER_ATTR)
+    old_state = old_module_marker["state"]
+    setattr(pipeline, te._MARKER_ATTR, {
+        "meta": old_meta,
+        "state": old_state,
+        "module": pipeline.unet,
+    })
+
+    # Trip the old cell once. Its eager fallback remains the only valid
+    # unwrapped callable, but the failed marker cannot satisfy a new cell.
+    assert pipeline.unet.forward(object(), return_dict=False) == "eager"
+    assert old_state["failed"] is True
+
+    meta = te.load_and_wrap(pipeline, _spec().compile, artifact, cache)
+    new_state = getattr(pipeline, te._MARKER_ATTR)["state"]
+    assert meta["source_digest"] == "new-cell"
+    assert new_state is not old_state
+    assert pipeline.unet.forward(object(), return_dict=False) == ("new-engine",)
+    assert calls == {"eager": 1, "old": 1, "new": 1, "loads": 1}
+    assert te.execution_count(pipeline) == 1
+    assert list(cache.glob("trt-engine-stage-*")) == []
+
+
 def test_find_artifact(tmp_path):
     a = _tar(tmp_path)
     assert te.find_artifact(a) == a

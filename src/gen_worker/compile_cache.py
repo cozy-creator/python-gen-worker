@@ -1020,9 +1020,10 @@ def _guarded(
         lock = signal.get("lock")
         if not isinstance(lock, _LOCK_TYPE):
             return None
-        with lock:
-            if int(signal.get("cache_hits", 0)) > 0:
-                return None
+        # Every call needs its own counter window. Stopping after the first
+        # hit lets one endpoint alias certify a later sibling without proving
+        # that sibling's graph. Executor warmups exclude concurrent GPU work,
+        # so this process-wide counter delta belongs to this exact wrapper.
         return inductor_counters()
 
     def record_success(before: Optional[Dict[str, int]]) -> None:
@@ -1100,9 +1101,8 @@ def _guarded_regional(
         lock = signal.get("lock")
         if not isinstance(lock, _LOCK_TYPE):
             return None
-        with lock:
-            if int(signal.get("cache_hits", 0)) > 0:
-                return None
+        # See _guarded: retain one counter window per compiled invocation so
+        # every declared handler alias must produce its own cache-hit proof.
         return inductor_counters()
 
     def record_success(before: Optional[Dict[str, int]]) -> None:
