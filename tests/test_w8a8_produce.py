@@ -178,6 +178,8 @@ def test_byte_gate_passes_then_catches_tampering(
     report = verify_w8a8_snapshot(tiny_dit, produced, sample=4)
     assert report["byte_exact"] and report["sampled"] == 4
     assert report["max_rel_err"] <= 2 ** -4 + 2 ** -9
+    assert report["source_compute_dtype"] == "storage"
+    assert report["source_storage_dtypes"] == ["bfloat16"]
 
     import shutil
 
@@ -197,6 +199,67 @@ def test_byte_gate_passes_then_catches_tampering(
     save_file(tensors, str(f))
     with pytest.raises(ConversionImplementationError, match="byte-gate"):
         verify_w8a8_snapshot(tiny_dit, bad, sample=len(art.quantized))
+
+
+def _rewrite_component_float_dtype(
+    root: Path, dtype: "torch.dtype", *, inject_fp16_detail: bool = False,
+) -> None:
+    from safetensors.torch import save_file
+
+    component = root / "transformer"
+    files = sorted(component.glob("*.safetensors"))
+    tensors = _load_all(component)
+    for name, value in tensors.items():
+        if value.is_floating_point():
+            converted = value.to(dtype=dtype)
+            if inject_fp16_detail and converted.ndim == 2 and converted.numel():
+                converted = converted.clone()
+                # Exactly representable in FP16, rounded to 1.0 in BF16. Put
+                # it at a row maximum so the declared compute cast changes
+                # both the exact scale and (where applicable) fp8 bytes.
+                converted.reshape(-1)[0] = 1.0009765625
+            tensors[name] = converted
+    for path in files:
+        path.unlink()
+    save_file(tensors, str(component / "diffusion_pytorch_model.safetensors"))
+    index = component / "diffusion_pytorch_model.safetensors.index.json"
+    if index.exists():
+        index.unlink()
+
+
+def test_byte_gate_uses_declared_bf16_quantization_input(
+    tiny_dit: Path, tmp_path: Path,
+) -> None:
+    """A prod#fp16 snapshot is quantized from its production BF16 compute
+    view; exact verification must reproduce that cast, not raw FP16 bytes."""
+    import shutil
+
+    fp16_source = tmp_path / "source-fp16"
+    shutil.copytree(tiny_dit, fp16_source)
+    _rewrite_component_float_dtype(
+        fp16_source, torch.float16, inject_fp16_detail=True,
+    )
+
+    bf16_input = tmp_path / "quant-input-bf16"
+    shutil.copytree(fp16_source, bf16_input)
+    _rewrite_component_float_dtype(bf16_input, torch.bfloat16)
+    candidate = tmp_path / "candidate"
+    streaming_w8a8_snapshot(bf16_input, candidate, file_layout="diffusers")
+
+    with pytest.raises(ConversionImplementationError, match="byte-gate"):
+        verify_w8a8_snapshot(fp16_source, candidate, sample=4)
+
+    report = verify_w8a8_snapshot(
+        fp16_source, candidate, sample=4, source_compute_dtype="bf16",
+    )
+    assert report["byte_exact"] is True
+    assert report["source_storage_dtypes"] == ["float16"]
+    assert report["source_compute_dtype"] == "bfloat16"
+
+    with pytest.raises(ConversionImplementationError, match="source_compute_dtype"):
+        verify_w8a8_snapshot(
+            fp16_source, candidate, source_compute_dtype="float8-e4m3",
+        )
 
 
 def test_dequant_round_trip_reproduces_source(tiny_dit: Path, produced: Path) -> None:

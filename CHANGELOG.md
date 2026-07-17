@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.32.2 (2026-07-16)
+
+- **gw#559 / ie#496: Forge captures every declared image CFG regime.**
+  `Compile.guidance_scales` is an explicit family-cell contract axis carried
+  through producer and local warmup, artifact metadata, and adoption drift
+  checks. SDXL can therefore capture ordinary CFG batch-2 and Turbo/no-CFG
+  batch-1 graphs in one checkpoint-independent `sdxl` cell.
+- **W8A8 exact-byte verification uses the declared quantization-input dtype.**
+  `verify_w8a8_snapshot` can cast immutable source storage to the code-owned
+  producer compute dtype before exact sampled byte/scale recomputation and
+  reports both storage and compute dtypes. This keeps production BF16 input
+  truthful for FP16-stored SDXL checkpoints without weakening exact equality.
+
 ## 0.32.1 (2026-07-16)
 
 - **ie#496: W8A8 production requires the exact compatible Forge cell.**

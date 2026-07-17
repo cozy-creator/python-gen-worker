@@ -28,11 +28,15 @@ def _restore_capture_env(monkeypatch):
 class _Cfg:
     """Stand-in for api.decorators.Compile (duck-typed in local_cells)."""
 
-    def __init__(self, family="fam", shapes=((64, 64),), targets=("transformer",), regional=False):
+    def __init__(
+        self, family="fam", shapes=((64, 64),), targets=("transformer",),
+        regional=False, guidance_scales=(),
+    ):
         self.family = family
         self.shapes = tuple(tuple(s) for s in shapes)
         self.targets = tuple(targets)
         self.regional = regional
+        self.guidance_scales = tuple(guidance_scales)
 
 
 class _Pipe:

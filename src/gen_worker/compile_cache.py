@@ -23,7 +23,8 @@ are CODE: only the platform's first-party compile job publishes shared ones.
 Artifact = deterministic ``.tar.gz``::
 
     metadata.json      key: family, sku/torch/triton/cuda, shapes, targets,
-                       diffusers/transformers versions (+ source_ref info)
+                       image guidance regimes, diffusers/transformers
+                       versions (+ source_ref info)
     inductor/**        TORCHINDUCTOR_CACHE_DIR contents
     triton/**          TRITON_CACHE_DIR contents
 
@@ -234,6 +235,7 @@ def artifact_metadata(
     source_digest: str = "",
     shapes: Iterable[Tuple[int, ...]] = (),
     targets: Iterable[str] = (),
+    guidance_scales: Iterable[float] = (),
     low_vram_mode: str = "",
     storage_dtype: str = "",
     compile_mode: str = "whole",
@@ -252,7 +254,8 @@ def artifact_metadata(
     ``loading.pipeline_weight_lane`` — "" plain-resident, "fp8-hooks"
     layerwise-cast; the hooks are traced INTO the graphs, ie#381) and is
     parity-checked at :func:`enable` like ``low_vram_mode``. Shape rows are
-    (w, h) or (w, h, frames) — see ``Compile``."""
+    (w, h) or (w, h, frames); ``guidance_scales`` records the image CFG /
+    no-CFG graph regimes captured for every 2-D row — see ``Compile``."""
     return {
         "format": ARTIFACT_FORMAT,
         "kind": "torch-inductor-cache",
@@ -263,6 +266,7 @@ def artifact_metadata(
         "source_digest": str(source_digest or ""),
         "shapes": [[int(v) for v in s] for s in shapes],
         "targets": list(targets),
+        "guidance_scales": [float(v) for v in guidance_scales],
         "low_vram_mode": str(low_vram_mode or ""),
         "storage_dtype": str(storage_dtype or ""),
         "compile_mode": str(compile_mode or "whole"),
@@ -731,6 +735,13 @@ def contract_drift(meta: Dict[str, Any], pipeline: Any, cfg: Any) -> str:
     targets = [str(v) for v in getattr(cfg, "targets", ())]
     if meta.get("targets") != targets:
         return f"targets {meta.get('targets')!r} != declared {targets!r}"
+    guidance_scales = [float(v) for v in getattr(cfg, "guidance_scales", ())]
+    cell_guidance_scales = [float(v) for v in (meta.get("guidance_scales") or ())]
+    if cell_guidance_scales != guidance_scales:
+        return (
+            f"guidance_scales {cell_guidance_scales!r} != declared "
+            f"{guidance_scales!r}"
+        )
     signature, weight_contract = execution_contract(pipeline, cfg)
     meta_signature = str(meta.get("graph_signature") or "")
     meta_weights = meta.get("weight_contract") or {}
@@ -1030,6 +1041,7 @@ def _warm_call(
     steps: int,
     prompt: str,
     decode: bool,
+    guidance_scales: Iterable[float] = (),
 ) -> None:
     """One warm-up call for ``shape``. (w, h) is the classic image call;
     (w, h, frames) is a video call (ie#381): the DiT graph keys on the token
@@ -1037,7 +1049,9 @@ def _warm_call(
     serving path (including a two-stage refine, whose latents arrive from an
     upsampler of identical shape) will look up. Video calls force the
     batch-1 no-CFG serving regime (CFG is a graph shape — ``Compile``) and
-    skip decode unless a vae target is declared."""
+    skip decode unless a vae target is declared. Image calls run once per
+    explicitly declared guidance scale, capturing CFG batch-2 and no-CFG
+    batch-1 graphs in one family cell."""
     import inspect
 
     import torch
@@ -1059,7 +1073,24 @@ def _warm_call(
             kwargs["guidance_scale"] = 1.0
         if "audio_guidance_scale" in params:
             kwargs["audio_guidance_scale"] = 1.0
-    pipe(**kwargs)
+        pipe(**kwargs)
+        return
+
+    scales = tuple(float(v) for v in guidance_scales)
+    if not scales:
+        pipe(**kwargs)
+        return
+    params = inspect.signature(type(pipe).__call__).parameters
+    accepts_guidance = "guidance_scale" in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+    if not accepts_guidance:
+        raise RuntimeError(
+            f"{type(pipe).__name__} cannot warm declared guidance_scales; "
+            "its call signature has no guidance_scale"
+        )
+    for scale in scales:
+        pipe(**kwargs, guidance_scale=scale)
 
 
 def build(
@@ -1068,6 +1099,7 @@ def build(
     *,
     shapes: Iterable[Tuple[int, ...]],
     targets: Iterable[str] = ("transformer", "vae.decode"),
+    guidance_scales: Iterable[float] = (),
     family: str = "",
     source_ref: str = "",
     source_digest: str = "",
@@ -1111,7 +1143,10 @@ def build(
     if not torch.cuda.is_available():
         raise RuntimeError("compile-cache build requires CUDA")
 
-    cfg = CompileCfg(shapes=tuple(shapes), targets=tuple(targets), regional=bool(regional))
+    cfg = CompileCfg(
+        shapes=tuple(shapes), targets=tuple(targets),
+        guidance_scales=tuple(guidance_scales), regional=bool(regional),
+    )
     pipe = load_from_pretrained(
         DiffusionPipeline, str(model_path), dtype=dtype,
         storage_dtype=storage_dtype,
@@ -1141,7 +1176,10 @@ def build(
     for shape in cfg.shapes:
         torch.cuda.synchronize()
         t = time.monotonic()
-        _warm_call(pipe, shape, steps=int(steps), prompt=prompt, decode=decode)
+        _warm_call(
+            pipe, shape, steps=int(steps), prompt=prompt, decode=decode,
+            guidance_scales=cfg.guidance_scales,
+        )
         torch.cuda.synchronize()
         key = "x".join(str(v) for v in shape)
         timings[key] = round(time.monotonic() - t, 2)
@@ -1160,6 +1198,7 @@ def build(
     meta = artifact_metadata(
         family=family, source_ref=source_ref, source_digest=source_digest,
         shapes=cfg.shapes, targets=cfg.targets,
+        guidance_scales=cfg.guidance_scales,
         low_vram_mode=str(placed.get("mode") or ""),
         storage_dtype=storage_dtype,
         compile_mode="regional" if regional else "whole",

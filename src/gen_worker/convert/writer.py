@@ -1207,6 +1207,7 @@ def verify_w8a8_snapshot(
     *,
     sample: int = 16,
     seed: int = 0,
+    source_compute_dtype: str = "storage",
 ) -> dict[str, Any]:
     """Byte-gate a produced w8a8 tree against its source (gw#557 / ie#494).
 
@@ -1218,13 +1219,34 @@ def verify_w8a8_snapshot(
     (b) ``dequant(w_fp8 x scale)`` must sit within fp8-e4m3 format error of
     the source (max row-relative error <= 2**-4 + subnormal floor).
     Raises :class:`ConversionImplementationError` on any failure; returns a
-    report dict for produce logs."""
+    report dict for produce logs. ``source_compute_dtype`` names the exact
+    producer-side quantization input view. For example, an immutable FP16
+    checkpoint loaded as production BF16 is cast to BF16 before exact
+    recomputation; storage and compute dtypes are both reported."""
     import random
 
     import torch
     from safetensors import safe_open
 
     from gen_worker.models.w8a8 import detect_w8a8_artifact
+
+    aliases = {
+        "storage": ("storage", None),
+        "": ("storage", None),
+        "bf16": ("bfloat16", torch.bfloat16),
+        "bfloat16": ("bfloat16", torch.bfloat16),
+        "fp16": ("float16", torch.float16),
+        "float16": ("float16", torch.float16),
+        "fp32": ("float32", torch.float32),
+        "float32": ("float32", torch.float32),
+    }
+    dtype_key = str(source_compute_dtype or "").strip().lower()
+    if dtype_key not in aliases:
+        raise ConversionImplementationError(
+            "byte-gate: source_compute_dtype must be one of storage, bf16, "
+            f"fp16, or fp32; got {source_compute_dtype!r}"
+        )
+    canonical_compute_dtype, cast_dtype = aliases[dtype_key]
 
     source_dir, out_dir = Path(source_dir), Path(out_dir)
     art = detect_w8a8_artifact(out_dir)
@@ -1249,6 +1271,7 @@ def verify_w8a8_snapshot(
     rng = random.Random(seed)
     picked = names if len(names) <= sample else sorted(rng.sample(names, sample))
     max_rel = 0.0
+    source_storage_dtypes: set[str] = set()
     for layer in picked:
         wname, sname = f"{layer}.weight", f"{layer}{_SCALE_SUFFIX}"
         src_file = src_where.get(wname)
@@ -1256,7 +1279,11 @@ def verify_w8a8_snapshot(
             raise ConversionImplementationError(
                 f"byte-gate: quantized layer {wname!r} missing from source")
         with safe_open(str(src_file), framework="pt", device="cpu") as fh:
-            src = fh.get_tensor(wname).float()
+            stored = fh.get_tensor(wname)
+        source_storage_dtypes.add(str(stored.dtype).removeprefix("torch."))
+        if cast_dtype is not None:
+            stored = stored.to(dtype=cast_dtype)
+        src = stored.float()
         with safe_open(str(out_where[wname]), framework="pt", device="cpu") as fh:
             got_q = fh.get_tensor(wname)
         with safe_open(str(out_where[sname]), framework="pt", device="cpu") as fh:
@@ -1287,6 +1314,8 @@ def verify_w8a8_snapshot(
         "sampled": len(picked),
         "byte_exact": True,
         "max_rel_err": max_rel,
+        "source_storage_dtypes": sorted(source_storage_dtypes),
+        "source_compute_dtype": canonical_compute_dtype,
     }
 
 
