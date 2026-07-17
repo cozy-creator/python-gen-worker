@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
+import multiprocessing
 from pathlib import Path
+from typing import Any
 
 from blake3 import blake3
 
@@ -34,6 +35,34 @@ def _resolved() -> WorkerResolvedRepo:
 
 def _blob(base: Path) -> Path:
     return base / "blobs" / "blake3" / _BLAKE3[:2] / _BLAKE3[2:4] / _BLAKE3
+
+
+def _copy_blob_process(
+    start: Any,
+    results: Any,
+    source: str,
+    destination: str,
+    size_bytes: int,
+    digest: str,
+) -> None:
+    """Run the production CAS publisher in an independently spawned process."""
+    if not start.wait(10):
+        results.put((False, "start barrier timed out"))
+        return
+    try:
+        copied = CozySnapshotDownloader._copy_verified_blob(
+            Path(source),
+            Path(destination),
+            WorkerResolvedRepoFile(
+                path="model.safetensors",
+                size_bytes=size_bytes,
+                blake3=digest,
+                url="https://tensorhub.invalid/authorized-blob",
+            ),
+        )
+        results.put((copied, ""))
+    except BaseException as exc:  # pragma: no cover - returned to the parent for diagnosis
+        results.put((False, repr(exc)))
 
 
 def test_shared_cache_is_enabled_only_for_real_provider_mount(monkeypatch) -> None:
@@ -114,21 +143,42 @@ def test_corrupt_endpoint_volume_blob_falls_back_and_atomically_repairs(
     assert not list(corrupt.parent.glob(f".{_BLAKE3}.writer-*"))
 
 
-def test_racing_writers_publish_only_complete_verified_blob(tmp_path: Path) -> None:
-    shared = _blob(tmp_path / "endpoint-volume")
-    sources = [tmp_path / "pod-a.blob", tmp_path / "pod-b.blob"]
+def test_spawned_process_writers_publish_only_complete_verified_blob(tmp_path: Path) -> None:
+    payload = _PAYLOAD * 128
+    digest = blake3(payload).hexdigest()
+    shared = (
+        tmp_path / "endpoint-volume" / "blobs" / "blake3" / digest[:2] / digest[2:4]
+        / digest
+    )
+    sources = [tmp_path / f"pod-{i}.blob" for i in range(4)]
     for source in sources:
-        source.write_bytes(_PAYLOAD)
-    file = _resolved().files[0]
+        source.write_bytes(payload)
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        results = list(pool.map(
-            lambda source: CozySnapshotDownloader._copy_verified_blob(
-                source, shared, file
-            ),
-            sources,
-        ))
+    ctx = multiprocessing.get_context("spawn")
+    start = ctx.Event()
+    results = ctx.Queue()
+    processes = [
+        ctx.Process(
+            target=_copy_blob_process,
+            args=(start, results, str(source), str(shared), len(payload), digest),
+        )
+        for source in sources
+    ]
+    try:
+        for process in processes:
+            process.start()
+        start.set()
+        for process in processes:
+            process.join(20)
+        assert [process.exitcode for process in processes] == [0] * len(processes)
+        outcomes = [results.get(timeout=5) for _ in processes]
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+                process.join(5)
+        results.close()
 
-    assert results == [True, True]
-    assert shared.read_bytes() == _PAYLOAD
-    assert not list(shared.parent.glob(f".{_BLAKE3}.writer-*"))
+    assert outcomes == [(True, "")] * len(processes)
+    assert shared.read_bytes() == payload
+    assert not list(shared.parent.glob(f".{digest}.writer-*"))
