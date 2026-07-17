@@ -51,9 +51,14 @@ class TestPlanShards:
         assert plan.shard_names[0] == "model-00001-of-00003.safetensors"
         assert sum(plan.shard_sizes.values()) == plan.total_size == 180
 
-    def test_tensor_larger_than_cap_raises(self) -> None:
-        with pytest.raises(ValueError, match="tensor_exceeds_max_shard_bytes"):
-            plan_shards({"big": 200}, max_shard_bytes=100)
+    def test_tensor_larger_than_cap_gets_own_oversized_shard(self) -> None:
+        """HF split semantics: an oversize tensor rides alone in its own
+        shard (fp32 lm_head > 2GiB killed every hidream cast, gw#562)."""
+        plan = plan_shards({"a": 60, "big": 200, "z": 60}, max_shard_bytes=100)
+        big_shard = plan.weight_map["big"]
+        assert plan.shard_sizes[big_shard] == 200
+        assert [k for k, s in plan.weight_map.items() if s == big_shard] == ["big"]
+        assert plan.total_size == 320
 
 
 class TestIncrementalWriter:

@@ -102,8 +102,11 @@ def plan_shards(
         size = int(tensor_bytes.get(key, 0) or 0)
         if size < 0:
             raise ValueError(f"tensor_size_invalid:{key}")
-        if size > int(max_shard_bytes):
-            raise ValueError(f"tensor_exceeds_max_shard_bytes:{key}")
+        # A tensor larger than max_shard_bytes gets its own oversized shard
+        # (HF split_torch_state_dict_into_shards semantics) — the greedy loop
+        # below already isolates it. Raising here killed every cast of fp32
+        # trees whose excluded lm_head/embedding exceeds 2GiB (hidream-o1,
+        # found live ie#480/gw#562).
         entries.append((key, size))
 
     single = f"{shard_prefix}.safetensors"
