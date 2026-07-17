@@ -25,9 +25,9 @@ authority. Weight-stripped refit uses plain ``REFIT`` (``REFIT_IDENTICAL``
 is documented undefined-behavior when refit weights differ from build-time
 weights — the whole point here is that they differ).
 
-Policy mirrors compile_cache: no verified artifact / key mismatch / missing
-tensorrt lib => eager, never a stall. A failing engine call permanently
-unwraps to the eager module.
+Policy mirrors compile_cache: an optional plain lane stays eager when no exact
+artifact is available. A failing optional engine call permanently routes to
+the eager module and revokes its compiled-state proof before that fallback.
 """
 
 from __future__ import annotations
@@ -38,11 +38,19 @@ import io
 import json
 import logging
 import tarfile
+import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
-from .compile_cache import AdoptError, _clean_tarinfo, parse_cell_ref, sku_slug
+from .compile_cache import (
+    AdoptError,
+    CompiledLaneUnavailableError,
+    _clean_tarinfo,
+    parse_cell_ref,
+    sku_slug,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -188,11 +196,13 @@ def unpack(artifact: Path, dest_root: Path) -> Dict[str, Any]:
     dest_root = Path(dest_root)
     dest_root.mkdir(parents=True, exist_ok=True)
     meta: Dict[str, Any] = {}
+    seen: set[str] = set()
     with tarfile.open(artifact, mode="r:*") as tar:
         for member in tar:
-            name = member.name.lstrip("./")
-            if name not in _MEMBERS or not member.isfile():
+            name = member.name
+            if name not in _MEMBERS or not member.isfile() or name in seen:
                 raise ValueError(f"unexpected member in trt-engine artifact: {member.name!r}")
+            seen.add(name)
             src = tar.extractfile(member)
             assert src is not None
             data = src.read()
@@ -200,16 +210,58 @@ def unpack(artifact: Path, dest_root: Path) -> Dict[str, Any]:
                 meta = json.loads(data.decode())
                 continue
             (dest_root / name).write_bytes(data)
+    missing = set(_MEMBERS) - seen
+    if missing:
+        raise ValueError(
+            f"trt-engine artifact {artifact} is incomplete; missing {sorted(missing)!r}"
+        )
     if not meta:
         raise ValueError(f"trt-engine artifact {artifact} has no {METADATA_NAME}")
     return meta
+
+
+@dataclass
+class _StagedEngineArtifact:
+    metadata: Dict[str, Any]
+    root: Path
+    temporary: tempfile.TemporaryDirectory[str]
+
+    def close(self) -> None:
+        self.temporary.cleanup()
+
+
+def stage_artifact(
+    artifact: Path, family: str, cache_dir: Optional[Path] = None,
+) -> _StagedEngineArtifact:
+    """Extract and runtime-verify a complete engine in an isolated tree.
+
+    The live/shared cache and pipeline remain untouched on every rejection.
+    Concurrent attempts use distinct trees; a process crash can leave only an
+    unreferenced staging directory, never partially published engine files.
+    """
+    base = Path(cache_dir) if cache_dir else Path.home() / ".cache" / "gen-worker"
+    base.mkdir(parents=True, exist_ok=True)
+    temporary = tempfile.TemporaryDirectory(prefix="trt-engine-stage-", dir=base)
+    root = Path(temporary.name)
+    try:
+        meta = unpack(Path(artifact), root)
+        reason = verify(meta, family=family)
+        if reason:
+            raise AdoptError("key_mismatch", reason)
+        return _StagedEngineArtifact(meta, root, temporary)
+    except AdoptError:
+        temporary.cleanup()
+        raise
+    except Exception as exc:
+        temporary.cleanup()
+        raise AdoptError("artifact_invalid", str(exc)) from exc
 
 
 def unpack_metadata(artifact: Path) -> Dict[str, Any]:
     """Read ONLY metadata.json from an artifact (kind sniffing — cheap)."""
     with tarfile.open(artifact, mode="r:*") as tar:
         for member in tar:
-            if member.name.lstrip("./") == METADATA_NAME and member.isfile():
+            if member.name == METADATA_NAME and member.isfile():
                 src = tar.extractfile(member)
                 assert src is not None
                 return json.loads(src.read().decode())
@@ -432,22 +484,61 @@ def _unet_feeds(meta: Dict[str, Any], args: tuple, kwargs: dict) -> Dict[str, An
     return feeds
 
 
-def wrap_module(module: Any, runner: TrtModuleRunner, meta: Dict[str, Any]) -> None:
-    """Swap ``module.forward`` for the engine behind a fail-soft guard: the
-    first engine error permanently unwraps back to eager. The module object
+def wrap_module(
+    module: Any,
+    runner: TrtModuleRunner,
+    meta: Dict[str, Any],
+    *,
+    eager_forward: Optional[Callable[..., Any]] = None,
+) -> None:
+    """Swap ``module.forward`` for an optional engine behind a fail-soft guard.
+
+    The first engine error synchronously revokes scheduler-visible compiled
+    proof, then permanently routes this wrapper to eager. The module object
     (config, dtype, device, weights) stays untouched — diffusers pipelines
-    read its attributes, and its weights remain the refit source."""
-    original = module.forward
-    state = {"failed": False}
+    read its attributes, and its weights remain the refit source.
+    """
+    # A different-cell rearm replaces a failed wrapper in one assignment.
+    # Preserve the underlying eager callable rather than capturing the old
+    # wrapper as the new fallback.
+    original = eager_forward or module.forward
+    state: Dict[str, Any] = {
+        "failed": False,
+        "successful_calls": 0,
+        "original": original,
+        "failure_callback": None,
+        "revocation_error": "",
+    }
 
     def trt_forward(*args: Any, **kwargs: Any) -> Any:
+        if state["revocation_error"]:
+            raise CompiledLaneUnavailableError(state["revocation_error"])
         if state["failed"]:
             return original(*args, **kwargs)
         try:
             feeds = _unet_feeds(meta, args, kwargs)
             out = runner(feeds)
+            state["successful_calls"] += 1
         except Exception as exc:  # noqa: BLE001 — ANY engine problem => eager
             state["failed"] = True
+            detail = (
+                f"TensorRT target {meta.get('module')} failed: "
+                f"{type(exc).__name__}: {exc}"
+            )
+            callback = state.get("failure_callback")
+            if callable(callback):
+                try:
+                    callback(detail)
+                except Exception as callback_exc:
+                    state["revocation_error"] = (
+                        "compiled-state revocation failed: "
+                        f"{type(callback_exc).__name__}: {callback_exc}"
+                    )
+                    logger.exception(
+                        "trt-engine: %s", state["revocation_error"])
+                    raise CompiledLaneUnavailableError(
+                        state["revocation_error"]
+                    ) from callback_exc
             logger.warning(
                 "trt-engine: %s failed (%s: %s); eager for the rest of this process",
                 meta.get("module"), type(exc).__name__, exc,
@@ -460,7 +551,10 @@ def wrap_module(module: Any, runner: TrtModuleRunner, meta: Dict[str, Any]) -> N
         return (out,)
 
     module.forward = trt_forward
-    setattr(module, _MARKER_ATTR, {"meta": {k: meta.get(k) for k in ("sku", "trt", "precision", "shapes")}})
+    setattr(module, _MARKER_ATTR, {
+        "meta": {k: meta.get(k) for k in ("sku", "trt", "precision", "shapes")},
+        "state": state,
+    })
 
 
 def enable(
@@ -490,37 +584,90 @@ def enable(
 def load_and_wrap(
     pipeline: Any, cfg: Any, artifact: Path, cache_dir: Optional[Path] = None
 ) -> Dict[str, Any]:
-    """The adopt-path core: unpack+verify+deserialize+refit+wrap. Raises
-    AdoptError with a classified reason on any failure (never half-wraps)."""
-    if getattr(pipeline, _MARKER_ATTR, None) is not None:
-        return getattr(pipeline, _MARKER_ATTR)["meta"]
-    root = (Path(cache_dir) if cache_dir else Path.home() / ".cache" / "gen-worker") / "trt-engine"
-    try:
-        meta = unpack(Path(artifact), root)
-    except AdoptError:
-        raise
-    except Exception as exc:
-        raise AdoptError("artifact_invalid", str(exc)) from exc
+    """Stage+verify+deserialize+refit, then perform the sole live wrap.
+
+    Raises :class:`AdoptError` with a classified reason on any failure and
+    never publishes extracted files into a shared live cache.
+    """
     family = str(getattr(cfg, "family", "") or "")
-    reason = verify(meta, family=family)
-    if reason:
-        raise AdoptError("key_mismatch", reason)
+    staged = stage_artifact(Path(artifact), family, cache_dir=cache_dir)
+    try:
+        meta = staged.metadata
+        module_name = str(meta.get("module") or "unet")
+        module = getattr(pipeline, module_name, None)
+        if module is None:
+            raise AdoptError("no_target", f"pipeline has no module {module_name!r}")
+        eager_forward: Optional[Callable[..., Any]] = None
+        old_marker = getattr(pipeline, _MARKER_ATTR, None)
+        if old_marker is not None:
+            old_module = old_marker.get("module")
+            old_state = old_marker.get("state") or {}
+            eager_forward = old_state.get("original")
+            if old_module is not module or not callable(eager_forward):
+                raise AdoptError(
+                    "old_marker_invalid",
+                    "existing TRT marker does not retain this module's eager callable",
+                )
 
-    module_name = str(meta.get("module") or "unet")
-    module = getattr(pipeline, module_name, None)
-    if module is None:
-        raise AdoptError("no_target", f"pipeline has no module {module_name!r}")
+        t0 = time.monotonic()
+        engine = _load_engine(staged.root / ENGINE_NAME)
+        entries: list[dict[str, Any]] = json.loads(
+            (staged.root / REFIT_MAP_NAME).read_text())
+        weights = refit_weights(dict(module.state_dict()), entries)
+        _refit_engine(engine, weights)
+        runner = TrtModuleRunner(
+            engine, meta, device=str(getattr(module, "device", "cuda")))
+        # This is the first live mutation: the complete artifact, runtime key,
+        # target, engine, and refit weights are already proven above.
+        wrap_module(module, runner, meta, eager_forward=eager_forward)
+        module_marker = getattr(module, _MARKER_ATTR, {})
+        setattr(pipeline, _MARKER_ATTR, {
+            "meta": meta,
+            "state": module_marker.get("state", {}),
+            "module": module,
+        })
+        logger.info("trt-engine: deserialize+refit in %.1fs", time.monotonic() - t0)
+        return meta
+    finally:
+        staged.close()
 
-    t0 = time.monotonic()
-    engine = _load_engine(root / ENGINE_NAME)
-    entries: list[dict[str, Any]] = json.loads((root / REFIT_MAP_NAME).read_text())
-    weights = refit_weights(dict(module.state_dict()), entries)
-    _refit_engine(engine, weights)
-    runner = TrtModuleRunner(engine, meta, device=str(getattr(module, "device", "cuda")))
-    wrap_module(module, runner, meta)
-    setattr(pipeline, _MARKER_ATTR, {"meta": meta})
-    logger.info("trt-engine: deserialize+refit in %.1fs", time.monotonic() - t0)
-    return meta
+
+def execution_count(pipeline: Any) -> int:
+    """Successful engine calls observed on this exact wrapped pipeline."""
+    marker = getattr(pipeline, _MARKER_ATTR, None) or {}
+    return int((marker.get("state") or {}).get("successful_calls", 0))
+
+
+def set_guard_failure_callback(
+    pipeline: Any, callback: Any,
+) -> bool:
+    """Bind scheduler-state revocation to an armed engine guard."""
+    marker = getattr(pipeline, _MARKER_ATTR, None) or {}
+    state = marker.get("state")
+    if not isinstance(state, dict):
+        return False
+    state["failure_callback"] = callback
+    return True
+
+
+def unwrap(pipeline: Any) -> bool:
+    """Restore eager forward after an unproven first-time engine adoption."""
+    marker = getattr(pipeline, _MARKER_ATTR, None) or {}
+    module = marker.get("module")
+    state = marker.get("state") or {}
+    original = state.get("original")
+    if module is None or not callable(original):
+        return False
+    module.forward = original
+    try:
+        delattr(module, _MARKER_ATTR)
+    except AttributeError:
+        pass
+    try:
+        delattr(pipeline, _MARKER_ATTR)
+    except AttributeError:
+        pass
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -761,6 +908,7 @@ __all__ = [
     "build",
     "build_refit_map",
     "enable",
+    "execution_count",
     "find_artifact",
     "flavor_label",
     "is_engine_ref",
@@ -768,6 +916,9 @@ __all__ = [
     "pack",
     "refit_weights",
     "runtime_key",
+    "set_guard_failure_callback",
+    "stage_artifact",
+    "unwrap",
     "trt_maj_min",
     "trt_version",
     "unpack",

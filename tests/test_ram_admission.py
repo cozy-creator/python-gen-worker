@@ -23,6 +23,7 @@ import msgspec
 import psutil
 import pytest
 
+import gen_worker.executor as executor_mod
 from gen_worker.api.binding import HF
 from gen_worker.api.decorators import Resources
 from gen_worker.api.slot import Slot
@@ -150,6 +151,7 @@ def _spec(
 
 def _executor(
     specs, tmp_path: Path, sent: list[pb.WorkerMessage] | None = None,
+    monkeypatch=None,
 ) -> Executor:
     async def _send(msg: pb.WorkerMessage) -> None:
         if sent is not None:
@@ -157,10 +159,12 @@ def _executor(
 
     store = ModelStore(_send, cache_dir=tmp_path, vram_budget_bytes=24 * _GiB)
 
-    async def _fake_ensure_local(ref, snapshot=None, *, binding=None) -> Path:
+    async def _fake_ensure_local(ref, **kwargs) -> Path:
         store.residency.track_disk(ref, tmp_path)
         return tmp_path
 
+    if monkeypatch is not None:
+        monkeypatch.setattr(executor_mod, "ensure_local", _fake_ensure_local)
     store.ensure_local = _fake_ensure_local  # type: ignore[method-assign]
     return Executor(specs, _send, store=store)
 
@@ -195,7 +199,7 @@ def test_setup_refused_retryable_when_host_ram_insufficient(tmp_path: Path, monk
     monkeypatch.setattr(residency_mod, "get_available_ram_gb", lambda: 8.0)
 
     async def _run() -> None:
-        ex = _executor([spec], tmp_path)
+        ex = _executor([spec], tmp_path, monkeypatch=monkeypatch)
         with pytest.raises(InsufficientHostRamError, match="insufficient host RAM") as caught:
             await ex.ensure_setup(spec)
         err = caught.value
@@ -257,7 +261,9 @@ def test_capacity_progress_requires_measured_owner_release(
     sent: list[pb.WorkerMessage] = []
 
     async def _run() -> None:
-        ex = _executor([spec_a, spec_b, spec_c], tmp_path, sent)
+        ex = _executor(
+            [spec_a, spec_b, spec_c], tmp_path, sent, monkeypatch=monkeypatch,
+        )
         await ex.ensure_setup(spec_a)
         await ex.ensure_setup(spec_b)
         rec_a = ex._classes[spec_a.instance_key]
@@ -785,7 +791,9 @@ def test_capacity_progress_observes_shutdown_endpoint_collection(
 
     async def _run() -> None:
         nonlocal endpoint
-        ex = _executor([old_spec, incoming_spec], tmp_path, sent)
+        ex = _executor(
+            [old_spec, incoming_spec], tmp_path, sent, monkeypatch=monkeypatch,
+        )
         await ex.ensure_setup(old_spec)
         rec = ex._classes[old_spec.instance_key]
         endpoint = weakref.ref(rec.instance)
@@ -853,7 +861,9 @@ def test_runjob_pin_release_emits_measured_capacity_progress(
     sent: list[pb.WorkerMessage] = []
 
     async def _run() -> None:
-        ex = _executor([busy_spec, incoming_spec], tmp_path, sent)
+        ex = _executor(
+            [busy_spec, incoming_spec], tmp_path, sent, monkeypatch=monkeypatch,
+        )
         await ex.ensure_setup(busy_spec)
         run = pb.RunJob(
             request_id="busy-job",
@@ -1025,7 +1035,7 @@ def test_setup_vacates_warm_record_after_vram_make_room(
     monkeypatch.setattr(residency_mod, "get_total_ram_gb", lambda: 31.0)
 
     async def _run() -> None:
-        ex = _executor([spec_a, spec_b], tmp_path)
+        ex = _executor([spec_a, spec_b], tmp_path, monkeypatch=monkeypatch)
         res = ex.store.residency
         from gen_worker import executor as executor_mod
 
@@ -1105,7 +1115,9 @@ def test_shared_ref_does_not_pin_idle_record_or_publish_false_disk(
     monkeypatch.setattr(residency_mod, "get_total_ram_gb", lambda: 31.0)
 
     async def _run() -> None:
-        ex = _executor([spec_a, spec_b, spec_c], tmp_path)
+        ex = _executor(
+            [spec_a, spec_b, spec_c], tmp_path, monkeypatch=monkeypatch,
+        )
         res = ex.store.residency
         monkeypatch.setattr(
             residency_mod, "get_available_ram_gb", lambda: 24.0)
@@ -1217,7 +1229,7 @@ def test_declarative_ninth_sdxl_load_uses_reclaimable_cgroup_cache(
         },
         resources=Resources(vram_gb=12),
     )
-    ex = _executor([spec], tmp_path)
+    ex = _executor([spec], tmp_path, monkeypatch=monkeypatch)
     sent: list[pb.WorkerMessage] = []
 
     async def _capture(message: pb.WorkerMessage) -> None:
@@ -1262,14 +1274,21 @@ def test_declarative_ninth_sdxl_load_uses_reclaimable_cgroup_cache(
     )
 
     async def _apply(generation: int, pipeline_ref: str) -> None:
+        vae_ref = "tensorhub/sdxl-vae:prod"
         await lifecycle.on_hello_ack(pb.HelloAck(
             desired_residency=pb.DesiredResidency(
                 generation=generation,
+                snapshots={
+                    pipeline_ref: pb.Snapshot(
+                        digest="blake3:" + f"{generation:064x}",
+                    ),
+                    vae_ref: pb.Snapshot(digest="blake3:" + "f" * 64),
+                },
                 hot=[pb.DesiredInstance(
                     function_name="generate",
                     models=[
                         pb.ModelBinding(slot="pipeline", ref=pipeline_ref),
-                        pb.ModelBinding(slot="vae", ref="tensorhub/sdxl-vae:prod"),
+                        pb.ModelBinding(slot="vae", ref=vae_ref),
                     ],
                 )],
             ),
@@ -1347,7 +1366,7 @@ def test_runjob_sixteen_model_cgroup_swap_stress(
         resources=Resources(vram_gb=12),
     )
     sent: list[pb.WorkerMessage] = []
-    ex = _executor([spec], tmp_path, sent)
+    ex = _executor([spec], tmp_path, sent, monkeypatch=monkeypatch)
     model_bytes = 6_941_377_969
     monkeypatch.setattr(disk_gc, "tree_bytes", lambda path: model_bytes)
 
@@ -1380,6 +1399,7 @@ def test_runjob_sixteen_model_cgroup_swap_stress(
         for i in range(16):
             observed_before.append(int(_ram().available_gb * _GiB))
             pipeline_ref = f"tensorhub/sdxl-{i}:prod"
+            vae_ref = "tensorhub/sdxl-vae:prod"
             run = pb.RunJob(
                 request_id=f"swap-{i}",
                 attempt=1,
@@ -1387,8 +1407,14 @@ def test_runjob_sixteen_model_cgroup_swap_stress(
                 input_payload=msgspec.msgpack.encode(_In(x=str(i))),
                 models=[
                     pb.ModelBinding(slot="pipeline", ref=pipeline_ref),
-                    pb.ModelBinding(slot="vae", ref="tensorhub/sdxl-vae:prod"),
+                    pb.ModelBinding(slot="vae", ref=vae_ref),
                 ],
+                snapshots={
+                    pipeline_ref: pb.Snapshot(
+                        digest="blake3:" + f"{i + 1:064x}",
+                    ),
+                    vae_ref: pb.Snapshot(digest="blake3:" + "f" * 64),
+                },
             )
             await ex.handle_run_job(run)
             job = ex.jobs[(run.request_id, run.attempt)]
@@ -1441,7 +1467,7 @@ def test_gate_ignores_tenant_owned_slots(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(residency_mod, "get_available_ram_gb", lambda: 28.0)
 
     async def _run() -> None:
-        ex = _executor([spec], tmp_path)
+        ex = _executor([spec], tmp_path, monkeypatch=monkeypatch)
         inst = await ex.ensure_setup(spec)  # gate skipped -> loads fine
         assert inst.model  # slot injected as the local path
 

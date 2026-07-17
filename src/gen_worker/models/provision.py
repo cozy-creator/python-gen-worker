@@ -224,6 +224,11 @@ class _ArmingContext:
     compile: Any
     cache_dir: Optional[Path]
     artifact: Optional[Path]
+    # The executor owns this list and reads it only after setup() returns.
+    # Capturing the exact objects passed to arm_compile() is what lets
+    # self-loading endpoints participate in object-scoped compile targets;
+    # inferring them later from class attributes would be ambiguous.
+    objects: list[tuple[Any, bool]]
 
 
 _ARMING_CTX: "contextvars.ContextVar[Optional[_ArmingContext]]" = contextvars.ContextVar(
@@ -242,8 +247,14 @@ class ArmingScope:
         self, compile: Any, cache_dir: Optional[Path] = None,
         artifact: Optional[Path] = None,
     ) -> None:
+        self._objects: list[tuple[Any, bool]] = []
         self._value = (
-            _ArmingContext(compile=compile, cache_dir=cache_dir, artifact=artifact)
+            _ArmingContext(
+                compile=compile,
+                cache_dir=cache_dir,
+                artifact=artifact,
+                objects=self._objects,
+            )
             if compile is not None else None
         )
         self._token: Optional["contextvars.Token[Optional[_ArmingContext]]"] = None
@@ -257,6 +268,11 @@ class ArmingScope:
         if self._token is not None:
             _ARMING_CTX.reset(self._token)
             self._token = None
+
+    @property
+    def objects(self) -> tuple[tuple[Any, bool], ...]:
+        """Exact ``(pipeline, armed)`` observations from this setup scope."""
+        return tuple(self._objects)
 
 
 def arm_compile(pipe: Any) -> bool:
@@ -280,7 +296,9 @@ def arm_compile(pipe: Any) -> bool:
             "when @endpoint(compile=Compile(...)) is declared on that "
             "function/class."
         )
-    return enable_compiled(pipe, ctx.compile, ctx.cache_dir, ctx.artifact)
+    armed = enable_compiled(pipe, ctx.compile, ctx.cache_dir, ctx.artifact)
+    ctx.objects.append((pipe, armed))
+    return armed
 
 
 # ---------------------------------------------------------------------------

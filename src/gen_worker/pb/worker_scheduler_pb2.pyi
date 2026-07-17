@@ -268,23 +268,57 @@ class ModelResolution(_message.Message):
     def __init__(self, ref: _Optional[str] = ..., resolved_ref: _Optional[str] = ..., cast: _Optional[str] = ...) -> None: ...
 
 class StateDelta(_message.Message):
-    __slots__ = ("phase", "available_functions", "loading_functions", "free_vram_bytes", "finalizing_jobs", "observed_residency_generation")
+    __slots__ = ("phase", "available_functions", "loading_functions", "free_vram_bytes", "finalizing_jobs", "observed_residency_generation", "compile_targets")
     PHASE_FIELD_NUMBER: _ClassVar[int]
     AVAILABLE_FUNCTIONS_FIELD_NUMBER: _ClassVar[int]
     LOADING_FUNCTIONS_FIELD_NUMBER: _ClassVar[int]
     FREE_VRAM_BYTES_FIELD_NUMBER: _ClassVar[int]
     FINALIZING_JOBS_FIELD_NUMBER: _ClassVar[int]
     OBSERVED_RESIDENCY_GENERATION_FIELD_NUMBER: _ClassVar[int]
+    COMPILE_TARGETS_FIELD_NUMBER: _ClassVar[int]
     phase: WorkerPhase
     available_functions: _containers.RepeatedScalarFieldContainer[str]
     loading_functions: _containers.RepeatedScalarFieldContainer[str]
     free_vram_bytes: int
     finalizing_jobs: int
     observed_residency_generation: int
-    def __init__(self, phase: _Optional[_Union[WorkerPhase, str]] = ..., available_functions: _Optional[_Iterable[str]] = ..., loading_functions: _Optional[_Iterable[str]] = ..., free_vram_bytes: _Optional[int] = ..., finalizing_jobs: _Optional[int] = ..., observed_residency_generation: _Optional[int] = ...) -> None: ...
+    compile_targets: _containers.RepeatedCompositeFieldContainer[CompileTarget]
+    def __init__(self, phase: _Optional[_Union[WorkerPhase, str]] = ..., available_functions: _Optional[_Iterable[str]] = ..., loading_functions: _Optional[_Iterable[str]] = ..., free_vram_bytes: _Optional[int] = ..., finalizing_jobs: _Optional[int] = ..., observed_residency_generation: _Optional[int] = ..., compile_targets: _Optional[_Iterable[_Union[CompileTarget, _Mapping]]] = ...) -> None: ...
+
+class CompileTarget(_message.Message):
+    __slots__ = ("incarnation_id", "family", "pipeline_weight_lane", "lora_bucket", "contract_digest", "active_compile_ref", "active_compile_snapshot_digest", "function_names", "model_bindings")
+    INCARNATION_ID_FIELD_NUMBER: _ClassVar[int]
+    FAMILY_FIELD_NUMBER: _ClassVar[int]
+    PIPELINE_WEIGHT_LANE_FIELD_NUMBER: _ClassVar[int]
+    LORA_BUCKET_FIELD_NUMBER: _ClassVar[int]
+    CONTRACT_DIGEST_FIELD_NUMBER: _ClassVar[int]
+    ACTIVE_COMPILE_REF_FIELD_NUMBER: _ClassVar[int]
+    ACTIVE_COMPILE_SNAPSHOT_DIGEST_FIELD_NUMBER: _ClassVar[int]
+    FUNCTION_NAMES_FIELD_NUMBER: _ClassVar[int]
+    MODEL_BINDINGS_FIELD_NUMBER: _ClassVar[int]
+    incarnation_id: str
+    family: str
+    pipeline_weight_lane: str
+    lora_bucket: int
+    contract_digest: str
+    active_compile_ref: str
+    active_compile_snapshot_digest: str
+    function_names: _containers.RepeatedScalarFieldContainer[str]
+    model_bindings: _containers.RepeatedCompositeFieldContainer[CompileTargetBinding]
+    def __init__(self, incarnation_id: _Optional[str] = ..., family: _Optional[str] = ..., pipeline_weight_lane: _Optional[str] = ..., lora_bucket: _Optional[int] = ..., contract_digest: _Optional[str] = ..., active_compile_ref: _Optional[str] = ..., active_compile_snapshot_digest: _Optional[str] = ..., function_names: _Optional[_Iterable[str]] = ..., model_bindings: _Optional[_Iterable[_Union[CompileTargetBinding, _Mapping]]] = ...) -> None: ...
+
+class CompileTargetBinding(_message.Message):
+    __slots__ = ("slot", "ref", "snapshot_digest")
+    SLOT_FIELD_NUMBER: _ClassVar[int]
+    REF_FIELD_NUMBER: _ClassVar[int]
+    SNAPSHOT_DIGEST_FIELD_NUMBER: _ClassVar[int]
+    slot: str
+    ref: str
+    snapshot_digest: str
+    def __init__(self, slot: _Optional[str] = ..., ref: _Optional[str] = ..., snapshot_digest: _Optional[str] = ...) -> None: ...
 
 class RunJob(_message.Message):
-    __slots__ = ("request_id", "attempt", "function_name", "input_payload", "timeout_ms", "tenant", "invoker_id", "capability_token", "output_mode", "compute", "models", "snapshots")
+    __slots__ = ("request_id", "attempt", "function_name", "input_payload", "timeout_ms", "tenant", "invoker_id", "capability_token", "output_mode", "compute", "models", "snapshots", "required_compile")
     class SnapshotsEntry(_message.Message):
         __slots__ = ("key", "value")
         KEY_FIELD_NUMBER: _ClassVar[int]
@@ -304,6 +338,7 @@ class RunJob(_message.Message):
     COMPUTE_FIELD_NUMBER: _ClassVar[int]
     MODELS_FIELD_NUMBER: _ClassVar[int]
     SNAPSHOTS_FIELD_NUMBER: _ClassVar[int]
+    REQUIRED_COMPILE_FIELD_NUMBER: _ClassVar[int]
     request_id: str
     attempt: int
     function_name: str
@@ -316,7 +351,20 @@ class RunJob(_message.Message):
     compute: ResolvedCompute
     models: _containers.RepeatedCompositeFieldContainer[ModelBinding]
     snapshots: _containers.MessageMap[str, Snapshot]
-    def __init__(self, request_id: _Optional[str] = ..., attempt: _Optional[int] = ..., function_name: _Optional[str] = ..., input_payload: _Optional[bytes] = ..., timeout_ms: _Optional[int] = ..., tenant: _Optional[str] = ..., invoker_id: _Optional[str] = ..., capability_token: _Optional[str] = ..., output_mode: _Optional[_Union[OutputMode, str]] = ..., compute: _Optional[_Union[ResolvedCompute, _Mapping]] = ..., models: _Optional[_Iterable[_Union[ModelBinding, _Mapping]]] = ..., snapshots: _Optional[_Mapping[str, Snapshot]] = ...) -> None: ...
+    required_compile: RequiredCompileExecution
+    def __init__(self, request_id: _Optional[str] = ..., attempt: _Optional[int] = ..., function_name: _Optional[str] = ..., input_payload: _Optional[bytes] = ..., timeout_ms: _Optional[int] = ..., tenant: _Optional[str] = ..., invoker_id: _Optional[str] = ..., capability_token: _Optional[str] = ..., output_mode: _Optional[_Union[OutputMode, str]] = ..., compute: _Optional[_Union[ResolvedCompute, _Mapping]] = ..., models: _Optional[_Iterable[_Union[ModelBinding, _Mapping]]] = ..., snapshots: _Optional[_Mapping[str, Snapshot]] = ..., required_compile: _Optional[_Union[RequiredCompileExecution, _Mapping]] = ...) -> None: ...
+
+class RequiredCompileExecution(_message.Message):
+    __slots__ = ("target_incarnation_id", "cell_ref", "cell_snapshot_digest", "contract_digest")
+    TARGET_INCARNATION_ID_FIELD_NUMBER: _ClassVar[int]
+    CELL_REF_FIELD_NUMBER: _ClassVar[int]
+    CELL_SNAPSHOT_DIGEST_FIELD_NUMBER: _ClassVar[int]
+    CONTRACT_DIGEST_FIELD_NUMBER: _ClassVar[int]
+    target_incarnation_id: str
+    cell_ref: str
+    cell_snapshot_digest: str
+    contract_digest: str
+    def __init__(self, target_incarnation_id: _Optional[str] = ..., cell_ref: _Optional[str] = ..., cell_snapshot_digest: _Optional[str] = ..., contract_digest: _Optional[str] = ...) -> None: ...
 
 class ResolvedCompute(_message.Message):
     __slots__ = ("accelerator", "gpu_index")
@@ -445,19 +493,21 @@ class CancelJob(_message.Message):
     def __init__(self, request_id: _Optional[str] = ..., attempt: _Optional[int] = ...) -> None: ...
 
 class ModelOp(_message.Message):
-    __slots__ = ("op", "ref", "snapshot", "operation_id")
+    __slots__ = ("op", "ref", "snapshot", "operation_id", "target_incarnation_id")
     OP_FIELD_NUMBER: _ClassVar[int]
     REF_FIELD_NUMBER: _ClassVar[int]
     SNAPSHOT_FIELD_NUMBER: _ClassVar[int]
     OPERATION_ID_FIELD_NUMBER: _ClassVar[int]
+    TARGET_INCARNATION_ID_FIELD_NUMBER: _ClassVar[int]
     op: ModelOpKind
     ref: str
     snapshot: Snapshot
     operation_id: str
-    def __init__(self, op: _Optional[_Union[ModelOpKind, str]] = ..., ref: _Optional[str] = ..., snapshot: _Optional[_Union[Snapshot, _Mapping]] = ..., operation_id: _Optional[str] = ...) -> None: ...
+    target_incarnation_id: str
+    def __init__(self, op: _Optional[_Union[ModelOpKind, str]] = ..., ref: _Optional[str] = ..., snapshot: _Optional[_Union[Snapshot, _Mapping]] = ..., operation_id: _Optional[str] = ..., target_incarnation_id: _Optional[str] = ...) -> None: ...
 
 class ModelEvent(_message.Message):
-    __slots__ = ("ref", "state", "vram_bytes", "error", "bytes_done", "bytes_total", "duration_ms", "cache_hits", "cache_misses", "warmup_s", "host_ram_required_bytes", "host_ram_available_before_bytes", "host_ram_available_after_bytes", "host_ram_evicted_refs", "host_ram_capacity_generation", "snapshot_digest", "residency_generation", "operation_id")
+    __slots__ = ("ref", "state", "vram_bytes", "error", "bytes_done", "bytes_total", "duration_ms", "cache_hits", "cache_misses", "warmup_s", "host_ram_required_bytes", "host_ram_available_before_bytes", "host_ram_available_after_bytes", "host_ram_evicted_refs", "host_ram_capacity_generation", "snapshot_digest", "residency_generation", "operation_id", "target_incarnation_id")
     REF_FIELD_NUMBER: _ClassVar[int]
     STATE_FIELD_NUMBER: _ClassVar[int]
     VRAM_BYTES_FIELD_NUMBER: _ClassVar[int]
@@ -476,6 +526,7 @@ class ModelEvent(_message.Message):
     SNAPSHOT_DIGEST_FIELD_NUMBER: _ClassVar[int]
     RESIDENCY_GENERATION_FIELD_NUMBER: _ClassVar[int]
     OPERATION_ID_FIELD_NUMBER: _ClassVar[int]
+    TARGET_INCARNATION_ID_FIELD_NUMBER: _ClassVar[int]
     ref: str
     state: ModelState
     vram_bytes: int
@@ -494,7 +545,8 @@ class ModelEvent(_message.Message):
     snapshot_digest: str
     residency_generation: int
     operation_id: str
-    def __init__(self, ref: _Optional[str] = ..., state: _Optional[_Union[ModelState, str]] = ..., vram_bytes: _Optional[int] = ..., error: _Optional[str] = ..., bytes_done: _Optional[int] = ..., bytes_total: _Optional[int] = ..., duration_ms: _Optional[int] = ..., cache_hits: _Optional[int] = ..., cache_misses: _Optional[int] = ..., warmup_s: _Optional[float] = ..., host_ram_required_bytes: _Optional[int] = ..., host_ram_available_before_bytes: _Optional[int] = ..., host_ram_available_after_bytes: _Optional[int] = ..., host_ram_evicted_refs: _Optional[_Iterable[str]] = ..., host_ram_capacity_generation: _Optional[int] = ..., snapshot_digest: _Optional[str] = ..., residency_generation: _Optional[int] = ..., operation_id: _Optional[str] = ...) -> None: ...
+    target_incarnation_id: str
+    def __init__(self, ref: _Optional[str] = ..., state: _Optional[_Union[ModelState, str]] = ..., vram_bytes: _Optional[int] = ..., error: _Optional[str] = ..., bytes_done: _Optional[int] = ..., bytes_total: _Optional[int] = ..., duration_ms: _Optional[int] = ..., cache_hits: _Optional[int] = ..., cache_misses: _Optional[int] = ..., warmup_s: _Optional[float] = ..., host_ram_required_bytes: _Optional[int] = ..., host_ram_available_before_bytes: _Optional[int] = ..., host_ram_available_after_bytes: _Optional[int] = ..., host_ram_evicted_refs: _Optional[_Iterable[str]] = ..., host_ram_capacity_generation: _Optional[int] = ..., snapshot_digest: _Optional[str] = ..., residency_generation: _Optional[int] = ..., operation_id: _Optional[str] = ..., target_incarnation_id: _Optional[str] = ...) -> None: ...
 
 class FnUnavailable(_message.Message):
     __slots__ = ("function_name", "reason", "detail", "axes")

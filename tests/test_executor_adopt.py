@@ -6,25 +6,31 @@ a compile-cache snapshot on RunJob.snapshots reaches compile_cache.enable."""
 from __future__ import annotations
 
 import asyncio
+import threading
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import msgspec
 import pytest
 
-from gen_worker import Compile, RequestContext, endpoint
+from gen_worker import Compile, RequestContext, Resources, endpoint
 from gen_worker import compile_cache as cc
+from gen_worker.models import provision
 from gen_worker.api.binding import Hub
 from gen_worker.api.binding import wire_ref
+from gen_worker.api.errors import RetryableError
 from gen_worker.executor import Executor, _Job
+from gen_worker.lifecycle import Lifecycle
 from gen_worker.pb import worker_scheduler_pb2 as pb
-from gen_worker.registry import EndpointSpec
+from gen_worker.registry import EndpointSpec, extract_specs
 
 FAMILY = "flux2-klein-4b"
 CACHE_REF = f"_system/family-{FAMILY}#inductor-rtx-4090-torch2.9"
 MODEL_REF = "acme/klein-finetune:latest"
 DIGEST_A = "blake3:" + "a" * 64
 DIGEST_B = "blake3:" + "b" * 64
+MODEL_DIGEST = "blake3:" + "c" * 64
 OP_A = "adopt-operation-a"
 OP_B = "adopt-operation-b"
 
@@ -37,7 +43,45 @@ class _Out(msgspec.Struct):
     y: str = ""
 
 
+class _Denoiser:
+    def forward(self, *args, **kwargs):  # pragma: no cover - contract surface
+        return None
+
+
 class _Pipe:
+    def __init__(self):
+        self.transformer = _Denoiser()
+
+
+class _LoadablePipe(_Pipe):
+    @classmethod
+    def from_pretrained(cls, path, **kwargs):  # pragma: no cover - loader is patched
+        return cls()
+
+
+class _AncillaryVae:
+    pass
+
+
+class _ColdEndpoint:
+    setups = 0
+    warmups = 0
+    runs = 0
+
+    def setup(self, pipeline: _LoadablePipe) -> None:
+        type(self).setups += 1
+        self.pipeline = pipeline
+
+    def warmup(self) -> None:
+        type(self).warmups += 1
+        _record_fake_warm(self.pipeline)
+
+    def run(self, ctx, payload: _In) -> _Out:
+        type(self).runs += 1
+        return _Out(y="ok")
+
+
+class _ColdEndpointB(_ColdEndpoint):
     pass
 
 
@@ -49,9 +93,58 @@ class _Endpoint:
 
     def warmup(self) -> None:
         type(self).warmups += 1
+        pipeline = getattr(self, "pipeline", None)
+        if pipeline is not None:
+            _record_fake_warm(pipeline)
 
     def run(self, ctx, payload: _In) -> _Out:  # pragma: no cover
         return _Out()
+
+
+_FAKE_WARM_PROOF = {"hits": 1, "misses": 0}
+
+
+def _mark_fake_guard(pipeline) -> None:
+    setattr(pipeline, cc._MARKER_ATTR, {
+        "failure_signal": {
+            "callback": None,
+            "lock": threading.Lock(),
+            "successful_calls": 0,
+            "cache_hits": 0,
+            "cache_misses": 0,
+        },
+        "originals": [],
+        "regional_mods": [],
+    })
+
+
+def _record_fake_warm(pipeline, *, hits=None, misses=None) -> None:
+    marker = getattr(pipeline, cc._MARKER_ATTR, None) or {}
+    signal = marker.get("failure_signal")
+    if not isinstance(signal, dict):
+        return
+    lock = signal["lock"]
+    with lock:
+        activated = signal["cache_hits"] > 0
+        signal["successful_calls"] += 1
+        signal["cache_hits"] += (
+            (0 if activated else _FAKE_WARM_PROOF["hits"])
+            if hits is None else hits)
+        signal["cache_misses"] += (
+            (0 if activated else _FAKE_WARM_PROOF["misses"])
+            if misses is None else misses)
+
+
+def _guarded_apply(pipeline, _cfg, *, cache_ready, guard=True):
+    assert cache_ready
+    assert guard
+    _mark_fake_guard(pipeline)
+    return True
+
+
+def _guarded_enable(pipeline, *_args):
+    _mark_fake_guard(pipeline)
+    return True
 
 
 def _spec(compile_cfg=None) -> EndpointSpec:
@@ -63,15 +156,17 @@ def _spec(compile_cfg=None) -> EndpointSpec:
     )
 
 
-def _artifact(tmp_path: Path, **meta_overrides) -> Path:
+def _artifact(
+    tmp_path: Path, *, family: str = FAMILY, **meta_overrides,
+) -> Path:
     cap = tmp_path / "cap"
     (cap / "inductor" / "g").mkdir(parents=True)
     (cap / "inductor" / "g" / "code.py").write_text("x")
     (cap / "triton").mkdir()
-    cfg = Compile(shapes=((768, 768),), family=FAMILY)
+    cfg = Compile(shapes=((768, 768),), family=family)
     signature, weight_contract = cc.execution_contract(_Pipe(), cfg)
     meta = cc.artifact_metadata(
-        family=FAMILY, shapes=cfg.shapes, targets=cfg.targets,
+        family=family, shapes=cfg.shapes, targets=cfg.targets,
         graph_signature=signature, weight_contract=weight_contract,
     )
     meta.update(meta_overrides)
@@ -89,11 +184,35 @@ def _wire_executor(spec, tmp_path, *, ready=True, resident=True):
     ex = Executor([spec], _send)
     ex.store._cache_dir = tmp_path / "cas"
     rec = ex._classes[spec.instance_key]
+    pipe = _Pipe()
     if ready:
         rec.instance = _Endpoint()
+        rec.instance.pipeline = pipe
         rec.ready = True
+        model_ref = wire_ref(spec.models["pipeline"])
+        rec.held_refs = [model_ref]
+        rec.held_snapshot_digests = {model_ref: MODEL_DIGEST}
+        rec.held_bindings = [("pipeline", model_ref, MODEL_DIGEST)]
+        active = None
+        if "#fp8-w8a8" in model_ref:
+            setattr(pipe, "_cozy_weight_lane", "w8a8")
+            _mark_fake_guard(pipe)
+            selection = type("Selection", (), {
+                "ref": CACHE_REF + "-w8a8",
+                "snapshot_digest": DIGEST_A,
+                "path": tmp_path / "already-proven-w8a8.tar.gz",
+            })()
+            active = {id(pipe): selection}
+        ex._install_compile_targets(
+            rec,
+            spec,
+            [pipe],
+            active,
+            {id(pipe): {spec.name}} if active else None,
+        )
     if resident:
-        ex.store.residency.track_vram(wire_ref(spec.models["pipeline"]), _Pipe(), vram_bytes=1)
+        ex.store.residency.track_vram(
+            wire_ref(spec.models["pipeline"]), pipe, vram_bytes=1)
 
     async def _fake_ensure_local(ref, snapshot=None, *, binding=None) -> Path:
         return tmp_path / "snap"
@@ -107,21 +226,44 @@ def _events(sent, state):
             if m.WhichOneof("msg") == "model_event" and m.model_event.state == state]
 
 
-def _assert_failed(sent, error, digest=DIGEST_A, operation_id=OP_A):
+def _assert_failed(
+    sent, error, digest=DIGEST_A, operation_id=OP_A,
+    target_incarnation_id=None,
+):
     failed = _events(sent, pb.MODEL_STATE_FAILED)
     assert failed and failed[-1].error == error
     assert failed[-1].snapshot_digest == digest
     assert failed[-1].operation_id == operation_id
+    if target_incarnation_id is None:
+        assert failed[-1].target_incarnation_id
+    else:
+        assert failed[-1].target_incarnation_id == target_incarnation_id
     return failed[-1]
 
 
-def _adopt(ex, ref=CACHE_REF, digest=DIGEST_A, operation_id=OP_A):
+_TARGET_UNSET = object()
+
+
+def _target_id(ex) -> str:
+    (target,) = ex.compile_targets()
+    return target.incarnation_id
+
+
+def _adopt(
+    ex, ref=CACHE_REF, digest=DIGEST_A, operation_id=OP_A,
+    target_incarnation_id=_TARGET_UNSET,
+):
+    if target_incarnation_id is _TARGET_UNSET:
+        targets = ex.compile_targets()
+        target_incarnation_id = (
+            targets[0].incarnation_id if targets else "missing-incarnation")
     asyncio.run(ex.handle_model_op(
         pb.ModelOp(
             op=pb.MODEL_OP_KIND_ADOPT_COMPILE_CACHE,
             ref=ref,
             snapshot=pb.Snapshot(digest=digest),
             operation_id=operation_id,
+            target_incarnation_id=target_incarnation_id,
         )
     ))
 
@@ -149,16 +291,9 @@ def test_family_from_ref_and_is_cache_ref():
 
 
 def _fake_counters(monkeypatch, *, hits=3, misses=1):
-    """Simulate inductor counters advancing across the adoption warmup."""
-    state = {"n": 0}
-
-    def counters():
-        state["n"] += 1
-        if state["n"] == 1:  # before-warmup snapshot
-            return {"fxgraph_cache_hit": 10, "fxgraph_cache_miss": 5}
-        return {"fxgraph_cache_hit": 10 + hits, "fxgraph_cache_miss": 5 + misses}
-
-    monkeypatch.setattr(cc, "inductor_counters", counters)
+    """Simulate exact-object cache proof inside the endpoint warmup."""
+    monkeypatch.setitem(_FAKE_WARM_PROOF, "hits", hits)
+    monkeypatch.setitem(_FAKE_WARM_PROOF, "misses", misses)
 
 
 def test_adopt_success_rewraps_warms_and_reports(tmp_path, monkeypatch):
@@ -171,6 +306,7 @@ def test_adopt_success_rewraps_warms_and_reports(tmp_path, monkeypatch):
 
     def _fake_apply(pipeline, cfg, *, cache_ready, guard=True):
         applied.append((pipeline, cfg, cache_ready))
+        _mark_fake_guard(pipeline)
         return True
 
     monkeypatch.setattr(cc, "apply", _fake_apply)
@@ -182,17 +318,18 @@ def test_adopt_success_rewraps_warms_and_reports(tmp_path, monkeypatch):
     assert adopted[0].ref == CACHE_REF
     assert adopted[0].snapshot_digest == DIGEST_A
     assert adopted[0].operation_id == OP_A
+    assert adopted[0].target_incarnation_id == _target_id(ex)
     assert adopted[0].duration_ms >= 0
-    # cache_hits/cache_misses/warmup_s are computed internally (gating the
-    # cache_miss rollback below) but intentionally not sent on the wire —
-    # the orchestrator has no reader for them (pgw#514/P3).
-    assert adopted[0].cache_hits == 0
-    assert adopted[0].cache_misses == 0
-    assert adopted[0].warmup_s == 0
+    assert adopted[0].cache_hits == 3
+    assert adopted[0].cache_misses == 1
+    assert adopted[0].warmup_s >= 0
     assert not _events(sent, pb.MODEL_STATE_FAILED)
     assert len(applied) == 1 and applied[0][2] is True
     assert isinstance(applied[0][0], _Pipe)
     assert _Endpoint.warmups == 1
+    target = ex.compile_targets()[0]
+    assert target.active_compile_ref == CACHE_REF
+    assert target.active_compile_snapshot_digest == DIGEST_A
 
 
 def test_adopt_zero_cache_hits_rolls_back_and_fails(tmp_path, monkeypatch):
@@ -202,7 +339,7 @@ def test_adopt_zero_cache_hits_rolls_back_and_fails(tmp_path, monkeypatch):
     _artifact(tmp_path)
     spec = _spec()
     ex, sent = _wire_executor(spec, tmp_path)
-    monkeypatch.setattr(cc, "apply", lambda *a, **k: True)
+    monkeypatch.setattr(cc, "apply", _guarded_apply)
     _fake_counters(monkeypatch, hits=0, misses=2)
     unwrapped: list = []
     monkeypatch.setattr(cc, "unwrap", lambda obj: unwrapped.append(obj))
@@ -211,6 +348,9 @@ def test_adopt_zero_cache_hits_rolls_back_and_fails(tmp_path, monkeypatch):
     _assert_failed(sent, "adopt_failed:cache_miss")
     assert not _events(sent, pb.MODEL_STATE_ADOPTED)
     assert any(isinstance(o, _Pipe) for o in unwrapped)  # rollback ran
+    target = ex.compile_targets()[0]
+    assert target.active_compile_ref == ""
+    assert target.active_compile_snapshot_digest == ""
 
 
 def test_adopt_prep_mode_drift_is_key_mismatch(tmp_path, monkeypatch):
@@ -230,9 +370,8 @@ def test_adopt_prep_mode_drift_is_key_mismatch(tmp_path, monkeypatch):
     assert not _events(sent, pb.MODEL_STATE_ADOPTED)
 
 
-def test_adopt_without_warmup_is_unprovable(tmp_path, monkeypatch):
-    """An endpoint without warmup() cannot prove the cell hits — the honest
-    answer is adopt_failed:no_warmup, never a blind ADOPTED."""
+def test_endpoint_without_warmup_exposes_no_adopt_target(tmp_path, monkeypatch):
+    """An endpoint without a warmup contract advertises no false target."""
 
     class _NoWarmupEndpoint:
         def setup(self, pipeline: str) -> None:  # pragma: no cover
@@ -252,11 +391,12 @@ def test_adopt_without_warmup_is_unprovable(tmp_path, monkeypatch):
     rec = ex._classes[spec.instance_key]
     rec.instance = _NoWarmupEndpoint()
     rec.ready = True
-    monkeypatch.setattr(cc, "apply", lambda *a, **k: True)
-    _fake_counters(monkeypatch, hits=5, misses=0)  # counters moved elsewhere: still unprovable
+    monkeypatch.setattr(
+        cc, "apply", lambda *args, **kwargs: pytest.fail("must not adopt"))
 
+    assert ex.compile_targets() == []
     _adopt(ex)
-    _assert_failed(sent, "adopt_failed:no_warmup")
+    _assert_failed(sent, "adopt_failed:target_not_ready")
     assert not _events(sent, pb.MODEL_STATE_ADOPTED)
 
 
@@ -282,7 +422,7 @@ def test_adopt_failed_warmup_reports_reason(tmp_path, monkeypatch):
     _artifact(tmp_path)
     spec = _spec()
     ex, sent = _wire_executor(spec, tmp_path)
-    monkeypatch.setattr(cc, "apply", lambda *a, **k: True)
+    monkeypatch.setattr(cc, "apply", _guarded_apply)
     monkeypatch.setattr(_Endpoint, "warmup", lambda self: 1 / 0)
 
     _adopt(ex)
@@ -323,18 +463,18 @@ def test_adopt_refuses_while_jobs_in_flight(tmp_path):
     assert calls == []  # refused before any download
 
 
-def test_adopt_no_endpoint_for_family(tmp_path):
+def test_adopt_rejects_target_from_another_family(tmp_path):
     spec = _spec(Compile(shapes=((768, 768),), family="sdxl"))
     ex, sent = _wire_executor(spec, tmp_path)
     _adopt(ex)  # ref names flux2-klein-4b; only sdxl is declared
-    _assert_failed(sent, "adopt_failed:no_endpoint")
+    _assert_failed(sent, "adopt_failed:target_family_mismatch")
 
 
-def test_adopt_not_resident(tmp_path):
+def test_adopt_target_not_ready(tmp_path):
     spec = _spec()
     ex, sent = _wire_executor(spec, tmp_path, ready=False, resident=False)
     _adopt(ex)
-    _assert_failed(sent, "adopt_failed:not_resident")
+    _assert_failed(sent, "adopt_failed:target_not_ready")
 
 
 def test_adopt_bad_ref(tmp_path):
@@ -382,6 +522,7 @@ def test_adopt_missing_identity_fails_before_work_or_resident_inference(
         kwargs["snapshot"] = pb.Snapshot(digest=digest)
     if operation_id is not None:
         kwargs["operation_id"] = operation_id
+    kwargs["target_incarnation_id"] = _target_id(ex)
 
     asyncio.run(ex.handle_model_op(pb.ModelOp(**kwargs)))
 
@@ -390,6 +531,7 @@ def test_adopt_missing_identity_fails_before_work_or_resident_inference(
     assert failed[0].error == error
     assert failed[0].snapshot_digest == (digest or "")
     assert failed[0].operation_id == (operation_id or "")
+    assert failed[0].target_incarnation_id == _target_id(ex)
     assert failed[0].residency_generation == 0
     assert ex.store.resident_identity(CACHE_REF) == ("resident-digest", 42)
     assert not _events(sent, pb.MODEL_STATE_ADOPTED)
@@ -410,6 +552,7 @@ def test_adopt_unexpected_failure_echoes_operation_digest(tmp_path, monkeypatch)
     assert failed[0].error == "adopt_failed:runtimeerror"
     assert failed[0].snapshot_digest == DIGEST_B
     assert failed[0].operation_id == OP_A
+    assert failed[0].target_incarnation_id == _target_id(ex)
 
 
 @pytest.mark.parametrize("digest_b", [DIGEST_A, DIGEST_B])
@@ -427,15 +570,8 @@ def test_adopt_serializes_same_ref_ops_across_transport_reconnect(
         active_transport["sent"].append(msg)
 
     ex._send = _send
-    monkeypatch.setattr(cc, "apply", lambda *args, **kwargs: True)
-
-    counter = {"hits": 0}
-
-    def _counters():
-        counter["hits"] += 1
-        return {"fxgraph_cache_hit": counter["hits"], "fxgraph_cache_miss": 0}
-
-    monkeypatch.setattr(cc, "inductor_counters", _counters)
+    monkeypatch.setattr(cc, "apply", _guarded_apply)
+    _fake_counters(monkeypatch, hits=1, misses=0)
 
     async def run():
         a_started = asyncio.Event()
@@ -456,12 +592,14 @@ def test_adopt_serializes_same_ref_ops_across_transport_reconnect(
             ref=CACHE_REF,
             snapshot=pb.Snapshot(digest=DIGEST_A),
             operation_id=OP_A,
+            target_incarnation_id=_target_id(ex),
         )
         op_b = pb.ModelOp(
             op=pb.MODEL_OP_KIND_ADOPT_COMPILE_CACHE,
             ref=CACHE_REF,
             snapshot=pb.Snapshot(digest=digest_b),
             operation_id=OP_B,
+            target_incarnation_id=_target_id(ex),
         )
 
         task_a = asyncio.create_task(ex.handle_model_op(op_a))
@@ -472,15 +610,30 @@ def test_adopt_serializes_same_ref_ops_across_transport_reconnect(
         assert entered == 1  # B cannot enter download while A owns the lock.
         release_a.set()
         await asyncio.gather(task_a, task_b)
-        assert entered == 2
+        # Once A proves the target active, an exact replay is acknowledged
+        # without work and a different digest requires record reload. Neither
+        # may unwrap the active target in place.
+        assert entered == 1
 
     asyncio.run(run())
 
     assert old_transport == []
     adopted = _events(new_transport, pb.MODEL_STATE_ADOPTED)
-    assert [event.ref for event in adopted] == [CACHE_REF, CACHE_REF]
-    assert [event.snapshot_digest for event in adopted] == [DIGEST_A, digest_b]
-    assert [event.operation_id for event in adopted] == [OP_A, OP_B]
+    if digest_b == DIGEST_A:
+        assert [event.ref for event in adopted] == [CACHE_REF, CACHE_REF]
+        assert [event.snapshot_digest for event in adopted] == [DIGEST_A, DIGEST_A]
+        assert [event.operation_id for event in adopted] == [OP_A, OP_B]
+    else:
+        assert [event.ref for event in adopted] == [CACHE_REF]
+        failed = _events(new_transport, pb.MODEL_STATE_FAILED)
+        assert len(failed) == 1
+        assert failed[0].error == "adopt_failed:active_replace_requires_reload"
+        assert failed[0].snapshot_digest == DIGEST_B
+        assert failed[0].operation_id == OP_B
+    assert all(
+        event.target_incarnation_id == _target_id(ex)
+        for event in adopted + _events(new_transport, pb.MODEL_STATE_FAILED)
+    )
 
 
 def test_ordinary_model_events_never_spoof_an_adoption_operation_id(tmp_path):
@@ -494,6 +647,7 @@ def test_ordinary_model_events_never_spoof_an_adoption_operation_id(tmp_path):
     assert ordinary.snapshot_digest == DIGEST_A
     assert ordinary.residency_generation == 7
     assert ordinary.operation_id == ""
+    assert ordinary.target_incarnation_id == ""
 
 
 def test_old_worker_semantics_unknown_kind_is_silent(tmp_path):
@@ -503,6 +657,1926 @@ def test_old_worker_semantics_unknown_kind_is_silent(tmp_path):
     ex, sent = _wire_executor(spec, tmp_path)
     asyncio.run(ex.handle_model_op(pb.ModelOp(op=99, ref=CACHE_REF)))
     assert not [m for m in sent if m.WhichOneof("msg") == "model_event"]
+
+
+# ---------------------------------------------------------------------------
+# pgw#572 exact compile-target state and execution fencing
+# ---------------------------------------------------------------------------
+
+
+def test_compile_target_state_delta_is_exact_and_ready_only(tmp_path):
+    spec = _spec()
+    ex, _sent = _wire_executor(spec, tmp_path)
+    (target,) = ex.compile_targets()
+    rec = ex._classes[spec.instance_key]
+    pipe = rec.compile_targets[target.incarnation_id].pipeline
+
+    assert target.family == FAMILY
+    assert target.contract_digest == cc.execution_contract_digest(pipe, spec.compile)
+    assert list(target.function_names) == ["ep"]
+    assert [(b.slot, b.ref, b.snapshot_digest) for b in target.model_bindings] == [
+        ("pipeline", wire_ref(spec.models["pipeline"]), MODEL_DIGEST)]
+    assert target.active_compile_ref == ""
+    assert target.active_compile_snapshot_digest == ""
+
+    lifecycle = Lifecycle(
+        SimpleNamespace(worker_jwt="", worker_id="worker"), ex)
+    delta = lifecycle._state_delta()
+    assert delta.compile_targets == ex.compile_targets()
+
+    rec.ready = False
+    assert ex.compile_targets() == []
+
+
+def test_target_vacate_removes_address_before_replacement(tmp_path):
+    spec = _spec()
+    ex, _sent = _wire_executor(spec, tmp_path)
+    rec = ex._classes[spec.instance_key]
+    old_id = _target_id(ex)
+    state_snapshots: list[list[str]] = []
+    ex._on_state_change = lambda: state_snapshots.append(
+        [t.incarnation_id for t in ex.compile_targets()])
+
+    asyncio.run(ex._vacate_record(rec))
+    assert ex.compile_targets() == []
+    assert state_snapshots and state_snapshots[0] == []
+
+    rec.instance = _Endpoint()
+    rec.ready = True
+    model_ref = wire_ref(spec.models["pipeline"])
+    rec.held_refs = [model_ref]
+    rec.held_snapshot_digests = {model_ref: MODEL_DIGEST}
+    rec.held_bindings = [("pipeline", model_ref, MODEL_DIGEST)]
+    ex._install_compile_targets(rec, spec, [_Pipe()])
+    assert _target_id(ex) != old_id
+
+
+def test_dynamic_sdxl_pick_target_uses_derived_load_time_binding(tmp_path):
+    authored = replace(
+        _spec(Compile(shapes=((1024, 1024),), family="sdxl")),
+        models={"pipeline": Hub("tensorhub/sdxl-default", tag="prod")},
+    )
+    ex, _sent = _wire_executor(authored, tmp_path, ready=False, resident=False)
+    picked_ref = "tensorhub/cyberrealistic-pony:prod"
+    picked_digest = "blake3:" + "d" * 64
+    derived = replace(
+        authored,
+        models={"pipeline": Hub("tensorhub/cyberrealistic-pony", tag="prod")},
+    )
+    rec = ex._class_record(derived)
+    rec.instance = _Endpoint()
+    rec.ready = True
+    rec.held_refs = [picked_ref]
+    rec.held_snapshot_digests = {picked_ref: picked_digest}
+    rec.held_bindings = [("pipeline", picked_ref, picked_digest)]
+    ex._install_compile_targets(rec, derived, [_Pipe()])
+
+    target = next(t for t in ex.compile_targets() if picked_ref in {
+        b.ref for b in t.model_bindings})
+    assert [(b.slot, b.ref, b.snapshot_digest) for b in target.model_bindings] == [
+        ("pipeline", picked_ref, picked_digest)]
+    internal = ex._compile_target(target.incarnation_id)
+    assert internal is not None and internal[1].spec is derived
+
+
+def test_shared_instance_target_reports_sorted_function_aliases(tmp_path):
+    first = _spec()
+    alias = replace(first, name="edit")
+    sent = []
+
+    async def _send(msg):
+        sent.append(msg)
+
+    ex = Executor([alias, first], _send)
+    rec = ex._classes[first.instance_key]
+    rec.instance = _Endpoint()
+    rec.ready = True
+    model_ref = wire_ref(first.models["pipeline"])
+    rec.held_refs = [model_ref]
+    rec.held_snapshot_digests = {model_ref: MODEL_DIGEST}
+    rec.held_bindings = [("pipeline", model_ref, MODEL_DIGEST)]
+    ex._install_compile_targets(rec, first, [_Pipe()])
+    # A custom object-level warmup cannot prove which sibling handler it
+    # covers. Only the setup-initiating handler is honestly addressable.
+    assert list(ex.compile_targets()[0].function_names) == ["ep"]
+
+
+def test_same_family_base_and_lora_targets_remain_distinct(tmp_path):
+    class _TurboEndpoint(_Endpoint):
+        pass
+
+    base = replace(_spec(), name="base")
+    turbo = replace(
+        _spec(Compile(
+            shapes=((768, 768),), family=FAMILY, lora_bucket=128)),
+        name="turbo", cls=_TurboEndpoint, method=_TurboEndpoint.run,
+    )
+
+    async def _send(_msg):
+        return None
+
+    ex = Executor([base, turbo], _send)
+    for spec, lane, digest in (
+        (base, "w8a8", MODEL_DIGEST),
+        (turbo, "w8a8-lora128", DIGEST_B),
+    ):
+        rec = ex._classes[spec.instance_key]
+        pipe = _Pipe()
+        setattr(pipe, "_cozy_weight_lane", lane)
+        rec.instance = spec.cls()
+        rec.ready = True
+        ref = wire_ref(spec.models["pipeline"])
+        rec.held_refs = [ref]
+        rec.held_snapshot_digests = {ref: digest}
+        rec.held_bindings = [("pipeline", ref, digest)]
+        selection = type("Selection", (), {
+            "ref": CACHE_REF + ("-w8a8-lora128" if spec is turbo else "-w8a8"),
+            "snapshot_digest": DIGEST_A,
+            "path": tmp_path / ("turbo.tar.gz" if spec is turbo else "base.tar.gz"),
+        })()
+        _mark_fake_guard(pipe)
+        ex._install_compile_targets(
+            rec, spec, [pipe], {id(pipe): selection}, {id(pipe): {spec.name}},
+        )
+
+    targets = {t.function_names[0]: t for t in ex.compile_targets()}
+    assert targets["base"].pipeline_weight_lane == "w8a8"
+    assert targets["base"].lora_bucket == 0
+    assert targets["turbo"].pipeline_weight_lane == "w8a8-lora128"
+    assert targets["turbo"].lora_bucket == 128
+    assert targets["base"].incarnation_id != targets["turbo"].incarnation_id
+
+
+@pytest.mark.parametrize(
+    "bindings",
+    [
+        [("pipeline", MODEL_REF, "")],
+        [("pipeline", wire_ref(_spec().models["pipeline"]), MODEL_DIGEST),
+         ("pipeline", "acme/other:latest", DIGEST_B)],
+    ],
+)
+def test_malformed_or_duplicate_target_bindings_fail_closed(tmp_path, bindings):
+    spec = _spec()
+    ex, _sent = _wire_executor(spec, tmp_path, ready=False, resident=False)
+    rec = ex._classes[spec.instance_key]
+    rec.instance = _Endpoint()
+    rec.ready = True
+    rec.held_bindings = bindings
+    ex._install_compile_targets(rec, spec, [_Pipe()])
+    assert ex.compile_targets() == []
+
+
+def test_unrelated_record_loading_preserves_existing_target(tmp_path):
+    class _OtherEndpoint(_Endpoint):
+        pass
+
+    first = _spec()
+    other = replace(first, name="other", cls=_OtherEndpoint, method=_OtherEndpoint.run)
+
+    async def _send(_msg):
+        return None
+
+    ex = Executor([first, other], _send)
+    first_rec = ex._classes[first.instance_key]
+    first_rec.instance = _Endpoint()
+    first_rec.ready = True
+    first_rec.held_bindings = [(
+        "pipeline", wire_ref(first.models["pipeline"]), MODEL_DIGEST)]
+    ex._install_compile_targets(first_rec, first, [_Pipe()])
+    first_id = ex.compile_targets()[0].incarnation_id
+
+    other_rec = ex._classes[other.instance_key]
+    other_rec.ready = False  # a different record is still loading
+    assert [t.incarnation_id for t in ex.compile_targets()] == [first_id]
+
+
+def test_adopt_rejects_target_replaced_during_download(tmp_path, monkeypatch):
+    _artifact(tmp_path)
+    spec = _spec()
+    ex, sent = _wire_executor(spec, tmp_path)
+    target_id = _target_id(ex)
+
+    async def run():
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _ensure(ref, snapshot=None, *, binding=None):
+            started.set()
+            await release.wait()
+            return tmp_path / "snap"
+
+        ex.store.ensure_local = _ensure  # type: ignore[method-assign]
+        task = asyncio.create_task(ex.handle_model_op(pb.ModelOp(
+            op=pb.MODEL_OP_KIND_ADOPT_COMPILE_CACHE,
+            ref=CACHE_REF,
+            snapshot=pb.Snapshot(digest=DIGEST_A),
+            operation_id=OP_A,
+            target_incarnation_id=target_id,
+        )))
+        await started.wait()
+        rec = ex._classes[spec.instance_key]
+        rec.compile_targets.clear()
+        rec.ready = False
+        release.set()
+        await task
+
+    asyncio.run(run())
+    _assert_failed(
+        sent, "adopt_failed:target_replaced", target_incarnation_id=target_id)
+
+
+def test_active_digest_republish_requires_reload_without_unwrap(tmp_path, monkeypatch):
+    _artifact(tmp_path)
+    spec = _spec()
+    ex, sent = _wire_executor(spec, tmp_path)
+    monkeypatch.setattr(cc, "apply", _guarded_apply)
+    _fake_counters(monkeypatch, hits=2, misses=0)
+    _adopt(ex, digest=DIGEST_A)
+    target_before = ex.compile_targets()[0]
+    assert target_before.active_compile_snapshot_digest == DIGEST_A
+
+    unwraps = []
+    monkeypatch.setattr(cc, "unwrap", lambda obj: unwraps.append(obj) or True)
+    sent.clear()
+    _adopt(ex, digest=DIGEST_B, operation_id=OP_B)
+    _assert_failed(
+        sent,
+        "adopt_failed:active_replace_requires_reload",
+        digest=DIGEST_B,
+        operation_id=OP_B,
+        target_incarnation_id=target_before.incarnation_id,
+    )
+    target_after = ex.compile_targets()[0]
+    assert target_after.active_compile_snapshot_digest == DIGEST_A
+    assert unwraps == []
+
+
+def _cold_spec(binding=None) -> EndpointSpec:
+    return EndpointSpec(
+        name="cold-generate",
+        method=_ColdEndpoint.run,
+        kind="inference",
+        payload_type=_In,
+        output_mode="single",
+        cls=_ColdEndpoint,
+        attr_name="run",
+        models={"pipeline": binding or Hub("acme/klein-finetune")},
+        compile=Compile(shapes=((768, 768),), family=FAMILY),
+    )
+
+
+def test_production_setup_stamps_cold_active_identity_after_warmup(
+    tmp_path, monkeypatch,
+):
+    """Real ensure_setup -> fetch -> typed injection -> warmup -> StateDelta."""
+    import gen_worker.executor as executor_mod
+
+    artifact = _artifact(tmp_path)
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    spec = _cold_spec()
+    model_ref = wire_ref(spec.models["pipeline"])
+    sent = []
+
+    async def _send(msg):
+        sent.append(msg)
+
+    ex = Executor([spec], _send)
+    ex.store._cache_dir = tmp_path / "cas"
+    pipe = _LoadablePipe()
+
+    async def _download(ref, **kwargs):
+        return artifact.parent if ref == CACHE_REF else model_dir
+
+    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(
+        provision,
+        "load_slot",
+        lambda *args, **kwargs: provision.SlotLoad(obj=pipe, is_pipeline=True),
+    )
+    monkeypatch.setattr(ex, "_enable_compiled", _guarded_enable)
+    counter = {"hits": 0}
+
+    def _counters():
+        counter["hits"] += 1
+        return {"fxgraph_cache_hit": counter["hits"], "fxgraph_cache_miss": 0}
+
+    monkeypatch.setattr(cc, "inductor_counters", _counters)
+    _ColdEndpoint.setups = _ColdEndpoint.warmups = 0
+    snapshots = {
+        model_ref: pb.Snapshot(digest=MODEL_DIGEST),
+        CACHE_REF: pb.Snapshot(digest=DIGEST_A),
+    }
+
+    instance = asyncio.run(ex.ensure_setup(spec, snapshots))
+    assert isinstance(instance, _ColdEndpoint)
+    assert _ColdEndpoint.setups == 1 and _ColdEndpoint.warmups == 1
+    (target,) = ex.compile_targets()
+    assert target.active_compile_ref == CACHE_REF
+    assert target.active_compile_snapshot_digest == DIGEST_A
+    assert target.model_bindings[0].ref == model_ref
+    assert target.model_bindings[0].snapshot_digest == MODEL_DIGEST
+    assert target.contract_digest == cc.execution_contract_digest(pipe, spec.compile)
+
+
+def test_boot_warmup_proves_each_compile_object_independently(
+    tmp_path, monkeypatch,
+):
+    """A hit from pipeline A must never certify its unexecuted sibling B."""
+    import gen_worker.executor as executor_mod
+
+    artifact = _artifact(tmp_path)
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    first_ref = "acme/first"
+    second_ref = "acme/second"
+
+    class _DualEndpoint:
+        def setup(self, first: _LoadablePipe, second: _LoadablePipe) -> None:
+            self.first = first
+            self.second = second
+
+        def warmup(self) -> None:
+            _record_fake_warm(self.first)
+
+        def run(self, ctx, payload: _In) -> _Out:  # pragma: no cover
+            return _Out()
+
+    spec = EndpointSpec(
+        name="dual", method=_DualEndpoint.run, kind="inference",
+        payload_type=_In, output_mode="single", cls=_DualEndpoint,
+        attr_name="run",
+        models={"first": Hub(first_ref), "second": Hub(second_ref)},
+        compile=Compile(shapes=((768, 768),), family=FAMILY),
+    )
+
+    async def _send(_msg):
+        return None
+
+    ex = Executor([spec], _send)
+    ex.store._cache_dir = tmp_path / "cas"
+    pipes = {"first": _LoadablePipe(), "second": _LoadablePipe()}
+
+    async def _download(ref, **kwargs):
+        return artifact.parent if ref == CACHE_REF else model_dir
+
+    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(
+        provision,
+        "load_slot",
+        lambda *args, **kwargs: provision.SlotLoad(
+            obj=pipes[kwargs["slot"]], is_pipeline=True),
+    )
+    monkeypatch.setattr(ex, "_enable_compiled", _guarded_enable)
+    instance = asyncio.run(ex.ensure_setup(spec, {
+        first_ref: pb.Snapshot(digest=MODEL_DIGEST),
+        second_ref: pb.Snapshot(digest=DIGEST_B),
+        CACHE_REF: pb.Snapshot(digest=DIGEST_A),
+    }))
+    assert isinstance(instance, _DualEndpoint)
+    targets = {
+        target.model_bindings[0].slot: target for target in ex.compile_targets()
+    }
+    # The custom warmup proves only the first object. The untouched sibling is
+    # omitted rather than advertised as an adoptable target it can never prove.
+    assert set(targets) == {"first"}
+    assert targets["first"].active_compile_ref == CACHE_REF
+    assert targets["first"].active_compile_snapshot_digest == DIGEST_A
+    assert targets["first"].model_bindings[0].ref == first_ref
+
+
+def test_sdxl_w8a8_boot_advertises_only_warmup_proven_generate_alias(
+    tmp_path, monkeypatch,
+):
+    """SDXL's legacy Turbo handler rejects W8A8 and is explicitly skipped.
+
+    The ordinary generate warmup still proves the attached cell and reaches
+    READY, but its cache hit must not certify the incompatible sibling alias.
+    """
+    import gen_worker.executor as executor_mod
+
+    family = "sdxl"
+    cell_ref = f"_system/family-{family}#inductor-rtx-4090-torch2.9-w8a8"
+    artifact = _artifact(tmp_path, family=family)
+    model_dir = tmp_path / "sdxl-model"
+    model_dir.mkdir()
+    calls = {"generate": 0, "generate_turbo": 0}
+
+    @endpoint(
+        models={"pipeline": Hub("acme/sdxl", flavor="fp8-w8a8")},
+        resources=Resources(vram_gb=24),
+        compile=Compile(shapes=((1024, 1024),), family=family),
+        warmup={"generate": {"prompt": "warmup"}, "generate_turbo": None},
+    )
+    class _SdxlEndpoint:
+        def setup(self, pipeline: _LoadablePipe) -> None:
+            self.pipeline = pipeline
+
+        def generate(self, ctx, payload: _In) -> _Out:
+            calls["generate"] += 1
+            _record_fake_warm(self.pipeline)
+            return _Out(y="ok")
+
+        def generate_turbo(self, ctx, payload: _In) -> _Out:
+            calls["generate_turbo"] += 1
+            raise AssertionError("legacy Turbo is incompatible with W8A8")
+
+    specs = extract_specs(_SdxlEndpoint)
+    generate = next(spec for spec in specs if spec.name == "generate")
+    model_ref = wire_ref(generate.models["pipeline"])
+    pipe = _LoadablePipe()
+    setattr(pipe, "_cozy_weight_lane", "w8a8")
+
+    async def _send(_msg):
+        return None
+
+    ex = Executor(specs, _send)
+    ex.store._cache_dir = tmp_path / "cas"
+
+    async def _download(ref, **kwargs):
+        return artifact.parent if ref == cell_ref else model_dir
+
+    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(
+        provision,
+        "load_slot",
+        lambda *args, **kwargs: provision.SlotLoad(obj=pipe, is_pipeline=True),
+    )
+    monkeypatch.setattr(ex, "_enable_compiled", _guarded_enable)
+
+    asyncio.run(ex.ensure_setup(generate, {
+        model_ref: pb.Snapshot(digest=MODEL_DIGEST),
+        cell_ref: pb.Snapshot(digest=DIGEST_A),
+    }))
+
+    assert calls == {"generate": 1, "generate_turbo": 0}
+    (target,) = ex.compile_targets()
+    assert list(target.function_names) == ["generate"]
+    assert target.active_compile_ref == cell_ref
+    assert target.active_compile_snapshot_digest == DIGEST_A
+
+
+def test_flux_base_w8a8_boot_proves_generate_and_edit_aliases(
+    tmp_path, monkeypatch,
+):
+    """Both aliases recover coherently after one target guard failure."""
+    import gen_worker.executor as executor_mod
+
+    cell_ref = CACHE_REF + "-w8a8"
+    artifact = _artifact(tmp_path)
+    model_dir = tmp_path / "flux-model"
+    model_dir.mkdir()
+    calls = {"generate": 0, "edit": 0}
+
+    @endpoint(
+        models={"pipeline": Hub("acme/flux-base", flavor="fp8-w8a8")},
+        resources=Resources(vram_gb=24),
+        compile=Compile(shapes=((768, 768),), family=FAMILY),
+        warmup={
+            "generate": {"prompt": "warmup"},
+            "edit": {"prompt": "warmup"},
+        },
+    )
+    class _FluxBaseEndpoint:
+        def setup(self, pipeline: _LoadablePipe) -> None:
+            self.pipeline = pipeline
+
+        def generate(self, ctx, payload: _In) -> _Out:
+            calls["generate"] += 1
+            _record_fake_warm(self.pipeline)
+            return _Out(y="ok")
+
+        def edit(self, ctx, payload: _In) -> _Out:
+            calls["edit"] += 1
+            # Reusing an already-loaded graph is a successful wrapper
+            # execution, but Inductor records no second lookup/cache hit.
+            _record_fake_warm(self.pipeline)
+            return _Out(y="ok")
+
+    specs = extract_specs(_FluxBaseEndpoint)
+    generate = next(spec for spec in specs if spec.name == "generate")
+    model_ref = wire_ref(generate.models["pipeline"])
+    pipes = [_LoadablePipe(), _LoadablePipe()]
+    for pipe in pipes:
+        setattr(pipe, "_cozy_weight_lane", "w8a8")
+    remaining_pipes = iter(pipes)
+    sent: list[pb.WorkerMessage] = []
+
+    async def _send(msg):
+        sent.append(msg)
+
+    ex = Executor(specs, _send)
+    ex.store._cache_dir = tmp_path / "cas"
+
+    async def _download(ref, **kwargs):
+        return artifact.parent if ref == cell_ref else model_dir
+
+    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(
+        provision,
+        "load_slot",
+        lambda *args, **kwargs: provision.SlotLoad(
+            obj=next(remaining_pipes), is_pipeline=True),
+    )
+    monkeypatch.setattr(ex, "_enable_compiled", _guarded_enable)
+
+    snapshots = {
+        model_ref: pb.Snapshot(digest=MODEL_DIGEST),
+        cell_ref: pb.Snapshot(digest=DIGEST_A),
+    }
+    asyncio.run(ex.ensure_setup(generate, snapshots))
+
+    assert calls == {"generate": 1, "edit": 1}
+    (target,) = ex.compile_targets()
+    assert list(target.function_names) == ["edit", "generate"]
+    assert target.active_compile_ref == cell_ref
+
+    # Replay binds a real operation identity to the boot-attached active cell,
+    # then a runtime guard failure disables every alias on the exact target.
+    _adopt(
+        ex,
+        ref=cell_ref,
+        digest=DIGEST_A,
+        operation_id=OP_A,
+        target_incarnation_id=target.incarnation_id,
+    )
+    found = ex._compile_target(target.incarnation_id)
+    assert found is not None
+    rec, internal = found
+    ex.unavailable["unrelated-hardware-gate"] = (
+        "hardware_unmet", "another record owns this", {"gpu": "too_small"},
+    )
+    signal = getattr(internal.pipeline, cc._MARKER_ATTR)["failure_signal"]
+    callback = signal["callback"]
+    assert callable(callback)
+
+    async def _trip() -> None:
+        ex._loop = asyncio.get_running_loop()
+        await asyncio.to_thread(callback, "compiled graph exploded")
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    asyncio.run(_trip())
+    assert rec.stale is True
+    assert set(ex.unavailable) >= {"edit", "generate"}
+    assert all(
+        ex.unavailable[name][0] == "compile_cell_failed"
+        for name in ("edit", "generate")
+    )
+    failed = _events(sent, pb.MODEL_STATE_FAILED)
+    assert len(failed) == 1
+    assert failed[0].error == "adopt_failed:runtime_guard"
+    assert failed[0].operation_id == OP_A
+
+    lifecycle = Lifecycle(
+        SimpleNamespace(worker_jwt="", worker_id="worker"), ex)
+    failed_delta = lifecycle._state_delta()
+    assert "edit" not in failed_delta.available_functions
+    assert "generate" not in failed_delta.available_functions
+
+    # Declarative reconciliation replaces the stale incarnation. Only after
+    # the new exact active target proves both aliases are its owned marks
+    # cleared; unrelated unavailable reasons would remain untouched.
+    asyncio.run(ex.ensure_setup(generate, snapshots))
+    (recovered,) = ex.compile_targets()
+    assert recovered.incarnation_id != target.incarnation_id
+    assert recovered.active_compile_ref == cell_ref
+    assert list(recovered.function_names) == ["edit", "generate"]
+    assert calls == {"generate": 2, "edit": 2}
+    assert "edit" not in ex.unavailable
+    assert "generate" not in ex.unavailable
+    assert ex.unavailable["unrelated-hardware-gate"][0] == "hardware_unmet"
+    recovered_delta = lifecycle._state_delta()
+    assert {"edit", "generate"}.issubset(recovered_delta.available_functions)
+
+
+@pytest.mark.parametrize(
+    (
+        "case", "edit_uses_wrapper", "counter_hits", "expected_names",
+        "expected_executions", "expected_hits",
+    ),
+    (
+        ("loaded_graph_reuse", True, (10, 11), ("edit", "generate"), 2, 1),
+        ("no_object_hit", True, (10, 10, 10, 10), (), 0, 0),
+        ("alias_bypasses_wrapper", False, (10, 11), ("generate",), 1, 1),
+    ),
+)
+def test_flux_real_guard_requires_object_activation_and_each_alias_execution(
+    tmp_path,
+    monkeypatch,
+    case,
+    edit_uses_wrapper,
+    counter_hits,
+    expected_names,
+    expected_executions,
+    expected_hits,
+):
+    """One object hit plus one exact wrapper call per alias is causal proof."""
+    import gen_worker.executor as executor_mod
+    import torch
+
+    artifact = _artifact(tmp_path)
+    model_dir = tmp_path / "real-guard-model"
+    model_dir.mkdir()
+    calls = {"generate": 0, "edit": 0}
+    compiled_ready = threading.Event()
+
+    @endpoint(
+        models={"pipeline": Hub("acme/flux-base")},
+        resources=Resources(vram_gb=24),
+        compile=Compile(shapes=((768, 768),), family=FAMILY),
+        warmup={
+            "generate": {"prompt": "warmup"},
+            "edit": {"prompt": "warmup"},
+        },
+    )
+    class _FluxBaseEndpoint:
+        def setup(self, pipeline: _LoadablePipe) -> None:
+            self.pipeline = pipeline
+
+        def generate(self, ctx, payload: _In) -> _Out:
+            calls["generate"] += 1
+            self.pipeline.transformer.forward(payload.prompt)
+            return _Out(y="ok")
+
+        def edit(self, ctx, payload: _In) -> _Out:
+            calls["edit"] += 1
+            if edit_uses_wrapper:
+                self.pipeline.transformer.forward(payload.prompt)
+            return _Out(y="ok")
+
+    specs = extract_specs(_FluxBaseEndpoint)
+    generate = next(spec for spec in specs if spec.name == "generate")
+    model_ref = wire_ref(generate.models["pipeline"])
+    pipe = _Pipe()
+
+    async def _send(_msg):
+        return None
+
+    ex = Executor(specs, _send, gpu_slots=2)
+    ex.store._cache_dir = tmp_path / "cas"
+
+    async def _download(ref, **kwargs):
+        return artifact.parent if ref == CACHE_REF else model_dir
+
+    def _compile(fn, **kwargs):
+        compiled_ready.set()
+        return fn
+
+    counters = iter(counter_hits)
+    counter_reads = []
+
+    def _counters():
+        counter_reads.append(case)
+        return {
+            "fxgraph_cache_hit": next(counters),
+            "fxgraph_cache_miss": 1,
+        }
+
+    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(
+        provision,
+        "load_slot",
+        lambda *args, **kwargs: provision.SlotLoad(obj=pipe, is_pipeline=True),
+    )
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch, "compile", _compile)
+    monkeypatch.setattr(cc, "inductor_counters", _counters)
+
+    async def scenario() -> None:
+        # Hold one of two permits. Setup may stage/arm, but its proof warmup
+        # must wait until it can hold the entire worker GPU execution surface.
+        await ex._gpu_semaphore.acquire()
+        task = asyncio.create_task(ex.ensure_setup(generate, {
+            model_ref: pb.Snapshot(digest=MODEL_DIGEST),
+            CACHE_REF: pb.Snapshot(digest=DIGEST_A),
+        }))
+        try:
+            assert await asyncio.to_thread(compiled_ready.wait, 10)
+            for _ in range(3):
+                await asyncio.sleep(0)
+            assert calls == {"generate": 0, "edit": 0}
+        finally:
+            ex._gpu_semaphore.release()
+        await task
+
+    asyncio.run(scenario())
+
+    assert calls == {"generate": 1, "edit": 1}
+    assert len(counter_reads) == len(counter_hits)
+    targets = ex.compile_targets()
+    if expected_names:
+        (target,) = targets
+        assert tuple(target.function_names) == expected_names
+        assert target.active_compile_ref == CACHE_REF
+        assert cc.execution_count(pipe) == expected_executions
+        assert cc.cache_hit_count(pipe) == expected_hits
+    else:
+        assert targets == []
+        assert getattr(pipe, cc._MARKER_ATTR, None) is None
+
+
+def test_compile_hit_on_other_object_cannot_certify_primary_object(
+    tmp_path, monkeypatch,
+):
+    """Process-wide hit deltas remain owned by the wrapper that observed them."""
+    import gen_worker.executor as executor_mod
+    import torch
+
+    artifact = _artifact(tmp_path)
+    model_dir = tmp_path / "two-object-models"
+    model_dir.mkdir()
+
+    @endpoint(
+        models={
+            "primary": Hub("acme/flux-primary"),
+            "other": Hub("acme/flux-other"),
+        },
+        resources=Resources(vram_gb=24),
+        compile=Compile(shapes=((768, 768),), family=FAMILY),
+        warmup={"generate": {"prompt": "warmup"}},
+    )
+    class _TwoObjectEndpoint:
+        def setup(
+            self, primary: _LoadablePipe, other: _LoadablePipe,
+        ) -> None:
+            self.primary = primary
+            self.other = other
+
+        def generate(self, ctx, payload: _In) -> _Out:
+            # The primary wrapper executes but sees no cache activation. The
+            # other wrapper then sees the sole process-wide hit.
+            self.primary.transformer.forward(payload.prompt)
+            self.other.transformer.forward(payload.prompt)
+            return _Out(y="ok")
+
+    (spec,) = extract_specs(_TwoObjectEndpoint)
+    refs = {slot: wire_ref(binding) for slot, binding in spec.models.items()}
+    pipes = {"primary": _Pipe(), "other": _Pipe()}
+
+    async def _send(_msg):
+        return None
+
+    ex = Executor([spec], _send)
+    ex.store._cache_dir = tmp_path / "cas"
+
+    async def _download(ref, **kwargs):
+        return artifact.parent if ref == CACHE_REF else model_dir
+
+    counter_hits = iter((10, 10, 10, 11))
+    counter_reads = 0
+
+    def _counters():
+        nonlocal counter_reads
+        counter_reads += 1
+        return {
+            "fxgraph_cache_hit": next(counter_hits),
+            "fxgraph_cache_miss": 1,
+        }
+
+    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(
+        provision,
+        "load_slot",
+        lambda *args, **kwargs: provision.SlotLoad(
+            obj=pipes[kwargs["slot"]], is_pipeline=True,
+        ),
+    )
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch, "compile", lambda fn, **kwargs: fn)
+    monkeypatch.setattr(cc, "inductor_counters", _counters)
+
+    asyncio.run(ex.ensure_setup(spec, {
+        refs["primary"]: pb.Snapshot(digest=MODEL_DIGEST),
+        refs["other"]: pb.Snapshot(digest=DIGEST_B),
+        CACHE_REF: pb.Snapshot(digest=DIGEST_A),
+    }))
+
+    assert counter_reads == 4
+    (target,) = ex.compile_targets()
+    assert [(binding.slot, binding.ref) for binding in target.model_bindings] == [
+        ("other", refs["other"]),
+    ]
+    assert list(target.function_names) == [spec.name]
+    assert target.active_compile_ref == CACHE_REF
+    assert getattr(pipes["primary"], cc._MARKER_ATTR, None) is None
+    assert cc.execution_count(pipes["other"]) == 1
+    assert cc.cache_hit_count(pipes["other"]) == 1
+
+
+def test_pipeline_target_owns_only_pipeline_not_ancillary_vae(
+    tmp_path, monkeypatch,
+):
+    """Production-shaped SDXL: ancillary bindings cannot certify the graph."""
+    import gen_worker.executor as executor_mod
+
+    artifact = _artifact(tmp_path)
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+
+    class _PipelineWithVaeEndpoint:
+        def setup(self, pipeline: _LoadablePipe, vae: _AncillaryVae) -> None:
+            self.pipeline = pipeline
+            self.vae = vae
+
+        def warmup(self) -> None:
+            _record_fake_warm(self.pipeline)
+
+        def run(self, ctx, payload: _In) -> _Out:  # pragma: no cover
+            return _Out()
+
+    spec = EndpointSpec(
+        name="sdxl-with-vae",
+        method=_PipelineWithVaeEndpoint.run,
+        kind="inference",
+        payload_type=_In,
+        output_mode="single",
+        cls=_PipelineWithVaeEndpoint,
+        attr_name="run",
+        models={
+            "pipeline": Hub("acme/sdxl", flavor="fp8-w8a8"),
+            "vae": Hub("acme/sdxl-vae"),
+        },
+        compile=Compile(shapes=((1024, 1024),), family=FAMILY),
+    )
+    pipeline_ref = wire_ref(spec.models["pipeline"])
+    vae_ref = wire_ref(spec.models["vae"])
+    cell_ref = CACHE_REF + "-w8a8"
+    pipe = _LoadablePipe()
+    setattr(pipe, "_cozy_weight_lane", "w8a8")
+    vae = _AncillaryVae()
+
+    async def _send(_msg):
+        return None
+
+    ex = Executor([spec], _send)
+    ex.store._cache_dir = tmp_path / "cas"
+
+    async def _download(ref, **kwargs):
+        return artifact.parent if ref == cell_ref else model_dir
+
+    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(
+        provision,
+        "load_slot",
+        lambda *args, **kwargs: provision.SlotLoad(
+            obj=pipe if kwargs["slot"] == "pipeline" else vae,
+            is_pipeline=kwargs["slot"] == "pipeline",
+        ),
+    )
+    monkeypatch.setattr(ex, "_enable_compiled", _guarded_enable)
+    asyncio.run(ex.ensure_setup(spec, {
+        pipeline_ref: pb.Snapshot(digest=MODEL_DIGEST),
+        vae_ref: pb.Snapshot(digest=DIGEST_B),
+        cell_ref: pb.Snapshot(digest=DIGEST_A),
+    }))
+    (target,) = ex.compile_targets()
+    assert [binding.slot for binding in target.model_bindings] == ["pipeline"]
+
+    def run_with_snapshots(snapshots) -> pb.RunJob:
+        return pb.RunJob(
+            function_name=spec.name,
+            models=[
+                pb.ModelBinding(slot="pipeline", ref=pipeline_ref),
+                pb.ModelBinding(slot="vae", ref=vae_ref),
+            ],
+            snapshots=snapshots,
+            required_compile=pb.RequiredCompileExecution(
+                target_incarnation_id=target.incarnation_id,
+                cell_ref=target.active_compile_ref,
+                cell_snapshot_digest=target.active_compile_snapshot_digest,
+                contract_digest=target.contract_digest,
+            ),
+        )
+
+    # Exact pipeline evidence accepts. VAE identity remains an independent
+    # setup/residency concern and cannot replace or broaden the target proof.
+    ex._validate_required_compile(spec, run_with_snapshots({
+        pipeline_ref: pb.Snapshot(digest=MODEL_DIGEST),
+        vae_ref: pb.Snapshot(digest=DIGEST_B),
+    }))
+    ex._validate_required_compile(spec, run_with_snapshots({
+        pipeline_ref: pb.Snapshot(digest=MODEL_DIGEST),
+        vae_ref: pb.Snapshot(digest="blake3:" + "e" * 64),
+    }))
+    with pytest.raises(RetryableError, match="required_compile_binding_missing"):
+        ex._validate_required_compile(spec, run_with_snapshots({
+            vae_ref: pb.Snapshot(digest=MODEL_DIGEST),
+        }))
+    with pytest.raises(RetryableError, match="required_compile_binding_mismatch"):
+        ex._validate_required_compile(spec, run_with_snapshots({
+            pipeline_ref: pb.Snapshot(digest=DIGEST_B),
+            vae_ref: pb.Snapshot(digest=MODEL_DIGEST),
+        }))
+
+
+def test_w8a8_without_exact_cell_fails_before_pipeline_load_or_handler(
+    tmp_path, monkeypatch,
+):
+    import gen_worker.executor as executor_mod
+
+    spec = _cold_spec(Hub("acme/klein-finetune", flavor="fp8-w8a8"))
+    model_ref = wire_ref(spec.models["pipeline"])
+
+    async def _send(_msg):
+        return None
+
+    ex = Executor([spec], _send)
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    loads = []
+
+    async def _download(ref, **kwargs):
+        return model_dir
+
+    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(
+        provision,
+        "load_slot",
+        lambda *args, **kwargs: loads.append(1) or pytest.fail(
+            "missing W8A8 cell must fail before pipeline/GPU setup"),
+    )
+    _ColdEndpoint.setups = _ColdEndpoint.warmups = _ColdEndpoint.runs = 0
+
+    with pytest.raises(cc.CompiledLaneUnavailableError, match="no exact W8A8"):
+        asyncio.run(ex.ensure_setup(
+            spec, {model_ref: pb.Snapshot(digest=MODEL_DIGEST)}))
+    assert loads == []
+    assert _ColdEndpoint.setups == 0
+    assert _ColdEndpoint.warmups == 0
+    assert _ColdEndpoint.runs == 0
+    assert ex.unavailable[spec.name][0] == "compile_cell_failed"
+
+
+def test_w8a8_partial_handler_proof_fails_loud_without_disabling_skipped_turbo(
+    tmp_path, monkeypatch,
+):
+    """Every required alias must prove the W8A8 cell; explicit skips do not."""
+    import gen_worker.executor as executor_mod
+
+    family = "sdxl"
+    cell_ref = f"_system/family-{family}#inductor-rtx-4090-torch2.9-w8a8"
+    artifact = _artifact(tmp_path, family=family)
+    model_dir = tmp_path / "partial-proof-model"
+    model_dir.mkdir()
+
+    @endpoint(
+        models={"pipeline": Hub("acme/sdxl", flavor="fp8-w8a8")},
+        resources=Resources(vram_gb=24),
+        compile=Compile(shapes=((1024, 1024),), family=family),
+        warmup={
+            "generate": {"prompt": "warmup"},
+            "edit": {"prompt": "warmup"},
+            "generate_turbo": None,
+        },
+    )
+    class _SdxlEndpoint:
+        def setup(self, pipeline: _LoadablePipe) -> None:
+            self.pipeline = pipeline
+
+        def warmup(self) -> None:
+            _record_fake_warm(self.pipeline)
+
+        def generate(self, ctx, payload: _In) -> _Out:
+            return _Out(y="ok")
+
+        def edit(self, ctx, payload: _In) -> _Out:
+            return _Out(y="eager")
+
+        def generate_turbo(self, ctx, payload: _In) -> _Out:
+            raise AssertionError("explicitly skipped Turbo must not run")
+
+    specs = extract_specs(_SdxlEndpoint)
+    by_attr = {spec.attr_name: spec for spec in specs}
+    generate = by_attr["generate"]
+    model_ref = wire_ref(generate.models["pipeline"])
+    pipe = _LoadablePipe()
+    setattr(pipe, "_cozy_weight_lane", "w8a8")
+
+    async def _send(_msg):
+        return None
+
+    ex = Executor(specs, _send)
+    ex.store._cache_dir = tmp_path / "cas"
+
+    async def _download(ref, **kwargs):
+        return artifact.parent if ref == cell_ref else model_dir
+
+    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(
+        provision,
+        "load_slot",
+        lambda *args, **kwargs: provision.SlotLoad(obj=pipe, is_pipeline=True),
+    )
+    monkeypatch.setattr(ex, "_enable_compiled", _guarded_enable)
+
+    with pytest.raises(
+        cc.CompiledLaneUnavailableError,
+        match="mandatory W8A8 function proof incomplete",
+    ):
+        asyncio.run(ex.ensure_setup(generate, {
+            model_ref: pb.Snapshot(digest=MODEL_DIGEST),
+            cell_ref: pb.Snapshot(digest=DIGEST_A),
+        }))
+
+    required = {by_attr["generate"].name, by_attr["edit"].name}
+    assert set(ex.unavailable) == required
+    assert all(ex.unavailable[name][0] == "compile_cell_failed" for name in required)
+    assert by_attr["generate_turbo"].name not in ex.unavailable
+    assert ex.compile_targets() == []
+
+
+def test_production_w8a8_ignores_legacy_compile_environment_fallbacks(
+    tmp_path, monkeypatch,
+):
+    """DesiredInstance and RunJob require Tensorhub-attached exact evidence."""
+    import gen_worker.executor as executor_mod
+
+    artifact = _artifact(tmp_path)
+    monkeypatch.setenv("GEN_WORKER_COMPILE_CACHE", str(artifact))
+    monkeypatch.setenv("GEN_WORKER_COMPILE_CACHE_URL", "https://ignored/cell")
+    monkeypatch.setenv("GEN_WORKER_COMPILE_ALLOW_COLD", "1")
+    spec = _cold_spec(Hub("acme/klein-finetune", flavor="fp8-w8a8"))
+    model_ref = wire_ref(spec.models["pipeline"])
+
+    async def _send(_msg):
+        return None
+
+    ex = Executor([spec], _send)
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+
+    async def _download(ref, **kwargs):
+        return model_dir
+
+    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    snapshot = pb.Snapshot(digest=MODEL_DIGEST)
+    desired = pb.DesiredInstance(
+        function_name=spec.name,
+        models=[pb.ModelBinding(slot="pipeline", ref=model_ref)],
+    )
+    with pytest.raises(cc.CompiledLaneUnavailableError, match="no exact W8A8"):
+        asyncio.run(ex.ensure_desired_instance(
+            desired, {model_ref: snapshot},
+        ))
+
+    # This is the first production RunJob fence, before setup/mutation. An
+    # inherited local/producer env cannot substitute for scheduler-selected
+    # RequiredCompileExecution evidence.
+    with pytest.raises(RetryableError, match="required_compile_missing"):
+        ex._validate_required_compile(
+            spec,
+            pb.RunJob(
+                function_name=spec.name,
+                models=[pb.ModelBinding(slot="pipeline", ref=model_ref)],
+                snapshots={model_ref: snapshot},
+            ),
+        )
+
+
+def test_w8a8_binding_cannot_advertise_plain_materialized_pipeline(tmp_path):
+    spec = replace(
+        _spec(), models={"pipeline": Hub(
+            "acme/klein-finetune", flavor="fp8-w8a8")})
+
+    async def _send(_msg):
+        return None
+
+    ex = Executor([spec], _send)
+    rec = ex._classes[spec.instance_key]
+    rec.ready = True
+    rec.instance = _Endpoint()
+    ref = wire_ref(spec.models["pipeline"])
+    rec.held_bindings = [("pipeline", ref, MODEL_DIGEST)]
+    pipe = _Pipe()  # loader silently lost the W8A8 lane
+    selection = type("Selection", (), {
+        "ref": CACHE_REF + "-w8a8",
+        "snapshot_digest": DIGEST_A,
+        "path": tmp_path / "cell.tar.gz",
+    })()
+    with pytest.raises(cc.CompiledLaneUnavailableError, match="non-W8A8"):
+        ex._install_compile_targets(
+            rec, spec, [pipe], {id(pipe): selection}, {id(pipe): {spec.name}},
+        )
+
+
+def test_w8a8_setup_with_no_addressable_compile_object_fails(tmp_path, monkeypatch):
+    import gen_worker.executor as executor_mod
+
+    artifact = _artifact(tmp_path)
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    spec = _cold_spec(Hub("acme/klein-finetune", flavor="fp8-w8a8"))
+    model_ref = wire_ref(spec.models["pipeline"])
+    cell_ref = CACHE_REF + "-w8a8"
+
+    async def _send(_msg):
+        return None
+
+    ex = Executor([spec], _send)
+    ex.store._cache_dir = tmp_path / "cas"
+
+    async def _download(ref, **kwargs):
+        return artifact.parent if ref == cell_ref else model_dir
+
+    class _SupportObject:
+        pass  # no transformer/vae target despite typed setup annotation
+
+    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(
+        provision,
+        "load_slot",
+        lambda *args, **kwargs: provision.SlotLoad(
+            obj=_SupportObject(), is_pipeline=True),
+    )
+    monkeypatch.setattr(ex, "_enable_compiled", _guarded_enable)
+
+    with pytest.raises(cc.CompiledLaneUnavailableError, match="no addressable"):
+        asyncio.run(ex.ensure_setup(spec, {
+            model_ref: pb.Snapshot(digest=MODEL_DIGEST),
+            cell_ref: pb.Snapshot(digest=DIGEST_A),
+        }))
+    assert ex.compile_targets() == []
+
+
+def test_desired_w8a8_cell_digest_and_ref_changes_vacate_then_rebuild(
+    tmp_path, monkeypatch,
+):
+    import gen_worker.executor as executor_mod
+
+    artifact = _artifact(tmp_path)
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    spec = _cold_spec(Hub("acme/klein-finetune", flavor="fp8-w8a8"))
+    model_ref = wire_ref(spec.models["pipeline"])
+    cell_a = CACHE_REF + "-w8a8"
+    cell_b = f"_system/family-{FAMILY}#inductor-rtx-5090-torch2.9-w8a8"
+
+    async def _send(_msg):
+        return None
+
+    ex = Executor([spec], _send)
+    ex.store._cache_dir = tmp_path / "cas"
+
+    async def _download(ref, **kwargs):
+        return artifact.parent if ref.startswith("_system/") else model_dir
+
+    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+
+    loaded = []
+
+    def _load(*args, **kwargs):
+        pipe = _LoadablePipe()
+        setattr(pipe, "_cozy_weight_lane", "w8a8")
+        loaded.append(pipe)
+        return provision.SlotLoad(obj=pipe, is_pipeline=True)
+
+    monkeypatch.setattr(provision, "load_slot", _load)
+    monkeypatch.setattr(ex, "_enable_compiled", _guarded_enable)
+    counter = {"hits": 0}
+
+    def _counters():
+        counter["hits"] += 1
+        return {"fxgraph_cache_hit": counter["hits"], "fxgraph_cache_miss": 0}
+
+    monkeypatch.setattr(cc, "inductor_counters", _counters)
+    _ColdEndpoint.setups = _ColdEndpoint.warmups = 0
+
+    def snapshots(cell_ref, cell_digest):
+        return {
+            model_ref: pb.Snapshot(digest=MODEL_DIGEST),
+            cell_ref: pb.Snapshot(digest=cell_digest),
+        }
+
+    desired = pb.DesiredInstance(
+        function_name=spec.name,
+        models=[pb.ModelBinding(slot="pipeline", ref=model_ref)],
+    )
+
+    def reconcile(cell_ref, cell_digest):
+        asyncio.run(ex.ensure_desired_instance(
+            desired, snapshots(cell_ref, cell_digest)))
+
+    reconcile(cell_a, DIGEST_A)
+    first = ex.compile_targets()[0]
+    assert (first.active_compile_ref,
+            first.active_compile_snapshot_digest) == (cell_a, DIGEST_A)
+    vacated_targets = []
+    vacate = ex._vacate_record
+
+    async def _observed_vacate(rec):
+        released = await vacate(rec)
+        vacated_targets.append(ex.compile_targets())
+        return released
+
+    monkeypatch.setattr(ex, "_vacate_record", _observed_vacate)
+
+    # Same mutable cell ref, new immutable bytes: no hot unwrap; declarative
+    # reconcile vacates and creates a fresh incarnation against the new digest.
+    reconcile(cell_a, DIGEST_B)
+    second = ex.compile_targets()[0]
+    assert second.incarnation_id != first.incarnation_id
+    assert (second.active_compile_ref,
+            second.active_compile_snapshot_digest) == (cell_a, DIGEST_B)
+    assert vacated_targets[-1] == []
+
+    # Chosen compatible ref/SKU changes: the same state-driven reload path.
+    reconcile(cell_b, DIGEST_A)
+    third = ex.compile_targets()[0]
+    assert third.incarnation_id not in {
+        first.incarnation_id, second.incarnation_id}
+    assert (third.active_compile_ref,
+            third.active_compile_snapshot_digest) == (cell_b, DIGEST_A)
+    assert _ColdEndpoint.setups == 3
+
+
+def test_desired_plain_cell_change_vacates_then_rebuilds(
+    tmp_path, monkeypatch,
+):
+    """Optional acceleration moves only from explicit desired cell evidence."""
+    import gen_worker.executor as executor_mod
+
+    artifact = _artifact(tmp_path)
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    spec = _cold_spec()
+    model_ref = wire_ref(spec.models["pipeline"])
+    cell_a = CACHE_REF
+    cell_b = f"_system/family-{FAMILY}#inductor-rtx-5090-torch2.9"
+
+    async def _send(_msg):
+        return None
+
+    ex = Executor([spec], _send)
+    ex.store._cache_dir = tmp_path / "cas"
+
+    async def _download(ref, **kwargs):
+        return artifact.parent if ref.startswith("_system/") else model_dir
+
+    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(
+        provision, "load_slot",
+        lambda *args, **kwargs: provision.SlotLoad(
+            obj=_LoadablePipe(), is_pipeline=True),
+    )
+    monkeypatch.setattr(ex, "_enable_compiled", _guarded_enable)
+    counter = {"hits": 0}
+
+    def _counters():
+        counter["hits"] += 1
+        return {"fxgraph_cache_hit": counter["hits"], "fxgraph_cache_miss": 0}
+
+    monkeypatch.setattr(cc, "inductor_counters", _counters)
+    desired = pb.DesiredInstance(
+        function_name=spec.name,
+        models=[pb.ModelBinding(slot="pipeline", ref=model_ref)],
+    )
+
+    def reconcile(cell_ref, cell_digest):
+        asyncio.run(ex.ensure_desired_instance(desired, {
+            model_ref: pb.Snapshot(digest=MODEL_DIGEST),
+            cell_ref: pb.Snapshot(digest=cell_digest),
+        }))
+
+    reconcile(cell_a, DIGEST_A)
+    first = ex.compile_targets()[0]
+    assert (first.active_compile_ref,
+            first.active_compile_snapshot_digest) == (cell_a, DIGEST_A)
+    vacated_targets = []
+    vacate = ex._vacate_record
+
+    async def _observed_vacate(rec):
+        released = await vacate(rec)
+        vacated_targets.append(ex.compile_targets())
+        return released
+
+    monkeypatch.setattr(ex, "_vacate_record", _observed_vacate)
+    reconcile(cell_b, DIGEST_B)
+    second = ex.compile_targets()[0]
+    assert vacated_targets == [[]]
+    assert second.incarnation_id != first.incarnation_id
+    assert (second.active_compile_ref,
+            second.active_compile_snapshot_digest) == (cell_b, DIGEST_B)
+
+
+def test_missing_desired_w8a8_cell_removes_old_ready_target(tmp_path, monkeypatch):
+    spec = replace(
+        _spec(), models={"pipeline": Hub(
+            "acme/klein-finetune", flavor="fp8-w8a8")})
+    ex, _sent = _wire_executor(spec, tmp_path)
+    _active_w8a8_target(ex)
+    model_ref = wire_ref(spec.models["pipeline"])
+
+    with pytest.raises(cc.CompiledLaneUnavailableError, match="no exact W8A8"):
+        asyncio.run(ex.ensure_setup(
+            spec, {model_ref: pb.Snapshot(digest=MODEL_DIGEST)}))
+    assert ex.compile_targets() == []
+    assert not ex._classes[spec.instance_key].ready
+
+
+def test_concurrent_same_ref_setups_keep_each_loaded_snapshot_identity(
+    tmp_path, monkeypatch,
+):
+    """A loads digest A, B advances ref-global disk state to B before A's
+    load lock; A's record/target must still say A, never the current B."""
+    import gen_worker.executor as executor_mod
+
+    first = _cold_spec()
+    second = replace(
+        first,
+        name="cold-generate-b",
+        cls=_ColdEndpointB,
+        method=_ColdEndpointB.run,
+    )
+
+    async def _send(_msg):
+        return None
+
+    ex = Executor([first, second], _send)
+    ex.store._cache_dir = tmp_path / "cas"
+    model_ref = wire_ref(first.models["pipeline"])
+    digest_a = "blake3:" + "1" * 64
+    digest_b = "blake3:" + "2" * 64
+    paths = {
+        digest_a: tmp_path / ("1" * 64),
+        digest_b: tmp_path / ("2" * 64),
+    }
+    for path in paths.values():
+        path.mkdir()
+    downloaded = {digest_a: asyncio.Event(), digest_b: asyncio.Event()}
+
+    async def _download(ref, *, snapshot=None, **kwargs):
+        digest = snapshot.snapshot_digest
+        downloaded[digest].set()
+        return paths[digest]
+
+    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(
+        provision,
+        "load_slot",
+        lambda *args, **kwargs: provision.SlotLoad(
+            obj=_LoadablePipe(), is_pipeline=True),
+    )
+    monkeypatch.setattr(ex, "_enable_compiled", lambda *args: False)
+
+    async def scenario():
+        await ex._load_lock.acquire()
+        task_a = asyncio.create_task(ex.ensure_setup(
+            first, {model_ref: pb.Snapshot(digest=digest_a)}))
+        await downloaded[digest_a].wait()
+        await asyncio.sleep(0)  # A queues on the held global load lock.
+
+        task_b = asyncio.create_task(ex.ensure_setup(
+            second, {model_ref: pb.Snapshot(digest=digest_b)}))
+        await downloaded[digest_b].wait()
+        await asyncio.sleep(0)  # B has advanced the ref-global disk identity.
+        assert ex.store._disk_identities[model_ref][0] == digest_b
+
+        ex._load_lock.release()
+        await asyncio.gather(task_a, task_b)
+
+    asyncio.run(scenario())
+
+    targets = {target.function_names[0]: target for target in ex.compile_targets()}
+    assert targets[first.name].model_bindings[0].snapshot_digest == digest_a
+    assert targets[second.name].model_bindings[0].snapshot_digest == digest_b
+    assert ex._classes[first.instance_key].held_snapshot_digests[model_ref] == digest_a
+    assert ex._classes[second.instance_key].held_snapshot_digests[model_ref] == digest_b
+    assert ex.store.resident_identity(model_ref)[0] == digest_b
+
+
+def _active_w8a8_target(ex: Executor, *, digest=DIGEST_A):
+    target_id = _target_id(ex)
+    found = ex._compile_target(target_id)
+    assert found is not None
+    _rec, target = found
+    setattr(target.pipeline, "_cozy_weight_lane", "w8a8")
+    ex._refresh_compile_target(target)
+    target.active_compile_ref = CACHE_REF + "-w8a8"
+    target.active_compile_snapshot_digest = digest
+    return target
+
+
+def _required_run(spec: EndpointSpec, target, **overrides) -> pb.RunJob:
+    model_ref = wire_ref(spec.models["pipeline"])
+    required = dict(
+        target_incarnation_id=target.incarnation_id,
+        cell_ref=target.active_compile_ref,
+        cell_snapshot_digest=target.active_compile_snapshot_digest,
+        contract_digest=target.contract_digest,
+    )
+    required.update(overrides)
+    return pb.RunJob(
+        request_id="required-compile",
+        attempt=1,
+        function_name=spec.name,
+        input_payload=msgspec.msgpack.encode(_In(prompt="cat")),
+        models=[pb.ModelBinding(slot="pipeline", ref=model_ref)],
+        snapshots={model_ref: pb.Snapshot(digest=MODEL_DIGEST)},
+        required_compile=pb.RequiredCompileExecution(**required),
+    )
+
+
+@pytest.mark.parametrize(
+    ("override", "reason"),
+    [
+        ({"target_incarnation_id": "gone"}, "required_compile_replaced"),
+        ({"cell_ref": CACHE_REF + "-other"}, "required_compile_identity_mismatch"),
+        ({"cell_snapshot_digest": DIGEST_B}, "required_compile_identity_mismatch"),
+        ({"contract_digest": "bad-contract"}, "required_compile_identity_mismatch"),
+        ({"cell_ref": ""}, "required_compile_invalid"),
+    ],
+)
+def test_required_compile_rejects_wrong_target_cell_digest_or_contract(
+    tmp_path, override, reason,
+):
+    spec = replace(
+        _spec(), models={"pipeline": Hub(
+            "acme/klein-finetune", flavor="fp8-w8a8")})
+    ex, _sent = _wire_executor(spec, tmp_path)
+    target = _active_w8a8_target(ex)
+    run = _required_run(spec, target, **override)
+    with pytest.raises(RetryableError, match=reason):
+        ex._validate_required_compile(spec, run)
+
+
+def test_required_compile_rejects_missing_fence_and_binding_digest_drift(tmp_path):
+    spec = replace(
+        _spec(), models={"pipeline": Hub(
+            "acme/klein-finetune", flavor="fp8-w8a8")})
+    ex, _sent = _wire_executor(spec, tmp_path)
+    target = _active_w8a8_target(ex)
+    model_ref = wire_ref(spec.models["pipeline"])
+
+    with pytest.raises(RetryableError, match="required_compile_missing"):
+        ex._validate_required_compile(spec, pb.RunJob(function_name=spec.name))
+
+    run = _required_run(spec, target)
+    run.snapshots[model_ref].digest = DIGEST_B
+    with pytest.raises(RetryableError, match="required_compile_binding_mismatch"):
+        ex._validate_required_compile(spec, run)
+
+    other = replace(
+        spec, models={"pipeline": Hub("acme/other-klein", flavor="fp8-w8a8")})
+    other_ref = wire_ref(other.models["pipeline"])
+    run = _required_run(spec, target)
+    del run.snapshots[model_ref]
+    run.snapshots[other_ref].CopyFrom(pb.Snapshot(digest=MODEL_DIGEST))
+    with pytest.raises(RetryableError, match="required_compile_binding_mismatch"):
+        ex._validate_required_compile(other, run)
+
+
+def test_runtime_guard_revokes_state_emits_one_causal_failure_and_quarantines(
+    tmp_path,
+):
+    spec = replace(
+        _spec(), models={"pipeline": Hub(
+            "acme/klein-finetune", flavor="fp8-w8a8")})
+    ex, sent = _wire_executor(spec, tmp_path)
+    active = _active_w8a8_target(ex)
+    active_ref = active.active_compile_ref
+    active_digest = active.active_compile_snapshot_digest
+    active_id = active.incarnation_id
+    required_run = _required_run(spec, active)
+    _adopt(
+        ex,
+        ref=active_ref,
+        digest=active_digest,
+        operation_id=OP_A,
+        target_incarnation_id=active_id,
+    )
+    sent.clear()
+    found = ex._compile_target(active_id)
+    assert found is not None
+    rec, internal = found
+    signal = getattr(internal.pipeline, cc._MARKER_ATTR)["failure_signal"]
+    callback = signal["callback"]
+    assert callable(callback)
+
+    async def _trip() -> None:
+        ex._loop = asyncio.get_running_loop()
+        await asyncio.to_thread(callback, "compiled graph exploded")
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        # The wrapper calls the callback only once, but duplicate delivery is
+        # harmless and cannot fabricate a second causal terminal event.
+        await asyncio.to_thread(callback, "duplicate")
+        await asyncio.sleep(0)
+
+    asyncio.run(_trip())
+    (revoked,) = ex.compile_targets()
+    assert revoked.incarnation_id == active_id
+    assert revoked.active_compile_ref == ""
+    assert revoked.active_compile_snapshot_digest == ""
+    assert rec.stale is True
+    failed = _events(sent, pb.MODEL_STATE_FAILED)
+    assert len(failed) == 1
+    assert failed[0].error == "adopt_failed:runtime_guard"
+    assert failed[0].ref == active_ref
+    assert failed[0].snapshot_digest == active_digest
+    assert failed[0].operation_id == OP_A
+    assert failed[0].target_incarnation_id == active_id
+
+    with pytest.raises(RetryableError, match="required_compile_identity_mismatch"):
+        ex._validate_required_compile(spec, required_run)
+
+    sent.clear()
+    # A controller-only desired/order rewrite can mint a new operation ID but
+    # does not change executable identity. The same target + immutable cell
+    # remains quarantined and cannot repeat wrap/warmup.
+    _adopt(
+        ex,
+        ref=active_ref,
+        digest=active_digest,
+        operation_id=OP_B,
+        target_incarnation_id=active_id,
+    )
+    _assert_failed(
+        sent,
+        "adopt_failed:cell_quarantined",
+        digest=active_digest,
+        operation_id=OP_B,
+        target_incarnation_id=active_id,
+    )
+
+
+def test_cell_quarantine_survives_successful_different_cell_adoption(
+    tmp_path, monkeypatch,
+):
+    """A failure stays sticky on its incarnation after B becomes active."""
+    _artifact(tmp_path)
+    spec = _spec()
+    ex, sent = _wire_executor(spec, tmp_path)
+    monkeypatch.setattr(cc, "apply", _guarded_apply)
+    _fake_counters(monkeypatch, hits=1, misses=0)
+    target_id = _target_id(ex)
+
+    _adopt(
+        ex,
+        digest=DIGEST_A,
+        operation_id=OP_A,
+        target_incarnation_id=target_id,
+    )
+    found = ex._compile_target(target_id)
+    assert found is not None
+    _rec, target = found
+    callback = getattr(target.pipeline, cc._MARKER_ATTR)[
+        "failure_signal"
+    ]["callback"]
+    assert callable(callback)
+
+    async def _trip_a() -> None:
+        ex._loop = asyncio.get_running_loop()
+        await asyncio.to_thread(callback, "cell A failed")
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    asyncio.run(_trip_a())
+    assert (CACHE_REF, DIGEST_A) in target.failed_compile_identities
+
+    sent.clear()
+    _adopt(
+        ex,
+        digest=DIGEST_B,
+        operation_id=OP_B,
+        target_incarnation_id=target_id,
+    )
+    adopted = _events(sent, pb.MODEL_STATE_ADOPTED)
+    assert len(adopted) == 1
+    assert adopted[0].snapshot_digest == DIGEST_B
+    assert (CACHE_REF, DIGEST_A) in target.failed_compile_identities
+
+    sent.clear()
+    _adopt(
+        ex,
+        digest=DIGEST_A,
+        operation_id="adopt-operation-c",
+        target_incarnation_id=target_id,
+    )
+    _assert_failed(
+        sent,
+        "adopt_failed:cell_quarantined",
+        digest=DIGEST_A,
+        operation_id="adopt-operation-c",
+        target_incarnation_id=target_id,
+    )
+    (still_b,) = ex.compile_targets()
+    assert still_b.active_compile_snapshot_digest == DIGEST_B
+
+
+def test_multifunction_adoption_keeps_target_identity_through_guard_failure(
+    tmp_path, monkeypatch,
+):
+    """ADOPTED -> StateDelta -> causal guard failure keeps one target key.
+
+    Tensorhub correlates the pending operation to the pre-adoption target
+    identity, including its function aliases. Adoption therefore proves the
+    entire advertised set and never narrows it in place before a later guard
+    event can quarantine the exact operation.
+    """
+    import gen_worker.executor as executor_mod
+
+    artifact = _artifact(tmp_path)
+    model_dir = tmp_path / "multifunction-model"
+    model_dir.mkdir()
+
+    @endpoint(
+        models={"pipeline": Hub("acme/flux-base")},
+        resources=Resources(vram_gb=24),
+        compile=Compile(shapes=((768, 768),), family=FAMILY),
+        warmup={
+            "generate": {"prompt": "warmup"},
+            "edit": {"prompt": "warmup"},
+        },
+    )
+    class _FluxBaseEndpoint:
+        def setup(self, pipeline: _LoadablePipe) -> None:
+            self.pipeline = pipeline
+
+        def generate(self, ctx, payload: _In) -> _Out:
+            _record_fake_warm(self.pipeline)
+            return _Out(y="ok")
+
+        def edit(self, ctx, payload: _In) -> _Out:
+            _record_fake_warm(self.pipeline)
+            return _Out(y="ok")
+
+    specs = extract_specs(_FluxBaseEndpoint)
+    generate = next(spec for spec in specs if spec.name == "generate")
+    model_ref = wire_ref(generate.models["pipeline"])
+    pipe = _Pipe()
+    sent: list[pb.WorkerMessage] = []
+
+    async def _send(msg):
+        sent.append(msg)
+
+    ex = Executor(specs, _send)
+    ex.store._cache_dir = tmp_path / "cas"
+
+    async def _download(ref, **kwargs):
+        return model_dir
+
+    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(
+        provision,
+        "load_slot",
+        lambda *args, **kwargs: provision.SlotLoad(obj=pipe, is_pipeline=True),
+    )
+    asyncio.run(ex.ensure_setup(generate, {
+        model_ref: pb.Snapshot(digest=MODEL_DIGEST),
+    }))
+    (before,) = ex.compile_targets()
+    assert list(before.function_names) == ["edit", "generate"]
+    assert before.active_compile_ref == ""
+
+    async def _local_cell(ref, snapshot=None, *, binding=None):
+        return artifact.parent
+
+    ex.store.ensure_local = _local_cell  # type: ignore[method-assign]
+    monkeypatch.setattr(cc, "apply", _guarded_apply)
+    _fake_counters(monkeypatch, hits=1, misses=0)
+    _adopt(
+        ex,
+        operation_id=OP_A,
+        target_incarnation_id=before.incarnation_id,
+    )
+    adopted = _events(sent, pb.MODEL_STATE_ADOPTED)
+    assert len(adopted) == 1
+    assert adopted[0].target_incarnation_id == before.incarnation_id
+
+    lifecycle = Lifecycle(
+        SimpleNamespace(worker_jwt="", worker_id="worker"), ex)
+    (after_adopt,) = lifecycle._state_delta().compile_targets
+    assert after_adopt.incarnation_id == before.incarnation_id
+    assert list(after_adopt.function_names) == list(before.function_names)
+    assert after_adopt.active_compile_ref == CACHE_REF
+
+    found = ex._compile_target(before.incarnation_id)
+    assert found is not None
+    _rec, internal = found
+    signal = getattr(internal.pipeline, cc._MARKER_ATTR)["failure_signal"]
+    callback = signal["callback"]
+    assert callable(callback)
+
+    async def _trip() -> None:
+        ex._loop = asyncio.get_running_loop()
+        await asyncio.to_thread(callback, "compiled graph exploded")
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+
+    asyncio.run(_trip())
+    failed = _events(sent, pb.MODEL_STATE_FAILED)
+    assert len(failed) == 1
+    assert failed[0].error == "adopt_failed:runtime_guard"
+    assert failed[0].operation_id == OP_A
+    assert failed[0].target_incarnation_id == before.incarnation_id
+
+    (after_guard,) = lifecycle._state_delta().compile_targets
+    assert after_guard.incarnation_id == before.incarnation_id
+    assert list(after_guard.function_names) == list(before.function_names)
+    assert after_guard.active_compile_ref == ""
+    assert after_guard.active_compile_snapshot_digest == ""
+
+
+def test_hot_adoption_rejects_an_unproven_advertised_function_alias(
+    tmp_path, monkeypatch,
+):
+    """One function's cache hit cannot certify its advertised sibling."""
+    import gen_worker.executor as executor_mod
+
+    artifact = _artifact(tmp_path)
+    model_dir = tmp_path / "partial-function-proof-model"
+    model_dir.mkdir()
+
+    @endpoint(
+        models={"pipeline": Hub("acme/flux-base")},
+        resources=Resources(vram_gb=24),
+        compile=Compile(shapes=((768, 768),), family=FAMILY),
+        warmup={
+            "generate": {"prompt": "warmup"},
+            "edit": {"prompt": "warmup"},
+        },
+    )
+    class _PartiallyCoveredEndpoint:
+        def setup(self, pipeline: _LoadablePipe) -> None:
+            self.pipeline = pipeline
+
+        def generate(self, ctx, payload: _In) -> _Out:
+            _record_fake_warm(self.pipeline)
+            return _Out(y="ok")
+
+        def edit(self, ctx, payload: _In) -> _Out:
+            return _Out(y="eager-only")
+
+    specs = extract_specs(_PartiallyCoveredEndpoint)
+    generate = next(spec for spec in specs if spec.name == "generate")
+    model_ref = wire_ref(generate.models["pipeline"])
+    pipe = _Pipe()
+    sent: list[pb.WorkerMessage] = []
+
+    async def _send(msg):
+        sent.append(msg)
+
+    ex = Executor(specs, _send)
+    ex.store._cache_dir = tmp_path / "cas"
+
+    async def _download(ref, **kwargs):
+        return model_dir
+
+    monkeypatch.setattr(executor_mod, "ensure_local", _download)
+    monkeypatch.setattr(
+        provision,
+        "load_slot",
+        lambda *args, **kwargs: provision.SlotLoad(obj=pipe, is_pipeline=True),
+    )
+    asyncio.run(ex.ensure_setup(generate, {
+        model_ref: pb.Snapshot(digest=MODEL_DIGEST),
+    }))
+    (before,) = ex.compile_targets()
+    assert list(before.function_names) == ["edit", "generate"]
+
+    async def _local_cell(ref, snapshot=None, *, binding=None):
+        return artifact.parent
+
+    ex.store.ensure_local = _local_cell  # type: ignore[method-assign]
+    monkeypatch.setattr(cc, "apply", _guarded_apply)
+    _fake_counters(monkeypatch, hits=1, misses=0)
+    _adopt(ex, target_incarnation_id=before.incarnation_id)
+
+    _assert_failed(
+        sent,
+        "adopt_failed:function_alias_unproven",
+        target_incarnation_id=before.incarnation_id,
+    )
+    assert not _events(sent, pb.MODEL_STATE_ADOPTED)
+    (after,) = ex.compile_targets()
+    assert after.incarnation_id == before.incarnation_id
+    assert list(after.function_names) == list(before.function_names)
+    assert after.active_compile_ref == ""
+
+
+def test_guard_revocation_between_intake_and_gpu_turn_fails_final_fence(
+    tmp_path,
+):
+    spec = replace(
+        _spec(), models={"pipeline": Hub(
+            "acme/klein-finetune", flavor="fp8-w8a8")})
+    ex, sent = _wire_executor(spec, tmp_path)
+    active = _active_w8a8_target(ex)
+    _adopt(
+        ex,
+        ref=active.active_compile_ref,
+        digest=active.active_compile_snapshot_digest,
+        operation_id=OP_A,
+        target_incarnation_id=active.incarnation_id,
+    )
+    sent.clear()
+    found = ex._compile_target(active.incarnation_id)
+    assert found is not None
+    _rec, internal = found
+    callback = getattr(
+        internal.pipeline, cc._MARKER_ATTR)["failure_signal"]["callback"]
+    run = _required_run(spec, active)
+
+    async def scenario() -> None:
+        ex._loop = asyncio.get_running_loop()
+        first_has_gpu = asyncio.Event()
+        sibling_validated = asyncio.Event()
+
+        async def first_request() -> None:
+            async with ex._gpu_semaphore:
+                first_has_gpu.set()
+                await sibling_validated.wait()
+                # The active request trips its guard before releasing the GPU
+                # turn to a sibling that validated during queueing.
+                await asyncio.to_thread(callback, "first request guard failed")
+
+        async def sibling_request() -> None:
+            await first_has_gpu.wait()
+            ex._validate_required_compile(spec, run)  # intake fence passes
+            sibling_validated.set()
+            async with ex._gpu_semaphore:
+                # This is the production final fence immediately after GPU
+                # acquisition. Revocation must already be visible here.
+                with pytest.raises(
+                    RetryableError, match="required_compile_identity_mismatch",
+                ):
+                    ex._validate_required_compile(spec, run)
+
+        await asyncio.gather(first_request(), sibling_request())
+        await asyncio.sleep(0)
+
+    asyncio.run(scenario())
+    assert len(_events(sent, pb.MODEL_STATE_FAILED)) == 1
+
+
+def test_target_replacement_between_assignment_and_gpu_never_runs_handler(tmp_path):
+    spec = replace(
+        _spec(), models={"pipeline": Hub(
+            "acme/klein-finetune", flavor="fp8-w8a8")})
+    ex, sent = _wire_executor(spec, tmp_path)
+    old = _active_w8a8_target(ex)
+    run = _required_run(spec, old)
+    run.compute.CopyFrom(pb.ResolvedCompute(accelerator="cuda", gpu_index=0))
+    _Endpoint.runs = 0
+    original_run = _Endpoint.run
+
+    def _counted_run(self, ctx, payload):
+        _Endpoint.runs += 1
+        return original_run(self, ctx, payload)
+
+    async def scenario():
+        await ex._gpu_semaphore.acquire()
+        initial_validated = asyncio.Event()
+        calls = 0
+        validate = ex._validate_required_compile
+
+        def _observed_validate(effective, incoming):
+            nonlocal calls
+            validate(effective, incoming)
+            calls += 1
+            if calls == 1:
+                initial_validated.set()
+
+        ex._validate_required_compile = _observed_validate  # type: ignore[method-assign]
+        setattr(_Endpoint, "run", _counted_run)
+        try:
+            await ex.handle_run_job(run)
+            job = ex.jobs[(run.request_id, run.attempt)]
+            assert job.task is not None
+            await initial_validated.wait()
+            await asyncio.sleep(0)
+
+            rec = ex._classes[spec.instance_key]
+            rec.compile_targets.clear()
+            new_pipe = _Pipe()
+            setattr(new_pipe, "_cozy_weight_lane", "w8a8")
+            selection = type("Selection", (), {
+                "ref": old.active_compile_ref,
+                "snapshot_digest": old.active_compile_snapshot_digest,
+                "path": tmp_path / "replacement.tar.gz",
+            })()
+            _mark_fake_guard(new_pipe)
+            ex._install_compile_targets(
+                rec,
+                spec,
+                [new_pipe],
+                {id(new_pipe): selection},
+                {id(new_pipe): {spec.name}},
+            )
+            assert _target_id(ex) != old.incarnation_id
+            ex._gpu_semaphore.release()
+            await job.task
+            assert calls == 1  # second validation raises before increment
+        finally:
+            setattr(_Endpoint, "run", original_run)
+            if ex._gpu_semaphore.locked():
+                ex._gpu_semaphore.release()
+
+    asyncio.run(scenario())
+    results = [m.job_result for m in sent if m.WhichOneof("msg") == "job_result"]
+    assert results and results[-1].status == pb.JOB_STATUS_RETRYABLE
+    assert _Endpoint.runs == 0
 
 
 # ---------------------------------------------------------------------------
@@ -519,7 +2593,10 @@ def test_fetch_compile_snapshot_finds_family_cache(tmp_path):
         CACHE_REF: pb.Snapshot(digest="blake3:bb"),
     }
     got = asyncio.run(ex._fetch_compile_snapshot(spec, snapshots))
-    assert got == artifact
+    assert got is not None
+    assert got.path == artifact
+    assert got.ref == CACHE_REF
+    assert got.snapshot_digest == "blake3:bb"
 
 
 def test_fetch_compile_snapshot_ignores_other_families(tmp_path):
@@ -554,12 +2631,13 @@ def test_fetch_compile_snapshot_selects_exact_w8a8_lane(tmp_path):
     plain_ref = f"_system/family-{FAMILY}#inductor-rtx-4090-torch2.9"
     w8a8_ref = plain_ref + "-w8a8"
     snapshots = {
-        plain_ref: pb.Snapshot(),
-        w8a8_ref: pb.Snapshot(),
+        plain_ref: pb.Snapshot(digest=DIGEST_A),
+        w8a8_ref: pb.Snapshot(digest=DIGEST_B),
         "acme/klein-finetune#fp8-w8a8": pb.Snapshot(),
     }
     got = asyncio.run(ex._fetch_compile_snapshot(spec, snapshots))
-    assert got == wanted
+    assert got is not None and got.path == wanted
+    assert got.ref == w8a8_ref and got.snapshot_digest == DIGEST_B
     assert seen == [w8a8_ref]
 
 
@@ -583,18 +2661,17 @@ def test_fetch_compile_snapshot_plain_lane_ignores_w8a8_cell(tmp_path):
     plain_ref = f"_system/family-{FAMILY}#inductor-rtx-4090-torch2.9"
     w8a8_ref = plain_ref + "-w8a8"
     snapshots = {
-        w8a8_ref: pb.Snapshot(),
-        plain_ref: pb.Snapshot(),
+        w8a8_ref: pb.Snapshot(digest=DIGEST_B),
+        plain_ref: pb.Snapshot(digest=DIGEST_A),
         "acme/unselected#fp8-w8a8": pb.Snapshot(),
     }
     got = asyncio.run(ex._fetch_compile_snapshot(spec, snapshots))
-    assert got == wanted
+    assert got is not None and got.path == wanted
+    assert got.ref == plain_ref and got.snapshot_digest == DIGEST_A
     assert seen == [plain_ref]
 
 
-def test_prepare_with_explicit_artifact_seeds(tmp_path, monkeypatch):
-    monkeypatch.delenv(cc.ENV_CACHE_PATH, raising=False)
-    monkeypatch.delenv(cc.ENV_CACHE_URL, raising=False)
+def test_prepare_with_explicit_artifact_seeds(tmp_path):
     artifact = _artifact(tmp_path)
     meta = cc.prepare(FAMILY, cache_dir=tmp_path / "cache", artifact=artifact)
     assert meta is not None and meta["family"] == FAMILY

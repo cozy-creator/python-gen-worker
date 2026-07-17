@@ -11,8 +11,8 @@ cache with no compiler and no stall.
 Policy: cache miss / key mismatch / no artifact leaves ordinary lanes eager,
 never causing a boot stall or a runtime compile attempt in prod. A declared
 W8A8 lane instead fails retryably: eager/dequantized execution cannot claim
-W8A8. The compile job itself opts into cold compilation with
-``GEN_WORKER_COMPILE_ALLOW_COLD=1`` (requires a toolchain).
+W8A8. The compile job itself opts into cold compilation through the explicit
+``allow_cold=True`` library argument (requires a toolchain).
 
 Artifacts are FAMILY-keyed (settled 2026-07-06): torch.compile caches key on
 the traced graph + shapes, not the weights, so one artifact serves every
@@ -42,6 +42,7 @@ compiled from — informational, never part of the match.
 from __future__ import annotations
 
 import ctypes
+import filecmp
 import functools
 import gzip
 import hashlib
@@ -52,18 +53,17 @@ import os
 import re
 import shutil
 import tarfile
+import tempfile
+import threading
 import time
-import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
 from .api.errors import RetryableError
 
 logger = logging.getLogger(__name__)
-
-ENV_CACHE_PATH = "GEN_WORKER_COMPILE_CACHE"       # local artifact (tar) or seeded dir
-ENV_CACHE_URL = "GEN_WORKER_COMPILE_CACHE_URL"    # http(s) URL to the artifact
-ENV_ALLOW_COLD = "GEN_WORKER_COMPILE_ALLOW_COLD"  # compile without an artifact (needs cc)
 
 METADATA_NAME = "metadata.json"
 # 2 (gw#391): key gained the producer gen-worker version. ie#496 extends its
@@ -73,6 +73,12 @@ METADATA_NAME = "metadata.json"
 ARTIFACT_FORMAT = 2
 _MARKER_ATTR = "_cozy_compile"
 _JUNK_SUFFIXES = (".lock", ".tmp", ".pid")
+# Cache directories and torch's in-process cache latches are process-global.
+# Serialize the complete seed+arm transaction so another setup can never arm
+# against a half-merged artifact. RLock keeps prepare -> seed_artifact and
+# seed_artifact -> capture_env composable without another configuration layer.
+_SEED_ARM_LOCK = threading.RLock()
+_LOCK_TYPE = type(threading.Lock())
 
 
 # ---------------------------------------------------------------------------
@@ -178,6 +184,37 @@ def lane_token(weight_lane: str) -> str:
     if bucket:
         return f"{tok}-lora{bucket}" if tok else f"lora{bucket}"
     return tok
+
+
+def compile_target_lane_error(weight_lane: str, lora_bucket: int) -> str:
+    """Return why a worker compile-target lane is not wire-canonical.
+
+    This is the Python half of Tensorhub's compile-target descriptor contract:
+    the worker reports the *raw pipeline lane* (Tensorhub maps ``fp8-hooks`` to
+    the ``w8a16`` cell token), with an optional exact canonical LoRA suffix.
+    Keeping this vocabulary explicit prevents a test or future loader from
+    advertising a target the scheduler must reject.
+    """
+    lane = str(weight_lane or "")
+    declared = int(lora_bucket or 0)
+    base, observed = lane_bucket(lane)
+    if base not in ("", "fp8-hooks", "w8a16", "w8a8"):
+        return f"unsupported pipeline_weight_lane {lane!r}"
+    from .models.w8a8_lora import RANK_BUCKETS
+
+    if observed not in (0, *RANK_BUCKETS):
+        return f"unsupported LoRA bucket {observed} in lane {lane!r}"
+    canonical = f"{base}-lora{observed}" if base and observed else (
+        f"lora{observed}" if observed else base
+    )
+    if lane != canonical:
+        return f"non-canonical pipeline_weight_lane {lane!r}; expected {canonical!r}"
+    if observed != declared:
+        return (
+            f"pipeline lane LoRA bucket {observed} != declared "
+            f"Compile.lora_bucket {declared}"
+        )
+    return ""
 
 
 def flavor_label(sku: str, torch_version: str, weight_lane: str = "") -> str:
@@ -387,19 +424,23 @@ def unpack(artifact: Path, dest_root: Path) -> Dict[str, Any]:
     meta: Dict[str, Any] = {}
     with tarfile.open(artifact, mode="r:*") as tar:
         for member in tar:
-            name = member.name.lstrip("./")
+            name = member.name
             if name == METADATA_NAME:
+                if not member.isfile():
+                    raise ValueError(
+                        f"unsafe {METADATA_NAME} member in compile-cache artifact"
+                    )
                 f = tar.extractfile(member)
                 meta = json.loads(f.read().decode()) if f else {}
                 continue
-            if not member.isfile():
-                continue
-            parts = Path(name).parts
+            posix = PurePosixPath(name)
+            parts = posix.parts
             if (
-                not parts
+                not member.isfile()
+                or not parts
                 or parts[0] not in ("inductor", "triton")
-                or ".." in parts
-                or Path(name).is_absolute()
+                or any(part in ("", ".", "..") for part in parts)
+                or posix.is_absolute()
             ):
                 raise ValueError(f"unsafe or unknown member in compile-cache artifact: {member.name!r}")
             target = dest_root.joinpath(*parts)
@@ -498,22 +539,115 @@ def find_artifact(root: Path) -> Optional[Path]:
     return next(iter(sorted(root.rglob("*.tar.gz"))), None)
 
 
+def _merge_staged_cache(staged: Path, live: Path) -> None:
+    """Safely add one already-verified staging tree to ``live``.
+
+    Inductor/Triton paths are content-addressed: an existing path must be
+    byte-identical, never overwritten. New files become visible one at a time
+    via ``os.replace`` (there is no portable whole-directory union swap), but
+    the process lock prevents normal arming consumers from observing that
+    interval. An in-process failure removes every newly added file. A process
+    crash can leave only complete, verified new files; replay treats those as
+    identical and finishes the additive merge.
+    """
+    files = sorted(
+        path
+        for sub in ("inductor", "triton")
+        for path in (staged / sub).rglob("*")
+        if path.is_file()
+    )
+    additions: list[tuple[Path, Path]] = []
+    for source in files:
+        target = live / source.relative_to(staged)
+        if target.exists():
+            if not target.is_file() or not filecmp.cmp(source, target, shallow=False):
+                raise AdoptError(
+                    "cache_collision",
+                    f"verified cache path {source.relative_to(staged)!s} "
+                    "already exists with different bytes",
+                )
+            continue
+        additions.append((source, target))
+
+    live.mkdir(parents=True, exist_ok=True)
+    added: list[Path] = []
+    try:
+        for source, target in additions:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(source, target)
+            added.append(target)
+    except BaseException:
+        for target in reversed(added):
+            target.unlink(missing_ok=True)
+        raise
+
+
+@dataclass
+class _StagedArtifact:
+    metadata: Dict[str, Any]
+    staged_root: Path
+    live_root: Path
+    temporary: tempfile.TemporaryDirectory[str]
+    activated: bool = False
+
+    def close(self) -> None:
+        self.temporary.cleanup()
+
+
+def stage_artifact(
+    artifact: Path, family: str, cache_dir: Optional[Path] = None,
+) -> _StagedArtifact:
+    """Extract and validate an artifact without touching process-global state."""
+    root = (Path(cache_dir) if cache_dir else Path.home() / ".cache" / "gen-worker")
+    root = root / "compile-cache"
+    root.parent.mkdir(parents=True, exist_ok=True)
+    temporary = tempfile.TemporaryDirectory(
+        prefix="compile-cache-stage-", dir=root.parent,
+    )
+    staged = Path(temporary.name) / "cache"
+    try:
+        meta = unpack(Path(artifact), staged)
+        reason = verify(meta, family=family)
+        if reason:
+            raise AdoptError("key_mismatch", reason)
+        return _StagedArtifact(meta, staged, root, temporary)
+    except AdoptError:
+        temporary.cleanup()
+        raise
+    except Exception as exc:
+        temporary.cleanup()
+        raise AdoptError("artifact_invalid", str(exc)) from exc
+
+
+def _activate_staged(staged: _StagedArtifact) -> Dict[str, Any]:
+    """Publish a verified staging tree while holding ``_SEED_ARM_LOCK``."""
+    if not staged.activated:
+        _merge_staged_cache(staged.staged_root, staged.live_root)
+        staged.activated = True
+    seed_env(staged.live_root)
+    return staged.metadata
+
+
 def seed_artifact(
     artifact: Path, family: str, cache_dir: Optional[Path] = None
 ) -> Dict[str, Any]:
-    """Unpack + verify + seed one artifact for this runtime. Returns its
-    metadata; raises :class:`AdoptError` (never seeds) on any mismatch."""
-    root = (Path(cache_dir) if cache_dir else Path.home() / ".cache" / "gen-worker")
-    root = root / "compile-cache"
+    """Verify in isolation, then seed one artifact under the process lock.
+
+    A malformed, unsafe, corrupt, or runtime-mismatched tar never writes into
+    the live Inductor/Triton cache. Returns metadata or raises
+    :class:`AdoptError` without changing the live tree.
+    """
+    staged = stage_artifact(artifact, family, cache_dir=cache_dir)
     try:
-        meta = unpack(Path(artifact), root)
-    except Exception as exc:
-        raise AdoptError("artifact_invalid", str(exc)) from exc
-    reason = verify(meta, family=family)
-    if reason:
-        raise AdoptError("key_mismatch", reason)
-    seed_env(root)
-    return meta
+        try:
+            with _SEED_ARM_LOCK:
+                return _activate_staged(staged)
+        except AdoptError:
+            raise
+        except Exception as exc:
+            raise AdoptError("activation_failed", str(exc)) from exc
+    finally:
+        staged.close()
 
 
 def mode_drift(meta: Dict[str, Any], pipeline: Any) -> str:
@@ -584,60 +718,25 @@ def lane_drift(meta: Dict[str, Any], pipeline: Any) -> str:
     return ""
 
 
-def _fetch_url(url: str, dest_dir: Path) -> Path:
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    name = hashlib.sha256(url.encode()).hexdigest()[:16] + ".tar.gz"
-    target = dest_dir / name
-    if target.exists():
-        return target
-    t = time.monotonic()
-    tmp = target.with_suffix(".part")
-    with urllib.request.urlopen(url, timeout=120) as resp, open(tmp, "wb") as out:
-        shutil.copyfileobj(resp, out)
-    tmp.rename(target)
-    logger.info(
-        "compile-cache: downloaded artifact (%d bytes in %.1fs)",
-        target.stat().st_size, time.monotonic() - t,
-    )
-    return target
-
-
 def prepare(
     family: str,
     cache_dir: Optional[Path] = None,
     artifact: Optional[Path] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Locate, verify, and seed a compile-cache artifact for this runtime.
+    """Verify and seed one explicitly delivered artifact for this runtime.
 
-    Sources, in order: explicit ``artifact`` (a hub-attached snapshot, #569),
-    then ``GEN_WORKER_COMPILE_CACHE`` (local tar), then
-    ``GEN_WORKER_COMPILE_CACHE_URL``. Returns the artifact metadata on a
-    verified hit (cache dirs seeded), else None with the reason logged.
-
-    ``local``/``url`` are raw env reads, not Settings fields — no production
-    launcher has ever set them (pgw#514 dead-config sweep), but they're a
-    real, tested manual-override path (see test_compile_cache.py) for local
-    dev / the compile-cell producer job, kept as library-standalone knobs.
+    Production obtains ``artifact`` from Tensorhub's immutable RunJob/
+    DesiredInstance snapshot attachment. Local tooling passes an explicit path
+    or uses the explicit local-cell store; environment fallbacks deliberately
+    do not participate in serving placement.
     """
-    local = os.environ.get(ENV_CACHE_PATH, "").strip()
-    url = os.environ.get(ENV_CACHE_URL, "").strip()
-    root = Path(cache_dir) if cache_dir else Path.home() / ".cache" / "gen-worker"
-    root = root / "compile-cache"
     try:
-        if artifact is not None:
-            artifact = Path(artifact)
-            if not artifact.exists():
-                logger.warning("compile-cache: attached artifact %s does not exist", artifact)
-                return None
-        elif local:
-            artifact = Path(local)
-            if not artifact.exists():
-                logger.warning("compile-cache: %s=%s does not exist", ENV_CACHE_PATH, local)
-                return None
-        elif url:
-            artifact = _fetch_url(url, root / "artifacts")
-        else:
-            logger.info("compile-cache: no artifact configured; staying eager")
+        if artifact is None:
+            logger.info("compile-cache: no delivered artifact; staying eager")
+            return None
+        artifact = Path(artifact)
+        if not artifact.exists():
+            logger.warning("compile-cache: attached artifact %s does not exist", artifact)
             return None
         meta = seed_artifact(artifact, family, cache_dir=cache_dir)
         logger.info(
@@ -673,6 +772,20 @@ def _resolve_target(pipeline: Any, target: str) -> Optional[Tuple[Any, str, Call
     if callable(leaf):
         return obj, parts[-1], leaf
     return None
+
+
+def has_compile_target(pipeline: Any, cfg: Any) -> bool:
+    """Whether ``pipeline`` owns at least one callable declared by ``cfg``.
+
+    A setup may inject support objects (for example SDXL's standalone VAE)
+    alongside the actual pipeline. Only the object whose graph targets resolve
+    is a compile-adoption target; family-wide scans must not try to wrap every
+    resident model object.
+    """
+    return any(
+        _resolve_target(pipeline, str(target)) is not None
+        for target in tuple(getattr(cfg, "targets", ()) or ())
+    )
 
 
 def _type_name(value: Any) -> str:
@@ -784,6 +897,41 @@ def execution_contract(pipeline: Any, cfg: Any) -> Tuple[str, Dict[str, Any]]:
     return hashlib.sha256(encoded).hexdigest(), weight_contract
 
 
+def execution_contract_digest(pipeline: Any, cfg: Any) -> str:
+    """Digest every graph-compatibility axis enforced by the consumer.
+
+    ``execution_contract()[0]`` is intentionally only the module-graph
+    signature. Scheduler fencing needs the complete contract: declared graph
+    shapes/targets/CFG regimes, whole-vs-regional mode, actual weight lane and
+    activation-scaling schema, LoRA bucket, and observed low-VRAM preparation.
+    Tensor values and checkpoint identities remain excluded so compatible
+    fine-tunes share one family cell.
+    """
+    graph_signature, weight_contract = execution_contract(pipeline, cfg)
+    from .models.memory import low_vram_mode
+
+    payload = {
+        "version": 1,
+        "family": str(getattr(cfg, "family", "") or ""),
+        "shapes": sorted(
+            [int(v) for v in row] for row in getattr(cfg, "shapes", ())
+        ),
+        "targets": [str(v) for v in getattr(cfg, "targets", ())],
+        "guidance_scales": [
+            float(v) for v in getattr(cfg, "guidance_scales", ())
+        ],
+        "compile_mode": (
+            "regional" if bool(getattr(cfg, "regional", False)) else "whole"
+        ),
+        "lora_bucket": int(getattr(cfg, "lora_bucket", 0) or 0),
+        "low_vram_mode": low_vram_mode(pipeline),
+        "graph_signature": graph_signature,
+        "weight_contract": weight_contract,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def contract_drift(meta: Dict[str, Any], pipeline: Any, cfg: Any) -> str:
     """Mismatch between the cell's declared graph and the loaded consumer."""
     shapes = sorted(
@@ -838,24 +986,85 @@ def contract_drift(meta: Dict[str, Any], pipeline: Any, cfg: Any) -> str:
 def _guarded(
     original: Callable[..., Any], compiled: Callable[..., Any], label: str,
     *, fail_closed: bool = False,
+    failure_signal: Optional[Dict[str, Any]] = None,
 ) -> Callable[..., Any]:
-    """Guard a compiled call; W8A8 cannot silently become eager compute."""
-    state: Dict[str, Any] = {"failed": False, "detail": ""}
+    """Guard one exact compiled callable and record its own warm-call proof.
+
+    The process-wide Dynamo counters are sampled *inside this wrapper* around
+    this object's compiled call.  Executor adoption therefore cannot use a
+    cache hit produced by a different resident pipeline as proof for this one.
+    """
+    state: Dict[str, Any] = {
+        "failed": False,
+        "detail": "",
+        "revocation_error": "",
+    }
+
+    def revoke(detail: str) -> None:
+        callback = (failure_signal or {}).get("callback")
+        if callable(callback):
+            try:
+                callback(detail)
+            except Exception as exc:
+                state["revocation_error"] = (
+                    "compiled-state revocation failed: "
+                    f"{type(exc).__name__}: {exc}"
+                )
+                logger.exception("compile-cache: %s", state["revocation_error"])
+                raise CompiledLaneUnavailableError(
+                    state["revocation_error"]
+                ) from exc
+
+    def proof_before() -> Optional[Dict[str, int]]:
+        signal = failure_signal or {}
+        lock = signal.get("lock")
+        if not isinstance(lock, _LOCK_TYPE):
+            return None
+        # Inductor counts graph lookup/compile hits, not every execution of an
+        # already-loaded graph. Capture activation once for this exact wrapper;
+        # successful_calls below remains a per-invocation alias proof. Executor
+        # proof warmups exclude concurrent GPU work, so the process-wide delta
+        # cannot come from another resident object.
+        with lock:
+            if int(signal.get("cache_hits", 0)) > 0:
+                return None
+        return inductor_counters()
+
+    def record_success(before: Optional[Dict[str, int]]) -> None:
+        signal = failure_signal or {}
+        lock = signal.get("lock")
+        if not isinstance(lock, _LOCK_TYPE):
+            return
+        stats = counters_delta(before, inductor_counters()) if before is not None else {}
+        with lock:
+            signal["successful_calls"] = int(signal.get("successful_calls", 0)) + 1
+            signal["cache_hits"] = int(signal.get("cache_hits", 0)) + max(
+                0, int(stats.get("fxgraph_cache_hit", 0)))
+            signal["cache_misses"] = int(signal.get("cache_misses", 0)) + max(
+                0, int(stats.get("fxgraph_cache_miss", 0)))
 
     @functools.wraps(original)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
+        if state["revocation_error"]:
+            raise CompiledLaneUnavailableError(state["revocation_error"])
         if state["failed"]:
             if fail_closed:
                 raise CompiledLaneUnavailableError(state["detail"])
             return original(*args, **kwargs)
+        before = proof_before()
         try:
-            return compiled(*args, **kwargs)
-        except Exception as exc:  # noqa: BLE001 — any compile failure => eager
+            result = compiled(*args, **kwargs)
+            record_success(before)
+            return result
+        except Exception as exc:  # noqa: BLE001 — optional lanes may use eager
             state["failed"] = True
             state["detail"] = (
-                f"compiled W8A8 target {label} failed: "
+                f"compiled {'W8A8 ' if fail_closed else ''}target {label} failed: "
                 f"{type(exc).__name__}: {exc}"
             )
+            # Revoke scheduler-visible compiled proof synchronously before
+            # either the optional eager fallback or mandatory W8A8 error.
+            revoke(state["detail"])
             if fail_closed:
                 logger.error("compile-cache: %s", state["detail"])
                 raise CompiledLaneUnavailableError(state["detail"]) from exc
@@ -876,32 +1085,88 @@ def _clear_regional(mod: Any) -> None:
 
 
 def _guarded_regional(
-    mod: Any, original: Callable[..., Any], label: str, *, fail_closed: bool = False,
+    mod: Any,
+    original: Callable[..., Any],
+    label: str,
+    *,
+    fail_closed: bool = False,
+    failure_signal: Optional[Dict[str, Any]] = None,
 ) -> Callable[..., Any]:
     """Regional analogue of :func:`_guarded`: blocks are compiled in place,
     so eager fallback must first CLEAR the block compilations, then retry."""
-    state: Dict[str, Any] = {"failed": False, "detail": ""}
+    state: Dict[str, Any] = {
+        "failed": False,
+        "detail": "",
+        "revocation_error": "",
+    }
+
+    def proof_before() -> Optional[Dict[str, int]]:
+        signal = failure_signal or {}
+        lock = signal.get("lock")
+        if not isinstance(lock, _LOCK_TYPE):
+            return None
+        # See _guarded: one exact-object activation is sufficient; subsequent
+        # aliases still need their own successful wrapper invocation.
+        with lock:
+            if int(signal.get("cache_hits", 0)) > 0:
+                return None
+        return inductor_counters()
+
+    def record_success(before: Optional[Dict[str, int]]) -> None:
+        signal = failure_signal or {}
+        lock = signal.get("lock")
+        if not isinstance(lock, _LOCK_TYPE):
+            return
+        stats = counters_delta(before, inductor_counters()) if before is not None else {}
+        with lock:
+            signal["successful_calls"] = int(signal.get("successful_calls", 0)) + 1
+            signal["cache_hits"] = int(signal.get("cache_hits", 0)) + max(
+                0, int(stats.get("fxgraph_cache_hit", 0)))
+            signal["cache_misses"] = int(signal.get("cache_misses", 0)) + max(
+                0, int(stats.get("fxgraph_cache_miss", 0)))
 
     @functools.wraps(original)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
+        if state["revocation_error"]:
+            raise CompiledLaneUnavailableError(state["revocation_error"])
         if not state["failed"]:
+            before = proof_before()
             try:
-                return original(*args, **kwargs)
-            except Exception as exc:  # noqa: BLE001 — any compile failure => eager
+                result = original(*args, **kwargs)
+                record_success(before)
+                return result
+            except Exception as exc:  # noqa: BLE001 — optional lanes may use eager
                 state["failed"] = True
                 state["detail"] = (
-                    f"regional compiled W8A8 target {label} failed: "
+                    f"regional compiled {'W8A8 ' if fail_closed else ''}"
+                    f"target {label} failed: "
                     f"{type(exc).__name__}: {exc}"
                 )
+                # Regional eager state is real only after the in-place block
+                # compilations are gone. Revoke proof after that mutation and
+                # before a state delta can be scheduled.
+                _clear_regional(mod)
+                callback = (failure_signal or {}).get("callback")
+                if callable(callback):
+                    try:
+                        callback(state["detail"])
+                    except Exception as callback_exc:
+                        state["revocation_error"] = (
+                            "compiled-state revocation failed: "
+                            f"{type(callback_exc).__name__}: {callback_exc}"
+                        )
+                        logger.exception(
+                            "compile-cache: %s", state["revocation_error"])
+                        raise CompiledLaneUnavailableError(
+                            state["revocation_error"]
+                        ) from callback_exc
                 if fail_closed:
-                    _clear_regional(mod)
                     logger.error("compile-cache: %s", state["detail"])
                     raise CompiledLaneUnavailableError(state["detail"]) from exc
                 logger.warning(
                     "compile-cache: regional-compiled %s failed (%s: %s); eager "
                     "for the rest of this process", label, type(exc).__name__, exc,
                 )
-                _clear_regional(mod)
         if fail_closed:
             raise CompiledLaneUnavailableError(state["detail"])
         return original(*args, **kwargs)
@@ -915,15 +1180,14 @@ def apply(
     *,
     cache_ready: bool,
     guard: bool = True,
-    allow_cold: Optional[bool] = None,
+    allow_cold: bool = False,
 ) -> bool:
     """Wrap ``cfg.targets`` on ``pipeline`` with compiled callables.
 
     Only compiles when a verified cache artifact was seeded (``cache_ready``)
-    or the process explicitly opted into cold compilation AND has a C
-    toolchain (``allow_cold``; defaults to the ``GEN_WORKER_COMPILE_ALLOW_COLD``
-    env var, read raw — not a Settings field, see ``prepare()``). Anything
-    else is a logged no-op — eager, never a stall.
+    or explicit producer/local tooling passes ``allow_cold=True`` and has a C
+    toolchain. Production serving never consults an environment fallback.
+    Anything else is a logged no-op — eager, never a stall.
 
     ``guard=True`` (consumer): a failing ordinary compiled call permanently
     unwraps to eager; W8A8 fails closed. ``guard=False`` (compile job): all
@@ -940,15 +1204,13 @@ def apply(
         logger.info("compile-cache: no CUDA; staying eager")
         return False
     if not cache_ready:
-        if allow_cold is None:
-            allow_cold = os.environ.get(ENV_ALLOW_COLD, "").strip().lower() in ("1", "true", "yes")
         if not allow_cold:
             logger.info("compile-cache: no verified cache artifact; staying eager")
             return False
         if not toolchain_present():
             logger.warning(
-                "compile-cache: %s set but no C compiler on PATH; staying eager",
-                ENV_ALLOW_COLD,
+                "compile-cache: cold compile explicitly requested but no C "
+                "compiler is on PATH; staying eager",
             )
             return False
 
@@ -972,6 +1234,13 @@ def apply(
     from .models.loading import pipeline_weight_lane
 
     fail_closed = pipeline_weight_lane(pipeline).startswith("w8a8")
+    failure_signal: Dict[str, Any] = {
+        "callback": None,
+        "lock": threading.Lock(),
+        "successful_calls": 0,
+        "cache_hits": 0,
+        "cache_misses": 0,
+    }
     applied: list[str] = []
     originals: list[Tuple[Any, str, Callable[..., Any]]] = []
     regional_mods: list[Any] = []
@@ -992,7 +1261,12 @@ def apply(
             owner.compile_repeated_blocks(dynamic=False)
             if guard:
                 setattr(owner, attr, _guarded_regional(
-                    owner, fn, target, fail_closed=fail_closed))
+                    owner,
+                    fn,
+                    target,
+                    fail_closed=fail_closed,
+                    failure_signal=failure_signal,
+                ))
                 originals.append((owner, attr, fn))
             regional_mods.append(owner)
             applied.append(target)
@@ -1010,7 +1284,12 @@ def apply(
                 vae.to(memory_format=torch.channels_last)
         compiled = torch.compile(fn, dynamic=False)
         setattr(owner, attr, _guarded(
-            fn, compiled, target, fail_closed=fail_closed) if guard else compiled)
+            fn,
+            compiled,
+            target,
+            fail_closed=fail_closed,
+            failure_signal=failure_signal,
+        ) if guard else compiled)
         applied.append(target)
         originals.append((owner, attr, fn))
     if not applied:
@@ -1021,11 +1300,51 @@ def apply(
         "cache": bool(cache_ready),
         "originals": originals,
         "regional_mods": regional_mods,
+        "failure_signal": failure_signal,
     })
     logger.info(
         "compile-cache: torch.compile armed for %s (cache=%s regional=%s)",
         applied, cache_ready, regional)
     return True
+
+
+def set_guard_failure_callback(
+    pipeline: Any, callback: Callable[[str], None],
+) -> bool:
+    """Bind scheduler-state revocation to an armed consumer guard."""
+    marker = getattr(pipeline, _MARKER_ATTR, None) or {}
+    signal = marker.get("failure_signal")
+    if not isinstance(signal, dict):
+        return False
+    signal["callback"] = callback
+    return True
+
+
+def _proof_count(pipeline: Any, key: str) -> int:
+    marker = getattr(pipeline, _MARKER_ATTR, None) or {}
+    signal = marker.get("failure_signal")
+    if not isinstance(signal, dict):
+        return 0
+    lock = signal.get("lock")
+    if isinstance(lock, _LOCK_TYPE):
+        with lock:
+            return int(signal.get(key, 0))
+    return int(signal.get(key, 0))
+
+
+def execution_count(pipeline: Any) -> int:
+    """Successful compiled calls observed on this exact pipeline object."""
+    return _proof_count(pipeline, "successful_calls")
+
+
+def cache_hit_count(pipeline: Any) -> int:
+    """FX-graph cache hits observed inside this exact pipeline's guard."""
+    return _proof_count(pipeline, "cache_hits")
+
+
+def cache_miss_count(pipeline: Any) -> int:
+    """FX-graph cache misses observed inside this exact pipeline's guard."""
+    return _proof_count(pipeline, "cache_misses")
 
 
 def unwrap(pipeline: Any) -> bool:
@@ -1059,44 +1378,100 @@ def unwrap(pipeline: Any) -> bool:
     return True
 
 
+def artifact_drift(meta: Dict[str, Any], pipeline: Any, cfg: Any) -> str:
+    """The complete pipeline/config compatibility verdict for one cell."""
+    drift = (
+        mode_drift(meta, pipeline)
+        or lane_drift(meta, pipeline)
+        or contract_drift(meta, pipeline, cfg)
+    )
+    if drift:
+        return drift
+    want = "regional" if getattr(cfg, "regional", False) else "whole"
+    have = str(meta.get("compile_mode") or "whole")
+    if have != want:
+        return f"cell compile_mode {have!r} != declared {want!r}"
+    return ""
+
+
+def arm_staged_artifact(
+    pipeline: Any,
+    cfg: Any,
+    staged: _StagedArtifact,
+) -> Dict[str, Any]:
+    """Activate and arm an already-verified artifact under the process lock.
+
+    This strict entry point is used by hot adoption: unlike :func:`enable`, a
+    mismatch is returned as a classified :class:`AdoptError` instead of an
+    eager fallback. Expensive tar extraction happened before the executor's
+    model/GPU locks; the process lock covers only atomic cache activation and
+    wrapper installation.
+    """
+    try:
+        with _SEED_ARM_LOCK:
+            meta = staged.metadata
+            drift = artifact_drift(meta, pipeline, cfg)
+            if drift:
+                raise AdoptError("key_mismatch", drift)
+            _activate_staged(staged)
+            unwrap(pipeline)
+            try:
+                if not apply(pipeline, cfg, cache_ready=True):
+                    raise AdoptError("no_target")
+            except Exception:
+                unwrap(pipeline)
+                raise
+            return meta
+    finally:
+        staged.close()
+
+
 def enable(
     pipeline: Any,
     cfg: Any,
     cache_dir: Optional[Path] = None,
     artifact: Optional[Path] = None,
 ) -> bool:
-    """The one consumer entry point (executor + local CLI): seed a verified
-    artifact if one is configured or attached, then arm compile under the
-    safety policy."""
-    meta = prepare(
-        getattr(cfg, "family", "") or "", cache_dir=cache_dir, artifact=artifact
-    )
-    if meta is not None:
-        drift = (
-            mode_drift(meta, pipeline)
-            or lane_drift(meta, pipeline)
-            or contract_drift(meta, pipeline, cfg)
-        )
-        if drift:
-            logger.warning("compile-cache: %s; staying eager", drift)
-            meta = None
-    if meta is not None:
-        want = "regional" if getattr(cfg, "regional", False) else "whole"
-        have = str(meta.get("compile_mode") or "whole")
-        if have != want:
-            logger.warning(
-                "compile-cache: cell compile_mode %r != declared %r; staying "
-                "eager (graphs would miss)", have, want)
-            meta = None
-    armed = apply(pipeline, cfg, cache_ready=meta is not None)
-    from .models.loading import pipeline_weight_lane
+    """The one consumer entry point (executor + local CLI): seed an explicitly
+    attached verified artifact, then arm compile under the safety policy."""
+    staged: Optional[_StagedArtifact] = None
+    if artifact is not None:
+        try:
+            staged = stage_artifact(
+                Path(artifact), getattr(cfg, "family", "") or "",
+                cache_dir=cache_dir,
+            )
+        except Exception as exc:
+            logger.warning("compile-cache: artifact unusable (%s); staying eager", exc)
+    try:
+        with _SEED_ARM_LOCK:
+            meta: Optional[Dict[str, Any]] = None
+            if staged is not None:
+                meta = staged.metadata
+                drift = artifact_drift(meta, pipeline, cfg)
+                if drift:
+                    logger.warning("compile-cache: %s; staying eager", drift)
+                    meta = None
+                else:
+                    try:
+                        _activate_staged(staged)
+                    except Exception as exc:
+                        logger.warning(
+                            "compile-cache: cache activation failed (%s); "
+                            "staying eager", exc)
+                        meta = None
+            armed = apply(pipeline, cfg, cache_ready=meta is not None)
+            from .models.loading import pipeline_weight_lane
 
-    if pipeline_weight_lane(pipeline).startswith("w8a8") and not armed:
-        raise CompiledLaneUnavailableError(
-            "W8A8 requires an exact compatible Forge cell; eager/dequantized "
-            "execution is not a W8A8 production lane"
-        )
-    return armed
+            if pipeline_weight_lane(pipeline).startswith("w8a8") and not armed:
+                raise CompiledLaneUnavailableError(
+                    "W8A8 requires an exact compatible Forge cell; eager/dequantized "
+                    "execution is not a W8A8 production lane"
+                )
+            return armed
+    finally:
+        if staged is not None:
+            staged.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1241,9 +1616,8 @@ def build(
     apply_lora_lane(pipe, int(lora_bucket))
     if callable(getattr(pipe, "set_progress_bar_config", None)):
         pipe.set_progress_bar_config(disable=True)
-    # Child processes (inductor compile workers) inherit the opt-in; this
-    # process opts in explicitly via the `allow_cold` param.
-    os.environ[ENV_ALLOW_COLD] = "1"
+    # Cold compilation is an explicit producer-library operation; serving
+    # workers have no environment switch that can enter this path.
     if not apply(pipe, cfg, cache_ready=False, guard=False, allow_cold=True):
         raise RuntimeError(f"no compile targets resolved on {type(pipe).__name__}")
 
@@ -1301,9 +1675,6 @@ __all__ = [
     "AdoptError",
     "CompiledLaneUnavailableError",
     "build",
-    "ENV_ALLOW_COLD",
-    "ENV_CACHE_PATH",
-    "ENV_CACHE_URL",
     "apply",
     "apply_lora_lane",
     "artifact_metadata",
@@ -1312,13 +1683,18 @@ __all__ = [
     "cell_lane",
     "contract_drift",
     "counters_delta",
+    "cache_hit_count",
+    "cache_miss_count",
     "enable",
+    "execution_count",
     "execution_contract",
+    "execution_contract_digest",
     "family_from_ref",
     "parse_cell_ref",
     "find_artifact",
     "flavor_label",
     "gen_worker_version",
+    "has_compile_target",
     "inductor_counters",
     "is_cache_ref",
     "lane_bucket",
@@ -1330,6 +1706,7 @@ __all__ = [
     "runtime_key",
     "seed_artifact",
     "seed_env",
+    "set_guard_failure_callback",
     "sku_slug",
     "system_repo",
     "toolchain_present",

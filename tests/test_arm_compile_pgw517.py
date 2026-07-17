@@ -13,15 +13,18 @@ endpoints. Two layers under test:
 from __future__ import annotations
 
 import asyncio
+import threading
 from pathlib import Path
 
 import msgspec
 import pytest
 
 import gen_worker
+import gen_worker.executor as executor_mod
 from gen_worker import Compile, RequestContext, Resources, endpoint
 from gen_worker import compile_cache as cc
-from gen_worker.api.binding import Hub
+from gen_worker.api.binding import Hub, wire_ref
+from gen_worker.api.errors import RetryableError
 from gen_worker.executor import Executor, ModelStore
 from gen_worker.models import provision
 from gen_worker.pb import worker_scheduler_pb2 as pb
@@ -182,9 +185,11 @@ def test_arm_compile_inside_scope_reaches_enable_compiled(monkeypatch, tmp_path)
         lambda pipe, c, cache_dir, artifact: seen.append((pipe, c, cache_dir, artifact)) or True,
     )
     pipe = _StubPipe()
-    with provision.ArmingScope(cfg, tmp_path, None):
+    scope = provision.ArmingScope(cfg, tmp_path, None)
+    with scope:
         assert provision.arm_compile(pipe) is True
     assert seen == [(pipe, cfg, tmp_path, None)]
+    assert scope.objects == ((pipe, True),)
     # the scope closed: arming outside it raises again
     with pytest.raises(RuntimeError, match="no active compile-arming scope"):
         provision.arm_compile(pipe)
@@ -203,16 +208,16 @@ def test_arming_scope_is_a_noop_when_compile_is_none() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _executor(spec: EndpointSpec, tmp_path: Path, sent: list) -> Executor:
+def _executor(spec: EndpointSpec, tmp_path: Path, sent: list, monkeypatch) -> Executor:
     async def _send(msg: pb.WorkerMessage) -> None:
         sent.append(msg)
 
     store = ModelStore(_send, cache_dir=tmp_path / "cas", vram_budget_bytes=4 << 30)
 
-    async def _fake_ensure_local(ref, snapshot=None, *, binding=None) -> Path:
+    async def _fake_ensure_local(ref, **kwargs) -> Path:
         return tmp_path / "snap"
 
-    store.ensure_local = _fake_ensure_local  # type: ignore[method-assign]
+    monkeypatch.setattr(executor_mod, "ensure_local", _fake_ensure_local)
     return Executor([spec], _send, store=store)
 
 
@@ -245,8 +250,11 @@ def test_executor_arms_self_loaded_pipeline_via_arm_compile(
     sent: list = []
 
     async def _go() -> None:
-        ex = _executor(spec, tmp_path, sent)
-        inst = await ex.ensure_setup(spec)
+        ex = _executor(spec, tmp_path, sent, monkeypatch)
+        inst = await ex.ensure_setup(spec, {
+            wire_ref(spec.models["model"]): pb.Snapshot(
+                digest="blake3:" + "a" * 64),
+        })
         assert inst.armed is True
         assert len(applied) == 1
         pipeline, cfg, cache_ready = applied[0]
@@ -283,8 +291,99 @@ def test_executor_never_arms_without_an_explicit_call(tmp_path, monkeypatch) -> 
     sent: list = []
 
     async def _go() -> None:
-        ex = _executor(spec, tmp_path, sent)
-        await ex.ensure_setup(spec)
+        ex = _executor(spec, tmp_path, sent, monkeypatch)
+        await ex.ensure_setup(spec, {
+            wire_ref(spec.models["model"]): pb.Snapshot(
+                digest="blake3:" + "a" * 64),
+        })
         assert applied == []
 
     asyncio.run(_go())
+
+
+def test_self_loaded_w8a8_pipeline_emits_exact_target_and_requires_cell_fence(
+    tmp_path, monkeypatch,
+) -> None:
+    """arm_compile ownership reaches the same target/fail-closed production path."""
+
+    class _Denoiser:
+        def forward(self, value):  # pragma: no cover - compile contract only
+            return value
+
+    class _CompilePipe:
+        def __init__(self):
+            self.transformer = _Denoiser()
+            self._cozy_weight_lane = "w8a8"
+
+    def _fake_enable(pipe, _cfg, _cache_dir, _artifact):
+        setattr(pipe, cc._MARKER_ATTR, {
+            "failure_signal": {
+                "callback": None,
+                "lock": threading.Lock(),
+                "successful_calls": 0,
+                "cache_hits": 0,
+                "cache_misses": 0,
+            },
+            "originals": [],
+            "regional_mods": [],
+        })
+        return True
+
+    class Endpoint:
+        def setup(self, model: str) -> None:
+            self.pipe = _CompilePipe()
+            self.armed = gen_worker.arm_compile(self.pipe)
+
+        def warmup(self) -> None:
+            signal = getattr(self.pipe, cc._MARKER_ATTR)["failure_signal"]
+            with signal["lock"]:
+                signal["successful_calls"] += 1
+                signal["cache_hits"] += 1
+
+        def run(self, ctx, payload: _In) -> _Out:  # pragma: no cover
+            return _Out()
+
+    monkeypatch.setattr(provision, "enable_compiled", _fake_enable)
+    compile_cfg = Compile(family=FAMILY, shapes=((768, 768),))
+    spec = EndpointSpec(
+        name="wan-w8a8", method=Endpoint.run, kind="inference",
+        payload_type=_In, output_mode="single", cls=Endpoint, attr_name="run",
+        models={"model": Hub("acme/wan", flavor="fp8-w8a8")},
+        resources=Resources(vram_gb=1.0), compile=compile_cfg,
+    )
+    model_ref = wire_ref(spec.models["model"])
+    cell_ref = (
+        f"_system/family-{FAMILY}#inductor-rtx-4090-torch2.9-w8a8"
+    )
+    snap = tmp_path / "snap"
+    snap.mkdir()
+    (snap / "cell.tar.gz").write_bytes(b"delivered-cell")
+    sent: list = []
+
+    async def _go() -> Executor:
+        ex = _executor(spec, tmp_path, sent, monkeypatch)
+        await ex.ensure_setup(spec, {
+            model_ref: pb.Snapshot(digest="blake3:" + "a" * 64),
+            cell_ref: pb.Snapshot(digest="blake3:" + "b" * 64),
+        })
+        return ex
+
+    ex = asyncio.run(_go())
+    (target,) = ex.compile_targets()
+    assert target.pipeline_weight_lane == "w8a8"
+    assert target.active_compile_ref == cell_ref
+    assert target.active_compile_snapshot_digest == "blake3:" + "b" * 64
+    assert list(target.function_names) == ["wan-w8a8"]
+    assert [
+        (binding.slot, binding.ref, binding.snapshot_digest)
+        for binding in target.model_bindings
+    ] == [("model", model_ref, "blake3:" + "a" * 64)]
+    with pytest.raises(RetryableError, match="required_compile_missing"):
+        ex._validate_required_compile(
+            spec,
+            pb.RunJob(
+                function_name=spec.name,
+                models=[pb.ModelBinding(slot="model", ref=model_ref)],
+                snapshots={model_ref: pb.Snapshot(digest="blake3:" + "a" * 64)},
+            ),
+        )

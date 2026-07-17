@@ -230,8 +230,7 @@ def enable_compiled(
     pipe: Any, cfg: Any, cache_dir: Optional[Path] = None,
     artifact: Optional[Path] = None,
 ) -> bool:
-    """Local-CLI compile arming: delivered/env artifacts first (production
-    policy, incl. TRT and the manual GEN_WORKER_COMPILE_CACHE overrides),
+    """Local-CLI compile arming: an explicitly delivered artifact first,
     then the local cell store — adopt a matching stored cell, or mint one.
 
     Store/mint failures log and serve eager (the production miss policy) —

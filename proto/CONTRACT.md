@@ -251,6 +251,37 @@ to avoid chatter). Never periodic. O overwrites its copy wholesale.
 | `free_vram_bytes` | W CUDA probe | O placement (free-VRAM ladder) | measured free VRAM |
 | `finalizing_jobs` | W executor (gw#516) | O drain/retire gating + worker status display | jobs past the decode→finalize handoff: GPU slot released, encode/upload tail running, `JobResult` unshipped. GPU-idle alone is NOT work-idle |
 | `observed_residency_generation` | W desired-state receiver | O controller status | latest non-stale generation accepted; not a convergence claim — `ModelEvent`/`Hello.models` report actual state |
+| `compile_targets` | W executor | O compile-cell planner + dispatch fence | full-replace snapshot of exact READY live pipeline incarnations; omission removes the old address immediately |
+
+### CompileTarget (embedded in StateDelta)
+
+One row addresses one exact live pipeline object. It is session-local: setup
+mints `incarnation_id`, and vacate/reload mints another even when checkpoint
+bytes are unchanged. O MUST NOT reconstruct or match a target from family
+alone.
+
+| field | producer | consumer | semantics |
+|---|---|---|---|
+| `incarnation_id` | W setup | O adoption + RunJob planner | opaque live-object address; immutable for the row lifetime |
+| `family` | W endpoint `Compile` contract | O cell compatibility | exact non-empty Forge family |
+| `pipeline_weight_lane` | W loaded object | O lane matching | observed lane such as plain or `w8a8`; never inferred from the requested ref |
+| `lora_bucket` | W loaded object/contract | O cell compatibility | exact compiled LoRA bucket |
+| `contract_digest` | W graph/lane contract | O adoption + dispatch fence | digest of graph, shapes, targets, guidance regimes, low-VRAM mode, weight lane, activation scaling, and LoRA bucket |
+| `active_compile_ref` | W proven boot/adoption path | O dispatch eligibility | exact cell ref, or empty when eager/revoked; ref and digest are both present or both empty |
+| `active_compile_snapshot_digest` | W proven boot/adoption path | O immutable cell identity | exact cell snapshot digest paired with `active_compile_ref` |
+| `function_names` | W per-handler warmup proof | O applicability | sorted aliases proved on this exact object. The set is immutable for the incarnation; a skipped/unproved sibling is absent even if it shares endpoint config |
+| `model_bindings` | W setup ownership | O applicability + RunJob fence | sorted exact slot/ref/snapshot triples owned by this target. It may be a strict subset of RunJob setup bindings (for example SDXL pipeline owned, ancillary VAE omitted) |
+
+Inductor proof separates two causal facts: the exact object wrapper must observe
+at least one isolated cache activation hit, and every advertised handler alias
+must independently execute that same wrapper successfully. Inductor does not
+increment its lookup counter on every execution of an already-loaded graph.
+Setup/adoption warmups exclude concurrent GPU work while capturing activation,
+and wrapper-local counters prevent a sibling object from supplying it.
+Mandatory W8A8 publishes no partial target: every non-skipped compatible alias
+must prove the exact active object/cell or setup fails and those handlers are
+reported unavailable. Explicitly skipped handlers such as legacy SDXL Turbo do
+not inherit another alias's proof.
 
 ### RunJob (O → W)
 
@@ -268,6 +299,31 @@ to avoid chatter). Never periodic. O overwrites its copy wholesale.
 | `compute` | O scheduler | W GPU-semaphore gating + CUDA binding | see below |
 | `models` | O binding resolver (endpoint defaults + `_models` envelope) | W model injection (`ensure_local` + typed path/pipeline) + per-request LoRA overlays | slot → ref (+ optional `loras`) |
 | `snapshots` | O resolver | W download stack | presigned snapshots for tensorhub-CAS refs in `models` (including LoRA overlay refs) that O doesn't know to be on this worker's disk; W ignores entries already local (digest match). hf/civitai refs need no snapshot |
+| `required_compile` | O unique target selection | W pre-setup + pre-execution fence | exact target/cell/contract required for this attempt; mandatory for W8A8 and fail-closed whenever present |
+
+### RequiredCompileExecution (embedded in RunJob)
+
+O selects exactly one active `CompileTarget` whose `function_names` contains
+the RunJob function and whose target-owned binding subset matches the RunJob
+refs plus immutable snapshot digests. Zero applicable active targets makes a
+W8A8 request wait/retry; multiple applicable targets are ambiguous and fail
+closed rather than choosing by map/order. Ancillary RunJob bindings that the
+target does not own do not broaden or certify the compiled graph.
+
+| field | producer | consumer | semantics |
+|---|---|---|---|
+| `target_incarnation_id` | O from current StateDelta | W exact live-object lookup | must still name the READY target selected for this worker session |
+| `cell_ref` | O from target active identity | W equality fence | exact immutable compile cell ref |
+| `cell_snapshot_digest` | O from target active identity | W equality fence | exact digest paired with `cell_ref` |
+| `contract_digest` | O from target | W graph/lane equality fence | must equal the live target contract digest |
+
+W validates this structure before setup/mutation and again after acquiring the
+GPU execution permit. Target replacement, binding drift, cell revocation, or a
+runtime guard failure therefore returns RETRYABLE without running tenant GPU
+work, including a request that queued while the old evidence was still valid.
+Hot adoption MUST prove the already-advertised immutable function set; it may
+not mutate aliases in place between ADOPTED, StateDelta, and a later causal
+runtime-guard failure.
 
 ### ResolvedCompute (embedded in RunJob)
 
@@ -459,7 +515,8 @@ DOWNLOAD/LOAD/UNLOAD enum values.
 | `op` | O | W model layer | ADOPT_COMPILE_CACHE only |
 | `ref` | O | W | canonical ref |
 | `snapshot` | O resolver | W downloader | required for ADOPT_COMPILE_CACHE |
-| `operation_id` | O adoption controller | W adoption handler | required opaque identity for this one adoption attempt |
+| `operation_id` | O adoption controller | W adoption handler | required causal identity for this attempt; retained after ADOPTED for at most one matching runtime-guard failure |
+| `target_incarnation_id` | O adoption controller | W adoption handler | exact live object to mutate; family/ref fallback is forbidden |
 
 Every ModelOp is answered by ≥1 `ModelEvent` for the ref (success path emits
 ADOPTED; failure path emits FAILED). Every terminal result echoes the exact
@@ -478,8 +535,9 @@ already-VRAM-resident modules of endpoints declaring
 `compile=Compile(family=<f>)` (module re-wrap only — weights are untouched,
 no reload), runs one warmup trace, and answers
 `ModelEvent{ADOPTED, duration_ms, cache_hits, cache_misses, warmup_s}`. The
-warmup is the proof (gw#391): inductor cells report ADOPTED only when the
-warmup observed ≥1 FX-graph cache hit — zero hits rolls the wrap back to
+warmup is the proof (gw#391): each inductor object reports ADOPTED only when
+that exact object's guarded warm call executes and observes ≥1 FX-graph cache
+hit — a process-global hit from a sibling cannot certify it. Zero hits rolls the wrap back to
 eager and answers `adopt_failed:cache_miss`; an endpoint without `warmup()`
 answers `adopt_failed:no_warmup` (unprovable). ANY failure ⇒ discard, stay
 eager, answer `ModelEvent{FAILED, error:"adopt_failed:<reason>"}` — adoption
@@ -495,6 +553,27 @@ worker session plus `(ref, snapshot_digest, operation_id)`, never by mutable
 `ref` alone. Thus a late terminal result from operation A cannot certify or
 fail operation B, including when both commands target the same digest.
 
+After ADOPTED, the first compiled-runtime guard failure synchronously clears
+the target's active ref/digest before an optional eager fallback and emits one
+causal `FAILED{error:"adopt_failed:runtime_guard"}` retaining that adoption's
+ref, digest, operation ID, and target incarnation. The same target row remains
+visible with empty active fields so event/StateDelta arrival order is harmless.
+Mandatory W8A8 fails closed, and the worker's repeated post-GPU-acquisition
+fence prevents a sibling that validated while queued from executing. The exact
+failed cell identity is quarantined on that incarnation: a repeated command
+fails immediately without wrap/warmup until the cell or target changes. This is
+state-driven; a desired-state generation, operation ID, or controller ordering
+rewrite alone does not re-arm the same target and immutable cell. Re-arming
+requires a new target/binding/contract incarnation, a different cell ref or
+digest, or a new worker session. Quarantines accumulate for the incarnation;
+successfully adopting cell B never clears an earlier failed identity A. There
+is no retry timer or timeout knob. A
+boot-attached cell has no ModelOp operation ID and never fabricates a causal
+failure event. Declarative reconciliation may re-advertise the failed target's
+aliases only after a fresh target has an exact active cell and proves those
+same aliases; it clears only the old target/record-owned `compile_cell_failed`
+marks, never hardware, setup, or another target's disable.
+
 ### ModelEvent (W → O)
 The single model-residency channel. Emitted for desired-state outcomes,
 compile-cache adoption, AND worker-initiated transitions (LRU eviction,
@@ -509,7 +588,7 @@ model-ready signals, and the JSON download-event fabric.
 | `error` | W | O reconcile handling (e.g. OOM ⇒ revise desired hot set; url_expired ⇒ re-mint snapshots and re-send the same generation) + triage log | set with FAILED |
 | `bytes_done`/`bytes_total` | W downloader (emit ≤1 per 5s per ref) | O boot/capacity progress display | set with DOWNLOADING |
 | `duration_ms` | W adopt handler | O adoption bookkeeping + fleet-adoption-latency metric | set with ADOPTED: wall time of download+seed+re-wrap+warmup |
-| `cache_hits`/`cache_misses` | W adopt handler (inductor FX-graph cache counter delta across the warmup) | O adoption observability: hits ≥ 1 on every ADOPTED; misses > 0 = partial shape coverage | set with ADOPTED (gw#391) |
+| `cache_hits`/`cache_misses` | W exact target guard (inductor FX-graph counter delta around that object's warm call) | O adoption observability: hits ≥ 1 on every inductor ADOPTED; misses > 0 = partial shape coverage | set with ADOPTED (gw#391); zero for TRT |
 | `warmup_s` | W adopt handler | O adoption bookkeeping | set with ADOPTED: warmup wall seconds |
 | `host_ram_required_bytes` | W host-RAM admission | O capacity block / durable request evidence | exact incoming staging requirement including the derived safety floor; set with `FAILED{error:"insufficient_host_ram"}` and HOST_CAPACITY_PROGRESS |
 | `host_ram_available_before_bytes` / `host_ram_available_after_bytes` | W cgroup-aware host-RAM probe | O capacity block / durable request evidence | exact measured headroom around failed cleanup, or from the last insufficient observation to the satisfying observation |
@@ -517,7 +596,7 @@ model-ready signals, and the JSON download-event fabric.
 | `host_ram_capacity_generation` | W executor | O capacity fencing | process-monotonic observation generation, fenced within the active Connect stream; the consumer resets its numeric fence on each Hello re-baseline, while a same-process reconnect replays only undelivered satisfying progress; progress clears only the same ref's older failed generation |
 | `snapshot_digest` | W exact materialization operation | O immutable residency identity | digest operated on by this event; empty is unknown and O MUST NOT fill it from the ref's current tag target |
 | `residency_generation` | W desired-state receiver | O per-ref event fence | desired generation captured when the operation began; lower generations and same-generation digest conflicts are stale and do not mutate residency |
-| `operation_id` | W adoption handler | O adoption controller | exact opaque ADOPT_COMPILE_CACHE attempt identity on terminal ADOPTED/FAILED; empty on ordinary residency events |
+| `operation_id` | W adoption handler/guard | O adoption controller | exact ADOPT_COMPILE_CACHE attempt on ADOPTED/adopt-FAILED and at most one later causal runtime FAILED; empty for boot-attached cells and ordinary residency |
 
 **State machine per (worker, ref):** `DOWNLOADING → ON_DISK → IN_RAM ⇄ IN_VRAM`,
 demotions emit the new lower tier, `EVICTED` = removed from disk (fully gone).
@@ -536,8 +615,9 @@ manufactures observed identity from desired config or a mutable tag target.
 `ADOPTED` is also not a residency tier: it reports one-shot success of ADOPT_COMPILE_CACHE for
 a compile-cache ref (whose bytes independently report DOWNLOADING/ON_DISK
 like any snapshot download). O MUST NOT feed `_system/family-*` compile-cache
-refs into model-failure availability handling: a failed cache ref means
-"stays eager", never "function unavailable".
+refs into ordinary model-failure availability handling. An optional lane may
+stay eager; mandatory W8A8 remains unavailable until exact compiled evidence
+changes and must never be marked function-ready from the failed cell.
 
 ### FnUnavailable (W → O)
 Emitted when a hardware-axis gate fails at startup or model-load time, or
@@ -705,14 +785,21 @@ Stream-level (gRPC status) errors:
 | `FAILED_PRECONDITION` `protocol_version_mismatch` | O | version gate |
 | `FAILED_PRECONDITION` (other) | O | protocol-order violation (e.g. first message not Hello) |
 
-Model-op errors travel as `ModelEvent{FAILED, error}` with a closed-ish
-vocabulary: `oom`, `model_in_use`, `url_expired`, `digest_mismatch`,
-`insufficient_disk`, `download_failed`, `load_failed`, and — for
-ADOPT_COMPILE_CACHE only — `adopt_failed:<reason>` with reason ∈ {`bad_ref`,
-`missing_operation_id`, `missing_snapshot_digest`, `no_endpoint`, `not_resident`,
-`model_in_use`, `download`,
-`artifact_missing`, `artifact_invalid`, `key_mismatch`, `no_target`,
-`warmup`, `no_warmup`, `cache_miss`}.
+Model-op errors travel as `ModelEvent{FAILED, error}` with classified tokens
+such as `oom`, `model_in_use`, `url_expired`, `digest_mismatch`,
+`insufficient_disk`, `download_failed`, and `load_failed`. The terminal answer
+to an initial ADOPT_COMPILE_CACHE attempt uses `adopt_failed:<initial-reason>`;
+the suffix is produced by the validation, staging, activation, and warmup rails
+(for example `bad_ref`, `missing_operation_id`, `missing_snapshot_digest`,
+`target_not_ready`, `target_replaced`, `artifact_invalid`, `key_mismatch`,
+`warmup`, `no_warmup`, `cache_miss`, or `guard_unbound`). Consumers MUST
+preserve unknown classified suffixes rather than treating this example list as
+an enum.
+
+`adopt_failed:runtime_guard` is deliberately not an initial-attempt reason. It
+is the later, at-most-once causal failure emitted only after ADOPTED when that
+active cell's runtime guard fails; it retains the original operation, cell,
+snapshot, and target identities as specified in §4.
 
 ---
 
