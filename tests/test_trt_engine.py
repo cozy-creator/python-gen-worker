@@ -18,6 +18,7 @@ from gen_worker.pb import worker_scheduler_pb2 as pb
 
 from test_executor_adopt import (  # noqa: F401 — shared harness
     CACHE_REF,
+    DIGEST_A,
     FAMILY,
     _adopt,
     _events,
@@ -245,6 +246,7 @@ def test_adopt_trt_key_mismatch_stays_eager(tmp_path, monkeypatch):
     _adopt(ex, ref=TRT_REF)
     failed = _events(sent, pb.MODEL_STATE_FAILED)
     assert len(failed) == 1 and failed[0].error == "adopt_failed:key_mismatch"
+    assert failed[0].snapshot_digest == DIGEST_A
     assert not _events(sent, pb.MODEL_STATE_ADOPTED)
 
 

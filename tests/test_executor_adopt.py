@@ -105,6 +105,13 @@ def _events(sent, state):
             if m.WhichOneof("msg") == "model_event" and m.model_event.state == state]
 
 
+def _assert_failed(sent, error, digest=DIGEST_A):
+    failed = _events(sent, pb.MODEL_STATE_FAILED)
+    assert failed and failed[-1].error == error
+    assert failed[-1].snapshot_digest == digest
+    return failed[-1]
+
+
 def _adopt(ex, ref=CACHE_REF, digest=DIGEST_A):
     asyncio.run(ex.handle_model_op(
         pb.ModelOp(
@@ -196,8 +203,7 @@ def test_adopt_zero_cache_hits_rolls_back_and_fails(tmp_path, monkeypatch):
     monkeypatch.setattr(cc, "unwrap", lambda obj: unwrapped.append(obj))
 
     _adopt(ex)
-    failed = _events(sent, pb.MODEL_STATE_FAILED)
-    assert failed and failed[-1].error == "adopt_failed:cache_miss"
+    _assert_failed(sent, "adopt_failed:cache_miss")
     assert not _events(sent, pb.MODEL_STATE_ADOPTED)
     assert any(isinstance(o, _Pipe) for o in unwrapped)  # rollback ran
 
@@ -215,9 +221,7 @@ def test_adopt_prep_mode_drift_is_key_mismatch(tmp_path, monkeypatch):
     monkeypatch.setattr(cc, "apply", lambda *a, **k: pytest.fail("must not re-wrap"))
 
     _adopt(ex)
-    failed = _events(sent, pb.MODEL_STATE_FAILED)
-    assert failed and failed[-1].error == "adopt_failed:key_mismatch"
-    assert failed[-1].snapshot_digest == DIGEST_A
+    _assert_failed(sent, "adopt_failed:key_mismatch")
     assert not _events(sent, pb.MODEL_STATE_ADOPTED)
 
 
@@ -247,8 +251,7 @@ def test_adopt_without_warmup_is_unprovable(tmp_path, monkeypatch):
     _fake_counters(monkeypatch, hits=5, misses=0)  # counters moved elsewhere: still unprovable
 
     _adopt(ex)
-    failed = _events(sent, pb.MODEL_STATE_FAILED)
-    assert failed and failed[-1].error == "adopt_failed:no_warmup"
+    _assert_failed(sent, "adopt_failed:no_warmup")
     assert not _events(sent, pb.MODEL_STATE_ADOPTED)
 
 
@@ -265,8 +268,7 @@ def test_adopt_prep_mode_drift_rejected(tmp_path, monkeypatch):
     monkeypatch.setattr(cc, "apply", lambda *a, **k: applied.append(1) or True)
 
     _adopt(ex)
-    failed = _events(sent, pb.MODEL_STATE_FAILED)
-    assert failed and failed[-1].error == "adopt_failed:key_mismatch"
+    _assert_failed(sent, "adopt_failed:key_mismatch")
     assert not _events(sent, pb.MODEL_STATE_ADOPTED)
     assert not applied  # rejected before the wrap
 
@@ -279,8 +281,7 @@ def test_adopt_failed_warmup_reports_reason(tmp_path, monkeypatch):
     monkeypatch.setattr(_Endpoint, "warmup", lambda self: 1 / 0)
 
     _adopt(ex)
-    failed = _events(sent, pb.MODEL_STATE_FAILED)
-    assert failed and failed[-1].error == "adopt_failed:warmup"
+    _assert_failed(sent, "adopt_failed:warmup")
     assert not _events(sent, pb.MODEL_STATE_ADOPTED)
 
 
@@ -296,8 +297,7 @@ def test_adopt_key_mismatch_stays_eager(tmp_path, monkeypatch):
     monkeypatch.setattr(cc, "apply", lambda *a, **k: pytest.fail("must not re-wrap"))
 
     _adopt(ex)
-    failed = _events(sent, pb.MODEL_STATE_FAILED)
-    assert failed and failed[-1].error == "adopt_failed:key_mismatch"
+    _assert_failed(sent, "adopt_failed:key_mismatch")
 
 
 def test_adopt_refuses_while_jobs_in_flight(tmp_path):
@@ -314,8 +314,7 @@ def test_adopt_refuses_while_jobs_in_flight(tmp_path):
 
     ex.store.ensure_local = _no_download  # type: ignore[method-assign]
     _adopt(ex)
-    failed = _events(sent, pb.MODEL_STATE_FAILED)
-    assert failed and failed[-1].error == "adopt_failed:model_in_use"
+    _assert_failed(sent, "adopt_failed:model_in_use")
     assert calls == []  # refused before any download
 
 
@@ -323,24 +322,21 @@ def test_adopt_no_endpoint_for_family(tmp_path):
     spec = _spec(Compile(shapes=((768, 768),), family="sdxl"))
     ex, sent = _wire_executor(spec, tmp_path)
     _adopt(ex)  # ref names flux2-klein-4b; only sdxl is declared
-    failed = _events(sent, pb.MODEL_STATE_FAILED)
-    assert failed and failed[-1].error == "adopt_failed:no_endpoint"
+    _assert_failed(sent, "adopt_failed:no_endpoint")
 
 
 def test_adopt_not_resident(tmp_path):
     spec = _spec()
     ex, sent = _wire_executor(spec, tmp_path, ready=False, resident=False)
     _adopt(ex)
-    failed = _events(sent, pb.MODEL_STATE_FAILED)
-    assert failed and failed[-1].error == "adopt_failed:not_resident"
+    _assert_failed(sent, "adopt_failed:not_resident")
 
 
 def test_adopt_bad_ref(tmp_path):
     spec = _spec()
     ex, sent = _wire_executor(spec, tmp_path)
     _adopt(ex, ref="acme/not-a-cache:latest")
-    failed = _events(sent, pb.MODEL_STATE_FAILED)
-    assert failed and failed[-1].error == "adopt_failed:bad_ref"
+    _assert_failed(sent, "adopt_failed:bad_ref")
 
 
 def test_adopt_artifact_missing(tmp_path):
@@ -348,8 +344,7 @@ def test_adopt_artifact_missing(tmp_path):
     spec = _spec()
     ex, sent = _wire_executor(spec, tmp_path)
     _adopt(ex)
-    failed = _events(sent, pb.MODEL_STATE_FAILED)
-    assert failed and failed[-1].error == "adopt_failed:artifact_missing"
+    _assert_failed(sent, "adopt_failed:artifact_missing")
 
 
 @pytest.mark.parametrize("digest", [None, "", "   "])
