@@ -290,16 +290,20 @@ class Residency:
                 e.last_used = time.monotonic()
 
     def track_disk(self, ref: str, path: Path) -> None:
-        """Register (or demote-to) an on-disk snapshot."""
+        """Register an on-disk snapshot.
+
+        Updating the disk path of a RAM/VRAM entry is not a tier transition:
+        the loaded object remains the highest residency until its owner
+        releases it. ``release_to_disk`` emits the later honest demotion.
+        """
         with self._lock:
             e = self._entries.get(ref)
             if e is None:
                 self._entries[ref] = _Entry(ref=ref, tier=Tier.DISK, path=Path(path))
             else:
                 e.path = Path(path)
-                if e.tier is Tier.DISK:
-                    e.last_used = time.monotonic()
-                    return  # no transition, no event
+                e.last_used = time.monotonic()
+                return  # same highest tier, no event
         self._emit(ref, ON_DISK)
 
     def track_ram(self, ref: str, obj: Any = None, *, path: Optional[Path] = None) -> None:

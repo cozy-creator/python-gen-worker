@@ -448,6 +448,9 @@ _TIER_TO_PB = {
     residency_mod.Tier.DISK: pb.RESIDENCY_TIER_DISK,
 }
 
+_USE_RESIDENT_IDENTITY = object()
+_ResidencyIdentity = Tuple[str, int]
+
 
 class ModelStore:
     """The worker's model seam: ensure-local with retries, the residency map,
@@ -487,6 +490,18 @@ class ModelStore:
         # state / RunJob snapshot they cannot materialize tensorhub refs. Stale
         # URLs self-heal: they fail url_expired and the hub re-mints.
         self._snapshots: Dict[str, pb.Snapshot] = {}
+        # Desired generation attached to each banked snapshot. A RunJob may
+        # repeat the same snapshot without a generation; in that case the
+        # generation already learned from DesiredResidency is retained.
+        self._snapshot_generations: Dict[str, int] = {}
+        # Identity of the bytes that ACTUALLY produced the current residency.
+        # This deliberately does not follow _snapshots when a tag moves.
+        self._resident_identities: Dict[str, _ResidencyIdentity] = {}
+        # A newer snapshot may coexist on disk while the prior snapshot's
+        # pipeline is still in RAM/VRAM. Keep the disk identity separately
+        # until record teardown makes it the highest residency tier.
+        self._disk_identities: Dict[str, _ResidencyIdentity] = {}
+        self._identity_lock = threading.RLock()
         # Cold-ref waiters (th#763): ensure_local blocks here until the
         # hub's re-minted DOWNLOAD banks a snapshot for the ref.
         self._snapshot_waiters: Dict[str, asyncio.Event] = {}
@@ -523,7 +538,22 @@ class ModelStore:
             # Swap telemetry (gw#479): promote/demote wall time rides the
             # existing ModelEvent.duration_ms field.
             kw["duration_ms"] = int(duration_ms)
-        coro = self._event(ref, pb_state, **kw)
+        if state == residency_mod.ON_DISK:
+            with self._identity_lock:
+                identity = self._disk_identities.get(
+                    ref, self._resident_identities.get(ref, ("", 0))
+                )
+                if identity[0]:
+                    self._resident_identities[ref] = identity
+        else:
+            identity = self.resident_identity(ref)
+        coro = self._event(ref, pb_state, identity=identity, **kw)
+        if state == residency_mod.EVICTED:
+            # Capture before removal so the eviction names the exact bytes it
+            # removed; later events cannot inherit that stale identity.
+            with self._identity_lock:
+                self._resident_identities.pop(ref, None)
+                self._disk_identities.pop(ref, None)
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -534,16 +564,55 @@ class ModelStore:
             return
         loop.create_task(coro)
 
-    async def _event(self, ref: str, state: "pb.ModelState", **kw: Any) -> None:
-        await self._emit(pb.WorkerMessage(model_event=pb.ModelEvent(ref=ref, state=state, **kw)))
+    def model_event(
+        self,
+        ref: str,
+        state: "pb.ModelState",
+        *,
+        identity: Any = _USE_RESIDENT_IDENTITY,
+        **kw: Any,
+    ) -> pb.ModelEvent:
+        """Build one identity-fenced model event.
+
+        Residency transitions and failures default to the identity of the
+        resident bytes. Downloads pass their operation identity explicitly so
+        a newly banked tag cannot relabel the old resident model.
+        """
+        if identity is _USE_RESIDENT_IDENTITY:
+            identity = self.resident_identity(ref)
+        digest, generation = identity or ("", 0)
+        if digest:
+            kw.setdefault("snapshot_digest", digest)
+        if generation:
+            kw.setdefault("residency_generation", int(generation))
+        return pb.ModelEvent(ref=ref, state=state, **kw)
+
+    async def _event(
+        self,
+        ref: str,
+        state: "pb.ModelState",
+        *,
+        identity: Any = _USE_RESIDENT_IDENTITY,
+        **kw: Any,
+    ) -> None:
+        await self._emit(pb.WorkerMessage(
+            model_event=self.model_event(ref, state, identity=identity, **kw)
+        ))
 
     # ---- residency facade ----------------------------------------------------
 
     def residency_snapshot(self) -> List[pb.ModelResidency]:
-        return [
-            pb.ModelResidency(ref=ref, tier=_TIER_TO_PB[tier], vram_bytes=vram)
-            for ref, tier, vram in self.residency.snapshot()
-        ]
+        out: List[pb.ModelResidency] = []
+        for ref, tier, vram in self.residency.snapshot():
+            digest, generation = self.resident_identity(ref)
+            out.append(pb.ModelResidency(
+                ref=ref,
+                tier=_TIER_TO_PB[tier],
+                vram_bytes=vram,
+                snapshot_digest=digest,
+                residency_generation=generation,
+            ))
+        return out
 
     def local_path(self, ref: str) -> Optional[Path]:
         return self.residency.local_path(ref)
@@ -553,14 +622,108 @@ class ModelStore:
         (gw#465): snapshot-less ops for it can still materialize the bytes."""
         return ref in self._snapshots
 
-    def bank_snapshot(self, ref: str, snapshot: pb.Snapshot) -> None:
+    def bank_snapshot(
+        self, ref: str, snapshot: pb.Snapshot, *, generation: Optional[int] = None,
+    ) -> None:
         """Make hub metadata available without starting a download."""
         if not ref or not snapshot.digest or not snapshot.files:
             return
-        self._snapshots[ref] = snapshot
+        stored = pb.Snapshot()
+        stored.CopyFrom(snapshot)
+        with self._identity_lock:
+            previous = self._snapshots.get(ref)
+            previous_generation = self._snapshot_generations.get(ref, 0)
+            if generation is None:
+                generation = (
+                    previous_generation
+                    if previous is not None and previous.digest == stored.digest
+                    else 0
+                )
+            self._snapshots[ref] = stored
+            self._snapshot_generations[ref] = max(0, int(generation))
         waiter = self._snapshot_waiters.get(ref)
         if waiter is not None:
             waiter.set()
+
+    def snapshot_digest(self, ref: str, snapshot: Optional[pb.Snapshot] = None) -> str:
+        candidate = snapshot
+        if candidate is None:
+            with self._identity_lock:
+                candidate = self._snapshots.get(ref)
+        return str(getattr(candidate, "digest", "") or "").strip()
+
+    def resident_identity(self, ref: str) -> _ResidencyIdentity:
+        with self._identity_lock:
+            return self._resident_identities.get(ref, ("", 0))
+
+    def _snapshot_identity(
+        self, ref: str, snapshot: Optional[pb.Snapshot],
+    ) -> _ResidencyIdentity:
+        digest = self.snapshot_digest(ref, snapshot)
+        if not digest:
+            return ("", 0)
+        with self._identity_lock:
+            banked = self._snapshots.get(ref)
+            generation = (
+                self._snapshot_generations.get(ref, 0)
+                if banked is not None and banked.digest == digest
+                else 0
+            )
+        return (digest, generation)
+
+    def _set_resident_identity(
+        self, ref: str, identity: _ResidencyIdentity,
+    ) -> bool:
+        digest, generation = identity
+        if not digest:
+            return False
+        exact = (str(digest).strip(), max(0, int(generation)))
+        with self._identity_lock:
+            changed = self._resident_identities.get(ref) != exact
+            self._resident_identities[ref] = exact
+        return changed
+
+    def activate_disk_identity(self, ref: str) -> _ResidencyIdentity:
+        """Make the verified disk snapshot the identity of a newly loaded
+        RAM/VRAM instance immediately before its residency transition."""
+        with self._identity_lock:
+            identity = self._disk_identities.get(ref, ("", 0))
+            if identity[0]:
+                self._resident_identities[ref] = identity
+            return identity
+
+    async def _confirm_cached_identity(
+        self, ref: str, identity: _ResidencyIdentity,
+    ) -> None:
+        """Publish exact identity when verified cached bytes satisfy a newer
+        desired generation without requiring a redundant download."""
+        tier = self.residency.tier(ref)
+        digest, _ = identity
+        if not digest:
+            return
+        with self._identity_lock:
+            self._disk_identities[ref] = identity
+            current = self._resident_identities.get(ref, ("", 0))
+        if tier is None:
+            return
+        # A newer tag may be on disk while an older pipeline remains loaded.
+        # Do not relabel the loaded object; ensure_setup will vacate it before
+        # serving the new snapshot.
+        if tier in (residency_mod.Tier.RAM, residency_mod.Tier.VRAM) and current[0] != digest:
+            return
+        if not self._set_resident_identity(ref, identity):
+            return
+        state = {
+            residency_mod.Tier.DISK: pb.MODEL_STATE_ON_DISK,
+            residency_mod.Tier.RAM: pb.MODEL_STATE_IN_RAM,
+            residency_mod.Tier.VRAM: pb.MODEL_STATE_IN_VRAM,
+        }.get(tier)
+        if state is None:
+            return
+        kw: Dict[str, Any] = {}
+        if tier is residency_mod.Tier.VRAM:
+            kw["vram_bytes"] = self.residency.vram_bytes(ref)
+        await self._event(ref, state, identity=identity, **kw)
 
     def component_digests(self, ref: str, local_path: Optional[Path] = None) -> Dict[str, str]:
         """Per-component content identity of ``ref``'s snapshot (gw#479):
@@ -680,14 +843,19 @@ class ModelStore:
             disk_gc.sweep_orphan_blobs(self._cache_dir)
         self._index.remove(ref)
 
-    async def _ensure_disk_headroom(self, ref: str, needed_bytes: int) -> None:
+    async def _ensure_disk_headroom(
+        self, ref: str, needed_bytes: int, identity: _ResidencyIdentity = ("", 0),
+    ) -> None:
         target = int(needed_bytes) + _DISK_GC_MARGIN_BYTES
         if self._disk_free() >= target:
             return
         await asyncio.to_thread(self.gc_disk, target, exclude=(ref,))
         free = self._disk_free()
         if free < target:
-            await self._event(ref, pb.MODEL_STATE_FAILED, error="insufficient_disk")
+            await self._event(
+                ref, pb.MODEL_STATE_FAILED,
+                identity=identity, error="insufficient_disk",
+            )
             raise InsufficientDiskError(
                 f"need {needed_bytes} bytes for {ref}; {free} free after disk GC",
                 available_bytes=free, required_bytes=needed_bytes,
@@ -720,7 +888,10 @@ class ModelStore:
         waiter = self._snapshot_waiters.get(ref)
         if waiter is None:
             waiter = self._snapshot_waiters[ref] = asyncio.Event()
-        await self._event(ref, pb.MODEL_STATE_FAILED, error="missing_snapshot")
+        await self._event(
+            ref, pb.MODEL_STATE_FAILED,
+            identity=("", 0), error="missing_snapshot",
+        )
         logger.info("no snapshot for %s; waiting up to %.0fs for the hub re-mint",
                     ref, _MISSING_SNAPSHOT_WAIT_S)
         try:
@@ -758,6 +929,7 @@ class ModelStore:
             self.bank_snapshot(ref, snapshot)
         elif snapshot is None:
             snapshot = self._snapshots.get(ref)
+        operation_identity = self._snapshot_identity(ref, snapshot)
         async with self._lock(ref):
             cached = self.residency.local_path(ref)
             # A digest-carrying snapshot is authoritative: a cached
@@ -770,6 +942,7 @@ class ModelStore:
             if cached is not None and cached.exists() and (not want or cached.name == want):
                 if ref in self._verified:
                     self._index.touch(ref)
+                    await self._confirm_cached_identity(ref, operation_identity)
                     return cached
                 # First use this boot: verify before trusting (gw#408). A
                 # pod-churn-truncated snapshot used to fatal every load until
@@ -780,6 +953,7 @@ class ModelStore:
                 if ok:
                     self._verified.add(ref)
                     self._index.touch(ref)
+                    await self._confirm_cached_identity(ref, operation_identity)
                     return cached
                 logger.error(
                     "snapshot for %s failed first-use verification "
@@ -806,11 +980,14 @@ class ModelStore:
                     # event, no retry burn; a hub that never answers raises
                     # the typed error (mapped RETRYABLE, never FATAL).
                     snapshot = await self._await_hub_snapshot(ref)
+                    operation_identity = self._snapshot_identity(ref, snapshot)
             if snapshot is not None and snapshot.files:
                 # Sizes are known up front for tensorhub snapshots: gate on
                 # disk headroom, GC-ing LRU refs first (#370).
                 await self._ensure_disk_headroom(
-                    ref, sum(int(f.size_bytes) for f in snapshot.files)
+                    ref,
+                    sum(int(f.size_bytes) for f in snapshot.files),
+                    operation_identity,
                 )
             last_progress = 0.0
 
@@ -823,11 +1000,14 @@ class ModelStore:
                 assert self._loop is not None
                 asyncio.run_coroutine_threadsafe(
                     self._event(ref, pb.MODEL_STATE_DOWNLOADING,
+                                identity=operation_identity,
                                 bytes_done=int(done), bytes_total=int(total or 0)),
                     self._loop,
                 )
 
-            await self._event(ref, pb.MODEL_STATE_DOWNLOADING)
+            await self._event(
+                ref, pb.MODEL_STATE_DOWNLOADING, identity=operation_identity,
+            )
             delay = 1.0
             for attempt in range(1, _DOWNLOAD_RETRIES + 1):
                 try:
@@ -845,7 +1025,24 @@ class ModelStore:
                         components=tuple(getattr(binding, "components", ()) or ()),
                         progress=_progress,
                     )
+                    tier_before = self.residency.tier(ref)
+                    with self._identity_lock:
+                        identity_changed = (
+                            bool(operation_identity[0])
+                            and self._disk_identities.get(ref) != operation_identity
+                        )
+                        if operation_identity[0]:
+                            self._disk_identities[ref] = operation_identity
+                            if tier_before in (None, residency_mod.Tier.DISK):
+                                self._resident_identities[ref] = operation_identity
                     self.residency.track_disk(ref, path)
+                    if tier_before is residency_mod.Tier.DISK and identity_changed:
+                        # Residency suppresses same-tier event spam. A digest
+                        # move is nevertheless a semantic ON_DISK transition.
+                        await self._event(
+                            ref, pb.MODEL_STATE_ON_DISK,
+                            identity=operation_identity,
+                        )
                     # tree_bytes stats every file — off-loop (gw#407: no
                     # multi-GB directory walks on the event loop).
                     size = await asyncio.to_thread(disk_gc.tree_bytes, path)
@@ -863,7 +1060,10 @@ class ModelStore:
                             # log is the only forensic surface (J24M run11:
                             # a starved request was undiagnosable hub-side).
                             vocab = f"download_failed: {_sanitize(f'{type(exc).__name__}: {exc}')[:200]}"
-                        await self._event(ref, pb.MODEL_STATE_FAILED, error=vocab)
+                        await self._event(
+                            ref, pb.MODEL_STATE_FAILED,
+                            identity=operation_identity, error=vocab,
+                        )
                         raise
                     logger.warning("download of %s failed (attempt %d): %s; retrying in %.1fs",
                                    ref, attempt, exc, delay)
@@ -1000,6 +1200,10 @@ class _ClassRecord:
     # possibly-rebound spec.models), so booking and clearing are provably
     # the same key space.
     held_refs: List[str] = dc_field(default_factory=list)
+    # Exact snapshot digest behind each held model instance. A mutable tag can
+    # keep the same wire ref while moving to new bytes; refs alone cannot
+    # decide whether a ready instance is reusable.
+    held_snapshot_digests: Dict[str, str] = dc_field(default_factory=dict)
     # The per-record object behind each booking. Residency has one entry per
     # wire ref, so a multiply-held ref needs this map to transfer its strong
     # representative when the latest owner leaves.
@@ -1358,6 +1562,35 @@ class Executor:
                 await self._vacate_record(rec)
         self._on_state_change()
 
+    async def revalidate_snapshot_identity(
+        self, ref: str, snapshot: Optional[pb.Snapshot],
+    ) -> None:
+        """Vacate ready instances built from an older digest of the same ref.
+
+        Desired disk preposition runs before any hot-instance request, so this
+        must work even when no DesiredInstance follows. Otherwise the worker
+        keeps reporting old RAM/VRAM bytes and the hub waits forever for the
+        newer ON_DISK identity it requested.
+        """
+        wanted = self.store.snapshot_digest(ref, snapshot)
+        if not wanted:
+            return
+        stale: List[_ClassRecord] = []
+        seen: set[int] = set()
+        for rec in self._classes.values():
+            if id(rec) in seen:
+                continue
+            seen.add(id(rec))
+            if (
+                rec.ready
+                and ref in rec.held_refs
+                and rec.held_snapshot_digests.get(ref) != wanted
+            ):
+                rec.stale = True
+                stale.append(rec)
+        for rec in stale:
+            await self._revalidate_record(rec)
+
     # ---- availability ----------------------------------------------------
 
     def gate_functions(self, gpu_info: Dict[str, Any]) -> None:
@@ -1707,9 +1940,11 @@ class Executor:
             if not isinstance(exc, InsufficientHostRamError):
                 error = _model_failure_vocab(exc)
                 for ref in dict.fromkeys(bindings.values()):
-                    await self._send(pb.WorkerMessage(model_event=pb.ModelEvent(
-                        ref=ref, state=pb.MODEL_STATE_FAILED, error=error,
-                    )))
+                    await self._send(pb.WorkerMessage(
+                        model_event=self.store.model_event(
+                            ref, pb.MODEL_STATE_FAILED, error=error,
+                        )
+                    ))
             raise
 
     def _job_pin_refs(self, spec: EndpointSpec, slots: List[str]) -> List[str]:
@@ -1748,6 +1983,22 @@ class Executor:
         self.store.bind_loop()
         rec = self._class_record(spec)
         async with rec.lock:
+            if rec.ready and not rec.stale:
+                for slot in self._setup_slots(spec):
+                    ref = wire_ref(spec.models[slot])
+                    wanted = self.store.snapshot_digest(
+                        ref, (snapshots or {}).get(ref)
+                    )
+                    if wanted and rec.held_snapshot_digests.get(ref) != wanted:
+                        logger.info(
+                            "snapshot identity moved for %s: %s %s -> %s; "
+                            "vacating stale instance",
+                            spec.name, ref,
+                            rec.held_snapshot_digests.get(ref) or "<unknown>",
+                            wanted,
+                        )
+                        rec.stale = True
+                        break
             if rec.ready and rec.stale:
                 # gw#494: the instance was loaded for a superseded pick —
                 # vacate (releasing its OLD-ref bookings) and set up fresh
@@ -1976,6 +2227,11 @@ class Executor:
                 lane_slots=inj.lane_slots, shared_bytes=inj.shared_bytes,
                 slot_refs=slot_refs)
             rec.held_refs = sorted(set(slot_refs.values()))
+            rec.held_snapshot_digests = {
+                ref: digest
+                for ref in rec.held_refs
+                if (digest := self.store.resident_identity(ref)[0])
+            }
             # gw#551: call-time-owned refs. Any record holding 2+ worker-
             # constructed pipelines can overcommit VRAM (content-keyed lanes
             # AND monolithic siblings alike) — those swap per use via the
@@ -2031,6 +2287,7 @@ class Executor:
         opaque = [r for r, (obj, _) in per_ref.items() if obj is None]
         share = residual // len(opaque) if opaque else 0
         for ref, (obj, measured) in per_ref.items():
+            self.store.activate_disk_identity(ref)
             vram = measured + (share if obj is None else 0)
             if vram > 0:
                 res.track_vram(ref, obj, vram_bytes=vram)
@@ -2114,9 +2371,8 @@ class Executor:
             self._host_ram_generation += 1
             generation = self._host_ram_generation
             for ref in causal_refs:
-                event = pb.ModelEvent(
-                    ref=ref,
-                    state=pb.MODEL_STATE_FAILED,
+                event = self.store.model_event(
+                    ref, pb.MODEL_STATE_FAILED,
                     error=error.reason,
                     host_ram_required_bytes=error.required_bytes,
                     host_ram_available_before_bytes=error.available_before_bytes,
@@ -2202,9 +2458,12 @@ class Executor:
             generation = self._host_ram_generation
             events: List[Tuple[str, pb.ModelEvent]] = []
             for ref, block in satisfied:
-                event = pb.ModelEvent(
-                    ref=ref,
-                    state=pb.MODEL_STATE_HOST_CAPACITY_PROGRESS,
+                event = self.store.model_event(
+                    ref, pb.MODEL_STATE_HOST_CAPACITY_PROGRESS,
+                    identity=(
+                        block.failure_event.snapshot_digest,
+                        int(block.failure_event.residency_generation),
+                    ),
                     host_ram_required_bytes=block.failure_event.host_ram_required_bytes,
                     host_ram_available_before_bytes=block.last_available_bytes,
                     host_ram_available_after_bytes=available,
@@ -2795,6 +3054,7 @@ class Executor:
             sorted(slot_share), fresh_bytes / _GiB,
             "fresh" if fresh_bytes else "reused",
         )
+        self.store.activate_disk_identity(ref)
         if lane_bytes > 0:
             res.track_vram(ref, lane_obj, vram_bytes=lane_bytes)
         elif int(estimate_cuda_resident_gb(lane_obj) * _GiB) > 0:
@@ -2890,11 +3150,13 @@ class Executor:
             await self._adopt_compile_cache(ref, snap)
         except Exception as exc:
             logger.warning("compile-cache adoption on %s failed: %s", ref, exc)
-            await self._send(pb.WorkerMessage(model_event=pb.ModelEvent(
-                ref=ref,
-                state=pb.MODEL_STATE_FAILED,
-                error=f"adopt_failed:{type(exc).__name__.lower()}",
-            )))
+            await self._send(pb.WorkerMessage(
+                model_event=self.store.model_event(
+                    ref,
+                    pb.MODEL_STATE_FAILED,
+                    error=f"adopt_failed:{type(exc).__name__.lower()}",
+                )
+            ))
 
     async def _adopt_compile_cache(self, ref: str, snap: Optional[pb.Snapshot]) -> None:
         """Hot adoption (th#567): download+verify a compiled artifact and
@@ -2910,9 +3172,12 @@ class Executor:
 
         async def fail(reason: str, detail: str = "") -> None:
             logger.warning("compile-cache adopt %s failed: %s %s", ref, reason, detail)
-            await self._send(pb.WorkerMessage(model_event=pb.ModelEvent(
-                ref=ref, state=pb.MODEL_STATE_FAILED,
-                error=f"adopt_failed:{reason}")))
+            await self._send(pb.WorkerMessage(
+                model_event=self.store.model_event(
+                    ref, pb.MODEL_STATE_FAILED,
+                    error=f"adopt_failed:{reason}",
+                )
+            ))
 
         family = compile_cache.family_from_ref(ref)
         is_trt = trt_engine.is_engine_ref(ref)
@@ -3072,8 +3337,11 @@ class Executor:
         # cache_hits/cache_misses/warmup_s computed above (hits/misses/
         # warmup_s) but intentionally NOT sent — the orchestrator has no
         # reader for them (pgw#514/P3; see the proto field comments).
-        await self._send(pb.WorkerMessage(model_event=pb.ModelEvent(
-            ref=ref, state=pb.MODEL_STATE_ADOPTED, duration_ms=duration_ms)))
+        await self._send(pb.WorkerMessage(
+            model_event=self.store.model_event(
+                ref, pb.MODEL_STATE_ADOPTED, duration_ms=duration_ms,
+            )
+        ))
 
     def _record_refs(self, rec: _ClassRecord) -> List[str]:
         """The wire refs a record's instance holds: the load-time booking
@@ -3164,6 +3432,7 @@ class Executor:
             ):
                 released_refs.append(ref)
         rec.held_refs = []
+        rec.held_snapshot_digests = {}
         rec.lane_refs = set()
         rec.held_objects = {}
         # Do not let this teardown frame itself retain a departing pipeline

@@ -118,6 +118,10 @@ message ModelResidency {
   string ref = 1;              // canonical model ref string
   ResidencyTier tier = 2;      // highest tier the model currently occupies
   int64 vram_bytes = 3;        // measured footprint; set when tier = VRAM, else 0
+  // Exact worker-observed identity. Empty/zero is a legacy or otherwise
+  // unknown observation; the orchestrator must never infer it from a tag.
+  string snapshot_digest = 4;
+  uint64 residency_generation = 5;
 }
 
 enum ResidencyTier {
@@ -450,6 +454,11 @@ message ModelEvent {
   // the worker; same-process reconnects replay only satisfying generations
   // whose successful stream.write delivery has not completed yet.
   uint64 host_ram_capacity_generation = 15;
+  // Snapshot identity captured when this operation began. Both fields are
+  // required for exact evidence; empty/zero remains backward-compatible
+  // unknown state rather than being relabelled from current desired config.
+  string snapshot_digest = 16;
+  uint64 residency_generation = 17;
 }
 
 enum ModelState {
