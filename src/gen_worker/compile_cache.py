@@ -1174,6 +1174,16 @@ def _guarded_regional(
     return wrapper
 
 
+def _vae_supports_channels_last(vae: Any) -> bool:
+    """True only when every VAE weight is rank<=4 (2D convs). channels_last
+    is a rank-4 memory format; rank-5 Conv3d weights (causal/video VAEs)
+    raise on it (gw#574)."""
+    try:
+        return all(p.dim() <= 4 for p in vae.parameters())
+    except Exception:
+        return False
+
+
 def apply(
     pipeline: Any,
     cfg: Any,
@@ -1278,9 +1288,13 @@ def apply(
         if target.startswith("vae"):
             # channels_last + compiled decode is the measured win combo (#382);
             # memory format changes strides, so it is part of the cache key —
-            # producer and consumer both come through here.
+            # producer and consumer both come through here. channels_last is a
+            # RANK-4 format: causal/video VAEs (Conv3d, rank-5 weights — qwen,
+            # LTX) crash on it (gw#574), so gate on the actual weight ranks.
+            # The gate is deterministic per model class, so producer and
+            # consumer always agree on the resulting strides.
             vae = getattr(pipeline, "vae", None)
-            if vae is not None:
+            if vae is not None and _vae_supports_channels_last(vae):
                 vae.to(memory_format=torch.channels_last)
         compiled = torch.compile(fn, dynamic=False)
         setattr(owner, attr, _guarded(
